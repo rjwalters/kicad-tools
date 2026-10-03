@@ -1928,8 +1928,9 @@ fact from "this host is not estimating".
 | Field | Type | Notes |
 |---|---|---|
 | `as_of` | RFC 3339 | the newest row's `as_of` — the freshness stamp |
-| `rows[]` | array | one row per `(repo, issue, kind)`, in that order, at most 200 |
+| `rows[]` | array | one row per `(repo, issue, kind)`, in that order, at most 200. Past the cap rows are kept by priority (`land` with `p50`, then `land` refusals, then `start`/`finish`), then re-sorted |
 | `rows_truncated` | integer | rows dropped by the 200-row cap |
+| `rows_truncated_by_kind` | object, optional | `rows_truncated` per kind (`start`/`finish`/`land` -> count). Omitted when nothing was dropped and on older daemons |
 
 Each row:
 

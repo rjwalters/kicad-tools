@@ -40,6 +40,10 @@ Loom-Issue: rjwalters/loom#9465
   from — the storyline rollups that motivated #9465 join across repos.
 - **Line-leading**, optionally behind a list marker or blockquote, exactly like
   `Part of #N`. A mid-sentence mention is a mention, not a declaration.
+- **Emphasis is fine.** `**`, `__`, `*` or `_` emphasis around a line-leading
+  `Part of #N` / `Contributes to #N` is accepted (also behind a list marker or
+  blockquote). This applies to the keyword form, not `Loom-Issue:`. Backticks
+  remain excluded.
 - **Plain text, never inside backticks.** See "The backtick pitfall" below.
 - Repeatable: a PR may carry more than one trailer (deduped by the parser).
 

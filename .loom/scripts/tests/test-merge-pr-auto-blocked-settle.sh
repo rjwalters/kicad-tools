@@ -104,9 +104,17 @@ assert_contains() {
 # verdict-contradiction`. Pin the binary this suite tests against — FATAL,
 # never a skip (a suite that skipped itself would report green while testing
 # nothing).
+#
+# `merge-pr loom-pr-override-comment` is named EXPLICITLY, not left to the
+# group check (#8191 slice): the #8896 scenarios below count posts by grepping
+# the recorded body for `Merge Proceeded Without`, and that body now comes from
+# that verb. A binary that knows `merge-pr` but predates the verb renders no
+# body, so the dedup assertions would read 0 landed comments and fail as if the
+# once-per-run rule had broken — exactly the "environment problem that looks
+# like a logic failure" the preflight exists to make legible.
 # shellcheck source=lib/require-daemon-bin.sh
 source "$TEST_DIR/lib/require-daemon-bin.sh"
-loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
+loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr" "merge-pr loom-pr-override-comment"
 
 # --- Extract the functions under test from the real merge-pr.sh -------------
 FUNCS_FILE="$(mktemp)"

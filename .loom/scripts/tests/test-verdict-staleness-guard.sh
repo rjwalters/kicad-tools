@@ -252,6 +252,21 @@ if [[ "$1" == "forge" && "$2" == "verdict-equivalent" ]]; then
   fi
   exit 0
 fi
+# #9709: `forge verdict-stale-notice` renders the --clear audit comment from the
+# daemon's template (its wording is tested in Rust). A READ: logs to notice-
+# calls.log and saves its stdin to notice-stdin.json (the guard must pass the
+# RAW listing, or a dropped marker could never be named). $STUB_DIR/notice-verb-
+# missing simulates a binary predating the verb.
+if [[ "$1" == "forge" && "$2" == "verdict-stale-notice" ]]; then
+  printf 'NOTICE %s\n' "$*" >> "$STUB_DIR_FROM_ENV/notice-calls.log"
+  cat > "$STUB_DIR_FROM_ENV/notice-stdin.json"
+  if [[ -f "$STUB_DIR_FROM_ENV/notice-verb-missing" ]]; then
+    echo "error: unrecognized subcommand 'verdict-stale-notice'" >&2
+    exit 2
+  fi
+  printf '<!-- loom:verdict-stale from=%s to=%s -->\nSTUB NOTICE for %s\n' "$6" "$8" "$4"
+  exit 0
+fi
 if [[ "$1" == "forge" && "$2" == "trusted-comments" ]]; then
   printf 'TRUST %s\n' "$*" >> "$STUB_DIR_FROM_ENV/trust-calls.log"
   if [[ -f "$STUB_DIR_FROM_ENV/trust-verb-missing" ]]; then
@@ -406,6 +421,7 @@ reset_state() {
     rm -f "$STUB_DIR"/tree-calls.log "$STUB_DIR"/tree-identical
     rm -f "$STUB_DIR"/tree-compare-fail "$STUB_DIR"/tree-verb-missing
     rm -f "$STUB_DIR"/equiv-clean-merge "$STUB_DIR"/equiv-rebase
+    rm -f "$STUB_DIR"/notice-calls.log "$STUB_DIR"/notice-stdin.json "$STUB_DIR"/notice-verb-missing
 }
 
 run_guard() {
@@ -1366,6 +1382,50 @@ run_guard 279 --clear
 assert_eq "12" "$RC" "(u10) VERDICT_EQUIVALENT=0 at exit 0 -> still exit 12"
 assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u10) CLEARED=1 — exit 0 alone never keeps a verdict"
 assert_contains "$WRITES" "--remove-label loom:pr" "(u10) The approval is cleared"
+
+# (n1) #9709: a newer approval from an admin GitHub reports as CONTRIBUTOR is
+#      dropped (trust unchanged: still STALE, still cleared), and the notice is
+#      the daemon verb's output, rendered from the RAW listing so the dropped
+#      author can be named.
+reset_state
+pr_json 290 "$SHA_B" "loom:pr"
+{
+  echo "["
+  verdict_comment "2026-09-30T02:00:00Z" "$SHA_A" "approved"; echo ","
+  authored_verdict_comment "2026-09-30T03:34:10Z" "$SHA_B" "approved" "rjwalters" "CONTRIBUTOR"
+  echo "]"
+} > "$STUB_DIR/comments-290.json"
+run_guard 290 --clear
+assert_eq "12" "$RC" "(n1) Untrusted newer approval -> still STALE"
+assert_eq "1" "$(get_field "$OUT" CLEARED)" "(n1) Still cleared — trust is not widened"
+assert_contains "$(cat "$STUB_DIR/notice-calls.log" 2>/dev/null)" "forge verdict-stale-notice --label loom:pr --marker-sha $SHA_A --head-sha $SHA_B" "(n1) Notice rendered by the daemon verb"
+assert_contains "$(cat "$STUB_DIR/notice-stdin.json" 2>/dev/null)" '"login":"rjwalters"' "(n1) The verb sees the RAW listing, untrusted author included"
+assert_contains "$COMMENTS_POSTED" "STUB NOTICE for loom:pr" "(n1) The verb's body is what gets posted"
+assert_not_contains "$DAEMON" "verdict-stale-notice" "(n1) The notice render is a read, not a daemon write"
+
+# (n2) A binary predating the verb: the one-line fallback still carries the
+#      transition marker (so the #9124 dedup holds) and the clear proceeds.
+reset_state
+pr_json 291 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T02:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-291.json"
+: > "$STUB_DIR/notice-verb-missing"
+run_guard 291 --clear
+assert_eq "1" "$(get_field "$OUT" CLEARED)" "(n2) Verb missing -> clear still happens"
+assert_contains "$COMMENTS_POSTED" "loom:verdict-stale from=$SHA_A to=$SHA_B" "(n2) Fallback carries the transition marker"
+assert_contains "$COMMENTS_POSTED" "head SHA moved" "(n2) Fallback keeps the plain wording"
+
+# (n3) Already announced: no notice is rendered at all (no wasted verb call).
+reset_state
+pr_json 292 "$SHA_B" "loom:pr"
+{
+  echo "["
+  verdict_comment "2026-09-30T02:00:00Z" "$SHA_A" "approved"; echo ","
+  plain_comment "2026-09-30T02:05:00Z" "<!-- loom:verdict-stale from=$SHA_A to=$SHA_B --> already announced"
+  echo "]"
+} > "$STUB_DIR/comments-292.json"
+run_guard 292 --clear
+assert_eq "" "$COMMENTS_POSTED" "(n3) No duplicate notice"
+assert_eq "" "$(cat "$STUB_DIR/notice-calls.log" 2>/dev/null)" "(n3) Verb not called when already announced"
 
 # --- Summary -------------------------------------------------------------
 echo ""

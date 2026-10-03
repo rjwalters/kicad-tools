@@ -707,6 +707,11 @@ means "apply `loom:operator-only` + `loom:operator-decision`, with the
 disagreement-axis comment rule 4 already requires". Contract and design
 rationale: [`premise-gate.md`](premise-gate.md).
 
+**`loom:decision-malformed` (#10057)**: the operator UI bounces a
+`loom:operator-decision` issue without a valid `decision` block into this label.
+Curator repairs it (back to `loom:operator-decision`) or, if no operator call
+exists, removes it and re-routes; a repeat bounce is left alone.
+
 ## `loom:needs-capability` — a narrower claim than `loom:operator-only` (#5817)
 
 A fleet-wide census (example-org/fleet-repo#301) found `loom:operator-only` carrying at

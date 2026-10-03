@@ -30,6 +30,22 @@ A comment or review is trusted when its author is:
 perfectly well-formed Loom markers; its Apps are not in this roster, so they
 count for nothing here.
 
+### Trap: an admin with private org membership reads as `CONTRIBUTOR`
+
+`author_association` reflects *public* organization membership and explicit
+collaborator records, not the live permission level. A repo admin (or org
+owner) whose org membership is **private**, or an outside collaborator, is
+reported as `CONTRIBUTOR`, so every verdict marker they post is dropped. The
+verdict-staleness pass then falls back to an older trusted marker and clears a
+fresh `loom:pr` (#9709). List such reviewers explicitly in
+`forge.trustedCommenters` (see Configuration below). Trust is deliberately not
+widened automatically; instead, when a newer marker was dropped this way, the
+stale-clear notice (from either the daemon pass or
+`verdict-staleness-guard.sh --clear`, both rendered by
+`loom-daemon forge verdict-stale-notice`'s template) and the daemon log line
+name the login, its `author_association`, and `forge.trustedCommenters`,
+rather than claiming the head SHA moved.
+
 ## Where it is enforced
 
 The predicate lives once, in `loom-daemon/src/comment_trust.rs`:
@@ -41,6 +57,10 @@ The predicate lives once, in `loom-daemon/src/comment_trust.rs`:
 - **Shell readers** call `loom-daemon forge trusted-comments`, which reads a
   comment listing on stdin and prints the trusted subset in the same shape.
   `verdict-staleness-guard.sh` and `check-promotion-landed.sh` use it.
+  `loom-daemon forge verdict-stale-notice --label L --marker-sha M --head-sha H`
+  reads the *raw* listing on stdin only to name a dropped newer marker's
+  author in the stale-clear notice (attribution, never evidence); without the
+  verb, the guard posts a one-line notice carrying the same dedup marker.
   Empty or whitespace-only stdin exits 1 like any other non-listing: an
   empty listing is `[]`, so nothing at all means the fetch never happened.
 - **The other Rust marker readers** (#9548, High slice) filter the same way,

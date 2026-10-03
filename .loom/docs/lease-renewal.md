@@ -95,12 +95,20 @@ startup" — because that is precisely what a restart would drop.
   still running **the same process** and the loop is under its absolute age
   cap. Prints the loop's PID. See
   [The loop's four exits](#the-loops-four-exits-7825) below.
-- **`renew-once <issue> [--host H] [--sweep-id S]`** — one synchronous
+- **`renew-once <issue> [--host H] [--sweep-id S] [--cached-lease ID@CREATED_AT]`** — one synchronous
   renewal cycle: locate the newest comment on `<issue>` whose body starts
   with the lease marker (or, if `--host`/`--sweep-id` are both given, the
   comment whose marker line matches them exactly), and idempotently PATCH
   it. Exit 0 on success, 2 when no matching lease comment exists (a normal,
   silent no-op — not every sweep is daemon-dispatched), 1 on a `gh` failure.
+  **`--cached-lease ID@CREATED_AT`** (#10021) is the steady-state path the
+  loop uses: each successful cycle reports `lease-cache=<id>@<created_at>`
+  on stderr, and the next cycle passes it back. That cycle makes one
+  non-paginated read of the comments updated since `CREATED_AT` (the lease
+  itself plus any later `loom:lease-yield` record, so the own-yield guard is
+  unchanged) and one PATCH — never a `--paginate` listing of the whole
+  issue. It falls back to the full listing only when the cached comment is
+  gone or no longer matches, the window is a full page, or the PATCH 404s.
 - **`stop <PID>`** — best-effort kill of a loop PID. Not required for
   correctness; the loop already self-terminates.
 
