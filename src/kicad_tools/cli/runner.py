@@ -64,8 +64,8 @@ def _kicad_cli_candidates() -> list[Path]:
     """Return candidate kicad-cli paths in priority order (PATH first)."""
     found: list[Path] = []
     # Check PATH first
-    if path := shutil.which("kicad-cli"):
-        found.append(Path(path))
+    if which_path := shutil.which("kicad-cli"):
+        found.append(Path(which_path))
 
     # Common installation locations
     locations = [
