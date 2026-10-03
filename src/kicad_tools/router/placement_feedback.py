@@ -2070,7 +2070,9 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
 
         count = 0
         for pad in self._router_pads():
-            if getattr(pad, "ref", "") != ref:
+            # ``ref`` is ``delta.target_key`` (physical identity), so match the
+            # pad's physical key, not its authored reference (Issue #5902).
+            if (getattr(pad, "component_id", "") or getattr(pad, "ref", "")) != ref:
                 continue
             x, y = float(pad.x), float(pad.y)
             for area in blocking:
