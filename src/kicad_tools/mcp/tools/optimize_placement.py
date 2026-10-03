@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
@@ -43,6 +43,10 @@ from kicad_tools.placement.wirelength import (
     compare_wirelength_estimators,
     compute_per_footprint_ratsnest,
 )
+
+if TYPE_CHECKING:
+    from kicad_tools.placement.bo_strategy import BayesianOptStrategy
+    from kicad_tools.placement.cmaes_strategy import CMAESStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +410,10 @@ def optimize_placement(
     footprint_sizes = _build_footprint_sizes(components)
     placement_bounds = bounds(board_outline, components)
 
-    # Create strategy
+    # Create strategy.  Annotated with the concrete union (not the abstract
+    # PlacementStrategy) because the loop below reads ``_population_size``,
+    # which both concrete strategies expose but the base class does not.
+    optimizer: CMAESStrategy | BayesianOptStrategy
     try:
         if strategy == "cmaes":
             from kicad_tools.placement.cmaes_strategy import CMAESStrategy
