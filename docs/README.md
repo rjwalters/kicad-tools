@@ -46,6 +46,7 @@ Detailed reference documentation:
 
 ### For Contributors
 - [Development Guide](contributing/development.md) - Setup, testing, code style
+- [Stacked PRs](contributing/stacked-prs.md) - What CI does and does not validate for PRs not based on `main`
 
 ### Research Notes & Audits
 Point-in-time working documents — dated entries describe the tree as of their date:
