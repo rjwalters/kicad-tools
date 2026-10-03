@@ -374,3 +374,122 @@ def test_recovery_does_not_run_with_shadow_construction_off():
 
     assert calls == []
     assert getattr(router, "_coupled_prephase_stall_exit", False) is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #5895: pose-centerline trunks are first-class yield candidates
+# ---------------------------------------------------------------------------
+
+
+def test_yield_candidates_are_every_pair_with_shadow_on():
+    router = _channel_router()
+    dp = router._diffpair
+    dp.enable_shadow_construction = True
+    pair, other = _pair(), _other_pair()
+    committed = [(pair, []), (other, [])]
+
+    assert dp._corridor_yield_candidates(committed, set()) == committed
+
+
+def test_yield_candidates_are_only_pose_trunks_with_shadow_off():
+    """Shadow OFF: a pose trunk may yield; a joint-state pair may not.
+
+    Board 06 (seed 42) with the pose search on: the pose-coupled MIPI_D0
+    trunk seals MIPI_RST's corridor (reach 21/21 -> 20/21).  Joint-state
+    pairs keep their pre-#5895 shadow-OFF behaviour (never yielded).
+    """
+    router = _channel_router()
+    dp = router._diffpair
+    dp.enable_shadow_construction = False
+    pair, other = _pair(), _other_pair()
+    committed = [(pair, []), (other, [])]
+
+    assert dp._corridor_yield_candidates(committed, set()) == []
+    assert dp._corridor_yield_candidates(committed, {id(other)}) == [(other, [])]
+
+
+def test_yielded_pose_claim_is_released_and_restored_on_revert():
+    """A yielded pose trunk's nets leave the two-phase claim set (#5895).
+
+    The two-phase main pass skips claimed nets, so a yielded pose pair
+    whose claim survived would never be re-routed.  A reverted yield puts
+    the claim back with the copper.
+    """
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    router._pose_coupled_nets = {1, 2}
+
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+    claims_during: list[set[int]] = []
+
+    def _strategy() -> list[Route]:
+        claims_during.append(set(router._pose_coupled_nets))
+        return []
+
+    kept, _released, _removed, _added = dp._apply_corridor_yields(to_yield, [3], _strategy)
+
+    assert claims_during == [set()], "the re-run must see the pose claim released"
+    assert kept is False
+    assert router._pose_coupled_nets == {1, 2}, "a reverted yield restores the claim"
+
+
+def test_recovery_does_not_run_without_a_pose_trunk_when_shadow_is_off():
+    """Pose search ON but no trunk committed: still the pre-#5895 pipeline."""
+    router = _channel_router()
+    dp = router._diffpair
+    dp.enable_pose_centerline = True
+    calls: list[object] = []
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        calls.append(args)
+        raise AssertionError("no pose trunk committed -> no corridor-yield recovery")
+
+    dp._plan_corridor_yields = _boom  # type: ignore[method-assign]
+    dp._apply_corridor_yields = _boom  # type: ignore[method-assign]
+    config = DifferentialPairConfig(enabled=True, enable_shadow_construction=False)
+
+    router.route_all_with_diffpairs(config, non_diffpair_strategy=lambda: [])
+
+    assert calls == []
+    assert getattr(router, "_coupled_prephase_stall_exit", False) is False
+
+
+def test_yield_rerun_starts_without_phantom_negotiated_usage():
+    """The re-run must not inherit the lifted copper's usage counts (#5895).
+
+    ``unmark_route`` clears occupancy but not negotiated usage, and
+    ``route_all_negotiated`` never resets it.  Board 06 (seed 42, CI): the
+    lifted legs' leftover usage showed up as overflow 4424 in the re-run's
+    iteration 0 (first pass: 2), the loop ripped all 19 nets every
+    iteration until the 300 s cap, and the contorted copper split the
+    +3V3 pour.  A reverted yield leaves usage consistent with the restored
+    copper.
+    """
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    for route in wall:
+        router.grid.mark_route_usage(route)
+    assert int(router.grid._usage_count.sum()) > 0
+
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+    usage_during: list[int] = []
+
+    def _strategy() -> list[Route]:
+        usage_during.append(int(router.grid._usage_count.sum()))
+        return []
+
+    kept, _released, _removed, _added = dp._apply_corridor_yields(to_yield, [3], _strategy)
+
+    assert usage_during == [0], "the re-run must start from zero negotiated usage"
+    assert kept is False
+    expected = 0
+    for route in router.routes:
+        expected += len(
+            {c for s in route.segments for c in router.grid._get_segment_cells(s)}
+            | {c for v in route.vias for c in router.grid._get_via_cells(v)}
+        )
+    assert int(router.grid._usage_count.sum()) == expected

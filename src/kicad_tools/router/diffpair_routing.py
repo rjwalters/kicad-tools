@@ -162,6 +162,13 @@ _OFFSET_JOIN_COINCIDENT_MM: float = 1e-4
 # experimentation (KCT_SHADOW_PER_PAIR_BUDGET_S).
 _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUDGET_S", "30.0"))
 
+# Issue #5786 / #5895: wall-clock budget of one pose-centerline search.  When
+# the caller plumbs a ``per_pair_timeout`` the search gets at most what is left
+# of it, and is skipped when less than ``_POSE_CENTERLINE_MIN_BUDGET_S``
+# remains (a wall-clock budget-exit must still defer promptly, #3089/#4107).
+_POSE_CENTERLINE_TIMEOUT_S: float = 30.0
+_POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
+
 # Issue #4463: budgets for the corridor-yield recovery
 # (``DiffPairRouter._plan_corridor_yields`` / ``_apply_corridor_yields``),
 # which runs after the main strategy when shadow construction is ON.  On
@@ -4226,6 +4233,14 @@ class DiffPairRouter:
         #   board 06 (Diff-Pair Routing Regression job): reach 21/21 ->
         #     20/21 -- the pose-coupled MIPI_D0 pair seals MIPI_RST's
         #     corridor -- so the job FAILS with it on.
+        # Issue #5895 made pose trunks corridor-yield candidates, but the
+        # yield cannot recover board 06 yet (measured 2026-10-02, seed 42):
+        # with the re-run's phantom negotiated usage cleared, the re-run
+        # still strands MIPI_RST (J4.RST sealed by the re-routed MIPI_CLK /
+        # MIPI_D0 legs) and the yield is reverted -> 20/21.  The CI run
+        # that showed 21/21 only got there through that phantom usage
+        # (overflow 4424 -> 188, 300 s cap hit) and its copper split the
+        # +3V3 pour (POST-LEGALIZE GATE FAIL).
         # Do not flip the default until that job passes with it on.
         self.enable_pose_centerline: bool = os.environ.get("KCT_POSE_CENTERLINE") == "1"
 
@@ -10998,7 +11013,37 @@ class DiffPairRouter:
             # Dubins-length heuristic and derive P/N as offsets, with
             # single-ended end legs (hybrid).  C++-only: with the backend
             # absent this returns ``None`` and behaviour is unchanged.
-            if result is None and self.enable_pose_centerline and not spec.polarity_swap:
+            # Issue #5895: the pose search honours the caller's per-pair
+            # WALL-CLOCK budget (#3089) -- it gets at most what is left of
+            # ``per_pair_timeout`` and is skipped once that is spent, so a
+            # pair that budget-exited on wall clock still defers promptly to
+            # the main strategy (the #4107 collapse path) instead of paying
+            # up to another 30 s.  Iteration-budget exits (board 06's
+            # 1000-iteration plateau) leave the wall clock nearly untouched
+            # and keep the full pose budget.
+            pose_timeout: float | None = _POSE_CENTERLINE_TIMEOUT_S
+            if per_pair_timeout is not None:
+                pose_remaining = per_pair_timeout - (
+                    time.monotonic() - spec_t0 - self._census_elapsed_s
+                )
+                pose_timeout = (
+                    min(_POSE_CENTERLINE_TIMEOUT_S, pose_remaining)
+                    if pose_remaining >= _POSE_CENTERLINE_MIN_BUDGET_S
+                    else None
+                )
+            if (
+                result is None
+                and self.enable_pose_centerline
+                and not spec.polarity_swap
+                and pose_timeout is None
+            ):
+                print("    [coupled-pose] skipped: per-pair wall-clock budget spent")
+            if (
+                result is None
+                and self.enable_pose_centerline
+                and not spec.polarity_swap
+                and pose_timeout is not None
+            ):
                 from .diffpair_pose import route_centerline_pose
 
                 pose_t0 = time.monotonic()
@@ -11008,7 +11053,7 @@ class DiffPairRouter:
                     spec.p_end,
                     spec.n_start,
                     spec.n_end,
-                    timeout_seconds=30.0,
+                    timeout_seconds=pose_timeout,
                     span_check=self._span_pad_clear,
                 )
                 if pose_result is not None:
@@ -12483,6 +12528,29 @@ class DiffPairRouter:
         conn = validate_net_connectivity(routes, {net_id: net_pads})
         return bool(conn.get(net_id, {}).get("connected", False))
 
+    def _corridor_yield_candidates(
+        self,
+        committed_pairs: list[tuple[DifferentialPair, list[Route]]],
+        pose_pair_ids: set[int],
+    ) -> list[tuple[DifferentialPair, list[Route]]]:
+        """Which committed coupled pairs may yield their corridor (#4463/#5895).
+
+        With shadow construction ON every committed pair is a candidate, as
+        #4463 established.  With it OFF, only pose-centerline trunks (#5786)
+        are: they are the one other source of committed coupled copper that
+        the negotiated loop treats as non-rippable, and on board 06 the
+        pose-coupled MIPI_D0 trunk seals the corridor MIPI_RST needs (reach
+        21/21 -> 20/21; the yield does not yet win it back, see
+        ``enable_pose_centerline``).  Joint-state pairs on a shadow-OFF run keep the
+        pre-#5895 behaviour (never yielded), so a board that commits no pose
+        trunk runs the exact pre-#5895 pipeline.
+        """
+        if self.enable_shadow_construction:
+            return list(committed_pairs)
+        if not pose_pair_ids:
+            return []
+        return [(pair, routes) for pair, routes in committed_pairs if id(pair) in pose_pair_ids]
+
     def _plan_corridor_yields(
         self,
         candidate_nets: list[int],
@@ -12653,6 +12721,8 @@ class DiffPairRouter:
         to_yield: list[tuple[DifferentialPair, list[Route]]],
         candidate_nets: list[int],
         non_diffpair_strategy: object,
+        also_release_nets: set[int] | None = None,
+        promote_nets: set[int] | None = None,
     ) -> tuple[bool, set[int], list[Route], list[Route]]:
         """Rip the planned pairs, re-run the main strategy, keep only if it paid.
 
@@ -12683,13 +12753,53 @@ class DiffPairRouter:
         snapshot_ids = {id(r) for r in autorouter.routes}
         yielded_routes = [r for _p, routes in to_yield for r in routes]
         released_nets: set[int] = set()
-        for pair, routes in to_yield:
+        # Issue #5895: single-ended legs of budget-exited pairs that the first
+        # main pass routed are frozen (non-rippable) in a re-run that only
+        # routes unconnected nets; on board 06 the relief rescue then rolls
+        # back with "blocked only by non-rippable copper of MIPI_CLK-".  Lift
+        # them with the yielded pairs so the negotiated loop arranges the whole
+        # contested corridor together, as it does with the pose search off.
+        # (Not sufficient on its own for board 06: see the
+        # ``enable_pose_centerline`` note in ``__init__``.)
+        if also_release_nets:
+            yielded_ids = {id(r) for r in yielded_routes}
+            for r in list(autorouter.routes):
+                if r.net in also_release_nets and id(r) not in yielded_ids:
+                    yielded_routes.append(r)
+                    yielded_ids.add(id(r))
+        for pair, _routes in to_yield:
             released_nets.update(pair.get_net_ids())
-            for route in routes:
-                with contextlib.suppress(Exception):
-                    autorouter.grid.unmark_route(route)
-                if route in autorouter.routes:
-                    autorouter.routes.remove(route)
+        for route in yielded_routes:
+            with contextlib.suppress(Exception):
+                autorouter.grid.unmark_route(route)
+            if route in autorouter.routes:
+                autorouter.routes.remove(route)
+        if promote_nets is None:
+            promote_nets = set(also_release_nets or ())
+        if promote_nets:
+            # The #3270 priority promotion for the re-run.  The caller drops
+            # it on the #4107 collapse signature (no coupled pair left after
+            # the yield), exactly as the first pass would have.
+            autorouter._budget_exit_diff_nets = set(promote_nets)
+        # Issue #5895: negotiated USAGE counts are not touched by
+        # ``unmark_route`` and ``route_all_negotiated`` never resets them, so
+        # the lifted copper's usage survived into the re-run as phantom
+        # congestion.  Board 06 (seed 42, CI): the re-run's iteration 0
+        # reported overflow 4424 (the first pass: 2), ripped all 19 nets
+        # every iteration, timed out at the 300 s cap with overflow 188, and
+        # the contorted copper split the +3V3 pour (POST-LEGALIZE GATE FAIL).
+        # Start the re-run from the clean slate a fresh negotiated pass sees.
+        grid = autorouter.grid
+        usage_reset = hasattr(grid, "reset_route_usage")
+        if usage_reset:
+            grid.reset_route_usage()
+        # Issue #5895: a yielded pose trunk's nets must be routable by the
+        # re-run.  The two-phase main pass skips claimed nets
+        # (``get_claimed_nets``), so drop the claim now and restore it if the
+        # yield is reverted.
+        pose_claims = self._pose_claims()
+        released_pose_claims = pose_claims & released_nets
+        pose_claims.difference_update(released_pose_claims)
 
         print(
             f"  [corridor-yield] {len(to_yield)} pair(s) yielded their corridor: "
@@ -12732,6 +12842,12 @@ class DiffPairRouter:
             autorouter._mark_route(route)
             if route not in autorouter.routes:
                 autorouter.routes.append(route)
+        if usage_reset and hasattr(grid, "mark_route_usage"):
+            # Leave usage consistent with the restored copper.
+            grid.reset_route_usage()
+            for route in autorouter.routes:
+                grid.mark_route_usage(route)
+        pose_claims.update(released_pose_claims)
         print(
             f"  [corridor-yield] reach {reach_before} -> {reach_after} of "
             f"{len(candidate_nets)} net(s); yield reverted"
@@ -12882,6 +12998,9 @@ class DiffPairRouter:
         # pre-phase committed -- the yield candidates for the
         # corridor-yield recovery that runs after the main strategy.
         committed_pair_routes: list[tuple[DifferentialPair, list[Route]]] = []
+        # Issue #5895: ``id(pair)`` of every committed pair whose copper is a
+        # pose-centerline trunk (#5786).
+        pose_committed_pair_ids: set[int] = set()
 
         refused_diff_nets: set[int] = set()
         # Issue #3089: track diff-pair nets whose coupled search hit the
@@ -12985,6 +13104,12 @@ class DiffPairRouter:
                 if routed_for_net.get(p_id, 0) > 0 and routed_for_net.get(n_id, 0) > 0:
                     coupled_routed_nets.add(p_id)
                     coupled_routed_nets.add(n_id)
+                    # Issue #5895: remember which committed pairs came from
+                    # the pose-centerline search (read BEFORE the stub-edge
+                    # discard below edits the claim set) so they can be
+                    # corridor-yield candidates on a shadow-OFF run.
+                    if self._pose_claims() & {p_id, n_id}:
+                        pose_committed_pair_ids.add(id(pair))
                     # Issue #3508: a net whose intra-cluster stub edge
                     # failed is INCOMPLETE -- leave it routable so the
                     # main strategy can finish it (its committed coupled
@@ -13120,9 +13245,18 @@ class DiffPairRouter:
         # re-deriving the same failure for its whole iteration ceiling
         # (board 06 shadow-ON seed 42: 10 iterations, 362.3s, no change) --
         # the corridor-yield recovery below is what can actually free those
-        # nets.  Shadow-OFF runs never set it, so CI is untouched.
+        # nets.
+        #
+        # Issue #5895: pose-centerline trunks (#5786) are first-class yield
+        # candidates too.  On a shadow-OFF run the candidates are ONLY the
+        # pose-coupled pairs, so a run with no pose trunk committed (pose
+        # search off, or every pose attempt declined) still never reaches
+        # either mechanism -- that is the pre-#5895 shadow-OFF pipeline.
+        yield_candidates = self._corridor_yield_candidates(
+            committed_pair_routes, pose_committed_pair_ids
+        )
         self.autorouter._coupled_prephase_stall_exit = bool(
-            _CORRIDOR_YIELD_ENABLED and self.enable_shadow_construction and committed_pair_routes
+            _CORRIDOR_YIELD_ENABLED and yield_candidates
         )
 
         non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
@@ -13183,23 +13317,35 @@ class DiffPairRouter:
         # together -- exactly what it does on a shadow-OFF run, which reaches
         # 21/21 with those nets routed single-ended.  The whole trade is
         # transactional on REACH: if the second pass does not connect more
-        # nets than the first, every route is restored.  Shadow-OFF runs skip
-        # this entirely, so CI and the committed artifacts are untouched.
-        if (
-            _CORRIDOR_YIELD_ENABLED
-            and self.enable_shadow_construction
-            and committed_pair_routes
-            and non_diffpair_strategy is not None
-        ):
+        # nets than the first, every route is restored.  Runs with no yield
+        # candidate (shadow OFF and no pose trunk committed) skip this
+        # entirely.
+        if _CORRIDOR_YIELD_ENABLED and yield_candidates and non_diffpair_strategy is not None:
             # Candidates are the main strategy's nets PLUS the diff-pair nets:
             # a pair the pre-phase claimed but left unconnected (board 06's
             # MIPI_D0, whose shadow declined and whose legs the negotiated loop
             # then failed) is itself a corridor-competition victim, and it is
             # not in ``non_diff_nets`` precisely because the claim removed it.
             candidate_nets = list(dict.fromkeys([*non_diff_nets, *sorted(diff_net_ids)]))
-            to_yield, _stranded = self._plan_corridor_yields(candidate_nets, committed_pair_routes)
+            to_yield, _stranded = self._plan_corridor_yields(candidate_nets, yield_candidates)
+            # Issue #5895: on a shadow-OFF run the yielded pose pairs become
+            # budget-exit pairs.  Re-apply the #4107 collapse rule to the
+            # post-yield picture: when no coupled pair is left, the re-run
+            # gets NO #3270 promotion -- the same default ordering a run with
+            # the pose search off uses (board 06: all 9 pairs budget-exit).
+            rerun_release: set[int] = set()
+            rerun_promote: set[int] = set()
+            if not self.enable_shadow_construction:
+                yielded_nets = {n for p, _r in to_yield for n in p.get_net_ids()}
+                rerun_release = set(budget_exit_diff_nets)
+                if coupled_routed_nets - yielded_nets:
+                    rerun_promote = rerun_release | yielded_nets
             kept, released_nets, removed_routes, added_routes = self._apply_corridor_yields(
-                to_yield, candidate_nets, non_diffpair_strategy
+                to_yield,
+                candidate_nets,
+                non_diffpair_strategy,
+                also_release_nets=rerun_release,
+                promote_nets=rerun_promote,
             )
             if kept:
                 diff_net_ids = diff_net_ids - released_nets
