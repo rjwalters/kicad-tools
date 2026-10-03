@@ -303,3 +303,85 @@ class TestLoopMeasuresRealGeometry:
             )
         ]
         assert loop._keepout_intrusion_count("UB") is None
+
+
+# --------------------------------------------------------------------------- #
+# Physical identity: duplicate references (Issue #5902)                        #
+# --------------------------------------------------------------------------- #
+
+
+def _duplicate_ref_loop():
+    """Two footprints both authored ``UB``; pads carry their physical key.
+
+    ``component_keys()`` synthesises a distinct ``component_id`` per footprint
+    when references repeat, so ``delta.target_key`` is that synthetic key while
+    every router ``pad.ref`` stays the raw duplicate ``"UB"``.  The first UB's
+    pad sits at (12, 10) exactly as in :func:`_improving_loop`; the second UB is
+    parked far away, inside nothing.
+    """
+    from kicad_tools.router.placement_delta import PlacementDelta
+    from kicad_tools.schema.physical_identity import footprint_keys
+    from tests.router.test_placement_delta_feedback import MockFootprint
+
+    keys = footprint_keys([MockFootprint("UB", 10.0, 10.0), MockFootprint("UB", 30.0, 30.0)])
+    assert keys[0] != "UB" and keys[0] != keys[1], keys
+
+    first = FakePad(12.0, 10.0, "UB", "2")
+    first.component_id = keys[0]
+    second = FakePad(32.0, 30.0, "UB", "9")
+    second.component_id = keys[1]
+    delta = PlacementDelta(
+        net_name="DQ2",
+        target_ref="UB",
+        kind="rotate_180",
+        rotation_delta=180.0,
+        source_action="de_reverse_bundle",
+        component_id=keys[0],
+    )
+    loop, router, pcb = _make_loop(
+        footprint_refs=[("UB", 10.0, 10.0), ("UB", 30.0, 30.0)],
+        pads=[first, second],
+        total_nets=2,
+        failed_predicate=_rotate_fixes_net2,
+        proposer=lambda _pcb: [delta],
+    )
+    return loop, router, keys
+
+
+def _keepout_area(polygon):
+    from kicad_tools.router.core import KeepoutRuleArea
+
+    return KeepoutRuleArea(
+        polygon=polygon,
+        layers=frozenset({0}),
+        blocks_tracks=True,
+        blocks_vias=True,
+        name="HV_KEEPOUT",
+    )
+
+
+class TestKeepoutGuardPhysicalIdentity:
+    """The guard keys on ``component_id or ref``, not the authored ref."""
+
+    def test_count_matches_pads_by_physical_key(self):
+        loop, router, keys = _duplicate_ref_loop()
+        # Covers BOTH UB pads: only the targeted footprint's pad may count.
+        area = _keepout_area(((11.0, 9.0), (33.0, 9.0), (33.0, 31.0), (11.0, 31.0)))
+        router._keepout_rule_area_polygons = lambda: [area]
+        assert loop._keepout_intrusion_count(keys[0]) == 1
+        assert loop._keepout_intrusion_count(keys[1]) == 1
+
+    def test_delta_into_keepout_reverted_on_duplicate_reference_board(self):
+        """Pre-#5902 this was 0 -> 0 (no pad matched) and the move was kept."""
+        loop, router, keys = _duplicate_ref_loop()
+        # The 180 about (10, 10) moves the first UB's pad from x=12 to x=8.
+        area = _keepout_area(((7.0, 9.0), (9.0, 9.0), (9.0, 11.0), (7.0, 11.0)))
+        router._keepout_rule_area_polygons = lambda: [area]
+        assert loop._keepout_intrusion_count(keys[0]) == 0
+
+        result = loop.run_delta(max_adjustments=1, use_negotiated=True)
+        assert result.applied_deltas == []
+        assert len(result.reverted_deltas) == 1
+        assert "keepout rule area 0 -> 1" in result.reverted_reasons[0]
+        # The revert restored the pad to its pre-move position.
+        assert router.pads[("UB", "2")].x == pytest.approx(12.0)
