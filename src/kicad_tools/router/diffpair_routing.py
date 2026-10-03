@@ -173,12 +173,12 @@ _POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
 # (``DiffPairRouter._pose_corridor_guard``).  Before a pose-centerline trunk is
 # committed, the still-unrouted signal nets with a pad within
 # ``_POSE_CORRIDOR_RADIUS_MM`` of the pair's four end pads (the pin fields the
-# trunk's end legs cross) are probe-routed with and without the trunk.  A net
-# that is routable without the trunk and not with it is a corridor the trunk
-# would seal: the search is re-run once with that net's probe path reserved,
+# trunk's end legs cross) are probe-routed jointly with and without the trunk.
+# A net that is routable without the trunk and not with it is a corridor the
+# trunk would seal: the search is re-run once with the probe paths reserved,
 # and the trunk is declined if it still seals one.  Board 06 (seed 42): the
-# pose-coupled MIPI_D0 trunk sealed J4.RST (MIPI_RST), whose pad sits 1.5 mm
-# above the gap between the CLK and D0 pins.
+# pose-coupled MIPI_D0 trunk, together with the MIPI_CLK legs, sealed J4.RST
+# (MIPI_RST), whose pad sits 1.5 mm above the gap between the CLK and D0 pins.
 #
 #   * ``_POSE_CORRIDOR_MAX_NETS`` caps the nets probed per pair (nearest first),
 #     so a pair landing on a large MCU does not probe every pin of it.
@@ -5554,9 +5554,9 @@ class DiffPairRouter:
            are not the trunk's doing and are ignored;
         2. probe them again, same order, with the trunk marked;
         3. if a net routable in step 1 is not in step 2, re-run the pose search
-           ONCE with that net's step-1 probe path reserved as an obstacle (the
-           corridor the net needs), and re-check the new trunk with the exact
-           copper gates and step 2;
+           ONCE with the step-1 probe paths of that net and of the nets probed
+           before it reserved as obstacles (the corridors they need), and
+           re-check the new trunk with the exact copper gates and step 2;
         4. decline the pair (``reason=seals-corridor``) if it still seals one.
            The caller then takes its ordinary no-coupled-result path, which is
            the pipeline from before #5786 for this pair.
@@ -5614,7 +5614,13 @@ class DiffPairRouter:
         if remaining is None or remaining >= _POSE_CENTERLINE_MIN_BUDGET_S:
             from .diffpair_pose import route_centerline_pose
 
-            reserved = [r for net_id in sealed for r in guides[net_id]]
+            # Reserve the sealed nets' probe paths AND those of the nets probed
+            # before them: in the joint probe those nets' copper is part of
+            # what shaped the sealed net's corridor (board 06: the MIPI_CLK
+            # legs, routed ahead of MIPI_RST, close it together with the trunk).
+            order = [n for n in neighbours if n in guides]
+            last = max(order.index(n) for n in sealed)
+            reserved = [r for net_id in order[: last + 1] for r in guides[net_id]]
             with self._temporarily_marked(reserved):
                 # The C++ coupled search works on a snapshot of the grid taken
                 # when it was built; rebuild it so it sees the reservation, and
@@ -5633,14 +5639,19 @@ class DiffPairRouter:
             if hasattr(pathfinder, "_cpp_coupled_impl"):
                 pathfinder._cpp_coupled_impl = None
             retry_report = dict(getattr(pathfinder, "last_pose_report", {}) or {})
-        if retry is not None and (
-            self._pose_copper_rejection(retry[0], retry[1], intra_clearance, pair.name) is not None
-        ):
-            retry = None
+        retry_outcome = "no budget left for a retry"
+        if retry is None and retry_report:
+            retry_outcome = f"retry declined: {retry_report.get('reason', 'n/a')}"
+        if retry is not None:
+            rejection = self._pose_copper_rejection(retry[0], retry[1], intra_clearance, pair.name)
+            if rejection is not None:
+                retry_outcome = f"retry rejected: {rejection}"
+                retry = None
         still_sealed = sealed
         if retry is not None:
             still_sealed = _sealed_by(retry)
             if still_sealed:
+                retry_outcome = "retry still seals it"
                 retry = None
         if retry is None:
             pathfinder.last_pose_report = {
@@ -5655,7 +5666,7 @@ class DiffPairRouter:
             )
             print(
                 f"    [coupled-pose] corridor guard: no trunk keeps {_label(still_sealed)} "
-                f"routable ({time.monotonic() - t0:.2f}s)"
+                f"routable ({retry_outcome}; {time.monotonic() - t0:.2f}s)"
             )
             return None
         pathfinder.last_pose_report = retry_report
