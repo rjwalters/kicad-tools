@@ -6351,9 +6351,12 @@ def _add_optimize_placement_parser(subparsers) -> None:
     op_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     op_parser.add_argument(
         "--strategy",
-        choices=["cmaes"],
+        choices=["cmaes", "bayesian"],
         default="cmaes",
-        help="Optimization strategy (default: cmaes)",
+        help=(
+            "Optimization strategy (default: cmaes). 'bayesian' requires the "
+            "optional extra: pip install 'kicad-tools[bayesian]'"
+        ),
     )
     op_parser.add_argument(
         "--max-iterations",

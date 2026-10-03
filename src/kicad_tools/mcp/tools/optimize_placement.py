@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
@@ -43,6 +43,10 @@ from kicad_tools.placement.wirelength import (
     compare_wirelength_estimators,
     compute_per_footprint_ratsnest,
 )
+
+if TYPE_CHECKING:
+    from kicad_tools.placement.bo_strategy import BayesianOptStrategy
+    from kicad_tools.placement.cmaes_strategy import CMAESStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -343,7 +347,8 @@ def optimize_placement(
 
     Args:
         pcb_path: Absolute path to .kicad_pcb file.
-        strategy: Optimization strategy name. Currently only "cmaes" is supported.
+        strategy: Optimization strategy name. "cmaes" (default) or "bayesian" (needs the optional
+            ``bayesian`` extra).
         max_iterations: Maximum number of optimization iterations.
         weights: Optional cost function weight overrides. Keys:
             overlap, drc, boundary, wirelength, area.
@@ -405,16 +410,24 @@ def optimize_placement(
     footprint_sizes = _build_footprint_sizes(components)
     placement_bounds = bounds(board_outline, components)
 
-    # Create strategy
+    # Create strategy.  Annotated with the concrete union (not the abstract
+    # PlacementStrategy) because the loop below reads ``_population_size``,
+    # which both concrete strategies expose but the base class does not.
+    optimizer: CMAESStrategy | BayesianOptStrategy
     try:
         if strategy == "cmaes":
             from kicad_tools.placement.cmaes_strategy import CMAESStrategy
 
             optimizer = CMAESStrategy()
+        elif strategy == "bayesian":
+            # Raises ImportError if the optional 'bayesian' extra is missing.
+            from kicad_tools.placement.bo_strategy import BayesianOptStrategy
+
+            optimizer = BayesianOptStrategy()
         else:
             return {
                 "success": False,
-                "error_message": f"Unknown strategy: {strategy!r}. Available: cmaes",
+                "error_message": f"Unknown strategy: {strategy!r}. Available: cmaes, bayesian",
                 "component_count": len(components),
                 "net_count": len(nets),
             }

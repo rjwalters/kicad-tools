@@ -161,6 +161,16 @@ class BayesianOptStrategy(PlacementStrategy):
         self._pending_trial_indices: list[int] = []
         self._initialized: bool = False
 
+    @property
+    def _population_size(self) -> int:
+        """Candidates per suggest/observe round (alias of the batch size).
+
+        The optimize-placement CLI and MCP tool drive every strategy through
+        ``strategy._population_size``; for Bayesian optimization this is the
+        configured ``batch_size``.
+        """
+        return self._batch_size
+
     def initialize(
         self,
         bounds: PlacementBounds,

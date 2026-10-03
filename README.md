@@ -564,7 +564,7 @@ full list (every command and subcommand) lives in
 | `kct route-auto <pcb>` | Orchestrator-based multi-strategy autorouting |
 | `kct optimize-traces <pcb>` | Optimize routed traces |
 | `kct placement <pcb>` | Detect and optimize component placement |
-| `kct optimize-placement <pcb>` | CMA-ES/Bayesian global placement optimization |
+| `kct optimize-placement <pcb>` | CMA-ES/Bayesian (`--strategy bayesian`, needs `kicad-tools[bayesian]`) global placement optimization |
 | `kct zones <subcommand>` | Add copper pour zones (and `hv-keepout` plane voids) |
 | `kct stitch <pcb>` | Auto-add stitching vias for plane connections |
 | `kct reason <pcb>` | LLM-driven PCB layout reasoning |

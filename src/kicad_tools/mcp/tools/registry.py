@@ -1800,8 +1800,11 @@ register_tool(
             },
             "strategy": {
                 "type": "string",
-                "description": "Optimization strategy",
-                "enum": ["cmaes"],
+                "description": (
+                    "Optimization strategy: cmaes (default) or bayesian "
+                    "(Ax/BoTorch; needs the optional 'bayesian' extra)"
+                ),
+                "enum": ["cmaes", "bayesian"],
                 "default": "cmaes",
             },
             "max_iterations": {

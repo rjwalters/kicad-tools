@@ -360,8 +360,13 @@ def _create_strategy(strategy_name: str) -> PlacementStrategy:
         from kicad_tools.placement.cmaes_strategy import CMAESStrategy
 
         return CMAESStrategy()
+    elif strategy_name == "bayesian":
+        # Raises ImportError if the optional 'bayesian' extra is missing.
+        from kicad_tools.placement.bo_strategy import BayesianOptStrategy
+
+        return BayesianOptStrategy()
     else:
-        raise ValueError(f"Unknown strategy: {strategy_name!r}. Available: cmaes")
+        raise ValueError(f"Unknown strategy: {strategy_name!r}. Available: cmaes, bayesian")
 
 
 def _read_current_vector(
