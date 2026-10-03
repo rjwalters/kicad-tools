@@ -82,7 +82,10 @@ class TestFindKicadCli:
     """Tests for find_kicad_cli function."""
 
     def test_find_in_path(self):
-        with patch("shutil.which") as mock_which:
+        with (
+            patch("shutil.which") as mock_which,
+            patch("kicad_tools.cli.runner._probe_kicad_cli", return_value=True),
+        ):
             mock_which.return_value = "/usr/bin/kicad-cli"
             result = find_kicad_cli()
             assert result == Path("/usr/bin/kicad-cli")

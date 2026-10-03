@@ -205,6 +205,21 @@ def _snapshot_hashes(rel_paths: list[str]) -> dict[str, str | None]:
     return snap
 
 
+@pytest.fixture(autouse=True)
+def _clear_find_kicad_cli_cache():
+    """Reset the ``find_kicad_cli`` memoization around every test (#5903).
+
+    ``find_kicad_cli`` is ``lru_cache``d for the process lifetime, so a test
+    that mocks ``shutil.which`` / ``Path.exists`` would otherwise leak its
+    result into (or inherit a stale result from) neighbouring tests.
+    """
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    find_kicad_cli.cache_clear()
+    yield
+    find_kicad_cli.cache_clear()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def committed_board_artifacts_guard():
     """Fail loudly if the test session modifies committed board artifacts.
