@@ -28,11 +28,13 @@ implementation of the pose search; when the C++ backend is unavailable
 :func:`route_centerline_pose` returns ``None`` and the caller keeps its
 existing fallback (independent legs), exactly as before this module existed.
 
-Selection: off by default.  ``DiffPairRouter.enable_pose_centerline`` (set from
-``KCT_POSE_CENTERLINE=1``) opts in, and the rescue runs only after the
+Selection: on by default since Issue #5895.  ``DiffPairRouter.enable_pose_centerline``
+(``KCT_POSE_CENTERLINE=0`` opts out) gates it, and the rescue runs only after the
 joint-state search (and the shadow constructor, if it is on) have failed.
 Before the pair is committed, the router also applies its exact foreign-pad gate
-and the intra-pair clearance audit to it (``DiffPairRouter._pose_copper_rejection``).
+and the intra-pair clearance audit to it (``DiffPairRouter._pose_copper_rejection``),
+and declines a trunk that would seal a neighbouring net's corridor
+(``DiffPairRouter._pose_corridor_guard``, Issue #5895).
 
 Scope (v1): single-layer trunks.  Pairs whose two ends sit on different layers
 or need a via between them are left to the joint-state search.

@@ -806,9 +806,13 @@ board.
      itself should be reimplemented in `coupled_pathfinder.cpp`.
    - **Status (Issue #5786):** shipped opt-in (`KCT_POSE_CENTERLINE=1`) for
      single-layer pairs. With it on, 06b minimum coupling goes from 0% to
-     87.0%, with 18/18 nets and 0 shared-referee errors. It stays off by
-     default until board 06's Diff-Pair job passes with it on. See "Opt-in fix
+     87.0%, with 18/18 nets and 0 shared-referee errors. See "Opt-in fix
      after this benchmark ran (Issue #5786)" above.
+   - **Status (Issue #5895):** on by default (`KCT_POSE_CENTERLINE=0` opts
+     out). A corridor guard probes the nets next to a trunk's end pads before
+     it is committed and declines a trunk that would seal one; on board 06 it
+     declines the MIPI_D0 trunk that stranded MIPI_RST, so the Diff-Pair job
+     passes (21/21) while 06b keeps 87.0% minimum coupling.
 
 3. **Crossing-aware default ordering plus frontier-attributed N+1 rip-up.**
    - **Target:** boards 02 and 03. Metrics: completion (12/12, 27/27), vias
