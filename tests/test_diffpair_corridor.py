@@ -566,6 +566,10 @@ def test_iteration_budget_is_split_between_corridor_and_fallback(monkeypatch):
     monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
     monkeypatch.setattr(DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None)
     router = _two_pad_diffpair_router()
+    # Issue #5895: the pose-centerline rescue (on by default) would couple
+    # this open-field pair after the joint-state attempts; this test is about
+    # the budget split between those attempts.
+    router._diffpair.enable_pose_centerline = False
     pairs = router._diffpair.detect_differential_pairs()
     assert len(pairs) == 1
 
