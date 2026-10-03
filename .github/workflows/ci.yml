@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Nightly run (Issue #5743): only jobs that opt in via
+  # `github.event_name == 'schedule'` (currently the Diff-Pair Routing
+  # Regression job) run on this trigger; everything else is skipped.
+  schedule:
+    - cron: "17 4 * * *"
 
 permissions:
   contents: read
@@ -38,7 +43,7 @@ env:
 # the superseded PR runs, held every job 70-100 min in queue against this
 # account's 40-job GitHub-hosted concurrency cap.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -73,6 +78,14 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      board00: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board00 == 'true') }}
+      board01: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board01 == 'true') }}
+      board02: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board02 == 'true') }}
+      board03: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board03 == 'true') }}
+      board04: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board04 == 'true') }}
+      board05: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board05 == 'true') }}
+      board06: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board06 == 'true') }}
+      board07: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board07 == 'true') }}
     steps:
       # Issue #5366: a single combined `!(a|b|c|...)` extglob only excludes
       # one path segment below each alternative (picomatch/extglob
@@ -100,6 +113,58 @@ jobs:
               - '!LICENSE'
               - '!.gitignore'
               - '!.gitattributes'
+
+      # Issue #5743: per-board path filters. A board job runs when (a) any
+      # non-board code path changed ("shared": same exclusions as `code`
+      # minus the eight CI'd board directories, so src/**, pyproject.toml,
+      # uv.lock, scripts/**, tests/**, this workflow, boards/08+, ... all
+      # count and every board still runs -- no coverage loss), or (b) that
+      # board's own directory changed. Default `some` quantifier here, so
+      # these are separate steps from the `every` step above.
+      - uses: dorny/paths-filter@v4
+        id: boards
+        with:
+          filters: |
+            board00:
+              - 'boards/00-simple-led/**'
+            board01:
+              - 'boards/01-voltage-divider/**'
+            board02:
+              - 'boards/02-charlieplex-led/**'
+            board03:
+              - 'boards/03-usb-joystick/**'
+            board04:
+              - 'boards/04-stm32-devboard/**'
+            board05:
+              - 'boards/05-bldc-motor-controller/**'
+            board06:
+              - 'boards/06-diffpair-test/**'
+            board07:
+              - 'boards/07-matchgroup-test/**'
+
+      - uses: dorny/paths-filter@v4
+        id: shared
+        with:
+          predicate-quantifier: every
+          filters: |
+            shared:
+              - '!docs/**'
+              - '!site/**'
+              - '!.claude/**'
+              - '!.loom/**'
+              - '!.github/ISSUE_TEMPLATE/**'
+              - '!**/*.md'
+              - '!LICENSE'
+              - '!.gitignore'
+              - '!.gitattributes'
+              - '!boards/00-simple-led/**'
+              - '!boards/01-voltage-divider/**'
+              - '!boards/02-charlieplex-led/**'
+              - '!boards/03-usb-joystick/**'
+              - '!boards/04-stm32-devboard/**'
+              - '!boards/05-bldc-motor-controller/**'
+              - '!boards/06-diffpair-test/**'
+              - '!boards/07-matchgroup-test/**'
 
   lint:
     name: Lint & Format
@@ -157,6 +222,7 @@ jobs:
         run: node scripts/ci/verify_changes_filter.mjs
 
   typecheck:
+    if: github.event_name != 'schedule'
     name: Type Check
     runs-on: ubuntu-latest
     steps:
@@ -860,8 +926,17 @@ jobs:
             bash scripts/ci/run_native_routed_drc.sh "${args[@]}"
 
   diffpair-routing-regression:
-    # Issue #2660 / Epic #2556 Phase 4N: re-route board 06 (the diff-pair
-    # testbench) from scratch on every PR and verify that
+    # Issue #5743 (operator ruling 2026-10-02): this job now runs on main
+    # pushes and the nightly schedule only, NOT on pull requests. It was
+    # measured at ~10.5 min median / 0 failures in 35 PR runs and board-06-
+    # end-to-end already re-routes board 06 from scratch with the same seed and
+    # the same check_diffpair_coverage.py gate, so the per-PR copy was ~22% of
+    # self-hosted slot time. The job and its assertions are unchanged; a
+    # routing-algorithm regression is still caught within minutes of landing.
+    # Nothing `needs:` this job, so skipping it on PRs gates nothing.
+    #
+    # Original rationale (Issue #2660 / Epic #2556 Phase 4N): re-route board 06
+    # (the diff-pair testbench) from scratch on every run and verify that
     #   (a) the resulting DRC error count is within the allowlist baseline
     #       in .github/routed-drc-tolerance.yml; AND
     #   (b) each of the three diff-pair DRC rules
@@ -906,7 +981,7 @@ jobs:
     # the merge button.
     name: Diff-Pair Routing Regression
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'schedule') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
     # fork PRs route back to GitHub-hosted instead of being skipped, so no
@@ -1164,7 +1239,7 @@ jobs:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
     needs: [changes, kicad_pin]
-    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
@@ -1459,7 +1534,7 @@ jobs:
     # ``diffpair-routing-regression`` and ``matchgroup-routing-regression``.
     name: Board 00 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board00 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     # The recipe is ~30 seconds locally (1 signal net + 2 pour nets),
     # the C++ backend build is ~2 min, ``kct export`` + ``kct check`` +
@@ -1604,7 +1679,7 @@ jobs:
     # branch-protection setting.
     name: Board 01 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board01 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -1698,7 +1773,7 @@ jobs:
     # until a repo admin flips the branch-protection setting.
     name: Board 02 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board02 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -1812,7 +1887,7 @@ jobs:
     # board 00/01/02/06/07 e2e jobs).
     name: Board 03 End-to-End (LVS-only)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board03 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -1992,7 +2067,7 @@ jobs:
     # board 00/01 e2e jobs).
     name: Board 06 End-to-End (LVS)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board06 == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
     # fork PRs route back to GitHub-hosted instead of being skipped, so no
@@ -2157,7 +2232,7 @@ jobs:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
     needs: [changes, kicad_pin]
-    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
     # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
@@ -2439,7 +2514,7 @@ jobs:
     # Test job) because no other job runs the board-05 rescue loop from clean.
     name: Board 05 Routing Regression (blocking <= 7)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board05 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
@@ -2559,7 +2634,7 @@ jobs:
     # 30 min for the LQFP-48 escape work.
     name: Board 04 End-to-End (LVS-only + DRC allowlist)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board04 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
