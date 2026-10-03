@@ -311,7 +311,21 @@ def test_all_invalid_export_replaces_stale_attempt(tmp_path, suffix):
     [
         pytest.param(["--no-auto-layers", "--strategy", "basic"], id="basic"),
         pytest.param(["--no-auto-layers", "--strategy", "monte-carlo"], id="monte-carlo"),
-        pytest.param(["--no-auto-layers", "--strategy", "evolutionary"], id="evolutionary"),
+        # The test asserts placement preservation, not route quality, so keep the
+        # GA tiny: the default pop-size x generations is many full route_all()
+        # calls and exceeds the 30s kct route deadline (Issue #5901).
+        pytest.param(
+            [
+                "--no-auto-layers",
+                "--strategy",
+                "evolutionary",
+                "--pop-size",
+                "4",
+                "--generations",
+                "2",
+            ],
+            id="evolutionary",
+        ),
         pytest.param(
             ["--no-auto-layers", "--strategy", "basic", "--route-engine", "mesh"], id="mesh"
         ),
