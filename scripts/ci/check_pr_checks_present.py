@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """Pre-merge gate: tell "no checks ran" apart from "checks passed" (issue #5701).
 
-``.github/workflows/ci.yml`` only triggers ``pull_request`` for PRs whose
-*base* is ``main``.  A stacked PR (base = ``feature/issue-N``) therefore gets
-no CI at all, and GitHub reports ``mergeStateStatus: CLEAN`` -- which means
-"never ran", not "passed".  This script classifies a PR's check rollup into
-four states so a merge path can refuse the first one:
+``.github/workflows/ci.yml`` (and ``changelog.yml``) only trigger
+``pull_request`` for PRs whose *base* is ``main``.  A stacked PR (base =
+``feature/issue-N``) therefore gets none of the ``ci.yml`` gates, and GitHub
+reports ``mergeStateStatus: CLEAN`` -- which means "never ran", not "passed".
 
-    absent   -- zero checks reported (the stacked-PR blind spot)   -> exit 3
+The rollup is not necessarily empty, though: ``ecosystem-drift.yml`` has a
+``paths:``-only ``pull_request`` trigger (no ``branches:`` filter), so a
+stacked PR touching the ecosystem registry gets that one check.  An "any
+check passed" test would wrongly report ``passing`` there.  So when the base
+is not ``main`` the script also requires at least one rollup entry from the
+``CI`` workflow (``--required-workflow``); without one the rollup counts as
+absent.
+
+This script classifies a PR's check rollup into four states so a merge path
+can refuse the first one:
+
+    absent   -- zero checks reported, or (base != main) no check from
+                the required ``CI`` workflow (the stacked-PR blind spot) -> exit 3
     failing  -- at least one check concluded unsuccessfully        -> exit 2
     pending  -- checks exist but some have not finished            -> exit 2
     passing  -- every check succeeded / was skipped / neutral      -> exit 0
@@ -35,6 +46,7 @@ import subprocess
 import sys
 
 OK_CONCLUSIONS = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+DEFAULT_REQUIRED_WORKFLOW = "CI"  # ``name:`` of .github/workflows/ci.yml
 PENDING_STATES = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
 
@@ -55,9 +67,20 @@ def _outcome(item: dict) -> str:
     return "pending"
 
 
-def classify(rollup: list[dict] | None) -> str:
-    """Classify a ``statusCheckRollup`` list as absent/failing/pending/passing."""
+def has_workflow(rollup: list[dict] | None, workflow: str) -> bool:
+    """True if any rollup entry came from the GitHub Actions workflow *workflow*."""
+    return any((i.get("workflowName") or "") == workflow for i in rollup or [])
+
+
+def classify(rollup: list[dict] | None, required_workflow: str | None = None) -> str:
+    """Classify a ``statusCheckRollup`` list as absent/failing/pending/passing.
+
+    With *required_workflow*, a rollup containing no entry from that workflow
+    is ``absent`` even if other (e.g. path-filtered) checks ran.
+    """
     if not rollup:
+        return "absent"
+    if required_workflow and not has_workflow(rollup, required_workflow):
         return "absent"
     outcomes = {_outcome(i) for i in rollup}
     if "fail" in outcomes:
@@ -87,6 +110,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo")
     p.add_argument("--json", help="read a statusCheckRollup JSON file instead of calling gh")
     p.add_argument(
+        "--required-workflow",
+        default=DEFAULT_REQUIRED_WORKFLOW,
+        help="when base != main, require a check from this workflow name "
+        f"(default: {DEFAULT_REQUIRED_WORKFLOW!r}; '' disables)",
+    )
+    p.add_argument(
         "--allow-absent", action="store_true", help="warn instead of failing when no checks ran"
     )
     args = p.parse_args(argv)
@@ -99,11 +128,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::could not read check rollup: {exc}", file=sys.stderr)
         return 1
 
-    state = classify(rollup)
     stacked = bool(base) and base != "main"
+    required = args.required_workflow if stacked else None
+    state = classify(rollup, required)
     if state == "absent":
+        if rollup:
+            what = (
+                f"NO '{required}' WORKFLOW CHECKS RAN for this PR ({len(rollup)} other "
+                "check(s) did, e.g. a path-filtered workflow, but none of ci.yml's gates)"
+            )
+        else:
+            what = "NO CHECKS RAN for this PR"
         msg = (
-            "NO CHECKS RAN for this PR"
+            what
             + (f" (base '{base}' is not 'main', so ci.yml never triggered)" if stacked else "")
             + ". mergeStateStatus CLEAN here means 'never ran', not 'passed'. "
             "Verify locally and record the evidence, or merge via the parent PR."
