@@ -562,7 +562,7 @@ Fail closed: `1` (the gate could not run) is handled as `10`, never as `0`.
 | Exit | Instead of enriching |
 |---|---|
 | `10`/`12` | Do the premise check now and post the record its `REASON=`/`EVIDENCE-CANDIDATE=` lines point at; re-run. |
-| `11` | Comment the disagreement axis, then `--add-label "loom:operator-only,loom:operator-decision"` per "Applying `loom:operator-only`" below. |
+| `11` | Route it as a ranked decision via `loom-daemon operator-decision apply` per "Applying `loom:operator-only`" below. |
 | `13` | Premise false — close or rescope per "Issues Are Suggestions" above. |
 
 Record format, scoped population, and why the gate sits one stage before you:
@@ -932,9 +932,9 @@ Champion's exclusions, the Priority-2 query above) is unchanged:
 | `loom:operator-objective` | Determined once the operator states an objective — list the candidate objectives and the answer under each (#5826); a missing objective is this, not `-decision` |
 
 ```bash
-# Curator routing a genuine PO-level decision:
-./.loom/scripts/post-comment.sh <number> --body "Routing to the operator: <ranked options, each with a why>."
-gh issue edit <number> --add-label "loom:operator-only,loom:operator-decision"
+# Curator routing a genuine PO-level decision: 2-4 ranked options, each with
+# a why (.loom/docs/operator-decision.md); a one-option ask is refused:
+loom-daemon operator-decision apply <number> --input d.json --also-label loom:operator-only
 ```
 
 **Unsure which sub-kind applies means curation is incomplete, not that a
@@ -1758,15 +1758,14 @@ with a why), swapping in `loom:decision-malformed` and commenting
 `<!-- loom-ui:decision-bounce -->`. Query `gh issue list --label loom:decision-malformed`; include them even
 with `loom:operator-only`. Read body, escalation comment, and bounce comment, then:
 
-- **Real operator call**: write the block from options already in the thread
-  (never invent options), post `<!-- loom:curator-decision-repair -->`, then
-  `--remove-label loom:decision-malformed --add-label loom:operator-decision`.
+- **Real operator call**: build the decision JSON from options already in the
+  thread (never invent options), post `<!-- loom:curator-decision-repair -->`,
+  then `loom-daemon operator-decision apply <number>` (clears the bounce label).
+  Same for a prose `loom:operator-decision` issue you touch, if faithful.
 - **No real operator call**: remove the label, comment why, and re-route per
   `label-state-machine.md` (normal flow, `loom:operator-objective`, or inbox mail).
 - **No-loop guard**: a decision-bounce comment newer than your repair marker means
   the repair bounced. Comment once and leave it alone.
-
-Render: `loom-daemon operator-decision apply` (`operator-decision.md`).
 
 ## Checking Operator-Only Premises (#6849)
 

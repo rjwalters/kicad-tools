@@ -230,7 +230,10 @@ done
 echo ""
 echo "Test 5: builder-complexity.md routes size findings to loom:blocked, not operator-only"
 BC="$ROLE_DIR/builder-complexity.md"
-if grep -q 'loom:operator-only' "$BC" && grep -qE 'loom:operator-only,loom:operator-(blocked|mechanical|decision)' "$BC"; then
+# The paired form is either a literal `--add-label` pair or the #9344
+# helper, which adds loom:operator-decision with `--also-label loom:operator-only`
+# in the same label write.
+if grep -q 'loom:operator-only' "$BC" && grep -qE 'loom:operator-only,loom:operator-(blocked|mechanical|decision)|operator-decision apply .*--also-label loom:operator-only' "$BC"; then
     pass "builder-complexity.md shows the paired-label form"
 else
     fail "builder-complexity.md does not show the paired-label form"

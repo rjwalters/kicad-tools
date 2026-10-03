@@ -81,8 +81,8 @@ When you claim an issue and realize mid-work it requires >6 hours or touches >8 
 gh issue edit 812 --body-file /tmp/body-812.md
 
 # 3. Mark the parent blocked — humans close it once children are filed.
-#    NEVER close a parent issue yourself; the park records above
-#    are the record, loom:blocked is the terminal state.
+#    NEVER close a parent yourself; the park records are the
+#    record, loom:blocked is the terminal state.
 gh issue edit 812 --remove-label "loom:building" --add-label "loom:blocked"
 
 # Then exit and let the Curator/sweep pipeline pick up each sub-issue.
@@ -103,7 +103,7 @@ gh issue edit 812 --remove-label "loom:building" --add-label "loom:blocked"
 > apply it, **never apply it alone** — add exactly one sub-kind in that command
 > (`loom:operator-blocked` / `loom:operator-mechanical` /
 > `loom:operator-decision` / `loom:operator-objective`), e.g.
-> `gh issue edit 812 --remove-label "loom:building" --add-label "loom:operator-only,loom:operator-decision"`.
+> `loom-daemon operator-decision apply 812 --input d.json --also-label loom:operator-only --remove-label loom:building`.
 > Being unsure which sub-kind fits means the analysis isn't finished — it is
 > **not** a reason to default to `loom:operator-decision` (#5826). Full rule,
 > including the machine-readable `Blocked by #N` line required with

@@ -264,11 +264,9 @@ unchanged:
 | `loom:operator-objective` | The question is determined once the operator states an objective — name the candidate objectives and the answer under each (#5826) |
 
 ```bash
-# Issue that encodes a still-pending human decision, surfaced during review:
-gh issue edit <issue-number> --add-label "loom:operator-only,loom:operator-decision"
-
-# PR whose review raises a question only a human can answer:
-gh pr edit <pr-number> --add-label "loom:operator-only,loom:operator-decision"
+# Issue (or PR: same command) holding a decision only a human can make, as
+# 2-4 ranked options each with a why (.loom/docs/operator-decision.md):
+loom-daemon operator-decision apply <number> --input d.json --also-label loom:operator-only
 ```
 
 **Being unsure which sub-kind applies means the review question is not yet
@@ -288,9 +286,8 @@ in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
 does not satisfy this — the phrase itself must be present so a later automated
 pass can tell when the blocker clears.
 
-**If you chose `loom:operator-decision`**, the same comment MUST name the
-disagreement axis and state why it is a preference rather than a fact — "needs
-a human ruling" alone does not satisfy this.
+**If you chose `loom:operator-decision`**, the options' whys MUST name the
+disagreement axis and why it is a preference, not a fact.
 
 **If you chose `loom:operator-objective`**, the same comment MUST list the
 candidate objectives and the answer under each, not just "needs an

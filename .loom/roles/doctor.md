@@ -505,8 +505,8 @@ in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
 `warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
 does not satisfy this.
 
-**If you chose `loom:operator-decision`**, the same comment MUST name the
-disagreement axis and state why it is a preference rather than a fact.
+**If you chose `loom:operator-decision`**, use `loom-daemon operator-decision
+apply` (`operator-decision.md`); the ranked whys name the axis.
 
 **If you chose `loom:operator-objective`**, the same comment MUST list the
 candidate objectives and the answer under each, not just "needs an
