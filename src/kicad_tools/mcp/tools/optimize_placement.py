@@ -343,7 +343,8 @@ def optimize_placement(
 
     Args:
         pcb_path: Absolute path to .kicad_pcb file.
-        strategy: Optimization strategy name. Currently only "cmaes" is supported.
+        strategy: Optimization strategy name. "cmaes" (default) or "bayesian" (needs the optional
+            ``bayesian`` extra).
         max_iterations: Maximum number of optimization iterations.
         weights: Optional cost function weight overrides. Keys:
             overlap, drc, boundary, wirelength, area.
@@ -411,10 +412,15 @@ def optimize_placement(
             from kicad_tools.placement.cmaes_strategy import CMAESStrategy
 
             optimizer = CMAESStrategy()
+        elif strategy == "bayesian":
+            # Raises ImportError if the optional 'bayesian' extra is missing.
+            from kicad_tools.placement.bo_strategy import BayesianOptStrategy
+
+            optimizer = BayesianOptStrategy()
         else:
             return {
                 "success": False,
-                "error_message": f"Unknown strategy: {strategy!r}. Available: cmaes",
+                "error_message": f"Unknown strategy: {strategy!r}. Available: cmaes, bayesian",
                 "component_count": len(components),
                 "net_count": len(nets),
             }
