@@ -18,7 +18,6 @@ from pathlib import Path
 
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
 
-
 #: Seconds to wait for ``kicad-cli version`` before declaring a candidate wedged.
 KICAD_CLI_PROBE_TIMEOUT = 5
 
