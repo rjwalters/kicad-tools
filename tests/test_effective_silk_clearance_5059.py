@@ -10,7 +10,8 @@ the whole point of the issue: a project-level silk minimum was set, looked
 correct in the emitted JSON, and produced **no** findings.
 
 The measured contract, re-derived locally on KiCad CLI **10.0.1**
-(macOS, 2026-09-23) with a minimal two-object board:
+(macOS, 2026-09-23) with a minimal two-object board, and re-measured unchanged
+on **10.0.5** and on the CI-pinned **10.0.6** image (Issue #5704, 2026-09-24):
 
 ===========================================================  ==============
 probe (identical geometry: 0.085 mm silk-to-mask gap)         native finding
@@ -56,14 +57,18 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.cli.runner import find_kicad_cli
-from kicad_tools.manufacturers import get_profile, write_drc_constraints
+from kicad_tools.manufacturers import _PROFILES, get_profile, write_drc_constraints
 from kicad_tools.manufacturers.dru_generator import generate_dru
-from kicad_tools.manufacturers.project_generator import build_project_rules
+from kicad_tools.manufacturers.project_generator import (
+    PROJECT_MIN_SILK_CLEARANCE_MM,
+    build_project_rules,
+)
 
 # --- fixture geometry -------------------------------------------------------
 #
@@ -422,14 +427,14 @@ def test_emitted_jlcpcb_profile_silk_rule_is_scoped_to_the_same_board_side(tmp_p
 def test_silk_floor_is_carried_by_the_dru_not_the_project_key():
     """Pins *where* the factory silk floor lives, given the measured gap.
 
-    ``build_project_rules`` maps KiCad's ``min_silk_clearance`` key from
-    ``min_solder_mask_clearance_mm`` (0.05 mm for JLCPCB), not from the
-    0.15 mm silkscreen-to-pad floor -- a mapping that predates this issue
-    (#3720) and is reproduced verbatim in 24 committed board/fixture
-    ``.kicad_pro`` artifacts.  The native probes above measured that key to
-    have no effect on a sub-floor gap in either direction, so re-pointing it
-    would churn those artifacts for no measured DRC change; that question is
-    tracked separately rather than settled here.
+    ``build_project_rules`` emits KiCad's ``min_silk_clearance`` key as the
+    fixed legacy constant ``PROJECT_MIN_SILK_CLEARANCE_MM`` (0.05 mm), not
+    the 0.15 mm silkscreen-to-pad floor.  Until #5704 the value was derived
+    from ``min_solder_mask_clearance_mm`` (#3720).  The native probes above
+    measured the key to have no effect on a sub-floor gap in either
+    direction, on 10.0.1, 10.0.5 and 10.0.6.  Re-pointing it would churn 24
+    committed ``.kicad_pro`` artifacts for no measured DRC change, so the
+    operator ruled on #5704 to keep 0.05 mm under an explicit name.
 
     What this test guards is the contract that actually matters: the factory
     floor reaches native DRC through the emitted ``Silk to Pad`` rule in the
@@ -443,5 +448,39 @@ def test_silk_floor_is_carried_by_the_dru_not_the_project_key():
     assert f"(constraint silk_clearance (min {_FACTORY_SILK_FLOOR_MM}mm))" in emitted
 
     project_rules = build_project_rules(rules)
-    assert project_rules["min_silk_clearance"] == rules.min_solder_mask_clearance_mm
+    assert project_rules["min_silk_clearance"] == PROJECT_MIN_SILK_CLEARANCE_MM == 0.05
     assert project_rules["min_silk_clearance"] != rules.min_silk_to_pad_clearance_mm
+
+
+@pytest.mark.parametrize("manufacturer_id", sorted(_PROFILES))
+def test_project_min_silk_clearance_is_a_fixed_constant_for_every_profile(manufacturer_id):
+    """Issue #5704: the key is a named constant, not derived from ``DesignRules``.
+
+    This test covers every registered profile, including the four
+    (``flashpcb``, ``seeed``, ``pcbway``, ``oshpark``) that declare no
+    ``min_silk_to_pad_clearance_mm``.  It checks that no profile emits
+    ``None`` / JSON ``null``, and that every profile emits exactly 0.05 mm.
+    The value matches the one already serialised in the committed
+    ``.kicad_pro`` artifacts, so none of them needs regenerating.
+    """
+    rules = get_profile(manufacturer_id).get_design_rules(layers=2, copper_oz=1.0)
+
+    value = build_project_rules(rules)["min_silk_clearance"]
+
+    assert value is not None
+    assert isinstance(value, float)
+    assert value == PROJECT_MIN_SILK_CLEARANCE_MM == 0.05
+
+
+def test_project_min_silk_clearance_is_decoupled_from_mask_clearance():
+    """Issue #5704: changing the mask clearance no longer moves the silk key.
+
+    Before #5704, ``min_silk_clearance`` was fed from
+    ``min_solder_mask_clearance_mm``.  A profile whose mask clearance differed
+    would have silently changed this key.  The two are now independent.  This
+    is the behaviour change the operator ruling accepted.
+    """
+    base = get_profile("jlcpcb").get_design_rules(layers=2, copper_oz=1.0)
+    diverged = replace(base, min_solder_mask_clearance_mm=0.1)
+
+    assert build_project_rules(diverged)["min_silk_clearance"] == PROJECT_MIN_SILK_CLEARANCE_MM
