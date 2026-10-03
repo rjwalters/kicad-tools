@@ -506,6 +506,37 @@ outcomes="$(python3 -c 'import json,sys; print(",".join(json.loads(l)["x-loom-ca
 assert_eq "miss,hit,bypass" "$outcomes" "records carry x-loom-cache: miss, then hit, then bypass"
 reset_cache
 
+# --- Sweep-support script call sites (#9953) --------------------------------
+# Static contract: observation scripts route reads through $GH_READ and keep
+# the probe/fallback; arbitration scripts stay on literal plain `gh`.
+S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+for sc in check-duplicate blame-issue resolve-tier-model sync-labels; do
+    grep -q 'GH_READ="gh"' "$S_DIR/$sc.sh" && grep -q '"$_ghc" --version' "$S_DIR/$sc.sh"
+    assert_eq "0" "$?" "$sc.sh resolves \$GH_READ with the --version probe + plain-gh fallback"
+    grep -q '"$GH_READ" ' "$S_DIR/$sc.sh"
+    assert_eq "0" "$?" "$sc.sh routes at least one read through \$GH_READ"
+done
+for sc in check-evaluating-staleness sweep-lease-renew verdict-staleness-guard claim-staleness rebase-stacked-children; do
+    grep -q 'GH_READ' "$S_DIR/$sc.sh"
+    assert_eq "1" "$?" "$sc.sh (arbitration/CAS) never uses \$GH_READ"
+    grep -q 'gh-cached.md' "$S_DIR/$sc.sh"
+    assert_eq "0" "$?" "$sc.sh cites docs/gh-cached.md for its plain-gh carve-out"
+done
+# The probe degrades to plain gh when the wrapper is absent.
+GH_READ="gh"; _ghc="/nonexistent-dir/gh-cached"
+if [[ -x "$_ghc" ]] && "$_ghc" --version >/dev/null 2>&1; then GH_READ="$_ghc"; fi
+assert_eq "gh" "$GH_READ" "missing wrapper -> GH_READ falls back to plain gh"
+# ...and when it is present but broken (its --version probe fails), under set -euo pipefail.
+BROKEN_DIR="$(mktemp -d)"; printf '#!/usr/bin/env bash\nexit 1\n' > "$BROKEN_DIR/gh-cached"; chmod +x "$BROKEN_DIR/gh-cached"
+broken_out="$(SCRIPT_DIR="$BROKEN_DIR" bash -c 'set -euo pipefail; GH_READ="gh"; _ghc="$SCRIPT_DIR/gh-cached"; if [[ -x "$_ghc" ]] && "$_ghc" --version >/dev/null 2>&1; then GH_READ="$_ghc"; fi; echo "$GH_READ"')"
+assert_eq "gh" "$broken_out" "broken wrapper -> GH_READ falls back to plain gh (set -euo pipefail safe)"
+rm -rf "$BROKEN_DIR"
+# Each routed script resolves the probe on ONE code line (shell budget, #7810).
+for sc in check-duplicate blame-issue resolve-tier-model sync-labels; do
+    grep -qE '^GH_READ="gh"; _ghc=.*"\$_ghc" --version >/dev/null 2>&1; then GH_READ="\$_ghc"; fi$' "$S_DIR/$sc.sh"
+    assert_eq "0" "$?" "$sc.sh resolves \$GH_READ on a single probe line"
+done
+
 # --- Summary ---------------------------------------------------------------
 echo ""
 echo "────────────────────────────────"

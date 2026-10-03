@@ -66,6 +66,8 @@ trap cleanup EXIT
 
 export GIT_AUTHOR_NAME="test" GIT_AUTHOR_EMAIL="test@example.com"
 export GIT_COMMITTER_NAME="test" GIT_COMMITTER_EMAIL="test@example.com"
+# gh-cached must not replay one fixture's answer into the next (#9953).
+export GH_CACHE_DISABLE=1
 
 # ---- Fake `gh` stub ---------------------------------------------------------
 # Answers exactly the invocations blame-issue.sh makes, keyed off a synthetic

@@ -133,6 +133,9 @@ if ! echo ",$CURRENT_LABELS," | grep -q ",$LABEL,"; then
 fi
 
 # --- Step 2: age of the most recent `labeled` timeline event for $LABEL -----
+# Plain `gh` (docs/gh-cached.md policy: claim arbitration, #9953) — a cached
+# timeline could hide a claim re-applied within the TTL and let a live claim
+# read as stale.
 TIMELINE_JSON="$(gh api "repos/{owner}/{repo}/issues/$ISSUE/timeline" --paginate 2>"$GH_STDERR")" || {
   echo "ERROR: 'gh api .../issues/$ISSUE/timeline' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   exit 1

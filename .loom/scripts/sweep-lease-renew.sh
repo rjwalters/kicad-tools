@@ -637,6 +637,9 @@ cmd_renew_once() {
     # eventual SUCCESS, and merging those into $comments_json would corrupt
     # the JSON this function is about to parse.
     local comments_json
+    # Plain `gh` via forge_gh_perm_safe, never gh-cached (docs/gh-cached.md
+    # policy, #9953): lease comments drive own-yield/fence decisions (CAS-style
+    # claim), so a 30s-stale read could renew a lease that was just yielded.
     if ! comments_json="$(forge_gh_perm_safe api "repos/${repo_path}/issues/${issue}/comments" --paginate)"; then
         echo "ERROR: 'gh api .../issues/${issue}/comments --paginate' failed (escalation ladder exhausted)" >&2
         exit 1

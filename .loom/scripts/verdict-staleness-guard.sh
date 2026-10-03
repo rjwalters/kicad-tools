@@ -448,6 +448,8 @@ VERDICT_TOKEN="$(verdict_token_for_label "$VERDICT_LABEL")"
 # (default per_page=30, oldest-first), so on a long-running PR the verdict
 # marker — always among the NEWEST comments — would never be seen and every
 # verdict would read as UNVERIFIABLE.
+# Plain `gh`, never gh-cached (docs/gh-cached.md policy "verdict-time CAS
+# rechecks", #9953): the guard exists to observe writes landing within the TTL.
 COMMENTS_JSON="$(gh api "repos/{owner}/{repo}/issues/$PR/comments" --paginate 2>"$GH_STDERR")" || {
   echo "ERROR: 'gh api .../issues/$PR/comments --paginate' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   exit 1

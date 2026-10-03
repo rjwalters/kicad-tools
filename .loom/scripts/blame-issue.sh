@@ -125,6 +125,10 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
 else
     echo "$SCRIPT_NAME: WARNING: gh CLI not available/authenticated -- PR/issue/role columns will be '-'/'unknown'" >&2
 fi
+# $GH_READ (docs/gh-cached.md interface, #9953): the short-TTL read cache when
+# the wrapper ships next to this script, plain `gh` otherwise. Only repeated
+# observation reads use it; writes stay literal `gh`.
+GH_READ="gh"; _ghc="$(dirname "${BASH_SOURCE[0]}")/gh-cached"; if [[ -x "$_ghc" ]] && "$_ghc" --version >/dev/null 2>&1; then GH_READ="$_ghc"; fi
 
 # git blame/log need a path relative to the repo (or CWD); resolve to a path
 # git accepts, working whether invoked from repo root or a subdirectory, and
@@ -191,19 +195,19 @@ resolve_pr_from_subject() {
 resolve_pr_from_gh() {
     local sha="$1"
     [[ "$HAVE_GH" == 1 ]] || return 0
-    gh api "repos/{owner}/{repo}/commits/$sha/pulls" --jq '.[0].number // empty' 2>/dev/null || true
+    "$GH_READ" api "repos/{owner}/{repo}/commits/$sha/pulls" --jq '.[0].number // empty' 2>/dev/null || true
 }
 
 # resolve_issues <pr> -> comma-separated issue numbers on stdout (may be empty)
 resolve_issues() {
     local pr="$1" issues=""
     [[ "$HAVE_GH" == 1 && -n "$pr" ]] || { printf ''; return; }
-    issues="$(gh pr view "$pr" --json closingIssuesReferences \
+    issues="$("$GH_READ" pr view "$pr" --json closingIssuesReferences \
         -q '[.closingIssuesReferences[].number] | join(",")' 2>/dev/null || true)"
     if [[ -z "$issues" ]]; then
         # Fallback: regex the PR body for Closes/Fixes/Resolves/Part of #N.
         local body
-        body="$(gh pr view "$pr" --json body -q '.body // ""' 2>/dev/null || true)"
+        body="$("$GH_READ" pr view "$pr" --json body -q '.body // ""' 2>/dev/null || true)"
         issues="$(printf '%s' "$body" \
             | grep -Eio '(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed)|part of)[[:space:]]+#[0-9]+' \
             | grep -Eo '[0-9]+' \
@@ -218,7 +222,7 @@ resolve_role() {
     local pr="$1"
     [[ "$DO_ROLE" == 1 && "$HAVE_GH" == 1 && -n "$pr" ]] || { printf 'unknown'; return; }
     local labels
-    labels="$(gh api "repos/{owner}/{repo}/issues/$pr/timeline" --paginate \
+    labels="$("$GH_READ" api "repos/{owner}/{repo}/issues/$pr/timeline" --paginate \
         -q '.[] | select(.event=="labeled") | .label.name' 2>/dev/null || true)"
     if [[ -z "$labels" ]]; then
         printf 'unknown'
@@ -244,9 +248,7 @@ resolve_commit() {
     fi
 
     pr="$(resolve_pr_from_subject "$subject")"
-    if [[ -z "$pr" ]]; then
-        pr="$(resolve_pr_from_gh "$sha")"
-    fi
+    [[ -n "$pr" ]] || pr="$(resolve_pr_from_gh "$sha")"
 
     issues=""
     role="unknown"

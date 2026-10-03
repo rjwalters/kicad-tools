@@ -339,11 +339,15 @@ fi
 [[ "$DRY_RUN" -eq 1 || "$CHECK_MODE" -eq 1 ]] || REPO="$(loom_write_repo "$REPO_OVERRIDE")" || error "not syncing labels: loom-daemon forge may-write refused the repo (#9548); to manage it from here, register its checkout as a daemon workspace"
 # Populate FORGE_OWNER / FORGE_REPO for the Gitea API paths.
 forge_split_nwo "$REPO"
+# $GH_READ (docs/gh-cached.md interface, #9953): the short-TTL read cache when
+# the wrapper ships next to this script, plain `gh` otherwise. Only repeated
+# observation reads use it; writes stay literal `gh`. Probed only on the GitHub
+# mutating / --check paths: the wrapper's --version probe shells out to `gh`,
+# and a bare --dry-run (and Gitea) must stay completely forge-free.
+GH_READ="gh"; _ghc="$SCRIPT_DIR/gh-cached"; if [[ "$FORGE_TYPE" == "github" && ( "$DRY_RUN" -eq 0 || "$CHECK_MODE" -eq 1 ) && -x "$_ghc" ]] && "$_ghc" --version >/dev/null 2>&1; then GH_READ="$_ghc"; fi
 
 info "Target repository: $REPO (${FORGE_TYPE})"
-if [[ "$DRY_RUN" -eq 1 ]]; then
-  info "Dry run: no labels will be created, updated, or deleted."
-fi
+[[ "$DRY_RUN" -eq 0 ]] || info "Dry run: no labels will be created, updated, or deleted."
 
 LABELS_FILE=".github/labels.yml"
 
@@ -380,6 +384,8 @@ github_delete_label() {
 # reason a label silently fails to sync.
 github_label_usage() {
   local label="$1"
+  # Plain `gh` on purpose (docs/gh-cached.md policy): this in-use check gates the
+  # irreversible `gh label delete`, so a 30s-stale answer must never feed it.
   gh api "repos/${REPO}/issues" \
     -f state=all -f per_page=100 -f "labels=${label}" \
     --jq '.[].number' 2>/dev/null || true
@@ -421,7 +427,7 @@ github_maybe_delete_label() {
 github_sync_label() {
   local name="$1" description="$2" color="$3"
 
-  if gh label list -R "$REPO" --json name --jq '.[].name' 2>&1 | grep -q "^${name}$" 2>/dev/null; then
+  if "$GH_READ" label list -R "$REPO" --json name --jq '.[].name' 2>&1 | grep -q "^${name}$" 2>/dev/null; then
     if output=$(gh label edit "$name" -R "$REPO" --description "$description" --color "$color" 2>&1); then
       info "Updated label: $name"
     else
@@ -644,7 +650,7 @@ github_check_labels() {
   read_declared_labels
 
   local live_tsv
-  if ! live_tsv=$(gh label list -R "$REPO" --json name,color,description \
+  if ! live_tsv=$("$GH_READ" label list -R "$REPO" --json name,color,description \
         --jq '.[] | [.name, .color, .description] | @tsv' --limit 300 2>&1); then
     check_unavailable "Could not list labels for $REPO: $live_tsv"
   fi
@@ -868,9 +874,7 @@ repo_override_preflight() {
   esac
 }
 
-if [[ -n "$REPO_OVERRIDE" && "$DRY_RUN" -eq 0 ]]; then
-  repo_override_preflight
-fi
+[[ -z "$REPO_OVERRIDE" || "$DRY_RUN" -eq 1 ]] || repo_override_preflight
 
 # Additive by default (#5066): deleting GitHub's default labels is
 # destructive to pre-existing repo data (it strips the label from every
@@ -947,6 +951,11 @@ while IFS= read -u 3 -r line; do
     ((label_count++)) || true
   fi
 done 3< "$LABELS_FILE"
+# One --clear-cache after the run's label writes (#9953): it drops EVERY entry,
+# so clearing per write would empty the cache before the next label's list
+# probe. Mid-run staleness is harmless (each label is probed once, and a
+# stale "missing" falls through to the "already exists" -> edit path).
+[[ "$GH_READ" == "gh" ]] || "$GH_READ" --clear-cache >/dev/null 2>&1 || true
 
 if [ "$label_count" -gt 0 ]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then

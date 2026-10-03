@@ -93,7 +93,7 @@
 #
 # All reads are live `gh api` calls on purpose: this is claim arbitration, and a
 # 30s-stale cache read is exactly the window a competing claim lands in. Never
-# route them through gh-cached.
+# route them through gh-cached (docs/gh-cached.md policy: claim arbitration, #9953).
 
 set -euo pipefail
 

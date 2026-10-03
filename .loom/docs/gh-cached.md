@@ -246,6 +246,21 @@ enforced by the skills documenting the plain `gh` form at those call sites.
 | Parked-PR listing (`gh pr list --label …`) | Pre-merge comment's data gathering — must not restate a stale criterion result |
 | | Post-merge linked-issue **state** reads and the dependency-`state` loop — they gate `gh issue close` / removing `loom:blocked` |
 
+## Per-script call-site inventory (#9953)
+
+Standalone `defaults/scripts/*.sh` resolve `$GH_READ` from `$SCRIPT_DIR/gh-cached`
+(same `--version` probe, same fallback to plain `gh`; cwd-independent), on a single
+line per script — no shared lib, since `blame-issue.sh` sources none and
+`resolve-tier-model.sh` sources `forge-helpers.sh` only best-effort.
+
+| Cached (`$GH_READ`) | Plain `gh` (and why) |
+|---|---|
+| `check-duplicate.sh` — the REST-fallback `gh api` branches of the open/closed issue and merged-PR surveys (the primary listing path is unchanged), cross-reference timeline | `check-evaluating-staleness.sh` — label + timeline reads: **claim arbitration** |
+| `blame-issue.sh` — commit-to-PR, closing-issue, body, label-timeline reads (read-only diagnostics) | `sweep-lease-renew.sh` — lease comments: **CAS-style claim** (own-yield/fence) |
+| `resolve-tier-model.sh` — issue body read, plain-`gh` fallback arms only (`forge_gh_repo_safe` stays uncached) | `verdict-staleness-guard.sh` — PR comments: **verdict-time CAS recheck** |
+| `sync-labels.sh` — per-label `label list` existence probe and `--check` label list (one `--clear-cache` after the run's writes; probed only on the GitHub mutating / `--check` paths) | `sync-labels.sh` `github_label_usage` — gates irreversible `label delete` |
+| | `rebase-stacked-children.sh`, `claim-staleness.sh` — **claim arbitration** |
+
 ## Verification
 
 ### Automated

@@ -176,6 +176,7 @@ _process_one_stacked_child() {
         child_issue="${BASH_REMATCH[1]}"
     fi
 
+    # (docs/gh-cached.md policy: claim arbitration stays on plain `gh`, #9953.)
     # Fresh (uncached) label read — mirrors merge-pr.sh's _reconcile_one_stacked_child:
     # plain `gh api` (never a gh-cache) so a stale cached view cannot mask a live
     # re-claim. A read failure is treated as "not building" (safe); force-with-lease
