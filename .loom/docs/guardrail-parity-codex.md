@@ -57,7 +57,7 @@ document should be read as "Codex is safe to point at your repos".
 | `sandbox_permissions` / `writable_roots` / `--add-dir` | Widen a `workspace-write` sandbox to extra readable/writable roots. | **Not driven by the adapter.** Passes through if an operator supplies it. |
 | `--skip-git-repo-check` | Waives Codex's refusal to run outside a git work tree. | Injected **only** when the cwd is genuinely not inside a work tree (see "Trusted-directory check" below). |
 | `$CODEX_HOME/hooks.json` (`pre_tool_use`, `permission_request`, `post_tool_use`, `user_prompt_submit`, `session_start`, `session_end`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop`) | Per-tool-call and per-prompt interception — the direct analogue of Claude Code's hook taxonomy. | **`pre_tool_use` is now WIRED** (issue #4495) via the managed bridge `defaults/hooks/guard-codex-bridge.sh`, installed by `defaults/scripts/provision-codex-hooks.sh`. See "Managed `pre_tool_use` hook bridge" below. Every other event remains unwired. |
-| `$CODEX_HOME/config.toml` → `hooks.state."<id>".trusted_hash` | Persisted hook trust. A hook that has not been trusted does not run. | **Verified, never bypassed.** `spawn-codex.sh` fails closed (exit 78) for mutable roles when trust cannot be observed. `--dangerously-bypass-hook-trust` is never passed — and profile provisioning (#8672) denylists these keys, so trust is never copied between pooled profiles either. |
+| `$CODEX_HOME/config.toml` → `hooks.state."<id>".trusted_hash` | Persisted hook trust. A hook that has not been trusted does not run. | **Verified, or replaced by a proven seal.** `spawn-codex.sh` fails closed (exit 78) for hook-required roles when neither holds. `--dangerously-bypass-hook-trust` is passed **only** for a sealed registration in a hardened session container, after Loom has vetted every hook source the flag could let run (#10102, "Sealed registration" below). Profile provisioning (#8672) denylists these keys, so trust is never copied between pooled profiles. |
 | `approval_policy` / `-a` | When Codex pauses to ask a human. | **Irrelevant to Loom.** `codex exec` is non-interactive and exposes no `-a` at all; there is no human to answer, so approvals gate nothing. The sandbox is the only load-bearing guard. |
 | `AGENTS.md` | Repository instructions, read natively by Codex via ancestor traversal. | Advisory context, not a boundary. Loom's `AGENTS.md` codegen is a separate issue (contract point 5). |
 
@@ -352,7 +352,12 @@ it explicitly when sizing a multi-account Codex pool):
 # 1. install the managed hook into every pooled profile (idempotent, credential-free)
 .loom/scripts/provision-codex-hooks.sh install --all-profiles --workspace "$PWD"
 
-# 2. accept Codex's hook-trust prompt once per profile (interactive — see above),
+# 2. session-managed profiles: NOTHING to accept since #10102. Restart the
+#    session so its read-only binds pick up step 1's files; the registration is
+#    then sealed and spawn-codex.sh passes the trust waiver (see "Sealed
+#    registration" below). The rest of this step is the BARE-METAL path, and the
+#    fallback for a profile that cannot be sealed (verify says why):
+#    accept Codex's hook-trust prompt once per profile (interactive — see above),
 #    WHERE THE PROFILE RUNS. Codex keys trust by the hooks.json path under the
 #    CODEX_HOME it runs with, so for a session-managed profile accept it with
 #    CODEX_HOME=/home/loom/.codex-profile; trust accepted on the host does not
@@ -372,16 +377,22 @@ CODEX_HOME=~/.loom/codex-profiles/alice codex                 # bare-metal only
 .loom/scripts/provision-codex-hooks.sh verify --all-profiles --workspace "$PWD" --json
 ```
 
+For session-managed profiles, run step 3 with `--allow-sealed` to see the
+sealed verdict (`trustSignal: "sealed-registration"`, `bypassHookTrust: true`).
+Without it, `verify` reports only recorded trust, as it always has. Only a
+caller that will pass the waiver may opt in.
+
 Step 3 succeeding (`ready: true` for every profile) is what unblocks
 `LOOM_ROLE=builder .loom/scripts/spawn-codex.sh` against that profile — without
 it, the mutable-role preflight in `spawn-codex.sh` (`defaults/scripts/spawn-codex.sh:635-693`)
 exits 78 before the CLI starts. Test coverage for the readiness signal itself:
 `defaults/scripts/tests/test-provision-codex-hooks.sh` (trust-baseline
-scenarios); coverage that no code path ever waives trust:
-`defaults/scripts/tests/test-provision-codex-hooks.sh`'s credential-hygiene
-section, which greps both `spawn-codex.sh` and `provision-codex-hooks.sh` for
-`--dangerously-bypass-hook-trust` and the `bypass_hook_trust` config-key
-equivalent.
+scenarios). Coverage that trust is waived only behind the sealed verdict:
+`test-provision-codex-hooks.sh`'s credential-hygiene section and
+`test-spawn-codex.sh` (8) both require exactly one non-comment occurrence of
+`--dangerously-bypass-hook-trust` in the two scripts, gated on
+`_hook_trust_bypass == sealed`. No Loom script sets the `bypass_hook_trust`
+config key. `test-spawn-codex-sealed.sh` drives the gate.
 
 Since #9390 the managed entry is ONE workspace-independent command (managed
 version 2): it runs the bridge of whichever checkout the session is in, so one
@@ -393,12 +404,114 @@ re-trusted. `verify` counts only trust recorded under the key Codex looks Loom's
 entry up under (`<runtime CODEX_HOME>/hooks.json:pre_tool_use:<group>:<handler>`)
 and reports `trustSignal: "wrong-location"` for trust taken anywhere else.
 
+### Sealed registration: no trust prompt in a session container (issue #10102)
+
+**What changed.** Accepting Codex's hook-trust prompt was the last manual step
+in the Codex lane: once per profile per host (about 26 seats), and in a session
+container it could not even be saved, because `config.toml` is a read-only
+bind. Codex 0.160 ships `--dangerously-bypass-hook-trust`: *"Run enabled hooks
+without requiring persisted hook trust for this invocation… Intended only for
+automation that already vets hook sources."* Loom now does that vetting itself
+and passes the flag when, and only when, the vetting proves that the only hook
+the flag can let run is Loom's own.
+
+**The rule** (`loom-daemon/src/tokens_pool/codex_hooks_seal.rs`). Codex 0.160's
+discovery (`codex-rs/hooks/src/engine/discovery.rs`) applies the flag to every
+*non-managed* hook source. Each one is closed off, and every clause below must
+hold:
+
+| Hook source Codex reads | Clause |
+|---|---|
+| — | **Location**: `CODEX_HOME=/home/loom/.codex-profile` in a session container whose `session-exec posture` is `host`, which means hardened HostConfig and read-only profile-control binds. Bare metal never qualifies. |
+| — | **Byte identity**: after vetting, `docker exec … sha256sum` of the container's `hooks.json`, `config.toml` and `loom-codex-hooks.json` must equal the hashes of the exact bytes Loom vetted. |
+| `$CODEX_HOME/hooks.json` | Exactly `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":<#10008 SHARED_COMMAND>,"timeout":30..=600}]}]}}`. There is no other event, group, handler, key, `async`, `statusMessage` or `description`. Duplicate keys refuse the seal, because Codex's own loader would reject the file and run nothing. The receipt must pin the command. |
+| `$CODEX_HOME/config.toml` | Parses. `hooks` holds only `state`, and `hooks.state` doesn't set `enabled = false` on Loom's key. `features.hooks`/`codex_hooks` are not false. There is no `project_root_markers`, and no `profiles.*` touching `hooks`/`features`/`plugins`. |
+| project layers | From the cwd up to the git root, plus the main checkout's matching dirs for a linked worktree: no `.codex/hooks.json`, and no `.codex/config.toml` that fails to parse or touches `hooks`/`features`/`plugins`/`marketplaces`/`project_root_markers`/`profile(s)`. |
+| session flags | The launch argv has no `-c`/`--config` on those keys or on `bypass_hook_trust`, no `-p/--profile`, no `--enable`/`--disable`, and no `-C`/`--cd`/`--worktree` (each would move project-layer discovery away from the vetted cwd). Attached short values (`-pwork`, `-C/x`) count too. A project `.codex/` entry Loom cannot inspect (anything but "not found") refuses the seal. A caller can never pass the waiver itself: `spawn-codex.sh` exits 78. |
+| plugins | Not vetted, because plugin hooks can come from the account's backend. A waived launch passes `-c features.plugins=false`, which removes the plugin source rather than trusting it. |
+
+The image ships no `/etc/codex` (no system or managed layer). Project layers
+are fixed at session start, and the only mid-session reload paths re-read the
+user `config.toml` (a read-only bind) or need plugins (off).
+
+**Why it fails closed.** Every clause is an allow-list of what Loom itself
+writes. Anything else, including any byte Loom can't read or parse, refuses
+the seal. A refused seal leaves readiness on recorded trust exactly as before:
+a hook-required role exits 78 and the daemon routes to the next runtime, and a
+read-only role runs with `trust-bypass=never`. Sealing is **opt-in**
+(`verify --allow-sealed`). A caller that wouldn't pass the waiver never sees a
+sealed seat as ready, because without the flag Codex skips the untrusted entry
+silently. If a daemon predating #10102 rejects `--allow-sealed` (exit 2),
+`spawn-codex.sh` judges the launch on recorded trust alone.
+
+**Why this is not the waiver #4495 forbade.** #4495 refused the flag because
+waiving trust would let a hook nobody reviewed run, which would defeat the
+boundary this preflight proves. The trust prompt exists to review hook
+sources, and this rule is that review, done mechanically against the bytes
+Codex will read, for each launch. Three facts #4495 didn't have keep it true
+for the whole session:
+
+- the container is the boundary (operator ruling, #10014; #9979);
+- the profile controls are read-only binds, so the session can't add a hook
+  for itself or for the next session;
+- byte identity between the vetted host files and the container's copies is
+  proven.
+
+**Who counts it.** `spawn-codex.sh` (the waiver, after the container proof),
+`provision-codex-hooks.sh verify --allow-sealed`, and the #10035 guard gate
+`runtime_preference::codex_guard`. The guard counts a sealed session seat as
+guard-ready, vetting its files against the workspace root. `spawn-codex.sh`
+then re-proves the seal for the launch's own cwd, argv and container, and
+exits 78 if it no longer holds.
+
+**Evidence** (robb-studio, 2026-10-03, the shipped session image, Codex
+0.160.0, a scratch container created with the session flags: `--cap-drop
+ALL`, `no-new-privileges`, the three controls bound read-only, the posture
+label, and a scripted loopback model):
+
+- **Sealed, no recorded trust, judge.** `posture=host`, `hooks=ready
+  trust-bypass=sealed`. Codex warns that the waiver is on. Loom's hook blocks
+  `git push --force origin HEAD:main` (`Command blocked by PreToolUse hook`),
+  and the bare remote's `main` doesn't move. A benign write runs through the
+  same launch.
+- **Control.** In the same container and profile, `codex exec` *without* the
+  waiver skips the untrusted hook, and the force-push lands.
+- **Tamper.** An extra handler beside Loom's, a matcher changed to `Bash`, or a
+  project `.codex/hooks.json` in the checkout gives `trust-bypass=never`, and
+  the judge exits 78 naming the clause ("Loom's PreToolUse group carries more
+  than Loom's one handler" / "the managed entry's matcher is not \"*\"" /
+  "the checkout carries a project .codex/hooks.json"). A read-only role
+  proceeds without the waiver. Restoring the file restores the seal.
+
+**Rollout, per host.** No container is recreated by this change; the operator
+does:
+
+```bash
+cd <daemon root>                       # e.g. ~/GitHub/loom (workers: ~/loom-daemon)
+.loom/scripts/provision-codex-hooks.sh install --all-profiles --workspace "$PWD"
+# Read-only binds don't follow a host-side replace, so restart each host-mode
+# session once. Restart only already-adopted seats: `session start` ADOPTS a
+# profile. Skip private-clone seats, which keep their pinned registration.
+# `stop` refuses while a job runs; retry it later.
+for d in ~/.loom/codex-profiles/*/; do
+  p="$(basename "$d")"
+  [[ -f "$d/.session-managed.json" && ! -e ~/.loom/codex-profiles/.private-sessions/$p ]] || continue
+  loom-daemon accounts session stop "$p" && \
+    loom-daemon accounts session start "$p" --mount-workspace ~/GitHub
+done
+.loom/scripts/provision-codex-hooks.sh verify --all-profiles --workspace "$PWD" --allow-sealed --json \
+  | jq -c '{profile, ready, trustSignal, bypassHookTrust, sealReason}'
+```
+
+Every session seat should read `"trustSignal":"sealed-registration"`. A seat
+that doesn't names its clause in `sealReason`.
+
 ### Role-aware spawn preflight
 
 `spawn-codex.sh` emits one audit line per spawn:
 
 ```text
-spawn-codex: hooks=<ready|not-ready|unavailable|verified-in-private-session> role=<name> mutable=<bool> guarded=<bool> trust-bypass=never reason="…"
+spawn-codex: hooks=<ready|not-ready|unavailable|verified-in-private-session> role=<name> mutable=<bool> guarded=<bool> trust-bypass=<never|sealed> reason="…"
 ```
 
 - **Mutable roles (`builder`, `doctor`, and their aliases)** exit **78 before the
@@ -410,8 +523,8 @@ spawn-codex: hooks=<ready|not-ready|unavailable|verified-in-private-session> rol
   when this launch inherited a private account lease **and** session-exec mode
   is active, and the identical obligation is then proven inside the session by
   `loom-daemon private-workspace execute`, against the image-owned bridge and
-  the read-only-bound profile controls. `--dangerously-bypass-hook-trust` is
-  still passed nowhere.
+  the read-only-bound profile controls. The trust waiver is never used for a
+  private-clone session.
 - **Merging roles (`champion`, `judge`)** do not write the repository and keep
   the read-only sandbox, but they merge or issue the verdict a merge relies on,
   which is what `guard-loom-workflow.sh` and `guard-destructive.sh` police. They
@@ -607,7 +720,10 @@ step.
 **Rollout.** Existing session containers keep their old mounts until they are
 recreated. `spawn-codex.sh` refuses to use them (exit 78) instead of dropping
 the sandbox in them. Recreate each one from the daemon's workspace, so the
-App-token dir is found:
+App-token dir is found (the accounts `--workspace`, which defaults to the
+current checkout, is one of the token-dir owners alongside the mount and
+`LOOM_WORKSPACE`; before #10103 a session started without `LOOM_WORKSPACE`
+mounted no token dir and posture reported `gh=skip`):
 `cd <daemon root> && loom-daemon accounts session stop <name> && loom-daemon
 accounts session start <name> --mount-workspace <checkout parent>`. A
 repository admitted later becomes visible only after its account's container
@@ -744,9 +860,12 @@ Known, documented, and accepted for tier-2. None is silent.
     was installed, not merely for one to exist anywhere in `config.toml`. This
     strengthens the correlation between "Loom's content" and "a trust
     decision" without being able to prove identity — which remains the reason
-    the capability manifest stays `partial`. Loom never passes
-    `--dangerously-bypass-hook-trust`, enforced by a test
-    (`test-provision-codex-hooks.sh`'s credential-hygiene section).
+    the capability manifest stays `partial`. Since #10102, a session seat
+    whose registration is **sealed** needs no trust step at all: Loom vets
+    every hook source and passes `--dangerously-bypass-hook-trust` for that
+    launch (see "Sealed registration"). That makes identity moot there,
+    because Loom's entry is the only hook that can run. Bare-metal seats keep
+    the trust step.
 12. **`write_stdin` is denied, not confined.** Writing bytes into an
     already-running PTY session is a mutation channel Loom cannot inspect, so it
     is refused outright. A Codex worker that needs interactive input must run a

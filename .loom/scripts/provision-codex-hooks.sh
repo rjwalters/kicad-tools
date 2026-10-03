@@ -43,8 +43,9 @@
 # output, `doctor --json`, `features list`, and a `strings` pass over the
 # shipped binary, which shows hook-trust as a TUI-only internal action
 # (`TrustHook`/`HookTrustUpdate`) with no CLI flag or RPC method reaching it).
-# Loom will not guess the identity string or the hash algorithm, and #4495's
-# scope guards forbid `--dangerously-bypass-hook-trust`. So this script takes
+# Loom will not guess the identity string or the hash algorithm, and outside a
+# sealed session registration (below, #10102) it does not pass
+# `--dangerously-bypass-hook-trust` (#4495). So this script takes
 # the second option #4495's (and #5005's) acceptance criteria explicitly
 # allow: an **operator-attested one-time trust step per profile**, with **fail
 # closed before mutable-role dispatch when trust cannot be verified.**
@@ -75,6 +76,22 @@
 # is one of the reasons `defaults/runtimes/codex.json` stays at
 # `hooks: partial` / `worktreeIsolation: partial` (see
 # defaults/docs/guardrail-parity-codex.md gap 11).
+#
+# ============================================================================
+# SEALED REGISTRATION (issue #10102) — NO TRUST PROMPT IN A SESSION CONTAINER
+# ============================================================================
+#
+# Inside a hardened host-mode session container, a profile needs no recorded
+# trust if its registration is SEALED. Sealed means hooks.json is exactly the
+# workspace-independent entry below and nothing else, config.toml adds no hook
+# source and doesn't switch it off, the launch's checkout and argv add none,
+# and the container's read-only copies are the vetted bytes. `spawn-codex.sh`
+# then passes Codex's `--dangerously-bypass-hook-trust` (with plugins off) for
+# that one launch. The rule lives in loom-daemon
+# (tokens_pool/codex_hooks_seal.rs) and fails closed: anything Loom did not
+# write means no waiver, so recorded trust is required as before. `verify
+# --allow-sealed` asks for it; a caller that cannot pass the waiver must not.
+# Bare-metal profiles always need the trust step described above.
 #
 # ============================================================================
 # REGISTRATION MODES (issue #9390)
@@ -126,6 +143,10 @@
 #                                    [--bridge <path>] [--json]
 #                                    [--runtime-codex-home <dir>]  (CODEX_HOME
 #                                    as Codex will see it; default: derived)
+#                                    [--allow-sealed [--cwd <dir>]
+#                                     [--container <name> [--docker <bin>]]
+#                                     [-- <codex argv>]]  (#10102; see
+#                                    SEALED REGISTRATION below)
 #   provision-codex-hooks.sh remove  --codex-home <dir>
 #
 # `--all-profiles` replaces `--codex-home` on any subcommand and applies it to
@@ -201,10 +222,32 @@ usage() {
 COMMAND="${1:-}"
 [[ $# -gt 0 ]] && shift
 
+# --- verify is native (#9390) ----------------------------------------------
+#
+# The readiness decision lives in `loom-daemon codex-hooks verify`
+# (tokens_pool::codex_hooks), shared with the daemon's own callers and the
+# private-session admission gate, so there is one implementation rather than a
+# shell copy and a Rust copy held together by a test. Same flags, same JSON,
+# same exit codes (0 ready, 78 not ready). A binary that cannot be found is
+# reported as 78, never as ready. Inside a private session's sealed control
+# bundle there is no lib/ helper; the image-owned binary on PATH is used.
+# Every argument is the daemon's own flag and is handed over unchanged
+# (#10102 moved this ahead of the parser so the sealed-registration flags need
+# no shell copy); only the stub's sibling bridge is added.
+# requires-daemon: codex-hooks >= 0.19.627   #9390 — verify moved into the daemon; an older binary cannot answer, and its refusal must read as not-ready (78), never as ready.
+if [[ "$COMMAND" == "verify" ]]; then
+    if [[ -f "$SCRIPT_DIR/lib/script-helper.sh" ]]; then
+        export LOOM_SCRIPT_HELPER_MISSING_RC=78
+        # shellcheck source=/dev/null
+        source "$SCRIPT_DIR/lib/script-helper.sh"
+        loom_exec_script_helper codex-hooks verify --fallback-bridge "$SCRIPT_DIR/../hooks/guard-codex-bridge.sh" "$@"
+    fi
+    exec loom-daemon codex-hooks verify --fallback-bridge "$SCRIPT_DIR/../hooks/guard-codex-bridge.sh" "$@"
+fi
+
 CODEX_HOME_ARG=""
 WORKSPACE_ARG=""
 BRIDGE_ARG=""
-RUNTIME_HOME_ARG=""
 MATCHER_ARG=""
 TIMEOUT_ARG=""
 JSON_OUT=0
@@ -222,7 +265,6 @@ while [[ $# -gt 0 ]]; do
         --workspace=*) WORKSPACE_ARG="${1#--workspace=}"; shift ;;
         --bridge) BRIDGE_ARG="${2:-}"; shift 2 || shift ;;
         --bridge=*) BRIDGE_ARG="${1#--bridge=}"; shift ;;
-        --runtime-codex-home) RUNTIME_HOME_ARG="${2:-}"; shift 2 || shift ;;
         --matcher) MATCHER_ARG="${2:-}"; shift 2 || shift ;;
         --matcher=*) MATCHER_ARG="${1#--matcher=}"; shift ;;
         --timeout) TIMEOUT_ARG="${2:-}"; shift 2 || shift ;;
@@ -265,34 +307,6 @@ private_session_state() {
     [[ -f "$state" ]] && printf '%s' "$state"
     return 0
 }
-
-# --- verify is native (#9390) ----------------------------------------------
-#
-# The readiness decision lives in `loom-daemon codex-hooks verify`
-# (tokens_pool::codex_hooks), shared with the daemon's own callers and the
-# private-session admission gate, so there is one implementation rather than a
-# shell copy and a Rust copy held together by a test. Same flags, same JSON,
-# same exit codes (0 ready, 78 not ready). A binary that cannot be found is
-# reported as 78, never as ready. Inside a private session's sealed control
-# bundle there is no lib/ helper; the image-owned binary on PATH is used.
-# requires-daemon: codex-hooks >= 0.19.627   #9390 — verify moved into the daemon; an older binary cannot answer, and its refusal must read as not-ready (78), never as ready.
-if [[ "$COMMAND" == "verify" ]]; then
-    _verify=(--fallback-bridge "$SCRIPT_DIR/../hooks/guard-codex-bridge.sh")
-    [[ "$ALL_PROFILES" == "1" ]] && _verify+=(--all-profiles)
-    [[ -n "$PROFILE_ROOT_ARG" ]] && _verify+=(--profile-root "$PROFILE_ROOT_ARG")
-    [[ -n "$CODEX_HOME_ARG" ]] && _verify+=(--codex-home "$CODEX_HOME_ARG")
-    [[ -n "$WORKSPACE_ARG" ]] && _verify+=(--workspace "${WORKSPACE_ARG%/}")
-    [[ -n "$BRIDGE_ARG" ]] && _verify+=(--bridge "$BRIDGE_ARG")
-    [[ -n "$RUNTIME_HOME_ARG" ]] && _verify+=(--runtime-codex-home "$RUNTIME_HOME_ARG")
-    [[ "$JSON_OUT" == "1" ]] && _verify+=(--json)
-    if [[ -f "$SCRIPT_DIR/lib/script-helper.sh" ]]; then
-        export LOOM_SCRIPT_HELPER_MISSING_RC=78
-        # shellcheck source=/dev/null
-        source "$SCRIPT_DIR/lib/script-helper.sh"
-        loom_exec_script_helper codex-hooks verify "${_verify[@]}"
-    fi
-    exec loom-daemon codex-hooks verify "${_verify[@]}"
-fi
 
 # --- fan out over every pooled profile ------------------------------------
 #
@@ -636,7 +650,7 @@ do_install() {
     fi
 
     log_info "Installed the managed PreToolUse hook (v$LOOM_HOOK_VERSION, $REGISTRATION) into Codex profile '$PROFILE_NAME'."
-    log_info "Codex hook trust is NOT established by this command. Run 'CODEX_HOME=<profile> codex' once and accept the hook-trust prompt; Loom never passes --dangerously-bypass-hook-trust."
+    log_info "Codex hook trust is NOT established by this command. A session-managed profile needs no trust prompt once its registration is sealed: restart its session so the read-only binds pick up this file, then verify (#10102). On bare metal, run 'CODEX_HOME=<profile> codex' once and accept the hook-trust prompt."
     return 0
 }
 

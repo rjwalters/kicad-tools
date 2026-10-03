@@ -621,11 +621,12 @@ if grep -q "$FAKE_TOKEN" <<<"$all_out"; then
 else
     pass "no credential material in install/verify output"
 fi
-if grep -nE '(^|[^-A-Za-z])--dangerously-bypass-hook-trust' "$REPO_ROOT/defaults/scripts/spawn-codex.sh" \
-    | grep -vqE '#|log_(error|warn|info)'; then
-    fail "spawn-codex.sh passes --dangerously-bypass-hook-trust"
+waiver="$(grep -nE '(^|[^-A-Za-z])--dangerously-bypass-hook-trust' "$REPO_ROOT/defaults/scripts/spawn-codex.sh" "$PROVISION" \
+    | grep -vE ':[[:space:]]*#|log_(error|warn|info)' || true)"
+if [[ "$(printf '%s\n' "$waiver" | grep -c .)" == "1" && "$waiver" == *'[[ "$_hook_trust_bypass" != "sealed" ]] ||'* ]]; then
+    pass "--dangerously-bypass-hook-trust is passed only behind spawn-codex.sh's sealed verdict (#10102)"
 else
-    pass "spawn-codex.sh never passes --dangerously-bypass-hook-trust"
+    fail "--dangerously-bypass-hook-trust is passed outside the sealed gate: $waiver"
 fi
 # The flag has a config-key equivalent (`-c bypass_hook_trust=true`) in the
 # 0.146.0 binary, so asserting only on the flag spelling would leave the same

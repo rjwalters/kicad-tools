@@ -1136,7 +1136,7 @@ run_preflight 0 "builder + ready managed hook -> proceeds" \
     LOOM_ROLE=builder CODEX_HOME="$READY_PROFILE"
 out="$PREFLIGHT_OUT"
 assert_contains "hooks=ready" "$out" "audit line reports hooks=ready"
-assert_contains "trust-bypass=never" "$out" "audit line records that trust is never bypassed"
+assert_contains "trust-bypass=never" "$out" "audit line records that a bare-metal launch never waives trust"
 assert_not_contains "sk-loom-FAKE-4495" "$out" "the audit line leaks no credential material"
 assert_not_contains "auth.json" "$out" "the audit line names no credential file for a ready profile"
 
@@ -1203,15 +1203,16 @@ out="$(env -u CODEX_HOME -u LOOM_CODEX_HOME -u LOOM_CODEX_PROFILE \
 assert_contains "hooks=unavailable" "$out" \
     "ambient Codex login state reports hooks=unavailable"
 
-# (8) The adapter must never pass Codex's hook-trust bypass flag.
+# (8) The adapter passes Codex's hook-trust waiver on exactly ONE line, gated on
+#     the sealed verdict (#10102; behaviour in test-spawn-codex-sealed.sh).
 TESTS_RUN=$((TESTS_RUN + 1))
-if grep -nE '^[^#]*--dangerously-bypass-hook-trust' "$SPAWN_CODEX" \
-    | grep -vqE 'log_(error|warn|info)'; then
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: spawn-codex.sh must never pass --dangerously-bypass-hook-trust"
-else
+waiver="$(grep -nE '^[^#]*--dangerously-bypass-hook-trust' "$SPAWN_CODEX" | grep -vE 'log_(error|warn|info)' || true)"
+if [[ "$(printf '%s\n' "$waiver" | grep -c .)" == "1" && "$waiver" == *'[[ "$_hook_trust_bypass" != "sealed" ]] ||'* ]]; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: spawn-codex.sh never passes --dangerously-bypass-hook-trust"
+    echo -e "  ${GREEN}PASS${NC}: spawn-codex.sh passes --dangerously-bypass-hook-trust only behind the sealed verdict"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: spawn-codex.sh passes --dangerously-bypass-hook-trust outside the sealed gate: $waiver"
 fi
 
 # ...and the config-key spelling of the same waiver (`-c bypass_hook_trust=true`),

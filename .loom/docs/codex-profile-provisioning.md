@@ -116,10 +116,12 @@ contains the target profile (or vice versa) is refused outright.
 - **Share hook trust.** Codex persists hook trust as
   `hooks.state."<id>".trusted_hash` in `config.toml`. Importing another
   profile's hashes would fake a trust decision that never happened for this
-  profile, so those keys are denied. Trust stays a per-profile,
-  operator-attested one-time step, and **Loom never passes
-  `--dangerously-bypass-hook-trust`** — see
-  [`guardrail-parity-codex.md`](guardrail-parity-codex.md).
+  profile, so those keys are denied. On bare metal, trust stays a
+  per-profile, operator-attested one-time step. In a session container a
+  **sealed** registration needs none: Loom vets every hook source and passes
+  `--dangerously-bypass-hook-trust` for that launch only (#10102). See
+  [`guardrail-parity-codex.md`](guardrail-parity-codex.md) § "Sealed
+  registration".
 - **Share per-project trust state.** `[projects."<path>"] trust_level` is
   denied for the same reason.
 - **Touch a session-managed profile.** Once `accounts session start` adopts

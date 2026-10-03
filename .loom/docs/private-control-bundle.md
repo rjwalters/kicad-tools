@@ -239,9 +239,10 @@ it runs the shipped TUI under `tmux` in a throwaway container with the profile
 still writable — the same pre-session step
 `provision-codex-hooks.sh` tells the operator to take — waits for the
 "Hooks can run outside the sandbox" prompt by its text, and answers it. Nothing
-writes a `trusted_hash` by hand and `--dangerously-bypass-hook-trust` is passed
-nowhere, in this script or in shipped Loom code. What §12 measures is therefore
-the production path exactly as it runs.
+writes a `trusted_hash` by hand and `--dangerously-bypass-hook-trust` is not
+passed. What §12 measures is therefore the recorded-trust path exactly as a
+private-clone session runs it. (Host-mode sessions may instead pass the waiver
+for a sealed registration, #10102. Private-clone sessions never do.)
 
 Two profiles are provisioned and registered identically and differ **only** in
 the answer to that one prompt — `2` (*Trust all and continue*) versus `3`

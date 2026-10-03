@@ -477,6 +477,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+# Codex's hook-trust waiver comes only from Loom's sealed-registration vetting (#10102), never from a caller.
+[[ " ${PASSTHROUGH_ARGS[*]-} " != *" --dangerously-bypass-hook-trust"* ]] || { log_error "A caller may not pass Codex's hook-trust waiver; spawn-codex.sh adds it only for a vetted sealed registration (issue #10102)."; exit 78; }
 
 # --- Model selection (mirrors spawn-claude.sh's #3477 precedence) ---
 # Precedence: explicit -m/--model > LOOM_MODEL > LOOM_CODEX_MODEL (the adapter's
@@ -919,9 +921,20 @@ fi
 #   the expected version, pinned, that THIS workspace has a readable bridge for
 #   the workspace-independent entry to run (#9390), and that the profile has
 #   established Codex hook trust. Any failure exits 78
-#   BEFORE the CLI starts. `--dangerously-bypass-hook-trust` is never passed —
-#   #4495's scope guards forbid it, and waiving trust would defeat the very
-#   boundary this preflight exists to prove.
+#   BEFORE the CLI starts.
+#
+#   Trust has exactly one substitute: a SEALED registration (issue #10102).
+#   Inside a hardened session container whose posture is `host` (read-only,
+#   byte-identical profile controls), `verify --allow-sealed` may find that the
+#   only hook source Codex would load is Loom's own entry: nothing else in
+#   hooks.json or config.toml, nothing in the checkout's `.codex/`, nothing in
+#   this launch's argv, and the container's copies are the vetted bytes. Then,
+#   and only then, this adapter passes `--dangerously-bypass-hook-trust` (with
+#   plugins off, since their hooks can't be vetted). That waiver is what #4495
+#   forbade. What changed is that the container is the boundary (#10014), the
+#   controls are sealed read-only binds, and their bytes are proven. The rule
+#   is in tokens_pool/codex_hooks_seal.rs. Anything Loom didn't write means
+#   no waiver, and recorded trust is required as before.
 #
 #   A PRIVATE-CLONE session (issue #8787) is the one case where this host-side
 #   check would inspect the wrong bridge and the wrong workspace; there the
@@ -967,6 +980,7 @@ _hook_role_is_mutable=false
 _hook_provisioner="${_SCRIPT_DIR}/provision-codex-hooks.sh"
 _hook_status="unknown"
 _hook_reason=""
+_hook_trust_bypass="never"
 
 if [[ -n "${LOOM_PRIVATE_LEASE_FD:-}" && "$CODEX_SESSION_EXEC" == "true" ]]; then
     # Private-clone session (issue #8787). The managed hook this launch runs
@@ -994,7 +1008,7 @@ if [[ -n "${LOOM_PRIVATE_LEASE_FD:-}" && "$CODEX_SESSION_EXEC" == "true" ]]; the
     #     has established Codex hook trust. That is a strictly stronger form of
     #     exactly the obligation checked below.
     #
-    # `--dangerously-bypass-hook-trust` is passed nowhere, here or there.
+    # The trust waiver (#10102) is never used for a private-clone session.
     _hook_status="verified-in-private-session"; _hook_reason="proven inside the account's private session, against the image-owned bridge for /workspace/repo (#8787)"
 elif [[ ! -x "$_hook_provisioner" && ! -r "$_hook_provisioner" ]]; then
     _hook_status="unavailable"
@@ -1010,26 +1024,33 @@ else
     # with, so name where THIS launch runs, never the derived default (#9390).
     _hook_runtime_home="/home/loom/.codex-profile"
     [[ "$CODEX_SESSION_EXEC" == "true" ]] || _hook_runtime_home="$(cd -P -- "$CODEX_HOME" 2>/dev/null && pwd -P)" || _hook_runtime_home="$CODEX_HOME"
-    if _hook_verify_out="$(bash "$_hook_provisioner" verify --codex-home "$CODEX_HOME" \
-            --workspace "$WORKSPACE" --runtime-codex-home "$_hook_runtime_home" --json 2>/dev/null)"; then
-        _hook_status="ready"
-    else
-        _hook_status="not-ready"
-    fi
+    # Sealed registration (#10102): asked for only once posture proved a
+    # hardened host-mode container (so verify can check the container's own
+    # copies), and only with jq to read back whether the waiver is required.
+    _hook_seal=()
+    [[ "$CODEX_SESSION_EXEC" != "true" || "${_posture_mode:-}" != "mode=host" ]] || ! command -v jq >/dev/null 2>&1 \
+        || _hook_seal=(--allow-sealed --cwd "$PWD" --container "$CODEX_SESSION_CONTAINER" --docker "$_posture_docker" -- ${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"})
+    _hook_verify() { bash "$_hook_provisioner" verify --codex-home "$CODEX_HOME" --workspace "$WORKSPACE" --runtime-codex-home "$_hook_runtime_home" --json "$@" 2>/dev/null; }
+    _hook_rc=0; _hook_verify_out="$(_hook_verify ${_hook_seal[@]+"${_hook_seal[@]}"})" || _hook_rc=$?
+    # A daemon predating #10102 rejects --allow-sealed (clap exits 2): judge on recorded trust alone.
+    [[ $_hook_rc -ne 2 || ${#_hook_seal[@]} -eq 0 ]] || { _hook_seal=(); _hook_rc=0; _hook_verify_out="$(_hook_verify)" || _hook_rc=$?; }
+    [[ $_hook_rc -eq 0 ]] && _hook_status="ready" || _hook_status="not-ready"
     if [[ -n "$_hook_verify_out" ]] && command -v jq >/dev/null 2>&1; then
         _hook_reason="$(printf '%s' "$_hook_verify_out" | jq -r '.reason // empty' 2>/dev/null)" || _hook_reason=""
     fi
+    # Ready on a seal means ready only WITH the waiver (verify proved the container's copies).
+    [[ "$_hook_status" != "ready" || ${#_hook_seal[@]} -eq 0 || "$(printf '%s' "$_hook_verify_out" | jq -r .bypassHookTrust 2>/dev/null)" != "true" ]] || _hook_trust_bypass="sealed"
 fi
 
-log_info "spawn-codex: hooks=$_hook_status role=${_hook_role:-unset} mutable=$_hook_role_is_mutable required=$_hook_required trust-bypass=never${_hook_reason:+ reason=\"$_hook_reason\"}"
+log_info "spawn-codex: hooks=$_hook_status role=${_hook_role:-unset} mutable=$_hook_role_is_mutable required=$_hook_required trust-bypass=$_hook_trust_bypass${_hook_reason:+ reason=\"$_hook_reason\"}"
 
 if [[ "$_hook_required" == "true" && "$_hook_status" != "ready" && "$_hook_status" != "verified-in-private-session" ]]; then
     log_error "Role '$_hook_role' mutates the repository or merges/issues verdicts, but Loom's managed Codex pre_tool_use hook is not ready (status=$_hook_status)."
     [[ -n "$_hook_reason" ]] && log_error "  reason: $_hook_reason"
     log_error "Without it a Codex worker runs with NO managed-worktree confinement, NO destructive-command blocking, and NO Loom workflow interception."
-    log_error "Provision and trust the profile, then retry (Loom will not pass --dangerously-bypass-hook-trust, issue #4495):"
+    log_error "Provision the profile, then retry (the trust waiver is used only for a sealed registration in a hardened session container, #10102):"
     log_error "  .loom/scripts/provision-codex-hooks.sh install --all-profiles --workspace $WORKSPACE"
-    log_error "  accept the hook-trust prompt once per profile WHERE IT RUNS (session-managed: a throwaway container at the session mount point, then restart the session — guardrail-parity-codex.md)"
+    log_error "  session-managed: restart the session so its read-only binds see the new files (no trust prompt once sealed); bare metal: accept the hook-trust prompt once per profile (guardrail-parity-codex.md)"
     log_error "  .loom/scripts/provision-codex-hooks.sh verify --all-profiles --workspace $WORKSPACE --json"
     exit 78  # EX_CONFIG
 fi
@@ -1045,6 +1066,8 @@ CODEX_ARGS=()
 if [[ "$HAS_PROMPT" == "true" ]]; then
     CODEX_ARGS+=(exec)
 fi
+# Only for a sealed registration whose every hook source was vetted above (#10102).
+[[ "$_hook_trust_bypass" != "sealed" ]] || CODEX_ARGS+=(--dangerously-bypass-hook-trust -c features.plugins=false)
 if [[ "$CODEX_DROP_PINNED_MODEL" == "true" ]]; then
     # Issue #5499: strip the pinned `-m`/`--model` (both the two-token and
     # `=`-joined single-token forms) that the ChatGPT-plan guard above decided
