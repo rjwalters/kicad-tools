@@ -30,8 +30,17 @@ class TestFindKicadCliUserApplications:
             # All other candidate paths should not exist
             return False
 
-        with patch.object(Path, "exists", fake_exists):
-            result = find_kicad_cli()
+        # The path is fake, so bypass the executable probe added in #5903 and
+        # clear the memoized result so earlier calls cannot leak in.
+        find_kicad_cli.cache_clear()
+        try:
+            with (
+                patch.object(Path, "exists", fake_exists),
+                patch("kicad_tools.cli.runner._probe_kicad_cli", return_value=True),
+            ):
+                result = find_kicad_cli()
+        finally:
+            find_kicad_cli.cache_clear()
 
         assert result is not None
         assert str(result) == user_app_path
