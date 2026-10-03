@@ -1558,7 +1558,7 @@ defines which rows count as waiting and where dwell starts.
 An unmeasurable host reading produces no point, never a `0`. Each work-finder
 tick also emits one `loom.dispatch.tick` span. It is a new root trace per tick
 that covers candidate evaluation and dispatch. Its attributes are
-`loom.dispatch.result` (`dispatched`, `halted_main_red`, `saturation_held`,
+`loom.dispatch.result` (`dispatched`, `halted_main_red`, `halted_ci_billing` (#10113), `saturation_held`,
 `build_backoff_held` (#9410), `error`, `no_eligible_work`, `capacity_full`, `all_skipped`, first match
 wins), `loom.dispatch.seen`, `loom.dispatch.dispatched`,
 `loom.dispatch.errors` and `loom.dispatch.max_concurrent`. Each `dispatch()` attempt in the
@@ -1611,7 +1611,7 @@ tick; otherwise a root of its own. Attributes:
 | `loom.queue.transition` | `changed` (first sight, or the disposition itself changed) / `refresh` (same disposition, resent after the refresh window) / `left_queue` (the row disappeared from a repo whose listing succeeded) |
 | `loom.queue.previous_disposition` | present only on a `changed` transition after the first sighting |
 | `loom.queue.park_label` | only for `parked`/`hard_exclusion`, and only when the label is in the row's closed vocabulary — `PARK_LABELS ∪ SKIP_LABELS` for `parked`, `hard_exclusion::HARD_EXCLUSION_LABELS` (e.g. `external`) for `hard_exclusion` (#9672) — so a span names which rule declined the issue. A repo-configured extra skip label, a rule name outside that set, or any other detail text is never exported |
-| `loom.queue.halt_cause` | only for `workspace_halted`: the closed-vocabulary `work_finder::halt_cause` token (#9017) — `main_red`, `gate_pending`, `token_pool`, `preflight_advisory`, `drain`, `breaker`, `write_scope` (#9673, #9548). Absent on a cause-less legacy row; a detail token outside the vocabulary is never exported |
+| `loom.queue.halt_cause` | only for `workspace_halted`: the closed-vocabulary `work_finder::halt_cause` token (#9017) — `main_red`, `gate_pending`, `token_pool`, `preflight_advisory`, `drain`, `breaker`, `write_scope` (#9673, #9548), `ci_billing` (#10113: owner's Actions jobs blocked by billing/spending limit). Absent on a cause-less legacy row; a detail token outside the vocabulary is never exported |
 | `loom.pr_number` | only for `open_pr`, parsed from the row's structured detail |
 | `lockout.frozen_candidates_count` | only for `open_pr` (Issue #9674): how many ready issues in this repo the #4123 open-PR guard is currently blocking (`pr-open-skip`) — the repo's frozen backlog |
 | `lockout.frozen_points_sum` | only for `open_pr` (Issue #9674): the summed story points of those blocked issues (`points:*` labels, `crate::story_points`); unsized issues contribute nothing — absent is never `0` |
