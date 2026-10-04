@@ -2491,6 +2491,15 @@ commits / Squash merges / Rebase merges are not allowed"; for #9276 that was
 A generic refusal (bare 405, merge method, ruleset) never searches, and
 nothing a later comment mentions ever inherits. With no open incident the ask
 quotes the forge's refusal text instead.
+Every open same-repo blocker inherits, not only the first one named. With
+`propagate` on, a starred issue's children by its own text inherit the same
+way: `<!-- loom:park Blocked by: #C -->` records, `- [ ] #C` task-list entries,
+and the dependency phrases of a `loom:blocked` issue even when it is also held
+for the operator (#10012). Inheritance is transitive to depth 3 (a cycle stops), never crosses
+repos, makes at most 50 walk reads per repo per pass (closed children and
+blocker reads count), and a child of
+several starred issues takes the earliest starred-at. This is the in-memory
+ordering only; the label itself is not written yet.
 
 **loom-ui stars.** The `/ingest` ack may carry `operator_priority_intents`
 (`defaults/docs/telemetry-schema.md`). The pass applies each valid one (the one
@@ -2506,6 +2515,7 @@ default**):
 | `escalate` | `LOOM_OPERATOR_PRIORITY_ESCALATE` | `true` | post escalations and apply loom-ui intents; `false` still computes and shows every landing state |
 | `intervalSecs` | `LOOM_OPERATOR_PRIORITY_INTERVAL_SECS` | `120` | pass interval |
 | `poolsExhaustedGraceMinutes` | `LOOM_OPERATOR_PRIORITY_POOLS_GRACE_MINUTES` | `10` | wait before a `pools-exhausted` ask; `0` asks at once |
+| `propagate` | `LOOM_OPERATOR_PRIORITY_PROPAGATE` | `true` | a star also reaches its children by park record, task list and dependency phrase; `false` keeps only the blocker / incident / red-main inheritance |
 
 ### Ready queue view (`loom-daemon queue`, #8852)
 
