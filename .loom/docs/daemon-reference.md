@@ -34,6 +34,7 @@
 - [Stale-claim reconciliation & the sweep journal (#3953, fixed #3975, extended to PR-side claims #4367)](#stale-claim-reconciliation--the-sweep-journal-3953-fixed-3975-extended-to-pr-side-claims-4367)
 - [Stacked-PR dependency — #3729 (v1), #3747 (v2 item 1)](#stacked-pr-dependency--3729-v1-3747-v2-item-1)
 - [Epic supervisor (#3842)](#epic-supervisor-3842)
+- [Curator intake reconcile (#10041)](#curator-intake-reconcile-10041)
 - [Autonomous work finder (#3810)](#autonomous-work-finder-3810)
 - [Operability — config, start/stop, E2E (Phase D, #3813)](#operability--config-startstop-e2e-phase-d-3813)
 - [Observability exporter (`observability`, #4705, epic #4702 Phase 1)](#observability-exporter-observability-4705-epic-4702-phase-1)
@@ -2378,6 +2379,46 @@ repo (no enabled `buildGate`), there is no verified-red signal, so the latest
 `main` CI conclusion stands in for key 3: one cached `gh run list` per repo per
 tick, made only when the repo has a marker-bearing candidate.
 
+### Fleet-degraded operator alert (`autonomous.fleetAlert`, #10164)
+
+`loom-daemon health` computes DEGRADED only when a human runs it. With
+`autonomous.fleetAlert.enabled`, a background thread
+(`loom-daemon/src/fleet_alert/`) reads the daemon's own `DaemonStatus` over its
+IPC socket every `intervalSecs` and pushes an alert for any of three
+conditions, each keyed and alerted independently:
+
+| Key | Condition | Cause and fix named in the alert |
+|-----|-----------|----------------------------------|
+| `tokens-zero-healthy` | zero healthy token accounts | `auth_401` (blocked by an auth-class `.bad_tokens` entry such as `auth-dead: 401`, or with no `.bad_tokens` history; never self-heals): re-auth / `tokens import-from-monitor` / `tokens unblock`; exhausted: wait or add accounts; empty pool: `tokens bootstrap` |
+| `dispatch-halted` | main-health gate halted, or the last tick halted while tokens are still available | read `health`'s dispatch section |
+| `roles-persistent` | one or more roles with PERSISTENT tick failures | a launch refused for a missing guarded-canary receipt (exit 78) is named as a runtime/version mismatch (`runtimes.default`, opencode version) |
+
+An unreachable status changes nothing (unknown is not healthy). A condition must
+hold `debounceTicks` consecutive ticks before one `Started` alert; one `Cleared`
+alert follows after `debounceTicks` good ticks; a still-held condition re-alerts
+at most once per `reminderHours` (so 24h is `1 + floor(24h / reminder)` alerts).
+Active alerts persist in `.loom/logs/fleet-alert-state.json`, so a restart does
+not re-announce them.
+
+Delivery is two independent sinks (one failing never suppresses the other):
+the event bus (an `operator_priority.escalation` event with issue `0`, which the
+Safehouse sink relays to the team Matrix room) and the loom-ui inbox
+(`LOOM_UI_INBOX_URL` + `LOOM_UI_INGEST_KEY`; keyed
+`mail-<host>-fleet-degraded-<condition>`, `resolve: true` on clear; the key is
+sent only as a Bearer header, never on argv or in logs; unset logs once and
+skips). **No forge call is made anywhere in this path**, so it still delivers
+while `gh` is rate-limited. `loom-daemon health` output and exit codes are
+unchanged.
+
+| Config (`autonomous.fleetAlert.*`) | Env | Default |
+|---|---|---|
+| `enabled` | `LOOM_FLEET_ALERT` | `false` (daemon flags default off) |
+| `reminderHours` | `LOOM_FLEET_ALERT_REMINDER_HOURS` | `6` |
+| `debounceTicks` | `LOOM_FLEET_ALERT_DEBOUNCE_TICKS` | `3` |
+| `intervalSecs` | `LOOM_FLEET_ALERT_INTERVAL_SECS` | `60` |
+
+Precedence is env > config > default.
+
 ### Starred-issue liveness and loom-ui stars (#9244 C)
 
 A starred issue is always either being worked on or escalated to the operator
@@ -3625,6 +3666,20 @@ at the source (a `Done` epic auto-closes before anything downstream can even
 cite it as unpromoted); the Champion-side check is what actually resolves the
 trap once it has already occurred, including across a repo boundary this
 supervisor cannot cross.
+
+## Curator intake reconcile (#10041)
+
+Each work-finder listing of a workspace also runs a cadence-gated intake pass
+(`loom-daemon/src/intake_reconcile.rs`): every open **issue** (never a PR) with
+no `loom:*` label gets `loom:triage`, so Curator has one queue. Non-`loom:`
+labels such as `bug` do not count. Issues younger than 2 minutes are skipped (a
+filer may still be labeling), the pass is REST-only, idempotent, and batch-capped.
+`create-issue.sh` also adds `loom:triage` when the caller passes no `loom:*`
+label. **Requires the work finder**, which is opt-in and off by default
+(`LOOM_WORK_FINDER`, below): without it this pass never runs. When the work
+finder runs, the pass is on unless `LOOM_INTAKE_RECONCILE=0`; also
+`LOOM_INTAKE_RECONCILE_INTERVAL_SECS` (300), `LOOM_INTAKE_RECONCILE_MAX_PER_PASS` (50).
+Writes are gated by `write_scope` (#9548).
 
 ## Autonomous work finder (#3810)
 

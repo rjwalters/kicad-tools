@@ -329,11 +329,10 @@ present" for the general form of this check
 and the forge's own view) and why a reported divergence should carry the live
 command output that established it.
 
-### Priority 2: Triage & Unlabeled Issues (Fallback)
+### Priority 2: Triage queue
 
-If no Priority 1 issues exist, find issues awaiting enhancement. The intake label
-`loom:triage` (applied by the issue filer — "New issue awaiting Curator
-enhancement") is the entry point, so **target it first**:
+If no Priority 1 issues exist, find issues awaiting enhancement via the intake
+label `loom:triage` ("New issue awaiting Curator enhancement"):
 
 ```bash
 # Newly filed issues awaiting Curator enhancement
@@ -342,28 +341,9 @@ gh issue list --label="loom:triage" --state=open --limit 500 --json number,title
   --jq "sort_by(.createdAt) | .[] | select($EXCL) | \"#\(.number) \(.title)\""
 ```
 
-If nothing carries `loom:triage`, fall back to any issue that is not already
-in-flight, a proposal awaiting Champion evaluation, approved, blocked, or
-reserved for a human operator, so an autonomous Curator never "curates" an
-issue being built, awaiting evaluation, or outside its authority entirely:
-
-```bash
-EXCL="$(./.loom/scripts/skip-labels.sh --jq-not)"   # #8255 shared source
-gh issue list --state=open --limit 500 --json number,title,labels,createdAt \
-  --jq "sort_by(.createdAt) | .[] | select(
-    ([.labels[].name] | contains([\"loom:curated\"]) | not) and
-    ([.labels[].name] | contains([\"loom:curating\"]) | not) and
-    ([.labels[].name] | contains([\"loom:issue\"]) | not) and
-    ([.labels[].name] | contains([\"loom:building\"]) | not) and
-    ([.labels[].name] | contains([\"loom:architect\"]) | not) and
-    ([.labels[].name] | contains([\"loom:hermit\"]) | not) and
-    ([.labels[].name] | contains([\"loom:auditor\"]) | not) and
-    ([.labels[].name] | contains([\"loom:epic\"]) | not) and
-    ([.labels[].name] | contains([\"loom:blocked\"]) | not) and
-    ([.labels[].name] | contains([\"loom:operator-only\"]) | not) and
-    $EXCL
-  ) | \"#\(.number) \(.title)\""
-```
+The daemon's intake reconcile pass (#10041) applies `loom:triage` to every open
+issue with no `loom:*` label, so this is the single intake queue — there is no
+unlabeled-issue fallback.
 
 Note: `loom:blocked` and `loom:operator-only` stay excluded here, but not from
 Curator's purview (open `loom:decision-malformed` issues are work even with

@@ -416,8 +416,7 @@ fi
 # to hold it across an ENTIRE burst can source lib/filing-lock.sh itself and
 # acquire once — the lock is re-entrant, so the per-call acquire here becomes a
 # no-op inside that hold.
-_filing_lock_rc=0
-loom_filing_lock_acquire "${LOOM_FILING_LOCK_LABEL:-create-issue}" || _filing_lock_rc=$?
+_filing_lock_rc=0; loom_filing_lock_acquire "${LOOM_FILING_LOCK_LABEL:-create-issue}" || _filing_lock_rc=$?
 if [[ "$_filing_lock_rc" -eq "$LOOM_FILING_LOCK_DEFER_RC" ]]; then
   # Fail-SAFE: nothing was filed. The caller retries on its next tick.
   exit "$LOOM_FILING_LOCK_DEFER_RC"
@@ -425,6 +424,8 @@ fi
 # Release on every exit path, including a failed create or an interrupt.
 trap 'loom_filing_lock_release' EXIT INT TERM
 
+# Single intake state (#10041): no loom:* label from the caller -> loom:triage.
+case " ${LABELS[*]-} " in *" loom:"*) ;; *) LABELS+=("loom:triage") ;; esac
 ISSUE_URL="$(forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}")" || exit 1
 echo "$ISSUE_URL"
 

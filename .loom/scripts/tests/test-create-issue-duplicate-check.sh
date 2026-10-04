@@ -554,6 +554,15 @@ assert_eq "$RC" "0" "a succeeding footer step exits 0"
 assert_eq "$STDOUT" "https://github.com/example/repo/issues/9999" "…stdout is exactly the URL"
 assert_not_contains "$STDERR" "dashboard footer" "…and no footer note is printed"
 
+# --- 14. Single intake state (#10041) ---------------------------------------
+echo "--- no loom:* label -> loom:triage; an explicit loom:* label wins ---"
+run_create --title "Intake default" --body "Body."
+assert_contains "$(cat "$GH_CREATES")" "loom:triage" "no --label files with loom:triage"
+run_create --title "Intake bug only" --body "Body." --label bug
+assert_contains "$(cat "$GH_CREATES")" "loom:triage" "a non-loom label still gets loom:triage"
+run_create --title "Intake explicit" --body "Body." --label loom:building
+assert_not_contains "$(cat "$GH_CREATES")" "loom:triage" "--label loom:building does not add loom:triage"
+
 echo
 echo "=== $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed ==="
 [[ "$TESTS_FAILED" -eq 0 ]]
