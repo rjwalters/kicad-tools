@@ -585,9 +585,23 @@ and so does its own refusal (`no_model` until a fit lands), so a fit that
 arrives mid-hold is picked up within one interval. The item's other series
 keep its unrefreshed `blocked` refusal. The seed is the hold visit's: every
 refresh within one hold reuses it, and a re-entry after a release draws a
-new one. One divergence remains: after a release, the pooled `merge_wait`
-entry (the approval) still positions a released PR on the serving roster,
-where training uses the release.
+new one. A `merge_wait` PR is also positioned as training positions it
+(#10312). After a release the pooled `merge_wait` keeps the approval, but
+training's split episode enters at the release. So the two twin-otter ids
+read a **modeled** input for any `merge_wait` PR, released or never held:
+its subject entry is the episode entry (the release, else the approval), and
+the roster is the **episode roster**, captured beside the ordinary roster in
+the same fleet observation, where a tracked released PR enters at its
+release. A never-held peer approved before that release is thus ahead of the
+released PR, as in training. This view keeps the item's own emit signature
+(never `merge_hold`), so cadence, caps, pooled samples and outcomes are
+unchanged, and the explanation records the features it used, so a replay
+reads what the model read. Limits: the release instant is the tracker's
+observation of it (at most one listing interval late); an untracked PR keeps
+the `updated_at` lower bound; an unavailable or stale fleet view stays
+omitted and imputed; and a later release never rewrites an earlier
+observation. The six path-engine heuristics keep the described input, so
+their `features` are byte-identical to before.
 
 ## The explanation (`eta-explanation/v1`)
 
