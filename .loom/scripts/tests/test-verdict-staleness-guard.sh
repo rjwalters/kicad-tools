@@ -237,7 +237,7 @@ if [[ "$1" == "forge" && "$2" == "verdict-equivalent" ]]; then
     exit 2
   fi
   if [[ -f "$STUB_DIR_FROM_ENV/tree-compare-fail" ]]; then
-    echo "stub loom-daemon: could not decide $4 -> $5" >&2
+    echo "stub loom-daemon: could not decide $4 -> $5 — re-review (fail closed). Why: clean-merge: new head $5 is not in the local clone and could not be fetched: stub" >&2
     exit 1
   fi
   EQ_KIND=""
@@ -1284,6 +1284,7 @@ assert_eq "STALE" "$(get_field "$OUT" DECISION)" "(u2) DECISION=STALE"
 assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u2) CLEARED=1"
 assert_contains "$WRITES" "--remove-label loom:pr" "(u2) The approval is still cleared on a real change"
 assert_contains "$TREE_CALLS" "forge verdict-equivalent" "(u2) The comparison was consulted"
+assert_not_contains "$OUT" "could not be checked" "(u2) A provable change is not reported as an unchecked one (#10134)"
 
 # (u3) FAIL CLOSED (AC2): the comparison itself failed (`gh api compare` error,
 #      unparsable response). The verdict must still be invalidated — matching
@@ -1296,6 +1297,8 @@ run_guard 272 --clear
 assert_eq "12" "$RC" "(u3) Failed compare -> exit 12 (fail closed)"
 assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u3) CLEARED=1 — an unavailable comparison never keeps a verdict"
 assert_contains "$WRITES" "--remove-label loom:pr" "(u3) The approval is cleared"
+assert_contains "$OUT" "equivalence could not be checked, failing closed (#10134)" "(u3) REASON says the clear is fail-closed, not a found change (#10134)"
+assert_contains "$OUT" "could not be fetched" "(u3) REASON carries the verb's Why: line"
 
 # (u4) FAIL CLOSED on a daemon predating the verb (clap: non-zero, empty
 #      stdout) — indistinguishable from a failed compare, and must behave

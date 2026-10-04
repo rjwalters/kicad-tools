@@ -107,8 +107,9 @@
 # while the daemon did, so PRs #9541 and #9483 lost `loom:pr` here to a re-date
 # commit the daemon pass would have kept, on a host already running #9124.
 #
-# FAIL CLOSED: only a literal `EQUIVALENCE_KIND=<kind>` line suppresses the
-# invalidation. An absent binary, one predating the verb (clap exits non-zero
+# FAIL CLOSED, VISIBLY: only a literal `EQUIVALENCE_KIND=<kind>` line suppresses
+# the invalidation; when the verb could not answer, its one-line `Why:` (e.g. an
+# unfetchable head commit) is carried into the STALE REASON (#10134). An absent binary, one predating the verb (clap exits non-zero
 # with nothing on stdout), a `gh` outage, a non-GitHub forge, a shallow clone, a
 # missing git object, a `merge-tree` conflict, an unparsable compare, or either
 # kill switch all leave the answer empty and the verdict reads STALE exactly as
@@ -563,8 +564,8 @@ FRESH_REASON=""
 if [[ "${HEAD_SHA:0:${#MARKER_SHA}}" == "$MARKER_SHA" ]]; then
   FRESH_REASON="verdict $VERDICT_LABEL was rendered against the current head SHA"
 else
-  EQUIV_KIND="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-equivalent "$PR" "$MARKER_SHA" "$HEAD_SHA" 2>/dev/null | sed -n 's/^EQUIVALENCE_KIND=//p')"
-  if [[ -n "$EQUIV_KIND" ]]; then
+  EQUIV_KIND="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-equivalent "$PR" "$MARKER_SHA" "$HEAD_SHA" 2>"$GH_STDERR" | sed -n 's/^EQUIVALENCE_KIND=//p')"
+  EQUIV_WHY="$(sed -n 's/.* Why: //p' "$GH_STDERR" | head -n 1)"; if [[ -n "$EQUIV_KIND" ]]; then
     FRESH_REASON="verdict $VERDICT_LABEL was rendered against $MARKER_SHA and head is now $HEAD_SHA, but the change this PR makes is unchanged across the move (equivalence kind: $EQUIV_KIND) — so the verdict still describes it (#9576, #9416). CI still re-runs against $HEAD_SHA; only the review carries over."
   fi
 fi
@@ -576,7 +577,7 @@ fi
 
 # --- Step 5: STALE — optionally clear + re-queue -----------------------------
 CLEARED=0
-REASON="verdict $VERDICT_LABEL was rendered against $MARKER_SHA but head is now $HEAD_SHA"
+REASON="verdict $VERDICT_LABEL was rendered against $MARKER_SHA but head is now $HEAD_SHA${EQUIV_WHY:+; equivalence could not be checked, failing closed (#10134): $EQUIV_WHY}"
 
 if [[ "$CLEAR" -eq 1 ]]; then
   HOLD_LABEL="$(hold_label)"

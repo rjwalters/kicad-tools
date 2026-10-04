@@ -240,6 +240,10 @@ tests/hooks/test-guard-loom-workflow.sh
 # no network/forge calls) — covers .loom/hooks/post-worktree.sh's redirected-
 # CARGO_TARGET_DIR resolution, wired since #6013.
 tests/hooks/test-post-worktree-target-dir.sh
+# Same hermetic pattern (stubbed PATH, fake cargo/pnpm/loom-daemon, no network)
+# — covers .githooks/pre-commit failing closed on a missing/failing formatter,
+# wired since #10123.
+tests/hooks/test-pre-commit-missing-formatter.sh
 
 # defaults/hooks/tests/ — remaining unwired guard-hook suites, wired since #4451.
 defaults/hooks/tests/test-guard-background-subagents.sh

@@ -28,6 +28,9 @@
 #  13. The full `stash-push && <check> && stash-pop` chain exits 0 even when
 #      the worktree was already clean (a pop with nothing captured is a
 #      no-op, not an error, so the chain cannot break mid-sweep).
+#  20. stash-push never says "already clean" on a dirty tree (#10122):
+#      untracked files left behind are named, `git add -N` entries are
+#      refused non-zero with the tree untouched.
 #
 # Follows the throwaway-repo harness pattern in test-worktree-snapshot.sh: a
 # bare origin remote + a working repo, with worktree.sh + its lib/ helpers
@@ -589,6 +592,75 @@ else
     fail "issue-target --json regressed: $json_out"
 fi
 ./.loom/scripts/worktree.sh stash-pop 322 >/dev/null 2>&1 || true
+
+# --- Test 20: never "already clean" on a dirty tree (#10122) ----------------
+echo ""
+echo "Test 20: stash-push never reports a dirty worktree as clean (#10122)"
+
+# (a) untracked-only, no --include-untracked: named, not "clean".
+make_worktree 330
+cd "$REPO"
+echo "new" > ".loom/worktrees/issue-330/new-file.rs"
+out20a="$(./.loom/scripts/worktree.sh stash-push 330 2>&1)" || true
+if ! grep -q "already clean" <<<"$out20a" && grep -q "NOT shelved" <<<"$out20a"; then
+    pass "untracked-only push names the files left behind instead of saying 'already clean'"
+else
+    fail "untracked-only push still reported clean: $out20a"
+fi
+./.loom/scripts/worktree.sh stash-pop 330 >/dev/null 2>&1 || true
+
+# (b) intent-to-add (git add -N): refused, non-zero, tree untouched.
+make_worktree 331
+cd "$REPO"
+echo "edited" >> ".loom/worktrees/issue-331/tracked.txt"
+echo "ita" > ".loom/worktrees/issue-331/ita.rs"
+git -C ".loom/worktrees/issue-331" add -N ita.rs
+if out20b="$(./.loom/scripts/worktree.sh stash-push 331 2>&1)"; then
+    fail "stash-push exited 0 with an intent-to-add entry: $out20b"
+else
+    pass "stash-push refuses (non-zero) when an intent-to-add entry is present"
+fi
+if grep -q "edited" ".loom/worktrees/issue-331/tracked.txt" \
+    && ! git -C ".loom/worktrees/issue-331" rev-parse --verify --quiet refs/loom/stash-baseline/issue-331 >/dev/null 2>&1; then
+    pass "the refused push left the tree untouched and anchored nothing"
+else
+    fail "the refused push modified the tree or created a baseline ref"
+fi
+
+# (c) truly clean: still exit 0, "already clean".
+make_worktree 332
+cd "$REPO"
+if out20c="$(./.loom/scripts/worktree.sh stash-push 332 2>&1)" && grep -q "already clean" <<<"$out20c"; then
+    pass "a truly clean worktree still pushes as an 'already clean' no-op"
+else
+    fail "clean-tree behaviour changed: $out20c"
+fi
+./.loom/scripts/worktree.sh stash-pop 332 >/dev/null 2>&1 || true
+
+# (d) tracked + untracked with the flag round-trips.
+make_worktree 333
+cd "$REPO"
+echo "t-wip" >> ".loom/worktrees/issue-333/tracked.txt"
+echo "u-wip" > ".loom/worktrees/issue-333/u.txt"
+# Capture the post-push status into a variable rather than piping into
+# `! (... | grep -q .)`: under pipefail an early-exiting grep -q makes the
+# negated pipeline read a failure as "clean" (pipefail ratchet).
+pushed20d=false
+st20d=""
+if ./.loom/scripts/worktree.sh stash-push 333 --include-untracked >/dev/null 2>&1 \
+    && st20d="$(git -C ".loom/worktrees/issue-333" status --porcelain --untracked-files=all)"; then
+    pushed20d=true
+    st20d="$(grep -v '\.loom-managed' <<<"$st20d" || true)"
+fi
+if $pushed20d \
+    && [[ -z "$st20d" ]] \
+    && ./.loom/scripts/worktree.sh stash-pop 333 >/dev/null 2>&1 \
+    && grep -q "t-wip" ".loom/worktrees/issue-333/tracked.txt" \
+    && [[ -f ".loom/worktrees/issue-333/u.txt" ]]; then
+    pass "tracked + untracked with --include-untracked round-trips through a clean baseline"
+else
+    fail "tracked + untracked --include-untracked round trip failed"
+fi
 
 # --- Summary ----------------------------------------------------------------
 echo ""
