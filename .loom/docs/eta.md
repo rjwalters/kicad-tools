@@ -19,6 +19,7 @@ host-scoped live list the fleet dashboard reads (#9329,
 
 - [The model](#the-model)
 - [Heuristics and versioning](#heuristics-and-versioning)
+- [Fitted coefficients (`eta-fit/v1`)](#fitted-coefficients-eta-fitv1)
 - [The explanation (`eta-explanation/v1`)](#the-explanation-eta-explanationv1)
 - [Features](#features)
 - [No-estimate reasons](#no-estimate-reasons)
@@ -150,8 +151,15 @@ verdicts) becomes a sample attributed to source `forge:pr-timeline` and host
   file and makes no forge call at all.
 - **Open segments are censored, not guessed.** A stage that had not closed when
   the snapshot was taken is a lower bound (#9328), kept out of every v1
-  distribution and read only by `land-v2`. When the PR lands, re-reading it
-  replaces the censored row with the real duration.
+  distribution and read only by `land-v2`. `eta backfill` is idempotent
+  (#9750): a row whose `(repo, pr, stage, entered_at)` is already journaled is
+  skipped, and on read a censored row is dropped once a completed row shares
+  its key, so a segment that later completes is counted once. **Backfilled
+  censored rows do not feed the backtest**: they are dated at read time
+  (`observed_at = as_of`), and the leak-free backtest (`eta/backtest.rs`)
+  refuses samples at or after an estimate's `as_of`, so on backfilled history
+  `land-v2` scores equal to `land-v1`. Only open segments the live tracker
+  records at close time help it.
 
 A filter asking for `eta-stage-samples.jsonl` also admits a
 `forge:pr-timeline` sample: they are the same measurement (a stage boundary
@@ -176,6 +184,7 @@ in-sweep half and takes the forge's word for the human-gated half.
 | `land-v1` | `land` | in-sweep phases and the stage-sample journal (turnovers too, for an unstarted issue) | after `merge_wait` |
 | `land-v2` | `land` | the same, with **right-censored** stage samples folded in (Kaplan–Meier grids) | after `merge_wait` |
 | `land-v3` | `land` | `land-v2`'s, with each stage grid calibrated first: widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored (recorded per stage as `distribution.adjustment`; #9970) | after `merge_wait` |
+| `land-2026-10-04-amber-heron` | `land` | `land-v2`'s path, then its p25/p75 recalibrated from `land-v2`'s own track record: the current stage's `ln(actual / p50)` distribution (landed estimates as events, still-open ones as censored lower bounds, recency-weighted) fitted at the estimate's own `as_of`; the median is kept (recorded as `recalibration`; #10207) | after `merge_wait` |
 
 A shipped id is **immutable**: a golden test pins each id's output on a fixed
 fixture. A behaviour change is a new id registered beside the old one
@@ -221,6 +230,91 @@ fixture. A behaviour change is a new id registered beside the old one
 all of the above.
 `land-v3` (#9970) ships the same way: its constants are fixture-derived,
 and the live coverage/pinball result is the operator's backtest, not a claim.
+`land-2026-10-04-amber-heron` (#10207) ships the same way, named by the
+datestamp-plus-two-words convention for shipped heuristics. Its evidence is
+`.loom/state/eta/calibration.jsonl` (every landed `land-v2` outcome the
+tracker scored) plus the pending store; `eta backtest` derives the same
+evidence by replaying `land-v2` over the cases, leak-free because the table is
+refitted at each case's own `as_of`. With fewer than 20 landings, even pooled
+across stages, it returns its base estimate unchanged.
+
+## Fitted coefficients (`eta-fit/v1`)
+
+A **fitted** heuristic (the first is `land-2026-10-04-twin-otter`, #10222)
+cannot fit inside the estimator, which may read only its two arguments.
+Fitting is a separate, pure step (`eta::fit`, #10221) whose output — one
+content-addressed JSON file per cutoff `T` — the registry loads. Building the
+training rows from fleet history, the `loom-daemon eta fit` CLI and the daily
+refit are #10245; until it lands nothing writes these files on a live host.
+
+**What is fitted**, on rows knowable before `T` over the 14 days before it:
+
+- **Per-stage exit hazard**: L2 logistic regression of "left the stage within
+  the next 30 minutes" on standardized features. The objective is a sum,
+  `Σ ln(1 + exp(−s(w·z + b))) + ‖w‖²/(2C)` with `C = 0.5` (scikit-learn's
+  `C`), intercept unpenalized. A stage is fitted only with ≥ 200 labelled rows
+  and ≥ 20 exits; otherwise it is listed in `hazard_skipped` with
+  `below_min_rows` or `below_min_exits`.
+- **Direct model**: a pooled log-normal AFT of time-to-merge on stage
+  indicators plus standardized features, per-stage `σ`, censoring-aware, each
+  row weighted `1 / (rows of its PR)`, L2 `1e-3` on the feature coefficients.
+  **Curator's rule:** only stages with ≥ 200 rows and ≥ 20 merge events enter
+  it (a stage whose rows are all censored has no finite optimum); the rest are
+  absent from `aft.stages`, `beta` and `log_sigma`.
+- **Path statistics**: per-stage dwell-time Kaplan–Meier curves with delayed
+  entry (an episode is at risk at `t` iff `entry_h < t ≤ dwell_h`) and
+  next-step probabilities. **Curator's rule:** `Next` and `Merged` ends are
+  events; `Closed` and `Censored` ends are censored, matching #10222's
+  conditioning on eventually merging. `next` tables exclude closes and sum
+  to 1. Each curve is stored with at most 64 exact points: keep index 0, then
+  for each `j = 1 … 62` the smallest index with `s ≤ 1 − j·(1 − sₙ)/63`, then
+  the last index — overstating the full curve by less than `(1 − sₙ)/63`.
+- **`age_p95_sec`**: per stage, the nearest-rank p95 (rank `⌈0.95·n⌉`) of
+  `round(age_h·3600)` over all of the stage's rows, in whole seconds.
+
+The numerics (erfc, the normal tail, AS241 probit, Cholesky, damped Newton)
+are hand-ported; `eta::fit` adds no crate.
+
+**Pinned contracts** (train and serve share them; every coefficient vector is
+positional): stages `review_wait`, `doctor_wait`, `merge_wait`, `merge_hold`
+in that order (`eta::fit::FitStage`, not `eta::Stage`); the 20 features in
+`eta::fit::FEATURES` order — the #10223 fixture's order, which is not the
+order of #10221's feature table; and one transform, `model_features`, that
+both sides call on the raw `ModelInputs`.
+
+**The file**, `.loom/state/eta/fit/fit-<YYYYMMDDTHHMMSSZ>.json` (a sibling of
+`fleet/`, whose every `*.json` is parsed as a snapshot; override:
+`LOOM_ETA_FIT_DIR`):
+
+```json
+{
+  "schema": "eta-fit/v1",
+  "id": "<16 hex>",
+  "as_of": "2026-10-04T00:00:00Z",
+  "window": {"start": "2026-09-20T00:00:00Z", "days": 14, "row_step_sec": 1800, "exit_horizon_sec": 1800, "knowable_lag_sec": 120},
+  "fitter": {"version": "…", "revision": "<full sha>"},
+  "settings": {"hazard_c": 0.5, "aft_l2": 0.001, "std_eps": 1e-9, "min_dur_h": 0.016666666666666666,
+               "min_stage_rows": 200, "min_stage_exits": 20, "km_max_points": 64},
+  "features": ["log_age", "…"],
+  "hazard": {"review_wait": {"mu": [], "sd": [], "coef": [], "intercept": -3.53, "rows": 1500, "exits": 89, "objective": 272.5, "iterations": 9, "converged": true}},
+  "hazard_skipped": {"merge_hold": {"reason": "below_min_exits", "rows": 640, "exits": 12}},
+  "aft": {"stages": ["review_wait", "…"], "mu": [], "sd": [], "beta": [], "log_sigma": [], "objective": 1.45, "converged": true, "rows": 6000, "events": 5798, "groups": 6000, "iterations": 6},
+  "path_stats": {"km": {"review_wait": {"t": [0.0], "s": [1.0], "episodes": 812, "events": 790}}, "next": {"review_wait": {"merge_wait": 0.6}}},
+  "age_p95_sec": {"review_wait": 154081}
+}
+```
+
+- **`id`** is `derived_hex(["loom.eta.fit", <compact JSON with "id": "">], 16)`
+  — content-derived, never random. The file holds no wall-clock time, host id
+  or input-snapshot id (a snapshot id digests facts after `T`).
+- **Deterministic**: the same rows in the same order give a byte-identical
+  file on one build and platform (`ln`/`exp`/`sin` come from the platform
+  libm). Written as pretty JSON plus a newline, through a temp file and a
+  rename.
+- **Reading** refuses an unknown `schema` and does not re-derive the id.
+  `load_latest(root, before)` returns the newest fit whose `as_of` is strictly
+  before `before`.
+- `aft` is `null` when no stage passes its gate.
 
 ## The explanation (`eta-explanation/v1`)
 
@@ -660,6 +754,44 @@ that is the tracker's job, described above. Every subcommand also accepts
 `autonomous.eta.historyScope` for one invocation. Neither makes a forge call to
 read fleet history — they read the cache `eta fleet` built — so scope does not
 change what an inspection costs.
+
+### Raw event cache and `fleet_state(t)` (#10197)
+
+`eta fleet` snapshots hold *derived* stage durations. The **raw event cache**
+keeps the forge history itself, so any later reconstruction is a pure function
+of what is on disk and never needs a refetch.
+
+- **Files**, beside the snapshots in `.loom/state/eta/fleet/`
+  (`LOOM_ETA_FLEET_SNAPSHOT_DIR` overrides): `events-<owner>-<repo>.jsonl`
+  (append-only, one `RawEvent` per line: content-derived `id`, `event_time`,
+  `fetched_at`, item kind/number, event kind, label, source, `seq`) and
+  `events-<owner>-<repo>.cursor.json` (next backfill page, refresh ETag,
+  in-progress refresh page). Rows are appended only if their `id` is new;
+  `fetched_at` is excluded from the id, so a re-read adds nothing and the
+  event time is never confused with the fetch time. The cursor is written
+  atomically *after* a page's rows, so a kill re-reads at most one page and
+  the rerun is byte-identical (tested, including a torn trailing line).
+- **Commands.** `eta fleet events backfill|refresh [--max-pages N]
+  [--reserve CALLS]` fetch from `GET repos/{o}/{r}/issues/events` through the
+  shared ETag store. A rate-limit stop, the reserve floor or `--max-pages`
+  exits `75` (`EX_TEMPFAIL`); re-run to resume. `eta fleet state --as-of
+  RFC3339 [--json]` reconstructs the fleet (open issues/PRs, stage and
+  time-in-stage per item, `loom:building` count, operator holds, approved PRs
+  held for a human) from cached events **strictly before** `--as-of`, with no
+  forge call. `eta fleet agreement --estimates FILE.jsonl [--json]` scores that
+  reconstruction against the features logged on `eta.estimate` records
+  (a SigNoz export of `eta-explanation/v1` objects, one per line): per-feature
+  agreement rate and mean `reconstructed - logged`. Forge-invisible features
+  (PR size, model, host pool) are listed, not scored.
+- **Forge-call budget** (op `timeline.read`, 100 events/page): a **backfill**
+  costs `ceil(events / 100)` calls total across however many resumed runs; a
+  **refresh** costs one conditional call (a `304`, which the ETag store does
+  not count against the core pool) on a quiet repo, else
+  `ceil(new events / 100)`. `state` and `agreement` cost zero.
+- **Not yet cached** (follow-up PRs of #10197): PR closing references (so
+  `pr_open_skip_lockout` is `null`), reviews, CI check-run conclusions, and the
+  webhook-mirror source. An item untouched since before the cache window is not
+  reported open.
 
 `loom eta …` (the machine dispatcher, `scripts/loom`) is a thin passthrough to
 `loom-daemon eta …`.

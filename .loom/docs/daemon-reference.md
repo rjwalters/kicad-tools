@@ -2384,7 +2384,7 @@ tick, made only when the repo has a marker-bearing candidate.
 `loom-daemon health` computes DEGRADED only when a human runs it. With
 `autonomous.fleetAlert.enabled`, a background thread
 (`loom-daemon/src/fleet_alert/`) reads the daemon's own `DaemonStatus` over its
-IPC socket every `intervalSecs` and pushes an alert for any of three
+IPC socket every `intervalSecs` and pushes an alert for any of these
 conditions, each keyed and alerted independently:
 
 | Key | Condition | Cause and fix named in the alert |
@@ -2392,6 +2392,8 @@ conditions, each keyed and alerted independently:
 | `tokens-zero-healthy` | zero healthy token accounts | `auth_401` (blocked by an auth-class `.bad_tokens` entry such as `auth-dead: 401`, or with no `.bad_tokens` history; never self-heals): re-auth / `tokens import-from-monitor` / `tokens unblock`; exhausted: wait or add accounts; empty pool: `tokens bootstrap` |
 | `dispatch-halted` | main-health gate halted, or the last tick halted while tokens are still available | read `health`'s dispatch section |
 | `roles-persistent` | one or more roles with PERSISTENT tick failures | a launch refused for a missing guarded-canary receipt (exit 78) is named as a runtime/version mismatch (`runtimes.default`, opencode version) |
+| `capacity-limited` | disk or RAM headroom holds the effective cap below the configured `maxConcurrent` (#10214; even with nothing starred) | which term, the effective vs. configured cap, how many starred issues wait; free disk / RAM or add capacity |
+| `star-backlog` | more than 3x the effective cap of starred issues waiting on this host (#10214) | the count, the oldest star and a new star's FIFO position; unstar or re-rank, or add capacity |
 
 An unreachable status changes nothing (unknown is not healthy). A condition must
 hold `debounceTicks` consecutive ticks before one `Started` alert; one `Cleared`
@@ -2449,7 +2451,13 @@ starred issue in each managed repo:
   trusted comment on the issue, including the sweep's lease renewal (a long
   Builder phase with a live lease is not a stall on any host). The stall key
   hashes only those facts (never the stage, which host-local capacity can
-  change), so N hosts post one comment.
+  change), so N hosts post one comment. A `no-capacity` row the work finder
+  deferred carries a structured `capacity_wait` (gate, binding cap term,
+  host-wide position among waiting stars) and reads e.g. `queued #88 of 106
+  (cap 2, disk-limited)`; its position moving forward is progress, and a
+  queue that stops moving escalates naming that reason, position and what the
+  operator can do (#10214). The host-level causes are fleet-alert asks
+  (`capacity-limited`, `star-backlog`), not per-issue comments.
 
 An escalation is one comment on the issue, carrying
 `<!-- loom:operator-priority-escalation key=<kind>:<specifics> -->`. Each
