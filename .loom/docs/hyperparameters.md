@@ -151,6 +151,21 @@ loom-daemon hyperparams --json | jq '.sources["dispatch.maxConcurrent"]'  # env-
 Invalid samples abort startup with the offending path named — treat a
 non-booting daemon as an infeasible point, not a crash.
 
+## Merge-queue mode: enablement prerequisites and rollback
+
+Queue mode (#9978) is not a hyperparameter. It is a per-repository merge-mode
+setting, defined by Phase A (#10255), that defaults to direct. Before any
+repository switches to queue mode, it must pass
+`loom-daemon merge-group-ci eligibility`. That check requires an
+organization-owned repository, push permission, an active `merge_queue` rule,
+required checks, and a workflow audit proving that every required suite
+validates the combined merge-group tree. The switch also needs operator
+authorization, because a ruleset change is a protected-settings change. To
+roll back, set the mode back to direct and have the operator remove the
+`merge_queue` rule. The `merge_group` workflow trigger can stay, because it is
+inert without a queue. Full checklist, evidence and rollback steps:
+[merge-queue-ci](merge-queue-ci.md).
+
 ## Tranche roadmap
 
 Tranche 1 (this issue) consolidates the seven fields above. Later tranches

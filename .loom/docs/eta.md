@@ -40,6 +40,7 @@ stage it is in now, with one branch at every Judge verdict:
 ```text
 ready_wait → sweep.curator → sweep.builder → review_wait ─┬─ approved ──→ merge_wait → landed
                                                           └─ changes_requested → doctor ─┘ (loop, capped)
+                                       approved + operator hold: merge_hold ⇄ merge_wait (#10218)
 ```
 
 | Stage | Entered when | Left when |
@@ -50,6 +51,7 @@ ready_wait → sweep.curator → sweep.builder → review_wait ─┬─ approve
 | `review_wait` | the PR asks for review | the Judge's verdict |
 | `doctor` | `loom:changes-requested` | the PR asks for review again |
 | `merge_wait` | `loom:pr` | the PR merges |
+| `merge_hold` | `loom:pr` plus `loom:operator`, `loom:operator-only` or `loom:operator-decision` | the hold is lifted (back to `merge_wait`), `loom:changes-requested`, or the PR merges or closes |
 
 **`ready_wait` (#9326).** A ready issue's wait is modelled from its
 [dispatch plan](daemon-reference.md) position on the last work-finder tick,
@@ -74,11 +76,14 @@ below its cap; a repo-cap or out-of-slice deferral is recorded (as the row's
 rides only `blocked` rows, which have no position, so it is refused
 `no_dispatch_plan` rather than turned into a start time.
 
-Human-gated stages (intake, approval, operator holds) are outside the model:
-an issue there has no estimate, with a reason (below). A running sweep gets a
-`land` estimate from `sweep.curator` on; an item in `doctor` always counts at
-least one rework round, because `doctor` is entered only through a
-rejection.
+Human-gated stages (intake, approval) are outside the model: an issue there
+has no estimate, with a reason (below). An approved PR under an operator hold
+is the `merge_hold` stage, but every path-engine heuristic still refuses it
+as `blocked` ([below](#operator-holds-merge_hold-and-stage-episodes-10218));
+only the shadow `land-2026-10-04-twin-otter` estimates it, from its fit.
+A running sweep gets a `land` estimate from `sweep.curator` on; an item in
+`doctor` always counts at least one rework round, because `doctor` is entered
+only through a rejection.
 
 **Distributions.** Each `(repo, stage)` is summarised as a 21-point
 nearest-rank quantile grid (`p0, p5, …, p100`) over the most recent 200
@@ -147,8 +152,10 @@ verdicts) becomes a sample attributed to source `forge:pr-timeline` and host
   `gh pr list` plus one timeline read per PR, paid once by
   `eta fleet backfill`. After that the snapshot's `cursor` bookmarks the newest
   forge event already ingested and `eta fleet refresh` enumerates only PRs
-  updated since. **The daemon itself never derives**: a tick reads the cached
-  file and makes no forge call at all.
+  updated since. Since #10263 the daemon keeps the snapshots fresh itself, on
+  its own hourly task and never on a tick
+  ([Fleet refresh task](#fleet-refresh-task-autonomousetafleetrefresh-10263));
+  the ETA pass still only reads the cached file.
 - **Open segments are censored, not guessed.** A stage that had not closed when
   the snapshot was taken is a lower bound (#9328), kept out of every v1
   distribution and read only by `land-v2`. `eta backfill` is idempotent
@@ -175,6 +182,80 @@ in-sweep merge share to invent one from.
 at all. Until then `augment` (the default) keeps this host's journals for the
 in-sweep half and takes the forge's word for the human-gated half.
 
+### Operator holds: `merge_hold` and stage episodes (#10218)
+
+An approved PR can be waiting to merge (`loom:pr`, usually over within the
+hour) or held for a human (`loom:pr` plus `loom:operator`,
+`loom:operator-only` or `loom:operator-decision`; `loom:operator-mechanical`
+may accompany them). The second is the `merge_hold` stage. Its one
+definition is `eta::labels::stage_from_pr_labels`; the episode derivation, the
+tracker and every later consumer call it, so the stage a model is trained on
+and the stage it serves cannot drift. `loom:blocked`, `loom:needs-capability`
+and an operator hold on a PR that is not approved are still `blocked`.
+
+**Shipped heuristics do not move.** `start-v1`, `finish-v1`, `land-v1` to
+`land-v3` and `land-2026-10-04-amber-heron` refuse an item in `merge_hold` as
+`blocked` before writing any field, and a held item's `features` are those
+of that refusal (`no_stage`), so their explanations are byte-identical to
+the refusal of a held PR before the stage existed, and no shipped
+`stage_marks` carries a `merge_hold` mark (it is marked only on a path that
+starts there). Their `merge_wait`
+history keeps the **pooled** definition from every source: approval in force
+to merge, hold included. A heuristic opts in to modelling the hold with
+`PathRules::models_hold`; its path from `merge_hold` is the rest of the hold
+(conditioned on its age) and then one `merge_wait`.
+
+**Stage episodes** are the split record a hold-aware heuristic fits
+(`eta::episodes`, #10221's input). One PR's label events are replayed in
+`(at, seq)` order from an empty label set; every event at one instant is
+applied in `seq` order and the stage is resolved once per instant, so two
+labels changed in one edit are one transition and no episode has zero
+length. `seq` is the timeline order for the forge (kept by a stable sort) and
+the delivery order for a future label stream; it decides only between changes
+to the same label at the same instant. Each episode is
+`{repo, pr_number, stage, entered_at, end}`. `stage` is `review_wait`,
+`doctor`, `merge_wait` (split: hold excluded) or `merge_hold`. `end` is
+`left` (with `at` and `next`: a stage, `merged` or `closed`), `unstaged` (the
+labels stopped resolving to any stage) or `open` (censored at its `at`). A
+label re-applied while in force opens nothing. The derivation is causal:
+cut at `T`, every episode that ended before `T` is identical and a running one
+has the same `entered_at`, which is what `StageSamples::select_episodes`
+reconstructs from a stored snapshot. Episodes store the events' own instants;
+each consumer applies its own knowability lag.
+
+**Where the history comes from.** Only label data the daemon already reads:
+the forge PR timelines behind the fleet snapshot (every `labeled` and
+`unlabeled` event, operator labels included) and the tracker's own listings.
+No new forge read; the PR listing gains `closedAt` in the same call, so a PR
+closed unmerged ends its last episode at its close. The webhook label stream
+is not readable by the daemon today; it becomes one more adapter once #10197's
+raw event cache imports it.
+
+- **Fleet snapshot.** `episodes` sits beside `samples` (`serde(default)`, not
+  written when empty), so an older daemon still parses the file and a
+  snapshot without episodes keeps its id. Each `merge_hold` episode is also a
+  `merge_hold` sample (completed, or censored when closed, unstaged or open);
+  split `merge_wait` episodes are not samples. A snapshot written before
+  #10218 gains episodes only as its PRs are re-read: run
+  `eta fleet backfill` (not `refresh`) to rebuild the window. `eta fleet show`
+  prints episode counts by stage.
+- **Tracker.** The hold is an overlay on the pooled `merge_wait` track.
+  Entering it journals a boundary-only `merge_wait` row
+  (`next_stage: merge_hold`, no duration); leaving it journals a `merge_hold`
+  row (with `duration_sec` when its entry was observed), then the pooled track
+  carries on as before. A merge or close while held adds a `merge_hold` row to
+  the unchanged pooled one. The `exits_*` and `merges_*` features count a
+  hold's entry as a `merge_wait` exit. They count its end once, from the
+  `merge_hold` row: the pooled row at the same instant is skipped, and a held
+  PR that leaves the listings still open is not a merge. While held the item
+  is `At(merge_hold)` and still refused `blocked`, so a refusal is emitted
+  once, as before; after a release
+  it is `At(merge_wait)` with the pooled entry, and
+  `CurrentStage.episode_entered_at` carries the release instant.
+  One deliberate change to local samples: `review_wait` approved and held
+  within one listing interval now closes at the approval (verdict `pass`), as
+  the forge measures it, instead of at the release.
+
 ## Heuristics and versioning
 
 | id | kind | reads | an approved path ends |
@@ -185,6 +266,8 @@ in-sweep half and takes the forge's word for the human-gated half.
 | `land-v2` | `land` | the same, with **right-censored** stage samples folded in (Kaplan–Meier grids) | after `merge_wait` |
 | `land-v3` | `land` | `land-v2`'s, with each stage grid calibrated first: widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored (recorded per stage as `distribution.adjustment`; #9970) | after `merge_wait` |
 | `land-2026-10-04-amber-heron` | `land` | `land-v2`'s path, then its p25/p75 recalibrated from `land-v2`'s own track record: the current stage's `ln(actual / p50)` distribution (landed estimates as events, still-open ones as censored lower bounds, recency-weighted) fitted at the estimate's own `as_of`; the median is kept (recorded as `recalibration`; #10207) | after `merge_wait` |
+| `land-2026-10-04-twin-otter` | `land` | no history: the newest `eta-fit/v1` coefficient file cut off strictly before `as_of` (see [Fitted coefficients](#fitted-coefficients-eta-fitv1)). PR stages only (`review_wait`, `doctor`, `merge_wait`, `merge_hold`); the blend of a stage-by-stage exit-hazard Monte Carlo (256 paths, seeded per stage visit) and a log-normal direct model (recorded as `twin_otter`; #10222, #10243) | at the merge |
+| `land-2026-10-04-twin-otter-b` | `land` | the pre-PR/PR composition of twin-otter (#10244): `ready_wait`, `sweep.curator` and `sweep.builder` are answered with `land-v2`'s path rules (same refusals, so its answer rate there equals `land-v2`'s; `combination.method` is `land_v2_path_prefix`); `review_wait`, `doctor`, `merge_wait` and `merge_hold` are `land-2026-10-04-twin-otter`'s own answer, unchanged | at the merge |
 
 A shipped id is **immutable**: a golden test pins each id's output on a fixed
 fixture. A behaviour change is a new id registered beside the old one
@@ -213,14 +296,35 @@ fixture. A behaviour change is a new id registered beside the old one
      the identical replay set. A heuristic that cannot win on history it can
      be re-run against is not judged on a live sample nobody can replay, so a
      failure here means the live gate is not even consulted.
-   - **Live**: at least 50 paired observations, the candidate's paired mean
-     pinball loss no worse than `current`'s, and its p25–p75 coverage inside
-     `[40%, 60%]`.
+   - **Live** (#10233): every figure is read on the **common decidable
+     subset** — a pair counts toward a figure only when *both* sides are
+     decidable for it, so a candidate cannot improve its numbers by refusing
+     the hard cases. All of the following, in this order:
+     - at least 50 paired observations carrying a p90 on both sides, and the
+       candidate's paired mean `pinball4_loss_sec` (q = .25, .5, .75, .9 —
+       the deciding loss) no worse than `current`'s;
+     - no **late surprise** regression: the candidate's `actual > p90` rate,
+       over at least 50 pairs where both sides' late surprise is decided
+       (`censored` outcomes included, see below), at most 2 points
+       (`LATE_SURPRISE_SLACK`) above `current`'s;
+     - no **answer-rate** regression: the candidate's answer rate at most 1
+       point (`ANSWER_RATE_SLACK`) below `current`'s. It is counted
+       **once per tracker pass** per live subject, carrying each heuristic's
+       last emitted state forward — never as answered rows over all rows, because a refusal
+       is emitted once and never refreshed while an answer is refreshed every
+       few minutes;
+     - its p25–p75 coverage inside `[40%, 60%]`;
+     - the win holds **day by day**: pairs are folded by the UTC day of their
+       `as_of`, a day goes to whichever side had the lower mean
+       `pinball4_loss_sec` (ties are left out), and over at least `MIN_FOLDS`
+       (7) decided days the 95% Wilson lower bound of the candidate's per-day
+       win rate must be above 50%. One lucky day cannot carry a pooled mean.
 
    Either gate failing leaves `current` untouched, and `--apply` on a failing
    candidate is a refusal, not an override. Every evaluation writes a
    `eta-promotion-decision/v1` record (`.loom/logs/`) carrying the numbers
-   that decided it, so "why did this flip?" — or "why has it not?" — is
+   that decided it (the #10233 figures and thresholds are additive fields, so
+   the tag is unchanged and an older record still parses), so "why did this flip?" — or "why has it not?" — is
    answered from the record. A flip is written to the **host-local** config
    tier (`.loom-local/local.json`): the evidence is this host's own history
    and pairs (#9343), so rolling a promotion fleet-wide stays an operator
@@ -237,15 +341,26 @@ tracker scored) plus the pending store; `eta backtest` derives the same
 evidence by replaying `land-v2` over the cases, leak-free because the table is
 refitted at each case's own `as_of`. With fewer than 20 landings, even pooled
 across stages, it returns its base estimate unchanged.
+`land-2026-10-04-twin-otter` (#10243) ships the same way; `land-2026-10-04-twin-otter-b`
+(#10244) follows it. Twin-otter's model is PR-level, so on its own it refuses every
+pre-PR item (`unknown_stage`) and could never pass the answer-rate gate against
+`land-v2` (#10233). Ids are immutable, so the fix is a new id that composes: pre-PR
+stages use `land-v2`'s path, PR stages use twin-otter. Fitting the pre-PR stages
+remains a separate future id.
+`eta view`, `eta list`, `eta backtest` and `eta promote` build the registry
+with no coefficient file, so there it refuses `no_model`: its backtest gate
+cannot pass while it is a shadow, by design. Its live evidence is the
+tracker's, which loads the file (below).
 
 ## Fitted coefficients (`eta-fit/v1`)
 
 A **fitted** heuristic (the first is `land-2026-10-04-twin-otter`, #10222)
 cannot fit inside the estimator, which may read only its two arguments.
 Fitting is a separate, pure step (`eta::fit`, #10221) whose output — one
-content-addressed JSON file per cutoff `T` — the registry loads. Building the
-training rows from fleet history, the `loom-daemon eta fit` CLI and the daily
-refit are #10245; until it lands nothing writes these files on a live host.
+content-addressed JSON file per cutoff `T` — the registry loads. The training
+rows come from the cached fleet snapshots, and the files are written by
+`loom-daemon eta fit` and by the daemon's daily refit (#10245; see
+[below](#training-rows-the-cli-and-the-daily-refit-10245)).
 
 **What is fitted**, on rows knowable before `T` over the 14 days before it:
 
@@ -315,6 +430,147 @@ both sides call on the raw `ModelInputs`.
   `load_latest(root, before)` returns the newest fit whose `as_of` is strictly
   before `before`.
 - `aft` is `null` when no stage passes its gate.
+- **`window.data_through`** (fleet fits only; absent otherwise) is the data
+  horizon `H` the rows were censored at (below). A value well before `as_of`
+  means the snapshots were stale.
+
+### Training rows, the CLI and the daily refit (#10245)
+
+**Source.** Rows come only from the fleet snapshots
+(`.loom/state/eta/fleet/*.json`): their stage episodes (#10218) and their
+label-flag timeline. The host-local stage journal is not a source, because
+its `observed_at` is not a knowability stamp. The builder is
+`eta::fit::rows::build`. It is pure, and its output does not depend on the
+order of snapshots, episodes or flag changes.
+
+**Knowability and the horizon.**
+
+- A fact at instant `a` is usable at row instant `t` iff `a + 120 s < t`. For
+  an episode, that is `StageEpisode::view_at(t − 120 s)`.
+- Labels are censored at the data horizon `H = min(T − 120 s, oldest
+  snapshot as_of)`, not at `T`. A merge in `[T − 120 s, T)` is not knowable
+  at `T`, and a stale snapshot has observed nothing after its `as_of`.
+
+**Rows.**
+
+- Row instants are `t = W + k·30 min` for `t < H`, with `W = T − 14 d`.
+- The subjects at `t` are the PRs with an episode in `review_wait`, `doctor`,
+  `merge_wait` or `merge_hold` open at `t − 120 s`. The mapping is
+  `FitStage::from_stage`, which serving also uses.
+- **Queue features** come from the one shared `queue_features` call:
+  - The roster is every PR open in an episode, known at entry + 120 s.
+  - The log has one event per episode end, known at end + 120 s. A merge is
+    one `merge` event, never an exit plus a merge. Every other end is an
+    `exit` of the episode's stage, so `merge_wait → merge_hold` counts as a
+    `merge_wait` exit.
+- **`age_h`** is measured within the current (split) episode.
+- **`rework`** counts the PR's entries into `doctor` (Judge rejections)
+  knowable at `t`, including the current one.
+- **Flags** are the last flag change before `t − 120 s`.
+- **Exit label**:
+  - `None` once `t + 30 min ≥ H`;
+  - otherwise whether the open episode ended by `t + 30 min`. An end in
+    `[t − 120 s, t)` counts, as at serve time.
+- **Merge label**, in hours: time to a merge before `H` (an event), else to
+  a close before `H` (censored), else to `H` (censored).
+- Rows are dropped and counted in two cases:
+  - a needed queue feature is missing (`rows_dropped_missing`);
+  - the PR has episodes but no flag timeline (`rows_dropped_no_flags`).
+
+**Dwells.**
+
+- There is one dwell per fit-stage episode that entered before `H` and had
+  not ended before `W`, with delayed entry `max(0, W − entered)`.
+- Ends map as follows:
+  - a `left` for a fit stage is `next`;
+  - a merge is `merged`, and a close is `closed`;
+  - `unstaged`, a `left` for a non-fit stage, and anything still running at
+    `H` are `censored`.
+
+**The label-flag timeline.**
+
+- `FleetSnapshot.flag_changes` stores when each PR's six model flags changed.
+  The flags are defined by `eta::labels::pr_flags`, the one label → flag
+  definition, which serving also uses:
+  - `op_hold`: any `merge_hold` label;
+  - `sequenced`, `starred` (`loom:operator-priority`), `conflict`,
+    `ci_fail` and `blocked`: one label each.
+- It is derived in `merge` by the same `(at, seq)` replay as the episodes.
+- Each PR gets an entry at its first label event, even with no flag set, then
+  one per change.
+- The prune keeps each PR's last change before the floor, so the state in
+  force at the floor survives.
+- It is not written when empty, so an older snapshot keeps its id. **A
+  snapshot written before #10245 has no timeline, so its PRs' rows are
+  dropped. Run `loom-daemon eta fleet backfill` (not `refresh`) for each repo
+  to rebuild it.**
+
+**The daily refit.**
+
+- With the [fleet refresh task](#fleet-refresh-task-autonomousetafleetrefresh-10263)
+  on (the default, #10263), the check runs at the end of every refresh cycle,
+  so it always sees that cycle's snapshots, and it is held while a backfill
+  younger than 6 h is in progress. Otherwise it is a dedicated daemon task
+  (`observability::eta_fit`) beside the ETA tracker; never both. Either way it
+  exists only where observability runs.
+- The standalone task's first check is 10 min after start, then every hour.
+- It fits at cutoff `T` = today 00:00Z, at most once per UTC day:
+  - when every snapshot is as of `T` or later;
+  - otherwise 6 h after `T`, with whatever is there.
+- Today's file makes later checks a no-op, whichever process wrote it.
+- The fit itself makes no forge call. Keeping the snapshots fresh is the
+  fleet refresh task's job; with that task off it is an operator or cron step
+  (`eta fleet refresh`).
+- Failures and panics are logged at `warn` and retried on the next check.
+- Writes go to `.loom/state/eta/fit/fit-<T>.json`, and the directory is
+  pruned to the newest **14** `fit-*.json` files.
+- It is controlled by `autonomous.eta.fit.enabled` ([Configuration](#configuration)).
+
+**Loading and reloading** (#10243). A heuristic may not read a file, so the
+file is loaded when the **registry** is built, and the fitted heuristic holds
+it:
+
+- `Registry::with_fit(fit)` is the pure constructor; `Registry::builtin()` is
+  `with_fit(None)` and reads nothing; `Registry::load(root, before)` wraps
+  `load_latest`. `land-2026-10-04-twin-otter` is registered with or without a
+  file, so its refusals are on the record.
+- The tracker builds its registry with `load(workspace_root, now)` at
+  startup. On **every pass** (`refreshSecs`, default 300 s) it re-runs
+  `load_latest(workspace_root, listed_at)` off the async runtime, next to the
+  history reload, and swaps in a rebuilt registry when the file id differs
+  from the registered one (a file appearing or disappearing counts). The
+  daily refit therefore reaches a running daemon within one pass, and an
+  unchanged file costs one parse per stored fit and no rebuild.
+- Each change is logged once: `info` with the new id, cutoff and the id it
+  replaced, or one `warn` naming the fit directory when there is no file.
+- An estimate never uses a file whose `as_of` is at or after its own `as_of`
+  (it refuses `no_model`), so a replay cannot see a later fit.
+
+**Serving `land-2026-10-04-twin-otter`.** The adapter maps the estimate's
+input onto the model's (train and serve share each definition):
+
+| model input | from |
+|---|---|
+| `stage` | `review_wait`, `doctor` → `doctor_wait`, `merge_wait`, `merge_hold`; every pre-PR stage refuses `unknown_stage` (the `-b` composition answers them from `land-v2`'s path) |
+| `age_h` | whole seconds in the current stage episode (since `episode_entered_at`, the release after a hold; else `entered_at`; else `age_sec`) |
+| `ahead`, `n_stage_repo`, `n_stage_fleet`, `exits_repo_6h`, `exits_repo_24h`, `exits_fleet_6h`, `merges_repo_24h`, `merges_fleet_6h` | the same-named queue features; `null` is imputed at the training mean and named in `twin_otter.imputed` |
+| `since_merge_h` | `since_merge_sec / 3600` |
+| `rework` | `doctor_cycles_so_far` (Judge rejections so far), else the resolver's count; at least 1 in `doctor` |
+| the six flags | `eta::labels::pr_flags(labels)`: bit 0 `op_hold` (`loom:operator`, `loom:operator-only`, `loom:operator-decision`), 1 `sequenced`, 2 `starred` (`loom:operator-priority`), 3 `conflict` (`loom:merge-conflict`), 4 `ci_fail` (`loom:ci-failure`), 5 `blocked` |
+
+The Monte Carlo seed is `seed_for_visit("<repo_key>#<issue>", stage,
+episode entry)`: every refresh of one stage visit draws the same uniforms, so
+an unchanged-input refresh moves p50 by the model's drift, not by a redraw
+(pinned under 5%). A stage the fit skipped refuses `insufficient_samples`; a
+missing, model-less, too-new or malformed file refuses `no_model`. It never
+refuses `beyond_history`.
+
+A held PR (`merge_hold`) is estimated, not refused `blocked`, with two known
+limits: its `features` are those of the path-engine heuristics' `blocked`
+refusal, so its stage-dependent counts (`ahead`, `n_stage_*`, `exits_*`) are
+`null` and imputed where training saw real ones; and its estimate is
+emitted at the hold's entry and not refreshed while it stays held (the item
+keeps `refused = blocked`, so the emit signature never refreshes).
 
 ## The explanation (`eta-explanation/v1`)
 
@@ -330,14 +586,15 @@ level: `schema`, `estimate_id`, `heuristic`, `kind`, `loom` (provenance),
 `admission_delay_sec`), `result` (`p25_sec`,
 `p50_sec`, `p75_sec`, `p90_sec`, `eta_p50_at`, `samples_min`, `stage_marks`),
 `contributions`, `features`, `features_omitted`, `no_estimate_reason`,
-`truncated`.
+`truncated`, and, on an answered `land-2026-10-04-twin-otter` estimate only,
+`twin_otter` (below).
 
 `result.p90_sec` (#10211) is the displayed upper bound that a late surprise
 is scored against. It is the nearest-rank 90th percentile of the same
 simulated path totals the quartiles come from, so it costs no new draws and
 leaves `p25_sec`, `p50_sec` and `p75_sec` unchanged; `run_explanation`
 recomputes all four. Every heuristic that simulates (`start-v1`, `finish-v1`,
-`land-v1`, `land-v2`, `land-v3`) records it. It is absent only on a refusal
+`land-v1`, `land-v2`, `land-v3`, `land-2026-10-04-twin-otter`) records it. It is absent only on a refusal
 and on an explanation recorded before the field existed, which still parses:
 the field is additive, so the schema stays `eta-explanation/v1`. The stage
 marks stay at three percentiles.
@@ -351,12 +608,42 @@ path completion time, so its `p50_at` is exactly `eta_p50_at`; a stage no
 path visits carries `null` times, never a fabricated one. A timeline can be
 drawn from `stage_marks` alone.
 
+`twin_otter` (#10243) is how a fitted estimate recomputes without stage
+grids: `fit_id` and `fit_as_of` (the coefficient file), `input` (the adapted
+model input, exactly as evaluated) and `imputed`, the config (`step_h`,
+`steps`, `cap_h`, `paths`, `age_clamp_h`, `age_clamp_applied`; the seed is
+`combination.seed`), both parts' p25/p50/p75/p90 in seconds
+(`hazard_path_sec`, `aft_sec`), and `model`, the slice of the file the
+evaluation read (the feature names, the current stage's hazard, the direct
+model and every stage's path statistics; about 4 KB, at most about 13 KB).
+`result` holds the blend, `combination.method` is `twin_otter_blend`, and
+`path`, `stages`, `branches`, `contributions` and the history fields are
+empty. The field is absent for every other heuristic and on every refusal, and
+an explanation recorded before it still parses.
+
 A feature is `null` when it was not measured, with a `features_omitted`
 reason; never a default ([Features](#features) lists the definitions and
 the reasons). An explanation stays near 8 KiB; over 32 KiB it
-drops `features`, then the stage grids, then the stage marks, then every
+drops `features`, then `twin_otter.model` (only when present; then nothing
+recomputes), then the stage grids, then the stage marks, then every
 remaining list (`detail`), stopping as soon as it fits, and names each drop
 in `truncated`.
+
+**Queue-friction features (#10193)** are logged on every estimate so a fitted
+model can be tested against the heuristics once ~14 days of them exist:
+`repo_open_prs`, `repo_pr_open_lockout` (the work finder's last tick had a
+`pr-open-skip` row, or an `open_pr_backoff` row inside the window that skip arms, for the repo; `nothing_ready` if it had no ready row), `repo_ci_typical_duration_sec` (median of
+the repo's PR workflow runs that finished before the read, last 7 days),
+`pr_ci_status` (`passing`/`failing`/`pending`/`none`), `pr_behind_main`,
+`pr_merge_conflict`, `operator_hold`, plus `repo_friction_observed_at` /
+`pr_friction_observed_at`, the instants they were read. They are additive
+`serde(default)` fields, so older v1 payloads still parse and the schema is not
+bumped. Each pass reads them **before** its `as_of` with ETag-conditional
+REST reads (`observability::eta_friction`: per repo at most every 15 min, per
+PR at most every 10 min, 12 PRs a pass); a reading taken after `as_of`, older
+than an hour, or that failed is omitted with its reason (`read_after_as_of`,
+`stale_reading`, `read_failed`, `no_pr`, `not_read_yet`, …), never defaulted.
+No heuristic reads them.
 
 ### Role-attempt stages: which percentile to read (#9420)
 
@@ -423,7 +710,7 @@ models (`eta fit`, #10221; the twin-otter heuristic, #10222) and for testing
 which inputs matter. No v1 heuristic reads them; `land-v3` reads `labels`
 and `queue_running`. A feature is `null` when unmeasured, with a specific
 `features_omitted` reason. `not_collected` is only the backstop for declared
-features that nothing populates yet (#10231, #10232).
+features that nothing populates yet (#10232).
 
 ### Queue, drain and friction (#10201)
 
@@ -497,6 +784,71 @@ passes later. Training sets `known_at` to the event time plus 2 min
   start, for the 168 h rule, is the journal's oldest row; daemon downtime
   inside that span is not visible.
 
+### Item facts: issue, sweep, verdicts (#10231)
+
+Populated from data the daemon already holds in process; **no forge read**.
+Each value is stored with the instant it was *observed* (`known_at`), and an
+estimate at `as_of` reads only observations with `known_at < as_of`, so a
+later queue refresh, registry read or verdict cannot change an earlier
+instant's features. Equality is excluded, as for the queue features.
+
+| Stored | Source | `known_at` | Definition |
+|---|---|---|---|
+| `tier` | ready-queue row (`tier:*` label) | the plan tick | the label value, as the row carries it |
+| `workspace_priority` | ready-queue row | the plan tick | the owning workspace's priority (lower dispatches first) |
+| `issue_created_at` | ready-queue row (`createdAt`) | the plan tick | the issue's creation instant, never the PR's |
+| `issue_age_sec` | derived | | `as_of − issue_created_at`, integer seconds |
+| `urgent` | none | | **deprecated** compatibility field (`loom:urgent` no longer affects dispatch, #9244): always null, serialized as before |
+| `sweep_runtime` | `sweep.global.dispatch` payload | the dispatch | the admitted runtime |
+| `sweep_model`, `sweep_effort` | the owning sweep registry's entry, read when the dispatch event is handled | the dispatch (not the registry's earlier `started_at`) | what the dispatch requested |
+| `attempt` | dispatches of the issue this process observed | the dispatch | 1-based ordinal of the latest dispatch known before `as_of` |
+| `judge_verdicts_so_far` | verdicts the tracker settled | the **settlement** (the next phase or listing), not the verdict's own instant | `"pass"`/`"fail"` in attempt order, one per attempt (duplicates dropped); `[]` is a real empty list |
+| `repo_first_pass_approval_rate` | the loaded verdict history (`StageSamples::verdicts`: three feeders, below) | each verdict's `observed_at` | see below |
+
+Issue facts are kept when the item leaves the ready queue (ready, building,
+PR stages), keyed by the item, with up to 8 distinct observations so an
+earlier `as_of` sees the value of its own time.
+
+**`repo_first_pass_approval_rate`** = approved first verdicts / first
+verdicts, over the repo's `attempt == 1` Judge verdicts in the loaded verdict
+history (`StageSamples::verdicts`) whose `observed_at` is in the history
+window before `as_of`, strictly. A verdict is *approved* unless it is
+`loom:changes-requested` (`fail`); the window is the history window the
+estimators already use. A merge timestamp is never used. The eligible
+population is every first verdict from **all three** feeders of that list, not
+only sweep outcomes:
+
+| Feeder | "First" means | `observed_at` |
+|---|---|---|
+| `sweep.outcome` (in-sweep Judge) | the sweep's attempt-1 verdict | when the outcome recorded it |
+| ETA stage journal, `in_sweep: false` rows (an external Judge's label transition seen by the tracker, and `eta backfill` rows from PR label history) | attempt 1 = the tracker's `rework_rounds + 1` at the transition, or the first `loom:review-requested` lap in the PR's label history | the listing that saw the transition, or the closing label event |
+| fleet snapshot verdicts (`historyScope` `augment`: added to local; `fleet`: replace local) | attempt 1 of the PR's forge label timeline | the label event that closed the stage |
+
+The denominator is not floored, so a rate over one verdict is reported as
+such; a model should weight by its own minimum. Limitations: a verdict sample
+carries no PR id or source tag, so the same first verdict can count more than
+once (a resumed sweep that records attempt 1 twice; a sweep-driven PR also
+backfilled into the journal; local and fleet copies under `augment`).
+
+**Null reasons** (never `not_collected` in a covered state):
+
+| reason | feature | when |
+|---|---|---|
+| `deprecated` | `urgent` | always |
+| `never_in_ready_queue` | `tier`, `workspace_priority`, `issue_created_at`, `issue_age_sec` | this process never saw a queue row for the item (it entered through a review listing, or the daemon restarted) |
+| `not_observed_yet` | the same | the first queue row was observed at or after `as_of` |
+| `no_tier_label` | `tier` | the issue has no `tier:*` label |
+| `issue_created_at_missing` / `_malformed` | `issue_created_at`, `issue_age_sec` | the row's `createdAt` is absent, or not RFC 3339 |
+| `issue_created_in_future` | `issue_age_sec` | `issue_created_at` is after `as_of`: no age is invented (the instant itself is still recorded) |
+| `no_sweep_yet` | `sweep_runtime`, `sweep_model`, `sweep_effort`, `attempt` | no sweep dispatched before `as_of` |
+| `sweep_not_observed` | the same | a sweep is running or ran, but this process did not observe its dispatch (adopted across a restart) |
+| `runtime_not_recorded` | `sweep_runtime` | the dispatch event named no admitted runtime |
+| `registry_unavailable` | `sweep_model`, `sweep_effort` | the owning registry had no entry for the sweep |
+| `runtime_default` | `sweep_model`, `sweep_effort` | the dispatch requested no explicit value, so the runtime's own default applied (not recorded in process; applicability per runtime is not distinguished) |
+| `verdict_history_unobserved` | `judge_verdicts_so_far` | the item has a PR, but this process saw neither its dispatch nor any verdict, or its first observed dispatch came after the PR already existed (a rework re-dispatch after a restart): earlier verdicts are unknown, not empty |
+| `no_verdict_history` | `repo_first_pass_approval_rate` | no verdict (any feeder, any repo) was observed before `as_of` |
+| `no_first_verdicts_before_as_of` | `repo_first_pass_approval_rate` | an empty denominator: the repo has no first verdict in the window before `as_of` |
+
 ### Host and queue context
 
 These describe the last work-finder tick's dispatch plan, and are recorded
@@ -534,6 +886,7 @@ Omission reasons are free-form strings.
 | `no_dispatch_plan` | not started, and the dispatch plan gives it no position (blocked, or no plan on this host) |
 | `unknown_stage` | no stage label, or contradictory ones |
 | `stale_inputs` | a ready item whose dispatch plan is older than 15 minutes (or three ticks) |
+| `no_model` | a fitted heuristic (`land-2026-10-04-twin-otter`) has no usable coefficient file: none loaded (always, in the CLI), no direct model, a cutoff at or after `as_of`, or malformed coefficients |
 
 A refusal is emitted as an `eta.estimate` with no `result`, when its reason
 first appears.
@@ -568,7 +921,9 @@ every boundary the tracker observes, the moment it observes it, with its raw
 fields: sweep dispatch, phase, repeat and terminal events, label transitions,
 first sightings, verdicts and PR resolutions. A row that completes a stage
 with an observed entry has a `duration_sec`; a row whose entry was only a
-lower bound does not. Rows the sweep-outcome journal already carries are
+lower bound does not. Operator holds add `merge_hold` rows and boundary-only
+`merge_wait → merge_hold` rows ([above](#operator-holds-merge_hold-and-stage-episodes-10218)).
+Rows the sweep-outcome journal already carries are
 marked `in_sweep` and are not read back as history. Rotation: 5 MiB or 30
 days, one `.1` generation.
 
@@ -580,6 +935,7 @@ days, one `.1` generation.
 | `finish` | the sweep's terminal event (exited or crashed) | `finished` |
 | `land` | the in-sweep merge phase, the PR's merge time read when it leaves the review listings, or the issue closing as **completed** | `landed` |
 | `land` | the issue closing as **not planned** | `abandoned` |
+| any | still unresolved when the pending estimate expires (30 days), with its p90 already behind it | `censored` |
 
 Each outcome carries `error_sec` (`actual − p50`), `covered`
 (`p25 ≤ actual ≤ p75`), `pinball_loss_sec`
@@ -601,8 +957,8 @@ would mix three- and four-quantile losses in one sum. Both p90 fields are
 absent on `abandoned` outcomes, on refusals, and on an estimate persisted
 before p90 existed. The outcome row also exports `loom.eta.p25_sec`,
 `loom.eta.p75_sec` and `loom.eta.p90_sec`, so an interval can be read without
-joining the estimate. The promotion gate does not read the p90 fields yet
-(#10233).
+joining the estimate. The promotion gate decides on `pinball4_loss_sec` and
+gates on `above_p90` (#10233; see "Adding a v2, and comparing it").
 
 **Nothing else is an outcome.** A PR closed unmerged and a sweep that ended
 before any PR are *not* abandonments — a replacement PR or a later sweep
@@ -610,6 +966,24 @@ usually lands the same issue — so each queues one `issues/{n}` read and the
 verdict comes from the issue's own `state` / `state_reason`. While the issue
 stays open the estimates stay pending: the join is on `(repo, issue, kind)`,
 so the eventual landing scores them, and only a 30-day expiry drops them.
+
+**Expiry censors, it does not hide** (#10233). The estimates that live 30
+days are exactly the ones whose subject has not landed — the late surprises —
+so dropping them unscored would bias every late-surprise rate down. An
+expiring estimate whose `as_of + p90` is already behind it is a *decided* late
+surprise whatever happens next, and is scored before it goes as a `censored`
+outcome (`outcome_source: pending_expiry`): `above_p90: true`, and nothing
+else — the actual is only a lower bound, so every error and loss field is
+absent. One with no p90, or whose p90 has not passed, is undecided and is
+dropped as before. The shadow ledger counts a censored pair toward the late
+surprise only when both sides were censored at the same `as_of`.
+
+**A failed ledger load is never silent** (#10233). `shadow.json` parses
+with defaults for every field added since it was written, so an upgrade keeps
+its counts. A file that still cannot be read is set aside as
+`shadow.json.unreadable-<UTC stamp>` (never overwritten) and the daemon logs
+an error and starts from an empty ledger; `eta promote` refuses to evaluate
+it at all.
 
 **A reopen starts a new series.** The first outcome stands: when an estimate
 resolves, every estimate of that series emitted *after* the outcome instant
@@ -677,11 +1051,12 @@ items which are not in it at all.
 
 ## CLI (`loom-daemon eta`)
 
-Six subcommands. All are read-only except `eta promote --apply`, which writes
-one config key, and `eta fleet backfill|refresh`, which writes only the
-snapshot cache; nothing here writes an estimate to the journal or telemetry —
-that is the tracker's job, described above. Every subcommand also accepts
-`--repo-root PATH` (default: the current directory).
+Eight subcommands. All are read-only except `eta promote --apply`, which writes
+one config key, `eta fleet backfill|refresh`, which writes only the snapshot
+cache, and `eta fit`, which writes only a coefficient file. Nothing here writes
+an estimate to the journal or telemetry — that is the tracker's job, described
+above. Every subcommand but `offline` (which reads only its `--input`) also
+accepts `--repo-root PATH` (default: the current directory).
 
 - **`loom-daemon eta backfill [--repo OWNER/NAME] [--limit N] [--dry-run]`** —
   seeds `.loom/logs/eta-stage-samples.jsonl` from `pr-latency`'s own
@@ -749,6 +1124,42 @@ that is the tracker's job, described above. Every subcommand also accepts
     form to hand another host.
   - `--as-of` pins the instant the snapshot describes; two hosts that pass the
     same `--as-of` against the same forge state get byte-identical files.
+- **`loom-daemon eta fit [--as-of RFC3339] [--out PATH] [--dry-run] [--json]`**
+  — fits the `eta-fit/v1` file from the cached fleet snapshots at cutoff
+  `--as-of` (default: today 00:00Z) and writes
+  `.loom/state/eta/fit/fit-<T>.json`, pruning that directory to the newest 14
+  files (#10245). It uses the same runner as the daily refit and makes no
+  forge call.
+  - Two runs at the same cutoff on the same snapshots write a byte-identical
+    file with the same `id`.
+  - `--out` writes elsewhere and prunes nothing.
+  - `--dry-run` fits and reports but writes nothing.
+  - `--json` prints the report: per-stage rows, exits and merge events,
+    `dwells`, `rows_dropped_missing`, `rows_dropped_no_flags`,
+    `data_through`, `id` and `path`.
+  - It fails, naming `eta fleet backfill`, when no snapshot is cached.
+
+The daemon's [fleet refresh task](#fleet-refresh-task-autonomousetafleetrefresh-10263)
+does the same work on a cadence, through reader Apps only. The CLI stays for
+ad-hoc and non-daemon use; it runs under the ambient `gh` credential, so do
+not script it on a host whose daemon already refreshes.
+
+- **`loom-daemon eta offline --input PATH --now RFC3339 [--baseline land-v2] [--train-days 14] [--selection-folds 2] [--reported-folds 2] [--margin-secs 120] [--resamples 1000] [--export PATH] [--json]`**
+  — the #10193 offline comparison on **logged** `eta.estimate` /
+  `eta.outcome` lines (JSONL of `{observed_at, event, body}` exported from
+  the log store). Strict temporal separation (`eta::offline` module doc):
+  every record is keyed by when it became knowable (`observed_at` + margin),
+  training labels are censored at each fold's cutoff, every fitted transform
+  comes from the fold's training rows, and the builder asserts each fold
+  point-in-time. Walk-forward daily folds: settings are chosen per model
+  family (Kaplan–Meier reference, linear quantile regression with
+  inverse-probability-of-censoring weights) on the two folds before
+  `now − 48h`, then each frozen model is scored once against the baseline's
+  own logged estimates on identical rows of the last 48h, still-open items
+  included as censored. Reports truncated pinball loss, landed MAE/bias and
+  25–75% coverage with issue-bootstrap 95% CIs. No random or k-fold split
+  exists; the future-invariance test pins that post-cutoff records cannot
+  move a fit.
 
 `view` and `list` also take `--scope local|augment|fleet`, overriding
 `autonomous.eta.historyScope` for one invocation. Neither makes a forge call to
@@ -764,34 +1175,46 @@ of what is on disk and never needs a refetch.
 - **Files**, beside the snapshots in `.loom/state/eta/fleet/`
   (`LOOM_ETA_FLEET_SNAPSHOT_DIR` overrides): `events-<owner>-<repo>.jsonl`
   (append-only, one `RawEvent` per line: content-derived `id`, `event_time`,
-  `fetched_at`, item kind/number, event kind, label, source, `seq`) and
-  `events-<owner>-<repo>.cursor.json` (next backfill page, refresh ETag,
-  in-progress refresh page). Rows are appended only if their `id` is new;
+  `fetched_at`, item kind/number, event kind, label, closing-ref `target`,
+  source, `seq`) and `events-<owner>-<repo>.cursor.json` (per endpoint: next
+  backfill page, refresh ETag, in-progress refresh page). Rows are appended only if their `id` is new;
   `fetched_at` is excluded from the id, so a re-read adds nothing and the
   event time is never confused with the fetch time. The cursor is written
   atomically *after* a page's rows, so a kill re-reads at most one page and
   the rerun is byte-identical (tested, including a torn trailing line).
-- **Commands.** `eta fleet events backfill|refresh [--max-pages N]
-  [--reserve CALLS]` fetch from `GET repos/{o}/{r}/issues/events` through the
-  shared ETag store. A rate-limit stop, the reserve floor or `--max-pages`
-  exits `75` (`EX_TEMPFAIL`); re-run to resume. `eta fleet state --as-of
-  RFC3339 [--json]` reconstructs the fleet (open issues/PRs, stage and
+- **Commands.** `eta fleet events backfill|refresh [--endpoint
+  issues-events|pulls] [--max-pages N] [--reserve CALLS]` read, through the
+  shared ETag store, `GET repos/{o}/{r}/issues/events` (labels, close, merge)
+  then `GET repos/{o}/{r}/pulls?state=all&sort=created` (PR open/merge/close
+  times, and linkage references parsed from the body with the open-PR guard's
+  own phrase set — closing keywords plus `Part of #N` / `Contributes to #N`,
+  colon/markdown tolerant — each row's `label` naming the family `closes` /
+  `part_of`, stamped at the PR's `created_at`). A merged/closed PR is stored
+  twice by design (the pulls row has `seq` 0, the issue-events row the event
+  id). A pulls refresh reads only the newest pages: closures of older PRs
+  arrive via the issue-events refresh, and body edits on older PRs are not
+  seen. A rate-limit stop, the reserve floor or `--max-pages` (per
+  endpoint) exits `75` (`EX_TEMPFAIL`); re-run to resume. `eta fleet state
+  --as-of RFC3339 [--json]` reconstructs the fleet (open issues/PRs, stage and
   time-in-stage per item, `loom:building` count, operator holds, approved PRs
-  held for a human) from cached events **strictly before** `--as-of`, with no
+  held for a human, open-PR lockout) from cached events **strictly before** `--as-of`, with no
   forge call. `eta fleet agreement --estimates FILE.jsonl [--json]` scores that
   reconstruction against the features logged on `eta.estimate` records
   (a SigNoz export of `eta-explanation/v1` objects, one per line): per-feature
   agreement rate and mean `reconstructed - logged`. Forge-invisible features
   (PR size, model, host pool) are listed, not scored.
-- **Forge-call budget** (op `timeline.read`, 100 events/page): a **backfill**
-  costs `ceil(events / 100)` calls total across however many resumed runs; a
-  **refresh** costs one conditional call (a `304`, which the ETag store does
-  not count against the core pool) on a quiet repo, else
-  `ceil(new events / 100)`. `state` and `agreement` cost zero.
-- **Not yet cached** (follow-up PRs of #10197): PR closing references (so
-  `pr_open_skip_lockout` is `null`), reviews, CI check-run conclusions, and the
-  webhook-mirror source. An item untouched since before the cache window is not
-  reported open.
+- **Forge-call budget** (100 rows/page; ops `timeline.read` and
+  `pr.closing-issue-references`): a **backfill** costs `ceil(events / 100) +
+  ceil(PRs / 100)` calls total across however many resumed runs; a **refresh**
+  costs one conditional call per endpoint (a `304`, not counted against the
+  core pool) on a quiet repo, else `ceil(new rows / 100)` each. `state` and
+  `agreement` cost zero.
+- **Not yet cached** (follow-ups of #10197): reviews, CI check-run conclusions
+  and the webhook-mirror source. `pr_open_skip_lockout` is `null` until a
+  linkage row precedes `--as-of`; during an unfinished pulls backfill it can
+  read `false` rather than unknown (older PRs not yet read link nothing). The
+  guard's PR-author trust filter is not reproduced (can only over-report). An
+  item untouched since before the cache window is not reported open.
 
 `loom eta …` (the machine dispatcher, `scripts/loom`) is a thin passthrough to
 `loom-daemon eta …`.
@@ -806,7 +1229,14 @@ of what is on disk and never needs a refetch.
 | `dryRun` | `LOOM_ETA_DRY_RUN` | `false`: compute, journal and log `eta: would emit …` lines, enqueue nothing |
 | `refreshSecs` | `LOOM_ETA_REFRESH_SECS` | `300` (floor 60) |
 | `historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` (#9343) |
+| `fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily refit (#10245). It runs only with `enabled` too, is read at start, and is a no-op until a fleet snapshot is cached |
 | `current.start` / `current.finish` / `current.land` | none | `start-v1` / `finish-v1` / `land-v1` |
+| `fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | `true` (#10263) |
+| `fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor 900) |
+| `fleetRefresh.maxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_MAX_CALLS` | `300` |
+| `fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `1500` |
+| `fleetRefresh.reserveCalls` | `LOOM_ETA_FLEET_REFRESH_RESERVE` | `1500` |
+| `fleetRefresh.backfillDays` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_DAYS` | `21` (floor 15: the fit window + 1) |
 
 `historyScope` is one of:
 
@@ -821,11 +1251,100 @@ of what is on disk and never needs a refetch.
 
 An unrecognised value leaves the default in force rather than picking a scope
 at random, and **every** scope falls back to the host-local history when no
-snapshot is cached — a missing cache is not evidence of an empty history. The
-default is therefore a no-op until an operator runs `eta fleet backfill`: a
-host that has not opted in behaves exactly as it did before.
+snapshot is cached — a missing cache is not evidence of an empty history.
+
+**`augment` changes live estimates once a snapshot exists.** With the fleet
+refresh task on by default (#10263), a host with reader Apps publishes its
+first snapshot within a cycle or a few, and from then on its live `current`
+estimates report `scope = fleet`. That is #9343's designed path; set
+`historyScope = local` to keep a host on its own journals.
 
 Each pass logs `eta: pass emitted=N refused=M outcomes=K …`.
+
+### Fleet refresh task (`autonomous.eta.fleetRefresh`, #10263)
+
+The daily fit (#10245) and `augment` read only the cached snapshots, so the
+daemon keeps them fresh itself. The task is spawned beside the ETA tracker,
+only with an observability exporter configured and `autonomous.eta.enabled`.
+It is **on by default** (operator decision): it generates no work, it only
+reads, and it is budgeted with a reserve floor. Without it the fit would have
+no training data on a fleet host. Settings are read once at spawn; change
+them with a daemon restart.
+
+- **Cadence.** The first cycle runs 120 s after start, then every
+  `intervalSecs`, skipping missed ticks. Each cycle runs off the tick in a
+  blocking task; a panic is logged and the next tick retries.
+- **Repo set.** Every provisioned root and the daemon's own (by `origin`
+  remote), plus every published snapshot's repo. Deleting a
+  `fleet-<owner>-<repo>.json` stops refreshing only a snapshot-only repo; for
+  a provisioned root or the daemon's own repo it triggers a full backfill on
+  the next cycle (no published snapshot means a backfill). To opt out, set
+  `autonomous.eta.fleetRefresh.enabled = false` (the whole task) or remove the
+  root from the workspace pool.
+- **Reader Apps only.** Every read runs under the repo's reader App
+  (`forge_identity`, #9537) with `GH_TOKEN` / `GITHUB_TOKEN` (and the
+  enterprise variants) removed from the child. There is no writer fallback and
+  the operator's PAT is never spent. A repo with no usable reader is skipped
+  at zero calls (`no_reader`), and so is a forge other than github.com
+  (`unsupported_forge`, e.g. Gitea); both are warned once per daemon lifetime.
+  REST only: the `issues` listing and the per-PR timeline, never GraphQL.
+- **Pass choice.** A repo gets a **backfill** (`backfillDays` deep) when it has
+  no published snapshot, no state file (a CLI-made snapshot at its default
+  `--limit` covers only days), coverage shallower than `backfillDays`, or an
+  older derivation revision. Otherwise it gets a **refresh** from the last
+  watermark minus 10 minutes. Refreshes run first, then backfills (in-progress
+  ones first).
+- **Budgets.** Every request counts, `304`s and errors included: refresh
+  passes draw from `maxCallsPerCycle`, backfills from
+  `backfillMaxCallsPerCycle`, both host-wide. When a response reports fewer
+  than `reserveCalls` core calls remaining, that page is kept and every further
+  repo on the same reader App is skipped for the cycle (`reserve`).
+- **Calls per refresh.** A quiet repo costs **1** (page 1 sent with its ETag,
+  answered `304`, which still advances `as_of`). An active one costs
+  `ceil(rows updated since the watermark / 100)` listing pages plus one
+  timeline page per moved PR (more for a PR with over 100 timeline entries).
+  A first backfill of `rjwalters/loom` at 21 days is about 1,300 calls, which
+  fits one cycle at the default backfill budget.
+- **Rate limits.** A rate-limited reader is withdrawn App-wide until the
+  forge's reset, the cycle ends, and the task makes **zero** calls until
+  `max(reset, now + intervalSecs)` (`backoff`). With the rate-limit breaker
+  suppressed it makes none either (`breaker_open`). A coverage gap withdraws
+  the reader for that repo only (`coverage`). The task never feeds the global
+  breaker.
+- **Files and resume.** State and the in-progress snapshot live in
+  `.loom/state/eta/fleet/refresh/` (`<owner>-<repo>.json`,
+  `<owner>-<repo>.staging.json`), a subdirectory the snapshot loader never
+  lists. Every merge in a pass uses the pass's listing instant `L`, and the
+  staging file then the state are written after each listing page and at every
+  stop. The next cycle continues the same pass, which is the in-process
+  equivalent of the CLI's exit 75. A pass that completes is published
+  atomically; until then the old snapshot stays in service. A state naming a
+  pass whose staging file is unreadable restarts the pass; a staging file with
+  no pass is deleted.
+- **Raw event cache.** After the snapshots, each repo's
+  [raw event cache](#raw-event-cache-and-fleet_statet-10197) is synced
+  in-process through a reader-only source, from whatever the matching budget
+  has left, resuming from its own cursor.
+- **The fit.** The daily refit check (#10245, `refit_if_due`) runs at the end
+  of each cycle, in the same blocking call, so it always sees that cycle's
+  snapshots; the standalone refit task is then not spawned. It is held while
+  a backfill is in progress and younger than 6 h (counted from that pass's
+  listing instant), so a fresh host's first fit is not trained on only the
+  repos that finished first. A backfill that is due but skipped before its
+  first call (`reserve`, `budget`, a halted or gated cycle) is recorded as in
+  progress from that cycle (#10292), so it holds the fit too, for 6 h from
+  that cycle. `autonomous.eta.fit.enabled = false` skips it.
+- **Rebuilds.** No host has a state file before this task first runs, so every
+  repo's first cycle is a full backfill. That also rebuilds snapshots written
+  before #10218's episodes and #10245's flag timeline, which a refresh would
+  not.
+- **Telemetry.** One `eta.fleet_refresh` record per repo per cycle, skipped
+  repos included ([telemetry-schema](telemetry-schema.md)), and one `info` line
+  per cycle with the stop-reason counts and the calls spent.
+- **Shared snapshot directory.** There is no lock against the CLI or another
+  host: every writer replaces whole files atomically, and the last writer
+  wins. A `LOOM_ETA_FLEET_SNAPSHOT_DIR` shared between hosts works, but enable
+  the task on only one of them.
 
 ## Queries
 
@@ -859,12 +1378,33 @@ answers, against `signoz_logs.distributed_logs_v2`:
     Q1 and Q2 but contributes no features here. Widen `since` past the longest
     lead time before treating a ranking as complete.
 
-Q1–Q3 group by `(heuristic, revision)` as well as by heuristic, so a daemon
-roll shows as two rows, and all three exclude rows with incomplete
-provenance. Every `loom.eta.*` attribute they read is pinned to the emitted
+- **Q4**: the **late surprise** rate (`actual > p90`) per heuristic,
+  revision and kind, on the **common decidable subset**: an instant
+  `(repo, issue, kind, as_of)` counts only when every heuristic's outcome
+  there has a decided late surprise, so a heuristic that refused (or recorded
+  no p90) removes the instant for all of them. `censored` counts the expired
+  but decided ones. Near 0.10 is calibrated.
+- **Q5**: **stability** — the median and maximum shift of the predicted
+  landing *instant* (`as_of + p50`) between consecutive emissions of one
+  series whose stage and rework count did not change. Measured on the
+  instant, not remaining seconds, which would read a steady ETA as moving.
+  Diagnostic; not a gate.
+- **Q6**: **convergence** — median p25–p75 and p25–p90 widths of scored
+  outcomes per bucket of the actual lead (`lead_bucket`). A converging
+  heuristic narrows as the event nears. `with_p90` counts the rows the p90
+  width is over. Diagnostic; not a gate.
+- **Q7**: the **answer rate**, time-weighted: each emitted state stands until
+  the series' next emission or outcome, so a refusal that is never refreshed
+  weighs as long as it stood rather than once. A series' still-open last state
+  is left out until something follows it.
+
+Every section groups by `(heuristic, revision)` as well as by heuristic, so a
+daemon roll shows as two rows, and the accuracy sections exclude rows with
+incomplete provenance. Every `loom.eta.*` attribute they read is pinned to the emitted
 schema by `loom-daemon/tests/eta_artifacts.rs`, so a renamed or dropped
 attribute fails CI here rather than silently returning empty columns in
 SigNoz. `loom-daemon/tests/signoz_eta_queries.rs` goes further: it executes the
 whole file verbatim against the pinned ClickHouse the SigNoz trial deploys and
 checks the answers, with the mutation of the committed SQL that breaks each one
-run as a counterfactual.
+run as a counterfactual; `loom-daemon/tests/signoz_eta_accuracy_views.rs` does
+the same for Q4–Q7 over its own fixture.

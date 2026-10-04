@@ -122,6 +122,17 @@ the next person to add one will have an equally good argument.
     next optimisation lands on `ci.yml`, the question is not "is this safe on
     its own" but "which run still makes the observation this removes".
 
+11. **A merge-group run is held to the same rules as a `main` run** (#10257).
+    Each merge group is a distinct commit, the combined tree that will land.
+    Its run is never cancelled once started (rule 2). Its concurrency group is
+    keyed on its own head SHA, so no other run can supersede it while it is
+    still pending. Without that key the queue would wait on a check that never
+    reports. A suite that is skipped on `merge_group` is not coverage
+    (rule 6), and path filters do not apply there (rule 3). `merge_group` runs
+    exactly what `push` runs. `loom-daemon merge-group-ci audit` checks all of
+    this statically, and it counts any suite it cannot prove runs as
+    uncovered. See [merge-queue-ci](merge-queue-ci.md).
+
 ## The daily backstop and its tracking issues
 
 `.github/workflows/ci-daily.yml` (#9085) is the slow run rule 10 requires. It
@@ -223,6 +234,8 @@ a cancellation rate.
   predicate, and rule 9's two narrowings
 - #9065 / #9069 — the wall-time work rule 10 exists to balance, and #9085 —
   `ci-daily.yml`, the slow run that balances it
+- #10257 — merge-queue qualification: rule 11, the `merge_group` trigger in
+  `ci.yml`, and the audit that proves it ([merge-queue-ci](merge-queue-ci.md))
 - [`ci-observability.md`](ci-observability.md) — the observability face of
   the same family: every run, job, duration, outcome and log is captured in
   SigNoz as standing policy, so a regression like #7779's cancellation storm

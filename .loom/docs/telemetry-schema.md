@@ -1910,7 +1910,7 @@ carries **both** the estimating build (`estimate.loom`, exported as
 | Field | Type | Notes |
 |---|---|---|
 | `trigger` | string | `first`, `transition` (stage, rework or refusal changed) or `refresh` (every `refreshSecs`, default 300) |
-| `explanation` | object | the `eta-explanation/v1` record: `estimate_id`, `heuristic`, `kind`, `loom` (required), `as_of`, `subject`, `current_stage`, `history` (`scope`: `local` until #9343 adds `fleet`; per-source and per-host sample counts), `stages[]`, `branches`, `combination`, `result` (with `p90_sec`, #10211, and `stage_marks`, #9366), `contributions`, `features` (including the queue, drain and friction group, #10201: `ahead`, `n_stage_repo`/`_fleet`, `exits_repo_*`/`exits_fleet_*`, `merges_repo_24h`, `merges_fleet_6h`, `since_merge_sec`, `open_prs_repo`, `fleet_scope_repos`, `repo_pr_open_skip`; additive, the schema stays v1; see [`eta.md` → Features](eta.md#features)), `features_omitted`, `no_estimate_reason`, `truncated` |
+| `explanation` | object | the `eta-explanation/v1` record: `estimate_id`, `heuristic`, `kind`, `loom` (required), `as_of`, `subject`, `current_stage`, `history` (`scope`: `local` until #9343 adds `fleet`; per-source and per-host sample counts), `stages[]`, `branches`, `combination`, `result` (with `p90_sec`, #10211, and `stage_marks`, #9366), `contributions`, `features` (including the queue, drain and friction group, #10201: `ahead`, `n_stage_repo`/`_fleet`, `exits_repo_*`/`exits_fleet_*`, `merges_repo_24h`, `merges_fleet_6h`, `since_merge_sec`, `open_prs_repo`, `fleet_scope_repos`, `repo_pr_open_skip`; and the item facts, #10231: `tier`, `workspace_priority`, `issue_created_at`, `issue_age_sec`, `sweep_runtime`, `sweep_model`, `sweep_effort`, `attempt`, `judge_verdicts_so_far`, `repo_first_pass_approval_rate`, with `urgent` deprecated and always null; additive, the schema stays v1, omission reasons are free-form strings; see [`eta.md` → Features](eta.md#features)), `features_omitted`, `no_estimate_reason`, `truncated` |
 
 A refusal is an estimate too: `explanation.result` is absent (never zero) and
 `no_estimate_reason` names why. Refusals are emitted when the reason first
@@ -1922,8 +1922,8 @@ appears and are not refreshed.
 |---|---|---|
 | `estimate` | object | the estimate as emitted: `estimate_id`, `kind`, `heuristic`, `loom` (required), `repo`, `repo_id`, `issue`, `pr_number`, `as_of`, `stage`, `age_sec`, `p25_sec`/`p50_sec`/`p75_sec`/`p90_sec` (absent on a refusal; `p90_sec` also absent on an estimate from before #10211), `samples_min`, `no_estimate_reason`, `stage_quartiles[]` |
 | `loom` | object | the observing daemon's provenance (required) |
-| `score` | object | `outcome` (`started` (#9326), `landed`, `finished`, `abandoned`), `actual_at`, `lead_sec`, `error_sec` (`actual − p50`), `abs_error_sec`, `covered` (`p25 ≤ actual ≤ p75`), `below_p25`, `above_p75`, `above_p90` (the late surprise, `actual > p90`, #10211), `pinball_loss_sec` (q = .25, .5, .75), `pinball4_loss_sec` (q = .25, .5, .75, .9, #10211), `horizon_bucket`, `age_bucket`, `stage_at_estimate`, `samples_min`, `stages_actual[]`, `rework_rounds_actual` |
-| `outcome_source` | string | `bus` (in-sweep merge), `pulls_read` (the PR's merge time), `issues_read` (the issue's close state), `sweep_terminal` |
+| `score` | object | `outcome` (`started` (#9326), `landed`, `finished`, `abandoned`, `censored` (#10233: expired unresolved with p90 already passed — `actual_at` is the censoring instant and only `above_p90` is set)), `actual_at`, `lead_sec`, `error_sec` (`actual − p50`), `abs_error_sec`, `covered` (`p25 ≤ actual ≤ p75`), `below_p25`, `above_p75`, `above_p90` (the late surprise, `actual > p90`, #10211), `pinball_loss_sec` (q = .25, .5, .75), `pinball4_loss_sec` (q = .25, .5, .75, .9, #10211), `horizon_bucket`, `age_bucket`, `stage_at_estimate`, `samples_min`, `stages_actual[]`, `rework_rounds_actual` |
+| `outcome_source` | string | `bus` (in-sweep merge), `pulls_read` (the PR's merge time), `issues_read` (the issue's close state), `sweep_terminal`, `pending_expiry` (a `censored` outcome, #10233) |
 | `outcome_resolution_sec` | integer? | how late the resolution may be |
 | `result` | string? | `finish`: the sweep's terminal class, `exited` or `crashed` |
 
@@ -1932,6 +1932,52 @@ planned**) and outcomes of refusals carry no error fields at all, so they are
 counted and never scored. A PR closed unmerged and a sweep that ended before
 any PR are not outcomes at all — the issue's own state decides, and until it
 closes those estimates stay pending.
+
+**`merge_hold` (#10218).** An approved PR held for a human is the
+`merge_hold` stage, so `merge_hold` is a possible `stage` /
+`stage_at_estimate` value (and a `stage_marks[]` / `stages[]` stage) on
+`eta.estimate` and `eta.outcome`, but **only from a heuristic that models the
+hold**: today the shadow `land-2026-10-04-twin-otter`. Every path-engine
+heuristic refuses it as `blocked`, exactly as before, so it never appears in
+`eta.snapshot` while `current.land` is one of them (those rows carry only
+`current`'s estimate). Once a hold-aware
+heuristic is promoted, consumers must render an unknown `stage` value
+gracefully.
+
+### `eta.fleet_refresh`
+
+One repo's outcome in one cycle of the daemon's fleet snapshot refresh task
+(Issue #10263; the task is in [`eta.md` → Fleet refresh
+task](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263)). Envelopes
+carry `schema_version: 12`. **OTLP-only** (native: `false`), one log record per
+repo per cycle, **skipped repos included**, so a repo the task never manages
+to refresh shows up as such. The body is the record's JSON; the scalars ride as
+`loom.repo` plus `loom.eta.fleet.*` attributes (in `ETA_LOG_ATTRIBUTE_KEYS`,
+allowlisted in the collector's `transform/privacy`). The record time is the
+cycle's start. Provenance is required, as for `eta.estimate`: `loom` exports as
+`loom.eta.version` / `revision` / `tree_state` / `provenance_complete`, and a
+record whose provenance does not validate is never emitted.
+
+| Field | Type | Notes |
+|---|---|---|
+| `repo` | string | `owner/repo` (`loom.repo`) |
+| `cycle_id` | string | derived, never random: `derived_hex(["loom.eta.fleet_refresh", host_id, cycle start])`; shared by every repo of one cycle |
+| `started_at` | RFC3339 | the cycle's start |
+| `pass` | string | `backfill`, `refresh`, or `none` (skipped before a pass was chosen) |
+| `stop_reason` | string | `complete`, `not_modified`, `budget`, `reserve`, `rate_limited`, `coverage`, `breaker_open`, `backoff`, `no_reader`, `unsupported_forge`, `forge_error`, `write_error`, `shutdown` |
+| `promoted` | bool | the pass completed and its snapshot was published |
+| `prs_read` | integer | PR timelines read this cycle |
+| `pass_done` | integer | PRs the pass has read in total |
+| `timelines_incomplete` | integer | timelines that did not parse (counted, contribute nothing) |
+| `samples_added` | integer | published samples after minus before |
+| `raw_events_added` | integer? | rows appended to the raw event cache (#10197), when its sync ran |
+| `forge_calls` | integer | requests made, `304`s and failures included |
+| `not_modified_calls` | integer | of which `304`s |
+| `ratelimit_remaining_min` | integer? | the lowest `x-ratelimit-remaining` seen |
+| `reader_app` | string? | the reader App's id (not a secret) |
+| `snapshot_id` / `as_of` | string? / RFC3339? | the published snapshot after the cycle |
+| `duration_ms` | integer | wall time spent on the repo |
+| `loom` | object | the computing daemon's provenance (required) |
 
 ### `eta.snapshot`
 
