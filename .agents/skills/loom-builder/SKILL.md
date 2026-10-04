@@ -1266,8 +1266,8 @@ restate it here; follow it there.
 ### Creating the PR
 
 **Immediately before `git push` + opening the PR, run the lease fencing
-check** — `./.loom/scripts/sweep-lease-fence.sh check "$N"` — and abort (no
-push, no PR) on exit `3`/`4` (expired / superseded lease). Canonical guidance
+check** — `./.loom/scripts/sweep-lease-fence.sh check "$N" --branch <yours>`
+— and abort (no push, no PR) on any non-zero exit. Canonical guidance
 in **builder-pr.md § "Lease Fencing: Confirm You Still Own the Claim" (Epic
 #6165 Phase 3, #6309)**.
 

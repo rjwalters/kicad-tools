@@ -138,40 +138,71 @@
 # unaffected by this change: that case still means a live peer genuinely
 # holds the claim, and aborting there remains unambiguously correct.
 #
-# ## Branch-collision hard stop (Issue #9453 Phase 4)
+# ## Branch-collision hard stop (Issue #9453 Phase 4, #10027)
 #
-# `check` also answers a SECOND, independent question before the lease logic
-# above ever runs: does `feature/issue-<N>` already exist on `origin`? This
-# is the #9447 incident's other failure mode -- a worker that found the
-# branch already pushed by a racing claimant, and improvised a SUFFIX branch
-# (`feature/issue-9447-install-merge`) rather than stopping, opening a second,
-# competing PR. There is no scripted fallback here: a collision is always a
-# hard abort, never a rename-and-push.
+# `check` also answers a SECOND, independent question: does the branch the
+# caller is about to push (`--branch`, default `feature/issue-<N>`) already
+# exist on `origin`? This is the #9447 incident's other failure mode -- a
+# worker that found the branch already pushed by a racing claimant, and
+# improvised a SUFFIX branch (`feature/issue-9447-install-merge`) rather than
+# stopping, opening a second, competing PR. There is no scripted fallback
+# here: a collision is always a hard abort, never a rename-and-push.
 #
-# The check delegates to `loom-daemon forge check-branch <issue>`
-# (`loom-daemon/src/forge_check_branch.rs`) -- a single `git ls-remote
-# --heads origin feature/issue-N`, zero forge-API calls. Its own exit
-# contract is `0` = branch exists, `1` = verified absent, `5` = the probe
-# itself failed (fail CLOSED, not a verified absence). This script treats
-# every code OTHER than exactly `1` as a collision -- including `5` -- unlike
-# the lease checks above, which fail OPEN on an unreadable answer. The
-# asymmetry is deliberate: an unverifiable BRANCH question is cheap to check
-# by hand and expensive to get wrong (a second competing PR), while an
+# The check delegates to `loom-daemon forge check-branch <issue> [--branch
+# B]` (`loom-daemon/src/forge_check_branch.rs`) -- a single `git ls-remote`,
+# zero forge-API calls. Its own exit contract is `0` = branch exists, `1` =
+# verified absent, `5` = the probe itself failed (fail CLOSED, not a verified
+# absence). Unlike the lease checks above, which fail OPEN on an unreadable
+# answer, this leg fails CLOSED: an unverifiable BRANCH question is cheap to
+# check by hand and expensive to get wrong (a second competing PR), while an
 # unverifiable LEASE comment is common (predates the lease feature, a
 # transient `gh` hiccup) and blocking on it would strand legitimate sweeps.
 #
+# A closed PR's preserved head is NOT a collision (#10027). The harm is a
+# second, *competing* PR, which a branch whose only PR was closed without
+# merging cannot produce -- yet such a branch is often deliberately kept on
+# `origin` (it holds the only copy of something), which used to make every
+# fence on its issue exit 5 forever. So on an existing branch the check asks
+# is asked with `--closed-pr-head`: the daemon exits `6` instead of `0` only
+# on POSITIVE evidence -- the tip is exactly the head of a PR closed without
+# merging, no open PR heads the branch, AND the issue has no open linked PR on
+# any branch (`forge check-open-pr`'s own union, asked in-process). Everything
+# short of that stays a collision: a racing claimant's fresh push (no PR at
+# all yet), an open PR, an unreachable forge. Builders should pass `--branch`
+# with the branch they will actually push, so the question is about that
+# branch.
+#
+# A `loom-daemon` that cannot answer at all -- missing binary (126/127), or a
+# usage error (2: clap's "unrecognized subcommand"/"unexpected argument" from
+# a binary predating `check-branch --branch --closed-pr-head`, or the
+# daemon's own refusal of an unsafe `--branch` name) -- exits `6`
+# BRANCH_PROBE_UNAVAILABLE, not `5`: that is a fleet-version (or invocation)
+# problem to fix, not a branch on `origin` to investigate.
+# Rollout compatibility: when the probed branch is the default
+# `feature/issue-<N>` (always a safe name, so a usage error can only mean an
+# older daemon), a usage error is first retried as the pre-#10027
+# `forge check-branch <N>` -- the old existence question, without the
+# closed-head exemption -- so a host whose daemon has not rolled yet keeps
+# its old fail-closed behaviour instead of refusing every push.
+#
 # Before asking the daemon, the check first looks at THIS worktree's own
-# push-tracking state: if `feature/issue-<N>` already has an `origin`
-# upstream configured locally (this exact worktree already ran `git push -u`
-# for it -- e.g. a resumed session pushing a follow-up commit within the same
-# claim), the branch's existence on `origin` is expected and is NOT a
-# collision -- this claim created it. Only a branch this worktree has never
-# itself pushed counts as foreign.
+# push-tracking state: if the current branch's upstream is already
+# `origin/<branch>` (this exact worktree already ran `git push -u` for it --
+# e.g. a resumed session pushing a follow-up commit within the same claim),
+# the branch's existence on `origin` is expected and is NOT a collision --
+# this claim created it. Only a branch this worktree has never itself pushed
+# counts as foreign.
+#
+# The branch leg NEVER suppresses the lease legs (#10027): both always run,
+# both verdicts are printed (plus a final `VERDICT:` line), and only then
+# does `check` exit, with the precedence given under "Exit codes" below.
 #
 # ## Commands
 #
-#   sweep-lease-fence.sh check <issue> [--host HOST] [--ttl-minutes N]
-#     Perform the fencing check for <issue>. --host defaults to the PUBLISHED
+#   sweep-lease-fence.sh check <issue> [--branch B] [--host HOST] [--ttl-minutes N]
+#     Perform the fencing check for <issue>. --branch names the branch about
+#     to be pushed (default `feature/issue-<issue>`; validated by the daemon,
+#     `loom-daemon/src/refname.rs`). --host defaults to the PUBLISHED
 #     form of this host's own identity (Issue #6322): the opaque id
 #     (`opaque_host_id`, mirroring `sweep_registry::opaque_host_id` byte for
 #     byte) of the raw identity `sweep_registry::host_identity()` resolves
@@ -184,11 +215,14 @@
 #     `LOOM_LEASE_TTL_MINUTES` or 15 (Phase 2's default,
 #     `DEFAULT_LEASE_TTL_MINUTES` in claim_reconciliation.rs).
 #
-#     Exit codes:
+#     Exit codes (precedence when several apply: 5, then 3/4, then 6, then 0;
+#     the lease and branch verdicts are both printed regardless):
 #       0  PASS -- proceed with push / PR-open. Covers: fresh lease owned by
 #          this host; no lease comment found; a lease comment that failed to
 #          parse; a `gh` fetch failure; or an EXPIRED lease owned by a
-#          DIFFERENT host (all fail-open, see above and Issue #6783).
+#          DIFFERENT host (all fail-open, see above and Issue #6783) -- AND
+#          the branch is absent, this worktree's own push, or a closed PR's
+#          preserved head (#10027).
 #       1  Usage error (bad issue number, unknown flag, non-numeric
 #          --ttl-minutes).
 #       3  ABORT: EXPIRED -- the freshest lease comment is older than
@@ -197,17 +231,23 @@
 #          above).
 #       4  ABORT: SUPERSEDED -- the freshest lease comment is still FRESH but
 #          its host= differs from this sweep's own host.
-#       5  ABORT: BRANCH_COLLISION -- `feature/issue-<N>` already exists on
-#          `origin` and this worktree never pushed it itself (Issue #9453
-#          Phase 4, see "Branch-collision hard stop" above). Checked BEFORE
-#          the lease logic, so it takes precedence over 0/3/4. NEVER retry
-#          with a suffix branch -- adopt the existing branch (if it is
-#          genuinely this claim's own from an earlier session) via
+#       5  ABORT: BRANCH_COLLISION -- the branch already exists on `origin`,
+#          this worktree never pushed it, and it is not a closed PR's
+#          preserved head with no open PR (Issue #9453 Phase 4, #10027; see
+#          "Branch-collision hard stop" above). Also the fail-closed answer
+#          when the branch probe itself failed. Takes precedence over 0/3/4/6.
+#          NEVER retry with a suffix branch -- adopt the existing branch (if
+#          it is genuinely this claim's own from an earlier session) via
 #          `create-pr.sh`'s adopt-first path, or stand down.
+#       6  ABORT: BRANCH_PROBE_UNAVAILABLE -- `loom-daemon` is missing, too
+#          old to answer `forge check-branch --branch --closed-pr-head`, or
+#          refused the --branch name (its exit 2, or 126/127). Do not push;
+#          upgrade the daemon / fix the name (#10027).
 #
 # Usage:
 #   .loom/scripts/sweep-lease-fence.sh check 6309
 #   .loom/scripts/sweep-lease-fence.sh check 6309 --host studio-host --ttl-minutes 15
+#   .loom/scripts/sweep-lease-fence.sh check 6309 --branch "$(git rev-parse --abbrev-ref HEAD)"
 
 set -euo pipefail
 
@@ -371,44 +411,32 @@ parse_lease_yield_marker_line() {
     printf '%s\t%s' "$host" "$sweep_id"
 }
 
-# check_branch_collision <issue> -- the #9453 Phase 4 hard stop. Aborts
-# (exit 5, BRANCH_COLLISION) when `feature/issue-<issue>` already exists on
-# `origin` and this worktree never pushed it itself. Returns (does not exit)
-# on every other outcome, so the caller proceeds to the lease-fencing logic
-# below exactly as before this check existed.
-#
-# See this script's own header doc, "Branch-collision hard stop", for the
-# fail-closed-vs-fail-open asymmetry with the lease checks below and why the
-# local upstream-tracking probe is the "did THIS claim create it" signal.
+# check_branch_collision <issue> <branch> -- the #9453 Phase 4 hard stop.
+# RETURNS (never exits) 0 = not a collision, 5 = BRANCH_COLLISION (incl. a
+# failed probe, fail CLOSED), 6 = BRANCH_PROBE_UNAVAILABLE (daemon missing or
+# too old, or it refused the --branch name). The caller runs the lease legs
+# regardless (#10027). Every decision beyond "which exit code" lives in
+# `loom-daemon forge check-branch --closed-pr-head` -- see the header doc's
+# "Branch-collision hard stop".
 check_branch_collision() {
-    local issue="$1"
-
-    # This worktree already has push-tracking configured for
-    # feature/issue-<issue> -- a prior `git push -u` from THIS exact worktree
-    # (e.g. a resumed session pushing a follow-up commit within the same
-    # claim). The branch's existence on origin is then expected, not a
-    # foreign collision.
-    local upstream
-    upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2> /dev/null || true)"
-    if [[ "$upstream" == "origin/feature/issue-${issue}" ]]; then
-        return 0
-    fi
-
-    local branch_out branch_rc
-    set +e
-    branch_out="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge check-branch "$issue" 2>&1)"
-    branch_rc=$?
-    set -e
-
-    # Mirrors `forge check-branch`'s own contract: exactly `1` is the only
-    # verified-safe answer. Every other code -- `0` (confirmed collision),
-    # `5` (fail-closed probe failure), or anything else (e.g. the binary
-    # itself missing) -- is treated as a collision here, deliberately FAIL
-    # CLOSED (unlike the lease checks below) -- see the header doc.
-    if [[ "$branch_rc" -ne 1 ]]; then
-        echo "ABORT: BRANCH_COLLISION -- remote branch feature/issue-${issue} may already exist on origin and this worktree has not pushed it (loom-daemon forge check-branch exit ${branch_rc}: ${branch_out}). Aborting BEFORE push/PR-open (Issue #9447, #9453 Phase 4). NEVER create a suffix branch past it (e.g. feature/issue-${issue}-*) -- if it is genuinely this claim's own branch from an earlier session, adopt it via create-pr.sh's adopt-first path instead; otherwise comment on the issue and stand down." >&2
-        exit 5
-    fi
+    local issue="$1" branch="$2" out rc
+    # This worktree already has push-tracking configured for <branch> -- a
+    # prior `git push -u` from THIS exact worktree (e.g. a resumed session
+    # pushing a follow-up commit within the same claim). Its existence on
+    # origin is then expected, not a foreign collision.
+    [[ "$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2> /dev/null || true)" == "origin/${branch}" ]] && return 0
+    out="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge check-branch "$issue" --branch "$branch" --closed-pr-head 2>&1)" && rc=0 || rc=$?
+    # A loom-daemon predating --branch/--closed-pr-head refuses them (clap exit 2). For the default
+    # branch that is the only possible cause, so re-ask the pre-#10027 question (no closed-head
+    # exemption, same fail-closed mapping) instead of stalling every push until the daemon rolls.
+    [[ "$rc" == 2 && "$branch" == "feature/issue-${issue}" ]] && { out="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge check-branch "$issue" 2>&1)" && rc=0 || rc=$?; }
+    case "$rc" in
+        1) return 0 ;;
+        6) echo "BRANCH OK: ${out}" >&2 && return 0 ;;
+        2 | 126 | 127) echo "ABORT: BRANCH_PROBE_UNAVAILABLE -- loom-daemon forge check-branch exited ${rc} (missing binary, a loom-daemon too old for check-branch --branch/--closed-pr-head, or a refused --branch name: ${out}). NOT a branch collision and NOT an all-clear -- do not push; upgrade loom-daemon and re-run (#10027)." >&2 && return 6 ;;
+    esac
+    echo "ABORT: BRANCH_COLLISION -- remote branch ${branch} may already exist on origin and this worktree has not pushed it (loom-daemon forge check-branch exit ${rc}: ${out}). Aborting BEFORE push/PR-open (Issue #9447, #9453 Phase 4). NEVER create a suffix branch past it (e.g. ${branch}-*) -- if it is genuinely this claim's own branch from an earlier session, adopt it via create-pr.sh's adopt-first path instead; otherwise comment on the issue and stand down." >&2
+    return 5
 }
 
 cmd_check() {
@@ -419,9 +447,13 @@ cmd_check() {
         exit 1
     }
 
-    local host="" ttl_minutes="$DEFAULT_TTL_MINUTES"
+    local host="" ttl_minutes="$DEFAULT_TTL_MINUTES" branch="feature/issue-${issue}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --branch)
+                branch="${2:-}"
+                shift 2
+                ;;
             --host)
                 host="${2:-}"
                 shift 2
@@ -449,12 +481,22 @@ cmd_check() {
         exit 1
     fi
 
-    # Issue #9453 Phase 4: the branch-collision hard stop runs FIRST and
-    # independently of the lease logic below -- it can abort (exit 5) before
-    # any lease comment is even fetched. See "Branch-collision hard stop" in
-    # this script's header doc.
-    check_branch_collision "$issue" # -> loom-daemon forge check-branch <issue>
+    # Issue #9453 Phase 4 / #10027: the branch leg and the lease legs BOTH
+    # always run -- a branch answer never suppresses the liveness answer.
+    # Precedence: 5, then a lease abort (3/4), then 6, then 0.
+    local rc=0 lease_rc=0
+    check_branch_collision "$issue" "$branch" || rc=$?
+    check_lease "$issue" "$host" "$ttl_minutes" || lease_rc=$?
+    echo "VERDICT: issue #${issue} branch-exit=${rc} (${branch}) lease-exit=${lease_rc}" >&2
+    ((rc == 5 || lease_rc == 0)) && exit "$rc"
+    exit "$lease_rc"
+}
 
+# check_lease <issue> <host> <ttl_minutes> -- the lease legs (FRESH/OWNED).
+# RETURNS 0 (PASS, incl. every fail-open case), 3 (EXPIRED) or 4
+# (SUPERSEDED); prints its own PASS/ABORT line. See the header doc.
+check_lease() {
+    local issue="$1" host="$2" ttl_minutes="$3"
     local repo_path
     repo_path="$(gh_repo_path)"
 
@@ -472,18 +514,13 @@ cmd_check() {
         ".[] | select(.body != null and ((.body | startswith(\"${LEASE_MARKER_PREFIX}\")) or (.body | startswith(\"${YIELD_MARKER_PREFIX}\")))) | {updated_at: .updated_at, body: .body, user: {login: .user.login, type: .user.type}, author_association: .author_association}" \
         2>&1)"; then
         echo "PASS: could not fetch comments for issue #${issue} (${comments_ndjson}) -- unverifiable, failing open (proceeding with push/PR-open)" >&2
-        exit 0
+        return 0
     fi
     # #9548: lease/yield markers count only from a TRUSTED author; an outsider's
     # is prose and can neither fence this push nor yield our lease.
     # requires-daemon: forge optional   Without the `trusted-comments` verb the markers are unverifiable, and this fence fails open exactly as it does on an unreadable listing (its documented direction: never block a push on unverifiable evidence).
     comments_ndjson="$(jq -s -c '.' <<< "$comments_ndjson" | "${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments 2> /dev/null | jq -c '.[]')" \
-        || { echo "PASS: lease comments on issue #${issue} could not be authenticated (loom-daemon forge trusted-comments unavailable) -- unverifiable, failing open (proceeding with push/PR-open)" >&2; exit 0; }
-
-    if [[ -z "$(printf '%s' "$comments_ndjson" | tr -d '[:space:]')" ]]; then
-        echo "PASS: no lease comment found on issue #${issue} (predates the lease feature, a manually-launched sweep, or a lease write that failed) -- no evidence to fence against; proceeding with push/PR-open" >&2
-        exit 0
-    fi
+        || { echo "PASS: lease comments on issue #${issue} could not be authenticated (loom-daemon forge trusted-comments unavailable) -- unverifiable, failing open (proceeding with push/PR-open)" >&2; return 0; }
 
     # Split into lease-marker and lease-yield-marker candidates. Neither jq
     # call goes through `gh --paginate --jq` (that already happened above),
@@ -495,7 +532,7 @@ cmd_check() {
 
     if [[ -z "$(printf '%s' "$lease_ndjson" | tr -d '[:space:]')" ]]; then
         echo "PASS: no lease comment found on issue #${issue} (predates the lease feature, a manually-launched sweep, or a lease write that failed) -- no evidence to fence against; proceeding with push/PR-open" >&2
-        exit 0
+        return 0
     fi
 
     # Yield-exclusion (Issue #6485): drop any lease comment whose OWN
@@ -536,7 +573,7 @@ cmd_check() {
 
     if [[ -z "$(printf '%s' "$filtered_ndjson" | tr -d '[:space:]')" ]]; then
         echo "PASS: every lease comment found on issue #${issue} belongs to a (host, sweep) that has since posted its own loom:lease-yield standdown record for this issue (#6485) -- no non-yielded evidence to fence against; proceeding with push/PR-open" >&2
-        exit 0
+        return 0
     fi
 
     # Pick the freshest by `updated_at` among the non-yielded candidates.
@@ -544,7 +581,7 @@ cmd_check() {
     freshest_json="$(jq -s -c 'sort_by(.updated_at) | last' <<< "$filtered_ndjson" 2> /dev/null || true)"
     if [[ -z "$freshest_json" || "$freshest_json" == "null" ]]; then
         echo "PASS: lease comments on issue #${issue} failed to parse -- no evidence to fence against; proceeding with push/PR-open" >&2
-        exit 0
+        return 0
     fi
 
     local updated_at body first_line
@@ -552,14 +589,14 @@ cmd_check() {
     body="$(jq -r '.body // empty' <<< "$freshest_json" 2>/dev/null || true)"
     if [[ -z "$updated_at" || -z "$body" ]]; then
         echo "PASS: freshest lease comment on issue #${issue} is missing updated_at/body -- no evidence to fence against; proceeding with push/PR-open" >&2
-        exit 0
+        return 0
     fi
     first_line="${body%%$'\n'*}"
 
     local parsed lease_host lease_sweep
     if ! parsed="$(parse_lease_marker_line "$first_line")"; then
         echo "PASS: freshest lease comment on issue #${issue} has a malformed marker ('${first_line}') -- no evidence to fence against; proceeding with push/PR-open" >&2
-        exit 0
+        return 0
     fi
     lease_host="${parsed%%$'\t'*}"
     lease_sweep="${parsed#*$'\t'}"
@@ -567,7 +604,7 @@ cmd_check() {
     local updated_epoch now_epoch
     if ! updated_epoch="$(iso_to_epoch "$updated_at")"; then
         echo "PASS: freshest lease comment on issue #${issue} has an unparseable updated_at ('${updated_at}') -- no evidence to fence against; proceeding with push/PR-open" >&2
-        exit 0
+        return 0
     fi
     now_epoch="${LOOM_LEASE_FENCE_NOW:-$(date -u +%s)}"
 
@@ -580,7 +617,7 @@ cmd_check() {
     if ((age_seconds > ttl_seconds)); then
         if [[ "$lease_host" == "$host" ]]; then
             echo "ABORT: EXPIRED -- lease fence failed for issue #${issue}. Freshest lease comment (host=${lease_host} sweep=${lease_sweep}) was last renewed at ${updated_at}, age ${age_minutes} min > ttl ${ttl_minutes} min. This sweep (host=${host}) is aborting BEFORE push/PR-open (Epic #6165 Phase 3, #6309) rather than proceed on a stale claim it can no longer trust as its own. Not contesting or cleaning up the peer/lease -- the loom:building label and claim are left alone." >&2
-            exit 3
+            return 3
         fi
         # Issue #6783: an expired lease owned by a DIFFERENT host is an
         # abandoned record, not a live peer -- it is exactly the state
@@ -594,16 +631,16 @@ cmd_check() {
         # incident). PASS instead -- this is fail-open, not fail-safe: it
         # does not contest or clean up the abandoned record.
         echo "PASS: freshest lease comment on issue #${issue} (host=${lease_host} sweep=${lease_sweep}) is EXPIRED (last renewed at ${updated_at}, age ${age_minutes} min > ttl ${ttl_minutes} min) and belongs to a DIFFERENT host than this sweep (${host}) -- an abandoned peer lease is no longer live evidence of a peer's claim; proceeding with push/PR-open" >&2
-        exit 0
+        return 0
     fi
 
     if [[ "$lease_host" != "$host" ]]; then
         echo "ABORT: SUPERSEDED -- lease fence failed for issue #${issue}. The freshest lease comment (updated_at=${updated_at}, age ${age_minutes} min <= ttl ${ttl_minutes} min) is held by host=${lease_host} sweep=${lease_sweep}, not this sweep's own host=${host}. Another host's dispatch or reclaim has superseded this sweep's claim. Aborting BEFORE push/PR-open (Epic #6165 Phase 3, #6309). Not contesting or cleaning up the peer's claim -- the loom:building label is left alone." >&2
-        exit 4
+        return 4
     fi
 
     echo "PASS: lease fence OK for issue #${issue} -- freshest lease (host=${lease_host} sweep=${lease_sweep}) updated_at=${updated_at}, age ${age_minutes} min <= ttl ${ttl_minutes} min, host matches this sweep (${host}). Proceeding with push/PR-open." >&2
-    exit 0
+    return 0
 }
 
 main() {

@@ -894,21 +894,21 @@ externally-visible action of this whole Builder run — run the sweep-side
 fencing check:
 
 ```bash
-./.loom/scripts/sweep-lease-fence.sh check "$N"
+./.loom/scripts/sweep-lease-fence.sh check "$N" --branch "$(git rev-parse --abbrev-ref HEAD)"
 FENCE_RC=$?
 if [[ "$FENCE_RC" -eq 3 ]]; then
   echo "Lease fence: EXPIRED — MY OWN claim's lease record is stale on the forge's own clock (my renewal loop died). Aborting before push/PR-open; NOT pushing, NOT opening a PR." >&2
   # Stop here for issue $N. Do not push, do not create a PR, do not touch
   # the loom:building label or contest any peer's claim — report this issue
-  # as not-contributed-this-run.
-  # (Issue #6783: exit 3 now means the EXPIRED lease is THIS sweep's own —
-  # an expired lease owned by a DIFFERENT, abandoned host is no longer a
-  # fencing abort; that case is folded into FENCE_RC == 0 below.)
+  # as not-contributed-this-run. (#6783: an expired lease of a DIFFERENT,
+  # abandoned host is not an abort; it folds into FENCE_RC == 0 below.)
 elif [[ "$FENCE_RC" -eq 4 ]]; then
   echo "Lease fence: SUPERSEDED — a different host's lease is now the freshest for issue $N. Aborting before push/PR-open; NOT pushing, NOT opening a PR." >&2
   # Same stop-here handling as the EXPIRED branch above.
-elif [[ "$FENCE_RC" -eq 5 ]]; then
-  echo "Lease fence: BRANCH_COLLISION — feature/issue-$N exists on origin, unpushed by this worktree. Yours: adopt via create-pr.sh. Else: stand down. NEVER a suffix branch." >&2
+elif [[ "$FENCE_RC" -ne 0 ]]; then
+  # 5: yours -> adopt via create-pr.sh, else stand down; NEVER a suffix
+  # branch. 6: loom-daemon too old/missing (#10027).
+  echo "Lease fence: exit $FENCE_RC (5 BRANCH_COLLISION / 6 BRANCH_PROBE_UNAVAILABLE) — NOT pushing." >&2
 else
   # FENCE_RC == 0 (fresh & own host, OR no lease evidence to fence against —
   # fail-open, see the script's own header doc — OR an EXPIRED lease owned
