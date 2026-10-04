@@ -25,6 +25,7 @@ A comment or review is trusted when its author is:
 | One of **this** fleet's GitHub Apps, matched exactly | The fleet's Apps appear as `NONE`/`CONTRIBUTOR`, so without this rule Loom could not read its own markers. The roster is [`forge_identity::FleetLogins`](github-authentication.md): the writer, every reader, `legacyLogins`, and the `loom-fleet-dispatch(-<digits>)` default family. The author must be *spelled* as an App (`x[bot]` from REST, `app/x` from GraphQL, or a `Bot` type): a user may register the bare slug, never `x[bot]`. |
 | This daemon's own identity | Compared with the same account kind: the user `x` is never the App `x[bot]`. |
 | A login in `forge.trustedCommenters` | An explicit allowlist, same account-kind rule (list `helper[bot]` to allow an App). |
+| A login on the **fleet admin roster**, `fleet/admins.json` in the fleet store | `{"admins": ["turian", "rjwalters"]}`, read through the fleet store reader (`fleet.repo`, `fleet.ref`), never from the repo being judged. User accounts only (App-spelled entries are ignored). Applies in every fleet repo (#10303). |
 
 **Another Loom installation's markers are not ours.** A foreign fleet emits
 perfectly well-formed Loom markers; its Apps are not in this roster, so they
@@ -37,9 +38,10 @@ collaborator records, not the live permission level. A repo admin (or org
 owner) whose org membership is **private**, or an outside collaborator, is
 reported as `CONTRIBUTOR`, so every verdict marker they post is dropped. The
 verdict-staleness pass then falls back to an older trusted marker and clears a
-fresh `loom:pr` (#9709). List such reviewers explicitly in
-`forge.trustedCommenters` (see Configuration below). Trust is deliberately not
-widened automatically; instead, when a newer marker was dropped this way, the
+fresh `loom:pr` (#9709). Fleet admins belong on the fleet admin roster
+(below), which covers every fleet repo at once; list other such reviewers
+explicitly in `forge.trustedCommenters` (see Configuration below). Trust is
+otherwise not widened automatically; instead, when a newer marker was dropped this way, the
 stale-clear notice (from either the daemon pass or
 `verdict-staleness-guard.sh --clear`, both rendered by
 `loom-daemon forge verdict-stale-notice`'s template) and the daemon log line
@@ -112,6 +114,23 @@ believe fleet-authored markers fetches the REST listing instead:
 gh api "repos/{owner}/{repo}/issues/$N/comments" --paginate \
   | loom-daemon forge trusted-comments
 ```
+
+## Fleet admin roster (#10303)
+
+Precedence: the roster and `forge.trustedCommenters` are a **union**; the
+per-repo list extends the roster and neither can remove the other. The
+association, Apps and self rules are unchanged.
+
+- Source: `fleet/admins.json` in the store named by `fleet.repo` /
+  `LOOM_FLEET_REPO` (proposed contract; fleet-gitops publishes it).
+- Cache: resolved once per process per store and kept for
+  `forge.fleetAdminsTtlSecs` (default 300). A stale on-disk snapshot is served
+  only while younger than 24h, else the roster is unavailable.
+- **Fails closed**: store unset, fetch error, missing file, malformed JSON or
+  a non-array `admins` yield an empty roster (trust equals the pre-roster
+  behaviour). Each cause is logged once at warn, and
+  `TrustPolicy::sources_consulted()` reports `fleet admin roster ...
+  (unavailable: <reason>)` for the ignored-marker notice.
 
 ## Configuration
 
