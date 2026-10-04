@@ -62,31 +62,45 @@ A hand-written record naming more than one `#N` on a single line is still
 tolerated by the reader (`park_record::parse` expands it into one record per
 reference) — the one-line-per-blocker rule binds the *writer*, not the parser.
 
-## Who writes one, and when
+## Who writes one, and when — `park-record apply` (#10152)
 
-Any role applying `loom:blocked` for a **dependency wait** — not every use of
-the label. Some parks are a human policy call (a quarantine/scope
-finding, an operator hold) rather than a resolvable dependency; those do not
-get a park record, because there is nothing for a future automated check to
-resolve. PR #8440's triage comment (filed alongside this issue's own backfill,
-#8925 AC4) is the worked example: `loom:blocked` there records an operator's
-"branch is contaminated, left for human triage" ruling, and deliberately
-carries no park record.
+**Every** role applying `loom:blocked` writes one, through one command — never
+a bare label edit:
 
-When the park **is** a dependency wait, render the marker at the moment the
-label is applied and paste it into the artifact's **body** — never only into
-the comment that explains it:
+```bash
+loom-daemon park-record apply --issue 8852 --blocked-by 8860 --by curator
+loom-daemon park-record apply --pr 8314 --blocked-by 8322 --by doctor \
+  --reason "needs an architecture ruling" --remove-label loom:treating
+loom-daemon park-record apply --issue 8440 --reason operator --by human   # no blocker
+```
+
+`apply` reads the artifact fresh, then:
+
+1. **Refuses** (exit 1, nothing changed) when there is neither `--blocked-by`
+   nor an explicit `--reason`. A park with no named blocker reads as
+   `blocked-unnamed` to star-liveness and UNDOCUMENTED to
+   `check-stale-blocked`, and is never released automatically — so it must be
+   a written choice (`--reason operator`, a quarantine/scope ruling …), which
+   renders an attributable `Blocked by: (unstated)` record, never an omission.
+2. **Refuses** a blocker that is already closed (#9102) — the unblock sweep
+   would release the park at once — and a self-block.
+3. Appends one record per blocker the body does **not** already declare in a
+   park record (idempotent: re-running changes nothing).
+4. Writes the **body first**, then adds `loom:blocked`, then removes each
+   `--remove-label` (e.g. `loom:building`). A failed body write applies no
+   label, so there is never a label-only park. Exit 4 on any forge failure.
+
+`--dry-run` prints the planned body and label changes. Comment as usual to
+explain *why* in prose — the marker is the part a machine can also read.
+
+`park-record render` (below) remains for composing a body by hand; a park
+record has no positional requirement in the body.
 
 ```bash
 loom-daemon park-record render --blocked-by 8322 --by doctor \
   --reason "needs an architecture ruling"
 # <!-- loom:park Blocked by: #8322 by=doctor at=2026-09-19T18:04:11Z reason="needs an architecture ruling" -->
 ```
-
-Paste the output line into the body (prepend/append; a park record has no
-positional requirement, unlike the lease record's "must be the first line").
-Comment as usual to explain *why* in prose — the comment and the marker are
-not in tension, the marker is just the part a machine can also read.
 
 ## Who reads one
 

@@ -410,7 +410,20 @@ echo "$PR_URL"
 # requires-daemon: forge optional   absent or pre-#9818 binary → the footer is skipped with a stderr note; the PR itself is already open (#9774)
 self_bin="$(command -v loom-daemon 2>/dev/null || true)"
 if [[ -n "$self_bin" ]]; then
-  if ! "$self_bin" forge comment --patch-created "$PR_URL" >/dev/null 2>&1; then
-    echo "create-pr.sh: note: could not append the dashboard footer to the PR body (best-effort; the PR itself is open)" >&2
+  # #10140: keep the daemon's stderr + exit code so the note names the cause
+  # (`2>&1 >/dev/null` captures stderr only; stdout stays the URL contract).
+  _footer_rc=0
+  _footer_err="$("$self_bin" forge comment --patch-created "$PR_URL" 2>&1 >/dev/null)" || _footer_rc=$?
+  if [[ "$_footer_rc" -ne 0 ]]; then
+    # First non-empty stderr line (the anyhow top-level message, which embeds
+    # gh's error), capped so a multi-KB dump cannot flood the terminal. Pure
+    # bash: a grep pipeline would trip set -e/pipefail on empty stderr.
+    _footer_line=""
+    while IFS= read -r _l; do
+      [[ "$_l" =~ ^[[:space:]]*$ ]] && continue
+      _footer_line="${_l:0:300}"
+      break
+    done <<<"$_footer_err"
+    echo "create-pr.sh: note: could not append the dashboard footer to the PR body (loom-daemon exit ${_footer_rc}: ${_footer_line:-no stderr}; best-effort, the PR itself is open)" >&2
   fi
 fi

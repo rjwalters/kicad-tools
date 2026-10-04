@@ -80,7 +80,7 @@ that applies:
    No batch/remote backend is configured for this repo, and a detached local run
    is forbidden (.loom/docs/long-running-compute.md). Needs either a batch
    backend or an operator-run grid.'
-   gh issue edit 303 --add-label "loom:blocked"
+   loom-daemon park-record apply --issue 303 --reason "compute gap" --by builder
    ```
 
    A `loom:blocked` issue with a named compute gap is a solvable operator

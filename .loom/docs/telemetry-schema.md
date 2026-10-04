@@ -1325,6 +1325,31 @@ was raised, `Info` otherwise) with `loom.session_id`,
 `loom.anomalies` (string array) attributes — all covered by the gateway
 collector's `loom.*` privacy allowlist.
 
+### `session.output`
+
+Live, redacted, issue-scoped agent output, published while a run is still in
+flight (Issue #9764). OTLP-only and opt-in. The full contract (content
+boundary, schema, ordering, gaps, latency, consumer queries) is in
+[`session-output.md`](session-output.md). This section records only how a
+consumer tells **who started the agent** (Issue #10116).
+
+Two producers emit the kind, and every record says which one with
+`loom.session.output.launch`:
+
+| `launch` | Producer | `loom.sweep_id` | `loom.attempt` |
+|---|---|---|---|
+| `daemon` | `loom-daemon`'s bus subscriber, for a sweep it dispatched | the dispatch's sweep id (`sweep-issue-<N>-<epoch>`) | the Nth run of that issue in this daemon's lifetime |
+| `attended` | the attended tailer (`loom-daemon live-output-attend`, started by `lease ensure` at a claim step) for a Loom role run as a subagent of an attended Claude Code session | `attended-<first 8 chars of the session id>-<agent id>`: a pure function of the transcript | absent |
+
+The rest of the identity is shared: `loom.repo`, `loom.issue`, `loom.role`,
+`loom.session_id`, and the per-record `loom.session.output.stream_id` /
+`.sequence` / `.event_id`. An attended run's `loom.repo` is the claim
+checkout's `origin` remote, never the transcript's `cwd`. A payload queued
+before #10116 carries no `launch` and decodes as `daemon`, which is what it was.
+The attended tailer refuses to start in a process tree the daemon launched
+(`LOOM_WORK_ORIGIN=autonomous`, `LOOM_SWEEP_ID`), so one run never appears
+under both values.
+
 ### `daemon.event`
 
 One of the four named event-bus topics that carried no telemetry record kind

@@ -66,6 +66,7 @@ make_real_checkout() {
     for s in builder judge sweep probe-protocol; do
         echo "# $s skill" > "$c/defaults/.claude/commands/loom/$s.md"
     done
+    echo "# star skill" > "$c/defaults/.claude/commands/loom/star.md"
     for a in builder judge doctor curator champion; do
         echo "# loom-$a agent" > "$c/defaults/.claude/agents/loom-$a.md"
     done
@@ -228,6 +229,49 @@ set +e
 deprovision_loom_skills "$CHK9" "$HOME9/.claude" >/dev/null 2>&1
 set -e 2>/dev/null || true
 assert_eq "$(cat "$HOME9/.claude/commands/loom/keep.md" 2>/dev/null)" "REAL" "deprovision preserved a real commands directory"
+
+# ── Test 10: /star alias (#10154) ────────────────────────────────────────────
+echo "Test 10: ~/.claude/commands/star.md aliases loom/star.md (#10154)"
+CHK10=$(make_real_checkout)
+HOME10=$(mktemp -d)
+STAR_SRC="$CHK10/defaults/.claude/commands/loom/star.md"
+STAR_DEST="$HOME10/.claude/commands/star.md"
+provision_loom_skills "$CHK10" "$HOME10/.claude" >/dev/null 2>&1
+assert_eq "$(readlink "$STAR_DEST")" "$STAR_SRC" "create: star.md symlinks to the checkout's loom/star.md"
+assert_eq "$(cat "$STAR_DEST")" "# star skill" "create: /star resolves to /loom:star content"
+echo "# star v2" > "$STAR_SRC"
+assert_eq "$(cat "$STAR_DEST")" "# star v2" "single edit of loom/star.md changes /star"
+before=$(cd "$HOME10/.claude" && find . | sort)
+provision_loom_skills "$CHK10" "$HOME10/.claude" >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "0" "idempotent: re-provision returns 0"
+assert_eq "$(cd "$HOME10/.claude" && find . | sort)" "$before" "idempotent: tree unchanged"
+
+echo "Test 11: a real star.md is preserved with a warning; stale link repointed (#10154)"
+HOME11=$(mktemp -d)
+mkdir -p "$HOME11/.claude/commands"
+echo "OPERATOR STAR" > "$HOME11/.claude/commands/star.md"
+out=$(provision_loom_skills "$CHK10" "$HOME11/.claude" 2>&1)
+[[ -L "$HOME11/.claude/commands/star.md" ]] && fail "clobbered operator's real star.md" \
+    || assert_eq "$(cat "$HOME11/.claude/commands/star.md")" "OPERATOR STAR" "real star.md preserved"
+assert_contains "$out" "star.md already exists" "real star.md produces a warning"
+HOME12=$(mktemp -d)
+mkdir -p "$HOME12/.claude/commands"
+OLD12=$(make_real_checkout)
+ln -s "$OLD12/defaults/.claude/commands/loom/star.md" "$HOME12/.claude/commands/star.md"
+provision_loom_skills "$CHK10" "$HOME12/.claude" >/dev/null 2>&1
+assert_eq "$(readlink "$HOME12/.claude/commands/star.md")" "$STAR_SRC" "stale star.md link repointed"
+
+echo "Test 12: deprovision removes star.md only when it points into the checkout (#10154)"
+deprovision_loom_skills "$CHK10" "$HOME10/.claude" >/dev/null 2>&1
+[[ -e "$STAR_DEST" || -L "$STAR_DEST" ]] && fail "deprovision left the star alias" || pass "deprovision removed the star alias"
+deprovision_loom_skills "$CHK10" "$HOME11/.claude" >/dev/null 2>&1
+assert_eq "$(cat "$HOME11/.claude/commands/star.md" 2>/dev/null)" "OPERATOR STAR" "deprovision preserved a real star.md"
+HOME13=$(mktemp -d)
+mkdir -p "$HOME13/.claude/commands"
+ln -s "/elsewhere/star.md" "$HOME13/.claude/commands/star.md"
+deprovision_loom_skills "$CHK10" "$HOME13/.claude" >/dev/null 2>&1
+assert_eq "$(readlink "$HOME13/.claude/commands/star.md")" "/elsewhere/star.md" "deprovision preserved a foreign star.md symlink"
 
 echo ""
 echo "======================================"

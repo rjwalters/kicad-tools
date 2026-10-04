@@ -96,6 +96,16 @@ cat > "$STUB_DIR/loom-daemon" <<'STUB'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "forge" && "${2:-}" == "comment" && "${3:-}" == "--patch-created" ]]; then
   printf '%s\n' "$*" > "$LOOM_TEST_STUB_DIR/daemon-footer-args.txt"
+  # #10140: LOOM_TEST_STUB_FOOTER=fail reproduces a failing footer step — a
+  # stdout line that must NOT leak, a recognizable first error line (after a
+  # blank line, which must be skipped), a noise line, exit 7.
+  if [[ "${LOOM_TEST_STUB_FOOTER:-ok}" == "fail" ]]; then
+    echo "stub-daemon stdout must stay discarded"
+    printf '\n%s\n%s\n' \
+      "Error: gh api repos/owner/repo/issues/9999 failed: API rate limit exceeded" \
+      "second line that is not the cause" >&2
+    exit 7
+  fi
   exit 0
 fi
 echo "stub loom-daemon: unhandled args: $*" >&2
@@ -163,6 +173,56 @@ else
   TESTS_FAILED=$((TESTS_FAILED + 1))
   echo "  FAIL: T5: the footer step passes the created PR's URL"
 fi
+
+# T6 (#10140): a failing footer step stays best-effort (exit 0, stdout exactly
+# the URL) but its stderr note names the daemon's exit code and first error
+# line; a succeeding footer step prints no note. stdout/stderr kept SEPARATE.
+run_create_pr_split() {
+  local rc=0
+  STDOUT="$(LOOM_DAEMON_SELF_BIN="$STUB_DIR/daemon-ok" \
+    "$CREATE_PR" --title "fix: x" --head "feature/issue-42" --body "Closes #42" \
+    2> "$STUB_DIR/stderr.txt")" || rc=$?
+  RC="$rc"
+  STDERR="$(cat "$STUB_DIR/stderr.txt")"
+}
+assert_contains() {
+  local haystack="$1" needle="$2" msg="$3"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo "  PASS: $msg"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo "  FAIL: $msg"
+    echo "    Expected to contain: '$needle'"
+    echo "    Actual: '$haystack'"
+  fi
+}
+assert_not_contains() {
+  local haystack="$1" needle="$2" msg="$3"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo "  PASS: $msg"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo "  FAIL: $msg"
+    echo "    Expected NOT to contain: '$needle'"
+    echo "    Actual: '$haystack'"
+  fi
+}
+
+LOOM_TEST_STUB_FOOTER=fail run_create_pr_split
+assert_eq "0" "$RC" "T6: a failing footer step still exits 0 (the PR is open)"
+assert_eq "https://github.com/owner/repo/pull/9999" "$STDOUT" \
+  "T6: stdout is exactly the URL (no daemon stdout, no stderr text mixed in)"
+assert_contains "$STDERR" "could not append the dashboard footer" "T6: the best-effort note is printed"
+assert_contains "$STDERR" "loom-daemon exit 7" "T6: the note names the daemon's exit code"
+assert_contains "$STDERR" "API rate limit exceeded" "T6: the note names the daemon's first error line"
+assert_not_contains "$STDERR" "second line that is not the cause" "T6: only the first error line"
+
+LOOM_TEST_STUB_FOOTER=ok run_create_pr_split
+assert_eq "0" "$RC" "T6: a succeeding footer step exits 0"
+assert_eq "https://github.com/owner/repo/pull/9999" "$STDOUT" "T6: stdout is exactly the URL"
+assert_not_contains "$STDERR" "dashboard footer" "T6: a succeeding footer step prints no note"
 
 echo ""
 echo "Tests run: $TESTS_RUN, failed: $TESTS_FAILED"

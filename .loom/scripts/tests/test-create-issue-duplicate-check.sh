@@ -38,6 +38,10 @@
 #      a forge failure that wrote to stdout, and an exit-0 create that
 #      returned no URL — plus the block path's stderr discipline, captured
 #      with stdout and stderr SEPARATE.
+#  13. FOOTER CAUSE (#10140): a failing `forge comment --patch-created`
+#      footer step still exits 0 with stdout exactly the URL, and its stderr
+#      note names the daemon's exit code and first error line; a succeeding
+#      footer step prints no note.
 #
 # Black-box and hermetic: create-issue.sh + lib/ are copied into a throwaway
 # dir next to a STUB check-duplicate.sh and a STUB `gh` on PATH, so no test
@@ -201,6 +205,16 @@ cat > "$FAKE_BIN/loom-daemon" << 'STUB'
 # in the end-to-end case).
 if [[ "${1:-}" == "forge" && "${2:-}" == "comment" && "${3:-}" == "--patch-created" ]]; then
     printf '%s\n' "$*" >> "${STUB_DAEMON_ARGS:-/dev/null}"
+    # #10140: STUB_DAEMON_FOOTER=fail reproduces a failing footer step — a
+    # recognizable first error line (after a blank line, which must be
+    # skipped), a noise line, a stdout line that must NOT leak, exit 7.
+    if [[ "${STUB_DAEMON_FOOTER:-ok}" == "fail" ]]; then
+        echo "stub-daemon stdout must stay discarded"
+        printf '\n%s\n%s\n' \
+            "Error: gh api repos/example/repo/issues/9999 failed: API rate limit exceeded" \
+            "second line that is not the cause" >&2
+        exit 7
+    fi
     exit 0
 fi
 exit 1
@@ -492,6 +506,7 @@ run_create_split() {
         STUB_DUP_CALLS="$DUP_CALLS" \
         STUB_GH_CREATES="$GH_CREATES" \
         STUB_GH_MODE="${STUB_GH_MODE:-ok}" \
+        STUB_DAEMON_FOOTER="${STUB_DAEMON_FOOTER:-ok}" \
         bash "$CREATE_ISSUE" "$@" 2> "$WORK/stderr.txt"
     )"
     RC=$?
@@ -518,6 +533,26 @@ STUB_DUP_MODE=match run_create_split --title "sweep-lease-fence.sh:392 unbound v
 assert_eq "$RC" "3" "the duplicate block path exits 3"
 assert_contains "$STDERR" "NOT FILED" "…with its refusal text on stderr (never stdout-only)"
 assert_eq "$STDOUT" "" "…and no URL on stdout"
+
+echo
+
+# --- 13. A failing footer step names its cause (#10140) ---------------------
+# The footer is best-effort, but the note used to discard the daemon's exit
+# code and stderr, so the operator could not tell why it failed.
+echo "--- a failing dashboard-footer step names the daemon's exit code and error ---"
+STUB_DAEMON_FOOTER=fail run_create_split --title "Something new" --body "Body."
+assert_eq "$RC" "0" "a failing footer step still exits 0 (the issue is filed)"
+assert_eq "$STDOUT" "https://github.com/example/repo/issues/9999" \
+  "…stdout is exactly the URL (no daemon stdout, no stderr text mixed in)"
+assert_contains "$STDERR" "could not append the dashboard footer" "…the best-effort note is printed"
+assert_contains "$STDERR" "loom-daemon exit 7" "…and names the daemon's exit code"
+assert_contains "$STDERR" "API rate limit exceeded" "…and the daemon's first error line"
+assert_not_contains "$STDERR" "second line that is not the cause" "…but only the first error line"
+
+STUB_DAEMON_FOOTER=ok run_create_split --title "Something new" --body "Body."
+assert_eq "$RC" "0" "a succeeding footer step exits 0"
+assert_eq "$STDOUT" "https://github.com/example/repo/issues/9999" "…stdout is exactly the URL"
+assert_not_contains "$STDERR" "dashboard footer" "…and no footer note is printed"
 
 echo
 echo "=== $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed ==="

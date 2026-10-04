@@ -89,6 +89,13 @@
 #       full --paginate lookup) only on a missing/stale cached comment, a
 #       full page, or a PATCH 404; the own-yield guard still fires on the
 #       window; and start's loop lists with --paginate exactly once
+#   (x) gh-call attribution (#10139): every comments read and PATCH -- from a
+#       detached `start` loop (explicit pair, and auto-resolved from
+#       LOOM_TERMINAL_ID=daemon-<id>), a direct renew-once, and the cache
+#       re-exec path -- runs with LOOM_SWEEP_ID=<resolved sweep> and
+#       LOOM_ROLE=sweep-lease-renew; explicit identity beats ambient, an
+#       inherited role is replaced, and a no-identity run keeps an inherited
+#       sweep id (or leaves it absent) without inventing one
 #
 # Usage:
 #   ./.loom/scripts/tests/test-sweep-lease-renew.sh
@@ -221,6 +228,8 @@ if [[ "$1" == "api" ]]; then
     esac
   done
   echo "$path" >> "$D/api-paths.log"
+  # #10139: the attribution a gh shim would read from this call's environment.
+  echo "$method sid=${LOOM_SWEEP_ID-<unset>} role=${LOOM_ROLE-<unset>}" >> "$D/attr.log"
   if [[ "$method" == "GET" && "$path" == repos/*/issues/*/comments* ]]; then
     echo "paginate=$paginated $path" >> "$D/list-calls.log"
     if [[ -f "$D/comments-fail" ]]; then
@@ -318,6 +327,7 @@ reset_state() {
     rm -f "$STUB_DIR"/patch-403-once "$STUB_DIR"/patch-403-always
     rm -f "$STUB_DIR"/patch-*.body "$STUB_DIR"/patch-count-* "$STUB_DIR"/patch-calls.log
     rm -f "$STUB_DIR"/comments-window.json "$STUB_DIR"/patch-404-* "$STUB_DIR"/list-calls.log
+    rm -f "$STUB_DIR"/attr.log
     echo "not-configured" > "$STUB_DIR/mint-mode"
     # Ensure rung 3 (personal-token / personal-ambient) has nothing of ITS
     # OWN to escalate to beyond whatever the real ambient host credential
@@ -334,6 +344,9 @@ reset_state() {
     # become exact-match tests against identity values the fixtures were
     # never written to match.
     unset LOOM_TERMINAL_ID LOOM_HOST_ID LOOM_LEASE_PUBLISH_HOSTNAME HOSTNAME 2> /dev/null || true
+    # Same reason for the gh-call attribution vars (#10139): test (x) sets them
+    # deliberately; everything else must start from an absent pair.
+    unset LOOM_SWEEP_ID LOOM_ROLE 2> /dev/null || true
 }
 
 run_script() {
@@ -1334,6 +1347,105 @@ assert_eq "1" "$(list_count 1)" "(w9) exactly ONE --paginate listing across all 
 assert_true "$([[ "$(list_count 0)" -ge 2 ]] && echo true || echo false)" "(w9) later cycles use the non-paginated window read"
 assert_eq "" "$(grep -v '^42$' "$STUB_DIR/patch-calls.log" 2> /dev/null)" "(w9) only the own lease (42) was ever PATCHed, never the newer peer (99)"
 assert_eq "" "$(cat "$STUB_DIR/start-w-stderr.log" 2> /dev/null)" "(w9) no FAILED cycle was logged"
+
+# --- (x) gh-call attribution: LOOM_SWEEP_ID / LOOM_ROLE (#10139) -----------
+echo ""
+echo "--- (x) every gh call carries the renewer's sweep id and role ---"
+
+# attr_set -- the distinct "<METHOD> sid=... role=..." lines the stub gh saw.
+attr_set() { sort -u "$STUB_DIR/attr.log" 2> /dev/null; }
+# wait_patches <n> -- poll (max ~10s) until the stub has recorded n PATCHes.
+wait_patches() {
+    local waited=0
+    while ((waited < 20)) && [[ "$(cat "$STUB_DIR/patch-calls.log" 2> /dev/null | wc -l | tr -d ' ')" -lt "$1" ]]; do
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+}
+X_ROLE="role=sweep-lease-renew"
+
+# (x1) direct renew-once: the explicit --sweep-id beats a conflicting ambient
+# LOOM_SWEEP_ID, and an inherited LOOM_ROLE is replaced, on BOTH forge calls.
+reset_state
+echo "[$W_LEASE]" > "$STUB_DIR/comments.json"
+LOOM_SWEEP_ID=ambient-sweep LOOM_ROLE=builder run_script renew-once 10139 --host w-host --sweep-id w-sweep
+assert_eq "0" "$RC" "(x1) explicit renew-once renews (exit 0)"
+assert_eq "GET sid=w-sweep $X_ROLE
+PATCH sid=w-sweep $X_ROLE" "$(attr_set)" "(x1) comments read and PATCH carry the explicit sweep id and the renewer role"
+
+# (x2) no identity anywhere (both vars absent, script runs under set -u): still
+# legal, no sweep id is invented, the role is still set.
+reset_state
+echo "[$W_LEASE]" > "$STUB_DIR/comments.json"
+run_script renew-once 10139
+assert_eq "0" "$RC" "(x2) no-identity renew-once stays legal with LOOM_SWEEP_ID/LOOM_ROLE absent"
+assert_eq "GET sid=<unset> $X_ROLE
+PATCH sid=<unset> $X_ROLE" "$(attr_set)" "(x2) no sweep id is invented; the role is set"
+
+# (x3) no local identity, but a valid inherited sweep id: kept, not erased.
+reset_state
+echo "[$W_LEASE]" > "$STUB_DIR/comments.json"
+LOOM_SWEEP_ID=inherited-sweep LOOM_ROLE=judge run_script renew-once 10139
+assert_eq "0" "$RC" "(x3) renew-once with only an inherited sweep id renews (exit 0)"
+assert_eq "GET sid=inherited-sweep $X_ROLE
+PATCH sid=inherited-sweep $X_ROLE" "$(attr_set)" "(x3) the inherited sweep id survives; the inherited role is replaced"
+
+# (x4) the cache-miss re-exec path keeps the identity: window read, full
+# re-listing, and PATCH all carry it.
+reset_state
+echo "[]" > "$STUB_DIR/comments-window.json"
+echo "[$W_NEW_LEASE]" > "$STUB_DIR/comments.json"
+LOOM_SWEEP_ID=ambient-sweep run_script renew-once 10139 --host w-host --sweep-id w-sweep --cached-lease 42@2026-10-01T00:00:00Z
+assert_eq "0" "$RC" "(x4) cached-miss re-exec renews (exit 0)"
+assert_eq "2" "$(grep -c '^GET ' "$STUB_DIR/attr.log" 2> /dev/null)" "(x4) both the window read and the re-listing ran"
+assert_eq "GET sid=w-sweep $X_ROLE
+PATCH sid=w-sweep $X_ROLE" "$(attr_set)" "(x4) every call across the re-exec carries the explicit identity"
+
+# (x5) detached start loop with an explicit pair over repeated cycles (first
+# --paginate listing, then cached window reads), ambient identity conflicting.
+reset_state
+echo "[$W_LEASE]" > "$STUB_DIR/comments.json"
+cp "$STUB_DIR/comments.json" "$STUB_DIR/comments-window.json"
+sleep 12 &
+WATCH_PID_X=$!
+LOOP_PID_X="$(LOOM_SWEEP_ID=ambient-sweep LOOM_ROLE=sweep-lifecycle "$SCRIPT" start 10139 --interval 1 --watch-pid "$WATCH_PID_X" --host w-host --sweep-id w-sweep 2> "$STUB_DIR/start-x-stderr.log")"
+wait_patches 2
+kill "$WATCH_PID_X" 2> /dev/null || true
+wait "$WATCH_PID_X" 2> /dev/null || true
+kill "$LOOP_PID_X" 2> /dev/null || true
+assert_true "$([[ "$(cat "$STUB_DIR/patch-calls.log" 2> /dev/null | wc -l | tr -d ' ')" -ge 2 ]] && echo true || echo false)" "(x5) the detached loop renewed over 2+ cycles"
+assert_eq "GET sid=w-sweep $X_ROLE
+PATCH sid=w-sweep $X_ROLE" "$(attr_set)" "(x5) every detached read and PATCH carries the explicit sweep id and the renewer role"
+
+# (x6) start auto-resolves its identity from LOOM_TERMINAL_ID=daemon-<id>; the
+# resolved id reaches the gh descendants.
+reset_state
+X6_HOST="$(compute_opaque_host_id x6-raw-host)"
+echo "[{\"id\": 61, \"created_at\": \"2026-10-01T00:00:00Z\", \"body\": \"<!-- loom:lease host=${X6_HOST} sweep=sweep-auto-61 -->\\nprose\"}]" > "$STUB_DIR/comments.json"
+sleep 8 &
+WATCH_PID_X6=$!
+LOOP_PID_X6="$(LOOM_HOST_ID=x6-raw-host LOOM_TERMINAL_ID=daemon-sweep-auto-61 "$SCRIPT" start 10139 --interval 1 --watch-pid "$WATCH_PID_X6" 2> "$STUB_DIR/start-x6-stderr.log")"
+wait_patches 1
+kill "$WATCH_PID_X6" 2> /dev/null || true
+wait "$WATCH_PID_X6" 2> /dev/null || true
+kill "$LOOP_PID_X6" 2> /dev/null || true
+assert_eq "61" "$(head -n1 "$STUB_DIR/patch-calls.log" 2> /dev/null)" "(x6) the auto-resolved loop renewed its own lease"
+assert_eq "GET sid=sweep-auto-61 $X_ROLE
+PATCH sid=sweep-auto-61 $X_ROLE" "$(attr_set)" "(x6) the auto-resolved sweep id reaches every gh call"
+
+# (x7) start with no identity at all (vars absent): the loop still runs and
+# renews, with the role set and no sweep id invented.
+reset_state
+echo "[$W_LEASE]" > "$STUB_DIR/comments.json"
+sleep 8 &
+WATCH_PID_X7=$!
+LOOP_PID_X7="$("$SCRIPT" start 10139 --interval 1 --watch-pid "$WATCH_PID_X7" 2> "$STUB_DIR/start-x7-stderr.log")"
+wait_patches 1
+kill "$WATCH_PID_X7" 2> /dev/null || true
+wait "$WATCH_PID_X7" 2> /dev/null || true
+kill "$LOOP_PID_X7" 2> /dev/null || true
+assert_eq "GET sid=<unset> $X_ROLE
+PATCH sid=<unset> $X_ROLE" "$(attr_set)" "(x7) a no-identity start loop renews with the role set and no sweep id"
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

@@ -639,6 +639,16 @@ cmd_renew_once() {
         echo "ERROR: renew-once: --cached-lease must be <comment-id>@<created_at> (got: '$cached')" >&2
         exit 1
     fi
+    # gh-call attribution (Issue #10139): the detached renewer is reparented
+    # to init/launchd, so a gh shim walking its parent chain never reaches the
+    # sweep; these two variables are the only way its forge calls can be
+    # attributed. Every forge call -- including the detached `start` loop's,
+    # which all run through this subcommand with the resolved --sweep-id --
+    # happens after this point. Telemetry only: lease targeting still uses the
+    # local host/sweep pair. An empty sweep id keeps any inherited
+    # LOOM_SWEEP_ID (never invent or erase one).
+    [[ -z "$sweep_id" ]] || export LOOM_SWEEP_ID="$sweep_id"
+    export LOOM_ROLE="sweep-lease-renew"
     # The cache-miss path: the same invocation minus the cache, i.e. today's
     # full paginated lookup. `exec` (not a call) so it can never recurse twice.
     local -a relist=("$SELF" renew-once "$issue" ${host:+--host "$host" --sweep-id "$sweep_id"})
@@ -976,9 +986,7 @@ cmd_start() {
             elif [[ "$renew_rc" -ne 4 ]]; then
                 echo "sweep-lease-renew: renewal cycle for issue #${issue} FAILED (renew-once exit ${renew_rc}): ${renew_err}" >&9
             fi
-            if [[ "$renew_rc" -eq 4 ]]; then
-                break
-            fi
+            [[ "$renew_rc" -ne 4 ]] || break
         done
     ) < /dev/null > /dev/null 2>&1 &
     local loop_pid=$!

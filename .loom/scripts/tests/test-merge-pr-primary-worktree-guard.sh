@@ -92,10 +92,12 @@ retired "the awk-body grep for _primary_worktree_path's parse" \
     "Test 4 below (a space-containing primary checkout, behavioural, unchanged), plus loom-daemon/tests/merge_pr_worktrees_differential.rs — which compares the port against a FROZEN copy of that exact awk body, including space-containing-path corpus entries — and primary_is_the_first_worktree_record / paths_containing_spaces_survive_intact in src/merge_pr/worktrees/tests.rs"
 assert_grep '_mp_worktree worktree-primary' "$MERGE_PR" \
     "_primary_worktree_path delegates the parse to 'merge-pr worktree-primary'"
-assert_grep 'Refusing to remove the primary/main worktree' "$MERGE_PR" \
-    "_remove_loom_worktree refuses when the target resolves to the primary"
-assert_grep 'primary_real="\$\(_primary_worktree_path\)"' "$MERGE_PR" \
-    "_remove_loom_worktree resolves the primary path before any removal"
+retired "the grep for the in-shell 'Refusing to remove the primary/main worktree' text and primary_real comparison" \
+    "_remove_loom_worktree refuses when the target resolves to the primary" \
+    "the comparison and its message left merge-pr.sh in the #8191 remove-gate slice; they are Rust in loom-daemon/src/merge_pr/remove_gate.rs, so no grep of this file can pass" \
+    "Tests 2-3 below (behavioural: the real _remove_loom_worktree, the real binary, a real primary checkout refused), loom-daemon/tests/merge_pr_remove_gate_differential.rs (frozen retired block vs the verb), and the_primary_checkout_is_refused_even_with_sentinel_and_opt_in in src/merge_pr/remove_gate/tests.rs"
+assert_grep '_mp_worktree remove-gate' "$MERGE_PR" \
+    "_remove_loom_worktree delegates the primary/sentinel gate to 'merge-pr remove-gate'"
 # The #8191 slice added a SECOND refusal: when the lookup itself cannot run, the
 # removal is refused rather than proceeding on an empty answer (which the
 # comparison above would otherwise read as "not the primary").

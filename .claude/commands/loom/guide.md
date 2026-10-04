@@ -308,16 +308,15 @@ fi
 **When overlaps are found:**
 
 1. **Overlaps with merged PR**: The work may already be done. Flag for human review —
-   comment **first**, and never cite the merged PR as a blocker (`Blocked by #N` on a
-   closed item reads as cleared and gets auto-unblocked; see `curator.md` → "Adding
-   Dependencies", #9102):
+   comment **first**; never cite the merged PR as a blocker (a closed blocker reads
+   as cleared, #9102 — `park-record apply` refuses it):
    ```bash
    ./.loom/scripts/post-comment.sh <number> --body "⚠️ **Potential overlap with merged PR**
 
    May overlap recently merged work. No open blocker: needs human review.
 
    Run \`check-duplicate.sh --include-merged-prs\` for details."
-   gh issue edit <number> --add-label "loom:blocked"
+   loom-daemon park-record apply --issue <number> --reason "overlaps merged PR" --by guide
    ```
 
 2. **Overlaps with closed issue**: Work was already completed or intentionally closed:

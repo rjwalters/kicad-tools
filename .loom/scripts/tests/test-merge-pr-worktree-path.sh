@@ -131,8 +131,10 @@ assert_grep "git branch -d" "$MERGE_PR" \
     "merge-pr.sh uses git branch -d (safe delete, not -D)"
 assert_grep "allow_unmanaged" "$MERGE_PR" \
     "_remove_loom_worktree takes allow_unmanaged second arg"
-assert_grep "Bypassing sentinel guard" "$MERGE_PR" \
-    "explicit --worktree-path logs the sentinel-bypass action"
+retired "the grep for the in-shell 'Bypassing sentinel guard' text" \
+    "explicit --worktree-path logs the sentinel-bypass action" \
+    "the sentinel test and its message left merge-pr.sh in the #8191 remove-gate slice; they are Rust in loom-daemon/src/merge_pr/remove_gate.rs, so no grep of this file can pass" \
+    "loom-daemon/tests/merge_pr_remove_gate_differential.rs (frozen retired block vs the verb, allow=true/sentinel=absent) and an_unmarked_worktree_is_refused_unless_opted_in in src/merge_pr/remove_gate/tests.rs"
 assert_grep "Discovered worktree for branch" "$MERGE_PR" \
     "discovery fallback emits a hint about the discovered path"
 assert_grep "re-run with: --worktree-path" "$MERGE_PR" \

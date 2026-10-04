@@ -75,6 +75,16 @@ Consequences:
 - The sweep span carries its derivation inputs: `loom.repo`, `loom.issue` and
   `loom.story_id` in a story, or `loom.repo` and `loom.sweep_id` outside one.
 
+**Attended runs (#10116).** A Loom role run as a subagent of an attended
+Claude Code session has no dispatch and so no sweep id or sweep span. Its
+live output (`session.output`) is grouped under `loom.sweep_id =
+attended-<first 8 chars of the session id>-<agent id>`, derived from the
+transcript's own identity, so a restarted
+tailer reports the same attempt. Every record carries
+`loom.session.output.launch = attended` (a daemon run says `daemon`); see
+[`telemetry-schema.md`](telemetry-schema.md) → `session.output`. The attended
+path mints no trace or span.
+
 **Enforcement:** the random constructors `TraceContext::root()` and
 `TraceContext::child()` only compile under `cfg(test)`, so production code that
 tries to mint a random ID fails to build. A new root trace must choose a

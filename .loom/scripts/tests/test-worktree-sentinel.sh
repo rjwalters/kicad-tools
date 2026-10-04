@@ -26,6 +26,7 @@ AGENT_DESTROY_SH="$SCRIPTS_DIR/agent-destroy.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'   # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -34,6 +35,19 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why it could not
+# survive, and what proves the property now. Counted as run so the totals stay
+# honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_file_exists() {
     if [[ -f "$1" ]]; then
@@ -108,8 +122,12 @@ assert_grep 'LOOM_PRESERVE_WORKTREE' "$MERGE_PR_SH" \
     "merge-pr.sh references LOOM_PRESERVE_WORKTREE"
 assert_grep '\.loom-managed' "$MERGE_PR_SH" \
     "merge-pr.sh references .loom-managed sentinel"
-assert_grep 'refusing to remove.*user-owned' "$MERGE_PR_SH" \
-    "merge-pr.sh emits a refusal message for unmanaged worktrees"
+retired "the grep for the in-shell 'refusing to remove (user-owned)' text" \
+    "_remove_loom_worktree refuses an unmarked (no .loom-managed) worktree unless the caller opted in" \
+    "the sentinel check and its refusal message left merge-pr.sh in the #8191 remove-gate slice; they are Rust in loom-daemon/src/merge_pr/remove_gate.rs, so no grep of this file can pass" \
+    "loom-daemon/tests/merge_pr_remove_gate_differential.rs (frozen retired block vs the verb, sentinel=absent with allow=false and allow=true, message compared byte for byte) and an_unmarked_worktree_is_refused_unless_opted_in in src/merge_pr/remove_gate/tests.rs"
+assert_grep '_mp_worktree remove-gate' "$MERGE_PR_SH" \
+    "_remove_loom_worktree delegates the sentinel/primary gate to 'merge-pr remove-gate'"
 
 # --- Test 3: agent-destroy.sh cleanup block enforces the same guards ---
 echo ""

@@ -75,15 +75,10 @@ When you claim an issue and realize mid-work it requires >6 hours or touches >8 
 ./.loom/scripts/create-issue.sh --title "[Parent #812] Part 2: Edge cases" --body "..." --label "loom:triage"
 # ... create remaining sub-issues ...
 
-# 2. Park-record each child in the parent BODY, BEFORE the label (builder.md
-#    "Label Discipline"; .loom/docs/park-record.md -- one line per child):
-{ gh issue view 812 --json body --jq .body; echo; loom-daemon park-record render --blocked-by XXX,YYY,ZZZ --by builder; } > /tmp/body-812.md
-gh issue edit 812 --body-file /tmp/body-812.md
-
-# 3. Mark the parent blocked — humans close it once children are filed.
-#    NEVER close a parent yourself; the park records are the
-#    record, loom:blocked is the terminal state.
-gh issue edit 812 --remove-label "loom:building" --add-label "loom:blocked"
+# 2. Park the parent on its children: one body park record per child, then
+#    building -> blocked. NEVER close a parent yourself; humans close it once
+#    children are filed, and loom:blocked is the terminal state.
+loom-daemon park-record apply --issue 812 --blocked-by XXX,YYY,ZZZ --by builder --remove-label loom:building
 
 # Then exit and let the Curator/sweep pipeline pick up each sub-issue.
 ```
@@ -398,9 +393,7 @@ with a rationale per `builder.md` → "Issues Are Suggestions" (or the `.no-chan
 marker under `/loom:sweep`).
 
 ```bash
-# body-file = current body + `park-record render --blocked-by <phase1>,<phase2>,<phase3> --by builder`
-gh issue edit <parent-number> --body-file /tmp/body-<parent-number>.md
-gh issue edit <parent-number> --remove-label "loom:building" --add-label "loom:blocked"
+loom-daemon park-record apply --issue <parent-number> --blocked-by <phase1>,<phase2>,<phase3> --by builder --remove-label loom:building
 ```
 
 ### Real-World Example
@@ -423,8 +416,8 @@ gh issue edit <parent-number> --remove-label "loom:building" --add-label "loom:b
 ./.loom/scripts/create-issue.sh --title "Add activity querying to /loom heuristic"
 # -> Issue #536 (1-2 hours, depends on #535)
 
-# Mark parent blocked (after park-recording #534-#536 in its body, as above)
-gh issue edit 524 --remove-label "loom:building" --add-label "loom:blocked"
+# Park the parent on its phases (body park records + label, as above)
+loom-daemon park-record apply --issue 524 --blocked-by 534,535,536 --by builder --remove-label loom:building
 ```
 
 **Benefits**:
