@@ -49,6 +49,17 @@ Every record is transmitted inside a versioned envelope:
 | `host_id`        | string            | Stable identifier for the emitting host. Opaque to the schema. |
 | `record`         | object            | The record payload, internally tagged on `kind` (see below). |
 
+### Event time vs knowable-at, and `loom.record_id` (Issue #10196)
+
+On OTLP log records, `timestamp` (`time_unix_nano`) is **event time** and
+`observed_timestamp` (`observed_time_unix_nano`) is **knowable-at**. **Replay
+filters on knowable-at**, never event time. The exporter currently sets
+`observed_timestamp` to `emitted_at` (a producer-side copy, only a lower bound);
+a true ingest-side value needs a collector-side receive stamp, a recorded design
+decision. Every log record also carries `loom.record_id`, a content-derived
+dedupe id (`derived_hex(["loom.record", kind, host_id, emitted_at, record JSON],
+16)`). Full contract: [`telemetry-replay.md`](telemetry-replay.md).
+
 ### `schema_version` semantics
 
 `schema_version` is a **plain integer**, not a semver string, deliberately: a
@@ -2276,6 +2287,12 @@ in `daemon-reference.md` for the full design:
   call resolved `Armed` here). Omitted/empty on a host that is not the
   captain, on a host with no declared singleton jobs at all, and on a record
   from a pre-#8848 daemon.
+- `exporters` / `exported_kinds` (#10196) — export coverage: the exporter names
+  that actually started in the emitting process (misconfigured, never-started
+  entries excluded) and the sorted record `kind` tags they carry (from the kind
+  registry). Omitted when empty; **empty means unknown** (pre-#10196 daemon or
+  no exporter started), never "exports nothing".
+  See [`telemetry-replay.md`](telemetry-replay.md).
 - `captainless_singleton_jobs` (#9014) — in-daemon singleton-job names whose
   most recent gate check was refused because **no** `fleet.captain` is
   declared at all, so the job runs on no host (e.g. `["ci-telemetry-poll"]`
