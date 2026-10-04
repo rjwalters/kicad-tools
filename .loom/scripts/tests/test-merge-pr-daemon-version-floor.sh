@@ -277,7 +277,11 @@ echo "Testing the merge-pr floor covers every fail-closed sub-subcommand (#8967)
 #   classify-response  97609b86f (#9228, squash)          0.19.455 -> 0.19.456
 #   partial-conflict   2ab7630c5 (merge of #9246)          0.19.463 -> 0.19.464
 #   checks-failure     397f06feb (merge of #9272)          0.19.464 -> 0.19.465
+# tree-checks (#10026) is `open` BY CONSTRUCTION: _check_tree_checks only calls it when .loom/config.json
+# declares merge.treeChecks (opt-in), so no repo that has not opted in is gated on a daemon carrying it; an
+# opted-in repo on an older binary is refused (fail closed) and told to roll the host.
 MERGE_PR_VERB_TABLE="verdict-contradiction closed 0.19.172
+tree-checks open -
 stale-checks closed 0.19.221
 loom-pr-guard closed 0.19.375
 classify-response closed 0.19.456

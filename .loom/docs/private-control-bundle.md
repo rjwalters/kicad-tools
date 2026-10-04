@@ -171,13 +171,13 @@ identity, which every recheck refuses rather than treating as proven.
 | Control protocol | `loom-private-control-v1`, `control_version` **2** | Exact-match on both sides; anything else is `Unsupported`. A v1 image reports v1 and is refused: its in-container half cannot make the control-file claim at all. |
 | Session image | `ghcr.io/rjwalters/loom-worker-session:<version>` built from `docker/session/Dockerfile` at or after this change | The bundle must be present, sealed, digest-intact and non-writable. |
 | Session mount topology | profile bound read-write; `hooks.json`, `config.toml` and `loom-codex-hooks.json` each bound read-only over their own path | Cross-checked against Docker's mount inventory on the host and `/proc/self/mountinfo` plus a real write probe in the container. |
-| Codex CLI | `0.149.1` as pinned by `CODEX_VERSION`; floor `0.146.0` | `seal-control` records `codex --version` as observed in the image and refuses to seal below the floor. |
+| Codex CLI | as pinned by `CODEX_VERSION` (tracks upstream latest via `harness-pins.yml`; 0.160.0 at 2026-10-02); floor `0.146.0` | `seal-control` records `codex --version` as observed in the image and refuses to seal below the floor. |
 | Codex hook schema | `pre_tool_use`, pinned at `0.146.0` in `guard-codex-bridge.sh` | Evidence below. |
 | Managed hook version | `LOOM_HOOK_VERSION` = 1 in `provision-codex-hooks.sh` | Cross-checked against the receipt at every observation. |
 
 ### Codex 0.149.1 vs the 0.146.0 schema pin — evidence, not assumption
 
-The image pins Codex **0.149.1** while `guard-codex-bridge.sh` and
+When this evidence was taken (2026-09-24), the image pinned Codex **0.149.1** while `guard-codex-bridge.sh` and
 `provision-codex-hooks.sh` pin their tested schema at **0.146.0**. "0.149.1 ≥
 the 0.146.0 floor" is not by itself evidence of compatibility, so the real
 `@openai/codex@0.149.1` package was examined directly (2026-09-24, Linux x64

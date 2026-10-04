@@ -266,6 +266,7 @@ raw event cache imports it.
 | `land-v2` | `land` | the same, with **right-censored** stage samples folded in (Kaplan–Meier grids) | after `merge_wait` |
 | `land-v3` | `land` | `land-v2`'s, with each stage grid calibrated first: widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored (recorded per stage as `distribution.adjustment`; #9970) | after `merge_wait` |
 | `land-2026-10-04-amber-heron` | `land` | `land-v2`'s path, then its p25/p75 recalibrated from `land-v2`'s own track record: the current stage's `ln(actual / p50)` distribution (landed estimates as events, still-open ones as censored lower bounds, recency-weighted) fitted at the estimate's own `as_of`; the median is kept (recorded as `recalibration`; #10207) | after `merge_wait` |
+| `land-2026-10-04-fresh-tide` | `land` | `land-v2`'s, with every stage sample (observed and censored) weighted `exp(−age / half_life)`, half-life 2 days, and the grid built from the weighted samples; when the effective N `(Σw)²/Σw²` falls below 8 the half-life doubles (up to 6 times, then flat). Records `distribution.half_life_sec` (absent when flat) and `distribution.effective_n` per stage (#10209) | after `merge_wait` |
 | `land-2026-10-04-twin-otter` | `land` | no history: the newest `eta-fit/v1` coefficient file cut off strictly before `as_of` (see [Fitted coefficients](#fitted-coefficients-eta-fitv1)). PR stages only (`review_wait`, `doctor`, `merge_wait`, `merge_hold`); the blend of a stage-by-stage exit-hazard Monte Carlo (256 paths, seeded per stage visit) and a log-normal direct model (recorded as `twin_otter`; #10222, #10243) | at the merge |
 | `land-2026-10-04-twin-otter-b` | `land` | the pre-PR/PR composition of twin-otter (#10244): `ready_wait`, `sweep.curator` and `sweep.builder` are answered with `land-v2`'s path rules (same refusals, so its answer rate there equals `land-v2`'s; `combination.method` is `land_v2_path_prefix`); `review_wait`, `doctor`, `merge_wait` and `merge_hold` are `land-2026-10-04-twin-otter`'s own answer, unchanged | at the merge |
 
@@ -351,6 +352,10 @@ remains a separate future id.
 with no coefficient file, so there it refuses `no_model`: its backtest gate
 cannot pass while it is a shadow, by design. Its live evidence is the
 tracker's, which loads the file (below).
+`land-2026-10-04-fresh-tide` (#10209) ships the same way. Its half-life is a
+constructor parameter (`LandFreshTide::with_half_life`), so a 1/2/7-day
+comparison needs no extra registered ids; only the 2-day default is
+registered and shadowed.
 
 ## Fitted coefficients (`eta-fit/v1`)
 

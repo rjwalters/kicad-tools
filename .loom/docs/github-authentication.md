@@ -50,6 +50,19 @@ Two credential modes exist:
   is gateway-owned" and makes no request. No policy, or a daemon too old to
   answer, leaves App minting unchanged.
 
+**Published `gh` profiles follow the egress stance (#9986).** One renderer
+writes every Loom-owned `hosts.yml` (`.loom/gh-config`,
+`.loom/gh-config-by-owner/<owner>`): no policy is byte-identical to the legacy
+token-only shape; `enforcement.api=observe` adds the gateway API-host routing
+key (so scenario 17's token refresh keeps routing) and runs `forge egress assert`, rolling back to the
+previous profile on a finding about that directory (`loom-daemon status` shows
+the rollback); `enforcement.api=required` publishes **no** `oauth_token`, mints
+nothing, selects no reader pool, and clears `GH_TOKEN`/`GITHUB_TOKEN` -- a
+published token there is only a bypass for anything that is not the managed
+launcher. `forge egress` reports `apiconfig.github-token-present` (a profile
+holding a token under `required`) and `git.credential-from-api-profile` (the
+git helper is `gh auth git-credential` under `required`).
+
 `gh` resolution order: the managed shim first on `PATH` (#9987), then the
 system `gh`; `LOOM_GH_BIN` overrides the binary for the daemon, `gh-cached`
 and test stubs. **Prompts need no change to be routed** -- plain `gh ...` is

@@ -151,6 +151,7 @@ test-merge-pr-daemon-version-floor.sh
 test-merge-pr-help.sh
 test-merge-pr-merge-method.sh
 test-merge-pr-rate-limit-fallback.sh
+test-merge-pr-tree-checks.sh
 test-nextest-daemon-guard.sh
 test-operator-only-subkind.sh
 test-post-verdict.sh

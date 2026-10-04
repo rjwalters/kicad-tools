@@ -12,13 +12,15 @@ Tested versions and live outcomes: [verification receipt](native-runtime-verific
 | Harness | Pinned version | What that pin rests on |
 | --- | --- | --- |
 | Pi | 0.85.1 | Guarded live canary — [verification receipt](native-runtime-verification-2026-09-19.md). |
-| OpenCode | 1.18.31 | Guarded live canary (1.x only) — same receipt; see "OpenCode major versions". |
+| OpenCode | latest 1.x (`harness-pins.yml`; 1.18.34 at 2026-10-02) | Guarded live canary on 1.18.31 (1.x only) — same receipt; see "OpenCode major versions". Later 1.x pins are gated by `docker/native/test-image.sh` in CI, not by a fresh canary. |
 | Kimi | 2.0.2 | **No guarded canary yet.** Credential-free harness probe only — [`docs/experiments/kimi-harness-probe-2026-09-22.json`](https://github.com/rjwalters/loom/blob/main/docs/experiments/kimi-harness-probe-2026-09-22.json) (#8561). The pin names the CLI the adapter and the container image were built against, *not* a verified guard boundary; see "Kimi". |
 
 `docker/native/Dockerfile` equality-checks all three at build time (`ARG
 OPENCODE_VERSION` / `PI_VERSION` / `KIMI_CODE_VERSION`), so a drifted pin fails
-the image build rather than shipping silently. Bump a pin, this table and a
-fresh run together; never one without the others.
+the image build rather than shipping silently. For Pi and Kimi, bump a pin,
+this table and a fresh run together; never one without the others. OpenCode's
+pin is moved by `harness-pins.yml` alone, so the version in its row above is a
+snapshot; the Dockerfile's `OPENCODE_VERSION` is the current value.
 
 Everything this page says about OpenCode's
 guard was verified on OpenCode 1.x only. **No OpenCode 2.x guarded receipt
@@ -97,8 +99,9 @@ launches and interactive harness sessions keep their previous behavior.
 
 The OpenCode binding depends on the matching
 `@opencode-ai/plugin` package; OpenCode installs it into that isolated config
-directory. That package is pinned to 1.18.31 and was verified against an
-OpenCode 1.18.31 host only; whether a 2.x host loads it is unverified. No
+directory. That package's pin moves with `OPENCODE_VERSION` (`harness-pins.yml`).
+It was live-verified against an OpenCode 1.18.31 host; whether a 2.x host loads
+it is unverified. No
 global CLI model/login settings are rewritten by Loom dispatch.
 
 ## Policy timeout vs. denial (#8451)

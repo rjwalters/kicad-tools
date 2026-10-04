@@ -1034,7 +1034,7 @@ silently waived.
 | Control protocol | `loom-private-control-v1`, `control_version` 2 (exact match on both sides) |
 | Workspace protocol | `loom-private-workspace-v1` |
 | Session image | `ghcr.io/rjwalters/loom-worker-session:<version>` built from `docker/session/Dockerfile`, bundle sealed and digest-intact |
-| Codex CLI | `0.149.1` as pinned by `CODEX_VERSION`; floor `0.146.0`, recorded by `seal-control` from the CLI observed in the image |
+| Codex CLI | as pinned by `CODEX_VERSION` (tracks upstream latest via `harness-pins.yml`; 0.160.0 at 2026-10-02); floor `0.146.0`, recorded by `seal-control` from the CLI observed in the image |
 | Codex hook schema | `pre_tool_use`, pinned at `0.146.0` in `guard-codex-bridge.sh`; the 0.149.1 wire evidence is in [private-control-bundle.md](private-control-bundle.md) |
 | Hook trust | Operator-attested, once per profile (#5005), measured by the install-time trust-baseline diff |
 
