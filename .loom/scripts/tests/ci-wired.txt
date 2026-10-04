@@ -213,6 +213,7 @@ test-warn-out-of-set-deps.sh
 test-write-scope.sh
 test-worktree-forge-pr-check.sh
 test-worktree-hookspath.sh
+test-worktree-refused-claim-no-lease.sh
 test-worktree-root-override.sh
 test-worktree-sentinel.sh
 

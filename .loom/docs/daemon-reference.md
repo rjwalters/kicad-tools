@@ -6243,9 +6243,23 @@ sustain counter, because a rate-limit rejection is unambiguous:
   *not* count against the quota — learns the real reset epoch; the cooldown
   runs to the latest exhausted resource's reset, clamped to `[60s, 3600s]`,
   falling back to `fallbackCooldownSecs` when the probe fails.
+- Reset evidence belongs to the credential that failed (#8997): the trip
+  lands first (no probe storms, no recursion), `X-RateLimit-*` headers from
+  the failing response win when captured, and otherwise the probe runs with
+  the failing call's workspace root / `gh` program / `GH_CONFIG_DIR`. A probe
+  reading *healthy* during a primary-limit failure (ambient user token, or a
+  new installation's false-full `/rate_limit`) or carrying an expired reset
+  is distrusted: the trip takes `fallbackCooldownSecs` and the reading is not
+  shown as the budget.
+- The dispatch path's `loom:building` label flip and lease comment, and
+  safehouse's forge lookups, report rate-limited failures too (#8997), so the
+  first authoritative failure trips the breaker; their probe runs off-thread.
 - While cooling, the work-finder, claim/quarantine reconciliation, epic
-  supervisor, and role-runner ticks **skip entirely** — zero gh calls, zero
-  doomed role spawns. Running sweeps are never touched.
+  supervisor, role-runner ticks and safehouse lookups (title enrichment,
+  merge verification, merge reconciliation) **skip entirely** — zero gh
+  calls, zero doomed role spawns; safehouse keeps narrating with what it has,
+  and an unverified completion is reconciled after release. Running sweeps
+  are never touched.
 - The breaker **releases itself** on the first tick past the reset. Edges are
   logged once each way and published as `daemon.rate_limit_breaker.state`
   events; `loom-daemon status` shows the phase, the tripping loop, the resume

@@ -20,6 +20,7 @@ host-scoped live list the fleet dashboard reads (#9329,
 - [The model](#the-model)
 - [Heuristics and versioning](#heuristics-and-versioning)
 - [The explanation (`eta-explanation/v1`)](#the-explanation-eta-explanationv1)
+- [Features](#features)
 - [No-estimate reasons](#no-estimate-reasons)
 - [Cadence, triggers and the journal](#cadence-triggers-and-the-journal)
 - [Outcomes and scoring](#outcomes-and-scoring)
@@ -174,6 +175,7 @@ in-sweep half and takes the forge's word for the human-gated half.
 | `finish-v1` | `finish` | in-sweep phase durations (`sweep-outcome-telemetry.jsonl`) | after the in-sweep merge when at least half of the history's successful sweeps merged themselves, else at the verdict |
 | `land-v1` | `land` | in-sweep phases and the stage-sample journal (turnovers too, for an unstarted issue) | after `merge_wait` |
 | `land-v2` | `land` | the same, with **right-censored** stage samples folded in (Kaplan–Meier grids) | after `merge_wait` |
+| `land-v3` | `land` | `land-v2`'s, with each stage grid calibrated first: widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored (recorded per stage as `distribution.adjustment`; #9970) | after `merge_wait` |
 
 A shipped id is **immutable**: a golden test pins each id's output on a fixed
 fixture. A behaviour change is a new id registered beside the old one
@@ -217,6 +219,8 @@ fixture. A behaviour change is a new id registered beside the old one
 
 `land-v2` ships registered-not-current on purpose, as the worked example of
 all of the above.
+`land-v3` (#9970) ships the same way: its constants are fixture-derived,
+and the live coverage/pinball result is the operator's backtest, not a claim.
 
 ## The explanation (`eta-explanation/v1`)
 
@@ -230,9 +234,19 @@ level: `schema`, `estimate_id`, `heuristic`, `kind`, `loom` (provenance),
 `combination` (`draws`, `seed`, `rng`, `draw_order`), `path.dispatch` (a
 `ready_wait` start only: the plan inputs, `turnovers`,
 `admission_delay_sec`), `result` (`p25_sec`,
-`p50_sec`, `p75_sec`, `eta_p50_at`, `samples_min`, `stage_marks`),
+`p50_sec`, `p75_sec`, `p90_sec`, `eta_p50_at`, `samples_min`, `stage_marks`),
 `contributions`, `features`, `features_omitted`, `no_estimate_reason`,
 `truncated`.
+
+`result.p90_sec` (#10211) is the displayed upper bound that a late surprise
+is scored against. It is the nearest-rank 90th percentile of the same
+simulated path totals the quartiles come from, so it costs no new draws and
+leaves `p25_sec`, `p50_sec` and `p75_sec` unchanged; `run_explanation`
+recomputes all four. Every heuristic that simulates (`start-v1`, `finish-v1`,
+`land-v1`, `land-v2`, `land-v3`) records it. It is absent only on a refusal
+and on an explanation recorded before the field existed, which still parses:
+the field is additive, so the schema stays `eta-explanation/v1`. The stage
+marks stay at three percentiles.
 
 `result.stage_marks` (#9366) is the projected future, one mark per stage in
 stage order (`ready_wait` only when the path starts there): `p25_at` / `p50_at` / `p75_at` are `as_of` plus that percentile
@@ -244,7 +258,8 @@ path visits carries `null` times, never a fabricated one. A timeline can be
 drawn from `stage_marks` alone.
 
 A feature is `null` when it was not measured, with a `features_omitted`
-reason; never a default. An explanation stays near 8 KiB; over 32 KiB it
+reason; never a default ([Features](#features) lists the definitions and
+the reasons). An explanation stays near 8 KiB; over 32 KiB it
 drops `features`, then the stage grids, then the stage marks, then every
 remaining list (`detail`), stopping as soon as it fits, and names each drop
 in `truncated`.
@@ -306,6 +321,113 @@ exists because its transition happened. The 2026-09-28 `story.review_wait`
 figures (≈14 min p50 against ≈8.9 h p95) are a genuine long tail in real
 waits, a different phenomenon with a different remedy, not a no-op
 population.
+
+## Features
+
+Every estimate records `features`: point-in-time context for the fitted
+models (`eta fit`, #10221; the twin-otter heuristic, #10222) and for testing
+which inputs matter. No v1 heuristic reads them; `land-v3` reads `labels`
+and `queue_running`. A feature is `null` when unmeasured, with a specific
+`features_omitted` reason. `not_collected` is only the backstop for declared
+features that nothing populates yet (#10231, #10232).
+
+### Queue, drain and friction (#10201)
+
+One definition, `eta::queue_features`, serves both sides: the tracker calls
+it for every estimate, and `eta fit` (#10221) calls it at each training
+row's instant. Stored values are raw counts and integer seconds; `log1p`,
+standardisation and the hour transforms belong to the model.
+
+| Stored | #10221 model feature | Definition at `as_of` | Applies to |
+|---|---|---|---|
+| `current_stage.age_sec` | `log_age` | seconds in the current stage | any staged item |
+| `ahead` | `log_ahead` | other open PRs in the item's repo and stage whose stage entry is earlier (ties: lower PR number first) | PR stages |
+| `n_stage_repo` | `log_n_stage_repo` | other open PRs in the item's repo and stage | PR stages |
+| `n_stage_fleet` | `log_n_stage_fleet` | other open PRs in the item's stage, fleet scope | PR stages |
+| `exits_repo_1h`, `_6h`, `_24h` | `log_exits_repo_6h`, `_24h` | departures from the item's stage in its repo, event time in `[as_of − w, as_of)`, any destination (a PR closed unmerged included) | PR stages |
+| `exits_fleet_1h`, `_6h`, `_24h` | `log_exits_fleet_6h` | the same, fleet scope | PR stages |
+| `merges_repo_24h` | `log_merges_repo_24h` | PR merges in the repo, `[as_of − 24 h, as_of)` | every item |
+| `merges_fleet_6h` | `log_merges_fleet_6h` | PR merges, fleet scope, `[as_of − 6 h, as_of)` | every item |
+| `since_merge_sec` | `log_since_merge` | seconds since the repo's last merge, capped at 604800 (168 h). With no merge known and history reaching back ≥ 168 h, the cap | every item |
+| `open_prs_repo` | — | open PRs under any review label in the repo, the item's own included | every item |
+| `fleet_scope_repos` | — | how many repos the fleet-scope values cover | every item |
+| `hour_utc`, `weekday_utc` | `hour_sin`, `hour_cos`, `weekend` | the model derives the fractional hour from `as_of`; `weekend` is `weekday_utc` 5 or 6 (Monday = 0) | every item |
+| `doctor_cycles_so_far` | `rework` | Judge rejections taken so far | every item |
+| `labels` | `op_hold`, `sequenced`, `starred`, `conflict`, `ci_fail`, `blocked` | PR label flags | PR items |
+
+**PR stages** are `review_wait`, `doctor` (#10221's `doctor_wait`),
+`merge_wait`, and any later post-Builder stage (`merge_hold`, #10218). A
+roster PR's stage comes from its labels (`stage_from_pr_labels`). A held PR
+is open but has no stage, so it counts in `open_prs_repo` only.
+
+**Null reasons**, in this order of precedence for a PR-stage feature:
+
+| reason | when |
+|---|---|
+| `not_listed_yet` | no fleet view was observed before `as_of` (every queue feature, until the first ETA pass after a start) |
+| `no_stage` | the item is refused, so it has no current stage |
+| `no_pr_yet` | the item has no PR |
+| `not_applicable_stage` | the item is in a pre-PR stage (`ready_wait`, `sweep.curator`, `sweep.builder`) |
+| `repo_not_listed` | the item's repo is outside the fleet scope: its review listings were not read completely on that pass. With an empty scope, the fleet values too |
+| `history_shorter_than_cap` | `since_merge_sec` only: no merge is known and the history is shorter than 168 h |
+
+**Fleet scope.** A daemon sees only the repos it manages, so at estimate
+time "fleet" means every repo whose review listings the ETA pass read
+completely. `fleet_scope_repos` records how many. Training sees the whole
+fleet through the webhook label stream, so this count lets #10222 detect a
+host whose scope differs from training.
+
+**Knowability.** Each roster entry and event carries `known_at`. A feature
+at `as_of` reads only entries with `known_at < as_of` (the strict-before
+rule of `StageSamples::select`), and an event also needs `at < as_of`.
+Nothing known at or after `as_of` can change a value. At serve time a
+roster entry is known when the pass listed it and an event when the pass
+read its journal row, both before the pass's `as_of`. An estimate between
+passes (a bus event) reuses the last pass's view. The journal's
+`observed_at` is never used as `known_at`: a `pr.resolved` row's
+`observed_at` is the merge instant, even when the read that found it came
+passes later. Training sets `known_at` to the event time plus 2 min
+(#10221): the function is the same, only the source of `known_at` differs.
+
+**Serve-side sources, and their limits.**
+
+- **Roster:** every PR in the pass's review listings, including PRs that
+  close no issue. Its `entered_at` is the tracker's own stage entry when the
+  tracker follows the PR in that stage, otherwise the listing's
+  `updated_at`, a lower bound. So `ahead` is approximate for first-seen PRs
+  until exact entry times come from the label stream (#10218).
+- **Events:** the ETA stage journal. A row with a `stage` and a `left_at` is
+  a departure (PR stages only). A `pr.resolved` row that is not a close,
+  and a `sweep.phase` `merge` row, are merges. The journal holds only PRs
+  this host tracks, which are the PRs that close an issue. The history's
+  start, for the 168 h rule, is the journal's oldest row; daemon downtime
+  inside that span is not visible.
+
+### Host and queue context
+
+These describe the last work-finder tick's dispatch plan, and are recorded
+on **every** item, started ones included.
+
+| Stored | Definition | Applies to |
+|---|---|---|
+| `queue_ready` | rows on the plan | every item |
+| `queue_running` | plan rows in state `running` | every item |
+| `max_concurrent` | the plan's concurrency cap | every item |
+| `active_sweeps_host` | the plan's slot occupancy | every item |
+| `repo_pr_open_skip` | the item's repo had at least one ready row with disposition `open_pr` (`pr-open-skip`) on the plan | every item |
+| `queue_rank` | the item's position in the ready queue | ready items |
+
+Their null reasons: `no_dispatch_plan` when there is no plan (no tick yet,
+or the single-workspace loop), `stale_inputs` when the plan is older than
+15 minutes or three ticks, and `repo_not_listed` for `repo_pr_open_skip`
+when the repo's ready listing failed on that tick. `queue_rank` is
+`not_applicable_stage` on an item that is not ready, and carries the item's
+refusal reason on a ready row the plan gives no position.
+
+**The schema stays `eta-explanation/v1`.** The fields are additive
+`Option`s, so an explanation recorded before them still parses, with the
+new features `null` (the precedent is `result.stage_marks`, #9366).
+Omission reasons are free-form strings.
 
 ## No-estimate reasons
 
@@ -371,6 +493,22 @@ Each outcome carries `error_sec` (`actual − p50`), `covered`
 predicted p50, and the per-stage actuals against each stage's predicted
 quartiles. `abandoned` outcomes and outcomes of refusals are counted but have
 no error fields: absent is never zero.
+
+An estimate that recorded a p90 is also scored on it (#10211):
+
+- `above_p90` is the **late surprise**, `actual > p90` (strict, like
+  `above_p75`). Its rate over scored outcomes should sit near 10%.
+- `pinball4_loss_sec` is the same pinball sum over q = .25, .5, .75, .9, that
+  is `pinball_loss_sec + ρ_.9(actual − p90)`.
+
+`pinball_loss_sec` keeps its three-quantile meaning: it is emitted, summed
+into the shadow ledger and pinned by the backtest golden, so redefining it
+would mix three- and four-quantile losses in one sum. Both p90 fields are
+absent on `abandoned` outcomes, on refusals, and on an estimate persisted
+before p90 existed. The outcome row also exports `loom.eta.p25_sec`,
+`loom.eta.p75_sec` and `loom.eta.p90_sec`, so an interval can be read without
+joining the estimate. The promotion gate does not read the p90 fields yet
+(#10233).
 
 **Nothing else is an outcome.** A PR closed unmerged and a sweep that ended
 before any PR are *not* abandonments — a replacement PR or a later sweep

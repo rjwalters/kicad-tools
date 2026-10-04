@@ -35,6 +35,9 @@
 # AC5 (the Rust half: `reconcile_stack` refuses with a named blocker) lives in
 # loom-daemon/tests/reconcile_stack_refname_guard.rs, next to the code it
 # guards; `loom-daemon/src/refname.rs` carries the Rust twin of AC1's table.
+# The AC2 scan's Rust counterpart — the same `--`-separator invariant, over
+# loom-daemon/src/**/*.rs — is loom-daemon/tests/git_ref_operand_scan.rs
+# (#9479), with merge_pr's two refusals in merge_pr_refname_guard.rs.
 #
 # Hermetic: every fixture is a `mktemp -d` git repo with a path-based origin.
 # Nothing touches the network, a forge, or `gh` (merge-pr.sh is driven through
@@ -345,13 +348,20 @@ else
     fail "loom_default_branch echoed an unsafe name: '$LDB_OUT'"
 fi
 
-# The Rust half must stay wired too — `reconcile_stack::plan` is the only
-# non-shell path a forge ref reaches a git argv through.
-if grep -q 'refname::check_all' "$REPO_ROOT/loom-daemon/src/reconcile_stack.rs" 2>/dev/null; then
-    pass "loom-daemon reconcile_stack calls refname::check_all"
-else
-    fail "loom-daemon/src/reconcile_stack.rs no longer validates its refs (refname::check_all)"
-fi
+# The Rust half must stay wired too. The `--` separator across ALL of
+# loom-daemon/src is machine-checked by loom-daemon/tests/git_ref_operand_scan.rs
+# (#9479 — this suite's awk scan only ever saw defaults/scripts/*.sh, which is
+# how four unguarded Rust sinks survived #9474). What is asserted here is the
+# validator half, for each module that receives a FORGE-derived name.
+for rust_sink in 'loom-daemon/src/reconcile_stack.rs' \
+                 'loom-daemon/src/merge_pr/version_policy.rs' \
+                 'loom-daemon/src/merge_pr/stacked_children.rs'; do
+    if grep -qE 'refname::check_(all|refname)' "$REPO_ROOT/$rust_sink" 2>/dev/null; then
+        pass "$rust_sink validates its refs (refname::check_all/check_refname)"
+    else
+        fail "$rust_sink hands a forge-derived branch name to git but no longer validates it"
+    fi
+done
 
 # Two sinks live OUTSIDE defaults/scripts and cannot source the validator: the
 # installer runs before `.loom/scripts/lib/` exists, and the uninstaller is
