@@ -565,12 +565,29 @@ an unchanged-input refresh moves p50 by the model's drift, not by a redraw
 missing, model-less, too-new or malformed file refuses `no_model`. It never
 refuses `beyond_history`.
 
-A held PR (`merge_hold`) is estimated, not refused `blocked`, with two known
-limits: its `features` are those of the path-engine heuristics' `blocked`
-refusal, so its stage-dependent counts (`ahead`, `n_stage_*`, `exits_*`) are
-`null` and imputed where training saw real ones; and its estimate is
-emitted at the hold's entry and not refreshed while it stays held (the item
-keeps `refused = blocked`, so the emit signature never refreshes).
+A held PR (`merge_hold`) is estimated, not refused `blocked`. Both
+twin-otter ids declare `Heuristic::models_hold`, and the tracker gives each
+of them the held item's **modeled** input (#10284). Its `features` are
+recomputed for `merge_hold`, entered at the hold, through the same
+`queue_features` call that training makes for a `merge_hold` row. So
+`ahead`, `n_stage_*` and `exits_*` are real counts, and on the fleet roster a
+tracked held PR enters `merge_hold` at its hold entry, not at `updated_at`.
+The explanation records these effective features, so a replay reads what
+the model read. Context that is genuinely unavailable (no fleet view yet, a
+repo not listed) stays omitted with its reason and is imputed. The six
+path-engine heuristics keep the described input: their `blocked` refusals,
+`features` included, are byte-identical to before.
+
+Each hold-aware series of a held item has its own emit signature: `merge_hold`
+with no refusal reason. The hold's entry and release are transitions of that
+series. While held it refreshes every `refresh_secs` under the hourly cap,
+and so does its own refusal (`no_model` until a fit lands), so a fit that
+arrives mid-hold is picked up within one interval. The item's other series
+keep its unrefreshed `blocked` refusal. The seed is the hold visit's: every
+refresh within one hold reuses it, and a re-entry after a release draws a
+new one. One divergence remains: after a release, the pooled `merge_wait`
+entry (the approval) still positions a released PR on the serving roster,
+where training uses the release.
 
 ## The explanation (`eta-explanation/v1`)
 
