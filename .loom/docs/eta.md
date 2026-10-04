@@ -1064,7 +1064,14 @@ accepts `--repo-root PATH` (default: the current directory).
 - **`loom-daemon eta backtest --heuristic ID [--compare ID] [--since RFC3339] [--json]`**
   — leak-free replay of a heuristic against real `sweep.outcome` history: mean
   pinball loss, p25–p75 coverage and bias, optionally paired against a second
-  heuristic on the identical replay set (#9325).
+  heuristic on the identical replay set (#9325). The fleet merges out of
+  sweep, so local records rarely carry a `land` case; `--pr-history PATH`
+  (offline `eta-pr-case/v1` records) or the opt-in `--forge-pr-cases
+  [--pr-limit N] [--save-pr-history PATH]` adds `land` cases from merged PRs'
+  label timelines, deduplicated against sweep-derived ones, with excluded PRs
+  (open, closed unmerged, incomplete timeline, missing/ambiguous closing
+  issue) reported by reason on stderr (#9579). Without either flag the
+  backtest makes no forge call.
 - **`loom-daemon eta view OWNER/NAME#ISSUE [--explain] [--json]`** — the
   current estimate(s) for one issue (#9327). State resolution, in order:
   1. An **open linked PR**: its review labels
@@ -1182,39 +1189,90 @@ of what is on disk and never needs a refetch.
   event time is never confused with the fetch time. The cursor is written
   atomically *after* a page's rows, so a kill re-reads at most one page and
   the rerun is byte-identical (tested, including a torn trailing line).
+  Same-second rows sort by `(event_time, source, seq, id)`.
 - **Commands.** `eta fleet events backfill|refresh [--endpoint
-  issues-events|pulls] [--max-pages N] [--reserve CALLS]` read, through the
-  shared ETag store, `GET repos/{o}/{r}/issues/events` (labels, close, merge)
-  then `GET repos/{o}/{r}/pulls?state=all&sort=created` (PR open/merge/close
-  times, and linkage references parsed from the body with the open-PR guard's
+  issues-events|pulls|reviews|check-runs] [--max-pages N] [--reserve CALLS]`
+  read, through the shared ETag store and in that order:
+  `GET repos/{o}/{r}/issues/events` (labels, close, merge);
+  `GET repos/{o}/{r}/pulls?state=all&sort=created` (PR open/merge/close
+  times; linkage references parsed from the body with the open-PR guard's
   own phrase set — closing keywords plus `Part of #N` / `Contributes to #N`,
   colon/markdown tolerant — each row's `label` naming the family `closes` /
-  `part_of`, stamped at the PR's `created_at`). A merged/closed PR is stored
-  twice by design (the pulls row has `seq` 0, the issue-events row the event
-  id). A pulls refresh reads only the newest pages: closures of older PRs
-  arrive via the issue-events refresh, and body edits on older PRs are not
-  seen. A rate-limit stop, the reserve floor or `--max-pages` (per
-  endpoint) exits `75` (`EX_TEMPFAIL`); re-run to resume. `eta fleet state
-  --as-of RFC3339 [--json]` reconstructs the fleet (open issues/PRs, stage and
-  time-in-stage per item, `loom:building` count, operator holds, approved PRs
-  held for a human, open-PR lockout) from cached events **strictly before** `--as-of`, with no
-  forge call. `eta fleet agreement --estimates FILE.jsonl [--json]` scores that
-  reconstruction against the features logged on `eta.estimate` records
-  (a SigNoz export of `eta-explanation/v1` objects, one per line): per-feature
-  agreement rate and mean `reconstructed - logged`. Forge-invisible features
-  (PR size, model, host pool) are listed, not scored.
-- **Forge-call budget** (100 rows/page; ops `timeline.read` and
-  `pr.closing-issue-references`): a **backfill** costs `ceil(events / 100) +
-  ceil(PRs / 100)` calls total across however many resumed runs; a **refresh**
-  costs one conditional call per endpoint (a `304`, not counted against the
-  core pool) on a quiet repo, else `ceil(new rows / 100)` each. `state` and
-  `agreement` cost zero.
-- **Not yet cached** (follow-ups of #10197): reviews, CI check-run conclusions
-  and the webhook-mirror source. `pr_open_skip_lockout` is `null` until a
-  linkage row precedes `--as-of`; during an unfinished pulls backfill it can
-  read `false` rather than unknown (older PRs not yet read link nothing). The
-  guard's PR-author trust filter is not reproduced (can only over-report). An
-  item untouched since before the cache window is not reported open.
+  `part_of`, stamped at the PR's `created_at`; and a `head_commit` row, label
+  = head SHA, stamped at the PR's `updated_at`); then, one PR at a time,
+  `GET repos/{o}/{r}/pulls/{n}/reviews` (`review` rows: label = state, at
+  `submitted_at`, `seq` = review id) and `GET
+  repos/{o}/{r}/commits/{head}/check-runs` (`check_run` rows, `seq` = run id:
+  `started:<name>` at `started_at`, `<conclusion>:<name>` at
+  `completed_at`, and for a run still queued (no `started_at`; the payload
+  has no creation time) `queued:<name>` at the page's `fetched_at` — the
+  only row whose id varies with the read; each names its run's `head_sha` in `commit`, part of the
+  id only when present, so older rows keep their ids). A merged/closed PR is stored twice by design (the pulls
+  row has `seq` 0, the issue-events row the event id). A pulls refresh reads
+  only the newest pages: closures of older PRs arrive via the issue-events
+  refresh, and body edits on older PRs are not seen. A rate-limit stop, the
+  reserve floor or `--max-pages` (per endpoint) exits `75` (`EX_TEMPFAIL`);
+  re-run to resume. `eta fleet state --as-of RFC3339 [--json]` reconstructs
+  the fleet (open issues/PRs, stage and time-in-stage per item,
+  `loom:building` count, operator holds, approved PRs held for a human,
+  open-PR lockout, and per open PR its CI and latest decisive review with
+  counts of failing / passing / approved PRs) from cached events **strictly
+  before** `--as-of`, with no forge call. `eta fleet agreement --estimates
+  FILE.jsonl [--json]` scores that reconstruction against the features
+  logged on `eta.estimate` records (a SigNoz export of `eta-explanation/v1`
+  objects, one per line): per-feature agreement rate and mean
+  `reconstructed - logged`, including `pr_ci_status`. Forge-invisible
+  features (PR size, model, host pool) are listed, not scored.
+- **Per-PR endpoints** (`reviews`, `check-runs`) take their work list from
+  the cache: every PR it holds (check runs: those with a `head_commit` row).
+  An **open** PR is polled (page 1 conditional on that PR's ETag); a
+  **closed** PR not yet settled is read once, in full, unconditionally, then
+  a settle marker (the endpoint's kind, no label, stamped at the close time)
+  means it is never read again. Pending PRs are walked newest-numbered first
+  as a cycle: the ledger entry's `resume_after` (cursor field, added here,
+  absent in older cursors) names the PR last completed and the next run
+  starts after it, wrapping, so under any `--max-pages` every pending PR is
+  reached in bounded runs. The per-PR cursor keys
+  (`forge:reviews#<n>`, `forge:check-runs#<n>@<sha>`) exist only while a PR is
+  open or mid-walk; `forge:reviews` / `forge:check-runs` keep the call ledger.
+  `backfill` and `refresh` behave the same for these two.
+- **Forge-call budget** (100 rows/page; ops `timeline.read`,
+  `pr.closing-issue-references`, `review.list-formal`,
+  `ci.check-runs-for-sha`): a **backfill** costs `ceil(events / 100) +
+  ceil(PRs / 100)` calls for the two listings, plus about one call per PR
+  for reviews and one per PR with a cached head for check runs (more only
+  for a PR with over 100 reviews or runs), across however many resumed runs —
+  `--max-pages` (default 200) caps each endpoint per run, so a repo with
+  2,000 closed PRs settles in about ten runs per endpoint. A **refresh**
+  costs one conditional call per listing (a `304`, not counted against the
+  core pool) on a quiet repo, else `ceil(new rows / 100)` each, plus one
+  conditional call per open PR per per-PR endpoint, plus one call per PR
+  closed since the last run. `state` and `agreement` cost zero.
+- **Limits.** `pr_open_skip_lockout` is `null` until a linkage row precedes
+  `--as-of`; during an unfinished pulls backfill it can read `false` rather
+  than unknown (older PRs not yet read link nothing). The guard's PR-author
+  trust filter is not reproduced (can only over-report). An item untouched
+  since before the cache window is not reported open. A PR's CI at `t` reads
+  only runs of its head at `t` (the latest `head_commit` row before `t`); it
+  is unknown (never `none`, never an older head's verdict) with no head row,
+  no started or queued run of that head, or a run on a commit no head row
+  before `t` names (a newer push). A queued run is pending (as
+  `friction::ci_status` reads a run not `completed`), from the read that saw
+  it: a queued rerun supersedes its name's previous verdict only from then,
+  never earlier. A closed PR's runs are cached for its **last** head
+  only; rows without `commit` are ignored. Reviews: the listing gives a
+  review's state when read, never a dismissal time, so per review id a
+  `dismissed` row supersedes the `approved` / `changes_requested` row of
+  an earlier read, from the review's submission on. When the latest
+  decisive-or-dismissed review before `t` is dismissed, `review` is absent
+  (not the verdict before it). This is a leak — a dismissal read after `t`
+  withdraws the review before `t` — but it can only under-report approvals:
+  a dismissed approval is never kept, and an older approval is never
+  surfaced behind a dismissed `changes_requested`. The answer depends on
+  each review's latest read, not on whether it was also read before the
+  dismissal. The CI and approval counts are absent until a row
+  of their listing precedes `--as-of`. Not yet cached: the webhook-mirror
+  source.
 
 `loom eta …` (the machine dispatcher, `scripts/loom`) is a thin passthrough to
 `loom-daemon eta …`.
