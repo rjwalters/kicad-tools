@@ -134,6 +134,17 @@ fi
 
 WORKTREE_PATH="$WORKTREE_ROOT_DIR/pr-$PR_NUMBER"
 
+# Attended live output for the issue this PR closes (#10120): an attended Judge
+# never claims, so this checkout is where its output starts publishing. Every
+# decision (only exactly one closing issue, subagents only, a silent no-op when
+# live output is off) lives in `loom-daemon live-output-attend --pr`; this file
+# is a `contract` entry and admits no logic. Never fails the checkout.
+# requires-daemon: live-output-attend optional   #10120 — an absent or older binary (no `--pr`) just publishes nothing; output is discarded either way
+# shellcheck source=lib/locate-daemon-bin.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/locate-daemon-bin.sh" 2>/dev/null || true
+_LD_BIN="$(loom_resolve_self_daemon_bin 2>/dev/null || true)"
+[[ -z "$_LD_BIN" ]] || "$_LD_BIN" live-output-attend --pr "$PR_NUMBER" --workspace "$REPO_ROOT" >/dev/null 2>&1 || true
+
 # If the worktree already exists, treat it as reusable. The doctor may
 # re-enter for the same PR across multiple iterations.
 if [[ -d "$WORKTREE_PATH" ]]; then
