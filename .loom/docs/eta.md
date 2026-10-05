@@ -561,7 +561,9 @@ order of snapshots, episodes or flag changes.
 - Failures and panics are logged at `warn` and retried on the next check.
 - **Every check emits one `eta.fit` record** (#10391), skips included, from
   both callers (the refresh tick's end-of-cycle check and the standalone
-  task), so the records are the fit loop's heartbeat. `outcome` is `written`,
+  task), so the records are the fit loop's heartbeat. The exception: a
+  non-captain serving the captain's published fit (#10395) runs no check and
+  emits none; `fit-pub/status.json` holds its outcome. `outcome` is `written`,
   `skipped`, `error` or `panic`; a skip's `skip_reason` is one of `disabled`,
   `held`, `today_exists`, `no_snapshots`, `stale_before_grace`. The last record
   is also kept at `.loom/state/eta/health/fit-check.json` (and each refresh
@@ -1526,15 +1528,55 @@ them with a daemon restart.
   ([daemon-reference → Fleet captain](daemon-reference.md#fleet-captain-8848)).
   Pick a captain with reader Apps, the OTLP exporter, and every fleet repo
   provisioned or already snapshotted. Every other host makes **no** forge call
-  and emits no record, but still runs the daily fit on the snapshots it has.
-  Those are the captain's only when `LOOM_ETA_FLEET_SNAPSHOT_DIR` is shared
-  with it; otherwise they are its own older ones, or none. With **no** captain
+  and emits no record. With `fleet.repo` set it instead takes the captain's
+  **published fit** (below); without it, it fits only on the snapshots it has,
+  which are the captain's only when `LOOM_ETA_FLEET_SNAPSHOT_DIR` is shared
+  with it, otherwise its own older ones, or none. With **no** captain
   declared, every host with a reader refreshes, as before, and logs a hint
   once. That keeps a single-host install's fit, but N hosts spend N times the
   shared reader budgets. The gate is re-read every tick, so editing
   `fleet.captain` needs no restart. The opt-in
   [SigNoz in-sweep half](#signoz-in-sweep-half-fleetrefreshsignoz-9758) is not
   gated: it spends no reader budget.
+
+- **When to declare `fleet.captain`: once `fleet.repo` is set** (#10395). The
+  captain fits once and publishes the coefficient file to a dedicated branch of
+  the fleet store; every other host fetches, verifies and installs it, so all
+  hosts serve the same `fit_id` (byte-identical estimates, and consistent
+  shadow scoring). So on a multi-host fleet declare `fleet.captain` **and** set
+  `fleet.repo`. With `fleet.captain` but no `fleet.repo`, non-captain hosts
+  cannot learn the fit and drift to `no_model`: do not declare a captain
+  there. On a single host, or with no captain, nothing changes.
+  - **Branch.** `fleet.etaFitRef` (default `eta-fit`), created from `fleet.ref`
+    on first publish; a `fleet.etaFitRef` equal to `fleet.ref` or `main` is
+    refused, never written. Files: `eta/fit/<fit_id>.json` (the coefficient file, byte
+    for byte) and `eta/fit/latest.json` (the `eta-fit-pub/v1` envelope:
+    `schema`, `fit_id`, `as_of`, `window{start,end}`, `captain_host`, `fitter`,
+    `file`, `sha256`, `published_at`), written last. Commit history is the audit
+    trail; nothing prunes the branch yet.
+  - **Prerequisites.** The captain's writer App needs `contents: write` on the
+    store repo, and the `eta-fit` branch must be exempt from the `main`
+    ruleset. Other hosts need nothing new: they read through the reader or
+    writer App they already use for `fleet.repo`, one conditional request (a
+    free 304 in the steady state) per refresh interval.
+  - **Verification** (any failure keeps the previous fit and is recorded):
+    envelope schema and a bare `<16 hex>.json` file name; sha256 of the exact
+    fetched bytes; `eta-fit/v1` parse; file `id`/`as_of`/window equal the
+    envelope's; `captain_host` equals the declared `fleet.captain` (a former
+    captain's file is refused); same feature set; `as_of` not in the future,
+    not older than `fleet.etaFitMaxAgeDays` (default 3), and not older than the
+    newest local fit.
+  - **Captain change.** A publication is the fit *and* its captain and
+    destination: after a failover the new captain republishes the fit it
+    installed under its own name (same file, new envelope), and so does a
+    captain publishing to a new `fleet.repo` or `fleet.etaFitRef`. Until it
+    does, hosts refuse the former captain's envelope and keep their fit.
+  - **Fallback.** No `fleet.repo`, no branch, a fetch error, a refusal or a
+    stale publication: the host keeps its newest local fit (or `no_model`), and,
+    when it has fresh snapshots, fits itself as before. A publish failure on
+    the captain is logged and never fails the fit or the cycle. State for
+    `eta doctor`: `fit-pub/status.json` beside the fit directory (last outcome,
+    refusal code, published `fit_id`, captain, age, `publish_error`).
 
 - **Cadence.** The first cycle runs 120 s after start, then every
   `intervalSecs`, skipping missed ticks. Each cycle runs off the tick in a

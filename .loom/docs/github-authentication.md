@@ -439,6 +439,15 @@ Every host is configured the same way. There is no per-host pinning:
   error is withdrawn (until the reported reset, where GitHub gives one) and
   the read is retried once on the writer. Reads fall back to the writer when
   no reader is usable.
+- **CI telemetry** reads its repos' runs, jobs, logs and artifacts on each
+  repo's reader. GitHub's `Link` header spells page 2+ of a repo listing as
+  `repositories/<id>/…`, which names no repo, so the poller reads every page
+  for the repo page 1 named (same reader, same accounting `rp`). Artifact
+  downloads (`gh run download`) go reader-first too, with the same writer
+  retry; a reader without `actions: read` on a repo falls back to the writer
+  and is withdrawn for that repo only. Owner discovery (`orgs/…/repos`,
+  `users/…/repos`) and the closing-issue GraphQL lookup name no repo and stay
+  on the writer.
 - **Reader tokens** are minted per managed owner every ~5 minutes into
   `.loom/gh-config-by-owner/<owner>/<app-id>/`, with an `identity.json`
   recording the expiry. A read only uses a reader token with at least two
