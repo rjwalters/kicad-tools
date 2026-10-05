@@ -3359,6 +3359,30 @@ commits**, which keep the PR branch's re-date commits reachable (verified
 undercounts. The PR's `loom:stale-check-redate` comment stays the budget's
 durable record either way.
 
+#### Re-dates per PR and time to land (#10163)
+
+On 2026-10-04 chain head #9832 was re-dated three times in about 40 minutes
+while `main` kept moving under it, and 31 approved PRs waited behind it. The
+per-check table above says *why* re-dates happen. It does not say *which PR*
+keeps being re-dated or how long that PR waited, so the livelock did not show
+on the dashboard. `merge_pr::redate::chain_telemetry` adds the per-PR view.
+
+| Surface | What it shows |
+|---------|---------------|
+| `merge-pr redate-report` | A `Per PR` section in the text output and `chains` in `--json`. Each row has the PR, its re-date count, the first and last re-date times, the landing merge's time, `time_to_land_secs` (first re-date to landing), and `stuck` (not landed after at least the default re-date budget of 3). |
+| `metric.points` (OTLP) | `loom.merge.redate_prs{state=landed\|pending\|stuck}`, `loom.merge.redates_max{state=landed\|pending}` and `loom.merge.time_to_land_max` (seconds). These are trailing-24 h gauges sampled on the `host.health` cadence by `observability::ops::redate_chain`. They are never labelled by PR. Every host that manages the repo reports it, so read them with `max` across hosts. A non-zero `stuck`, or a rising `redates_max{state=pending}`, is the livelock signature. |
+
+Unlike the per-check table, these rows also read every local
+**remote-tracking** ref (`git log <ref> --remotes`). A re-date commit only
+reaches `main` when its PR merges, so a PR that is still livelocked has all of
+its re-dates on its own branch. Everything is read from local git: nothing is
+fetched and no forge call is made. A PR is therefore seen as of the clone's last
+fetch. A remote branch whose PR closed unmerged reads as not landed until it is
+pruned, and the window bounds that error. Landing lookups are capped at 64 PRs
+per pass, most re-dated first. Telemetry only observes the livelock. The
+daemon-enforced chain-head merge lock that would prevent it is a separate
+follow-up.
+
 #### Anchoring an unmarked verdict (#6319)
 
 Failing safe on a missing marker is correct, but it is not a resting state: an

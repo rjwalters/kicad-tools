@@ -112,6 +112,11 @@
 #   LOOM_TEST_DAEMON_BIN_STRICT_FRESHNESS=1   make the stale-binary warning fatal.
 #   LOOM_TEST_DAEMON_BIN_QUIET=1              suppress the one-line resolution
 #                                             trace (warnings still print).
+#
+# Sourcing also exports LOOM_GH_NO_POLICY_LAUNCHER=1 (#9995): a suite that
+# stubs `gh` (via LOOM_GH_BIN or on PATH) must never have the pinned daemon
+# exec a host forge-egress policy's managed launcher instead of the stub.
+export LOOM_GH_NO_POLICY_LAUNCHER=1
 
 # ---------------------------------------------------------------------------
 # Small portability helpers. Every one of them is safe under `set -euo pipefail`

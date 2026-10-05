@@ -457,6 +457,14 @@ and review requested → merged. It reads ETag-cached stage listings every 5
 minutes plus at most 8 per-item reads per sample, never per tick. Details are
 in [`telemetry-schema.md`](telemetry-schema.md#metricpoints).
 
+**Merge-chain re-date pressure (#10163).** Three gauges track the #8508
+re-date remedy over a trailing 24 h: `loom.merge.redate_prs{state}`
+(`landed`, `pending`, `stuck`), `loom.merge.redates_max{state}` and
+`loom.merge.time_to_land_max`. They are read from local `git log` on the
+`host.health` cadence, with no forge call. A non-zero `stuck` series is a
+merge-chain head that `main` keeps moving under. Details are in
+[`telemetry-schema.md`](telemetry-schema.md#metricpoints).
+
 **Per-issue dispatch disposition (#9222).** `loom.dispatch.admission` only
 covers candidates that reached a `dispatch()` attempt — a candidate filtered
 out earlier (`workspace_halted`, `parked`, `deferred_saturation`,
@@ -518,6 +526,20 @@ its issue, so #9445 resolves that from the session's worktree/branch as well as
 from a slash-command argument (and its `loom.repo` from the workspace's git
 remote, as an `owner/name` slug or not at all). Details are in
 [`telemetry-schema.md`](telemetry-schema.md#metricpoints).
+
+**GitHub rate limit (#10022).** Each rate-limit breaker trip emits one
+`loom.ratelimit.trip` span (never one per re-trip while cooling), carrying the
+job that tripped it (`loom.ratelimit.source`), the cooldown end and, per pool,
+the probe's `used` split into this host's own share and the external share
+(`github.ratelimit.{core,graphql}.{used,own,external}`) — the `attribution:`
+line from `daemon.log`, now queryable fleet-wide. Every 60 s the collector
+probes `gh api rate_limit` (free: it does not count against the quota) and
+exports `github.ratelimit.{remaining,used,reset}` gauges labelled `resource`
+(`core`|`graphql`) and `account` (`app-<app id>` for the daemon's GitHub App,
+the `gh` login for an ambient credential, else `unknown` — never a token or
+path), and flushes `github.ratelimit.breaker_skips{reason=<job>}`: one per
+pass a job skipped while the breaker suppressed. A host that never enables an
+OTLP exporter exports none of this; its evidence stays in `daemon.log`.
 
 To add a signal, add a `MetricName` or `SpanName` variant. If it needs a new
 label or attribute key, extend `OPS_METRIC_LABEL_KEYS` or

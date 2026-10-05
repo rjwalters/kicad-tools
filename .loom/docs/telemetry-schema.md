@@ -1582,6 +1582,22 @@ baseline, so a restart never replays history. Every host managing a repo
 samples it: sums scale with the host count, means do not. Completed sweeps'
 own phase durations remain the cycle-time rollup's (#8692).
 
+Merge-chain re-date pressure (Issue #10163, `observability/ops/redate_chain.rs`).
+These are `Gauge`s over a trailing 24 h window, sampled on the `host.health`
+cadence from local `git log` only, with no forge call. They are never labelled
+by PR or repo. Read them with `max` across hosts:
+
+| Metric | Unit | Labels | Meaning |
+|---|---|---|---|
+| `loom.merge.redate_prs` | `{pull_request}` | `state` ∈ `landed`, `pending`, `stuck` | PRs with at least one #8508 re-date commit. `stuck` is the subset of `pending` that has spent at least the default re-date budget (3). |
+| `loom.merge.redates_max` | `{redate}` | `state` ∈ `landed`, `pending` | the most re-dates any one PR took |
+| `loom.merge.time_to_land_max` | `s` | none | longest time from a PR's first re-date to its landing merge. Omitted when nothing landed. |
+
+`redate_prs` and `redates_max` are emitted every sample, zeros included. The
+per-PR rows are in `loom-daemon merge-pr redate-report --json` (`chains`); see
+[`daemon-reference.md`](daemon-reference.md) §"Re-dates per PR and time to
+land".
+
 The dwell names (#8856) are `loom.queue.oldest_wait`, `loom.queue.starved`,
 `loom.queue.starved.by_reason` and `loom.queue.dispatch_wait[.samples]`. They
 measure how long ready-queue issues have waited; for depth, use
@@ -1691,6 +1707,24 @@ Tokens, providers and pools (Issues #8908, #8931):
 | `loom.pool.account_marks` | delta `Sum` | `{account}`; labels `provider`, `reason` | one per account mark the daemon writes, at the seam that writes it: sweep and role-tick Codex terminal feedback (`provider=codex`), API-key pool bad marks (`provider` = the pool namespace, e.g. `zai`), and the Claude insta-crash exhaustion mark (`claude`). `reason` ∈ `rate_limited`, `exhausted`, `session_limit`, `model_credits`, `credential`, `transient`. No point when no mark is written (a native credential failure, a Codex `SUCCESS`/`TIMEOUT`, a failed write) |
 | `loom.pool.hold` span | own root trace (derived from `loom.pool.hold.pool` + hold start) | `loom.pool.hold.pool` (16-hex SHA-256 prefix of the pool directory — the pool's identity, never its path), `loom.pool.hold.post_mortem` (`true` when a real token-selection death armed it), `loom.pool.hold.accounts` | one work-finder pool dispatch hold, from arming to clearing. A hold still armed when the daemon stops emits no span |
 | `loom.runtime.usage` span | one per **model**, child of the unit it measures (see below) | `loom.usage.scope` (`execution` \| `attempt`), `loom.model`, `loom.tokens.input`, `.output`, `.cache_read`, `.cache_write` (= `.cache_write_5m` + `.cache_write_1h`), `.total`; aliases `gen_ai.usage.input_tokens` (**uncached input only, NOT total input** — decision #9315: kept, following Anthropic's vocabulary and so that `input + cache_read + cache_write` never double-counts; a generic OTel GenAI consumer must add `.cache_read_input_tokens` and `.cache_creation_input_tokens` to get total input, as the downstream telemetry consumer must), `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens`; `loom.cost.usd_estimate` = `gen_ai.cost.usd_estimate` with `loom.pricing.verified_on` and `loom.pricing.source` (`asset` \| `compiled`); optional `loom.runtime`, `loom.role`, `loom.attempt`, `loom.sweep_id`, `loom.issue`, `loom.pr_number` | one unit's exact token usage for one model (#8908, #9204, #9303). Absent when usage is unknown or has no model rows; a model row's measured-zero counter is `"0"`. No cost attributes for a model the rate card does not know (never a Sonnet fallback) |
+
+GitHub rate limit (Issue #10022):
+
+| Signal | Kind | Unit / attributes | Meaning |
+|---|---|---|---|
+| `loom.ratelimit.trip` span | instant span, own root trace (derived from `loom.ratelimit.source` + trip instant) | `loom.ratelimit.source` (the tripping job), `loom.ratelimit.cooldown_until` (RFC 3339), `github.ratelimit.core.used`, `.core.own`, `.core.external`, and the same three for `graphql` | one per rate-limit breaker trip; a re-trip while cooling emits nothing. `used` is the trip-time probe's pool-wide count, `own` this host's forge-call ledger for the window, `external` = `used − own`. Each is **omitted** (not 0) when unknown: no `used` in the probe, an untrusted probe reading (#8997), or the ledger sink off |
+| `github.ratelimit.remaining` | `Gauge` | `{request}`; labels `resource`, `account` | requests left in the pool, from a `gh api rate_limit` probe every 60 s (falling back to the breaker's last trip-time reading when the probe fails, only while that reading's reset windows are still open). An unresolvable `account` stays `unknown` and is retried at most every 20 min, never while the breaker is suppressing |
+| `github.ratelimit.used` | `Gauge` | `{request}`; labels `resource`, `account` | requests spent this window; absent when the response carried no `used` |
+| `github.ratelimit.reset` | `Gauge` | `s` (Unix epoch seconds); labels `resource`, `account` | when the pool's window resets |
+| `github.ratelimit.breaker_skips` | delta `Sum` | `{pass}`; label `reason` | job passes skipped because the breaker was suppressing, flushed on the 60 s tick |
+
+`resource` ∈ `core`, `graphql`. `account` is `app-<app id>` when the daemon
+runs on its GitHub App credential, the validated `gh` login for an ambient
+credential, else `unknown` — never a token, token hash or path. `reason` and
+`loom.ratelimit.source` ∈ `work_finder`, `claim_reconciliation`,
+`role_runner`, `epic_supervisor`, `quarantine_reconciliation`,
+`ci_telemetry`, `outcome_journal`, `star_liveness`, `other`. Names follow the
+`github.ratelimit.*` prefix of an external fleet schema.
 
 **Usage spans: scope, sources, and how to total them (#9204, #9303).**
 
@@ -1938,9 +1972,9 @@ closes those estimates stay pending.
 `stage_at_estimate` value (and a `stage_marks[]` / `stages[]` stage) on
 `eta.estimate` and `eta.outcome`, but **only from a heuristic that models the
 hold**: today the shadow `land-2026-10-04-twin-otter`. Every path-engine
-heuristic refuses it as `blocked`, exactly as before, so it never appears in
-`eta.snapshot` while `current.land` is one of them (those rows carry only
-`current`'s estimate). Once a hold-aware
+heuristic refuses it as `blocked`, exactly as before. In `eta.snapshot` it
+never becomes a row's `stage` while `current.land` is one of them; a shadow's
+estimate appears only under the row's `alternates[]` (stage-less, #10390). Once a hold-aware
 heuristic is promoted, consumers must render an unknown `stage` value
 gracefully.
 
@@ -2024,11 +2058,31 @@ Each row:
 | `pr` | integer, optional | the PR the work is in, when one is known |
 | `kind` | string | `start`, `finish` or `land` |
 | `p25` / `p50` / `p75` | integer, optional | **remaining seconds** from `as_of`, not an instant. All three absent on a refusal |
-| `heuristic` | string | the heuristic that made it — always the kind's **`current`** one. A shadow candidate's estimate (#9328) is never shown as the ETA and never appears here |
+| `heuristic` | string | the heuristic that made it — always the kind's **`current`** one. A shadow candidate's estimate (#9328) is never shown as the ETA; it appears only under `alternates[]` |
 | `estimate_id` | string | the derived id of the `eta.estimate` record in SigNoz: the join key for "why this ETA?" |
 | `as_of` | RFC 3339 | the instant this estimate describes |
 | `stage` | string, optional | the stage the item was in (`ready_wait`, `sweep.curator`, …) |
 | `no_estimate_reason` | string, optional | why there is no estimate (`blocked`, `human_gated`, `insufficient_samples`, …), present exactly when the quantiles are absent |
+| `alternates[]` | array, optional | shadow heuristics' estimates for the same item (#10390); omitted when empty, so `start`/`finish` rows and hosts without shadows are unchanged |
+
+**`alternates[]` (#10390)** is additive: `schema_version` stays 12 and older
+readers ignore it. One entry per registered non-current heuristic of the row's
+kind that has a pending estimate for the item — the newest per heuristic
+(matched by item, never by equal `as_of`), sorted by `heuristic`, at most 8
+(loom-ui slices at 8). Built only from estimates the tracker already holds; an
+alternate never creates a row, and a row cut by the 200-row cap takes its
+alternates with it. A change to a shadow estimate alone triggers a new
+snapshot. Each alternate:
+
+| Field | Type | Notes |
+|---|---|---|
+| `heuristic` | string | e.g. `land-2026-10-04-twin-otter` |
+| `estimate_id` | string | that heuristic's own `eta.estimate` id, for "why this ETA?" |
+| `as_of` | RFC 3339 | the alternate's own `as_of`, which may differ from the row's; the ETA anchor for `p50` |
+| `p25` / `p50` / `p75` / `p90` | integer, optional | remaining seconds from the alternate's `as_of`. Absent on a refusal (the `p25`/`p50`/`p75` triple is all-or-nothing) |
+| `no_estimate_reason` | string, optional | why the shadow refused (`no_model`, `blocked`, …) |
+
+There is no `stage` on an alternate; consumers use the row's.
 
 **Absent is never zero**, and a refusal is a row. An issue the model cannot
 estimate is carried with its `no_estimate_reason` and no quantiles: that it

@@ -295,6 +295,32 @@ future reclamation decision's evidence, not the claim's own validity.
   renewing until the 4 h / 24 h age cap. Re-list reasons (`full-window`,
   `missing-comment`, `patch-404`) are logged and exported as
   `LOOM_LEASE_FALLBACK_REASON` for gh-shim telemetry.
+- **Whose bucket.** Each call asks `loom-daemon forge token` for the host's
+  GitHub App installation: a reader App for the two GETs, the writer App for
+  the PATCH. `forge_gh_perm_safe`'s 403 ladder still runs under that token.
+  A host with no App, or an App attempt that fails for any reason, re-runs
+  the call on the caller's own credential, exactly as before, and tags it
+  `lease-credential=ambient-fallback` on stderr. `LOOM_LEASE_CREDENTIAL`
+  (`app` or `ambient`) is exported for gh-shim telemetry per attempt, not per
+  call: when the ladder recovers an App 403 on a personal rung
+  (`LOOM_PERSONAL_GH_TOKEN` or the ambient personal login), that attempt is
+  `ambient`, an escalated ladder prints one `lease-credential-attempt:` line
+  per attempt, and the call is tagged `lease-credential=ambient-recovered`,
+  even though it succeeded. On a host with an
+  App, a held lease therefore costs the personal login nothing in steady
+  state. The 36/h lands on the App buckets instead.
+- **Why `--paginate` recurred.** A full listing is meant to happen once per
+  loop, on its first cycle. Two paths made it recur. First, a loop with no
+  trusted, matching lease comment exits 2 on every cycle. That clears the
+  cache, so the next cycle lists everything again, for the loop's whole life.
+  Such a loop now stops after two consecutive misses, one interval apart, and
+  any successful renewal in between resets the count. Second, the cached window
+  was anchored at the lease's `created_at`, so it grew for the claim's whole
+  life and could fill a page (`full-window`). The cursor is now the lease
+  comment's `updated_at` as the previous cycle listed it. Every comment
+  created after that listing is still inside the window, so the own-yield
+  guard sees every new `loom:lease-yield`. The window now spans about two
+  intervals.
 
 ## For Phase 2 (reclamation) and Phase 3 (fencing)
 

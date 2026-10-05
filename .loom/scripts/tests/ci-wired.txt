@@ -177,6 +177,7 @@ test-resync-installed-dogfood-symlink.sh
 test-resync-installed-stamp.sh
 test-resync-installed-output-staging.sh
 test-resync-installed.sh
+test-resync-installed-egress-doctor.sh
 test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
 test-run-ci-suites-failure-excerpt.sh

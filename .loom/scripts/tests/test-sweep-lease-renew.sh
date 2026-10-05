@@ -160,6 +160,12 @@ assert_true() {
     fi
 }
 
+# wait_until <cmd...> -- poll (max ~5s) until the command succeeds. A cycle
+# also pays the state read and the App-credential probe (#10229), so a fixed
+# sleep sized for one cycle is a race on a loaded host.
+wait_until() { local w=0; until "$@" || ((w >= 25)); do sleep 0.2; w=$((w + 1)); done; }
+not_alive() { ! kill -0 "$1" 2> /dev/null; }
+
 if [[ ! -x "$SCRIPT" ]]; then
     echo -e "${RED}FATAL${NC}: $SCRIPT not found or not executable" >&2
     exit 2
@@ -601,7 +607,7 @@ export LOOM_HOST_ID="$OWN_RAW_HOST"
 export LOOM_TERMINAL_ID="daemon-sweep-mine-1000"
 LOOP_PID_J="$("$SCRIPT" start 6485 --interval 1 --watch-pid "$WATCH_PID_J" 2> "$STUB_DIR/start-j-stderr.log")"
 unset LOOM_HOST_ID LOOM_TERMINAL_ID
-sleep 1.8
+wait_until test -f "$STUB_DIR/patch-10-1.body"
 kill "$WATCH_PID_J" 2> /dev/null || true
 wait "$WATCH_PID_J" 2> /dev/null || true
 sleep 0.5
@@ -623,7 +629,7 @@ JSON
 sleep 8 &
 WATCH_PID_K=$!
 LOOP_PID_K="$("$SCRIPT" start 6485 --interval 1 --watch-pid "$WATCH_PID_K" --host k-host --sweep-id k-sweep 2> "$STUB_DIR/start-k-stderr.log")"
-sleep 1.8
+wait_until not_alive "$LOOP_PID_K"
 LOOP_ALIVE_AFTER_YIELD="false"
 kill -0 "$LOOP_PID_K" 2> /dev/null && LOOP_ALIVE_AFTER_YIELD="true"
 assert_true "$([[ "$LOOP_ALIVE_AFTER_YIELD" == "false" ]] && echo true || echo false)" "(k) loop has already self-terminated shortly after its own-yield guard fires, without waiting for the watched PID to die"
@@ -753,7 +759,7 @@ JSON
 sleep 8 &
 WATCH_PID_M3=$!
 LOOP_PID_M3="$("$SCRIPT" start 6485 --interval 1 --watch-pid "$WATCH_PID_M3" --host m3-host --sweep-id m3-sweep 2> "$STUB_DIR/start-m3-stderr.log")"
-sleep 1.8
+wait_until not_alive "$LOOP_PID_M3"
 LOOP_ALIVE_M3="false"
 kill -0 "$LOOP_PID_M3" 2> /dev/null && LOOP_ALIVE_M3="true"
 assert_true "$([[ "$LOOP_ALIVE_M3" == "false" ]] && echo true || echo false)" "(m3) the #6485 own-yield-guard exit-4 path still self-terminates the loop immediately (unchanged)"

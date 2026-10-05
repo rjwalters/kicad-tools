@@ -2,7 +2,8 @@
 # trust-stub.sh -- a `loom-daemon` stand-in for shell suites whose subject
 # calls the daemon's `forge` verbs. Source it, then call `loom_trust_stub
 # <stub-dir>`: it writes <stub-dir>/loom-daemon and exports LOOM_DAEMON_BIN to
-# it. Covers two verbs:
+# it. Covers these verbs (plus `forge may-write`, `lease renewer` and
+# `forge token`, documented at their branches):
 #
 # `forge trusted-comments` (#9548, loom-daemon/src/comment_trust.rs) -- the
 # stub mirrors the real predicate for the shapes fixtures use: a repo insider
@@ -78,6 +79,19 @@ if [[ "${1:-} ${2:-}" == "lease renewer" ]]; then
             ;;
         check) exit "$(cat "$d/renewer-check-rc" 2> /dev/null || echo 0)" ;;
     esac
+    exit 0
+fi
+# #10229: `forge token --repo R --access A` answers not_configured unless
+# `app-token` exists in LOOM_TEST_STUB_DIR, in which case the token is that
+# file's content plus "-<access>" (so a gh stub can tell reader from writer).
+# Every argv is appended to `forge-token-args.log`.
+if [[ "${1:-} ${2:-}" == "forge token" ]]; then
+    d="${LOOM_TEST_STUB_DIR:-/dev/null/x}"
+    echo "$*" >> "$d/forge-token-args.log" 2> /dev/null
+    access="write"
+    while [[ $# -gt 0 ]]; do [[ "$1" != --access ]] || access="${2:-}"; shift; done
+    [[ -f "$d/app-token" ]] || { echo '{"status":"not_configured","access":"'"$access"'"}'; exit 0; }
+    echo '{"status":"ok","token":"'"$(cat "$d/app-token")-$access"'","access":"'"$access"'"}'
     exit 0
 fi
 echo "trust stub: unexpected loom-daemon $*" >&2

@@ -18,6 +18,11 @@
 #   (y5) release delegates to `lease renewer release` with its flags
 #   (y6) per-cycle call budget: one state read + one window read + one PATCH
 #   (y7) fail-open: a daemon without the verb (exit 2) still renews
+#   (z1)-(z4) credential routing: reads on a reader App, the PATCH on the
+#        writer, ambient fallback on any App failure, ladder kept, 404 kept
+#   (z5) sliding window cursor + own-yield guard retained
+#   (z6)/(z7) a loop with no lease stops after two consecutive misses; a hit
+#        in between resets the count
 #
 # With LEASE_RENEWER_DAEMON=<built loom-daemon> the stub hands `lease renewer`
 # to the real binary and (r1)-(r4) run end to end: closed issue, concurrent
@@ -69,6 +74,12 @@ while [[ $# -gt 0 ]]; do
     *) [[ -n "$path" ]] || path="$1"; shift ;;
   esac
 done
+# #10229: which credential each call ran on, and an App-only failure to inject.
+echo "$method ${path%%\?*} tok=${GH_TOKEN-<unset>} cred=${LOOM_LEASE_CREDENTIAL-<unset>}" >> "$D/cred.log"
+if [[ "${GH_TOKEN:-}" == ghs_app* && -f "$D/app-fail-$method" ]]; then
+  [[ "$(cat "$D/app-fail-$method")" == 403 ]] && echo "HTTP 403: Resource not accessible by integration" >&2 || echo "gh: Not Found (HTTP 404)" >&2
+  exit 1
+fi
 if [[ "$method" == "GET" && "$path" == repos/*/issues/*/comments* ]]; then
   echo "$path" >> "$D/list-calls.log"; cat "$D/comments.json"; exit 0
 fi
@@ -80,6 +91,7 @@ if [[ "$method" == "GET" && "$path" == repos/*/issues/[0-9]* ]]; then
   exit 0
 fi
 if [[ "$method" == "PATCH" && "$path" == repos/*/issues/comments/* ]]; then
+  [[ ! -f "$D/patch-404-once" ]] || { rm -f "$D/patch-404-once"; echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
   echo "${path##*/}" >> "$D/patch-calls.log"; echo '{}'; exit 0
 fi
 echo "stub gh: unhandled: $method $path" >&2; exit 3
@@ -100,11 +112,12 @@ loom_trust_stub "$STUB_DIR"
 write_scope_register "$STUB_DIR/checkout" acme/widget
 cd "$STUB_DIR/checkout" || exit 1
 export LOOM_GITHUB_APP_SCRIPT="$STUB_DIR/github-app-token.sh"
-unset LOOM_PERSONAL_GH_TOKEN LOOM_TERMINAL_ID LOOM_HOST_ID LOOM_LEASE_PUBLISH_HOSTNAME HOSTNAME LOOM_SWEEP_ID LOOM_ROLE LOOM_REPO 2> /dev/null || true
+unset GH_TOKEN GITHUB_TOKEN LOOM_PERSONAL_GH_TOKEN LOOM_TERMINAL_ID LOOM_HOST_ID LOOM_LEASE_PUBLISH_HOSTNAME HOSTNAME LOOM_SWEEP_ID LOOM_ROLE LOOM_REPO 2> /dev/null || true
 
 reset_state() {
     rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/issue-state* "$STUB_DIR"/state-calls.log \
-        "$STUB_DIR"/list-calls.log "$STUB_DIR"/patch-calls.log "$STUB_DIR"/renewer-* "$STUB_DIR"/r2-out.*
+        "$STUB_DIR"/list-calls.log "$STUB_DIR"/patch-calls.log "$STUB_DIR"/renewer-* "$STUB_DIR"/r2-out.* \
+        "$STUB_DIR"/cred.log "$STUB_DIR"/app-* "$STUB_DIR"/forge-token-args.log "$STUB_DIR"/z-*.log
     rm -rf "$LOOM_LEASE_RENEW_STATE_DIR" 2> /dev/null || true
     echo "[$Y_LEASE]" > "$STUB_DIR/comments.json"
 }
@@ -254,6 +267,145 @@ P="$(patch_n)"
 S="$(cat "$STUB_DIR/state-calls.log" 2> /dev/null | wc -l | tr -d ' ')"
 L="$(cat "$STUB_DIR/list-calls.log" 2> /dev/null | wc -l | tr -d ' ')"
 assert_eq "true" "$([[ "$P" -ge 3 && "$S" -ge "$P" && "$S" -le $((P + 1)) && "$L" -ge "$P" && "$L" -le $((P + 1)) ]] && echo true || echo false)" "(y6) one state read, one list read, one PATCH per cycle (p=$P s=$S l=$L)"
+# (y6) no App configured: every call runs on the caller's own credential.
+assert_eq "" "$(grep -v 'tok=<unset> cred=ambient$' "$STUB_DIR/cred.log" 2> /dev/null)" "(y6) without an App every call is ambient, untagged as a fallback"
+
+# --- Credential routing (#10229): reads on a reader App, the PATCH on the writer.
+cred_lines() { sed 's/ repos\/[^ ]*\/issues\/comments\/[0-9]*/ PATCH-PATH/; s/ repos\/[^ ]*\/issues\/[0-9]*\/comments/ LIST-PATH/; s/ repos\/[^ ]*\/issues\/[0-9]*/ STATE-PATH/' "$STUB_DIR/cred.log" 2> /dev/null | sort -u; }
+
+# (z1) App configured: the loop's state read and window read use the reader
+# token, the PATCH the writer token, and nothing touches the ambient login.
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+sleep 30 &
+WATCH=$!
+LOOP="$(start_loop 10229 "$WATCH")"
+wait_patches 2
+kill "$LOOP" "$WATCH" 2> /dev/null
+assert_eq "GET LIST-PATH tok=ghs_app-read cred=app
+GET STATE-PATH tok=ghs_app-read cred=app
+PATCH PATCH-PATH tok=ghs_app-write cred=app" "$(cred_lines)" "(z1) reads on the reader App, the PATCH on the writer App, no ambient call"
+assert_eq "true" "$(grep -q -- '--repo acme/widget --access read' "$STUB_DIR/forge-token-args.log" && grep -q -- '--repo acme/widget --access write' "$STUB_DIR/forge-token-args.log" && echo true || echo false)" "(z1) the token is asked for this checkout's repo, per access"
+
+# (z2) the App cannot PATCH (404: not installed on this repo) -> the call re-runs
+# on the caller's credential, tagged, and the renewal still lands.
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+echo 404 > "$STUB_DIR/app-fail-PATCH"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep 2>&1)"
+RC=$?
+assert_eq "0" "$RC" "(z2) renewal succeeds after the App attempt fails"
+assert_eq "true" "$([[ "$OUT" == *"lease-credential=ambient-fallback"* ]] && echo true || echo false)" "(z2) the fallback is tagged on stderr"
+assert_eq "PATCH tok=<unset> cred=ambient" "$(grep '^PATCH' "$STUB_DIR/cred.log" | tail -n1 | sed 's/ repos[^ ]*//')" "(z2) the retry ran on the ambient credential"
+assert_eq "1" "$(patch_n)" "(z2) exactly one PATCH landed"
+
+# (z3) an App permission-scope 403 still climbs forge_gh_perm_safe's ladder
+# under the App attempt (the personal rung recovers), with no wrapper-level
+# fallback -- but the recovering attempt is attributed ambient, not app, and the
+# recovery is visible on stderr although the call succeeded.
+z3_patches() { grep '^PATCH' "$STUB_DIR/cred.log" | sed 's/ repos[^ ]*//'; }
+z3_attempts() { printf '%s\n' "$OUT" | sed -n 's/^lease-credential-attempt: //p'; }
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+echo 403 > "$STUB_DIR/app-fail-PATCH"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep 2>&1)"
+RC=$?
+assert_eq "0" "$RC" "(z3) a 403 on the App PATCH recovers through the ladder"
+assert_eq "false" "$([[ "$OUT" == *"lease-credential=ambient-fallback"* ]] && echo true || echo false)" "(z3) no wrapper fallback was needed"
+assert_eq "1" "$(patch_n)" "(z3) exactly one PATCH landed"
+assert_eq "PATCH tok=ghs_app-write cred=app
+PATCH tok=<unset> cred=ambient" "$(z3_patches)" "(z3) the App attempt is app; the ambient personal login's recovery is ambient"
+assert_eq "attempt=1 credential=app attribution=app
+attempt=2 credential=personal-ambient attribution=ambient" "$(z3_attempts)" "(z3) every attempt's credential and attribution is on stderr"
+assert_eq "true" "$([[ "$OUT" == *"lease-credential=ambient-recovered: the write call was recovered on the personal credential (personal-ambient)"* ]] && echo true || echo false)" "(z3) the personal recovery is tagged although the call succeeded"
+assert_eq "true" "$([[ "$OUT" == *"forge: still 403 after a fresh mint"* ]] && echo true || echo false)" "(z3) the ladder's own diagnostics are no longer discarded"
+assert_eq "" "$(grep -v '^PATCH' "$STUB_DIR/cred.log" | grep -v 'cred=app$')" "(z3) the reads stayed on the App"
+
+# (z3b) LOOM_PERSONAL_GH_TOKEN is the personal rung: also ambient.
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+echo 403 > "$STUB_DIR/app-fail-PATCH"
+OUT="$(LOOM_PERSONAL_GH_TOKEN=ghp_personal "$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep 2>&1)"
+assert_eq "0" "$?" "(z3b) the personal-token rung recovers the App 403"
+assert_eq "PATCH tok=ghs_app-write cred=app
+PATCH tok=ghp_personal cred=ambient" "$(z3_patches)" "(z3b) the LOOM_PERSONAL_GH_TOKEN attempt is attributed ambient"
+assert_eq "attempt=1 credential=app attribution=app
+attempt=2 credential=personal-token attribution=ambient" "$(z3_attempts)" "(z3b) every attempt's credential and attribution is on stderr"
+assert_eq "true" "$([[ "$OUT" == *"lease-credential=ambient-recovered: the write call was recovered on the personal credential (personal-token)"* ]] && echo true || echo false)" "(z3b) the personal recovery is tagged"
+
+# (z3c) the fresh-mint rung stays app; only the personal rung after it is ambient.
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+echo 403 > "$STUB_DIR/app-fail-PATCH"
+printf '#!/usr/bin/env bash\necho %s\n' "'{\"status\":\"ok\",\"token\":\"ghs_app-fresh\"}'" > "$STUB_DIR/github-app-token-ok.sh"
+OUT="$(LOOM_GITHUB_APP_SCRIPT="$STUB_DIR/github-app-token-ok.sh" "$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep 2>&1)"
+assert_eq "0" "$?" "(z3c) the ladder recovers after a fresh mint still 403s"
+assert_eq "PATCH tok=ghs_app-write cred=app
+PATCH tok=ghs_app-fresh cred=app
+PATCH tok=<unset> cred=ambient" "$(z3_patches)" "(z3c) App, fresh-mint App, then the ambient personal login"
+assert_eq "attempt=1 credential=app attribution=app
+attempt=2 credential=app-fresh-mint attribution=app
+attempt=3 credential=personal-ambient attribution=ambient" "$(z3_attempts)" "(z3c) every attempt's credential and attribution is on stderr"
+rm -f "$STUB_DIR/github-app-token-ok.sh"
+
+# (z3d) a clean App call stays silent: no attempt lines, no recovery tag.
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep 2>&1)"
+assert_eq "false" "$([[ "$OUT" == *"lease-credential"* ]] && echo true || echo false)" "(z3d) steady state prints no credential diagnostics"
+
+# (z4) a deleted comment 404s on BOTH credentials -> still recognised as a
+# PATCH 404, so the cached path re-lists (#10021) instead of failing.
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+echo 404 > "$STUB_DIR/app-fail-PATCH"
+touch "$STUB_DIR/patch-404-once"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep --cached-lease 42@2026-10-01T00:00:00Z 2>&1)"
+assert_eq "0" "$?" "(z4) a 404 on both credentials re-lists and renews"
+assert_eq "true" "$([[ "$OUT" == *"returned 404; re-listing"* ]] && echo true || echo false)" "(z4) it is still recognised as the patch-404 fallback"
+assert_eq "1" "$(patch_n)" "(z4) exactly one PATCH landed"
+
+# (z5) sliding window: the cursor is the lease's updated_at as listed, and a
+# yield record posted after it still stops renewal (own-yield guard retained).
+reset_state
+echo '[{"id": 42, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T05:00:00Z", "body": "<!-- loom:lease host=y-host sweep=y-sweep -->\nprose"}]' > "$STUB_DIR/comments.json"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep 2>&1)"
+assert_eq "true" "$([[ "$OUT" == *"lease-cache=42@2026-10-01T05:00:00Z"* ]] && echo true || echo false)" "(z5) the next cursor is the listed updated_at, not created_at"
+"$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep --cached-lease 42@2026-10-01T05:00:00Z > /dev/null 2>&1
+assert_eq "repos/{owner}/{repo}/issues/10229/comments?since=2026-10-01T05:00:00Z&per_page=100" "$(tail -n1 "$STUB_DIR/list-calls.log")" "(z5) the cached window starts at that cursor"
+echo '[{"id": 42, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T05:05:00Z", "body": "<!-- loom:lease host=y-host sweep=y-sweep -->\nprose"},
+ {"id": 43, "created_at": "2026-10-01T05:06:00Z", "updated_at": "2026-10-01T05:06:00Z", "body": "<!-- loom:lease-yield host=y-host sweep=y-sweep earliest_host=x earliest_sweep=z -->\nprose"}]' > "$STUB_DIR/comments.json"
+N="$(patch_n)"
+"$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep --cached-lease 42@2026-10-01T05:00:00Z > /dev/null 2>&1
+assert_eq "4" "$?" "(z5) a yield inside the sliding window still trips the own-yield guard"
+assert_eq "$N" "$(patch_n)" "(z5) ...and nothing is PATCHed"
+
+# (z6) no lease to renew: the loop stops after two consecutive misses instead
+# of paying a --paginate listing every interval forever; the parent lives on.
+reset_state
+echo '[{"id": 1, "body": "no lease here"}]' > "$STUB_DIR/comments.json"
+sleep 30 &
+WATCH=$!
+LOOP="$("$SCRIPT" start 10229 --interval 1 --watch-pid "$WATCH" --host y-host --sweep-id y-sweep 2> "$STUB_DIR/z-6.log")"
+waited=0
+while ((waited < 40)) && alive "$LOOP"; do sleep 0.2; waited=$((waited + 1)); done
+assert_eq "false" "$(yb alive "$LOOP")" "(z6) a loop with no lease comment stops on its own"
+assert_eq "true" "$(yb alive "$WATCH")" "(z6) the interactive parent was untouched"
+assert_eq "2" "$(wc -l < "$STUB_DIR/list-calls.log" | tr -d ' ')" "(z6) after exactly two listings"
+assert_eq "true" "$(grep -q 'no lease comment to renew on two consecutive cycles' "$STUB_DIR/z-6.log" && echo true || echo false)" "(z6) the stop is logged"
+assert_eq "0" "$(patch_n)" "(z6) nothing was PATCHed"
+
+# (z7) a miss followed by a hit resets the count: the loop keeps renewing.
+reset_state
+echo '[{"id": 1, "body": "no lease here"}]' > "$STUB_DIR/comments.json"
+LOOP="$("$SCRIPT" start 10229 --interval 2 --watch-pid "$WATCH" --host y-host --sweep-id y-sweep 2> /dev/null)"
+waited=0
+while ((waited < 50)) && [[ ! -s "$STUB_DIR/list-calls.log" ]]; do sleep 0.1; waited=$((waited + 1)); done
+echo "[$Y_LEASE]" > "$STUB_DIR/comments.json"
+wait_patches 2
+assert_eq "true" "$([[ "$(patch_n)" -ge 2 ]] && yb alive "$LOOP" || echo false)" "(z7) one miss then hits: the loop survives and renews"
+kill "$LOOP" "$WATCH" 2> /dev/null
+wait "$WATCH" 2> /dev/null
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

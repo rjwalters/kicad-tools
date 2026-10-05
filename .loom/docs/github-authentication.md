@@ -66,7 +66,7 @@ git helper is `gh auth git-credential` under `required`).
 
 `gh` resolution order: the managed shim first on `PATH` (#9987), then the
 system `gh`; `LOOM_GH_BIN` overrides the binary for the daemon, `gh-cached`
-and test stubs. **Prompts need no change to be routed** -- plain `gh ...` is
+and test stubs. Worker `PATH` also fronts plain `gh` with an ETag-revalidating read cache (#10331, `LOOM_GH_NO_CACHE=1` to bypass; see `gh-cached.md`). **Prompts need no change to be routed** -- plain `gh ...` is
 covered by construction. Do not assign `GH_HOST` or `GH_CONFIG_DIR`, pass the hostname flag, set the
 `gh` API-host config key, wrap `gh` in an environment-clearing `env`, call `gh` by absolute path, or
 `curl` the REST API host directly in prompts or scripts; use `gh api`. The

@@ -126,6 +126,7 @@ export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-check-ok.sh"
 export LOOM_DAEMON_SELF_BIN="$STUB_DIR/daemon"
 export LOOM_DAEMON_BIN="$STUB_DIR/daemon"
 export LOOM_GH_BIN="$STUB_DIR/gh"
+export LOOM_GH_NO_POLICY_LAUNCHER=1  # no host egress-policy launcher over the stub (#9995)
 export LOOM_WRITE_SCOPE_CACHE_DIR="$STUB_DIR/write-scope-cache"
 unset GH_REPO LOOM_REPO
 

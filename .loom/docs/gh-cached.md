@@ -216,6 +216,32 @@ merge that should not have happened, or a test that observes its own stale
 those carve-outs hold even if a caller wraps them by accident. The rest are
 enforced by the skills documenting the plain `gh` form at those call sites.
 
+## Default agent front (#10331)
+
+Dispatched workers get `gh` -> `loom-daemon` first on `PATH` (the worker spawn
+prepends a private shim dir; `loom-daemon gh-shim path` prints it). Plain
+`gh issue|pr view|list --json ...` is then served by ETag revalidation
+(`forge_cached_view` / `forge_cached_list`): a `304` proves the stored body
+current and costs no primary quota, so it is **never stale** and the
+gating carve-outs above stay correct. There is deliberately no identical-call
+TTL in the front; the TTL stays opt-in via `gh-cached`. Everything else
+(mutations, `api`, `run`, `pr diff|checks`, `repo view`, unknown or
+ambiguous argv, a TTY on stdout, hosts other than GitHub) execs the next `gh`
+with argv, streams and exit status untouched. The next `gh` is `LOOM_GH_BIN`,
+else the next `gh` on `PATH` (the managed launcher, #9987, when installed), so
+its policy and telemetry are composed with, not replaced. Any cache error
+degrades to that real `gh`.
+
+- **Escape hatch**: `LOOM_GH_NO_CACHE=1` (also `GH_CACHE_DISABLE=1`) forces a
+  real call. Env-only: there is no `--fresh` flag, since plain `gh` rejects it (#3547).
+- **Opt out of the shim**: `LOOM_GH_SHIM=0` at worker spawn.
+- **Reader App**: reads route to a configured reader App through
+  `forge_etag_store::fetch_conditional` (#9537); with none configured nothing
+  changes. Passthrough reads are tracked as follow-up work.
+- **Telemetry**: served reads are recorded under caller `agent_gh_front` in
+  `forge_call_stats`; set `GH_CACHE_OUTCOME_LOG` for `x-loom-cache`
+  `revalidated`/`bypass` records. Measure the 304 share, not process counts.
+
 ## Per-skill call-site inventory
 
 ### `/loom:sweep` (`sweep.md`)
