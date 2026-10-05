@@ -1711,10 +1711,12 @@ ROT_THRESHOLD_DAYS=3   # continuously CONFLICTING at least this long -> "rotting
 DIGEST_ROWS=""
 CONFLICT_SINCE_MARKERS=""
 HELD_ROTTING=0
-# #9244: starred (loom:operator-priority) held PRs sort to the top, marked ⭐.
-for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r 'sort_by([.labels[].name] | index("loom:operator-priority") == null) | .[].number'); do
+# #9244/#10307: starred held PRs sort to the top (level 2 first), marked ⭐ / ⭐⭐.
+# level list: keep in sync with operator_levels.rs LEVELS until #10311 (LVL and STAR)
+LVL='[.labels[].name] | if (index("loom:operator-high-priority") or index("loom:high-priority-inherited")) then 2 elif index("loom:operator-priority") then 1 else 0 end'
+for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r "sort_by(-($LVL)) | .[].number"); do
   ROW=$(printf '%s\n' "$HELD_JSON" | jq -c --argjson n "$PR_NUM" '.[] | select(.number == $n)')
-  STAR=$(jq -e '[.labels[].name] | index("loom:operator-priority")' <<<"$ROW" >/dev/null && echo '⭐ ' || true)
+  STAR=$(case "$(jq -r "$LVL" <<<"$ROW")" in 2) echo '⭐⭐ ';; 1) echo '⭐ ';; esac)
   PR_MERGEABLE=$(jq -r '.mergeable' <<<"$ROW")
   AT_DOCTOR=$(jq -e '[.labels[].name] | index("loom:changes-requested")' <<<"$ROW" >/dev/null && echo true || echo false)
 
@@ -3195,7 +3197,7 @@ line into the pass summary — measurement only, never a merge-order input.
 Full policy: `.loom/docs/pr-congestion-signal.md` (source:
 `defaults/docs/pr-congestion-signal.md`).
 
-**Starred PRs first (`loom:operator-priority`, #9244).** The shared queue puts stars
+**Starred PRs first (`loom:operator-priority`, #9244; level 2 before the star, #10307).** The shared queue puts stars
 ahead of interactive work, then ordinary work (oldest first within each class). The star changes order only: all 6
 Safety Criteria, the Verdict-State Janitor, and every hold (merge-risk,
 critical-file, `loom:operator-only`, `loom:blocked`) apply unchanged. A starred

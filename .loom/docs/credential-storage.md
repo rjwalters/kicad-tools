@@ -69,6 +69,10 @@ managed `gh` launcher process (`principal.credentialRef`), never in a profile.
 profile (`git.credential-from-api-profile`); git should use SSH or a dedicated
 git credential. See [github-authentication](github-authentication.md).
 
+A second PAT of the same GitHub user is **not** a second rate-limit pool, so
+never export a token globally or `launchctl setenv` it; see
+[Rate-limit pools: what actually splits the bucket](github-authentication.md#rate-limit-pools-what-actually-splits-the-bucket-9872).
+
 ## Persistent telemetry credentials
 
 Keep cloud credentials separate from the local Collector ingress credential.

@@ -94,7 +94,8 @@ fewer than 8 there too the estimate is refused.
 **Conditioning.** The current stage's draw is conditioned on the time already
 spent in it: draws come from the grid's `[F(age), 1]` range and the age is
 subtracted. Fewer than 5 samples longer than the age means the item has
-outlived its own history (`beyond_history`).
+outlived its own history (`beyond_history`). `land-v4` answers that case
+instead of refusing it — see "Stalls and the residual-life tail" below.
 
 **Combination.** A deterministic Monte Carlo of 4000 paths draws every stage
 a path visits from its grid, and a verdict at every `review_wait`
@@ -267,6 +268,7 @@ raw event cache imports it.
 | `land-v3` | `land` | `land-v2`'s, with each stage grid calibrated first: widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored (recorded per stage as `distribution.adjustment`; #9970) | after `merge_wait` |
 | `land-2026-10-04-amber-heron` | `land` | `land-v2`'s path, then its p25/p75 recalibrated from `land-v2`'s own track record: the current stage's `ln(actual / p50)` distribution (landed estimates as events, still-open ones as censored lower bounds, recency-weighted) fitted at the estimate's own `as_of`; the median is kept (recorded as `recalibration`; #10207) | after `merge_wait` |
 | `land-2026-10-04-fresh-tide` | `land` | `land-v2`'s, with every stage sample (observed and censored) weighted `exp(−age / half_life)`, half-life 2 days, and the grid built from the weighted samples; when the effective N `(Σw)²/Σw²` falls below 8 the half-life doubles (up to 6 times, then flat). Records `distribution.half_life_sec` (absent when flat) and `distribution.effective_n` per stage (#10209) | after `merge_wait` |
+| `land-v4` | `land` | `land-v3`'s, plus the binding stall's term added to every path, operator-held PRs estimated from the stage under the hold, and no `beyond_history` refusal (a flagged residual-life tail instead; #10210) | after `merge_wait` |
 | `land-2026-10-04-twin-otter` | `land` | no history: the newest `eta-fit/v1` coefficient file cut off strictly before `as_of` (see [Fitted coefficients](#fitted-coefficients-eta-fitv1)). PR stages only (`review_wait`, `doctor`, `merge_wait`, `merge_hold`); the blend of a stage-by-stage exit-hazard Monte Carlo (256 paths, seeded per stage visit) and a log-normal direct model (recorded as `twin_otter`; #10222, #10243) | at the merge |
 | `land-2026-10-04-twin-otter-b` | `land` | the pre-PR/PR composition of twin-otter (#10244): `ready_wait`, `sweep.curator` and `sweep.builder` are answered with `land-v2`'s path rules (same refusals, so its answer rate there equals `land-v2`'s; `combination.method` is `land_v2_path_prefix`); `review_wait`, `doctor`, `merge_wait` and `merge_hold` are `land-2026-10-04-twin-otter`'s own answer, unchanged | at the merge |
 
@@ -384,6 +386,7 @@ tracker's, which loads the file (below).
 constructor parameter (`LandFreshTide::with_half_life`), so a 1/2/7-day
 comparison needs no extra registered ids; only the 2-day default is
 registered and shadowed.
+`land-v4` (#10210) ships the same way.
 
 ## Fitted coefficients (`eta-fit/v1`)
 
@@ -635,6 +638,82 @@ the `updated_at` lower bound; an unavailable or stale fleet view stays
 omitted and imputed; and a later release never rewrites an earlier
 observation. The six path-engine heuristics keep the described input, so
 their `features` are byte-identical to before.
+
+### Stalls and the residual-life tail (#10210)
+
+The worst `land` misses are **stopped** service, not slow service. The
+daemon assembles a read-only stall snapshot (no forge call) from what it
+already holds, and narrows it per item:
+
+| `stalled.cause` | signal | applies to | `resume_at` |
+|---|---|---|---|
+| `rate_limit_quota` | breaker cooldown with a pool at zero, or the forge-call ledger's last header reading at zero | every item | the cooldown end / the pool's reset |
+| `breaker_cooldown` | breaker cooldown with budget left (a secondary limit) | every item | the cooldown end |
+| `token_pool_exhausted` | a workspace's empty-pool brake is tripped | every item | unknown |
+| `operator_hold` | `loom:operator`, `-only`, `-decision`, `-mechanical` on the item | that item | unknown (the hold model is #10218) |
+| `pr_open_lockout` | the repo's ready backlog is frozen by the open-PR guard | a `ready_wait` item | unknown |
+
+Every heuristic records the binding stall — the one with the longest term —
+as `stalled { cause, resume_at, term_sec, term_basis, applied, detail?,
+also? }`. `term_sec` is `resume_at − as_of`, or with no `resume_at` the
+cause's documented default (`eta::stall::default_term_sec`: quota 1 h,
+breaker 15 min, pool 5 h, operator hold 1 day, lockout 4 h — priors, not
+measurements). Only `land-v4` applies it (`applied: true`): the term is
+added to every simulated path before service resumes, consuming no draw, so
+with a known `resume_at = T` every quantile is exactly `T − as_of` above the
+unstalled one; the stall pauses the stage clock, so the normal term is
+conditioned on today's age. Its share of the median band is
+`contributions.p50_share.stalled`. A PR whose only holds are operator holds
+is estimated by `land-v4` from the stage its review labels name under the
+hold, plus the `operator_hold` term; every other hold still refuses. An
+approved PR so held reaches the estimator as `merge_hold` (#10218); `land-v4`
+does not declare `models_hold`, so it reads the `merge_wait` underneath plus
+the term rather than the fitted hold model.
+
+When the item has outlived its stage history, `land-v4` draws the remaining
+in-stage time from the residual-life tail `P(R ≤ x) = x / (x + age)`
+(`conditioning.method = "residual_life_tail"`; median = the age, capped at
+`19 × age`) and sets `result.tail_extrapolated: true`. The flag is carried
+into `eta.outcome`'s `estimate.tail_extrapolated` (with `estimate.stall_cause`),
+and `eta backtest` reports `by_tail` (`normal` / `tail_extrapolated`)
+whenever a replayed case was tail-extrapolated, so a tail guess never hides
+inside the ordinary accuracy. Every new field is additive and absent when
+unset: no schema bump.
+
+### Starred at `t`: PR or linked issue (#10372)
+
+`eta::star::star_state_at` is the one definition of "starred" for a PR at an
+instant, used by the fit (`fit/rows.rs`, `cutoff = t - 120 s`) and by serving
+(the tracker, `cutoff = as_of`): the PR's own `pr_flags` star **or** any issue
+it links whose link **and** star were both known before `cutoff`.
+
+- **Link rule**: `worktree_ops::gh::linkage_refs` of the PR body, every linked
+  issue, closing keywords and `Part of` / `Contributes to` (the work finder's
+  rule). Training reads the raw event cache's `closing_ref` rows (known at the
+  PR's `created_at`); serving stamps a link at the first pass that saw it.
+- **Knowable-at**: a fact at `a` is usable iff `a < cutoff`. An issue's star
+  run counts from the later of its labeled-at time and the link's known-at
+  time, so a link or star that becomes known after `T` never stars a row at
+  `T`. Training reads issue `label_added` / `label_removed` rows; serving
+  reads one ETag-conditional listing per star label per pass, for repos with
+  at least one tracked PR only (the work finder's URLs), and stamps changes
+  at the pass.
+- **Known skew: closed issues.** Serving lists only *open* starred issues, so
+  a linked issue that closes while still labeled reads as an unstar from that
+  pass on. Training replays label events only and keeps it starred until a
+  `label_removed`. This is rare while the linking PR is still open; it only
+  affects the recorded `starred_any` / `star_source`, never the model.
+- **Unknown coverage**: a repo whose raw cache has no pulls (link) or
+  issue-events rows before `cutoff` gives an unknown state (`null`, counted in
+  `rows_star_unknown`), never "unstarred". Serving records nothing for a repo
+  with no star observation within the last hour.
+- **Not a model input.** Twin-otter's `starred` feature is still the PR's own
+  flag, and coefficient files are byte-identical. The result is recorded as
+  `starred_any` (bool) and `star_source` (`none` / `pr` / `issue` / `both`) on
+  each training row and in an estimate's `features` (absent when unknown), so
+  the late surprise of issue-starred items can be queried without a new model.
+  Using `starred_any` as the model input changes the coefficient's meaning and
+  needs a new datestamped heuristic (follow-up #10379).
 
 ## The explanation (`eta-explanation/v1`)
 
@@ -943,10 +1022,10 @@ Omission reasons are free-form strings.
 
 | reason | when |
 |---|---|
-| `blocked` | a hold or park label: `loom:blocked`, `loom:operator`, `loom:operator-only`, `loom:operator-decision`, `loom:operator-mechanical`, `loom:needs-capability` |
+| `blocked` | a hold or park label: `loom:blocked`, `loom:operator`, `loom:operator-only`, `loom:operator-decision`, `loom:operator-mechanical`, `loom:needs-capability` (`land-v4` estimates a PR held by operator labels alone) |
 | `human_gated` | intake or approval (`loom:triage`, `loom:curating`, `loom:curated`) |
 | `insufficient_samples` | a needed stage or the verdict history is under the sample floor |
-| `beyond_history` | the item has been in its stage longer than all but 5 samples |
+| `beyond_history` | the item has been in its stage longer than all but 5 samples (never `land-v4`, which answers with a flagged tail estimate) |
 | `no_dispatch_plan` | not started, and the dispatch plan gives it no position (blocked, or no plan on this host) |
 | `unknown_stage` | no stage label, or contradictory ones |
 | `stale_inputs` | a ready item whose dispatch plan is older than 15 minutes (or three ticks) |
@@ -1366,6 +1445,7 @@ of what is on disk and never needs a refetch.
 | `fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `1500` |
 | `fleetRefresh.reserveCalls` | `LOOM_ETA_FLEET_REFRESH_RESERVE` | `1500` |
 | `fleetRefresh.backfillDays` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_DAYS` | `21` (floor 15: the fit window + 1) |
+| `fleetRefresh.signoz.enabled` | `LOOM_ETA_FLEET_SIGNOZ_ENABLED` | `false` (#9758; see [SigNoz in-sweep half](#signoz-in-sweep-half-fleetrefreshsignoz-9758)) |
 
 `historyScope` is one of:
 
@@ -1475,6 +1555,50 @@ them with a daemon restart.
   host: every writer replaces whole files atomically, and the last writer
   wins. A `LOOM_ETA_FLEET_SNAPSHOT_DIR` shared between hosts works, but enable
   the task on only one of them.
+
+### SigNoz in-sweep half (`fleetRefresh.signoz`, #9758)
+
+The forge snapshot cannot see inside a sweep, so `finish` refuses at `scope =
+fleet` on it alone. The SigNoz half caches the fleet's own exported
+`sweep.outcome` records per repo under `<snapshot dir>/signoz/<slug>.json`
+(schema `eta-fleet-signoz-snapshot/v1`), and the fleet history folds both kinds
+of snapshot together.
+
+- **Source.** `SampleSource::SignozOutcome` (`signoz:sweep.outcome` in
+  `samples_by_source`), admitted by a `SweepOutcome` filter and **not** by a
+  `StageJournal` one. Each sample keeps the host that recorded the sweep in
+  `samples_by_host`. Phase durations and the merge share are taken; Judge
+  verdicts are not, because the forge snapshot already carries them. The
+  `judge`/`doctor`/`merge` phases land in `review_wait`/`doctor`/`merge_wait`
+  beside the forge's samples of the same stages — the overlap `augment`
+  already has between this host's journal and the forge, now fleet-wide.
+- **Identity.** Deduplicated by `loom.record_id` (a redelivery), then by
+  `(host.id, loom.sweep_id)` keeping the first to become knowable. Under
+  `augment`, a sweep in this host's own journal is read from the journal, never
+  twice.
+- **Knowable-at.** A sample is observed at the row's `observed_timestamp`,
+  never its event time. That column is still a producer-side lower bound
+  ([telemetry-replay](telemetry-replay.md)), so a replay is point-in-time
+  correct only up to the export latency. A row with no knowable-at, or one
+  earlier than its event time, is rejected.
+- **Rejections.** A malformed record (no record id, host, sweep id or knowable
+  time, another repo, an unknown result, absent or invalid
+  `loom.phase_durations`) is counted by reason and skipped. An unavailable
+  backend, a failed page, an unparseable response or the page ceiling stops the
+  walk and keeps the last valid snapshot; a partial window is never published.
+- **Refresh.** Each refresh re-reads the whole retention window (120 days),
+  because a late-delivered record carries an old `observed_timestamp` that an
+  incremental cursor would skip.
+- **Settings.** Off by default. Set `endpoint` (ClickHouse HTTP of the
+  telemetry store), `user`, and `credentialFile` (the path of an owner-only
+  password file outside every repository, never the secret). Environment
+  overrides: `LOOM_ETA_FLEET_SIGNOZ_ENABLED`, `…_ENDPOINT`, `…_USER`,
+  `…_CREDENTIAL_FILE`, `…_PAGE_SIZE` (500), `…_MAX_PAGES` (200). It runs in the
+  fleet refresh task's cycle, so it also needs `fleetRefresh.enabled`.
+- **CLI.** `loom-daemon eta fleet signoz refresh --repo R [--endpoint URL
+  --credential-file PATH | --from-file export.jsonl] [--as-of T] [--dry-run]`,
+  `… signoz show`, and `… signoz query` (the SQL, for a manual
+  `clickhouse-client --format JSONEachRow` export).
 
 ## Queries
 

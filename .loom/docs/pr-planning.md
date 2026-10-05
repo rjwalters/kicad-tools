@@ -10,7 +10,7 @@ Three concepts remain separate:
 | --- | --- |
 | Origin | Historical fact: `interactive`, `autonomous`, or `unknown` |
 | Planning preference | Prefer interactive PRs through review, repair, re-review and merge |
-| Operator star | Explicit `loom:operator-priority` override, stronger than human preference |
+| Operator star | Explicit `loom:operator-priority` override, stronger than human preference; higher levels (`loom:operator-high-priority`, `loom:high-priority-inherited`, #10307) drain first, highest level first (`operatorPriorityLevel` on each row) |
 
 Set the origin explicitly at session start with `LOOM_WORK_ORIGIN=interactive`,
 or at creation:

@@ -107,6 +107,15 @@ says so, and no role applies it).
   `loom:operator-decision`, Champion's merge-risk and critical-file holds, the
   host-class gate and Judge's bar all still apply. A starred PR on a hold stays
   held and is listed first (marked ⭐) in the pinned hold digest (#6877).
+- **Levels (#10307).** Operator priority has levels, mapped in one table
+  (`loom-daemon/src/operator_levels.rs`): level 1 is the star; level 2 is
+  `loom:operator-high-priority` (human-only, like the star; capped at 5 open
+  issues fleet-wide by loom-ui, over-cap reported in the star-liveness digest,
+  never refused). Levels nest: level ≥ 2 counts as starred everywhere, and
+  every starred-first pass drains by effective level, highest first. An open
+  blocker of a level-2 issue carries the daemon-written
+  `loom:high-priority-inherited` and is treated exactly like level 2; no role
+  applies or removes it.
 - **Red-main fixes** are a body marker, not a label: an issue that fixes a red
   `main` carries `<!-- loom:main-red-fix -->` (Doctor adds it when filing a
   pre-existing failure confirmed on `origin/main`). Curator takes these next,

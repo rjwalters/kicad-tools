@@ -16,6 +16,7 @@ separate question. See [`forge-egress.md`](forge-egress.md)
 - [Using the Token](#using-the-token)
 - [Verifying Authentication](#verifying-authentication)
 - [Headless and SSH-only daemon operation (#4005)](#headless-and-ssh-only-daemon-operation-4005)
+- [Rate-limit pools: what actually splits the bucket (#9872)](#rate-limit-pools-what-actually-splits-the-bucket-9872)
 - [GitHub App identity (#4430)](#github-app-identity-4430)
 - [Fleet rate-limit protections are `loom-daemon`-internal (#4432)](#fleet-rate-limit-protections-are-loom-daemon-internal-4432)
 - [Filing issues under GraphQL exhaustion](#filing-issues-under-graphql-exhaustion)
@@ -110,15 +111,18 @@ A fine-grained PAT scoped to the target repository needs these permissions:
 The `gh` CLI checks for `GH_TOKEN` (or `GITHUB_TOKEN`) before using its default credential store. Set the variable in the shell session where Loom runs:
 
 ```bash
-# Option A: Export in current session
+# Option A: Export in the one session that starts Loom
 export GH_TOKEN=github_pat_xxxxxxxxxxxxxxxxxxxx
 
-# Option B: Add to shell profile (~/.zshrc, ~/.bashrc)
-export GH_TOKEN=github_pat_xxxxxxxxxxxxxxxxxxxx
-
-# Option C: Use a secrets manager or .env file (not committed)
-source .env  # where .env contains: export GH_TOKEN=github_pat_xxx
+# Option B: Read it from a secrets manager or an owner-only file outside the
+# repository, in that session only (see credential-storage.md)
+export GH_TOKEN="$(cat ~/.config/loom/gh-token)"  # chmod 600, never committed
 ```
+
+Do **not** export a token from your shell profile (`~/.zshrc`, `~/.bashrc`)
+or with `launchctl setenv`: every shell, GUI app and agent then spends it, and
+all of them share your one personal rate-limit pool (see
+[Rate-limit pools](#rate-limit-pools-what-actually-splits-the-bucket-9872)).
 
 When using Daemon Mode, set the variable before launching the daemon so all spawned terminals inherit it.
 
@@ -225,11 +229,57 @@ consequences of the non-Aqua domain are covered in
 As before, export a `GH_TOKEN` for forge auth in a headless session (the login
 keychain may be locked) — the #4005 credential preflight reports this loudly.
 
+## Rate-limit pools: what actually splits the bucket (#9872)
+
+GitHub meters rate limits per **pool**, not per token
+([REST rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)):
+
+- **One per-user pool** (5,000/h REST, plus a separate GraphQL budget) covers
+  **every** credential of that account: all personal access tokens (classic
+  and fine-grained), the `gh` keyring login, OAuth-app tokens and GitHub App
+  *user*-access tokens. Minting another PAT for the same user, one per
+  consumer, changes nothing: all of them spend the same quota.
+- **A separate pool comes only from**:
+  - a GitHub App **installation** token (one pool per installation, 5,000 to
+    12,500/h). For the same account, this is the only way to split the pool;
+  - a token belonging to a **different account**;
+  - Actions' own `GITHUB_TOKEN` (per repository, inside a workflow run).
+
+So on a host where the shell's `GITHUB_TOKEN`, the daemon's keyring login and
+an agent's `LOOM_FLEET_TOKEN` are three tokens of one user, there is still
+**one** quota. One noisy consumer (a GUI PR panel, a burst of agent
+exploration) starves the daemon.
+
+| Consumer | Identity that gives it its own pool | How |
+|----------|-------------------------------------|-----|
+| `loom-daemon` reads | a reader App (`forge.identities.readers`) | Captured, repo-scoped `gh` reads go to the repo's reader through the `GhInvocation` choke point, with one writer retry on a credential failure ([Several Apps](#several-apps-one-writer-a-pool-of-readers-9248-9537)) |
+| `loom-daemon` writes | the writer App (`forge.githubApp`) | Place the App private key on the host ([GitHub App identity](#github-app-identity-4430)) |
+| Agent sessions and sweep children | the writer App, through the daemon's `GH_CONFIG_DIR` | Inherited once the writer key is placed |
+| GUI apps (PR panels, desktop clients) | another account, or nothing | They inherit the launchd gui-domain environment and the `gh` keyring login, so the operator's own pool, unless given their own credential |
+
+**Rules:**
+
+- Never export `GITHUB_TOKEN` / `GH_TOKEN` globally (shell profile). Export
+  it only in the session that starts Loom.
+- Never `launchctl setenv` a token: every GUI app in the login session then
+  inherits it.
+- Check which pool the daemon spends with
+  `loom-daemon status --json | jq .credential_preflight.pool`. `kind` is
+  `installation` for a GitHub App installation token, or `user` with the
+  account `login` / `user_id`. For `user`, the daemon logs a startup WARN
+  naming the account: its pool is shared with every PAT, OAuth token and `gh`
+  login of that user. The report never carries a token value.
+- Reads by pool: `loom-daemon status --json | jq .forge_calls.identity_roles`
+  counts calls per identity role: `reader` (a reader App's pool), `writer`,
+  `writer-fallback` (a read a reader failed on, re-run on the writer) and
+  `unknown` (a call recorded outside the `gh` facade, or by an older binary).
+
 ## GitHub App identity (#4430)
 
-Every fleet host authenticating as the same personal account (or the same
-long-lived fine-grained PAT) shares one 5,000/hr REST + 5,000/hr GraphQL
-budget with **every other host and the operator's own interactive use** — a
+Every fleet host authenticating as the same personal account — through any
+of that account's PATs (classic or fine-grained), OAuth tokens or `gh`
+logins, which all draw on the account's one pool — shares one 5,000/hr REST
+and 5,000/hr GraphQL budget with **every other host and the operator's own interactive use** — a
 busy fleet can exhaust it fleet-wide. A GitHub App gives each **installation**
 (e.g. one per GitHub account/org the fleet operates against) its own
 rate-limit bucket, centralizes repo access in one place (adding a repo to the

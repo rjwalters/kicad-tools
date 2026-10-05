@@ -170,20 +170,21 @@ gh issue list \
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-issue-promo.md`**. Architect/Hermit/Auditor proposals use the curated issues' 8 criteria plus that file's "Concurrency Guard and Idempotency (`loom:evaluating`)" section.
 
-**Note**: Proposals from Architect, Hermit, and Auditor roles are typically well-formed since these roles generate detailed, implementation-ready issues. Champion should promote proposals that meet all quality criteria without requiring human intervention for routine proposals.
+**Note**: Architect, Hermit and Auditor proposals are usually implementation-ready; promote those meeting all quality criteria without human intervention.
 
 ### Priority 4: Epic Proposals Ready to Evaluate
 
 If no individual proposals need promotion, check for epic proposals:
 
 ```bash
-# Check for Epic proposals — starred (loom:operator-priority, #9244) first
+# Epic proposals, highest priority level first (#9244, #10307)
+# level list: keep in sync with operator_levels.rs LEVELS until #10311
 gh issue list \
   --label="loom:epic" \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments \
-  --jq 'sort_by([.labels[].name] | index("loom:operator-priority") == null) | .[] | "#\(.number) \(.title) [epic]"'
+  --jq 'sort_by([.labels[].name] | if any(test("high-priority")) then 0 elif index("loom:operator-priority") then 1 else 2 end) | .[] | "#\(.number) \(.title) [epic]"'
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-epic.md`**. Epics have their own evaluation criteria focused on structure and phase decomposition.

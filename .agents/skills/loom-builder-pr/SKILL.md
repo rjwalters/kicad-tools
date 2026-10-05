@@ -664,8 +664,10 @@ body. `--signoff` is harmless when not required. See
 ### PR Label Rules
 
 **When creating a NEW PR:**
-- Add `loom:review-requested` during creation, plus `loom:operator-priority`
-  if the issue carries it (#9244: the one label a role copies, never invents)
+- Add `loom:review-requested` during creation, plus each priority label the issue
+  carries (`loom:operator-priority`, `loom:operator-high-priority`,
+  `loom:high-priority-inherited`; #9244/#10307: the one set a role copies, never invents;
+  level list: keep in sync with operator_levels.rs LEVELS until #10311)
 - This is the ONLY time you add labels to a PR
 
 **After PR creation:**
@@ -674,16 +676,8 @@ body. `--signoff` is harmless when not required. See
 - NEVER add `loom:pr` yourself (only Judge can approve)
 - NEVER modify any labels on PRs you didn't create
 
-**Why?** PR labels are review-pipeline signals:
-```
-Builder creates PR -> loom:review-requested -> Judge reviews
-                                            |
-                      Judge removes loom:review-requested
-                                            |
-                      Judge adds loom:pr -> Champion merges
-```
-
-Touching them breaks the pipeline.
+**Why?** PR labels are review-pipeline signals (`loom:review-requested` -> Judge
+-> `loom:pr` -> Champion merges). Touching them breaks the pipeline.
 
 ### GitHub Auto-Close Requirements
 

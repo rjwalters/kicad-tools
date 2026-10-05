@@ -205,14 +205,19 @@ Use a **priority-based search** to find the highest-value curation opportunity:
 
 ### Priority 0: Starred Issues (`loom:operator-priority`, #9244) — first, every pass
 
+Level 2 (`loom:operator-high-priority`, or daemon-written `loom:high-priority-inherited`) counts as starred and goes first (#10307):
+
 ```bash
-gh issue list --label loom:operator-priority --state open --json number,title,labels \
+# level list: keep in sync with operator_levels.rs LEVELS until #10311
+for L in loom:operator-high-priority loom:high-priority-inherited loom:operator-priority; do
+gh issue list --label "$L" --state open --json number,title,labels \
   --jq '.[] | select([.labels[].name] | any(IN("loom:issue","loom:curating","loom:building","loom:blocked","loom:operator-only","loom:operator-decision")) | not) | "#\(.number) \(.title)"'
+done
 ```
 
 Curate each at once (no workflow label = treat as `loom:triage`), then add
 `loom:curated` and `loom:issue` in ONE label POST. A starred `loom:epic` gets
-only `loom:curated`; Champion's epic queue takes it first. Guards still apply: skip the labels in the query above and hard exclusions. The star is human-only — never add or remove it. Next come red-main
+only `loom:curated`; Champion's epic queue takes it first. Guards still apply: skip the labels in the query above and hard exclusions. Never add or remove a priority label (the star and level 2 are human-only; `*-inherited` is daemon-only). Next come red-main
 fixes (`<!-- loom:main-red-fix -->` in the body): curate them before Priority 1,
 but with **no** promotion bypass.
 

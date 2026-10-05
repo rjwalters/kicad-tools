@@ -1553,42 +1553,19 @@ If checks are still running, **do not block on them and do not approve on a gues
 2. **Release your claim** — remove `loom:reviewing` so a later pass picks it up cleanly.
 3. **Skip and continue the batch** — move on to the next PR. The next cron tick re-evaluates this PR once CI has settled.
 
-**Trap: empty `gh pr checks` output is NOT proof nothing is pending.** `gh pr
-checks` is GraphQL-backed and can return completely empty output (zero rows)
-during a transient forge failure (e.g. an intermittent TLS handshake error) —
-that empty state is indistinguishable from "nothing pending" to a naive `grep
--q pending`, and this has already happened in production: on kicad-tools PR
-#4792 (2026-08-13) a Judge poller read one empty response and declared CI
-"settled" 6 minutes into a ~40-minute board-test run (#6169). Guard against it
-by requiring at least one row back before trusting the absence of "pending" —
-retry once on a zero-row read before concluding there is genuinely nothing to
-wait for:
+**Pending-CI skip check.** `loom-daemon forge wait-checks <PR_NUMBER> --timeout 0` is a single ETag'd poll (no wait) that also handles the empty-rollup trap (#6169). Branch on the first **stdout** line:
 
 ```bash
-# ci_still_pending: true (pending) if any row shows pending/queued/in_progress.
-# A ZERO-ROW read is retried once before being trusted — on a real forge blip
-# the retry almost always returns real rows; only a read that is STILL empty
-# after the retry is treated as "genuinely no checks reported" (not pending).
-ci_still_pending() {
-  local pr="$1" out rows
-  out="$(gh pr checks "$pr" 2>/dev/null)"
-  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
-  if [[ "$rows" -eq 0 ]]; then
-    sleep 3
-    out="$(gh pr checks "$pr" 2>/dev/null)"
-    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
-    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
-  fi
-  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
-}
-
-# Check if any checks are still pending; if so, release the claim and skip (no end-state label)
-if ci_still_pending <PR_NUMBER>; then
+first="$(loom-daemon forge wait-checks <PR_NUMBER> --timeout 0 2>/dev/null | head -n1)"
+case "$first" in
+  LOOM-CHECKS-TIMEOUT*)   # still pending: release the claim and skip (no end-state label)
     gh pr comment <number> --body "Code evaluation looks good; CI is still running. Releasing the claim and skipping — a later tick will re-evaluate once CI settles."
-    # Release the claim WITHOUT applying an end-state label — PR stays loom:review-requested
-    gh pr edit <number> --remove-label "loom:reviewing"
-    # Continue to the next PR in the batch
-fi
+    gh pr edit <number> --remove-label "loom:reviewing"   # PR stays loom:review-requested; continue to the next PR
+    ;;
+  LOOM-CHECKS-RED*) ;;    # failing checks: rerun without 2>/dev/null for <name>\t<url>\t<run_id>
+  LOOM-CHECKS-GREEN*|LOOM-CHECKS-NONE*) ;;
+  *) gh pr checks <PR_NUMBER> ;;   # no sentinel (older binary / Gitea): one snapshot, no loop
+esac
 ```
 
 ### CRITICAL: Never End Your Turn on a Background CI Monitor
@@ -1600,37 +1577,16 @@ This mirrors the orchestrator-level guardrail already documented in `sweep.md` (
 **There are exactly two safe paths when CI is pending and you cannot approve on a guess:**
 
 1. **Batch mode (there is a next PR to move to): skip and continue.** Use the "When CI is Pending" procedure above — release `loom:reviewing`, leave `loom:review-requested` in place, move on to the next PR. This is not a fallback of last resort; it is the correct default whenever a next PR exists, because a later tick re-evaluates this one.
-2. **Single-PR / manual invocation (there is no next PR — you were dispatched to judge exactly this one PR and a verdict is expected before your turn ends): block-poll in the foreground.** Loop **inside this same turn** — check `gh pr checks <PR_NUMBER>`, `sleep` a fixed interval, repeat — until the checks resolve or you hit an explicit, bounded cap. This is an ordinary shell loop that runs to completion and returns control to you before you write your final message; nothing about it depends on a future turn.
+2. **Single-PR / manual invocation (there is no next PR — you were dispatched to judge exactly this one PR and a verdict is expected before your turn ends): wait in the foreground.** Run `loom-daemon forge wait-checks` **inside this same turn** (bounded by `--timeout`; it also handles the empty-rollup trap, #6169). It returns control before you write your final message; nothing about it depends on a future turn. Branch on the first **stdout** line, never the exit code; keep stderr separate (RED detail).
 
 ```bash
-# Foreground block-poll — single-PR Judge invocation, no batch to fall back to.
-# Bounded: MAX_WAIT caps total wait time; never loop unboundedly.
-# ci_still_pending guards against the empty-output false-settle trap (#6169) —
-# see "When CI is Pending" above for the full rationale.
-ci_still_pending() {
-  local pr="$1" out rows
-  out="$(gh pr checks "$pr" 2>/dev/null)"
-  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
-  if [[ "$rows" -eq 0 ]]; then
-    sleep 3
-    out="$(gh pr checks "$pr" 2>/dev/null)"
-    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
-    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
-  fi
-  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
-}
-
-MAX_WAIT=1800   # 30 min cap — tune to the repo's typical CI duration
-INTERVAL=60
-ELAPSED=0
-while ci_still_pending <PR_NUMBER>; do
-  if [[ "$ELAPSED" -ge "$MAX_WAIT" ]]; then
-    echo "CI still pending after ${MAX_WAIT}s — falling back to a conditional verdict."
-    break
-  fi
-  sleep "$INTERVAL"
-  ELAPSED=$((ELAPSED + INTERVAL))
-done
+err="$(mktemp)"; out="$(loom-daemon forge wait-checks <PR_NUMBER> --timeout 1800 2>"$err")"; first="${out%%$'\n'*}"
+case "$first" in
+  LOOM-CHECKS-GREEN*|LOOM-CHECKS-NONE*) ;;   # settled green
+  LOOM-CHECKS-RED*) cat "$err" ;;            # <name>\t<url>\t<run_id> per failure; gh run view <run_id> --log-failed
+  LOOM-CHECKS-TIMEOUT*|LOOM-CHECKS-HEAD-MOVED*|LOOM-CHECKS-ERROR*) ;;   # unsettled: conditional verdict below
+  *) gh pr checks <PR_NUMBER> ;;             # no sentinel (older binary / Gitea): one snapshot, no loop
+esac
 ```
 
 **If the cap is reached and CI is still pending, do not extend the wait and do not reach for a background watcher instead.** Post a conditional-verdict comment stating plainly that the code review passed but CI had not settled after the bounded wait, then — since there is no batch to hand this off to — release `loom:reviewing` and leave `loom:review-requested` in place, exactly as the skip-and-continue path does, so a later Judge invocation (the next cron tick, or a fresh manual dispatch) can re-evaluate once CI has settled.
