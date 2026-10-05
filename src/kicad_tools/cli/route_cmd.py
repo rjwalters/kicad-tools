@@ -67,7 +67,7 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
 
@@ -349,7 +349,13 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
             )
 
 
-def _deterministic_rescue_kwargs(args) -> dict[str, bool]:
+class _RescueKwargs(TypedDict, total=False):
+    """Typed ``**`` payload of :func:`_deterministic_rescue_kwargs`."""
+
+    deterministic_rescue: bool
+
+
+def _deterministic_rescue_kwargs(args) -> _RescueKwargs:
     """Routing-entry kwargs for ``--deterministic-rescue`` (Issue #5870).
 
     Every ``router.route_*`` call site in this module splats this.  Without
@@ -370,7 +376,7 @@ def _deterministic_rescue_kwargs(args) -> dict[str, bool]:
     """
     if getattr(args, "deterministic_rescue", False):
         return {"deterministic_rescue": True}
-    return {}
+    return _RescueKwargs()
 
 
 def _auto_fix_budget(args) -> float:
