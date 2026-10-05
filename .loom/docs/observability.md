@@ -541,6 +541,31 @@ path), and flushes `github.ratelimit.breaker_skips{reason=<job>}`: one per
 pass a job skipped while the breaker suppressed. A host that never enables an
 OTLP exporter exports none of this; its evidence stays in `daemon.log`.
 
+**Long-running task liveness and self-update decisions (#10414).** Each
+long-running daemon loop beats a process-global liveness registry
+(`crate::task_liveness`) once per finished iteration. The loops are the
+self-update loop (`auto_update`), the ETA fleet refresh
+(`eta_fleet_refresh`), the 5-minute ETA pass (`eta_pass`) and each role-runner
+loop (`role_runner.<role>`). Every 60 s, on its own ticker independent of the
+collector pass, the daemon exports `loom.daemon.task_alive{task}`. The value
+is `1` while the loop has beaten within its staleness window. That window is
+two intervals plus 60 s, and the self-update loop adds its 35-minute tick
+bound. The value is `0` once the loop has gone quiet past that window or has
+marked itself dead. So a loop that exited, or whose blocking cycle never
+returns, reads `0` within one window. Before #10414 it simply went silent.
+`loom.daemon.task_faults{task,reason}` counts `panic` (an iteration panicked
+and the loop caught it), `overrun` (an iteration ran past the loop's own
+bound) and `exit` (the loop stopped for good). The same entries are listed
+under `Task liveness:` in `loom-daemon status`, and as `task_liveness` in
+`status --json`. Alert on `task_alive == 0`, and also on the series going
+silent: that means the sampler or the whole daemon stopped. The self-update
+loop also emits one `auto_update.tick` log per tick. It records the decision
+(`skip`, `defer`, `stale_repo`, `fetch`, `rebuild`, `drain_wait`,
+`roll_stall`, `panic`), the installed and target versions, the defer reason,
+the drain state and the deciding build's version and revision. A host that
+stops converging now says why on every tick. See
+[`telemetry-schema.md` → `auto_update.tick`](telemetry-schema.md#auto_updatetick).
+
 To add a signal, add a `MetricName` or `SpanName` variant. If it needs a new
 label or attribute key, extend `OPS_METRIC_LABEL_KEYS` or
 `OPS_SPAN_ATTRIBUTE_KEYS` and the gateway collector's `keep_keys` in
