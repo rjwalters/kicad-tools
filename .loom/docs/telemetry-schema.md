@@ -1841,14 +1841,14 @@ Each entry:
 | `repo` | string | forge `owner/repo` |
 | `visibility` | `public` / `private` | per entry; missing or unknown decodes to `private` |
 | `issue` | integer | issue number |
-| `stage` | string | `curating`, `ready`, `building`, `in-review`, `changes-requested`, `mergeable`, `merging`, `blocked-by`, `needs-operator`, `no-capacity` (unknown values are forward-compatible) |
+| `stage` | string | `curating`, `ready`, `building`, `in-review`, `changes-requested`, `mergeable`, `merging`, `blocked-by`, `stale-block` (`loom:blocked` with no open blocker named; the daemon unblocks it or hands it to Curator, #10151), `needs-operator`, `no-capacity` (unknown values are forward-compatible) |
 | `next_actor` | string | `curator`, `builder`, `judge`, `doctor`, `champion`, `work-finder`, `operator`, or `blocker #N` |
 | `stage_since` | RFC 3339, optional | when this host first saw it in `stage` |
 | `time_in_stage_secs` | integer | seconds in `stage` |
 | `pr` | integer, optional | its open PR |
 | `blocked_by` | string, optional | `blocked-by`: `#N`, or `owner/repo#N` across repos |
 | `no_capacity` | string, optional | `no-capacity`: the work finder's fixed reason text, or the pools-exhausted grace note |
-| `ask` | object, optional | set when the operator has been asked: `{kind, key, text}`. `kind` is `operator-only`, `operator-decision`, `merge-risk-hold`, `merge-refused`, `pools-exhausted`, `unmanaged-repo`, `blocked-unnamed`, `blocked-cross-repo` or `no-progress`. `key` is the dedupe key (`<kind>:<specifics>`), identical on every host for the same cause. `text` is the one concrete ask, templated by the daemon; the only forge text it can quote is a `merge-refused` ask with no open incident, which carries the refusal line bounded to 300 characters, stripped of backticks and angle brackets, inside a code span. A `no-progress` ask keeps the agent-owned `stage` |
+| `ask` | object, optional | set when the operator has been asked: `{kind, key, text}`. `kind` is `operator-only`, `operator-decision`, `merge-risk-hold`, `merge-refused`, `pools-exhausted`, `unmanaged-repo`, `blocked-unnamed` (only after a Curator handoff or an earlier unblock), `blocked-cross-repo` or `no-progress`. `key` is the dedupe key (`<kind>:<specifics>`), identical on every host for the same cause. `text` is the one concrete ask, templated by the daemon; the only forge text it can quote is a `merge-refused` ask with no open incident, which carries the refusal line bounded to 300 characters, stripped of backticks and angle brackets, inside a code span. A `no-progress` ask keeps the agent-owned `stage` |
 | `inherited_from` | integer, optional | this entry is a blocker inheriting the star of that issue |
 | `operator_priority_at` | RFC 3339, optional | the starred-at it sorts by (its own, the inheriting star's, or `created_at`) |
 | `last_progress_at` | RFC 3339, optional | when forward progress was last seen |
