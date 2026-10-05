@@ -6296,6 +6296,49 @@ The cache is in-memory, per (workspace, query), for the daemon's lifetime; a
 restart re-fetches each listing once. PR-side claim listings stay on
 `gh pr list` (they need `headRefName`, which REST issue rows do not carry).
 
+### Agent CI wait: `forge wait-checks` (#10330)
+
+`loom-daemon forge wait-checks <PR|SHA> [--timeout SECS] [--required-only]
+[--repo O/R] [--base BRANCH]` is the agent-side counterpart of the steady-state
+work above: it waits for a PR's (or a commit's) CI with REST reads revalidated by
+ETag — `pulls/{n}` (head SHA; the same entry `forge pr view --cached` holds),
+`commits/{sha}/check-runs` and `commits/{sha}/status` — so an unchanged poll is
+three free `304`s. The first poll is immediate; then 30s, ×1.5 per poll, capped
+at 120s (`--min-interval`/`--max-interval`, `LOOM_WAIT_CHECKS_MIN`/`_MAX`). On a
+simulated 15-minute run whose rollup changes 6 times that is 11 polls and 11
+quota-spending (non-`304`) responses, against ~16 unconditional GraphQL
+`gh pr checks` reads for the retired 60s prompt loop. Reads are recorded under caller `forge_wait_checks`, so
+`loom-daemon status` shows its `ok` / `not_modified` split.
+
+Exactly one sentinel line goes to stdout; callers branch on it, never on the exit
+code (clap's usage error is also `2`, and an older binary lacks the verb). Parse
+the sentinel from **stdout only** — never from a `2>&1` merge: notes, the RED
+detail lines, and any library warning go to stderr, and a merged stream would
+let one of them be read as the sentinel:
+
+| Sentinel | Exit | Meaning |
+|---|---|---|
+| `LOOM-CHECKS-GREEN <sha>` | 0 | every check (or, with `--required-only`, every required check) is terminal-success |
+| `LOOM-CHECKS-NONE <sha>` | 0 | zero rows, confirmed by the bounded zero-row settle (`merge_pr::zero_checks`), and the base branch requires no contexts |
+| `LOOM-CHECKS-RED <sha> <names>` | 1 | a terminal failure (`failure`/`timed_out`/`cancelled`/`action_required`, or any other non-success conclusion); stderr lists `<name>\t<url>\t<run_id>` per check for `gh run view <run_id> --log-failed` |
+| `LOOM-CHECKS-TIMEOUT <sha> <pending>` | 2 | the deadline passed with checks pending — including zero rows while required contexts exist (never `NONE`) |
+| `LOOM-CHECKS-ERROR <reason>` | 3 | unreadable or truncated rollup, auth/404, repeated read failures, a required-context lookup still failing after 3 attempts when the wait would otherwise settle (`required-lookup-failed: …`), or Gitea |
+| `LOOM-CHECKS-HEAD-MOVED <old> <new>` | 4 | PR mode: the head changed mid-wait, so no verdict for `<old>` applies to `<new>` |
+
+`--timeout 0` is one snapshot poll. Default mode settles on every observed check,
+and before `GREEN` also waits for a required context that has not registered yet
+(no check-run or status for it exists): that context is pending, not green. The
+required set is the same two-source lookup the merge guards use
+(`stale_checks::fetch::required_contexts`), made only when a verdict needs it and
+cached once it succeeds. A failed lookup is never cached and never read as
+"nothing required" (#10351): it is retried on the next poll, no poll settles
+`GREEN` while the set is unknown (a snapshot reports `TIMEOUT <sha>
+(required-contexts-unknown)`), and after 3 failed lookups a poll that would
+otherwise settle is `ERROR`. Under `--required-only`, a base branch that requires
+no contexts falls back to the default-mode decision over every observed check,
+with a stderr note — `gh pr checks --required` errors there ("no required checks
+reported"), so a vacuous `GREEN` would be a false pass.
+
 ### Cross-host dispatch-collision detection and enforcement (#4085, Phase 0 of #4028; enforcement added by #5789)
 
 When two `loom-daemon` hosts share one repo backlog, both can dispatch the same

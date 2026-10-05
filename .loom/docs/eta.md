@@ -279,9 +279,28 @@ fixture. A behaviour change is a new id registered beside the old one
 1. **Register it beside the incumbent** — a new `eta::Heuristic` with its own
    id, added to `Registry::builtin()`. `current` does not move, so nothing
    downstream changes: registering a candidate is free.
-2. **Backtest it** (`loom-daemon eta backtest --heuristic land-v2 --compare
-   land-v1`): a leak-free replay over the identical case set, reporting mean
-   pinball loss, coverage and bias for both.
+2. **Backtest it** (`loom-daemon eta backtest --heuristic land-v1 --compare
+   land-v2`): a leak-free replay over the identical case set, reporting mean
+   pinball loss, coverage and bias for both, then the two **paired on the
+   union of cases** (#10233): each side's answer rate over the union
+   (refusals count against it), and its mean `pinball4_loss_sec` and
+   late-surprise rate over the cases both answered. The pairing also has
+   **walk-forward daily folds**: cases grouped by the UTC day of their
+   `as_of`. Every case already replays against history strictly before it,
+   so each day is out of sample. The challenger (`--compare`) wins a day when
+   its mean `pinball4_loss_sec` on that day's common cases is lower, and the
+   report gives its per-day win rate with the same deterministic 95% Wilson
+   interval as the live gate. Each report also carries two diagnostics that
+   do not gate:
+   - **stability**: the median and maximum shift of the predicted landing
+     *instant* (`as_of + p50`) between consecutive cases of one series
+     (repo, issue, sweep) that both answered; a refusal between two answers
+     breaks the pair rather than being skipped. This is measured on the
+     instant, not on remaining seconds, so a steady promise reads as 0. In
+     a replay the consecutive cases are consecutive stage entries, so this
+     is how far the promise moves as the work advances.
+   - **convergence**: the median p25–p75 and p25–p90 widths of scored cases
+     per bucket of the actual lead.
 3. **Let it run in shadow** — from the moment it is registered, the tracker
    estimates **every** heuristic of the kind at the same `as_of` for the same
    subject. Each is its own `eta.estimate`; only `current`'s carries
@@ -293,10 +312,19 @@ fixture. A behaviour change is a new id registered beside the old one
 4. **Promote it** (`loom-daemon eta promote --candidate land-v2 [--apply]`),
    which applies the two gates **in order**, both required (operator decision
    2 on #9289):
-   - **Backtest**: the candidate must beat `current`'s mean pinball loss on
-     the identical replay set. A heuristic that cannot win on history it can
-     be re-run against is not judged on a live sample nobody can replay, so a
-     failure here means the live gate is not even consulted.
+   - **Backtest**: the candidate must be the better of the two on the
+     identical replay set, judged on the **union of cases, counting
+     refusals** (#10233). Before #10233 each side was ranked on the cases
+     it answered, so refusing the slowest cases looked like accuracy. Now
+     the candidate needs a lower mean `pinball4_loss_sec` over the cases both
+     answered (an exact tie goes to the side that answered more). Its answer
+     rate over the union may be at most `ANSWER_RATE_SLACK` below `current`'s,
+     and its late-surprise rate at most `LATE_SURPRISE_SLACK` above. The
+     win must also hold across the walk-forward daily folds: over at least
+     `MIN_FOLDS` (7) decided days, the 95% Wilson lower bound of its per-day
+     win rate must be above 50%. A heuristic that cannot win on history it
+     can be re-run against is not judged on a live sample nobody can replay,
+     so a failure here means the live gate is not even consulted.
    - **Live** (#10233): every figure is read on the **common decidable
      subset** — a pair counts toward a figure only when *both* sides are
      decidable for it, so a candidate cannot improve its numbers by refusing
@@ -1099,15 +1127,22 @@ accepts `--repo-root PATH` (default: the current directory).
   forge-derived history (#9325).
 - **`loom-daemon eta backtest --heuristic ID [--compare ID] [--since RFC3339] [--json]`**
   — leak-free replay of a heuristic against real `sweep.outcome` history: mean
-  pinball loss, p25–p75 coverage and bias, optionally paired against a second
-  heuristic on the identical replay set (#9325). The fleet merges out of
-  sweep, so local records rarely carry a `land` case; `--pr-history PATH`
+  pinball loss, p25–p75 coverage and bias, stability of the predicted landing
+  instant and convergence of the interval. With `--compare` it pairs a second
+  heuristic on the identical replay set (#9325): the union of cases counting
+  refusals, and the walk-forward daily folds with the `--compare` side's
+  per-day win rate and its 95% Wilson interval (#10233). The fleet merges out
+  of sweep, so local records rarely carry a `land` case; `--pr-history PATH`
   (offline `eta-pr-case/v1` records) or the opt-in `--forge-pr-cases
   [--pr-limit N] [--save-pr-history PATH]` adds `land` cases from merged PRs'
   label timelines, deduplicated against sweep-derived ones, with excluded PRs
   (open, closed unmerged, incomplete timeline, missing/ambiguous closing
-  issue) reported by reason on stderr (#9579). Without either flag the
-  backtest makes no forge call.
+  issue) reported by reason on stderr (#9579). Each case's stage is
+  `stage_from_pr_labels` over the labels in force at its entry, so an
+  operator-held approval replays as `merge_hold` and its release as
+  `merge_wait`; entries the resolver refuses (`blocked`, `unknown_stage`)
+  yield no case and are reported as refused entries (#10305). Without either
+  flag the backtest makes no forge call.
 - **`loom-daemon eta view OWNER/NAME#ISSUE [--explain] [--json]`** — the
   current estimate(s) for one issue (#9327). State resolution, in order:
   1. An **open linked PR**: its review labels
@@ -1417,8 +1452,9 @@ them with a daemon restart.
   no pass is deleted.
 - **Raw event cache.** After the snapshots, each repo's
   [raw event cache](#raw-event-cache-and-fleet_statet-10197) is synced
-  in-process through a reader-only source, from whatever the matching budget
-  has left, resuming from its own cursor.
+  in-process from the issue-events then the pulls listing (#10298), each
+  through a reader-only source and its own cursor, from whatever the matching
+  shared budget has left. The per-PR reviews/check-runs walks stay CLI-only.
 - **The fit.** The daily refit check (#10245, `refit_if_due`) runs at the end
   of each cycle, in the same blocking call, so it always sees that cycle's
   snapshots; the standalone refit task is then not spawned. It is held while

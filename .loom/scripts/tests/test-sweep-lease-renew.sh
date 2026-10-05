@@ -281,6 +281,10 @@ if [[ "$1" == "api" ]]; then
     echo '{}'
     exit 0
   fi
+  # #10229: the loop's explicit issue-state read (comments carry no state).
+  if [[ "$method" == "GET" && "$path" == repos/*/issues/[0-9]* && "$path" != */comments* ]]; then
+    echo '{"state":"open"}'; exit 0
+  fi
   echo "stub gh: unhandled api args: method=$method path=$path" >&2
   exit 3
 fi
@@ -309,6 +313,7 @@ MINT
 chmod +x "$STUB_DIR/github-app-token.sh"
 
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
+export LOOM_LEASE_RENEW_STATE_DIR="$STUB_DIR/renew-state"
 export PATH="$STUB_DIR:$PATH"
 # #9548: the subject filters lease markers through `forge trusted-comments`.
 # shellcheck source=lib/trust-stub.sh
@@ -327,7 +332,7 @@ reset_state() {
     rm -f "$STUB_DIR"/patch-403-once "$STUB_DIR"/patch-403-always
     rm -f "$STUB_DIR"/patch-*.body "$STUB_DIR"/patch-count-* "$STUB_DIR"/patch-calls.log
     rm -f "$STUB_DIR"/comments-window.json "$STUB_DIR"/patch-404-* "$STUB_DIR"/list-calls.log
-    rm -f "$STUB_DIR"/attr.log
+    rm -f "$STUB_DIR"/attr.log "$STUB_DIR"/renew-state/*.owner # #10229: per-test renewer ownership
     echo "not-configured" > "$STUB_DIR/mint-mode"
     # Ensure rung 3 (personal-token / personal-ambient) has nothing of ITS
     # OWN to escalate to beyond whatever the real ambient host credential
