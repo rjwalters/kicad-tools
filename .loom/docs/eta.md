@@ -559,6 +559,14 @@ order of snapshots, episodes or flag changes.
   fleet refresh task's job; with that task off it is an operator or cron step
   (`eta fleet refresh`).
 - Failures and panics are logged at `warn` and retried on the next check.
+- **Every check emits one `eta.fit` record** (#10391), skips included, from
+  both callers (the refresh tick's end-of-cycle check and the standalone
+  task), so the records are the fit loop's heartbeat. `outcome` is `written`,
+  `skipped`, `error` or `panic`; a skip's `skip_reason` is one of `disabled`,
+  `held`, `today_exists`, `no_snapshots`, `stale_before_grace`. The last record
+  is also kept at `.loom/state/eta/health/fit-check.json` (and each refresh
+  tick at `refresh-cycle.json`), which `eta doctor` reads. Field list:
+  [telemetry-schema.md `eta.fit`](telemetry-schema.md#etafit).
 - Writes go to `.loom/state/eta/fit/fit-<T>.json`, and the directory is
   pruned to the newest **14** `fit-*.json` files.
 - It is controlled by `autonomous.eta.fit.enabled` ([Configuration](#configuration)).
@@ -1289,6 +1297,16 @@ accepts `--repo-root PATH` (default: the current directory).
     form to hand another host.
   - `--as-of` pins the instant the snapshot describes; two hosts that pass the
     same `--as-of` against the same forge state get byte-identical files.
+- **`loom-daemon eta doctor [--repo-root PATH] [--json]`** (#10391) —
+  read-only: prints one `OK|WARN|FAIL|SKIP <link>.<check>: <detail>` line per
+  check, walking the pipeline `config` -> `data` -> `fit` -> `serving` ->
+  `snapshot_feed` -> `outcomes`, with an indented `remedy:` line on every WARN
+  and FAIL (for example `no_reader` -> install a reader App via the fleet reader-App provisioning step,
+  or declare `fleet.captain` and share its snapshot dir through
+  `LOOM_ETA_FLEET_SNAPSHOT_DIR`). It makes no forge call, arms nothing and
+  writes nothing. Exit `0`: no FAIL; `1`: at least one FAIL; `2`: not a Loom
+  workspace. `--json` prints the same checks as an array. The
+  `snapshot_feed.alternates` check is `SKIP` until #10390 lands.
 - **`loom-daemon eta fit [--as-of RFC3339] [--out PATH] [--dry-run] [--json]`**
   — fits the `eta-fit/v1` file from the cached fleet snapshots at cutoff
   `--as-of` (default: today 00:00Z) and writes

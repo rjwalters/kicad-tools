@@ -2056,6 +2056,48 @@ otherwise.
 | `duration_ms` | integer | wall time of the tick |
 | `loom` | object | the deciding (running) daemon's provenance (required) |
 
+### `eta.fit`
+
+One daily-fit check (Issue #10391), whether it fitted or not. Envelopes carry
+`schema_version: 12`. **OTLP-only** (native: `false`). Each caller of the fit
+check emits exactly one record per check: the fleet refresh tick's end-of-cycle
+check (`trigger: fleet_refresh`, every host including a stand-down one) and the
+standalone daily task (`trigger: daily_task`, when fleet refresh is off). They
+double as the fit loop's heartbeat, about 24 per host per day. The body is the
+record's JSON; the scalars ride as `loom.eta.fit.*` attributes (in
+`ETA_LOG_ATTRIBUTE_KEYS`, allowlisted in the collector's `transform/privacy`).
+The record time is the check's start. Provenance is required, as for
+`eta.estimate`: it exports as `loom.eta.version` / `revision` / `tree_state` /
+`provenance_complete`, and a record whose provenance does not validate is never
+emitted. **Absent is never zero**: every `?` field is omitted when it does not
+apply. `fit_id` joins to the `fit_id` on every twin-otter explanation.
+
+| Field | Type | Notes |
+|---|---|---|
+| `check_id` | string | derived, never random: `derived_hex(["loom.eta.fit_check", host_id, started_at])` |
+| `trigger` | string | `fleet_refresh` or `daily_task` |
+| `started_at` | RFC3339 | the check's start |
+| `outcome` | string | `written`, `skipped`, `error` or `panic` |
+| `skip_reason` | string? | present exactly when `outcome = skipped`: `disabled`, `held`, `today_exists`, `no_snapshots` or `stale_before_grace` |
+| `error` | string? | `error` only; at most 512 bytes of daemon-authored text |
+| `fit_id` | string? | the coefficient file's content id: on `written`, and on `today_exists` (the existing file's) |
+| `cutoff` | RFC3339? | the fit's `T` |
+| `window_start`, `window_days`, `data_through` | RFC3339? / integer? / RFC3339? | the training window and the data horizon `H` |
+| `snapshots` | integer | snapshots read (`0` on `no_snapshots`) |
+| `snapshot_oldest_as_of`, `snapshot_newest_as_of` | RFC3339? | ages are derivable at query time |
+| `snapshot_as_of` | object? | body only: `{repo: as_of}` |
+| `stages` | object? | body only: per fit stage `{rows, exits, exit_censored, merge_events, merge_censored, hazard, aft}`; `exit_censored` counts rows with no exit label, `merge_censored` is `rows - merge_events` |
+| `rows_total`, `rows_censored` | integer? | rows over every stage, and those with a censored exit label |
+| `rows_dropped_missing`, `rows_dropped_no_flags`, `rows_star_unknown`, `dwells`, `pruned` | integer? | the fit report's counts |
+| `coeff_file` | string? | file name, never a path |
+| `coeff_bytes`, `coeff_sha256` | integer? / string? | size and sha256 of the file as written |
+| `duration_ms` | integer | wall time of the check |
+| `loom` | object | the computing daemon's provenance (required) |
+
+The daemon also keeps the last record at `.loom/state/eta/health/fit-check.json`
+(byte-identical to the body) and the last refresh tick at
+`refresh-cycle.json`, for `loom-daemon eta doctor`.
+
 ### `eta.snapshot`
 
 This host's **live** ETA estimate set (Issue #9329) — one row per
