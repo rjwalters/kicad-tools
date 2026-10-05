@@ -317,6 +317,18 @@ def _parse_drc_error_rules(stdout: str) -> dict[str, int] | None:
     return rule_counts
 
 
+def _parse_drc_error_lines(stdout: str) -> list[str]:
+    """Return the full ``- <rule>: <message>`` lines of the ERROR section."""
+    err_match = re.search(r"Errors:\s+(\d+)", stdout)
+    if err_match is None:
+        return []
+    section = stdout[err_match.end() :]
+    warn_match = re.search(r"^\s*Warnings:\s+\d+", section, re.MULTILINE)
+    if warn_match is not None:
+        section = section[: warn_match.start()]
+    return [m.strip() for m in re.findall(r"^\s+-\s+[a-z][a-z_]+:.*$", section, re.MULTILINE)]
+
+
 @pytest.fixture(scope="module")
 def unrouted_pcb_path() -> Path:
     """Verify the committed unrouted board 02 PCB exists for the route run."""
@@ -328,8 +340,52 @@ def unrouted_pcb_path() -> Path:
     return UNROUTED_PCB
 
 
+#: Marker ``kct route`` prints when its ``kicad-cli version`` probe failed
+#: and the post-route native zone refill was therefore skipped.
+_ZONE_FILL_SKIPPED_MARKER = "Zone fill: skipped (kicad-cli not installed)"
+
+#: Extra route attempts allowed when the run was degraded by the environment.
+_MAX_ENV_RETRIES = 2
+
+
+def _env_degradation(stdout: str) -> str | None:
+    """Return a description if the run lost its zone refill to a failed probe.
+
+    Issue #5905: a single fresh process, with router ``--seed 42`` and
+    ``PYTHONHASHSEED`` unset/42/43/45 all reaching 0 errors, once printed
+    this marker even though ``kicad-cli`` was installed (the
+    ``find_kicad_cli`` probe has a 5s timeout and is memoised).  Without
+    the native refill the committed GND/VCC pour is never re-carved
+    around the routed copper and ``connectivity`` reports a stranded GND
+    pad -- an environment artefact, not a router regression.
+    """
+    if _ZONE_FILL_SKIPPED_MARKER in stdout and shutil.which("kicad-cli"):
+        return (
+            "kct route skipped the native zone refill ('kicad-cli not "
+            "installed') although kicad-cli is on PATH -- the kicad-cli "
+            "probe failed transiently"
+        )
+    return None
+
+
 @pytest.fixture(scope="module")
 def route_stdout(unrouted_pcb_path: Path) -> str:
+    """Run the canonical route once; retry only environment-degraded runs.
+
+    A run whose zone refill was skipped by a transient ``kicad-cli`` probe
+    failure (see ``_env_degradation``) is re-run up to ``_MAX_ENV_RETRIES``
+    times.  Any other outcome -- including a genuine DRC error on a
+    healthy run -- is returned untouched so the assertions see it.
+    """
+    stdout = ""
+    for _attempt in range(_MAX_ENV_RETRIES + 1):
+        stdout = _route_board02_once(unrouted_pcb_path)
+        if _env_degradation(stdout) is None:
+            break
+    return stdout
+
+
+def _route_board02_once(unrouted_pcb_path: Path) -> str:
     """Run the canonical ``kct route`` invocation for board 02 once per module.
 
     Mirrors the recipe in ``boards/02-charlieplex-led/generate_design.py``
@@ -439,29 +495,30 @@ class TestBoard02ManufacturableBaseline:
         )
 
     def test_drc_clean_at_jlcpcb_tier1(self, route_stdout: str) -> None:
-        """The post-route DRC sweep carries only the grandfathered #3556 findings.
+        """The post-route DRC sweep is clean (strict ``MAX_DRC_ERRORS`` = 0).
 
         ``kct route`` runs ``drc_verify_and_nudge`` after routing
         (see ``router/drc_nudge.py:1513``) and reports the per-rule
         DRC error breakdown in its ``--- DRC Validation ---`` block.
 
-        Through Wave 3 (PRs #3247-#3250) this board was perfectly clean
-        (0 errors) at jlcpcb-tier1 across all 3 seeds.  Issue #3556 then
-        added the ``clearance_pad_zone`` rule (pad copper vs foreign-net
-        zone fill), which surfaces 4 pre-existing stale-pour-carve shorts
-        at the U1 DIP-8 cluster (3x GND-pad-in-VCC-fill + 1x
-        VCC-pad-in-GND-fill).  These are GENUINE foreign-net defects, not
-        false positives -- the same class grandfathered for boards 04-07
-        in ``.github/routed-drc-tolerance.yml`` (#3556).  This test
-        therefore allows ONLY the grandfathered ``clearance_pad_zone``
-        findings (<= ``MAX_DRC_ERRORS``) through and FAILS on:
-        - any NEW rule appearing in the error breakdown (a real
-          clearance/auto-fix regression -- bisect PRs #3247-#3250), OR
-        - MORE than ``MAX_DRC_ERRORS`` total (the pour-carve cluster grew).
+        Through Wave 3 (PRs #3247-#3250) this board was clean (0 errors);
+        issue #3556 added ``clearance_pad_zone`` (pad copper vs foreign-net
+        zone fill), which surfaced 4 stale-pour-carve shorts at the U1
+        DIP-8 cluster.  Issue #3724 (zone refill after routing) burned
+        those down, so ``MAX_DRC_ERRORS`` is 0 and nothing is tolerated
+        in practice.  ``GRANDFATHERED_DRC_RULES`` is retained only so a
+        regression is reported as "cluster grew" vs "new rule"; Board 02
+        has no entry in ``.github/routed-drc-tolerance.yml`` and must not
+        get one.  The test FAILS on:
+        - any NEW rule in the error breakdown (bisect PRs #3247-#3250), OR
+        - ANY error (> ``MAX_DRC_ERRORS``).
 
-        Burn-down: once the VCC/GND pours are re-carved against the final
-        pad geometry (sibling of #3549-#3553), drop ``MAX_DRC_ERRORS``
-        back to 0 and remove the #3556 entries here + in the tolerance yml.
+        Issue #5905: a lone ``connectivity`` error (GND pad stranded) was
+        observed once in 9 fresh-process runs of the exact historical
+        fixture; it coincided with ``Zone fill: skipped (kicad-cli not
+        installed)`` (transient probe failure) and not with
+        ``PYTHONHASHSEED`` (44 failed once, passed twice; unset/42/43/45
+        passed).  The fixture re-runs such environment-degraded runs.
 
         Issue #3843/#3830 (June 20 2026): the new WARNING-severity
         ``copper_sliver`` rule surfaces a handful of ~0.04mm residual
@@ -490,6 +547,13 @@ class TestBoard02ManufacturableBaseline:
         )
 
         total = rule_counts.pop("__total__")
+        findings = _parse_drc_error_lines(route_stdout)
+        degraded = _env_degradation(route_stdout)
+        finding_report = (
+            "Exact ERROR findings:\n  " + "\n  ".join(findings)
+            if findings
+            else "No per-finding ERROR lines parsed."
+        ) + (f"\nEnvironment note: {degraded}" if degraded else "")
         unexpected = {
             rule: count
             for rule, count in rule_counts.items()
@@ -502,6 +566,7 @@ class TestBoard02ManufacturableBaseline:
             "tolerated.  A new rule means a real regression -- check the "
             "negotiated loop's clearance handling or the auto-fix sweep "
             "(Issue #3238 / PR #3247).\n"
+            f"{finding_report}\n"
             f"Last 2000 chars:\n{route_stdout[-2000:]}"
         )
         assert total <= MAX_DRC_ERRORS, (
@@ -511,6 +576,7 @@ class TestBoard02ManufacturableBaseline:
             "-- either a clearance regression added foreign-net pad-in-pour "
             "overlaps, or the pour geometry drifted.  Inspect the U1 DIP-8 "
             "cluster.\n"
+            f"{finding_report}\n"
             f"Last 2000 chars:\n{route_stdout[-2000:]}"
         )
 
@@ -919,3 +985,29 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
         "manufacturability signal; the exact routes/vias/length pins and "
         "the cross-seed equality check are the real guards."
     )
+
+
+class TestEnvDegradationHelpers:
+    """Cheap regression coverage for the #5905 diagnostics (no routing)."""
+
+    def test_skipped_zone_fill_with_kicad_cli_is_degraded(self, monkeypatch) -> None:
+        monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/kicad-cli")
+        assert _env_degradation(f"x\n  {_ZONE_FILL_SKIPPED_MARKER}\n") is not None
+
+    def test_skipped_zone_fill_without_kicad_cli_is_not_degraded(self, monkeypatch) -> None:
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        assert _env_degradation(f"  {_ZONE_FILL_SKIPPED_MARKER}\n") is None
+
+    def test_clean_run_is_not_degraded(self) -> None:
+        assert _env_degradation("  Zone fill: complete\n") is None
+
+    def test_error_lines_named_and_warnings_excluded(self) -> None:
+        out = (
+            "--- DRC Validation ---\n  Errors:   1\n    - connectivity: Net 'GND' "
+            "is partially routed at (152.30, 108.30)\n  Warnings: 2\n"
+            "    - pin1_marker_missing: D1 ...\n"
+        )
+        assert _parse_drc_error_lines(out) == [
+            "- connectivity: Net 'GND' is partially routed at (152.30, 108.30)"
+        ]
+        assert _parse_drc_error_lines("  Warnings: 3\n") == []
