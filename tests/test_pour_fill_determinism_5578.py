@@ -81,6 +81,23 @@ comparison: "same total copper" and "same fragmentation" are different
 guarantees, and #5578's scope guards call out that conflating them is what
 produced the original false report.
 
+Issue #5870: the load-sensitive failure was routing, not the fill
+-----------------------------------------------------------------
+
+The slow test failed once under concurrent CPU load with board 03's
+``('GND', 'B.Cu')`` pour 21.59 mm^2 different between the two routes.
+Measured on fresh processes with stage snapshots retained, the first
+divergent stage was ROUTING: the stall-relief rescue's victim re-land
+sub-searches kept a 10 s wall clock under ``--deterministic-budget``, and
+under load they needed 10-31 s, so the cut landed different copper.  The
+test now routes with ``--deterministic-rescue``, checks each route's exit
+status, fill and rescue-arm log lines, and compares the routed copper
+*before* the pour.  That way a routing divergence, a skipped or failed fill,
+and a genuine fill mismatch each fail with their own message.  It also runs
+with ``--oracle-rounds 0``: the later pour-oracle stage (#5785) has its own
+nondeterminism, inherited from ``kicad-cli`` DRC and tracked in #5934 (see
+:data:`_DETERMINISTIC_FLAGS`).
+
 Deliberately out of scope, tracked separately
 ---------------------------------------------
 
@@ -112,9 +129,46 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 BOARD03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick.kicad_pcb"
 
-#: The flags that make ``kct route`` reproducible.  Same set
-#: ``tests/test_routing_plan_5510.py`` uses.
-_DETERMINISTIC_FLAGS = ("--seed", "42", "--deterministic-budget")
+#: The flags that make ``kct route`` reproducible.
+#:
+#: ``--deterministic-rescue`` is load-bearing (Issue #5870).  Without it the
+#: stall-relief rescue's probe / victim re-land sub-searches keep a 10 s wall
+#: clock even under ``--deterministic-budget`` (#4730).  Board 03 reaches that
+#: rescue (``USB_CC1``), and its victim re-lands finished inside 10 s on a
+#: lightly loaded box but needed 10-31 s under CPU load, so the cap cut them only when
+#: the machine was busy: the same seed then landed different copper (once
+#: 22/24 nets and a layer escalation), and the pour fill around it differed by
+#: tens of mm^2 -- the 21.59 mm^2 ``('GND', 'B.Cu')`` failure #5870 reported.
+#: The fill engine was never the variable; its *input* was.
+#:
+#: ``--oracle-rounds 0`` scopes this test to the guarantee it owns (#5578:
+#: identical routes -> identical pour fill).  The KiCad-oracle completion loop
+#: (#5785, merged after #5870 was reported) is a separate stage with its own,
+#: measured nondeterminism: ``kicad-cli pcb drc`` reports a byte-identical
+#: board's ``unconnected_items`` in a different order and set from run to run,
+#: so the stitches it closes -- and the pour around them -- differ even with no
+#: load at all.  That is tracked, with its evidence, in #5934; drop this flag
+#: once #5934 makes that stage reproducible.
+_DETERMINISTIC_FLAGS = (
+    "--seed",
+    "42",
+    "--deterministic-budget",
+    "--deterministic-rescue",
+    "--oracle-rounds",
+    "0",
+)
+
+#: The routing log line that proves the iteration-bounded rescue arm was in
+#: force (``Autorouter._relief_subsearch_bound_line``; greppable evidence
+#: token, pinned there).
+_DETERMINISTIC_RESCUE_EVIDENCE = "Relief-rescue sub-search cap: iteration-bounded"
+
+#: ``kct route`` exit codes that mean "every net was routed": ``0``, or ``3``
+#: when a post-route validation fails afterwards.  Measured on board 03 with
+#: the flags above: ``0``.  Anything else (no/partial routing, interrupted,
+#: pre-route gate) is a ROUTING outcome, and the copper comparison below would
+#: then be blaming the fill for it.
+_ROUTED_EXIT_CODES = (0, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +515,14 @@ def test_zone_generator_uuids_differ_for_distinct_zones():
 
 
 def _route(pcb: Path, out: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    """Route ``pcb`` into ``out`` in a fresh process; keep its logs beside it.
+
+    ``<out>.stdout.txt`` / ``<out>.stderr.txt`` / ``<out>.rc`` are written so a
+    failing run under ``--basetemp`` retains the evidence needed to tell a
+    routing divergence from a skipped fill from a genuine fill mismatch.
+    """
     env = dict(os.environ, PYTHONHASHSEED="0")
-    return subprocess.run(
+    proc = subprocess.run(
         [
             sys.executable,
             "-m",
@@ -479,6 +539,42 @@ def _route(pcb: Path, out: Path, *extra: str) -> subprocess.CompletedProcess[str
         text=True,
         cwd=REPO_ROOT,
         env=env,
+    )
+    out.with_suffix(".stdout.txt").write_text(proc.stdout)
+    out.with_suffix(".stderr.txt").write_text(proc.stderr)
+    out.with_suffix(".rc").write_text(f"{proc.returncode}\n")
+    return proc
+
+
+def _assert_route_completed_and_filled(proc: subprocess.CompletedProcess[str], label: str) -> None:
+    """Fail loudly unless this route ran every stage the comparison relies on.
+
+    Issue #5870: the slow test used to discard both ``CompletedProcess``
+    objects.  A route that failed, a fill the child skipped (its own
+    ``find_kicad_cli`` probe is independent of the parent's -- see #5932), or
+    a fill that failed non-fatally all left an output file behind, and the
+    copper comparison then reported them as a "genuine" pour-copper change.
+    """
+    tail = (
+        f"\n--- stdout tail ---\n{proc.stdout[-3000:]}\n--- stderr tail ---\n{proc.stderr[-3000:]}"
+    )
+    assert proc.returncode in _ROUTED_EXIT_CODES, (
+        f"{label}: kct route exited {proc.returncode}, not one of "
+        f"{_ROUTED_EXIT_CODES} (all nets routed).  This is a ROUTING outcome, "
+        f"not a pour-fill one.{tail}"
+    )
+    assert "Zone fill: skipped" not in proc.stdout, (
+        f"{label}: the route subprocess skipped the zone fill (its own "
+        f"kicad-cli probe failed -- #5932), so there is no fresh fill to "
+        f"compare.{tail}"
+    )
+    assert "zone fill failed" not in proc.stdout, f"{label}: the zone fill failed.{tail}"
+    assert "Zone fill: complete" in proc.stdout, (
+        f"{label}: no 'Zone fill: complete' line -- the fill did not run.{tail}"
+    )
+    assert _DETERMINISTIC_RESCUE_EVIDENCE in proc.stdout, (
+        f"{label}: the iteration-bounded relief-rescue arm was not in force, "
+        f"so the route is not load-independent (Issue #5870).{tail}"
     )
 
 
@@ -499,11 +595,32 @@ def test_board03_pour_fill_is_reproducible(tmp_path):
     if find_kicad_cli() is None:
         pytest.skip("kicad-cli not installed -- zone fill is a no-op, nothing to compare")
 
+    from tests.test_routing_plan_5510 import _copper_elements
+
     a = tmp_path / "a.kicad_pcb"
     b = tmp_path / "b.kicad_pcb"
-    _route(BOARD03, a)
-    _route(BOARD03, b)
+    proc_a = _route(BOARD03, a)
+    proc_b = _route(BOARD03, b)
     assert a.exists() and b.exists()
+    _assert_route_completed_and_filled(proc_a, "run a")
+    _assert_route_completed_and_filled(proc_b, "run b")
+    assert proc_a.returncode == proc_b.returncode, (
+        f"two identical board-03 routes ended with different statuses "
+        f"({proc_a.returncode} vs {proc_b.returncode})"
+    )
+
+    # Stage attribution (Issue #5870): the fill can only be blamed for a pour
+    # difference when the copper it poured around is the same.  Compare the
+    # routed copper first, so a routing divergence is reported as one instead
+    # of as "a net genuinely gained or lost pour copper".
+    copper_a, copper_b = _copper_elements(a), _copper_elements(b)
+    assert copper_a == copper_b, (
+        "two identical board-03 routes produced different routed copper "
+        f"({len(copper_a)} vs {len(copper_b)} segment/via/arc nodes; "
+        f"{len(set(copper_a) ^ set(copper_b))} differ).  The pour fill is "
+        "downstream of this, so any fill difference below would be a "
+        "consequence, not a fill-engine nondeterminism (Issue #5870)."
+    )
 
     sig_a = _fill_union_signature(a)
     sig_b = _fill_union_signature(b)
