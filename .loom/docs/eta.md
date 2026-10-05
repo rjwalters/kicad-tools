@@ -1442,7 +1442,7 @@ of what is on disk and never needs a refetch.
 | `fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | `true` (#10263) |
 | `fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor 900) |
 | `fleetRefresh.maxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_MAX_CALLS` | `300` |
-| `fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `1500` |
+| `fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `600` (#10329; was `1500`) |
 | `fleetRefresh.reserveCalls` | `LOOM_ETA_FLEET_REFRESH_RESERVE` | `1500` |
 | `fleetRefresh.backfillDays` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_DAYS` | `21` (floor 15: the fit window + 1) |
 | `fleetRefresh.signoz.enabled` | `LOOM_ETA_FLEET_SIGNOZ_ENABLED` | `false` (#9758; see [SigNoz in-sweep half](#signoz-in-sweep-half-fleetrefreshsignoz-9758)) |
@@ -1480,6 +1480,22 @@ reads, and it is budgeted with a reserve floor. Without it the fit would have
 no training data on a fleet host. Settings are read once at spawn; change
 them with a daemon restart.
 
+- **One refresher: declare `fleet.captain`** (#10329). On a multi-host fleet,
+  declare `fleet.captain` in the tracked `.loom/config.json`. Only the captain
+  refreshes; it is the singleton job `eta-fleet-refresh`
+  ([daemon-reference → Fleet captain](daemon-reference.md#fleet-captain-8848)).
+  Pick a captain with reader Apps, the OTLP exporter, and every fleet repo
+  provisioned or already snapshotted. Every other host makes **no** forge call
+  and emits no record, but still runs the daily fit on the snapshots it has.
+  Those are the captain's only when `LOOM_ETA_FLEET_SNAPSHOT_DIR` is shared
+  with it; otherwise they are its own older ones, or none. With **no** captain
+  declared, every host with a reader refreshes, as before, and logs a hint
+  once. That keeps a single-host install's fit, but N hosts spend N times the
+  shared reader budgets. The gate is re-read every tick, so editing
+  `fleet.captain` needs no restart. The opt-in
+  [SigNoz in-sweep half](#signoz-in-sweep-half-fleetrefreshsignoz-9758) is not
+  gated: it spends no reader budget.
+
 - **Cadence.** The first cycle runs 120 s after start, then every
   `intervalSecs`, skipping missed ticks. Each cycle runs off the tick in a
   blocking task; a panic is logged and the next tick retries.
@@ -1507,13 +1523,20 @@ them with a daemon restart.
   passes draw from `maxCallsPerCycle`, backfills from
   `backfillMaxCallsPerCycle`, both host-wide. When a response reports fewer
   than `reserveCalls` core calls remaining, that page is kept and every further
-  repo on the same reader App is skipped for the cycle (`reserve`).
+  repo on the same reader installation is skipped for the cycle (`reserve`).
+  An installation is an App **and** a repo owner (#10329): that is the bucket
+  the response header reports, so one owner's low bucket does not skip the
+  same App's repos for another owner. Spend per hour is
+  `budget × 3600 / intervalSecs`, so a lowered `intervalSecs` multiplies it.
 - **Calls per refresh.** A quiet repo costs **1** (page 1 sent with its ETag,
   answered `304`, which still advances `as_of`). An active one costs
   `ceil(rows updated since the watermark / 100)` listing pages plus one
   timeline page per moved PR (more for a PR with over 100 timeline entries).
   A first backfill of `rjwalters/loom` at 21 days is about 1,300 calls, which
-  fits one cycle at the default backfill budget.
+  takes three cycles (about 3 h at the default `intervalSecs`) at the default
+  backfill budget of 600, inside the fit's 6 h backfill hold. A whole-fleet
+  first backfill can take longer; the first fit then trains on what has
+  finished, and the fit reruns daily.
 - **Rate limits.** A rate-limited reader is withdrawn App-wide until the
   forge's reset, the cycle ends, and the task makes **zero** calls until
   `max(reset, now + intervalSecs)` (`backoff`). With the rate-limit breaker
@@ -1553,8 +1576,8 @@ them with a daemon restart.
   per cycle with the stop-reason counts and the calls spent.
 - **Shared snapshot directory.** There is no lock against the CLI or another
   host: every writer replaces whole files atomically, and the last writer
-  wins. A `LOOM_ETA_FLEET_SNAPSHOT_DIR` shared between hosts works, but enable
-  the task on only one of them.
+  wins. A `LOOM_ETA_FLEET_SNAPSHOT_DIR` shared between hosts works. Declare
+  `fleet.captain` so only one of them refreshes it; the others fit from it.
 
 ### SigNoz in-sweep half (`fleetRefresh.signoz`, #9758)
 
