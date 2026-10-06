@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -92,6 +93,26 @@ def _git(args: Sequence[str], cwd: Path) -> bytes:
     return proc.stdout
 
 
+def _repo_relative(rel: str, cwd: Path, root: Path, label: str, spec: str) -> Path:
+    """Return ``rel`` as a normalised repo-relative path, refusing escapes."""
+    root_resolved = root.resolve()
+    if rel.startswith("./") or rel.startswith("../"):
+        candidate = (cwd / rel).resolve()
+    else:
+        if Path(rel).is_absolute():
+            raise DiffSideError(f"{label}: {spec!r}: path must be relative to the repository")
+        # Lexical normalisation only: the path names a file *in the
+        # revision*, so working-tree symlinks must not be followed.
+        candidate = Path(os.path.normpath(root_resolved / rel))
+    try:
+        rel_path = candidate.relative_to(root_resolved)
+    except ValueError:
+        raise DiffSideError(f"{label}: {spec!r}: path escapes the repository root") from None
+    if rel_path == Path("."):
+        raise DiffSideError(f"{label}: {spec!r}: path names the repository root, not a board")
+    return rel_path
+
+
 def resolve_side(spec: str, scratch: Path, label: str) -> Path:
     """Return a local path for ``spec`` (a path, or ``REV:path`` git spec)."""
     as_path = Path(spec)
@@ -100,26 +121,29 @@ def resolve_side(spec: str, scratch: Path, label: str) -> Path:
     rev, sep, rel = spec.partition(":")
     if not sep or not rev or not rel:
         raise DiffSideError(f"{label}: path not found: {spec}")
-    if rev.startswith("-"):
-        # A leading "-" would be parsed by git as an option (e.g. --output=FILE).
-        raise DiffSideError(f"{label}: invalid revision {rev!r}")
     cwd = Path.cwd()
     try:
         root = Path(_git(["rev-parse", "--show-toplevel"], cwd).decode().strip())
     except (DiffSideError, OSError) as e:
         raise DiffSideError(f"{label}: {spec!r} is not a path, and not in a git repo: {e}") from e
-    if rel.startswith("./") or rel.startswith("../"):
-        try:
-            rel_path = (cwd / rel).resolve().relative_to(root.resolve())
-        except ValueError as e:
-            raise DiffSideError(f"{label}: {rel!r} is outside the git repository") from e
-    else:
-        rel_path = Path(rel)
+    if rev.startswith("-"):
+        # A leading dash would be parsed by git as an option (e.g.
+        # ``--output=FILE`` makes ``git archive`` write/truncate FILE).
+        raise DiffSideError(f"{label}: invalid git revision {rev!r} (must not start with '-')")
+    rel_path = _repo_relative(rel, cwd, root, label, spec)
     parent = rel_path.parent.as_posix() or "."
     try:
-        # Resolve to a SHA first so ``rev`` can never act as an option.
-        tree = _git(["rev-parse", "--verify", "--end-of-options", f"{rev}^{{tree}}"], root)
-        blob = _git(["archive", "--format=tar", tree.decode().strip(), "--", parent], root)
+        tree = (
+            _git(["rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{tree}}"], root)
+            .decode()
+            .strip()
+        )
+    except DiffSideError as e:
+        raise DiffSideError(f"{label}: unknown git revision {rev!r}") from e
+    if not tree or tree.startswith("-"):  # pragma: no cover - defensive
+        raise DiffSideError(f"{label}: unknown git revision {rev!r}")
+    try:
+        blob = _git(["archive", "--format=tar", tree, "--", parent], root)
     except DiffSideError as e:
         raise DiffSideError(f"{label}: cannot export {parent} at {rev}: {e}") from e
     dest = scratch / label

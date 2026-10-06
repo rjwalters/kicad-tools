@@ -15,7 +15,8 @@ Two identities are attached to every :class:`~kicad_tools.validate.violations.DR
     *The local evidence* that produced the finding: its rounded location and
     closest points, its measured and required values, the placement and pad
     geometry (with pad nets) of every footprint it names, and the pad
-    membership of every net it names.  When the copper or nets under a finding
+    membership of every net it names (and, when several findings share one
+    key, how many do -- see :func:`evidence_payload`).  When the copper or nets under a finding
     change, the hash changes -- that is what makes an evidence-bound waiver go
     **stale** instead of silently suppressing a finding whose geometry nobody
     has reviewed.
@@ -31,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -150,8 +152,22 @@ class EvidenceContext:
         self.has_board = pcb is not None
 
 
-def evidence_payload(violation: DRCViolation, context: EvidenceContext | None = None) -> dict:
-    """Return the canonical evidence document hashed by :func:`compute_evidence_hash`."""
+def evidence_payload(
+    violation: DRCViolation,
+    context: EvidenceContext | None = None,
+    *,
+    multiplicity: int = 1,
+) -> dict:
+    """Return the canonical evidence document hashed by :func:`compute_evidence_hash`.
+
+    ``multiplicity`` is how many findings on the board share this finding's
+    key.  Findings that share a key cannot be told apart by it, so when there
+    is more than one the count joins the evidence: adding (or removing) a
+    look-alike finding then changes every hash under that key, and a waiver
+    reviewed against the old population goes stale instead of silently
+    covering the newcomer.  A unique key (the common case) leaves the payload
+    -- and so the hash -- exactly as it was.
+    """
     ctx = context or EvidenceContext(None)
     payload: dict[str, Any] = {
         "key": violation.key,
@@ -160,6 +176,8 @@ def evidence_payload(violation: DRCViolation, context: EvidenceContext | None = 
         "actual": _round(violation.actual_value, _VALUE_DIGITS),
         "required": _round(violation.required_value, _VALUE_DIGITS),
     }
+    if multiplicity > 1:
+        payload["multiplicity"] = multiplicity
     if ctx.has_board:
         footprints: dict[str, Any] = {}
         for item in violation.items:
@@ -171,10 +189,17 @@ def evidence_payload(violation: DRCViolation, context: EvidenceContext | None = 
     return payload
 
 
-def compute_evidence_hash(violation: DRCViolation, context: EvidenceContext | None = None) -> str:
+def compute_evidence_hash(
+    violation: DRCViolation,
+    context: EvidenceContext | None = None,
+    *,
+    multiplicity: int = 1,
+) -> str:
     """Hash the local evidence of ``violation`` (see module docstring)."""
     canonical = json.dumps(
-        evidence_payload(violation, context), sort_keys=True, separators=(",", ":")
+        evidence_payload(violation, context, multiplicity=multiplicity),
+        sort_keys=True,
+        separators=(",", ":"),
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     return EVIDENCE_HASH_PREFIX + digest
@@ -195,7 +220,10 @@ def annotate_evidence(results: DRCResults, pcb: PCB | None) -> None:
     if not any(_needs(v) for v in results.violations):
         return
     context = EvidenceContext(pcb)
+    counts = Counter(v.key for v in results.violations if isinstance(v, DRCViolation))
     results.violations = [
-        replace(v, evidence_hash=compute_evidence_hash(v, context)) if _needs(v) else v
+        replace(v, evidence_hash=compute_evidence_hash(v, context, multiplicity=counts[v.key]))
+        if _needs(v)
+        else v
         for v in results.violations
     ]

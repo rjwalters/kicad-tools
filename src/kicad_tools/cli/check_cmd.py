@@ -2119,6 +2119,7 @@ def main(argv: list[str] | None = None) -> int:
     from kicad_tools.validate.rules.waivers import (
         discover_waivers_sidecar,
         load_waivers,
+        shadowed_waivers_sidecars,
     )
 
     general_waivers = None
@@ -2127,6 +2128,14 @@ def main(argv: list[str] | None = None) -> int:
         gw_path: Path | None = Path(args.waivers).resolve()
     else:
         gw_path = discover_waivers_sidecar(pcb_path)
+        if gw_path is not None:
+            for shadowed in shadowed_waivers_sidecars(pcb_path, gw_path):
+                print(
+                    f"WARNING: waivers sidecar {shadowed} is NOT applied: {gw_path} takes"
+                    " precedence and only one sidecar is loaded. Move its entries into"
+                    f" {gw_path.name} (or pass --waivers explicitly).",
+                    file=sys.stderr,
+                )
 
     if gw_path is not None:
         if not gw_path.exists():
@@ -3543,8 +3552,10 @@ def output_json(
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
     # Issue #5946: stale evidence-bound waivers, and the coverage rollup.
+    # Counted on the unfiltered results so ``--errors-only`` cannot hide a
+    # stale waiver on a warning-severity finding.
     summary_data["stale_waivers"] = sum(
-        1 for v in violations if getattr(v, "stale_waiver_hash", None)
+        1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
     )
     if coverage is not None:
         summary_data.update(_coverage_summary(coverage))
@@ -3614,8 +3625,10 @@ def write_json_report(
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
     # Issue #5946: stale evidence-bound waivers, and the coverage rollup.
+    # Counted on the unfiltered results so ``--errors-only`` cannot hide a
+    # stale waiver on a warning-severity finding.
     summary_data["stale_waivers"] = sum(
-        1 for v in violations if getattr(v, "stale_waiver_hash", None)
+        1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
     )
     if coverage is not None:
         summary_data.update(_coverage_summary(coverage))

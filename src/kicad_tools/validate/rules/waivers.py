@@ -408,6 +408,39 @@ def load_waivers(path: Path) -> Waivers:
     return waivers_from_dict(data)
 
 
+def _waivers_sidecar_candidates(pcb_path: Path) -> list[Path]:
+    pcb_dir = pcb_path.parent
+    filename = ".kct_waivers.json"
+    return [
+        # Issue #5946: a per-board ``<board>.kct-waivers.json`` committed next
+        # to the board wins over the shared directory-level sidecar.
+        pcb_dir / f"{pcb_path.stem}.kct-waivers.json",
+        pcb_dir / filename,
+        pcb_dir / "output" / filename,
+        pcb_dir.parent / "output" / filename,
+    ]
+
+
+def shadowed_waivers_sidecars(pcb_path: Path, chosen: Path) -> list[Path]:
+    """Existing sidecars that :func:`discover_waivers_sidecar` passed over.
+
+    Only one sidecar is loaded, so when a per-board
+    ``<board>.kct-waivers.json`` exists every lower-priority
+    ``.kct_waivers.json`` is ignored.  Callers warn with this list so entries
+    in the shared file do not silently stop applying (Issue #5946 review).
+    """
+    try:
+        chosen_resolved = chosen.resolve()
+    except OSError:  # pragma: no cover - defensive
+        chosen_resolved = chosen
+    out: list[Path] = []
+    for candidate in _waivers_sidecar_candidates(pcb_path):
+        if candidate.is_file() and candidate.resolve() != chosen_resolved:
+            if candidate.resolve() not in {p.resolve() for p in out}:
+                out.append(candidate)
+    return out
+
+
 def discover_waivers_sidecar(pcb_path: Path) -> Path | None:
     """Probe conventional locations for a ``.kct_waivers.json`` sidecar.
 
@@ -416,20 +449,13 @@ def discover_waivers_sidecar(pcb_path: Path) -> Path | None:
     for ``.kct_waivers.json``: the PCB directory, then a sibling ``output/``
     subdir, then ``../output/``.
 
+    Only the first hit is loaded; see :func:`shadowed_waivers_sidecars` for
+    the ones it passed over.
+
     Returns:
         The first existing candidate path, or ``None`` when no sidecar found.
     """
-    pcb_dir = pcb_path.parent
-    filename = ".kct_waivers.json"
-    candidates = [
-        # Issue #5946: a per-board ``<board>.kct-waivers.json`` committed next
-        # to the board wins over the shared directory-level sidecar.
-        pcb_dir / f"{pcb_path.stem}.kct-waivers.json",
-        pcb_dir / filename,
-        pcb_dir / "output" / filename,
-        pcb_dir.parent / "output" / filename,
-    ]
-    for candidate in candidates:
+    for candidate in _waivers_sidecar_candidates(pcb_path):
         if candidate.is_file():
             return candidate
     return None

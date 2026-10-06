@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import replace
@@ -11,8 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from kicad_tools.cli import check_cmd
-from kicad_tools.cli.check_diff import DiffSideError, diff_reports, resolve_side, strip_driver_args
+from kicad_tools.cli import check_cmd, check_diff
+from kicad_tools.cli.check_diff import (
+    DiffSideError,
+    diff_reports,
+    resolve_side,
+    strip_driver_args,
+)
 from kicad_tools.drc.waivers import apply_waivers_to_report
 from kicad_tools.validate import DRCResults, DRCViolation
 from kicad_tools.validate import coverage as cov
@@ -347,37 +353,99 @@ class TestDiffReports:
         assert side.with_suffix(".kicad_pro").is_file()  # sidecars come along
         assert resolve_side(str(board), scratch, "new") == board.resolve()
 
-    def test_option_like_revision_rejected(self, tmp_path, monkeypatch):
-        if shutil.which("git") is None:
-            pytest.skip("git not installed")
+    @staticmethod
+    def _repo(tmp_path):
         repo = tmp_path / "repo"
-        (repo / "boards").mkdir(parents=True)
-        (repo / "boards" / "b.kicad_pcb").write_text("x")
+        (repo / "boards" / "x").mkdir(parents=True)
+        (repo / "boards" / "x" / "x.kicad_pcb").write_text("rev1")
         env = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(repo), *env, "commit", "-qm", "r1"], check=True)
-        monkeypatch.chdir(repo)
-        victim = tmp_path / "x"
-        victim.write_text("keep")
-        for spec in (
-            f"--output={victim}:boards/b.kicad_pcb",
-            f"--output={tmp_path}/full.tar:HEAD/b",
-        ):
-            with pytest.raises(DiffSideError):
-                resolve_side(spec, tmp_path / "scratch", "old")
-        assert victim.read_text() == "keep"
-        assert not (tmp_path / "full.tar").exists()
+        return repo
 
-    def test_rev_path_escaping_repo_is_clean_error(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "rev_template",
+        [
+            "--output={victim}",
+            "--output={newfile}",
+            "-o{newfile}",
+            "--remote=ext::sh",
+        ],
+    )
+    def test_dash_revision_is_rejected_and_writes_nothing(
+        self, tmp_path, monkeypatch, rev_template
+    ):
+        """A ``REV`` starting with ``-`` must never reach git as an option (#5946 review)."""
         if shutil.which("git") is None:
             pytest.skip("git not installed")
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        repo = self._repo(tmp_path)
+        victim = tmp_path / "victim.txt"
+        victim.write_text("precious")
+        newfile = tmp_path / "full.tar"
         monkeypatch.chdir(repo)
+        rev = rev_template.format(victim=victim, newfile=newfile)
+        for rel in ("boards/x/x.kicad_pcb", "HEAD/boards/x/x.kicad_pcb"):
+            with pytest.raises(DiffSideError, match="must not start with"):
+                resolve_side(f"{rev}:{rel}", tmp_path / "scratch", "old")
+        assert victim.read_text() == "precious"
+        assert not newfile.exists()
+
+    def test_revision_is_resolved_to_a_tree_sha(self, tmp_path, monkeypatch):
+        """Only the ``rev-parse``d tree SHA is handed to ``git archive``."""
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        repo = self._repo(tmp_path)
+        monkeypatch.chdir(repo)
+        calls: list[list[str]] = []
+        real_git = check_diff._git
+
+        def spy(args, cwd):
+            calls.append(list(args))
+            return real_git(args, cwd)
+
+        monkeypatch.setattr(check_diff, "_git", spy)
+        side = resolve_side("HEAD:boards/x/x.kicad_pcb", tmp_path / "scratch", "old")
+        assert side.read_text() == "rev1"
+        rev_parse = next(c for c in calls if c[0] == "rev-parse" and "--verify" in c)
+        assert "--end-of-options" in rev_parse
+        assert rev_parse.index("--end-of-options") < rev_parse.index("HEAD^{tree}")
+        archive = next(c for c in calls if c[0] == "archive")
+        tree_ish = archive[archive.index("--") - 1]
+        assert re.fullmatch(r"[0-9a-f]{40,64}", tree_ish)
+
+        with pytest.raises(DiffSideError, match="unknown git revision"):
+            resolve_side("no-such-ref:boards/x/x.kicad_pcb", tmp_path / "scratch2", "old")
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "../../etc/passwd",
+            "boards/../../../etc/passwd",
+            "/etc/passwd",
+            "./../../outside.kicad_pcb",
+        ],
+    )
+    def test_path_traversal_is_a_clean_error(self, tmp_path, monkeypatch, rel):
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        repo = self._repo(tmp_path)
+        monkeypatch.chdir(repo / "boards")
         with pytest.raises(DiffSideError):
-            resolve_side("HEAD:../../etc/passwd", tmp_path / "scratch", "old")
+            resolve_side(f"HEAD:{rel}", tmp_path / "scratch", "old")
+
+    def test_path_traversal_exits_1_via_cli(self, tmp_path, monkeypatch, capsys):
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        repo = self._repo(tmp_path)
+        monkeypatch.chdir(repo)
+        code = check_cmd.main(
+            ["--diff", "HEAD:../../etc/passwd", "boards/x/x.kicad_pcb", "--format", "json"]
+        )
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "escapes the repository root" in err
+        assert "Traceback" not in err
 
 
 # ---------------------------------------------------------------------------
@@ -465,3 +533,171 @@ def test_diff_two_revisions(project, tmp_path, capsys):
 def test_diff_rejects_positional_pcb(project):
     with pytest.raises(SystemExit):
         check_cmd.main([str(project), "--diff", str(project), str(project)])
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: key collisions, sidecar shadowing, --errors-only count
+# ---------------------------------------------------------------------------
+
+
+def _silk_board(lines, position=(10.0, 20.0)):
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB, Footprint, FootprintGraphic
+    from kicad_tools.sexp import SExp
+
+    pcb = PCB(SExp(name="kicad_pcb"))
+    graphics = [
+        FootprintGraphic(graphic_type="line", layer="F.SilkS", stroke_width=0.10, start=s, end=e)
+        for s, e in lines
+    ]
+    pcb._footprints.append(
+        Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=position,
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[],
+            graphics=graphics,
+        )
+    )
+    return pcb, get_profile("jlcpcb").get_design_rules(layers=4)
+
+
+def _silk_findings(lines, position=(10.0, 20.0)):
+    from kicad_tools.validate.evidence import annotate_evidence
+    from kicad_tools.validate.rules.silkscreen import check_silkscreen_line_width
+
+    pcb, rules = _silk_board(lines, position)
+    results = check_silkscreen_line_width(pcb, rules)
+    annotate_evidence(results, pcb)
+    return results
+
+
+class TestKeyCollisions:
+    LINE_A = ((0.0, 0.0), (5.0, 0.0))
+    LINE_B = ((0.0, 1.0), (5.0, 1.0))
+
+    def test_silk_lines_on_one_footprint_get_distinct_keys(self):
+        results = _silk_findings([self.LINE_A, self.LINE_B])
+        keys = [v.key for v in results.violations]
+        hashes = [v.evidence_hash for v in results.violations]
+        assert len(set(keys)) == 2
+        assert len(set(hashes)) == 2
+        assert all(v.items[0] == "U1" for v in results.violations)
+
+    def test_silk_key_survives_moving_the_footprint(self):
+        before = {v.key for v in _silk_findings([self.LINE_A]).violations}
+        after = {v.key for v in _silk_findings([self.LINE_A], position=(30.0, 5.0)).violations}
+        assert before == after
+
+    def test_waiver_on_one_silk_line_does_not_cover_a_new_one(self):
+        reviewed = _silk_findings([self.LINE_A])
+        waivers = waivers_from_dict(
+            {
+                "version": 3,
+                "waivers": [
+                    {
+                        "key": v.key,
+                        "evidence_hash": v.evidence_hash,
+                        "reason": "r",
+                        "reviewer": "ee",
+                        "date": "2026-10-06",
+                    }
+                    for v in reviewed.violations
+                ],
+            }
+        )
+        now = _silk_findings([self.LINE_A, self.LINE_B])
+        apply_waivers(now, waivers)
+        findings = [v for v in now.violations if v.rule_id == "silkscreen_line_width"]
+        assert sum(1 for v in findings if v.waived) == 1
+        assert sum(1 for v in findings if not v.waived) == 1  # the newcomer is active
+
+    def test_identical_twins_waiver_goes_stale_when_count_changes(self):
+        """Findings that still share a key: the count joins the evidence."""
+        one = _silk_findings([self.LINE_A])
+        two = _silk_findings([self.LINE_A, self.LINE_A])  # exact duplicate line
+        assert len({v.key for v in two.violations}) == 1
+        assert one.violations[0].evidence_hash != two.violations[0].evidence_hash
+        waivers = waivers_from_dict(
+            {
+                "version": 3,
+                "waivers": [
+                    {
+                        "key": one.violations[0].key,
+                        "evidence_hash": one.violations[0].evidence_hash,
+                        "reason": "r",
+                        "reviewer": "ee",
+                        "date": "2026-10-06",
+                    }
+                ],
+            }
+        )
+        apply_waivers(two, waivers)
+        findings = [v for v in two.violations if v.rule_id == "silkscreen_line_width"]
+        assert not any(v.waived for v in findings)
+        assert all(v.stale_waiver_hash for v in findings)
+
+    def test_unique_key_hash_is_unchanged_by_multiplicity_guard(self):
+        v = _v()
+        assert compute_evidence_hash(v) == compute_evidence_hash(v, multiplicity=1)
+        assert compute_evidence_hash(v) != compute_evidence_hash(v, multiplicity=2)
+
+
+class TestSidecarShadowing:
+    def test_shadowed_sidecars_listed(self, tmp_path):
+        from kicad_tools.validate.rules.waivers import shadowed_waivers_sidecars
+
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text("")
+        shared = tmp_path / ".kct_waivers.json"
+        shared.write_text("{}")
+        assert shadowed_waivers_sidecars(pcb, shared) == []
+        per_board = tmp_path / "b.kct-waivers.json"
+        per_board.write_text("{}")
+        assert shadowed_waivers_sidecars(pcb, per_board) == [shared]
+
+    def test_check_warns_when_per_board_sidecar_shadows_shared(self, project, capsys):
+        empty = json.dumps({"version": 3, "waivers": []})
+        project.with_name(".kct_waivers.json").write_text(empty)
+        project.with_name("test_project.kct-waivers.json").write_text(empty)
+        check_cmd.main([str(project), "--format", "json"])
+        err = capsys.readouterr().err
+        assert "is NOT applied" in err and ".kct_waivers.json" in err
+
+
+def test_errors_only_still_counts_stale_warning_waivers(project, capsys):
+    """``summary.stale_waivers`` is counted before the ``--errors-only`` filter."""
+    _, before = _check_json(capsys, str(project))
+    target = next(
+        (
+            v
+            for v in before["violations"]
+            if v["severity"] == "warning" and v["key"] and "D1" in ",".join(v["items"])
+        ),
+        None,
+    )
+    if target is None:
+        pytest.skip("fixture has no D1 warning finding to waive")
+    check_cmd.main(
+        [
+            str(project),
+            "--waive",
+            target["key"],
+            "--waive-reason",
+            "r",
+            "--waive-reviewer",
+            "pytest",
+            "--format",
+            "json",
+        ]
+    )
+    capsys.readouterr()
+    _move_d1(project)
+    _, full = _check_json(capsys, str(project))
+    _, errors_only = _check_json(capsys, str(project), "--errors-only")
+    assert full["summary"]["stale_waivers"] >= 1
+    assert errors_only["summary"]["stale_waivers"] == full["summary"]["stale_waivers"]
