@@ -9,7 +9,7 @@ description: Scaffold a new consumer board recipe (generate_design.py) following
 
 Scaffold a new `generate_design.py`-style board recipe for a consumer PCB, following the **artifact-first convention**: the committed board artifact is shipping truth, and regeneration may diverge by design. This skill emits the proven sequential pipeline (steps 1-9) as a template with the circuit-specific parts left as clearly marked fill-in points — it does **not** reproduce any specific board's circuit.
 
-> **The `kct` namespace.** This skill lives in `.claude/commands/kct/` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `/kct:board-recipe-scaffold`. It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency. It hardcodes no board path and assumes nothing about the current directory being the kicad-tools repo.
+> **The `kct` namespace.** This skill lives in `{{skills-dir}}` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `{{skill:board-recipe-scaffold}}`. It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency. It hardcodes no board path and assumes nothing about the current directory being the kicad-tools repo.
 
 > **Artifact-first (why this shape).** The recipe's job is to *generate* a board artifact; once committed, that artifact is the shipping truth. A later `python generate_design.py` run may diverge from the committed artifact (placement heuristics, router seed) — that is intentional, not a bug. The committed `*.kicad_pcb` and its `manufacturing/` bundle are what ships; the recipe documents *how* it was produced. This is Epic #4054 convention #3 expressed as code structure.
 
@@ -36,7 +36,7 @@ uv run kct build-native           # if "not installed" (uv sync does NOT build i
 |-------|---------|
 | `<board-path>` | **Required.** The directory for the new board recipe (e.g. the path where `generate_design.py` and its `output/` will live). The user supplies it; the scaffold writes into it. Never a hardcoded board directory. |
 | `--name <slug>` | Project slug used for the `.kicad_pro` / output filenames. Optional; default derived from `<board-path>`'s basename. |
-| `--mfr <tier>` | Fab tier for the export step. Optional; if omitted, leave a marked fill-in point and resolve it the same way `/kct:manufacturing-readiness` does (read the recipe/manifest or ask the user; validate against `kicad_tools.manufacturers.get_manufacturer_ids()` / `kct export --help`). **Do not hardcode a tier list.** |
+| `--mfr <tier>` | Fab tier for the export step. Optional; if omitted, leave a marked fill-in point and resolve it the same way `{{skill:manufacturing-readiness}}` does (read the recipe/manifest or ask the user; validate against `kicad_tools.manufacturers.get_manufacturer_ids()` / `kct export --help`). **Do not hardcode a tier list.** |
 
 ## The recipe skeleton (steps 1-9)
 
@@ -125,7 +125,7 @@ documentation that happens to be structured and machine-readable.
 
 Do **not** invent a fifth artifact for this. `project.kct` `decisions:` is the
 durable design-decision surface; see the disambiguation table in
-`/kct:layout-journal` for how it relates to `LAYOUT_NOTES.md` and to the
+`{{skill:layout-journal}}` for how it relates to `LAYOUT_NOTES.md` and to the
 `kct decisions` machine store.
 
 ## What to leave as fill-in points (do NOT invent a circuit)
@@ -152,4 +152,4 @@ For common sub-circuits, start with the existing `kicad_tools.schematic.blocks` 
 ## References
 
 - The nine-step skeleton is the validated artifact-first pipeline shape used across kicad-tools' own board fleet (validated end-to-end on the repo's own smallest fixture recipe). Issue #3737 (rotation-transform ambiguity → 45°-multiple placements), #3747 (LVS caught a polarity divergence), and #4047 (the `route_success` fast-fail so a partial route surfaces as a distinct "partial route" error, not a misleading LVS `BoardNetlistMismatch`) are the *why* behind three of the constraints.
-- `/kct:manufacturing-readiness` — the sibling sign-off skill for the committed artifact (adds the `kicad-cli pcb drc --refill-zones` cross-gate on top of `kct check` + `kct export`).
+- `{{skill:manufacturing-readiness}}` — the sibling sign-off skill for the committed artifact (adds the `kicad-cli pcb drc --refill-zones` cross-gate on top of `kct check` + `kct export`).

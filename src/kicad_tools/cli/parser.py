@@ -7998,7 +7998,8 @@ def _add_mcp_parser(subparsers) -> None:
         help="Start the MCP server",
         description=(
             "Start the MCP server with the specified transport. "
-            "Use stdio (default) for Claude Desktop integration, "
+            "Use stdio (default) for local MCP clients (Claude Code, Codex CLI, "
+            "opencode, Claude Desktop), "
             "or http for web-based integrations."
         ),
     )

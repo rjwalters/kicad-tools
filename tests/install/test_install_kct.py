@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from kicad_tools.agent_surfaces import PLACEHOLDER_RE, render
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts" / "install-kct.sh"
 SKILLS_SRC = REPO_ROOT / ".claude" / "commands" / "kct"
@@ -198,12 +200,21 @@ def test_path_install_produces_all_artifacts(
     assert "[tool.uv.sources]" in pyproject
     assert "path" in pyproject.split("[tool.uv.sources]", 1)[1]
 
-    # Vendored skills byte-identical to source. README.md and help.md are the
-    # always-vendored meta files (help.md is the introspective /kct:help skill).
-    for name in ("README.md", "help.md", "ee-review.md"):
+    # Vendored skills are the source with its harness-neutral placeholders
+    # rendered for Claude Code (issue #5954); the installer's sed rules must
+    # agree exactly with kicad_tools.agent_surfaces.render. README.md and
+    # help.md are the always-vendored meta files (help.md is the introspective
+    # help skill).
+    for name in ("README.md", "help.md", "ee-review.md", "tapeout.md"):
         dst = target_repo / ".claude" / "commands" / "kct" / name
         assert dst.exists()
-        assert dst.read_bytes() == (SKILLS_SRC / name).read_bytes()
+        source = (SKILLS_SRC / name).read_text(encoding="utf-8")
+        assert dst.read_text(encoding="utf-8") == render(source, "claude-code")
+        assert not PLACEHOLDER_RE.search(dst.read_text(encoding="utf-8"))
+    # Rendering restores the Claude Code invocation and paths.
+    tapeout = (target_repo / ".claude" / "commands" / "kct" / "tapeout.md").read_text()
+    assert "/kct:manufacturing-readiness" in tapeout
+    assert ".claude/commands/kct/manufacturing-readiness.md" in tapeout
 
     # Exactly one guarded CLAUDE.md block, slimmed to a pointer (the
     # load-bearing conventions now live in .kct/CONVENTIONS.md, not inlined).
@@ -694,7 +705,9 @@ def test_client_codex_installs_agents_skills_and_agents_md(
     ee_review_body = (skills_dir / "kct-ee-review" / "SKILL.md").read_text()
     source_body = (SKILLS_SRC / "ee-review.md").read_text().split("---", 2)[2]
     for line in source_body.splitlines():
-        if not any(token in line for token in ("/kct:", ".claude/commands/kct/", "CLAUDE.md")):
+        if not any(
+            token in line for token in ("{{", "/kct:", ".claude/commands/kct/", "CLAUDE.md")
+        ):
             assert line in ee_review_body
 
     # Operational references resolve inside a Codex-only installation.
@@ -703,7 +716,7 @@ def test_client_codex_installs_agents_skills_and_agents_md(
     assert ".agents/skills/kct-<command>/SKILL.md" in help_text
     assert (skills_dir / "kct-help" / "README.md").exists()
     assert "optional metadata" in help_text
-    assert "`$` followed by its `name`" in help_text
+    assert "`$kct-<name>`" in help_text
     tapeout_text = (skills_dir / "kct-tapeout" / "SKILL.md").read_text()
     assert ".agents/skills/kct-manufacturing-readiness/SKILL.md" in tapeout_text
     assert "$kct-manufacturing-readiness" in tapeout_text
@@ -711,6 +724,13 @@ def test_client_codex_installs_agents_skills_and_agents_md(
         body = skill_md.read_text().split("---", 2)[2].split("-->\n", 1)[1]
         assert ".claude/commands/kct/" not in body
         assert "/kct:" not in body
+        assert not PLACEHOLDER_RE.search(body)
+        # The installer's sed rules agree with the Python renderer (issue #5954).
+        name = skill_md.parent.name.removeprefix("kct-")
+        source_body = (SKILLS_SRC / f"{name}.md").read_text(encoding="utf-8").split("---", 2)[2]
+        assert body.strip("\n") == render(source_body, "codex").strip("\n")
+    readme = (skills_dir / "kct-help" / "README.md").read_text(encoding="utf-8")
+    assert readme == render((SKILLS_SRC / "README.md").read_text(encoding="utf-8"), "codex")
 
     # A guarded AGENTS.md block was created, pointing at the SKILL.md layout.
     agents_md = (target_repo / "AGENTS.md").read_text()

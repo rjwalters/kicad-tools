@@ -32,7 +32,7 @@ LAYER_PRESETS: dict[str, list[str]] = {
     "back": ["B.Cu", "Edge.Cuts", "B.SilkS", "B.Mask"],
 }
 
-# Maximum image dimension for Claude vision API
+# Maximum image dimension that fits common vision-model input limits
 MAX_VISION_API_PX = 1568
 
 # Fallback pixel width used for the first-pass render when the SVG has no
@@ -362,7 +362,7 @@ def screenshot_board(
         layers: Layer specification - list of layer names, a preset name
                 ("default", "copper", "assembly", "front", "back"), or None
                 for the default composite view.
-        max_size_px: Maximum dimension in pixels (default: 1568 for Claude vision)
+        max_size_px: Maximum dimension in pixels (default: 1568, fits common vision-model input limits)
         output_path: Optional path to save PNG file to disk
         black_and_white: Use black and white rendering (good for compact AI images)
         theme: KiCad color theme name (optional)
@@ -510,7 +510,7 @@ def screenshot_schematic(
 
     Args:
         sch_path: Path to .kicad_sch file
-        max_size_px: Maximum dimension in pixels (default: 1568 for Claude vision)
+        max_size_px: Maximum dimension in pixels (default: 1568, fits common vision-model input limits)
         output_path: Optional path to save PNG file to disk
         black_and_white: Use black and white rendering
         theme: KiCad color theme name (optional)
