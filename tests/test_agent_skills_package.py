@@ -249,6 +249,16 @@ def test_opencode_layout(tmp_path: Path) -> None:
     assert again.written == [] and set(again.unchanged) == expected
 
 
+def test_opencode_help_does_not_require_frontmatter_name(tmp_path: Path) -> None:
+    """The rendered help command must not demand a `name` opencode files omit."""
+    help_text = (planned_files("opencode"))["kct/help.md"]
+    fields, _ = split_frontmatter(help_text)
+    assert "name" not in fields
+    # It must still tell the agent how to identify a skill with no `name`.
+    assert "where it is absent" in help_text and "filename `<name>.md`" in help_text
+    assert "identify it from frontmatter, not the basename" not in help_text
+
+
 def test_opencode_frontmatter_is_valid_yaml(tmp_path: Path) -> None:
     yaml = pytest.importorskip("yaml")
     for rel, text in planned_files("opencode").items():
