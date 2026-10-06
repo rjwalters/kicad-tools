@@ -985,7 +985,11 @@ def print_routing_diagnostics_json(
         single_pad_count=single_pad_count,
         routing_plan=routing_plan,
     )
-    print(json.dumps(diagnostics, indent=2))
+    # json_stdout(): the real stdout even while ``kct route --format json``
+    # diverts progress prints to stderr (issue #5938).
+    from kicad_tools.json_stdout import json_stdout
+
+    print(json.dumps(diagnostics, indent=2), file=json_stdout())
 
 
 def format_failed_nets_summary(

@@ -143,7 +143,10 @@ def _show_decisions(args) -> int:
     decisions_path = get_decisions_path(pcb_path)
     if not decisions_path.exists():
         print(f"No decisions file found at: {decisions_path}", file=sys.stderr)
-        print("Run placement optimizer or autorouter with record_decisions=True first.")
+        print(
+            "Run placement optimizer or autorouter with record_decisions=True first.",
+            file=sys.stderr,
+        )
         return 1
 
     store = DecisionStore.load(decisions_path)
@@ -163,7 +166,10 @@ def _show_decisions(args) -> int:
         truncated = False
 
     if not decisions:
-        print("No decisions found matching the specified filters.")
+        if args.format == "json":
+            print(json.dumps([]))
+        else:
+            print("No decisions found matching the specified filters.")
         return 0
 
     if args.format == "json":
@@ -175,7 +181,11 @@ def _show_decisions(args) -> int:
         _print_decisions_text(decisions)
 
     if truncated:
-        print(f"\n(Showing {args.limit} of {len(store)} total decisions)")
+        # stderr under JSON so stdout stays a single document (issue #5938).
+        print(
+            f"\n(Showing {args.limit} of {len(store)} total decisions)",
+            file=sys.stderr if args.format == "json" else sys.stdout,
+        )
 
     return 0
 
@@ -197,7 +207,7 @@ def _list_decisions(args) -> int:
     store = DecisionStore.load(decisions_path)
     decisions = store.all()
 
-    if not decisions:
+    if not decisions and args.format != "json":
         print("No decisions recorded.")
         return 0
 
@@ -260,7 +270,7 @@ def _explain_placement(args) -> int:
     rationale = explain_placement(args.component, pcb)
 
     if rationale is None:
-        print(f"Component {args.component} not found in PCB.")
+        print(f"Component {args.component} not found in PCB.", file=sys.stderr)
         return 1
 
     if args.format == "json":
@@ -305,7 +315,7 @@ def _explain_route(args) -> int:
     rationale = explain_route(args.net, pcb)
 
     if rationale is None:
-        print(f"No routing decision found for net: {args.net}")
+        print(f"No routing decision found for net: {args.net}", file=sys.stderr)
         return 1
 
     if args.format == "json":

@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Handle list mode
     if args.list:
-        return _list_rules()
+        return _list_rules(args.format)
 
     # Handle search mode
     if args.search:
@@ -127,11 +127,20 @@ def main(argv: list[str] | None = None) -> int:
     return _explain_rule(args)
 
 
-def _list_rules() -> int:
+def _list_rules(format_type: str = "text") -> int:
     """List all available rule IDs."""
     from kicad_tools.explain import list_rules
 
     rules = list_rules()
+
+    if format_type == "json":
+        # Issue #5938: one JSON document on stdout, diagnostics on stderr.
+        import json
+
+        if not rules:
+            print("No rules found. Check that spec YAML files are present.", file=sys.stderr)
+        print(json.dumps({"rules": list(rules), "total": len(rules)}, indent=2))
+        return 0 if rules else 1
 
     if not rules:
         print("No rules found. Check that spec YAML files are present.")
@@ -155,6 +164,19 @@ def _search_rules(query: str, format_type: str) -> int:
     from kicad_tools.explain import search_rules
 
     matches = search_rules(query)
+
+    if format_type == "json":
+        # Issue #5938: a single JSON document (previously a prose header
+        # followed by one JSON object per match, which no parser accepts).
+        import json
+
+        payload = {
+            "query": query,
+            "matches": [exp.to_dict() for exp in matches],
+            "total": len(matches),
+        }
+        print(json.dumps(payload, indent=2))
+        return 0 if matches else 1
 
     if not matches:
         print(f"No rules found matching '{query}'")

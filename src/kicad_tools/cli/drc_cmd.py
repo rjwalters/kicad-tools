@@ -420,7 +420,7 @@ def run_drc_on_pcb(
         print("\nmacOS: brew install --cask kicad", file=sys.stderr)
         return None
 
-    print(f"Running DRC on: {pcb_path.name}")
+    print(f"Running DRC on: {pcb_path.name}", file=sys.stderr)
 
     result = run_drc(pcb_path, output_path)
 

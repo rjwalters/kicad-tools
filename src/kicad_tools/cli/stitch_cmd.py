@@ -6073,7 +6073,7 @@ def run_post_stitch_drc(pcb_path: Path) -> dict:
         )
         return _drc_not_run("kicad-cli not found")
 
-    print(f"\nRunning DRC on {pcb_path.name}...")
+    print(f"\nRunning DRC on {pcb_path.name}...", file=sys.stderr)
 
     result = run_drc(pcb_path, format="json", kicad_cli=kicad_cli)
 

@@ -18,13 +18,23 @@ def run_decisions_command(args) -> int:
         if hasattr(args, "pcb") and args.pcb:
             sub_argv.append(args.pcb)
 
+        # explain-placement / explain-route take the component / net as a
+        # *positional*; show takes them as --component / --net filters.
+        positional = args.decisions_command in ("explain-placement", "explain-route")
+
         # Add component filter if present
         if hasattr(args, "component") and args.component:
-            sub_argv.extend(["--component", args.component])
+            if positional:
+                sub_argv.append(args.component)
+            else:
+                sub_argv.extend(["--component", args.component])
 
         # Add net filter if present
         if hasattr(args, "net") and args.net:
-            sub_argv.extend(["--net", args.net])
+            if positional:
+                sub_argv.append(args.net)
+            else:
+                sub_argv.extend(["--net", args.net])
 
         # Add action filter if present
         if hasattr(args, "action") and args.action:

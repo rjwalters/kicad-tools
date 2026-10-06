@@ -16297,13 +16297,25 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    from kicad_tools.json_stdout import prose_to_stderr
     from kicad_tools.router.routing_plan import RoutingPlanGateAbort
 
     from .route_deadline import CONTROL_ENV, TIMEOUT_EXIT, RouteDeadlineExpired
     from .route_placement import finish
 
     try:
-        result = _run_main_impl(args, parser, argv)
+        # Issue #5938: under --format json every progress/diagnostic print
+        # from the (very chatty) routing pipeline goes to stderr; only the
+        # JSON emitters write to the real stdout via ``json_stdout()``.
+        with prose_to_stderr(getattr(args, "format", "text") == "json") as json_stream:
+            result = _run_main_impl(args, parser, argv)
+            exit_code = finish(args, result)
+            if json_stream is not None and not json_stream.written:
+                # The layer/rule-escalation paths (the default) never reached
+                # the direct-route JSON emitter; publish the same document
+                # for the final router so --format json always yields one.
+                _emit_route_json_fallback(args, exit_code)
+            return exit_code
     except DRCConstraintPropagationError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return finish(args, 1)
@@ -16329,7 +16341,41 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 args._placement_output_before = output.stat() if output.exists() else None
             finish(args, TIMEOUT_EXIT)
         raise
-    return finish(args, result)
+
+
+def _emit_route_json_fallback(args, exit_code: int) -> None:
+    """Emit the routing-diagnostics JSON for runs that bypassed it (issue #5938).
+
+    ``route_with_layer_escalation`` (the default path) prints only a prose
+    summary, so ``kct route --format json`` used to put no JSON on stdout at
+    all.  The escalation wrappers stash their final result on
+    ``args._last_layer_result``; reuse :func:`print_routing_diagnostics_json`
+    on it so both paths share one document shape.  Runs that never built a
+    router (dry runs, early validation exits) get a minimal ``exit_code``
+    document instead.
+    """
+    import json
+
+    from kicad_tools.json_stdout import json_stdout
+
+    last = getattr(args, "_last_layer_result", None)
+    if last is not None:
+        from kicad_tools.router import print_routing_diagnostics_json
+
+        try:
+            multi_pad_ids = {n for n, pads in last.router.nets.items() if n > 0 and len(pads) >= 2}
+            print_routing_diagnostics_json(
+                last.router,
+                last.net_map,
+                last.nets_to_route,
+                current_strategy=args.strategy,
+                nets_to_route_ids=multi_pad_ids,
+                single_pad_count=getattr(last, "single_pad_count", 0),
+            )
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
+    print(json.dumps({"exit_code": exit_code}, indent=2), file=json_stdout())
 
 
 def _run_main_impl(args, parser, argv) -> int:
@@ -17629,7 +17675,9 @@ def _run_main_impl(args, parser, argv) -> int:
             if args.format == "json":
                 import json as _json
 
-                print(_json.dumps(estimator.format_json(), indent=2))
+                from kicad_tools.json_stdout import json_stdout
+
+                print(_json.dumps(estimator.format_json(), indent=2), file=json_stdout())
             else:
                 print(estimator.format_ascii_heatmap())
                 # Summary stats

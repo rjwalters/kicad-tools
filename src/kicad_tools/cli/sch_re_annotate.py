@@ -556,17 +556,22 @@ def run_re_annotate(
             include_power=include_power,
         )
 
-    if not uuid_mapping:
-        print("No references to renumber.")
-        return 0
-
     # Filter out identity mappings
     effective_mapping = {
         uid: info for uid, info in uuid_mapping.items() if info["old"] != info["new"]
     }
 
     if not effective_mapping:
-        print("All references are already sequential. No changes needed.")
+        if format == "json":
+            # Issue #5938: stdout under --format json must be a JSON document
+            # even when there is nothing to do.
+            import json
+
+            print(json.dumps({"mappings": [], "total": 0, "dry_run": dry_run}, indent=2))
+        elif not uuid_mapping:
+            print("No references to renumber.")
+        else:
+            print("All references are already sequential. No changes needed.")
         return 0
 
     # Phase 3: Output mapping / apply changes

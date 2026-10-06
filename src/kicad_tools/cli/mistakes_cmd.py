@@ -182,7 +182,7 @@ def _analyze_pcb(args) -> int:
 
     # Load PCB
     try:
-        print(f"Analyzing: {pcb_path.name}")
+        print(f"Analyzing: {pcb_path.name}", file=sys.stderr)
         pcb = PCB.load(str(pcb_path))
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)

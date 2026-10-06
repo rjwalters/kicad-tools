@@ -149,7 +149,7 @@ def _get_erc_report(erc_report_path: str | None, sch_path: Path):
 
         kicad_cli = find_kicad_cli()
         if kicad_cli:
-            print(f"Running ERC on: {sch_path.name}")
+            print(f"Running ERC on: {sch_path.name}", file=sys.stderr)
             erc_result = run_erc(sch_path, kicad_cli=kicad_cli)
             if not erc_result.success:
                 print(f"Error running ERC: {erc_result.stderr}", file=sys.stderr)
