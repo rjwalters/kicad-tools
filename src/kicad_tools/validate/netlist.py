@@ -193,6 +193,21 @@ class SyncResult:
         return "\n".join(parts)
 
 
+def _same_net_spelling(sch_net: str, pcb_net: str) -> bool:
+    """True when ``pcb_net`` plausibly names the same net as ``sch_net``.
+
+    Used only as a tie-breaker when pairing nets by connectivity, never as
+    the test of whether a pad is correct.  Accepts exact equality and the
+    sheet-path spellings KiCad and kicad-tools produce for one local net
+    (``/SENSE``, ``SENSE``, ``/MCU/SENSE``, ``MCU/SENSE``).
+    """
+    if sch_net == pcb_net:
+        return True
+    s = sch_net.lstrip("/")
+    p = pcb_net.lstrip("/")
+    return s == p or s.rsplit("/", 1)[-1] == p.rsplit("/", 1)[-1]
+
+
 class NetlistValidator:
     """Validates synchronization between schematic and PCB netlists.
 
@@ -200,7 +215,8 @@ class NetlistValidator:
     - Symbols missing from PCB (no corresponding footprint)
     - Orphaned footprints on PCB (no corresponding symbol)
     - Net name mismatches between schematic and PCB
-    - Pin-to-pad mapping issues
+    - Pads on a different net than their schematic pin (compared by
+      connectivity, so net renaming alone is not drift)
 
     Example:
         >>> validator = NetlistValidator("project.kicad_sch", "project.kicad_pcb")
@@ -378,24 +394,68 @@ class NetlistValidator:
             )
 
     def _check_nets(self, result: SyncResult) -> None:
-        """Check for net name mismatches.
+        """Check net names and per-pad net connectivity.
 
         Args:
             result: SyncResult to add issues to
         """
-        # Build net mapping from PCB: component/pad -> net_name
-        pcb_pad_nets: dict[tuple[str, str], str] = {}
-        for fp in self.pcb.footprints:
-            if fp.reference and not fp.reference.startswith("#"):
-                for pad in fp.pads:
-                    if pad.net_name:
-                        pcb_pad_nets[(fp.reference, pad.number)] = pad.net_name
-
-        # Build expected nets from schematic
-        # This requires extracting pin-to-net mapping from the schematic
-        # For now, we compare using global labels and PCB nets
         self._check_global_net_names(result)
-        self._check_pad_net_assignments(result, pcb_pad_nets)
+        self._check_pad_net_assignments(result, self._pcb_pad_nets())
+
+    def _pcb_pad_nets(self) -> dict[tuple[str, str], str | None]:
+        """Build ``{(ref, pad) -> net | None}`` from the PCB.
+
+        The empty net-0 name and KiCad's explicit no-connect sentinel
+        ``unconnected-(<REF>-<PIN>-Pad<PAD>)`` naming *this* pad both mean
+        "not connected" and normalize to ``None``.  Non-plated holes are
+        skipped: they carry no copper and can never be on a net.
+        """
+        pcb_pad_nets: dict[tuple[str, str], str | None] = {}
+        for fp in self.pcb.footprints:
+            ref = fp.reference
+            if not ref or ref.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.type == "np_thru_hole" or not pad.number:
+                    continue
+                name: str | None = pad.net_name or None
+                if (
+                    name is not None
+                    and name.startswith(f"unconnected-({ref}-")
+                    and name.endswith(f"-Pad{pad.number})")
+                ):
+                    name = None
+                key = (ref, pad.number)
+                # A footprint may repeat a pad number (e.g. a thermal pad
+                # split into several copper shapes).  Keep any real binding
+                # rather than letting an unbound duplicate erase it.
+                if name is not None or key not in pcb_pad_nets:
+                    pcb_pad_nets[key] = name
+        return pcb_pad_nets
+
+    def _schematic_pin_nets(self) -> dict[tuple[str, str], str | None] | None:
+        """Build ``{(ref, pin) -> net | None}`` from the schematic hierarchy.
+
+        Reuses the LVS extraction
+        (:func:`kicad_tools.lvs.board_lvs._schematic_pin_to_net`), which
+        walks every sub-sheet and returns one canonical identity per
+        connected component.  Returns ``None`` when no schematic file path
+        is available (an unsaved in-memory :class:`Schematic`), in which
+        case the pad check cannot run.
+        """
+        from kicad_tools.lvs.board_lvs import _schematic_pin_to_net
+
+        sch_path = self._schematic_path
+        if sch_path is None:
+            path = getattr(self.schematic, "path", None)
+            sch_path = str(path) if path else None
+        if sch_path is None or not Path(sch_path).exists():
+            return None
+        return {
+            key: net
+            for key, net in _schematic_pin_to_net(Path(sch_path)).items()
+            if key[0] and not key[0].startswith("#")
+        }
 
     def _check_global_net_names(self, result: SyncResult) -> None:
         """Check that global label names match PCB net names.
@@ -455,29 +515,179 @@ class NetlistValidator:
     def _check_pad_net_assignments(
         self,
         result: SyncResult,
-        pcb_pad_nets: dict[tuple[str, str], str],
+        pcb_pad_nets: dict[tuple[str, str], str | None],
     ) -> None:
-        """Check pad-to-net assignments for consistency.
+        """Check that every pad sits on the net the schematic puts its pin on.
 
-        This is a placeholder for more sophisticated netlist extraction.
-        Full implementation would require proper netlist extraction from schematic.
+        The comparison is by **connectivity, not by net name** (issue
+        #5937).  Net names legitimately differ between the two documents --
+        KiCad qualifies a local label as ``/SENSE`` while a generated board
+        may carry ``SENSE``, and unnamed nets get tool-invented
+        ``Net-(...)`` names -- so a name-equality test would flag correct
+        boards.  Instead:
+
+        1. Only pads present on both sides are compared; missing and
+           orphaned footprints are already reported by
+           :meth:`_check_components`.
+        2. Each schematic net is paired with the PCB net that holds the
+           most of its pads (one-to-one, largest overlap first; ties prefer
+           the PCB net whose name is a spelling of the schematic name, then
+           the alphabetically first).
+        3. A pad whose PCB net is not the one paired with its schematic net
+           is an error: a swapped pad, a short into another net, or a pad
+           split off its net (an open).
+        4. A pin the schematic connects to other pins whose PCB pad has no
+           net is an error.  A pin the schematic leaves floating whose pad
+           the PCB joins to other pads is an error.  Single-pin nets on
+           either side are electrically the same as "unconnected" and are
+           not reported.
 
         Args:
             result: SyncResult to add issues to
-            pcb_pad_nets: Mapping of (reference, pad) to net name
+            pcb_pad_nets: Mapping of (reference, pad) to PCB net (``None`` =
+                unconnected)
         """
-        # Check for pads with no net assignment
-        for fp in self.pcb.footprints:
-            if fp.reference and not fp.reference.startswith("#"):
-                for pad in fp.pads:
-                    # Skip mounting holes and similar
-                    if pad.type in ("np_thru_hole",):
-                        continue
-                    # Check if pad has a net
-                    if not pad.net_name and pad.net_number == 0:
-                        # Only warn if this isn't a DNP component
-                        # (would need to check schematic for DNP status)
-                        pass  # Skip for now - too noisy without proper filtering
+        sch_pin_nets = self._schematic_pin_nets()
+        if not sch_pin_nets:
+            return
+
+        common = sorted(set(sch_pin_nets) & set(pcb_pad_nets))
+        if not common:
+            return
+
+        # Vacuity guard (mirrors the LVS legs, #4005 / #4681): a schematic
+        # that wires none of these pins -- symbols placed but no wires or
+        # labels, as in a PCB-first fixture -- gives no connectivity to
+        # compare against.  Reporting every PCB net as "unconnected in
+        # schematic" would be noise, and staying silent would read as a
+        # pass, so say explicitly that the check could not run.
+        if all(sch_pin_nets[key] is None for key in common):
+            result.add(
+                SyncIssue(
+                    severity="warning",
+                    category="net_mismatch",
+                    message=(
+                        f"Pad-net check skipped: the schematic connects none of the "
+                        f"{len(common)} pins that have PCB pads"
+                    ),
+                    suggestion=(
+                        "Wire the schematic (wires, labels or power symbols) so pad "
+                        "nets can be compared against it"
+                    ),
+                )
+            )
+            return
+
+        sch_groups: dict[str, set[tuple[str, str]]] = {}
+        pcb_groups: dict[str, set[tuple[str, str]]] = {}
+        overlap: dict[tuple[str, str], int] = {}
+        for key in common:
+            s_net = sch_pin_nets[key]
+            p_net = pcb_pad_nets[key]
+            if s_net is not None:
+                sch_groups.setdefault(s_net, set()).add(key)
+            if p_net is not None:
+                pcb_groups.setdefault(p_net, set()).add(key)
+            if s_net is not None and p_net is not None:
+                overlap[(s_net, p_net)] = overlap.get((s_net, p_net), 0) + 1
+
+        # Greedy one-to-one pairing, largest overlap first.
+        ranked = sorted(
+            overlap.items(),
+            key=lambda item: (
+                -item[1],
+                0 if _same_net_spelling(item[0][0], item[0][1]) else 1,
+                item[0][0],
+                item[0][1],
+            ),
+        )
+        sch_to_pcb: dict[str, str] = {}
+        pcb_to_sch: dict[str, str] = {}
+        for (s_net, p_net), _count in ranked:
+            if s_net in sch_to_pcb or p_net in pcb_to_sch:
+                continue
+            sch_to_pcb[s_net] = p_net
+            pcb_to_sch[p_net] = s_net
+
+        for key in common:
+            ref, pad = key
+            s_net = sch_pin_nets[key]
+            p_net = pcb_pad_nets[key]
+
+            if s_net is None and p_net is None:
+                continue
+
+            if s_net is None:
+                assert p_net is not None
+                # Floating in the schematic; only a problem if the PCB
+                # actually joins this pad to something.
+                if len(pcb_groups[p_net]) < 2:
+                    continue
+                result.add(
+                    SyncIssue(
+                        severity="error",
+                        category="net_mismatch",
+                        message=(f"{ref}.{pad}: unconnected in schematic, PCB net {p_net!r}"),
+                        suggestion=(
+                            f"Remove {ref}.{pad} from net {p_net!r} on the PCB, or "
+                            "connect the pin in the schematic and update the PCB"
+                        ),
+                        reference=ref,
+                        net_pcb=p_net,
+                        pin=pad,
+                    )
+                )
+                continue
+
+            if p_net is None:
+                if len(sch_groups[s_net]) < 2:
+                    continue
+                result.add(
+                    SyncIssue(
+                        severity="error",
+                        category="net_mismatch",
+                        message=(f"{ref}.{pad}: schematic net {s_net!r}, unconnected on PCB"),
+                        suggestion=(
+                            f"Assign {ref}.{pad} to net {s_net!r} on the PCB "
+                            "(update PCB from schematic)"
+                        ),
+                        reference=ref,
+                        net_schematic=s_net,
+                        pin=pad,
+                    )
+                )
+                continue
+
+            if sch_to_pcb.get(s_net) == p_net:
+                continue
+            # A pad alone on a PCB net that no other schematic net claims,
+            # whose schematic net is also a single pin: nothing is wired
+            # differently, only named differently.
+            if (
+                len(sch_groups[s_net]) < 2
+                and len(pcb_groups[p_net]) < 2
+                and p_net not in pcb_to_sch
+            ):
+                continue
+            expected = sch_to_pcb.get(s_net)
+            expected_str = f" (expected PCB net {expected!r})" if expected else ""
+            result.add(
+                SyncIssue(
+                    severity="error",
+                    category="net_mismatch",
+                    message=(
+                        f"{ref}.{pad}: schematic net {s_net!r}, PCB net {p_net!r}{expected_str}"
+                    ),
+                    suggestion=(
+                        f"Move {ref}.{pad} to the PCB net that carries schematic net "
+                        f"{s_net!r} (update PCB from schematic)"
+                    ),
+                    reference=ref,
+                    net_schematic=s_net,
+                    net_pcb=p_net,
+                    pin=pad,
+                )
+            )
 
     def __repr__(self) -> str:
         """Return string representation."""
