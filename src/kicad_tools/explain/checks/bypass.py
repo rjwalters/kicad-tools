@@ -13,6 +13,7 @@ from ..mistakes import (
     MistakeCategory,
     distance,
     is_bypass_cap,
+    is_ic_footprint,
     is_power_net,
     power_pin_nets,
 )
@@ -49,7 +50,8 @@ class BypassCapDistanceCheck:
         """
         mistakes: list[Mistake] = []
 
-        # Find all ICs (components with VCC/VDD pins)
+        # Find all ICs with a pad on a power rail (positively classified as
+        # ICs -- not every part that touches a rail; issue #5970)
         evidence = power_pin_nets(pcb)
         ics = self._find_ics_with_power_pins(pcb, evidence)
 
@@ -123,14 +125,19 @@ class BypassCapDistanceCheck:
     def _find_ics_with_power_pins(
         self, pcb: PCB, evidence: set[str] | None = None
     ) -> list[Footprint]:
-        """Find ICs that have power pins (VCC, VDD, etc)."""
+        """Find ICs that have power pins (VCC, VDD, etc).
+
+        Only footprints :func:`is_ic_footprint` positively classifies as ICs
+        qualify.  Issue #5970: this used to accept *any* footprint with a
+        power-net pad, so resistors, other caps, connectors and fuses were
+        reported as the "IC" a bypass cap should sit next to.
+        """
         ics = []
         for fp in pcb.footprints:
-            # Check if any pad is connected to a power net
-            for pad in fp.pads:
-                if is_power_net(pad.net_name, evidence):
-                    ics.append(fp)
-                    break
+            if not is_ic_footprint(fp):
+                continue
+            if any(is_power_net(pad.net_name, evidence) for pad in fp.pads):
+                ics.append(fp)
         return ics
 
     def _find_bypass_caps(self, pcb: PCB) -> list[Footprint]:
