@@ -255,12 +255,124 @@ def test_file_annotation_replaces_stale_values(design: tuple[Path, Path]) -> Non
     assert "OLD" not in pcb.read_text()
 
 
-def test_unconnected_pad_gets_no_connect_suffix(design: tuple[Path, Path]) -> None:
-    """KiCad marks an unconnected pin's pad ``<type>+no_connect``."""
+# R1 sits at (130, 50) unrotated: pin 1 at library (0, 3.81) lands on
+# (130, 46.19), pin 2 at library (0, -3.81) on (130, 53.81).
+_NC_ON_R1_PIN2 = '  (no_connect (at 130 53.81) (uuid "00000000-0000-0000-0000-0000000000f2"))\n)\n'
+_R1_PIN2_UNCONNECTED_NET = '(net 5 "unconnected-(R1-Pad2)"))'
+
+
+def _flag_r1_pin2(sch: Path) -> None:
+    """Put a schematic no-connect flag on R1 pin 2."""
+    sch.write_text(_SCHEMATIC.rstrip().removesuffix(")") + _NC_ON_R1_PIN2)
+
+
+def _r1_pin2_on_unconnected_net(pcb: Path) -> None:
+    """Move R1 pad 2 onto KiCad's single-pad ``unconnected-(...)`` net."""
+    text = _PCB.replace('  (net 4 "EN")\n', '  (net 4 "EN")\n  (net 5 "unconnected-(R1-Pad2)")\n')
+    pcb.write_text(text.replace('(net 4 "EN"))', _R1_PIN2_UNCONNECTED_NET))
+
+
+def test_schematic_no_connect_flag_sets_pin_info(design: tuple[Path, Path]) -> None:
+    sch, _ = design
+    _flag_r1_pin2(sch)
+    info = schematic_pin_info(sch)
+    assert info[("R1", "2")].no_connect
+    assert info[("R1", "2")].effective_pintype == "passive+no_connect"
+    assert not info[("R1", "1")].no_connect
+    assert info[("R1", "1")].effective_pintype == "passive"
+
+
+@pytest.mark.parametrize("pad_net", ["unconnected", "none"])
+def test_flagged_pin_gets_no_connect_suffix(design: tuple[Path, Path], pad_net: str) -> None:
+    """KiCad writes ``<type>+no_connect`` for a pin with a no-connect flag.
+
+    It must survive whether the pad sits on KiCad's ``unconnected-(...)``
+    net (KiCad-saved boards, and pads after ``sync-netlist``) or on no net
+    at all (kct-generated boards): the suffix is schematic-derived.
+    """
     sch, pcb = design
-    pcb.write_text(_PCB.replace(' (net 4 "EN"))', ")"))
+    _flag_r1_pin2(sch)
+    if pad_net == "unconnected":
+        _r1_pin2_on_unconnected_net(pcb)
+    else:
+        pcb.write_text(_PCB.replace(' (net 4 "EN"))', ")"))
     annotate_pcb_file_pintypes(pcb, sch)
     assert _pad_children(pcb)[("R1", "2")] == ("", "passive+no_connect")
+    assert _pad_children(pcb)[("R1", "1")] == ("", "passive")
+
+
+def test_unflagged_unconnected_net_keeps_plain_type(design: tuple[Path, Path]) -> None:
+    """No flag, no suffix -- even on an ``unconnected-(...)`` net.
+
+    KiCad 10's Edgeberry and STM32 Nucleo-64 templates have such pads typed
+    plain ``passive``/``output``; re-annotating must not add the suffix.
+    """
+    sch, pcb = design
+    _r1_pin2_on_unconnected_net(pcb)
+    annotate_pcb_file_pintypes(pcb, sch)
+    assert _pad_children(pcb)[("R1", "2")] == ("", "passive")
+
+
+def test_pristine_kicad_no_connect_value_is_kept(design: tuple[Path, Path]) -> None:
+    """Re-annotating KiCad's own ``passive+no_connect`` is a no-op (byte-identical)."""
+    sch, pcb = design
+    _flag_r1_pin2(sch)
+    _r1_pin2_on_unconnected_net(pcb)
+    annotate_pcb_file_pintypes(pcb, sch)
+    annotated = pcb.read_text()
+    again = annotate_pcb_file_pintypes(pcb, sch)
+    assert again.updated == 0
+    assert pcb.read_text() == annotated
+    assert '"unconnected-(R1-Pad2)") (pintype "passive+no_connect"))' in annotated
+
+
+def test_mirrored_symbol_flag_resolves_to_the_right_pin(design: tuple[Path, Path]) -> None:
+    """``(mirror x)`` flips the pin positions before the flag is matched.
+
+    Mirrored, R1 pin 2 lands where pin 1 would be unmirrored, so ignoring the
+    mirror would put the suffix on the wrong pad (KiCad's
+    stm32f100-discovery-shield template, P2).
+    """
+    sch, _ = design
+    mirrored = _SCHEMATIC.replace(
+        '(symbol (lib_id "Device:R") (at 130 50 0) (unit 1)',
+        '(symbol (lib_id "Device:R") (at 130 50 0) (mirror x) (unit 1)',
+    )
+    nc = '  (no_connect (at 130 46.19) (uuid "00000000-0000-0000-0000-0000000000f3"))\n)\n'
+    sch.write_text(mirrored.rstrip().removesuffix(")") + nc)
+    info = schematic_pin_info(sch)
+    assert info[("R1", "2")].no_connect
+    assert not info[("R1", "1")].no_connect
+
+
+def test_multiline_pad_replacement_leaves_no_blank_lines(design: tuple[Path, Path]) -> None:
+    """Stale children on their own lines (KiCad layout) are replaced in place."""
+    sch, pcb = design
+    stale = _PCB.replace(
+        '      (net 1 "MAIN")\n    )',
+        '      (net 1 "MAIN")\n'
+        '      (pinfunction "OLD")\n'
+        '      (pintype "passive")\n'
+        '      (uuid "00000000-0000-0000-0000-0000000000a1")\n'
+        "    )",
+    )
+    assert stale != _PCB
+    pcb.write_text(stale)
+    annotate_pcb_file_pintypes(pcb, sch)
+    text = pcb.read_text()
+    assert (
+        '    (pad "1" smd rect\n'
+        "      (at -1 -1)\n"
+        "      (size 0.6 0.6)\n"
+        '      (layers "F.Cu")\n'
+        '      (net 1 "MAIN")\n'
+        '      (pinfunction "VIN")\n'
+        '      (pintype "power_in")\n'
+        '      (uuid "00000000-0000-0000-0000-0000000000a1")\n'
+        "    )\n"
+    ) in text
+    assert "\n\n" not in text
+    assert "OLD" not in text
 
 
 def test_dry_run_does_not_write(design: tuple[Path, Path]) -> None:
@@ -298,6 +410,28 @@ def test_sync_netlist_writes_pintypes(design: tuple[Path, Path]) -> None:
     assert result.pintype_updated == len(_EXPECTED)
     assert result.has_changes
     assert power_pin_nets(pcb) == {"MAIN", "VREG_1V2"}
+
+
+def test_sync_netlist_keeps_no_connect_on_unconnected_net(design: tuple[Path, Path]) -> None:
+    """``sync-netlist`` gives NC pins ``unconnected-(...)`` nets before
+    annotating; the flagged pin must still get ``+no_connect``, exactly as
+    the file path writes it."""
+    from kicad_tools.cli.pcb_sync_netlist import SyncResult, _annotate_pintypes
+
+    sch, pcb_path = design
+    _flag_r1_pin2(sch)
+    _r1_pin2_on_unconnected_net(pcb_path)
+    pcb = PCB.load(pcb_path)
+    _annotate_pintypes(pcb, sch, result := SyncResult())
+    r1 = pcb.get_footprint("R1")
+    assert r1 is not None
+    assert {p.number: p.pintype for p in r1.pads} == {"1": "passive", "2": "passive+no_connect"}
+
+    out = pcb_path.with_name("synced.kicad_pcb")
+    pcb.save(out)
+    annotate_pcb_file_pintypes(pcb_path, sch)
+    assert _pad_children(out) == _pad_children(pcb_path)
+    assert result.pintype_updated == len(_EXPECTED)
 
 
 def test_cli_annotate_pintypes(design: tuple[Path, Path], capsys) -> None:
@@ -349,3 +483,38 @@ def test_fleet_board04_power_pin_nets(tmp_path: Path, pcb_name: str) -> None:
     by_net = {p.net_name: p.pintype for p in u1.pads if p.pintype.startswith("power")}
     assert by_net["+5V"] == "power_in"
     assert by_net["+3.3V"] == "power_out"
+
+
+def test_fleet_board04_sync_netlist_matches_file_path(tmp_path: Path) -> None:
+    """Both entry points write the same pin types on board 04.
+
+    ``sync-netlist`` assigns ``unconnected-(...)`` nets to the 31 flagged
+    STM32 pins before annotating; they must still come out
+    ``bidirectional+no_connect``, as ``annotate-pintypes`` writes them.
+    """
+    from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+    sch = _BOARD04 / "stm32_devboard.kicad_sch"
+    src = _BOARD04 / "stm32_devboard.kicad_pcb"
+    if not (sch.exists() and src.exists()):
+        pytest.skip("board 04 outputs not present")
+    file_pcb = tmp_path / "file.kicad_pcb"
+    sync_pcb = tmp_path / "sync.kicad_pcb"
+    shutil.copy(src, file_pcb)
+    shutil.copy(src, sync_pcb)
+
+    annotate_pcb_file_pintypes(file_pcb, sch)
+    result = sync_netlist(sch, sync_pcb)
+    assert result.pintype_updated > 0
+
+    def pintypes(path: Path) -> dict[tuple[str, str], str]:
+        return {
+            (fp.reference, pad.number): pad.pintype
+            for fp in PCB.load(path).footprints
+            for pad in fp.pads
+            if pad.pintype
+        }
+
+    by_file = pintypes(file_pcb)
+    assert sum(t == "bidirectional+no_connect" for t in by_file.values()) == 31
+    assert pintypes(sync_pcb) == by_file

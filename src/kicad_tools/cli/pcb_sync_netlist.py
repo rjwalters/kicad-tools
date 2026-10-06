@@ -566,8 +566,10 @@ def _annotate_pintypes(pcb, schematic_path: Path, result: SyncResult) -> None:
 
     KiCad's "Update PCB from Schematic" writes ``(pinfunction ...)`` and
     ``(pintype ...)`` on every pad; ``kct detect-mistakes`` reads ``pintype``
-    as power-rail evidence (issue #5939).  Runs after net assignment so the
-    ``+no_connect`` suffix reflects the final pad nets.
+    as power-rail evidence (issue #5939).  The ``+no_connect`` suffix comes
+    from the schematic's no-connect flags, not from the pad nets, so the
+    ``unconnected-(...)`` nets assigned above do not affect it and the result
+    matches ``kct pcb annotate-pintypes`` on the same design.
     """
     from kicad_tools.operations.pintype import annotate_pcb_pintypes
 

@@ -6,9 +6,17 @@ footprint that has a schematic symbol::
     (pad "1" smd rect ... (net 3 "+3V3") (pinfunction "VDD") (pintype "power_in") ...)
 
 ``pinfunction`` is the symbol pin *name* and ``pintype`` its electrical type
-(``power_in``, ``power_out``, ``passive``, ``input``, ...).  For a pin that is
-not connected to any net KiCad appends ``+no_connect`` to the type
-(``passive+no_connect``).
+(``power_in``, ``power_out``, ``passive``, ``input``, ...).  For a pin that
+carries a schematic no-connect flag (the ``X`` marker) KiCad appends
+``+no_connect`` to the type (``passive+no_connect``).
+
+The suffix is a property of the *schematic*, not of the pad's PCB net: KiCad
+gives every unconnected pin a single-pad ``unconnected-(REF-PIN-PadN)`` net
+whether or not it is flagged, and writes the suffix only for flagged pins
+(KiCad 10's Edgeberry and STM32 Nucleo-64 templates have unflagged
+``unconnected-(...)`` pads typed plain ``passive``/``output``).  Deriving it
+from the schematic alone also makes both entry points below agree regardless
+of how -- or whether -- nets have been assigned yet.
 
 The kct board generators build ``.kicad_pcb`` files directly rather than
 through pcbnew, so until this module they never carried that data and the
@@ -59,6 +67,20 @@ class PadPinInfo:
 
     pinfunction: str
     pintype: str
+    #: The schematic pin carries a no-connect flag (``+no_connect`` suffix).
+    no_connect: bool = False
+
+    @property
+    def effective_pintype(self) -> str:
+        """The ``pintype`` value KiCad writes on the pad."""
+        # A pin already typed ``no_connect`` is not suffixed a second time.
+        if (
+            self.no_connect
+            and self.pintype != "no_connect"
+            and not self.pintype.endswith(NO_CONNECT_SUFFIX)
+        ):
+            return self.pintype + NO_CONNECT_SUFFIX
+        return self.pintype
 
 
 @dataclass
@@ -79,9 +101,20 @@ class PinTypeAnnotation:
 
 
 def _iter_schematic_symbols(sch_path: Path):
-    """Yield every placed symbol across the sheet hierarchy rooted at *sch_path*."""
+    """Yield ``(symbol, mirror, no_connect_points)`` across the hierarchy.
+
+    ``mirror`` is the placed symbol's ``(mirror x|y)`` axis (``""`` if none);
+    the :class:`~kicad_tools.schematic.models.Schematic` model does not keep
+    it, so it is read from the raw sheet text by symbol UUID.
+    ``no_connect_points`` is the set of rounded ``(x, y)`` positions of the
+    no-connect flags on the symbol's own sheet.
+
+    A sheet *file* is read once even when it is placed several times; the
+    extra placements' references are not resolved (follow-up to #5985).
+    """
     from kicad_tools.operations.netlist import _get_sheet_entries
     from kicad_tools.schematic.models import Schematic
+    from kicad_tools.sexp import parse_file
 
     visited: set[Path] = set()
     stack = [sch_path]
@@ -92,7 +125,16 @@ def _iter_schematic_symbols(sch_path: Path):
             continue
         visited.add(resolved)
         sch = Schematic.load(str(path))
-        yield from sch.symbols
+        nc_points = {(round(nc.x, 2), round(nc.y, 2)) for nc in sch.no_connects}
+        mirrors: dict[str, str] = {}
+        if nc_points:
+            for node in parse_file(path).find_all("symbol"):
+                uuid_node = node.find_child("uuid")
+                mirror_node = node.find_child("mirror")
+                if uuid_node is not None and mirror_node is not None:
+                    mirrors[uuid_node.get_string(0) or ""] = mirror_node.get_string(0) or ""
+        for sym in sch.symbols:
+            yield sym, mirrors.get(getattr(sym, "uuid_str", ""), ""), nc_points
         for entry in _get_sheet_entries(path):
             stack.append(path.parent / entry.filename)
 
@@ -102,6 +144,51 @@ def _pinfunction_for(name: str) -> str:
     return "" if name in ("", "~") else name
 
 
+def _placed_pin_xy(sym, pin, mirror: str) -> tuple[float, float]:
+    """Schematic position of *pin*'s connection point on the placed *sym*.
+
+    Same transform as :meth:`SymbolInstance.pin_position`, plus the symbol's
+    mirror, which KiCad applies in library (Y-up) coordinates *before* the
+    rotation: ``(mirror x)`` flips across the X axis (negates Y), ``(mirror
+    y)`` across the Y axis (negates X).
+    """
+    import math
+
+    x, y = pin.connection_point()
+    if mirror == "x":
+        y = -y
+    elif mirror == "y":
+        x = -x
+    rad = math.radians(getattr(sym, "rotation", 0) or 0)
+    rx = x * math.cos(rad) - y * math.sin(rad)
+    ry = x * math.sin(rad) + y * math.cos(rad)
+    return (round(sym.x + rx, 2), round(sym.y - ry, 2))
+
+
+def _pin_has_no_connect_flag(sym, pin, mirror: str, nc_points: set[tuple[float, float]]) -> bool:
+    """Whether a no-connect flag sits on *pin* of the placed symbol *sym*."""
+    if not nc_points:
+        return False
+    # Only the placed unit's pins (and unit-0 commons) have a real position.
+    pin_unit = getattr(pin, "unit", 0)
+    if pin_unit not in (0, getattr(sym, "unit", 1)):
+        return False
+    try:
+        return _placed_pin_xy(sym, pin, mirror) in nc_points
+    except Exception:  # pragma: no cover - defensive: odd library geometry
+        return False
+
+
+def _merge(old: PadPinInfo | None, new: PadPinInfo) -> PadPinInfo:
+    """Combine two schematic pins that land on one key (stacked/multi-unit)."""
+    if old is None:
+        return new
+    flagged = old.no_connect or new.no_connect
+    if old.pintype == "passive" and new.pintype != "passive":
+        return PadPinInfo(new.pinfunction, new.pintype, flagged)
+    return PadPinInfo(old.pinfunction, old.pintype, flagged)
+
+
 def schematic_pin_info(sch_path: str | Path) -> dict[tuple[str, str], PadPinInfo]:
     """Map ``(reference, schematic pin number)`` to the pin's name and type.
 
@@ -109,10 +196,11 @@ def schematic_pin_info(sch_path: str | Path) -> dict[tuple[str, str], PadPinInfo
     definition.  Power symbols (``#PWR``/``#FLG`` references) never reach the
     PCB and are skipped.  When a symbol defines several pins with the same
     number (stacked pins), the first non-``passive`` type wins so a stacked
-    ``power_in`` group is not masked by a passive twin.
+    ``power_in`` group is not masked by a passive twin.  ``no_connect`` is set
+    when a no-connect flag sits on the pin.
     """
     info: dict[tuple[str, str], PadPinInfo] = {}
-    for sym in _iter_schematic_symbols(Path(sch_path)):
+    for sym, mirror, nc_points in _iter_schematic_symbols(Path(sch_path)):
         ref = getattr(sym, "reference", "") or ""
         if not ref or ref.startswith("#"):
             continue
@@ -123,10 +211,12 @@ def schematic_pin_info(sch_path: str | Path) -> dict[tuple[str, str], PadPinInfo
             if not pin.number:
                 continue
             key = (ref, pin.number)
-            new = PadPinInfo(_pinfunction_for(pin.name), pin.pin_type or "passive")
-            old = info.get(key)
-            if old is None or (old.pintype == "passive" and new.pintype != "passive"):
-                info[key] = new
+            new = PadPinInfo(
+                _pinfunction_for(pin.name),
+                pin.pin_type or "passive",
+                _pin_has_no_connect_flag(sym, pin, mirror, nc_points),
+            )
+            info[key] = _merge(info.get(key), new)
     return info
 
 
@@ -150,17 +240,8 @@ def pad_pin_info_map(sch_path: str | Path, pcb: PCB) -> dict[tuple[str, str], Pa
     for (ref, pin), data in pin_info.items():
         pad = pin_to_pad.get((ref, pin), pin)
         key = (ref, pad)
-        old = result.get(key)
-        if old is None or (old.pintype == "passive" and data.pintype != "passive"):
-            result[key] = data
+        result[key] = _merge(result.get(key), data)
     return result
-
-
-def _effective_pintype(pintype: str, has_net: bool) -> str:
-    # A pin already typed ``no_connect`` is not suffixed a second time.
-    if not has_net and pintype != "no_connect" and not pintype.endswith(NO_CONNECT_SUFFIX):
-        return pintype + NO_CONNECT_SUFFIX
-    return pintype
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +276,7 @@ def annotate_pcb_pintypes(
             if data is None:
                 continue
             seen.add((ref, pad.number))
-            pintype = _effective_pintype(data.pintype, bool(pad.net_name))
+            pintype = data.effective_pintype
             node = pad._sexp_node
             current_func = ""
             if node is not None and (fn := node.find_child("pinfunction")) is not None:
@@ -275,7 +356,6 @@ def _scan_spans(text: str) -> _Span:
 _REF_PROPERTY_RE = re.compile(r'\(\s*property\s+"Reference"\s+"((?:[^"\\]|\\.)*)"')
 _REF_FPTEXT_RE = re.compile(r'\(\s*fp_text\s+reference\s+"?((?:[^"\\\s)]|\\.)*)"?')
 _PAD_NUMBER_RE = re.compile(r'\(\s*pad\s+(?:"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
-_NET_NAME_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 
 def _footprint_reference(text: str, fp: _Span) -> str:
@@ -363,12 +443,7 @@ def annotate_pcb_file_pintypes(
             seen.add((ref, number))
 
             net_span = next((c for c in pad.children if c.name == "net"), None)
-            has_net = False
-            if net_span is not None:
-                net_text = text[net_span.start : net_span.end]
-                names = _NET_NAME_RE.findall(net_text)
-                has_net = bool(names and names[-1])
-            pintype = _effective_pintype(data.pintype, has_net)
+            pintype = data.effective_pintype
 
             existing = {c.name: c for c in pad.children if c.name in ("pinfunction", "pintype")}
             want = {"pintype": f"(pintype {_quote(pintype)})"}
@@ -380,11 +455,19 @@ def annotate_pcb_file_pintypes(
                 continue
             result.updated += 1
 
-            # Drop stale children (with one preceding whitespace run).
+            # Drop stale children together with the separator in front of
+            # them: the preceding spaces/tabs and, on a multi-line pad, the
+            # line break too, so the old child's whole line disappears and
+            # the insertion below (which brings its own separator) does not
+            # leave a blank line behind.
             for span in existing.values():
                 start = span.start
                 while start > pad.start and text[start - 1] in " \t":
                     start -= 1
+                if start > pad.start and text[start - 1] == "\n":
+                    start -= 1
+                    if start > pad.start and text[start - 1] == "\r":
+                        start -= 1
                 edits.append((start, span.end, ""))
             if net_span is not None:
                 at = net_span.end
