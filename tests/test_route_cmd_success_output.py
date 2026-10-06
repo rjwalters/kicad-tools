@@ -71,6 +71,31 @@ def _route(pcb: Path, out: Path, *extra: str) -> subprocess.CompletedProcess:
     )
 
 
+def _assert_zone_fill_ran(output: str) -> None:
+    """Fail with the real cause when the post-route zone fill did not run.
+
+    Board 00's GND and VCC are served only by the auto-pours, so their pads
+    connect only after ``kicad-cli`` refills the zones. When the fill is
+    skipped, DRC reports two ``connectivity`` errors (one per pour net), and
+    the headline changes from SUCCESS to "ROUTING FAILED: DRC violations
+    detected". Asserting the precondition first means the failure names the
+    real cause instead of a missing "SUCCESS:" (issue #5935). A common way to
+    get here is a ``kicad-cli version`` probe that exceeds
+    ``KICAD_CLI_PROBE_TIMEOUT`` on a host whose kicad-cli is installed but
+    slow to start; see #5932. Do not turn this into a skip: the
+    0-DRC SUCCESS bar needs filled pours.
+    """
+    m = re.search(r"^\s*Zone fill:.*$", output, re.MULTILINE)
+    status = m.group(0).strip() if m else "no 'Zone fill:' line printed"
+    assert m is not None and m.group(0).strip().startswith("Zone fill: complete"), (
+        "board 00 needs its GND/VCC pours filled to be DRC-clean, but the "
+        f"post-route zone fill did not run ({status}). If kicad-cli is "
+        "installed, its `kicad-cli version` probe probably timed out; "
+        "see issue #5932 / #5935.\n"
+        f"{output}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Bug A + Bug B: successful routes must not print failure-flavored wording
 # ---------------------------------------------------------------------------
@@ -89,6 +114,7 @@ def test_board00_success_output_has_no_failure_wording(tmp_path):
     output = proc.stdout + proc.stderr
 
     assert out.exists(), f"route did not write output:\n{output}"
+    _assert_zone_fill_ran(output)
     # Bug B: fully-routed board reports SUCCESS, not PARTIAL.
     assert "SUCCESS:" in output, f"expected SUCCESS headline:\n{output}"
     assert not _PARTIAL_RE.search(output), f"unexpected PARTIAL on 100% board:\n{output}"
@@ -133,6 +159,7 @@ def test_verbose_keeps_status_detail(tmp_path):
     output = proc.stdout + proc.stderr
 
     assert out.exists(), f"route did not write output:\n{output}"
+    _assert_zone_fill_ran(output)
     assert "SUCCESS:" in output, f"verbose run lost its SUCCESS headline:\n{output}"
     # Even under --verbose, a clean route stays free of the failure wording.
     assert not _OSCILLATION_RE.search(output), f"oscillation wording under --verbose:\n{output}"
