@@ -19,6 +19,7 @@ Example:
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -33,7 +34,7 @@ from ..router.net_class import (
 if TYPE_CHECKING:
     from collections.abc import Collection
 
-    from ..schema.pcb import PCB
+    from ..schema.pcb import PCB, Footprint
 
 
 class MistakeCategory(Enum):
@@ -538,6 +539,123 @@ def is_bypass_cap(reference: str, value: str) -> bool:
     bypass_values = ["100n", "0.1u", "10n", "1u", "4.7u", "10u"]
     lower_value = value.lower().replace(" ", "").replace("f", "")
     return any(bv in lower_value for bv in bypass_values)
+
+
+# --- IC classification (issue #5970) ---------------------------------------
+#
+# Shared by the decoupling-related checks: a bypass capacitor decouples an
+# *IC* supply pin, so the "IC" side of the pairing must be a real IC -- not a
+# resistor, another capacitor, a connector or a fuse that merely touches the
+# same rail.
+
+#: Reference prefixes that positively identify an IC (``U3``, ``IC1``).
+#: Matches :data:`kicad_tools.optim.clustering.IC_PREFIXES`.
+IC_REFERENCE_PREFIXES = frozenset({"U", "IC"})
+
+#: Minimum pad count for a footprint to be considered an IC rather than a
+#: passive/connector (used by :class:`MissingDecouplingCapCheck` and by the
+#: package-based fallback of :func:`is_ic_footprint`).
+MIN_IC_PADS = 4
+
+#: Reference prefixes that are never ICs needing a bypass cap of their own:
+#: R/C/L/D/Y/X are passives; J/SW/TP/FB are connectors, switches, test
+#: points and ferrite beads; Q is a discrete transistor (an 8-pad SO-8 power
+#: MOSFET on a rail is not an IC supply pin); MH/FID are mechanical.
+NON_IC_REFERENCE_PREFIXES = (
+    "R",
+    "C",
+    "L",
+    "D",
+    "Y",
+    "X",
+    "J",
+    "Q",
+    "SW",
+    "TP",
+    "FB",
+    "MH",
+    "FID",
+)
+
+# Extra exact prefixes the positive classifier also rejects (fuses,
+# varistors, batteries, relays, LEDs, plugs) -- see :func:`is_ic_footprint`.
+_EXTRA_NON_IC_PREFIXES = frozenset({"F", "RV", "BT", "K", "LED", "P", "CN", "RN", "RSH"})
+
+# KiCad footprint libraries that hold IC packages / modules.
+_IC_FOOTPRINT_LIBRARIES = frozenset(
+    {
+        "Package_SO",
+        "Package_QFP",
+        "Package_DFN_QFN",
+        "Package_BGA",
+        "Package_CSP",
+        "Package_DIP",
+        "Package_SON",
+        "Package_LGA",
+        "Package_LCC",
+        "RF_Module",
+        "Module",
+    }
+)
+
+# Package-name token suffixes that identify IC packages: QFN/VQFN, QFP/LQFP,
+# SOIC, SOP/SSOP/TSSOP/MSOP/HVSSOP/TSOP, SON/WSON, DFN, BGA, LGA, CSP, DIP.
+_IC_PACKAGE_SUFFIXES = (
+    "QFN",
+    "QFP",
+    "SOIC",
+    "SOP",
+    "SON",
+    "DFN",
+    "BGA",
+    "LGA",
+    "CSP",
+    "DIP",
+    "PLCC",
+)
+_SOT_MULTIPIN_RE = re.compile(r"T?SOT-?23-[5-8]\b")
+
+
+def reference_prefix(reference: str) -> str:
+    """Leading alphabetic prefix of a reference designator (``"RV2"`` -> ``"RV"``)."""
+    match = re.match(r"[A-Za-z]+", reference or "")
+    return match.group(0).upper() if match else ""
+
+
+def _has_ic_package(footprint_name: str, pad_count: int) -> bool:
+    """True when the footprint's library or package name is an IC package."""
+    library, _, package = (footprint_name or "").rpartition(":")
+    if library in _IC_FOOTPRINT_LIBRARIES:
+        return True
+    upper = package.upper()
+    tokens = re.split(r"[^A-Z0-9]+", upper)
+    if any(tok.endswith(_IC_PACKAGE_SUFFIXES) for tok in tokens if tok):
+        return True
+    return pad_count >= 5 and bool(_SOT_MULTIPIN_RE.search(upper))
+
+
+def is_ic_footprint(fp: Footprint) -> bool:
+    """Positively classify a footprint as an IC (issue #5970).
+
+    Having a pad on a power rail is **not** evidence: resistors, capacitors,
+    connectors and fuses all touch rails.  A footprint is an IC when
+
+    * its reference prefix is ``U`` / ``IC`` and it has at least 3 pads
+      (a SOT-23 LDO is a real IC), or
+    * its prefix is not a known passive/connector/discrete prefix, it has at
+      least :data:`MIN_IC_PADS` pads, and its footprint is an IC package
+      (``Package_SO:``, ``...QFN...``, ``TSSOP``, ``RF_Module:`` ...) -- so
+      an unconventionally-named ``A1`` module or ``MCU1`` still counts.
+    """
+    prefix = reference_prefix(fp.reference)
+    pad_count = len(fp.pads)
+    if prefix in IC_REFERENCE_PREFIXES:
+        return pad_count >= 3
+    if prefix in NON_IC_REFERENCE_PREFIXES or prefix in _EXTRA_NON_IC_PREFIXES:
+        return False
+    if pad_count < MIN_IC_PADS:
+        return False
+    return _has_ic_package(fp.name, pad_count)
 
 
 def is_crystal(reference: str, footprint: str) -> bool:

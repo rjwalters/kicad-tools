@@ -13,6 +13,8 @@ import re
 from typing import TYPE_CHECKING
 
 from ..mistakes import (
+    MIN_IC_PADS,
+    NON_IC_REFERENCE_PREFIXES,
     Mistake,
     MistakeCategory,
     is_bypass_cap,
@@ -24,28 +26,10 @@ from ..mistakes import (
 if TYPE_CHECKING:
     from ...schema.pcb import PCB, Footprint
 
-# Minimum pad count for a footprint to be considered an IC rather than a
-# passive/connector. Mirrors the reference-prefix exclusions used elsewhere
-# in this module (R/C/L/D/Y/X are passives; J/SW/TP/FB are connectors,
-# switches, test points, and ferrite beads -- none of these need bypass
-# capacitors decoupling their own supply pin). Q is a discrete transistor:
-# an 8-pad SO-8 power MOSFET sitting on a rail is not an IC supply pin.
-_MIN_IC_PADS = 4
-_NON_IC_REFERENCE_PREFIXES = (
-    "R",
-    "C",
-    "L",
-    "D",
-    "Y",
-    "X",
-    "J",
-    "Q",
-    "SW",
-    "TP",
-    "FB",
-    "MH",
-    "FID",
-)
+# IC filter constants live in :mod:`..mistakes` so the bypass-distance check
+# shares them (issue #5970).
+_MIN_IC_PADS = MIN_IC_PADS
+_NON_IC_REFERENCE_PREFIXES = NON_IC_REFERENCE_PREFIXES
 
 # "Is there *any* decoupling on this rail?" accepts any capacitor of at least
 # this value, not just :func:`is_bypass_cap`'s fixed value list (which misses
