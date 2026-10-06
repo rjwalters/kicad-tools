@@ -149,5 +149,10 @@ def apply_waivers_to_report(report: DRCReport, waivers: Waivers) -> WaiverApplic
             result.waived.append(violation)
             break
 
-    result.unused = [entry for idx, entry in enumerate(waivers.entries) if idx not in used]
+    # Keyed, evidence-bound entries (schema v3, Issue #5946) name ``kct check``
+    # findings by their stable key; kicad-cli findings have no such key, so
+    # those entries are out of scope here -- neither matched nor "unused".
+    result.unused = [
+        entry for idx, entry in enumerate(waivers.entries) if idx not in used and entry.key is None
+    ]
     return result

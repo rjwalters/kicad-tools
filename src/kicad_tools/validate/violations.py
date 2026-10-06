@@ -44,6 +44,17 @@ class DRCViolation:
             (present only when ``waived`` is True).
         waiver_issue: Tracking reference from the waiver entry, e.g.
             ``"chorus#13"`` (present only when ``waived`` is True).
+        evidence_hash: Hash of the finding's local evidence (geometry,
+            measured values, named footprints and net membership), attached
+            by :func:`kicad_tools.validate.evidence.annotate_evidence`
+            (Issue #5946).  ``None`` until annotated.
+        stale_waiver_hash: When an evidence-bound waiver names this finding's
+            :attr:`key` but its ``evidence_hash`` no longer matches, the
+            waiver is **stale**: the finding stays active (never suppressed)
+            and this field records the hash the waiver was reviewed against
+            (Issue #5946).
+        stale_waiver_reason: The stale waiver's ``reason`` (present only when
+            ``stale_waiver_hash`` is set).
     """
 
     rule_id: str
@@ -59,6 +70,9 @@ class DRCViolation:
     waiver_reason: str | None = None
     waiver_issue: str | None = None
     closest_locations: tuple[tuple[float, float], ...] = ()
+    evidence_hash: str | None = None
+    stale_waiver_hash: str | None = None
+    stale_waiver_reason: str | None = None
 
     def __post_init__(self) -> None:
         """Validate severity value."""
@@ -86,6 +100,18 @@ class DRCViolation:
     def is_waived(self) -> bool:
         """Check if this finding was matched by a waiver entry."""
         return self.waived
+
+    @property
+    def key(self) -> str:
+        """Stable finding key: ``rule_id|items|nets|layer`` (Issue #5946).
+
+        Independent of location, measured values and message wording, so the
+        same finding keeps its key across board revisions.  See
+        :mod:`kicad_tools.validate.evidence`.
+        """
+        from .evidence import finding_key
+
+        return finding_key(self.rule_id, self.items, self.nets, self.layer)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization.
@@ -115,12 +141,20 @@ class DRCViolation:
             # #4137).
             "status": "waived" if self.waived else self.severity,
             "waived": self.waived,
+            # Issue #5946: stable identity + local-evidence hash, the two
+            # handles an evidence-bound waiver and ``kct check --diff`` use.
+            "key": self.key,
+            "evidence_hash": self.evidence_hash,
         }
         if self.closest_locations:
             data["closest_locations"] = [list(point) for point in self.closest_locations]
         if self.waived:
             data["waiver_reason"] = self.waiver_reason
             data["waiver_issue"] = self.waiver_issue
+        if self.stale_waiver_hash is not None:
+            data["waiver_status"] = "stale"
+            data["stale_waiver_evidence_hash"] = self.stale_waiver_hash
+            data["stale_waiver_reason"] = self.stale_waiver_reason
         return data
 
 

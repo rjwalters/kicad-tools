@@ -347,12 +347,23 @@ def _load_waivers(explicit: str | None, input_path: Path) -> tuple["Waivers | No
         ``(waivers, exit_code)``; a nonzero exit code means the caller must
         return it immediately.
     """
-    from ..validate.rules.waivers import discover_waivers_sidecar, load_waivers
+    from ..validate.rules.waivers import (
+        discover_waivers_sidecar,
+        load_waivers,
+        shadowed_waivers_sidecars,
+    )
 
     if explicit is not None:
         path: Path | None = Path(explicit).resolve()
     else:
         path = discover_waivers_sidecar(input_path)
+        if path is not None:
+            for shadowed in shadowed_waivers_sidecars(input_path, path):
+                print(
+                    f"WARNING: waivers sidecar {shadowed} is NOT applied: {path} takes"
+                    " precedence and only one sidecar is loaded.",
+                    file=sys.stderr,
+                )
         if path is None and input_path.suffix in (".json", ".rpt"):
             # Issue #4765: for REPORT input the anchor is the report, not the
             # board -- and ``discover_waivers_sidecar`` probes ``<dir>/``,

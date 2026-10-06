@@ -284,6 +284,99 @@ from the board's `build_net_class_map()`. The match-group gate
 in-pipeline DRC while leaving the standalone `kct check` no-op contract
 unchanged.
 
+## CLI: Waivers, Revision Diffs and Coverage (Issue #5946)
+
+### Evidence-bound waivers
+
+Every `kct check` finding in `--format json` carries two handles:
+
+- `key` names *what* the finding is about: `rule_id|items|nets|layer`, sorted
+  and independent of location or wording. For example,
+  `courtyards_overlap|C52,U10||F.Cu`.
+- `evidence_hash` is a hash of the *local evidence*: the finding's location and
+  measured values, the placement and pads of the footprints it names, and the
+  pad membership of the nets it names.
+
+To record a reviewed acknowledgment, waive the key:
+
+```bash
+kct check board.kicad_pcb --waive 'courtyards_overlap|C52,U10||F.Cu' \
+    --waive-reason "EE-mandated tight decoupling" --waive-reviewer rjwalters
+```
+
+The command writes a keyed entry, bound to the current hash, to
+`<board>.kct-waivers.json` next to the board. If a waivers file was given with
+`--waivers` or auto-discovered, it writes there instead.
+
+```json
+{
+  "version": 3,
+  "waivers": [
+    {
+      "key": "courtyards_overlap|C52,U10||F.Cu",
+      "evidence_hash": "ev1:3f0c9a1d2b7e4c55",
+      "reason": "EE-mandated tight decoupling",
+      "reviewer": "rjwalters",
+      "date": "2026-10-06"
+    }
+  ]
+}
+```
+
+When the copper or nets under the finding change, the waiver goes **stale**:
+
+- The finding is active again, and its JSON carries `"waiver_status": "stale"`.
+- A `waiver_stale` warning names the entry.
+- `summary.stale_waivers` counts the stale findings.
+
+Re-review the finding, and re-run `--waive` only if it is still intentional.
+Re-running `--waive` replaces the old entry. Legacy
+`rule`/`items`/`nets` entries (schema 2) still work, and a schema-3 legacy entry
+may add its own `evidence_hash`. Keyed entries apply to `kct check` only;
+`kct drc` ignores them.
+
+### `kct check --diff OLD NEW`
+
+```bash
+kct check --diff old/board.kicad_pcb board.kicad_pcb
+kct check --diff HEAD~3:boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb \
+    boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb --format json
+```
+
+Both sides are checked with the same flags, and their findings are paired by
+`key`:
+
+- **introduced**: new in NEW.
+- **resolved**: gone from OLD.
+- **changed**: same key, but the evidence moved.
+- **unchanged**: same key and same evidence.
+
+Waived findings are excluded. A `REV:path` side exports the board's directory
+at that git revision, so sidecars next to the board come along. The diff also
+lists coverage changes. It exits 2 when NEW introduces error findings, or
+warnings under `--strict`.
+
+### Coverage: unknown is not pass
+
+The JSON report has a `coverage` map with one entry per check category. Each
+entry gives a `status` of `checked`, `skipped:<reason>` or `unknown:<reason>`,
+plus `blocking`. A `summary.coverage_blocking_unknown` list rolls them up.
+
+`unknown` means the check should have had something to say but could not
+evaluate the board. Examples:
+
+- `segment_zone` / `via_zone` with `zone_fills_absent`: the zones have no
+  committed fill, so there was nothing to measure.
+- Diff-pair skew or continuity with `needs_input:net_class_map` on a board
+  with diff-pair-named nets.
+- `netclass_floor` with an unreadable `.kicad_pro`.
+
+`skipped` means the check did not apply, for example because nothing was
+declared to verify or it was deselected. The table output prints every
+`unknown` category under a `Coverage:` line. The `kct check` exit code does not
+change. Sign-off (`kct readiness`, `/kct:tapeout`) refuses while any
+**blocking** check is `unknown` or any waiver is stale.
+
 ## CLI: Compare Manufacturer Rules
 
 See how different fabs compare:
