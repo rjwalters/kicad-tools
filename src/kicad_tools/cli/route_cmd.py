@@ -4548,7 +4548,8 @@ def _fill_zones_after_route(
 
     This function mirrors :func:`pipeline_cmd._run_step_zones`:
 
-    - Skips silently when ``kicad-cli`` is not installed (no-op with warning).
+    - Skips when ``kicad-cli`` is unavailable, but always warns on stderr and
+      says whether it is not installed or its probe failed (#5932).
     - Delegates to :func:`runner.run_fill_zones` so the existing
       net-corruption snapshot/restore guard (``_snapshot_net_declarations`` /
       ``_restore_net_declarations``) runs.
@@ -4597,14 +4598,23 @@ def _fill_zones_after_route(
         return
     from kicad_tools.cli.runner import (
         find_kicad_cli,
+        kicad_cli_unavailable_message,
+        kicad_cli_unavailable_reason,
         run_fill_zones,
         validate_net_format,
     )
 
     kicad_cli = find_kicad_cli()
     if kicad_cli is None:
+        # Never skip silently (#5932): unfilled pours ship without the second
+        # DRC engine, so warn on stderr even under --quiet.
         if not quiet:
-            print("  Zone fill: skipped (kicad-cli not installed)")
+            print(f"  Zone fill: skipped ({kicad_cli_unavailable_reason()})")
+        print(
+            f"WARNING: zone fill skipped -- {kicad_cli_unavailable_message()} "
+            "Copper pours in the output are NOT refilled.",
+            file=sys.stderr,
+        )
         return
 
     # Quick check: does the PCB even have any zones to fill?
@@ -6354,6 +6364,13 @@ def _complete_pour_nets_with_oracle(output_path: Path, *, args, quiet: bool = Fa
         from kicad_tools.router.oracle_completion import PourLinkCloser, run_oracle_completion
 
         if find_kicad_cli() is None:
+            from kicad_tools.cli.runner import kicad_cli_unavailable_message
+
+            print(
+                "WARNING: KiCad oracle completion (pour-net refill) skipped -- "
+                f"{kicad_cli_unavailable_message()}",
+                file=sys.stderr,
+            )
             return 0
         pour_nets = set(find_all_plane_nets(load_pcb(output_path)))
         if not pour_nets:

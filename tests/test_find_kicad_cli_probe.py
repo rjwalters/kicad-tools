@@ -51,11 +51,16 @@ def test_nonzero_exit_treated_as_missing(tmp_path, monkeypatch):
 
 
 def test_result_is_memoized(tmp_path, monkeypatch):
+    # A generous budget: a timed-out probe is (correctly) not memoized (#5932),
+    # so a loaded xdist worker must not turn this into a re-probe.
+    monkeypatch.setattr(runner, "KICAD_CLI_PROBE_TIMEOUT", 10)
     d = _stub(tmp_path, "echo 10.0.0")
     _only_path(monkeypatch, d)
     calls = []
     real = runner._probe_kicad_cli
-    monkeypatch.setattr(runner, "_probe_kicad_cli", lambda p: calls.append(p) or real(p))
+    monkeypatch.setattr(
+        runner, "_probe_kicad_cli", lambda p, **kw: calls.append(p) or real(p, **kw)
+    )
     runner.find_kicad_cli()
     runner.find_kicad_cli()
     assert len(calls) == 1

@@ -461,6 +461,20 @@ class ConnectivityValidator:
 
         kicad_cli = find_kicad_cli()
         if kicad_cli is None:
+            from kicad_tools.cli.runner import last_kicad_cli_lookup
+
+            cli_lookup = last_kicad_cli_lookup()
+            if cli_lookup is not None and cli_lookup.probe_failed:
+                # Installed-but-unresponsive is not the documented KiCad-less
+                # path: never drop the refill cross-check silently (#5932).
+                import warnings
+
+                warnings.warn(
+                    f"{cli_lookup.reason}; skipping the kicad-cli --refill-zones "
+                    "cross-check and using the internal zone analysis",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             return None
         with tempfile.NamedTemporaryFile(suffix=".json") as report_file:
             proc = subprocess.run(
