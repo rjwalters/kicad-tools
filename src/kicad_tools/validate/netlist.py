@@ -208,6 +208,26 @@ def _same_net_spelling(sch_net: str, pcb_net: str) -> bool:
     return s == p or s.rsplit("/", 1)[-1] == p.rsplit("/", 1)[-1]
 
 
+def _names_same_net_strict(name_a: str, name_b: str) -> bool:
+    """True when two net names are unambiguously spellings of one net.
+
+    Stricter than :func:`_same_net_spelling`, for deciding that a PCB net
+    carries the *name of another* schematic net (issue #5980).  Accepts
+    equality after stripping the leading ``/`` (``X`` / ``/X``), and a leaf
+    match only when one side has no sheet path (``X`` vs ``/Sheet/X``).
+    Two fully sheet-qualified names on different sheets (``/A/CLK`` vs
+    ``/B/CLK``) are different nets -- a net class or zone keyed on one does
+    not apply to the other -- so they never match.
+    """
+    a = name_a.lstrip("/")
+    b = name_b.lstrip("/")
+    if a == b:
+        return True
+    if "/" in a and "/" in b:
+        return False
+    return a.rsplit("/", 1)[-1] == b.rsplit("/", 1)[-1]
+
+
 def _is_generated_net_name(name: str) -> bool:
     """True for tool-invented net names that carry no design intent.
 
@@ -577,7 +597,9 @@ class NetlistValidator:
         another PCB net while the pad itself kept the net's own name, the
         message says the net is *split* and names the pads that moved,
         rather than presenting the one pad still on the right name as the
-        culprit.
+        culprit.  That wording is used only when the pad's PCB net carries
+        no other schematic net: if it does, the pad sits on that net's
+        copper (a short), and the plain mismatch message is kept.
 
         Args:
             result: SyncResult to add issues to
@@ -646,7 +668,16 @@ class NetlistValidator:
             sch_to_pcb[s_net] = p_net
             pcb_to_sch[p_net] = s_net
 
-        self._check_swapped_net_names(result, sch_to_pcb, set(sch_groups))
+        # Schematic nets whose paired PCB net holds exactly their pads (no
+        # pad strayed off, no foreign pad on it): only for these is "the
+        # copper joins the right pads" true.
+        clean_nets = {
+            s_net
+            for s_net, p_net in sch_to_pcb.items()
+            if all(pcb_pad_nets[k] == p_net for k in sch_groups[s_net])
+            and all(sch_pin_nets[k] == s_net for k in pcb_groups[p_net])
+        }
+        self._check_swapped_net_names(result, sch_to_pcb, set(sch_groups), clean_nets)
 
         for key in common:
             ref, pad = key
@@ -709,8 +740,14 @@ class NetlistValidator:
             ):
                 continue
             expected = sch_to_pcb.get(s_net)
+            # ``p_net`` holding another schematic net's pads means this pad
+            # sits on that net's copper -- a short, not a split -- so keep
+            # the plain mismatch wording (and never suggest moving the rest
+            # of the net onto that copper).
+            owner = pcb_to_sch.get(p_net)
             if (
                 expected is not None
+                and owner is None
                 and _same_net_spelling(s_net, p_net)
                 and not _same_net_spelling(s_net, expected)
             ):
@@ -733,6 +770,8 @@ class NetlistValidator:
             else:
                 expected_str = f" (expected PCB net {expected!r})" if expected else ""
                 message = f"{ref}.{pad}: schematic net {s_net!r}, PCB net {p_net!r}{expected_str}"
+                if owner is not None and owner != s_net:
+                    message += f"; PCB net {p_net!r} carries schematic net {owner!r}"
                 suggestion = (
                     f"Move {ref}.{pad} to the PCB net that carries schematic net "
                     f"{s_net!r} (update PCB from schematic)"
@@ -755,6 +794,7 @@ class NetlistValidator:
         result: SyncResult,
         sch_to_pcb: dict[str, str],
         sch_nets: set[str],
+        clean_nets: set[str] | None = None,
     ) -> None:
         """Flag PCB nets that carry the name of a *different* schematic net.
 
@@ -770,7 +810,9 @@ class NetlistValidator:
         A schematic net ``S`` is reported when its paired PCB net ``P``:
 
         * is not a spelling of ``S`` itself (``/X``, ``X``, ``/Sheet/X``), and
-        * is a spelling of another schematic net ``S2`` that has pads here, and
+        * is unambiguously the name of another schematic net ``S2`` that has
+          pads here (:func:`_names_same_net_strict`: ``/A/CLK`` is not the
+          name of ``/B/CLK``), and
         * neither ``P`` nor ``S2`` is a tool-generated ``Net-(...)`` name.
 
         When ``S2`` is in turn paired with a PCB net named like ``S``, the
@@ -784,6 +826,9 @@ class NetlistValidator:
             result: SyncResult to add issues to
             sch_to_pcb: The one-to-one schematic-to-PCB net pairing
             sch_nets: Schematic nets that have at least one compared pad
+            clean_nets: Schematic nets whose paired PCB net holds exactly
+                their pads.  The swap message claims the copper is right only
+                when both nets are in this set (``None``: unknown, never claim).
         """
         named_after: dict[str, str] = {}
         for s_net, p_net in sch_to_pcb.items():
@@ -795,7 +840,7 @@ class NetlistValidator:
                     for s2 in sch_nets
                     if s2 != s_net
                     and not _is_generated_net_name(s2)
-                    and _same_net_spelling(s2, p_net)
+                    and _names_same_net_strict(s2, p_net)
                 ),
                 key=lambda s2: (_name_match_rank(s2, p_net), s2),
             )
@@ -809,6 +854,13 @@ class NetlistValidator:
                 if s2 < s_net:
                     continue  # reported with the pair's first net
                 p2 = sch_to_pcb[s2]
+                if clean_nets is not None and s_net in clean_nets and s2 in clean_nets:
+                    lead = "The copper joins the right pads but the names are exchanged, "
+                else:
+                    lead = (
+                        "The names are exchanged (stray pads on these nets are "
+                        "reported separately), "
+                    )
                 result.add(
                     SyncIssue(
                         severity="error",
@@ -818,7 +870,7 @@ class NetlistValidator:
                             f"{p_net!r} and schematic net {s2!r} is PCB net {p2!r}"
                         ),
                         suggestion=(
-                            "The copper joins the right pads but the names are exchanged, "
+                            f"{lead}"
                             "so net classes, diff pairs and zones keyed on these names "
                             f"apply to the wrong pads. Exchange the names of PCB nets "
                             f"{p_net!r} and {p2!r} (update PCB from schematic)"

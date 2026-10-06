@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.validate.netlist import NetlistValidator
+from kicad_tools.validate.netlist import NetlistValidator, SyncResult, _names_same_net_strict
 
 BOARD00 = Path(__file__).resolve().parents[1] / "boards" / "00-simple-led" / "output"
 SCH = BOARD00 / "simple_led.kicad_sch"
@@ -277,11 +277,13 @@ def test_split_net_names_the_moved_pads_not_the_correct_one(tmp_path: Path) -> N
 
 
 @needs_board04
-def test_rail_swap_with_stray_pad_reports_swap_and_split(tmp_path: Path) -> None:
+def test_rail_swap_with_stray_pad_reports_swap_and_short(tmp_path: Path) -> None:
     """GND/+3.3V names exchanged except one GND pad left on PCB ``GND``.
 
-    Before #5980 this read ``C1.2: schematic net 'GND', PCB net 'GND'
-    (expected PCB net '+3.3V')`` -- blaming the one pad whose name is right.
+    PCB net ``GND`` is the 3.3 V copper (it carries every ``+3.3V`` pad), so
+    C1.2 left on it is a GND pin shorted onto the 3.3 V rail.  That must be
+    reported as a mismatch, not as a "split" whose suggested fix (move the
+    other GND pads onto PCB ``GND``) would short the two rails.
     """
     text = _rename_nets(PCB04.read_text(), {"GND": "+3.3V", "+3.3V": "GND"})
     text = _set_pad_net(text, "C1", "2", "GND")
@@ -292,7 +294,46 @@ def test_rail_swap_with_stray_pad_reports_swap_and_split(tmp_path: Path) -> None
     swaps = _name_errors(result)
     assert len(swaps) == 1 and swaps[0].message.startswith("Net names swapped")
     assert {swaps[0].net_schematic, swaps[0].net_pcb} == {"+3.3V", "GND"}
-    pads = {(i.reference, i.pin): i.message for i in result.errors if i.pin}
+    # A stray pad exists, so the copper is *not* all right.
+    assert "copper joins the right pads" not in swaps[0].suggestion
+    pads = {(i.reference, i.pin): i for i in result.errors if i.pin}
     assert set(pads) == {("C1", "2")}
-    assert "schematic net 'GND' is split on the PCB" in pads[("C1", "2")]
-    assert "are on '+3.3V'" in pads[("C1", "2")]
+    issue = pads[("C1", "2")]
+    assert "split" not in issue.message
+    assert "expected PCB net '+3.3V'" in issue.message
+    assert "carries schematic net '+3.3V'" in issue.message
+    assert "back to" not in issue.suggestion
+
+
+def test_same_leaf_nets_on_different_sheets_are_not_named_after_each_other() -> None:
+    """``/A/CLK`` is not the name of ``/B/CLK`` (judge repro on PR #5997)."""
+    result = SyncResult()
+    NetlistValidator.__new__(NetlistValidator)._check_swapped_net_names(
+        result, {"/SYSCLK": "/A/CLK", "/B/CLK": "/B/CLK"}, {"/SYSCLK", "/B/CLK"}
+    )
+    assert not result.issues, [i.message for i in result.issues]
+
+    result = SyncResult()
+    NetlistValidator.__new__(NetlistValidator)._check_swapped_net_names(
+        result,
+        {"/MCU/I2C_SDA": "/MCU/SDA", "/AUX/SDA": "/AUX/SDA"},
+        {"/MCU/I2C_SDA", "/AUX/SDA"},
+    )
+    assert not result.issues, [i.message for i in result.issues]
+
+
+def test_unqualified_name_still_names_a_sheet_net() -> None:
+    """``CLK`` on the PCB still spells schematic ``/B/CLK``."""
+    result = SyncResult()
+    NetlistValidator.__new__(NetlistValidator)._check_swapped_net_names(
+        result, {"/SYSCLK": "CLK", "/B/CLK": "/B/CLK"}, {"/SYSCLK", "/B/CLK"}
+    )
+    assert [i.net_schematic for i in result.errors] == ["/SYSCLK"]
+
+
+def test_names_same_net_strict() -> None:
+    assert _names_same_net_strict("X", "/X")
+    assert _names_same_net_strict("/Sheet/X", "X")
+    assert _names_same_net_strict("/A/X", "A/X")
+    assert not _names_same_net_strict("/A/X", "/B/X")
+    assert not _names_same_net_strict("X", "Y")
