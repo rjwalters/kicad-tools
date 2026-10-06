@@ -229,7 +229,7 @@ class Waiver:
 
 
 def _evidence_hash_of(violation: DRCViolation) -> str:
-    existing = getattr(violation, "evidence_hash", None)
+    existing: str | None = getattr(violation, "evidence_hash", None)
     if existing:
         return existing
     # Not annotated (library caller): hash the finding's own evidence only.

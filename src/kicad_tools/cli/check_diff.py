@@ -100,18 +100,26 @@ def resolve_side(spec: str, scratch: Path, label: str) -> Path:
     rev, sep, rel = spec.partition(":")
     if not sep or not rev or not rel:
         raise DiffSideError(f"{label}: path not found: {spec}")
+    if rev.startswith("-"):
+        # A leading "-" would be parsed by git as an option (e.g. --output=FILE).
+        raise DiffSideError(f"{label}: invalid revision {rev!r}")
     cwd = Path.cwd()
     try:
         root = Path(_git(["rev-parse", "--show-toplevel"], cwd).decode().strip())
     except (DiffSideError, OSError) as e:
         raise DiffSideError(f"{label}: {spec!r} is not a path, and not in a git repo: {e}") from e
     if rel.startswith("./") or rel.startswith("../"):
-        rel_path = (cwd / rel).resolve().relative_to(root.resolve())
+        try:
+            rel_path = (cwd / rel).resolve().relative_to(root.resolve())
+        except ValueError as e:
+            raise DiffSideError(f"{label}: {rel!r} is outside the git repository") from e
     else:
         rel_path = Path(rel)
     parent = rel_path.parent.as_posix() or "."
     try:
-        blob = _git(["archive", "--format=tar", rev, "--", parent], root)
+        # Resolve to a SHA first so ``rev`` can never act as an option.
+        tree = _git(["rev-parse", "--verify", "--end-of-options", f"{rev}^{{tree}}"], root)
+        blob = _git(["archive", "--format=tar", tree.decode().strip(), "--", parent], root)
     except DiffSideError as e:
         raise DiffSideError(f"{label}: cannot export {parent} at {rev}: {e}") from e
     dest = scratch / label

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from kicad_tools.cli import check_cmd
-from kicad_tools.cli.check_diff import diff_reports, resolve_side, strip_driver_args
+from kicad_tools.cli.check_diff import DiffSideError, diff_reports, resolve_side, strip_driver_args
 from kicad_tools.drc.waivers import apply_waivers_to_report
 from kicad_tools.validate import DRCResults, DRCViolation
 from kicad_tools.validate import coverage as cov
@@ -346,6 +346,38 @@ class TestDiffReports:
         assert side.read_text() == "rev1"
         assert side.with_suffix(".kicad_pro").is_file()  # sidecars come along
         assert resolve_side(str(board), scratch, "new") == board.resolve()
+
+    def test_option_like_revision_rejected(self, tmp_path, monkeypatch):
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        repo = tmp_path / "repo"
+        (repo / "boards").mkdir(parents=True)
+        (repo / "boards" / "b.kicad_pcb").write_text("x")
+        env = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), *env, "commit", "-qm", "r1"], check=True)
+        monkeypatch.chdir(repo)
+        victim = tmp_path / "x"
+        victim.write_text("keep")
+        for spec in (
+            f"--output={victim}:boards/b.kicad_pcb",
+            f"--output={tmp_path}/full.tar:HEAD/b",
+        ):
+            with pytest.raises(DiffSideError):
+                resolve_side(spec, tmp_path / "scratch", "old")
+        assert victim.read_text() == "keep"
+        assert not (tmp_path / "full.tar").exists()
+
+    def test_rev_path_escaping_repo_is_clean_error(self, tmp_path, monkeypatch):
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        monkeypatch.chdir(repo)
+        with pytest.raises(DiffSideError):
+            resolve_side("HEAD:../../etc/passwd", tmp_path / "scratch", "old")
 
 
 # ---------------------------------------------------------------------------
