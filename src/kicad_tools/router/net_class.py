@@ -246,7 +246,31 @@ _POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
         rf"VMOT|VMOTOR|VPWR|VDRIVE|VM|PWR|POWER)\d*(?:_{_VOLTAGE})?$",
         # Rail keyword as the trailing word: SENSOR_VDD, USB_VBUS, MCU_VCC
         r"_(?:VCC|VDD|VBUS|VBAT|PWR)$",
+        # Analog / USB supply aliases: VAA, VUSB
+        r"^(?:VAA|VUSB)\d*$",
     )
+)
+
+#: Rails that may carry a qualifier (``3V3_MCU``, ``VOUT_PRE``) unless the
+#: qualifier is a signal suffix (see ``_SIGNAL_SUFFIX_RE``).
+_QUALIFIED_POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        # Leading voltage token + qualifiers: 3V3_MCU, 5V_USB, 12V_IN
+        rf"^{_VOLTAGE}[ADPS]?(?:_[A-Z0-9.]+)+$",
+        # P-/V-prefixed voltage, optional qualifiers: P3V3, P5V, V3V3, V5V0
+        rf"^[PV]{_VOLTAGE}[ADPS]?(?:_[A-Z0-9.]+)*$",
+        # VIN / VOUT with a qualifier: VOUT_PRE, VIN_FILT
+        r"^(?:VIN|VOUT)\d*(?:_[A-Z0-9.]+)+$",
+    )
+)
+
+#: Last-token suffixes that mark a qualified name as a signal about the rail
+#: (``VIN_SENSE``, ``3V3_PG``), not the rail itself.
+_SIGNAL_SUFFIX_RE = re.compile(
+    r"_(?:SENSE|SNS|DET|DETECT|EN|ENABLE|FB|PG|PGOOD|GOOD|OK|FLT|FAULT|"
+    r"MON|ADC|CTRL|SEL|INT|ALERT|OVP|UVP|OCP|STATUS|STAT)\d*$",
+    re.IGNORECASE,
 )
 
 _GROUND_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
@@ -304,7 +328,11 @@ def is_power_rail_name(net_name: str) -> bool:
         return False
     if any(rx.search(base) for rx in _GROUND_RAIL_NAME_RES):
         return False
-    return any(rx.search(base) for rx in _POWER_RAIL_NAME_RES)
+    if any(rx.search(base) for rx in _POWER_RAIL_NAME_RES):
+        return True
+    if _SIGNAL_SUFFIX_RE.search(base):
+        return False
+    return any(rx.search(base) for rx in _QUALIFIED_POWER_RAIL_NAME_RES)
 
 
 # =============================================================================

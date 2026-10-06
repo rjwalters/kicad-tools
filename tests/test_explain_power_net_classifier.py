@@ -30,6 +30,12 @@ BOARD_03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_
 # The five names from the issue: signals that merely *contain* "+" or a
 # voltage fragment, and a KiCad auto-named no-connect net.
 NOT_POWER = [
+    "VIN_SENSE",
+    "VOUT_DET",
+    "3V3_PG",
+    "5V_EN",
+    "KELVIN_P",
+    "KELVIN_N",
     "/USB_D+",
     "ISENSE_A+",
     "/PG_3V3",
@@ -37,7 +43,31 @@ NOT_POWER = [
     "unconnected-(U11-D+-Pad2)",
 ]
 
-POWER_RAILS = ["+3V3", "VBUS", "/+5V", "+5V", "3.3V", "-12V", "+1V8", "VCC", "VDD_CORE"]
+POWER_RAILS = [
+    "+3V3",
+    "VBUS",
+    "/+5V",
+    "+5V",
+    "3.3V",
+    "-12V",
+    "+1V8",
+    "VCC",
+    "VDD_CORE",
+    # Voltage token plus qualifier, P-/V-prefixed voltages, aliases (review of #5971)
+    "3V3_MCU",
+    "5V_USB",
+    "12V_IN",
+    "3V3_LDO",
+    "P3V3",
+    "P5V",
+    "P12V",
+    "V3V3",
+    "V5V0",
+    "VAA",
+    "VUSB",
+    "VOUT_PRE",
+    "VIN_FILT",
+]
 
 
 @pytest.mark.parametrize("name", NOT_POWER)
