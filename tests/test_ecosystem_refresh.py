@@ -344,6 +344,84 @@ class TestTimestampNormalization:
         assert refresh._to_date(raw) == expected
 
 
+class TestLicenseDetectorAlias:
+    """``upstream_license_detected`` suppresses a known detector mismatch only.
+
+    PCBSchemaGen ships a verbatim MIT file GitHub reports as NOASSERTION, and
+    TraceMaker's NOTICE says GPL-3.0-or-later while GitHub reports GPL-3.0.
+    Without the alias the weekly drift run raised a false ``license-changed``
+    error for each, and suggested overwriting the correct ``license``.
+    """
+
+    PCBSCHEMAGEN = {"license": "MIT", "upstream_license_detected": "NOASSERTION"}
+    TRACEMAKER = {
+        "license": "GPL-3.0-or-later",
+        "license_compat": "copyleft-ideas-only",
+        "upstream_license_detected": "GPL-3.0",
+    }
+
+    @pytest.mark.parametrize(
+        ("entry", "detected"),
+        [(PCBSCHEMAGEN, "NOASSERTION"), (TRACEMAKER, "GPL-3.0")],
+        ids=["pcbschemagen-noassertion", "tracemaker-gpl-3.0"],
+    )
+    def test_detector_alias_counts_as_matching_license(self, refresh, entry, detected) -> None:
+        findings = refresh.compare(_project(**entry), _facts(refresh, license=detected), TODAY)
+        assert all(f.severity == "info" for f in findings), findings
+        assert "license-changed" not in _classes(findings)
+        assert "license-missing" not in _classes(findings)
+        assert not any(
+            line.startswith("license =") for f in findings for line in f.suggested_toml
+        ), "must not suggest overwriting the human-read license"
+
+    def test_alias_does_not_fire_reeval_trigger(self, refresh) -> None:
+        project = _project(**self.PCBSCHEMAGEN, reeval_trigger="Re-check if it changes.")
+        findings = refresh.compare(project, _facts(refresh, license="NOASSERTION"), TODAY)
+        assert "reeval-trigger" not in _classes(findings)
+
+    @pytest.mark.parametrize(
+        ("entry", "detected"),
+        [(PCBSCHEMAGEN, "AGPL-3.0"), (TRACEMAKER, "MIT"), (PCBSCHEMAGEN, "NONE")],
+        ids=["mit-to-agpl", "gpl-to-mit", "license-removed"],
+    )
+    def test_real_change_is_still_an_error(self, refresh, entry, detected) -> None:
+        """A value matching neither ``license`` nor the alias is real drift."""
+        findings = refresh.compare(_project(**entry), _facts(refresh, license=detected), TODAY)
+        (finding,) = [f for f in findings if f.drift_class == "license-changed"]
+        assert finding.severity == "error"
+        assert f'license = "{detected}"' in finding.suggested_toml
+        assert entry["upstream_license_detected"] in finding.detail
+
+    def test_detector_catching_up_reports_stale_alias_as_info(self, refresh) -> None:
+        """Once GitHub classifies the file correctly the alias is dead weight."""
+        project = _project(**self.TRACEMAKER)
+        findings = refresh.compare(project, _facts(refresh, license="GPL-3.0-or-later"), TODAY)
+        assert _classes(findings) == {"license-alias-stale"}
+        (finding,) = findings
+        assert finding.severity == "info"
+        assert "upstream_license_detected" in finding.detail
+
+    @pytest.mark.parametrize("project_id", ["pcbschemagen", "tracemaker"])
+    def test_committed_entries_carry_the_alias(self, refresh, project_id) -> None:
+        """The two known mismatches are recorded in the registry itself."""
+        from kicad_tools.ecosystem import load_registry
+
+        project = load_registry().get(project_id)
+        assert project.upstream_license_detected
+        findings = refresh.compare(
+            project,
+            _facts(
+                refresh,
+                license=project.upstream_license_detected,
+                stars=project.stars,
+                last_push=project.last_push,
+                full_name=project.slug,
+            ),
+            date.fromisoformat(project.last_verified),
+        )
+        assert findings == []
+
+
 class TestSeverityTable:
     def test_every_drift_class_has_a_severity(self, refresh) -> None:
         emitted = {
@@ -353,6 +431,7 @@ class TestSeverityTable:
             "license-missing",
             "reeval-trigger",
             "stale-facts",
+            "license-alias-stale",
             "unpollable",
             "probe-failed",
         }

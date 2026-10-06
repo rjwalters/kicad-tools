@@ -20,9 +20,19 @@
 #      or tag -- those move, and a moving pin makes a recorded measurement
 #      unreproducible.
 #
-# `license` is the SPDX identifier from the upstream LICENSE file at
-# `last_verified`, or the literal "NONE" when the project commits no LICENSE
-# (which is *not* the same as public domain -- see `license_compat`).
+# `license` is the SPDX identifier from the upstream LICENSE file (or the
+# project's own SPDX tag, e.g. in NOTICE) at `last_verified`, or the literal
+# "NONE" when the project commits no LICENSE (which is *not* the same as
+# public domain -- see `license_compat`). It records what a human read, not
+# what the forge's license detector guessed.
+#
+# `upstream_license_detected` (optional) records the detector's answer when
+# it disagrees with `license` for a known, non-substantive reason -- e.g.
+# GitHub reports "NOASSERTION" for a verbatim MIT file it cannot classify, or
+# the deprecated "GPL-3.0" for a GPL-3.0-or-later project. The refresh script
+# treats that exact value as matching `license`, so the weekly drift run does
+# not raise a false `license-changed`; any *other* detected value is still an
+# error. Omit the field when the detector agrees with `license`.
 #
 # ORDER IS EDITORIAL. Projects render into the README in the order they
 # appear here, grouped by `category`. The closest peer leads its section.
@@ -75,11 +85,13 @@ vcs = "github"
 category = "autorouter"
 relation = "peer"
 verdict = "watch"
-# The LICENSE file is the GPLv3 text and the README states GPL-3.0-or-later;
-# NOTICE adds a section-7 permission to link NVIDIA's CUDA runtime. Recorded
-# as "GPL-3.0" to match GitHub's detector (and the freerouting entry), so
-# `ecosystem_refresh.py` does not report a phantom `license-changed`.
-license = "GPL-3.0"
+# The LICENSE file is the GPLv3 text; NOTICE carries
+# `SPDX-License-Identifier: GPL-3.0-or-later` and adds a section-7 permission
+# to link NVIDIA's CUDA runtime. GitHub's detector reports the deprecated
+# "GPL-3.0", recorded below so `ecosystem_refresh.py` does not report a
+# phantom `license-changed`.
+license = "GPL-3.0-or-later"
+upstream_license_detected = "GPL-3.0"
 license_compat = "copyleft-ideas-only"
 language = "C++20 + CUDA"
 stars = 42
@@ -666,9 +678,13 @@ vcs = "github"
 category = "agent-interface"
 relation = "downstream"
 verdict = "watch"
-# No LICENSE file in the repo or in `kicadmium/`; the Cargo manifests declare
-# `license = "MIT"`, which is a claim, not a grant -- same rule as the Seeed
-# entry. The `kct/` port does carry our own MIT notice as
+# No LICENSE file covers kicadmium's own code: there is none at the repo
+# root or the top of `kicadmium/`. The LICENSE files that do exist under
+# `kicadmium/` are third-party (`frontend/static/kicad-viewer/three/LICENSE`
+# for three.js, and `skills/kistack/LICENSE`, MIT from American Embedded,
+# LLC), and neither grants rights to kicadmium itself. The Cargo manifests
+# declare `license = "MIT"`, which is a claim, not a grant -- same rule as
+# the Seeed entry. The `kct/` port does carry our own MIT notice as
 # `kct/LICENSE-kicad-tools`, which covers our code, not theirs.
 license = "NONE"
 license_compat = "unlicensed"
@@ -940,7 +956,11 @@ language = "Python"
 stars = 25
 last_push = "2026-09-16"
 last_verified = "2026-10-06"
-# v1.0.1. The Clean Pass figures are Table 2 of arXiv:2607.05915.
+# v1.0.1. The Clean Pass figures are Table 3 ("Routing quality on D2, D3-A,
+# and D3-B") of arXiv:2607.05915. They are best-of-5 numbers (single-rollout
+# results are in Table 22), whereas the circuit-skills TraceMaker-vs-
+# Freerouting comparison cited in the tracemaker entry used single runs, so
+# the two sets of figures are not directly comparable.
 pinned_commit = "b3d62f5c37e7528670d112e03d9a90029f23f4f3"
 summary = """
 a Gymnasium environment around KiCad's push-and-shove router, scored by \
@@ -948,7 +968,7 @@ KiCad's own DRC (arXiv:2607.05915). It ships synthetic sets D1/D2 and a \
 recipe to rebuild D3: 679 PCBench boards converted to KiCad 9, keeping \
 their human reference copper. Its headline metric, Clean Pass (fully \
 connected and 0 error-level DRC), matches our bar. Published Clean Pass \
-on D3-A / D3-B: Freerouting 0.80 / 0.78, KiCadRoutingTools 0.74 / 0.20. \
+on D3-A / D3-B (best-of-5): Freerouting 0.80 / 0.78, KiCadRoutingTools 0.74 / 0.20. \
 The most direct public leaderboard for `kct route`.\
 """
 reeval_trigger = """
@@ -991,9 +1011,10 @@ category = "benchmark"
 relation = "reference"
 verdict = "watch"
 # The LICENSE file is verbatim MIT; GitHub's detector reports NOASSERTION
-# (multi-line copyright holder), so `ecosystem_refresh.py` will flag a
-# `license-changed` that is not real. Re-read the file before acting on it.
+# (multi-line copyright holder). `upstream_license_detected` records that, so
+# `ecosystem_refresh.py` does not flag a `license-changed` that is not real.
 license = "MIT"
+upstream_license_detected = "NOASSERTION"
 license_compat = "mit-clean"
 language = "Python"
 stars = 12
