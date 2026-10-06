@@ -440,7 +440,7 @@ class TestMCPCommandHandler:
         assert result == 1
 
         captured = capsys.readouterr()
-        assert "FastMCP is required" in captured.out
+        assert "FastMCP is required" in captured.err
 
     @pytest.mark.parametrize("transport", ["stdio", "http"])
     def test_run_serve_module_import_error(self, monkeypatch, capsys, transport):
@@ -462,9 +462,11 @@ class TestMCPCommandHandler:
         result = _run_serve(MockArgs())
         assert result == 1
 
-        out = capsys.readouterr().out
-        assert "The MCP server requires the 'mcp' extra:" in out
-        assert "pip install 'kicad-tools[mcp]'" in out
+        captured = capsys.readouterr()
+        # stderr, never stdout: stdout is the stdio JSON-RPC transport (#5961).
+        assert captured.out == ""
+        assert "The MCP server requires the 'mcp' extra:" in captured.err
+        assert "pip install 'kicad-tools[mcp]'" in captured.err
 
 
 class TestMCPModuleExports:

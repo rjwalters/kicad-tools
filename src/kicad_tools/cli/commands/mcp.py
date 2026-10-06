@@ -73,17 +73,19 @@ def _run_serve(args) -> int:
 
         run_server(transport=transport, host=host, port=port)
         return 0
+    # Diagnostics go to stderr: in stdio mode stdout is the JSON-RPC
+    # transport, and a client would parse these lines as frames (#5961).
     except ImportError as e:
-        print(f"Error: {e}")
-        print()
-        print("The MCP server requires the 'mcp' extra:")
-        print("  pip install 'kicad-tools[mcp]'")
+        print(f"Error: {e}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("The MCP server requires the 'mcp' extra:", file=sys.stderr)
+        print("  pip install 'kicad-tools[mcp]'", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("\nServer stopped.")
+        print("\nServer stopped.", file=sys.stderr)
         return 0
     except Exception as e:
-        print(f"Error starting server: {e}")
+        print(f"Error starting server: {e}", file=sys.stderr)
         return 1
 
 
