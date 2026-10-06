@@ -130,11 +130,26 @@ class LedSeriesResistorCheck:
     Driving an LED directly from a rail (or a GPIO) without a series
     resistor relies on the LED's own (typically very low) forward
     resistance to limit current -- this usually over-drives the LED and
-    shortens its life or destroys it outright. This conservative heuristic
-    requires a private, non-rail junction
-    between a two-terminal LED and resistor. Branched junctions and
-    constant-current drivers remain warnings because this PCB-only check
-    cannot establish their current-limiting behavior.
+    shortens its life or destroys it outright.
+
+    Path rule (issue #5940, replacing the #4899/#5316 two-terminal-junction
+    test): a two-net LED is current-limited when, on its anode side or its
+    cathode side, every DC path from the LED to a rail or a driver pin goes
+    through a resistor. Concretely, starting from one LED terminal net we
+    walk the net graph, crossing other two-net diodes/LEDs and inductors /
+    ferrite beads (DC-conductive series parts) and ignoring capacitors and
+    test points. The side is protected when that walk reaches no rail net
+    and no other component pad (IC, connector, transistor, ...), and stops
+    at at least one resistor whose far side leaves the LED's own
+    neighbourhood (so a resistor in parallel with the LED, or shorted onto
+    one net, does not count).
+
+    Shared resistors -- one line resistor per charlieplex line, or one
+    resistor feeding several LEDs -- therefore pass, while an LED whose net
+    also touches a GPIO/connector pin directly (a branch that bypasses the
+    resistor) is still flagged. Constant-current drivers wired straight to
+    the LED remain warnings because this PCB-only check cannot establish
+    their current-limiting behaviour.
     """
 
     category = MistakeCategory.CONNECTIVITY
@@ -185,22 +200,88 @@ class LedSeriesResistorCheck:
         return mistakes
 
     def _has_series_resistor(self, pcb: PCB, led: Footprint, led_nets: set[str]) -> bool:
-        if len(led.pads) != 2 or len(led_nets) != 2:
+        if len(led_nets) != 2:
             return False
-        for fp in pcb.footprints:
-            if fp is led or not fp.reference.upper().startswith("R") or len(fp.pads) != 2:
+        net_index = _pads_by_net(pcb)
+        first, second = sorted(led_nets)
+        side_a = _explore_side(net_index, led, first, stop=second)
+        side_b = _explore_side(net_index, led, second, stop=first)
+        neighbourhood = side_a.nets | side_b.nets | led_nets
+        return side_a.is_protected(neighbourhood) or side_b.is_protected(neighbourhood)
+
+
+# Two-net parts that conduct DC and so extend a path rather than end it.
+_SERIES_PREFIXES = ("LED", "D", "DS", "L", "FB", "F")
+# Parts that never sit in a DC path to a source (decoupling, test access).
+_IGNORED_PREFIXES = ("C", "TP", "MH", "H")
+
+
+def _ref_prefix(ref: str) -> str:
+    match = re.match(r"[A-Za-z_]+", ref)
+    return match.group(0).upper() if match else ""
+
+
+def _pads_by_net(pcb: PCB) -> dict[str, list[Footprint]]:
+    """Map net name -> footprints with a pad on it (one entry per pad)."""
+    index: dict[str, list[Footprint]] = {}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name:
+                index.setdefault(pad.net_name, []).append(fp)
+    return index
+
+
+class _SideWalk:
+    """Result of walking the net graph out from one LED terminal."""
+
+    def __init__(self) -> None:
+        self.nets: set[str] = set()
+        self.unprotected = False
+        # Far-side nets of each resistor the walk stopped at.
+        self.resistor_far_nets: list[set[str]] = []
+
+    def is_protected(self, neighbourhood: set[str]) -> bool:
+        if self.unprotected:
+            return False
+        return any(far - neighbourhood for far in self.resistor_far_nets)
+
+
+def _explore_side(
+    index: dict[str, list[Footprint]], led: Footprint, start: str, stop: str
+) -> _SideWalk:
+    """Walk out from *start*, never entering the LED's other terminal *stop*.
+
+    A path that loops back to the LED's own other terminal (a second LED in
+    parallel, an anti-parallel charlieplex partner) is not a path to a
+    source; whatever lies beyond *stop* belongs to the other side's walk.
+    """
+    walk = _SideWalk()
+    queue = [start]
+    seen_parts: set[int] = {id(led)}
+    while queue:
+        net = queue.pop()
+        if net in walk.nets or net == stop:
+            continue
+        walk.nets.add(net)
+        if is_power_net(net) or is_ground_net(net):
+            walk.unprotected = True
+            continue
+        for fp in index.get(net, []):
+            if fp is led:
                 continue
-            pad_nets = {pad.net_name for pad in fp.pads if pad.net_name}
-            shared = pad_nets & led_nets
-            if len(pad_nets) != 2 or len(shared) != 1:
+            prefix = _ref_prefix(fp.reference)
+            fp_nets = {pad.net_name for pad in fp.pads if pad.net_name}
+            if prefix.startswith("R"):
+                if id(fp) not in seen_parts:
+                    seen_parts.add(id(fp))
+                    walk.resistor_far_nets.append(fp_nets - {net})
                 continue
-            junction = next(iter(shared))
-            if is_power_net(junction) or is_ground_net(junction):
+            if prefix in _IGNORED_PREFIXES:
                 continue
-            # Extra terminals could drive or bypass this junction.
-            terminals = sum(
-                pad.net_name == junction for component in pcb.footprints for pad in component.pads
-            )
-            if terminals == 2:
-                return True
-        return False
+            if prefix in _SERIES_PREFIXES and len(fp_nets) == 2:
+                queue.extend(fp_nets - walk.nets)
+                continue
+            # IC, connector, transistor, switch, ...: a driver pin reached
+            # without passing through a resistor.
+            walk.unprotected = True
+    return walk
