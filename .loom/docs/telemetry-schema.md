@@ -1467,7 +1467,7 @@ inventing a record kind per signal. Envelopes carry `schema_version: 10`.
 | `interval_start` | RFC 3339, optional | start of the interval the batch's delta counters cover (OTLP `start_time_unix_nano`; the tick start for `loom.dispatch.decisions`); defaults to `captured_at` |
 | `points[].name` | string | closed vocabulary, `telemetry::ops::MetricName` |
 | `points[].value` | int or float | non-finite floats are dropped before the queue (at emit) and again at export |
-| `points[].labels` | object | optional; keys limited to `reason`, `provider`, `account`, `model`, `state`; values ≤128 bytes, no control chars, ≤8 per point |
+| `points[].labels` | object | optional; keys limited to `OPS_METRIC_LABEL_KEYS` (`reason`, `provider`, `account`, `model`, `state`, `resource`, `task`, `heuristic`, `kind`, `repo`); values ≤128 bytes, no control chars, ≤8 per point |
 
 Each name fixes its OTLP kind. `loom.dispatch.decisions` is a monotonic
 **delta `Sum`**, one point per non-zero work-finder outcome per tick, labelled
@@ -1609,6 +1609,26 @@ fixed daemon loop name: `auto_update`, `eta_fleet_refresh`, `eta_pass` or
 | `loom.daemon.task_alive` | `1` | `task` | `1` while the loop has beaten within its staleness window (two intervals plus 60 s, plus the loop's own iteration bound where it has one), `0` once it has gone silent past the window or marked itself dead |
 | `loom.daemon.task_faults` | `{fault}` | `task`, `reason` ∈ `panic`, `overrun`, `exit` | a delta counter: an iteration panicked and was caught, an iteration ran past the loop's bound, or the loop stopped for good |
 
+ETA pipeline health (Issue #10391, `observability/ops/eta_health.rs`). All
+gauges, sampled once per collector pass, so they stay alive when no
+`eta.fleet_refresh` record is emitted (a stood-down host). An unmeasurable
+reading emits no point. `kind` is `start`/`finish`/`land`; `heuristic` is a
+registered heuristic id; `repo` is `owner/repo` of a cached fleet snapshot.
+Never an issue number, sha or path.
+
+| Metric | Unit | Labels | Meaning |
+|---|---|---|---|
+| `loom.eta.health.items` | `{item}` | `kind`, `heuristic`, `reason` ∈ `answered` or a `no_estimate_reason` | live items in the tracker's pending set (newest estimate per item and heuristic). Answer rate is `answered / sum`. Omitted when ETA is disabled |
+| `loom.eta.health.fit_loaded` | `1` | none | `1` when a coefficient file is loaded, else `0` |
+| `loom.eta.health.fit_age_seconds` | `s` | none | now minus the loaded file's cutoff. Omitted when none is loaded |
+| `loom.eta.health.fit_check_age_seconds` | `s` | `reason` (the last fit check's outcome or skip reason) | time since the last fit check. Omitted until one has run in this process |
+| `loom.eta.health.snapshot_age_seconds` | `s` | `repo` | now minus each cached fleet snapshot's `as_of` |
+| `loom.eta.health.refresh_gate` | `1` | `state` ∈ `captain`, `no_captain`, `stand_down`, `disabled` | `1` for the current gate state, `0` for the other three. Before the first tick it is the state the read-only captain resolver reports (`disabled` when the loop does not run) |
+| `loom.eta.health.refresh_last_cycle_age_seconds` | `s` | none | time since the last refresh tick (stand-down ticks count). Omitted before the first tick; keeps growing if the loop stalls |
+| `loom.eta.health.refresh_repos` | `{repository}` | `reason` (a fleet-refresh stop reason) | repos per stop reason in the last tick that refreshed; a reason that drops out is exported once as `0` |
+| `loom.eta.health.snapshot_rows` | `{row}` | none | rows in the last `eta.snapshot` this process built. Omitted until one was built |
+| `loom.eta.health.snapshot_alternates_rows` | `{row}` | none | of those, rows with non-empty `alternates` (#10390) |
+
 The dwell names (#8856) are `loom.queue.oldest_wait`, `loom.queue.starved`,
 `loom.queue.starved.by_reason` and `loom.queue.dispatch_wait[.samples]`. They
 measure how long ready-queue issues have waited; for depth, use
@@ -1728,10 +1748,18 @@ GitHub rate limit (Issue #10022):
 | `github.ratelimit.used` | `Gauge` | `{request}`; labels `resource`, `account` | requests spent this window; absent when the response carried no `used` |
 | `github.ratelimit.reset` | `Gauge` | `s` (Unix epoch seconds); labels `resource`, `account` | when the pool's window resets |
 | `github.ratelimit.breaker_skips` | delta `Sum` | `{pass}`; label `reason` | job passes skipped because the breaker was suppressing, flushed on the 60 s tick |
+| `github.ratelimit.{remaining,used,reset}` per bucket | `Gauge` | as above; labels `resource`, `account`, `owner` | one series per believed reading of the forge bucket book (W1): every App installation's pool this host spends, keyed `(account, owner, resource)`. Fed by the free `x-ratelimit-*` headers of `gh api --include` calls and by one free `gh api rate_limit` probe per published credential directory after each 5-minute reader-refresh pass. A reading counts only while its window is open and it is under 10 minutes old. The account-only points above are unchanged |
+| `loom.forge.calls` | delta `Sum` | `{request}`; labels `caller`, `op`, `role`, `account`, `cred_owner`, `target_owner`, `resource`, `outcome` | requests the `gh` facade sent since the previous point (W1), flushed on the 60 s tick. A `--paginate --include` call counts its pages; `run download` counts 2. The free `gh api rate_limit` probe is counted under `resource` = `other` (a request observation, never a charge). `outcome` ∈ `ok`, `not_modified`, `rate_limited`, `error`, `shed` (reserved for a budget gate). Past 2048 distinct label sets between flushes, a new set is folded into one series per `outcome` with every other label `overflow`, so totals are kept and the point count stays bounded. Accumulated only while an ops sink is registered |
 
 `resource` ∈ `core`, `graphql`. `account` is `app-<app id>` when the daemon
 runs on its GitHub App credential, the validated `gh` login for an ambient
-credential, else `unknown` — never a token, token hash or path. `reason` and
+credential, else `unknown` — never a token, token hash or path. On the
+per-bucket points and `loom.forge.calls`, `account` is `app-<app id>`,
+`app-unknown` (the writer's id is not configured), `env-token` (a
+`GH_TOKEN`/`GITHUB_TOKEN` reached `gh`) or `ambient`, and `owner` /
+`cred_owner` is the GitHub owner the App installation covers, lowercased.
+`target_owner` is the owner of the repository the call was for, or
+`unknown`. `reason` and
 `loom.ratelimit.source` ∈ `work_finder`, `claim_reconciliation`,
 `role_runner`, `epic_supervisor`, `quarantine_reconciliation`,
 `ci_telemetry`, `outcome_journal`, `star_liveness`, `other`. Names follow the
@@ -2175,6 +2203,15 @@ estimate is carried with its `no_estimate_reason` and no quantiles: that it
 as "no such issue" instead. No field carries forge free text (no title, no
 label text, no comment body): every value is an enum, a number, or a
 daemon-derived id.
+
+### `pick.decision`
+
+One OTLP-only log record per role tick and per work-finder tick (Issue #10212):
+the ranked candidate list (capped at 50, with `candidates_total`), the items
+acted on, and a closed-set reason code per skipped candidate. Empty ticks still
+emit, so per-host service cadence is measurable. Full field reference, the
+SigNoz rank-at-instant query and the rows/day volume:
+[`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).
 
 ### `tokens.snapshot`
 

@@ -541,6 +541,21 @@ path), and flushes `github.ratelimit.breaker_skips{reason=<job>}`: one per
 pass a job skipped while the breaker suppressed. A host that never enables an
 OTLP exporter exports none of this; its evidence stays in `daemon.log`.
 
+**Per-bucket rate limits and `loom.forge.calls` (W1).** GitHub bills each App
+installation separately, so the daemon also keeps a *bucket book*: the newest
+reading of every `(account, owner, resource)` pool it spends, from the free
+`x-ratelimit-*` headers of `gh api --include` calls and from one free
+`gh api rate_limit` probe per published credential directory after every
+reader-refresh pass. Each believed reading is exported as the same
+`github.ratelimit.{remaining,used,reset}` gauges with an extra `owner` label.
+`loom.forge.calls` is a delta counter of the requests the `gh` facade sent,
+labelled by caller, inventoried operation, identity role, credential bucket
+(`account`, `cred_owner`, `resource`), `target_owner` and `outcome`; the free
+`rate_limit` probe appears under `resource="other"` and is never charged to a
+bucket. On a host
+without an exporter, `loom-daemon forge calls --by bucket` shows the same
+picture from the local forge-call sink.
+
 **Long-running task liveness and self-update decisions (#10414).** Each
 long-running daemon loop beats a process-global liveness registry
 (`crate::task_liveness`) once per finished iteration. The loops are the

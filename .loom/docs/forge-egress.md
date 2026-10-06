@@ -31,9 +31,23 @@ and the validator never falls back to a cached, default or narrower one:
 2. `/etc/loom/forge-egress/policy.json` (`origin: machine`). Only a missing
    file is absent; one that cannot be stat'ed (e.g. `EACCES`) still wins and
    is `policy.unreadable`, exit 2.
-3. `.loom/config.json` → `forge.egress.policyPath` (`origin: repo`). A relative
+3. `/etc/2am/github-egress/policy.json` (`origin: machine`) — the 2am
+   deployment's path, probed after Loom's own with the same missing-vs-
+   unreadable rule. This is the shared-discovery mechanism: a host provisioned
+   for 2am's `scripts/github-egress.py` (same vendored schema) is found by both
+   validators with no reprovisioning, so the two doctors cannot disagree.
+4. `.loom/config.json` → `forge.egress.policyPath` (`origin: repo`). A relative
    path resolves against the repo root.
-4. None ⇒ `unconfigured`.
+5. None ⇒ `unconfigured`.
+
+**Unconfigured is visible, not silent** (#10168). With no policy, `doctor`,
+`assert` and `status` report a `policy.unconfigured` finding ("GitHub routing is
+neither enforced nor validated on this host"). On a generic install it is a
+non-fatal `notice` (exit 0, daemon gate admits). A host declares itself
+*managed* by setting `LOOM_FORGE_EGRESS_MANAGED=1` (also `true`/`yes`/`on`) or
+by creating the marker file `/etc/loom/forge-egress/managed`; the same finding
+is then `incomplete` and exits 2, matching 2am's doctor. The marker only adds
+strictness; the daemon gate never refuses on an unconfigured host.
 
 Lower-precedence candidates that were present are listed under
 `policy.ignored`, so a repo-local policy can never weaken a machine one. A
@@ -117,18 +131,16 @@ versions, counts and remedies only. Token-shaped strings are redacted.
 | Entry point | Call | On failure under `enforcement.api = required` |
 |---|---|---|
 | daemon startup, then every `LOOM_FORGE_EGRESS_DOCTOR_INTERVAL_SECS` (default 900) | `doctor` | logs each finding + repair command, caches `~/.loom/forge-egress-doctor.json`, publishes `forge.egress.drift` when the code set changes; the daemon stays up |
-| `loom-daemon status` / `status --json` (`forge_egress` key) | fresh `assert` + cached daemon `doctor` | shows the codes and fixes; prints nothing when unconfigured |
+| `loom-daemon status` / `status --json` (`forge_egress` key) | fresh `assert` + cached daemon `doctor` | shows the codes and fixes; shows the `policy.unconfigured` notice when unconfigured |
 | sweep dispatch | `assert` | refuses before any claim or spawn; event `sweep.blocked` with `reason: forge-egress` |
 | worker spawn (`spawn-worker.sh` → `loom-daemon spawn-worker`) | `assert` | does not spawn (exit 78) |
 | `install_self_check` (`forge-egress-aligned`) | `assert` | files an issue naming the codes, refreshes it when the codes change, and closes it once aligned or once no policy is configured |
 | `loom-daemon init` (`install-loom.sh`, `loom update`) | `doctor` | prints the findings; non-zero exit |
-| `resync-installed.sh` | `doctor` | prints the findings after the sync completes; exits with the doctor's code (non-zero only under `required`); `--dry-run` never runs it and never fails; a daemon without `forge egress` warns |
+| `resync-installed.sh` | `doctor` | prints the findings after the sync completes; exits with the doctor's code (non-zero only under `required`, or 2 on an unconfigured host declared managed); `--dry-run` never runs it and never fails; a daemon without `forge egress` warns |
 | `/loom:sweep` pre-wave hygiene | `assert` | advisory text in the summary |
 
 `enforcement.api = observe` logs the same findings and proceeds. An unreadable
 policy, or one with an unknown `schemaVersion`, is never treated as observe-only.
-
-Not wired yet: post-publication `assert` + rollback (C3, #9986).
 
 ## Lockstep with 2am
 

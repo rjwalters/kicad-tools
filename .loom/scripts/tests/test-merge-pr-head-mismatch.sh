@@ -487,12 +487,27 @@ fi
 # on a PR whose only problem was that CI outran LOOM_AUTO_MERGE_TIMEOUT.
 TESTS_RUN=$((TESTS_RUN + 1))
 if [[ -f "$CHAMPION_MD" ]] && grep -q '"\$MERGE_RC" -eq 5' "$CHAMPION_MD" \
-   && grep -q 'Exception: exit codes 3, 4 and 5' "$CHAMPION_MD"; then
+   && grep -q 'Exception: exit codes 3-6' "$CHAMPION_MD"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: champion-pr-merge.md branches on exit 5 and its exception section covers it (#8896)"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: champion-pr-merge.md does not wire merge-pr.sh's exit 5 (#8896)"
+fi
+
+# #10167's exit 6 (deferred behind another PR's chain-head merge lock) is the
+# same family: branched on in Step 3, listed in the exception section, and
+# documented in the script header and the exceptions doc.
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -f "$CHAMPION_MD" ]] && grep -q '"\$MERGE_RC" -eq 6' "$CHAMPION_MD" \
+   && grep -q '^- \*\*6\*\* — ' "$CHAMPION_MD" \
+   && grep -q '^#   6 = deferred' "$MERGE_PR_SRC" \
+   && [[ -f "$EXIT_CODE_DOC" ]] && grep -q '^| `6` |' "$EXIT_CODE_DOC"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: exit 6 (chain-head merge lock defer) is wired in Champion and documented (#10167)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: exit 6 (chain-head merge lock defer) is not wired/documented (#10167)"
 fi
 
 TESTS_RUN=$((TESTS_RUN + 1))

@@ -282,6 +282,7 @@ echo "Testing the merge-pr floor covers every fail-closed sub-subcommand (#8967)
 # opted-in repo on an older binary is refused (fail closed) and told to roll the host.
 MERGE_PR_VERB_TABLE="verdict-contradiction closed 0.19.172
 tree-checks open -
+chain-lock open -
 stale-checks closed 0.19.221
 loom-pr-guard closed 0.19.375
 classify-response closed 0.19.456
@@ -376,6 +377,51 @@ else
     echo "    A host between the two passes the declared floor and then has every merge refused,"
     echo "    while _mp_daemon_roll_hint names a version it already satisfies (#8967). Raise the marker."
 fi
+
+echo ""
+echo "Testing the merge.reverifyStaleChecks version-floor warning (#10465)…"
+
+# Fail-OPEN by design: the warning never refuses a merge and never raises the
+# `requires-daemon: merge-pr` marker (the verb table above stays untouched).
+REV_FILE="$WORKDIR/reverify.sh"
+awk '/^_MP_REVERIFY_FLOOR=/ { print } /^_mp_warn_reverify_floor\(\) \{/ { print }' "$MERGE_PR_SRC" >"$REV_FILE"
+if ! grep -q '^_mp_warn_reverify_floor() {' "$REV_FILE"; then
+    echo -e "${RED}FATAL${NC}: could not extract _mp_warn_reverify_floor from $MERGE_PR_SRC" >&2
+    exit 2
+fi
+# shellcheck disable=SC2317
+warning() { printf 'WARNING: %s\n' "$*"; }
+# shellcheck disable=SC1090
+source "$REV_FILE"
+mkdir -p "$WORKDIR/rv-repo/.loom"
+REPO_ROOT_SAVED="$REPO_ROOT"
+REPO_ROOT="$WORKDIR/rv-repo"
+
+REV_OFF="$(LOOM_MERGE_REVERIFY_STALE_CHECKS="" LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"; REV_OFF_RC=$?
+assert_eq "" "$REV_OFF" "no warning while reverify is off (default)"
+assert_eq "0" "$REV_OFF_RC" "off: returns 0"
+
+REV_ON="$(LOOM_MERGE_REVERIFY_STALE_CHECKS=1 LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"; REV_ON_RC=$?
+assert_eq "0" "$REV_ON_RC" "reverify on + old daemon: the warning never changes the exit code"
+assert_eq "1" "$(grep -c WARNING <<<"$REV_ON")" "reverify on + old daemon: exactly one warning"
+assert_contains "$REV_ON" "0.19.161" "the warning names the resolved daemon version"
+assert_contains "$REV_ON" "$_MP_REVERIFY_FLOOR" "the warning names the floor version"
+assert_contains "$REV_ON" "$(hostname 2>/dev/null || echo unknown)" "the warning names the host"
+
+# Enabled through .loom/config.json instead of the env.
+echo '{"merge":{"reverifyStaleChecks":true}}' >"$REPO_ROOT/.loom/config.json"
+REV_CFG="$(LOOM_MERGE_REVERIFY_STALE_CHECKS="" LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"
+assert_contains "$REV_CFG" "0.19.161" "the config key enables the check too"
+
+cat >"$WORKDIR/new-loom-daemon" <<'FAKE'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--version" ]] && { echo "loom-daemon 99.0.0 (commit abc)"; exit 0; }
+exit 2
+FAKE
+chmod +x "$WORKDIR/new-loom-daemon"
+REV_NEW="$(LOOM_MERGE_REVERIFY_STALE_CHECKS=1 LOOM_DAEMON_BIN="$WORKDIR/new-loom-daemon" _mp_warn_reverify_floor 2>&1)"
+assert_eq "" "$REV_NEW" "no warning when the daemon is at or above the floor"
+REPO_ROOT="$REPO_ROOT_SAVED"
 
 echo ""
 echo "Testing the CI gate agrees merge-pr.sh's dependencies are declared…"
