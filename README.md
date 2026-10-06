@@ -939,6 +939,7 @@ kct skills install                       # ./.claude/commands/kct/*.md (Claude C
 kct skills install --user                # ~/.claude/commands/kct/
 kct skills install --target /tmp/x       # /tmp/x/kct/*.md
 kct skills install --harness codex       # ./.agents/skills/kct-<name>/SKILL.md
+kct skills install --harness opencode    # ./.opencode/commands/kct/*.md, run as /kct/<name>
 kct skills install --list                # packaged skills and their install state
 kct skills install --check               # exit 1 if the installed copy has drifted
 ```

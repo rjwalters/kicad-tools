@@ -24,7 +24,8 @@ skill needs beyond that.
 | `layout-journal` | `kct net-status`, `kct check`, `kicad-cli pcb drc --refill-zones` | `<board-path>/LAYOUT_NOTES.md` | no | no | no | no |
 
 `suggestedModel` in a skill's frontmatter is advisory dispatch metadata. Harnesses
-without per-skill model selection ignore it, and the Codex renderer drops it.
+without per-skill model selection ignore it, and the Codex and opencode renderers
+drop it.
 
 ## Placeholder vocabulary
 
@@ -36,18 +37,74 @@ The bodies are shared by every harness. They never hard-code an invocation synta
 or install path. They use placeholders, which `kicad_tools.agent_surfaces.render`
 (called by `kct skills install`) and `scripts/install-kct.sh` fill in per harness:
 
-| Placeholder | Claude Code | Codex CLI |
-|---|---|---|
-| `{{skill:<name>}}` | `/kct:<name>` | `$kct-<name>` |
-| `{{skill-file:<name>}}` | `.claude/commands/kct/<name>.md` | `.agents/skills/kct-<name>/SKILL.md` |
-| `{{skills-dir}}` | `.claude/commands/kct/` | `.agents/skills/` |
-| `{{skills-readme}}` | `.claude/commands/kct/README.md` | `.agents/skills/kct-help/README.md` |
-| `{{agent-guide}}` | `CLAUDE.md` | `AGENTS.md` |
+| Placeholder | Claude Code | Codex CLI | opencode |
+|---|---|---|---|
+| `{{skill:<name>}}` | `/kct:<name>` | `$kct-<name>` | `/kct/<name>` |
+| `{{skill-file:<name>}}` | `.claude/commands/kct/<name>.md` | `.agents/skills/kct-<name>/SKILL.md` | `.opencode/commands/kct/<name>.md` |
+| `{{skills-dir}}` | `.claude/commands/kct/` | `.agents/skills/` | `.opencode/commands/kct/` |
+| `{{skills-readme}}` | `.claude/commands/kct/README.md` | `.agents/skills/kct-help/README.md` | `.opencode/commands/kct/README.md` |
+| `{{agent-guide}}` | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` |
 
 `$ARGUMENTS` is not a placeholder. Claude Code commands, Codex prompts and
-opencode commands all accept it, so it passes through unchanged. opencode
-rendering is Phase 2 work (#5951). An unknown `{{...}}` token makes the renderer
-raise an error, so a typo cannot ship.
+opencode commands all accept it, so it passes through unchanged. An unknown
+`{{...}}` token makes the renderer raise an error, so a typo cannot ship.
+
+## opencode: commands, not skills (#5951)
+
+`kct skills install --harness opencode` writes each skill as an opencode
+**command**, `.opencode/commands/kct/<name>.md`, invoked as `/kct/<name>`.
+`--user` writes to opencode's global `commands/` dir instead.
+
+Checked against opencode v2.0.22, using the v2 docs at
+`opencode.ai/v2/docs/commands` and `opencode.ai/v2/docs/skills`, and the live
+binary:
+
+- **Commands** are Markdown files in `.opencode/commands/` (project) or
+  `~/.config/opencode/commands/` (global). The legacy singular `command/` still
+  loads, but new files belong in `commands/`. Nested paths become names with
+  `/` separators, so `kct/tapeout.md` is `/kct/tapeout`. The body is the prompt
+  template and takes `$ARGUMENTS`. Frontmatter accepts `description`, `agent`,
+  `model` (`provider/model[#variant]`) and `subagent`.
+- **Skills** are `.opencode/skills/<id>/SKILL.md` (opencode also reads
+  `.claude/skills` and `.agents/skills`). The *model* loads them through its
+  `skill` tool when their description matches the task, or a user mentions
+  `@<id>` in a prompt. They take no arguments.
+- **Global dir.** opencode resolves it as `$OPENCODE_CONFIG_DIR`, then
+  `$XDG_CONFIG_HOME/opencode`, then `~/.config/opencode` (confirmed by
+  `opencode debug paths` and the binary). `--user` follows the same order.
+- **Live check.** Run `kct skills install --harness opencode` into a scratch
+  project, then `opencode api command.list`. It lists all eight `kct/*` commands
+  with their descriptions.
+
+Every `kct` skill is a user-started workflow with an argument contract:
+`$ARGUMENTS` is `<board-path> [--mfr <tier>] ...`. That matches an opencode
+command, not a model-selected skill. Commands are therefore the closest
+equivalent of the Claude Code `/kct:<name>` slash commands. Codex users already
+reach the same skills through `.agents/skills/`, which opencode also reads. So
+installing both layouts into one project gives opencode both forms.
+
+How the frontmatter is mapped:
+
+| Source key | opencode command |
+|---|---|
+| `description` | kept (rendered, as a YAML folded scalar) |
+| `name` | dropped; opencode takes the command name from the path |
+| `invocation` | dropped (Claude Code metadata) |
+| `suggestedModel` | dropped. It is a bare tier (`sonnet`, `opus`), and `model:` needs a provider-qualified id. Mapping it would pin every user to one provider, so the session model stays in charge. |
+
+Things that differ from the other harnesses:
+
+- **Template hazards.** opencode expands `` !`cmd` `` in a command template by
+  running the shell command, outside the agent's permission flow. It also
+  replaces `$1`, `$2`, ... with positional arguments. The opencode renderer
+  refuses a skill body containing either, so a future skill cannot run a
+  command, or lose text, by accident.
+- **`kct/README.md`.** The README is installed beside the commands so that
+  `{{skill:help}}` can read it. opencode therefore also lists it as
+  `/kct/README`, just as Claude Code lists `/kct:README`.
+- **Paths in the text.** In a `--user` install, `{{skill-file:...}}` still
+  renders the project path (`.opencode/commands/kct/...`). The Claude Code and
+  Codex `--user` installs behave the same way.
 
 When you read a source file inside this repo, `{{skill:tapeout}}` means "the
 `tapeout` skill, invoked however your harness invokes skills".

@@ -10035,7 +10035,8 @@ def _add_skills_parser(subparsers) -> None:
         description=(
             "Manage the kct agent skills shipped inside the kicad-tools wheel. "
             "`kct skills install` renders them for one agent harness and writes "
-            "them where that harness looks (Claude Code: .claude/commands/kct/)."
+            "them where that harness looks (Claude Code: .claude/commands/kct/, "
+            "Codex: .agents/skills/, opencode: .opencode/commands/kct/)."
         ),
     )
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command", help="Skills commands")
@@ -10056,7 +10057,8 @@ def _add_skills_parser(subparsers) -> None:
         default=DEFAULT_HARNESS,
         help=(
             "Agent harness to render for (default: %(default)s). claude-code "
-            "writes kct/<name>.md; codex writes kct-<name>/SKILL.md"
+            "writes kct/<name>.md; codex writes kct-<name>/SKILL.md; opencode "
+            "writes kct/<name>.md commands, invoked as /kct/<name>"
         ),
     )
     where = install.add_mutually_exclusive_group()
@@ -10074,7 +10076,11 @@ def _add_skills_parser(subparsers) -> None:
         "--user",
         dest="skills_user",
         action="store_true",
-        help="Install into the user-level skills dir (e.g. ~/.claude/commands)",
+        help=(
+            "Install into the user-level skills dir (e.g. ~/.claude/commands; "
+            "opencode: ~/.config/opencode/commands, honouring "
+            "$OPENCODE_CONFIG_DIR / $XDG_CONFIG_HOME)"
+        ),
     )
     mode = install.add_mutually_exclusive_group()
     mode.add_argument(

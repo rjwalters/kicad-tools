@@ -57,8 +57,10 @@ the files actually present:
    ```
 
    For each skill file other than the namespace README and this help skill,
-   read its YAML `name` and `description`. A skill can be stored as `<name>.md`
-   or as `kct-<name>/SKILL.md`; identify it from frontmatter, not the basename.
+   read its YAML `description`, and its `name` when the frontmatter has one. A
+   skill can be stored as `<name>.md` or as `kct-<name>/SKILL.md`. Prefer the
+   frontmatter `name`; where it is absent (opencode command files omit it, the
+   file path being the command name), take the name from the filename `<name>.md`.
    Render one row per installed skill with its name, purpose, and invocation,
    written as `{{skill:<name>}}` where `<name>` is the skill name without any
    `kct-` prefix. Include a suggested model only when that optional metadata

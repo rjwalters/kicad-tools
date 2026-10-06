@@ -257,6 +257,13 @@ def test_marked_note_is_exempt_but_plain_text_is_not() -> None:
         ("{{agent-guide}}", "claude-code", "CLAUDE.md"),
         ("{{agent-guide}}", "codex", "AGENTS.md"),
         ("**Arguments**: `$ARGUMENTS`", "codex", "**Arguments**: `$ARGUMENTS`"),
+        ("{{skill:tapeout}}", "opencode", "/kct/tapeout"),
+        ("{{skill-file:<command>}}", "opencode", ".opencode/commands/kct/<command>.md"),
+        ("{{skill-file:*}}", "opencode", ".opencode/commands/kct/*.md"),
+        ("{{skills-dir}}", "opencode", ".opencode/commands/kct/"),
+        ("{{skills-readme}}", "opencode", ".opencode/commands/kct/README.md"),
+        ("{{agent-guide}}", "opencode", "AGENTS.md"),
+        ("**Arguments**: `$ARGUMENTS`", "opencode", "**Arguments**: `$ARGUMENTS`"),
     ],
 )
 def test_render(text: str, harness: str, expected: str) -> None:
@@ -269,6 +276,12 @@ def test_render_rejects_unknown_placeholders(text: str) -> None:
 
     with pytest.raises(UnknownPlaceholderError):
         render(text, "claude-code")
+
+
+def test_render_covers_opencode() -> None:
+    from kicad_tools.agent_surfaces import HARNESSES
+
+    assert "opencode" in HARNESSES
 
 
 def test_render_rejects_unknown_harness() -> None:
