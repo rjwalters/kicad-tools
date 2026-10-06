@@ -494,7 +494,27 @@ def _steiner_total_signal_length(features: BoardFeatures) -> float:
 
 
 def _looks_like_power_net(name: str) -> bool:
-    """Crude power-net heuristic (avoid importing the heavier classifier here)."""
+    """Crude power-*or-ground* net heuristic for the Phase 0 research features.
+
+    Deliberately *not* delegated to
+    :func:`kicad_tools.router.net_class.is_power_rail_name` (decided in
+    issue #5984):
+
+    * it means "pour-able net" -- ``GND*``/``VSS*`` count -- which the
+      rail-only classifier excludes, so a faithful delegation would be
+      ``is_power_rail_name(n) or is_ground_rail_name(n)``;
+    * its only consumers are :func:`extract_phase0_features` columns
+      (``steiner_signal_length``, ``decoupling_proximity_median``,
+      ``pour_pad_coverage``), read solely by ``scripts/research/`` and the
+      committed ``data/research/fom_phase0/classifier.joblib``.  Placement
+      and :func:`kicad_tools.optim.fom.compute_fom` never call it, so the
+      placement-output delta of consolidating is zero;
+    * consolidating *would* shift those features on boards 01 and 05
+      (``VIN``/``VOUT``/``VM``/``V3P3`` become rails; board 01's
+      ``steiner_signal_length`` drops 32.23 -> 0, ``pour_pad_coverage``
+      0.375 -> 1.0) and so silently skew the frozen classifier's inputs.
+      Do it together with a Phase 0 retrain, not on its own.
+    """
     if not name:
         return False
     upper = name.upper()
