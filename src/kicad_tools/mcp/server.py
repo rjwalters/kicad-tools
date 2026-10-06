@@ -10,9 +10,11 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, TextIO, cast
 
 if TYPE_CHECKING:
     # mcp SDK >= 2.x (#5601): ``FastMCP`` was renamed to ``MCPServer`` and
@@ -204,17 +206,17 @@ class MCPServer:
         logger.info(f"Starting MCP server: {self.name} v{self.version}")
 
         # stdout *is* the transport: anything else written to it corrupts the
-        # JSON-RPC stream (issue #5961).  Tool handlers reach code -- the
-        # router, the placement optimizer -- that reports progress with bare
-        # print(), so route sys.stdout to stderr for the whole loop and write
-        # frames only through the saved real stream.
-        transport = sys.stdout
+        # JSON-RPC stream (issues #5961, #5965).  Frames go only through the
+        # stream ``_stdio_transport`` yields; everything else that targets
+        # stdout -- Python print(), and (when stdout is the real fd 1) native
+        # code, C extensions and inherited child-process fds -- lands on
+        # stderr for the duration of the loop.
+        with _stdio_transport() as transport:
 
-        def send(message: dict[str, Any]) -> None:
-            transport.write(json.dumps(message) + "\n")
-            transport.flush()
+            def send(message: dict[str, Any]) -> None:
+                transport.write(json.dumps(message) + "\n")
+                transport.flush()
 
-        with contextlib.redirect_stdout(sys.stderr):
             for line in sys.stdin:
                 line = line.strip()
                 if not line:
@@ -238,6 +240,77 @@ class MCPServer:
                             },
                         }
                     )
+
+
+def _stream_fd(stream: Any) -> int | None:
+    """Return the OS file descriptor behind ``stream``, or None if it has none."""
+    try:
+        return int(stream.fileno())
+    except (AttributeError, OSError, ValueError):
+        # io.UnsupportedOperation (StringIO, pytest capture objects) is an
+        # OSError + ValueError subclass.
+        return None
+
+
+@contextlib.contextmanager
+def _stdio_transport() -> Iterator[TextIO]:
+    """Reserve stdout for JSON-RPC frames for the duration of the block.
+
+    Yields the stream frames must be written to; every other route to stdout
+    is pointed at stderr until the block exits (normally or by exception).
+
+    * Always: ``sys.stdout`` is rebound to ``sys.stderr``, so bare ``print()``
+      from tool code (router, placement optimizer progress) can't leak (#5961).
+    * When ``sys.stdout`` is backed by file descriptor 1 -- the real
+      ``kct mcp serve`` stdio case -- the real stdout is ``os.dup``'d into a
+      private, non-inheritable fd that carries the frames, and fd 1 itself is
+      ``dup2``'d onto fd 2.  Writes that bypass ``sys.stdout`` -- C/C++
+      ``printf``/``std::cout``, ``os.write(1, ...)``, child processes that
+      inherit stdout -- then reach stderr instead of the transport (#5965).
+      fd 1 is restored on exit.
+
+    When ``sys.stdout`` is not fd 1 (an injected stream, e.g. in tests), fd 1
+    is not the transport and is left alone.
+    """
+    original = sys.stdout
+    if _stream_fd(original) != 1 or _stream_fd(sys.stderr) is None:
+        with contextlib.redirect_stdout(sys.stderr):
+            yield original
+        return
+
+    # Anything already buffered was written before serving began; let it
+    # reach its original destination before fd 1 moves.
+    original.flush()
+    stderr_fd = _stream_fd(sys.stderr)
+    assert stderr_fd is not None
+    saved_fd = os.dup(1)  # non-inheritable: children never see the transport
+    try:
+        transport = open(  # noqa: SIM115 -- closed in the finally below
+            saved_fd,
+            "w",
+            encoding=getattr(original, "encoding", None) or "utf-8",
+            errors="strict",
+            closefd=False,
+        )
+        try:
+            sys.stderr.flush()
+            os.dup2(stderr_fd, 1)
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    yield transport
+            finally:
+                # Push anything native code or Python left buffered for the
+                # redirected fd 1 out to stderr before it points back.
+                with contextlib.suppress(Exception):
+                    sys.stderr.flush()
+                with contextlib.suppress(Exception):
+                    original.flush()
+                os.dup2(saved_fd, 1)
+        finally:
+            with contextlib.suppress(Exception):
+                transport.close()
+    finally:
+        os.close(saved_fd)
 
 
 def create_server() -> MCPServer:
