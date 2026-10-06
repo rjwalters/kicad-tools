@@ -1308,13 +1308,22 @@ class _TraceResolverTransaction:
 
 
 def _emit_route_checkpoint(
-    callback, routes: list[Route], overflow: int | Callable[[], int], iteration: int = 0
+    callback,
+    routes: list[Route],
+    overflow: int | Callable[[], int],
+    iteration: int = 0,
+    completion: Callable[[list[Route]], int] | None = None,
 ) -> None:
     """Copy committed geometry only when a synchronous checkpoint is due.
 
     Callers must invoke this outside rip-up/recovery transactions. Persistence
     errors do not abort routing; deadline exceptions inherit BaseException and
     still propagate to the supervisor.
+
+    *completion* (Issue #5945) counts the snapshot's fully connected nets.  It
+    is only evaluated when the callback sets ``wants_completion`` (a
+    ``--checkpoint`` best-so-far writer, whose score ranks complete nets
+    first); interval-only checkpoints skip the connectivity walk.
     """
     if callback is None:
         return
@@ -1322,12 +1331,16 @@ def _emit_route_checkpoint(
         if not getattr(callback, "checkpoint_due", lambda: True)():
             return
         snapshot = copy.deepcopy(list({id(route): route for route in routes}.values()))
+        connected = 0
+        if completion is not None and getattr(callback, "wants_completion", False):
+            connected = int(completion(snapshot))
         callback(
             snapshot,
             IterationMetrics(
                 iteration=iteration,
                 routed_count=len({route.net for route in snapshot}),
                 overflow=int(overflow() if callable(overflow) else overflow),
+                nets_fully_connected=connected,
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -1425,6 +1438,10 @@ class Autorouter:
         # alongside ``self.routes`` so preserved trace copper is not
         # structurally invisible to the safety gate.
         self._emitted_preserved_routes: list[Any] | None = None
+        # Issue #5945: which negotiated pass produced the emitted result
+        # (``None`` until ``route_all_negotiated`` finishes its rip-up loop).
+        self.emitted_iteration: int | None = None
+        self.emitted_iteration_rolled_back: bool = False
         # Issue #4605: optional ``spatial_keepouts`` sidecar filter block
         # (``{rule_area_name: {"except_classes": [...] | "only_classes":
         # [...]}}``), stashed by the CLI's ``_apply_net_class_map_sidecar``.
@@ -8798,7 +8815,12 @@ class Autorouter:
             # MST/RSMT edge loop bounds each per-edge A* search.
             routes = self.route_net(net, per_net_timeout=per_net_timeout)
             all_routes.extend(routes)
-            _emit_route_checkpoint(checkpoint_callback, self.routes, self.grid.get_total_overflow)
+            _emit_route_checkpoint(
+                checkpoint_callback,
+                self.routes,
+                self.grid.get_total_overflow,
+                completion=self._count_fully_connected_nets,
+            )
             new_failure_count = sum(1 for f in self.routing_failures if f.net == net)
             recorded_new_failure = new_failure_count > pre_failure_count
 
@@ -8855,9 +8877,31 @@ class Autorouter:
             getattr(checkpoint_callback, "checkpoint_completed", None),
             self.routes,
             self.grid.get_total_overflow,
+            completion=self._count_fully_connected_nets,
         )
 
         return all_routes
+
+    def _count_fully_connected_nets(self, routes: list[Route]) -> int:
+        """Count multi-pad nets whose pads *routes* join into one component.
+
+        Issue #5945: lets the ``route_all`` / two-phase checkpoint hooks score
+        ``--checkpoint`` snapshots by completion, like the negotiated loop.
+        """
+        from .observability import validate_net_connectivity
+
+        routed = {route.net for route in routes}
+        net_pads: dict[int, list[Pad]] = {}
+        for net, keys in self.nets.items():
+            if net not in routed:
+                continue
+            pads = [self.pads[key] for key in keys if key in self.pads]
+            if len(pads) >= 2:
+                net_pads[net] = pads
+        if not net_pads:
+            return 0
+        conn = validate_net_connectivity(routes, net_pads)
+        return sum(1 for info in conn.values() if info.get("connected"))
 
     def _attempt_blocked_component_ripup(
         self,
@@ -13457,7 +13501,18 @@ class Autorouter:
                 nets_fully_connected=final_connected,
                 demotable_connected=final_demotable,
             )
-            if best_metrics.is_better_than(final_metrics):
+            _restored_best = best_metrics.is_better_than(final_metrics)
+            # Issue #5945: record (and report) which pass produced the result
+            # this run emits -- the best snapshot when the final pass regressed,
+            # otherwise the final pass itself.
+            self.emitted_iteration = best_iteration if _restored_best else final_iter_idx
+            self.emitted_iteration_rolled_back = _restored_best
+            flush_print(
+                f"  Emitting iteration {self.emitted_iteration} result "
+                f"({len(iteration_trajectory)} pass(es) scored"
+                f"{'; final pass regressed, rolled back' if _restored_best else ''})"
+            )
+            if _restored_best:
                 flush_print(
                     f"  Restoring iteration {best_iteration} state "
                     f"(connected={best_metrics.nets_fully_connected}, "
@@ -16057,6 +16112,7 @@ class Autorouter:
             getattr(checkpoint_callback, "checkpoint_completed", None),
             self.routes,
             self.grid.get_total_overflow,
+            completion=self._count_fully_connected_nets,
         )
         return result
 

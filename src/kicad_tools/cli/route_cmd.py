@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from kicad_tools.router import Autorouter, LayerStack
+    from kicad_tools.router.checkpoint import BestCheckpointWriter
     from kicad_tools.router.clearance_resolver import DeclaredClearanceRules
     from kicad_tools.router.current_paths import CurrentPathSpec
     from kicad_tools.router.io import ClearanceViolation
@@ -1615,6 +1616,7 @@ def _make_checkpoint_callback(
     preserved_sexp: str = "",
     router_provider: "Callable[[], Autorouter] | None" = None,
     source_pcb_path: Path | None = None,
+    best_checkpoint: "BestCheckpointWriter | None" = None,
 ):
     """Build a checkpoint callback for ``route_all_negotiated`` (Issue #2808).
 
@@ -1653,8 +1655,15 @@ def _make_checkpoint_callback(
         lazily, so a layer ladder shares one throttle clock while each snapshot
         uses its own active layer count. ``source_pcb_path`` identifies authored
         project/custom rules before CLI staging or renaming.
+
+        ``best_checkpoint`` (Issue #5945, ``--checkpoint PATH``) is offered
+        EVERY improvement, unthrottled: it writes its own path + JSON sidecar
+        only when the snapshot's :class:`RouteScore` beats the best already
+        written, so a layer-escalation attempt that restarts from a worse
+        state can never overwrite a better earlier checkpoint.  When it is
+        set, a callback is returned even if ``interval <= 0``.
     """
-    if interval <= 0:
+    if interval <= 0 and best_checkpoint is None:
         return None
 
     # Issue #4416: detect the source dialect once so every checkpoint write
@@ -1668,11 +1677,61 @@ def _make_checkpoint_callback(
     last_router_id: list[int | None] = [None]
     history: list[str] = []
 
-    def _checkpoint_due() -> bool:
+    def _interval_due() -> bool:
+        if interval <= 0:
+            return False
         return last_time[0] is None or time.monotonic() - last_time[0] >= interval
+
+    def _checkpoint_due() -> bool:
+        # Issue #5945: the best-so-far writer must see every improvement.
+        return best_checkpoint is not None or _interval_due()
+
+    def _offer_best(best_routes, best_metrics, label: str | None = None) -> None:
+        """Issue #5945: write ``--checkpoint`` when this snapshot is a new best."""
+        if best_checkpoint is None:
+            return
+        from kicad_tools.router.checkpoint import RouteScore
+
+        score = RouteScore.from_routes(
+            best_routes,
+            best_metrics,
+            complete_offset=best_checkpoint.complete_offset,
+            baseline=best_checkpoint.baseline,
+        )
+        if not score.is_better_than(best_checkpoint.best):
+            return
+        router = router_provider() if router_provider is not None else None
+        layer_count = router.grid.num_layers if router is not None else 2
+
+        def _write(dest: Path) -> None:
+            route_sexp = "\n\t".join(r.to_sexp(name_only=name_only) for r in best_routes)
+            if preserved_sexp:
+                route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
+            _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, dest)
+            _write_routed_pcb(
+                pcb_path, dest, route_sexp, is_checkpoint=True, layer_count=layer_count
+            )
+
+        with restore_stage():
+            record_stage("serialization")
+            best_checkpoint.offer(
+                score,
+                int(getattr(best_metrics, "iteration", 0) or 0),
+                _write,
+                label=label,
+                extra={"layers": layer_count},
+            )
 
     def _checkpoint(best_routes, best_metrics) -> None:
         from kicad_tools.cli.progress import flush_print
+
+        if best_checkpoint is not None:
+            try:
+                _offer_best(best_routes, best_metrics)
+            except Exception as exc:  # noqa: BLE001 - never abort routing
+                flush_print(f"  checkpoint: --checkpoint write failed ({exc!r}); continuing")
+        if interval <= 0:
+            return
 
         now = time.monotonic()
         if last_time[0] is not None and (now - last_time[0]) < interval:
@@ -1748,6 +1807,16 @@ def _make_checkpoint_callback(
         """Retain a completed attempt separately from periodic checkpoints."""
         import tempfile
 
+        if best_checkpoint is not None:
+            try:
+                _offer_best(routes, metrics, label="completed attempt")
+            except Exception as exc:  # noqa: BLE001 - never abort routing
+                from kicad_tools.cli.progress import flush_print
+
+                flush_print(f"  checkpoint: --checkpoint write failed ({exc!r}); continuing")
+        if interval <= 0:
+            return
+
         with restore_stage():
             record_stage("serialization")
             router = router_provider() if router_provider is not None else None
@@ -1771,6 +1840,11 @@ def _make_checkpoint_callback(
     # window. Generic callbacks without this hook still receive owned copies.
     setattr(_checkpoint, "checkpoint_due", _checkpoint_due)  # noqa: B010
     setattr(_checkpoint, "checkpoint_completed", _checkpoint_completed)  # noqa: B010
+    # Issue #5945: the best-so-far score ranks complete nets first, so ask the
+    # route_all / two-phase hooks to measure connectivity for it.
+    _wants = best_checkpoint is not None
+    setattr(_checkpoint, "wants_completion", _wants)  # noqa: B010
+    setattr(_checkpoint_completed, "wants_completion", _wants)  # noqa: B010
     return _checkpoint
 
 
@@ -8257,6 +8331,7 @@ def route_with_layer_escalation(
         preserved_sexp=_preserved_sexp,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
+        best_checkpoint=getattr(args, "_best_checkpoint", None),
     )
 
     # Issue #3923: pre-rung deduplication.  The escalation ladder built by
@@ -9500,6 +9575,7 @@ def route_with_rule_relaxation(
         preserved_sexp=_preserved_sexp,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
+        best_checkpoint=getattr(args, "_best_checkpoint", None),
     )
 
     # Issue #2823: precompute total tier count so per-attempt budget can
@@ -11862,6 +11938,7 @@ def route_with_combined_escalation(
         preserved_sexp=_preserved_sexp,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
+        best_checkpoint=getattr(args, "_best_checkpoint", None),
     )
 
     # 2D search: prioritize fewer layers first, then stricter rules.
@@ -14201,6 +14278,114 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
     return 0
 
 
+def _apply_checkpoint_and_resume(args, pcb_path: Path) -> tuple[int, Path]:
+    """Wire ``--resume PATH`` and ``--checkpoint PATH`` (Issue #5945).
+
+    ``--resume`` seeds the run with a checkpoint's copper: the checkpoint
+    becomes the routing input and ``--preserve-existing`` is implied, so the
+    #5788 preflight holds every net the checkpoint already completed out of
+    the routable set (its copper is re-emitted verbatim and is a hard
+    obstacle) and only the rest are routed.  Completion therefore cannot drop
+    below the checkpoint's.  A checkpoint whose footprints or nets differ from
+    the positional board is refused (exit 2) -- seeding with another design's
+    copper would be LVS-inconsistent.  The default output stays derived from
+    the ORIGINAL board name.
+
+    ``--checkpoint`` stamps a :class:`BestCheckpointWriter` on
+    ``args._best_checkpoint``; every routing sub-flow passes it to
+    :func:`_make_checkpoint_callback`.  When resuming onto the same path, the
+    writer is seeded with the checkpoint's own score so a worse pass can never
+    overwrite it.
+
+    Returns ``(rc, pcb_path)`` -- the (possibly swapped) routing input.
+    """
+    args._best_checkpoint = None
+    quiet = bool(getattr(args, "quiet", False))
+    resume = getattr(args, "resume", None)
+    if resume:
+        from kicad_tools.router.checkpoint import (
+            checkpoint_identity_mismatch,
+            read_checkpoint_meta,
+        )
+
+        resume_path = Path(resume)
+        if not resume_path.exists():
+            print(f"Error: --resume checkpoint not found: {resume_path}", file=sys.stderr)
+            return 1, pcb_path
+        try:
+            mismatch = checkpoint_identity_mismatch(pcb_path, resume_path)
+        except OSError as e:
+            print(f"Error: cannot read --resume checkpoint: {e}", file=sys.stderr)
+            return 1, pcb_path
+        if mismatch:
+            print(
+                f"Error: --resume checkpoint {resume_path} does not match {pcb_path} ({mismatch}).",
+                file=sys.stderr,
+            )
+            return 2, pcb_path
+        if not args.output:
+            args.output = str(pcb_path.with_stem(pcb_path.stem + "_routed"))
+        meta = read_checkpoint_meta(resume_path) or {}
+        if not quiet:
+            where = f" (pass {meta['pass']})" if meta.get("pass") is not None else ""
+            score = meta.get("score") or {}
+            done = f", {score['nets_complete']} net(s) complete" if "nets_complete" in score else ""
+            print(
+                f"  --resume: seeding from {resume_path}{where}{done}; implies --preserve-existing"
+            )
+        lock_off = [
+            flag
+            for flag, on in (
+                ("--nets", getattr(args, "nets", None)),
+                ("--complete", getattr(args, "complete", False)),
+                ("--region", getattr(args, "region", None)),
+            )
+            if on
+        ]
+        if lock_off:
+            # The #5788 preflight that locks complete nets is a deliberate
+            # no-op under these flags, so the checkpoint's completed nets are
+            # NOT guaranteed to be kept verbatim.
+            print(
+                f"Warning: --resume with {', '.join(lock_off)}: the checkpoint's "
+                "completed nets are not locked and may be re-routed.",
+                file=sys.stderr,
+            )
+        args._resumed_from = str(resume_path)
+        args.pcb = str(resume_path)
+        pcb_path = resume_path
+        args.preserve_existing = True
+
+    checkpoint = getattr(args, "checkpoint", None)
+    if checkpoint:
+        from kicad_tools.router.checkpoint import BestCheckpointWriter, RouteScore
+
+        ck_path = Path(checkpoint)
+        if ck_path.suffix != ".kicad_pcb":
+            print(
+                f"Error: --checkpoint must be a .kicad_pcb path, got {ck_path}",
+                file=sys.stderr,
+            )
+            return 1, pcb_path
+        writer = BestCheckpointWriter(
+            ck_path,
+            command="route",
+            source_pcb=getattr(args, "_resumed_from", None) or pcb_path,
+            quiet=quiet,
+        )
+        if resume:
+            # The resumed board's copper is preserved and re-emitted by every
+            # write, so count it in each pass's wirelength/vias -- the same
+            # copper RouteScore.from_board sees on the seed.
+            with contextlib.suppress(OSError, ValueError):
+                writer.baseline = RouteScore.from_board(Path(resume))
+        if resume and ck_path.exists() and ck_path.resolve() == Path(resume).resolve():
+            with contextlib.suppress(OSError):
+                writer.seed(RouteScore.from_board(ck_path), None, label="resumed checkpoint")
+        args._best_checkpoint = writer
+    return 0, pcb_path
+
+
 def _extend_skip_for_preserved_nets(args, skip_nets: list[str]) -> list[str]:
     """Append the #5788 already-connected nets to *skip_nets*, in place.
 
@@ -14987,6 +15172,38 @@ def _route_parser() -> argparse.ArgumentParser:
             "crash/SIGTERM/--timeout leaves the user with the best partial "
             "result rather than the original unrouted input. Default: 30.0. "
             "Use 0 to disable checkpointing (only the terminal save fires)."
+        ),
+    )
+    # Issue #5945: best-so-far checkpoint file + resume.  Mirror of the outer
+    # parser flags in parser.py; tests/test_cli_parser_drift.py keeps them in
+    # sync.
+    parser.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write the best result so far to PATH (.kicad_pcb) every time a "
+            "pass improves the score (nets complete, then DRC/clearance count, "
+            "then overflow, wirelength and vias), plus a PATH-stem "
+            ".checkpoint.json sidecar with the score and pass number. A pass "
+            "that is not better never overwrites it, so a killed run leaves the "
+            "best state on disk. Unthrottled, independent of "
+            "--checkpoint-interval (Issue #5945)."
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Seed routing with the copper of a checkpoint board (e.g. from "
+            "--checkpoint). Nets the checkpoint already completed are kept "
+            "verbatim and locked; only the rest are routed (implies "
+            "--preserve-existing; with --nets, --complete or --region the "
+            "lock does not apply and listed nets may be re-routed). The "
+            "checkpoint's footprints and nets must "
+            "match the input board. Output defaults to <input>_routed "
+            "(Issue #5945)."
         ),
     )
     # Issue #2819: declare --max-search-iterations on the inner parser so the
@@ -16662,6 +16879,12 @@ def _run_main_impl(args, parser, argv) -> int:
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
+    # Issue #5945: --resume / --checkpoint.  Runs before anything reads the
+    # board so a resumed run routes FROM the checkpoint copper.
+    _ck_rc, pcb_path = _apply_checkpoint_and_resume(args, pcb_path)
+    if _ck_rc != 0:
+        return _ck_rc
+
     # Issue #2996: Validate and load the optional --net-class-map sidecar
     # early -- before dispatching to any of the route_with_* sub-flows --
     # so the error paths (missing file / malformed JSON / invalid structure)
@@ -16821,6 +17044,13 @@ def _run_main_impl(args, parser, argv) -> int:
     _pc_rc = _resolve_preserved_connected_nets(args, pcb_path)
     if _pc_rc != 0:
         return _pc_rc
+    # Issue #5945: nets held out of the routable set are still complete on
+    # the board, so the --checkpoint score must count them -- otherwise a
+    # resumed run's scores would not be comparable with its checkpoint.
+    if getattr(args, "_best_checkpoint", None) is not None:
+        args._best_checkpoint.complete_offset = len(
+            getattr(args, "_preserved_connected_nets", None) or []
+        )
 
     # Issue #4472 (epic #4465, Phase 2): localize a --complete pass to a
     # per-link bounding box.  Runs AFTER --region so a user-supplied box wins
@@ -18288,6 +18518,7 @@ def _run_main_impl(args, parser, argv) -> int:
             preserved_sexp=_preserved_sexp,
             router_provider=lambda: router,
             source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
+            best_checkpoint=getattr(args, "_best_checkpoint", None),
         )
 
         # Define routing function for profiling
