@@ -97,3 +97,12 @@ scripts/tests/test-sweep-lease-publish.sh
 scripts/worktree.sh
 scripts/lib/worktree-foreign-lease-guard.sh
 scripts/tests/test-worktree-foreign-lease-guard.sh
+
+# #5967 (and #4558): the post-worktree hook is REPO-OWNED -- Loom never ships
+# hooks/post-worktree.sh; it is the documented per-project extension point
+# (`uv sync --frozen --extra dev`, now bounded by a timeout). Pinned as the
+# explicit declaration .loom/docs/repo-owned-files.md recommends, so neither a
+# resync, an explicit --clean, nor the installed-file write guard treats it as
+# a vendored Loom copy. Its regression test is repo-owned too. Permanent pin.
+hooks/post-worktree.sh
+hooks/tests/test-post-worktree.sh
