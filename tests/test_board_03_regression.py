@@ -116,6 +116,130 @@ SKIP_NETS = ["VCC", "GND", "VBUS"]
 # (``REQUIRED_NETS_ROUTED = 13``).
 MIN_FULLY_ROUTED_NETS = 13
 
+# Issue #5981: kicad-cli 10.0.1 mis-measures the annular ring of the four
+# J1 USB-C shield (``SH``) pads.  Those are oval PTH pads (0.9 mm wide,
+# 0.6 mm oval drill), so the nominal ring is (0.9 - 0.6) / 2 = 0.150 mm --
+# exactly the jlcpcb-tier1 ``PTH Annular Ring`` floor.  10.0.1 measures
+# 0.1462 mm (an oval-hole polygon-approximation error) and reports four
+# ``annular_width`` errors.  On the committed routed board with its project
+# rules, ``kicad-cli pcb drc --refill-zones --severity-all`` reports 0 errors
+# and 0 unconnected on the ``kicad/kicad`` 10.0.2, 10.0.4, 10.0.5 and 10.0.6
+# images (CI pins 10.0.6), while 10.0.1 reports exactly the 4 J1 SH errors
+# with the same 2 warnings.  The same four errors reproduce on 10.0.1 at
+# a73d3a0e (where #5191 closed green on 10.0.6), so this is toolchain skew,
+# not board drift.  10.0.2 is the first version verified clean (10.0.3 was
+# not tested).  Below it we XFAIL -- never pass -- when, and only when,
+# those exact false positives are the sole errors.
+ANNULAR_OVAL_MIN_KICAD_VERSION = (10, 0, 2)
+_J1_SHIELD_PAD_RE = re.compile(r"\bpad SH\b.*\bof J1\b")
+# The mis-measurement is ~4 um; anything larger is a real deficit.
+_ANNULAR_MEASUREMENT_SLOP_MM = 0.01
+
+
+def _parse_kicad_version(raw: object) -> tuple[int, ...] | None:
+    """Parse ``"10.0.1"`` (or ``"10.0.6-1"``) into ``(10, 0, 1)``; else ``None``."""
+    match = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", raw if isinstance(raw, str) else "")
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _kicad_cli_version_tuple() -> tuple[int, ...] | None:
+    """Return the installed kicad-cli version as ``(major, minor, patch)``."""
+    from kicad_tools.cli.runner import get_kicad_version
+
+    return _parse_kicad_version(get_kicad_version())
+
+
+def _old_kicad_annular_xfail_reason(
+    errors: list[tuple[str, list[str], float | None, float | None]],
+    version: tuple[int, ...] | None,
+) -> str | None:
+    """Explain why ``errors`` are the known pre-10.0.2 J1 shield false positive.
+
+    ``errors`` holds ``(type, item_descriptions, actual_mm, required_mm)`` for
+    every error-severity violation.  ``version`` is the kicad-cli version that
+    produced those errors -- the report's own ``kicad_version`` where the
+    caller has the report, so the gate and the report come from the same
+    binary.  Returns ``None`` (so the caller fails normally) unless that
+    version is older than :data:`ANNULAR_OVAL_MIN_KICAD_VERSION` AND every
+    error is an ``annular_width`` on a J1 ``SH`` pad within measurement slop
+    of the rule.
+    """
+    if not errors or version is None or version >= ANNULAR_OVAL_MIN_KICAD_VERSION:
+        return None
+    for type_str, items, actual, required in errors:
+        if type_str != "annular_width":
+            return None
+        if not items or not all(_J1_SHIELD_PAD_RE.search(item) for item in items):
+            return None
+        if actual is None or required is None:
+            return None
+        if required - actual > _ANNULAR_MEASUREMENT_SLOP_MM:
+            return None
+    floor = ".".join(str(part) for part in ANNULAR_OVAL_MIN_KICAD_VERSION)
+    found = ".".join(str(part) for part in version)
+    return (
+        f"kicad-cli {found} < {floor} (first version verified clean) mis-measures the "
+        f"oval-drill annular ring of the J1 USB-C SH pads (nominal 0.150 mm) and "
+        f"reports {len(errors)} false-positive annular_width error(s); "
+        f"upgrade kicad-cli to >= {floor} to run this check (issue #5981)."
+    )
+
+
+_ANNULAR_DESC_RE = re.compile(r"min annular width ([\d.]+) mm; actual ([\d.]+) mm")
+
+
+def _native_violation_summary(
+    violation: dict,
+) -> tuple[str, list[str], float | None, float | None]:
+    """Reduce a raw kicad-cli JSON violation to the tuple the xfail check takes."""
+    match = _ANNULAR_DESC_RE.search(violation.get("description", ""))
+    required, actual = (float(match.group(1)), float(match.group(2))) if match else (None, None)
+    items = [item.get("description", "") for item in violation.get("items", [])]
+    return violation.get("type", ""), items, actual, required
+
+
+# route_demo.py prints the kct-check leg's own result on this line (#5981).
+_KCT_CHECK_RESULT_RE = re.compile(
+    r"^\s*kct check: passed=(True|False) errors=(-?\d+)\s*$", re.MULTILINE
+)
+
+
+def _route_demo_xfail_reason(
+    returncode: int, stdout: str, native_report: dict | None
+) -> str | None:
+    """Decide whether a failed ``route_demo.py`` run is the #5981 false positive.
+
+    ``route_demo`` fails its DRC when EITHER leg fails: ``kct check
+    --drc-only`` or the native kicad-cli pass that writes ``native_report``.
+    Only the native leg is affected by the old-kicad-cli oval-ring bug, so
+    the XFAIL requires all of:
+
+    * every net routed;
+    * the kct-check leg's own line reads exactly ``passed=True errors=0`` --
+      a kct-check DRC regression (``errors>0``) or crash/failure to run
+      (``errors=-1`` / ``passed=False``) fails normally, as does a missing
+      line;
+    * a native report with no unconnected items, produced by a kicad-cli
+      older than the floor (read from the report's ``kicad_version``), whose
+      only errors are the J1 SH annular false positives.
+    """
+    if returncode == 0 or "All nets routed" not in stdout:
+        return None
+    kct_lines = _KCT_CHECK_RESULT_RE.findall(stdout)
+    if kct_lines != [("True", "0")]:
+        return None
+    if not isinstance(native_report, dict) or native_report.get("unconnected_items"):
+        return None
+    return _old_kicad_annular_xfail_reason(
+        [
+            _native_violation_summary(v)
+            for v in native_report.get("violations", [])
+            if v.get("severity") == "error"
+        ],
+        _parse_kicad_version(native_report.get("kicad_version")),
+    )
+
+
 # References the schematic emits that the PCB generator MUST also emit
 # to keep sync clean.  This is the explicit anti-regression list from
 # the issue #2744 curator: drift in any of these refs blocks export.
@@ -1005,10 +1129,24 @@ def test_route_demo_achieves_minimum_completion(regenerated_board: Path) -> None
         cwd=str(BOARD_DIR),
         env=env,
     )
+    # Unrelated to #5981, so asserted before any XFAIL can short-circuit it.
+    assert "Applying reviewed routing plan" in proc.stdout, (
+        proc.stdout[-4000:] + proc.stderr[-2000:]
+    )
+    # Issue #5981: route_demo's second, native kicad-cli DRC pass writes its
+    # report beside the routed board.  XFAIL only when the kct-check leg is
+    # clean and the native report's sole errors are the known old-kicad-cli
+    # J1 SH oval-ring false positives.
+    native_report_path = routed_tmp.parent / "native-drc.json"
+    native_report = (
+        json.loads(native_report_path.read_text()) if native_report_path.is_file() else None
+    )
+    xfail_reason = _route_demo_xfail_reason(proc.returncode, proc.stdout, native_report)
+    if xfail_reason is not None:
+        pytest.xfail(xfail_reason)
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
     assert "SUCCESS: All nets routed, DRC passed!" in proc.stdout
     assert "Native errors and opens: 0" in proc.stdout
-    assert "Applying reviewed routing plan" in proc.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -1287,6 +1425,182 @@ def test_run_geometric_drc_passes_refill_zones() -> None:
     assert cmd.index("--refill-zones") < cmd.index("--format")
 
 
+_J1_SH_FALSE_POSITIVE = (
+    "annular_width",
+    ["PTH pad SH [GND] of J1"],
+    0.1462,
+    0.15,
+)
+
+
+@pytest.mark.parametrize(
+    ("version", "errors", "expect_xfail"),
+    [
+        # The exact #5981 signature on 10.0.1 -> xfail with a reason.
+        ((10, 0, 1), [_J1_SH_FALSE_POSITIVE] * 4, True),
+        # The first verified-clean version (and newer) never gets the escape hatch.
+        ((10, 0, 2), [_J1_SH_FALSE_POSITIVE] * 4, False),
+        ((10, 0, 6), [_J1_SH_FALSE_POSITIVE] * 4, False),
+        ((11, 0, 0), [_J1_SH_FALSE_POSITIVE] * 4, False),
+        # Unknown version -> fail normally.
+        (None, [_J1_SH_FALSE_POSITIVE], False),
+        # No errors -> nothing to excuse.
+        ((10, 0, 1), [], False),
+        # Any other error type alongside the false positive -> real failure.
+        ((10, 0, 1), [_J1_SH_FALSE_POSITIVE, ("clearance", ["Track [GND]"], None, None)], False),
+        # Annular error on a different pad -> real failure.
+        ((10, 0, 1), [("annular_width", ["PTH pad 1 [VCC] of J2"], 0.1462, 0.15)], False),
+        # A genuine (larger than measurement slop) deficit -> real failure.
+        ((10, 0, 1), [("annular_width", ["PTH pad SH [GND] of J1"], 0.10, 0.15)], False),
+        # One violation naming J1 SH AND another pad -> real failure.
+        (
+            (10, 0, 1),
+            [("annular_width", ["PTH pad SH [GND] of J1", "PTH pad 1 [VCC] of J10"], 0.1462, 0.15)],
+            False,
+        ),
+    ],
+)
+def test_old_kicad_annular_xfail_gate(version, errors, expect_xfail) -> None:
+    """Issue #5981: the old-kicad-cli escape hatch is narrow and version-gated."""
+    reason = _old_kicad_annular_xfail_reason(errors, version)
+    if expect_xfail:
+        assert reason is not None
+        assert f"10.0.1 < {_FLOOR_STR}" in reason
+        assert "#5981" in reason
+    else:
+        assert reason is None
+
+
+_FLOOR_STR = ".".join(str(part) for part in ANNULAR_OVAL_MIN_KICAD_VERSION)
+
+
+def _j1_sh_native_violation() -> dict:
+    return {
+        "type": "annular_width",
+        "severity": "error",
+        "description": (
+            "Annular width (rule 'PTH Annular Ring - jlcpcb-tier1' min annular "
+            "width 0.1500 mm; actual 0.1462 mm)"
+        ),
+        "items": [{"description": "PTH pad SH [GND] of J1", "pos": {"x": 1, "y": 2}}],
+    }
+
+
+def _native_report(version: str | None = "10.0.1", **overrides) -> dict:
+    report: dict = {
+        "violations": [_j1_sh_native_violation() for _ in range(4)],
+        "unconnected_items": [],
+    }
+    if version is not None:
+        report["kicad_version"] = version
+    report.update(overrides)
+    return report
+
+
+# The real 10.0.1 route_demo tail (#5981): kct leg clean, native leg fails.
+_ROUTE_DEMO_OLD_KICAD_STDOUT = (
+    "Applying reviewed routing plan\n"
+    "--- DRC Validation ---\n"
+    "  kct check: passed=True errors=0\n"
+    "  Native errors and opens: 4\n"
+    "WARNING: All nets routed, but the DRC check could not be completed.\n"
+)
+
+
+def test_route_demo_xfail_gate_accepts_only_the_known_false_positive() -> None:
+    """Issue #5981: the exact 10.0.1 signature, with a clean kct leg, XFAILs."""
+    reason = _route_demo_xfail_reason(1, _ROUTE_DEMO_OLD_KICAD_STDOUT, _native_report())
+    assert reason is not None
+    assert f"10.0.1 < {_FLOOR_STR}" in reason
+    assert "#5981" in reason
+
+
+@pytest.mark.parametrize(
+    ("kct_line", "why"),
+    [
+        # kct-check found real DRC errors -> must FAIL, not XFAIL.
+        ("  kct check: passed=False errors=3", "kct-check DRC regression"),
+        # run_drc() crashed / could not run: (False, -1, -1).
+        ("  kct check: passed=False errors=-1", "kct-check crash"),
+        # Non-zero exit with no parsed errors: (False, 0, _).
+        ("  kct check: passed=False errors=0", "kct-check non-zero exit"),
+        # route_demo died before (or without) reporting the kct leg.
+        ("", "kct-check line missing"),
+    ],
+)
+def test_route_demo_xfail_gate_fails_on_kct_check_failure(kct_line, why) -> None:
+    """Issue #5981 (review): on old kicad-cli, a failing/crashed kct-check
+    leg is NOT masked by the native-only false positive -- it still FAILs."""
+    stdout = _ROUTE_DEMO_OLD_KICAD_STDOUT.replace("  kct check: passed=True errors=0", kct_line)
+    assert _route_demo_xfail_reason(1, stdout, _native_report()) is None, why
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "report", "why"),
+    [
+        (0, _ROUTE_DEMO_OLD_KICAD_STDOUT, _native_report(), "run passed"),
+        (
+            1,
+            _ROUTE_DEMO_OLD_KICAD_STDOUT.replace("All nets routed", "Routed 12/13"),
+            _native_report(),
+            "incomplete routing",
+        ),
+        (1, _ROUTE_DEMO_OLD_KICAD_STDOUT, None, "native report missing"),
+        (
+            1,
+            _ROUTE_DEMO_OLD_KICAD_STDOUT,
+            _native_report(unconnected_items=[{"type": "unconnected_items"}]),
+            "native opens",
+        ),
+        (1, _ROUTE_DEMO_OLD_KICAD_STDOUT, _native_report(_FLOOR_STR), "report from floor version"),
+        (1, _ROUTE_DEMO_OLD_KICAD_STDOUT, _native_report(None), "report without kicad_version"),
+        (
+            1,
+            _ROUTE_DEMO_OLD_KICAD_STDOUT,
+            _native_report(
+                violations=[
+                    _j1_sh_native_violation(),
+                    {"type": "clearance", "severity": "error", "description": "", "items": []},
+                ]
+            ),
+            "extra native error",
+        ),
+        (
+            1,
+            _ROUTE_DEMO_OLD_KICAD_STDOUT + "  kct check: passed=True errors=0\n",
+            _native_report(),
+            "ambiguous duplicate kct line",
+        ),
+    ],
+)
+def test_route_demo_xfail_gate_rejects_other_failures(returncode, stdout, report, why) -> None:
+    """Issue #5981: every other route_demo failure shape fails normally."""
+    assert _route_demo_xfail_reason(returncode, stdout, report) is None, why
+
+
+def test_route_demo_prints_parseable_kct_check_line() -> None:
+    """Issue #5981: route_demo.py emits the line the XFAIL gate keys off of."""
+    source = ROUTE_DEMO_SCRIPT.read_text()
+    assert 'print(f"  kct check: passed={drc_passed} errors={drc_errors}")' in source
+    assert _KCT_CHECK_RESULT_RE.search("  kct check: passed=True errors=0\n")
+
+
+def test_native_violation_summary_parses_kicad_cli_json() -> None:
+    """Issue #5981: the raw kicad-cli JSON record feeds the same gate."""
+    summary = _native_violation_summary(
+        {
+            "type": "annular_width",
+            "severity": "error",
+            "description": (
+                "Annular width (rule 'PTH Annular Ring - jlcpcb-tier1' min annular "
+                "width 0.1500 mm; actual 0.1462 mm)"
+            ),
+            "items": [{"description": "PTH pad SH [GND] of J1", "pos": {"x": 1, "y": 2}}],
+        }
+    )
+    assert summary == ("annular_width", ["PTH pad SH [GND] of J1"], 0.1462, 0.15)
+
+
 def test_committed_routed_board_is_geometrically_clean_with_refill() -> None:
     """Bug A (#3969) end-to-end: the committed board-03 routed PCB reports
     0 error-severity geometric violations from the shared helper.
@@ -1307,6 +1621,17 @@ def test_committed_routed_board_is_geometrically_clean_with_refill() -> None:
     result = run_geometric_drc(ROUTED_PCB_FILE)
 
     assert result.ran is True, f"geometric DRC did not run: {result.note}"
+    xfail_reason = _old_kicad_annular_xfail_reason(
+        [
+            (v.type_str, list(v.items), v.actual_value_mm, v.required_value_mm)
+            for v in result.error_violations
+        ],
+        # run_geometric_drc() runs find_kicad_cli() and discards its report,
+        # so the installed binary's version is the report's version here.
+        _kicad_cli_version_tuple(),
+    )
+    if xfail_reason is not None:
+        pytest.xfail(xfail_reason)
     assert result.error_count == 0, (
         "Committed board-03 routed PCB has "
         f"{result.error_count} error-severity geometric violation(s) after "
