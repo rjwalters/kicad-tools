@@ -1,0 +1,165 @@
+---
+name: manufacturing-readiness
+invocation: /kct:manufacturing-readiness
+suggestedModel: sonnet
+description: Sign off a routed board for fabrication — run kct check, the mandatory kicad-cli pcb drc --refill-zones cross-gate, and a kct export bundle at the board's fab tier — and refuse sign-off if any gate is skipped.
+---
+
+# Manufacturing readiness
+
+Sign off a routed `.kicad_pcb` for fabrication. This skill codifies the **sign-off ritual**: `kct check` at the board's fab tier, the **mandatory** independent cross-gate `kicad-cli pcb drc --refill-zones`, and a `kct export` manufacturing bundle — then confirms a `manifest.json` was produced. A clean `kct check` **alone is not sign-off**.
+
+> **The `kct` namespace.** This skill lives in `{{skills-dir}}` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `{{skill:manufacturing-readiness}}`. It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency (`kct ...` is on `PATH` via the venv). It does **not** assume the current directory is the kicad-tools repo, and it hardcodes no board path, no fab-tier list, and no CI-workflow context.
+
+## Prerequisite
+
+The native router/DRC backend must be built in the active checkout before this skill is meaningful (Epic #4054 convention #1). Run once per checkout / worktree:
+
+```bash
+uv run kct build-native --check   # expect: "C++ backend: available"
+# if "not installed":
+uv run kct build-native
+```
+
+`uv sync` does **not** build the native extension. A fresh checkout or git worktree needs this step explicitly.
+
+## Model selection
+
+`suggestedModel: sonnet`. This is a deterministic checklist-execution task — run three gates in order, read their exit codes and reports, and refuse sign-off on any failure. It does not require frontier judgment. Model resolves through the harness's normal precedence chain (explicit dispatch param → harness role config → this doc's frontmatter `suggestedModel` → session default).
+
+## Arguments
+
+**Arguments**: `$ARGUMENTS`
+
+`$ARGUMENTS` is `<board-path> [--mfr <tier>] [--output <dir>]`.
+
+| Token | Meaning |
+|-------|---------|
+| `<board-path>` | **Required.** Path to the routed `*.kicad_pcb` to sign off (or a board directory containing one). Everything the skill operates on is derived from this token — never from a hardcoded board directory. The user supplies it. |
+| `--mfr <tier>` | The fabrication tier to check and export against. **Optional**; if omitted, discover it (see "Resolving the fab tier" below) rather than assuming a default. |
+| `--output <dir>` | Where the export bundle is written. Optional; defaults to `<pcb-dir>/manufacturing/` (the `kct export` default). |
+
+## Resolving the fab tier (never hardcode a tier list)
+
+Do **not** embed a fixed list of tier names in your reasoning — the set of tiers lives in `kicad_tools.manufacturers` and grows without any edit to this skill. Resolve `<tier>` in this order:
+
+1. If the user passed `--mfr <tier>`, use it.
+2. Otherwise read the tier from the **board's own recipe / manifest** — a `generate_design.py`, `README.md`, or existing `manufacturing/manifest.json` next to the board usually names its target fab. Use that.
+3. Otherwise ask the user which tier to target.
+
+Then **validate** the resolved tier against `kct`'s own registry rather than a memorized list:
+
+```bash
+# The authoritative choices — sourced from kicad_tools.manufacturers.get_manufacturer_ids():
+kct check --help      # see the --mfr {choices} set
+kct export --help     # same registry, plus the "generic" export-only pseudo-tier
+# or, programmatically:
+uv run python -c "from kicad_tools.manufacturers import get_manufacturer_ids; print(get_manufacturer_ids())"
+```
+
+If the resolved tier is not in that set, stop and ask — do not silently fall back to a default, because the fab tier is load-bearing (in-pad-via rescue rules, min trace/space floors, etc. differ by tier).
+
+## The sign-off ritual (run all three, in order)
+
+### Gate 1 — `kct check` at the fab tier
+
+```bash
+kct check <board.kicad_pcb> --mfr <tier>
+```
+
+- This is the DRC / manufacturing-rules check (clearances, dimensions, edge, silkscreen, plus the ERC / LVS / Manifest meta sub-checks).
+- **`--net-class-map` is auto-discovered** — `kct check` probes `<pcb_dir>/net_class_map.json`, `<pcb_dir>/output/net_class_map.json`, and `<pcb_dir>/../output/net_class_map.json` (the sidecar `kct route` itself writes). Do **not** over-specify `--net-class-map` unless the sidecar lives somewhere non-conventional; if it does, pass it explicitly:
+  ```bash
+  kct check <board.kicad_pcb> --mfr <tier> --net-class-map <path/to/net_class_map.json>
+  ```
+- **Quote the per-rule warning breakdown, not the aggregate.** `kct check`'s table output prints a per-rule `BY RULE:` breakdown of warnings; the sign-off verdict must quote that breakdown (rule → warning count) rather than a single aggregate total, even when the check exits clean. A warning **baseline is only meaningful per rule**: "N warnings, non-regressive vs. the baseline" can be satisfied by an aggregate while an entire defect class (e.g. silkscreen over exposed pads — a real assembly risk) hides inside it across repeated sign-offs. When recording or re-verifying a warning baseline, record and compare counts rule-by-rule. For a machine-readable form, pass `--output <report.json>` — the JSON envelope's `violations[]` carry a `rule_id` and severity per finding, so per-rule counts are a one-line derivation.
+- A clean exit here is necessary but **not sufficient**. Proceed to Gate 2 regardless — do not treat a green Gate 1 as sign-off. Warnings do not affect the exit code, so a "clean" Gate 1 says nothing about the warning population — that is exactly why the per-rule quote above is mandatory.
+
+### Gate 2 — the mandatory independent cross-gate (NOT optional)
+
+```bash
+kicad-cli pcb drc --refill-zones <board.kicad_pcb>
+```
+
+This is **not decorative and not skippable.** It is a *second, independent* DRC engine (KiCad's own), and it is the gate that catches what `kct check` misses:
+
+- On 2026-07-04 a live copper short shipped past a clean `kct check` because `kct` read **stale zone fills**. The `--refill-zones` flag is load-bearing: it forces KiCad to refill the pours before checking, so the DRC reasons over the *actual* copper, not a stale cache.
+- A clean `kct check` **does not by itself constitute manufacturing sign-off.** Both engines must agree.
+
+Read the KiCad DRC report. **Zero new errors** is required. If `kicad-cli` is not installed on the machine, this is a **hard blocker for sign-off** — say so explicitly; do not silently sign off on Gate 1 alone.
+
+### Gate 3 — export the manufacturing bundle at the fab tier
+
+```bash
+kct export <board.kicad_pcb> --output <dir> --mfr <tier>
+```
+
+- Produces gerbers, drill, BOM, CPL, a report, and `manifest.json`.
+- **Confirm `<dir>/manifest.json` exists and was freshly written** (its mtime should be newer than the routed PCB). No manifest ⇒ no sign-off.
+- Useful variants: `--dry-run` (show what would be generated without writing) and `--no-report`.
+
+### Gate 4 — HV / isolation creepage gate (conditional: mains/HV boards only)
+
+**Skip this gate entirely for boards with no high-voltage / mains net.** For any board carrying an HV net group (mains input, primary-side switcher, etc.), a below-standard creepage/clearance pair is a safety defect that neither Gate 1 nor Gate 2 derives from an insulation standard. Run the isolation audit and require a clean verdict:
+
+```bash
+kct audit <board.kicad_pcb> --mfr <tier> \
+  --net-class-map <net_class_map.json> \
+  --hv-standard <iec60664|iec62368> \
+  --hv-working-voltage <V-rms> \
+  --hv-pollution-degree <1|2|3> \
+  [--hv-material-group <I|II|IIIa|IIIb>]
+```
+
+- HV nets are selected from the `--net-class-map` sidecar (the net whose class name is `HV`, or `--hv-net-class <name>`). Without a map the HV group will not resolve and the section is skipped.
+- The required creepage **and** clearance are derived from the IEC 60664-1 / 62368-1 tables for the `(working voltage, pollution degree, material group)` triple. To gate against a manually specified creepage instead, use `--hv-min <mm>` (phase-1).
+- A below-derived-requirement HV pair makes the audit verdict `NOT_READY`, so **`kct audit` exits 2** — the manufacturing-readiness gate FAILs with a non-zero exit. A compliant board exits 0.
+- If HV nets are present but no threshold source (`--hv-min` / `--hv-standard`) is supplied, the audit downgrades to `WARNING` ("no isolation requirement specified") rather than silently passing — so an HV path is never signed off un-evaluated.
+- The derived values are an engineering aid, **NOT a certification** — the governing standard and a qualified engineer remain authoritative.
+
+## Sign-off verdict
+
+Sign off **only if all applicable gates** hold:
+
+1. Gate 1 `kct check --mfr <tier>` exits clean at the resolved tier, **and** the verdict quotes the per-rule `BY RULE:` warning breakdown (not just an aggregate warning total) so a later re-verification can diff the warning population rule-by-rule.
+2. Gate 2 `kicad-cli pcb drc --refill-zones` reports **0 new errors** (and actually ran — a missing `kicad-cli` is a blocker, not a pass).
+3. Gate 3 `kct export --mfr <tier>` wrote a fresh `manifest.json`.
+4. **(HV/mains boards only)** Gate 4 `kct audit --hv-standard ...` exits 0 with a clean HV/isolation verdict — a `NOT_READY` (exit 2) isolation gate is a hard blocker; an un-gated HV path (`WARNING`, no requirement specified) is not sign-off either.
+
+If any applicable gate fails or could not run, report **NOT signed off**, name the failing gate, and quote the specific violation(s). Never mark a board fab-ready on a partial run.
+
+## Scripted equivalent: `kct readiness`
+
+These gates are also available non-interactively as `kct readiness <board-path>
+[--mfr <tier>] [--generate | --verify] [--assembly | --pcb-only]` (issue
+#4977). The command runs the same ritual — refill + save the canonical PCB,
+`kct check` at the resolved tier, the mandatory `kicad-cli pcb drc
+--refill-zones` cross-gate, the per-rule warning review, export/packaging —
+and additionally emits the hash-bound `output/readiness.json` evidence
+documented in `docs/board-json-schema.md`. It exits non-zero for anything
+other than a `ready` verdict and has no bypass flag.
+
+`--verify` and `--generate` are mutually exclusive; **`--verify` is the
+default**, so a bare `kct readiness <board-path>` checks an already-produced
+package without writing gerbers, BOM/CPL or the manifest. Pass `--generate`
+explicitly to (re)produce the package — the first sign-off for a board, or any
+time the checked sources changed since the last package was built. `--generate`
+refuses to replace a package a manufacturing recipe has already finalized;
+re-verify or regenerate through that recipe instead (issue #5816).
+
+Use the command for CI and batch sign-off. Use this skill when a human-in-the-loop
+judgment is needed (an ambiguous BOM candidate, an accepted-risk warning decision)
+— the command refuses those rather than adjudicating them.
+
+## What this skill does NOT do
+
+- It does not route copper, place parts, or edit the `.kicad_pcb`.
+- It does not depend on any CI workflow, GitHub Actions context, or repo-internal `scripts/ci/*` gate. It runs identically as an interactive agent invocation inside any consumer repo's working tree. (Consumer repos that installed kicad-tools get portable gates under their own `.kct/ci/` — reference those if you need a scripted gate — but this skill needs only the `kct` / `kicad-cli` commands above.)
+- It does not enumerate fab tiers; the tier set is owned by `kicad_tools.manufacturers`.
+
+## References
+
+- `kct check --help` / `kct export --help` — authoritative `--mfr` tier choices (sourced from `kicad_tools.manufacturers.get_manufacturer_ids()`).
+- The `--refill-zones` cross-gate convention (Epic #4054 convention #2) was established after a 2026-07-04 defect where `kct check` alone missed a live short and read stale zone fills.
+- The per-rule warning-quote requirement was established after #4614: an aggregate "warnings match baseline" result concealed dozens of `silk_over_copper` warnings (silkscreen over exposed pads — an assembly risk) across two sign-offs; the fab order was aborted at the vendor site. A baseline compared per rule would have surfaced it immediately.
+- `{{skill:ee-review}}` — sibling `kct` skill for analog/placement-blocked boards (advisory decisions, not copper).

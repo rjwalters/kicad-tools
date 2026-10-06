@@ -433,6 +433,11 @@ def _dispatch_command(args) -> int:
 
         return run_ecosystem_command(args)
 
+    elif args.command == "skills":
+        from .commands.skills import run_skills_command
+
+        return run_skills_command(args)
+
     elif args.command == "render":
         return _run_render_command(args)
 

@@ -187,6 +187,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_net_status_parser(subparsers)
     _add_fleet_parser(subparsers)
     _add_ecosystem_parser(subparsers)
+    _add_skills_parser(subparsers)
     _add_render_parser(subparsers)
     _add_board_metrics_parser(subparsers)
     _add_readiness_parser(subparsers)
@@ -10020,3 +10021,87 @@ def _add_ecosystem_parser(subparsers) -> None:
         help="Print our invariants, non-goals and the neighbour map",
     )
     add_format_flag(eco_where, dest="ecosystem_format")
+
+
+def _add_skills_parser(subparsers) -> None:
+    """Add the ``skills`` parent-subaction parser (Issue #5950)."""
+    from kicad_tools.agent_skills import DEFAULT_HARNESS, LAYOUTS
+
+    from .format_options import add_format_flag
+
+    skills_parser = subparsers.add_parser(
+        "skills",
+        help="Install the packaged kct agent skills into a project or user dir",
+        description=(
+            "Manage the kct agent skills shipped inside the kicad-tools wheel. "
+            "`kct skills install` renders them for one agent harness and writes "
+            "them where that harness looks (Claude Code: .claude/commands/kct/)."
+        ),
+    )
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", help="Skills commands")
+
+    install = skills_subparsers.add_parser(
+        "install",
+        help="Write (or --list / --check) the packaged kct skills",
+        description=(
+            "Render the packaged kct skills for --harness and write them under "
+            "the target directory. Re-running is idempotent. --list and --check "
+            "only read."
+        ),
+    )
+    install.add_argument(
+        "--harness",
+        dest="skills_harness",
+        choices=list(LAYOUTS),
+        default=DEFAULT_HARNESS,
+        help=(
+            "Agent harness to render for (default: %(default)s). claude-code "
+            "writes kct/<name>.md; codex writes kct-<name>/SKILL.md"
+        ),
+    )
+    where = install.add_mutually_exclusive_group()
+    where.add_argument(
+        "--target",
+        dest="skills_target",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Skills root to install into (default: the harness's project dir, "
+            "e.g. .claude/commands; files go under DIR/kct/)"
+        ),
+    )
+    where.add_argument(
+        "--user",
+        dest="skills_user",
+        action="store_true",
+        help="Install into the user-level skills dir (e.g. ~/.claude/commands)",
+    )
+    mode = install.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--list",
+        dest="skills_list",
+        action="store_true",
+        help="List the packaged skills and their install state; write nothing",
+    )
+    mode.add_argument(
+        "--check",
+        dest="skills_check",
+        action="store_true",
+        help=(
+            "Report drift between installed and packaged skills; exit 1 on "
+            "missing, changed or stale files; write nothing"
+        ),
+    )
+    install.add_argument(
+        "--dry-run",
+        dest="skills_dry_run",
+        action="store_true",
+        help="Show what would be written without writing",
+    )
+    install.add_argument(
+        "--prune",
+        dest="skills_prune",
+        action="store_true",
+        help="Also delete stale kct skill files the package no longer ships",
+    )
+    add_format_flag(install, dest="skills_format")

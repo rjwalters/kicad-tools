@@ -137,6 +137,8 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "sch repair-instances": ["{sch}", "--dry-run"],
     "sch fix-annotation": ["{sch}", "--dry-run"],
     # -- pcb family ---------------------------------------------------------
+    # Installs into a scratch dir: exercises the real write path, not just --list.
+    "skills install": ["--target", "{dir}/_skills"],
     "pcb summary": ["{pcb}"],
     "pcb footprints": ["{pcb}"],
     "pcb nets": ["{pcb}"],

@@ -90,6 +90,7 @@ kct [--help] [--version] <command> [options]
 | | `build-native` | Build the C++ router backend (10-100x faster routing) |
 | | `doctor` | Diagnose kicad-tools installation health (version-record drift + environment preflight) |
 | | `ecosystem` | Where kicad-tools sits among related projects (verdicts, license reuse rights, our evaluation notes) |
+| | `skills` | Install the packaged `kct` agent skills into a project or user skills directory |
 
 ---
 
@@ -1792,6 +1793,40 @@ Source of truth: the `Exit Codes:` section of the module docstring in
 | 0 | All surveyed boards are ship-ready |
 | 1 | Argparse / IO error |
 | 2 | One or more boards are not ship-ready (also returned when no boards are found, since "no ship-ready boards" is treated as not-ship-ready). Matches `kct net-status` semantics. |
+
+---
+
+### `skills`
+
+Install the `kct` agent skills that ship inside the kicad-tools wheel
+(`kicad_tools/agent_skills/kct/*.md`). `kct skills install` renders their
+harness-neutral placeholders for one agent harness and writes them where that
+harness looks. Files outside the `kct` namespace are never touched.
+
+Implemented in
+[`src/kicad_tools/cli/commands/skills.py`](../../src/kicad_tools/cli/commands/skills.py)
+and [`src/kicad_tools/agent_skills/__init__.py`](../../src/kicad_tools/agent_skills/__init__.py).
+
+```bash
+kct skills install                         # .claude/commands/kct/*.md
+kct skills install --user                  # ~/.claude/commands/kct/*.md
+kct skills install --target /tmp/x         # /tmp/x/kct/*.md
+kct skills install --harness codex         # .agents/skills/kct-<name>/SKILL.md
+kct skills install --list --format json    # packaged skills + install state
+kct skills install --check                 # exit 1 on missing/changed/stale files
+kct skills install --prune --dry-run       # preview removal of retired skills
+```
+
+| Option | Description |
+|--------|-------------|
+| `--harness` | `claude-code` (default) or `codex` |
+| `--target DIR` | Skills root to write under (default: the harness's project dir) |
+| `--user` | Use the user-level dir (`~/.claude/commands`, `~/.agents/skills`) |
+| `--list` | List packaged skills and their state at the target; writes nothing |
+| `--check` | Compare the installed copy with the packaged one; exit 1 on drift |
+| `--dry-run` | Show what would be written |
+| `--prune` | Delete `kct` skill files the package no longer ships |
+| `--format` | `text` (default) or `json` |
 
 ---
 

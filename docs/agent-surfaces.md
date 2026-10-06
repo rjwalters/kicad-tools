@@ -28,10 +28,13 @@ without per-skill model selection ignore it, and the Codex renderer drops it.
 
 ## Placeholder vocabulary
 
-Skill sources live in `.claude/commands/kct/*.md`, but their bodies are shared by
-every harness. They never hard-code an invocation syntax or install path. They use
-placeholders, which `kicad_tools.agent_surfaces.render` and
-`scripts/install-kct.sh` fill in per harness:
+Skill sources live in `src/kicad_tools/agent_skills/kct/*.md` (package data, so
+they ship in the wheel; issue #5950). `.claude/commands/kct/` is this repo's
+byte-identical copy: edit the package data, then run
+`uv run python scripts/sync_agent_skills.py --write` (a test fails on drift).
+The bodies are shared by every harness. They never hard-code an invocation syntax
+or install path. They use placeholders, which `kicad_tools.agent_surfaces.render`
+(called by `kct skills install`) and `scripts/install-kct.sh` fill in per harness:
 
 | Placeholder | Claude Code | Codex CLI |
 |---|---|---|
