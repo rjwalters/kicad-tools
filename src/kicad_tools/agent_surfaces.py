@@ -5,24 +5,30 @@ into. Their bodies never hard-code one harness's invocation syntax or install
 paths; instead they use a small placeholder vocabulary that a per-harness
 renderer fills in:
 
-==========================  ==================================  ========================================
-Placeholder                 Claude Code                         Codex CLI
-==========================  ==================================  ========================================
-``{{skill:<name>}}``        ``/kct:<name>``                     ``$kct-<name>``
-``{{skill-file:<name>}}``   ``.claude/commands/kct/<name>.md``  ``.agents/skills/kct-<name>/SKILL.md``
-``{{skills-dir}}``          ``.claude/commands/kct/``           ``.agents/skills/``
-``{{skills-readme}}``       ``.claude/commands/kct/README.md``  ``.agents/skills/kct-help/README.md``
-``{{agent-guide}}``         ``CLAUDE.md``                       ``AGENTS.md``
-==========================  ==================================  ========================================
+==========================  ==================================  ========================================  ======================================
+Placeholder                 Claude Code                         Codex CLI                                 opencode
+==========================  ==================================  ========================================  ======================================
+``{{skill:<name>}}``        ``/kct:<name>``                     ``$kct-<name>``                           ``/kct/<name>``
+``{{skill-file:<name>}}``   ``.claude/commands/kct/<name>.md``  ``.agents/skills/kct-<name>/SKILL.md``    ``.opencode/commands/kct/<name>.md``
+``{{skills-dir}}``          ``.claude/commands/kct/``           ``.agents/skills/``                       ``.opencode/commands/kct/``
+``{{skills-readme}}``       ``.claude/commands/kct/README.md``  ``.agents/skills/kct-help/README.md``     ``.opencode/commands/kct/README.md``
+``{{agent-guide}}``         ``CLAUDE.md``                       ``AGENTS.md``                             ``AGENTS.md``
+==========================  ==================================  ========================================  ======================================
+
+opencode (v2) installs the skills as *commands*: a nested
+``.opencode/commands/kct/<name>.md`` is the command ``/kct/<name>`` (nested
+paths become command names with ``/`` separators), which is the closest
+equivalent of a Claude Code ``/kct:<name>`` slash command. See
+``docs/agent-surfaces.md`` for why commands rather than opencode skills (#5951).
 
 ``<name>`` may itself be a placeholder token such as ``<command>`` or the glob
 ``*``. ``$ARGUMENTS`` is not a placeholder: it is the argument token Claude Code,
 Codex prompts and opencode commands all understand, so it is left as is.
 
-``scripts/install-kct.sh`` carries the same table as ``sed`` rules; the
-installer tests check that its output equals :func:`render` so the two cannot
-drift. The packaged installer (#5950) and per-harness rendering (#5951) are
-expected to call :func:`render` directly.
+``scripts/install-kct.sh`` carries the Claude Code and Codex columns as ``sed``
+rules; the installer tests check that its output equals :func:`render` so the
+two cannot drift. The packaged installer, ``kct skills install`` (#5950, #5951),
+calls :func:`render` directly and is the only installer with an opencode target.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ import re
 __all__ = ["HARNESSES", "PLACEHOLDER_RE", "UnknownPlaceholderError", "render"]
 
 #: Harnesses :func:`render` knows how to target.
-HARNESSES: tuple[str, ...] = ("claude-code", "codex")
+HARNESSES: tuple[str, ...] = ("claude-code", "codex", "opencode")
 
 #: Matches any ``{{...}}`` token, known or not, so typos are caught rather than
 #: silently shipped.
@@ -42,10 +48,12 @@ _PARAM_TEMPLATES: dict[str, dict[str, str]] = {
     "skill": {
         "claude-code": "/kct:{arg}",
         "codex": "$kct-{arg}",
+        "opencode": "/kct/{arg}",
     },
     "skill-file": {
         "claude-code": ".claude/commands/kct/{arg}.md",
         "codex": ".agents/skills/kct-{arg}/SKILL.md",
+        "opencode": ".opencode/commands/kct/{arg}.md",
     },
 }
 
@@ -53,14 +61,17 @@ _BARE_VALUES: dict[str, dict[str, str]] = {
     "skills-dir": {
         "claude-code": ".claude/commands/kct/",
         "codex": ".agents/skills/",
+        "opencode": ".opencode/commands/kct/",
     },
     "skills-readme": {
         "claude-code": ".claude/commands/kct/README.md",
         "codex": ".agents/skills/kct-help/README.md",
+        "opencode": ".opencode/commands/kct/README.md",
     },
     "agent-guide": {
         "claude-code": "CLAUDE.md",
         "codex": "AGENTS.md",
+        "opencode": "AGENTS.md",
     },
 }
 

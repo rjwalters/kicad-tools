@@ -7,7 +7,8 @@ The skills ship as package data in ``src/kicad_tools/agent_skills/kct/`` so a
   data (one source of truth);
 * the wheel actually contains the skills;
 * ``kct skills install`` round-trips: install, ``--check`` clean, idempotent
-  re-run, drift and stale-file detection, ``--prune``, and the codex layout.
+  re-run, drift and stale-file detection, ``--prune``, and the codex and
+  opencode layouts (#5951).
 """
 
 from __future__ import annotations
@@ -213,6 +214,95 @@ def test_codex_layout(tmp_path: Path) -> None:
     assert check_installed(tmp_path, "codex").in_sync
 
 
+# --- opencode layout (#5951) ---------------------------------------------------
+
+
+def test_opencode_layout(tmp_path: Path) -> None:
+    """opencode gets ``kct/<name>.md`` commands (``/kct/<name>``) plus the README."""
+    report = install_skills(tmp_path, "opencode")
+    expected = {f"kct/{name}" for name in _repo_skill_names()}
+    files = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()}
+    assert files == expected == set(report.written)
+
+    readme = (tmp_path / "kct" / "README.md").read_text(encoding="utf-8")
+    assert readme == render((REPO_COPY_DIR / "README.md").read_text(encoding="utf-8"), "opencode")
+
+    for source in packaged_skill_sources():
+        if source.is_readme:
+            continue
+        text = (tmp_path / "kct" / source.filename).read_text(encoding="utf-8")
+        fields, body = split_frontmatter(text)
+        # Only `description` survives: opencode derives the command name from
+        # the path, and `suggestedModel` is not a provider/model id.
+        assert set(fields) == {"description"}, fields
+        assert text.startswith("---\ndescription: >-\n  ")
+        source_fields, source_body = split_frontmatter(source.text)
+        assert render(source_fields["description"], "opencode") in text
+        assert render(source_body, "opencode").strip("\n") in body
+        assert not PLACEHOLDER_RE.search(text), source.filename
+        assert "/kct:" not in text and ".claude/" not in text, source.filename
+        assert f"/kct/{source.name}" in text, source.filename
+        assert "$ARGUMENTS" in text, source.filename
+
+    assert check_installed(tmp_path, "opencode").in_sync
+    again = install_skills(tmp_path, "opencode")
+    assert again.written == [] and set(again.unchanged) == expected
+
+
+def test_opencode_frontmatter_is_valid_yaml(tmp_path: Path) -> None:
+    yaml = pytest.importorskip("yaml")
+    for rel, text in planned_files("opencode").items():
+        if rel.endswith("README.md"):
+            continue
+        front = text.split("---\n", 2)[1]
+        data = yaml.safe_load(front)
+        assert set(data) == {"description"} and data["description"].strip(), rel
+
+
+def test_opencode_stale_and_prune(tmp_path: Path) -> None:
+    install_skills(tmp_path, "opencode")
+    (tmp_path / "kct" / "retired-skill.md").write_text("old\n", encoding="utf-8")
+    other = tmp_path / "review.md"
+    other.write_text("user command\n", encoding="utf-8")
+    assert check_installed(tmp_path, "opencode").stale == ["kct/retired-skill.md"]
+    assert install_skills(tmp_path, "opencode", prune=True).removed == ["kct/retired-skill.md"]
+    assert other.read_text(encoding="utf-8") == "user command\n"
+    assert check_installed(tmp_path, "opencode").in_sync
+
+
+@pytest.mark.parametrize("snippet", ["Run !`git status` first.", "awk '{print $1}'"])
+def test_opencode_refuses_template_hazards(snippet: str) -> None:
+    from kicad_tools.agent_skills import SkillSource
+
+    source = SkillSource("probe.md", f"---\nname: probe\ndescription: d\n---\n{snippet}\n")
+    with pytest.raises(ValueError, match="opencode"):
+        LAYOUTS["opencode"].files([source])
+    # The other harnesses do not interpret either token.
+    assert LAYOUTS["claude-code"].files([source])
+
+
+def test_opencode_user_target_follows_opencode_config_dir(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    assert resolve_target("opencode", user=True, home=home, env={}) == (
+        home / ".config" / "opencode" / "commands"
+    )
+    xdg = tmp_path / "xdg"
+    assert resolve_target("opencode", user=True, home=home, env={"XDG_CONFIG_HOME": str(xdg)}) == (
+        xdg / "opencode" / "commands"
+    )
+    custom = tmp_path / "oc"
+    env = {"OPENCODE_CONFIG_DIR": str(custom), "XDG_CONFIG_HOME": str(xdg)}
+    assert resolve_target("opencode", user=True, home=home, env=env) == custom / "commands"
+    # A relative value is ignored, as for XDG; other harnesses ignore both vars.
+    assert resolve_target("opencode", user=True, home=home, env={"XDG_CONFIG_HOME": "rel"}) == (
+        home / ".config" / "opencode" / "commands"
+    )
+    assert resolve_target("claude-code", user=True, home=home, env=env) == (
+        home / ".claude" / "commands"
+    )
+    assert resolve_target("opencode", cwd=tmp_path) == tmp_path / ".opencode" / "commands"
+
+
 # --- target resolution --------------------------------------------------------
 
 
@@ -270,6 +360,29 @@ def test_cli_default_target_is_project_dir(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.chdir(tmp_path)
     assert main(["skills", "install", "--harness", "codex"]) == 0
     assert (tmp_path / ".agents" / "skills" / "kct-help" / "SKILL.md").is_file()
+
+
+def test_cli_opencode_project_user_and_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["skills", "install", "--harness", "opencode"]) == 0
+    assert (tmp_path / ".opencode" / "commands" / "kct" / "tapeout.md").is_file()
+
+    capsys.readouterr()
+    assert main(["skills", "install", "--harness", "opencode", "--list", "--format", "json"]) == 0
+    listing = json.loads(capsys.readouterr().out)
+    assert listing["harness"] == "opencode"
+    invocations = {s["invocation"] for s in listing["skills"]}
+    assert "/kct/tapeout" in invocations and "/kct/help" in invocations
+    assert {s["status"] for s in listing["skills"]} == {"installed"}
+
+    xdg = tmp_path / "xdg"
+    monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    assert main(["skills", "install", "--harness", "opencode", "--user"]) == 0
+    assert (xdg / "opencode" / "commands" / "kct" / "help.md").is_file()
+    assert main(["skills", "install", "--harness", "opencode", "--user", "--check"]) == 0
 
 
 def test_cli_rejects_target_with_user(tmp_path: Path) -> None:

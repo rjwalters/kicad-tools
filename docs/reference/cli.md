@@ -1812,6 +1812,8 @@ kct skills install                         # .claude/commands/kct/*.md
 kct skills install --user                  # ~/.claude/commands/kct/*.md
 kct skills install --target /tmp/x         # /tmp/x/kct/*.md
 kct skills install --harness codex         # .agents/skills/kct-<name>/SKILL.md
+kct skills install --harness opencode      # .opencode/commands/kct/*.md (/kct/<name>)
+kct skills install --harness opencode --user  # ~/.config/opencode/commands/kct/*.md
 kct skills install --list --format json    # packaged skills + install state
 kct skills install --check                 # exit 1 on missing/changed/stale files
 kct skills install --prune --dry-run       # preview removal of retired skills
@@ -1819,9 +1821,9 @@ kct skills install --prune --dry-run       # preview removal of retired skills
 
 | Option | Description |
 |--------|-------------|
-| `--harness` | `claude-code` (default) or `codex` |
+| `--harness` | `claude-code` (default), `codex` or `opencode` |
 | `--target DIR` | Skills root to write under (default: the harness's project dir) |
-| `--user` | Use the user-level dir (`~/.claude/commands`, `~/.agents/skills`) |
+| `--user` | Use the user-level dir (`~/.claude/commands`, `~/.agents/skills`, or opencode's `commands/` under `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`) |
 | `--list` | List packaged skills and their state at the target; writes nothing |
 | `--check` | Compare the installed copy with the packaged one; exit 1 on drift |
 | `--dry-run` | Show what would be written |
