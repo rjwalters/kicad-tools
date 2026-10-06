@@ -52,6 +52,7 @@ from .utils import format_error, print_error
 
 __all__ = [
     "main",
+    "normalize_argv",
     "symbols_main",
     "nets_main",
     "erc_main",
@@ -62,6 +63,21 @@ __all__ = [
     "format_error",
     "print_error",
 ]
+
+
+def normalize_argv(argv: list[str]) -> list[str]:
+    """Return a copy of *argv* with the CLI's backwards-compatible shorthands expanded.
+
+    :func:`main` runs this before :func:`create_parser` parses the arguments, so
+    anything that checks a ``kct`` command line against the parser (such as the
+    agent-guide test, issue #5966) must run it too.
+    """
+    argv = list(argv)  # Make a copy to avoid mutating the original
+    # Handle erc backwards compatibility: kct erc <file> -> kct erc parse <file>
+    # Insert "parse" subcommand if the first arg after "erc" isn't a known subcommand
+    if len(argv) >= 2 and argv[0] == "erc" and argv[1] not in ("parse", "explain", "-h", "--help"):
+        argv.insert(1, "parse")
+    return argv
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,13 +92,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return generate_main(argv[2:]) or 0
 
-    # Handle erc backwards compatibility: kct erc <file> -> kct erc parse <file>
-    # Insert "parse" subcommand if the first arg after "erc" isn't a known subcommand
-    argv = list(argv)  # Make a copy to avoid mutating the original
-    if len(argv) >= 2 and argv[0] == "erc" and argv[1] not in ("parse", "explain", "-h", "--help"):
-        argv.insert(1, "parse")
-
-    args = parser.parse_args(argv)
+    args = parser.parse_args(normalize_argv(argv))
 
     if not args.command:
         parser.print_help()
