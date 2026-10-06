@@ -11,10 +11,21 @@ server whose machine contract *is* the MCP protocol.  See
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from ..format_options import FORMAT_JSON, emit_json
+from .mcp_clients import (
+    SERVER_NAME,
+    STATUS_REPLACED,
+    STATUS_UNCHANGED,
+    ClientConfigError,
+    parse_opencode_version,
+    render_codex_config,
+    render_opencode_config,
+)
 
 __all__ = ["run_mcp_command"]
 
@@ -157,6 +168,12 @@ def _run_setup(args) -> int:
     dry_run = getattr(args, "dry_run", False)
     as_json = getattr(args, "format", "text") == FORMAT_JSON
 
+    if client in ("codex", "opencode"):
+        return _run_setup_harness(args, client, dry_run, as_json)
+    if getattr(args, "project", None) is not None:
+        print("Error: --project only applies to --client opencode", file=sys.stderr)
+        return 2
+
     command, cmd_args = _find_kct_command()
 
     server_config = {
@@ -251,4 +268,200 @@ def _run_setup(args) -> int:
         print()
         print("Restart Claude Desktop to pick up the new MCP server.")
 
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Codex CLI and opencode (issue #5953)
+# ---------------------------------------------------------------------------
+
+
+def _get_codex_config_path() -> Path:
+    """``$CODEX_HOME/config.toml``, defaulting to ``~/.codex/config.toml``."""
+    codex_home = os.environ.get("CODEX_HOME")
+    base = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+    return base / "config.toml"
+
+
+def _pick_opencode_file(directory: Path) -> Path:
+    """``opencode.json`` in ``directory``, or an existing ``opencode.jsonc``."""
+    json_path = directory / "opencode.json"
+    jsonc_path = directory / "opencode.jsonc"
+    if not json_path.exists() and jsonc_path.exists():
+        return jsonc_path
+    return json_path
+
+
+def _get_opencode_config_path(project: str | None = None) -> Path:
+    """User-level ``$XDG_CONFIG_HOME/opencode/opencode.json`` or a project file.
+
+    opencode resolves its global config through XDG on every platform
+    (``~/.config/opencode`` when ``XDG_CONFIG_HOME`` is unset, macOS included).
+    """
+    if project is not None:
+        return _pick_opencode_file(Path(project).expanduser().resolve())
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return _pick_opencode_file(base / "opencode")
+
+
+def _detect_opencode_schema(config_text: str | None) -> tuple[str, str]:
+    """Pick the opencode config schema; returns ``(schema, reason)``.
+
+    The installed ``opencode --version`` wins (major 1 -> ``v1``).  Without an
+    ``opencode`` binary, an existing config that only holds legacy top-level
+    ``mcp.<name>`` entries keeps ``v1``; everything else gets ``v2``, the
+    layout current opencode (and ``opencode mcp add``) writes.
+    """
+    exe = shutil.which("opencode")
+    if exe:
+        try:
+            proc = subprocess.run(
+                [exe, "--version"], capture_output=True, text=True, timeout=15, check=False
+            )
+            major = parse_opencode_version(proc.stdout + proc.stderr)
+        except (OSError, subprocess.SubprocessError):
+            major = None
+        if major is not None:
+            return ("v1" if major < 2 else "v2"), f"opencode {major}.x on PATH"
+    if config_text:
+        try:
+            mcp = json.loads(config_text).get("mcp")
+        except (json.JSONDecodeError, AttributeError):
+            mcp = None
+        if isinstance(mcp, dict) and mcp and "servers" not in mcp:
+            return "v1", "existing config uses legacy mcp.<name> entries"
+    return "v2", "default"
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        if path.exists():
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _run_setup_harness(args, client: str, dry_run: bool, as_json: bool) -> int:
+    """Register ``kct mcp serve`` with Codex CLI or opencode."""
+    project = getattr(args, "project", None)
+    schema_opt = getattr(args, "opencode_schema", None) or "auto"
+
+    def fail(message: str, config_path: Path | None) -> int:
+        if as_json:
+            emit_json(
+                {
+                    "command": "setup",
+                    "client": client,
+                    "config_path": str(config_path) if config_path else None,
+                    "dry_run": dry_run,
+                    "written": False,
+                    "replaced": False,
+                    "success": False,
+                    "error": message,
+                }
+            )
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+        return 1
+
+    if client == "codex" and project is not None:
+        return fail("--project only applies to --client opencode", None)
+
+    command, cmd_args = _find_kct_command()
+    command = os.path.abspath(command)
+
+    config_path = (
+        _get_codex_config_path() if client == "codex" else _get_opencode_config_path(project)
+    )
+    try:
+        existing = config_path.read_text() if config_path.exists() else None
+    except OSError as exc:
+        return fail(f"cannot read {config_path}: {exc}", config_path)
+
+    schema = None
+    schema_reason = None
+    try:
+        if client == "codex":
+            new_text, status, entry = render_codex_config(existing, command, cmd_args)
+        else:
+            if schema_opt == "auto":
+                schema, schema_reason = _detect_opencode_schema(existing)
+            else:
+                schema, schema_reason = schema_opt, "--opencode-schema"
+            new_text, status, entry = render_opencode_config(existing, command, cmd_args, schema)
+    except ClientConfigError as exc:
+        return fail(f"{config_path}: {exc}", config_path)
+
+    unchanged = status == STATUS_UNCHANGED
+    replaced = status == STATUS_REPLACED
+    written = not dry_run and not unchanged
+
+    if written:
+        try:
+            _write_atomic(config_path, new_text)
+        except OSError as exc:
+            return fail(f"cannot write {config_path}: {exc}", config_path)
+
+    if as_json:
+        payload = {
+            "command": "setup",
+            "client": client,
+            "config_path": str(config_path),
+            "dry_run": dry_run,
+            "written": written,
+            "replaced": replaced,
+            "unchanged": unchanged,
+            "server_name": SERVER_NAME,
+            "server": entry,
+            "success": True,
+        }
+        if schema is not None:
+            payload["opencode_schema"] = schema
+        emit_json(payload)
+        return 0
+
+    print(f"MCP client: {client}")
+    print(f"Config file: {config_path}")
+    if schema is not None:
+        print(f"opencode schema: {schema} ({schema_reason})")
+    print(f"Command: {command} {' '.join(cmd_args)}")
+    print()
+
+    if client == "codex":
+        snippet = f"[mcp_servers.{SERVER_NAME}]\n" + "".join(
+            f"{k} = {json.dumps(v)}\n" for k, v in entry.items()
+        )
+    else:
+        key = ("mcp", "servers", SERVER_NAME) if schema == "v2" else ("mcp", SERVER_NAME)
+        nested: dict = entry
+        for part in reversed(key):
+            nested = {part: nested}
+        snippet = json.dumps(nested, indent=2) + "\n"
+
+    if unchanged:
+        print(f"Already configured: the {SERVER_NAME!r} server entry is up to date.")
+        return 0
+    action = "replace the existing" if replaced else "add the"
+    if dry_run:
+        print(f"Dry run - no changes made. Would {action} {SERVER_NAME!r} server entry:")
+        print()
+        print(snippet, end="")
+        return 0
+
+    verb = "Replaced the existing" if replaced else "Added the"
+    print(f"{verb} {SERVER_NAME!r} server entry:")
+    print()
+    print(snippet, end="")
+    print()
+    print(f"Wrote {config_path}")
+    harness = "Codex CLI" if client == "codex" else "opencode"
+    print(f"Restart {harness} to pick up the new MCP server.")
     return 0

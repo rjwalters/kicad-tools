@@ -64,8 +64,16 @@ kct mcp setup
 # For Claude Desktop
 kct mcp setup --client claude-desktop
 
+# For Codex CLI ([mcp_servers.kct] in $CODEX_HOME/config.toml)
+kct mcp setup --client codex
+
+# For opencode (user-level ~/.config/opencode/opencode.json)
+kct mcp setup --client opencode
+# ...or the project-level opencode.json in the current directory
+kct mcp setup --client opencode --project
+
 # Preview without making changes
-kct mcp setup --dry-run
+kct mcp setup --client codex --dry-run
 ```
 
 If you're developing from source with `uv`:
@@ -77,6 +85,11 @@ uv run kct mcp setup
 This auto-detects the correct `kct` binary path and writes the
 appropriate MCP config file. It handles development installs (uv),
 global installs (pip/pipx), and virtual environments.
+
+Every client is merged, never overwritten: other MCP servers and settings in
+the file are kept, and re-running when the entry is already current is a
+no-op. An existing file that cannot be parsed is left alone and reported as
+an error (exit 1). Add `--format json` for a machine-readable result.
 
 ## Manual Client Configuration
 
@@ -189,6 +202,59 @@ global installs (pip/pipx), and virtual environments.
    ```
 
 3. **Restart Claude Desktop**
+
+### Codex CLI
+
+`kct mcp setup --client codex` writes the same table as
+`codex mcp add kct -- <kct> mcp serve`, into `$CODEX_HOME/config.toml`
+(default `~/.codex/config.toml`). Pointing `CODEX_HOME` at a per-run directory
+(as benchmark harnesses do) registers the server for that run only.
+
+```toml
+[mcp_servers.kct]
+command = "/absolute/path/to/kct"
+args = ["mcp", "serve"]
+```
+
+The file is edited in place: comments, other tables and any extra keys you put
+on `[mcp_servers.kct]` (`startup_timeout_sec`, an `[mcp_servers.kct.env]`
+table) are kept; only `command` and `args` are rewritten. Check with
+`codex mcp list`.
+
+### opencode
+
+`kct mcp setup --client opencode` adds a `local` server to
+`$XDG_CONFIG_HOME/opencode/opencode.json` (default
+`~/.config/opencode/opencode.json`, on macOS too), or with `--project [DIR]`
+to `DIR/opencode.json` (default: the current directory). If only an
+`opencode.jsonc` exists it is targeted instead, but files with comments are
+refused rather than rewritten.
+
+opencode v2 nests servers under `mcp.servers`; this is what `opencode mcp add`
+writes (verified against opencode 2.0.22):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "kct": {"type": "local", "command": ["/absolute/path/to/kct", "mcp", "serve"]}
+    }
+  }
+}
+```
+
+opencode v1 keys servers directly under `mcp` and needs `"enabled": true`:
+
+```json
+{"mcp": {"kct": {"type": "local", "command": ["/absolute/path/to/kct", "mcp", "serve"], "enabled": true}}}
+```
+
+`--opencode-schema auto` (the default) picks the layout from
+`opencode --version`; without an `opencode` binary it keeps a file that already
+uses the v1 layout on v1, and otherwise writes v2. Force it with
+`--opencode-schema v1` or `v2`. Writing v2 over a legacy `mcp.kct` entry
+moves it to `mcp.servers.kct` (keeping `environment` and other keys) so the
+two never coexist.
 
 ### Other MCP Clients
 

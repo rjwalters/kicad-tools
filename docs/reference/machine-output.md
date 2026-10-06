@@ -253,7 +253,7 @@ rather than a board file: `config`, `ipc status/connect/push-routes`,
 | `ipc status` | `{"command": "status", "socket", "connected", "kicad_version", "instances", "open_documents", "success"}` |
 | `ipc connect` | `{"command": "connect", "socket", "connected", "kicad_version", "success"}` |
 | `ipc push-routes` | `{"command": "push-routes", "pcb", "net_filter", "tracks", "vias", "dry_run", "pushed", "success"}` (`socket` once resolved) |
-| `mcp setup` | `{"command": "setup", "client", "config_path", "dry_run", "written", "replaced", "server", "success"}` |
+| `mcp setup` | `{"command": "setup", "client", "config_path", "dry_run", "written", "replaced", "server", "success"}`; `--client codex\|opencode` (#5953) also carry `unchanged` (re-run was a no-op, so `written` is false), `server_name` (`"kct"`) and, for opencode, `opencode_schema` (`"v2"`\|`"v1"`); an unparseable existing config yields `success: false` plus `error`, exit 1 |
 
 Two conventions this batch establishes for the remaining long tail:
 

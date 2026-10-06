@@ -8012,16 +8012,38 @@ def _add_mcp_parser(subparsers) -> None:
         "setup",
         help="Configure MCP client integration",
         description=(
-            "Auto-detect the kct binary and write the MCP server config "
-            "for Claude Code or Claude Desktop."
+            "Auto-detect the kct binary and register `kct mcp serve` with an MCP "
+            "client: Claude Code (~/.claude/mcp.json), Claude Desktop, Codex CLI "
+            "([mcp_servers.kct] in $CODEX_HOME/config.toml, default "
+            "~/.codex/config.toml) or opencode (the kct entry in "
+            "~/.config/opencode/opencode.json, or ./opencode.json with --project). "
+            "Existing config is preserved and re-running is a no-op."
         ),
     )
     setup_parser.add_argument(
         "--client",
         "-c",
-        choices=["claude-code", "claude-desktop"],
+        choices=["claude-code", "claude-desktop", "codex", "opencode"],
         default="claude-code",
-        help="MCP client to configure (default: claude-code)",
+        help="MCP client to configure: claude-code, claude-desktop, codex, opencode "
+        "(default: claude-code)",
+    )
+    setup_parser.add_argument(
+        "--project",
+        nargs="?",
+        const=".",
+        default=None,
+        metavar="DIR",
+        help="opencode only: write the project-level opencode.json in DIR "
+        "(default: current directory) instead of the user-level config",
+    )
+    setup_parser.add_argument(
+        "--opencode-schema",
+        choices=["auto", "v2", "v1"],
+        default="auto",
+        help="opencode only: config layout to write. v2 = mcp.servers.kct (opencode "
+        ">= 2), v1 = mcp.kct with enabled=true. auto (default) asks `opencode "
+        "--version`, then falls back to the existing file's layout, then v2",
     )
     setup_parser.add_argument(
         "--dry-run",

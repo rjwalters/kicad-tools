@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "servers": {
+      "kct": {
+        "type": "local",
+        "command": [
+          "/opt/kct/bin/kct",
+          "mcp",
+          "serve"
+        ]
+      }
+    }
+  }
+}
