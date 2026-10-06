@@ -10,6 +10,9 @@ Usage:
     kct check board.kicad_pcb --format json        # JSON output for CI
     kct check board.kicad_pcb --only clearance     # Run specific checks
     kct check board.kicad_pcb --skip silkscreen    # Exclude checks
+    kct check --diff OLD.kicad_pcb NEW.kicad_pcb   # Findings introduced/resolved
+    kct check --diff HEAD~1:b/b.kicad_pcb b/b.kicad_pcb   # vs. a git revision
+    kct check board.kicad_pcb --waive KEY --waive-reason R --waive-reviewer ME
 
 Exit Codes:
     0 - All meta sub-checks PASSED (or --drc-only: no errors)
@@ -56,6 +59,7 @@ from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.sync.discover import resolve_target_fab_for_pcb
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
+from kicad_tools.validate.coverage import coverage_to_dict
 from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
 
 if TYPE_CHECKING:
@@ -1370,7 +1374,56 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "pcb",
-        help="Path to .kicad_pcb file or directory containing one",
+        nargs="?",
+        default=None,
+        help=(
+            "Path to .kicad_pcb file or directory containing one (omit when using --diff OLD NEW)"
+        ),
+    )
+    parser.add_argument(
+        "--diff",
+        nargs=2,
+        metavar=("OLD", "NEW"),
+        default=None,
+        help=(
+            "Check two revisions with the same flags and report findings "
+            "introduced, resolved and changed, paired by stable finding key "
+            "(Issue #5946). Each side is a path or a git spec REV:path "
+            "(e.g. HEAD~3:boards/x/x.kicad_pcb). Exits 2 when NEW introduces "
+            "error findings (or warnings under --strict)."
+        ),
+    )
+    parser.add_argument(
+        "--waive",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Record an evidence-bound waiver for every current finding with "
+            "this stable key (the 'key' field in --format json; repeatable), "
+            "bound to the finding's current evidence_hash, then report with it "
+            "applied. Requires --waive-reason and --waive-reviewer. Written to "
+            "--waivers PATH, else the discovered sidecar, else "
+            "<board>.kct-waivers.json next to the board (Issue #5946)."
+        ),
+    )
+    parser.add_argument(
+        "--waive-reason",
+        dest="waive_reason",
+        default=None,
+        help="Justification recorded on --waive entries",
+    )
+    parser.add_argument(
+        "--waive-reviewer",
+        dest="waive_reviewer",
+        default=None,
+        help="Reviewer recorded on --waive entries",
+    )
+    parser.add_argument(
+        "--waive-issue",
+        dest="waive_issue",
+        default=None,
+        help="Optional tracking reference recorded on --waive entries",
     )
     parser.add_argument(
         "--format",
@@ -1644,13 +1697,16 @@ def main(argv: list[str] | None = None) -> int:
         dest="waivers",
         default=None,
         help=(
-            "Path to a general .kct_waivers.json sidecar (schema version 2) "
-            "waiving findings for ANY rule by matching the violation's items "
-            "(and optional nets) set (see kicad_tools.validate.rules.waivers). "
-            "Matched findings report as WAIVED instead of failing the gate. "
-            "Auto-discovered next to the board when this flag is omitted "
-            "(Issue #4417). Waived findings keep severity 'error' in JSON so "
-            "the kct audit manufacturing gate stays blocking by default."
+            "Path to a general waivers sidecar (schema version 2, or 3 for "
+            "evidence-bound keyed entries, Issue #5946) waiving findings for "
+            "ANY rule (see kicad_tools.validate.rules.waivers). Matched "
+            "findings report as WAIVED instead of failing the gate; an "
+            "evidence-bound entry whose evidence hash no longer matches is "
+            "STALE and does not suppress its finding. Auto-discovered next to "
+            "the board (<board>.kct-waivers.json, then .kct_waivers.json) when "
+            "this flag is omitted (Issue #4417). Waived findings keep severity "
+            "'error' in JSON so the kct audit manufacturing gate stays "
+            "blocking by default."
         ),
     )
     # Issue #3061: auto-derive the pad_grid tolerance from each board's
@@ -1729,7 +1785,35 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
+
+    # Issue #5946: ``--diff OLD NEW`` checks both revisions with the remaining
+    # flags and reports the difference instead of a single-board report.
+    if args.diff is not None:
+        if args.pcb is not None:
+            parser.error(
+                "--diff OLD NEW replaces the positional pcb argument; pass one or the other"
+            )
+        if args.waive:
+            parser.error("--waive cannot be combined with --diff")
+        from kicad_tools.cli.check_diff import run_diff, strip_driver_args
+
+        return run_diff(
+            args.diff[0],
+            args.diff[1],
+            strip_driver_args(raw_argv),
+            fmt=args.format,
+            output=args.output,
+            strict=args.strict,
+            check_main=main,
+        )
+    if args.pcb is None:
+        parser.error("the following arguments are required: pcb (or --diff OLD NEW)")
+    if args.waive and not (
+        (args.waive_reason or "").strip() and (args.waive_reviewer or "").strip()
+    ):
+        parser.error("--waive requires --waive-reason and --waive-reviewer")
 
     # Issue #4651: validate the routing-quality ceilings up front.  The
     # metrics are fractions in [0, 1], so anything outside that range is a
@@ -2334,6 +2418,7 @@ def main(argv: list[str] | None = None) -> int:
         sch_path = _resolve_check_schematic(getattr(args, "schematic", None), pcb_path)
 
     # Run selected checks
+    coverage: dict = {}
     results = run_selected_checks(
         checker,
         only_set,
@@ -2344,7 +2429,58 @@ def main(argv: list[str] | None = None) -> int:
         sch_field_threshold=args.sch_field_threshold,
         pcb_path=pcb_path,
         layers=layers,
+        coverage=coverage,
+        drc_only=getattr(args, "drc_only", False),
     )
+
+    # Issue #5946: bind every finding to a hash of its local evidence (its
+    # geometry, the footprints it names and the membership of its nets).
+    # Evidence-bound waivers and ``--diff`` both key off this.
+    from kicad_tools.validate.evidence import annotate_evidence
+
+    annotate_evidence(results, pcb)
+
+    # Issue #5946: ``--waive KEY`` records reviewed, evidence-bound waivers for
+    # the current findings with that key, then applies them below.
+    if args.waive:
+        from kicad_tools.validate.rules.waivers import write_keyed_waivers
+
+        wanted = list(dict.fromkeys(args.waive))
+        targets = [
+            v
+            for v in results.violations
+            if isinstance(v, DRCViolation) and v.key in wanted and not v.waived
+        ]
+        missing = [k for k in wanted if not any(v.key == k for v in targets)]
+        if missing:
+            print(
+                "Error: --waive names no current finding for key(s): "
+                + ", ".join(repr(k) for k in missing)
+                + ". Copy the 'key' field from `kct check --format json`.",
+                file=sys.stderr,
+            )
+            return 1
+        waive_path = (
+            gw_path
+            if gw_path is not None
+            else pcb_path.parent / f"{pcb_path.stem}.kct-waivers.json"
+        )
+        try:
+            written = write_keyed_waivers(
+                waive_path,
+                targets,
+                reason=args.waive_reason,
+                reviewer=args.waive_reviewer,
+                issue=args.waive_issue,
+            )
+            general_waivers = load_waivers(waive_path)
+        except (OSError, ValueError) as e:
+            print(f"Error: cannot record waiver(s) in {waive_path}: {e}", file=sys.stderr)
+            return 1
+        print(
+            f"[INFO] recorded {written} evidence-bound waiver(s) in {waive_path}",
+            file=sys.stderr,
+        )
 
     # Issue #4417: apply general waivers centrally, once, AFTER all checks run.
     # This marks matching findings waived (visible, counted separately, excluded
@@ -2461,6 +2597,11 @@ def main(argv: list[str] | None = None) -> int:
             ),
         }
 
+    # Issue #5946: findings added after the first annotation pass (the
+    # routing-quality gate, waiver advisories) get their evidence hash too.
+    annotate_evidence(results, pcb)
+    coverage_dict = coverage_to_dict(coverage)
+
     # Apply errors-only filter
     violations = list(results.violations)
     if args.errors_only:
@@ -2534,6 +2675,7 @@ def main(argv: list[str] | None = None) -> int:
             meta=meta,
             routing_quality=routing_quality_dict,
             fabrication_process=fabrication_process_dict,
+            coverage=coverage_dict,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -2547,6 +2689,11 @@ def main(argv: list[str] | None = None) -> int:
             print_meta_check_stanza(meta, args.verbose)
         if routing_quality is not None:
             print_routing_quality_stanza(routing_quality)
+    # Issue #5946: "unknown is not pass" -- name every check that could not
+    # evaluate this board.  Kept off the --drc-only legacy stdout and out of
+    # the JSON stream (the JSON carries the full ``coverage`` map).
+    if args.format != "json" and not drc_only:
+        print_coverage_stanza(coverage)
 
     # Write JSON report to file if --output specified
     if args.output:
@@ -2562,6 +2709,7 @@ def main(argv: list[str] | None = None) -> int:
             meta=meta,
             routing_quality=routing_quality_dict,
             fabrication_process=fabrication_process_dict,
+            coverage=coverage_dict,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -2728,6 +2876,8 @@ def run_selected_checks(
     sch_field_threshold: float = DEFAULT_SCH_FIELD_THRESHOLD_MM,
     pcb_path: Path | None = None,
     layers: int | None = None,
+    coverage: dict | None = None,
+    drc_only: bool = False,
 ) -> DRCResults:
     """Run the selected DRC checks based on filters.
 
@@ -2765,8 +2915,18 @@ def run_selected_checks(
             fab-blocking (2+ copper layers) or advisory (a 1-layer board
             can carry no via at all).  ``None`` falls back to the PCB's
             own copper-layer count.
+        coverage: Optional dict filled in place with one
+            :class:`kicad_tools.validate.coverage.Coverage` per category --
+            ``checked``, ``skipped:<reason>`` or ``unknown:<reason>`` (Issue
+            #5946).  Recording coverage never changes which checks run or
+            what they report.
+        drc_only: Whether ``--drc-only`` is in effect (reported as the
+            ``sch_fields`` skip reason).
     """
+    from kicad_tools.validate import coverage as cov
+
     results = DRCResults()
+    cov_map: dict = coverage if coverage is not None else {}
 
     # Build the pad_grid invocation as a thunk so the map below can
     # remain uniform (every value is a zero-arg callable).
@@ -2876,25 +3036,41 @@ def run_selected_checks(
             and only_set is None
             and checker.mask_copper_request is None
         ):
+            cov_map[category] = cov.skipped(category, "opt_in:--mask-copper-config")
             continue
 
         # width_consistency is a heuristic routing-quality audit; it is
         # opt-in (``--only width_consistency``) so it never changes the
         # verdict of an existing board or of gates that count warnings.
         if category == "width_consistency" and only_set is None:
+            cov_map[category] = cov.skipped(category, "opt_in:--only")
             continue
 
         # Skip if --only specified and this category not in it
         if only_set is not None and category not in only_set:
+            cov_map[category] = cov.skipped(category, "deselected:--only")
             continue
 
         # Skip if this category is in --skip
         if category in skip_set:
+            cov_map[category] = cov.skipped(category, "deselected:--skip")
             continue
+
+        # Issue #5946: decide, before running, whether this category's inputs
+        # let it say anything about the board.  The check still runs either
+        # way, so findings are unaffected.
+        pre = cov.precheck(
+            category,
+            checker,
+            pcb_path=pcb_path,
+            sch_path=sch_path,
+            drc_only=drc_only,
+        )
 
         # Run the check
         category_results = method()
         results.merge(category_results)
+        cov_map[category] = pre if pre is not None else cov.checked(category)
 
     return results
 
@@ -3274,6 +3450,39 @@ def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None
             print(f"{indent}    Nets: {', '.join(net_labels)}")
 
 
+def _coverage_summary(coverage: dict) -> dict:
+    """Counts + names for the JSON ``summary`` (Issue #5946)."""
+    from kicad_tools.validate.coverage import blocking_unknowns
+
+    states = [entry.get("state") for entry in coverage.values() if isinstance(entry, dict)]
+    return {
+        "coverage_checked": states.count("checked"),
+        "coverage_skipped": states.count("skipped"),
+        "coverage_unknown": sorted(
+            name
+            for name, entry in coverage.items()
+            if isinstance(entry, dict) and entry.get("state") == "unknown"
+        ),
+        "coverage_blocking_unknown": blocking_unknowns(coverage),
+    }
+
+
+def print_coverage_stanza(coverage: dict) -> None:
+    """Print the coverage rollup and every ``unknown`` category (Issue #5946)."""
+    if not coverage:
+        return
+    states = [c.state for c in coverage.values()]
+    print()
+    print(
+        f"Coverage: {states.count('checked')} checked, {states.count('skipped')} skipped, "
+        f"{states.count('unknown')} unknown"
+    )
+    for name, c in sorted(coverage.items()):
+        if c.state == "unknown":
+            tag = "BLOCKING " if c.blocking else ""
+            print(f"  {tag}UNKNOWN {name}: {c.reason} (zero findings here is not a pass)")
+
+
 def output_json(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -3283,6 +3492,7 @@ def output_json(
     meta: MetaCheckResult | None = None,
     routing_quality: dict | None = None,
     fabrication_process: dict | None = None,
+    coverage: dict | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -3332,6 +3542,12 @@ def output_json(
     }
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
+    # Issue #5946: stale evidence-bound waivers, and the coverage rollup.
+    summary_data["stale_waivers"] = sum(
+        1 for v in violations if getattr(v, "stale_waiver_hash", None)
+    )
+    if coverage is not None:
+        summary_data.update(_coverage_summary(coverage))
 
     data: dict = {
         "file": str(pcb_path),
@@ -3347,6 +3563,8 @@ def output_json(
         data["routing_quality"] = routing_quality
     if fabrication_process is not None:
         data["fabrication_process"] = fabrication_process
+    if coverage is not None:
+        data["coverage"] = coverage
     print(json.dumps(data, indent=2))
 
 
@@ -3360,6 +3578,7 @@ def write_json_report(
     meta: MetaCheckResult | None = None,
     routing_quality: dict | None = None,
     fabrication_process: dict | None = None,
+    coverage: dict | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -3394,6 +3613,12 @@ def write_json_report(
     }
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
+    # Issue #5946: stale evidence-bound waivers, and the coverage rollup.
+    summary_data["stale_waivers"] = sum(
+        1 for v in violations if getattr(v, "stale_waiver_hash", None)
+    )
+    if coverage is not None:
+        summary_data.update(_coverage_summary(coverage))
 
     data: dict = {
         "file": str(pcb_path),
@@ -3409,6 +3634,8 @@ def write_json_report(
         data["routing_quality"] = routing_quality
     if fabrication_process is not None:
         data["fabrication_process"] = fabrication_process
+    if coverage is not None:
+        data["coverage"] = coverage
     output_path.write_text(json.dumps(data, indent=2) + "\n")
 
 

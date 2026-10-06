@@ -250,7 +250,20 @@ def run_check_command(args) -> int:
     """Handle check command (pure Python DRC)."""
     from ..check_cmd import main as check_main
 
-    sub_argv = [args.pcb]
+    # Issue #5946: ``--diff OLD NEW`` replaces the positional board.
+    diff = getattr(args, "diff", None)
+    sub_argv = ["--diff", *diff] if diff else []
+    if args.pcb is not None:
+        sub_argv.append(args.pcb)
+    for key in getattr(args, "waive", None) or []:
+        sub_argv.extend(["--waive", key])
+    for flag, dest in (
+        ("--waive-reason", "waive_reason"),
+        ("--waive-reviewer", "waive_reviewer"),
+        ("--waive-issue", "waive_issue"),
+    ):
+        if getattr(args, dest, None) is not None:
+            sub_argv.extend([flag, getattr(args, dest)])
     if getattr(args, "mask_copper_config", None) is not None:
         sub_argv.extend(["--mask-copper-config", str(args.mask_copper_config)])
     if getattr(args, "physical_copper_gap", None) is not None:

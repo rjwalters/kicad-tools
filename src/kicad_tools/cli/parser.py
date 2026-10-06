@@ -690,7 +690,33 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
 def _add_check_parser(subparsers) -> None:
     """Add check subcommand parser (pure Python DRC)."""
     check_parser = subparsers.add_parser("check", help="Pure Python DRC (no kicad-cli)")
-    check_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    check_parser.add_argument(
+        "pcb",
+        nargs="?",
+        default=None,
+        help="Path to .kicad_pcb file (omit when using --diff OLD NEW)",
+    )
+    # Issue #5946: revision diff + evidence-bound waiver recording.
+    check_parser.add_argument(
+        "--diff",
+        nargs=2,
+        metavar=("OLD", "NEW"),
+        default=None,
+        help=(
+            "Report findings introduced/resolved between two revisions (paths "
+            "or git REV:path specs), paired by stable finding key"
+        ),
+    )
+    check_parser.add_argument(
+        "--waive",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help="Record an evidence-bound waiver for the findings with this key (repeatable)",
+    )
+    check_parser.add_argument("--waive-reason", dest="waive_reason", default=None)
+    check_parser.add_argument("--waive-reviewer", dest="waive_reviewer", default=None)
+    check_parser.add_argument("--waive-issue", dest="waive_issue", default=None)
     check_parser.add_argument("--physical-copper-gap", type=float, default=None, metavar="MM")
     check_parser.add_argument(
         "--mask-copper-config",
@@ -917,11 +943,13 @@ def _add_check_parser(subparsers) -> None:
         dest="waivers",
         default=None,
         help=(
-            "Path to a general .kct_waivers.json sidecar (schema version 2) "
-            "waiving findings for ANY rule by matching the violation's items "
-            "(and optional nets) set.  Matched findings report as WAIVED "
-            "instead of failing the gate.  Auto-discovered next to the board "
-            "when this flag is omitted (Issue #4417)."
+            "Path to a general waivers sidecar (schema version 2, or 3 for "
+            "evidence-bound keyed entries, Issue #5946) waiving findings for "
+            "ANY rule.  Matched findings report as WAIVED instead of failing "
+            "the gate; an evidence-bound entry whose evidence changed is STALE "
+            "and does not suppress its finding.  Auto-discovered next to the "
+            "board (<board>.kct-waivers.json, then .kct_waivers.json) when "
+            "this flag is omitted (Issue #4417)."
         ),
     )
     # Issue #3061: per-board auto-derive of the pad_grid tolerance is the

@@ -1089,6 +1089,19 @@ def _format_warning_table(counts: dict[str, int]) -> str:
     return ", ".join(f"{rule}={count}" for rule, count in counts.items())
 
 
+def _blocking_unknown_coverage(report: dict) -> list[str]:
+    """``name (reason)`` for each blocking category ``kct check`` marked unknown."""
+    coverage = report.get("coverage")
+    if not isinstance(coverage, dict):
+        return []
+    from kicad_tools.validate.coverage import blocking_unknowns
+
+    return [
+        f"{name} ({(coverage.get(name) or {}).get('reason')})"
+        for name in blocking_unknowns(coverage)
+    ]
+
+
 def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
     """Gate 1 — ``kct check`` at the resolved fab tier."""
     report_path = options.evidence_dir / "kct-check.json"
@@ -1155,6 +1168,51 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
                 detail=f"Sub-checks did not run: {named}; warning counts: {table}.",
                 evidence=evidence_rel,
                 blockers=[f"kct check sub-check(s) did not run: {named}."],
+            ),
+            report,
+        )
+    # Issue #5946: "unknown is not pass".  A blocking check category that
+    # could not evaluate this board (missing input, absent zone fills, an
+    # unreadable sidecar) reported zero findings without having looked, so
+    # sign-off is refused until the input is supplied.  A report without a
+    # ``coverage`` map predates #5946 and is not gated on coverage.
+    # Issue #5946: a stale evidence-bound waiver means reviewed geometry
+    # changed under an accepted finding; it must be re-reviewed, never
+    # carried into a sign-off as accepted risk.
+    stale = int(summary.get("stale_waivers", 0) or 0)
+    if stale:
+        return (
+            CheckOutcome(
+                name="kct_check",
+                status=FAILED,
+                detail=(
+                    f"{stale} stale evidence-bound waiver(s): the evidence under a "
+                    f"reviewed finding changed; warning counts: {table}."
+                ),
+                evidence=evidence_rel,
+                blockers=[
+                    f"kct check reports {stale} stale waiver(s); re-review the "
+                    "findings and re-waive them (kct check --waive) only if still intentional."
+                ],
+            ),
+            report,
+        )
+    unknown = _blocking_unknown_coverage(report)
+    if unknown:
+        named = "; ".join(unknown)
+        return (
+            CheckOutcome(
+                name="kct_check",
+                status=NOT_RUN,
+                detail=(
+                    f"0 errors, but blocking check(s) could not evaluate the board: "
+                    f"{named}; warning counts: {table}."
+                ),
+                evidence=evidence_rel,
+                blockers=[
+                    "kct check coverage is unknown for blocking check(s) "
+                    f"({named}); unknown is not pass -- supply the missing input."
+                ],
             ),
             report,
         )

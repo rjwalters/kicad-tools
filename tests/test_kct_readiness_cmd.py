@@ -73,8 +73,12 @@ class FakeEngines:
         zip_pcb_stale: bool = False,
         drop_gerbers: bool = False,
         drawings_ok: bool = True,
+        coverage: dict | None = None,
+        stale_waivers: int = 0,
     ) -> None:
         self.board = board
+        self.coverage = coverage
+        self.stale_waivers = stale_waivers
         self.check_errors = check_errors
         self.meta_overall = meta_overall
         self.drc_status = drc_status
@@ -140,15 +144,20 @@ class FakeEngines:
             "copper_vacuous": self.lvs_bound_pads == 0,
         }
         report_path.parent.mkdir(parents=True, exist_ok=True)
+        extra_top: dict = {}
+        if self.coverage is not None:
+            extra_top["coverage"] = self.coverage
         report_path.write_text(
             json.dumps(
                 {
+                    **extra_top,
                     "file": str(pcb),
                     "manufacturer": mfr,
                     "summary": {
                         "errors": self.check_errors,
                         "warnings": sum(self.warnings.values()),
                         "passed": self.check_errors == 0,
+                        "stale_waivers": self.stale_waivers,
                     },
                     "violations": violations,
                     "meta_checks": {
@@ -587,6 +596,58 @@ def test_kct_check_errors_block(tmp_path):
     assert code != 0
     assert check_status(report, "kct_check") == "failed"
     assert report["metrics"]["drc_violations"] == 4
+
+
+def _coverage(state: str, reason: str | None, blocking: bool) -> dict:
+    status = state if reason is None else f"{state}:{reason}"
+    return {"status": status, "state": state, "reason": reason, "blocking": blocking}
+
+
+def test_blocking_unknown_coverage_is_not_a_pass(tmp_path):
+    """Issue #5946: unknown is not pass -- a blocking unknown refuses sign-off."""
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        coverage={
+            "clearance": _coverage("checked", None, True),
+            "segment_zone": _coverage("unknown", "zone_fills_absent (2 unfilled zone(s))", True),
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert check_status(report, "kct_check") == "not_run"
+    joined = " ".join(report["blockers"])
+    assert "segment_zone" in joined and "zone_fills_absent" in joined
+
+
+def test_advisory_unknown_and_skipped_coverage_still_pass(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        coverage={
+            "clearance": _coverage("checked", None, True),
+            "sch_fields": _coverage("unknown", "needs_input:schematic", False),
+            "ampacity": _coverage("skipped", "no_declared_targets", True),
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code == 0, report.get("blockers")
+    assert check_status(report, "kct_check") == "passed"
+
+
+def test_stale_waiver_blocks_sign_off(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, stale_waivers=1)
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert check_status(report, "kct_check") == "failed"
+    assert any("stale waiver" in blocker for blocker in report["blockers"])
 
 
 def test_missing_drawings_block_the_bundle(tmp_path):

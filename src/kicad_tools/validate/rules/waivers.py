@@ -54,6 +54,38 @@ keys off ``is_error`` (waived excluded -> intended relief), but ``kct audit``
 re-parses the JSON ``severity`` field and ignores ``waived``, so a waived
 finding **stays blocking in the manufacturing gate by default**.
 
+Evidence-bound waivers (schema ``version == 3``, Issue #5946)::
+
+    {
+      "version": 3,
+      "waivers": [
+        {
+          "key": "courtyards_overlap|C52,U10||F.Cu",
+          "evidence_hash": "ev1:3f0c9a1d2b7e4c55",
+          "reason": "EE-mandated tight decoupling",
+          "reviewer": "rjwalters",
+          "date": "2026-10-06"
+        }
+      ]
+    }
+
+A keyed entry names one finding by its stable ``key`` (see
+:mod:`kicad_tools.validate.evidence`) and is bound to the hash of the local
+evidence that was reviewed.  When the geometry or nets under the finding
+change, the hash no longer matches: the waiver is **stale**, the finding stays
+active (it is never suppressed), it is annotated with the stale waiver's hash,
+and a ``waiver_stale`` warning names the entry.  ``reviewer`` and ``date`` are
+required on keyed entries; ``issue`` is optional.  Version 3 files may also
+carry legacy ``rule``/``items``/``nets`` entries, which may optionally add an
+``evidence_hash`` of their own.  ``kct check --waive KEY --reason ...
+--reviewer ...`` writes keyed entries with the current hash.  Version-2 files
+keep loading unchanged; a build older than #5946 rejects a version-3 file
+(so evidence binding can never be silently dropped).
+
+Keyed entries are ``kct check``-only: the ``kct drc`` cross-gate
+(:mod:`kicad_tools.drc.waivers`) ignores them, because kicad-cli findings have
+no ``kct check`` key.
+
 Discovery / loading contract mirrors ``courtyard_waivers`` exactly:
 
 * An explicit ``--waivers <path>`` always wins and a malformed explicit file is a
@@ -64,21 +96,33 @@ Discovery / loading contract mirrors ``courtyard_waivers`` exactly:
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from kicad_tools.validate.violations import DRCResults, DRCViolation
 
-# The only schema version understood by this loader.  Reject other values with
-# a clear error rather than silently misinterpreting a future schema.
-SUPPORTED_VERSION = 2
+# Schema versions understood by this loader.  Version 3 (Issue #5946) adds
+# keyed, evidence-bound entries; version 2 files keep loading unchanged.
+# Reject other values with a clear error rather than silently misinterpreting
+# a future schema.
+SUPPORTED_VERSIONS = (2, 3)
+# The version written by :func:`write_keyed_waivers`.
+CURRENT_VERSION = 3
+# Backwards-compatible alias for callers that imported the old constant.
+SUPPORTED_VERSION = CURRENT_VERSION
 
 # Rule id for the advisory "unused waiver" info finding emitted when a loaded
 # waiver entry matches no violation on the board (generalization of the
 # courtyard-specific ``courtyard_waiver_unused``).
 WAIVER_UNUSED_RULE_ID = "waiver_unused"
+
+# Rule id for the warning emitted when an evidence-bound waiver names a finding
+# whose local evidence has changed since review (Issue #5946).
+WAIVER_STALE_RULE_ID = "waiver_stale"
 
 
 @dataclass(frozen=True)
@@ -92,7 +136,16 @@ class Waiver:
         nets: Unordered set of net names.  Empty when the waiver is matched
             purely by ``items``.
         reason: Human-readable justification (non-empty).
-        issue: Tracking reference, e.g. ``"chorus#18"`` (non-empty).
+        issue: Tracking reference, e.g. ``"chorus#18"`` (non-empty on legacy
+            entries; optional -- empty string -- on keyed entries).
+        key: Stable finding key (Issue #5946).  When set, the entry is a
+            *keyed* entry: it matches findings whose :attr:`DRCViolation.key`
+            equals it, and ``rule`` is derived from the key's first field.
+        evidence_hash: Local-evidence hash the waiver was reviewed against.
+            When set, a finding matched by identity but carrying a different
+            hash is **not** waived -- the waiver is stale.
+        reviewer: Who reviewed the finding (required on keyed entries).
+        date: ISO date of the review (required on keyed entries).
     """
 
     rule: str
@@ -100,6 +153,10 @@ class Waiver:
     nets: frozenset[str]
     reason: str
     issue: str
+    key: str | None = None
+    evidence_hash: str | None = None
+    reviewer: str | None = None
+    date: str | None = None
 
     def matches_normalized(
         self,
@@ -123,7 +180,12 @@ class Waiver:
         ``nets``.  An empty ``items`` / ``nets`` on the waiver means "do not
         constrain on that axis"; at least one axis is always populated (the
         loader enforces it).
+
+        Keyed entries (Issue #5946) never match here: a kicad-cli finding has
+        no ``kct check`` key, so they apply to ``kct check`` only.
         """
+        if self.key is not None:
+            return False
         if rule != self.rule:
             return False
         if self.items and frozenset(items) != self.items:
@@ -133,12 +195,47 @@ class Waiver:
         return True
 
     def matches(self, violation: DRCViolation) -> bool:
-        """Return True when this waiver applies to a ``kct check`` finding."""
+        """Return True when this waiver *names* a ``kct check`` finding.
+
+        Identity only: an evidence-bound entry whose hash no longer matches
+        still "names" the finding (that is what makes it stale rather than
+        unused).  See :meth:`evidence_matches`.
+        """
+        if self.key is not None:
+            return getattr(violation, "key", None) == self.key
         return self.matches_normalized(
             violation.rule_id,
             frozenset(violation.items),
             frozenset(violation.nets),
         )
+
+    def evidence_matches(self, violation: DRCViolation) -> bool:
+        """True when this entry carries no hash, or its hash equals the finding's."""
+        if self.evidence_hash is None:
+            return True
+        return _evidence_hash_of(violation) == self.evidence_hash
+
+    @property
+    def scope(self) -> str:
+        """Human-readable description of what this entry names."""
+        if self.key is not None:
+            return f"key={self.key!r}"
+        parts = []
+        if self.items:
+            parts.append(f"items={sorted(self.items)}")
+        if self.nets:
+            parts.append(f"nets={sorted(self.nets)}")
+        return ", ".join(parts)
+
+
+def _evidence_hash_of(violation: DRCViolation) -> str:
+    existing = getattr(violation, "evidence_hash", None)
+    if existing:
+        return existing
+    # Not annotated (library caller): hash the finding's own evidence only.
+    from kicad_tools.validate.evidence import compute_evidence_hash
+
+    return compute_evidence_hash(violation)
 
 
 @dataclass
@@ -148,9 +245,9 @@ class Waivers:
     entries: list[Waiver] = field(default_factory=list)
 
     def match(self, violation: DRCViolation) -> Waiver | None:
-        """Return the first waiver matching ``violation``, or ``None``."""
+        """Return the first waiver that names ``violation`` with matching evidence."""
         for entry in self.entries:
-            if entry.matches(violation):
+            if entry.matches(violation) and entry.evidence_matches(violation):
                 return entry
         return None
 
@@ -172,10 +269,11 @@ def waivers_from_dict(data: Any) -> Waivers:
     if "version" not in data:
         raise ValueError("waivers file is missing the required 'version' key")
     version = data["version"]
-    if version != SUPPORTED_VERSION:
+    if version not in SUPPORTED_VERSIONS:
+        understood = " and ".join(str(v) for v in SUPPORTED_VERSIONS)
         raise ValueError(
             f"unsupported waivers version {version!r} "
-            f"(this build understands version {SUPPORTED_VERSION})"
+            f"(this build understands versions {understood})"
         )
 
     raw_waivers = data.get("waivers", [])
@@ -184,7 +282,7 @@ def waivers_from_dict(data: Any) -> Waivers:
 
     entries: list[Waiver] = []
     for idx, raw in enumerate(raw_waivers):
-        entries.append(_parse_entry(idx, raw))
+        entries.append(_parse_entry(idx, raw, version))
 
     return Waivers(entries=entries)
 
@@ -200,11 +298,68 @@ def _parse_str_set(where: str, key: str, raw: Any) -> frozenset[str]:
     return frozenset(raw)
 
 
-def _parse_entry(idx: int, raw: Any) -> Waiver:
+def _optional_str(where: str, raw: dict, name: str) -> str | None:
+    value = raw.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{where} '{name}' must be a non-empty string")
+    return value
+
+
+def _required_str(where: str, raw: dict, name: str) -> str:
+    value = raw.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{where} is missing a non-empty '{name}'")
+    return value
+
+
+def _parse_keyed_entry(where: str, raw: dict) -> Waiver:
+    """Validate a version-3 keyed, evidence-bound entry (Issue #5946)."""
+    for legacy in ("rule", "items", "nets"):
+        if legacy in raw:
+            raise ValueError(
+                f"{where} names a 'key'; it must not also carry '{legacy}' "
+                "(the key already encodes the rule, items, nets and layer)"
+            )
+    key = _required_str(where, raw, "key")
+    evidence_hash = _required_str(where, raw, "evidence_hash")
+    reason = _required_str(where, raw, "reason")
+    reviewer = _required_str(where, raw, "reviewer")
+    date = _required_str(where, raw, "date")
+    try:
+        _dt.date.fromisoformat(date)
+    except ValueError as e:
+        raise ValueError(f"{where} 'date' must be an ISO date (YYYY-MM-DD): {e}") from e
+    issue = _optional_str(where, raw, "issue") or ""
+    rule = key.split("|", 1)[0]
+    if not rule:
+        raise ValueError(f"{where} 'key' must start with a rule id")
+    return Waiver(
+        rule=rule,
+        items=frozenset(),
+        nets=frozenset(),
+        reason=reason,
+        issue=issue,
+        key=key,
+        evidence_hash=evidence_hash,
+        reviewer=reviewer,
+        date=date,
+    )
+
+
+def _parse_entry(idx: int, raw: Any, version: int = 2) -> Waiver:
     """Validate and build one waiver entry, raising on any defect."""
     where = f"waiver #{idx}"
     if not isinstance(raw, dict):
         raise ValueError(f"{where} must be an object, got {type(raw).__name__}")
+
+    if "key" in raw:
+        if version < 3:
+            raise ValueError(
+                f"{where} is a keyed (evidence-bound) entry, which needs waivers version 3"
+            )
+        return _parse_keyed_entry(where, raw)
 
     rule = raw.get("rule")
     if not isinstance(rule, str) or not rule:
@@ -223,7 +378,21 @@ def _parse_entry(idx: int, raw: Any) -> Waiver:
     if not isinstance(issue, str) or not issue.strip():
         raise ValueError(f"{where} is missing a non-empty 'issue'")
 
-    return Waiver(rule=rule, items=items, nets=nets, reason=reason, issue=issue)
+    evidence_hash = reviewer = date = None
+    if version >= 3:
+        evidence_hash = _optional_str(where, raw, "evidence_hash")
+        reviewer = _optional_str(where, raw, "reviewer")
+        date = _optional_str(where, raw, "date")
+    return Waiver(
+        rule=rule,
+        items=items,
+        nets=nets,
+        reason=reason,
+        issue=issue,
+        evidence_hash=evidence_hash,
+        reviewer=reviewer,
+        date=date,
+    )
 
 
 def load_waivers(path: Path) -> Waivers:
@@ -242,8 +411,10 @@ def load_waivers(path: Path) -> Waivers:
 def discover_waivers_sidecar(pcb_path: Path) -> Path | None:
     """Probe conventional locations for a ``.kct_waivers.json`` sidecar.
 
-    Mirrors :func:`courtyard_waivers.discover_courtyard_waivers_sidecar`: probe
-    the PCB directory, then a sibling ``output/`` subdir, then ``../output/``.
+    Probes ``<board>.kct-waivers.json`` next to the board first (Issue #5946),
+    then mirrors :func:`courtyard_waivers.discover_courtyard_waivers_sidecar`
+    for ``.kct_waivers.json``: the PCB directory, then a sibling ``output/``
+    subdir, then ``../output/``.
 
     Returns:
         The first existing candidate path, or ``None`` when no sidecar found.
@@ -251,6 +422,9 @@ def discover_waivers_sidecar(pcb_path: Path) -> Path | None:
     pcb_dir = pcb_path.parent
     filename = ".kct_waivers.json"
     candidates = [
+        # Issue #5946: a per-board ``<board>.kct-waivers.json`` committed next
+        # to the board wins over the shared directory-level sidecar.
+        pcb_dir / f"{pcb_path.stem}.kct-waivers.json",
         pcb_dir / filename,
         pcb_dir / "output" / filename,
         pcb_dir.parent / "output" / filename,
@@ -264,60 +438,103 @@ def discover_waivers_sidecar(pcb_path: Path) -> Path | None:
 def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
     """Apply general waivers to ``results`` in place (post-check step).
 
-    For each non-waived violation that matches a waiver entry, replace it with a
-    ``waived=True`` copy carrying the entry's ``reason`` / ``issue``.  Because
-    :class:`DRCViolation` is frozen, a new instance is built via
-    :func:`dataclasses.replace`.  Findings already waived (e.g. by the
-    per-rule courtyard path) are left untouched.
+    For each non-waived violation that a waiver entry names *and* whose
+    evidence matches (entries without an ``evidence_hash`` always match),
+    replace it with a ``waived=True`` copy carrying the entry's ``reason`` /
+    ``issue``.  Because :class:`DRCViolation` is frozen, a new instance is
+    built via :func:`dataclasses.replace`.  Findings already waived (e.g. by
+    the per-rule courtyard path) are left untouched.
 
-    Any waiver entry that matched no finding gets a :data:`WAIVER_UNUSED_RULE_ID`
-    ``info`` advisory appended so stale entries stay visible without failing the
-    gate.
+    Issue #5946: when the only entries naming a finding are evidence-bound
+    and their hash differs from the finding's current
+    :attr:`DRCViolation.evidence_hash`, the waiver is **stale**: the finding
+    stays active, is annotated with the stale hash, and a
+    :data:`WAIVER_STALE_RULE_ID` warning names the entry.  Annotate findings
+    with :func:`kicad_tools.validate.evidence.annotate_evidence` first so the
+    hash includes the board-level evidence.
+
+    Any waiver entry that named no finding at all gets a
+    :data:`WAIVER_UNUSED_RULE_ID` ``info`` advisory appended so leftover
+    entries stay visible without failing the gate.
     """
     if not waivers.entries:
         return
 
     used: set[int] = set()
+    stale_hits: dict[int, list[DRCViolation]] = {}
     rebuilt: list[DRCViolation] = []
     for v in results.violations:
         if v.waived:
             rebuilt.append(v)
             continue
         matched_idx: int | None = None
+        stale_idx: int | None = None
         for idx, entry in enumerate(waivers.entries):
-            if entry.matches(v):
+            if not entry.matches(v):
+                continue
+            if entry.evidence_matches(v):
                 matched_idx = idx
                 break
-        if matched_idx is None:
-            rebuilt.append(v)
-            continue
-        entry = waivers.entries[matched_idx]
-        used.add(matched_idx)
-        rebuilt.append(
-            replace(
-                v,
-                waived=True,
-                waiver_reason=entry.reason,
-                waiver_issue=entry.issue,
+            if stale_idx is None:
+                stale_idx = idx
+        if matched_idx is not None:
+            entry = waivers.entries[matched_idx]
+            used.add(matched_idx)
+            rebuilt.append(
+                replace(
+                    v,
+                    waived=True,
+                    waiver_reason=entry.reason,
+                    waiver_issue=entry.issue or None,
+                )
             )
-        )
+            continue
+        if stale_idx is not None:
+            entry = waivers.entries[stale_idx]
+            stale_hits.setdefault(stale_idx, []).append(v)
+            rebuilt.append(
+                replace(
+                    v,
+                    stale_waiver_hash=entry.evidence_hash,
+                    stale_waiver_reason=entry.reason,
+                )
+            )
+            continue
+        rebuilt.append(v)
 
     for idx, entry in enumerate(waivers.entries):
         if idx in used:
             continue
-        scope_parts = []
-        if entry.items:
-            scope_parts.append(f"items={sorted(entry.items)}")
-        if entry.nets:
-            scope_parts.append(f"nets={sorted(entry.nets)}")
-        scope = ", ".join(scope_parts)
+        if idx in stale_hits:
+            current = sorted({_evidence_hash_of(v) for v in stale_hits[idx]})
+            tracking = f" (tracking {entry.issue})" if entry.issue else ""
+            reviewed = f" reviewed by {entry.reviewer}" if entry.reviewer else ""
+            dated = f" on {entry.date}" if entry.date else ""
+            rebuilt.append(
+                DRCViolation(
+                    rule_id=WAIVER_STALE_RULE_ID,
+                    severity="warning",
+                    message=(
+                        f"STALE waiver for rule {entry.rule!r} ({entry.scope}){tracking}:"
+                        f" the evidence{reviewed}{dated} was {entry.evidence_hash}, the"
+                        f" board now gives {', '.join(current)}. The geometry or nets"
+                        " under the finding changed, so the finding is active again;"
+                        " re-review it and re-waive (kct check --waive) if it is"
+                        " still intentional."
+                    ),
+                    items=tuple(sorted(entry.items)),
+                    nets=tuple(sorted(entry.nets)),
+                )
+            )
+            continue
+        tracking = f" (tracking {entry.issue})" if entry.issue else ""
         rebuilt.append(
             DRCViolation(
                 rule_id=WAIVER_UNUSED_RULE_ID,
                 severity="info",
                 message=(
-                    f"Waiver for rule {entry.rule!r} ({scope}) matched no finding "
-                    f"(tracking {entry.issue}); the underlying defect may already "
+                    f"Waiver for rule {entry.rule!r} ({entry.scope}) matched no finding"
+                    f"{tracking}; the underlying defect may already "
                     "be resolved, or the rule/refs may have changed."
                 ),
                 items=tuple(sorted(entry.items)),
@@ -326,3 +543,72 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
         )
 
     results.violations = rebuilt
+
+
+def write_keyed_waivers(
+    path: Path,
+    findings: Iterable[DRCViolation],
+    *,
+    reason: str,
+    reviewer: str,
+    issue: str | None = None,
+    date: str | None = None,
+) -> int:
+    """Record evidence-bound waivers for ``findings`` in ``path`` (Issue #5946).
+
+    Writes one keyed entry per distinct ``(key, evidence_hash)`` among
+    ``findings``, binding each to the finding's *current* evidence hash.  Any
+    existing keyed entry for the same key is replaced -- re-waiving a stale
+    finding is the re-review.  Other entries (legacy or for other keys) are
+    preserved verbatim.  The file is (re)written as schema version 3.
+
+    Raises:
+        ValueError: when ``reason`` / ``reviewer`` is empty, a finding has no
+            evidence hash, or an existing file fails validation (it is never
+            clobbered).
+
+    Returns:
+        The number of entries written.
+    """
+    if not reason.strip():
+        raise ValueError("a waiver needs a non-empty reason")
+    if not reviewer.strip():
+        raise ValueError("a waiver needs a non-empty reviewer")
+    day = date or _dt.date.today().isoformat()
+
+    raw_entries: list[Any] = []
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"parsing waivers JSON {path}: {e}") from e
+        waivers_from_dict(existing)  # validate before touching it
+        raw_entries = list(existing.get("waivers", []))
+
+    new_entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for finding in findings:
+        if not finding.evidence_hash:
+            raise ValueError(f"finding {finding.key!r} has no evidence hash to bind to")
+        ident = (finding.key, finding.evidence_hash)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        entry = {
+            "key": finding.key,
+            "evidence_hash": finding.evidence_hash,
+            "reason": reason,
+            "reviewer": reviewer,
+            "date": day,
+        }
+        if issue:
+            entry["issue"] = issue
+        new_entries.append(entry)
+
+    keys = {key for key, _ in seen}
+    kept = [e for e in raw_entries if not (isinstance(e, dict) and e.get("key") in keys)]
+    data = {"version": CURRENT_VERSION, "waivers": [*kept, *new_entries]}
+    waivers_from_dict(data)  # never write a file this build cannot read back
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return len(new_entries)
