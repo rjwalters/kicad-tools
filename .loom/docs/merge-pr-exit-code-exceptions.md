@@ -193,9 +193,34 @@ tick counter no process owns, and only trusted authors' markers count (#9548).
 Each step needs a full re-date → CI → block cycle, and the remedy's own pushes
 can never reset the chain; only a push from outside the remedy can.
 
+### Base-sync handoff before escalation (#10388)
+
+An exhausted chain is not yet a human decision: the base simply moved faster
+than CI. First the remedy spends a **base sync** (the same
+`PUT /pulls/{n}/update-branch` `merge-pr.sh` already uses), up to
+`champion.redateSyncHandoffs` per PR (env `LOOM_REDATE_SYNC_HANDOFFS`, env >
+config > default **1**, max 5, `0` turns it off):
+
+- clean sync: a real merge commit starts a fresh chain; the Judge verdict
+  carries via `clean-merge-of-base`; no LLM session. The remedy records
+  `<!-- loom:stale-check-sync head=<sha> n=<k> -->` (trusted authors only,
+  #9548; counted across all of the PR's heads), prints
+  `LOOM-REDATE-SYNCED …` and exits 0, so `merge-pr.sh` exits **4**. No
+  `loom:operator`, and never `loom:changes-requested` (Judge's verdict, not the
+  merge engine's);
+- conflict: `loom:merge-conflict` is applied (Doctor's Priority-1 queue does the
+  rebase), `LOOM-REDATE-SYNC-CONFLICT …`, exit 0 -> `merge-pr.sh` exit **4**;
+  no `loom:operator`;
+- any other `update-branch` failure, or handoffs already spent: the escalation
+  below, unchanged.
+
+The sync comment carries the per-PR cycle count (`sync k of N`, and the chain's
+`spent of budget`).
+
 ### Escalation when the bound is reached
 
-Once the chain has spent the whole budget and the guard still blocks, the PR is
+Once the chain has spent the whole budget, the sync handoffs are spent, and the
+guard still blocks, the PR is
 escalated the same way `champion-pr-merge.md`'s merge-risk hold escalates. The
 notice and the `LOOM-REDATE-ESCALATED … spent=<k> budget=<N>` line both say the
 budget is exhausted:

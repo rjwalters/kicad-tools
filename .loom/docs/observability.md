@@ -454,8 +454,12 @@ waited (`loom.dispatch.idle_slot_seconds`). Forge label-stage dwell
 (`loom.forge.stage_dwell{state}` / `.samples`, `loom.forge.stage_items{state}`)
 covers created → curated, curated → `loom:issue`, building → review requested
 and review requested → merged. It reads ETag-cached stage listings every 5
-minutes plus at most 8 per-item reads per sample, never per tick. Details are
-in [`telemetry-schema.md`](telemetry-schema.md#metricpoints).
+minutes plus at most 8 per-item reads per sample, never per tick. With
+`fleet.captainGauges` configured, the fleet captain samples for the fleet and
+dispatchers stand down while its published data is fresh
+(`loom.captain.gauge_age_seconds`, `loom.captain.gauge_fallback`; see
+[`daemon-reference.md`](daemon-reference.md#fleet-gauges-produced-by-the-captain-w12)).
+Details are in [`telemetry-schema.md`](telemetry-schema.md#metricpoints).
 
 **Merge-chain re-date pressure (#10163).** Three gauges track the #8508
 re-date remedy over a trailing 24 h: `loom.merge.redate_prs{state}`
@@ -533,11 +537,13 @@ job that tripped it (`loom.ratelimit.source`), the cooldown end and, per pool,
 the probe's `used` split into this host's own share and the external share
 (`github.ratelimit.{core,graphql}.{used,own,external}`) — the `attribution:`
 line from `daemon.log`, now queryable fleet-wide. Every 60 s the collector
-probes `gh api rate_limit` (free: it does not count against the quota) and
-exports `github.ratelimit.{remaining,used,reset}` gauges labelled `resource`
-(`core`|`graphql`) and `account` (`app-<app id>` for the daemon's GitHub App,
-the `gh` login for an ambient credential, else `unknown` — never a token or
-path), and flushes `github.ratelimit.breaker_skips{reason=<job>}`: one per
+probes `gh api rate_limit` (free: it does not count against the quota). On a
+GitHub App host the reading is booked into the bucket book below as the
+writer App's bucket for the workspace's own owner; on an ambient-login host it
+is exported as `github.ratelimit.{remaining,used,reset}` gauges labelled
+`resource` (`core`|`graphql`), `account` (the `gh` login, else `unknown` —
+never a token or path), `owner="-"` and `role="ambient"`. The collector also
+flushes `github.ratelimit.breaker_skips{reason=<job>}`: one per
 pass a job skipped while the breaker suppressed. A host that never enables an
 OTLP exporter exports none of this; its evidence stays in `daemon.log`.
 
@@ -546,15 +552,47 @@ installation separately, so the daemon also keeps a *bucket book*: the newest
 reading of every `(account, owner, resource)` pool it spends, from the free
 `x-ratelimit-*` headers of `gh api --include` calls and from one free
 `gh api rate_limit` probe per published credential directory after every
-reader-refresh pass. Each believed reading is exported as the same
-`github.ratelimit.{remaining,used,reset}` gauges with an extra `owner` label.
+reader-refresh pass, plus the 60 s probe above. Each believed reading is
+exported once per tick as `github.ratelimit.{remaining,used,reset}` labelled
+`resource`, `account`, `owner` and `role` (`writer`|`reader`) — since #10343
+no point leaves without `owner`. A label set is still **not** guaranteed to
+be one GitHub bucket: live data shows some `(account, owner, resource)` keys
+carrying two interleaved hourly reset windows (#10571), and several hosts
+export one bucket with readings of different ages. Read `used` together with
+its `reset` (the window), never as a monotone series.
 `loom.forge.calls` is a delta counter of the requests the `gh` facade sent,
 labelled by caller, inventoried operation, identity role, credential bucket
 (`account`, `cred_owner`, `resource`), `target_owner` and `outcome`; the free
 `rate_limit` probe appears under `resource="other"` and is never charged to a
 bucket. On a host
 without an exporter, `loom-daemon forge calls --by bucket` shows the same
-picture from the local forge-call sink.
+picture from the local forge-call sink. Each `invoke github` span carries the
+same facts per call (#10343): `github.http.{status,not_modified,requests,source}`
+(`unknown` when `gh` gave no HTTP evidence — never guessed),
+`github.billing` (`ok`|`not_modified`|`rate_limited`|`error`|`not_sent`) and
+the bucket join keys `github.{resource,account,cred_owner,role}`.
+
+**Shadow reconciliation (#10343).** *Shadow* spend is what GitHub billed a
+bucket that Loom did not attribute: GitHub's bill per `(account, owner,
+resource)` hour, minus that bucket's `loom.forge.calls`. The bill keys every
+`github.ratelimit.used` reading by its quota window (the paired
+`github.ratelimit.reset`) and charges each window's high-water mark once, so
+stale readings from another host and interleaved windows never re-charge. It is a band, not a point: `outcome="ok"` rows
+are surely charged (the band's high end), and `ok`+`error` bounds the
+attributed figure from above (an `error` may be a charged 4xx or a local
+failure that sent nothing); 304s and the free probe are excluded. The
+recipe is `defaults/observability/signoz/github-shadow.sql`
+(queries 1–3, with query 4 cross-checking against the spans); a large
+shadow on a bucket means spend from outside this fleet's daemons (agent `gh`
+calls, another host, an operator) or an uninstrumented caller. A negative
+shadow means the bucket's readings undercount it (sparse readings, or the
+readings describe another bucket — #10571), not that Loom over-spent.
+
+**Uncovered `gh` callers (#10343, tracked in #10618).** Spend from `safehouse.rs`,
+`auto_update`/`release_resolve`, `credential_preflight`, `sweep-lease-renew.sh`,
+`peer_coord.rs` and `main_health_gate` bypasses the `invoke github` span, so it
+reads as shadow spend. The span-vs-`/rate_limit` hourly reconciliation is an
+operational check on a fleet host (shadow recipe above), not a CI check.
 
 **Long-running task liveness and self-update decisions (#10414).** Each
 long-running daemon loop beats a process-global liveness registry

@@ -1473,7 +1473,7 @@ auth**. A reader that cannot serve the store falls through to the writer after
 one request. The App needs read access to the store repo (`contents: read`).
 Calls are counted in the forge-call stats as `fleet_store`. GitHub only.
 
-### `fleet-config render [--host H] [--check] [--offline]`
+### `fleet-config render [--host H] [--check] [--offline] [--allow-reduce]`
 
 Computes the host's machine tier as `deep_merge(fleet/defaults.json,
 fleet/hosts/<H>/defaults.json)` — the same `config_resolver::deep_merge` the
@@ -1489,6 +1489,17 @@ so a no-op render makes no backup.
 `--check` writes nothing: it prints a per-path diff (`~ key: disk -> store`,
 `+`, `-`) and exits `1` on drift, `0` in sync, `2` on error — the drift
 detector. Comparison is semantic (parsed JSON), not textual.
+
+**Lossy-reduction guard (2am#1653):** a write that would DROP a top-level
+block the file on disk carries but the store's render does not is refused by
+default (exit `2`; `--check` reports it as `LOSSY REDUCTION`) — the store is
+the tier's record of truth, so the block belongs there first
+(`fleet-config propose adopt [--host H]` proposes exactly that). Pass
+`--allow-reduce` to accept the loss knowingly. This CLI flag is the operator's
+answer to that prompt; the daemon's own unattended writes (the startup pass,
+and the timer pass under `fleet.autoApply`) apply the identical guard but have
+no operator to ask, so they just skip the write and surface the loss via the
+sync status (`ConfigPass.error` / the tier's `detail`) instead of writing.
 
 If the forge is unreachable, `render` (and `state`) use the last good snapshot
 and print a `CACHED … last confirmed current <age> ago` warning; `--offline`
@@ -2988,7 +2999,7 @@ rules with `git check-ignore`.
 | `autonomous.eta.historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` — `local` (this host's journals), `augment` (plus the cached fleet snapshot) or `fleet` (the snapshot alone). A no-op until a snapshot is cached (#9343); since #10263 the fleet refresh task below caches one by default, so live estimates switch to `scope = fleet` on a host with reader Apps. `local` opts out |
 | `autonomous.eta.fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily coefficient refit (#10245). It checks hourly, fits at most once per UTC day into `.loom/state/eta/fit/`, makes no forge call, and runs only with `autonomous.eta.enabled`. A no-op until a snapshot is cached. With `fleetRefresh.enabled` (below, #10263) the check runs at the end of every fleet refresh cycle instead of on its own task, so it always sees fresh snapshots. Read at start |
 | `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
-| `autonomous.eta.shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `10` registered heuristics per kind (floor 1, #10525). A build over it does not start the ETA tracker; the error names the excess heuristics. Read at start. See [eta → shadow fleet management](eta.md#shadow-fleet-management) |
+| `autonomous.eta.shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `13` registered heuristics per kind (floor 1, #10525): `current` plus the 12 `eta.snapshot` alternates (#10549, was 10). A build over it does not start the ETA tracker; the error names the excess heuristics. Read at start. See [eta → shadow fleet management](eta.md#shadow-fleet-management) |
 | `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. **Restart required**. **On a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
 | `fleet.etaAuthority` | `LOOM_ETA_AUTHORITY` | unset (#10498). The one host that computes and emits `eta.*` records and fits locally. Unset: the declared `fleet.captain`, else the host whose own `fleetRefresh.enabled` is on; several candidates fall back to the lowest host id with a warning. Re-read every pass. See [eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498) |
 | `autonomous.eta.fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor `900`); first cycle 120 s after start |
@@ -7022,6 +7033,69 @@ repo, and every existing snapshot). Then re-enable `fleetRefresh` on any host
 where it was turned off as a mitigation; the other hosts stand down by
 themselves.
 
+#### Fleet gauges produced by the captain (W12)
+
+Some collector gauges describe the forge, not the host. The forge label-stage
+dwell (`loom.forge.stage_dwell`, `loom.forge.stage_items`; singleton job
+**`stage-dwell`**) lists the same stage labels of the same repos on every host
+that manages them, so N hosts spend N times the reader budget to export N
+copies of one fact. With `fleet.captainGauges` configured, the declared
+captain produces it for the fleet and a dispatcher stops producing it for the
+repos the captain covers, **only while the captain's output is fresh**.
+Assigned, not elected: there is no standby producer. Per-host gauges and
+dispatch gates (`role_queue_gate`, `role_demand`, the work finder's listings)
+are unchanged on every host. Code: `observability/captain_gauges.rs`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `fleet.captainGauges.enabled` | `false` | On the declared captain: arm the singleton jobs (`host.health.armed_singleton_jobs`) and publish their freshness |
+| `fleet.captainGauges.standDown` | `false` | On a dispatcher: skip a job for the repos a fresh heartbeat covers. Env `LOOM_CAPTAIN_GAUGES_STAND_DOWN` (`0`/`1`) overrides it per host |
+| `fleet.captainGauges.maxAgeSecs` | `1800` | A job's published `as_of` older than this is stale and the dispatcher produces locally again. Two publish intervals plus two collector passes, the fleet refresh's own liveness rule |
+| `fleet.captainGauges.publishIntervalSecs` | `600` | How often the captain writes the heartbeat |
+| `fleet.captainGauges.ref` | `fleet.etaFitRef` (`eta-fit`) | The fleet-store branch the heartbeat lives on. Never the store's reviewed branch or `main` |
+
+**How a dispatcher knows the captain is fresh.** Hosts have no channel to
+each other's telemetry, so the captain publishes a heartbeat to the fleet
+store (`fleet.repo`), beside its ETA fit and through the same transport and
+credentials (#10395): `captain/gauges.json`, schema `captain-gauges/v1`, with
+per job the `as_of` of the captain's last finished pass (its points handed to
+the OTLP sink) and the repos it covered. A dispatcher reads it once per
+collector pass with `If-None-Match` (a `304` when unchanged) and stands down
+for a job and repo only when the heartbeat names the declared captain and the
+`as_of` is within `maxAgeSecs`. A read failure keeps the last heartbeat, which
+keeps ageing; a missing or malformed one counts as absent. Without
+`fleet.repo` there is no heartbeat and every host produces locally. When a
+dispatcher takes a repo back it starts from a fresh baseline, so the
+transitions the captain already sampled are not replayed.
+
+| Gate | `fleet.captainGauges` | What the pass does |
+|---|---|---|
+| `Armed` | `enabled` | Arms `stage-dwell`, produces as before, publishes the heartbeat every `publishIntervalSecs` |
+| `Refused` | `standDown`, store configured | Skips the repos the fresh heartbeat covers; produces the rest |
+| anything else | | Produces locally, exactly as before |
+
+**Captain down** shows as `loom.captain.gauge_age_seconds{task}` growing on
+every dispatcher, then `loom.captain.gauge_fallback{task} = 1` once it passes
+`maxAgeSecs` while the dispatchers produce locally: the gauges never go
+missing. Alert on `gauge_fallback == 1` or on the age passing the bound. See
+[`telemetry-schema.md`](telemetry-schema.md#metricpoints).
+
+**Mixed-version safety.** Both switches default off and older daemons ignore
+the keys, so an unconfigured or older host keeps today's behaviour. A
+dispatcher stands down only on fresh data from the current captain, so an
+older captain (no heartbeat) leaves every dispatcher producing.
+
+**Rollout order**: deploy everywhere; set `fleet.captainGauges.enabled` and
+confirm the captain's `loom.captain.gauge_age_seconds` stays under
+`maxAgeSecs`; then set `fleet.captainGauges.standDown`. The captain needs the
+OTLP exporter, the fleet repos provisioned, and the writer App's
+`contents:write` on the store's publication branch (already true where the ETA
+fit is published).
+
+**ETA queue friction** is already a singleton: it runs inside the ETA pass,
+which only the ETA authority runs (#10498), and the authority defaults to the
+declared captain. It needs no heartbeat.
+
 ### Role-runner host roster (#6704, phases A and B)
 
 The design record — [`role-runner-roster.md`](role-runner-roster.md) — picked
@@ -7377,8 +7451,8 @@ layers:
 1. **The base repo**, resolved locally the way gh resolves it (`GH_REPO` >
    `gh repo set-default` > `upstream` > `github` > `origin`, the same port
    write scoping uses). Each site keeps its own `GH_REPO` rule: placeholder
-   (`gh api`) sites honour `LOOM_REPO`/`GH_REPO`, `gh repo view` sites ignore
-   it. The answer is memoised until any git config file that defines it
+   (`gh api`) sites honour `LOOM_REPO`/`GH_REPO`, `gh repo view` sites and
+   the hygiene read path (below) ignore it. The answer is memoised until any git config file that defines it
    changes. The fingerprint is `(dev, inode, length, mtime)` of every file
    `git config --list --show-origin` read (system, global, includes),
    `<common-dir>/config` and `<git-dir>/config.worktree` (presence counts),
@@ -7506,12 +7580,13 @@ rate-limit signature, so it never trips the breaker. A shed books an
 `intake_reconcile` reports a shed listing as a skipped pass, not a failure.
 Classified sites:
 Hygiene — `worktree.issue_state`, `worktree.has_open_pr`, `clean.pr_list`,
-`clean.pr_by_number_rest`, `clean.pr_status_rest`, `worktree.landed_pulls`,
-`intake.list_open`; Observability — `stage_dwell`'s `api.rest`,
-`telemetry.repo_identity`. `worktree.issue_state_rest`,
-`worktree.issue_closed_at` and `visibility.repo` are conditional reads
-through the shared ETag store (#10512) and route as `Gate` — not shed, but
-mostly free `304`s. Nothing under `sweep_registry/`,
+`clean.pr_status_rest`, `worktree.landed_pulls`, `intake.list_open`, and
+`clean.pr_by_number_rest` / `worktree.issue_state_rest` /
+`worktree.issue_closed_at` on a root without a repo fact; Observability —
+`stage_dwell`'s `api.rest`, `telemetry.repo_identity`. `visibility.repo`, and
+the single-item hygiene reads on a root with a repo fact, are conditional
+reads through the shared ETag store (#10512, W6) and route as `Gate` — not
+shed, but mostly free `304`s. Nothing under `sweep_registry/`,
 `claim_reconciliation`, `merge_*`, verdict, quarantine or reclaim, nor
 `forge_check_claim`, `cli/lease_co_occupancy`, `role_runner/roster`,
 `worktree_reaper` or `primary_checkout_reaper`, is ever anything but `Gate`
@@ -7535,6 +7610,64 @@ A `Gate` read always confirms on the writer, and the reader is not withdrawn.
 | `LOOM_FACADE_CWD_ROUTING` | on | `0` disables the derivation: every untargeted read stays on the writer. Typed reads keep the class-aware chain, so a typed `Observability` read (`telemetry.repo_identity`) can still be shed. Read on every call. |
 | `LOOM_READ_SHED` | on | `0` treats every read as `Gate`: no shed and no gone-memo shortcut, so `Hygiene`/`Observability` reads fall back to the writer. Derivation stays on. Read on every call. |
 | `LOOM_READ_ROUTING` | `v2` | `legacy` is the only exact revert: the pre-W4 path (no derivation, no classes, no reserve, the unconditional reader → writer fallback), and it reverts W4-A's scoped withdrawal and W4-B's split and spill with it. `LOOM_FACADE_CWD_ROUTING=0` plus `LOOM_READ_SHED=0` together restore W4-C's load placement only (untargeted reads on the writer, nothing shed), keeping W4-A/W4-B, the retry on the next reader and the writer pins. Read on every call. |
+
+### Hygiene read path: the checkout's own repo, conditional and fresh (`LOOM_HYGIENE_CONDITIONAL`)
+
+The REST issue and PR reads behind the worktree reaper, eager reclaim,
+`clean` (sweep transients, stale branches, the `pr-<N>` probe),
+`--aggressive`, `checkpoint read` and the primary-checkout reaper go through
+one module, `loom-daemon/src/worktree_ops/forge_state.rs`. Not every hygiene
+read does yet: the GraphQL-backed probes `gh::issue_state` (`gh issue view`,
+in `clean`'s worktree pass and stale-branch cleanup), `check_pr_merged`, and
+the `check_pr_status_for_branch` fallback (`clean` and the primary-checkout
+reaper, when REST is unknown or no owner resolves) still name gh's own
+target and are not conditional.
+
+- **The checkout's own repo.** Reads name gh's base repo for the root,
+  resolved and verified by the repo facts above with `GH_REPO`/`LOOM_REPO`
+  ignored, by its canonical (post-rename) name. A process that exported
+  `LOOM_REPO` for another repo never reads that repo's issue `N` for this
+  checkout. A root the facts cannot model keeps gh's `{owner}/{repo}`
+  placeholder, unconditional, with `GH_REPO` stripped from the child. A fact
+  that cannot be established now is "unknown" (keep). The `head=` owner for
+  PR listings follows the same rule.
+- **Conditional and fresh.** `issues/{n}` (state and `closed_at` in one
+  read) and `pulls/{n}` (status and `head.sha`) are conditional `GET`s on the
+  agents' shared `view-` entry, so an unchanged item is a free `304` and
+  `gh-cached --invalidate N` drops the entry after a write. Nothing is
+  remembered beyond the `ETag` and its body: every read reaches the forge,
+  and a `304` is server-fresh (ADR-0021). Branch listings
+  (`pulls?head=`) stay unconditional, because `--invalidate` does not drop
+  them.
+- **Identity.** An answer must be the item asked for: its `number`, and its
+  repository by `base.repo.id` (when the record knows the id) or by name. A
+  mismatch — a transferred item, a followed redirect — is "unknown" and
+  bumps `hygiene.identity_mismatch`. Only a first-hand `200` for the
+  asked-for number that names the repo under a new name (same id, or no id
+  to compare) marks the repo record suspect, as of the request-sent time, so
+  a renamed repo re-resolves on the next read; a `304` body, another number
+  (a transferred issue) or another repo id never does.
+- **Rate-limit breaker.** While the global breaker is cooling, an item read
+  makes no forge call (not even the repo resolve) and is "unknown"; a failed
+  item read's stderr is reported to the breaker, so a rate-limit refusal
+  trips it. The branch listings and the owner read keep their pre-W6
+  behaviour: they never consulted the breaker.
+- **Failure.** A shed, timeout, non-200/304, parse failure or mismatch is
+  "unknown"; a `404`/`410` is "gone" (`hygiene.item_gone`). Both are KEEP —
+  never "closed" or "no PR".
+- **Item-scoped `404`.** A reader `404` on `issues/{n}` or `pulls/{n}` is the
+  item's answer (no writer retry, no withdrawal, `forge.item_scoped_404`)
+  only when the same reader answered a `200`/`304` for the same repo and the
+  same endpoint family (`issues` vs `pulls`) within the last hour. Otherwise
+  it is a coverage failure, retried on the writer as before.
+- **Trust boundary.** A `304` serves the body stored next to the `ETag` in
+  the `0700` per-user store. Any process of the same uid (agents included)
+  can write it; that is accepted, as the same uid can already edit the
+  worktrees and the daemon's state. Other users are refused.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `LOOM_HYGIENE_CONDITIONAL` | on | `0` makes the single-item reads on a root with a repo fact unconditional: no `If-None-Match` sent, the `view-` entry neither read nor written. Everything else stays: the explicit target, the identity check, reader routing and the breaker. It is not a revert of W6 — no switch restores the pre-W6 `LOOM_REPO` > `origin` target. `LOOM_REPO_FACTS=0` sends every item read down the placeholder path (`{owner}/{repo}`, `GH_REPO` stripped, unconditional). |
 
 ### Merged-PR worktree reaper (#4876)
 
@@ -11066,6 +11199,8 @@ seams):
 | `LOOM_DAEMON_UPDATE_COSIGN_PUBKEY` | Path to the cosign public key used to verify a **key-signed** Linux `.sig` (one published without a `.pem`) |
 | `LOOM_DAEMON_UPDATE_COSIGN_IDENTITY` | Pin one exact expected keyless signer identity instead of the derived regexp |
 | `LOOM_DAEMON_UPDATE_COSIGN_OIDC_ISSUER` | Expected keyless certificate issuer (default `https://token.actions.githubusercontent.com`) |
+| `LOOM_DAEMON_UPDATE_REQUIRE_SIGNATURE` | `1`/`true`/`yes`/`on` selects **required** signature mode (#10470): an unsigned release (`SIGNATURE=skipped`) or one whose signature cannot be checked here (`SIGNATURE=unavailable`) is refused before provisioning, with distinct messages, and a sanitized `LOOM_SIGNATURE_EVIDENCE {...}` line is emitted on success: tag, asset sha256, signature state, and what the verifier that actually succeeded checked (`verification_method` = `codesign` / `cosign-key` / `cosign-keyless-identity` / `cosign-keyless-identity-regexp`; `identity`, `identity_regexp` and `oidc_issuer` are populated only by the keyless verifier that checked them and are `null` for codesign and key mode, which establish no GitHub workflow identity). Default off = the **present-only** compatibility mode (#5054), unchanged |
+| `LOOM_DAEMON_UPDATE_APPROVED_WORKFLOW` | Optional, with required mode: pin the derived keyless identity to this workflow file (regex-escaped) instead of `[^@]+`; a workflow rename then needs an explicit policy update. Recorded in the evidence line as `configured_workflow`, with `configured_workflow_applied` true only when a keyless regexp actually enforced it (false for codesign, key mode and an exact-identity override) |
 
 **No new daemon config keys.** The autonomous self-update loop
 (`autonomous.autoUpdate.*`) needs no new knobs. Since Issue #7609 it drives its

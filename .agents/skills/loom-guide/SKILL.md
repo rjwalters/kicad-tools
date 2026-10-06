@@ -576,18 +576,13 @@ For each `loom:blocked` issue, check if all dependencies have resolved:
 "$GH_READ" issue list --label "loom:blocked" --state open --limit 1000 --json number,title,body
 
 # For each issue:
-# 1. Parse dependency references from body
-# 2. Check if all referenced issues are closed
-# 3. If all resolved, unblock the issue
+# Parse body dependencies; unblock when all are closed
 ```
 
-**A dependency stated only in a comment cannot be read here (#8925's other
-defect)** — this routine reads the BODY only. A role applying `loom:blocked`
-must record the blocker in the body as a **park record**
-(`loom-daemon park-record render`; grammar: `.loom/docs/park-record.md`),
-not as prose in a comment — its rendered `Blocked by: #N`
-line already matches `parse_dependencies` below, so no parser change is
-needed once a role writes one.
+**A dependency stated only in a comment cannot be read here (#8925)** — this
+routine reads the BODY only. Record the blocker as a **park record**
+(`loom-daemon park-record render`; `.loom/docs/park-record.md`); its
+`Blocked by: #N` / `OWNER/REPO#N` line already matches `parse_dependencies`.
 
 ### Dependency Parsing
 
@@ -606,11 +601,11 @@ matched line is captured, not just the first (#4508):
 ```bash
 parse_dependencies() {
   local body="$1"
-  # Two-stage parse (#4508): stage 1 selects whole lines declaring a dependency
-  # (forms above; checkbox is UNCHECKED-only, #7973); stage 2 extracts every #N.
+  # Two-stage parse (#4508): select dependency lines (checkbox UNCHECKED-only,
+  # #7973), then extract every N / OWNER/REPO#N.
   echo "$body" \
-    | grep -E '(Blocked by|Depends on|Requires|\- \[ \])[*_:[:space:]]*#[0-9]+' \
-    | grep -oE '#[0-9]+' | tr -d '#' | sort -u
+    | grep -E '(Blocked by|Depends on|Requires|\- \[ \])[*_:[:space:]]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+' \
+    | grep -oE '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+' | sed 's/^#//' | sort -u
 }
 ```
 
@@ -746,12 +741,13 @@ check_and_unblock() {
     local resolved_deps=""
 
     for dep in $deps; do
-      local state=$(gh issue view "$dep" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+      local dn="${dep##*#}" dr=""; [[ "$dep" == */* ]] && dr="${dep%#*}"  # OWNER/REPO#N: own repo (#10443)
+      local state=$(gh issue view "$dn" ${dr:+--repo "$dr"} --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
       if [ "$state" != "CLOSED" ] && [ "$state" != "MERGED" ]; then
         all_resolved=false
         break
       fi
-      resolved_deps="$resolved_deps #$dep"
+      resolved_deps="$resolved_deps $dr#$dn"
     done
 
     if [ "$all_resolved" = true ]; then

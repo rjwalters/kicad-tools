@@ -493,6 +493,8 @@ log="$(read_log)"
 assert_contains "$log" "issue comment 206" "First citer (prose) notified"
 assert_contains "$log" "issue comment 207" "Second citer (## Dependencies) notified"
 assert_eq "2" "$(grep -c 'comment' <<<"$log")" "Exactly one comment per citer"
+assert_contains "$(read_comment_body 207)" "checklist box is still unticked" \
+    "Second citer's comment names the unticked ## Dependencies box (#9274)"
 assert_no_view "T10"
 
 # T11: an issue cites two blockers; this merge closes one, the other stays

@@ -1357,6 +1357,9 @@ The rest of the identity is shared: `loom.repo`, `loom.issue`, `loom.role`,
 `.sequence` / `.event_id`. An attended run's `loom.repo` is the claim
 checkout's `origin` remote, never the transcript's `cwd`. A payload queued
 before #10116 carries no `launch` and decodes as `daemon`, which is what it was.
+A record already exported before #10116 has no `loom.session.output.launch`
+attribute at all; it too came from the daemon, so a consumer filtering on
+`launch = daemon` should treat an absent attribute as `daemon`.
 The attended tailer refuses to start in a process tree the daemon launched
 (`LOOM_WORK_ORIGIN=autonomous`, `LOOM_SWEEP_ID`), so one run never appears
 under both values.
@@ -1579,8 +1582,11 @@ warm-up only spends the remainder; work over the budget waits, uncounted, for
 the next sample. Only the first events page (100 events) is read. The reads
 run off the collector loop, so a slow forge never stalls it. The first sample after start is a
 baseline, so a restart never replays history. Every host managing a repo
-samples it: sums scale with the host count, means do not. Completed sweeps'
-own phase durations remain the cycle-time rollup's (#8692).
+samples it: sums scale with the host count, means do not. With
+`fleet.captainGauges` configured (W12), only the fleet captain samples a repo
+while its published data is fresh, and a dispatcher samples it again only when
+that data goes stale (see "Fleet gauges produced by the captain" below).
+Completed sweeps' own phase durations remain the cycle-time rollup's (#8692).
 
 Merge-chain re-date pressure (Issue #10163, `observability/ops/redate_chain.rs`).
 These are `Gauge`s over a trailing 24 h window, sampled on the `host.health`
@@ -1629,6 +1635,18 @@ Never an issue number, sha or path.
 | `loom.eta.health.snapshot_rows` | `{row}` | none | rows in the last `eta.snapshot` this process built. Omitted until one was built |
 | `loom.eta.health.snapshot_alternates_rows` | `{row}` | none | of those, rows with non-empty `alternates` (#10390) |
 | `loom.eta.health.pending_over_cap` | `{estimate}` | none | cumulative pending estimates evicted by the `MAX_PENDING` cap since process start (#10496). Omitted before the first ETA pass; a rising value means refreshes are being thinned (redundant middles, then pairs to their earliest). Whole series are evicted only when distinct series alone exceed the cap; the daemon log's `whole series lost` count reports those |
+
+Fleet gauges produced by the captain (W12, `observability/captain_gauges.rs`).
+Gauges on the collector pass, emitted only on a host that is the armed captain
+or a dispatcher with `fleet.captainGauges.standDown`. `task` is the singleton job
+name (`stage-dwell`), the same label key the task-liveness gauges use; never a
+repo or issue. Configuration is in
+[`daemon-reference.md`](daemon-reference.md#fleet-gauges-produced-by-the-captain-w12).
+
+| Metric | Unit | Labels | Meaning |
+|---|---|---|---|
+| `loom.captain.gauge_age_seconds` | `s` | `task` | on the captain, the age of its own last finished pass of the job; on a dispatcher, the age of the captain's published `as_of` as last read. Omitted while unknown. Past `fleet.captainGauges.maxAgeSecs` the captain has stopped producing |
+| `loom.captain.gauge_fallback` | `1` | `task` | dispatchers only: `1` while the captain's data for the job is stale or absent and this host produces it locally, `0` while it stands down |
 
 The dwell names (#8856) are `loom.queue.oldest_wait`, `loom.queue.starved`,
 `loom.queue.starved.by_reason` and `loom.queue.dispatch_wait[.samples]`. They
@@ -1747,18 +1765,20 @@ GitHub rate limit (Issue #10022):
 | `loom.ratelimit.trip` span | instant span, own root trace (derived from `loom.ratelimit.source` + trip instant) | `loom.ratelimit.source` (the tripping job), `loom.ratelimit.cooldown_until` (RFC 3339), `github.ratelimit.core.used`, `.core.own`, `.core.external`, and the same three for `graphql` | one per rate-limit breaker trip; a re-trip while cooling emits nothing. `used` is the trip-time probe's pool-wide count, `own` this host's forge-call ledger for the window, `external` = `used − own`. Each is **omitted** (not 0) when unknown: no `used` in the probe, an untrusted probe reading (#8997), or the ledger sink off |
 | `forge.reader.withdrawn` span | instant span, own root trace (derived from the App, owner, resource and the instant) | `forge.reader.app` (the reader App id), `forge.reader.owner` (lowercased; `-` for an App-wide withdrawal), `forge.reader.resource` (`core`, `graphql`, `search`, `all`, or `app` for an App-wide withdrawal), `forge.reader.until` (RFC 3339), `forge.reader.source` (`header`, `probe` or `default`: where the end came from), `forge.reader.secondary` (`true` for a secondary limit) | one per reader withdrawal (W4-A). A rate limit withdraws only the refused `(owner, resource)` bucket; a secondary limit or a refused credential withdraws that owner's `all`; a mint or key failure, or any failure under `LOOM_READ_ROUTING=legacy`, withdraws the App (`app`). A per-repo coverage withdrawal emits nothing |
 | `forge.reader.spill` span | instant span, own root trace (derived from the repo, resource, home reader, mode and instant) | `forge.spill.owner_repo`, `forge.spill.resource` (`core` / `graphql` / `search`), `forge.spill.from` (home reader App id), `forge.spill.to` (target reader App id, or `home` when none has headroom and on release), `forge.spill.mode` (`partial` / `full` / `off`), `forge.spill.until` (RFC 3339 release instant) | one per read-pool spill-latch transition (W4-B, [daemon-reference](daemon-reference.md) `forge.readPool.routing`): engaged when the home bucket is projected at or above `spillProjectedPct` / `spillFullPct` or is withdrawn, released at the home bucket's reset; one more when a held latch re-picks a target that was withdrawn, went stale or reached `spillFullPct` (current mode, new `to`). A few per repo per day is normal; a steady stream means the pool is short of readers |
-| `github.ratelimit.remaining` | `Gauge` | `{request}`; labels `resource`, `account` | requests left in the pool, from a `gh api rate_limit` probe every 60 s (falling back to the breaker's last trip-time reading when the probe fails, only while that reading's reset windows are still open). An unresolvable `account` stays `unknown` and is retried at most every 20 min, never while the breaker is suppressing |
-| `github.ratelimit.used` | `Gauge` | `{request}`; labels `resource`, `account` | requests spent this window; absent when the response carried no `used` |
-| `github.ratelimit.reset` | `Gauge` | `s` (Unix epoch seconds); labels `resource`, `account` | when the pool's window resets |
+| `invoke github` span | one per `gh` facade execution; child of the caller's span (or `LOOM_TRACEPARENT`), else its own root (derived per [`trace-identity.md`](trace-identity.md)) | process truth: `github.operation`, `github.access_intent`, `github.target`, `github.outcome` (`ok`, `exit_nonzero`, `signaled`, `timeout`, `spawn_failed`, `collect_failed`, `routing_refused`, `routing_blocked`, `adapter_unavailable`), `github.exit_code`, `github.invocation`, `github.launcher`, `github.api`, `context_source`. What GitHub billed (#10343): `github.http.status` (`200`, `304`, `403`, … or `unknown`), `github.http.not_modified` (`true`/`false`, `unknown` without a status), `github.http.requests` (pages of a `--paginate --include` call, `1` for one `--include` block, `2` for `run download`, `0` when nothing was sent, else `unknown`), `github.http.source` (`headers`, `stderr`, `none`), `github.billing` (`ok`, `not_modified`, `rate_limited`, `error`, `not_sent`), and the bucket join keys `github.resource`, `github.account`, `github.cred_owner` (`-` when not an App installation), `github.role` (`reader`, `writer`, `writer-fallback`) | one per execution (a reader-routed read retried on the writer is two). The status comes from the `--include` status line, else `gh`'s `(HTTP NNN)` / `HTTP NNN:` stderr marker, else it is `unknown` — never guessed; a passthrough run is always `unknown`. A `304` is `github.billing=not_modified` while `github.outcome=exit_nonzero` (gh exits non-zero on it) |
+| `github.ratelimit.remaining` | `Gauge` | `{request}`; labels `resource`, `account`, `owner`, `role` | requests left in one bucket. On an App host every point is a bucket-book reading (below); the 60 s `gh api rate_limit` probe is booked there as the `(writer account, workspace owner, resource)` bucket (`role=writer`), never exported bare. On an ambient-login host the probe (falling back to the breaker's last trip-time reading while its reset windows are still open) is exported with `owner="-"`, `role="ambient"`; an unresolvable `account` stays `unknown` and is retried at most every 20 min, never while the breaker is suppressing |
+| `github.ratelimit.used` | `Gauge` | `{request}`; labels `resource`, `account`, `owner`, `role` | requests spent this window; absent when the response carried no `used`. Monotone only within one window (`github.ratelimit.reset`): several hosts export one bucket with readings of different ages, and a label set can carry two interleaved windows (#10571), so GitHub's bill is each window's high-water mark (`github-shadow.sql`), never Σ of drops-as-resets |
+| `github.ratelimit.reset` | `Gauge` | `s` (Unix epoch seconds); labels `resource`, `account`, `owner`, `role` | when the bucket's window resets |
 | `github.ratelimit.breaker_skips` | delta `Sum` | `{pass}`; label `reason` | job passes skipped because the breaker was suppressing, flushed on the 60 s tick |
-| `github.ratelimit.{remaining,used,reset}` per bucket | `Gauge` | as above; labels `resource`, `account`, `owner` | one series per believed reading of the forge bucket book (W1): every App installation's pool this host spends, keyed `(account, owner, resource)`. Fed by the free `x-ratelimit-*` headers of `gh api --include` calls and by one free `gh api rate_limit` probe per published credential directory after each 5-minute reader-refresh pass. A reading counts only while its window is open and it is under 10 minutes old. The account-only points above are unchanged |
+| `github.ratelimit.{remaining,used,reset}` per bucket | `Gauge` | as above | one series per believed reading of the forge bucket book (W1), exported once per 60 s tick after the probe: every App installation's pool this host spends, keyed `(account, owner, resource)`; `role` is `writer` for the workspace's writer App, else `reader`. Fed by the free `x-ratelimit-*` headers of `gh api --include` calls, by one free `gh api rate_limit` probe per published credential directory after each 5-minute reader-refresh pass, and by the 60 s probe (#10343). A reading counts only while its window is open and it is under 10 minutes old. Since #10343 no `github.ratelimit.*` point leaves without `owner`; one label set is not yet guaranteed to be one bucket (#10571) |
 | `loom.forge.calls` | delta `Sum` | `{request}`; labels `caller`, `op`, `role`, `account`, `cred_owner`, `target_owner`, `resource`, `outcome` | requests the `gh` facade sent since the previous point (W1), flushed on the 60 s tick. A `--paginate --include` call counts its pages; `run download` counts 2. The free `gh api rate_limit` probe is counted under `resource` = `other` (a request observation, never a charge). `outcome` ∈ `ok`, `not_modified`, `rate_limited`, `error`, `shed` (reserved for a budget gate). Past 2048 distinct label sets between flushes, a new set is folded into one series per `outcome` with every other label `overflow`, so totals are kept and the point count stays bounded. Accumulated only while an ops sink is registered |
 | `loom.forge.facade.events` | delta `Sum` | `{event}`; label `reason` = the counter name | named `gh`-facade events that are not forge calls, since the previous point, flushed on the same tick: `facade.cwd_route.disagree` (a checkout whose local sources name different repositories, so its untargeted reads stay on the writer — counted once per call, whether W1's accounting or W4-C's derivation saw it), `repo_facts.redirected`, `repo_facts.resolver_disagree`. Only counters that moved emit a point. Exported only while an ops sink is registered |
 
-`resource` ∈ `core`, `graphql`. `account` is `app-<app id>` when the daemon
-runs on its GitHub App credential, the validated `gh` login for an ambient
-credential, else `unknown` — never a token, token hash or path. On the
-per-bucket points and `loom.forge.calls`, `account` is `app-<app id>`,
+`resource` ∈ `core`, `graphql` (`search` too on a bucket point). On an
+ambient-login host's points `account` is the validated `gh` login, else
+`unknown`, with `owner="-"` and `role="ambient"` — never a token, token hash
+or path. On the per-bucket points, `loom.forge.calls` and the `invoke github`
+span's `github.account`, `account` is `app-<app id>`,
 `app-unknown` (the writer's id is not configured), `env-token` (a
 `GH_TOKEN`/`GITHUB_TOKEN` reached `gh`) or `ambient`, and `owner` /
 `cred_owner` is the GitHub owner the App installation covers, lowercased.
@@ -2191,8 +2211,9 @@ Each row:
 **`alternates[]` (#10390)** is additive: `schema_version` stays 12 and older
 readers ignore it. One entry per registered non-current heuristic of the row's
 kind that has a pending estimate for the item — the newest per heuristic
-(matched by item, never by equal `as_of`), sorted by `heuristic`, at most 8
-(loom-ui slices at 8). Built only from estimates the tracker already holds; an
+(matched by item, never by equal `as_of`), sorted by `heuristic`, at most 12
+(#10549, was 8; a loom-ui that still slices at 8 reads the first 8, so
+either deploy order is safe). Built only from estimates the tracker already holds; an
 alternate never creates a row, and a row cut by the 200-row cap takes its
 alternates with it. A change to a shadow estimate alone triggers a new
 snapshot. Each alternate:
@@ -2219,7 +2240,10 @@ daemon-derived id.
 
 One OTLP-only log record per role tick and per work-finder tick (Issue #10212):
 the ranked candidate list (capped at 50, with `candidates_total`), the items
-acted on, and a closed-set reason code per skipped candidate. Empty ticks still
+acted on, and a closed-set reason code per skipped candidate. Role ticks record
+the queue the agent actually consumed (`pr-queue`, or Curator's listings) and
+the writes it issued, via a per-tick pick journal (#10432); `candidate_source`
+and `decisions_observed` say what was seen. Empty ticks still
 emit, so per-host service cadence is measurable. Full field reference, the
 SigNoz rank-at-instant query and the rows/day volume:
 [`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).

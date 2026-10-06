@@ -127,7 +127,7 @@ contract-tested against the collector allowlist by
 | `loom.session.output.redaction` | Producer redaction policy that produced the body. |
 | `loom.session.output.producer_lag_ms` | `observed_at - source_at` for this one record. |
 | `loom.session.output.lag_p50_ms` / `.lag_p95_ms` / `.lag_max_ms` / `.lag_samples` / `.lag_historical_excluded` | Run-level producer-lag distribution. **Status records only.** See [Latency](#latency). |
-| `loom.session.output.launch` | `daemon` · `attended`: who started the agent. Present on every record; a payload queued before #10116 decodes as `daemon`. See [Attended runs](#attended-runs-10116). |
+| `loom.session.output.launch` | `daemon` · `attended`: who started the agent. Present on every record; a payload queued before #10116 decodes as `daemon`. A record already exported before #10116 has no `launch` attribute at all, so a consumer filtering on `launch = daemon` should treat an absent attribute as `daemon`. See [Attended runs](#attended-runs-10116). |
 
 ### Ordering and de-duplication
 
@@ -475,6 +475,15 @@ as a `backlog_skipped` gap, exactly as the daemon does.
 **How it ends.** With a `coverage = ended` record, at the first of:
 
 - the end of its lines (above);
+- for a foreground subagent, its parent recording its result: the
+  `tool_result` for the `toolUseId` in the subagent's `.meta.json` appears in
+  the parent's transcript, written after the tailer attached (#10125). The
+  watched pid is the operator's session, which outlives the subagent, so
+  without this a finished subagent's run stayed open until the idle limit.
+  Measured on 377 foreground subagents, the parent writes the result 0.04 s
+  (median) to 0.17 s (max) after the subagent's last line. A background
+  subagent's result is written at launch, so only `requestShape = foreground`
+  is watched;
 - the watched session process (`--watch-pid`, `lease ensure`'s own) exiting;
 - 30 minutes with no change to the transcript;
 - 4 hours, the lease renewer's cap.
@@ -482,7 +491,12 @@ as a `backlog_skipped` gap, exactly as the daemon does.
 The tailer then lets go of the transcript, so a newer claim can take it over
 at once. It drains for at most 5 s and removes its queue, lock and claim
 files. Queue files are per tailer process. A tailer also removes any queue
-files that an earlier, dead tailer of the same transcript left behind. A tail it could not deliver is dropped with its queue: a tailer has no
+files that an earlier, dead tailer of the same transcript left behind, and
+every configured start sweeps the state directory for a killed tailer's
+leftovers: lock files whose `flock` is free, queue files whose tailer process
+is gone, and claim files older than 4 hours whose lock is free. A held lock
+is never removed. A start whose spawn fails removes the lock it probed (#10125).
+A tail it could not deliver is dropped with its queue: a tailer has no
 next boot to drain it on. After a run ends at the agent's next task, coverage
 resumes only when the agent runs a claim step again.
 
@@ -500,7 +514,11 @@ resumes only when the agent runs a claim step again.
 | `loom.session_kind` | `sweep` (the run names an issue) |
 
 **When it does nothing.** Each of these is a silent no-op with one stderr
-line naming the reason, and the session carries on unchanged:
+line naming the reason, and the session carries on unchanged. `worktree.sh`
+discards that stderr, so every start outcome, including a successful one, is
+also written to `<repo>/.loom/logs/live-output-attended/last-start.log` as
+`<UTC time> <the same line>`, replacing the previous start's (#10125). Read
+it when an issue's log panel stays empty:
 
 - the agent was launched by the daemon (`LOOM_WORK_ORIGIN=autonomous`,
   `LOOM_SWEEP_ID`, or a GitHub Actions run), whose own producer covers it;

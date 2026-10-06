@@ -145,6 +145,7 @@ versions, counts and remedies only. Token-shaped strings are redacted.
 | `resync-installed.sh` | `doctor` | prints the findings after the sync completes; exits with the doctor's code (non-zero only under `required`, or 2 on an unconfigured host declared managed); `--dry-run` never runs it and never fails; a daemon without `forge egress` warns |
 | `/loom:sweep` pre-wave hygiene | `assert` | advisory text in the summary |
 | `PreToolUse` Bash hook (`guard-loom-workflow.sh`, also under Codex via `guard-codex-bridge.sh`) | `guard --for-command` | denies the typed bypass naming `routing.denied-by-guard`, plain `gh …` and the policy origin; opt-out `guards.forgeEgress=false` (#9989) |
+| `--disallowedTools` (`loom-daemon role-tool-policy deny-specs`, every role) | `guard::enforced` | appends the same bypass classes as command-anchored deny specs, so the deny holds in `bypassPermissions` runs where hooks do not fire; absent with no or an `observe` policy; the trusted `launcherPath` is never denied; `guards.forgeEgress` does not apply (#9989) |
 
 `enforcement.api = observe` logs the same findings and proceeds. An unreadable
 policy, or one with an unknown `schemaVersion`, is never treated as observe-only.

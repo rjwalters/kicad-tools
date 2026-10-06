@@ -21,9 +21,14 @@
 # a label that outlives its cause removes an issue from every queue
 # indefinitely (three issues suppressed ~11 months in the incident that filed
 # #8927). It reuses dep-recheck-fingerprint.sh's reference extraction rather
-# than adding a second parser, and reports two categories to stderr: a STALE
-# BLOCK (the cited blocker has closed/merged) and an UNDOCUMENTED BLOCK (no
-# parseable blocker reference anywhere in the body or comments).
+# than adding a second parser, and reports to stderr: a STALE BLOCK (a cited
+# blocker has merged, or an issue closed; a PR closed WITHOUT merging is NOT
+# satisfied, and a checklist is stale only when every box is ticked), a
+# CHECKLIST REFS RESOLVED, BOXES UNTICKED section (never folded into stale), and
+# an UNDOCUMENTED BLOCK (no parseable blocker reference). Parse scope (#9274):
+# `## Dependencies` checklists and park records are read from the issue BODY
+# ONLY; prose phrases (`Blocked by #N`, ...) from the body and non-fleet
+# comments. A linked closing PR is not a blocker reference.
 #
 # Usage:
 #   ./.loom/scripts/check-stale-blocked.sh           # print warning (or nothing) and exit 0

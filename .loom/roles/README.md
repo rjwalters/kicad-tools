@@ -95,6 +95,10 @@ than re-deriving the answer, and the two runtimes cannot disagree about the same
 role file. No role shipped in `defaults/roles/` declares a `toolPolicy` yet; the
 spawn-side wiring that enforces one lands with #8256.
 
+`deny-specs` also appends the forge-egress bypass specs (#9989) for **every**
+role, whatever its allowlist, when a resolved forge egress policy enforces the
+API route — see `defaults/docs/forge-egress.md`. With no policy it adds nothing.
+
 ```json
 { "toolPolicy": { "allowedCapabilities": [] } }               // reaches none
 { "toolPolicy": { "allowedCapabilities": ["cloud-cli"] } }    // reaches only that one

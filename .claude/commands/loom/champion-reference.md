@@ -677,9 +677,8 @@ EXISTING=$(gh issue list --search "Follow-on from PR #$PR_NUMBER" --limit 500)
 - Check for webhook delays in GitHub's processing
 
 **Issue not auto-closing after merge**
-- Verify PR body uses correct format: "Closes #123" (not "closes issue #123")
-- Check if issue is in the same repository
-- Manual close may be needed for cross-repo references
+- Verify PR body format: "Closes #123" (not "closes issue #123")
+- Cross-repo references may need a manual close
 
 **Blocked issues not unblocking**
 - Verify dependency format: "Blocked by #123" or "Depends on #123" — markdown
@@ -689,15 +688,15 @@ EXISTING=$(gh issue list --search "Follow-on from PR #$PR_NUMBER" --limit 500)
 - Manual unblock may be needed for complex dependency patterns
 
 **Worktree checkout errors**
-- These are expected when running from a worktree
-- Champion verifies merge via API, not exit code
-- No action needed - merge still succeeds
+- Expected from a worktree; Champion verifies the merge via API, not exit
+  code — no action needed, the merge still succeeds
 
 ### Debugging Commands
 
 ```bash
-# Check PR merge status
-gh pr view <number> --json state,mergeable,statusCheckRollup
+# PR merge + CI status
+gh pr view <number> --json state,mergeable
+loom-daemon forge wait-checks <number> --timeout 20
 
 # View linked issues (uses GitHub's authoritative parser; `Updates #N` is excluded)
 gh pr view <number> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'

@@ -58,10 +58,23 @@ a failing dequeue, can still merge. The test
 a forge-side mechanism that closes the window or an explicit operator decision
 to accept it; neither is in scope here.
 
-## Not in this slice
+## Phase B2 (#10256): lifecycle, delivered dormant
 
-Wiring into Champion (`champion-pr-merge.md`), queue-drop reconciliation with
-verified removal reasons, confirmed-merge gating of issue close and cleanup,
-deduplicated telemetry, a durable `GrantStore`, and the `merge_group` check
-workflow. Production enablement also needs Phase C qualification
-(`merge-queue-ci.md`).
+`forge_merge_queue::lifecycle` adds, behind fake-forge tests: a guarded
+`handoff` (all gates then enqueue; refused in direct mode), `reconcile_pr`
+(confirms GitHub-reported merge, routes drops by verified reason, reports an
+unknown reason as unknown), revocation-then-dequeue before Loom-owned
+stale-verdict transitions (`forge disable-auto-merge`, claim-reconciliation
+disarm), a daemon-tick sweep, a comment-backed `GrantStore`, a refusal of the
+direct re-date remedy in queue mode, and deduplicated enqueue/removed/merged
+telemetry. Direct mode makes no forge call from any of these. Issue closure
+stays GitHub's `Closes #N` on the confirmed merge; worktree cleanup stays the
+reaper's merged-PR pass.
+
+## Still not done
+
+Champion prompt (`champion-pr-merge.md`) and `merge-pr.sh` do not call the
+handoff yet; the grant store is comment-backed, not durable; no `merge_group`
+check workflow; the post-check-pass revocation window above is still open, so
+`INVARIANT_FULLY_DEMONSTRATED` and `QUEUE_EXECUTION_ENABLED` stay `false`.
+Production enablement also needs Phase C qualification (`merge-queue-ci.md`).

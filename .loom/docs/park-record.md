@@ -64,6 +64,15 @@ reference) — the one-line-per-blocker rule binds the *writer*, not the parser.
 
 ## Who writes one, and when — `park-record apply` (#10152)
 
+**Cross-repo blockers (#10443).** A blocker in another repository is written
+`OWNER/REPO#N` (`Blocked by: example-org/tool-repo#202`). `--blocked-by` accepts `N`,
+`#N` (this repo) and `OWNER/REPO#N`, mixed and comma-separated; still one record
+per blocker. A qualified reference is **never** resolved against the local repo:
+`check-stale-blocked` reads its state in its own repo, `apply` refuses a closed
+one by looking it up there, and it is a self-block only when it names this very
+repo and number. `#9` and `o/r#9` are two distinct blockers. Records written
+with a bare number parse exactly as before (`repo` is `None`).
+
 **Every** role applying `loom:blocked` writes one, through one command — never
 a bare label edit:
 
@@ -101,6 +110,35 @@ loom-daemon park-record render --blocked-by 8322 --by doctor \
   --reason "needs an architecture ruling"
 # <!-- loom:park Blocked by: #8322 by=doctor at=2026-09-19T18:04:11Z reason="needs an architecture ruling" -->
 ```
+
+### The daemon's own holds (#10161)
+
+Two `loom:blocked` writers live inside `loom-daemon`, not in a role prompt: the
+insta-crash quarantine (#3939) and the PR-less retry hold (#7972/#9239). Each
+writes a reason-only record **before** its label edit:
+
+```text
+<!-- loom:park Blocked by: (unstated) by=daemon at=2026-10-06T12:00:00Z reason="insta-crash quarantine" -->
+<!-- loom:park Blocked by: (unstated) by=daemon at=2026-10-06T12:00:00Z reason="pr-less hold" -->
+```
+
+`loom_daemon::sweep_registry::park_hold` owns the format: `DAEMON_HOLD_BY`,
+`QUARANTINE_HOLD_REASON`, `PRLESS_HOLD_REASON`, and `is_daemon_hold(&record)`.
+A reader that needs to tell a deliberate daemon hold from an undocumented park
+should key on `is_daemon_hold`, not on comment prose.
+
+These writers differ from `apply` in two documented ways:
+
+- **A refused body write still applies the label.** For the PR-less hold, the
+  label is the deliverable (#9239), and an unparked re-claim loop costs more
+  than a park without a name. The fallback is logged at `warn`. A body read or
+  write that **times out** stops the writer before its label edit, so a wedged
+  `gh` costs one timeout on the `reap_once` read path (#3973).
+- **Re-applying a hold replaces that hold's earlier record**, so `at=` dates
+  the current park. Releases (`quarantine clear`, the TTL, reconciliation, a
+  hand flip back to `loom:issue`) change only labels and leave the record in
+  the body. Readers key on `loom:blocked` first, so a leftover record on an
+  unblocked issue declares nothing.
 
 ## Who reads one
 
@@ -178,15 +216,16 @@ check_and_unblock_prs() {
 
     for dep in $deps; do
       # A declared blocker can itself be an issue or a PR — try both reads.
+      local dn="${dep##*#}" dr=""; [[ "$dep" == */* ]] && dr="${dep%#*}"  # OWNER/REPO#N: own repo (#10443)
       local state
-      state=$(gh issue view "$dep" --json state --jq '.state' 2>/dev/null) \
-        || state=$(gh pr view "$dep" --json state --jq '.state' 2>/dev/null) \
+      state=$(gh issue view "$dn" ${dr:+--repo "$dr"} --json state --jq '.state' 2>/dev/null) \
+        || state=$(gh pr view "$dn" ${dr:+--repo "$dr"} --json state --jq '.state' 2>/dev/null) \
         || state="UNKNOWN"
       if [ "$state" != "CLOSED" ] && [ "$state" != "MERGED" ]; then
         all_resolved=false
         break
       fi
-      resolved_deps="$resolved_deps #$dep"
+      resolved_deps="$resolved_deps $dr#$dn"
     done
 
     if [ "$all_resolved" = true ]; then
