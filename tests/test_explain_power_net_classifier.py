@@ -30,6 +30,8 @@ BOARD_03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_
 # The five names from the issue: signals that merely *contain* "+" or a
 # voltage fragment, and a KiCad auto-named no-connect net.
 NOT_POWER = [
+    # Rail-ish names carrying a derived-signal qualifier, and the Kelvin
+    # sense pair the old "VIN" substring matched inside "KELVIN".
     "VIN_SENSE",
     "VOUT_DET",
     "3V3_PG",
@@ -53,20 +55,55 @@ POWER_RAILS = [
     "+1V8",
     "VCC",
     "VDD_CORE",
-    # Voltage token plus qualifier, P-/V-prefixed voltages, aliases (review of #5971)
+    # Leading voltage token plus a qualifier (PR #5971 review)
     "3V3_MCU",
     "5V_USB",
     "12V_IN",
     "3V3_LDO",
+    # P-/V-prefixed voltages (Intel/server style)
     "P3V3",
     "P5V",
     "P12V",
     "V3V3",
     "V5V0",
+    "V3P3",
+    # Named rails, including the old FOM hint VAA and the VBUS alias VUSB
     "VAA",
     "VUSB",
-    "VOUT_PRE",
+    "VIN",
+    "VIN_12V",
     "VIN_FILT",
+    "VBAT",
+    "VSYS",
+    "VCC_3V3",
+    "VDD_1V8",
+    "VDDA",
+    "AVDD",
+    "+12V",
+    "+3.3V",
+    # Board 09's buck output and power-path rails
+    "VOUT_PRE",
+    "VBUS_FUSED",
+    "VBUS_RAW",
+]
+
+# More signals next to rail-ish words: a derived-signal qualifier
+# (SENSE/DET/EN/FB/PG ...), a voltage fragment that does not lead the name,
+# a P/V prefix with no voltage, or a regulator compensation pin.
+NOT_RAILS = [
+    "PV_EN",
+    "PWR_LED",
+    "POWER_GOOD",
+    "VBUS_SENSE",
+    "VOUT_FB",
+    "VIN_EN2",
+    "VBUS_OVP",
+    "3V3_EN",
+    "5V_PG",
+    "VREF",
+    "VCAP1",
+    "VREG_1V2",
+    "Net-(U1-VDD)",
 ]
 
 
@@ -81,6 +118,12 @@ def test_signal_names_are_not_power(name: str) -> None:
 def test_real_rails_are_power(name: str) -> None:
     assert is_power_net(name)
     assert is_supply_net(name)
+
+
+@pytest.mark.parametrize("name", NOT_RAILS)
+def test_rail_adjacent_signal_names_are_not_power(name: str) -> None:
+    assert not is_power_rail_name(name)
+    assert not is_power_net(name)
 
 
 @pytest.mark.parametrize("name", ["GND", "/GND", "AGND", "GNDA", "SHIELD_GND", "VSS"])
@@ -191,3 +234,65 @@ def test_board03_has_no_findings_on_usb_data_nets() -> None:
             assert not any(net in m.explanation for net in usb_data), m
 
     assert not [m for m in mistakes if m.category == MistakeCategory.DECOUPLING]
+
+
+# ---------------------------------------------------------------------------
+# Fleet regressions (PR #5971 review)
+# ---------------------------------------------------------------------------
+
+BOARD_05 = REPO_ROOT / "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+BOARD_07 = REPO_ROOT / "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
+BOARD_09 = REPO_ROOT / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
+
+
+def _power_trace_nets(mistakes: list) -> set[str]:
+    nets = set()
+    for m in mistakes:
+        if m.category == MistakeCategory.POWER_TRACE:
+            nets.add(m.explanation.split("Power trace on ", 1)[1].split(" ", 1)[0])
+    return nets
+
+
+@pytest.mark.skipif(not BOARD_09.exists(), reason="board 09 output not present")
+def test_board09_buck_output_keeps_its_trace_width_warning() -> None:
+    """VOUT_PRE (L1 -> C8/C9 22u -> shunt) is a rail; KELVIN_P/N are not."""
+    mistakes = detect_mistakes(PCB.load(str(BOARD_09)))
+    nets = _power_trace_nets(mistakes)
+    assert {"VOUT_PRE", "VBUS_RAW"} <= nets
+    assert not {"KELVIN_P", "KELVIN_N", "VBUS_SENSE"} & nets
+    # Q1 (P-MOSFET on VBUS_FUSED) is not an IC that needs decoupling.
+    assert not [m for m in mistakes if m.category == MistakeCategory.DECOUPLING]
+
+
+@pytest.mark.parametrize("board", [BOARD_05, BOARD_07], ids=["board05", "board07"])
+def test_decoupled_regulator_pins_are_not_missing_decoupling(board: Path) -> None:
+    """Board 05 V3P3 has C6 470nF and board 07 VCAP1/2 have 2.2uF caps.
+
+    Neither value is in ``is_bypass_cap``'s fixed list, so the decoupling
+    check must recognise them by parsed capacitance.
+    """
+    if not board.exists():
+        pytest.skip("board output not present")
+    mistakes = detect_mistakes(PCB.load(str(board)))
+    assert not [m for m in mistakes if m.category == MistakeCategory.DECOUPLING]
+
+
+@pytest.mark.parametrize(
+    ("value", "counts"),
+    [
+        ("100nF", True),
+        ("470nF", True),
+        ("2.2uF", True),
+        ("22u 25V", True),
+        ("4u7", True),
+        ("10nF", True),
+        ("75p C0G", False),
+        ("22pF", False),
+        ("DNP", False),
+    ],
+)
+def test_decoupling_cap_value_threshold(value: str, counts: bool) -> None:
+    from kicad_tools.explain.checks.decoupling import _is_decoupling_cap
+
+    assert _is_decoupling_cap("C1", value) is counts
+    assert not _is_decoupling_cap("R1", value)

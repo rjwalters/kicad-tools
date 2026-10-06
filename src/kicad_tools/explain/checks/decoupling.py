@@ -9,6 +9,7 @@ Konnect's ``audit_decoupling`` (issue #4899, item 4 of #4880's ideas audit).
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from ..mistakes import (
@@ -27,9 +28,55 @@ if TYPE_CHECKING:
 # passive/connector. Mirrors the reference-prefix exclusions used elsewhere
 # in this module (R/C/L/D/Y/X are passives; J/SW/TP/FB are connectors,
 # switches, test points, and ferrite beads -- none of these need bypass
-# capacitors decoupling their own supply pin).
+# capacitors decoupling their own supply pin). Q is a discrete transistor:
+# an 8-pad SO-8 power MOSFET sitting on a rail is not an IC supply pin.
 _MIN_IC_PADS = 4
-_NON_IC_REFERENCE_PREFIXES = ("R", "C", "L", "D", "Y", "X", "J", "SW", "TP", "FB", "MH", "FID")
+_NON_IC_REFERENCE_PREFIXES = (
+    "R",
+    "C",
+    "L",
+    "D",
+    "Y",
+    "X",
+    "J",
+    "Q",
+    "SW",
+    "TP",
+    "FB",
+    "MH",
+    "FID",
+)
+
+# "Is there *any* decoupling on this rail?" accepts any capacitor of at least
+# this value, not just :func:`is_bypass_cap`'s fixed value list (which misses
+# 470nF, 2.2uF, 22uF ...). 10nF keeps load/compensation caps (22pF, 75pF C0G)
+# from counting.
+_MIN_DECOUPLING_FARADS = 10e-9
+_CAP_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([pnuµμm])?(\d*)", re.IGNORECASE)
+_CAP_MULTIPLIERS = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3}
+
+
+def _capacitance_farads(value: str) -> float | None:
+    """Parse ``100nF``, ``2.2uF``, ``4u7``, ``22u 25V`` to farads (None if unparseable)."""
+    match = _CAP_VALUE_RE.match(value or "")
+    if not match or not match.group(2):
+        return None
+    number = match.group(1)
+    if match.group(3):  # RKM notation: 4u7 -> 4.7u
+        if "." in number:
+            return None
+        number = f"{number}.{match.group(3)}"
+    return float(number) * _CAP_MULTIPLIERS[match.group(2).lower()]
+
+
+def _is_decoupling_cap(reference: str, value: str) -> bool:
+    """A capacitor big enough to count as *some* decoupling on a rail."""
+    if is_bypass_cap(reference, value):
+        return True
+    if not reference.upper().startswith("C"):
+        return False
+    farads = _capacitance_farads(value)
+    return farads is not None and farads >= _MIN_DECOUPLING_FARADS
 
 
 class MissingDecouplingCapCheck:
@@ -120,7 +167,7 @@ class MissingDecouplingCapCheck:
         """Return supply nets with a two-terminal bypass cap to ground."""
         nets: set[str] = set()
         for fp in pcb.footprints:
-            if not is_bypass_cap(fp.reference, fp.value):
+            if not _is_decoupling_cap(fp.reference, fp.value):
                 continue
             if len(fp.pads) != 2:
                 continue

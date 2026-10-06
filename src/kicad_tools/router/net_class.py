@@ -211,13 +211,23 @@ NET_CLASS_PATTERNS: dict[NetClass, list[str]] = {
 # * the hierarchical sheet path is stripped first (``/+5V`` -> ``+5V``);
 # * KiCad's auto-generated ``unconnected-(...)`` and ``Net-(...)`` names are
 #   never rails, whatever pin names they embed;
-# * a voltage token must be the *whole* name (``+3V3``, ``3.3V``, ``-12V``)
-#   or the name must lead with ``+`` (``+BATT``, ``+5V_USB``); a voltage
-#   fragment inside a signal name (``PG_3V3``, ``TRIGGER_5V``) is not a rail;
-# * rail keywords match as a leading word (``VDD_CORE``, ``VCCIO``) for the
-#   VCC/VDD families, as the whole name for the rest (``VBUS``, ``VIN`` --
-#   but not ``VBUS_DET``/``VIN_SENSE``), or as a trailing word
-#   (``SENSOR_VDD``, ``USB_VBUS``).
+# * a voltage token must *lead* the name (``+3V3``, ``3.3V``, ``3V3_MCU``,
+#   ``12V_IN``), optionally behind a ``P``/``V`` prefix (``P3V3``, ``V5V0``,
+#   ``V3P3``), or the name must lead with ``+`` (``+BATT``, ``+5V_USB``); a
+#   voltage fragment inside a signal name (``PG_3V3``, ``TRIGGER_5V``) is
+#   not a rail;
+# * rail keywords match as a leading word -- ``VDD_CORE``, ``VCCIO``,
+#   ``VBUS_FUSED``, ``VOUT_PRE`` -- or as a trailing word (``SENSOR_VDD``,
+#   ``USB_VBUS``);  ``PWR``/``POWER`` only as the whole name, because
+#   ``PWR_LED``/``POWER_GOOD`` are signals;
+# * a qualifier word that names a *signal derived from* a rail -- ``_SENSE``,
+#   ``_DET``, ``_EN``, ``_FB``, ``_PG`` ... (:data:`_SIGNAL_QUALIFIERS`) --
+#   makes the name a signal: ``VBUS_DET``, ``VIN_SENSE``, ``3V3_EN``.
+#   ``+``-led names are exempt (``+`` is KiCad's power-symbol convention).
+#
+# Regulator compensation pins (``VCAP1``, ``VREG_1V2``, ``UCAP``) are
+# deliberately *not* rails: they carry no load current, and counting them
+# made the decoupling/trace-width checks fire on STM32 ``VCAP`` nets.
 #
 # Callers that have real evidence -- a pad/pin of electrical type
 # ``power_in``/``power_out`` (see :data:`POWER_PIN_TYPES`) or a power symbol
@@ -229,49 +239,55 @@ POWER_PIN_TYPES: frozenset[str] = frozenset({"power_in", "power_out"})
 _AUTO_NET_NAME_RE = re.compile(r"^(unconnected|net)-\(", re.IGNORECASE)
 
 _VOLTAGE = r"[+-]?\d+(?:\.\d+)?V\d*"
+# Unsigned voltage token for the P-/V-prefixed forms: 3V3, 5V0, 12V, 3P3.
+_PREFIXED_VOLTAGE = r"\d+(?:(?:\.\d+)?V\d*|P\d+)"
+# Zero or more ``_WORD`` qualifiers: 3V3_MCU, VDD_CORE, VOUT_PRE.
+_QUALIFIERS = r"(?:_[A-Z0-9.]+)*"
+
+#: Qualifier words that turn a rail-ish name into a *signal* derived from
+#: the rail: ``VBUS_DET``, ``VIN_SENSE``, ``3V3_EN``, ``VOUT_FB``.
+_SIGNAL_QUALIFIERS: frozenset[str] = frozenset(
+    {
+        "SENSE", "SNS", "SEN", "DET", "DETECT", "EN", "ENA", "ENABLE",
+        "FB", "PG", "PGOOD", "GOOD", "POK", "OK", "FAULT", "FLT", "ALERT",
+        "MON", "ADC", "DIV", "CTRL", "CTL", "SET", "ADJ", "ON", "OFF",
+        "REF", "IRQ", "INT", "SEL", "KELVIN", "OVP", "UVP", "OCP",
+        "STATUS", "STAT",
+    }
+)  # fmt: skip
 
 _POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        # Bare voltage: +3V3, 3.3V, +5V, -12V, +1V8, 3V3A, +5VD
-        rf"^{_VOLTAGE}[ADPS]?$",
+        # Leading voltage token, optionally qualified: +3V3, 3.3V, -12V,
+        # +1V8, 3V3A, +5VD, 3V3_MCU, 5V_USB, 12V_IN
+        rf"^{_VOLTAGE}[ADPS]?{_QUALIFIERS}$",
+        # P-/V-prefixed voltage: P3V3, P5V, P12V, V3V3, V5V0, V3P3, V1P8
+        rf"^[PV]{_PREFIXED_VOLTAGE}[ADPS]?{_QUALIFIERS}$",
         # Leading '+' is KiCad's power-symbol convention: +BATT, +5V_USB
         r"^\+[A-Z0-9][A-Z0-9_.]*$",
         # VCC / VDD families as a leading word: VCC, VCCIO, VDDA, VDD_CORE,
         # AVDD, DVDD, PVDD, IOVDD, AVCC, VEE
-        r"^(?:A|D|P|IO)?V(?:CC|DD|EE)[A-Z0-9]*(?:_[A-Z0-9.]+)*$",
-        # Named rails, whole name (optionally numbered or voltage-suffixed):
-        # VBUS, VBAT, VSYS, VIN, VOUT, VBUS1, VIN_5V, PWR, POWER
-        r"^(?:VBUS|VBAT|VBATT|VSYS|VIN|VOUT|VMAIN|VCORE|VIO|VCAP|VSUPPLY|"
-        rf"VMOT|VMOTOR|VPWR|VDRIVE|VM|PWR|POWER)\d*(?:_{_VOLTAGE})?$",
+        rf"^(?:A|D|P|IO)?V(?:CC|DD|EE)[A-Z0-9]*{_QUALIFIERS}$",
+        # Named rails as the leading word (optionally numbered/qualified):
+        # VBUS, VBUS_FUSED, VBAT, VSYS, VIN, VIN_12V, VOUT, VOUT_PRE, VAA, VUSB
+        r"^(?:VBUS|VBAT|VBATT|VSYS|VIN|VOUT|VMAIN|VCORE|VIO|VSUPPLY|VMOT|"
+        rf"VMOTOR|VPWR|VDRIVE|VM|VAA|VUSB)\d*{_QUALIFIERS}$",
+        # PWR / POWER only as the whole name: PWR_LED / POWER_GOOD are signals
+        rf"^(?:PWR|POWER)\d*(?:_{_VOLTAGE})?$",
         # Rail keyword as the trailing word: SENSOR_VDD, USB_VBUS, MCU_VCC
         r"_(?:VCC|VDD|VBUS|VBAT|PWR)$",
-        # Analog / USB supply aliases: VAA, VUSB
-        r"^(?:VAA|VUSB)\d*$",
     )
 )
 
-#: Rails that may carry a qualifier (``3V3_MCU``, ``VOUT_PRE``) unless the
-#: qualifier is a signal suffix (see ``_SIGNAL_SUFFIX_RE``).
-_QUALIFIED_POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        # Leading voltage token + qualifiers: 3V3_MCU, 5V_USB, 12V_IN
-        rf"^{_VOLTAGE}[ADPS]?(?:_[A-Z0-9.]+)+$",
-        # P-/V-prefixed voltage, optional qualifiers: P3V3, P5V, V3V3, V5V0
-        rf"^[PV]{_VOLTAGE}[ADPS]?(?:_[A-Z0-9.]+)*$",
-        # VIN / VOUT with a qualifier: VOUT_PRE, VIN_FILT
-        r"^(?:VIN|VOUT)\d*(?:_[A-Z0-9.]+)+$",
-    )
-)
 
-#: Last-token suffixes that mark a qualified name as a signal about the rail
-#: (``VIN_SENSE``, ``3V3_PG``), not the rail itself.
-_SIGNAL_SUFFIX_RE = re.compile(
-    r"_(?:SENSE|SNS|DET|DETECT|EN|ENABLE|FB|PG|PGOOD|GOOD|OK|FLT|FAULT|"
-    r"MON|ADC|CTRL|SEL|INT|ALERT|OVP|UVP|OCP|STATUS|STAT)\d*$",
-    re.IGNORECASE,
-)
+def _has_signal_qualifier(base: str) -> bool:
+    """True when a qualifier word after the first marks a derived signal."""
+    # Trailing digits are an index, not part of the word: VIN_EN2, 3V3_PG1.
+    return any(
+        tok.rstrip("0123456789") in _SIGNAL_QUALIFIERS for tok in base.upper().split("_")[1:]
+    )
+
 
 _GROUND_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
@@ -319,8 +335,9 @@ def is_ground_rail_name(net_name: str) -> bool:
 def is_power_rail_name(net_name: str) -> bool:
     """Name-only heuristic: does *net_name* look like a (non-ground) power rail?
 
-    ``+3V3``, ``/+5V``, ``VBUS``, ``VDD_CORE`` -> True;
-    ``USB_D+``, ``ISENSE_A+``, ``/PG_3V3``, ``TRIGGER_5V``,
+    ``+3V3``, ``/+5V``, ``VBUS``, ``VDD_CORE``, ``3V3_MCU``, ``P3V3``,
+    ``VOUT_PRE`` -> True;
+    ``USB_D+``, ``ISENSE_A+``, ``/PG_3V3``, ``TRIGGER_5V``, ``VBUS_DET``,
     ``unconnected-(U11-D+-Pad2)``, ``GND`` -> False.
     """
     base = _rail_base_name(net_name)
@@ -328,11 +345,9 @@ def is_power_rail_name(net_name: str) -> bool:
         return False
     if any(rx.search(base) for rx in _GROUND_RAIL_NAME_RES):
         return False
-    if any(rx.search(base) for rx in _POWER_RAIL_NAME_RES):
-        return True
-    if _SIGNAL_SUFFIX_RE.search(base):
+    if not base.startswith("+") and _has_signal_qualifier(base):
         return False
-    return any(rx.search(base) for rx in _QUALIFIED_POWER_RAIL_NAME_RES)
+    return any(rx.search(base) for rx in _POWER_RAIL_NAME_RES)
 
 
 # =============================================================================
