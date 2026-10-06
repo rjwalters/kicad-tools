@@ -19,45 +19,211 @@ from pathlib import Path
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
 
 #: Seconds to wait for ``kicad-cli version`` before declaring a candidate wedged.
-KICAD_CLI_PROBE_TIMEOUT = 5
+#: A healthy-but-cold KiCad 10 on macOS was measured at a steady ~6 s
+#: (#5932), so the default leaves headroom; ``KCT_KICAD_CLI_PROBE_TIMEOUT``
+#: overrides it per process.
+KICAD_CLI_PROBE_TIMEOUT: float = 10
+
+#: Env var overriding :data:`KICAD_CLI_PROBE_TIMEOUT` (seconds, float).
+KICAD_CLI_PROBE_TIMEOUT_ENV = "KCT_KICAD_CLI_PROBE_TIMEOUT"
+
+#: A candidate whose first probe times out is retried once with this multiple
+#: of the base timeout before the lookup is reported as ``probe_failed``.
+KICAD_CLI_PROBE_RETRY_FACTOR = 2
 
 #: Opt-in env var enabling the container fallback (``docker run kicad/kicad``).
 KICAD_DOCKER_ENV = "KCT_KICAD_DOCKER"
 KICAD_DOCKER_IMAGE_ENV = "KCT_KICAD_DOCKER_IMAGE"
 DEFAULT_KICAD_DOCKER_IMAGE = "kicad/kicad:10.0"
 
+#: :class:`KiCadCLILookup` statuses.
+KICAD_CLI_FOUND = "found"
+KICAD_CLI_NOT_FOUND = "not_found"  # definitive: no candidate, or every candidate answered "broken"
+KICAD_CLI_PROBE_FAILED = "probe_failed"  # indeterminate: a candidate timed out / transient OS error
 
-def _probe_kicad_cli(path: Path) -> bool:
-    """Return True if ``<path> version`` answers promptly with exit code 0."""
+_INSTALL_HINT = "Install KiCad 8+ from https://www.kicad.org/download/"
+
+
+@dataclass(frozen=True)
+class KiCadCLILookup:
+    """Outcome of locating a working ``kicad-cli`` (issue #5932).
+
+    ``status`` distinguishes a definitive absence (``not_found``) from a probe
+    that could not reach a verdict (``probe_failed`` -- e.g. ``kicad-cli
+    version`` timed out). Only ``found`` and ``not_found`` are memoized; a
+    ``probe_failed`` lookup is re-probed on the next call.
+    """
+
+    path: Path | None
+    status: str
+    detail: str = ""
+
+    @property
+    def found(self) -> bool:
+        return self.status == KICAD_CLI_FOUND
+
+    @property
+    def probe_failed(self) -> bool:
+        return self.status == KICAD_CLI_PROBE_FAILED
+
+    @property
+    def reason(self) -> str:
+        """Short human-readable reason kicad-cli is unavailable ("" when found)."""
+        if self.status == KICAD_CLI_FOUND:
+            return ""
+        if self.status == KICAD_CLI_PROBE_FAILED:
+            msg = "kicad-cli probe failed"
+            return f"{msg} ({self.detail})" if self.detail else msg
+        if self.detail:
+            return f"kicad-cli not installed ({self.detail})"
+        return "kicad-cli not installed"
+
+
+def _probe_timeout() -> float:
+    """Base probe timeout: env override, else :data:`KICAD_CLI_PROBE_TIMEOUT`."""
+    raw = os.environ.get(KICAD_CLI_PROBE_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if value > 0:
+            return value
+    return float(KICAD_CLI_PROBE_TIMEOUT)
+
+
+def _probe_kicad_cli(path: Path, timeout: float | None = None) -> bool | None:
+    """Probe ``<path> version``.
+
+    Returns:
+        ``True`` when it answers promptly with exit code 0; ``False`` when the
+        verdict is definitive (non-zero exit, missing or non-executable file);
+        ``None`` when indeterminate (timeout or another transient failure) --
+        callers must not memoize ``None`` as "not installed" (#5932).
+    """
     try:
         result = subprocess.run(
             [str(path), "version"],
             capture_output=True,
             text=True,
-            timeout=KICAD_CLI_PROBE_TIMEOUT,
+            timeout=_probe_timeout() if timeout is None else timeout,
         )
-    except (subprocess.SubprocessError, OSError):
+    except subprocess.TimeoutExpired:
+        return None
+    except (FileNotFoundError, PermissionError, NotADirectoryError, IsADirectoryError):
         return False
+    except (subprocess.SubprocessError, OSError):
+        return None
     return result.returncode == 0
 
 
-@lru_cache(maxsize=1)
+def _locate_kicad_cli_uncached() -> KiCadCLILookup:
+    candidates = _kicad_cli_candidates()
+    if not candidates:
+        return KiCadCLILookup(None, KICAD_CLI_NOT_FOUND, "")
+    base = _probe_timeout()
+    indeterminate: list[str] = []
+    for candidate in candidates:
+        verdict = _probe_kicad_cli(candidate, timeout=base)
+        if verdict is None:
+            # Retry once with a longer budget: a cold start or a transient
+            # stall must not be reported as "not installed" (#5932).
+            retry_timeout = base * KICAD_CLI_PROBE_RETRY_FACTOR
+            verdict = _probe_kicad_cli(candidate, timeout=retry_timeout)
+            if verdict is None:
+                indeterminate.append(
+                    f"`{candidate} version` did not answer within {base:g}s "
+                    f"then {retry_timeout:g}s; set {KICAD_CLI_PROBE_TIMEOUT_ENV} to raise it"
+                )
+                continue
+        if verdict:
+            return KiCadCLILookup(candidate, KICAD_CLI_FOUND)
+    if indeterminate:
+        return KiCadCLILookup(None, KICAD_CLI_PROBE_FAILED, "; ".join(indeterminate))
+    return KiCadCLILookup(None, KICAD_CLI_NOT_FOUND, "no candidate answered `kicad-cli version`")
+
+
+_lookup_cache: list[KiCadCLILookup] = []
+_last_lookup: list[KiCadCLILookup] = []
+
+
+def locate_kicad_cli() -> KiCadCLILookup:
+    """Locate a working kicad-cli and report *why* when there is none.
+
+    Definitive results (``found`` / ``not_found``) are memoized for the
+    process lifetime; ``probe_failed`` is never cached, so the next call
+    re-probes (issue #5932). Clear with ``find_kicad_cli.cache_clear()``.
+    """
+    if _lookup_cache:
+        return _lookup_cache[0]
+    lookup = _locate_kicad_cli_uncached()
+    _last_lookup[:] = [lookup]
+    if lookup.status != KICAD_CLI_PROBE_FAILED:
+        _lookup_cache[:] = [lookup]
+    return lookup
+
+
+def _clear_kicad_cli_cache() -> None:
+    _lookup_cache.clear()
+    _last_lookup.clear()
+
+
+def last_kicad_cli_lookup() -> KiCadCLILookup | None:
+    """The most recent lookup result, without probing (None if never probed)."""
+    if _lookup_cache:
+        return _lookup_cache[0]
+    return _last_lookup[0] if _last_lookup else None
+
+
+locate_kicad_cli.cache_clear = _clear_kicad_cli_cache  # type: ignore[attr-defined]
+
+
 def find_kicad_cli() -> Path | None:
     """Find a *working* kicad-cli executable.
 
     Searches PATH and common installation locations for KiCad 8+. Each
-    candidate is probed with ``kicad-cli version`` under a short timeout; a
-    candidate that hangs or fails is treated as not found. The result is
-    memoized for the process lifetime (use ``find_kicad_cli.cache_clear()``
-    to re-probe).
+    candidate is probed with ``kicad-cli version`` under a timeout (retried
+    once with a longer budget on timeout). A definitive answer is memoized
+    for the process lifetime (use ``find_kicad_cli.cache_clear()`` to
+    re-probe); a timeout is *not* cached, so a transient stall cannot leave
+    the process believing kicad-cli is absent (#5932).
+
+    Callers that need to tell "not installed" from "probe failed" (e.g. to
+    warn before skipping a zone refill) should use :func:`locate_kicad_cli`.
 
     Returns:
         Path to kicad-cli if found and responsive, None otherwise
     """
-    for candidate in _kicad_cli_candidates():
-        if _probe_kicad_cli(candidate):
-            return candidate
-    return None
+    return locate_kicad_cli().path
+
+
+find_kicad_cli.cache_clear = _clear_kicad_cli_cache  # type: ignore[attr-defined]
+
+
+def kicad_cli_unavailable_message(lookup: KiCadCLILookup | None = None) -> str:
+    """One-line explanation for why kicad-cli is unusable, with remediation.
+
+    Without *lookup*, explains the most recent :func:`find_kicad_cli` result
+    (no re-probe). Distinguishes "probe failed" (installed but unresponsive,
+    #5877) from "not installed" (#5932).
+    """
+    if lookup is None:
+        lookup = last_kicad_cli_lookup()
+    if lookup is None or lookup.found:
+        lookup = KiCadCLILookup(None, KICAD_CLI_NOT_FOUND)
+    if lookup.probe_failed:
+        return (
+            f"{lookup.reason}. kicad-cli appears installed but did not respond (see issue #5877)."
+        )
+    return f"{lookup.reason}. {_INSTALL_HINT}"
+
+
+def kicad_cli_unavailable_reason() -> str:
+    """Short reason (no remediation) for the most recent failed lookup."""
+    lookup = last_kicad_cli_lookup()
+    if lookup is None or lookup.found:
+        return "kicad-cli not installed"
+    return lookup.reason
 
 
 def _kicad_cli_candidates() -> list[Path]:
@@ -543,7 +709,7 @@ def run_fill_zones(
         if kicad_cli is None:
             return KiCadCLIResult(
                 success=False,
-                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+                stderr=kicad_cli_unavailable_message(),
             )
 
     # Pre-fill normalization (Issues #3727 / #3729): legacy zones use thermal

@@ -160,6 +160,13 @@ def run_geometric_drc(
     if kicad_cli is None:
         kicad_cli = find_kicad_cli()
     if kicad_cli is None:
+        from kicad_tools.cli.runner import last_kicad_cli_lookup
+
+        lookup = last_kicad_cli_lookup()
+        if lookup is not None and lookup.probe_failed:
+            # Installed but unresponsive (#5932): say so instead of "not found".
+            note = f"{lookup.reason}; geometric DRC skipped"
+            return GeometricDRCResult(ran=False, note=note, reason=REASON_ABSENT)
         return GeometricDRCResult(ran=False, note=KICAD_CLI_ABSENT_NOTE, reason=REASON_ABSENT)
 
     report_path: Path | None = None

@@ -1476,10 +1476,17 @@ def _run_step_zones(ctx: PipelineContext, console: Console) -> PipelineResult:
     kicad_cli = find_kicad_cli()
 
     if kicad_cli is None:
+        from .runner import kicad_cli_unavailable_message, kicad_cli_unavailable_reason
+
+        # Never skip a zone refill silently (#5932).
+        print(
+            f"WARNING: zones fill skipped -- {kicad_cli_unavailable_message()}",
+            file=sys.stderr,
+        )
         return PipelineResult(
             step=PipelineStep.ZONES,
             success=True,
-            message="zones fill: skipped (kicad-cli not installed)",
+            message=f"zones fill: skipped ({kicad_cli_unavailable_reason()})",
             skipped=True,
         )
 
@@ -1547,10 +1554,17 @@ def _run_step_zones_refill(ctx: PipelineContext, console: Console) -> PipelineRe
     kicad_cli = find_kicad_cli()
 
     if kicad_cli is None:
+        from .runner import kicad_cli_unavailable_message, kicad_cli_unavailable_reason
+
+        # Never skip a zone refill silently (#5932).
+        print(
+            f"WARNING: zones refill skipped -- {kicad_cli_unavailable_message()}",
+            file=sys.stderr,
+        )
         return PipelineResult(
             step=PipelineStep.ZONES_REFILL,
             success=True,
-            message="zones refill: skipped (kicad-cli not installed)",
+            message=f"zones refill: skipped ({kicad_cli_unavailable_reason()})",
             skipped=True,
         )
 
