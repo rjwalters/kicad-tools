@@ -34,6 +34,7 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
@@ -2125,6 +2126,13 @@ def main() -> int:
 
         # Step 4: Create PCB
         pcb_path = create_stm32_pcb(output_dir)
+
+        # Step 4.1: Copy schematic pin names/electrical types onto the pads
+        # (issue #5985), as KiCad's "Update PCB from Schematic" does.  The
+        # router merges tracks into this text, so the routed PCB inherits the
+        # ``(pintype ...)`` evidence ``kct detect-mistakes`` reads for rails.
+        annotation = annotate_pcb_file_pintypes(pcb_path, sch_path)
+        print(f"   Pad pin types annotated: {annotation.annotated}")
 
         # Step 5: Route PCB
         routed_path = output_dir / "stm32_devboard_routed.kicad_pcb"

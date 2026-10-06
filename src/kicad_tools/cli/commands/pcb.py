@@ -13,7 +13,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses, current-paths-audit"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses, current-paths-audit"
         )
         return 1
 
@@ -59,6 +59,10 @@ def run_pcb_command(args) -> int:
     # Handle sync-netlist command
     if args.pcb_command == "sync-netlist":
         return _run_sync_netlist_command(args, pcb_path)
+
+    # Handle annotate-pintypes command (issue #5985)
+    if args.pcb_command == "annotate-pintypes":
+        return _run_annotate_pintypes_command(args, pcb_path)
 
     # Handle add-3d-models command
     if args.pcb_command == "add-3d-models":
@@ -1946,4 +1950,50 @@ def _run_import_ses_command(args, pcb_path: Path) -> int:
     print(f"Imported SES routes into {dest}")
     print(f"  Wires: {len(importer.wires)}")
     print(f"  Vias: {len(importer.vias)}")
+    return 0
+
+
+def _run_annotate_pintypes_command(args, pcb_path: Path) -> int:
+    """Handle ``pcb annotate-pintypes`` (issue #5985)."""
+    from kicad_tools.explain.mistakes import power_pin_nets
+    from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+    from kicad_tools.schema.pcb import PCB
+
+    sch_path = Path(args.schematic)
+    if not sch_path.exists():
+        message = f"Error: Schematic not found: {sch_path}"
+        if args.format == "json":
+            print(json.dumps({"command": "annotate-pintypes", "error": message, "success": False}))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+    result = annotate_pcb_file_pintypes(pcb_path, sch_path, dry_run=args.dry_run)
+    rails = sorted(power_pin_nets(PCB.load(pcb_path))) if not args.dry_run else []
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "pcb": str(pcb_path),
+                    "schematic": str(sch_path),
+                    "dry_run": args.dry_run,
+                    "updated": result.updated,
+                    "unchanged": result.unchanged,
+                    "missing_pads": result.missing_pads,
+                    "power_pin_nets": rails,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    verb = "would update" if args.dry_run else "updated"
+    print(f"Pad pin types: {verb} {result.updated}, unchanged {result.unchanged}")
+    if result.missing_pads:
+        shown = ", ".join(result.missing_pads[:10])
+        more = f" (+{len(result.missing_pads) - 10} more)" if len(result.missing_pads) > 10 else ""
+        print(f"Schematic pins with no matching pad: {shown}{more}")
+    if not args.dry_run:
+        print(f"Power rails by pin-type evidence: {', '.join(rails) if rails else '(none)'}")
     return 0

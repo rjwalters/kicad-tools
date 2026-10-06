@@ -152,6 +152,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb dedupe": ["{pcb}", "--dry-run"],
     "pcb reannotate": ["{pcb}", "--map", "{dir}/missing_map.json", "--dry-run"],
     "pcb sync-netlist": ["{pcb}", "--schematic", "{sch}", "--dry-run"],
+    "pcb annotate-pintypes": ["{pcb}", "--schematic", "{sch}", "--dry-run"],
     "pcb zones": ["{pcb}"],
     "pcb add-3d-models": ["{pcb}", "--dry-run"],
     "pcb remove-footprint": ["{pcb}", "--ref", "R1", "--dry-run"],
