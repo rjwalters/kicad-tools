@@ -177,8 +177,10 @@ CLIENT_WANTS_CODEX=false
 info "Stage 1: resolve kicad-tools source root"
 KCT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -f "$KCT_ROOT/pyproject.toml" ]] || error "source root missing pyproject.toml: $KCT_ROOT"
-SKILLS_SRC="$KCT_ROOT/.claude/commands/kct"
-[[ -d "$SKILLS_SRC" ]] || error "source root missing .claude/commands/kct/: $KCT_ROOT"
+# The packaged skills are the single source (issue #5950); the repo's
+# .claude/commands/kct/ is a byte-identical copy (scripts/sync_agent_skills.py).
+SKILLS_SRC="$KCT_ROOT/src/kicad_tools/agent_skills/kct"
+[[ -d "$SKILLS_SRC" ]] || error "source root missing src/kicad_tools/agent_skills/kct/: $KCT_ROOT"
 CI_GATES_SRC="$KCT_ROOT/scripts/ci"
 [[ -d "$CI_GATES_SRC" ]] || error "source root missing scripts/ci/: $KCT_ROOT"
 ok "KCT_ROOT=$KCT_ROOT"

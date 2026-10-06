@@ -932,6 +932,19 @@ uv run ruff format . --check && uv run ruff check . && uv run pytest
 
 kicad-tools ships its own Claude agent skills under `.claude/commands/kct/` (invoked as `/kct:<name>`), a harness-agnostic namespace kept separate from any installed orchestration framework. Seven skills ship today — `/kct:tapeout` (complete fab-ready export bundle or loud refusal), `/kct:manufacturing-readiness` (sign-off gates), `/kct:hv-isolation-loop` (mains/HV creepage design loop), `/kct:board-recipe-scaffold`, `/kct:layout-journal`, `/kct:ee-review` (advisory EE decision document for analog/placement-blocked boards), and `/kct:help` (introspective guide to the namespace). See [.claude/commands/kct/README.md](.claude/commands/kct/README.md) for the full contracts. The skill text is harness-neutral; [docs/agent-surfaces.md](docs/agent-surfaces.md) lists what each skill needs from Claude Code, Codex CLI or opencode.
 
+The skills ship inside the `kicad-tools` wheel (`kicad_tools/agent_skills/kct/`), so a plain `pip install kicad-tools` is enough; no clone of this repository is needed. Install them with `kct skills install`:
+
+```bash
+kct skills install                       # ./.claude/commands/kct/*.md (Claude Code, project)
+kct skills install --user                # ~/.claude/commands/kct/
+kct skills install --target /tmp/x       # /tmp/x/kct/*.md
+kct skills install --harness codex       # ./.agents/skills/kct-<name>/SKILL.md
+kct skills install --list                # packaged skills and their install state
+kct skills install --check               # exit 1 if the installed copy has drifted
+```
+
+Re-running is idempotent. `--prune` removes `kct` skill files the package no longer ships, and `--dry-run` previews. Edit skills in `src/kicad_tools/agent_skills/kct/`; `.claude/commands/kct/` is a synced copy (`uv run python scripts/sync_agent_skills.py --write`).
+
 ## Related Projects
 
 <!-- BEGIN kct:ecosystem -->
