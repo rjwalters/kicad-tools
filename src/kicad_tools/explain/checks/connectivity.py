@@ -164,6 +164,8 @@ class LedSeriesResistorCheck:
             List of Mistake objects for LEDs with no series resistor
         """
         mistakes: list[Mistake] = []
+        # Built once per board (not per LED) -- issue #5940 review.
+        net_index: dict[str, list[Footprint]] | None = None
 
         for fp in pcb.footprints:
             if not _is_led(fp):
@@ -171,7 +173,9 @@ class LedSeriesResistorCheck:
             led_nets = {pad.net_name for pad in fp.pads if pad.net_name}
             if not led_nets:
                 continue
-            if self._has_series_resistor(pcb, fp, led_nets):
+            if net_index is None:
+                net_index = _pads_by_net(pcb)
+            if self._has_series_resistor(net_index, fp, led_nets):
                 continue
             mistakes.append(
                 Mistake(
@@ -199,17 +203,28 @@ class LedSeriesResistorCheck:
 
         return mistakes
 
-    def _has_series_resistor(self, pcb: PCB, led: Footprint, led_nets: set[str]) -> bool:
+    def _has_series_resistor(
+        self,
+        net_index: dict[str, list[Footprint]],
+        led: Footprint,
+        led_nets: set[str],
+    ) -> bool:
         if len(led_nets) != 2:
             return False
-        net_index = _pads_by_net(pcb)
         first, second = sorted(led_nets)
         side_a = _explore_side(net_index, led, first, stop=second)
         side_b = _explore_side(net_index, led, second, stop=first)
+        # A walk that stops early (unprotected) contributes only the nets it
+        # visited; that side is already decided, so this is enough to
+        # reject a resistor that merely loops back around the LED.
         neighbourhood = side_a.nets | side_b.nets | led_nets
         return side_a.is_protected(neighbourhood) or side_b.is_protected(neighbourhood)
 
 
+# Reference prefixes that denote a resistor or resistor array. An explicit
+# set rather than ``startswith("R")``: relays (``RLY``/``RL``) and other
+# ``R*``-prefixed parts must not count as current limiters (issue #5940).
+_RESISTOR_PREFIXES = frozenset({"R", "RN", "RA", "RP", "RM"})
 # Two-net parts that conduct DC and so extend a path rather than end it.
 _SERIES_PREFIXES = ("LED", "D", "DS", "L", "FB", "F")
 # Parts that never sit in a DC path to a source (decoupling, test access).
@@ -264,14 +279,15 @@ def _explore_side(
             continue
         walk.nets.add(net)
         if is_power_net(net) or is_ground_net(net):
+            # One unprotected path decides the side; stop walking.
             walk.unprotected = True
-            continue
+            return walk
         for fp in index.get(net, []):
             if fp is led:
                 continue
             prefix = _ref_prefix(fp.reference)
             fp_nets = {pad.net_name for pad in fp.pads if pad.net_name}
-            if prefix.startswith("R"):
+            if prefix in _RESISTOR_PREFIXES:
                 if id(fp) not in seen_parts:
                     seen_parts.add(id(fp))
                     walk.resistor_far_nets.append(fp_nets - {net})
@@ -281,7 +297,8 @@ def _explore_side(
             if prefix in _SERIES_PREFIXES and len(fp_nets) == 2:
                 queue.extend(fp_nets - walk.nets)
                 continue
-            # IC, connector, transistor, switch, ...: a driver pin reached
-            # without passing through a resistor.
+            # IC, connector, transistor, switch, relay, ...: a driver pin
+            # reached without passing through a resistor.
             walk.unprotected = True
+            return walk
     return walk

@@ -516,6 +516,47 @@ def test_charlieplex_line_resistors_pass(tmp_path: Path) -> None:
     assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
 
 
+@pytest.mark.parametrize("ref", ["RLY1", "RL1"])
+def test_led_behind_relay_contact_is_flagged(tmp_path: Path, ref: str) -> None:
+    # VCC -> relay contact -> NODE -> LED -> GND. A relay reference starts
+    # with "R" but it is not a current limiter (issue #5940 review).
+    body = _NETS + _fp(ref, "RELAY", _VCC, _NODE, (4, "MID"), _GND) + _fp("D1", "LED", _NODE, _GND)
+    mistakes = LedSeriesResistorCheck().check(_load_pcb(tmp_path, body))
+    assert [m.components for m in mistakes] == [["D1"]]
+
+
+def test_led_resistor_array_prefix_still_counts(tmp_path: Path) -> None:
+    body = _NETS + _fp("RN1", "4x330", _VCC, _NODE) + _fp("D1", "LED", _NODE, _GND)
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_matrix_32x32_is_fast(tmp_path: Path) -> None:
+    """Perf guard: the side walk must not re-flood the matrix per LED."""
+    import time
+
+    size = 32
+    names = ["VCC", "GND"]
+    names += [f"ROW{i}" for i in range(size)]
+    names += [f"COL{j}" for j in range(size)]
+    names += [f"CN{j}" for j in range(size)]
+    num = {name: i for i, name in enumerate(names, start=1)}
+    body = "".join(f'  (net {i} "{name}")\n' for name, i in num.items())
+    mcu_nets = [(num[n], n) for n in names if n.startswith(("ROW", "COL"))]
+    body += _fp("U1", "MCU", (1, "VCC"), (2, "GND"), *mcu_nets)
+    for j in range(size):
+        body += _fp(f"R{j + 1}", "330", (num[f"COL{j}"], f"COL{j}"), (num[f"CN{j}"], f"CN{j}"))
+    ref = 1
+    for i in range(size):
+        for j in range(size):
+            body += _fp(f"D{ref}", "LED", (num[f"ROW{i}"], f"ROW{i}"), (num[f"CN{j}"], f"CN{j}"))
+            ref += 1
+    pcb = _load_pcb(tmp_path, body)
+
+    start = time.perf_counter()
+    LedSeriesResistorCheck().check(pcb)
+    assert time.perf_counter() - start < 1.0
+
+
 _BOARD02 = (
     Path(__file__).resolve().parents[1]
     / "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
