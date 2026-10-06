@@ -81,6 +81,17 @@ POWER_RAILS = [
     "AVDD",
     "+12V",
     "+3.3V",
+    # VCC/VDD supplies named for what they feed (PR #5971 re-review): the
+    # ADC/REF/MON word is the load, not a derived signal.
+    "VDD_ADC",
+    "AVDD_ADC",
+    "VDDA_ADC",
+    "VCC_REF",
+    "VDD_MON",
+    "VDDIO",
+    "AVCC",
+    "DVDD",
+    "PVIN",
     # Board 09's buck output and power-path rails
     "VOUT_PRE",
     "VBUS_FUSED",
@@ -101,6 +112,13 @@ NOT_RAILS = [
     "3V3_EN",
     "5V_PG",
     "VREF",
+    # A non-supply-family rail word with a telemetry qualifier stays a signal,
+    # and supply-family names still drop out on control qualifiers.
+    "VBAT_ADC",
+    "VIN_REF",
+    "VDD_EN",
+    "VCC_PG",
+    "AVDD_SENSE",
     "VCAP1",
     "VREG_1V2",
     "Net-(U1-VDD)",

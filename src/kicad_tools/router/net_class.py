@@ -256,6 +256,16 @@ _SIGNAL_QUALIFIERS: frozenset[str] = frozenset(
     }
 )  # fmt: skip
 
+#: For the VCC/VDD/VEE supply families a trailing word usually names what the
+#: supply *feeds* (``VDD_ADC``, ``AVDD_ADC``, ``VCC_REF``, ``VDD_MON``), not a
+#: signal derived from it, so only these control/telemetry words make such a
+#: name a signal (``VDD_EN``, ``VCC_PG``, ``VDD_SENSE``).
+_SUPPLY_FAMILY_SIGNAL_QUALIFIERS: frozenset[str] = _SIGNAL_QUALIFIERS - {
+    "ADC", "REF", "MON", "DIV", "SET", "ADJ", "SEL", "INT",
+}  # fmt: skip
+
+_SUPPLY_FAMILY_RE = re.compile(r"^(?:A|D|P|IO)?V(?:CC|DD|EE)", re.IGNORECASE)
+
 _POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
@@ -270,8 +280,8 @@ _POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
         # AVDD, DVDD, PVDD, IOVDD, AVCC, VEE
         rf"^(?:A|D|P|IO)?V(?:CC|DD|EE)[A-Z0-9]*{_QUALIFIERS}$",
         # Named rails as the leading word (optionally numbered/qualified):
-        # VBUS, VBUS_FUSED, VBAT, VSYS, VIN, VIN_12V, VOUT, VOUT_PRE, VAA, VUSB
-        r"^(?:VBUS|VBAT|VBATT|VSYS|VIN|VOUT|VMAIN|VCORE|VIO|VSUPPLY|VMOT|"
+        # VBUS, VBUS_FUSED, VBAT, VSYS, VIN, PVIN, VIN_12V, VOUT, VOUT_PRE, VAA, VUSB
+        r"^(?:VBUS|VBAT|VBATT|VSYS|VIN|PVIN|VOUT|VMAIN|VCORE|VIO|VSUPPLY|VMOT|"
         rf"VMOTOR|VPWR|VDRIVE|VM|VAA|VUSB)\d*{_QUALIFIERS}$",
         # PWR / POWER only as the whole name: PWR_LED / POWER_GOOD are signals
         rf"^(?:PWR|POWER)\d*(?:_{_VOLTAGE})?$",
@@ -283,10 +293,11 @@ _POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
 
 def _has_signal_qualifier(base: str) -> bool:
     """True when a qualifier word after the first marks a derived signal."""
-    # Trailing digits are an index, not part of the word: VIN_EN2, 3V3_PG1.
-    return any(
-        tok.rstrip("0123456789") in _SIGNAL_QUALIFIERS for tok in base.upper().split("_")[1:]
+    qualifiers = (
+        _SUPPLY_FAMILY_SIGNAL_QUALIFIERS if _SUPPLY_FAMILY_RE.match(base) else _SIGNAL_QUALIFIERS
     )
+    # Trailing digits are an index, not part of the word: VIN_EN2, 3V3_PG1.
+    return any(tok.rstrip("0123456789") in qualifiers for tok in base.upper().split("_")[1:])
 
 
 _GROUND_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
