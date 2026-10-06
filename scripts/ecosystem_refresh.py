@@ -15,8 +15,10 @@ checked them.
 Drift classes, in severity order:
 
 ===================  ==========================================================
-``license-changed``  SPDX id differs. Recomputes code-reuse rights -- an
-                     MIT -> AGPL flip retroactively forbids reuse.  ERROR
+``license-changed``  SPDX id differs from both ``license`` and the entry's
+                     ``upstream_license_detected`` (if any). Recomputes
+                     code-reuse rights -- an MIT -> AGPL flip retroactively
+                     forbids reuse.  ERROR
 ``renamed``          Upstream moved; the recorded URL is now a redirect and
                      will eventually rot.  ERROR
 ``archived``         Upstream archived; the verdict and framing need
@@ -27,6 +29,9 @@ Drift classes, in severity order:
                      error-class fact moved; a human should re-read it.  WARN
 ``stale-facts``      stars / last_push drifted, or last_verified is older
                      than --max-age days.  INFO
+``license-alias-``   The forge's detector now agrees with ``license``, so
+``stale``            the entry's ``upstream_license_detected`` is no longer
+                     needed and can be deleted.  INFO
 ===================  ==========================================================
 
 Usage::
@@ -71,6 +76,7 @@ SEVERITY: dict[str, str] = {
     "license-missing": "warn",
     "reeval-trigger": "warn",
     "stale-facts": "info",
+    "license-alias-stale": "info",
     "unpollable": "info",
     "probe-failed": "info",
 }
@@ -290,14 +296,36 @@ def compare(
         )
 
     upstream_license = facts.license or "NONE"
+    detector_alias = project.upstream_license_detected
+    if detector_alias and upstream_license == detector_alias:
+        # The forge's detector disagrees with the human-read LICENSE in a
+        # known, recorded way (e.g. NOASSERTION for a verbatim MIT file).
+        # Treat it as matching `license`: reporting it, or suggesting
+        # `license = "NOASSERTION"`, would be a weekly false positive.
+        upstream_license = project.license
+    elif detector_alias and upstream_license == project.license:
+        findings.append(
+            Finding(
+                project.project_id,
+                "license-alias-stale",
+                (
+                    f"detector now reports {upstream_license!r}, matching license; "
+                    f"upstream_license_detected = {detector_alias!r} can be deleted"
+                ),
+            )
+        )
+
     if upstream_license != project.license:
+        alias_note = (
+            f" (and upstream_license_detected {detector_alias!r})" if detector_alias else ""
+        )
         findings.append(
             Finding(
                 project.project_id,
                 "license-changed",
                 (
                     f"license is now {upstream_license!r}, registry says "
-                    f"{project.license!r} -- re-derive license_compat "
+                    f"{project.license!r}{alias_note} -- re-derive license_compat "
                     f"(currently {project.license_compat!r})"
                 ),
                 [f'license = "{upstream_license}"'],

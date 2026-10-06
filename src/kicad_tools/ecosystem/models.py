@@ -122,6 +122,11 @@ LICENSE_COMPAT: frozenset[str] = frozenset(
 _PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: SPDX-ish identifier: an SPDX license id (``MIT``, ``GPL-3.0``,
+#: ``GPL-3.0-or-later``, ``LicenseRef-foo``) or the forge's ``NOASSERTION``.
+#: Deliberately a shape check, not a lookup against the SPDX list -- forges
+#: report deprecated ids (``GPL-3.0``) that a strict lookup would reject.
+_SPDX_ISH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+-]*$")
 
 _REQUIRED_FIELDS = (
     "name",
@@ -146,6 +151,7 @@ _KNOWN_FIELDS = frozenset(
         "pinned_commit",
         "research_docs",
         "reeval_trigger",
+        "upstream_license_detected",
     )
 )
 
@@ -181,6 +187,16 @@ class EcosystemProject:
         summary: README-voice prose. States the verdict in *both* directions
             where we have measured it.
         reeval_trigger: What would make this verdict worth revisiting.
+        upstream_license_detected: What the forge's license detector reports
+            for this repo when that differs from ``license`` even though the
+            license itself has not changed -- e.g. ``"NOASSERTION"`` for a
+            verbatim MIT file GitHub cannot classify, or ``"GPL-3.0"`` for a
+            project whose NOTICE says ``GPL-3.0-or-later``.  An SPDX-ish id or
+            ``"NOASSERTION"``; must differ from ``license``.  When the
+            detector reports exactly this value,
+            ``scripts/ecosystem_refresh.py`` treats it as matching ``license``
+            instead of raising ``license-changed``.  Empty when the detector
+            agrees with ``license`` (the normal case).
     """
 
     project_id: str
@@ -201,6 +217,7 @@ class EcosystemProject:
     pinned_commit: str = ""
     research_docs: tuple[str, ...] = field(default_factory=tuple)
     reeval_trigger: str = ""
+    upstream_license_detected: str = ""
 
     @property
     def is_pollable(self) -> bool:
@@ -239,6 +256,7 @@ class EcosystemProject:
             "research_docs": list(self.research_docs),
             "summary": self.summary,
             "reeval_trigger": self.reeval_trigger,
+            "upstream_license_detected": self.upstream_license_detected,
         }
 
     @classmethod
@@ -310,6 +328,23 @@ class EcosystemProject:
                 'can poll it (use vcs="other" for a project with no API)'
             )
 
+        license_id = str(raw["license"])
+        detected = raw.get("upstream_license_detected", "")
+        if not isinstance(detected, str):
+            raise RegistryError(f"{project_id}: upstream_license_detected must be a string")
+        if detected:
+            if not _SPDX_ISH_RE.match(detected):
+                raise RegistryError(
+                    f"{project_id}: upstream_license_detected {detected!r} must be "
+                    'an SPDX identifier or "NOASSERTION"'
+                )
+            if detected == license_id:
+                raise RegistryError(
+                    f"{project_id}: upstream_license_detected {detected!r} equals "
+                    "license; drop the field -- it only records a detector "
+                    "result that differs from the real license"
+                )
+
         research_docs = raw.get("research_docs", [])
         if not isinstance(research_docs, list) or not all(
             isinstance(doc, str) for doc in research_docs
@@ -324,7 +359,7 @@ class EcosystemProject:
             category=str(raw["category"]),
             relation=str(raw["relation"]),
             verdict=str(raw["verdict"]),
-            license=str(raw["license"]),
+            license=license_id,
             license_compat=str(raw["license_compat"]),
             summary=str(raw["summary"]).strip(),
             last_verified=last_verified,
@@ -335,6 +370,7 @@ class EcosystemProject:
             pinned_commit=pinned_commit,
             research_docs=tuple(research_docs),
             reeval_trigger=str(raw.get("reeval_trigger", "")).strip(),
+            upstream_license_detected=detected,
         )
 
 

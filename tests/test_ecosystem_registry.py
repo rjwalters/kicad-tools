@@ -146,6 +146,48 @@ class TestValidation:
         with pytest.raises(RegistryError, match="positioning"):
             load_registry(_write(tmp_path, text))
 
+    @pytest.mark.parametrize(
+        ("license_id", "detected"),
+        [("MIT", "NOASSERTION"), ("GPL-3.0-or-later", "GPL-3.0")],
+        ids=["pcbschemagen", "tracemaker"],
+    )
+    def test_upstream_license_detected_is_accepted(
+        self, tmp_path: Path, license_id: str, detected: str
+    ) -> None:
+        text = MINIMAL.replace(
+            'license = "MIT"',
+            f'license = "{license_id}"\nupstream_license_detected = "{detected}"',
+        )
+        project = load_registry(_write(tmp_path, text)).get("example")
+        assert project.license == license_id
+        assert project.upstream_license_detected == detected
+
+    def test_upstream_license_detected_defaults_to_empty(self, tmp_path: Path) -> None:
+        assert (
+            load_registry(_write(tmp_path, MINIMAL)).get("example").upstream_license_detected == ""
+        )
+
+    @pytest.mark.parametrize("bad", ["MIT License", "GPL 3", "-MIT", "MIT/Apache"])
+    def test_upstream_license_detected_must_be_spdx_ish(self, tmp_path: Path, bad: str) -> None:
+        text = MINIMAL.replace(
+            'license = "MIT"', f'license = "MIT"\nupstream_license_detected = "{bad}"'
+        )
+        with pytest.raises(RegistryError, match="upstream_license_detected"):
+            load_registry(_write(tmp_path, text))
+
+    def test_upstream_license_detected_must_differ_from_license(self, tmp_path: Path) -> None:
+        """An alias equal to ``license`` is a no-op that hides intent."""
+        text = MINIMAL.replace(
+            'license = "MIT"', 'license = "MIT"\nupstream_license_detected = "MIT"'
+        )
+        with pytest.raises(RegistryError, match="equals license"):
+            load_registry(_write(tmp_path, text))
+
+    def test_upstream_license_detected_must_be_a_string(self, tmp_path: Path) -> None:
+        text = MINIMAL.replace('license = "MIT"', 'license = "MIT"\nupstream_license_detected = 3')
+        with pytest.raises(RegistryError, match="upstream_license_detected"):
+            load_registry(_write(tmp_path, text))
+
     def test_missing_file_names_the_path(self, tmp_path: Path) -> None:
         with pytest.raises(RegistryError, match="not found"):
             load_registry(tmp_path / "absent.toml")
@@ -442,10 +484,14 @@ class TestMcpTools:
         assert "error" in ecosystem_show("nope")
 
 
-def test_project_to_dict_round_trips_through_from_toml(tmp_path: Path) -> None:
-    """``to_dict`` must not silently drop a field ``from_toml`` accepts."""
+@pytest.mark.parametrize("project_id", ["kicadroutingtools", "pcbschemagen"])
+def test_project_to_dict_round_trips_through_from_toml(project_id: str) -> None:
+    """``to_dict`` must not silently drop a field ``from_toml`` accepts.
+
+    ``pcbschemagen`` covers ``upstream_license_detected``.
+    """
     registry = load_registry()
-    project = registry.get("kicadroutingtools")
+    project = registry.get(project_id)
     as_dict = project.to_dict()
     # Derived and renamed keys are not inputs.
     for derived in ("project_id", "code_reuse_allowed"):
