@@ -72,6 +72,7 @@ alert rule (loom-ui#1015) matches both validators:
   `ghhost.unapproved`, `ghrepo.host-qualified-conflict`,
   `toolchain.below-api-host-floor`, `toolchain.unpinned-version`,
   `toolchain.gh-unresolvable`, `toolchain.launcher-not-first`,
+  `toolchain.launcher-python3-missing` (Loom-only, container spawn),
   `apiconfig.profile-not-enumerated`, `apiconfig.shadowed-profile`
 - **git**: `git.unqualified` (incomplete), `git.premature-rewrite`,
   `git.missing-rewrite`, `git.enforced-without-host`
@@ -141,6 +142,54 @@ versions, counts and remedies only. Token-shaped strings are redacted.
 
 `enforcement.api = observe` logs the same findings and proceeds. An unreadable
 policy, or one with an unknown `schemaVersion`, is never treated as observe-only.
+
+## The managed `gh` launcher (Loom consumes it; it does not provision it)
+
+On a policy-governed host every `gh` is 2am's managed launcher
+(`scripts/gh-managed.py`, 2am#2002), provisioned as an executable named
+`gh` at `toolchain.launcherPath`. Provisioning it is host/image/CI work
+(2am#1931 / #1928); Loom ships no second implementation of that security
+boundary. To use it, point `toolchain.launcherPath` at the provisioned file (and
+`toolchain.upstreamGhPath` at the pinned upstream `gh`) in an env- or
+machine-origin policy. A repo-origin policy never chooses an executable.
+
+What Loom does with `launcherPath` (all no-ops with no policy):
+
+- **Daemon `gh`** — the resolver's first rung (see `NO_POLICY_LAUNCHER_ENV`).
+  That opt-out affects only which `gh` the daemon execs: worker and container
+  credential admission ignores it, so it can never turn a `required` or
+  managed-marker host into `unconfigured` (#10446).
+- **Bare-metal workers** — `loom-daemon spawn-worker` puts the launcher's
+  directory first on the worker `PATH` (ahead of the `gh-cached` front, which is
+  therefore bypassed under a policy). Under `enforcement.api = required` a worker
+  whose first `gh` is not the launcher is not spawned (`toolchain.launcher-not-first`).
+- **Containers** (`spawn-claude.sh`, native containment) — the launcher directory,
+  `toolchain.upstreamGhPath`, the policy file and the `principal.credentialRef`
+  file (`file:/abs/path`) are mounted read-only at their host paths, and
+  `LOOM_FORGE_EGRESS_POLICY` / `GITHUB_EGRESS_POLICY` name the policy. The
+  whole launcher directory is mounted, so give `launcherPath` a dedicated
+  directory: a shared one such as `/usr/local/bin` would shadow the image's
+  copy (where `docker/worker/Dockerfile` installs `loom-daemon`) and expose
+  its siblings. `~/.config/gh`
+  is not mounted and `GH_TOKEN` / `GITHUB_TOKEN` are not forwarded. The launcher
+  is Python 3: under `required`, an image without `python3` is refused
+  (`toolchain.launcher-python3-missing`) and so is one whose `gh` does not
+  resolve to the launcher (`toolchain.launcher-not-first`) — on both container
+  paths (`spawn-worker` and `spawn-claude.sh`, the latter via `loom-daemon forge
+  egress container-args --image <image>`, exit 78). The policy is schema-validated
+  before any routing result: an unreadable policy, an unsupported
+  `schemaVersion`, or — unless it is a valid `observe` policy — a schema finding
+  or a missing/empty launcher is refused with exit 78 and never falls back to
+  `~/.config/gh` / `GH_TOKEN`. `observe` logs those findings and proceeds.
+  `loom-daemon forge egress container-args` makes the whole container
+  credential decision: an explicit status line first (`loom-forge-egress:
+  managed` / `unconfigured` / `observe-unmanaged`), then the docker arguments —
+  the managed mounts, or only for the last two the legacy token-by-name /
+  `~/.config/gh` arguments. `spawn-claude.sh` appends them; empty output, a
+  failure or a missing status line refuses (78), never empty-means-none.
+- **Exit codes** — a launcher exit of `78` is `outcome=routing_blocked` and `69`
+  is `outcome=adapter_unavailable`. Neither is a forge answer: the invocation
+  surfaces as unavailable (never an empty result) and is not retried.
 
 ## Lockstep with 2am
 

@@ -70,6 +70,18 @@ the next person to add one will have an equally good argument.
    the artifact is missing), because a skipped required check counts as
    passing (rule 6).
 
+   The aggregate backstop is the `CI Result` job (#10444): `if: always()`,
+   `needs:` every job, and it fails when `Detect Changes` is not `success` on
+   a PR (a cancelled / never-acquired runner otherwise skips every filtered
+   job while the always-run required checks stay green, as on #10403), when
+   any job failed or was cancelled, or when a job was skipped only because its
+   upstream did not succeed. A skip the path filter decided still passes. The
+   rule lives in `scripts/ci-result-gate.sh`; `merge-pr.sh` independently
+   refuses a head whose latest `CI` run is not `success` and names the
+   cancelled jobs. Remedy: `gh run rerun --failed <run>` (in place, never a
+   cancel). `CI Result` becomes a required context only after it has reported
+   on `main`; that ruleset change is an operator step.
+
 8. **Group required gates by component, and judge each component on its own
    inputs.** Many tiny required jobs compete for the concurrent-job cap, so
    #9065 folded 19 of them into `Structural Checks`, `Daemon Checks` and the

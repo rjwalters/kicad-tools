@@ -21,7 +21,7 @@ does not need loaded to act correctly.
 | `3` | The PR's head branch changed between the fresh head-SHA read taken immediately before merging and the merge call itself (#5579). | someone else |
 | `4` | The #8248/#8919 required-check freshness guard blocked the merge and `--redate-stale-checks` re-dated the checks with a tree-identical no-op push (#8508). | this run |
 | `5` | `--auto`'s bounded settle-wait expired before this head's checks finished, or before the check-runs API became readable (#8896). | nobody |
-| `6` | Another PR on the same base holds the chain-head merge lock: it was just re-dated and its required checks have not reported, so merging now would move the base under it again (#10167). | nobody |
+| `6` | Another PR on the same base holds the chain-head merge lock: it was just re-dated and has not landed, so merging now would move the base under it again (#10167). | nobody |
 | `1` | Everything else, including a #8248 block with no remedy left. | — |
 | *(none)* | The caller was killed before the script could exit at all — not an exit code, and the only outcome that leaves no forge-visible trace (#9096). | unknown |
 
@@ -343,10 +343,21 @@ A lock is live only while all of these hold:
 - the holder is open, still targets that base, and is not `loom:operator`
   (budget exhaustion releases the lock);
 - the holder's head is still the marker's `head` — any push voids it;
-- its required checks have not all reported (completed, any conclusion);
+- no required check on its head has failed. Green checks do **not** release
+  the lock (#10448): it holds until the head lands (the PR closes), a required
+  check goes red, or the cap, so held PRs cannot all race the head the moment
+  its checks finish and stale it again;
 - less than the cap has passed since the comment's forge-assigned
   `created_at`. The embedded `acquired=` is never trusted, and the effective
   cap is the smaller of the marker's and the reader's.
+
+**Which re-dates take the lock**: every fresh-verdict re-date that
+`merge-pr redate-checks` pushes (a `Pushed` outcome), not only sequenced
+chain heads. A head that re-dates is exactly a PR whose evidence the busy base
+keeps staling, so the same hold is wanted for it. A re-date that pushes
+nothing (no budget left, hold escalated) takes no lock, and neither does a
+plain head-sync push. The cap bounds every lock, and `LOOM_CHAIN_LOCK_OVERRIDE`
+skips the guard.
 
 The chain head is never held by its own lock. Two heads that both hold one
 are ordered oldest-lock-first, so they cannot hold each other.
@@ -358,11 +369,22 @@ are ordered oldest-lock-first, so they cannot hold each other.
   falls through a tier; anything above 3600 s is clamped to 3600 s).
 - **No budget bypass**: the lock is a separate marker that the #9590 chain
   position never reads, so taking it neither spends nor refunds a re-date.
+- **API cost** (#10448): a repo-wide `GET issues/comments?since=…` listing
+  finds every marker, recorded in `forge_call_stats` as `chain_lock.comments`.
+  It is read 100 comments per page until a short page, never truncated, and
+  each page is its own ETag'd conditional read. The window start is floored
+  to 5 minutes, so an unchanged re-check is all free 304s, and a new comment
+  re-bills only the last page. Only a PR with an unexpired marker for this
+  base costs a further `GET pulls/N`. A check with no lock present costs one
+  billable call when the window holds fewer than 100 comments, and at most
+  `floor(n / 100) + 1` for `n` comments. A window past 50 pages is reported
+  unreadable (below), not cut short.
 - **Unreadable state** (API error, quota) defers rather than guessing "no
   lock", and records the first unreadable read in
   `.loom/state/chain-lock/` (ignored). Once a whole cap has passed since then,
   no lock taken before the outage can still be live, so the guard fails open
-  (`LOOM-CHAIN-LOCK-FAIL-OPEN`). A good read clears the record. If the record
+  (`LOOM-CHAIN-LOCK-FAIL-OPEN`). A good read clears the record, and a record older than twice the cap is a
+  leftover from a past outage that counts as a fresh first failure. If the record
   cannot be written at all, the guard fails open at once rather than defer
   without bound.
 - **Older daemon**: any `chain-lock` exit other than 0 or 6 (a binary without

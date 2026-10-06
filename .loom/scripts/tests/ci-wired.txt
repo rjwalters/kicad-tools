@@ -154,6 +154,7 @@ test-merge-pr-help.sh
 test-merge-pr-merge-method.sh
 test-merge-pr-rate-limit-fallback.sh
 test-merge-pr-tree-checks.sh
+test-merge-pr-ci-result.sh
 test-nextest-daemon-guard.sh
 test-operator-only-subkind.sh
 test-post-verdict.sh
@@ -292,3 +293,7 @@ tests/hermit/test-stateless-ceremony.sh
 # scripts/ — repo-root tooling suites. Hermetic: builds a disposable git
 # repo under mktemp -d with its own identity, no network, no gh.
 scripts/test-changelog.sh
+
+# #9987: spawn-claude.sh managed-gh container admission. Hermetic: a fake daemon
+# and docker stub under mktemp -d; no network, forge or real daemon binary.
+test-spawn-claude-managed-gh.sh

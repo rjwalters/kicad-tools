@@ -570,7 +570,9 @@ marked itself dead. So a loop that exited, or whose blocking cycle never
 returns, reads `0` within one window. Before #10414 it simply went silent.
 `loom.daemon.task_faults{task,reason}` counts `panic` (an iteration panicked
 and the loop caught it), `overrun` (an iteration ran past the loop's own
-bound) and `exit` (the loop stopped for good). The same entries are listed
+bound), `exit` (the loop stopped for good) and, on `task=eta_pass` only,
+`eta_non_authority_emit` (a host that is not the fleet's ETA authority reached
+the ETA sink; the records were dropped, #10498). The same entries are listed
 under `Task liveness:` in `loom-daemon status`, and as `task_liveness` in
 `status --json`. Alert on `task_alive == 0`, and also on the series going
 silent: that means the sampler or the whole daemon stopped. The self-update

@@ -94,6 +94,8 @@
 #       branch than ours (1:1 issue-to-PR review-gate guard, #9453 phase 5).
 #       Stand down instead of pushing a second PR into the same review
 #       pipeline -- message on stderr names the existing PR.
+#   7 - Refused: `buildGate` is enabled and HEAD has no passing
+#       `loom-daemon preflight` receipt (#10476). Run it, fix, re-run.
 #
 # NOTE: GitHub-specific, like create-issue.sh. On a Gitea forge it exits 2 --
 # Gitea has no GitHub App installation tokens, so it has no equivalent
@@ -287,6 +289,16 @@ close this branch as a duplicate." >&2
     # or 5 (probe failed): all fall through, matching the fail-open posture
     # of every other lookup in this script.
   fi
+fi
+
+# --- Pre-PR gate receipt (#10476) ---------------------------------------------
+# requires-daemon: preflight optional   no binary, or one predating `preflight`, skips this (only an exact exit 7 refuses)
+source "$SCRIPT_DIR/lib/locate-daemon-bin.sh"
+_cpr_loom_daemon="$(loom_resolve_self_daemon_bin 2>/dev/null || true)"
+if [[ -n "$_cpr_loom_daemon" ]]; then
+  _cpr_pf_rc=0
+  "$_cpr_loom_daemon" preflight --check || _cpr_pf_rc=$?
+  [[ "$_cpr_pf_rc" -ne 7 ]] || exit 7
 fi
 
 # --- Superseded-target-issue freshness check (#6277) -------------------------

@@ -283,6 +283,7 @@ echo "Testing the merge-pr floor covers every fail-closed sub-subcommand (#8967)
 MERGE_PR_VERB_TABLE="verdict-contradiction closed 0.19.172
 tree-checks open -
 chain-lock open -
+ci-result open -
 stale-checks closed 0.19.221
 loom-pr-guard closed 0.19.375
 classify-response closed 0.19.456

@@ -152,10 +152,10 @@ It merges via the forge API and cleans up the worktree. `--auto` waits for the h
   ```
 - Advance to the next PR in the candidate list.
 
-**On merge failure** (script returns non-zero):
+**On merge failure** (non-zero; exit **6**: log `PR #P held by chain lock`, #10448):
 - Classify `<reason>` through "Forge write failure diagnosis (#6425)" above **before** writing the log line — do not assert a permission/credential diagnosis without running `forge_write_permission_confirmed` and getting positive evidence. Log `PR #P merge failed: <reason>` using that section's vocabulary (`forge-transient: …`, `permission fault not confirmed — will retry`, or the confirmed-and-cited form).
-- Do **NOT** delete the checkpoint — leave it at `judge-done` (or earlier) so the next sweep retries.
-- Advance to the next PR in the candidate list (do not block the rest of the list).
+- Do **NOT** delete the checkpoint (leave at `judge-done` or earlier) so the next sweep retries.
+- Advance to the next PR.
 
 ### C3. Wave settled → advance to next PR
 

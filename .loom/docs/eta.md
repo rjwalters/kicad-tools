@@ -195,8 +195,8 @@ tracker and every later consumer call it, so the stage a model is trained on
 and the stage it serves cannot drift. `loom:blocked`, `loom:needs-capability`
 and an operator hold on a PR that is not approved are still `blocked`.
 
-**Shipped heuristics do not move.** `start-v1`, `finish-v1`, `land-v1` to
-`land-v3` and `land-2026-10-04-amber-heron` refuse an item in `merge_hold` as
+**Shipped heuristics do not move.** `start-v1`, `finish-v1`, `land-v1` and
+`land-v2` refuse an item in `merge_hold` as
 `blocked` before writing any field, and a held item's `features` are those
 of that refusal (`no_stage`), so their explanations are byte-identical to
 the refusal of a held PR before the stage existed, and no shipped
@@ -267,12 +267,32 @@ only.
 | `finish-v1` | `finish` | in-sweep phase durations (`sweep-outcome-telemetry.jsonl`) | after the in-sweep merge when at least half of the history's successful sweeps merged themselves, else at the verdict |
 | `land-v1` | `land` | in-sweep phases and the stage-sample journal (turnovers too, for an unstarted issue) | after `merge_wait` |
 | `land-v2` | `land` | the same, with **right-censored** stage samples folded in (Kaplan–Meier grids) | after `merge_wait` |
-| `land-v3` | `land` | `land-v2`'s, with each stage grid calibrated first: widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored (recorded per stage as `distribution.adjustment`; #9970) | after `merge_wait` |
-| `land-2026-10-04-amber-heron` | `land` | `land-v2`'s path, then its p25/p75 recalibrated from `land-v2`'s own track record: the current stage's `ln(actual / p50)` distribution (landed estimates as events, still-open ones as censored lower bounds, recency-weighted) fitted at the estimate's own `as_of`; the median is kept (recorded as `recalibration`; #10207) | after `merge_wait` |
+| `land-2026-10-06-calm-plover` | `land` | `land-v2`'s path, then **each** of p25/p50/p75/p90 conformally calibrated against its own hit rate from `land-v2`'s landed **and** still-open (right-censored lower-bound) track record in a trailing 14-day window, per (stage, age bucket) → stage → pooled, with the per-day change of the shift rate-limited; fitted at the estimate's own `as_of` (recorded as `calibration`; #10489) | after `merge_wait` |
 | `land-2026-10-04-fresh-tide` | `land` | `land-v2`'s, with every stage sample (observed and censored) weighted `exp(−age / half_life)`, half-life 2 days, and the grid built from the weighted samples; when the effective N `(Σw)²/Σw²` falls below 8 the half-life doubles (up to 6 times, then flat). Records `distribution.half_life_sec` (absent when flat) and `distribution.effective_n` per stage (#10209) | after `merge_wait` |
-| `land-v4` | `land` | `land-v3`'s, plus the binding stall's term added to every path, operator-held PRs estimated from the stage under the hold, and no `beyond_history` refusal (a flagged residual-life tail instead; #10210) | after `merge_wait` |
+| `land-v4` | `land` | the retired `land-v3`'s grid calibration (widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored; recorded per stage as `distribution.adjustment`; #9970), plus the binding stall's term added to every path, operator-held PRs estimated from the stage under the hold, and no `beyond_history` refusal (a flagged residual-life tail instead; #10210) | after `merge_wait` |
+| `little-v0` | `land` | **floor baseline, never promoted** (#10208): Little's law. For a PR in `review_wait` / `doctor` / `merge_wait`, `items_ahead / drain_rate` for the current stage plus the recency-weighted mean duration of each later stage; interval from a Gamma posterior on the rate (shape = observed exits, 400 seeded draws). Refuses with a zero drain rate and items ahead, or with no queue context; a held PR (`merge_hold`) is refused `blocked`, as by every heuristic that does not model the hold | after `merge_wait` |
 | `land-2026-10-04-twin-otter` | `land` | no history: the newest `eta-fit/v1` coefficient file cut off strictly before `as_of` (see [Fitted coefficients](#fitted-coefficients-eta-fitv1)). PR stages only (`review_wait`, `doctor`, `merge_wait`, `merge_hold`); the blend of a stage-by-stage exit-hazard Monte Carlo (256 paths, seeded per stage visit) and a log-normal direct model (recorded as `twin_otter`; #10222, #10243) | at the merge |
 | `land-2026-10-04-twin-otter-b` | `land` | the pre-PR/PR composition of twin-otter (#10244): `ready_wait`, `sweep.curator` and `sweep.builder` are answered with `land-v2`'s path rules (same refusals, so its answer rate there equals `land-v2`'s; `combination.method` is `land_v2_path_prefix`); `review_wait`, `doctor`, `merge_wait` and `merge_hold` are `land-2026-10-04-twin-otter`'s own answer, unchanged | at the merge |
+
+### Retired heuristics
+
+A retired id is **not registered**: it produces no `eta.estimate`, no
+`eta.snapshot` `alternates[]` entry and no shadow-ledger pairs, and
+`eta backtest --heuristic` / `eta promote` reject it as an unknown id. Pairs
+for it in an older `shadow.json` load without error and are never added to.
+Pending-store entries for it are dropped when the daemon restores the store
+(the startup log counts them), so they are never scored: no `eta.outcome` and
+no ledger pair when the item lands or is censored at expiry. A config that
+names a retired id as `autonomous.eta.current` falls back to the kind's
+default (`land-v1`), as any unregistered id does. The ids stay immutable and are
+never reused. Historical outcomes remain
+in the outcome journals for audit; replay is not retained (a replay-only
+registry would be a second mechanism for dominated heuristics).
+
+| id | retired | reason | refs |
+|---|---|---|---|
+| `land-v3` | 2026-10-06 | Dominated in live outcomes (48 h of `eta.outcome`, `land`): pinball4 3.51 h, p25-p75 coverage 0.126, late surprise (> p90) 0.611. It sits strictly between `land-v2` and `land-v4` on every calibration figure, and `land-v4` is `land-v3` plus the stall, hold and tail fixes. Its grid step lives on inside `land-v4`. | #9970, #10484 |
+| `land-2026-10-04-amber-heron` | 2026-10-06 | Dominated in live outcomes (same 48 h window): pinball4 8.97 h (the worst of any heuristic that answers broadly), p25-p75 coverage 0.147, late surprise 0.649, barely better than `land-v2`'s 0.71. On the small common subset all seven answered (6 items) it is last on pinball. | #10207, #10484 |
 
 A shipped id is **immutable**: a golden test pins each id's output on a fixed
 fixture. A behaviour change is a new id registered beside the old one
@@ -365,15 +385,85 @@ fixture. A behaviour change is a new id registered beside the old one
 
 `land-v2` ships registered-not-current on purpose, as the worked example of
 all of the above.
-`land-v3` (#9970) ships the same way: its constants are fixture-derived,
-and the live coverage/pinball result is the operator's backtest, not a claim.
-`land-2026-10-04-amber-heron` (#10207) ships the same way, named by the
-datestamp-plus-two-words convention for shipped heuristics. Its evidence is
-`.loom/state/eta/calibration.jsonl` (every landed `land-v2` outcome the
-tracker scored) plus the pending store; `eta backtest` derives the same
-evidence by replaying `land-v2` over the cases, leak-free because the table is
-refitted at each case's own `as_of`. With fewer than 20 landings, even pooled
-across stages, it returns its base estimate unchanged.
+`land-v3` (#9970) and `land-2026-10-04-amber-heron` (#10207) shipped the same way and
+were retired on 2026-10-06 (see [Retired heuristics](#retired-heuristics)).
+The calibration log (`.loom/state/eta/calibration.jsonl`, every landed
+`land-v2` outcome the tracker scored) and the recalibration machinery stay in
+the daemon. `land-2026-10-06-calm-plover` (below) reads it, so `eta view`
+loads it and `eta backtest` / `eta promote` derive the same evidence by
+replaying `land-v2` over the cases, leak-free because the calibration is
+refitted at each case's own `as_of`.
+`land-2026-10-06-calm-plover` (#10489) ships the same way: registered, not
+current, shadowed so it appears in every snapshot's `alternates` (the loom-ui
+ETA chooser), promotion only through the #10233 gate. It is a generic
+calibration layer; the registered id fixes its base at `land-v2`
+(`eta::conformal::calibrate` takes any base explanation and the base's
+observations).
+
+*Method.* A past base estimate with quantile `q_τ` and actual remaining time
+`a` has score `ln(a / q_τ)`; `a ≤ q_τ` exactly when the score is `≤ 0`. The
+adjusted quantile is `q_τ · exp(c_τ)` where `c_τ` is the finite-sample
+corrected (`(n+1)τ/n`) split-conformal quantile of the scores in the cell,
+so it would have held `τ` of the cell's outcomes: p25, p50, p75 and p90 each
+aim at 25/50/75/90%. The cell is the estimate's (stage, age bucket) when it
+has 20 landings in the window, else the stage, else all stages, else nothing
+(the base estimate is returned unchanged with no `calibration`; rows logged
+before observations carried the base's p25/p75/p90 and age are not evidence).
+A still-open base estimate is a **lower bound** `ln(elapsed / q_τ)` entering a
+Kaplan–Meier estimate with the landings; an unresolvable tail clamps to the
+largest bound. The change of every shift is limited to `ln 1.2` per day: the
+shift is replayed day by day (on `as_of`'s own day lattice) from the oldest
+usable base estimate, each day's raw fit clamped to one step of the day
+before. The anchor is fixed by the evidence, not by `as_of`, so two estimates
+a day apart differ by at most one step whatever enters or leaves the window,
+and a backtest replays it exactly; only log compaction moves the anchor
+(#10497). Outputs are made monotone (`p25 ≤ p50 ≤ p75 ≤ p90`).
+
+*Point-in-time.* Everything is a function of the estimate's own `as_of`: a
+base estimate made at or after it, and an outcome *known* at or after it, are
+not used (a landing not yet known is a censored bound). A test perturbs every
+post-`as_of` outcome and requires bit-identical output.
+
+*The record.* `calibration{method, base, window{from,to,days}, level, stage,
+age_bucket, shift{p25,p50,p75,p90}, raw_shift, n_events, n_censored,
+max_daily_step, replay_from, base_quantiles_sec}` — the shifts are natural-log units, so
+"why this range?" is `base_quantiles_sec × exp(shift)`; the result recomputes
+from the explanation alone.
+
+*Why it differs from `amber-heron`* (retired, see above). Amber-heron also
+folds still-open estimates in as lower bounds, so censoring is not the
+difference. What differs
+is what is calibrated against what. Amber-heron fits one distribution of
+`ln(actual / p50)` per stage and sets every quantile by
+`p50 · exp(Q(τ) − Q(0.5))` (default `SpreadOnly`): the base median is kept
+as-is, and the p25/p75/p90 are placed relative to it using ratios to the
+*median*, not to the quantile being reported, so no reported quantile is tied
+to its own hit rate. It has no age conditioning, and a recency-weighted fit
+that nothing limits from one day to the next — on the live data #10489
+reports it as the worst candidate (pinball 8.97 h, late surprise 0.649).
+Calm-plover scores each quantile against itself (`ln(actual / q_τ)`), moves
+the median too, conditions on the age bucket, and rate-limits the adjustment.
+That it fixes those defects is the hypothesis the shadow evidence and the
+#10233 gate test; it is not claimed here.
+
+`little-v0` (#10208) is registered the same way but is a **floor**, not a
+candidate: zero parameters, expected to lose to `land-v2` (long waits are mostly
+PRs held for a human, which a queue model cannot see), reported beside every
+candidate in `eta backtest` / `eta view` as the bar a fitted model must clear. It
+is never set as `current.land`, and the gates only ever promote a candidate that
+measurably beats `land-v1`.
+
+Its inputs arrive in `EstimateInput.queue` (`eta::stage_queue`), never fetched:
+for the stage the PR is in, `items_ahead` (other open PRs in that stage and
+scope that entered it earlier; scope is the repo for `merge_wait`, the fleet for
+`review_wait` / `doctor`) and `drain_rate_per_hr` (exits from the stage in
+scope over the 24 h before `as_of`, each weighted `2^(-age/6h)` and normalised so
+a steady rate reads as itself), from events and the roster known before `as_of`.
+The explanation's `queue` record carries `items_ahead`, `drain_rate_per_hr`,
+`half_life_sec`, `window_sec`, `exits`, `wait_sec`, each later stage's service
+mean and the seed, so `p50_sec = round(items_ahead / drain_rate_per_hr * 3600) +
+round(sum of service means)` is recomputable from it alone. A backtest
+`ReplayCase` carries the same `queue`, built by the same `stage_queue` function.
 `land-2026-10-04-twin-otter` (#10243) ships the same way; `land-2026-10-04-twin-otter-b`
 (#10244) follows it. Twin-otter's model is PR-level, so on its own it refuses every
 pre-PR item (`unknown_stage`) and could never pass the answer-rate gate against
@@ -791,7 +881,7 @@ is scored against. It is the nearest-rank 90th percentile of the same
 simulated path totals the quartiles come from, so it costs no new draws and
 leaves `p25_sec`, `p50_sec` and `p75_sec` unchanged; `run_explanation`
 recomputes all four. Every heuristic that simulates (`start-v1`, `finish-v1`,
-`land-v1`, `land-v2`, `land-v3`, `land-2026-10-04-twin-otter`) records it. It is absent only on a refusal
+`land-v1`, `land-v2`, `land-2026-10-04-twin-otter`) records it. It is absent only on a refusal
 and on an explanation recorded before the field existed, which still parses:
 the field is additive, so the schema stays `eta-explanation/v1`. The stage
 marks stay at three percentiles.
@@ -904,7 +994,7 @@ population.
 
 Every estimate records `features`: point-in-time context for the fitted
 models (`eta fit`, #10221; the twin-otter heuristic, #10222) and for testing
-which inputs matter. No v1 heuristic reads them; `land-v3` reads `labels`
+which inputs matter. No v1 heuristic reads them; `land-v4` (through its `land-v3` grid step) reads `labels`
 and `queue_running`. A feature is `null` when unmeasured, with a specific
 `features_omitted` reason. `not_collected` is only the backstop for declared
 features that nothing populates yet (#10232).
@@ -1232,7 +1322,8 @@ triggers:
 An unchanged estimate is refreshed every `refreshSecs` (300); a changed stage,
 rework count or refusal reason emits at once; a series is capped at 20
 emissions per rolling hour. Every emitted estimate waits for its outcome in
-`.loom/state/eta/pending.jsonl`, which survives a restart. It is per-host
+`.loom/state/eta/pending.jsonl`, which survives a restart (an entry whose
+heuristic is no longer registered is dropped on restore). It is per-host
 runtime state and is never git-tracked (the managed gitignore block ignores
 all of `.loom/state/*`, #9592).
 
@@ -1335,6 +1426,8 @@ kind, heuristic, as_of])`), never random, and both kinds sit inside the
 issue's D32 story trace.
 
 ## The live list (`eta.snapshot`)
+
+> Only the fleet's [ETA authority](#one-eta-authority-per-fleet-fleetetaauthority-10498) emits it (#10498).
 
 The estimates above are emitted one at a time as `eta.estimate` log records
 and live in SigNoz, which is what accuracy scoring needs and what a dashboard
@@ -1673,6 +1766,47 @@ estimates report `scope = fleet`. That is #9343's designed path; set
 `historyScope = local` to keep a host on its own journals.
 
 Each pass logs `eta: pass emitted=N refused=M outcomes=K …`.
+
+### One ETA authority per fleet (`fleet.etaAuthority`, #10498)
+
+Exactly one host computes and emits ETAs, so SigNoz holds one series per item,
+not one per host.
+
+- **The rule** (re-read every pass, no restart):
+  1. `fleet.etaAuthority: "<host id>"` (or `LOOM_ETA_AUTHORITY`) names it:
+     reason `explicit`. This is the override, and is how the authority is
+     later moved to the captain.
+  2. Else the fleet refresher: the declared `fleet.captain`, or, with none
+     declared, this host when its own `autonomous.eta.fleetRefresh.enabled` is
+     on: reason `fleet_refresh`.
+  3. Several candidates and no explicit key: the lowest host id wins (reason
+     `lowest_id_fallback`) and the others log one warning per change naming the
+     conflict.
+  4. No candidate and no explicit key: no authority (`no_candidate`); `eta
+     doctor` warns.
+- **How a host learns its peers' state: it does not.** There is no peer
+  roster, and a network read in a per-pass gate would turn a peer outage into
+  an ETA outage. The candidate set uses this host's own inputs plus the
+  committed `fleet.captain` / `fleet.etaAuthority`. `fleetRefresh.enabled`
+  defaults to `true`, so two default hosts with no captain and no
+  `fleet.etaAuthority` each think they are the authority. On a multi-host
+  fleet declare one of the two keys. A fleet where no host has fleetRefresh on
+  and no key is set has no ETA emitter at all.
+- **The authority** runs the tracker passes that emit `eta.estimate`,
+  `eta.outcome` and `eta.snapshot`, and is the only host that fits
+  (`eta-fit/v1`), **locally, even when `fleet.captain` names another host**: it
+  never takes a published fit in place of its own. Published fits (#10395)
+  stay for redundancy. Every `eta.estimate` / `eta.outcome` carries
+  `loom.eta.authority`, the authority's host id.
+- **Every other host** makes no forge read for the ETA pass, emits no
+  `eta.estimate`, `eta.outcome`, `eta.snapshot` or `eta.fit`, and **drops its
+  pending-estimate store** (`.loom/state/eta/pending.jsonl`) on start and on
+  demotion, so it never scores a stale outcome. Its stage journal still
+  records what it saw, and the `eta` CLI keeps working read-only.
+- **Observability.** `eta doctor` prints the authority host and why
+  (`config.authority`). A non-authority host that reaches the ETA sink anyway
+  drops the records and counts
+  `loom.daemon.task_faults{task=eta_pass,reason=eta_non_authority_emit}`.
 
 ### Fleet refresh task (`autonomous.eta.fleetRefresh`, #10263)
 

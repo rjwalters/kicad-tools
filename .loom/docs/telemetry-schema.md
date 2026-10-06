@@ -1628,6 +1628,7 @@ Never an issue number, sha or path.
 | `loom.eta.health.refresh_repos` | `{repository}` | `reason` (a fleet-refresh stop reason) | repos per stop reason in the last tick that refreshed; a reason that drops out is exported once as `0` |
 | `loom.eta.health.snapshot_rows` | `{row}` | none | rows in the last `eta.snapshot` this process built. Omitted until one was built |
 | `loom.eta.health.snapshot_alternates_rows` | `{row}` | none | of those, rows with non-empty `alternates` (#10390) |
+| `loom.eta.health.pending_over_cap` | `{estimate}` | none | cumulative pending estimates evicted by the `MAX_PENDING` cap since process start (#10496). Omitted before the first ETA pass; a rising value means refreshes are being thinned (redundant middles, then pairs to their earliest). Whole series are evicted only when distinct series alone exceed the cap; the daemon log's `whole series lost` count reports those |
 
 The dwell names (#8856) are `loom.queue.oldest_wait`, `loom.queue.starved`,
 `loom.queue.starved.by_reason` and `loom.queue.dispatch_wait[.samples]`. They
@@ -1752,6 +1753,7 @@ GitHub rate limit (Issue #10022):
 | `github.ratelimit.breaker_skips` | delta `Sum` | `{pass}`; label `reason` | job passes skipped because the breaker was suppressing, flushed on the 60 s tick |
 | `github.ratelimit.{remaining,used,reset}` per bucket | `Gauge` | as above; labels `resource`, `account`, `owner` | one series per believed reading of the forge bucket book (W1): every App installation's pool this host spends, keyed `(account, owner, resource)`. Fed by the free `x-ratelimit-*` headers of `gh api --include` calls and by one free `gh api rate_limit` probe per published credential directory after each 5-minute reader-refresh pass. A reading counts only while its window is open and it is under 10 minutes old. The account-only points above are unchanged |
 | `loom.forge.calls` | delta `Sum` | `{request}`; labels `caller`, `op`, `role`, `account`, `cred_owner`, `target_owner`, `resource`, `outcome` | requests the `gh` facade sent since the previous point (W1), flushed on the 60 s tick. A `--paginate --include` call counts its pages; `run download` counts 2. The free `gh api rate_limit` probe is counted under `resource` = `other` (a request observation, never a charge). `outcome` ∈ `ok`, `not_modified`, `rate_limited`, `error`, `shed` (reserved for a budget gate). Past 2048 distinct label sets between flushes, a new set is folded into one series per `outcome` with every other label `overflow`, so totals are kept and the point count stays bounded. Accumulated only while an ops sink is registered |
+| `loom.forge.facade.events` | delta `Sum` | `{event}`; label `reason` = the counter name | named `gh`-facade events that are not forge calls, since the previous point, flushed on the same tick: `facade.cwd_route.disagree` (a checkout whose local sources name different repositories, so its untargeted reads stay on the writer — counted once per call, whether W1's accounting or W4-C's derivation saw it), `repo_facts.redirected`, `repo_facts.resolver_disagree`. Only counters that moved emit a point. Exported only while an ops sink is registered |
 
 `resource` ∈ `core`, `graphql`. `account` is `app-<app id>` when the daemon
 runs on its GitHub App credential, the validated `gh` login for an ambient
@@ -1965,6 +1967,12 @@ allowlisted in the collector's `transform/privacy`). Both kinds set the
 envelope's `trace_context` to the issue's D32 story
 (`story_context(repo_id, issue)`), so they land in the issue's story trace;
 a repo with no resolvable `repo_id` gets none.
+
+**One emitter per fleet (#10498).** Only the fleet's ETA authority emits these
+kinds (and `eta.snapshot`, `eta.fit`); every record carries the attribute
+`loom.eta.authority`, the authority's host id, which equals the envelope's
+`host_id`. `uniqExact(host.id)` over `eta.*` in the last hour is `1`. See
+[`eta.md`](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498).
 
 **Provenance is required on both.** `version`, the full 40-hex `revision`
 (or `unknown` for a tarball build), `tree_state` and `complete` (a full SHA

@@ -86,6 +86,7 @@ test-worktree-lease-co-occupancy.sh  Needs a built loom-daemon: worktree.sh's sh
 # scripts/ (repo root, top-level only) — since #5278. Each of these already
 # runs as its own direct step in ci.yml and/or build-gate.sh; excluded here
 # (rather than wired) to avoid double-running it via run-ci-suites.sh.
+scripts/test-ci-result-gate.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the CI Result aggregate gate", #10444); excluded here to avoid double-running it behind the path filter.
 scripts/test-install-local-mode.sh  Already wired directly in ci.yml's "Installer local/gitignore mode" step and build-gate.sh; excluded here to avoid double-running it.
 scripts/test-installer.sh  Already wired directly in ci.yml's "Installer Integration Tests" job and build-gate.sh; excluded here to avoid double-running it.
 scripts/test-migrate-consumer.sh  Already wired directly in ci.yml's "migrate-consumer" step and build-gate.sh; excluded here to avoid double-running it.

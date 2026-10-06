@@ -95,9 +95,10 @@ act" but "a human wants this landed ASAP, act now". It is the one "land this
 ASAP" signal; the older urgent label is retired (its `labels.yml` description
 says so, and no role applies it).
 
-- **Human-only.** No role decides to apply or remove it. The daemon only relays
-  a loom-ui star intent, and Builder copies it from a starred issue onto the PR
-  it opens.
+- **Operator-derived only (#10012).** No role stars on its own judgment. The
+  daemon relays a loom-ui star intent; Builder copies it onto the PR it opens;
+  `create-issue.sh --parent N` stars a new child of a starred N (audit comment
+  `inherited_from=#N`). Never propagated: holds, claim/lifecycle labels, `loom:heavy`, `points:*`.
 - **Starred first, every stage.** Curator curates starred issues first (a
   starred issue with no workflow label counts as `loom:triage`) and promotes
   them straight to `loom:issue`, because the star is the Tier-3 approval. A

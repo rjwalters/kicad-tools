@@ -10,6 +10,7 @@ See issue [#3347](https://github.com/rjwalters/loom/issues/3347) for the origina
 - [Why a gate?](#why-a-gate)
 - [The three checks](#the-three-checks)
 - [Configuration](#configuration)
+- [In-session pre-PR gate (`loom-daemon preflight`)](#in-session-pre-pr-gate-loom-daemon-preflight)
 - [Examples](#examples)
 - [Failure semantics](#failure-semantics)
 - [Why orchestrator-side?](#why-orchestrator-side)
@@ -69,6 +70,7 @@ The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` s
 | `command` | string | _(none)_ | Shell-style command run in the worktree (parsed with `shlex.split`). When omitted, the build check is skipped but the has-commits and has-real-changes checks still run. |
 | `realChangeGlobs` | array of strings | _(default exclusions)_ | Positive globs. A changed file must match at least one to count as "real." When omitted, every changed file counts unless it matches one of the default scratch exclusions: `.loom-*`, `*.log`, `.no-changes-needed`. |
 | `timeoutSeconds` | integer | `600` | Timeout for the `command` run. |
+| `preflightMaxAttempts` | integer | `3` | Max failed in-session `loom-daemon preflight` runs before the terminal `preflight_unresolved` outcome (#10476). |
 | `loadThreshold` | number | `0.9` | Daemon main-health gate only (#4259): 1-minute load average per logical CPU at/above which the gate DEFERS instead of running the full suite. Env override `LOOM_BUILD_GATE_LOAD_THRESHOLD`. See "Tiered gate + load-aware deferral". |
 | `maxDeferSeconds` | integer | `1800` | Daemon main-health gate only (#4259): after this many seconds of consecutive load-deferred ticks, the FAST tier runs regardless of load so a permanently-loaded host still reaches a verdict. Env override `LOOM_BUILD_GATE_MAX_DEFER_SECS`. |
 | `fastCommand` | string | _(derived)_ | Daemon main-health gate only (#4259): the command run for the fast tier. When omitted, the base `command` is run with `LOOM_BUILD_GATE_TIER=fast` prefixed. |
@@ -78,6 +80,21 @@ The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` s
 > `LOOM_GATE_CI_WORKFLOW`, #3987) lives under `autonomous.mainHealthGate`, **not**
 > here. `buildGate` is the builder-side worktree quality gate; it has no business
 > knowing about forge CI. See [Optional named verification workflow](daemon-reference.md#optional-named-verification-workflow-loom_gate_ci_workflow-3987).
+
+## In-session pre-PR gate (`loom-daemon preflight`)
+
+The orchestrator-side gate above runs *after* the Builder exits, so the failing output never reaches the Builder that wrote the change (#10476). `loom-daemon preflight --issue N` runs the **same** `buildGate.command` (same `enabled`, `command`, `timeoutSeconds`) **inside the Builder's session, before the PR is opened**, and hands the failure tail back for in-session repair.
+
+| Exit | Meaning |
+|------|---------|
+| `0` | Gate passed (a receipt for `HEAD` is recorded), or no enabled `buildGate` command — a no-op. |
+| `1` | Failed, attempts remain: the output tail is printed; fix, commit, re-run. |
+| `4` | Attempts exhausted: `reason=preflight_unresolved`. The claim is released via the protected restore path (a parked, closed or PR target is not re-queued; a failed release is reported) and the Builder opens **no PR**. |
+| `7` | `--check` only: `HEAD` has no passing receipt. |
+
+Attempts and the receipt live in the worktree's git dir (never committed); `buildGate.preflightMaxAttempts` (default 3) bounds the loop within one dispatch episode (`LOOM_SWEEP_ID`); a re-dispatch into the same worktree starts a fresh budget. **Enforcement:** `create-pr.sh` runs `loom-daemon preflight --check` and exits `7` for an un-gated `HEAD`; a binary predating the subcommand skips the check (fail-open, like its sibling guards). A new commit invalidates the receipt, so fixes must be re-gated. Repos with no `buildGate` block are unchanged.
+
+**Measuring first-pass Judge approval (post-merge observation, not a merge gate).** The target (>80%, from ~43%) is the share of PRs whose first Judge verdict is approve, i.e. PRs with exactly one `loom:review-requested` cycle. Query it in SigNoz on the Judge review spans/verdict events grouped by PR (first verdict per PR = approved vs. changes-requested), comparing before/after this lands; a `preflight_unresolved` log line counts sweeps stopped before any PR existed.
 
 ## Examples
 

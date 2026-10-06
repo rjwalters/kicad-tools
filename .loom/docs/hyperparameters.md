@@ -166,6 +166,51 @@ roll back, set the mode back to direct and have the operator remove the
 inert without a queue. Full checklist, evidence and rollback steps:
 [merge-queue-ci](merge-queue-ci.md).
 
+### The setting: `champion.mergeMode` (#10255)
+
+There is one key, `champion.mergeMode`. It is a top-level config key, not part
+of the `"hyperparameters"` block, and the strict gate described above does not
+cover it.
+
+| Value | Meaning |
+|---|---|
+| `direct` (default) | `merge-pr.sh` merges the approved PR itself. This is today's behaviour. |
+| `queue` | Put the approved head on the forge's merge queue. This is dormant; see below. |
+
+Precedence is `$LOOM_MERGE_MODE` (an empty value counts as unset), then the
+tier-merged config (`config_resolver.rs`, with `.loom-local` above
+`.loom-project` above `.loom/config.json` above machine defaults), then
+`direct`. Any other value, including `"Queue"`, `"queued"` or a non-string, is
+an error that names the value and where it came from. It **never** falls back
+to `direct`.
+
+`loom-daemon forge merge-queue` exposes the typed controls in
+`loom-daemon/src/forge_merge_queue/`:
+
+- `mode` prints the resolved mode, its source and the execution gate.
+- `preflight [--repo] [--branch]` is read-only. It reports one of these
+  distinct kinds: `UNSUPPORTED_FORGE`, `UNSUPPORTED_REPOSITORY`,
+  `MISSING_QUEUE_RULE`, `MISSING_REQUIRED_CHECKS`, `CONFIG_INACCESSIBLE` or
+  `RATE_LIMITED`.
+- `status <pr>` shows the PR's head and its queue entry.
+- `enqueue <pr> --approved-sha SHA` always sends `expectedHeadOid` set to the
+  approved head and never sends `jump`.
+- `dequeue <pr>` removes the PR from the queue.
+
+Enqueue and dequeue are idempotent: if the PR is already queued at the approved
+head, or is not queued at all, nothing is sent. A head mismatch is reported and
+never retried with the refreshed SHA. Diagnostics redact anything that looks
+like a token.
+
+Exit codes are 0 for ok, 1 for failed or not capable, 2 for an invalid config,
+3 for could-not-determine, and 4 for a refusal before any forge call.
+
+**Dormant.** Queue execution is compiled off (`QUEUE_EXECUTION_ENABLED = false`).
+Under `direct`, `enqueue` and `dequeue` refuse with `NOT_QUEUE_MODE` before any
+forge call. Under `queue`, they refuse with `EXECUTION_DORMANT` until #9978's
+later phases install the lifecycle safety contract and the required
+merge-group checks. No role or script invokes these verbs yet.
+
 ## Tranche roadmap
 
 Tranche 1 (this issue) consolidates the seven fields above. Later tranches

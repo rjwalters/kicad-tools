@@ -398,6 +398,8 @@ Local verification:
 - [ ] Linter run on changed files (0 errors)
 ```
 
+**Pre-PR gate (pre-flight, #10476).** If `buildGate` is configured, run `loom-daemon preflight --issue N` before `create-pr.sh`. Exit 1 = failed: it prints the output tail; fix, commit, re-run (max `buildGate.preflightMaxAttempts`, default 3). Exit 4 (`preflight_unresolved`) = stop, open NO PR (claim already released). `create-pr.sh` refuses (exit 7) a HEAD that has not passed. No `buildGate` = no-op exit 0.
+
 ### Language-Specific Verification
 
 **Rust Code Changes**
@@ -418,12 +420,7 @@ cargo fmt
 cargo fmt --all -- --check
 ```
 
-**Why check compilation before commit (not just rely on CI)?**
-
-1. **Defense in depth** - Pre-commit hooks can fail silently in worktrees or with PATH issues
-2. **Early feedback** - Catch errors immediately instead of after CI failure
-3. **Save a Doctor cycle** - the project's check command (`buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`) includes compilation; catching it early avoids a fix cycle
-4. **Async pitfalls** - Common Rust async errors (e.g., holding `MutexGuard` across `.await`) are only caught by the compiler, not by reading code
+**Why check before commit?** Pre-commit hooks can fail silently in worktrees; a Doctor cycle costs far more than a local check; async errors (e.g. `MutexGuard` across `.await`) only the compiler catches.
 
 **Add to your pre-PR checklist when modifying Rust:**
 
