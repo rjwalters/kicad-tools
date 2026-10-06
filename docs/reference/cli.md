@@ -840,6 +840,7 @@ Common flags (the full surface lives in `kct route --help`):
 | `--no-routing-plan` | Skip the report-only routing-plan stage (on by default; see [`routing-plan.md`](routing-plan.md)) |
 | `--plan-gate` | Refuse to start detailed routing (exit 9) when the routing plan reports overflow, printing the per-edge overflow report and its computed relief first. Off by default. Overridden by `--force` |
 | `--force` | Route even when the grid resolution exceeds clearance — **and** override `--plan-gate`. Also disables grid/DRC validation, so to simply not gate, omit `--plan-gate` rather than adding `--force` |
+| `--diagnose-unrouted-budget SEC` | Time budget for classifying each unrouted connection as `congested` or `blocked` in `--format json` output (default: 20; `0` disables). See [Why a connection is unrouted](#why-a-connection-is-unrouted) |
 
 #### Post-route sidecars
 
@@ -867,6 +868,37 @@ produced by replaying the journal against the live grid at the end of the
 route, because the clearance resolver that decided each access set is gone
 once the router is. `kct route --format json` reports the same block under
 `access_witness`.
+
+#### Why a connection is unrouted
+
+When `kct route --format json` leaves connections unrouted, the document adds an
+`unrouted` array with one entry per unrouted pad-to-pad connection, plus an
+`unrouted_diagnosis` summary (counts, `elapsed_s`, `budget_s`,
+`budget_exhausted`). Each entry's `cause` tells you which kind of fix applies
+(Issue #5944):
+
+| `cause` | Meaning | Extra key |
+|---------|---------|-----------|
+| `congested` | The connection routes once every other signal trace is removed, so other nets' copper is in the way. Try rip-up, net reordering, more layers or re-placement. | `contenders`: the nets whose copper lies on that solo path, most-overlapping first. These are the rip-up candidates. |
+| `blocked` | There is no path even with all other signal copper removed. Only a placement, keepout, rule or footprint change can fix it. | `blockers`: the objects that close off the endpoint the search could not leave, such as a `pad` (with `ref`/`pin`), a `keepout` (with `bbox`), the `board_edge`, a `pour`, or remaining fixed `copper`. `frontier` names that endpoint. |
+| `unclassified` | The budget ran out before this connection, or its solo search hit its time cap. | `note` |
+
+```json
+{"net_name": "B", "source_pad": {"ref": "J3", "pin": "1"},
+ "target_pad": {"ref": "J4", "pin": "1"}, "cause": "congested",
+ "contenders": [{"net_id": 1, "net_name": "A", "cells": 3}],
+ "solo_path": {"length_mm": 8.0, "vias": 0}, "search_s": 0.001}
+```
+
+The classifier lifts all committed routes off the routing grid and then runs
+the router's own A* once per connection. Pads, keepouts, pours and the
+board-edge keepout stay in place. Afterwards it restores the routes exactly,
+so the routed board is unaffected. The pass has a total time limit
+(`--diagnose-unrouted-budget`) and a per-connection search cap of 5 s. It shows
+up as its own `unrouted-diagnosis` stage in the route deadline supervisor and
+in `scripts/research/route_phase_profile.py`. A one-line summary goes to
+stderr. Both keys are absent when everything routed, when the output is text,
+or when the budget is `0`. `kct route-auto` does not report causes yet.
 
 #### Routing around invalid placement
 

@@ -198,6 +198,11 @@ PHASES: tuple[tuple[str, str, str], ...] = (
         "kicad_tools.router.optimizer.trace",
         "optimize_routes_grid_synced",
     ),
+    (
+        "unrouted congested/blocked diagnosis (solo A* per connection)",
+        "kicad_tools.router.unrouted_cause",
+        "diagnose_unrouted",
+    ),
     ("write routed PCB (checkpoints + final)", "kicad_tools.cli.route_cmd", "_write_routed_pcb"),
     (
         "routing-plan sidecar",
