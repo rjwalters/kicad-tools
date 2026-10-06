@@ -116,17 +116,21 @@ SKIP_NETS = ["VCC", "GND", "VBUS"]
 # (``REQUIRED_NETS_ROUTED = 13``).
 MIN_FULLY_ROUTED_NETS = 13
 
-# Issue #5981: older kicad-cli builds mis-measure the annular ring of the
-# four J1 USB-C shield (``SH``) pads.  Those are oval PTH pads (0.9 mm wide,
+# Issue #5981: kicad-cli 10.0.1 mis-measures the annular ring of the four
+# J1 USB-C shield (``SH``) pads.  Those are oval PTH pads (0.9 mm wide,
 # 0.6 mm oval drill), so the nominal ring is (0.9 - 0.6) / 2 = 0.150 mm --
-# exactly the jlcpcb-tier1 ``PTH Annular Ring`` floor.  kicad-cli 10.0.1
-# measures 0.1462 mm (an oval-hole polygon-approximation error) and reports
-# four ``annular_width`` errors; the CI-pinned 10.0.6 measures the true
-# value and reports zero.  The same four errors reproduce on 10.0.1 at
-# a73d3a0e (where #5191 closed green on 10.0.6), so this is toolchain
-# skew, not board drift.  Below this version we XFAIL -- never pass --
-# when, and only when, those exact false positives are the sole errors.
-ANNULAR_OVAL_MIN_KICAD_VERSION = (10, 0, 6)
+# exactly the jlcpcb-tier1 ``PTH Annular Ring`` floor.  10.0.1 measures
+# 0.1462 mm (an oval-hole polygon-approximation error) and reports four
+# ``annular_width`` errors.  On the committed routed board with its project
+# rules, ``kicad-cli pcb drc --refill-zones --severity-all`` reports 0 errors
+# and 0 unconnected on the ``kicad/kicad`` 10.0.2, 10.0.4, 10.0.5 and 10.0.6
+# images (CI pins 10.0.6), while 10.0.1 reports exactly the 4 J1 SH errors
+# with the same 2 warnings.  The same four errors reproduce on 10.0.1 at
+# a73d3a0e (where #5191 closed green on 10.0.6), so this is toolchain skew,
+# not board drift.  10.0.2 is the first version verified clean (10.0.3 was
+# not tested).  Below it we XFAIL -- never pass -- when, and only when,
+# those exact false positives are the sole errors.
+ANNULAR_OVAL_MIN_KICAD_VERSION = (10, 0, 2)
 _J1_SHIELD_PAD_RE = re.compile(r"\bpad SH\b.*\bof J1\b")
 # The mis-measurement is ~4 um; anything larger is a real deficit.
 _ANNULAR_MEASUREMENT_SLOP_MM = 0.01
@@ -149,7 +153,7 @@ def _old_kicad_annular_xfail_reason(
     errors: list[tuple[str, list[str], float | None, float | None]],
     version: tuple[int, ...] | None,
 ) -> str | None:
-    """Explain why ``errors`` are the known pre-10.0.6 J1 shield false positive.
+    """Explain why ``errors`` are the known pre-10.0.2 J1 shield false positive.
 
     ``errors`` holds ``(type, item_descriptions, actual_mm, required_mm)`` for
     every error-severity violation.  ``version`` is the kicad-cli version that
@@ -174,7 +178,7 @@ def _old_kicad_annular_xfail_reason(
     floor = ".".join(str(part) for part in ANNULAR_OVAL_MIN_KICAD_VERSION)
     found = ".".join(str(part) for part in version)
     return (
-        f"kicad-cli {found} < {floor} (the CI-pinned version) mis-measures the "
+        f"kicad-cli {found} < {floor} (first version verified clean) mis-measures the "
         f"oval-drill annular ring of the J1 USB-C SH pads (nominal 0.150 mm) and "
         f"reports {len(errors)} false-positive annular_width error(s); "
         f"upgrade kicad-cli to >= {floor} to run this check (issue #5981)."
@@ -1434,7 +1438,8 @@ _J1_SH_FALSE_POSITIVE = (
     [
         # The exact #5981 signature on 10.0.1 -> xfail with a reason.
         ((10, 0, 1), [_J1_SH_FALSE_POSITIVE] * 4, True),
-        # The pinned version (and newer) never gets the escape hatch.
+        # The first verified-clean version (and newer) never gets the escape hatch.
+        ((10, 0, 2), [_J1_SH_FALSE_POSITIVE] * 4, False),
         ((10, 0, 6), [_J1_SH_FALSE_POSITIVE] * 4, False),
         ((11, 0, 0), [_J1_SH_FALSE_POSITIVE] * 4, False),
         # Unknown version -> fail normally.
