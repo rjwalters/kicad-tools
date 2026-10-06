@@ -208,6 +208,53 @@ def _same_net_spelling(sch_net: str, pcb_net: str) -> bool:
     return s == p or s.rsplit("/", 1)[-1] == p.rsplit("/", 1)[-1]
 
 
+def _names_same_net_strict(name_a: str, name_b: str) -> bool:
+    """True when two net names are unambiguously spellings of one net.
+
+    Stricter than :func:`_same_net_spelling`, for deciding that a PCB net
+    carries the *name of another* schematic net (issue #5980).  Accepts
+    equality after stripping the leading ``/`` (``X`` / ``/X``), and a leaf
+    match only when one side has no sheet path (``X`` vs ``/Sheet/X``).
+    Two fully sheet-qualified names on different sheets (``/A/CLK`` vs
+    ``/B/CLK``) are different nets -- a net class or zone keyed on one does
+    not apply to the other -- so they never match.
+    """
+    a = name_a.lstrip("/")
+    b = name_b.lstrip("/")
+    if a == b:
+        return True
+    if "/" in a and "/" in b:
+        return False
+    return a.rsplit("/", 1)[-1] == b.rsplit("/", 1)[-1]
+
+
+def _is_generated_net_name(name: str) -> bool:
+    """True for tool-invented net names that carry no design intent.
+
+    ``Net-(R1-Pad2)`` and ``unconnected-(...)`` are derived from a pad, not
+    chosen by the designer, so no net class, diff pair or zone is keyed on
+    them and they never count as "the name of another net".
+    """
+    return name.startswith(("Net-(", "unconnected-"))
+
+
+def _name_match_rank(sch_net: str, pcb_net: str) -> int:
+    """Lower is a closer spelling match (exact, then ``/`` prefix, then leaf)."""
+    if sch_net == pcb_net:
+        return 0
+    if sch_net.lstrip("/") == pcb_net.lstrip("/"):
+        return 1
+    return 2
+
+
+def _format_pads(pads: list[tuple[str, str]], limit: int = 5) -> str:
+    """Render ``[("C1", "1"), ...]`` as ``C1.1, C2.1`` (truncated past ``limit``)."""
+    shown = ", ".join(f"{ref}.{pad}" for ref, pad in pads[:limit])
+    if len(pads) > limit:
+        shown += f", ... ({len(pads) - limit} more)"
+    return shown
+
+
 class NetlistValidator:
     """Validates synchronization between schematic and PCB netlists.
 
@@ -217,6 +264,7 @@ class NetlistValidator:
     - Net name mismatches between schematic and PCB
     - Pads on a different net than their schematic pin (compared by
       connectivity, so net renaming alone is not drift)
+    - PCB nets carrying another schematic net's name (swapped net names)
 
     Example:
         >>> validator = NetlistValidator("project.kicad_sch", "project.kicad_pcb")
@@ -541,6 +589,17 @@ class NetlistValidator:
            the PCB joins to other pads is an error.  Single-pin nets on
            either side are electrically the same as "unconnected" and are
            not reported.
+        5. A schematic net whose paired PCB net carries the *name* of a
+           different schematic net is an error, even when every pad is
+           wired correctly (issue #5980): see :meth:`_check_swapped_net_names`.
+
+        When a pad is reported because most of its schematic net moved to
+        another PCB net while the pad itself kept the net's own name, the
+        message says the net is *split* and names the pads that moved,
+        rather than presenting the one pad still on the right name as the
+        culprit.  That wording is used only when the pad's PCB net carries
+        no other schematic net: if it does, the pad sits on that net's
+        copper (a short), and the plain mismatch message is kept.
 
         Args:
             result: SyncResult to add issues to
@@ -609,6 +668,17 @@ class NetlistValidator:
             sch_to_pcb[s_net] = p_net
             pcb_to_sch[p_net] = s_net
 
+        # Schematic nets whose paired PCB net holds exactly their pads (no
+        # pad strayed off, no foreign pad on it): only for these is "the
+        # copper joins the right pads" true.
+        clean_nets = {
+            s_net
+            for s_net, p_net in sch_to_pcb.items()
+            if all(pcb_pad_nets[k] == p_net for k in sch_groups[s_net])
+            and all(sch_pin_nets[k] == s_net for k in pcb_groups[p_net])
+        }
+        self._check_swapped_net_names(result, sch_to_pcb, set(sch_groups), clean_nets)
+
         for key in common:
             ref, pad = key
             s_net = sch_pin_nets[key]
@@ -670,22 +740,161 @@ class NetlistValidator:
             ):
                 continue
             expected = sch_to_pcb.get(s_net)
-            expected_str = f" (expected PCB net {expected!r})" if expected else ""
+            # ``p_net`` holding another schematic net's pads means this pad
+            # sits on that net's copper -- a short, not a split -- so keep
+            # the plain mismatch wording (and never suggest moving the rest
+            # of the net onto that copper).
+            owner = pcb_to_sch.get(p_net)
+            if (
+                expected is not None
+                and owner is None
+                and _same_net_spelling(s_net, p_net)
+                and not _same_net_spelling(s_net, expected)
+            ):
+                # Most of this net moved to ``expected`` while this pad kept
+                # the net's own name (issue #5980).  Calling this pad wrong
+                # ("expected PCB net 'Net-X'") points at the one pad that is
+                # most likely right, so describe the split instead.
+                moved = sorted(k for k in sch_groups[s_net] if pcb_pad_nets[k] == expected)
+                message = (
+                    f"{ref}.{pad}: schematic net {s_net!r} is split on the PCB: this pad "
+                    f"is on {p_net!r}, but {len(moved)} of the net's "
+                    f"{len(sch_groups[s_net])} pads ({_format_pads(moved)}) are on "
+                    f"{expected!r}"
+                )
+                suggestion = (
+                    f"Rejoin schematic net {s_net!r} on one PCB net: move "
+                    f"{_format_pads(moved)} back to {p_net!r}, or move {ref}.{pad} to "
+                    f"{expected!r} (update PCB from schematic)"
+                )
+            else:
+                expected_str = f" (expected PCB net {expected!r})" if expected else ""
+                message = f"{ref}.{pad}: schematic net {s_net!r}, PCB net {p_net!r}{expected_str}"
+                if owner is not None and owner != s_net:
+                    message += f"; PCB net {p_net!r} carries schematic net {owner!r}"
+                suggestion = (
+                    f"Move {ref}.{pad} to the PCB net that carries schematic net "
+                    f"{s_net!r} (update PCB from schematic)"
+                )
+            result.add(
+                SyncIssue(
+                    severity="error",
+                    category="net_mismatch",
+                    message=message,
+                    suggestion=suggestion,
+                    reference=ref,
+                    net_schematic=s_net,
+                    net_pcb=p_net,
+                    pin=pad,
+                )
+            )
+
+    def _check_swapped_net_names(
+        self,
+        result: SyncResult,
+        sch_to_pcb: dict[str, str],
+        sch_nets: set[str],
+        clean_nets: set[str] | None = None,
+    ) -> None:
+        """Flag PCB nets that carry the name of a *different* schematic net.
+
+        The pad check compares by connectivity, so when every pad of two
+        nets is exchanged wholesale (all ``SWDIO`` pads on PCB net
+        ``SWCLK`` and vice versa) the copper still joins the right pads and
+        no pad is out of place (issue #5980).  The **names** are wrong,
+        though, and names are what net classes (track width, clearance),
+        diff-pair and match-group membership, zone nets and kicad-tools'
+        own name-based power-net inference key on -- so a ``GND``/``+3.3V``
+        swap puts the power rules on the wrong copper.
+
+        A schematic net ``S`` is reported when its paired PCB net ``P``:
+
+        * is not a spelling of ``S`` itself (``/X``, ``X``, ``/Sheet/X``), and
+        * is unambiguously the name of another schematic net ``S2`` that has
+          pads here (:func:`_names_same_net_strict`: ``/A/CLK`` is not the
+          name of ``/B/CLK``), and
+        * neither ``P`` nor ``S2`` is a tool-generated ``Net-(...)`` name.
+
+        When ``S2`` is in turn paired with a PCB net named like ``S``, the
+        two are reported once, as a swap.  Severity is ``error``: the trigger
+        requires a designer-chosen name to land on another net's pads, which
+        no correct board does (none of the fleet boards does), and
+        ``in_sync: true`` would otherwise certify a board whose name-keyed
+        design rules apply to the wrong pads.
+
+        Args:
+            result: SyncResult to add issues to
+            sch_to_pcb: The one-to-one schematic-to-PCB net pairing
+            sch_nets: Schematic nets that have at least one compared pad
+            clean_nets: Schematic nets whose paired PCB net holds exactly
+                their pads.  The swap message claims the copper is right only
+                when both nets are in this set (``None``: unknown, never claim).
+        """
+        named_after: dict[str, str] = {}
+        for s_net, p_net in sch_to_pcb.items():
+            if _is_generated_net_name(p_net) or _same_net_spelling(s_net, p_net):
+                continue
+            others = sorted(
+                (
+                    s2
+                    for s2 in sch_nets
+                    if s2 != s_net
+                    and not _is_generated_net_name(s2)
+                    and _names_same_net_strict(s2, p_net)
+                ),
+                key=lambda s2: (_name_match_rank(s2, p_net), s2),
+            )
+            if others:
+                named_after[s_net] = others[0]
+
+        for s_net in sorted(named_after):
+            s2 = named_after[s_net]
+            p_net = sch_to_pcb[s_net]
+            if named_after.get(s2) == s_net:
+                if s2 < s_net:
+                    continue  # reported with the pair's first net
+                p2 = sch_to_pcb[s2]
+                if clean_nets is not None and s_net in clean_nets and s2 in clean_nets:
+                    lead = "The copper joins the right pads but the names are exchanged, "
+                else:
+                    lead = (
+                        "The names are exchanged (stray pads on these nets are "
+                        "reported separately), "
+                    )
+                result.add(
+                    SyncIssue(
+                        severity="error",
+                        category="net_mismatch",
+                        message=(
+                            f"Net names swapped: schematic net {s_net!r} is PCB net "
+                            f"{p_net!r} and schematic net {s2!r} is PCB net {p2!r}"
+                        ),
+                        suggestion=(
+                            f"{lead}"
+                            "so net classes, diff pairs and zones keyed on these names "
+                            f"apply to the wrong pads. Exchange the names of PCB nets "
+                            f"{p_net!r} and {p2!r} (update PCB from schematic)"
+                        ),
+                        net_schematic=s_net,
+                        net_pcb=p_net,
+                    )
+                )
+                continue
             result.add(
                 SyncIssue(
                     severity="error",
                     category="net_mismatch",
                     message=(
-                        f"{ref}.{pad}: schematic net {s_net!r}, PCB net {p_net!r}{expected_str}"
+                        f"Net named after another net: schematic net {s_net!r} is PCB net "
+                        f"{p_net!r}, which is the name of schematic net {s2!r}"
                     ),
                     suggestion=(
-                        f"Move {ref}.{pad} to the PCB net that carries schematic net "
-                        f"{s_net!r} (update PCB from schematic)"
+                        f"Rename PCB net {p_net!r} after schematic net {s_net!r}, so net "
+                        f"classes, diff pairs and zones keyed on {p_net!r} do not apply to "
+                        "its pads (update PCB from schematic)"
                     ),
-                    reference=ref,
                     net_schematic=s_net,
                     net_pcb=p_net,
-                    pin=pad,
                 )
             )
 
