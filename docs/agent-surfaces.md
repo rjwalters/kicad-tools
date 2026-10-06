@@ -109,11 +109,36 @@ Things that differ from the other harnesses:
 When you read a source file inside this repo, `{{skill:tapeout}}` means "the
 `tapeout` skill, invoked however your harness invokes skills".
 
+### `{{agent-guide}}` vs `kct agent-guide`
+
+`{{agent-guide}}` still renders to the harness's **project instructions file**
+(`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex). It is not retargeted at
+the shipped primer (issue #5960). The placeholder names a real file in the
+consumer repo: the `help` skill uses it as the fallback location of the
+guarded kicad-tools block that `scripts/install-kct.sh` writes into that file.
+Pointing it at a command would break that fallback.
+
+The shipped primer needs no placeholder, because it is reached the same way in
+every harness: `kct agent-guide`. The `help` skill's closing pointer names it
+directly.
+
+## The agent primer (`kct agent-guide`)
+
+`src/kicad_tools/agent_skills/AGENT_GUIDE.md` is package data, printed by
+`kct agent-guide`. Most of it is plain harness-neutral Markdown. Harness-specific
+examples live only in its `<!-- per-harness -->` block, which may use the
+placeholders above plus the literal token `<harness>` (the harness id).
+`kicad_tools.agent_skills.guide.render_guide` renders that block through
+`render()` for `--harness X`, or once per harness when `--harness` is omitted.
+A placeholder outside the block is an error. opencode joins `--harness` as soon
+as `render()` supports it (#5951); the guide needs no edit.
+
 ## Neutrality rules (enforced)
 
 `tests/test_agent_surface_neutrality.py` lints every skill body, every skill
-`description`, and every MCP tool and parameter description in
-`kicad_tools.mcp.tools.registry.TOOL_REGISTRY`. It fails if it finds any of these:
+`description`, the agent primer (`AGENT_GUIDE.md`), and every MCP tool and
+parameter description in `kicad_tools.mcp.tools.registry.TOOL_REGISTRY`. It
+fails if it finds any of these:
 
 - a Claude Code tool name (a backticked `` `Read` `` / `` `Bash` ``, "the Task tool",
   `TodoWrite`, `AskUserQuestion`, ...) or a subagent assumption. Write neutral

@@ -946,6 +946,30 @@ kct skills install --check               # exit 1 if the installed copy has drif
 
 Re-running is idempotent. `--prune` removes `kct` skill files the package no longer ships, and `--dry-run` previews. Edit skills in `src/kicad_tools/agent_skills/kct/`; `.claude/commands/kct/` is a synced copy (`uv run python scripts/sync_agent_skills.py --write`).
 
+## Using kicad-tools from Claude Code, Codex and opencode
+
+Each harness needs two setup commands: one registers the MCP server, the other
+installs the `kct` skills in that harness's own format. The skill sources are
+shared, so every harness gets the same skills.
+
+| Harness | MCP server | Skills | Invoke a skill |
+|---|---|---|---|
+| Claude Code | `kct mcp setup --client claude-code` | `kct skills install` (`.claude/commands/kct/`) | `/kct:<name>`, e.g. `/kct:tapeout <board-path>` |
+| Codex CLI | `kct mcp setup --client codex` | `kct skills install --harness codex` (`.agents/skills/kct-<name>/`) | Codex skills: `$kct-<name>`, e.g. `$kct-tapeout <board-path>` |
+| opencode | `kct mcp setup --client opencode` | `kct skills install --harness opencode` once opencode rendering lands (#5951) | `/kct/<name>` |
+
+Add `--user` to `kct skills install` to install for every project. Then start
+the agent with the primer:
+
+```bash
+kct agent-guide                   # workflow, JSON contract, sign-off rule, pitfalls
+kct agent-guide --harness codex   # with skill examples in Codex syntax
+kct agent-guide --format json     # {"version", "harness", "sections": [...]}
+```
+
+`kct agent-guide` ships in the wheel and reads the same in every harness. Point
+your agent at it from `CLAUDE.md` or `AGENTS.md` instead of copying it.
+
 ## Related Projects
 
 <!-- BEGIN kct:ecosystem -->

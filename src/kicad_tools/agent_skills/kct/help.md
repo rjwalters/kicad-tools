@@ -98,7 +98,9 @@ the files actually present:
 
 4. **Start here.** Close with a short pointer: read `.kct/CONVENTIONS.md`
    first, then run `{{skill:help}} <command>` for details on any single skill, or
-   read `{{skills-readme}}` for the namespace overview.
+   read `{{skills-readme}}` for the namespace overview. For the `kct` workflow,
+   the `--format json` contract and the sign-off rule, run `kct agent-guide`
+   (the primer shipped with kicad-tools, the same in every harness).
 
 ## Detail mode (`{{skill:help}} <command>`)
 

@@ -438,6 +438,11 @@ def _dispatch_command(args) -> int:
 
         return run_skills_command(args)
 
+    elif args.command == "agent-guide":
+        from .commands.agent_guide import run_agent_guide_command
+
+        return run_agent_guide_command(args)
+
     elif args.command == "render":
         return _run_render_command(args)
 

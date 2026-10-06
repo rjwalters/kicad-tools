@@ -139,6 +139,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     # -- pcb family ---------------------------------------------------------
     # Installs into a scratch dir: exercises the real write path, not just --list.
     "skills install": ["--target", "{dir}/_skills"],
+    "agent-guide": [],
     "pcb summary": ["{pcb}"],
     "pcb footprints": ["{pcb}"],
     "pcb nets": ["{pcb}"],
