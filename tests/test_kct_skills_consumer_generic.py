@@ -7,9 +7,9 @@ hardcoded board), no hardcoded fab-tier enum (defer to
 ``kicad_tools.manufacturers.get_manufacturer_ids()``), and no CI-workflow assumptions.
 
 These tests encode the curated grep-based acceptance gates so they are enforced in CI,
-not just checked once at authoring time. ``ee-review.md`` is intentionally excluded from
-the path-literal gate: it is board-05-cited as its own worked example (#3995), predates
-#4057, and is out of scope for this issue.
+not just checked once at authoring time. ``ee-review.md`` was excluded from the
+path-literal gate here because it predates #4057; since #5954 its demo-board paths are
+gone and ``tests/test_agent_surface_neutrality.py`` gates every skill, ee-review included.
 """
 
 from __future__ import annotations
@@ -159,7 +159,8 @@ def test_mfr_skill_states_cross_gate_is_mandatory() -> None:
 def test_readme_indexes_every_new_skill(skill: str) -> None:
     """Gate: README table lists every new skill in the same table as ee-review."""
     readme = (KCT_DIR / "README.md").read_text(encoding="utf-8")
-    assert f"/kct:{skill}" in readme, f"README.md does not index /kct:{skill}"
+    # Invocations are harness-neutral placeholders (issue #5954).
+    assert f"{{{{skill:{skill}}}}}" in readme, f"README.md does not index the {skill} skill"
 
 
 @pytest.mark.parametrize("skill", META_SKILLS)

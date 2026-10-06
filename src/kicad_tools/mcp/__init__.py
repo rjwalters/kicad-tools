@@ -4,7 +4,7 @@ This module provides tools that can be exposed via MCP for AI agents
 to analyze and manipulate KiCad PCB designs.
 
 Supports two transport modes:
-- stdio: Default mode for Claude Desktop integration
+- stdio: Default mode for local MCP clients (any harness that launches `kct mcp serve`)
 - http: HTTP mode for web-based integrations
 
 Example (stdio):

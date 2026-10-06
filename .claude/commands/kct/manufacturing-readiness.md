@@ -9,7 +9,7 @@ description: Sign off a routed board for fabrication — run kct check, the mand
 
 Sign off a routed `.kicad_pcb` for fabrication. This skill codifies the **sign-off ritual**: `kct check` at the board's fab tier, the **mandatory** independent cross-gate `kicad-cli pcb drc --refill-zones`, and a `kct export` manufacturing bundle — then confirms a `manifest.json` was produced. A clean `kct check` **alone is not sign-off**.
 
-> **The `kct` namespace.** This skill lives in `.claude/commands/kct/` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `/kct:manufacturing-readiness`. It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency (`kct ...` is on `PATH` via the venv). It does **not** assume the current directory is the kicad-tools repo, and it hardcodes no board path, no fab-tier list, and no CI-workflow context.
+> **The `kct` namespace.** This skill lives in `{{skills-dir}}` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `{{skill:manufacturing-readiness}}`. It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency (`kct ...` is on `PATH` via the venv). It does **not** assume the current directory is the kicad-tools repo, and it hardcodes no board path, no fab-tier list, and no CI-workflow context.
 
 ## Prerequisite
 
@@ -162,4 +162,4 @@ judgment is needed (an ambiguous BOM candidate, an accepted-risk warning decisio
 - `kct check --help` / `kct export --help` — authoritative `--mfr` tier choices (sourced from `kicad_tools.manufacturers.get_manufacturer_ids()`).
 - The `--refill-zones` cross-gate convention (Epic #4054 convention #2) was established after a 2026-07-04 defect where `kct check` alone missed a live short and read stale zone fills.
 - The per-rule warning-quote requirement was established after #4614: an aggregate "warnings match baseline" result concealed dozens of `silk_over_copper` warnings (silkscreen over exposed pads — an assembly risk) across two sign-offs; the fab order was aborted at the vendor site. A baseline compared per rule would have surfaced it immediately.
-- `/kct:ee-review` — sibling `kct` skill for analog/placement-blocked boards (advisory decisions, not copper).
+- `{{skill:ee-review}}` — sibling `kct` skill for analog/placement-blocked boards (advisory decisions, not copper).

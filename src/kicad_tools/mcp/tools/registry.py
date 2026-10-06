@@ -2044,7 +2044,7 @@ register_tool(
             "max_size_px": {
                 "type": "integer",
                 "description": (
-                    "Maximum image dimension in pixels. Default: 1568 (Claude vision API limit)."
+                    "Maximum image dimension in pixels. Default: 1568 (fits common vision-model input limits)."
                 ),
                 "default": 1568,
             },
@@ -2113,7 +2113,7 @@ register_tool(
             "max_size_px": {
                 "type": "integer",
                 "description": (
-                    "Maximum image dimension in pixels. Default: 1568 (Claude vision API limit)."
+                    "Maximum image dimension in pixels. Default: 1568 (fits common vision-model input limits)."
                 ),
                 "default": 1568,
             },

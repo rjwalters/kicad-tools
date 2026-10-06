@@ -9,7 +9,7 @@ description: Keep a LAYOUT_NOTES.md journal for a hand-routing session so the re
 
 Keep a `LAYOUT_NOTES.md` journal alongside a board while hand-routing it, so the *reasoning* behind manual copper is not lost when the scratch workspace is (a reboot, a new worktree, a hand-off to another agent or the owner). The committed board artifact is shipping truth; this journal is the *why* behind it. This skill generalizes the hand-router-session convention proven during kicad-tools' own manufacturing hand-routing work — it hardcodes no board and no fixture.
 
-> **The `kct` namespace.** This skill lives in `.claude/commands/kct/` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `/kct:layout-journal`. It runs from inside a **consumer repo** and assumes nothing about the current directory being the kicad-tools repo.
+> **The `kct` namespace.** This skill lives in `{{skills-dir}}` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `{{skill:layout-journal}}`. It runs from inside a **consumer repo** and assumes nothing about the current directory being the kicad-tools repo.
 
 ## Why this skill exists
 
@@ -75,7 +75,7 @@ Referee for every entry: `kicad-cli pcb drc --refill-zones <board.kicad_pcb>` �
    ```
    `--refill-zones` is load-bearing (it refills pours before checking, so DRC sees actual copper, not a stale fill). Record **new-error count**, not a bare "looks fine". A pass entry is one with **0 new errors**.
 3. **Record decisions, not just actions.** "Ripped 5 sense nets and re-dressed as one Kelvin-ordered bundle through the south band *because* the nearest blockers were 0.05-0.35mm" — the *because* is what a resumed session needs.
-4. **Surface blockers explicitly.** If a net is stuck on an owner/EE decision, say so in "Open" and in the net-status table — do not bury it. (For an analog/placement-blocked net, `/kct:ee-review <board-path>` produces the decision document the hand-route then executes.)
+4. **Surface blockers explicitly.** If a net is stuck on an owner/EE decision, say so in "Open" and in the net-status table — do not bury it. (For an analog/placement-blocked net, `{{skill:ee-review}} <board-path>` produces the decision document the hand-route then executes.)
 5. **Tie every claim to the committed artifact.** Measured facts ("nearest blocker 0.05mm") come from `kct net-status <pcb> --why` on the committed board, not memory.
 
 ## Which decision surface? (do not add a fifth)
@@ -87,10 +87,10 @@ four existing ones drift.
 
 | Surface | Write it with | Author | Lifetime | Use it for |
 |---------|---------------|--------|----------|------------|
-| `LAYOUT_NOTES.md` (this skill) | `/kct:layout-journal` | Human/agent, free-form Markdown | **Per session** — a dated journal that accumulates | What you did in *this* hand-routing pass: nets ripped, corridor chosen, referee result, what is still open |
+| `LAYOUT_NOTES.md` (this skill) | `{{skill:layout-journal}}` | Human/agent, free-form Markdown | **Per session** — a dated journal that accumulates | What you did in *this* hand-routing pass: nets ripped, corridor chosen, referee result, what is still open |
 | `project.kct` → `decisions:` | `kct spec decide` (append-only) | Human/agent, structured YAML | **Durable** — outlives every session | Material design decisions: topology, part family, stackup, fab tier, a constraint a future reader would second-guess |
 | `<board>.kicad_pcb.decisions.json` | Written by the placement optimizer / autorouter (`record_decisions=True`); queried with `kct decisions show/list/explain-placement/explain-route` | **Machine** | Regenerated with the board | Why the *tools* placed or routed something a particular way |
-| `/kct:ee-review` decision document | `/kct:ee-review <board-path>` | EE reviewer (advisory sign-off) | Per review | An analog/placement blocker needing an EE call before the hand-route can proceed |
+| `{{skill:ee-review}}` decision document | `{{skill:ee-review}} <board-path>` | EE reviewer (advisory sign-off) | Per review | An analog/placement blocker needing an EE call before the hand-route can proceed |
 
 **Rule of thumb.** If a resumed session next week needs it → `LAYOUT_NOTES.md`.
 If a reviewer *next year* would ask "why is it like this?" → `kct spec decide`.
@@ -111,10 +111,10 @@ writer never rewrites what is already recorded, so promotion is always safe.
 
 ```bash
 kicad-cli pcb drc --refill-zones <board.kicad_pcb>   # 0 new errors
-kct check <board.kicad_pcb> --mfr <tier>             # tier resolved per /kct:manufacturing-readiness
+kct check <board.kicad_pcb> --mfr <tier>             # tier resolved per {{skill:manufacturing-readiness}}
 ```
 
-A hand-route session is not "done" until the referee is clean and the journal entry records it. For full fab sign-off, hand off to `/kct:manufacturing-readiness <board-path>` (adds the export bundle on top of the cross-gate).
+A hand-route session is not "done" until the referee is clean and the journal entry records it. For full fab sign-off, hand off to `{{skill:manufacturing-readiness}} <board-path>` (adds the export bundle on top of the cross-gate).
 
 ## What this skill does NOT do
 
@@ -125,5 +125,5 @@ A hand-route session is not "done" until the referee is clean and the journal en
 ## References
 
 - The `LAYOUT_NOTES.md` journal pattern was proven during kicad-tools' own manufacturing hand-routing work, where a preserved journal survived scratch-state loss across reboots and carried the routing rationale forward.
-- `/kct:ee-review` — produces the EE decision document a hand-route executes when a net is analog/placement-blocked.
-- `/kct:manufacturing-readiness` — the fab sign-off ritual the finished hand-route hands off to.
+- `{{skill:ee-review}}` — produces the EE decision document a hand-route executes when a net is analog/placement-blocked.
+- `{{skill:manufacturing-readiness}}` — the fab sign-off ritual the finished hand-route hands off to.

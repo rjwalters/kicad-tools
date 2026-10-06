@@ -405,7 +405,8 @@ else
 fi
 
 # ----- Stage 6: vendor .claude/commands/kct/ skills (client: claude) --------
-# Copy README.md and help.md (both always) plus each selected skill's <name>.md.
+# Render README.md and help.md (both always) plus each selected skill's <name>.md
+# (placeholders filled for Claude Code; see render_claude_content below).
 # NEVER touch .claude/commands/loom/ (coexist additively with Loom). Only for
 # --client claude|both (#4905) — CI gates/conventions below stay unconditional.
 VENDORED_FILES=()  # target-relative paths, for the metadata manifest.
@@ -414,6 +415,27 @@ vendor_file() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
   cp "$src" "$dst"
+  chmod 0644 "$dst"
+}
+
+# Skill sources use harness-neutral placeholders (issue #5954) instead of a
+# hard-coded invocation syntax or install path. Render them for Claude Code.
+# This table mirrors kicad_tools.agent_surfaces.render(); the installer tests
+# assert the two agree, so edit both together. Skills are therefore RENDERED,
+# not copied byte-for-byte (`$ARGUMENTS` is not a placeholder and passes through).
+render_claude_content() {
+  sed -E \
+    -e 's@[{][{]skill:([^{}[:space:]]+)[}][}]@/kct:\1@g' \
+    -e 's@[{][{]skill-file:([^{}[:space:]]+)[}][}]@.claude/commands/kct/\1.md@g' \
+    -e 's@[{][{]skills-dir[}][}]@.claude/commands/kct/@g' \
+    -e 's@[{][{]skills-readme[}][}]@.claude/commands/kct/README.md@g' \
+    -e 's@[{][{]agent-guide[}][}]@CLAUDE.md@g'
+}
+
+vendor_claude_skill() {
+  local src="$1" dst="$2"
+  mkdir -p "$(dirname "$dst")"
+  render_claude_content < "$src" > "$dst"
   chmod 0644 "$dst"
 }
 
@@ -427,16 +449,16 @@ if [[ "$CLIENT_WANTS_CLAUDE" == true ]]; then
   # present, so it must exist for every install exactly like README.md (not
   # opt-in via --skills=).
   do_action "vendor .claude/commands/kct/README.md" \
-    vendor_file "$SKILLS_SRC/README.md" "$DST_SKILLS_DIR/README.md"
+    vendor_claude_skill "$SKILLS_SRC/README.md" "$DST_SKILLS_DIR/README.md"
   VENDORED_FILES+=(".claude/commands/kct/README.md")
 
   do_action "vendor .claude/commands/kct/help.md" \
-    vendor_file "$SKILLS_SRC/help.md" "$DST_SKILLS_DIR/help.md"
+    vendor_claude_skill "$SKILLS_SRC/help.md" "$DST_SKILLS_DIR/help.md"
   VENDORED_FILES+=(".claude/commands/kct/help.md")
 
   for s in "${SELECTED_SKILLS[@]}"; do
     do_action "vendor .claude/commands/kct/$s.md" \
-      vendor_file "$SKILLS_SRC/$s.md" "$DST_SKILLS_DIR/$s.md"
+      vendor_claude_skill "$SKILLS_SRC/$s.md" "$DST_SKILLS_DIR/$s.md"
     VENDORED_FILES+=(".claude/commands/kct/$s.md")
   done
   ok "vendored ${#VENDORED_FILES[@]} skill file(s) for client=claude"
@@ -610,11 +632,19 @@ if [[ "$CLIENT_WANTS_CODEX" == true ]]; then
   DST_AGENTS_SKILLS_DIR="$TARGET/.agents/skills"
 
   # Adapt only runtime references; the workflow instructions remain shared.
-  # Resolve concrete sibling paths before the namespace directory itself.
+  # The harness-neutral placeholders (issue #5954; mirrors
+  # kicad_tools.agent_surfaces.render) come first. The legacy literal rules
+  # after them are kept for sources that predate the placeholders; resolve
+  # concrete sibling paths before the namespace directory itself.
   adapt_codex_content() {
     # The dollar sign is a literal Codex skill invocation, not a shell variable.
     # shellcheck disable=SC2016
     sed -E \
+      -e 's@[{][{]skill:([^{}[:space:]]+)[}][}]@$kct-\1@g' \
+      -e 's@[{][{]skill-file:([^{}[:space:]]+)[}][}]@.agents/skills/kct-\1/SKILL.md@g' \
+      -e 's@[{][{]skills-dir[}][}]@.agents/skills/@g' \
+      -e 's@[{][{]skills-readme[}][}]@.agents/skills/kct-help/README.md@g' \
+      -e 's@[{][{]agent-guide[}][}]@AGENTS.md@g' \
       -e 's@\.claude/commands/kct/README\.md@.agents/skills/kct-help/README.md@g' \
       -e 's@\.claude/commands/kct/([^/[:space:]`]+)\.md@.agents/skills/kct-\1/SKILL.md@g' \
       -e 's@\.claude/commands/kct/@.agents/skills/@g' \

@@ -9,9 +9,9 @@ description: Drive the HV-isolation / creepage design loop on a mains/high-volta
 
 Drive a non-isolated-mains or high-voltage-bank board **from a raw floorplan to a creepage-closed, sign-off-ready layout**. This skill is the *orchestration layer* over the shipped `kct` HV commands: it sequences voltage-domain capture, per-pair creepage targets, HV plane-void generation, HV-aware placement, routing, and the isolation gates into one coherent runbook, then hands the decision and fab sign-off steps off to the sibling skills.
 
-It **complements, not duplicates**, `/kct:ee-review` (which writes the *decision document*) and `/kct:manufacturing-readiness` / `/kct:tapeout` (which do *fab sign-off*). This skill drives the *layout to closure* and calls those skills at the right steps.
+It **complements, not duplicates**, `{{skill:ee-review}}` (which writes the *decision document*) and `{{skill:manufacturing-readiness}}` / `{{skill:tapeout}}` (which do *fab sign-off*). This skill drives the *layout to closure* and calls those skills at the right steps.
 
-> **The `kct` namespace.** This skill lives in `.claude/commands/kct/` — the **kicad-tools-native**, harness-agnostic agent-tool namespace, invoked as `/kct:hv-isolation-loop`. Keep kicad-tools' own agent tools here, *not* under `.claude/commands/loom/` or `.loom/roles/`: that tree is installed into this repo *from* [rjwalters/loom](https://github.com/rjwalters/loom) and belongs to the loom framework. The `kct` namespace is deliberately harness-agnostic — it hosts kicad-tools-native skills that live alongside installable harness frameworks (loom, [rjwalters/anvil](https://github.com/rjwalters/anvil), or any future orchestrator). It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency (`kct ...` is on `PATH` via the venv); it does not assume the current directory is the kicad-tools repo, and it hardcodes no board path and no fab tier.
+> **The `kct` namespace.** This skill lives in `{{skills-dir}}` — the **kicad-tools-native**, harness-agnostic agent-tool namespace, invoked as `{{skill:hv-isolation-loop}}`. Keep kicad-tools' own agent tools in this namespace, *not* in the `loom` namespace: that one is installed *from* [rjwalters/loom](https://github.com/rjwalters/loom) and belongs to the loom framework. The `kct` namespace is deliberately harness-agnostic — it hosts kicad-tools-native skills that live alongside installable harness frameworks (loom, [rjwalters/anvil](https://github.com/rjwalters/anvil), or any future orchestrator). It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency (`kct ...` is on `PATH` via the venv); it does not assume the current directory is the kicad-tools repo, and it hardcodes no board path and no fab tier.
 
 > **Scope (advisory / orchestration only).** This skill *sequences commands and states gates*. It does not itself route copper, place parts, or edit the `.kicad_pcb` beyond invoking the documented mutating commands, and it **never self-applies a work label**. The one **human-judgment** input — the voltage-map sidecar (net → volts) — is authored by a qualified EE, and the human EE ratifies the result before fabrication. Derived IEC creepage/clearance values are an **engineering aid, NOT a certification**: the governing standard and a qualified engineer remain authoritative (same disclaimer as `manufacturing-readiness` Gate 4).
 
@@ -29,7 +29,7 @@ uv run kct build-native
 
 ## Model selection
 
-`suggestedModel: sonnet`. Like `manufacturing-readiness`, this is a deterministic pipeline-orchestration task — author/collect the inputs, run each command in order, read exit codes and reports, and refuse to advance on any failure. It does not require frontier judgment (the frontier-judgment step, the EE decision, is delegated to `/kct:ee-review`, which is opus). Model resolves through the harness's normal precedence chain (explicit dispatch param → harness role config → this doc's frontmatter `suggestedModel` → session default).
+`suggestedModel: sonnet`. Like `manufacturing-readiness`, this is a deterministic pipeline-orchestration task — author/collect the inputs, run each command in order, read exit codes and reports, and refuse to advance on any failure. It does not require frontier judgment (the frontier-judgment step, the EE decision, is delegated to `{{skill:ee-review}}`, which is opus). Model resolves through the harness's normal precedence chain (explicit dispatch param → harness role config → this doc's frontmatter `suggestedModel` → session default).
 
 ## Arguments
 
@@ -157,8 +157,8 @@ HV nets should route on outer layers (creepage is a surface path) and to their a
 
 ### Step 7 — Decision + sign-off handoff (do NOT duplicate those skills)
 
-- **EE decision document:** hand the "which parts may move + binding constraints" question to **`/kct:ee-review <issue-or-board>`** (opus). It writes the escalating-ladder decision doc; this loop does not re-implement it.
-- **Fab sign-off:** hand off to **`/kct:manufacturing-readiness <board-path>`** (its Gate 4 already runs `kct audit --hv-standard ...`) or **`/kct:tapeout <board-path>`** for the full fab-ready bundle. This loop does not re-implement sign-off.
+- **EE decision document:** hand the "which parts may move + binding constraints" question to **`{{skill:ee-review}} <issue-or-board>`** (opus). It writes the escalating-ladder decision doc; this loop does not re-implement it.
+- **Fab sign-off:** hand off to **`{{skill:manufacturing-readiness}} <board-path>`** (its Gate 4 already runs `kct audit --hv-standard ...`) or **`{{skill:tapeout}} <board-path>`** for the full fab-ready bundle. This loop does not re-implement sign-off.
 
 ## Guardrails (must hold — match sibling-skill conventions)
 
@@ -172,8 +172,8 @@ HV nets should route on outer layers (creepage is a surface path) and to their a
 
 | Skill | Owns | This loop's relationship |
 |-------|------|--------------------------|
-| `/kct:ee-review` | The *decision document* (escalating intervention ladder + binding constraints, cited/confidence-graded). | Step 7 hands the EE decision off to it; this loop drives the layout, not the decision. |
-| `/kct:manufacturing-readiness` / `/kct:tapeout` | Fab sign-off (their HV Gate 4 wraps `kct audit --hv-standard`). | Step 7 hands final sign-off off to them; this loop does not re-implement sign-off. |
+| `{{skill:ee-review}}` | The *decision document* (escalating intervention ladder + binding constraints, cited/confidence-graded). | Step 7 hands the EE decision off to it; this loop drives the layout, not the decision. |
+| `{{skill:manufacturing-readiness}}` / `{{skill:tapeout}}` | Fab sign-off (their HV Gate 4 wraps `kct audit --hv-standard`). | Step 7 hands final sign-off off to them; this loop does not re-implement sign-off. |
 
 No existing `kct` skill covers the domains → voids → placement → creepage loop; the three siblings above are complementary, not overlapping.
 
@@ -182,5 +182,5 @@ No existing `kct` skill covers the domains → voids → placement → creepage 
 - `kct creepage --help` / `kct zones hv-keepout --help` / `kct optimize-placement --help` — the authoritative flag surfaces this skill cites (verified against `src/kicad_tools/cli/parser.py`).
 - **#4371 / #4372 / #4373** — the three capability requests this skill orchestrates (per-net voltage map + pairwise \|ΔV\| creepage; `kct zones hv-keepout`; HV-aware `optimize-placement --voltage-map`), merged via #4383 / #4382 / #4384.
 - **#4354** — the creepage false-pass safety gate (`EXIT_HV_UNCLASSIFIED = 2`) referenced in Step 6.
-- `/kct:ee-review`, `/kct:manufacturing-readiness`, `/kct:tapeout` — the sibling `kct` skills this loop hands off to (it does not duplicate them).
+- `{{skill:ee-review}}`, `{{skill:manufacturing-readiness}}`, `{{skill:tapeout}}` — the sibling `kct` skills this loop hands off to (it does not duplicate them).
 - The `--refill-zones` cross-gate convention (Epic #4054 convention #2) — established after a 2026-07-04 defect where `kct check` alone missed a live short and read stale zone fills.
