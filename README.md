@@ -172,7 +172,19 @@ pip install "kicad-tools[mcp]"
 kct mcp serve
 ```
 
-Configure Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+Register the server with your agent harness. `kct mcp setup` finds the
+absolute `kct` path, merges into the existing config without touching other
+servers, and is a no-op when re-run (`--dry-run` previews, `--format json` for
+scripts):
+
+```bash
+kct mcp setup --client claude-code      # ~/.claude/mcp.json (default)
+kct mcp setup --client claude-desktop   # Claude Desktop config
+kct mcp setup --client codex            # [mcp_servers.kct] in $CODEX_HOME/config.toml
+kct mcp setup --client opencode         # ~/.config/opencode/opencode.json (--project for ./opencode.json)
+```
+
+Or configure Claude Desktop by hand (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {

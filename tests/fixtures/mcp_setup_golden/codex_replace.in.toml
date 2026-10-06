@@ -1,0 +1,16 @@
+model = "gpt-6-astra"
+
+[mcp_servers.kct]
+# user-tuned timeout must survive a re-point
+startup_timeout_sec = 30
+command = "/stale/venv/bin/kct"
+args = [
+  "mcp",
+  "serve",
+]
+
+[mcp_servers.kct.env]
+KCT_LOG = "debug"
+
+[mcp_servers.other]
+command = "/usr/bin/other"

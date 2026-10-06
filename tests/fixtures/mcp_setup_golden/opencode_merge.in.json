@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "zai/glm-5.3",
+  "mcp": {
+    "servers": {
+      "other": {
+        "type": "remote",
+        "url": "https://example.invalid/mcp"
+      },
+      "kct": {
+        "type": "local",
+        "command": ["/stale/kct", "mcp", "serve"],
+        "environment": {"KCT_LOG": "debug"}
+      }
+    }
+  }
+}
