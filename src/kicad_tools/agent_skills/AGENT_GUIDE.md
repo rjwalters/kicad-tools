@@ -11,7 +11,8 @@ Work board by board, and keep each step's output as a file you can re-check:
 
 1. **Schematic**: write or generate the `.kicad_sch`, then run ERC: `kct erc <sch>`.
 2. **PCB**: `kct create-pcb <sch>`. For an existing board, run
-   `kct sync <pro> --analyze`, then `--apply`.
+   `kct sync <pro> --analyze`, preview with `kct sync <pro> --apply --dry-run`,
+   then apply with `kct sync <pro> --apply --confirm`.
 3. **Place**: `kct placement check <pcb>`, then `kct optimize-placement <pcb>`.
 4. **Route**: `kct route <pcb>`. Check what is left with `kct net-status <pcb>`.
 5. **Fill zones**: `kct zones fill <pcb>`.
@@ -32,10 +33,10 @@ is on stderr.
 
 A board is manufacturable only when all of these hold:
 
-- `kct check --mfr <fab>` reports **0 errors**;
-- `kicad-cli pcb drc --refill-zones` reports **0 errors**;
-- **100%** of nets are routed (`kct net-status`);
-- schematic and PCB have **0 sync drift** (`kct validate --sync --lvs`).
+- `kct check <pcb> --mfr <fab>` reports **0 errors**;
+- `kicad-cli pcb drc --refill-zones <pcb>` reports **0 errors**;
+- **100%** of nets are routed (`kct net-status <pcb>`);
+- schematic and PCB have **0 sync drift** (`kct validate --sync --lvs <pro>`).
 
 The two DRC engines catch different mistakes, so one clean run is not
 enough. Never report 90% routed as done. If a gate cannot run, say which
