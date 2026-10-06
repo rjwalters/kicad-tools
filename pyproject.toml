@@ -345,6 +345,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests requiring real board fixtures",
     "benchmark: marks A/B benchmarks (run with 'pytest -m benchmark', skipped by default)",
+    "ci_extended: slow tail of the bulk pool, run by the \"Test (extended)\" CI job instead of \"Test\" (tests/ci_extended.txt, Issue #6013)",
 ]
 
 [tool.coverage.run]
