@@ -430,3 +430,139 @@ def test_led_low_side_series_resistor(tmp_path: Path) -> None:
     # Swap the external rails while preserving the exclusive LED/R junction.
     body = _LED_WITH_RESISTOR.replace('"GND"', '"VCC"').replace('"+3V3"', '"GND"')
     assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+# ---------------------------------------------------------------------------
+# LedSeriesResistorCheck path rule (issue #5940)
+# ---------------------------------------------------------------------------
+
+
+def _fp(ref: str, value: str, *nets: tuple[int, str]) -> str:
+    pads = "\n".join(
+        f'    (pad "{i}" smd rect (at {i} 0) (size 0.5 0.5) (layers "F.Cu") (net {n} "{name}"))'
+        for i, (n, name) in enumerate(nets, start=1)
+    )
+    return f"""
+  (footprint "Lib:{value}"
+    (layer "F.Cu") (at 10 10)
+    (property "Reference" "{ref}") (property "Value" "{value}")
+{pads}
+  )
+"""
+
+
+_VCC, _GND, _NODE = (1, "VCC"), (2, "GND"), (3, "NODE")
+_NETS = '  (net 1 "VCC")\n  (net 2 "GND")\n  (net 3 "NODE")\n  (net 4 "MID")\n  (net 5 "GPIO")\n'
+
+
+def test_led_shared_resistor_driving_two_leds_passes(tmp_path: Path) -> None:
+    body = (
+        _NETS
+        + _fp("R1", "330", _VCC, _NODE)
+        + _fp("D1", "LED", _NODE, _GND)
+        + _fp("D2", "LED", _NODE, _GND)
+    )
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_series_chain_through_second_led_passes(tmp_path: Path) -> None:
+    body = (
+        _NETS
+        + _fp("D1", "LED", _VCC, (4, "MID"))
+        + _fp("D2", "LED", (4, "MID"), _NODE)
+        + _fp("R1", "330", _NODE, _GND)
+    )
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_gpio_through_resistor_passes(tmp_path: Path) -> None:
+    body = (
+        _NETS
+        + _fp("U1", "MCU", _VCC, _GND, (5, "GPIO"))
+        + _fp("R1", "330", (5, "GPIO"), _NODE)
+        + _fp("D1", "LED", _NODE, _GND)
+    )
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_driven_directly_by_gpio_is_flagged(tmp_path: Path) -> None:
+    body = _NETS + _fp("U1", "MCU", _VCC, _GND, (5, "GPIO")) + _fp("D1", "LED", (5, "GPIO"), _GND)
+    mistakes = LedSeriesResistorCheck().check(_load_pcb(tmp_path, body))
+    assert [m.components for m in mistakes] == [["D1"]]
+
+
+def test_led_rail_to_rail_without_resistor_is_flagged(tmp_path: Path) -> None:
+    body = _NETS + _fp("D1", "LED", _VCC, _GND) + _fp("C1", "100nF", _VCC, _GND)
+    mistakes = LedSeriesResistorCheck().check(_load_pcb(tmp_path, body))
+    assert [m.components for m in mistakes] == [["D1"]]
+
+
+def test_charlieplex_line_resistors_pass(tmp_path: Path) -> None:
+    nets = "".join(
+        f'  (net {i} "{name}")\n'
+        for i, name in enumerate(["VCC", "GND", "LA", "LB", "LC", "NA", "NB", "NC"], start=1)
+    )
+    lines = [(3, "LA"), (4, "LB"), (5, "LC")]
+    nodes = [(6, "NA"), (7, "NB"), (8, "NC")]
+    body = nets + _fp("U1", "MCU", (1, "VCC"), (2, "GND"), *lines)
+    for i, (line, node) in enumerate(zip(lines, nodes, strict=True), start=1):
+        body += _fp(f"R{i}", "330", line, node)
+    ref = 1
+    for a in nodes:
+        for k in nodes:
+            if a != k:
+                body += _fp(f"D{ref}", "LED", a, k)
+                ref += 1
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+@pytest.mark.parametrize("ref", ["RLY1", "RL1"])
+def test_led_behind_relay_contact_is_flagged(tmp_path: Path, ref: str) -> None:
+    # VCC -> relay contact -> NODE -> LED -> GND. A relay reference starts
+    # with "R" but it is not a current limiter (issue #5940 review).
+    body = _NETS + _fp(ref, "RELAY", _VCC, _NODE, (4, "MID"), _GND) + _fp("D1", "LED", _NODE, _GND)
+    mistakes = LedSeriesResistorCheck().check(_load_pcb(tmp_path, body))
+    assert [m.components for m in mistakes] == [["D1"]]
+
+
+def test_led_resistor_array_prefix_still_counts(tmp_path: Path) -> None:
+    body = _NETS + _fp("RN1", "4x330", _VCC, _NODE) + _fp("D1", "LED", _NODE, _GND)
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_matrix_32x32_is_fast(tmp_path: Path) -> None:
+    """Perf guard: the side walk must not re-flood the matrix per LED."""
+    import time
+
+    size = 32
+    names = ["VCC", "GND"]
+    names += [f"ROW{i}" for i in range(size)]
+    names += [f"COL{j}" for j in range(size)]
+    names += [f"CN{j}" for j in range(size)]
+    num = {name: i for i, name in enumerate(names, start=1)}
+    body = "".join(f'  (net {i} "{name}")\n' for name, i in num.items())
+    mcu_nets = [(num[n], n) for n in names if n.startswith(("ROW", "COL"))]
+    body += _fp("U1", "MCU", (1, "VCC"), (2, "GND"), *mcu_nets)
+    for j in range(size):
+        body += _fp(f"R{j + 1}", "330", (num[f"COL{j}"], f"COL{j}"), (num[f"CN{j}"], f"CN{j}"))
+    ref = 1
+    for i in range(size):
+        for j in range(size):
+            body += _fp(f"D{ref}", "LED", (num[f"ROW{i}"], f"ROW{i}"), (num[f"CN{j}"], f"CN{j}"))
+            ref += 1
+    pcb = _load_pcb(tmp_path, body)
+
+    start = time.perf_counter()
+    LedSeriesResistorCheck().check(pcb)
+    assert time.perf_counter() - start < 1.0
+
+
+_BOARD02 = (
+    Path(__file__).resolve().parents[1]
+    / "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
+)
+
+
+@pytest.mark.skipif(not _BOARD02.exists(), reason="board 02 output not present")
+def test_board02_charlieplex_has_no_led_series_resistor_findings() -> None:
+    assert LedSeriesResistorCheck().check(PCB.load(str(_BOARD02))) == []
