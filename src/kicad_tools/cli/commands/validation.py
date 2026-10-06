@@ -604,5 +604,19 @@ def run_audit_command(args) -> int:
         sub_argv.append("--verbose")
     if getattr(args, "audit_net_class_map", None):
         sub_argv.extend(["--net-class-map", args.audit_net_class_map])
+    # HV / isolation flags (issue #5979): forward only what was given, so
+    # audit_cmd's own defaults stay the single source of truth.
+    if getattr(args, "audit_hv_net_class", "HV") != "HV":
+        sub_argv.extend(["--hv-net-class", args.audit_hv_net_class])
+    if getattr(args, "audit_hv_min", None) is not None:
+        sub_argv.extend(["--hv-min", str(args.audit_hv_min)])
+    if getattr(args, "audit_hv_standard", None):
+        sub_argv.extend(["--hv-standard", args.audit_hv_standard])
+    if getattr(args, "audit_hv_working_voltage", None) is not None:
+        sub_argv.extend(["--hv-working-voltage", str(args.audit_hv_working_voltage)])
+    if getattr(args, "audit_hv_pollution_degree", None) is not None:
+        sub_argv.extend(["--hv-pollution-degree", str(args.audit_hv_pollution_degree)])
+    if getattr(args, "audit_hv_material_group", "IIIa") != "IIIa":
+        sub_argv.extend(["--hv-material-group", args.audit_hv_material_group])
 
     return audit_main(sub_argv)

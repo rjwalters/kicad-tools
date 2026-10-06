@@ -131,7 +131,7 @@ Use the existing 0.18 flow — no new flags here:
 
 ```bash
 kct route-auto <board.kicad_pcb>       # HV-outer + ampacity considerations apply
-kct reinforce <board.kicad_pcb> --all-runs
+kct pcb reinforce <board.kicad_pcb> --net <hv-net> --all-runs   # once per high-current net
 ```
 
 HV nets should route on outer layers (creepage is a surface path) and to their ampacity width. These are standard-flow considerations, referenced here, not new flags introduced by this skill.
