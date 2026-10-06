@@ -100,21 +100,165 @@ class PinTypeAnnotation:
         return self.updated + self.unchanged
 
 
-def _iter_schematic_symbols(sch_path: Path):
-    """Yield ``(symbol, mirror, no_connect_points)`` across the hierarchy.
+#: Coordinate tolerance (mm) when matching a pin end against a no-connect
+#: flag or a wire.  Raw file coordinates are compared, so float noise on a
+#: 0.635 mm half-grid (``…x.xx5``) cannot flip the result the way exact
+#: equality after ``round(…, 2)`` could.
+_POINT_TOLERANCE = 1e-3
 
-    ``mirror`` is the placed symbol's ``(mirror x|y)`` axis (``""`` if none);
-    the :class:`~kicad_tools.schematic.models.Schematic` model does not keep
-    it, so it is read from the raw sheet text by symbol UUID.
-    ``no_connect_points`` is the set of rounded ``(x, y)`` positions of the
-    no-connect flags on the symbol's own sheet.
+_Point = tuple[float, float]
+_Segment = tuple[float, float, float, float]
+
+
+def _on_segment(px: float, py: float, seg: _Segment, tol: float = _POINT_TOLERANCE) -> bool:
+    """Whether ``(px, py)`` lies on the segment (endpoints included)."""
+    x1, y1, x2, y2 = seg
+    dx, dy = x2 - x1, y2 - y1
+    length_sq = dx * dx + dy * dy
+    if length_sq <= tol * tol:
+        return abs(px - x1) <= tol and abs(py - y1) <= tol
+    t = ((px - x1) * dx + (py - y1) * dy) / length_sq
+    t = min(1.0, max(0.0, t))
+    cx, cy = x1 + t * dx, y1 + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2 <= tol * tol
+
+
+def _at_wire_end(px: float, py: float, seg: _Segment, tol: float = _POINT_TOLERANCE) -> bool:
+    """Whether ``(px, py)`` is one of the wire's two end points."""
+    x1, y1, x2, y2 = seg
+    return (abs(px - x1) <= tol and abs(py - y1) <= tol) or (
+        abs(px - x2) <= tol and abs(py - y2) <= tol
+    )
+
+
+def _segments_touch(a: _Segment, b: _Segment) -> bool:
+    """KiCad wire-to-wire connection without a junction: a shared end point.
+
+    An end point landing on another wire's *interior* (a bare "T") does not
+    connect in KiCad's netlist; that needs a junction, handled separately.
+    """
+    return _at_wire_end(a[0], a[1], b) or _at_wire_end(a[2], a[3], b)
+
+
+@dataclass
+class _NoConnectZone:
+    """Everything on one sheet that a no-connect flag electrically reaches.
+
+    KiCad writes ``+no_connect`` for every pin in a connection subgraph that
+    holds a no-connect flag.  A subgraph is per sheet and built from wires,
+    so a pin is flagged when the flag sits on its end point *or* on a wire
+    network the pin touches (the "stub wire ending in an X" style).  Labels
+    join subgraphs into nets but do not share the flag, so they are not
+    followed.
+
+    Connection rules, each checked against ``kicad-cli sch export netlist``:
+    pins and flags join a wire only at its end points; wires join at shared
+    end points, or where a junction sits on both.  A pin or flag on a wire's
+    interior, or a bare "T" without a junction, does not connect.
+    """
+
+    points: list[_Point]
+    wires: list[_Segment]
+
+    @classmethod
+    def build(
+        cls, points: list[_Point], wires: list[_Segment], junctions: list[_Point]
+    ) -> _NoConnectZone:
+        reached: list[_Segment] = []
+        # Like a pin, a flag joins a wire only at one of the wire's end points.
+        pending = [w for w in wires if any(_at_wire_end(x, y, w) for x, y in points)]
+        remaining = [w for w in wires if w not in pending]
+        while pending:
+            wire = pending.pop()
+            reached.append(wire)
+            nxt = []
+            for other in remaining:
+                if _segments_touch(wire, other) or any(
+                    _on_segment(jx, jy, wire) and _on_segment(jx, jy, other) for jx, jy in junctions
+                ):
+                    pending.append(other)
+                else:
+                    nxt.append(other)
+            remaining = nxt
+        return cls(points, reached)
+
+    def covers(self, x: float, y: float) -> bool:
+        tol = _POINT_TOLERANCE
+        if any(abs(x - px) <= tol and abs(y - py) <= tol for px, py in self.points):
+            return True
+        # A pin joins a wire only at the wire's end points; one lying on a
+        # wire's interior is not connected (KiCad's own netlist agrees).
+        return any(_at_wire_end(x, y, w) for w in self.wires)
+
+
+@dataclass(frozen=True)
+class _Placement:
+    """A placed symbol's raw ``(at x y rot)`` and ``(mirror …)`` axis."""
+
+    x: float
+    y: float
+    rotation: float
+    mirror: str
+
+
+def _xy(node) -> _Point | None:
+    if node is None:
+        return None
+    x, y = node.get_float(0), node.get_float(1)
+    if x is None or y is None:
+        return None
+    return (x, y)
+
+
+def _read_sheet_geometry(path: Path) -> tuple[dict[str, _Placement], _NoConnectZone | None]:
+    """Raw placements (by symbol UUID) and the no-connect zone of one sheet.
+
+    Read from the raw file rather than the
+    :class:`~kicad_tools.schematic.models.Schematic` model, which rounds
+    coordinates to 0.01 mm and does not keep a symbol's mirror.
+    """
+    from kicad_tools.sexp import parse_file
+
+    root = parse_file(path)
+    points = [p for p in (_xy(n.find_child("at")) for n in root.find_children("no_connect")) if p]
+    if not points:
+        return {}, None
+    placements: dict[str, _Placement] = {}
+    for node in root.find_children("symbol"):
+        uuid_node = node.find_child("uuid")
+        at = node.find_child("at")
+        xy = _xy(at)
+        if uuid_node is None or at is None or xy is None:
+            continue
+        mirror_node = node.find_child("mirror")
+        placements[uuid_node.get_string(0) or ""] = _Placement(
+            xy[0],
+            xy[1],
+            at.get_float(2) or 0.0,
+            (mirror_node.get_string(0) or "") if mirror_node is not None else "",
+        )
+    wires: list[_Segment] = []
+    for node in root.find_children("wire"):
+        pts = node.find_child("pts")
+        ends = [_xy(p) for p in pts.find_children("xy")] if pts is not None else []
+        if len(ends) == 2 and ends[0] and ends[1]:
+            wires.append((*ends[0], *ends[1]))
+    junctions = [p for p in (_xy(n.find_child("at")) for n in root.find_children("junction")) if p]
+    return placements, _NoConnectZone.build(points, wires, junctions)
+
+
+def _iter_schematic_symbols(sch_path: Path):
+    """Yield ``(symbol, placement, no_connect_zone)`` across the hierarchy.
+
+    ``placement`` is the symbol's raw position, rotation and mirror axis
+    (``None`` when the sheet has no no-connect flags, so nothing needs it);
+    ``no_connect_zone`` is the sheet's :class:`_NoConnectZone` or ``None``.
 
     A sheet *file* is read once even when it is placed several times; the
     extra placements' references are not resolved (follow-up to #5985).
     """
     from kicad_tools.operations.netlist import _get_sheet_entries
     from kicad_tools.schematic.models import Schematic
-    from kicad_tools.sexp import parse_file
 
     visited: set[Path] = set()
     stack = [sch_path]
@@ -125,16 +269,15 @@ def _iter_schematic_symbols(sch_path: Path):
             continue
         visited.add(resolved)
         sch = Schematic.load(str(path))
-        nc_points = {(round(nc.x, 2), round(nc.y, 2)) for nc in sch.no_connects}
-        mirrors: dict[str, str] = {}
-        if nc_points:
-            for node in parse_file(path).find_all("symbol"):
-                uuid_node = node.find_child("uuid")
-                mirror_node = node.find_child("mirror")
-                if uuid_node is not None and mirror_node is not None:
-                    mirrors[uuid_node.get_string(0) or ""] = mirror_node.get_string(0) or ""
+        placements: dict[str, _Placement] = {}
+        zone: _NoConnectZone | None = None
+        if sch.no_connects:
+            placements, zone = _read_sheet_geometry(path)
         for sym in sch.symbols:
-            yield sym, mirrors.get(getattr(sym, "uuid_str", ""), ""), nc_points
+            placement = placements.get(getattr(sym, "uuid_str", ""))
+            if zone is not None and placement is None:
+                placement = _Placement(sym.x, sym.y, getattr(sym, "rotation", 0) or 0, "")
+            yield sym, placement, zone
         for entry in _get_sheet_entries(path):
             stack.append(path.parent / entry.filename)
 
@@ -144,37 +287,41 @@ def _pinfunction_for(name: str) -> str:
     return "" if name in ("", "~") else name
 
 
-def _placed_pin_xy(sym, pin, mirror: str) -> tuple[float, float]:
-    """Schematic position of *pin*'s connection point on the placed *sym*.
+def _placed_pin_xy(placement: _Placement, pin) -> _Point:
+    """Schematic (Y-down) position of *pin*'s connection point on a placed symbol.
 
-    Same transform as :meth:`SymbolInstance.pin_position`, plus the symbol's
-    mirror, which KiCad applies in library (Y-up) coordinates *before* the
-    rotation: ``(mirror x)`` flips across the X axis (negates Y), ``(mirror
-    y)`` across the Y axis (negates X).
+    KiCad builds the placed symbol's transform as rotation *then* mirror, in
+    library (Y-up) coordinates: rotate the library point by the symbol's
+    angle, then ``(mirror x)`` negates the rotated Y and ``(mirror y)`` the
+    rotated X.  At 0 and 180 degrees the order does not matter (an axis flip
+    commutes with a half turn); at 90 and 270 degrees mirroring first lands
+    on the mirror-twin pin instead.
     """
     import math
 
     x, y = pin.connection_point()
-    if mirror == "x":
-        y = -y
-    elif mirror == "y":
-        x = -x
-    rad = math.radians(getattr(sym, "rotation", 0) or 0)
+    rad = math.radians(placement.rotation)
     rx = x * math.cos(rad) - y * math.sin(rad)
     ry = x * math.sin(rad) + y * math.cos(rad)
-    return (round(sym.x + rx, 2), round(sym.y - ry, 2))
+    if placement.mirror == "x":
+        ry = -ry
+    elif placement.mirror == "y":
+        rx = -rx
+    return (placement.x + rx, placement.y - ry)
 
 
-def _pin_has_no_connect_flag(sym, pin, mirror: str, nc_points: set[tuple[float, float]]) -> bool:
-    """Whether a no-connect flag sits on *pin* of the placed symbol *sym*."""
-    if not nc_points:
+def _pin_has_no_connect_flag(
+    sym, pin, placement: _Placement | None, zone: _NoConnectZone | None
+) -> bool:
+    """Whether a no-connect flag reaches *pin* of the placed symbol *sym*."""
+    if zone is None or placement is None:
         return False
     # Only the placed unit's pins (and unit-0 commons) have a real position.
     pin_unit = getattr(pin, "unit", 0)
     if pin_unit not in (0, getattr(sym, "unit", 1)):
         return False
     try:
-        return _placed_pin_xy(sym, pin, mirror) in nc_points
+        return zone.covers(*_placed_pin_xy(placement, pin))
     except Exception:  # pragma: no cover - defensive: odd library geometry
         return False
 
@@ -197,26 +344,46 @@ def schematic_pin_info(sch_path: str | Path) -> dict[tuple[str, str], PadPinInfo
     PCB and are skipped.  When a symbol defines several pins with the same
     number (stacked pins), the first non-``passive`` type wins so a stacked
     ``power_in`` group is not masked by a passive twin.  ``no_connect`` is set
-    when a no-connect flag sits on the pin.
+    when a no-connect flag reaches the pin (see :class:`_NoConnectZone`).
+
+    A unit-0 (common) pin of a multi-unit symbol is drawn once per placed
+    unit, and KiCad's netlist lists one node per copy.  The pad takes the
+    first copy in KiCad's net order, which for unconnected copies is the
+    lowest unit (``unconnected-(U1A-…)`` sorts before ``unconnected-(U1B-…)``),
+    so only that copy's flag counts -- not an OR across units.
     """
     info: dict[tuple[str, str], PadPinInfo] = {}
-    for sym, mirror, nc_points in _iter_schematic_symbols(Path(sch_path)):
+    # (ref, pin) -> (lowest placed unit seen, that copy's flag) for unit-0 pins.
+    common_flags: dict[tuple[str, str], tuple[int, bool]] = {}
+    for sym, placement, zone in _iter_schematic_symbols(Path(sch_path)):
         ref = getattr(sym, "reference", "") or ""
         if not ref or ref.startswith("#"):
             continue
         symbol_def = getattr(sym, "symbol_def", None)
         if symbol_def is None:
             continue
+        sym_unit = getattr(sym, "unit", 1) or 1
+        unit_flags: dict[str, bool] = {}
         for pin in symbol_def.pins:
             if not pin.number:
                 continue
             key = (ref, pin.number)
-            new = PadPinInfo(
-                _pinfunction_for(pin.name),
-                pin.pin_type or "passive",
-                _pin_has_no_connect_flag(sym, pin, mirror, nc_points),
-            )
+            flagged = _pin_has_no_connect_flag(sym, pin, placement, zone)
+            if getattr(pin, "unit", 0) == 0:
+                # Stacked unit-0 pins within this placement still OR together.
+                unit_flags[pin.number] = unit_flags.get(pin.number, False) or flagged
+                flagged = False
+            new = PadPinInfo(_pinfunction_for(pin.name), pin.pin_type or "passive", flagged)
             info[key] = _merge(info.get(key), new)
+        for number, flagged in unit_flags.items():
+            key = (ref, number)
+            seen = common_flags.get(key)
+            if seen is None or sym_unit < seen[0]:
+                common_flags[key] = (sym_unit, flagged)
+    for key, (_, flagged) in common_flags.items():
+        if flagged and key in info:
+            old = info[key]
+            info[key] = PadPinInfo(old.pinfunction, old.pintype, True)
     return info
 
 

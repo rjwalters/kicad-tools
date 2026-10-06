@@ -327,7 +327,7 @@ def test_pristine_kicad_no_connect_value_is_kept(design: tuple[Path, Path]) -> N
 
 
 def test_mirrored_symbol_flag_resolves_to_the_right_pin(design: tuple[Path, Path]) -> None:
-    """``(mirror x)`` flips the pin positions before the flag is matched.
+    """``(mirror x)`` is applied before the flag is matched.
 
     Mirrored, R1 pin 2 lands where pin 1 would be unmirrored, so ignoring the
     mirror would put the suffix on the wrong pad (KiCad's
@@ -343,6 +343,194 @@ def test_mirrored_symbol_flag_resolves_to_the_right_pin(design: tuple[Path, Path
     info = schematic_pin_info(sch)
     assert info[("R1", "2")].no_connect
     assert not info[("R1", "1")].no_connect
+
+
+# --- Placement geometry and connectivity, checked against KiCad ------------
+#
+# Every expectation below was confirmed with ``kicad-cli sch export netlist``
+# (KiCad 10.0.1), which writes KiCad's own ``(pintype "...+no_connect")`` per
+# node: the 12 rotation x mirror combinations, wire stubs, junctions and
+# unit-0 pins of a multi-unit symbol (PR #6000 review).
+
+
+def _asym_pin(num: str, x: float, y: float, ptype: str) -> str:
+    return (
+        f'(pin {ptype} line (at {x} {y} 0) (length 2.54) (name "P{num}" '
+        f'(effects (font (size 1.27 1.27)))) (number "{num}" '
+        f"(effects (font (size 1.27 1.27)))))"
+    )
+
+
+# Asymmetric two-unit symbol: no pin is the mirror twin of another, so a
+# wrong transform lands on empty space or on a *different* pin.  Pin 5 is a
+# unit-0 (common) pin drawn with every unit.
+_ASYM_LIB = (
+    '(lib_symbols (symbol "T:ASYM" (in_bom yes) (on_board yes)'
+    ' (property "Reference" "U" (at 0 10 0)) (property "Value" "ASYM" (at 0 -10 0))'
+    f' (symbol "ASYM_0_1" {_asym_pin("5", 0, -7.62, "power_in")})'
+    f' (symbol "ASYM_1_1" {_asym_pin("1", -7.62, 2.54, "input")}'
+    f" {_asym_pin('2', -7.62, 0, 'input')} {_asym_pin('3', 7.62, 1.27, 'output')})"
+    f' (symbol "ASYM_2_1" {_asym_pin("4", -7.62, 3.81, "bidirectional")}'
+    f" {_asym_pin('6', 7.62, -2.54, 'open_collector')})))"
+)
+
+
+def _asym_sheet(
+    path: Path,
+    *,
+    rotation: int = 0,
+    mirror: str = "",
+    units: tuple[int, ...] = (1,),
+    extra: str = "",
+) -> Path:
+    """Write a sheet with U1 (``T:ASYM``) placed at (100, 100) per unit."""
+    placed = []
+    for i, unit in enumerate(units):
+        y = 100 + 40 * i
+        mir = f" (mirror {mirror})" if mirror else ""
+        placed.append(
+            f'(symbol (lib_id "T:ASYM") (at 100 {y} {rotation}){mir} (unit {unit})'
+            f' (in_bom yes) (on_board yes) (uuid "00000000-0000-0000-0000-0000000001{i:02d}")'
+            ' (property "Reference" "U1" (at 0 0 0)) (property "Value" "ASYM" (at 0 0 0)))'
+        )
+    path.write_text(
+        '(kicad_sch (version 20250114) (generator "test")'
+        ' (uuid "00000000-0000-0000-0000-000000000100") (paper "A3")\n'
+        f"{_ASYM_LIB}\n" + "\n".join(placed) + f"\n{extra}\n)\n"
+    )
+    return path
+
+
+def _nc(x: float, y: float) -> str:
+    return f"(no_connect (at {x} {y}))"
+
+
+def _wire(x1: float, y1: float, x2: float, y2: float) -> str:
+    return f"(wire (pts (xy {x1} {y1}) (xy {x2} {y2})))"
+
+
+def _flagged(sch: Path) -> set[str]:
+    return {pin for (ref, pin), v in schematic_pin_info(sch).items() if v.no_connect}
+
+
+# Schematic (Y-down) offset of U1 pin 1 (library (-7.62, 2.54)) from the
+# symbol origin.  KiCad rotates first, then mirrors.
+_PIN1_OFFSET = {
+    (0, ""): (-7.62, -2.54),
+    (0, "x"): (-7.62, 2.54),
+    (0, "y"): (7.62, -2.54),
+    (90, ""): (-2.54, 7.62),
+    (90, "x"): (-2.54, -7.62),
+    (90, "y"): (2.54, 7.62),
+    (180, ""): (7.62, 2.54),
+    (180, "x"): (7.62, -2.54),
+    (180, "y"): (-7.62, 2.54),
+    (270, ""): (2.54, -7.62),
+    (270, "x"): (2.54, 7.62),
+    (270, "y"): (-2.54, -7.62),
+}
+
+
+@pytest.mark.parametrize(("rotation", "mirror"), sorted(_PIN1_OFFSET))
+def test_flag_resolves_to_the_right_pin_at_every_orientation(
+    tmp_path: Path, rotation: int, mirror: str
+) -> None:
+    """Rotation then mirror: at 90/270 degrees the order changes the answer."""
+    dx, dy = _PIN1_OFFSET[(rotation, mirror)]
+    sch = _asym_sheet(
+        tmp_path / "u.kicad_sch", rotation=rotation, mirror=mirror, extra=_nc(100 + dx, 100 + dy)
+    )
+    assert _flagged(sch) == {"1"}
+
+
+@pytest.mark.parametrize(("rotation", "mirror"), [(90, "x"), (90, "y"), (270, "x"), (270, "y")])
+def test_mirror_before_rotation_position_is_not_the_pin(
+    tmp_path: Path, rotation: int, mirror: str
+) -> None:
+    """The old mirror-then-rotate position of pin 1 is the opposite mirror's."""
+    other = {"x": "y", "y": "x"}[mirror]
+    dx, dy = _PIN1_OFFSET[(rotation, other)]
+    sch = _asym_sheet(
+        tmp_path / "u.kicad_sch", rotation=rotation, mirror=mirror, extra=_nc(100 + dx, 100 + dy)
+    )
+    assert _flagged(sch) == set()
+
+
+# U1 unit 1 at (100, 100), rotation 0: pin 1 at (92.38, 97.46),
+# pin 3 at (107.62, 98.73).
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        # Flag at the far end of a stub wire from pin 3.
+        (_wire(107.62, 98.73, 117.78, 98.73) + _nc(117.78, 98.73), {"3"}),
+        # Two-segment chain joined end to end.
+        (
+            _wire(107.62, 98.73, 112.7, 98.73)
+            + _wire(112.7, 98.73, 112.7, 108.89)
+            + _nc(112.7, 108.89),
+            {"3"},
+        ),
+        # Bare "T": a branch ending on the stub's interior does not connect...
+        (
+            _wire(107.62, 98.73, 117.78, 98.73)
+            + _wire(112.7, 98.73, 112.7, 103.81)
+            + _nc(112.7, 103.81),
+            set(),
+        ),
+        # ...but it does with a junction there.
+        (
+            _wire(107.62, 98.73, 117.78, 98.73)
+            + _wire(112.7, 98.73, 112.7, 103.81)
+            + _nc(112.7, 103.81)
+            + "(junction (at 112.7 98.73))",
+            {"3"},
+        ),
+        # A flag on a wire's interior is not connected to it.
+        (_wire(107.62, 98.73, 117.78, 98.73) + _nc(112.7, 98.73), set()),
+        # Nor is a pin on a wire's interior: the wire runs through pin 2
+        # (92.38, 100) from pin 1, and only pin 1 carries the flag.
+        (_wire(92.38, 97.46, 92.38, 102.54) + _nc(92.38, 97.46), {"1"}),
+        # A dangling flag on no pin and no wire flags nothing.
+        (_nc(150, 150), set()),
+    ],
+    ids=["stub", "chain", "bare-tee", "junction-tee", "flag-mid-wire", "pin-mid-wire", "dangling"],
+)
+def test_flag_reaches_pin_through_wires(tmp_path: Path, extra: str, expected: set[str]) -> None:
+    """KiCad flags every pin in the flag's wire-connected subgraph."""
+    sch = _asym_sheet(tmp_path / "u.kicad_sch", extra=extra)
+    assert _flagged(sch) == expected
+
+
+# Unit-0 pin 5 sits at (100, 107.62) on unit 1 and at (100, 147.62) on unit 2.
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ((100, 107.62), True),  # unit 1's copy only
+        ((100, 147.62), False),  # unit 2's copy only
+        (((100, 107.62), (100, 147.62)), True),  # both copies
+    ],
+    ids=["unit1-copy", "unit2-copy", "both-copies"],
+)
+def test_common_pin_takes_the_lowest_units_flag(tmp_path: Path, flags, expected: bool) -> None:
+    """KiCad lists one netlist node per unit's copy; the pad takes the first.
+
+    For unconnected copies that is the lowest unit (``unconnected-(U1A-...)``
+    sorts first), so flags are not OR-ed across units.
+    """
+    points = flags if isinstance(flags[0], tuple) else (flags,)
+    sch = _asym_sheet(
+        tmp_path / "u.kicad_sch", units=(1, 2), extra=" ".join(_nc(x, y) for x, y in points)
+    )
+    assert schematic_pin_info(sch)[("U1", "5")].no_connect is expected
+
+
+def test_flag_match_tolerates_half_grid_float_noise(tmp_path: Path) -> None:
+    """A ``.xx5`` coordinate must match regardless of how it would round."""
+    sch = _asym_sheet(tmp_path / "u.kicad_sch", extra="")
+    text = sch.read_text().replace("(at 100 100 0)", "(at 100.635 100.005 0)")
+    # Pin 3: (100.635 + 7.62, 100.005 - 1.27), written as KiCad would.
+    sch.write_text(text.replace("\n)\n", "\n" + _nc(108.255, 98.735) + "\n)\n"))
+    assert _flagged(sch) == {"3"}
 
 
 def test_multiline_pad_replacement_leaves_no_blank_lines(design: tuple[Path, Path]) -> None:
