@@ -174,7 +174,11 @@ STUB
 chmod +x "$STUB_DIR/git"
 
 # --- Stub gh on PATH ---
-#   gh auth status                                     -> exit 0 (authenticated)
+#   gh auth status                                     -> exit 0 (authenticated), or fail printing
+#                                                           $STUB_DIR/auth-fail if that file exists (#10025)
+#   gh api rate_limit --jq FILTER                        -> jq FILTER over $STUB_DIR/rate-limit.json
+#                                                           (fails if that file is absent, as a bad
+#                                                           token does) (#10025)
 #   gh issue list --state=open|closed ...               -> cat $STUB_DIR/issues-<state>.json (or [];
 #                                                           simulates a GraphQL rate-limit failure if
 #                                                           $STUB_DIR/issue-list-rate-limit-<state> exists)
@@ -220,6 +224,10 @@ rate_limit_message() {
 
 case "$1" in
   auth)
+    if [[ -f "$STUB_DIR_FROM_ENV/auth-fail" ]]; then
+      cat "$STUB_DIR_FROM_ENV/auth-fail" >&2
+      exit 1
+    fi
     exit 0
     ;;
   issue)
@@ -258,7 +266,11 @@ case "$1" in
     ;;
   api)
     path="$2"
-    if [[ "$path" == *"/timeline" ]]; then
+    if [[ "$path" == "rate_limit" ]]; then
+      [[ -f "$STUB_DIR_FROM_ENV/rate-limit.json" ]] || { echo "HTTP 401: Bad credentials" >&2; exit 1; }
+      [[ "$3" == "--jq" ]] && exec jq -r "$4" "$STUB_DIR_FROM_ENV/rate-limit.json"
+      exec cat "$STUB_DIR_FROM_ENV/rate-limit.json"
+    elif [[ "$path" == *"/timeline" ]]; then
       if [[ -f "$STUB_DIR_FROM_ENV/timeline-fail" ]]; then
         echo "stub gh: api call failed" >&2
         exit 1
@@ -307,7 +319,7 @@ reset_state() {
     rm -f "$STUB_DIR/timeline-fail" "$STUB_DIR/git-remote-fail" "$STUB_DIR/git-remote-url"
     rm -f "$STUB_DIR"/issue-list-rate-limit-* "$STUB_DIR/pr-list-rate-limit"
     rm -f "$STUB_DIR/rest-issues-fail" "$STUB_DIR/rest-prs-fail"
-    rm -f "$STUB_DIR/rate-limit-message"
+    rm -f "$STUB_DIR/rate-limit-message" "$STUB_DIR/auth-fail" "$STUB_DIR/rate-limit.json"
 }
 
 run_cds() {
@@ -1276,6 +1288,50 @@ run_cds --title "Alpha Bravo Charlie Delta"
 assert_eq "1" "$RC" "(tc4) Above the corroboration ceiling, body overlap stands on its own"
 assert_contains "$OUT" "DUPLICATE_FOUND" "(tc4) …and blocks as before"
 assert_not_contains "$OUT" "NEAR #8506" "(tc4) …with no demotion"
+
+echo ""
+echo "Testing the auth preflight under REST exhaustion (issue #10025)..."
+
+# `gh auth status` hits REST (/user), so an exhausted core quota made it fail
+# exactly like a missing login, and check-duplicate.sh told every Curator to
+# run `gh auth login`. A rate limit must now be named as one, with the reset
+# time, and exit 2 (inconclusive); a real auth failure keeps the old message.
+
+# (ra1) auth status fails with gh's generic text while `gh api rate_limit`
+# (free of quota) shows core exhausted -> rate-limit message with the reset.
+reset_state
+echo "X Failed to log in to github.com account someone (default)" > "$STUB_DIR/auth-fail"
+echo '{"resources":{"core":{"limit":5000,"remaining":0,"reset":1790917200},"graphql":{"limit":5000,"remaining":4900,"reset":1790917200}}}' > "$STUB_DIR/rate-limit.json"
+run_cds --title "Alpha Bravo Charlie Delta"
+assert_eq "2" "$RC" "(ra1) REST-exhausted auth preflight -> exit 2 (inconclusive)"
+assert_contains "$ERR" "rate limit exhausted" "(ra1) ...names the rate limit"
+assert_contains "$ERR" "resets 2026-10-02T05:00:00Z" "(ra1) ...with the core reset time"
+assert_not_contains "$ERR" "Not authenticated" "(ra1) ...and never claims an auth failure"
+
+# (ra2) The auth output itself carries a rate-limit phrasing and the probe is
+# unavailable -> still a rate limit, with a generic reset hint.
+reset_state
+echo "HTTP 403: API rate limit exceeded for user ID 1." > "$STUB_DIR/auth-fail"
+run_cds --title "Alpha Bravo Charlie Delta"
+assert_eq "2" "$RC" "(ra2) Rate-limit phrasing in auth output -> exit 2"
+assert_contains "$ERR" "rate limit exhausted" "(ra2) ...names the rate limit"
+assert_not_contains "$ERR" "Not authenticated" "(ra2) ...not an auth failure"
+
+# (ra3) Genuine auth failure: quota is fine -> the original guidance.
+reset_state
+echo "X Failed to log in to github.com account someone (default)" > "$STUB_DIR/auth-fail"
+echo '{"resources":{"core":{"limit":5000,"remaining":4123,"reset":1790917200}}}' > "$STUB_DIR/rate-limit.json"
+run_cds --title "Alpha Bravo Charlie Delta"
+assert_eq "2" "$RC" "(ra3) Real auth failure -> exit 2"
+assert_contains "$ERR" "Not authenticated with forge" "(ra3) ...keeps the auth message"
+assert_not_contains "$ERR" "rate limit exhausted" "(ra3) ...and does not blame the quota"
+
+# (ra4) Bad token: the probe is refused too -> the auth message.
+reset_state
+echo "X Failed to log in to github.com account someone (default)" > "$STUB_DIR/auth-fail"
+run_cds --title "Alpha Bravo Charlie Delta"
+assert_eq "2" "$RC" "(ra4) Bad token -> exit 2"
+assert_contains "$ERR" "Not authenticated with forge" "(ra4) ...keeps the auth message"
 
 # --- Summary ---
 echo ""

@@ -6216,6 +6216,29 @@ mask_catastrophic_comment_lines() {
     }'
 }
 
+# Toggle hint (issue #10434): one line naming the env var (set under the
+# Claude Code settings.json "env" block -- the hook is a separate process, so an
+# inline `VAR=x cmd` prefix is invisible to it and is never suggested) and the
+# .loom/config.json key for a TOGGLEABLE category. Ungated-floor tags
+# (catastrophic:*, rm-protected-path, cloud-delete-ask, ...) match no arm and
+# get no hint, since no toggle can disable them. Keep in sync with
+# `loom-daemon guards status` (loom-daemon/src/guards_status.rs).
+toggle_hint_for_tag() {
+    local env="" key=""
+    case "$1" in
+        sql-ddl|sql-delete-no-where)  env="LOOM_GUARD_SQL=0";               key='"guards.sqlDdl": false' ;;
+        cloud-cli:*)                  env="LOOM_GUARD_CLOUD=0";             key='"guards.cloudCli": false' ;;
+        reversible-gh:*)              env="LOOM_GUARD_REVERSIBLE_GH=1";     key='"guards.reversibleGh": true' ;;
+        cargo-clean-scope-outside-repo) env="LOOM_GUARD_CARGO_CLEAN=0";     key='"guards.cargoCleanScope": false' ;;
+        rm-scope-unresolved-var|rm-scope-outside-repo) env="LOOM_RM_SCOPE=off"; key='"guards.rmScope": "off"' ;;
+        force-op:*)                   env="LOOM_FORCE_SCOPE=off";           key='"guards.forceScope": "off"' ;;
+        stash-scope:*)                env="LOOM_GUARD_STASH_SCOPE=0";       key='"guards.stashScope": false' ;;
+        worktree-write-confinement*)  env="LOOM_GUARD_WORKTREE_ISOLATION=0"; key='"guards.worktreeIsolation": false' ;;
+        *) return 0 ;;
+    esac
+    printf '\nToggle: set %s in Claude Code settings "env", or %s in .loom/config.json' "$env" "$key"
+}
+
 # Helper: output a deny decision and exit
 #
 # Optional second arg is a short, STABLE rule tag (issue #3771) recorded as the
@@ -6228,6 +6251,7 @@ deny() {
     local reason="$1"
     local tag="${2:-deny}"
     log_guard_decision "deny" "catastrophic" "$tag" || true
+    reason="${reason}$(toggle_hint_for_tag "$tag")"
     if jq -n --arg reason "$reason" '{
         hookSpecificOutput: {
             hookEventName: "PreToolUse",
@@ -6253,6 +6277,7 @@ ask() {
     local reason="$1"
     local tag="${2:-ask}"
     log_guard_decision "ask" "ask" "$tag" || true
+    reason="${reason}$(toggle_hint_for_tag "$tag")"
     if jq -n --arg reason "$reason" '{
         hookSpecificOutput: {
             hookEventName: "PreToolUse",

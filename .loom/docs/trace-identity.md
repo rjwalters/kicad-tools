@@ -26,6 +26,8 @@ inside a key use RFC 3339 UTC with nanosecond precision.
 | Dispatch tick (`loom.dispatch.tick`) | tick start instant |
 | Pool hold (`loom.pool.hold`) | pool identity (`loom.pool.hold.pool`, a hash of the pool directory) and hold start instant (`since`) — every hold armed in one work-finder tick shares `since`, so the pool is what tells them apart |
 | Rate-limit trip (`loom.ratelimit.trip`) | the tripping job (`loom.ratelimit.source`) and the trip instant (#10022) |
+| Reader withdrawal (`forge.reader.withdrawn`) | the reader App (`forge.reader.app`), the owner and resource withdrawn (`forge.reader.owner`, `forge.reader.resource`) and the withdrawal instant (W4-A) |
+| Read-pool spill-latch transition (`forge.reader.spill`) | the repo (`forge.spill.owner_repo`), resource, home reader, mode and the transition instant (W4-B) |
 | `gh` invocation with no parent (`loom.github.invoke`, span `invoke github`) | `github.operation`, start instant, and `github.invocation` (`<pid>.<seq>`, so two calls in one clock tick differ); with a parent it is that span's child, keyed by the same facts (#9985) |
 | CI run/job (`loom.ci.*`) | repo, run id, attempt (job: job id) — [`ci-observability.md`](ci-observability.md) |
 

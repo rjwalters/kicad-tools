@@ -109,7 +109,18 @@ loom-daemon park-record render --blocked-by 8322 --by doctor \
   artifact's body to populate `Evidence::declared`; an artifact whose only
   blocker reference is NOT inside a park record is reported as **PROSE-ONLY**
   (`stale_blocked::undeclared`), separate from **UNDOCUMENTED** (no blocker
-  reference anywhere).
+  reference anywhere). Its forge reads are batched (#10480: one REST + ETag
+  listing, REST blocker reads, one GraphQL query per 100 issues) and run under
+  a **budget floor**: after the listing it reads the free `/rate_limit` probe,
+  and if the run's projected cost would leave fewer than
+  `--min-graphql-remaining` GraphQL points or `--min-core-remaining` core
+  requests (default 1000 each; `0` disables) it gathers nothing and reports
+  every artifact **NOT EVALUATED**, still exit 0. The same floors are
+  re-checked between reads from the forge's own rate-limit answers, so a run
+  stops part-way rather than draining the bucket. `--json` adds a
+  `forge_cost` object (`graphql_queries`, `graphql_points` from
+  `rateLimit.cost`, `rest_requests`, `rest_not_modified`, `budget_before`,
+  `projected`, `floor`, `budget_refused`, `budget_stopped`).
 - `guide.md`'s `check_and_unblock` / `check_and_unblock_prs` — the active
   unblock sweep. A rendered park record's `Blocked by: #N` line already
   matches `parse_dependencies`'s existing pattern, so no separate parser is

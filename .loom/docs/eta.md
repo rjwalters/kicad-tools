@@ -387,7 +387,10 @@ tracker's, which loads the file (below).
 `land-2026-10-04-fresh-tide` (#10209) ships the same way. Its half-life is a
 constructor parameter (`LandFreshTide::with_half_life`), so a 1/2/7-day
 comparison needs no extra registered ids; only the 2-day default is
-registered and shadowed.
+registered and shadowed. `loom-daemon eta backtest --heuristic
+land-2026-10-04-fresh-tide --compare land-v2 --half-life-days 1|2|7` replays
+any setting on the same snapshot (#10325); it needs a journal that holds
+stage samples (run `eta backfill` first), or every case refuses.
 `land-v4` (#10210) ships the same way.
 
 ## Fitted coefficients (`eta-fit/v1`)
@@ -1087,6 +1090,7 @@ first call fails.
 |---|---|---|
 | `pr_additions`, `pr_deletions`, `pr_changed_files`, `pr_commits` | `pulls/{n}` | items with a PR |
 | `checks_pending`, `checks_failed` | `commits/{head}/check-runs` and `commits/{head}/status` (legacy statuses; if either read fails the features are omitted as `read_failed`) for the head the PR read shows, counted over the base branch's **required** contexts only (the `forge wait-checks` lookup and rollup): a required context still running or not yet registered is pending; one concluded other than `success`, `neutral` or `skipped` is failed. Optional checks never count; a branch that requires nothing gives `0`, `0` | items with an open PR |
+| `checks_all_pending`, `checks_all_failed` | the same head's runs and statuses over **every** check, required or not (#10334), apart from the required counts; no required lookup needed, so set even while those are `required_unknown`. An optional failure raises `checks_all_failed` only | items with an open PR |
 | `complexity_marker`, `points_marker`, `author` | `issues/{n}`: the `<!-- loom:complexity=… -->` and `<!-- loom:points=… -->` markers (the work finder's parsers) and `user.login` | every item |
 
 Each pass plans the reads that are due (`pulls` and checks older than
@@ -1137,20 +1141,32 @@ in-process state, the pool from the token directory.
 |---|---|
 | `ratelimit_core_remaining`, `ratelimit_core_reset_at` | the item's reader App's freshest REST budget reading (≤ 15 min old) and its reset |
 | `ratelimit_graphql_remaining`, `ratelimit_graphql_reset_at` | the same for GraphQL |
+| `ratelimit_writer_core_remaining`, `ratelimit_writer_graphql_remaining` | the freshest REST / GraphQL budget reading of the writer credential that serves the item's repo (#10334) |
+| `ratelimit_min_remaining`, `ratelimit_exhausted` | the fewest calls left over the item's serving reader and serving writer, both pools, and whether that is zero (#10334); a reading past its reset is ignored |
 | `breaker_state`, `breaker_cooldown_until` | the rate-limit breaker: `closed` or `cooldown`, and when an active cooldown releases |
 | `pool_usable_accounts`, `pool_exhausted` | spawnable accounts in the pool the workspace resolves to (neither bad-marked nor hard-excluded), and whether that is zero |
 
 The sink keeps each reader's readings under a public bucket label
 (`reader:<app id>@<owner>`, never a credential), because two reader Apps
 share the `reader` role but not a budget. An item's budget is the reading of
-the reader App that serves its repo; the writer's and any other reader's
-readings are never borrowed. A repo with no reader App (it reads on the
+the reader App that serves its repo; another reader's readings are never
+borrowed. Writers are per owner too: a multi-owner fleet holds one writer
+credential per managed owner (`.loom/gh-config-by-owner/<owner>` beside the
+primary `.loom/gh-config`), so each writer's readings sit under
+`writer@<owner>` — the owner its credential is installed for, else the owner
+of the repo the call served; a public owner name, never a credential, token or
+App id, and a writer line naming no owner lands in no bucket. An item reads the
+writer that serves its repo — that owner's own writer when one is registered,
+else the primary writer — carried as its own features, so neither a healthy
+reader nor another owner's healthy writer can mask an exhausted writer. A repo
+with no reader App (it reads on the
 writer) has no budget features, and neither does a reader with no fresh
 reading.
 
 Null reasons: `no_stall_snapshot` (no snapshot taken before `as_of`),
 `stale_inputs` (the snapshot is over 15 min old), `no_reader_for_repo`,
 `no_identity_reading` (the serving reader has no fresh reading),
+`no_writer_reading`, `no_budget_reading` (no identity has a live reading),
 `no_reset_in_reading` (a breaker probe carries none), `breaker_not_registered`,
 `breaker_closed` (`breaker_cooldown_until` only) and `no_token_pool`.
 

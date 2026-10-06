@@ -37,6 +37,8 @@
 - [Curator intake reconcile (#10041)](#curator-intake-reconcile-10041)
 - [Autonomous work finder (#3810)](#autonomous-work-finder-3810)
 - [Operability — config, start/stop, E2E (Phase D, #3813)](#operability--config-startstop-e2e-phase-d-3813)
+- [Reader withdrawal kill switch (`LOOM_READ_ROUTING`)](#reader-withdrawal-kill-switch-loom_read_routing)
+- [Read-pool routing (`forge.readPool.routing`)](#read-pool-routing-forgereadpoolrouting)
 - [Observability exporter (`observability`, #4705, epic #4702 Phase 1)](#observability-exporter-observability-4705-epic-4702-phase-1)
 - [Fleet dashboard (`loom-daemon serve`)](#fleet-dashboard-loom-daemon-serve)
 - [Locks and lifecycle](#locks-and-lifecycle)
@@ -5301,6 +5303,12 @@ knobs not yet audited here.
 | `autonomous.mainHealthGate.ciWorkflow` | `LOOM_GATE_CI_WORKFLOW` | *(unset)* | Forge workflow that must itself conclude `success` for forge-CI corroboration to vouch for a commit (#3987). Empty/whitespace → unset. Absent → today's unanimity rule, unchanged. See [Optional named verification workflow](#optional-named-verification-workflow-loom_gate_ci_workflow-3987) |
 | `autonomous.mainHealthGate.suppressDispatchDuringGate` | `LOOM_MAIN_HEALTH_GATE_SUPPRESS_DISPATCH` | `true` | Hold new dispatch off a root while its build-gate run is in flight (#4084), per-root so a sibling with no gate in flight keeps dispatching. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. Set `false` to recover the pre-#4084 `is_halted`-only behavior. **Restart required** — resolved once at startup from the primary workspace config (#5963). See [build-gate.md → gate-in-flight dispatch suppressor](build-gate.md) |
 | **`forge.githubApp.mintTimeoutSeconds`** (not `autonomous.*` — it lives beside the `appId` / `privateKeyPath` that `github-app-token.sh` itself reads) | `LOOM_GITHUB_APP_MINT_TIMEOUT_SECS` | `90` | Bound on one `github-app-token.sh get-token` subprocess (#5630). Raised from the pre-#5630 fixed `20` because on a saturated host (`observed_idle=0%`) fork/exec + the JWT sign + two GitHub round-trips routinely exceeded 20s, failing a refresh tick that succeeds in ~30ms by hand. Zero/invalid → default. The mint is additionally retried **once** on a transport-level failure (timeout / spawn error), never on a parsed `{"status":"error"}` answer |
+| `forge.identities.readers[].owners` | *(config only)* | *(absent = every owner)* | The owners one reader App serves (W4-B), e.g. `["acme"]`. A reader limited to some owners is left out of every other owner's reader walk, so its `hash(owner/repo) mod N` uses only the readers that serve that owner: adding a reader for one owner reshuffles that owner's repos once and leaves every other owner's placement unchanged. Entries are owner names (lowercased); an invalid entry is dropped and `forge identities` reports it, as it does a list with no valid owner (that reader serves nothing). Re-read every 60 s |
+| `forge.readPool.routing.splitRepos` | `LOOM_READ_POOL_SPLIT=0` disables | `[]` | Hot repos (`owner/repo`) whose reads are split across the reader pool **per request** instead of all going to the repo's one home reader (W4-B). The reader is `SHA-256("loom-read-pool/split/v1:" + owner/repo + "\|" + affinity key)` mod N, where the affinity key is the request's identity — the `gh` subcommand, positional args, method and `-f`/`-F` fields, with `-H`, `--jq`, `--template`, `--include`, `--paginate`, the host flag and `--cache` removed, or a conditional read's URL — so one URL always lands on one reader and keeps its ETag (GitHub ETags are credential-specific; the cache key is unchanged, a 304 is only trusted from the reader that matched the sent validator, so a URL that moves costs one 200). A read with no key (the plain `read_credential` callers) keeps the home reader. Re-read every 60 s |
+| `forge.readPool.routing.spill` | `LOOM_READ_POOL_SPILL=0` disables the latch **and** the split (home reader only) | `true` | The spill latch (W4-B), per `(owner/repo, resource, home reader)`, in memory. **Off → partial** when the home bucket's projected use (`used / max(elapsed fraction, 1/6)`, the W1 bucket book; unknown in the first 10 minutes of a window while more than half remains) reaches `spillProjectedPct`; **→ full** at `spillFullPct` or when the home reader is withdrawn for that owner and resource. Partial moves exactly the requests whose `SHA-256("loom-read-pool/spill/v1:" + owner/repo + "\|" + affinity key)` is odd; full moves all. The target is the next reader in walk order that is not withdrawn and is projected below `targetMaxPct` (or unknown); with none, the request stays home. The latch pins the target it chose until it releases — later readings of the target never move a spilled URL (each move costs a full 200, since ETags are credential-specific) — and re-picks only when the pinned target is withdrawn, its token is stale, or it is projected at or above `spillFullPct`. The latch releases at the home bucket's reset (the later of the reset and a live withdrawal's end), capped at 3660 s after it engaged; with no known reset, 3600 s after. Better readings never release it early. An unknown home reading never engages it. Each transition emits a `forge.reader.spill` span |
+| `forge.readPool.routing.spillProjectedPct` | *(config only)* | `70` | Home projection that engages a partial spill. Must satisfy `0 < targetMaxPct < spillProjectedPct < spillFullPct ≤ 100`; an invalid set falls back to `60`/`70`/`90` (all three) with a warning in `forge identities` and the daemon log |
+| `forge.readPool.routing.spillFullPct` | *(config only)* | `90` | Home projection that engages a full spill |
+| `forge.readPool.routing.targetMaxPct` | *(config only)* | `60` | A spill never *starts* on a reader projected at or above this. A pinned target keeps its spill until it reaches `spillFullPct` (so the target band is hysteretic, and a target crossing this mark does not bounce URLs back home) |
 | *(env only — n/a)* | `LOOM_FORGE_CREDENTIAL_STALE_GRACE_SECS` | `1800` | How long after the **first** failure of a consecutive credential-refresh-failure streak the main-health gate treats its forge answers as untrustworthy and holds each repo's previous verdict (#5630). Env-only: the credentials are daemon-global, so a per-repo config key would be ambiguous. Zero/invalid → default. See [Stale-credential gate hold](#stale-credential-gate-hold-5630) below |
 | `autonomous.roleRunner.enabled` | `LOOM_ROLE_RUNNER` | `false` | Periodic standalone support-role runner on/off (#4015). **Resolved per registered root** (#4377) — see the callout below the table. **Live** — every `roleRunner.*` key (`enabled`, `roles`, `onIdle`, `model`, …) is re-read from that root's config on every role-runner tick, not cached at daemon startup; no restart needed for a config-only change (#5963) |
 | `autonomous.roleRunner.roles` | *(config only)* | the 7 **interval-default** roles (`architect` excluded, #5656) | Subset of `champion`/`curator`/`judge`/`doctor`/`auditor`/`guide`/`hermit`/`architect` to dispatch on the interval cadence; explicit empty array runs none. **The absent-key default is the interval-default subset, not the whole table**: `architect` is idle-addressable-only (see `onIdle` below) and is never swept in by the "unset ⇒ all defaults" fallback — naming it here explicitly is the deliberate opt-in to a timer-driven architect (1h cadence). **Allowlist, not an addition** — must be updated by hand when a new interval-default role ships, or it silently never dispatches (#5339); a non-empty pinned list missing an interval-default entry warns, once per resolved-config change, in one workspace-named aggregated line (#6163) (omitting `architect` never warns — that is correct, not stale; neither does omitting a role named in `onIdle`, which dispatches on the idle edge instead). Also resolved from each root's own config |
@@ -11346,6 +11354,61 @@ dispatch — is validated by the E2E playbook at
 throwaway issue from `loom:triage` → Curator → `loom:issue` → work-finder
 dispatch → PR → merge, with a scripted label-transition assertion, and confirms
 the operator only ever created the issue.
+
+## Reader withdrawal kill switch (`LOOM_READ_ROUTING`)
+
+When a reader App fails a read, the daemon withdraws it from routing for a
+while and retries the read once on the writer. Since W4-A the withdrawal is
+scoped to the `(App, owner, resource)` bucket that failed, so one owner's
+exhausted `core` pool no longer takes the reader off every other owner and
+resource; the rules are in
+[`github-authentication.md`](github-authentication.md#several-apps-one-writer-a-pool-of-readers-9248-9537).
+
+| Env | Default | Effect |
+|---|---|---|
+| `LOOM_READ_ROUTING` | *(unset: scoped)* | `legacy` (any case) restores the pre-W4-A behaviour exactly: the old failure classifier, an App-wide withdrawal for any rate limit or credential failure (until the caller's reported reset, else 300 s), no on-demand `rate_limit` probe, and no scoped withdrawal consulted when choosing a reader. Any other value is the scoped default. Read on **every** withdrawal and reader choice (a plain env read, no cache), so a process started with it set behaves as before W4-A with no new release; the daemon picks it up on its next start |
+
+Scoped withdrawals live in the daemon's memory only (a restart clears them),
+are only ever extended, never shortened, and are listed by `loom-daemon
+status` under `reader withdrawals (scoped)`. Each withdrawal, scoped or
+App-wide, is exported as a `forge.reader.withdrawn` span
+([`telemetry-schema.md`](telemetry-schema.md)).
+
+## Read-pool routing (`forge.readPool.routing`)
+
+Since W4-B every reader choice goes through one routing step. A repo's
+reads start at its **home** reader, `hash(owner/repo) mod N` over the
+readers that serve its owner (a reader entry's optional `owners` list), and
+walk forward past a withdrawn reader or a stale token, exactly as before.
+Two additions move reads off home, and both keep each URL on one reader,
+because GitHub ETags are specific to the credential that served them:
+
+- **Split.** A repo in `forge.readPool.routing.splitRepos` starts each
+  request at a reader chosen from the request's affinity key (the `gh`
+  subcommand, positional args, method and fields, without `-H`, `--jq`,
+  `--include`, `--paginate`, the host flag or `--cache`; or a conditional
+  read's URL), so the repo spreads across the pool and an ETag rotation
+  never moves a URL.
+- **Spill latch.** When the home bucket's projected use reaches
+  `spillProjectedPct`, half the requests (a fixed half, by a second hash)
+  move to the next reader projected below `targetMaxPct`; at
+  `spillFullPct`, or while home is withdrawn, all of them do. The latch
+  holds until the home bucket's reset (capped at 61 minutes; one hour when
+  no reset is known), whatever later readings say, and keeps the target it
+  chose unless that target is withdrawn, stale or reaches `spillFullPct`;
+  each transition and each re-pick is a `forge.reader.spill` span. No
+  reading means no move.
+
+With no `splitRepos` and no home reading at or above `spillProjectedPct`
+the choice is the same reader as before W4-B. The keys are in the
+[config surface table](#config-surface-loomconfigjson--autonomous); the config is re-read
+every 60 s.
+
+| Env | Default | Effect |
+|---|---|---|
+| `LOOM_READ_POOL_SPILL` | *(unset: on)* | `0` keeps every read on its home reader: no split and no latch |
+| `LOOM_READ_POOL_SPLIT` | *(unset: on)* | `0` disables the split only |
+| `LOOM_READ_ROUTING` | *(unset: v2)* | `legacy` also restores the pre-W4-B walk: every reader counts (no `owners` filter), no split, no latch. In v2 a host whose egress policy gives the gateway the GitHub credential gets no reader pool (the writer path, unchanged); the plain `read_credential` path never had that check and still does not |
 
 ## Observability exporter (`observability`, #4705, epic #4702 Phase 1)
 

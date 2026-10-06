@@ -585,6 +585,13 @@ Record format, scoped population, and why the gate sits one stage before you:
 `.loom/docs/premise-gate.md`. Under `/loom:sweep` the orchestrator already ran
 it before dispatching you; re-running is cheap and idempotent.
 
+**REST exhausted mid-pass (#10025)**: GraphQL is a separate quota.
+`premise-check.sh` and `post-comment.sh` fall back to it; `check-duplicate.sh`
+exits `2` naming the rate limit and its reset. If the gate still exits `1`,
+save the body and run `premise-check.sh --body-file <path>`. Waiting on a
+reset? Post your `loom:claim-activity` marker via `post-comment.sh` so the
+claim is not reclaimed as stale.
+
 ## Triage: Ready or Needs Enhancement?
 
 When you find an unlabeled issue, **first assess if it's already implementation-ready**:
@@ -984,18 +991,11 @@ each. Full taxonomy: `.loom/docs/label-state-machine.md` →
 TITLE=$(./.loom/scripts/gh-cached issue view <number> --json title --jq .title)
 BODY=$(./.loom/scripts/gh-cached issue view <number> --json body --jq .body)
 
-# Check for similar existing issues, merged PRs, closed issues, AND open
-# issues/PRs that cross-reference this one (--issue, issue #4162)
 ./.loom/scripts/check-duplicate.sh --include-merged-prs --issue "<number>" "$TITLE" "$BODY"
 CHECK_RC=$?
 if [[ $CHECK_RC -eq 1 ]]; then
-    # DUPLICATE_FOUND and/or RELATED_OPEN_WORK found - read the full output
-    # before marking curated
     echo "Potential duplicate or related open work detected - review before curating"
 elif [[ $CHECK_RC -eq 2 ]]; then
-    # Could not check at all (e.g. GraphQL exhaustion with no working
-    # fallback) - this is NOT "duplicate found". Don't block curation on it;
-    # note the inconclusive check in your enhancement comment instead.
     echo "Duplicate check could not complete (forge error) - proceeding without a duplicate verdict"
 fi
 ```

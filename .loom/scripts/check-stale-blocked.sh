@@ -28,7 +28,9 @@
 # Usage:
 #   ./.loom/scripts/check-stale-blocked.sh           # print warning (or nothing) and exit 0
 #   ./.loom/scripts/check-stale-blocked.sh --quiet    # suppress the stdout one-liner
-#   ./.loom/scripts/check-stale-blocked.sh --json     # one JSON object on stdout
+#   ./.loom/scripts/check-stale-blocked.sh --json     # one JSON object on stdout (incl. forge_cost)
+#   ./.loom/scripts/check-stale-blocked.sh --min-graphql-remaining N --min-core-remaining N
+#                                                     # budget floor (default 1000 each; 0 disables; #10480)
 #   ./.loom/scripts/check-stale-blocked.sh --help     # show usage
 #
 # Exit codes:
