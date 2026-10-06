@@ -898,7 +898,7 @@ so the routed board is unaffected. The pass has a total time limit
 up as its own `unrouted-diagnosis` stage in the route deadline supervisor and
 in `scripts/research/route_phase_profile.py`. A one-line summary goes to
 stderr. Both keys are absent when everything routed, when the output is text,
-or when the budget is `0`. `kct route-auto` does not report causes yet.
+or when the budget is `0`. `kct route-auto` does not report causes yet (#6001).
 
 #### Routing around invalid placement
 

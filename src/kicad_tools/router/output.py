@@ -1001,7 +1001,12 @@ def _unrouted_diagnosis_block(
     entries = [conn.to_dict() for conn in diagnosis.connections if conn.net_id in wanted]
     if not entries:
         return None
-    return entries, diagnosis.summary_dict()
+    summary = diagnosis.summary_dict()
+    # Counts describe the emitted entries, not every connection searched.
+    summary["connections"] = len(entries)
+    for cause in ("congested", "blocked", "unclassified"):
+        summary[cause] = sum(1 for entry in entries if entry["cause"] == cause)
+    return entries, summary
 
 
 def _access_witness_block(router: Autorouter) -> dict | None:

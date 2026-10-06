@@ -300,3 +300,24 @@ def test_budget_flag_parses_and_is_forwarded() -> None:
         route_cmd.main = original  # type: ignore[assignment]
     argv = captured["argv"]
     assert argv[argv.index("--diagnose-unrouted-budget") + 1] == "7.5"
+
+
+def test_cli_stash_diagnoses_the_missing_edge_of_a_partial_net() -> None:
+    """A net with some copper but a stranded pad is diagnosed on its failed edge."""
+    from kicad_tools.cli.route_cmd import _stash_unrouted_diagnosis
+
+    router = _boxed_pad_router(force_python=True)
+    router.add_component("R3", [{"number": "1", "x": 9.0, "y": 8.0, "net": 1, "net_name": "SIG"}])
+    _route(router)
+    assert 1 in {route.net for route in router.routes}, "fixture sanity: R2-R3 routes"
+
+    _stash_unrouted_diagnosis(router, _args())
+
+    diagnosis = router.unrouted_diagnosis
+    assert diagnosis is not None
+    assert [c.cause for c in diagnosis.connections] == [CAUSE_BLOCKED]
+    [conn] = diagnosis.connections
+    assert ("R1", "1") in {conn.source_pad, conn.target_pad}
+    doc = get_routing_diagnostics_json(router, {"SIG": 1}, 1)
+    assert [e["cause"] for e in doc["unrouted"]] == ["blocked"]
+    assert doc["unrouted_diagnosis"]["connections"] == 1

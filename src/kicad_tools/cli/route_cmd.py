@@ -1891,8 +1891,19 @@ def _stash_unrouted_diagnosis(router: "Autorouter", args) -> None:
     multi_pad = {n for n, pads in nets.items() if n > 0 and len(pads) >= 2}
     routed = {route.net for route in getattr(router, "routes", [])}
     unrouted = multi_pad - routed
+    # Partial = routed nets whose copper does not join all their pads, judged
+    # the same way the JSON report judges it (``validate_net_connectivity``),
+    # so a stale failure record for a net that later routed is not diagnosed.
+    partial: set[int] = set()
     failed = {int(f.net) for f in getattr(router, "routing_failures", [])}
-    partial = (failed & multi_pad & routed) - unrouted
+    candidates = (failed & multi_pad & routed) - unrouted
+    if candidates:
+        from kicad_tools.router.observability import validate_net_connectivity
+
+        pads = getattr(router, "pads", {}) or {}
+        net_pads = {n: [pads[k] for k in nets[n] if k in pads] for n in candidates}
+        connectivity = validate_net_connectivity(list(router.routes), net_pads)
+        partial = {n for n, info in connectivity.items() if not info.get("connected", True)}
     if not unrouted and not partial:
         return
     from kicad_tools.router.unrouted_cause import diagnose_unrouted
