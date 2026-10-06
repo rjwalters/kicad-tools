@@ -552,6 +552,7 @@ def get_routing_diagnostics_json(
     single_pad_count: int = 0,
     min_completion: float = 1.0,
     routing_plan: dict | None = None,
+    diagnose_unrouted_budget: float | None = None,
 ) -> dict:
     """Get routing diagnostics as a JSON-serializable dictionary.
 
@@ -577,6 +578,13 @@ def get_routing_diagnostics_json(
             when provided; the key is absent (not ``null``) when the caller
             passes ``None`` (e.g. no dense package triggered the two-phase
             global pass, or ``--no-routing-plan`` in a later phase).
+        diagnose_unrouted_budget: Issue #5944.  When a positive number of
+            seconds, every unrouted connection (fully unrouted nets and the
+            missing edges of partial nets) is re-searched with all other
+            signal copper lifted and classified ``congested`` / ``blocked``
+            under the ``"unrouted"`` key, with the pass's own timing under
+            ``"unrouted_diagnosis"``.  ``None`` / ``0`` (the default) skips
+            the pass; both keys are then absent.
 
     Returns:
         Dictionary with routing diagnostics in JSON-serializable format
@@ -932,7 +940,73 @@ def get_routing_diagnostics_json(
     witness_block = _access_witness_block(router)
     if witness_block is not None:
         result_dict["access_witness"] = witness_block
+    # Issue #5944: congested-vs-blocked classification of each unrouted
+    # connection.  Absent (not empty) when the pass did not run or nothing is
+    # unrouted, so a fully-routed board's JSON is unchanged.
+    diagnosis_block = _unrouted_diagnosis_block(
+        router,
+        unrouted_ids,
+        {entry["net_id"] for entry in partially_connected},
+        reverse_net,
+        diagnose_unrouted_budget,
+    )
+    if diagnosis_block is not None:
+        result_dict["unrouted"], result_dict["unrouted_diagnosis"] = diagnosis_block
     return result_dict
+
+
+def _unrouted_diagnosis_block(
+    router: Autorouter,
+    unrouted_ids: set[int],
+    partial_ids: set[int],
+    net_names: dict[int, str],
+    budget_s: float | None,
+) -> tuple[list[dict], dict] | None:
+    """The ``"unrouted"`` / ``"unrouted_diagnosis"`` JSON pair (Issue #5944).
+
+    ``kct route`` runs the diagnosis while its grid is still live and stashes
+    it on ``router.unrouted_diagnosis`` (the grid's occupancy planes are
+    released before the report is built).  Library callers can instead pass
+    ``budget_s`` to run it here.  Only connections of nets that are still
+    unrouted / partial in THIS report are emitted.
+
+    Never raises a regular exception: a diagnostic must not be able to fail
+    the report that carries it.  A live run's one-line summary goes to
+    stderr so the ``--format json`` stdout contract (#5938) holds.
+    """
+    import sys
+
+    wanted = set(unrouted_ids) | set(partial_ids)
+    if not wanted:
+        return None
+    diagnosis = getattr(router, "unrouted_diagnosis", None)
+    if diagnosis is None and budget_s:
+        try:
+            from .unrouted_cause import diagnose_unrouted
+
+            diagnosis = diagnose_unrouted(
+                router,
+                unrouted_ids,
+                partial_net_ids=partial_ids,
+                net_names=net_names,
+                budget_s=float(budget_s),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Warning: unrouted diagnosis failed: {exc}", file=sys.stderr)
+            return None
+        if diagnosis is not None:
+            print(diagnosis.summary_line(), file=sys.stderr)
+    if diagnosis is None or not hasattr(diagnosis, "connections"):
+        return None
+    entries = [conn.to_dict() for conn in diagnosis.connections if conn.net_id in wanted]
+    if not entries:
+        return None
+    summary = diagnosis.summary_dict()
+    # Counts describe the emitted entries, not every connection searched.
+    summary["connections"] = len(entries)
+    for cause in ("congested", "blocked", "unclassified"):
+        summary[cause] = sum(1 for entry in entries if entry["cause"] == cause)
+    return entries, summary
 
 
 def _access_witness_block(router: Autorouter) -> dict | None:
@@ -962,6 +1036,7 @@ def print_routing_diagnostics_json(
     nets_to_route_ids: set[int] | None = None,
     single_pad_count: int = 0,
     routing_plan: dict | None = None,
+    diagnose_unrouted_budget: float | None = None,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -975,6 +1050,9 @@ def print_routing_diagnostics_json(
         single_pad_count: Number of single-pad nets excluded from routing.
         routing_plan: Optional ``RoutingPlan`` summary block -- see
             :func:`get_routing_diagnostics_json`.
+        diagnose_unrouted_budget: Seconds for the congested/blocked
+            classification pass (Issue #5944) -- see
+            :func:`get_routing_diagnostics_json`.
     """
     diagnostics = get_routing_diagnostics_json(
         router,
@@ -984,6 +1062,7 @@ def print_routing_diagnostics_json(
         nets_to_route_ids=nets_to_route_ids,
         single_pad_count=single_pad_count,
         routing_plan=routing_plan,
+        diagnose_unrouted_budget=diagnose_unrouted_budget,
     )
     # json_stdout(): the real stdout even while ``kct route --format json``
     # diverts progress prints to stderr (issue #5938).

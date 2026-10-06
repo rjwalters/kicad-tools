@@ -4752,6 +4752,22 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--diagnose-unrouted-budget",
+        type=float,
+        default=20.0,
+        metavar="SECONDS",
+        help=(
+            "Issue #5944: wall-clock budget for classifying each unrouted "
+            "connection as 'congested' (routable once other nets' copper is "
+            "removed -- the JSON lists those nets as rip-up 'contenders') or "
+            "'blocked' (no path even on an empty board -- the JSON lists the "
+            "pads/keepouts/edge closing it off as 'blockers'). Reported under "
+            "'unrouted' in --format json output. Connections the budget does "
+            "not reach are 'unclassified'. 0 disables the pass. Default: 20. "
+            "Forwarded to the inner route parser."
+        ),
+    )
+    route_parser.add_argument(
         "--no-auto-build-native",
         action="store_true",
         help=(

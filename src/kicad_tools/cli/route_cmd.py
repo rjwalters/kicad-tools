@@ -1868,6 +1868,83 @@ def _serialize_preserved_routes(
     return "\n\t".join(parts)
 
 
+def _stash_unrouted_diagnosis(router: "Autorouter", args) -> None:
+    """Classify unrouted connections as congested / blocked (Issue #5944).
+
+    Runs only for ``--format json`` with a positive
+    ``--diagnose-unrouted-budget``, and only when something is unrouted.  It
+    must run while the routing grid is still live -- i.e. before
+    :func:`_release_routing_engine_state` drops the occupancy planes -- so the
+    result is stashed on ``router.unrouted_diagnosis`` for
+    :func:`~kicad_tools.router.output.get_routing_diagnostics_json` to emit
+    under ``"unrouted"`` later.  Published as its own ``unrouted-diagnosis``
+    stage so the deadline supervisor and the phase profiler attribute its
+    time; the one-line summary goes to stderr (the #5938 stdout contract).
+    Never raises a regular exception: the diagnosis must not fail a route.
+    """
+    if getattr(args, "format", "text") != "json":
+        return
+    budget = getattr(args, "diagnose_unrouted_budget", 20.0)
+    if budget is None or budget <= 0:
+        return
+    nets = getattr(router, "nets", None) or {}
+    multi_pad = {n for n, pads in nets.items() if n > 0 and len(pads) >= 2}
+    # Mirror the JSON report's notion of "unrouted"
+    # (``get_routing_diagnostics_json``) so no budget is spent on a net the
+    # report will not list: with a placement disposition, only its eligible
+    # nets are targets, and retained ``--preserve-existing`` copper counts as
+    # connecting.
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    disposition = getattr(router, "placement_disposition", None)
+    if not isinstance(disposition, RoutingPlacementDisposition):
+        disposition = None
+    if disposition is not None:
+        net_names = getattr(router, "net_names", None) or {}
+        multi_pad = {n for n in multi_pad if net_names.get(n) in disposition.eligible_nets}
+    routed = {route.net for route in getattr(router, "routes", [])}
+    unrouted = multi_pad - routed
+    # Partial = routed nets whose copper does not join all their pads, judged
+    # the same way the JSON report judges it (``validate_net_connectivity``),
+    # so a stale failure record for a net that later routed is not diagnosed.
+    partial: set[int] = set()
+    failed = {int(f.net) for f in getattr(router, "routing_failures", [])}
+    candidates = (failed & multi_pad & routed) - unrouted
+    preserved = list(getattr(router, "existing_routes", []) or []) if disposition else []
+    if preserved:
+        # Retained copper alone may complete a net the router never touched.
+        candidates |= unrouted & {route.net for route in preserved}
+    if candidates:
+        from kicad_tools.router.observability import validate_net_connectivity
+
+        pads = getattr(router, "pads", {}) or {}
+        net_pads = {n: [pads[k] for k in nets[n] if k in pads] for n in candidates}
+        connectivity = validate_net_connectivity(list(router.routes) + preserved, net_pads)
+        connected = {n for n, info in connectivity.items() if info.get("connected", True)}
+        unrouted -= connected
+        partial = {n for n in candidates - connected if n in routed}
+    if not unrouted and not partial:
+        return
+    from kicad_tools.router.unrouted_cause import diagnose_unrouted
+
+    with restore_stage():
+        record_stage("unrouted-diagnosis")
+        try:
+            diagnosis = diagnose_unrouted(
+                router,
+                unrouted,
+                partial_net_ids=partial,
+                net_names=dict(getattr(router, "net_names", {}) or {}),
+                budget_s=float(budget),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Warning: unrouted diagnosis failed: {exc}", file=sys.stderr)
+            return
+    if diagnosis is not None:
+        router.unrouted_diagnosis = diagnosis
+        print(diagnosis.summary_line(), file=sys.stderr)
+
+
 def _release_routing_engine_state(router: "Autorouter") -> None:
     """Free the routing-engine negotiation structures before the CLI tail (#4292).
 
@@ -9047,6 +9124,9 @@ def route_with_layer_escalation(
     # Issue #4292: copper is committed to ``route_sexp``; free the routing grid
     # + lattice negotiation structures before the save/zone-fill/DRC tail so
     # they do not coexist with the ``kicad-cli`` child's footprint.
+    # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
+    # runs (and stashes its result for the JSON report) before the release.
+    _stash_unrouted_diagnosis(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Save output
@@ -9986,6 +10066,9 @@ def route_with_rule_relaxation(
     # Issue #4292: copper is committed to ``route_sexp``; free the routing grid
     # + lattice negotiation structures before the save/zone-fill/DRC tail so
     # they do not coexist with the ``kicad-cli`` child's footprint.
+    # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
+    # runs (and stashes its result for the JSON report) before the release.
+    _stash_unrouted_diagnosis(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Save output
@@ -12427,6 +12510,9 @@ def route_with_combined_escalation(
     # Issue #4292: copper is committed to ``route_sexp``; free the routing grid
     # + lattice negotiation structures before the save/zone-fill/DRC tail so
     # they do not coexist with the ``kicad-cli`` child's footprint.
+    # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
+    # runs (and stashes its result for the JSON report) before the release.
+    _stash_unrouted_diagnosis(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Save output
@@ -15042,6 +15128,22 @@ def _route_parser() -> argparse.ArgumentParser:
             "src/kicad_tools/router/sequential_ripup.py). Mirror of the "
             "outer ``parser.py`` flag; both sites must stay in sync per "
             "the --order-method precedent above."
+        ),
+    )
+    parser.add_argument(
+        "--diagnose-unrouted-budget",
+        type=float,
+        default=20.0,
+        metavar="SECONDS",
+        help=(
+            "Issue #5944: wall-clock budget for classifying each unrouted "
+            "connection as 'congested' (routable once other nets' copper is "
+            "removed -- the JSON lists those nets as rip-up 'contenders') or "
+            "'blocked' (no path even on an empty board -- the JSON lists the "
+            "pads/keepouts/edge closing it off as 'blockers'). Reported under "
+            "'unrouted' in --format json output. Connections the budget does "
+            "not reach are 'unclassified'. 0 disables the pass. Default: 20. "
+            "Mirror of the outer parser.py flag."
         ),
     )
     parser.add_argument(
@@ -19022,6 +19124,8 @@ def _run_main_impl(args, parser, argv) -> int:
     # routing grid or the lattice negotiation structures again.  Release them
     # so their resident footprint does not coexist with the memory-heavy
     # ``kicad-cli`` DRC/zone-fill child spawned below.
+    # Issue #5944: diagnose unrouted connections while the grid is still live.
+    _stash_unrouted_diagnosis(router, args)
     _release_routing_engine_state(router)
 
     _rss.mark("post-finalize")

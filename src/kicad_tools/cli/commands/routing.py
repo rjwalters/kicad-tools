@@ -920,6 +920,10 @@ def run_route_command(args) -> int:
     # about a new route flag, per tests/test_cli_parser_drift.py).
     if getattr(args, "ripup_strategy", "negotiated") != "negotiated":
         sub_argv.extend(["--ripup-strategy", str(args.ripup_strategy)])
+    # Issue #5944: forward --diagnose-unrouted-budget only when it differs
+    # from the default (20 s), matching the --ripup-strategy pattern above.
+    if getattr(args, "diagnose_unrouted_budget", 20.0) != 20.0:
+        sub_argv.extend(["--diagnose-unrouted-budget", str(args.diagnose_unrouted_budget)])
     # Issue #3054 (Phase 2 of #3045): forward --region-parallel and partition
     # tuning flags to the inner parser.  All four flags are opt-in and only
     # forwarded when set to non-default values, so existing scripts using

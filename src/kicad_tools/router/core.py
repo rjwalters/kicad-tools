@@ -1940,6 +1940,10 @@ class Autorouter:
 
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
+        # Issue #5944: congested/blocked classification of the unrouted
+        # connections (``unrouted_cause.UnroutedDiagnosis``), stashed by the
+        # CLI while the grid is still live and emitted by the JSON report.
+        self.unrouted_diagnosis: Any = None
 
         # Power-net stall abort tracking (Issue #2388).
         # Set to True by the negotiated routing loop when it bails out
