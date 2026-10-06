@@ -1693,7 +1693,10 @@ def _make_checkpoint_callback(
         from kicad_tools.router.checkpoint import RouteScore
 
         score = RouteScore.from_routes(
-            best_routes, best_metrics, complete_offset=best_checkpoint.complete_offset
+            best_routes,
+            best_metrics,
+            complete_offset=best_checkpoint.complete_offset,
+            baseline=best_checkpoint.baseline,
         )
         if not score.is_better_than(best_checkpoint.best):
             return
@@ -1837,6 +1840,11 @@ def _make_checkpoint_callback(
     # window. Generic callbacks without this hook still receive owned copies.
     setattr(_checkpoint, "checkpoint_due", _checkpoint_due)  # noqa: B010
     setattr(_checkpoint, "checkpoint_completed", _checkpoint_completed)  # noqa: B010
+    # Issue #5945: the best-so-far score ranks complete nets first, so ask the
+    # route_all / two-phase hooks to measure connectivity for it.
+    _wants = best_checkpoint is not None
+    setattr(_checkpoint, "wants_completion", _wants)  # noqa: B010
+    setattr(_checkpoint_completed, "wants_completion", _wants)  # noqa: B010
     return _checkpoint
 
 
@@ -14239,6 +14247,24 @@ def _apply_checkpoint_and_resume(args, pcb_path: Path) -> tuple[int, Path]:
             print(
                 f"  --resume: seeding from {resume_path}{where}{done}; implies --preserve-existing"
             )
+        lock_off = [
+            flag
+            for flag, on in (
+                ("--nets", getattr(args, "nets", None)),
+                ("--complete", getattr(args, "complete", False)),
+                ("--region", getattr(args, "region", None)),
+            )
+            if on
+        ]
+        if lock_off:
+            # The #5788 preflight that locks complete nets is a deliberate
+            # no-op under these flags, so the checkpoint's completed nets are
+            # NOT guaranteed to be kept verbatim.
+            print(
+                f"Warning: --resume with {', '.join(lock_off)}: the checkpoint's "
+                "completed nets are not locked and may be re-routed.",
+                file=sys.stderr,
+            )
         args._resumed_from = str(resume_path)
         args.pcb = str(resume_path)
         pcb_path = resume_path
@@ -14261,6 +14287,12 @@ def _apply_checkpoint_and_resume(args, pcb_path: Path) -> tuple[int, Path]:
             source_pcb=getattr(args, "_resumed_from", None) or pcb_path,
             quiet=quiet,
         )
+        if resume:
+            # The resumed board's copper is preserved and re-emitted by every
+            # write, so count it in each pass's wirelength/vias -- the same
+            # copper RouteScore.from_board sees on the seed.
+            with contextlib.suppress(OSError, ValueError):
+                writer.baseline = RouteScore.from_board(Path(resume))
         if resume and ck_path.exists() and ck_path.resolve() == Path(resume).resolve():
             with contextlib.suppress(OSError):
                 writer.seed(RouteScore.from_board(ck_path), None, label="resumed checkpoint")
@@ -15081,7 +15113,9 @@ def _route_parser() -> argparse.ArgumentParser:
             "Seed routing with the copper of a checkpoint board (e.g. from "
             "--checkpoint). Nets the checkpoint already completed are kept "
             "verbatim and locked; only the rest are routed (implies "
-            "--preserve-existing). The checkpoint's footprints and nets must "
+            "--preserve-existing; with --nets, --complete or --region the "
+            "lock does not apply and listed nets may be re-routed). The "
+            "checkpoint's footprints and nets must "
             "match the input board. Output defaults to <input>_routed "
             "(Issue #5945)."
         ),

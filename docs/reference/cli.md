@@ -1137,7 +1137,8 @@ See [Routing Guide → Strategy Escalation](../guides/routing.md#strategy-escala
 |--------|-------------|
 | `--checkpoint-interval SEC` | Interval between best-so-far checkpoint writes to `--output`. Default: 30. Pass `0` to disable. |
 | `--checkpoint PATH` | Write the best result so far to `PATH` (`.kicad_pcb`) on **every** improvement (nets complete, then clearance/DRC count, overflow, wirelength, vias), plus `PATH`-stem `.checkpoint.json` with the score and pass number. A worse pass never overwrites it. Also on `route-auto` (Issue #5945). |
-| `--resume PATH` | Seed routing with a checkpoint's copper: nets it already completed are kept verbatim and locked, only the rest are routed (implies `--preserve-existing`). Refused (exit 2) if the checkpoint's footprints/nets differ from the input. Also on `route-auto`, where completed nets are skipped (Issue #5945). |
+| `--resume PATH` | Seed routing with a checkpoint's copper: nets it already completed are kept verbatim and locked, only the rest are routed (implies `--preserve-existing`; with `--nets`, `--complete` or `--region` the lock does not apply and a warning is printed). Refused (exit 2) if the checkpoint's footprints/nets differ from the input. Also on `route-auto`, where completed nets are skipped and `-o` is seeded from the checkpoint (Issue #5945). |
+| `--no-rollback` | `route-auto` only. Keep a net pass even when it lowers the number of complete nets. By default a multi-net `--nets ... -o` run (or any `--checkpoint`/`--resume` run) undoes such a pass, reports the net as failed (`success: false`, `rolled_back: true` in `--format json`; a `rollback:` line on stderr) and exits 1 (Issue #5945). |
 | `--export-failed-nets PATH` | Write failed-net names (one per line) for follow-up. |
 | `--strict` | Exit non-zero if the written PCB has any disconnected net. |
 

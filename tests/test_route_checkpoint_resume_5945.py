@@ -318,6 +318,62 @@ class TestRouteAutoPasses:
         assert meta is not None and meta["pass"] == 1
         assert ck.read_text() == routed_text
 
+    def test_rolled_back_net_reports_not_successful_in_json(self, tmp_path, monkeypatch, capsys):
+        from kicad_tools.cli.commands import routing
+
+        board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
+        out = tmp_path / "out.kicad_pcb"
+        routed_text = VD_ROUTED.read_text()
+        unrouted_text = VD_UNROUTED.read_text()
+
+        def fake_one(args, net_name, pcb_path, output_path, **kwargs):
+            Path(output_path).write_text(routed_text if net_name == "VIN" else unrouted_text)
+            return 0, {"net": net_name, "success": True}
+
+        monkeypatch.setattr(routing, "_route_auto_one", fake_one)
+        rc = routing.run_route_auto_command(
+            _auto_args(pcb=str(board), nets="VIN,VOUT", output=str(out), format="json")
+        )
+        assert rc == 1
+        doc = json.loads(capsys.readouterr().out)
+        vin, vout = doc["nets"]
+        assert vin["success"] is True and "rolled_back" not in vin
+        assert vout["success"] is False
+        assert vout["rolled_back"] is True and vout["rolled_back_to_pass"] == 1
+        assert doc["nets_routed"] == 1 and doc["success"] is False
+
+    def test_no_rollback_keeps_regressing_pass(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.commands import routing
+
+        board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
+        out = tmp_path / "out.kicad_pcb"
+        ck = tmp_path / "ck.kicad_pcb"
+        routed_text = VD_ROUTED.read_text()
+        unrouted_text = VD_UNROUTED.read_text()
+        docs: list[dict] = []
+
+        def fake_one(args, net_name, pcb_path, output_path, **kwargs):
+            Path(output_path).write_text(routed_text if net_name == "VIN" else unrouted_text)
+            doc = {"net": net_name, "success": True}
+            docs.append(doc)
+            return 0, doc
+
+        monkeypatch.setattr(routing, "_route_auto_one", fake_one)
+        rc = routing.run_route_auto_command(
+            _auto_args(
+                pcb=str(board),
+                nets="VIN,VOUT",
+                output=str(out),
+                checkpoint=str(ck),
+                no_rollback=True,
+            )
+        )
+        assert rc == 0
+        assert out.read_text() == unrouted_text
+        assert all(d["success"] and "rolled_back" not in d for d in docs)
+        # Scoring still runs: the checkpoint keeps the best pass.
+        assert ck.read_text() == routed_text
+
     def test_checkpoint_without_output_uses_working_copy(self, tmp_path, monkeypatch):
         from kicad_tools.cli.commands import routing
 
@@ -358,6 +414,66 @@ class TestRouteAutoPasses:
         assert rc == 0
         assert called == []
 
+    def test_resume_all_complete_still_writes_output(self, tmp_path, monkeypatch):
+        """Every requested net complete in CK: -o must hold CK, not be missing/stale."""
+        from kicad_tools.cli.commands import routing
+
+        board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
+        ck = _copy_board(VD_ROUTED, tmp_path / "ck.kicad_pcb")
+        out = tmp_path / "out.kicad_pcb"
+        out.write_text("stale output from an earlier run\n")
+
+        def fake_one(*a, **kw):  # pragma: no cover - must not be called
+            raise AssertionError("no net should be routed")
+
+        monkeypatch.setattr(routing, "_route_auto_one", fake_one)
+        rc = routing.run_route_auto_command(
+            _auto_args(pcb=str(board), nets="VIN,VOUT", resume=str(ck), output=str(out))
+        )
+        assert rc == 0
+        assert out.read_text() == ck.read_text()
+        assert out.with_suffix(".kicad_pro").exists() == ck.with_suffix(".kicad_pro").exists()
+
+    def test_resume_first_routed_net_chains_from_seeded_output(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.commands import routing
+
+        board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
+        ck = _copy_board(VD_UNROUTED, tmp_path / "ck.kicad_pcb")
+        out = tmp_path / "out.kicad_pcb"
+        sources: list[tuple[str, str]] = []
+
+        def fake_one(args, net_name, pcb_path, output_path, **kwargs):
+            sources.append((pcb_path, Path(pcb_path).read_text()))
+            return 1, {"net": net_name, "success": False}
+
+        monkeypatch.setattr(routing, "_route_auto_one", fake_one)
+        routing.run_route_auto_command(
+            _auto_args(pcb=str(board), nets="VIN,VOUT", resume=str(ck), output=str(out))
+        )
+        assert [p for p, _ in sources] == [str(out), str(out)]
+        assert all(text == ck.read_text() for _, text in sources)
+
+    def test_failed_first_net_does_not_chain_from_stale_output(self, tmp_path, monkeypatch):
+        """Issue #6010: a net that writes nothing must not leave a stale -o in play."""
+        from kicad_tools.cli.commands import routing
+
+        board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
+        out = tmp_path / "out.kicad_pcb"
+        out.write_text("stale output from an earlier run\n")
+        seen: list[str] = []
+
+        def fake_one(args, net_name, pcb_path, output_path, **kwargs):
+            seen.append(Path(pcb_path).read_text())
+            return 1, {"net": net_name, "success": False}
+
+        monkeypatch.setattr(routing, "_route_auto_one", fake_one)
+        rc = routing.run_route_auto_command(
+            _auto_args(pcb=str(board), nets="VIN,VOUT", output=str(out))
+        )
+        assert rc == 1
+        assert seen == [VD_UNROUTED.read_text()] * 2
+        assert out.read_text() == VD_UNROUTED.read_text()
+
 
 def test_flags_declared_on_route_and_route_auto():
     from kicad_tools.cli.parser import create_parser
@@ -380,6 +496,37 @@ def test_flags_declared_on_route_and_route_auto():
         ]
     )
     assert ns.checkpoint == "c.kicad_pcb" and ns.resume == "r.kicad_pcb"
+    assert ns.no_rollback is False
+    ns = parser.parse_args(["route-auto", "b.kicad_pcb", "--nets", "A,B", "--no-rollback"])
+    assert ns.no_rollback is True
+
+
+def test_route_all_checkpoint_measures_completion():
+    """Issue #5945: route_all / two-phase snapshots carry nets_fully_connected."""
+    from kicad_tools.router.core import _emit_route_checkpoint
+
+    got: list = []
+
+    def cb(routes, metrics):
+        got.append(metrics)
+
+    cb.wants_completion = True  # type: ignore[attr-defined]
+    _emit_route_checkpoint(cb, [], 0, completion=lambda routes: 7)
+    assert got[-1].nets_fully_connected == 7
+    assert RouteScore.from_routes([], got[-1]).nets_complete == 7
+
+    cb.wants_completion = False  # type: ignore[attr-defined]
+    _emit_route_checkpoint(cb, [], 0, completion=lambda routes: 7)
+    assert got[-1].nets_fully_connected == 0
+
+
+def test_resume_baseline_makes_route_scores_like_for_like():
+    seed = RouteScore.from_board(VD_ROUTED)
+    # A resumed pass that adds nothing scores exactly like the seed copper.
+    same = RouteScore.from_routes([], None, complete_offset=seed.nets_complete, baseline=seed)
+    assert same.wirelength_mm == seed.wirelength_mm and same.vias == seed.vias
+    assert same.nets_routed >= seed.nets_routed
+    assert not same.is_better_than(seed)
 
 
 @pytest.mark.parametrize("flag", ["--checkpoint", "--resume"])

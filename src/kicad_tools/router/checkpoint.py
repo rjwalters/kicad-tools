@@ -90,6 +90,7 @@ class RouteScore:
         metrics: Any = None,
         *,
         complete_offset: int = 0,
+        baseline: RouteScore | None = None,
     ) -> RouteScore:
         """Score an in-memory route snapshot from the negotiated router.
 
@@ -99,6 +100,14 @@ class RouteScore:
         because they were already complete and held out of the routable set
         (``--resume`` / ``--preserve-existing``), so resumed scores stay
         comparable with the checkpoint they started from.
+
+        *baseline* is the score of copper that is on the board but not in
+        *routes* (the ``--resume`` checkpoint's preserved copper, re-emitted
+        verbatim by every write).  Its wirelength and vias are added so a
+        resumed pass is compared like-for-like with a seed scored by
+        :meth:`from_board`, which counts all copper on the board (the routed
+        count becomes a lower bound: the larger of the pass's and the
+        baseline's).
         """
         routes = list(routes)
         wirelength = 0.0
@@ -121,11 +130,20 @@ class RouteScore:
             violations = int(getattr(metrics, "clearance_violations", 0) or 0)
             overflow = int(getattr(metrics, "overflow", 0) or 0)
             routed = int(getattr(metrics, "routed_count", routed) or routed)
+        if baseline is not None:
+            wirelength += baseline.wirelength_mm
+            vias += baseline.vias
+            # Every net with preserved copper is still routed on the board.
+            # Which of this pass's nets already had copper is unknown here, so
+            # take the lower bound: a pass that adds nothing ties the seed.
+            routed = max(routed, baseline.nets_routed)
+        else:
+            routed += complete_offset
         return cls(
             nets_complete=connected + complete_offset,
             drc_violations=violations,
             overflow=overflow,
-            nets_routed=routed + complete_offset,
+            nets_routed=routed,
             wirelength_mm=wirelength,
             vias=vias,
         )
@@ -253,6 +271,9 @@ class BestCheckpointWriter:
         #: Added to ``nets_complete`` by :meth:`RouteScore.from_routes` callers
         #: for nets held out of the routable set (``--resume``).
         self.complete_offset = 0
+        #: Score of preserved copper absent from route snapshots (``--resume``);
+        #: passed as ``baseline`` to :meth:`RouteScore.from_routes`.
+        self.baseline: RouteScore | None = None
 
     def seed(self, score: RouteScore, pass_index: int | None, label: str | None = None) -> None:
         """Treat *score* as already on disk (resuming onto the same path)."""

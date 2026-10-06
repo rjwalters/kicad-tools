@@ -545,7 +545,11 @@ class _RouteAutoPasses:
     ``--resume PATH`` routes the first net from the checkpoint board instead
     of the input, and skips requested nets the checkpoint already completed.
     Without ``--output``, ``--checkpoint`` accumulates copper in a private
-    working file next to the checkpoint (removed at the end).
+    working file next to the checkpoint (removed at the end); with
+    ``--output``, the output is seeded with the starting board up front, so
+    it is always written and never a stale leftover (Issue #6010).
+    ``--no-rollback`` keeps regressing passes (scoring and checkpoints still
+    run).  A rolled-back net reports ``success: False``.
     """
 
     def __init__(self) -> None:
@@ -558,6 +562,8 @@ class _RouteAutoPasses:
         self.accepted_score: RouteScore | None = None
         self.accepted_pass = 0
         self.resumed_complete: set[str] = set()
+        self._seeded_output = False
+        self.rollback = True
         self.quiet = False
         self.as_json = False
 
@@ -640,10 +646,42 @@ class _RouteAutoPasses:
 
         if self.working is None:
             self.working = output_path
+        self.rollback = not getattr(args, "no_rollback", False)
         self.active = bool(self.working and (checkpoint or resume or len(net_list) > 1))
+        if self.active and self._tmp_working is None and output_path:
+            # Seed --output with the starting board (the --resume checkpoint,
+            # or the input) exactly like the private working copy above, so
+            # (a) the first routed net chains from it, (b) a run in which
+            # every requested net is already complete -- or every pass
+            # writes nothing -- still leaves the right board at --output
+            # instead of a missing or stale file from an earlier run
+            # (Issues #5945, #6010), and (c) after_pass never scores a stale
+            # leftover as a net's pass.
+            try:
+                self._seed_output(Path(output_path))
+            except OSError as e:
+                self._err(f"Error: cannot write --output {output_path}: {e}")
+                return self, 1
         if self.active:
             self._score_baseline()
         return self, 0
+
+    def _seed_output(self, dest) -> None:
+        from pathlib import Path
+
+        from kicad_tools.core.atomic_write import atomic_write_text
+
+        base = Path(self.base_pcb)
+        if not base.exists():
+            return
+        if not (dest.exists() and dest.resolve() == base.resolve()):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(dest, base.read_text(encoding="utf-8"))
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                src, dst = base.with_suffix(suffix), dest.with_suffix(suffix)
+                if src.exists() and not dst.exists():
+                    atomic_write_text(dst, src.read_text(encoding="utf-8"))
+        self._seeded_output = True
 
     # -- reporting -------------------------------------------------------
     def _err(self, msg: str) -> None:
@@ -698,7 +736,7 @@ class _RouteAutoPasses:
 
     @property
     def seeded_working(self) -> bool:
-        return self._tmp_working is not None
+        return self._tmp_working is not None or self._seeded_output
 
     def resumed_skip(self, net_name: str) -> dict | None:
         if net_name not in self.resumed_complete:
@@ -733,17 +771,21 @@ class _RouteAutoPasses:
         score = RouteScore.from_board(Path(target))
         label = f"pass {pass_index} (net {net_name})"
         if (
-            self.accepted_score is not None
+            self.rollback
+            and self.accepted_score is not None
             and self.accepted_text is not None
             and score.nets_complete < self.accepted_score.nets_complete
         ):
             atomic_write_text(Path(target), self.accepted_text)
+            # The pass's copper is not in the output: report it as not
+            # successful, consistent with the exit code and nets_routed.
+            doc["success"] = False
             doc["rolled_back"] = True
             doc["rolled_back_to_pass"] = self.accepted_pass
             msg = (
                 f"  rollback: {label} lowered complete nets "
                 f"{self.accepted_score.nets_complete} -> {score.nets_complete}; "
-                f"restored pass {self.accepted_pass}"
+                f"restored pass {self.accepted_pass} (--no-rollback keeps it)"
             )
             self._err(msg)
             return True
