@@ -28,6 +28,10 @@ Writing rules for the body:
 
 - It is rendered into files at the repo root, so relative links and paths are
   **repo-root relative** (`RELEASING.md`, not `../../RELEASING.md`).
+  Those links therefore do not resolve when this source file is viewed on
+  GitHub; follow them from `CLAUDE.md` or `AGENTS.md` instead.
+- It must not contain a `<!-- BEGIN ` or `<!-- END ` marker line; the
+  renderer refuses such a body rather than duplicate a managed-block marker.
 - Keep it harness-neutral: the #5954 lint in
   `tests/test_agent_surface_neutrality.py` (no harness tool names, no
   harness-specific guide or directory pointers) runs over it. A genuinely

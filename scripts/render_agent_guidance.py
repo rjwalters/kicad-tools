@@ -39,6 +39,7 @@ TARGETS: tuple[Path, ...] = (REPO_ROOT / "CLAUDE.md", REPO_ROOT / "AGENTS.md")
 BODY_MARKER = "<!-- kct:guidance-body -->"
 BEGIN_MARKER = "<!-- BEGIN KCT CONTRIBUTOR GUIDANCE -->"
 END_MARKER = "<!-- END KCT CONTRIBUTOR GUIDANCE -->"
+MANAGED_MARKER_PREFIXES = ("<!-- BEGIN ", "<!-- END ")
 FIX_COMMAND = "uv run python scripts/render_agent_guidance.py --write"
 GENERATED_NOTE = (
     "<!-- Generated from docs/contributing/agent-guidance.md. Do not edit inside "
@@ -57,6 +58,13 @@ def source_body(source_text: str, source_path: Path = SOURCE) -> str:
     body = source_text.split(BODY_MARKER, 1)[1].strip("\n")
     if not body.strip():
         raise RenderError(f"{source_path} has no guidance after {BODY_MARKER}")
+    for line in body.splitlines():
+        if line.lstrip().startswith(MANAGED_MARKER_PREFIXES):
+            raise RenderError(
+                f"{source_path}: the guidance body must not contain a managed-block "
+                f"marker line ({line.strip()!r}); it would duplicate a BEGIN/END "
+                "marker in CLAUDE.md / AGENTS.md"
+            )
     return body
 
 

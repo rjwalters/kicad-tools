@@ -156,6 +156,21 @@ def test_malformed_markers_raise(render, tmp_path: Path, text: str) -> None:
         render.apply_block(text, render.render_block("x"), tmp_path / "CLAUDE.md")
 
 
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- BEGIN KCT CONTRIBUTOR GUIDANCE -->",
+        "<!-- END KCT CONTRIBUTOR GUIDANCE -->",
+        "<!-- BEGIN SQUAD -->",
+        "  <!-- END LOOM ORCHESTRATION -->",
+    ],
+)
+def test_source_body_rejects_managed_markers(render, tmp_path: Path, marker: str) -> None:
+    text = f"header\n{render.BODY_MARKER}\n## Section\n\n{marker}\n"
+    with pytest.raises(render.RenderError, match="marker"):
+        render.source_body(text, tmp_path / "agent-guidance.md")
+
+
 def test_check_mode_names_fix_command(render, tmp_path: Path, capsys, monkeypatch) -> None:
     source = tmp_path / "agent-guidance.md"
     source.write_text(f"header\n{render.BODY_MARKER}\n\n## Section\n\ntext\n", encoding="utf-8")
