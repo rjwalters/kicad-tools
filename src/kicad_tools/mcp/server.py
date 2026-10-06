@@ -7,6 +7,7 @@ to interact with KiCad files via stdio transport.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sys
@@ -202,28 +203,41 @@ class MCPServer:
         """
         logger.info(f"Starting MCP server: {self.name} v{self.version}")
 
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
+        # stdout *is* the transport: anything else written to it corrupts the
+        # JSON-RPC stream (issue #5961).  Tool handlers reach code -- the
+        # router, the placement optimizer -- that reports progress with bare
+        # print(), so route sys.stdout to stderr for the whole loop and write
+        # frames only through the saved real stream.
+        transport = sys.stdout
 
-            try:
-                request = json.loads(line)
-                response = self.handle_request(request)
+        def send(message: dict[str, Any]) -> None:
+            transport.write(json.dumps(message) + "\n")
+            transport.flush()
 
-                if response:  # Skip empty responses (notifications)
-                    print(json.dumps(response), flush=True)
+        with contextlib.redirect_stdout(sys.stderr):
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
 
-            except json.JSONDecodeError as e:
-                error_response = {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": -32700,
-                        "message": f"Parse error: {e}",
-                    },
-                }
-                print(json.dumps(error_response), flush=True)
+                try:
+                    request = json.loads(line)
+                    response = self.handle_request(request)
+
+                    if response:  # Skip empty responses (notifications)
+                        send(response)
+
+                except json.JSONDecodeError as e:
+                    send(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {
+                                "code": -32700,
+                                "message": f"Parse error: {e}",
+                            },
+                        }
+                    )
 
 
 def create_server() -> MCPServer:
