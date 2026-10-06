@@ -1,3 +1,6 @@
+<!-- BEGIN KCT CONTRIBUTOR GUIDANCE -->
+<!-- Generated from docs/contributing/agent-guidance.md. Do not edit inside these markers; edit the source, then run: uv run python scripts/render_agent_guidance.py --write -->
+
 ## Routing performance: build the C++ backend first
 
 Before benchmarking routing latency or filing "router is slow" issues,
@@ -72,15 +75,6 @@ high CPU use alone does not distinguish slow progress from a bug. The original
 300–550s observations in #5490 were not reproduced to completion, so this check
 rules coverage overhead *in* — it does not rule every hang out.
 
-<!-- BEGIN REPO-SKILLS -->
-This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.19.5 installed —
-general repository hygiene and environment commands invoked as `/repo:<command>`. Run
-`/repo:help` for the command list, or see `.claude/skills/repo/SKILL.md` for the full
-guide. Hygiene commands apply safe, reversible fixes by default and report each
-change; run with `--ask` to review first, and `--prune` to allow irreversible
-removals. Managed by `install.sh` — edit outside the markers only.
-<!-- END REPO-SKILLS -->
-
 ## "Have we already evaluated X?" -- ask the ecosystem registry
 
 Before researching, benchmarking or reimplementing something a neighbouring
@@ -140,6 +134,17 @@ created **only after** the bump PR merges (the tag must point at a commit that
 is actually on `main`, never a pre-merge `release/vX.Y.Z` branch commit —
 `main` squash-merges, so the commit that lands has a different SHA than the
 one on the release branch).
+
+<!-- END KCT CONTRIBUTOR GUIDANCE -->
+
+<!-- BEGIN REPO-SKILLS -->
+This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.19.5 installed —
+general repository hygiene and environment commands invoked as `/repo:<command>`. Run
+`/repo:help` for the command list, or see `.claude/skills/repo/SKILL.md` for the full
+guide. Hygiene commands apply safe, reversible fixes by default and report each
+change; run with `--ask` to review first, and `--prune` to allow irreversible
+removals. Managed by `install.sh` — edit outside the markers only.
+<!-- END REPO-SKILLS -->
 
 <!-- BEGIN LOOM ORCHESTRATION -->
 This repository uses [Loom](https://github.com/rjwalters/loom) for AI-powered development orchestration — see the Loom repository for the full guide (roles, labels, worktrees, configuration). When installed, Loom also writes a locally-substituted copy of that guide to `.loom/CLAUDE.md`.

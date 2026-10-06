@@ -1,5 +1,45 @@
-<!-- BEGIN KCT CONTRIBUTOR GUIDANCE -->
-<!-- Generated from docs/contributing/agent-guidance.md. Do not edit inside these markers; edit the source, then run: uv run python scripts/render_agent_guidance.py --write -->
+# Contributor guidance (single source)
+
+This file is the **single source of truth** for kicad-tools' project-specific
+contributor guidance (issue #5964, Epic #5952). Everything below the
+`kct:guidance-body` marker is rendered verbatim into a managed block in both
+agent guide files at the repo root:
+
+- `CLAUDE.md`, read by Claude Code;
+- `AGENTS.md`, read by Codex CLI, opencode and other AGENTS.md-aware runtimes.
+
+The block sits between `<!-- BEGIN KCT CONTRIBUTOR GUIDANCE -->` and
+`<!-- END KCT CONTRIBUTOR GUIDANCE -->`. Never hand-edit it there; edit this
+file, then re-render:
+
+```bash
+uv run python scripts/render_agent_guidance.py --write   # rewrite both blocks
+uv run python scripts/render_agent_guidance.py           # check: exit 1 on drift
+uv run python scripts/render_agent_guidance.py --stdout  # print the rendered block
+```
+
+`tests/test_agent_guidance_render.py` runs the check, so a hand-edit to either
+rendered block, or an edit here without re-rendering, fails CI with the fix
+command in the message. The other managed blocks in those files (REPO-SKILLS,
+LOOM ORCHESTRATION, SQUAD) belong to their installers; the renderer never
+touches them.
+
+Writing rules for the body:
+
+- It is rendered into files at the repo root, so relative links and paths are
+  **repo-root relative** (`RELEASING.md`, not `../../RELEASING.md`).
+  Those links therefore do not resolve when this source file is viewed on
+  GitHub; follow them from `CLAUDE.md` or `AGENTS.md` instead.
+- It must not contain a `<!-- BEGIN ` or `<!-- END ` marker line; the
+  renderer refuses such a body rather than duplicate a managed-block marker.
+- Keep it harness-neutral: the #5954 lint in
+  `tests/test_agent_surface_neutrality.py` (no harness tool names, no
+  harness-specific guide or directory pointers) runs over it. A genuinely
+  harness-specific paragraph must be a marked note (`> **Claude Code only** ...`)
+  that names a fallback for other harnesses.
+- Use `##` headings; the body is one section among others in each file.
+
+<!-- kct:guidance-body -->
 
 ## Routing performance: build the C++ backend first
 
@@ -134,26 +174,3 @@ created **only after** the bump PR merges (the tag must point at a commit that
 is actually on `main`, never a pre-merge `release/vX.Y.Z` branch commit —
 `main` squash-merges, so the commit that lands has a different SHA than the
 one on the release branch).
-
-<!-- END KCT CONTRIBUTOR GUIDANCE -->
-
-<!-- BEGIN LOOM ORCHESTRATION (AGENTS) -->
-This repository uses [Loom](https://github.com/rjwalters/loom) for AI-powered development orchestration (dual-runtime: Claude Code reads `CLAUDE.md`; OpenAI Codex CLI and other AGENTS.md-aware runtimes read this file). See the Loom repository for the full guide (roles, labels, worktrees, configuration). When installed, Loom also writes a locally-substituted copy of the runtime-neutral guide to `.loom/AGENTS.md`.
-<!-- END LOOM ORCHESTRATION (AGENTS) -->
-<!-- BEGIN SQUAD -->
-## Squad — cross-agent collaboration
-
-This repo has [Squad](https://github.com/rjwalters/squad) installed. Claude and
-Codex share the same room and MCP tools. Before touching shared state, read
-and follow the installed Squad skill, including its room/identity conventions:
-
-- Claude: `.claude/skills/squad/SKILL.md`
-- Codex: `.agents/skills/squad/SKILL.md` (invoke `$squad` or ask naturally)
-
-Both expose join, goals, card, fanout, steward, and clear workflows. Claude aliases are
-`/squad:<workflow>`; legacy Codex prompts are `/squad-<workflow>`.
-
-For research work, discover and reuse the durable Science Card node IDs surfaced
-by join/node list; the shared card workflow connects dependencies, committed
-artifacts and revision-bound bank provenance.
-<!-- END SQUAD -->
