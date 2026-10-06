@@ -2396,6 +2396,34 @@ def _add_pcb_parser(subparsers) -> None:
         ),
     )
 
+    # pcb annotate-pintypes (issue #5985)
+    pcb_annotate_pintypes = pcb_subparsers.add_parser(
+        "annotate-pintypes",
+        help="Copy schematic pin names/electrical types onto PCB pads",
+        description="Write (pinfunction ...) and (pintype ...) on every pad from "
+        "the schematic symbol pins, as KiCad's 'Update PCB from Schematic' does. "
+        "Only those pad children change; the rest of the file is preserved "
+        "byte-for-byte. kct detect-mistakes reads pintype power_in/power_out "
+        "as power-rail evidence.",
+    )
+    pcb_annotate_pintypes.add_argument("pcb", help="Path to .kicad_pcb file (edited in place)")
+    pcb_annotate_pintypes.add_argument(
+        "--schematic",
+        required=True,
+        help="Path to root .kicad_sch file",
+    )
+    pcb_annotate_pintypes.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report how many pads would change without writing the file",
+    )
+    pcb_annotate_pintypes.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+
     # pcb zones
     pcb_zones = pcb_subparsers.add_parser("zones", help="List copper pour zones")
     pcb_zones.add_argument("pcb", help="Path to .kicad_pcb file")

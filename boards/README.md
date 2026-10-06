@@ -242,6 +242,35 @@ These are known limitations that may affect your experience:
 [#3766]: https://github.com/rjwalters/kicad-tools/issues/3766
 [#3952]: https://github.com/rjwalters/kicad-tools/issues/3952
 
+## Pad pin types (`pintype`)
+
+KiCad's "Update PCB from Schematic" writes each schematic pin's name and
+electrical type onto its pad (`(pinfunction "VDD") (pintype "power_in")`).
+`kct detect-mistakes` treats `power_in`/`power_out` pads as power-rail
+evidence, which catches rails the name heuristic misses (`VREG_1V2`, `VCAP1`).
+The generators write PCBs directly, so they have to add this data
+themselves ([#5985]):
+
+- **Board 04** calls `annotate_pcb_file_pintypes(pcb_path, sch_path)` right
+  after it writes the unrouted PCB. The router merges tracks into that text,
+  so the routed PCB inherits the annotation.
+- **Other boards** are not wired yet, and their committed outputs carry no
+  `pintype` ([#5998]). To annotate a board by hand, run this on its unrouted
+  and routed PCBs. It edits only the pads' `pinfunction`/`pintype` children
+  and keeps every other byte:
+
+  ```bash
+  uv run kct pcb annotate-pintypes boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb \
+      --schematic boards/04-stm32-devboard/output/stm32_devboard.kicad_sch
+  ```
+
+  It prints the rails it found by pin-type evidence. Annotating a PCB changes
+  its bytes, so refresh the board's `readiness.json` by re-running its
+  generator.
+
+[#5985]: https://github.com/rjwalters/kicad-tools/issues/5985
+[#5998]: https://github.com/rjwalters/kicad-tools/issues/5998
+
 ## Project Files (.kct)
 
 Each board includes a `project.kct` file with:
