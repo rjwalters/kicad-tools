@@ -947,7 +947,7 @@ def cmd_suggest(args) -> int:
         return 1
 
     if not quiet:
-        print(f"Analyzing {len(optimizer.components)} components...")
+        print(f"Analyzing {len(optimizer.components)} components...", file=sys.stderr)
 
     # Generate suggestions
     if args.component:

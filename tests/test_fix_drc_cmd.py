@@ -876,7 +876,7 @@ class TestFixDRCCLI:
         the "Running DRC ..." status line must identify the kicad-cli engine.
         """
         import io
-        from contextlib import redirect_stdout
+        from contextlib import redirect_stderr
 
         from kicad_tools.cli import fix_drc_cmd
 
@@ -903,8 +903,9 @@ class TestFixDRCCLI:
         monkeypatch.setattr("kicad_tools.cli.runner.run_drc", _fake_run_drc)
         monkeypatch.setattr("kicad_tools.drc.report.DRCReport.load", staticmethod(_fake_load))
 
+        # Status lines go to stderr so --format json stdout stays pure (#5938).
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with redirect_stderr(buf):
             fix_drc_cmd._get_drc_report(None, pcb_file)
 
         assert "Running DRC (kicad-cli) on:" in buf.getvalue()

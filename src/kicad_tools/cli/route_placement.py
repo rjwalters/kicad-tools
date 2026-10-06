@@ -252,6 +252,8 @@ def finish(args, exit_code: int) -> int:
         # The normal diagnostics branch is bypassed by placement-only partials
         # and early all-invalid exits. Publish an attempt summary on every such
         # path, including --quiet and runs without --complete-report.
+        from kicad_tools.json_stdout import json_stdout
+
         print(
             json.dumps(
                 {
@@ -260,7 +262,8 @@ def finish(args, exit_code: int) -> int:
                     "placement_disposition": report,
                 },
                 indent=2,
-            )
+            ),
+            file=json_stdout(),
         )
     report_path = getattr(args, "complete_report", None)
     if report_path:

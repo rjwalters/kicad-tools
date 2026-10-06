@@ -269,7 +269,7 @@ def run_erc_on_schematic(
         print("\nmacOS: brew install --cask kicad", file=sys.stderr)
         return None
 
-    print(f"Running ERC on: {schematic_path.name}")
+    print(f"Running ERC on: {schematic_path.name}", file=sys.stderr)
 
     result = run_erc(schematic_path, output_path)
 

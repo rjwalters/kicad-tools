@@ -151,7 +151,11 @@ Examples:
     total_count = clearance_count + pad_pad_count
     if total_count == 0:
         if not args.quiet:
-            print("No clearance violations found. Nothing to repair.")
+            if args.format == "json":
+                # Issue #5938: keep stdout a JSON document on the no-op path.
+                _print_json(RepairResult(), args.dry_run, args.max_displacement, args.mfr)
+            else:
+                print("No clearance violations found. Nothing to repair.")
         return 0
 
     if not args.quiet and args.format == "text":
@@ -225,7 +229,7 @@ def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | 
             )
             return None
 
-        print(f"Running DRC on: {pcb_path.name}")
+        print(f"Running DRC on: {pcb_path.name}", file=sys.stderr)
         drc_result = run_drc(pcb_path)
         if not drc_result.success:
             print(f"Error running DRC: {drc_result.stderr}", file=sys.stderr)

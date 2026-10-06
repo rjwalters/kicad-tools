@@ -131,7 +131,10 @@ def show_symbol_info(
     symbol = lib.get_symbol(symbol_name)
     if not symbol:
         print(f"Error: Symbol '{symbol_name}' not found in {library}", file=sys.stderr)
-        print(f"Available symbols: {', '.join(sorted(lib.symbols.keys())[:10])}...")
+        print(
+            f"Available symbols: {', '.join(sorted(lib.symbols.keys())[:10])}...",
+            file=sys.stderr,
+        )
         return 1
 
     if output_format == "json":

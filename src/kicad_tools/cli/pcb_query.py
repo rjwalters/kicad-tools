@@ -557,7 +557,11 @@ def cmd_vias(pcb: PCB, args):
 def cmd_stackup(pcb: PCB, args):
     """Show layer stackup."""
     if not pcb.setup or not pcb.setup.stackup:
-        print("No stackup information available")
+        if args.format == "json":
+            # Issue #5938: an empty stackup is an empty JSON list, not prose.
+            print(json.dumps([]))
+        else:
+            print("No stackup information available")
         return
 
     stackup = pcb.setup.stackup

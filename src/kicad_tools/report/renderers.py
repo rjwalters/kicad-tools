@@ -9,6 +9,7 @@ reports with embedded PCB visualization via :func:`render_interactive_html`.
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 import re
 import shutil
@@ -144,7 +145,10 @@ def render_pdf(html_content: str, output_path: Path | str) -> None:
         )
 
     try:
-        import weasyprint
+        # WeasyPrint prints its missing-library banner to *stdout*; keep it
+        # off stdout so ``--format json`` callers get only JSON (#5938).
+        with contextlib.redirect_stdout(sys.stderr):
+            import weasyprint
     except OSError as exc:
         # Defense in depth: if libgobject/pango/cairo became unavailable
         # between the _weasyprint_available() check and this import, surface
@@ -280,7 +284,9 @@ def _weasyprint_available() -> bool:
     report alone (see :func:`pdf_renderer_available`).
     """
     try:
-        import weasyprint  # noqa: F401
+        # See render_pdf: the missing-library banner goes to stdout (#5938).
+        with contextlib.redirect_stdout(sys.stderr):
+            import weasyprint  # noqa: F401
 
         return True
     except ImportError:

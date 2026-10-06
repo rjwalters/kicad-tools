@@ -299,6 +299,10 @@ def _execute_repair(
     # Effective max passes: dry-run forces single pass since no geometry changes
     effective_max_passes = 1 if args.dry_run else args.max_passes
 
+    # Human-readable side reports (--verify) go to stderr under --format json
+    # so stdout carries only the JSON document (issue #5938).
+    human_out = sys.stderr if args.format == "json" else sys.stdout
+
     # --verify: snapshot violation counts from pure-Python DRC before repair
     verify_before: DRCReport | None = None
     if args.verify:
@@ -306,7 +310,8 @@ def _execute_repair(
         if verify_before is not None and not args.quiet:
             print(
                 f"[verify] Before repair: {len(verify_before.violations)} "
-                f"violation(s) via pure-Python DRC"
+                f"violation(s) via pure-Python DRC",
+                file=human_out,
             )
 
     pass_results: list[PassResult] = []
@@ -353,9 +358,27 @@ def _execute_repair(
 
         if total_targeted == 0:
             if pass_num == 1:
+                if not args.quiet and args.format == "json":
+                    # Issue #5938: the nothing-to-repair outcome is still a
+                    # JSON document under --format json, never prose.
+                    _print_json(
+                        [
+                            PassResult(
+                                pass_number=1,
+                                violations_before=0,
+                                repaired=0,
+                                clearance_result=RepairResult(),
+                                drill_result=DrillRepairResult(),
+                                non_targeted_count=non_targeted_count,
+                            )
+                        ],
+                        args.dry_run,
+                        args.max_displacement,
+                        args.max_passes,
+                    )
                 if non_targeted_count > 0:
                     # No repairable violations, but non-targeted violations exist
-                    if not args.quiet:
+                    if not args.quiet and args.format != "json":
                         print(
                             f"No repairable violations found, but {non_targeted_count} "
                             f"non-repairable violation(s) detected "
@@ -363,7 +386,7 @@ def _execute_repair(
                         )
                     return 2
                 # No violations at all on first pass
-                if not args.quiet:
+                if not args.quiet and args.format != "json":
                     print("No targeted violations found. Nothing to repair.")
                 return 0
             else:
@@ -534,19 +557,20 @@ def _execute_repair(
             after_count = len(verify_after.violations)
             delta = before_count - after_count
             if not args.quiet:
-                print(f"\n{'=' * 60}")
-                print("VERIFICATION (pure-Python DRC)")
-                print(f"{'=' * 60}")
-                print(f"  Before repair: {before_count} violation(s)")
-                print(f"  After repair:  {after_count} violation(s)")
+                print(f"\n{'=' * 60}", file=human_out)
+                print("VERIFICATION (pure-Python DRC)", file=human_out)
+                print(f"{'=' * 60}", file=human_out)
+                print(f"  Before repair: {before_count} violation(s)", file=human_out)
+                print(f"  After repair:  {after_count} violation(s)", file=human_out)
                 if delta > 0:
-                    print(f"  Resolved:      {delta}")
+                    print(f"  Resolved:      {delta}", file=human_out)
                 elif delta == 0:
-                    print("  No change in violation count.")
+                    print("  No change in violation count.", file=human_out)
                 else:
-                    print(f"  WARNING: {-delta} new violation(s) introduced!")
+                    print(f"  WARNING: {-delta} new violation(s) introduced!", file=human_out)
                 print(
-                    "\nThese counts use the same engine as `kct check` for consistent comparison."
+                    "\nThese counts use the same engine as `kct check` for consistent comparison.",
+                    file=human_out,
                 )
 
     # Exit code: 0 = all repaired (no remaining violations of any type),
@@ -830,7 +854,7 @@ def _get_drc_report(
 
         kicad_cli = find_kicad_cli()
         if kicad_cli:
-            print(f"Running DRC (kicad-cli) on: {pcb_path.name}")
+            print(f"Running DRC (kicad-cli) on: {pcb_path.name}", file=sys.stderr)
             drc_result = run_drc(pcb_path)
             if not drc_result.success:
                 print(f"Error running DRC: {drc_result.stderr}", file=sys.stderr)

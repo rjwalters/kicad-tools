@@ -68,11 +68,11 @@ def _get_stackup(args: Namespace):
         if preset in preset_map:
             return preset_map[preset]()
         else:
-            print(f"Unknown preset: {preset}")
-            print(f"Available presets: {', '.join(preset_map.keys())}")
+            print(f"Unknown preset: {preset}", file=sys.stderr)
+            print(f"Available presets: {', '.join(preset_map.keys())}", file=sys.stderr)
             sys.exit(1)
     else:
-        print("Error: Provide either BOARD path or --preset option")
+        print("Error: Provide either BOARD path or --preset option", file=sys.stderr)
         sys.exit(1)
 
 
@@ -452,10 +452,12 @@ def _run_crosstalk_command(args: Namespace) -> int:
     # Standard crosstalk analysis
     spacing_mm = getattr(args, "impedance_spacing", None)
     if not spacing_mm or not length_mm or not width_mm:
-        console.print(
+        # Errors go to stderr so ``--format json`` stdout stays clean (#5938).
+        err_console = Console(stderr=True)
+        err_console.print(
             "[red]Error: For crosstalk analysis, provide --spacing, --length, and --width[/red]"
         )
-        console.print(
+        err_console.print(
             "[red]       Or use --max-percent, --length, and --width to calculate spacing[/red]"
         )
         return 1
