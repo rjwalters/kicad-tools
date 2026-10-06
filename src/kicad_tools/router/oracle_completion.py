@@ -218,6 +218,74 @@ def links_from_violations(violations: Iterable[DRCViolation]) -> list[OracleLink
 
 
 # ---------------------------------------------------------------------------
+# Canonical link order (Issue #5934)
+# ---------------------------------------------------------------------------
+#
+# ``kicad-cli pcb drc`` does NOT report a byte-identical board's
+# ``unconnected_items`` reproducibly (measured on board 03, KiCad 10.0.1: 8
+# DRC runs on one file gave 3-5 distinct reports, also with KiCad capped to
+# one thread via ``MaximumThreads=1``).  The number of links per net is
+# stable -- it is the number of pad-bearing copper clusters minus one -- but
+# KiCad's ratsnest picks an arbitrary spanning tree over those clusters and,
+# where several items share one anchor point (a via and the track ending on
+# it, a pad and the track leaving it, a zone island and the via inside it),
+# names an arbitrary one of them.  Nothing downstream may depend on that
+# choice, starting with the order the links are handled in.
+
+_KIND_RANK = {"pad": 0, "via": 1, "track": 2, "other": 3, "zone": 4}
+
+
+def _natural(text: str | None) -> tuple:
+    """Sort key ordering ``"R2"`` before ``"R10"`` and ``"A4"`` before ``"B1"``."""
+    return tuple(
+        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        for part in re.split(r"(\d+)", text or "")
+        if part
+    )
+
+
+def _endpoint_key(end: OracleEndpoint) -> tuple:
+    """Order-defining key of one link end.
+
+    A zone end's layer is deliberately left out: KiCad anchors every zone end
+    at the zone outline's first corner and names whichever of the net's zones
+    shares the tie (``Zone [GND] on F.Cu <-> ... on B.Cu`` in one run,
+    ``... <-> ... on In1.Cu`` in the next), and the closer treats a zone-zone
+    link per net anyway.
+    """
+    return (
+        _KIND_RANK.get(end.kind, 3),
+        _natural(end.ref),
+        _natural(end.pad),
+        round(end.x, 3),
+        round(end.y, 3),
+        "" if end.kind == "zone" else (end.layer or ""),
+    )
+
+
+def canonical_links(links: Iterable[OracleLink]) -> list[OracleLink]:
+    """``links`` in an order, and with an end orientation, KiCad cannot perturb.
+
+    Each link's two ends are oriented by :func:`_endpoint_key` and the links
+    sorted by net then ends, so two reports holding the same links in a
+    different order hand the closer the same sequence (Issue #5934).
+    """
+
+    def full(end: OracleEndpoint) -> tuple:
+        # The description only breaks exact ties (two zone ends of one net),
+        # so it can never move a link past one with a different key.
+        return (_endpoint_key(end), end.description)
+
+    out: list[OracleLink] = []
+    for lk in links:
+        if full(lk.b) < full(lk.a):
+            lk = OracleLink(net=lk.net, a=lk.b, b=lk.a)
+        out.append(lk)
+    out.sort(key=lambda lk: (lk.net, full(lk.a), full(lk.b)))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # The loop
 # ---------------------------------------------------------------------------
 
@@ -362,7 +430,10 @@ def run_oracle_completion(
     say = log or (lambda _msg: None)
 
     def in_scope(geo: GeometricDRCResult) -> list[OracleLink]:
-        return [lk for lk in links_from_violations(geo.unconnected_items) if lk.net in scope]
+        # Canonical order: KiCad's report order is not reproducible (#5934).
+        return canonical_links(
+            lk for lk in links_from_violations(geo.unconnected_items) if lk.net in scope
+        )
 
     geo = oracle(pcb_path)
     if not geo.ran:
@@ -506,11 +577,17 @@ class PourLinkCloser:
     refill: Callable[[Path], object] | None = None
     #: Route links no via weld could close (see :mod:`kicad_tools.router.link_router`).
     route_links: bool = True
+    #: Close whole copper clusters instead of the items KiCad happened to name
+    #: (Issue #5934).  See :meth:`_cluster_links`.
+    canonical_clusters: bool = True
 
     def __call__(
         self, pcb_path: Path, links: Sequence[OracleLink], banned: frozenset[str]
     ) -> ClosureAttempt:
         attempt = ClosureAttempt()
+        links = canonical_links(links)
+        if self.canonical_clusters:
+            links = self._cluster_links(pcb_path, links, attempt)
         pads_by_net: dict[str, set[str]] = {}
         for lk in links:
             for end in (lk.a, lk.b):
@@ -532,6 +609,123 @@ class PourLinkCloser:
         if attempt.applied and self.refill is not None:
             self.refill(pcb_path)
         return attempt
+
+    # -- canonical clusters (Issue #5934) ---------------------------------------
+
+    def _cluster_links(
+        self, pcb_path: Path, links: Sequence[OracleLink], attempt: ClosureAttempt
+    ) -> list[OracleLink]:
+        """Replace KiCad's links with one canonical link per stranded cluster.
+
+        KiCad's link COUNT per net is reproducible (pad-bearing clusters minus
+        one), but WHICH links it reports is not: it names an arbitrary
+        spanning tree over the clusters, and an arbitrary one of the items
+        sharing each anchor.  Closing the named items therefore landed
+        different stitches on a byte-identical board (Issue #5934).
+
+        A spanning tree touches every cluster, so the set of clusters KiCad
+        wants joined is stable even though the names are not.  When this
+        board's own copper model splits a net into exactly KiCad's cluster
+        count (its pad-bearing components; KiCad's ratsnest ignores padless
+        islands), the model's components ARE those clusters, and the net's
+        links are rebuilt from them: for every component except the one that
+        owns the plane, a link from its canonical pad (lowest reference, then
+        pad number) to the net's zone.  The existing machinery then welds that
+        pad, or -- when no weld lands -- grows the component to the nearest
+        other island of the net.  Both are functions of the board alone.
+
+        A net whose counts disagree keeps KiCad's links (canonically ordered,
+        see :func:`canonical_links`) and is named in ``attempt.notes``; that
+        fallback is still exposed to KiCad's naming.
+        """
+        if not links:
+            return list(links)
+        try:
+            from kicad_tools.router.link_router import (
+                _build_model,
+                net_components,
+                terminal_for_pad,
+            )
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(str(pcb_path))
+            model = _build_model(pcb)
+        except Exception as exc:  # the canonical pass must never block closing
+            attempt.notes.append(f"canonical clusters unavailable ({exc}); using KiCad's links")
+            return list(links)
+
+        ox, oy = pcb.board_origin
+        net_ids = {net.name: num for num, net in pcb.nets.items() if net.name}
+        counts: dict[str, int] = {}
+        for lk in links:
+            counts[lk.net] = counts.get(lk.net, 0) + 1
+
+        rebuilt: dict[str, list[OracleLink]] = {}
+        for net in sorted(counts):
+            net_number = net_ids.get(net)
+            if net_number is None:
+                continue
+            comps = net_components(model, net_number)
+            # (component index, pad key, centroid) for every pad of the net.
+            pads: list[tuple[int, str, str, float, float]] = []
+            for fp in pcb.footprints:
+                for pad in fp.pads:
+                    if getattr(pad, "net_name", None) != net:
+                        continue
+                    t = terminal_for_pad(pcb, fp.reference, str(pad.number))
+                    if t is None:
+                        continue
+                    owner = next(
+                        (
+                            idx
+                            for idx, comp in enumerate(comps)
+                            if any(
+                                layer in comp and comp[layer].intersects(g)
+                                for layer, g in t.layers.items()
+                            )
+                        ),
+                        None,
+                    )
+                    if owner is not None:
+                        pads.append((owner, fp.reference, str(pad.number), *t.point))
+            clusters = sorted({owner for owner, *_ in pads})
+            if len(clusters) != counts[net] + 1:
+                attempt.notes.append(
+                    f"{net}: copper model has {len(clusters)} pad-bearing cluster(s), KiCad "
+                    f"reports {counts[net] + 1}; closing KiCad's links as named"
+                )
+                continue
+            # ``comps`` is sorted largest first, so ``comps[0]`` holds the plane.
+            # When the plane carries no pad (a pour no pad reaches yet), every
+            # pad cluster is stranded from it and all of them are closed.
+            main = 0 if 0 in clusters else None
+            out: list[OracleLink] = []
+            for idx in clusters:
+                if idx == main:
+                    continue
+                _, ref, num, cx, cy = min(
+                    (p for p in pads if p[0] == idx),
+                    key=lambda p: (_natural(p[1]), _natural(p[2])),
+                )
+                x, y = cx + ox, cy + oy
+                pad_end = OracleEndpoint(
+                    description=f"Pad {num} [{net}] of {ref}",
+                    kind="pad",
+                    net=net,
+                    x=x,
+                    y=y,
+                    ref=ref,
+                    pad=num,
+                )
+                zone_end = OracleEndpoint(
+                    description=f"Zone [{net}]", kind="zone", net=net, x=x, y=y
+                )
+                out.append(OracleLink(net=net, a=pad_end, b=zone_end))
+            rebuilt[net] = out
+        if not rebuilt:
+            return list(links)
+        kept = [lk for lk in links if lk.net not in rebuilt]
+        return canonical_links(kept + [lk for net in sorted(rebuilt) for lk in rebuilt[net]])
 
     # -- pads ---------------------------------------------------------------
 

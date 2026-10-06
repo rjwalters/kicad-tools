@@ -6432,6 +6432,27 @@ def _stranded_pour_escalation_exit(rc: int, args) -> int:
     )
 
 
+def _merge_unconnected_per_net(primary: list, alternate: list, net_of) -> list:
+    """Union two projects' ``unconnected_items`` net by net (Issue #5934).
+
+    Each net's records come wholesale from whichever list holds more of them
+    (``primary`` on a tie); records whose net cannot be resolved are kept from
+    ``primary`` only.  The result depends only on the per-net counts, which
+    KiCad reports reproducibly, and never on which items KiCad named.
+    """
+    by_net_primary: dict = {}
+    by_net_alt: dict = {}
+    for records, by_net in ((primary, by_net_primary), (alternate, by_net_alt)):
+        for v in records:
+            by_net.setdefault(net_of(v), []).append(v)
+    merged = list(by_net_primary.pop(None, []))
+    by_net_alt.pop(None, None)
+    for net in sorted(set(by_net_primary) | set(by_net_alt)):
+        mine, theirs = by_net_primary.get(net, []), by_net_alt.get(net, [])
+        merged.extend(theirs if len(theirs) > len(mine) else mine)
+    return merged
+
+
 def _make_pour_oracle(args):
     """kicad-cli oracle for the pour completion loop (Issue #5785).
 
@@ -6442,11 +6463,20 @@ def _make_pour_oracle(args):
     float) depends on the project's clearances.  A link is "unconnected" if
     EITHER project's fill leaves it so; the DRC *error* count stays the
     emitted project's.
+
+    The union is taken **per net** (Issue #5934): for each net, the project
+    reporting more links wins (the emitted one on a tie).  KiCad's link count
+    per net is reproducible, but which items it names is not -- two runs on
+    one board name different spanning trees -- so a union of the raw records
+    double-counted a link whenever the two runs happened to name it
+    differently, and the loop's keep/no-progress rule then compared counts
+    that varied from run to run.
     """
     import shutil
     import tempfile
 
     from kicad_tools.drc import run_geometric_drc
+    from kicad_tools.router.oracle_completion import links_from_violations
 
     src_pro = None
     if getattr(args, "pcb", None):
@@ -6454,11 +6484,9 @@ def _make_pour_oracle(args):
         if cand.is_file():
             src_pro = cand
 
-    def key(v) -> tuple:
-        return (
-            tuple(v.items),
-            tuple((round(loc.x_mm, 3), round(loc.y_mm, 3)) for loc in v.locations),
-        )
+    def net_of(v) -> str | None:
+        links = links_from_violations([v])
+        return links[0].net if links else None
 
     def oracle(path: Path):
         geo = run_geometric_drc(path)
@@ -6476,8 +6504,9 @@ def _make_pour_oracle(args):
         except OSError:
             return geo
         if alt.ran:
-            seen = {key(v) for v in geo.unconnected_items}
-            geo.unconnected_items.extend(v for v in alt.unconnected_items if key(v) not in seen)
+            geo.unconnected_items[:] = _merge_unconnected_per_net(
+                geo.unconnected_items, alt.unconnected_items, net_of
+            )
         return geo
 
     return oracle
