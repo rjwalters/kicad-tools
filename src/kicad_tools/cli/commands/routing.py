@@ -8,9 +8,14 @@ written copper and warnings, or the failure that stopped it) -- and
 codes are unchanged in both cases.  See ``docs/reference/machine-output.md``.
 """
 
+import contextlib
 import sys
+from typing import TYPE_CHECKING
 
 from ..format_options import FORMAT_JSON, emit_json, stdout_to_stderr_when
+
+if TYPE_CHECKING:
+    from kicad_tools.router.checkpoint import BestCheckpointWriter, RouteScore
 
 __all__ = [
     "run_route_command",
@@ -483,22 +488,282 @@ def run_route_auto_command(args) -> int:
             _emit(previews, 0)
         return 0
 
-    output_path = args.output
     overall_rc = 0
     net_docs: list[dict] = []
-    for i, net_name in enumerate(net_list):
+
+    # Issue #5945: --resume / --checkpoint / regressing-pass rollback.
+    passes, rc = _RouteAutoPasses.create(args, net_list, as_json=as_json)
+    if rc != 0:
+        return rc
+    base_pcb = passes.base_pcb
+    working = passes.working
+
+    routed_so_far = 0
+    for net_name in net_list:
+        skip_doc = passes.resumed_skip(net_name)
+        if skip_doc is not None:
+            net_docs.append(skip_doc)
+            continue
         # Chain outputs so multi-net copper accumulates: the first net routes
         # from the original board; subsequent nets route from the prior output
         # (only possible when an output path was given -- otherwise nothing is
         # persisted and each net routes independently against the input).
-        source = args.pcb if (i == 0 or not output_path) else output_path
-        net_rc, net_doc = _route_auto_one(args, net_name, source, output_path, as_json=as_json)
+        source = base_pcb
+        if working and (routed_so_far > 0 or passes.seeded_working):
+            # Later nets chain from the accumulated output; a private
+            # --checkpoint working copy already holds the base board.
+            source = working
+        routed_so_far += 1
+        net_rc, net_doc = _route_auto_one(args, net_name, source, working, as_json=as_json)
+        if passes.after_pass(routed_so_far, net_name, net_doc):
+            # The pass made the board worse and was undone -- its copper is
+            # not in the output, so it cannot count as routed.
+            net_rc = 1
         net_docs.append(net_doc)
         if net_rc != 0:
             overall_rc = 1
+    passes.finish()
     if as_json:
         _emit(net_docs, overall_rc)
     return overall_rc
+
+
+class _RouteAutoPasses:
+    """Per-net pass bookkeeping for ``route-auto`` (Issue #5945).
+
+    Each routed net is one *pass* over the accumulating board.  When active
+    (``--checkpoint``, ``--resume``, or a multi-net ``--nets`` run with
+    ``--output``), every pass that wrote copper is scored with
+    :meth:`RouteScore.from_board`:
+
+    * a pass that LOWERS the number of complete nets is rolled back -- the
+      previous accepted board is restored atomically before the next net
+      routes, so a regression can never be what ships;
+    * a pass that strictly beats the best score is written to
+      ``--checkpoint`` (board + ``.checkpoint.json`` sidecar).
+
+    ``--resume PATH`` routes the first net from the checkpoint board instead
+    of the input, and skips requested nets the checkpoint already completed.
+    Without ``--output``, ``--checkpoint`` accumulates copper in a private
+    working file next to the checkpoint (removed at the end).
+    """
+
+    def __init__(self) -> None:
+        self.active = False
+        self.base_pcb: str = ""
+        self.working: str | None = None
+        self._tmp_working: str | None = None
+        self.writer: BestCheckpointWriter | None = None
+        self.accepted_text: str | None = None
+        self.accepted_score: RouteScore | None = None
+        self.accepted_pass = 0
+        self.resumed_complete: set[str] = set()
+        self.quiet = False
+        self.as_json = False
+
+    @classmethod
+    def create(cls, args, net_list: list[str], *, as_json: bool) -> "tuple[_RouteAutoPasses, int]":
+        from pathlib import Path
+
+        self = cls()
+        self.as_json = as_json
+        self.quiet = bool(getattr(args, "quiet", False) or getattr(args, "global_quiet", False))
+        self.base_pcb = args.pcb
+        checkpoint = getattr(args, "checkpoint", None)
+        resume = getattr(args, "resume", None)
+        output_path = args.output
+
+        if resume:
+            from kicad_tools.router.checkpoint import checkpoint_identity_mismatch
+            from kicad_tools.router.preserve_existing import fully_connected_nets
+
+            if not Path(resume).exists():
+                self._err(f"Error: --resume checkpoint not found: {resume}")
+                return self, 1
+            try:
+                mismatch = checkpoint_identity_mismatch(args.pcb, resume)
+            except OSError as e:
+                self._err(f"Error: cannot read --resume checkpoint: {e}")
+                return self, 1
+            if mismatch:
+                self._err(
+                    f"Error: --resume checkpoint {resume} does not match {args.pcb} ({mismatch})."
+                )
+                return self, 2
+            self.base_pcb = str(resume)
+            try:
+                self.resumed_complete = set(fully_connected_nets(Path(resume)))
+            except Exception:  # noqa: BLE001 - nothing known complete => route all
+                self.resumed_complete = set()
+
+        if checkpoint:
+            from kicad_tools.router.checkpoint import BestCheckpointWriter, RouteScore
+
+            ck = Path(checkpoint)
+            if ck.suffix != ".kicad_pcb":
+                self._err(f"Error: --checkpoint must be a .kicad_pcb path, got {ck}")
+                return self, 1
+            writer = self.writer = BestCheckpointWriter(
+                ck,
+                command="route-auto",
+                source_pcb=resume or args.pcb,
+                quiet=self.quiet or as_json,
+                printer=self._info,
+            )
+            if resume and ck.exists() and ck.resolve() == Path(resume).resolve():
+                with contextlib.suppress(OSError):
+                    writer.seed(RouteScore.from_board(ck), 0, label="resumed checkpoint")
+            if not output_path:
+                import os
+                import tempfile
+
+                ck.parent.mkdir(parents=True, exist_ok=True)
+                fd, name = tempfile.mkstemp(
+                    prefix=ck.stem + "_working_", suffix=".kicad_pcb", dir=ck.parent
+                )
+                os.close(fd)
+                # Seed the working copy with the starting board (and its
+                # project rules) so every pass -- even after a failed first
+                # net -- has a board to chain from.
+                from kicad_tools.core.atomic_write import atomic_write_text
+
+                base = Path(self.base_pcb)
+                atomic_write_text(name, base.read_text(encoding="utf-8"))
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    if base.with_suffix(suffix).exists():
+                        atomic_write_text(
+                            Path(name).with_suffix(suffix),
+                            base.with_suffix(suffix).read_text(encoding="utf-8"),
+                        )
+                self._tmp_working = name
+                self.working = name
+
+        if self.working is None:
+            self.working = output_path
+        self.active = bool(self.working and (checkpoint or resume or len(net_list) > 1))
+        if self.active:
+            self._score_baseline()
+        return self, 0
+
+    # -- reporting -------------------------------------------------------
+    def _err(self, msg: str) -> None:
+        # stderr is never part of the --format json document.
+        print(msg, file=sys.stderr)
+
+    def _info(self, msg: str) -> None:
+        if not (self.quiet or self.as_json):
+            print(msg)
+
+    # -- passes ----------------------------------------------------------
+    def _score_baseline(self) -> None:
+        from pathlib import Path
+
+        from kicad_tools.router.checkpoint import RouteScore
+
+        base = Path(self.base_pcb)
+        if not base.exists():
+            return
+        try:
+            text = base.read_text(encoding="utf-8")
+            score = RouteScore.from_board(base)
+        except (OSError, ValueError):
+            return
+        self.accepted_text, self.accepted_score, self.accepted_pass = text, score, 0
+        if self.writer is not None:
+            self._offer(
+                score,
+                0,
+                text,
+                "pass 0 (resumed checkpoint)" if self.resumed_complete else "pass 0 (input)",
+            )
+
+    def _offer(self, score, pass_index: int, text: str, label: str) -> None:
+        from pathlib import Path
+
+        from kicad_tools.core.atomic_write import atomic_write_text
+
+        def _write(dest: Path) -> None:
+            atomic_write_text(dest, text)
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                src = Path(self.base_pcb).with_suffix(suffix)
+                dst = dest.with_suffix(suffix)
+                if src.exists() and not dst.exists():
+                    atomic_write_text(dst, src.read_text(encoding="utf-8"))
+
+        try:
+            if self.writer is not None:
+                self.writer.offer(score, pass_index, _write, label=label)
+        except OSError as e:  # a checkpoint failure must never fail the route
+            self._err(f"  checkpoint: write failed ({e}); continuing")
+
+    @property
+    def seeded_working(self) -> bool:
+        return self._tmp_working is not None
+
+    def resumed_skip(self, net_name: str) -> dict | None:
+        if net_name not in self.resumed_complete:
+            return None
+        self._info(f"Net '{net_name}' already complete in --resume checkpoint; kept as-is")
+        return {
+            "net": net_name,
+            "success": True,
+            "partial": False,
+            "resumed": True,
+            "source": self.base_pcb,
+        }
+
+    def after_pass(self, pass_index: int, net_name: str, doc: dict) -> bool:
+        """Score the board after a pass; return True when it was rolled back."""
+        if not self.active:
+            return False
+        from pathlib import Path
+
+        from kicad_tools.core.atomic_write import atomic_write_text
+        from kicad_tools.router.checkpoint import RouteScore
+
+        target = self.working
+        if not target or not Path(target).exists():
+            return False
+        try:
+            text = Path(target).read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if text == self.accepted_text:
+            return False  # the pass wrote nothing new
+        score = RouteScore.from_board(Path(target))
+        label = f"pass {pass_index} (net {net_name})"
+        if (
+            self.accepted_score is not None
+            and self.accepted_text is not None
+            and score.nets_complete < self.accepted_score.nets_complete
+        ):
+            atomic_write_text(Path(target), self.accepted_text)
+            doc["rolled_back"] = True
+            doc["rolled_back_to_pass"] = self.accepted_pass
+            msg = (
+                f"  rollback: {label} lowered complete nets "
+                f"{self.accepted_score.nets_complete} -> {score.nets_complete}; "
+                f"restored pass {self.accepted_pass}"
+            )
+            self._err(msg)
+            return True
+        self.accepted_text, self.accepted_score, self.accepted_pass = text, score, pass_index
+        if self.writer is not None:
+            self._offer(score, pass_index, text, label)
+        return False
+
+    def finish(self) -> None:
+        import os
+
+        if self.active and self.accepted_score is not None:
+            self._info(
+                f"Emitted result: pass {self.accepted_pass} "
+                f"({self.accepted_score.nets_complete} net(s) complete)"
+            )
+        if self._tmp_working:
+            for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+                with contextlib.suppress(OSError):
+                    os.unlink(os.path.splitext(self._tmp_working)[0] + suffix)
 
 
 def run_route_command(args) -> int:
@@ -664,6 +929,11 @@ def run_route_command(args) -> int:
     checkpoint_interval_val = getattr(args, "checkpoint_interval", 30.0)
     if checkpoint_interval_val != 30.0:
         sub_argv.extend(["--checkpoint-interval", str(checkpoint_interval_val)])
+    # Issue #5945: forward --checkpoint / --resume (both default None).
+    if getattr(args, "checkpoint", None):
+        sub_argv.extend(["--checkpoint", args.checkpoint])
+    if getattr(args, "resume", None):
+        sub_argv.extend(["--resume", args.resume])
     # Issue #2819: forward --max-search-iterations to the inner parser.
     # Both defaults are 0 (= use cols*rows*4 heuristic), so only forward
     # when the user passed a non-default value (matches the per-net-timeout

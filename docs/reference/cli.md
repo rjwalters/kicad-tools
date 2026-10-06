@@ -1136,6 +1136,8 @@ See [Routing Guide → Strategy Escalation](../guides/routing.md#strategy-escala
 | Option | Description |
 |--------|-------------|
 | `--checkpoint-interval SEC` | Interval between best-so-far checkpoint writes to `--output`. Default: 30. Pass `0` to disable. |
+| `--checkpoint PATH` | Write the best result so far to `PATH` (`.kicad_pcb`) on **every** improvement (nets complete, then clearance/DRC count, overflow, wirelength, vias), plus `PATH`-stem `.checkpoint.json` with the score and pass number. A worse pass never overwrites it. Also on `route-auto` (Issue #5945). |
+| `--resume PATH` | Seed routing with a checkpoint's copper: nets it already completed are kept verbatim and locked, only the rest are routed (implies `--preserve-existing`). Refused (exit 2) if the checkpoint's footprints/nets differ from the input. Also on `route-auto`, where completed nets are skipped (Issue #5945). |
 | `--export-failed-nets PATH` | Write failed-net names (one per line) for follow-up. |
 | `--strict` | Exit non-zero if the written PCB has any disconnected net. |
 
@@ -1168,6 +1170,10 @@ kct route board.kicad_pcb \
 
 # CI-friendly checkpointing every 10s
 kct route board.kicad_pcb --checkpoint-interval 10 -o routed.kicad_pcb
+
+# Keep the best-so-far board on disk; pick up where a killed run stopped
+kct route board.kicad_pcb --checkpoint best.kicad_pcb -o routed.kicad_pcb
+kct route board.kicad_pcb --resume best.kicad_pcb --checkpoint best.kicad_pcb -o routed.kicad_pcb
 ```
 
 ---

@@ -4000,6 +4000,36 @@ def _add_route_parser(subparsers) -> None:
             "--output. Default: 30. Use 0 to disable."
         ),
     )
+    # Issue #5945: best-so-far checkpoint file + resume.  Mirror of the inner
+    # parser flags in route_cmd.py; tests/test_cli_parser_drift.py keeps them in
+    # sync.
+    route_parser.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write the best result so far to PATH (.kicad_pcb) every time a "
+            "pass improves the score (nets complete, then DRC/clearance count, "
+            "then overflow, wirelength and vias), plus a PATH-stem "
+            ".checkpoint.json sidecar with the score and pass number. A pass "
+            "that is not better never overwrites it, so a killed run leaves the "
+            "best state on disk. Unthrottled, independent of "
+            "--checkpoint-interval (Issue #5945)."
+        ),
+    )
+    route_parser.add_argument(
+        "--resume",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Seed routing with the copper of a checkpoint board (e.g. from "
+            "--checkpoint). Nets the checkpoint already completed are kept "
+            "verbatim and locked; only the rest are routed (implies "
+            "--preserve-existing). The checkpoint's footprints and nets must "
+            "match the input board. Output defaults to <input>_routed "
+            "(Issue #5945)."
+        ),
+    )
     # Issue #2610: --max-search-iterations override for the C++ A* memory
     # backstop (default 0 = use the historical ``cols * rows * 4`` heuristic).
     # Documented as an escape hatch for dense boards where the cap fires
@@ -5162,6 +5192,28 @@ def _add_route_auto_parser(subparsers) -> None:
         ),
     )
     route_auto_parser.add_argument("-o", "--output", help="Output PCB file path")
+    route_auto_parser.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write the board to PATH (.kicad_pcb) after every net pass that "
+            "improves the score (nets complete, then wirelength and vias), "
+            "plus a PATH-stem .checkpoint.json sidecar with the score and pass "
+            "number. Works without --output (copper accumulates in a private "
+            "working file). Enables regressing-pass rollback (Issue #5945)."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--resume",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Start from a checkpoint board's copper instead of the input; "
+            "requested nets it already completed are kept and skipped. Its "
+            "footprints and nets must match the input board (Issue #5945)."
+        ),
+    )
     route_auto_parser.add_argument(
         "--dry-run",
         action="store_true",

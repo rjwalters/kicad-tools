@@ -1425,6 +1425,10 @@ class Autorouter:
         # alongside ``self.routes`` so preserved trace copper is not
         # structurally invisible to the safety gate.
         self._emitted_preserved_routes: list[Any] | None = None
+        # Issue #5945: which negotiated pass produced the emitted result
+        # (``None`` until ``route_all_negotiated`` finishes its rip-up loop).
+        self.emitted_iteration: int | None = None
+        self.emitted_iteration_rolled_back: bool = False
         # Issue #4605: optional ``spatial_keepouts`` sidecar filter block
         # (``{rule_area_name: {"except_classes": [...] | "only_classes":
         # [...]}}``), stashed by the CLI's ``_apply_net_class_map_sidecar``.
@@ -13453,7 +13457,18 @@ class Autorouter:
                 nets_fully_connected=final_connected,
                 demotable_connected=final_demotable,
             )
-            if best_metrics.is_better_than(final_metrics):
+            _restored_best = best_metrics.is_better_than(final_metrics)
+            # Issue #5945: record (and report) which pass produced the result
+            # this run emits -- the best snapshot when the final pass regressed,
+            # otherwise the final pass itself.
+            self.emitted_iteration = best_iteration if _restored_best else final_iter_idx
+            self.emitted_iteration_rolled_back = _restored_best
+            flush_print(
+                f"  Emitting iteration {self.emitted_iteration} result "
+                f"({len(iteration_trajectory)} pass(es) scored"
+                f"{'; final pass regressed, rolled back' if _restored_best else ''})"
+            )
+            if _restored_best:
                 flush_print(
                     f"  Restoring iteration {best_iteration} state "
                     f"(connected={best_metrics.nets_fully_connected}, "
