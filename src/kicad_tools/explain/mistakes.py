@@ -23,7 +23,16 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from ..router.net_class import (
+    POWER_PIN_TYPES,
+    is_ground_rail_name,
+    is_power_rail_name,
+    is_unconnected_net_name,
+)
+
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from ..schema.pcb import PCB
 
 
@@ -436,36 +445,67 @@ def trace_length(segments: list[Any]) -> float:
     return total
 
 
-def is_power_net(net_name: str) -> bool:
-    """Check if a net name appears to be a power net.
+def power_pin_nets(pcb: PCB) -> set[str]:
+    """Return nets with *evidence* of being a power rail (issue #5939).
+
+    Evidence is a pad whose schematic pin electrical type (``pintype``,
+    copied onto the board by KiCad 6+) is ``power_in`` or ``power_out``.
+    Ground nets carry ``power_in`` pins too, so ground-named nets are
+    excluded -- this set answers "non-ground supply rail?", matching
+    :func:`is_power_net`.
+
+    Boards without pin-type data (pre-KiCad-6, or generated without a
+    schematic) yield an empty set and the checks fall back to
+    :func:`is_power_net`'s anchored name heuristic.
+    """
+    nets: set[str] = set()
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if (
+                pad.net_name
+                and getattr(pad, "pintype", "") in POWER_PIN_TYPES
+                and not is_unconnected_net_name(pad.net_name)
+                and not is_ground_rail_name(pad.net_name)
+            ):
+                nets.add(pad.net_name)
+    return nets
+
+
+def is_power_net(net_name: str, power_pin_evidence: Collection[str] | None = None) -> bool:
+    """Check whether a net is a (non-ground) power rail.
+
+    Prefers real evidence over the name: when *power_pin_evidence* (from
+    :func:`power_pin_nets`) contains the net, it is power.  Otherwise the
+    shared whole-token name heuristic
+    :func:`kicad_tools.router.net_class.is_power_rail_name` decides, after
+    stripping the hierarchical sheet path.  KiCad ``unconnected-(...)`` nets
+    are never power.
+
+    Issue #5939: this used to be a substring match, so ``USB_D+``,
+    ``ISENSE_A+``, ``/PG_3V3``, ``TRIGGER_5V`` and
+    ``unconnected-(U11-D+-Pad2)`` were all "power".
 
     Args:
         net_name: The net name to check
+        power_pin_evidence: Optional set of net names known to carry a
+            ``power_in``/``power_out`` pin.
 
     Returns:
-        True if the net appears to be a power net
+        True if the net is a power net
     """
-    power_patterns = [
-        "VCC",
-        "VDD",
-        "VIN",
-        "VOUT",
-        "3V3",
-        "3.3V",
-        "5V",
-        "12V",
-        "VBAT",
-        "VSYS",
-        "+",
-        "PWR",
-        "POWER",
-    ]
-    upper_name = net_name.upper()
-    return any(pattern in upper_name for pattern in power_patterns)
+    if not net_name or is_unconnected_net_name(net_name):
+        return False
+    if power_pin_evidence is not None and net_name in power_pin_evidence:
+        return True
+    return is_power_rail_name(net_name)
 
 
 def is_ground_net(net_name: str) -> bool:
-    """Check if a net name appears to be a ground net.
+    """Check whether a net name looks like a ground rail.
+
+    Whole-token match after stripping the hierarchical sheet path
+    (``GND``, ``/AGND``, ``GNDA``, ``SHIELD_GND``, ``VSS``); KiCad
+    ``unconnected-(...)`` nets are never ground (issue #5939).
 
     Args:
         net_name: The net name to check
@@ -473,9 +513,12 @@ def is_ground_net(net_name: str) -> bool:
     Returns:
         True if the net appears to be a ground net
     """
-    ground_patterns = ["GND", "GROUND", "VSS", "AGND", "DGND", "PGND", "SGND"]
-    upper_name = net_name.upper()
-    return any(pattern in upper_name for pattern in ground_patterns)
+    return is_ground_rail_name(net_name)
+
+
+def is_supply_net(net_name: str, power_pin_evidence: Collection[str] | None = None) -> bool:
+    """True for any supply rail: power (:func:`is_power_net`) or ground."""
+    return is_power_net(net_name, power_pin_evidence) or is_ground_net(net_name)
 
 
 def is_bypass_cap(reference: str, value: str) -> bool:

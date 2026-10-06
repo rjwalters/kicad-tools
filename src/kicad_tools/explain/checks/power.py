@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..mistakes import Mistake, MistakeCategory, is_ground_net, is_power_net
+from ..mistakes import Mistake, MistakeCategory, is_supply_net, power_pin_nets
 
 if TYPE_CHECKING:
     from ...schema.pcb import PCB
@@ -51,9 +51,10 @@ class PowerTraceWidthCheck:
         mistakes: list[Mistake] = []
 
         # Find power and ground nets
+        evidence = power_pin_nets(pcb)
         power_nets = set()
         for net in pcb.nets.values():
-            if is_power_net(net.name) or is_ground_net(net.name):
+            if is_supply_net(net.name, evidence):
                 power_nets.add(net.number)
 
         # Check trace widths on power nets

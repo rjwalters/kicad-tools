@@ -18,6 +18,7 @@ import math
 from typing import TYPE_CHECKING
 
 from kicad_tools.optim.fom_features import BoardFeatures, euclidean
+from kicad_tools.router.net_class import is_power_rail_name
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -231,28 +232,14 @@ def _point_segment_distance(
     return math.hypot(p[0] - cx, p[1] - cy)
 
 
-# Power-rail name heuristics for the decoupling proximity term.
-POWER_RAIL_HINTS = (
-    "VCC",
-    "VDD",
-    "+3V3",
-    "+3V",
-    "+5V",
-    "+12V",
-    "VBAT",
-    "VBUS",
-    "VAA",
-    "AVDD",
-    "DVDD",
-    "VCCIO",
-    "VDDIO",
-    "PWR",
-)
-
-
 def _looks_like_power_net(net_name: str) -> bool:
-    name = (net_name or "").upper()
-    return any(hint in name for hint in POWER_RAIL_HINTS)
+    """Power-rail name heuristic for the decoupling proximity term.
+
+    Delegates to the shared whole-token classifier
+    :func:`kicad_tools.router.net_class.is_power_rail_name` (issue #5939);
+    the previous substring match counted ``PWR_EN`` or ``VBUS_DET`` as rails.
+    """
+    return is_power_rail_name(net_name or "")
 
 
 def _looks_like_capacitor(reference: str) -> bool:

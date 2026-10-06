@@ -196,6 +196,172 @@ NET_CLASS_PATTERNS: dict[NetClass, list[str]] = {
 
 
 # =============================================================================
+# SUPPLY-RAIL NAME HEURISTICS (issue #5939)
+# =============================================================================
+#
+# ``is_power_rail_name`` / ``is_ground_rail_name`` are the shared *name-only*
+# fallback for "is this net a supply rail?".  They exist because several
+# callers (``explain/mistakes.py`` most visibly) used substring matching --
+# ``"+" in name`` or ``"5V" in name`` -- which classified ``USB_D+``,
+# ``ISENSE_A+``, ``/PG_3V3``, ``TRIGGER_5V`` and ``unconnected-(U11-D+-Pad2)``
+# as power rails and produced false decoupling / trace-width findings.
+#
+# Rules, all anchored to whole tokens of the sheet-local name:
+#
+# * the hierarchical sheet path is stripped first (``/+5V`` -> ``+5V``);
+# * KiCad's auto-generated ``unconnected-(...)`` and ``Net-(...)`` names are
+#   never rails, whatever pin names they embed;
+# * a voltage token must *lead* the name (``+3V3``, ``3.3V``, ``3V3_MCU``,
+#   ``12V_IN``), optionally behind a ``P``/``V`` prefix (``P3V3``, ``V5V0``,
+#   ``V3P3``), or the name must lead with ``+`` (``+BATT``, ``+5V_USB``); a
+#   voltage fragment inside a signal name (``PG_3V3``, ``TRIGGER_5V``) is
+#   not a rail;
+# * rail keywords match as a leading word -- ``VDD_CORE``, ``VCCIO``,
+#   ``VBUS_FUSED``, ``VOUT_PRE`` -- or as a trailing word (``SENSOR_VDD``,
+#   ``USB_VBUS``);  ``PWR``/``POWER`` only as the whole name, because
+#   ``PWR_LED``/``POWER_GOOD`` are signals;
+# * a qualifier word that names a *signal derived from* a rail -- ``_SENSE``,
+#   ``_DET``, ``_EN``, ``_FB``, ``_PG`` ... (:data:`_SIGNAL_QUALIFIERS`) --
+#   makes the name a signal: ``VBUS_DET``, ``VIN_SENSE``, ``3V3_EN``.
+#   ``+``-led names are exempt (``+`` is KiCad's power-symbol convention).
+#
+# Regulator compensation pins (``VCAP1``, ``VREG_1V2``, ``UCAP``) are
+# deliberately *not* rails: they carry no load current, and counting them
+# made the decoupling/trace-width checks fire on STM32 ``VCAP`` nets.
+#
+# Callers that have real evidence -- a pad/pin of electrical type
+# ``power_in``/``power_out`` (see :data:`POWER_PIN_TYPES`) or a power symbol
+# on the net -- should prefer it and use these only as the fallback.
+
+#: Pin electrical types that mark a net as a supply rail.
+POWER_PIN_TYPES: frozenset[str] = frozenset({"power_in", "power_out"})
+
+_AUTO_NET_NAME_RE = re.compile(r"^(unconnected|net)-\(", re.IGNORECASE)
+
+_VOLTAGE = r"[+-]?\d+(?:\.\d+)?V\d*"
+# Unsigned voltage token for the P-/V-prefixed forms: 3V3, 5V0, 12V, 3P3.
+_PREFIXED_VOLTAGE = r"\d+(?:(?:\.\d+)?V\d*|P\d+)"
+# Zero or more ``_WORD`` qualifiers: 3V3_MCU, VDD_CORE, VOUT_PRE.
+_QUALIFIERS = r"(?:_[A-Z0-9.]+)*"
+
+#: Qualifier words that turn a rail-ish name into a *signal* derived from
+#: the rail: ``VBUS_DET``, ``VIN_SENSE``, ``3V3_EN``, ``VOUT_FB``.
+_SIGNAL_QUALIFIERS: frozenset[str] = frozenset(
+    {
+        "SENSE", "SNS", "SEN", "DET", "DETECT", "EN", "ENA", "ENABLE",
+        "FB", "PG", "PGOOD", "GOOD", "POK", "OK", "FAULT", "FLT", "ALERT",
+        "MON", "ADC", "DIV", "CTRL", "CTL", "SET", "ADJ", "ON", "OFF",
+        "REF", "IRQ", "INT", "SEL", "KELVIN", "OVP", "UVP", "OCP",
+        "STATUS", "STAT",
+    }
+)  # fmt: skip
+
+#: For the VCC/VDD/VEE supply families a trailing word usually names what the
+#: supply *feeds* (``VDD_ADC``, ``AVDD_ADC``, ``VCC_REF``, ``VDD_MON``), not a
+#: signal derived from it, so only these control/telemetry words make such a
+#: name a signal (``VDD_EN``, ``VCC_PG``, ``VDD_SENSE``).
+_SUPPLY_FAMILY_SIGNAL_QUALIFIERS: frozenset[str] = _SIGNAL_QUALIFIERS - {
+    "ADC", "REF", "MON", "DIV", "SET", "ADJ", "SEL", "INT",
+}  # fmt: skip
+
+_SUPPLY_FAMILY_RE = re.compile(r"^(?:A|D|P|IO)?V(?:CC|DD|EE)", re.IGNORECASE)
+
+_POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        # Leading voltage token, optionally qualified: +3V3, 3.3V, -12V,
+        # +1V8, 3V3A, +5VD, 3V3_MCU, 5V_USB, 12V_IN
+        rf"^{_VOLTAGE}[ADPS]?{_QUALIFIERS}$",
+        # P-/V-prefixed voltage: P3V3, P5V, P12V, V3V3, V5V0, V3P3, V1P8
+        rf"^[PV]{_PREFIXED_VOLTAGE}[ADPS]?{_QUALIFIERS}$",
+        # Leading '+' is KiCad's power-symbol convention: +BATT, +5V_USB
+        r"^\+[A-Z0-9][A-Z0-9_.]*$",
+        # VCC / VDD families as a leading word: VCC, VCCIO, VDDA, VDD_CORE,
+        # AVDD, DVDD, PVDD, IOVDD, AVCC, VEE
+        rf"^(?:A|D|P|IO)?V(?:CC|DD|EE)[A-Z0-9]*{_QUALIFIERS}$",
+        # Named rails as the leading word (optionally numbered/qualified):
+        # VBUS, VBUS_FUSED, VBAT, VSYS, VIN, PVIN, VIN_12V, VOUT, VOUT_PRE, VAA, VUSB
+        r"^(?:VBUS|VBAT|VBATT|VSYS|VIN|PVIN|VOUT|VMAIN|VCORE|VIO|VSUPPLY|VMOT|"
+        rf"VMOTOR|VPWR|VDRIVE|VM|VAA|VUSB)\d*{_QUALIFIERS}$",
+        # PWR / POWER only as the whole name: PWR_LED / POWER_GOOD are signals
+        rf"^(?:PWR|POWER)\d*(?:_{_VOLTAGE})?$",
+        # Rail keyword as the trailing word: SENSOR_VDD, USB_VBUS, MCU_VCC
+        r"_(?:VCC|VDD|VBUS|VBAT|PWR)$",
+    )
+)
+
+
+def _has_signal_qualifier(base: str) -> bool:
+    """True when a qualifier word after the first marks a derived signal."""
+    qualifiers = (
+        _SUPPLY_FAMILY_SIGNAL_QUALIFIERS if _SUPPLY_FAMILY_RE.match(base) else _SIGNAL_QUALIFIERS
+    )
+    # Trailing digits are an index, not part of the word: VIN_EN2, 3V3_PG1.
+    return any(tok.rstrip("0123456789") in qualifiers for tok in base.upper().split("_")[1:])
+
+
+_GROUND_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        # GND family as a leading word: GND, GNDA, GNDD, GNDPWR, AGND, PGND,
+        # GND_ISO
+        r"^(?:A|D|P|S|C)?GND[A-Z0-9]*(?:_[A-Z0-9]+)*$",
+        r"^(?:VSS[A-Z0-9]*|GROUND|EARTH|CHASSIS)$",
+        # Trailing word: SHIELD_GND, MCU_VSS
+        r"_(?:A|D|P|S|C)?(?:GND|VSS)$",
+    )
+)
+
+
+def _rail_base_name(net_name: str) -> str | None:
+    """Return the sheet-local, trimmed name, or None for auto-generated nets."""
+    if not net_name:
+        return None
+    name = net_name.strip()
+    if _AUTO_NET_NAME_RE.match(name):
+        return None
+    # Strip the hierarchical sheet path: "/sheet/+5V" -> "+5V".
+    base = name.rsplit("/", 1)[-1].strip()
+    if not base or _AUTO_NET_NAME_RE.match(base):
+        return None
+    return base
+
+
+def is_unconnected_net_name(net_name: str) -> bool:
+    """Return True for KiCad's auto-named no-connect nets (``unconnected-(...)``)."""
+    return bool(net_name) and net_name.strip().lower().startswith("unconnected-")
+
+
+def is_ground_rail_name(net_name: str) -> bool:
+    """Name-only heuristic: does *net_name* look like a ground rail?
+
+    See the module comment above :data:`POWER_PIN_TYPES` for the rules.
+    """
+    base = _rail_base_name(net_name)
+    if base is None:
+        return False
+    return any(rx.search(base) for rx in _GROUND_RAIL_NAME_RES)
+
+
+def is_power_rail_name(net_name: str) -> bool:
+    """Name-only heuristic: does *net_name* look like a (non-ground) power rail?
+
+    ``+3V3``, ``/+5V``, ``VBUS``, ``VDD_CORE``, ``3V3_MCU``, ``P3V3``,
+    ``VOUT_PRE`` -> True;
+    ``USB_D+``, ``ISENSE_A+``, ``/PG_3V3``, ``TRIGGER_5V``, ``VBUS_DET``,
+    ``unconnected-(U11-D+-Pad2)``, ``GND`` -> False.
+    """
+    base = _rail_base_name(net_name)
+    if base is None:
+        return False
+    if any(rx.search(base) for rx in _GROUND_RAIL_NAME_RES):
+        return False
+    if not base.startswith("+") and _has_signal_qualifier(base):
+        return False
+    return any(rx.search(base) for rx in _POWER_RAIL_NAME_RES)
+
+
+# =============================================================================
 # CLASSIFICATION FUNCTIONS
 # =============================================================================
 

@@ -14,6 +14,7 @@ from ..mistakes import (
     distance,
     is_bypass_cap,
     is_power_net,
+    power_pin_nets,
 )
 
 if TYPE_CHECKING:
@@ -49,14 +50,15 @@ class BypassCapDistanceCheck:
         mistakes: list[Mistake] = []
 
         # Find all ICs (components with VCC/VDD pins)
-        ics = self._find_ics_with_power_pins(pcb)
+        evidence = power_pin_nets(pcb)
+        ics = self._find_ics_with_power_pins(pcb, evidence)
 
         # Find all bypass capacitors
         bypass_caps = self._find_bypass_caps(pcb)
 
         # For each bypass cap, find its associated IC and check distance
         for cap in bypass_caps:
-            cap_power_net = self._get_cap_power_net(cap)
+            cap_power_net = self._get_cap_power_net(cap, evidence)
             if not cap_power_net:
                 continue
 
@@ -118,13 +120,15 @@ class BypassCapDistanceCheck:
 
         return mistakes
 
-    def _find_ics_with_power_pins(self, pcb: PCB) -> list[Footprint]:
+    def _find_ics_with_power_pins(
+        self, pcb: PCB, evidence: set[str] | None = None
+    ) -> list[Footprint]:
         """Find ICs that have power pins (VCC, VDD, etc)."""
         ics = []
         for fp in pcb.footprints:
             # Check if any pad is connected to a power net
             for pad in fp.pads:
-                if is_power_net(pad.net_name):
+                if is_power_net(pad.net_name, evidence):
                     ics.append(fp)
                     break
         return ics
@@ -137,10 +141,10 @@ class BypassCapDistanceCheck:
                 caps.append(fp)
         return caps
 
-    def _get_cap_power_net(self, cap: Footprint) -> str | None:
+    def _get_cap_power_net(self, cap: Footprint, evidence: set[str] | None = None) -> str | None:
         """Get the power net a capacitor is connected to."""
         for pad in cap.pads:
-            if is_power_net(pad.net_name):
+            if is_power_net(pad.net_name, evidence):
                 return pad.net_name
         return None
 
