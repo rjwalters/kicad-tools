@@ -196,6 +196,118 @@ NET_CLASS_PATTERNS: dict[NetClass, list[str]] = {
 
 
 # =============================================================================
+# SUPPLY-RAIL NAME HEURISTICS (issue #5939)
+# =============================================================================
+#
+# ``is_power_rail_name`` / ``is_ground_rail_name`` are the shared *name-only*
+# fallback for "is this net a supply rail?".  They exist because several
+# callers (``explain/mistakes.py`` most visibly) used substring matching --
+# ``"+" in name`` or ``"5V" in name`` -- which classified ``USB_D+``,
+# ``ISENSE_A+``, ``/PG_3V3``, ``TRIGGER_5V`` and ``unconnected-(U11-D+-Pad2)``
+# as power rails and produced false decoupling / trace-width findings.
+#
+# Rules, all anchored to whole tokens of the sheet-local name:
+#
+# * the hierarchical sheet path is stripped first (``/+5V`` -> ``+5V``);
+# * KiCad's auto-generated ``unconnected-(...)`` and ``Net-(...)`` names are
+#   never rails, whatever pin names they embed;
+# * a voltage token must be the *whole* name (``+3V3``, ``3.3V``, ``-12V``)
+#   or the name must lead with ``+`` (``+BATT``, ``+5V_USB``); a voltage
+#   fragment inside a signal name (``PG_3V3``, ``TRIGGER_5V``) is not a rail;
+# * rail keywords match as a leading word (``VDD_CORE``, ``VCCIO``) for the
+#   VCC/VDD families, as the whole name for the rest (``VBUS``, ``VIN`` --
+#   but not ``VBUS_DET``/``VIN_SENSE``), or as a trailing word
+#   (``SENSOR_VDD``, ``USB_VBUS``).
+#
+# Callers that have real evidence -- a pad/pin of electrical type
+# ``power_in``/``power_out`` (see :data:`POWER_PIN_TYPES`) or a power symbol
+# on the net -- should prefer it and use these only as the fallback.
+
+#: Pin electrical types that mark a net as a supply rail.
+POWER_PIN_TYPES: frozenset[str] = frozenset({"power_in", "power_out"})
+
+_AUTO_NET_NAME_RE = re.compile(r"^(unconnected|net)-\(", re.IGNORECASE)
+
+_VOLTAGE = r"[+-]?\d+(?:\.\d+)?V\d*"
+
+_POWER_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        # Bare voltage: +3V3, 3.3V, +5V, -12V, +1V8, 3V3A, +5VD
+        rf"^{_VOLTAGE}[ADPS]?$",
+        # Leading '+' is KiCad's power-symbol convention: +BATT, +5V_USB
+        r"^\+[A-Z0-9][A-Z0-9_.]*$",
+        # VCC / VDD families as a leading word: VCC, VCCIO, VDDA, VDD_CORE,
+        # AVDD, DVDD, PVDD, IOVDD, AVCC, VEE
+        r"^(?:A|D|P|IO)?V(?:CC|DD|EE)[A-Z0-9]*(?:_[A-Z0-9.]+)*$",
+        # Named rails, whole name (optionally numbered or voltage-suffixed):
+        # VBUS, VBAT, VSYS, VIN, VOUT, VBUS1, VIN_5V, PWR, POWER
+        r"^(?:VBUS|VBAT|VBATT|VSYS|VIN|VOUT|VMAIN|VCORE|VIO|VCAP|VSUPPLY|"
+        rf"VMOT|VMOTOR|VPWR|VDRIVE|VM|PWR|POWER)\d*(?:_{_VOLTAGE})?$",
+        # Rail keyword as the trailing word: SENSOR_VDD, USB_VBUS, MCU_VCC
+        r"_(?:VCC|VDD|VBUS|VBAT|PWR)$",
+    )
+)
+
+_GROUND_RAIL_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        # GND family as a leading word: GND, GNDA, GNDD, GNDPWR, AGND, PGND,
+        # GND_ISO
+        r"^(?:A|D|P|S|C)?GND[A-Z0-9]*(?:_[A-Z0-9]+)*$",
+        r"^(?:VSS[A-Z0-9]*|GROUND|EARTH|CHASSIS)$",
+        # Trailing word: SHIELD_GND, MCU_VSS
+        r"_(?:A|D|P|S|C)?(?:GND|VSS)$",
+    )
+)
+
+
+def _rail_base_name(net_name: str) -> str | None:
+    """Return the sheet-local, trimmed name, or None for auto-generated nets."""
+    if not net_name:
+        return None
+    name = net_name.strip()
+    if _AUTO_NET_NAME_RE.match(name):
+        return None
+    # Strip the hierarchical sheet path: "/sheet/+5V" -> "+5V".
+    base = name.rsplit("/", 1)[-1].strip()
+    if not base or _AUTO_NET_NAME_RE.match(base):
+        return None
+    return base
+
+
+def is_unconnected_net_name(net_name: str) -> bool:
+    """Return True for KiCad's auto-named no-connect nets (``unconnected-(...)``)."""
+    return bool(net_name) and net_name.strip().lower().startswith("unconnected-")
+
+
+def is_ground_rail_name(net_name: str) -> bool:
+    """Name-only heuristic: does *net_name* look like a ground rail?
+
+    See the module comment above :data:`POWER_PIN_TYPES` for the rules.
+    """
+    base = _rail_base_name(net_name)
+    if base is None:
+        return False
+    return any(rx.search(base) for rx in _GROUND_RAIL_NAME_RES)
+
+
+def is_power_rail_name(net_name: str) -> bool:
+    """Name-only heuristic: does *net_name* look like a (non-ground) power rail?
+
+    ``+3V3``, ``/+5V``, ``VBUS``, ``VDD_CORE`` -> True;
+    ``USB_D+``, ``ISENSE_A+``, ``/PG_3V3``, ``TRIGGER_5V``,
+    ``unconnected-(U11-D+-Pad2)``, ``GND`` -> False.
+    """
+    base = _rail_base_name(net_name)
+    if base is None:
+        return False
+    if any(rx.search(base) for rx in _GROUND_RAIL_NAME_RES):
+        return False
+    return any(rx.search(base) for rx in _POWER_RAIL_NAME_RES)
+
+
+# =============================================================================
 # CLASSIFICATION FUNCTIONS
 # =============================================================================
 

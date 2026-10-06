@@ -17,6 +17,7 @@ from ..mistakes import (
     is_bypass_cap,
     is_ground_net,
     is_power_net,
+    power_pin_nets,
 )
 
 if TYPE_CHECKING:
@@ -54,8 +55,9 @@ class MissingDecouplingCapCheck:
         """
         mistakes: list[Mistake] = []
 
-        ics = self._find_ics(pcb)
-        cap_nets = self._bypass_cap_nets(pcb)
+        evidence = power_pin_nets(pcb)
+        ics = self._find_ics(pcb, evidence)
+        cap_nets = self._bypass_cap_nets(pcb, evidence)
 
         # Report each (IC, power net) pair only once even if the IC has
         # multiple pads on the same net (common for high-current pins).
@@ -63,7 +65,9 @@ class MissingDecouplingCapCheck:
 
         for ic in ics:
             power_nets = {
-                pad.net_name for pad in ic.pads if pad.net_name and is_power_net(pad.net_name)
+                pad.net_name
+                for pad in ic.pads
+                if pad.net_name and is_power_net(pad.net_name, evidence)
             }
             for net_name in sorted(power_nets):
                 if net_name in cap_nets:
@@ -99,7 +103,7 @@ class MissingDecouplingCapCheck:
 
         return mistakes
 
-    def _find_ics(self, pcb: PCB) -> list[Footprint]:
+    def _find_ics(self, pcb: PCB, evidence: set[str] | None = None) -> list[Footprint]:
         """Find components that look like ICs with a power-net pad."""
         ics: list[Footprint] = []
         for fp in pcb.footprints:
@@ -108,11 +112,11 @@ class MissingDecouplingCapCheck:
             ref_upper = fp.reference.upper()
             if ref_upper.startswith(_NON_IC_REFERENCE_PREFIXES):
                 continue
-            if any(pad.net_name and is_power_net(pad.net_name) for pad in fp.pads):
+            if any(pad.net_name and is_power_net(pad.net_name, evidence) for pad in fp.pads):
                 ics.append(fp)
         return ics
 
-    def _bypass_cap_nets(self, pcb: PCB) -> set[str]:
+    def _bypass_cap_nets(self, pcb: PCB, evidence: set[str] | None = None) -> set[str]:
         """Return supply nets with a two-terminal bypass cap to ground."""
         nets: set[str] = set()
         for fp in pcb.footprints:
@@ -123,5 +127,5 @@ class MissingDecouplingCapCheck:
             pad_nets = {pad.net_name for pad in fp.pads if pad.net_name}
             if len(pad_nets) != 2 or not any(is_ground_net(net) for net in pad_nets):
                 continue
-            nets.update(net for net in pad_nets if is_power_net(net))
+            nets.update(net for net in pad_nets if is_power_net(net, evidence))
         return nets

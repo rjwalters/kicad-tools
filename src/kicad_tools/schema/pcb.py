@@ -371,6 +371,11 @@ class Pad:
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
     drill_size: tuple[float, float] | None = None
     drill_offset: tuple[float, float] = (0.0, 0.0)
+    # Schematic pin electrical type copied onto the pad by KiCad's
+    # "Update PCB from Schematic" (``(pintype "power_in")``).  Empty when the
+    # board predates KiCad 6 or was generated without schematic pin data.
+    # Read-only: used as evidence for power-net classification (issue #5939).
+    pintype: str = ""
 
     def __setattr__(self, name: str, value: object) -> None:
         # Store the Python value first via the default mechanism.
@@ -497,6 +502,10 @@ class Pad:
         # UUID
         if uuid := sexp.find("uuid"):
             pad.uuid = uuid.get_string(0) or ""
+
+        # Schematic pin electrical type (KiCad 6+), e.g. "power_in"
+        if pintype := sexp.find_child("pintype"):
+            pad.pintype = pintype.get_string(0) or ""
 
         return pad
 
