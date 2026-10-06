@@ -13,6 +13,10 @@ tool / parameter description:
   ``{{agent-guide}}`` / ``{{skill-file:<name>}}`` / ``{{skills-dir}}``);
 * a ``boards/NN-*`` demo-board path (use a ``<board>`` placeholder).
 
+The packaged agent primer behind ``kct agent-guide``
+(``kicad_tools/agent_skills/AGENT_GUIDE.md``, issue #5960) is linted the same
+way: it is printed verbatim to agents in every harness.
+
 Exceptions
 ----------
 1. **Marked notes.** A blockquote paragraph that opens with
@@ -39,6 +43,8 @@ from kicad_tools.agent_surfaces import HARNESSES, PLACEHOLDER_RE, render
 REPO_ROOT = Path(__file__).resolve().parents[1]
 KCT_DIR = REPO_ROOT / ".claude" / "commands" / "kct"
 SKILL_FILES = sorted(KCT_DIR.glob("*.md"))
+GUIDE_FILE = REPO_ROOT / "src" / "kicad_tools" / "agent_skills" / "AGENT_GUIDE.md"
+GUIDE_LABEL = "AGENT_GUIDE.md"
 
 # Claude Code tool names. Bare English verbs ("Read the report") are fine, so the
 # ambiguous names only count when backticked or followed by "tool"; names that
@@ -178,8 +184,35 @@ def test_marked_claude_only_notes_carry_a_fallback(path: Path) -> None:
         )
 
 
+def _guide_surfaces() -> Iterator[tuple[str, str]]:
+    yield GUIDE_LABEL, GUIDE_FILE.read_text(encoding="utf-8")
+
+
+def test_agent_guide_is_harness_neutral() -> None:
+    hits = [hit for label, text in _guide_surfaces() for hit in find_violations(label, text)]
+    assert not hits, (
+        "Claude-only text in the agent guide. Put harness-specific examples in "
+        "its <!-- per-harness --> block, using kicad_tools.agent_surfaces "
+        "placeholders:\n" + "\n".join(hits)
+    )
+
+
+def test_agent_guide_marked_notes_carry_a_fallback() -> None:
+    for note in marked_notes(GUIDE_FILE.read_text(encoding="utf-8")):
+        assert "fallback" in note.lower(), f"{GUIDE_LABEL}: note without a fallback:\n{note}"
+
+
+@pytest.mark.parametrize("harness", [*HARNESSES, None])
+def test_agent_guide_placeholders_render(harness: str | None) -> None:
+    from kicad_tools.agent_skills.guide import render_guide
+
+    rendered = render_guide(harness, GUIDE_FILE.read_text(encoding="utf-8"))
+    assert not PLACEHOLDER_RE.search(rendered)
+    assert "<!-- per-harness -->" not in rendered
+
+
 def test_allowlist_has_no_stale_entries() -> None:
-    surfaces = dict(_skill_surfaces()) | dict(_mcp_surfaces())
+    surfaces = dict(_skill_surfaces()) | dict(_mcp_surfaces()) | dict(_guide_surfaces())
     for label, snippet in ALLOWLIST:
         assert label in surfaces and snippet in surfaces[label], (
             f"stale ALLOWLIST entry {(label, snippet)!r}: the text it excuses is gone"

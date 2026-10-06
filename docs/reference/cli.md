@@ -91,6 +91,7 @@ kct [--help] [--version] <command> [options]
 | | `doctor` | Diagnose kicad-tools installation health (version-record drift + environment preflight) |
 | | `ecosystem` | Where kicad-tools sits among related projects (verdicts, license reuse rights, our evaluation notes) |
 | | `skills` | Install the packaged `kct` agent skills into a project or user skills directory |
+| | `agent-guide` | Print the harness-neutral primer for agents using `kct` (workflow, JSON contract, sign-off, harness setup, pitfalls) |
 
 ---
 
@@ -1827,6 +1828,32 @@ kct skills install --prune --dry-run       # preview removal of retired skills
 | `--dry-run` | Show what would be written |
 | `--prune` | Delete `kct` skill files the package no longer ships |
 | `--format` | `text` (default) or `json` |
+
+---
+
+### `agent-guide`
+
+Print the agent primer that ships inside the kicad-tools wheel
+(`kicad_tools/agent_skills/AGENT_GUIDE.md`, issue #5960). It is a one-to-two
+screen Markdown orientation for an agent in any harness: the core workflow
+(schematic, ERC, PCB, place, route, zone fill, two DRC engines, LVS/sync,
+export), the `--format json` stdout contract, the two-engine sign-off rule,
+how to wire up a harness, and common pitfalls.
+
+Implemented in
+[`src/kicad_tools/cli/commands/agent_guide.py`](../../src/kicad_tools/cli/commands/agent_guide.py)
+and [`src/kicad_tools/agent_skills/guide.py`](../../src/kicad_tools/agent_skills/guide.py).
+
+```bash
+kct agent-guide                            # the primer, examples for every harness
+kct agent-guide --harness codex            # skill examples in Codex syntax only
+kct agent-guide --format json              # {"version", "harness", "sections": [{"title", "body"}]}
+```
+
+| Option | Description |
+|--------|-------------|
+| `--harness` | `claude-code` or `codex`: show only that harness's skill invocation examples, rendered by `kicad_tools.agent_surfaces.render()`. opencode is added when its renderer lands (#5951) |
+| `--format` | `text` (default, the Markdown) or `json` |
 
 ---
 

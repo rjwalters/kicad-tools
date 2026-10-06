@@ -188,6 +188,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fleet_parser(subparsers)
     _add_ecosystem_parser(subparsers)
     _add_skills_parser(subparsers)
+    _add_agent_guide_parser(subparsers)
     _add_render_parser(subparsers)
     _add_board_metrics_parser(subparsers)
     _add_readiness_parser(subparsers)
@@ -10021,6 +10022,40 @@ def _add_ecosystem_parser(subparsers) -> None:
         help="Print our invariants, non-goals and the neighbour map",
     )
     add_format_flag(eco_where, dest="ecosystem_format")
+
+
+def _add_agent_guide_parser(subparsers) -> None:
+    """Add the ``agent-guide`` parser (Issue #5960)."""
+    from kicad_tools.agent_surfaces import HARNESSES
+
+    from .format_options import add_format_flag
+
+    guide = subparsers.add_parser(
+        "agent-guide",
+        help="Print the harness-neutral primer for agents using kct",
+        description=(
+            "Print the agent primer shipped in the kicad-tools wheel: the core "
+            "workflow, the --format json contract, the two-engine sign-off rule, "
+            "harness setup and common pitfalls. --harness fills in that "
+            "harness's skill invocation examples; without it, every harness's "
+            "examples are listed."
+        ),
+    )
+    guide.add_argument(
+        "--harness",
+        dest="agent_guide_harness",
+        choices=list(HARNESSES),
+        default=None,
+        help="Show skill invocation examples for this harness only",
+    )
+    add_format_flag(
+        guide,
+        dest="agent_guide_format",
+        help_text=(
+            "Output format (default: %(default)s). json emits "
+            '{"version", "harness", "sections": [{"title", "body"}]}'
+        ),
+    )
 
 
 def _add_skills_parser(subparsers) -> None:

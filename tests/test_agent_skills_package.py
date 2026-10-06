@@ -120,6 +120,8 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
     shipped = {n.rsplit("/", 1)[1] for n in names if n.startswith("kicad_tools/agent_skills/kct/")}
     assert shipped == _repo_skill_names()
     assert "kicad_tools/agent_skills/__init__.py" in names
+    # The agent primer behind `kct agent-guide` ships beside the skills (#5960).
+    assert "kicad_tools/agent_skills/AGENT_GUIDE.md" in names
 
     target = tmp_path / "x"
     code = (
@@ -135,6 +137,21 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
     assert str(tmp_path / "site") in run.stderr, "imported kicad_tools from outside the wheel"
     assert {p.name for p in (target / "kct").glob("*.md")} == _repo_skill_names()
     assert check_installed(target).in_sync
+
+    guide = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from kicad_tools.cli import main; "
+            "sys.exit(main(['agent-guide', '--harness', 'codex']))",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert guide.returncode == 0, guide.stderr[-2000:]
+    assert guide.stdout.startswith("# kicad-tools agent guide")
 
 
 # --- claude-code round trip ---------------------------------------------------
