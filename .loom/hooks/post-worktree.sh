@@ -48,6 +48,11 @@ SYNC_CMD=(uv sync --frozen --extra dev)
 SYNC_CMD_TEXT="uv sync --frozen --extra dev"
 
 SYNC_TIMEOUT="${POST_WORKTREE_SYNC_TIMEOUT:-600}"
+# Normalise to base 10 before any arithmetic: bash reads "08"/"09" as invalid
+# octal, which would make every timeout comparison error and the cap never fire.
+if [[ "$SYNC_TIMEOUT" =~ ^[0-9]+$ ]]; then
+    SYNC_TIMEOUT=$((10#$SYNC_TIMEOUT))
+fi
 if ! [[ "$SYNC_TIMEOUT" =~ ^[0-9]+$ ]] || [[ "$SYNC_TIMEOUT" -eq 0 ]]; then
     echo "post-worktree hook: ignoring invalid POST_WORKTREE_SYNC_TIMEOUT='$SYNC_TIMEOUT'; using 600s." >&2
     SYNC_TIMEOUT=600
@@ -107,6 +112,21 @@ SYNC_START=$SECONDS
     exec "${SYNC_CMD[@]}"
 ) </dev/null >>"$LOG_FILE" 2>&1 3>&- 9>&- &
 SYNC_PID=$!
+
+# If the hook itself is killed mid-sync, take the sync down with it rather than
+# orphaning uv (and its build-backend children) holding the log open.
+on_signal() {
+    log "hook received SIG$1 during sync; killing pid $SYNC_PID"
+    kill_tree "$SYNC_PID" TERM
+    sleep 1
+    kill_tree "$SYNC_PID" KILL
+    wait "$SYNC_PID" 2>/dev/null
+    warn "WARNING: hook interrupted (SIG$1); '$SYNC_CMD_TEXT' was killed."
+    warn "worktree is usable; run '$SYNC_CMD_TEXT' manually in $WORKTREE_PATH."
+    finish
+}
+trap 'on_signal TERM' TERM
+trap 'on_signal INT' INT
 
 # Portable timeout: poll the sync process once per second.
 TIMED_OUT=0
