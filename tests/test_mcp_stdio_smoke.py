@@ -159,14 +159,20 @@ def _assert_launches_mcp_serve(argv: list[str]) -> None:
 class StdioSession:
     """Drive one server process; record every stdout line for the purity check."""
 
-    def __init__(self, argv: list[str], stderr_path: Path) -> None:
+    def __init__(self, argv: list[str], stderr_path: Path, *, unbuffered: bool = True) -> None:
         env = dict(os.environ)
         # `uv run` would otherwise re-sync the project environment on every
         # launch: slow, network-dependent, and racy under xdist.  The test's
         # own interpreter is already that environment, so skipping the sync
         # changes nothing about the server being exercised.
         env["UV_NO_SYNC"] = "1"
-        env["PYTHONUNBUFFERED"] = "1"
+        if unbuffered:
+            env["PYTHONUNBUFFERED"] = "1"
+        else:
+            # PYTHONUNBUFFERED also makes CPython setvbuf() libc's stdout to
+            # unbuffered, which would hide native-buffering bugs that a real
+            # `kct mcp serve` (no -u) has (#5982).
+            env.pop("PYTHONUNBUFFERED", None)
         self._stderr = stderr_path.open("wb")
         self.proc = subprocess.Popen(
             argv,
@@ -414,6 +420,12 @@ def noisy(params):
         libc = ctypes.CDLL(None)
         libc.printf(b"junk-from-native\n")
         libc.fflush(None)
+    elif mode == "native-unflushed":
+        # No newline, no fflush: the bytes sit in libc's stdout buffer until
+        # something flushes it -- which must happen before fd 1 is restored,
+        # or they trail onto the JSON-RPC stream at exit (#5982).
+        libc = ctypes.CDLL(None)
+        libc.printf(b"junk-from-native-unflushed")
     return {"mode": mode}
 
 server = create_server()
@@ -425,6 +437,7 @@ FD_NOISE = {
     "fd1": "junk-from-fd1",
     "child": "junk-from-child",
     "native": "junk-from-native",
+    "native-unflushed": "junk-from-native-unflushed",
 }
 
 
@@ -432,7 +445,7 @@ def test_fd_level_stdout_writes_do_not_corrupt_transport(tmp_path):
     """Writes to fd 1 that bypass sys.stdout -- os.write, an inheriting child
     process, C-level printf -- must land on stderr, never on the transport."""
     stderr_path = tmp_path / "fd-noise.stderr"
-    session = StdioSession([sys.executable, "-c", _FD_NOISE_SERVER], stderr_path)
+    session = StdioSession([sys.executable, "-c", _FD_NOISE_SERVER], stderr_path, unbuffered=False)
     try:
         init = session.request(
             "initialize",

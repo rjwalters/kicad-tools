@@ -252,6 +252,20 @@ def _stream_fd(stream: Any) -> int | None:
         return None
 
 
+def _flush_c_stdio() -> None:
+    """Best-effort ``fflush(NULL)`` of the C library's stdio buffers.
+
+    Native code that ``printf``s without flushing leaves bytes in libc's own
+    ``stdout`` buffer, which Python's ``flush()`` never touches.  Unless they
+    are pushed out while fd 1 still points at stderr, libc writes them at
+    process exit -- after fd 1 is restored -- onto the JSON-RPC stream (#5982).
+    """
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        ctypes.CDLL(None).fflush(None)
+
+
 @contextlib.contextmanager
 def _stdio_transport() -> Iterator[TextIO]:
     """Reserve stdout for JSON-RPC frames for the duration of the block.
@@ -267,7 +281,8 @@ def _stdio_transport() -> Iterator[TextIO]:
       ``dup2``'d onto fd 2.  Writes that bypass ``sys.stdout`` -- C/C++
       ``printf``/``std::cout``, ``os.write(1, ...)``, child processes that
       inherit stdout -- then reach stderr instead of the transport (#5965).
-      fd 1 is restored on exit.
+      Python's and libc's stdio buffers are flushed while fd 1 still points
+      at stderr (#5982), then fd 1 is restored on exit.
 
     When ``sys.stdout`` is not fd 1 (an injected stream, e.g. in tests), fd 1
     is not the transport and is left alone.
@@ -305,6 +320,7 @@ def _stdio_transport() -> Iterator[TextIO]:
                     sys.stderr.flush()
                 with contextlib.suppress(Exception):
                     original.flush()
+                _flush_c_stdio()
                 os.dup2(saved_fd, 1)
         finally:
             with contextlib.suppress(Exception):
