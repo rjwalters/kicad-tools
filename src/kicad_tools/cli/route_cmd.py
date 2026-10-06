@@ -67,7 +67,7 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
 
@@ -320,6 +320,17 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
             "monopolise the budget and more nets get a turn (Python fallback "
             "skipped for capped nets)."
         )
+        if not getattr(args, "deterministic_rescue", False):
+            from kicad_tools.router.core import RELIEF_SUBSEARCH_BUDGET_S
+
+            print(
+                "[deterministic-budget] NOTE: relief-rescue probe / victim "
+                "re-land sub-searches keep their "
+                f"{RELIEF_SUBSEARCH_BUDGET_S:g}s wall clock (Issue #4730), so "
+                "a loaded or slow machine can still land different copper.  "
+                "Pass --deterministic-rescue to bound them by the per-net "
+                "iteration cap instead (Issue #5870)."
+            )
         if timeout and timeout > 0:
             print(
                 "[deterministic-budget] WARNING: --timeout "
@@ -336,6 +347,36 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
                 "generously (or omit it) so the iteration budget -- not "
                 "wall-clock -- bounds the work."
             )
+
+
+class _RescueKwargs(TypedDict, total=False):
+    """Typed ``**`` payload of :func:`_deterministic_rescue_kwargs`."""
+
+    deterministic_rescue: bool
+
+
+def _deterministic_rescue_kwargs(args) -> _RescueKwargs:
+    """Routing-entry kwargs for ``--deterministic-rescue`` (Issue #5870).
+
+    Every ``router.route_*`` call site in this module splats this.  Without
+    the flag it returns ``{}`` so the call is byte-identical to before and
+    the entry point keeps :data:`~kicad_tools.router.core.DETERMINISTIC_RESCUE_DEFAULT`
+    (``False`` -- the #4730/#4770 board-07 negative result still stands).
+    With it, ``deterministic_rescue=True`` swaps the relief rescue's 10 s
+    sub-search wall clock for the per-net node-expansion cap (#4536), which
+    only takes effect when a cap is active (``--deterministic-budget`` or
+    ``--per-net-iterations``); the router logs which arm is in force.
+
+    Measured on board 03 (Issue #5870): the victim re-land sub-searches of
+    the ``USB_CC1`` stall-relief rescue finish inside 10 s on a lightly
+    loaded box but needed 10-31 s under CPU load, so the 10 s wall clock cut
+    them only under load and the same ``--seed 42 --deterministic-budget``
+    route landed different copper (twice dropping to 22/24 nets and
+    escalating).  With the flag every loaded route matched the unloaded one.
+    """
+    if getattr(args, "deterministic_rescue", False):
+        return {"deterministic_rescue": True}
+    return _RescueKwargs()
 
 
 def _auto_fix_budget(args) -> float:
@@ -8402,6 +8443,7 @@ def route_with_layer_escalation(
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         checkpoint_callback=_checkpoint_cb,
+                        **_deterministic_rescue_kwargs(args),
                     )
                 else:
                     router.route_with_escape(
@@ -8409,6 +8451,7 @@ def route_with_layer_escalation(
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         checkpoint_callback=_checkpoint_cb,
+                        **_deterministic_rescue_kwargs(args),
                     )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
@@ -8424,19 +8467,21 @@ def route_with_layer_escalation(
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                     checkpoint_callback=_checkpoint_cb,
+                    **_deterministic_rescue_kwargs(args),
                 )
             elif args.strategy == "negotiated":
                 # Issue #4730: ``deterministic_rescue`` is deliberately NOT
-                # passed here -- and neither is it on the escape / two-phase
+                # turned on by default here -- nor on the escape / two-phase
                 # branches above.  Every one of those entry points defaults to
                 # ``DETERMINISTIC_RESCUE_DEFAULT`` (False), the documented
                 # board-07 negative result: with the deterministic bound in
                 # force board 07's copper-LVS open set changed and its
                 # routed-DRC went 8 -> 13 against an allowlist main sits
                 # exactly at.  So ``kct route`` keeps the historical wall clock
-                # on every path until that regression is understood.  All the
-                # call sites take the kwarg, so opting a board in is a one-line
-                # change here once its own A/B backs it.
+                # on every path by default.  Issue #5870 added the per-run
+                # opt-in ``--deterministic-rescue`` (``_deterministic_rescue_kwargs``,
+                # splatted into every call site here) for routes that must be
+                # load-independent; without it the kwarg is not passed at all.
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
@@ -8465,6 +8510,7 @@ def route_with_layer_escalation(
                     # Issue #3101: best-metric early-stop patience.  0
                     # disables (matches pre-#3101 behaviour).
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
+                    **_deterministic_rescue_kwargs(args),
                 )
             elif args.strategy == "basic":
                 # Issue #4697: forward the user's budgets rather than calling
@@ -9547,6 +9593,7 @@ def route_with_rule_relaxation(
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         checkpoint_callback=_checkpoint_cb,
+                        **_deterministic_rescue_kwargs(args),
                     )
                 else:
                     router.route_with_escape(
@@ -9554,6 +9601,7 @@ def route_with_rule_relaxation(
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         checkpoint_callback=_checkpoint_cb,
+                        **_deterministic_rescue_kwargs(args),
                     )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
@@ -9569,19 +9617,21 @@ def route_with_rule_relaxation(
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                     checkpoint_callback=_checkpoint_cb,
+                    **_deterministic_rescue_kwargs(args),
                 )
             elif args.strategy == "negotiated":
                 # Issue #4730: ``deterministic_rescue`` is deliberately NOT
-                # passed here -- and neither is it on the escape / two-phase
+                # turned on by default here -- nor on the escape / two-phase
                 # branches above.  Every one of those entry points defaults to
                 # ``DETERMINISTIC_RESCUE_DEFAULT`` (False), the documented
                 # board-07 negative result: with the deterministic bound in
                 # force board 07's copper-LVS open set changed and its
                 # routed-DRC went 8 -> 13 against an allowlist main sits
                 # exactly at.  So ``kct route`` keeps the historical wall clock
-                # on every path until that regression is understood.  All the
-                # call sites take the kwarg, so opting a board in is a one-line
-                # change here once its own A/B backs it.
+                # on every path by default.  Issue #5870 added the per-run
+                # opt-in ``--deterministic-rescue`` (``_deterministic_rescue_kwargs``,
+                # splatted into every call site here) for routes that must be
+                # load-independent; without it the kwarg is not passed at all.
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
@@ -9610,6 +9660,7 @@ def route_with_rule_relaxation(
                     # Issue #3101: best-metric early-stop patience.  0
                     # disables (matches pre-#3101 behaviour).
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
+                    **_deterministic_rescue_kwargs(args),
                 )
             elif args.strategy == "basic":
                 # Issue #4697: forward the user's budgets rather than calling
@@ -11926,6 +11977,7 @@ def route_with_combined_escalation(
                             timeout=_attempt_timeout,
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                             checkpoint_callback=_checkpoint_cb,
+                            **_deterministic_rescue_kwargs(args),
                         )
                     else:
                         router.route_with_escape(
@@ -11933,6 +11985,7 @@ def route_with_combined_escalation(
                             timeout=_attempt_timeout,
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                             checkpoint_callback=_checkpoint_cb,
+                            **_deterministic_rescue_kwargs(args),
                         )
                 elif getattr(args, "multi_resolution", False):
                     router.route_all_multi_resolution(
@@ -11949,6 +12002,7 @@ def route_with_combined_escalation(
                         max_iterations=getattr(args, "two_phase_iterations", None)
                         or args.iterations,
                         checkpoint_callback=_checkpoint_cb,
+                        **_deterministic_rescue_kwargs(args),
                     )
                 elif args.strategy == "negotiated":
                     router.route_all_negotiated(
@@ -11979,6 +12033,7 @@ def route_with_combined_escalation(
                         # Issue #3101: best-metric early-stop patience.  0
                         # disables (matches pre-#3101 behaviour).
                         best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
+                        **_deterministic_rescue_kwargs(args),
                     )
                 elif args.strategy == "basic":
                     # Issue #4697: forward the user's budgets rather than calling
@@ -14895,7 +14950,21 @@ def _route_parser() -> argparse.ArgumentParser:
             "iteration backstop value can be overridden by passing an explicit "
             "--max-search-iterations N alongside this flag (N is then used "
             "verbatim); see DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS for the "
-            "default."
+            "default. Relief-rescue sub-searches keep a 10 s wall clock unless "
+            "--deterministic-rescue is also passed."
+        ),
+    )
+    parser.add_argument(
+        "--deterministic-rescue",
+        action="store_true",
+        help=(
+            "Bound the stall-relief rescue's probe and victim re-land "
+            "sub-searches by the per-net node-expansion cap instead of their "
+            "10 s wall clock (Issue #5870, mechanism #4536). Only takes effect "
+            "with an active cap (--deterministic-budget or "
+            "--per-net-iterations). Off by default because it costs board 07 "
+            "routed nets (#4730/#4770); use it when the route must be "
+            "independent of machine load."
         ),
     )
     parser.add_argument(
@@ -18118,6 +18187,7 @@ def _run_main_impl(args, parser, argv) -> int:
                                     best_stall_patience=(
                                         getattr(args, "early_stop_patience", 2) or None
                                     ),
+                                    **_deterministic_rescue_kwargs(args),
                                 )
                             # Issue #4697: forward the user's budgets rather than calling
                             # route_all() bare (which tripped the #2794 no-timeout guard
@@ -18173,6 +18243,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             max_iterations=getattr(args, "two_phase_iterations", None)
                             or args.iterations,
                             checkpoint_callback=_checkpoint_cb,
+                            **_deterministic_rescue_kwargs(args),
                         )
                     elif args.strategy == "negotiated":
                         return router.route_all_negotiated(
@@ -18201,6 +18272,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             # inner main-path negotiator call so the CLI flag
                             # is honored (default 2 was silently overriding it).
                             best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
+                            **_deterministic_rescue_kwargs(args),
                         )
                     else:
                         # Issue #4697: forward the user's budgets rather than calling
@@ -18242,6 +18314,7 @@ def _run_main_impl(args, parser, argv) -> int:
                         timeout=_budgeted_timeout(args),
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         checkpoint_callback=_checkpoint_cb,
+                        **_deterministic_rescue_kwargs(args),
                     )
                     diffpair_warnings.extend(dp_warnings)
                     # Issue #4095: the escape-composed path delegates to the
@@ -18254,6 +18327,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     checkpoint_callback=_checkpoint_cb,
+                    **_deterministic_rescue_kwargs(args),
                 )
 
             # Progressive clearance relaxation mode
@@ -18279,6 +18353,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                     checkpoint_callback=_checkpoint_cb,
+                    **_deterministic_rescue_kwargs(args),
                 )
             elif args.differential_pairs and args.strategy == "negotiated":
                 # Issue #2464: Diff-pair pre-pass + negotiated for the rest.
@@ -18315,6 +18390,7 @@ def _run_main_impl(args, parser, argv) -> int:
                         # actually hits; previously the parameter silently
                         # defaulted to 2.
                         best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
+                        **_deterministic_rescue_kwargs(args),
                     )
 
                 # Issue #3321: forward --timeout so the diff-pair
@@ -18359,6 +18435,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     # the parameter silently defaulted to 2 even when the
                     # CLI passed a higher value.
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
+                    **_deterministic_rescue_kwargs(args),
                 )
             elif args.differential_pairs and args.strategy == "basic":
                 # Issue #3321: forward --timeout so the diff-pair pre-pass

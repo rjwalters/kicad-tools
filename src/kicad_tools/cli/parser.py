@@ -4047,7 +4047,22 @@ def _add_route_parser(subparsers) -> None:
             "per-net wall-clock cutoff (--per-net-timeout 0) and pins the C++ "
             "A* iteration backstop (--max-search-iterations) to a fixed "
             "node-expansion count. --timeout is kept only as a safety "
-            "backstop. Combine with --seed for byte-stable re-routes."
+            "backstop. Combine with --seed for byte-stable re-routes. "
+            "Relief-rescue sub-searches keep a 10 s wall clock unless "
+            "--deterministic-rescue is also passed."
+        ),
+    )
+    # Issue #5870: per-run opt-in for the iteration-bounded relief rescue
+    # (#4536).  Forwarded like --deterministic-budget; both sites declare it.
+    route_parser.add_argument(
+        "--deterministic-rescue",
+        action="store_true",
+        help=(
+            "Bound the stall-relief rescue's probe and victim re-land "
+            "sub-searches by the per-net node-expansion cap instead of their "
+            "10 s wall clock (Issue #5870). Needs an active cap "
+            "(--deterministic-budget or --per-net-iterations). Off by default "
+            "(#4730); use it when the route must not depend on machine load."
         ),
     )
     route_parser.add_argument("-v", "--verbose", action="store_true")

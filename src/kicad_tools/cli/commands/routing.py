@@ -686,6 +686,9 @@ def run_route_command(args) -> int:
     # per-net wall-clock cutoff and pins the iteration backstop.
     if getattr(args, "deterministic_budget", False):
         sub_argv.append("--deterministic-budget")
+    # Issue #5870: forward the relief-rescue opt-in the same way.
+    if getattr(args, "deterministic_rescue", False):
+        sub_argv.append("--deterministic-rescue")
     if args.verbose:
         sub_argv.append("--verbose")
     if args.dry_run:
