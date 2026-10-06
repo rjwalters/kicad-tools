@@ -385,3 +385,146 @@ def test_handler_stdout_writes_do_not_corrupt_transport(monkeypatch):
     assert frame["id"] == 1 and json.loads(frame["result"]["content"][0]["text"]) == {"ok": True}
     assert "progress: routing net 1/3" in stderr.getvalue()
     assert sys.stdout is stdout  # redirect is scoped to the serve loop
+
+
+# ---------------------------------------------------------------------------
+# fd-level stdout isolation (#5965)
+# ---------------------------------------------------------------------------
+
+# A real `kct mcp serve`-style server process whose `board_summary` handler is
+# swapped for one that writes to stdout *below* sys.stdout, keyed on the
+# `pcb_path` argument (the tool's schema requires that string).  Run as a
+# separate interpreter so fd 1 really is the pipe the client reads.
+_FD_NOISE_SERVER = r"""
+import ctypes
+import os
+import subprocess
+
+from kicad_tools.mcp.server import create_server
+
+def noisy(params):
+    mode = params["pcb_path"]
+    if mode == "fd1":
+        os.write(1, b"junk-from-fd1\n")
+    elif mode == "child":
+        # The child inherits the server's fd 1, exactly like a tool shelling
+        # out to kicad-cli without capturing its output.
+        subprocess.run(["echo", "junk-from-child"], check=True)
+    elif mode == "native":
+        libc = ctypes.CDLL(None)
+        libc.printf(b"junk-from-native\n")
+        libc.fflush(None)
+    return {"mode": mode}
+
+server = create_server()
+server.tools["board_summary"].handler = noisy
+server.run()
+"""
+
+FD_NOISE = {
+    "fd1": "junk-from-fd1",
+    "child": "junk-from-child",
+    "native": "junk-from-native",
+}
+
+
+def test_fd_level_stdout_writes_do_not_corrupt_transport(tmp_path):
+    """Writes to fd 1 that bypass sys.stdout -- os.write, an inheriting child
+    process, C-level printf -- must land on stderr, never on the transport."""
+    stderr_path = tmp_path / "fd-noise.stderr"
+    session = StdioSession([sys.executable, "-c", _FD_NOISE_SERVER], stderr_path)
+    try:
+        init = session.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "kct-fd-noise", "version": "0"},
+            },
+        )
+        assert "error" not in init, init
+        for mode in FD_NOISE:
+            called = session.request(
+                "tools/call", {"name": "board_summary", "arguments": {"pcb_path": mode}}
+            )
+            assert "error" not in called, called
+            assert json.loads(called["result"]["content"][0]["text"]) == {"mode": mode}
+        returncode = session.shutdown()
+    finally:
+        session.close()
+
+    stderr = stderr_path.read_text(errors="replace")
+    assert returncode == 0, stderr
+    _assert_only_jsonrpc_frames(session.raw_lines, stderr_path)
+    assert len(session.raw_lines) == 1 + len(FD_NOISE)
+    for junk in FD_NOISE.values():
+        assert junk in stderr, f"{junk!r} missing from stderr:\n{stderr}"
+
+
+def _fd_identity(fd: int) -> tuple[int, int]:
+    st = os.fstat(fd)
+    return st.st_dev, st.st_ino
+
+
+def _run_with_real_fd1(monkeypatch, handler) -> tuple[Any, Any]:
+    """Run the stdio loop with sys.stdout bound to the real fd 1."""
+    import io
+
+    from kicad_tools.mcp.server import create_server
+
+    server = create_server()
+    monkeypatch.setattr(server.tools["board_summary"], "handler", handler)
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "board_summary", "arguments": {"pcb_path": "x"}},
+    }
+    real_stdout = open(1, "w", closefd=False)  # noqa: SIM115
+    real_stderr = open(2, "w", closefd=False)  # noqa: SIM115
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request) + "\n"))
+    monkeypatch.setattr(sys, "stdout", real_stdout)
+    monkeypatch.setattr(sys, "stderr", real_stderr)
+    return server, real_stdout
+
+
+def test_fd1_restored_after_run_returns(monkeypatch, capfd):
+    def handler(params: dict[str, Any]) -> dict[str, Any]:
+        os.write(1, b"junk-from-fd1\n")
+        return {"ok": True}
+
+    before = _fd_identity(1)
+    server, real_stdout = _run_with_real_fd1(monkeypatch, handler)
+    server.run()
+
+    assert _fd_identity(1) == before
+    assert sys.stdout is real_stdout
+    os.write(1, b"after-run\n")  # fd 1 is usable and back on the original target
+    out, err = capfd.readouterr()
+    lines = out.splitlines()
+    assert len(lines) == 2, lines
+    frame = json.loads(lines[0])
+    assert frame["id"] == 1 and json.loads(frame["result"]["content"][0]["text"]) == {"ok": True}
+    assert lines[1] == "after-run"
+    assert "junk-from-fd1" in err
+
+
+def test_fd1_restored_after_run_raises(monkeypatch, capfd):
+    class Stop(BaseException):
+        """Escapes handle_request's ``except Exception`` like KeyboardInterrupt."""
+
+    def handler(params: dict[str, Any]) -> dict[str, Any]:
+        os.write(1, b"junk-before-raise\n")
+        raise Stop
+
+    before = _fd_identity(1)
+    server, real_stdout = _run_with_real_fd1(monkeypatch, handler)
+    with pytest.raises(Stop):
+        server.run()
+
+    assert _fd_identity(1) == before
+    assert sys.stdout is real_stdout
+    os.write(1, b"after-raise\n")
+    out, err = capfd.readouterr()
+    assert out == "after-raise\n"
+    assert "junk-before-raise" in err
