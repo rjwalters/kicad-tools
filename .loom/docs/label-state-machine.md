@@ -99,6 +99,8 @@ says so, and no role applies it).
   daemon relays a loom-ui star intent; Builder copies it onto the PR it opens;
   `create-issue.sh --parent N` stars a new child of a starred N (audit comment
   `inherited_from=#N`). Never propagated: holds, claim/lifecycle labels, `loom:heavy`, `points:*`.
+  Only the star, `external` and (as a default) `tier:*` travel to children;
+  the table and full never-list: `daemon-reference.md` → "What travels to children".
 - **Starred first, every stage.** Curator curates starred issues first (a
   starred issue with no workflow label counts as `loom:triage`) and promotes
   them straight to `loom:issue`, because the star is the Tier-3 approval. A

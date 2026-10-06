@@ -2546,6 +2546,26 @@ blocker reads count), and a child of
 several starred issues takes the earliest starred-at. This is the in-memory
 ordering only; the label itself is not written yet.
 
+**What travels to children (#10012 §6).** One table in code
+(`star_liveness::propagation_rules`) says which labels go from a parent to
+its children, always downward. The star goes to child issues and their PRs and
+is removed with the parent's star. `external` goes to child issues and is
+removed when no ancestor carries it any more, so a child of an unapproved
+outside submission cannot get past the maintainer gate. A `tier:*` label is
+only a default: the child gets the nearest tiered ancestor's tier when it has
+none of its own. Propagation never overwrites a child's tier and never removes
+one. Removal only takes off a copy that propagation put there, never one a
+human put on the child, and never after an incomplete walk. The
+`<!-- loom:main-red-fix -->` body marker is copied once, by
+`create-issue.sh --parent`; no pass edits bodies. **Never propagate**: holds
+(`loom:blocked`, `loom:operator`, `loom:operator-only` and its sub-kinds,
+`loom:needs-capability`), claim, lifecycle and PR-lane labels, proposal kinds,
+`loom:epic-phase`, `loom:heavy`, `points:*`, the retired `loom:urgent`, and the
+#10307 level labels, which reach blockers by their own pass. A unit test fails
+when a `defaults/labels.json` label is in neither the table nor the
+never-propagate list. The table is the rule set only. The pass that writes
+these labels is not built yet.
+
 **loom-ui stars.** The `/ingest` ack may carry `operator_priority_intents`
 (`defaults/docs/telemetry-schema.md`). The pass applies each valid one (the one
 label, a managed repo, a `requested_by`) idempotently with one audit comment;
@@ -2968,6 +2988,7 @@ rules with `git check-ignore`.
 | `autonomous.eta.historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` — `local` (this host's journals), `augment` (plus the cached fleet snapshot) or `fleet` (the snapshot alone). A no-op until a snapshot is cached (#9343); since #10263 the fleet refresh task below caches one by default, so live estimates switch to `scope = fleet` on a host with reader Apps. `local` opts out |
 | `autonomous.eta.fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily coefficient refit (#10245). It checks hourly, fits at most once per UTC day into `.loom/state/eta/fit/`, makes no forge call, and runs only with `autonomous.eta.enabled`. A no-op until a snapshot is cached. With `fleetRefresh.enabled` (below, #10263) the check runs at the end of every fleet refresh cycle instead of on its own task, so it always sees fresh snapshots. Read at start |
 | `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
+| `autonomous.eta.shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `10` registered heuristics per kind (floor 1, #10525). A build over it does not start the ETA tracker; the error names the excess heuristics. Read at start. See [eta → shadow fleet management](eta.md#shadow-fleet-management) |
 | `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. **Restart required**. **On a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
 | `fleet.etaAuthority` | `LOOM_ETA_AUTHORITY` | unset (#10498). The one host that computes and emits `eta.*` records and fits locally. Unset: the declared `fleet.captain`, else the host whose own `fleetRefresh.enabled` is on; several candidates fall back to the lowest host id with a warning. Re-read every pass. See [eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498) |
 | `autonomous.eta.fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor `900`); first cycle 120 s after start |
@@ -7484,11 +7505,13 @@ rate-limit signature, so it never trips the breaker. A shed books an
 `info` line per operation at most every 300 s (the rest at `debug`), and
 `intake_reconcile` reports a shed listing as a skipped pass, not a failure.
 Classified sites:
-Hygiene — `worktree.issue_state`, `worktree.issue_state_rest`,
-`worktree.issue_closed_at`, `worktree.has_open_pr`, `clean.pr_list`,
+Hygiene — `worktree.issue_state`, `worktree.has_open_pr`, `clean.pr_list`,
 `clean.pr_by_number_rest`, `clean.pr_status_rest`, `worktree.landed_pulls`,
 `intake.list_open`; Observability — `stage_dwell`'s `api.rest`,
-`visibility.repo`, `telemetry.repo_identity`. Nothing under `sweep_registry/`,
+`telemetry.repo_identity`. `worktree.issue_state_rest`,
+`worktree.issue_closed_at` and `visibility.repo` are conditional reads
+through the shared ETag store (#10512) and route as `Gate` — not shed, but
+mostly free `304`s. Nothing under `sweep_registry/`,
 `claim_reconciliation`, `merge_*`, verdict, quarantine or reclaim, nor
 `forge_check_claim`, `cli/lease_co_occupancy`, `role_runner/roster`,
 `worktree_reaper` or `primary_checkout_reaper`, is ever anything but `Gate`
@@ -7509,7 +7532,7 @@ A `Gate` read always confirms on the writer, and the reader is not withdrawn.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `LOOM_FACADE_CWD_ROUTING` | on | `0` disables the derivation: every untargeted read stays on the writer. Typed reads keep the class-aware chain, so a typed `Observability` read (`visibility.repo`, `telemetry.repo_identity`) can still be shed. Read on every call. |
+| `LOOM_FACADE_CWD_ROUTING` | on | `0` disables the derivation: every untargeted read stays on the writer. Typed reads keep the class-aware chain, so a typed `Observability` read (`telemetry.repo_identity`) can still be shed. Read on every call. |
 | `LOOM_READ_SHED` | on | `0` treats every read as `Gate`: no shed and no gone-memo shortcut, so `Hygiene`/`Observability` reads fall back to the writer. Derivation stays on. Read on every call. |
 | `LOOM_READ_ROUTING` | `v2` | `legacy` is the only exact revert: the pre-W4 path (no derivation, no classes, no reserve, the unconditional reader → writer fallback), and it reverts W4-A's scoped withdrawal and W4-B's split and spill with it. `LOOM_FACADE_CWD_ROUTING=0` plus `LOOM_READ_SHED=0` together restore W4-C's load placement only (untargeted reads on the writer, nothing shed), keeping W4-A/W4-B, the retry on the next reader and the writer pins. Read on every call. |
 

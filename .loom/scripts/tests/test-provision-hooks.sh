@@ -620,6 +620,52 @@ assert_contains "$CMD24" "bash -c '" "machine-level entry is still the bash -c w
 [[ "$CMD24" != *'"${CLAUDE_PROJECT_DIR}'* ]] && pass "machine-level wrapper does not use the project-level \${CLAUDE_PROJECT_DIR} quoting form at all" \
     || fail "machine-level wrapper unexpectedly picked up the project-level quoting form"
 
+# ── Test 25: the SessionStart gh front (#10516) ──────────────────────────────
+echo "Test 25: SessionStart gh-front-env.sh — wired once, operator entries kept, removed by deprovision, stub fail-open + stdout-silent (#10516)"
+HOME25=$(mktemp -d); mkdir -p "$HOME25/.claude"
+cat > "$HOME25/.claude/settings.json" <<'EOF'
+{ "hooks": { "SessionStart": [ { "matcher": "startup", "hooks": [
+  { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/skills/repo/hooks/session-start-handoff.sh" }
+] } ] } }
+EOF
+S25="$HOME25/.claude/settings.json"
+provision_loom_hooks "$HOME25/.claude" >/dev/null 2>&1
+provision_loom_hooks "$HOME25/.claude" >/dev/null 2>&1
+assert_eq "$(count_marker "$S25" gh-front-env.sh)" "1" "gh-front-env.sh wired exactly once after two provisions"
+assert_eq "$(jq -r '[.hooks.SessionStart[] | select(any(.hooks[]?; .command | contains("defaults/hooks/gh-front-env.sh"))) | .matcher] == [""]' "$S25")" "true" "wired under matcher \"\" (startup, resume, clear, compact)"
+HANDOFF25='[.hooks.SessionStart[]? | .hooks[]? | .command | select(contains("session-start-handoff.sh"))] | length'
+assert_eq "$(jq -r "$HANDOFF25" "$S25")" "1" "operator's own SessionStart entry preserved"
+deprovision_loom_hooks "$HOME25/.claude" >/dev/null 2>&1
+assert_eq "$(count_marker "$S25" gh-front-env.sh)" "0" "deprovision removed the SessionStart entry"
+assert_eq "$(jq -r "$HANDOFF25" "$S25")" "1" "operator's SessionStart entry survives deprovision"
+# The stub itself: whatever the daemon prints, the hook prints
+# nothing on stdout (SessionStart stdout reaches the model) and exits 0.
+CHK25=$(mktemp -d); mkdir -p "$CHK25/defaults/hooks"
+cp "$REPO_ROOT/defaults/hooks/gh-front-env.sh" "$CHK25/defaults/hooks/"
+ln -s "$REPO_ROOT/defaults/scripts" "$CHK25/defaults/scripts"
+FAKE25="$CHK25/fake-daemon"
+ARGV25="$CHK25/argv"
+# A fake daemon: `--version` answers the preflight (FAKEVER25), anything else
+# is logged with LOOM_PROJECT_ROOT and prints stdout noise the hook must swallow.
+printf '#!/bin/sh\n[ "$1" = --version ] && { echo "loom-daemon $FAKEVER25"; exit 0; }\necho "$*|$LOOM_PROJECT_ROOT" >> "%s"\necho STDOUT-NOISE\n' "$ARGV25" > "$FAKE25"
+chmod +x "$FAKE25"
+WS25=$(mktemp -d)
+out=$(cd "$WS25" && FAKEVER25=99.0.0 LOOM_DAEMON_SELF_BIN="$FAKE25" LOOM_PROJECT_ROOT="$WS25" bash "$CHK25/defaults/hooks/gh-front-env.sh" </dev/null 2>/dev/null); rc=$?
+assert_eq "$out|$rc" "|0" "stub is stdout-silent and exits 0 even when the daemon prints on stdout"
+assert_eq "$(cat "$ARGV25" 2>/dev/null)" "gh-shim session-env|$WS25" "stub runs \`gh-shim session-env\` with LOOM_PROJECT_ROOT"
+: > "$ARGV25"
+out=$(cd "$WS25" && FAKEVER25=0.1.0 LOOM_DAEMON_SELF_BIN="$FAKE25" bash "$CHK25/defaults/hooks/gh-front-env.sh" </dev/null 2>/dev/null); rc=$?
+assert_eq "$out|$rc|$(cat "$ARGV25")" "|0|" "a daemon below the declared floor is refused by the preflight: exit 0, never called"
+NOLIB25=$(mktemp -d); cp "$REPO_ROOT/defaults/hooks/gh-front-env.sh" "$NOLIB25/"
+out=$(LOOM_DAEMON_SELF_BIN="$FAKE25" bash "$NOLIB25/gh-front-env.sh" </dev/null 2>&1); rc=$?
+assert_eq "$out|$rc" "|0" "no daemon library -> silent exit 0"
+# Through the wired wrapper: a non-Loom repo never reaches the stub.
+CMD25=$(_phook_cmd gh-front-env.sh)
+NONLOOM25=$(mktemp -d); git -C "$NONLOOM25" init -q
+: > "$ARGV25"
+out=$(cd "$NONLOOM25" && LOOM_HOME="$CHK25" LOOM_DAEMON_SELF_BIN="$FAKE25" bash -c "$CMD25" </dev/null 2>&1); rc=$?
+assert_eq "$out|$rc|$(cat "$ARGV25")" "|0|" "non-Loom repo: the wrapper never runs the stub (PATH untouched)"
+
 echo ""
 echo "======================================"
 echo "test-provision-hooks.sh: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

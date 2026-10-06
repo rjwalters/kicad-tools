@@ -234,7 +234,30 @@ degrades to that real `gh`.
 
 - **Escape hatch**: `LOOM_GH_NO_CACHE=1` (also `GH_CACHE_DISABLE=1`) forces a
   real call. Env-only: there is no `--fresh` flag, since plain `gh` rejects it (#3547).
-- **Opt out of the shim**: `LOOM_GH_SHIM=0` at worker spawn.
+- **Opt out of the shim**: `LOOM_GH_SHIM=0` at worker spawn or session start.
+- **Interactive sessions (#10516)**: a `SessionStart` hook
+  (`defaults/hooks/gh-front-env.sh`, wired user-scope by
+  `scripts/install/provision-hooks.sh` with matcher `""`) runs
+  `loom-daemon gh-shim session-env`. That appends one guarded `PATH` line to
+  `$CLAUDE_ENV_FILE`, in the worker's order (`agent_gh::session_path`):
+  - the managed launcher first when a policy names one;
+  - then the front;
+  - then the session's existing `PATH`, so the 2am telemetry shim stays the front's next `gh`.
+
+  Claude Code sources that file before every Bash call, and Task subagents
+  inherit it. This was verified on Claude Code 2.1.291. A `SubagentStart` hook
+  gets no `CLAUDE_ENV_FILE`, so it is not used.
+
+  The hook only runs in a Loom workspace on GitHub. It is fail-open and prints
+  nothing on stdout. It never appends twice, and the line skips the prepend
+  when `PATH` already starts with the prefix, as it does for a dispatched
+  worker.
+- **Under a policy**: the launcher execs its pinned upstream `gh`, so the
+  front is bypassed. Workers behave the same way.
+- **Self-check**: inside a session, `loom-daemon gh-shim status` prints
+  `front|launcher|bypassed: <gh>` and exits 1 only for `bypassed`. The
+  `gh-front-wired` install self-check invariant flags a host whose user-scope
+  hooks predate the entry; `loom update` re-provisions it.
 - **Reader App**: reads route to a configured reader App through
   `forge_etag_store::fetch_conditional` (#9537); with none configured nothing
   changes. Passthrough reads are tracked as follow-up work.

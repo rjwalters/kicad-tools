@@ -47,6 +47,14 @@
 # whether to use it verbatim (a static `Environment=PATH=` line) or prepend
 # it onto an inherited `$PATH` (an interactive/login-adjacent shell that
 # might already have something useful earlier in `$PATH`).
+#
+# MANAGED `gh` LAUNCHER (#9987): on a forge-egress-policy-governed host the
+# directory of `toolchain.launcherPath` goes FIRST on every PATH Loom renders
+# for something that runs `gh`. That prefix is policy-derived, so it is never
+# part of this constant; the render sites that need it are all in Rust now
+# (`daemon-start`'s resolve_plist_path, `spawn-worker`, the fleet drain's
+# local `gh`) and apply it via `path_bootstrap::with_managed_launcher_dir`.
+# No policy: the rendered PATH is exactly this function's output.
 canonical_daemon_path() {
     printf '%s' "${HOME}/.local/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }

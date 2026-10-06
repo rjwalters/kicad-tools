@@ -2200,6 +2200,7 @@ snapshot. Each alternate:
 | Field | Type | Notes |
 |---|---|---|
 | `heuristic` | string | e.g. `land-2026-10-04-twin-otter` |
+| `tier` | string, optional | `baseline` or `candidate` (#10525); the ETA chooser offers only `candidate`. Absent only for an id the emitting build does not know, or from a build before tiers |
 | `estimate_id` | string | that heuristic's own `eta.estimate` id, for "why this ETA?" |
 | `as_of` | RFC 3339 | the alternate's own `as_of`, which may differ from the row's; the ETA anchor for `p50` |
 | `p25` / `p50` / `p75` / `p90` | integer, optional | remaining seconds from the alternate's `as_of`. Absent on a refusal (the `p25`/`p50`/`p75` triple is all-or-nothing) |
@@ -2714,7 +2715,7 @@ telemetry journal shares.
 The write is best-effort like its siblings: a failure is logged and swallowed,
 and can never change whether a role keeps ticking. The emit runs inside the
 tick's existing blocking task, costs one local `git remote get-url origin`, the
-300s-TTL-memoized visibility probe, and a single pass over the tick's own
+1h-TTL-memoized visibility probe (a conditional read, #10512), and a single pass over the tick's own
 transcripts (folding token usage and forge actions together rather than reading
 each file twice).
 
