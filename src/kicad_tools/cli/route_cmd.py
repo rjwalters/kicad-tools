@@ -1889,6 +1889,19 @@ def _stash_unrouted_diagnosis(router: "Autorouter", args) -> None:
         return
     nets = getattr(router, "nets", None) or {}
     multi_pad = {n for n, pads in nets.items() if n > 0 and len(pads) >= 2}
+    # Mirror the JSON report's notion of "unrouted"
+    # (``get_routing_diagnostics_json``) so no budget is spent on a net the
+    # report will not list: with a placement disposition, only its eligible
+    # nets are targets, and retained ``--preserve-existing`` copper counts as
+    # connecting.
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    disposition = getattr(router, "placement_disposition", None)
+    if not isinstance(disposition, RoutingPlacementDisposition):
+        disposition = None
+    if disposition is not None:
+        net_names = getattr(router, "net_names", None) or {}
+        multi_pad = {n for n in multi_pad if net_names.get(n) in disposition.eligible_nets}
     routed = {route.net for route in getattr(router, "routes", [])}
     unrouted = multi_pad - routed
     # Partial = routed nets whose copper does not join all their pads, judged
@@ -1897,13 +1910,19 @@ def _stash_unrouted_diagnosis(router: "Autorouter", args) -> None:
     partial: set[int] = set()
     failed = {int(f.net) for f in getattr(router, "routing_failures", [])}
     candidates = (failed & multi_pad & routed) - unrouted
+    preserved = list(getattr(router, "existing_routes", []) or []) if disposition else []
+    if preserved:
+        # Retained copper alone may complete a net the router never touched.
+        candidates |= unrouted & {route.net for route in preserved}
     if candidates:
         from kicad_tools.router.observability import validate_net_connectivity
 
         pads = getattr(router, "pads", {}) or {}
         net_pads = {n: [pads[k] for k in nets[n] if k in pads] for n in candidates}
-        connectivity = validate_net_connectivity(list(router.routes), net_pads)
-        partial = {n for n, info in connectivity.items() if not info.get("connected", True)}
+        connectivity = validate_net_connectivity(list(router.routes) + preserved, net_pads)
+        connected = {n for n, info in connectivity.items() if info.get("connected", True)}
+        unrouted -= connected
+        partial = {n for n in candidates - connected if n in routed}
     if not unrouted and not partial:
         return
     from kicad_tools.router.unrouted_cause import diagnose_unrouted

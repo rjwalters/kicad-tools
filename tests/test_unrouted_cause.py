@@ -87,17 +87,6 @@ def _route(router: Autorouter) -> set[int]:
     return {n for n, pads in router.nets.items() if n > 0 and len(pads) >= 2} - routed
 
 
-def _grid_state(router: Autorouter) -> tuple:
-    grid = router.grid
-    cpp = getattr(grid, "_cpp_grid", None)
-    return (
-        np.array(grid._blocked, copy=True),
-        np.array(grid._net, copy=True),
-        sorted(id(r) for r in grid.routes),
-        cpp._impl.count_blocked() if cpp is not None else None,
-    )
-
-
 # ---------------------------------------------------------------------------
 # The two classes
 # ---------------------------------------------------------------------------
@@ -162,29 +151,131 @@ def test_two_net_crossing_on_one_layer_is_congested(force_python: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _dense_router(force_python: bool, seed: int = 2) -> Autorouter:
+    """Many short nets on one routable layer, so committed routes' clearance
+    halos overlap each other and the pads' halos.
+
+    Lifting and re-adding routes through ``resync_route_occupancy`` re-derives
+    the owner of those shared cells from the current route order, so this
+    fixture is what exposes a restore that is not exact (#6002 review).
+    """
+    import random
+
+    rnd = random.Random(seed)
+    router = Autorouter(10, 10, rules=DesignRules(**RULES), force_python=force_python)
+    for net in range(1, 13):
+        for k in range(rnd.choice([2, 2, 3])):
+            x = round(rnd.uniform(1, 9), 1)
+            y = round(rnd.uniform(1, 9), 1)
+            router.add_component(
+                f"U{net}_{k}", [{"number": "1", "x": x, "y": y, "net": net, "net_name": f"N{net}"}]
+            )
+    router.add_obstacle(5.0, 5.0, 10.0, 10.0, Layer.B_CU)  # one routable layer
+    return router
+
+
+_CPP_CELL_FIELDS = (
+    "blocked",
+    "net",
+    "usage_count",
+    "is_obstacle",
+    "is_zone",
+    "pad_blocked",
+    "original_net",
+    "static_blocked",
+    "avoidance_cost",
+)
+
+
+def _full_grid_snapshot(router: Autorouter) -> tuple:
+    """Every ndarray on the Python grid, every per-cell C++ field, the routes."""
+    grid = router.grid
+    planes = {
+        name: np.array(value, copy=True)
+        for name, value in vars(grid).items()
+        if isinstance(value, np.ndarray)
+    }
+    counted = getattr(grid, "_congestion_counted", None)
+    planes["_congestion_counted"] = None if counted is None else np.array(counted, copy=True)
+    cpp = getattr(grid, "_cpp_grid", None)
+    cells = None
+    if cpp is not None:
+        impl = cpp._impl
+        cells = [
+            tuple(getattr(cell, f) for f in _CPP_CELL_FIELDS)
+            for layer in range(grid.num_layers)
+            for y in range(grid.rows)
+            for x in range(grid.cols)
+            for cell in [impl.at(x, y, layer)]
+        ]
+    return planes, cells, [id(r) for r in grid.routes]
+
+
+def _assert_snapshots_equal(before: tuple, after: tuple) -> None:
+    planes_b, cells_b, routes_b = before
+    planes_a, cells_a, routes_a = after
+    assert planes_b.keys() == planes_a.keys()
+    changed = {}
+    for name, value in planes_b.items():
+        other = planes_a[name]
+        if value is None or other is None:
+            if value is not other:
+                changed[name] = "None-ness differs"
+        elif not np.array_equal(value, other):
+            changed[name] = int((value != other).sum())
+    assert not changed, f"Python grid planes not restored exactly: {changed}"
+    if cells_b is not None:
+        diff = sum(1 for p, q in zip(cells_b, cells_a, strict=True) if p != q)
+        assert diff == 0, f"{diff} C++ grid cells not restored exactly"
+    assert routes_b == routes_a, "grid.routes order/membership not restored"
+
+
 @pytest.mark.parametrize("force_python", BACKENDS)
 def test_grid_and_witness_journal_are_restored(force_python: bool) -> None:
-    router = _crossing_router(force_python)
+    router = _dense_router(force_python)
     unrouted = _route(router)
-    assert router.grid.routes, "fixture sanity: the winning net's copper is on the grid"
+    assert len(router.grid.routes) >= 2, "fixture sanity: several overlapping routes"
+    assert unrouted, "fixture sanity: something is left to diagnose"
     journal: list[tuple[str, object]] = []
 
     def observer(event: str, route: object) -> None:
         journal.append((event, route))
 
     router.grid.commit_observer = observer
-    before = _grid_state(router)
+    generation = router.grid.occupancy_generation
+    before = _full_grid_snapshot(router)
 
     diagnosis = diagnose_unrouted(router, unrouted)
 
-    after = _grid_state(router)
+    after = _full_grid_snapshot(router)
     assert diagnosis is not None and diagnosis.routes_lifted == len(router.grid.routes)
-    assert np.array_equal(before[0], after[0]), "blocked plane not restored"
-    assert np.array_equal(before[1], after[1]), "net plane not restored"
-    assert before[2] == after[2], "grid.routes membership not restored"
-    assert before[3] == after[3], "C++ grid occupancy not restored"
+    _assert_snapshots_equal(before, after)
+    assert router.grid.occupancy_generation > generation, "occupancy caches not invalidated"
     assert journal == [], "the diagnosis leaked lift/restore events into the witness journal"
     assert router.grid.commit_observer is observer
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_grid_is_restored_exactly_when_diagnosis_raises(
+    force_python: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kicad_tools.router.unrouted_cause as uc
+
+    router = _dense_router(force_python)
+    unrouted = _route(router)
+    assert len(router.grid.routes) >= 2, "fixture sanity: several overlapping routes"
+    before = _full_grid_snapshot(router)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(uc, "_contenders", boom)
+    monkeypatch.setattr(uc, "_blocked_report", boom)
+    routed = {route.net for route in router.routes}
+    with pytest.raises(RuntimeError, match="boom"):
+        diagnose_unrouted(router, unrouted | routed)
+
+    _assert_snapshots_equal(before, _full_grid_snapshot(router))
 
 
 def test_exhausted_budget_reports_unclassified_not_a_guess() -> None:
@@ -321,3 +412,39 @@ def test_cli_stash_diagnoses_the_missing_edge_of_a_partial_net() -> None:
     doc = get_routing_diagnostics_json(router, {"SIG": 1}, 1)
     assert [e["cause"] for e in doc["unrouted"]] == ["blocked"]
     assert doc["unrouted_diagnosis"]["connections"] == 1
+
+
+def test_cli_stash_skips_nets_outside_the_placement_disposition() -> None:
+    """With a disposition, only its eligible nets are diagnosed (as in the report)."""
+    from kicad_tools.cli.route_cmd import _stash_unrouted_diagnosis
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    router = _boxed_pad_router(force_python=True)
+    _route(router)
+    router.placement_disposition = RoutingPlacementDisposition(requested_nets=frozenset())
+
+    _stash_unrouted_diagnosis(router, _args())
+
+    assert router.unrouted_diagnosis is None
+
+
+def test_cli_stash_treats_preserved_copper_as_connecting() -> None:
+    """A net joined only by retained ``--preserve-existing`` copper is not unrouted."""
+    from kicad_tools.cli.route_cmd import _stash_unrouted_diagnosis
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _boxed_pad_router(force_python=True)
+    assert _route(router) == {1}, "fixture sanity: the boxed pad fails to route"
+    router.placement_disposition = RoutingPlacementDisposition(requested_nets=frozenset({"SIG"}))
+    router.existing_routes = [
+        Route(
+            net=1,
+            net_name="SIG",
+            segments=[Segment(3.0, 5.0, 9.0, 5.0, 0.2, Layer.F_CU, net=1, net_name="SIG")],
+        )
+    ]
+
+    _stash_unrouted_diagnosis(router, _args())
+
+    assert router.unrouted_diagnosis is None

@@ -892,8 +892,12 @@ When `kct route --format json` leaves connections unrouted, the document adds an
 
 The classifier lifts all committed routes off the routing grid and then runs
 the router's own A* once per connection. Pads, keepouts, pours and the
-board-edge keepout stay in place. Afterwards it restores the routes exactly,
-so the routed board is unaffected. The pass has a total time limit
+board-edge keepout stay in place. Afterwards it re-adds the routes and copies
+back the occupancy planes it snapshotted before the lift, so the routing grid
+ends bit-identical and the routed board is unaffected. Only nets the JSON
+report would list as unrouted are searched: with a placement disposition, just
+its eligible nets, and copper retained by `--preserve-existing` counts as
+connecting. The pass has a total time limit
 (`--diagnose-unrouted-budget`) and a per-connection search cap of 5 s. It shows
 up as its own `unrouted-diagnosis` stage in the route deadline supervisor and
 in `scripts/research/route_phase_profile.py`. A one-line summary goes to

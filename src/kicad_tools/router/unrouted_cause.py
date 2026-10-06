@@ -22,8 +22,11 @@ routing:
    windows, finds the endpoint whose reachable region is closed off; the
    objects on that region's boundary -- the search frontier -- are the
    ``blockers`` (pad, keepout, board edge, pour, ...).
-5. The committed copper is put back exactly (same resync path), in a
-   ``finally`` so an exception cannot leave the grid half-lifted.
+5. The committed copper is put back (same resync path) and the occupancy
+   planes snapshotted before the lift are copied back over the result, so
+   the grid -- every Python plane and every C++ cell -- ends bit-identical
+   to how it started.  This runs in a ``finally`` so an exception cannot
+   leave the grid half-lifted.
 
 The pass is bounded: a total wall-clock budget, and a per-connection search
 cap.  A connection the budget never reached, or whose solo search ran into its
@@ -240,6 +243,16 @@ class _CopperLift:
     for the duration so the diagnostic leaves no trace in the replay, and the
     pathfinder's crossing-cost segment cache (#1250) is emptied so the solo
     search is priced as if the board were empty of signal copper.
+
+    ``resync_route_occupancy`` re-derives the owner of every cell a route
+    touches from the *current* route order, so lifting and re-adding the
+    routes is not by itself an exact inverse: overlapping clearance halos and
+    pad-halo cells can change owner, and the congestion planes can drift.
+    The four occupancy planes it writes (``_blocked``, ``_net``,
+    ``_congestion``, ``_congestion_counted``) are therefore snapshotted on
+    entry and copied back on exit -- the same pattern as
+    :class:`~kicad_tools.router.grid.RoutedNetsUnblocker`.  The paired C++
+    grid is already restored exactly by the re-add.
     """
 
     def __init__(self, router: Autorouter) -> None:
@@ -247,12 +260,21 @@ class _CopperLift:
         self._grid = router.grid
         self._routes: list[Route] = []
         self._observer: Any = None
+        self._saved_blocked: Any = None
+        self._saved_net: Any = None
+        self._saved_congestion: Any = None
+        self._saved_congestion_counted: Any = None
 
     def __enter__(self) -> _CopperLift:
         grid = self._grid
         self._routes = list(getattr(grid, "routes", []) or [])
         self._observer = getattr(grid, "commit_observer", None)
         grid.commit_observer = None
+        self._saved_blocked = grid._blocked.copy()
+        self._saved_net = grid._net.copy()
+        self._saved_congestion = grid._congestion.copy()
+        counted = getattr(grid, "_congestion_counted", None)
+        self._saved_congestion_counted = None if counted is None else counted.copy()
         if self._routes:
             grid.resync_route_occupancy([(route, None) for route in self._routes])
         pathfinder = self._router.router
@@ -269,6 +291,13 @@ class _CopperLift:
         try:
             if self._routes:
                 grid.resync_route_occupancy([(None, route) for route in self._routes])
+            # Exact restore of the Python occupancy planes (see class doc).
+            if self._saved_blocked is not None:
+                grid._blocked[...] = self._saved_blocked
+                grid._net[...] = self._saved_net
+                grid._congestion[...] = self._saved_congestion
+                grid._congestion_counted = self._saved_congestion_counted
+                grid.bump_occupancy_generation()  # Issue #4794
             pathfinder = self._router.router
             if hasattr(pathfinder, "add_routed_segments"):
                 for route in grid.routes:
