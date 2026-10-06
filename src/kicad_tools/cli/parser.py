@@ -7194,6 +7194,59 @@ def _add_audit_parser(subparsers) -> None:
             "fire on routed boards (Issue #2684)."
         ),
     )
+    # HV / isolation (creepage) audit flags, mirrored from audit_cmd.main
+    # (Issue #4333). Before issue #5979 they were only reachable through the
+    # standalone audit_cmd parser, so `kct audit --hv-standard ...` -- the
+    # manufacturing-readiness skill's Gate 4 -- was rejected by `kct`.
+    audit_parser.add_argument(
+        "--hv-net-class",
+        dest="audit_hv_net_class",
+        default="HV",
+        help="Net class treated as the HV group for the isolation audit (default: HV)",
+    )
+    audit_parser.add_argument(
+        "--hv-min",
+        dest="audit_hv_min",
+        type=float,
+        default=None,
+        help=(
+            "Manual required creepage (surface-path) distance in mm. When "
+            "combined with --hv-standard the stricter creepage bound governs."
+        ),
+    )
+    audit_parser.add_argument(
+        "--hv-standard",
+        dest="audit_hv_standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage AND clearance from an IEC standard "
+            "table instead of --hv-min. Requires --hv-working-voltage and "
+            "--hv-pollution-degree. Engineering aid, NOT a certification."
+        ),
+    )
+    audit_parser.add_argument(
+        "--hv-working-voltage",
+        dest="audit_hv_working_voltage",
+        type=float,
+        default=None,
+        help="RMS working voltage in volts (required with --hv-standard).",
+    )
+    audit_parser.add_argument(
+        "--hv-pollution-degree",
+        dest="audit_hv_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="IEC pollution degree 1/2/3 (required with --hv-standard).",
+    )
+    audit_parser.add_argument(
+        "--hv-material-group",
+        dest="audit_hv_material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
+    )
 
 
 def _add_suggest_parser(subparsers) -> None:

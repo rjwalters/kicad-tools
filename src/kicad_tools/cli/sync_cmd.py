@@ -19,6 +19,19 @@ import json
 import sys
 
 
+def apply_guard_error(apply: bool, dry_run: bool, confirm: bool) -> str | None:
+    """Return why an ``--apply`` request must be refused, or ``None`` if it may run.
+
+    ``--apply`` rewrites the PCB, so it needs an explicit safety flag:
+    ``--dry-run`` to preview or ``--confirm`` to write. This runs after
+    argparse, so the parser cannot report it. ``main`` and the agent-guide
+    command test (``tests/test_agent_guide_commands.py``) both call this.
+    """
+    if apply and not (dry_run or confirm):
+        return "--apply requires either --dry-run or --confirm"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kct sync command."""
     import argparse
@@ -109,11 +122,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Validate apply mode requires either --dry-run or --confirm
-    if args.apply and not args.dry_run and not args.confirm:
-        print(
-            "Error: --apply requires either --dry-run or --confirm",
-            file=sys.stderr,
-        )
+    guard_error = apply_guard_error(args.apply, args.dry_run, args.confirm)
+    if guard_error:
+        print(f"Error: {guard_error}", file=sys.stderr)
         return 1
 
     # Build reconciler kwargs

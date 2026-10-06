@@ -499,3 +499,58 @@ class TestVerdictRollup:
         )
         monkeypatch.setattr(audit_cmd.ManufacturingAudit, "run", lambda self: ok_result)
         assert audit_cmd.main([str(pcb), "--skip-erc"]) == 0
+
+
+class TestKctAuditForwardsHvFlags:
+    """``kct audit`` must accept and forward the HV flags (issue #5979).
+
+    They were defined only on ``audit_cmd``'s standalone parser, so the
+    manufacturing-readiness skill's Gate 4 (``kct audit --hv-standard ...``)
+    was rejected by the top-level ``kct`` parser.
+    """
+
+    def _forwarded(self, monkeypatch, argv: list[str]) -> list[str]:
+        from kicad_tools.cli import main
+
+        seen: list[list[str]] = []
+        monkeypatch.setattr(audit_cmd, "main", lambda sub_argv: seen.append(sub_argv) or 0)
+        assert main(["audit", *argv]) == 0
+        return seen[0]
+
+    def test_hv_flags_are_forwarded(self, monkeypatch):
+        sub_argv = self._forwarded(
+            monkeypatch,
+            [
+                "b.kicad_pcb",
+                "--hv-standard",
+                "iec62368",
+                "--hv-working-voltage",
+                "230",
+                "--hv-pollution-degree",
+                "3",
+                "--hv-material-group",
+                "II",
+                "--hv-min",
+                "6.4",
+                "--hv-net-class",
+                "MAINS",
+            ],
+        )
+        assert sub_argv == [
+            "b.kicad_pcb",
+            "--hv-net-class",
+            "MAINS",
+            "--hv-min",
+            "6.4",
+            "--hv-standard",
+            "iec62368",
+            "--hv-working-voltage",
+            "230.0",
+            "--hv-pollution-degree",
+            "3",
+            "--hv-material-group",
+            "II",
+        ]
+
+    def test_defaults_forward_nothing(self, monkeypatch):
+        assert self._forwarded(monkeypatch, ["b.kicad_pcb"]) == ["b.kicad_pcb"]
