@@ -47,14 +47,15 @@ WORKTREE_PATH="${1:-$PWD}"
 SYNC_CMD=(uv sync --frozen --extra dev)
 SYNC_CMD_TEXT="uv sync --frozen --extra dev"
 
-SYNC_TIMEOUT="${POST_WORKTREE_SYNC_TIMEOUT:-600}"
-# Normalise to base 10 before any arithmetic: bash reads "08"/"09" as invalid
-# octal, which would make every timeout comparison error and the cap never fire.
-if [[ "$SYNC_TIMEOUT" =~ ^[0-9]+$ ]]; then
-    SYNC_TIMEOUT=$((10#$SYNC_TIMEOUT))
-fi
-if ! [[ "$SYNC_TIMEOUT" =~ ^[0-9]+$ ]] || [[ "$SYNC_TIMEOUT" -eq 0 ]]; then
-    echo "post-worktree hook: ignoring invalid POST_WORKTREE_SYNC_TIMEOUT='$SYNC_TIMEOUT'; using 600s." >&2
+SYNC_TIMEOUT_RAW="${POST_WORKTREE_SYNC_TIMEOUT:-600}"
+# Accept 1-6 decimal digits (up to ~11.5 days). Longer values would wrap bash's
+# 64-bit arithmetic. Normalise to base 10 before any arithmetic: bash reads
+# "08"/"09" as invalid octal, which would make every timeout comparison error
+# and the cap never fire.
+if [[ "$SYNC_TIMEOUT_RAW" =~ ^[0-9]{1,6}$ ]] && ((10#$SYNC_TIMEOUT_RAW > 0)); then
+    SYNC_TIMEOUT=$((10#$SYNC_TIMEOUT_RAW))
+else
+    echo "post-worktree hook: ignoring invalid POST_WORKTREE_SYNC_TIMEOUT='$SYNC_TIMEOUT_RAW'; using 600s." >&2
     SYNC_TIMEOUT=600
 fi
 
@@ -114,7 +115,10 @@ SYNC_START=$SECONDS
 SYNC_PID=$!
 
 # If the hook itself is killed mid-sync, take the sync down with it rather than
-# orphaning uv (and its build-backend children) holding the log open.
+# orphaning uv (and its build-backend children) holding the log open. Then
+# re-raise the signal instead of exiting 0: the always-exit-0 contract covers
+# failures, not a caller deliberately cancelling, and a parent shell (e.g.
+# worktree.sh on Ctrl-C) only aborts if its child really died of the signal.
 on_signal() {
     log "hook received SIG$1 during sync; killing pid $SYNC_PID"
     kill_tree "$SYNC_PID" TERM
@@ -123,7 +127,9 @@ on_signal() {
     wait "$SYNC_PID" 2>/dev/null
     warn "WARNING: hook interrupted (SIG$1); '$SYNC_CMD_TEXT' was killed."
     warn "worktree is usable; run '$SYNC_CMD_TEXT' manually in $WORKTREE_PATH."
-    finish
+    log "hook re-raising SIG$1 after $((SECONDS - HOOK_START))s"
+    trap - "$1"
+    kill "-$1" $$
 }
 trap 'on_signal TERM' TERM
 trap 'on_signal INT' INT
@@ -166,6 +172,9 @@ else
         warn "run it manually in $WORKTREE_PATH before trusting mypy/pytest results. Details: $LOG_FILE"
     fi
 fi
+
+# The sync is over: a late signal must not be reported as an interrupted sync.
+trap - TERM INT
 
 # Standing reminder (CLAUDE.md): uv sync does NOT build the native extension.
 echo "post-worktree hook: reminder -- 'uv run kct build-native' is still a separate step" \

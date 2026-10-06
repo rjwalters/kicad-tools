@@ -15,7 +15,11 @@
 #   (f) uv missing from PATH: exit 0 with a warning
 #   (g) invalid POST_WORKTREE_SYNC_TIMEOUT falls back to the default
 #   (h) a leading-zero timeout ("02") is read as decimal and still caps (#5973)
-#   (i) TERM to the hook mid-sync kills the sync instead of orphaning it (#5973)
+#   (i) TERM to the hook mid-sync kills the sync instead of orphaning it, and
+#       the hook dies of SIGTERM (exit 143) rather than reporting success (#5973)
+#   (j) Ctrl-C (SIGINT to the process group) aborts the calling parent script
+#       too, the way worktree.sh calls the hook; it must not carry on (#5973)
+#   (k) oversized POST_WORKTREE_SYNC_TIMEOUT is rejected, not wrapped (#5973)
 # Exit code 0 = all pass, 1 = failures.
 
 set -uo pipefail
@@ -139,13 +143,49 @@ wait "$HOOK_PID"
 RC=$?
 ELAPSED=$((SECONDS - START))
 OUT="$(cat "$TMPROOT/out-i")"
-if [[ $RC -eq 0 && "$OUT" == *"hook interrupted (SIGTERM)"* && $ELAPSED -lt 10 ]]; then
-    ok "(i) TERM to the hook exits 0 promptly (${ELAPSED}s)"
+if [[ $RC -eq 143 && "$OUT" == *"hook interrupted (SIGTERM)"* && $ELAPSED -lt 10 ]]; then
+    ok "(i) TERM to the hook re-raises (exit 143) promptly (${ELAPSED}s)"
 else
     bad "(i) rc=$RC elapsed=${ELAPSED}s out=$OUT"
 fi
 sleep 0.5
 if pgrep -f "post-worktree-test-sleeper-i" >/dev/null; then bad "(i) uv orphaned after TERM to the hook"; else ok "(i) sync killed with the hook"; fi
+
+# (j) Ctrl-C reaches the whole foreground process group. Model that: a parent
+# shell (in its own process group, with default SIGINT -- a backgrounded job in
+# a non-interactive shell would otherwise start with SIGINT ignored) calls the
+# hook as worktree.sh does, then would print PARENT_CONTINUED.
+STUB="$(make_stub hang-j 'exec -a post-worktree-test-sleeper-j sleep 300')"
+WTJ="$(new_wt j)"
+POST_WORKTREE_SYNC_TIMEOUT=120 PATH="$STUB:$BASE_PATH" \
+    perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; setpgrp(0,0); exec @ARGV' \
+    /bin/bash -c '"$1" "$2" b 1; echo PARENT_CONTINUED' _ "$HOOK" "$WTJ" >"$TMPROOT/out-j" 2>&1 &
+PARENT_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -f "post-worktree-test-sleeper-j" >/dev/null && break
+    sleep 0.5
+done
+kill -INT -- "-$PARENT_PID"
+wait "$PARENT_PID"
+RC=$?
+OUT="$(cat "$TMPROOT/out-j")"
+if [[ $RC -eq 130 && "$OUT" != *"PARENT_CONTINUED"* && "$OUT" == *"hook interrupted (SIGINT)"* ]]; then
+    ok "(j) Ctrl-C aborts the calling parent (exit 130)"
+else
+    bad "(j) rc=$RC out=$OUT"
+fi
+sleep 0.5
+if pgrep -f "post-worktree-test-sleeper-j" >/dev/null; then bad "(j) uv orphaned after Ctrl-C"; else ok "(j) sync killed on Ctrl-C"; fi
+
+# (k) oversized timeout values are rejected rather than wrapped by 64-bit math
+STUB="$(make_stub ok3 'exit 0')"
+OUT="$(POST_WORKTREE_SYNC_TIMEOUT=18446744073709551617 PATH="$STUB:$BASE_PATH" "$HOOK" "$(new_wt k)" b 1 2>&1)"
+RC=$?
+if [[ $RC -eq 0 && "$OUT" == *"invalid POST_WORKTREE_SYNC_TIMEOUT='18446744073709551617'"* && "$OUT" == *"timeout 600s"* ]]; then
+    ok "(k) oversized timeout rejected, shown as typed"
+else
+    bad "(k) rc=$RC out=$OUT"
+fi
 
 echo
 echo "post-worktree hook tests: $PASS passed, $FAIL failed"
