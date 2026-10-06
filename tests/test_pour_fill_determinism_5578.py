@@ -94,8 +94,8 @@ test now routes with ``--deterministic-rescue``, checks each route's exit
 status, fill and rescue-arm log lines, and compares the routed copper
 *before* the pour.  That way a routing divergence, a skipped or failed fill,
 and a genuine fill mismatch each fail with their own message.  It also runs
-with ``--oracle-rounds 0``: the later pour-oracle stage (#5785) has its own
-nondeterminism, inherited from ``kicad-cli`` DRC and tracked in #5934 (see
+with the pour-oracle stage (#5785) on: that stage's own nondeterminism,
+inherited from ``kicad-cli`` DRC, was fixed in #5934 (see
 :data:`_DETERMINISTIC_FLAGS`).
 
 Deliberately out of scope, tracked separately
@@ -141,22 +141,23 @@ BOARD03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick.kicad_pcb"
 #: tens of mm^2 -- the 21.59 mm^2 ``('GND', 'B.Cu')`` failure #5870 reported.
 #: The fill engine was never the variable; its *input* was.
 #:
-#: ``--oracle-rounds 0`` scopes this test to the guarantee it owns (#5578:
-#: identical routes -> identical pour fill).  The KiCad-oracle completion loop
-#: (#5785, merged after #5870 was reported) is a separate stage with its own,
-#: measured nondeterminism: ``kicad-cli pcb drc`` reports a byte-identical
-#: board's ``unconnected_items`` in a different order and set from run to run,
-#: so the stitches it closes -- and the pour around them -- differ even with no
-#: load at all.  That is tracked, with its evidence, in #5934; drop this flag
-#: once #5934 makes that stage reproducible.
+#: The KiCad-oracle completion loop (#5785) runs at its default rounds: it is
+#: the last copper-changing stage of ``kct route``, so the guarantee is only
+#: worth having with it on.  It used to need ``--oracle-rounds 0`` here
+#: because ``kicad-cli pcb drc`` names a byte-identical board's
+#: ``unconnected_items`` differently from run to run and the closer acted on
+#: those names (Issue #5934); the closer now acts on the board's own clusters
+#: and the refill no longer reads stale fills, see
+#: ``tests/test_oracle_determinism_5934.py``.
 _DETERMINISTIC_FLAGS = (
     "--seed",
     "42",
     "--deterministic-budget",
     "--deterministic-rescue",
-    "--oracle-rounds",
-    "0",
 )
+
+#: Printed by ``_complete_pour_nets_with_oracle`` when the oracle stage runs.
+_ORACLE_STAGE_EVIDENCE = "--- KiCad Oracle Completion (pour nets) ---"
 
 #: The routing log line that proves the iteration-bounded rescue arm was in
 #: force (``Autorouter._relief_subsearch_bound_line``; greppable evidence
@@ -571,6 +572,10 @@ def _assert_route_completed_and_filled(proc: subprocess.CompletedProcess[str], l
     assert "zone fill failed" not in proc.stdout, f"{label}: the zone fill failed.{tail}"
     assert "Zone fill: complete" in proc.stdout, (
         f"{label}: no 'Zone fill: complete' line -- the fill did not run.{tail}"
+    )
+    assert _ORACLE_STAGE_EVIDENCE in proc.stdout, (
+        f"{label}: the KiCad-oracle completion stage did not run, so its "
+        f"reproducibility (Issue #5934) is not being tested.{tail}"
     )
     assert _DETERMINISTIC_RESCUE_EVIDENCE in proc.stdout, (
         f"{label}: the iteration-bounded relief-rescue arm was not in force, "

@@ -1890,10 +1890,17 @@ def _run_fill_zones_via_drc(
     ]
 
     # KiCad 10+ requires explicit flags to refill zones and persist changes.
-    if _kicad_drc_supports_refill(kicad_cli):
+    refills = _kicad_drc_supports_refill(kicad_cli)
+    if refills:
         cmd.extend(["--refill-zones", "--save-board"])
 
     cmd.append(str(target_pcb))
+
+    # Issue #5934: drop the stale fills before KiCad loads the board.  See
+    # :func:`_strip_stale_zone_fills`.  Only when the run refills AND saves:
+    # a KiCad 8/9 DRC refills in memory but persists nothing, so stripping
+    # there would ship the board unfilled.
+    unfilled_backup = _strip_stale_zone_fills(target_pcb) if refills else None
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -1914,6 +1921,7 @@ def _run_fill_zones_via_drc(
                 return_code=result.returncode,
             )
         else:
+            _restore_stale_zone_fills(target_pcb, unfilled_backup)
             return KiCadCLIResult(
                 success=False,
                 stderr=result.stderr or "Zone fill via DRC failed — no report produced",
@@ -1921,12 +1929,62 @@ def _run_fill_zones_via_drc(
             )
 
     except FileNotFoundError as e:
+        _restore_stale_zone_fills(target_pcb, unfilled_backup)
         return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
     except subprocess.SubprocessError as e:
+        _restore_stale_zone_fills(target_pcb, unfilled_backup)
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
     finally:
         # Clean up the temporary DRC report.
         drc_report.unlink(missing_ok=True)
+
+
+def _strip_stale_zone_fills(pcb_path: Path) -> bytes | None:
+    """Remove every zone's ``filled_polygon`` before a KiCad refill (Issue #5934).
+
+    Returns the original bytes when the file changed (so a failed fill can
+    restore them with :func:`_restore_stale_zone_fills`), else ``None``.
+
+    ``kicad-cli pcb drc --refill-zones`` recomputes every fill, but it builds
+    its connectivity from the board *as loaded*, stale fills included.  When
+    copper was added since the last fill -- a stitch or link via that crosses
+    another net's plane -- the new item overlaps that net's stale fill, KiCad
+    sees one cluster holding two nets, and resolves the conflict in an
+    arbitrary (run-to-run varying) order.  Measured on board 03 (KiCad
+    10.0.1): a GND island-join via inside the stale VCC ``In2.Cu`` fill was
+    saved as ``(net "VCC")`` in 2 of 8 refills of one byte-identical file,
+    which also changed the GND pours by 0.43 mm^2 per layer.  With the stale
+    fills removed first, 8/8 refills were byte-identical and kept the via on
+    GND.  The fills are about to be recomputed, so nothing is lost.
+    """
+    try:
+        from kicad_tools.core.sexp_file import load_pcb, save_pcb
+
+        original = pcb_path.read_bytes()
+        if b"filled_polygon" not in original:
+            return None
+        doc = load_pcb(str(pcb_path))
+        removed = 0
+        for zone in (c for c in doc.children if c.name == "zone"):
+            for poly in [c for c in zone.children if c.name == "filled_polygon"]:
+                zone.children.remove(poly)
+                removed += 1
+        if not removed:
+            return None
+        save_pcb(doc, pcb_path)
+        return original
+    except Exception:
+        # Never block a fill over this; KiCad refills either way.
+        return None
+
+
+def _restore_stale_zone_fills(pcb_path: Path, original: bytes | None) -> None:
+    """Undo :func:`_strip_stale_zone_fills` after a fill that did not complete."""
+    if original is not None:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            pcb_path.write_bytes(original)
 
 
 def run_pcb_export_svg(
