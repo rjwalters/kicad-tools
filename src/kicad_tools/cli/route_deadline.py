@@ -103,9 +103,10 @@ def _output_identity(args) -> dict:
     # Retain the requested stem: derived outputs use this name even if the
     # canonical PCB is a symlink. Resolve only when comparing identities.
     source = Path(args.pcb).absolute()
-    output = (
-        Path(args.output).absolute() if args.output else source.with_stem(source.stem + "_routed")
-    )
+    # Issue #6090: under --lint-gate, args.output names a staging file; the
+    # supervisor must still see (and quarantine) the requested output.
+    requested = getattr(args, "_lint_gate_output", None) or args.output
+    output = Path(requested).absolute() if requested else source.with_stem(source.stem + "_routed")
     protected = set()
     for board in (source, source.resolve()):
         protected.add(board)

@@ -4104,7 +4104,9 @@ def _add_route_parser(subparsers) -> None:
             "`kct check --diff`); if routing introduced new error findings, roll "
             "the output back (restore its pre-run contents, keep the routed board "
             "as <output>.lint-rejected.kicad_pcb) and exit 3. Waived findings never "
-            "count (Issue #6054)."
+            "count (Issue #6054). Routing writes a staging file next to the output "
+            "and only a judged board is moved onto it, so SIGTERM/SIGKILL never "
+            "leave an unjudged board at --output (Issue #6090)."
         ),
     )
     route_parser.add_argument(
