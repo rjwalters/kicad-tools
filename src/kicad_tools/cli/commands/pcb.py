@@ -1503,6 +1503,12 @@ def _run_snap_rotation_command(args, pcb_path: Path) -> int:
                 }
             )
             if not dry_run:
+                # Pad angles are board-absolute (#3902), so they turn by the
+                # snap amount; ``fp.rotation`` turns the board-absolute text
+                # angles and embedded zones itself (Issues #6119, #6126).
+                snap_delta = snapped - old_rotation
+                for pad in fp.pads:
+                    pad.rotation = (float(pad.rotation) + snap_delta) % 360.0
                 fp.rotation = snapped
                 # When snapping to 0, remove the third child from the (at ...)
                 # node so KiCad does not serialize a stale rotation value.

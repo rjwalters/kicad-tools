@@ -274,6 +274,12 @@ class StrategyApplicator:
             if hasattr(pad, "rotation"):
                 pad.rotation = (float(pad.rotation) + float(rotation_delta)) % 360.0
 
+        # ``fp.rotation`` already turned the board-absolute text angles; an
+        # in-place rotate is KiCad's ``FOOTPRINT::Rotate``, which then
+        # re-uprights "keep upright" texts (Issue #6126).
+        if hasattr(fp, "keep_texts_upright"):
+            fp.keep_texts_upright()
+
         return ApplicationResult(
             success=True,
             components_moved=[ref],
@@ -312,8 +318,11 @@ class StrategyApplicator:
         * pad ``layers``: per-name side swap (through-hole ``*.Cu``/``*.Mask``
           unchanged);
         * footprint texts/graphics: local ``y`` negation + side swap +
-          ``(justify mirror)`` toggle (correct side/geometry; silk prettiness
-          beyond that is out of scope, #4560).
+          ``(justify mirror)`` toggle (#4560);
+        * text angles (ABSOLUTE, like pad angles): ``a -> -a``, applied by the
+          ``fp.layer``/``fp.rotation`` setters, then KiCad's keep-upright step
+          (a "keep upright" text at 180 or more turns by -180 and swaps its
+          justification; ``(unlocked yes)`` texts keep ``-a``) -- #6126.
 
         The pad mutations go through ``Pad.__setattr__`` write-through
         (``position``/``layers`` sync added by #4560), so the flip reaches the
@@ -363,6 +372,10 @@ class StrategyApplicator:
                 pad.layers = [_flip_layer_side(layer) for layer in pad.layers]
 
         self._mirror_footprint_cosmetics(fp)
+        # ``Flip(LEFT_RIGHT)`` ends with ``FOOTPRINT::Rotate(180)``, which
+        # re-uprights "keep upright" texts (Issue #6126).
+        if hasattr(fp, "keep_texts_upright"):
+            fp.keep_texts_upright()
 
         new_layer = str(getattr(fp, "layer", old_layer))
         return ApplicationResult(
@@ -476,9 +489,10 @@ class StrategyApplicator:
           carry no per-object node back-reference), which ``PCB.save`` writes.
 
         Both derive from the same pre-flip state and receive the identical
-        transform: local ``y`` negation, absolute angle ``a -> 180 - a``,
-        ``F.* <-> B.*`` side swap, and a ``(justify mirror)`` toggle on text
-        effects (what KiCad itself emits).  No-ops gracefully on test doubles
+        transform: local ``y`` negation, ``F.* <-> B.*`` side swap, and a
+        ``(justify mirror)`` toggle on text effects (what KiCad itself
+        emits).  Text *angles* are board-absolute and were already turned by
+        the footprint's ``layer``/``rotation`` setters (Issue #6126).  No-ops gracefully on test doubles
         without ``texts``/``graphics``/``_sexp_node``.
         """
         for text in getattr(fp, "texts", []):
@@ -523,12 +537,8 @@ class StrategyApplicator:
             y = at_node.get_float(1)
             if y is not None:
                 at_node.set_value(1, -y)
-            angle = at_node.get_float(2)
-            if angle is not None:
-                at_node.set_value(2, (180.0 - angle) % 360.0)
-            elif node.tag in ("property", "fp_text", "fp_text_box"):
-                # Absent angle token == 0 deg; the flipped text is at 180.
-                at_node.add(180.0)
+            # The text angle is board-absolute: ``Footprint``'s layer/rotation
+            # setters already turned it with the footprint (Issue #6126).
 
         for tag in ("start", "end", "center", "mid"):
             geo = node.find_child(tag)

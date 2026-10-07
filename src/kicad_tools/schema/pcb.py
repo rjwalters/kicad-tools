@@ -502,6 +502,176 @@ def footprint_node_frame(footprint_node: SExp) -> _FootprintFrame:
     return (x, y, rot, _is_back_layer(layer))
 
 
+# ---------------------------------------------------------------------------
+# Footprint text angles (Issue #6126)
+# ---------------------------------------------------------------------------
+
+# Footprint children whose ``(at x y ANGLE)`` angle KiCad stores
+# **board-absolute** -- like a pad angle, it already includes the footprint's
+# rotation and side -- while ``x y`` stay footprint-local.
+_FP_TEXT_TAGS = frozenset({"property", "fp_text"})
+
+# What KiCad's ``PCB_TEXT::KeepUpright`` does to the justification when it
+# turns a text by 180 degrees (``center`` maps to itself).
+_JUSTIFY_SWAP = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
+
+
+def _normalize_text_angle(angle: float) -> float:
+    """Fold a text angle into ``[0, 360)`` like ``EDA_ANGLE::Normalize``.
+
+    Rounded to 6 decimals (what KiCad writes) so a rotate-and-restore round
+    trip lands back on the exact original value instead of ``44.99999999``.
+    """
+    value = round(float(angle) % 360.0, 6)
+    if value >= 360.0 or value == 0.0:
+        return 0.0
+    return value
+
+
+def footprint_text_angle(
+    old_frame: _FootprintFrame, new_frame: _FootprintFrame, angle: float
+) -> float:
+    """A footprint text's board-absolute angle after re-placing the footprint.
+
+    KiCad stores a ``property`` / ``fp_text`` angle board-absolute.  With ``l``
+    the text's angle inside the footprint definition and ``(theta, is_back)``
+    the footprint's placement, the stored angle is::
+
+        front:  a = theta + l
+        back:   a = 180 + theta - l
+
+    (``FOOTPRINT::Flip`` maps a text angle ``a -> 180 - a`` while the
+    footprint orientation goes ``theta -> -theta``).  Pulling *angle* back
+    through *old_frame* and pushing it through *new_frame* reproduces
+    ``SetOrientation`` (``a + delta``) and the side swap of
+    ``Flip(LEFT_RIGHT)`` (``a -> -a``), pinned against pcbnew 10.0.1 by
+    ``tests/fixtures/fp_zone_transform/``.  Like the zone mapper, it depends
+    only on the two end states, so single-field updates compose in any order.
+
+    This is the ``SetOrientation`` result: KiCad's interactive rotate and
+    left/right flip additionally re-upright "keep upright" texts -- see
+    :func:`keep_footprint_texts_upright`.
+    """
+    _ox, _oy, old_rot, old_back = old_frame
+    _nx, _ny, new_rot, new_back = new_frame
+    if old_back == new_back:
+        turned = angle + (new_rot - old_rot)
+    else:
+        turned = 180.0 + old_rot + new_rot - angle
+    return _normalize_text_angle(turned)
+
+
+def _text_is_keep_upright(text_node: SExp) -> bool:
+    """Whether a footprint text has KiCad's "keep upright" flag set.
+
+    KiCad 8+ writes ``(unlocked yes)`` for a text that is *not* kept upright;
+    KiCad 6/7 wrote an ``unlocked`` token inside ``(at x y [angle] unlocked)``.
+    Absent both, the text is kept upright (KiCad's default for fields).
+    """
+    unlocked = text_node.find_child("unlocked")
+    if unlocked is not None:
+        return unlocked.get_string(0) == "no"
+    at_node = text_node.find_child("at")
+    if at_node is not None and any(
+        child.is_atom and child.value == "unlocked" for child in at_node.children[2:]
+    ):
+        return False
+    return True
+
+
+def _set_text_at_angle(at_node: SExp, angle: float, synthetic: set[int] | None) -> None:
+    """Write a text's ``(at x y ANGLE)`` angle, keeping any ``unlocked`` token.
+
+    KiCad 10 always writes the angle; older files omit a zero one.  An angle
+    token this function had to add is tracked in *synthetic* (by node id) so
+    that returning to zero removes it again and a rotate-and-restore round
+    trip leaves the file byte-identical (the #4752 rule ``_sync_at_angle``
+    applies to footprints and pads).
+    """
+    if at_node.get_float(2) is not None:
+        if angle == 0.0 and synthetic is not None and id(at_node) in synthetic:
+            del at_node.children[2]
+            synthetic.discard(id(at_node))
+        else:
+            at_node.children[2] = _mm_atom(angle)
+    elif angle != 0.0:
+        # Before a legacy trailing ``unlocked`` token, if any.
+        at_node.children.insert(2, _mm_atom(angle))
+        if synthetic is not None:
+            synthetic.add(id(at_node))
+
+
+def _footprint_text_at_nodes(footprint_node: SExp) -> Iterator[tuple[SExp, SExp]]:
+    """``(text_node, at_node)`` for each direct ``property``/``fp_text`` child."""
+    for child in footprint_node.iter_children():
+        if child.tag in _FP_TEXT_TAGS:
+            at_node = child.find_child("at")
+            if at_node is not None and at_node.get_float(1) is not None:
+                yield child, at_node
+
+
+def transform_footprint_text_nodes(
+    footprint_node: SExp,
+    old_frame: _FootprintFrame,
+    new_frame: _FootprintFrame,
+    *,
+    synthetic: set[int] | None = None,
+) -> int:
+    """Turn the ``property``/``fp_text`` angles of a raw footprint node.
+
+    The text counterpart of :func:`transform_footprint_zone_nodes`, for code
+    that edits a footprint's ``(at ...)``/``(layer ...)`` directly in the
+    S-expression tree (``Footprint``'s setters already do this).  Each text
+    angle is re-placed with :func:`footprint_text_angle`; text positions are
+    footprint-local and stay put.  Returns the number of texts rewritten
+    (Issue #6126).
+    """
+    if (old_frame[2], old_frame[3]) == (new_frame[2], new_frame[3]):
+        return 0
+    count = 0
+    for _text, at_node in _footprint_text_at_nodes(footprint_node):
+        angle = at_node.get_float(2) or 0.0
+        _set_text_at_angle(at_node, footprint_text_angle(old_frame, new_frame, angle), synthetic)
+        count += 1
+    return count
+
+
+def _keep_text_node_upright(text_node: SExp, at_node: SExp) -> bool:
+    if not _text_is_keep_upright(text_node):
+        return False
+    angle = _normalize_text_angle(at_node.get_float(2) or 0.0)
+    if angle < 180.0:
+        return False
+    _set_text_at_angle(at_node, _normalize_text_angle(angle - 180.0), None)
+    effects = text_node.find_child("effects")
+    justify = effects.find_child("justify") if effects is not None else None
+    if justify is not None:
+        justify.children = [
+            SExp.atom(_JUSTIFY_SWAP[child.value])
+            if child.is_atom and child.value in _JUSTIFY_SWAP
+            else child
+            for child in justify.children
+        ]
+    return True
+
+
+def keep_footprint_texts_upright(footprint_node: SExp) -> int:
+    """Apply KiCad's ``PCB_TEXT::KeepUpright`` to a raw footprint's texts.
+
+    ``FOOTPRINT::Rotate`` -- the interactive rotate, and the 180-degree turn
+    inside ``Flip(LEFT_RIGHT)`` -- ends by re-uprighting every "keep upright"
+    text: one whose normalized angle is 180 or more turns by -180 and swaps
+    its justification (left/right, top/bottom), so it reads the same way up
+    from the same spot.  ``SetOrientation`` does not.  Texts with
+    ``(unlocked yes)`` are left alone.  Returns the number of texts turned
+    (Issue #6126).
+    """
+    return sum(
+        _keep_text_node_upright(text, at_node)
+        for text, at_node in _footprint_text_at_nodes(footprint_node)
+    )
+
+
 def _transform_zone_object(zone: Zone, mapper, flip_layers: bool) -> None:
     """Re-place one parsed footprint :class:`Zone` (board-relative coords)."""
     zone.polygon = [mapper(x, y) for x, y in zone.polygon]
@@ -712,6 +882,9 @@ class FootprintText:
     hidden: bool = False
     # Serialized board-frame angle; position remains footprint-local for fp_text.
     rotation: float = 0.0
+    # KiCad's "keep upright" flag (absent ``(unlocked yes)``): an interactive
+    # rotate or a left/right flip turns such a text back upright (Issue #6126).
+    keep_upright: bool = field(default=True, compare=False)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> FootprintText:
@@ -734,6 +907,7 @@ class FootprintText:
             y = at.get_float(1) or 0.0
             fp_text.position = (x, y)
             fp_text.rotation = at.get_float(2) or 0.0
+        fp_text.keep_upright = _text_is_keep_upright(sexp)
 
         # Layer
         if layer := sexp.find("layer"):
@@ -781,6 +955,7 @@ class FootprintText:
             y = at.get_float(1) or 0.0
             fp_text.position = (x, y)
             fp_text.rotation = at.get_float(2) or 0.0
+        fp_text.keep_upright = _text_is_keep_upright(sexp)
 
         # Layer
         if layer := sexp.find("layer"):
@@ -1164,6 +1339,7 @@ class Footprint:
 
         if old_frame is not None:
             self._replace_embedded_zones(sexp_node, old_frame)
+            self._turn_texts(sexp_node, old_frame)
 
         # Direct children only for the (at)/(layer) lookups below:
         # properties, fp_texts and pads carry their own (at)/(layer)
@@ -1237,6 +1413,45 @@ class Footprint:
             (old_frame[0] + ox, old_frame[1] + oy, old_frame[2], old_frame[3]),
             (new_frame[0] + ox, new_frame[1] + oy, new_frame[2], new_frame[3]),
         )
+
+    def _turn_texts(self, sexp_node: SExp, old_frame: _FootprintFrame) -> None:
+        """Turn this footprint's text angles with a rotation/side change.
+
+        KiCad stores ``property``/``fp_text`` angles board-absolute, like pad
+        angles, so a rotation or side change must rewrite them or the
+        silkscreen/fab text is drawn at the old orientation (Issue #6126).
+        This is ``FOOTPRINT::SetOrientation``'s result; the interactive
+        rotate's extra "keep upright" step is :meth:`keep_texts_upright`.
+        Both the ``(at ...)`` nodes ``PCB.save`` writes and the parsed
+        :attr:`texts` are updated.
+        """
+        new_frame = self._placement_frame()
+        if new_frame is None or (new_frame[2], new_frame[3]) == (old_frame[2], old_frame[3]):
+            return
+        for text in self.__dict__.get("texts") or []:
+            text.rotation = footprint_text_angle(old_frame, new_frame, text.rotation)
+        synthetic: set[int] = self.__dict__.setdefault("_text_angle_synthetic", set())
+        transform_footprint_text_nodes(sexp_node, old_frame, new_frame, synthetic=synthetic)
+
+    def keep_texts_upright(self) -> int:
+        """Re-upright "keep upright" texts, as KiCad's ``FOOTPRINT::Rotate`` does.
+
+        Call after a *relative* rotation or a left/right flip -- the
+        operations KiCad performs through ``FOOTPRINT::Rotate`` -- to match
+        what pcbnew writes: each keep-upright text whose angle is 180 or more
+        turns by -180 and swaps its justification.  Absolute placement
+        writes (``rotation = ...``, ``PCB.update_footprint_position``) follow
+        ``SetOrientation`` and skip this.  Returns the number of texts turned
+        in the S-expression tree (Issue #6126).
+        """
+        for text in self.texts:
+            angle = _normalize_text_angle(text.rotation)
+            if text.keep_upright and angle >= 180.0:
+                text.rotation = _normalize_text_angle(angle - 180.0)
+        sexp_node: SExp | None = self.__dict__.get("_sexp_node")
+        if sexp_node is None:
+            return 0
+        return keep_footprint_texts_upright(sexp_node)
 
     def _sync_attr_node(self) -> None:
         """Rebuild the ``(attr ...)`` child of ``_sexp_node`` from Python state.
