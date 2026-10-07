@@ -228,6 +228,19 @@ def _names_same_net_strict(name_a: str, name_b: str) -> bool:
     return a.rsplit("/", 1)[-1] == b.rsplit("/", 1)[-1]
 
 
+def _spelling_tier(sch_net: str, pcb_net: str) -> int:
+    """Pairing tie-break: 0 strict spelling, 1 leaf-only spelling, 2 unrelated.
+
+    Ranking the strict match first keeps ``/A/CLK`` paired with PCB
+    ``/A/CLK`` rather than ``/B/CLK`` when both overlap it equally.
+    """
+    if _names_same_net_strict(sch_net, pcb_net):
+        return 0
+    if _same_net_spelling(sch_net, pcb_net):
+        return 1
+    return 2
+
+
 def _is_generated_net_name(name: str) -> bool:
     """True for tool-invented net names that carry no design intent.
 
@@ -655,7 +668,7 @@ class NetlistValidator:
             overlap.items(),
             key=lambda item: (
                 -item[1],
-                0 if _same_net_spelling(item[0][0], item[0][1]) else 1,
+                _spelling_tier(item[0][0], item[0][1]),
                 item[0][0],
                 item[0][1],
             ),
@@ -809,10 +822,13 @@ class NetlistValidator:
 
         A schematic net ``S`` is reported when its paired PCB net ``P``:
 
-        * is not a spelling of ``S`` itself (``/X``, ``X``, ``/Sheet/X``), and
+        * is not strictly a spelling of ``S`` itself (``/X``, ``X``,
+          ``/Sheet/X``; :func:`_names_same_net_strict`), and
         * is unambiguously the name of another schematic net ``S2`` that has
           pads here (:func:`_names_same_net_strict`: ``/A/CLK`` is not the
-          name of ``/B/CLK``), and
+          name of ``/B/CLK``, but it *is* the name of ``/A/CLK``, so a
+          wholesale ``/A/CLK`` <-> ``/B/CLK`` exchange is a swap, issue
+          #5999), and
         * neither ``P`` nor ``S2`` is a tool-generated ``Net-(...)`` name.
 
         When ``S2`` is in turn paired with a PCB net named like ``S``, the
@@ -831,21 +847,43 @@ class NetlistValidator:
                 when both nets are in this set (``None``: unknown, never claim).
         """
         named_after: dict[str, str] = {}
+        # Every best-ranked claimant of a PCB name, when more than one (an
+        # unqualified ``CLK`` spells both ``/A/CLK`` and ``/B/CLK``).
+        ambiguous: dict[str, list[str]] = {}
         for s_net, p_net in sch_to_pcb.items():
-            if _is_generated_net_name(p_net) or _same_net_spelling(s_net, p_net):
+            # Self-name test.  ``P`` is S's own name when it strictly spells
+            # S (``X`` / ``/X`` / ``/Sheet/X``).  A merely leaf-equal name
+            # (``/B/CLK`` for ``/A/CLK``) is tolerated too -- kct's identity
+            # for a net and KiCad's chosen label can differ in the sheet
+            # path, e.g. a hierarchical label in a repeated sheet -- but only
+            # when no *other* schematic net strictly owns that name; if one
+            # does, ``P`` is that net's name (issue #5999).
+            if _is_generated_net_name(p_net) or _names_same_net_strict(s_net, p_net):
                 continue
-            others = sorted(
-                (
-                    s2
-                    for s2 in sch_nets
-                    if s2 != s_net
-                    and not _is_generated_net_name(s2)
-                    and _names_same_net_strict(s2, p_net)
-                ),
-                key=lambda s2: (_name_match_rank(s2, p_net), s2),
-            )
-            if others:
-                named_after[s_net] = others[0]
+            others = [
+                s2
+                for s2 in sch_nets
+                if s2 != s_net
+                and not _is_generated_net_name(s2)
+                and _names_same_net_strict(s2, p_net)
+            ]
+            if not others:
+                continue
+            best_rank = min(_name_match_rank(s2, p_net) for s2 in others)
+            best = sorted(s2 for s2 in others if _name_match_rank(s2, p_net) == best_rank)
+            # Several sheets share the leaf of an unqualified PCB name: prefer
+            # the claimant whose own PCB net carries S's name (a swap partner)
+            # over whichever sheet sorts first.
+            partners = [
+                s2
+                for s2 in best
+                if s2 in sch_to_pcb
+                and not _is_generated_net_name(sch_to_pcb[s2])
+                and _names_same_net_strict(s_net, sch_to_pcb[s2])
+            ]
+            named_after[s_net] = partners[0] if partners else best[0]
+            if not partners and len(best) > 1:
+                ambiguous[s_net] = best
 
         for s_net in sorted(named_after):
             s2 = named_after[s_net]
@@ -880,13 +918,18 @@ class NetlistValidator:
                     )
                 )
                 continue
+            if s_net in ambiguous:
+                owners = ", ".join(repr(n) for n in ambiguous[s_net])
+                owned_by = f"which is the name of schematic nets {owners}"
+            else:
+                owned_by = f"which is the name of schematic net {s2!r}"
             result.add(
                 SyncIssue(
                     severity="error",
                     category="net_mismatch",
                     message=(
                         f"Net named after another net: schematic net {s_net!r} is PCB net "
-                        f"{p_net!r}, which is the name of schematic net {s2!r}"
+                        f"{p_net!r}, {owned_by}"
                     ),
                     suggestion=(
                         f"Rename PCB net {p_net!r} after schematic net {s_net!r}, so net "
