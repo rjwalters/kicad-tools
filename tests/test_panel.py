@@ -34,9 +34,10 @@ from kicad_tools.panel.furniture import (  # noqa: E402
 from kicad_tools.panel.panel import (  # noqa: E402
     Panel,
     _deep_copy_sexp,
-    _offset_positions,
     _remap_reference,
     _remap_uuids,
+    _rigid_mapper,
+    _transform_board_item,
 )
 from kicad_tools.panel.tabs import (  # noqa: E402
     Tab,
@@ -354,7 +355,8 @@ class TestSExpHelpers:
             SExp.list("end", 30.0, 40.0),
         )
 
-        _offset_positions(node, 5.0, 10.0)
+        # A pure translation by (5, 10): centre (0, 0) -> (5, 10).
+        _transform_board_item(node, _rigid_mapper(0.0, 0.0, 0.0, 5.0, 10.0), 0.0)
 
         start = node.find_child("start")
         assert start.get_value(0) == pytest.approx(15.0)
