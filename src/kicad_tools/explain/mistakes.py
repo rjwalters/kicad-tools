@@ -581,7 +581,12 @@ NON_IC_REFERENCE_PREFIXES = (
 # varistors, batteries, relays, LEDs, plugs) -- see :func:`is_ic_footprint`.
 _EXTRA_NON_IC_PREFIXES = frozenset({"F", "RV", "BT", "K", "LED", "P", "CN", "RN", "RSH"})
 
-# KiCad footprint libraries that hold IC packages / modules.
+# KiCad footprint libraries that hold IC packages / modules.  Matched on the
+# exact library name, or -- for the families listed in
+# ``_IC_FOOTPRINT_LIBRARY_PREFIXES`` -- on the library-name prefix
+# (``Sensor_Humidity``, ``Converter_DCDC`` ...).  Issue #5995 added the
+# oscillator, sensor and DC/DC-converter libraries: every footprint in them is
+# an active part with its own supply pin.
 _IC_FOOTPRINT_LIBRARIES = frozenset(
     {
         "Package_SO",
@@ -595,7 +600,41 @@ _IC_FOOTPRINT_LIBRARIES = frozenset(
         "Package_LCC",
         "RF_Module",
         "Module",
+        "Oscillator",
     }
+)
+_IC_FOOTPRINT_LIBRARY_PREFIXES = ("Sensor", "Converter_")
+
+# KiCad footprint libraries that never hold an IC (issue #5995).  A footprint
+# from one of these is rejected whatever its reference prefix, pad count or
+# package-name tokens say: ``Button_Switch_THT:SW_DIP_SPSTx04`` is a DIP
+# *switch*, not a DIP IC, and ``Connector_*`` / passive libraries never need
+# a bypass cap of their own.
+_NON_IC_FOOTPRINT_LIBRARY_PREFIXES = (
+    "Button_Switch",
+    "Connector",
+    "TerminalBlock",
+    "Resistor",
+    "Capacitor",
+    "Inductor",
+    "Crystal",
+    "Fuse",
+    "Varistor",
+    "Potentiometer",
+    "LED",
+    "Diode",
+    "Relay",
+    "Jumper",
+    "TestPoint",
+    "MountingHole",
+    "Fiducial",
+    "Battery",
+    "Buzzer_Beeper",
+    "Ferrite",
+    "Filter",
+    "Transformer",
+    "Symbol",
+    "NetTie",
 )
 
 # Package-name token suffixes that identify IC packages: QFN/VQFN, QFP/LQFP,
@@ -615,6 +654,37 @@ _IC_PACKAGE_SUFFIXES = (
 )
 _SOT_MULTIPIN_RE = re.compile(r"T?SOT-?23-[5-8]\b")
 
+#: Reference prefixes of linear/switching regulators and power-supply
+#: modules (IEEE 315 ``VR``; common ``REG``/``VREG``/``LDO``/``PS``/``PSU``).  Issue
+#: #5995: a ``VR1`` in ``SOT-223`` is an IC, but ``VR`` is also used for
+#: trimmers in some regions, so these prefixes only count when the package is
+#: a regulator package (or any other IC package), never a potentiometer.
+REGULATOR_REFERENCE_PREFIXES = frozenset({"VR", "REG", "VREG", "LDO", "PS", "PSU"})
+
+# Power packages regulators ship in (but discrete transistors also do, so a
+# ``Q`` part in one of these is still rejected by its prefix).
+_REGULATOR_PACKAGE_RE = re.compile(
+    r"SOT-?223|SOT-?89|SOT-?23\b|SOT-?3[256]3|SC-?70"
+    r"|TO-?252|TO-?263|TO-?220|TO-?92|TO-?277|D2?PAK"
+)
+
+#: Reference prefixes of crystal/oscillator parts (IEEE 315 ``Y``; ``X`` is
+#: common too).  A passive crystal is not an IC, but an *oscillator* (a
+#: powered part with its own VDD pin) in the same class letter is.
+_OSCILLATOR_REFERENCE_PREFIXES = frozenset({"X", "Y", "XO", "OSC", "XTAL"})
+
+#: Pad ``pintype`` values (copied from the schematic symbol on "Update PCB
+#: from Schematic") that mark a pin as a supply input of an active part.
+#: The PCB carries no symbol ``lib_id``; ``pintype`` is the symbol-derived
+#: signal that survives into the board file.
+_SUPPLY_PIN_TYPES = frozenset({"power_in", "power_out"})
+
+#: Pad count from which a footprint with an unrecognised (project-local)
+#: library and an unknown, non-excluded reference prefix is taken to be an
+#: IC/module -- ``MOD2`` in ``myproj:RPi_CM4``.  Connectors are excluded
+#: by their ``J``/``P``/``CN`` prefix and ``Connector*`` library first.
+_MANY_PADS_IC_THRESHOLD = 16
+
 
 def reference_prefix(reference: str) -> str:
     """Leading alphabetic prefix of a reference designator (``"RV2"`` -> ``"RV"``)."""
@@ -622,10 +692,23 @@ def reference_prefix(reference: str) -> str:
     return match.group(0).upper() if match else ""
 
 
+def _split_footprint_name(footprint_name: str) -> tuple[str, str]:
+    library, _, package = (footprint_name or "").rpartition(":")
+    return library, package
+
+
+def _is_ic_library(library: str) -> bool:
+    return library in _IC_FOOTPRINT_LIBRARIES or library.startswith(_IC_FOOTPRINT_LIBRARY_PREFIXES)
+
+
+def _is_non_ic_library(library: str) -> bool:
+    return bool(library) and library.startswith(_NON_IC_FOOTPRINT_LIBRARY_PREFIXES)
+
+
 def _has_ic_package(footprint_name: str, pad_count: int) -> bool:
     """True when the footprint's library or package name is an IC package."""
-    library, _, package = (footprint_name or "").rpartition(":")
-    if library in _IC_FOOTPRINT_LIBRARIES:
+    library, package = _split_footprint_name(footprint_name)
+    if _is_ic_library(library):
         return True
     upper = package.upper()
     tokens = re.split(r"[^A-Z0-9]+", upper)
@@ -634,28 +717,63 @@ def _has_ic_package(footprint_name: str, pad_count: int) -> bool:
     return pad_count >= 5 and bool(_SOT_MULTIPIN_RE.search(upper))
 
 
+def _has_supply_pintype(fp: Footprint) -> bool:
+    return any(getattr(pad, "pintype", "") in _SUPPLY_PIN_TYPES for pad in fp.pads)
+
+
 def is_ic_footprint(fp: Footprint) -> bool:
-    """Positively classify a footprint as an IC (issue #5970).
+    """Positively classify a footprint as an IC (issues #5970, #5995).
 
     Having a pad on a power rail is **not** evidence: resistors, capacitors,
-    connectors and fuses all touch rails.  A footprint is an IC when
+    connectors and fuses all touch rails.  Reference prefix, footprint
+    library/package name, pad count and -- when the board carries it -- the
+    symbol-derived pad ``pintype`` are combined:
 
-    * its reference prefix is ``U`` / ``IC`` and it has at least 3 pads
-      (a SOT-23 LDO is a real IC), or
-    * its prefix is not a known passive/connector/discrete prefix, it has at
-      least :data:`MIN_IC_PADS` pads, and its footprint is an IC package
-      (``Package_SO:``, ``...QFN...``, ``TSSOP``, ``RF_Module:`` ...) -- so
-      an unconventionally-named ``A1`` module or ``MCU1`` still counts.
+    * a footprint from a library that never holds ICs (``Button_Switch*``,
+      ``Connector*``, passives, ``Crystal`` ...) is never an IC;
+    * prefix ``U`` / ``IC`` with at least 3 pads is an IC (a SOT-23 LDO);
+    * an oscillator: ``X``/``Y``/``OSC`` prefix in the ``Oscillator:``
+      library (or an ``Oscillator`` package name), or with a ``power_in``
+      pad, and at least 3 pads -- a passive ``Crystal:`` part is not;
+    * a regulator: ``VR``/``REG``/``VREG``/``LDO``/``PS``/``PSU`` prefix with at
+      least 3 pads in a regulator package (SOT-223, TO-252/DPAK, SOT-89 ...),
+      an IC package, or with a ``power_in`` pad;
+    * any other prefix that is not a known passive/connector/discrete prefix
+      with at least :data:`MIN_IC_PADS` pads and an IC package or IC library
+      (``Package_SO:``, ``...QFN...``, ``Sensor*:``, ``Oscillator:``,
+      ``Converter_*:``, ``RF_Module:`` ...), with a ``power_in`` pad, or with
+      at least 16 pads in an unrecognised (project-local) library -- so an
+      ``A1`` module, ``MCU1``, ``S1`` sensor or ``MOD2`` compute module counts.
     """
     prefix = reference_prefix(fp.reference)
     pad_count = len(fp.pads)
+    library, package = _split_footprint_name(fp.name)
+    if _is_non_ic_library(library):
+        return False
     if prefix in IC_REFERENCE_PREFIXES:
         return pad_count >= 3
+    if prefix in _OSCILLATOR_REFERENCE_PREFIXES:
+        if pad_count < 3:
+            return False
+        return library == "Oscillator" or "OSCILLATOR" in package.upper() or _has_supply_pintype(fp)
+    if prefix in REGULATOR_REFERENCE_PREFIXES:
+        if pad_count < 3 or "POTENTIOMETER" in package.upper():
+            return False
+        return (
+            bool(_REGULATOR_PACKAGE_RE.search(package.upper()))
+            or _has_ic_package(fp.name, pad_count)
+            or _has_supply_pintype(fp)
+        )
     if prefix in NON_IC_REFERENCE_PREFIXES or prefix in _EXTRA_NON_IC_PREFIXES:
         return False
     if pad_count < MIN_IC_PADS:
         return False
-    return _has_ic_package(fp.name, pad_count)
+    if _has_ic_package(fp.name, pad_count) or _has_supply_pintype(fp):
+        return True
+    # A big part in a project-local library (``myproj:RPi_CM4``) with a
+    # non-excluded prefix is a module, not a passive.
+    known_kicad_library = library.startswith(("Package_", "Connector", "Button_Switch"))
+    return pad_count >= _MANY_PADS_IC_THRESHOLD and not known_kicad_library
 
 
 def is_crystal(reference: str, footprint: str) -> bool:

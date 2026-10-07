@@ -161,3 +161,81 @@ def test_board03_bypass_findings_name_only_ics() -> None:
     assert all(m.components[1].startswith("U") for m in mistakes), sorted(
         {m.components[1] for m in mistakes}
     )
+
+
+# --- Issue #5995: non-``U`` active parts ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("ref", "name", "pads", "expected"),
+    [
+        # Oscillators (powered) are ICs; passive crystals are not.
+        ("X1", "Oscillator:Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm", 4, True),
+        ("Y2", "Oscillator:Oscillator_SMD_SiT_PQFN-6Pin_3.2x2.5mm", 6, True),
+        ("OSC1", "Oscillator:Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm", 4, True),
+        ("Y1", "Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm", 4, False),
+        ("Y3", "Crystal:Crystal_HC49-4H_Vertical", 2, False),
+        ("X2", "Oscillator:Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm", 2, False),
+        # Regulators in power packages.
+        ("VR1", "Package_TO_SOT_SMD:SOT-223-3_TabPin2", 4, True),
+        ("REG1", "Package_TO_SOT_SMD:SOT-223-3_TabPin2", 4, True),
+        ("VR3", "Package_TO_SOT_SMD:TO-252-2", 3, True),
+        ("VREG2", "Package_TO_SOT_SMD:SOT-89-3", 3, True),
+        ("LDO1", "Package_TO_SOT_SMD:SOT-23", 3, True),
+        ("PS1", "Converter_DCDC:Converter_DCDC_RECOM_R-78E-0.5_THT", 3, True),
+        # ``VR`` used for a trimmer must not be promoted.
+        ("VR2", "Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical", 3, False),
+        ("VR4", "custom:Trimmer_Potentiometer_3mm", 3, False),
+        ("VR5", "Package_TO_SOT_SMD:SOT-223-3_TabPin2", 2, False),
+        # Sensor / converter libraries.
+        ("S1", "Sensor:Sensirion_SCD4x-1EP_10.1x10.1mm_P1.25mm_EP4.8x4.8mm", 21, True),
+        ("S2", "Sensor_Humidity:Sensirion_DFN-4-1EP_2x2mm_P1mm_EP0.7x1.6mm", 5, True),
+        ("PSU1", "Converter_DCDC:Converter_DCDC_TRACO_TSR-1_THT", 3, True),
+        # Project-local module with many pads.
+        ("MOD2", "myproj:RPi_CM4", 100, True),
+        ("MOD3", "myproj:Small_Thing", 6, False),
+        # False positives that must stay out.
+        ("S3", "Button_Switch_THT:SW_DIP_SPSTx04_Slide_9.78x12.34mm_W7.62mm_P2.54mm", 8, False),
+        ("SW4", "Button_Switch_SMD:SW_DIP_SPSTx04_Slide_6.7x11.72mm_W8.61mm_P2.54mm", 8, False),
+        ("Q2", "Package_TO_SOT_SMD:TO-252-2", 3, False),
+        ("Q3", "Package_TO_SOT_SMD:SOT-223-3_TabPin2", 4, False),
+        ("A2", "Connector_PinHeader_2.54mm:PinHeader_2x20_P2.54mm_Vertical", 40, False),
+        ("H1", "Package_TO_SOT_THT:TO-220-3_Vertical", 3, False),
+        ("U7", "Connector_USB:USB_C_Receptacle_GCT_USB4085", 20, False),
+    ],
+)
+def test_is_ic_footprint_non_u_active_parts(ref: str, name: str, pads: int, expected: bool) -> None:
+    assert is_ic_footprint(_fp(ref, name, pads)) is expected
+
+
+def test_power_in_pintype_promotes_unconventional_reference() -> None:
+    """A symbol-derived ``power_in`` pad marks an active part (issue #5995)."""
+    fp = _fp("Y5", "custom:SMD_Clock_5032", 4)
+    assert is_ic_footprint(fp) is False
+    fp.pads[3].pintype = "power_in"
+    assert is_ic_footprint(fp) is True
+    # A connector stays excluded even with a power_in pad.
+    conn = _fp("J9", "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical", 4)
+    conn.pads[0].pintype = "power_in"
+    assert is_ic_footprint(conn) is False
+
+
+_OSCILLATOR_NEAR_CAP = """
+  (footprint "Oscillator:Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm"
+    (layer "F.Cu")
+    (at 30 10)
+    (property "Reference" "X1")
+    (property "Value" "25MHz")
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 3 "SIG"))
+    (pad "2" smd rect (at -0.5 0) (size 1 1) (layers "F.Cu") (net 2 "GND"))
+    (pad "3" smd rect (at 0.5 0) (size 1 1) (layers "F.Cu") (net 3 "SIG"))
+    (pad "4" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 1 "+3V3"))
+  )
+"""
+
+
+def test_oscillator_is_a_bypass_partner(tmp_path: Path) -> None:
+    """``X1`` in ``Oscillator:`` now pairs with a far bypass cap (issue #5995)."""
+    body = _two_pad("Capacitor_SMD:C_0402", "C1", "100nF", 10) + _OSCILLATOR_NEAR_CAP
+    mistakes = BypassCapDistanceCheck().check(_load(tmp_path, body))
+    assert {m.components[1] for m in mistakes} == {"X1"}
