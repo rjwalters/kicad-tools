@@ -472,3 +472,89 @@ def _fp_tp(ref: str, x: float, y: float, net: int, net_name: str) -> str:
     (pad "1" smd circle (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net {net} "{net_name}"))
   )
 """
+
+
+# ---------------------------------------------------------------------------
+# Footprint-embedded keepouts (Issue #6087) reach route-auto too
+# ---------------------------------------------------------------------------
+
+
+def _footprint_keepout(poly: list[tuple[float, float]], *, name: str = "antkeep") -> str:
+    """A footprint ``AE1`` that owns a track/via-blocking keepout ``poly``.
+
+    The zone sits inside the ``(footprint ...)`` block, so it is exposed
+    through ``PCB.footprint_rule_areas`` and never ``PCB.rule_areas``.
+    """
+    pts = " ".join(f"(xy {x} {y})" for x, y in poly)
+    cx = (min(x for x, _ in poly) + max(x for x, _ in poly)) / 2
+    cy = (min(y for _, y in poly) + max(y for _, y in poly)) / 2
+    return f"""  (footprint "RF_Module:Antenna"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000021")
+    (at {cx} {cy})
+    (property "Reference" "AE1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "ant" (at 0 1.5 0) (layer "F.Fab"))
+    (zone
+      (net 0)
+      (net_name "")
+      (name "{name}")
+      (layers "F.Cu" "B.Cu")
+      (uuid "eeeeeeee-0000-0000-0000-000000000001")
+      (hatch edge 0.5)
+      (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed))
+      (polygon (pts {pts}))
+    )
+  )
+"""
+
+
+def test_footprint_keepout_reaches_route_and_route_auto_alike(tmp_path: Path) -> None:
+    """Issue #6087 x #6059: both CLIs read footprint keepouts through the
+    shared ``rule_area_resolve`` parse, so they see the same area."""
+    from kicad_tools.router.io import detect_layer_stack, load_pcb_for_routing
+    from kicad_tools.router.orchestrator import RoutingOrchestrator
+    from kicad_tools.router.rules import DesignRules
+
+    text = _board(_footprint_keepout(BLOCK))
+    src = _write(tmp_path, text)
+    pcb = PCB.load(str(src))
+    assert pcb.rule_areas == [] and len(pcb.footprint_rule_areas) == 1
+
+    router, _ = load_pcb_for_routing(
+        str(src), rules=DesignRules(), use_pcb_rules=False, validate_drc=False
+    )
+    route_areas = router._keepout_rule_area_polygons()
+    orchestrator = RoutingOrchestrator(
+        pcb=pcb,  # type: ignore[arg-type]
+        rules=DesignRules(),
+        layer_stack=detect_layer_stack(text),
+    )
+    auto_areas = orchestrator._keepout_mask().areas
+
+    assert len(route_areas) == len(auto_areas) == 1
+    (r,), (a,) = route_areas, auto_areas
+    assert r.name == a.name == "antkeep"
+    assert r.layers == a.layers and len(a.layers) == 2
+    assert a.blocks_tracks and a.blocks_vias
+    assert [(x - BX0, y - BY0) for x, y in r.polygon] == list(a.polygon)
+
+
+def test_route_auto_routes_around_a_footprint_keepout(tmp_path: Path) -> None:
+    """Enforcement, not just parsing: route-auto's hierarchical strategy
+    detours a keepout owned by a footprint exactly as a board-level one."""
+    result, out = _route(tmp_path, _board(_footprint_keepout(BLOCK)), "hierarchical")
+    assert result["success"] is True, result["error_message"]
+    segments, _vias = _written_copper(out)
+    assert segments
+    assert [s for s in segments if _copper_in_rect(s, REL_BLOCK)] == []
+
+
+def test_route_auto_refuses_to_cross_a_footprint_keepout_wall(tmp_path: Path) -> None:
+    """A full-height footprint keepout is a wall: the corridor strategy
+    refuses and names the area, as for a board-level wall."""
+    wall = [(WALL_X0, BY0 - 1), (WALL_X1, BY0 - 1), (WALL_X1, BY0 + 17), (WALL_X0, BY0 + 17)]
+    result, out = _route(tmp_path, _board(_footprint_keepout(wall, name="antwall")), "global")
+    assert result["success"] is False
+    assert "keepout rule area" in result["error_message"]
+    assert "'antwall'" in result["error_message"]
+    assert not out.exists()
