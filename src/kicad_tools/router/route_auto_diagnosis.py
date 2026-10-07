@@ -16,11 +16,15 @@ whose strategies route on different grids:
 
 Which grid the diagnosis runs on
 --------------------------------
-The fine grid the hierarchical strategy searched is the right *resolution*,
-but not the right *board*: its ``AdaptiveAutorouter`` is built from the routed
-net's own pads only, with none of the other nets' pads or copper.  Re-running a
-connection there would never find a contender, so every connection would look
-routable.  The diagnosis therefore rebuilds that grid from the board file --
+The fine grid the hierarchical strategy searched is the right *resolution*.
+Since #6107 it is also the right board when route-auto has the board file: the
+strategy routes on the board loaded with every other net skipped (their pads
+become obstacles) and only the routed net routable.  That grid still cannot
+show a *contender* -- a skipped net's pads are anonymous obstacles there, and
+the classifier needs every net's copper committed as liftable routes.  (Without
+a board file the strategy falls back to a grid holding only the routed net's
+own pads, which shows nothing at all.)  The diagnosis therefore rebuilds the
+grid from the board file --
 same design rules and resolution, same keepout rule areas, plus every pad and
 every existing track and via -- with the loader ``kct route`` uses
 (:func:`~kicad_tools.router.io.load_pcb_for_routing` with
