@@ -2859,19 +2859,22 @@ def _emit_drc_sidecars(
             # a blanket overwrite, so hand-written rules and the creepage
             # managed block (#4508) in a pre-existing file survive the emit.
             existing_dru = dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
-            dru_path.write_text(
-                merge_dru_floors(
-                    existing_dru,
-                    generate_project_dru(
-                        checker.design_rules,
-                        project_data,
-                        manufacturer_id=manufacturer_id,
-                        net_classes=net_classes,
-                    ),
-                    path=dru_path,
+            from kicad_tools.manufacturers.keepout_dru import apply_keepout_rules
+
+            merged_dru = merge_dru_floors(
+                existing_dru,
+                generate_project_dru(
+                    checker.design_rules,
+                    project_data,
+                    manufacturer_id=manufacturer_id,
+                    net_classes=net_classes,
                 ),
-                encoding="utf-8",
+                path=dru_path,
             )
+            # Issue #6039: per-rule-area keepout rules (kicad-cli 10.0.1 does
+            # not enforce rule areas without them).
+            merged_dru = apply_keepout_rules(merged_dru, pcb_path) or merged_dru
+            dru_path.write_text(merged_dru, encoding="utf-8")
             written = [dru_path]
     except (OSError, json.JSONDecodeError) as e:
         print(

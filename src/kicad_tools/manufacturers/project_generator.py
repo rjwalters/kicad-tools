@@ -468,6 +468,7 @@ def write_drc_constraints(
     write_dru: bool = True,
     net_classes: Sequence[NetClassRouting] | None = None,
     source_pcb_path: str | Path | None = None,
+    _board_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
 
@@ -496,8 +497,15 @@ def write_drc_constraints(
     identical either way -- this is a diagnostic only, and it stays silent
     when ``kicad-cli`` cannot be located or its version cannot be parsed.
 
+    The ``.kicad_dru`` also gets one explicit ``intersectsArea`` disallow
+    rule per keepout rule area on the board, in its own managed block
+    (Issue #6039): ``kicad-cli`` 10.0.1 does not enforce rule areas on its
+    own.  See :mod:`kicad_tools.manufacturers.keepout_dru`.
+
     Args:
         pcb_path: Path to the routed board.
+        _board_path: Internal -- board to read keepout rule areas from when
+            ``pcb_path`` is a staged sibling with no ``.kicad_pcb`` beside it.
         source_pcb_path: Original board when routing to a renamed destination.
             Copy authored project/DRU before merging floors; reject conflicting
             destination files before writing either sidecar. Source is read-only.
@@ -549,6 +557,7 @@ def write_drc_constraints(
                 copper_oz=copper_oz,
                 write_dru=write_dru,
                 net_classes=net_classes,
+                _board_path=pcb_path,
             )
             for result in rendered:
                 authored = source.with_suffix(result.suffix)
@@ -609,16 +618,21 @@ def write_drc_constraints(
             # Unreadable existing file -- nothing recoverable to preserve;
             # write cleanly (mirrors the corrupt-``.kicad_pro`` fallback).
             existing_dru = None
-        dru_path.write_text(
-            merge_dru_floors(
-                existing_dru,
-                generate_project_dru(
-                    rules, project_data, manufacturer_id=manufacturer_id, net_classes=net_classes
-                ),
-                path=dru_path,
+        from .keepout_dru import apply_keepout_rules
+
+        merged_dru = merge_dru_floors(
+            existing_dru,
+            generate_project_dru(
+                rules, project_data, manufacturer_id=manufacturer_id, net_classes=net_classes
             ),
-            encoding="utf-8",
+            path=dru_path,
         )
+        # Issue #6039: explicit per-rule-area keepout rules, since headless
+        # kicad-cli does not enforce rule areas on its own.
+        board = Path(_board_path) if _board_path is not None else pcb_path
+        if board.exists():
+            merged_dru = apply_keepout_rules(merged_dru, board) or merged_dru
+        dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have
         # installed will silently ignore its SMD pad floor (#5724).
