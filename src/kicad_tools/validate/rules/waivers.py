@@ -61,7 +61,7 @@ Evidence-bound waivers (schema ``version == 3``, Issue #5946)::
       "waivers": [
         {
           "key": "courtyards_overlap|C52,U10||F.Cu",
-          "evidence_hash": "ev1:3f0c9a1d2b7e4c55",
+          "evidence_hash": "ev2:3f0c9a1d2b7e4c55",
           "reason": "EE-mandated tight decoupling",
           "reviewer": "rjwalters",
           "date": "2026-10-06"
@@ -74,7 +74,11 @@ A keyed entry names one finding by its stable ``key`` (see
 evidence that was reviewed.  When the geometry or nets under the finding
 change, the hash no longer matches: the waiver is **stale**, the finding stays
 active (it is never suppressed), it is annotated with the stale waiver's hash,
-and a ``waiver_stale`` warning names the entry.  ``reviewer`` and ``date`` are
+and a ``waiver_stale`` warning names the entry.  A waiver whose hash was
+computed by an older evidence recipe (an ``ev1:`` hash after the ``ev2``
+upgrade, Issue #6011) can never match; it is reported as stale with a
+distinct *outdated evidence version* message, so a reviewer knows the cause
+is the kct upgrade rather than a board edit.  ``reviewer`` and ``date`` are
 required on keyed entries; ``issue`` is optional.  Version 3 files may also
 carry legacy ``rule``/``items``/``nets`` entries, which may optionally add an
 ``evidence_hash`` of their own.  ``kct check --waive KEY --reason ...
@@ -104,6 +108,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.validate.evidence import (
+    EVIDENCE_HASH_VERSION,
+    evidence_hash_version,
+    is_outdated_evidence_hash,
+)
 from kicad_tools.validate.violations import DRCResults, DRCViolation
 
 # Schema versions understood by this loader.  Version 3 (Issue #5946) adds
@@ -584,18 +593,33 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
             tracking = f" (tracking {entry.issue})" if entry.issue else ""
             reviewed = f" reviewed by {entry.reviewer}" if entry.reviewer else ""
             dated = f" on {entry.date}" if entry.date else ""
+            if is_outdated_evidence_hash(entry.evidence_hash):
+                # Issue #6011: the recipe changed, not (necessarily) the board.
+                message = (
+                    f"STALE waiver (outdated evidence version) for rule {entry.rule!r}"
+                    f" ({entry.scope}){tracking}: it was recorded{reviewed}{dated} as"
+                    f" {entry.evidence_hash}, an"
+                    f" {evidence_hash_version(entry.evidence_hash)!s} hash, but this kct"
+                    f" computes {EVIDENCE_HASH_VERSION} hashes (now"
+                    f" {', '.join(current)}). The evidence recipe changed in a kct"
+                    " upgrade, so every older waiver goes stale once even if the"
+                    " board is unchanged; re-review the finding and re-waive it"
+                    " (kct check --waive) to record the new hash."
+                )
+            else:
+                message = (
+                    f"STALE waiver for rule {entry.rule!r} ({entry.scope}){tracking}:"
+                    f" the evidence{reviewed}{dated} was {entry.evidence_hash}, the"
+                    f" board now gives {', '.join(current)}. The geometry or nets"
+                    " under the finding changed, so the finding is active again;"
+                    " re-review it and re-waive (kct check --waive) if it is"
+                    " still intentional."
+                )
             rebuilt.append(
                 DRCViolation(
                     rule_id=WAIVER_STALE_RULE_ID,
                     severity="warning",
-                    message=(
-                        f"STALE waiver for rule {entry.rule!r} ({entry.scope}){tracking}:"
-                        f" the evidence{reviewed}{dated} was {entry.evidence_hash}, the"
-                        f" board now gives {', '.join(current)}. The geometry or nets"
-                        " under the finding changed, so the finding is active again;"
-                        " re-review it and re-waive (kct check --waive) if it is"
-                        " still intentional."
-                    ),
+                    message=message,
                     items=tuple(sorted(entry.items)),
                     nets=tuple(sorted(entry.nets)),
                 )

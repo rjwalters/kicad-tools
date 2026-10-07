@@ -79,7 +79,7 @@ class TestKeyAndEvidence:
 
     def test_hash_tracks_geometry_and_is_float_noise_stable(self):
         base = compute_evidence_hash(_v())
-        assert base.startswith("ev1:")
+        assert base.startswith("ev2:")
         assert compute_evidence_hash(_v(location=(10.0000001, 20.0))) == base
         assert compute_evidence_hash(_v(location=(10.5, 20.0))) != base
         assert compute_evidence_hash(_v(actual_value=0.15)) != base

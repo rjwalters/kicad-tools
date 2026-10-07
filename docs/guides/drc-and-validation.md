@@ -295,7 +295,14 @@ Every `kct check` finding in `--format json` carries two handles:
   `courtyards_overlap|C52,U10||F.Cu`.
 - `evidence_hash` is a hash of the *local evidence*: the finding's location and
   measured values, the placement and pads of the footprints it names, and the
-  pad membership of the nets it names.
+  pad membership of the nets it names. For a finding with a location, a net's
+  membership is limited to the pads near the finding: within 3 mm for
+  clearance, width and dimension rules, 5 mm otherwise, in board coordinates.
+  Adding a `GND` pad across the board therefore leaves a `GND` clearance
+  waiver alone, while adding, removing or moving a nearby pad still makes it
+  stale. Whole-net rules (`connectivity`, `single_pad_net`, `ampacity`,
+  `path_ampacity`, the diff-pair and match-group skew rules and similar) and
+  findings without a location keep the full membership.
 
 To record a reviewed acknowledgment, waive the key:
 
@@ -314,7 +321,7 @@ The command writes a keyed entry, bound to the current hash, to
   "waivers": [
     {
       "key": "courtyards_overlap|C52,U10||F.Cu",
-      "evidence_hash": "ev1:3f0c9a1d2b7e4c55",
+      "evidence_hash": "ev2:3f0c9a1d2b7e4c55",
       "reason": "EE-mandated tight decoupling",
       "reviewer": "rjwalters",
       "date": "2026-10-06"
@@ -330,6 +337,13 @@ When the copper or nets under the finding change, the waiver goes **stale**:
 - `summary.stale_waivers` counts the stale findings.
 
 Re-review the finding, and re-run `--waive` only if it is still intentional.
+
+The hash prefix (`ev2:`) names the evidence recipe. When an upgrade changes
+the recipe, every waiver recorded with an older prefix goes stale once, even
+on an unchanged board. Those are reported as `STALE waiver (outdated evidence
+version)`, and the finding's JSON carries
+`"stale_waiver_cause": "outdated_evidence_version"` instead of
+`"evidence_changed"`. Re-waive them once after upgrading.
 Re-running `--waive` replaces the old entry. Legacy
 `rule`/`items`/`nets` entries (schema 2) still work, and a schema-3 legacy entry
 may add its own `evidence_hash`. Keyed entries apply to `kct check` only;
