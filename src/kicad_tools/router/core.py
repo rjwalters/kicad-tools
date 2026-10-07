@@ -14125,6 +14125,28 @@ class Autorouter:
             return max(subsearch_budget, RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S)
         return subsearch_budget
 
+    @staticmethod
+    def _relief_victim_connected_pads(
+        net: int, routes: list[Route], pads_by_net: dict[int, list[Pad]]
+    ) -> tuple[bool, int] | None:
+        """``(fully_connected, connected_pads)`` for one rescue victim's copper.
+
+        Issue #6151 review.  The same predicate the final connectivity report
+        and the negotiated loop's ``_connected_net_ids`` use
+        (:func:`observability.validate_net_connectivity`), scoped to one net.
+        ``None`` when the net's pads are unknown or it has fewer than two --
+        nothing to measure, so the caller applies the strict gate.
+        """
+        from .observability import validate_net_connectivity
+
+        pads = pads_by_net.get(net)
+        if not pads or len(pads) < 2:
+            return None
+        info = validate_net_connectivity(routes, {net: pads}).get(net)
+        if info is None:
+            return None
+        return bool(info.get("connected")), int(info.get("connected_pads", 0))
+
     def _relief_subsearch_bound_line(
         self, per_net_timeout: float | None, deterministic_rescue: bool
     ) -> str:
@@ -14491,6 +14513,22 @@ class Autorouter:
         snapshot_nets: set[int] = {failed_net}
         original_routes: dict[int, list[Route]] = {failed_net: list(net_routes.get(failed_net, []))}
         ripped: list[int] = []
+        # Issue #6151 review: the negotiated loop keeps PARTIAL nets in
+        # ``net_routes``, so a victim can already be partial when ripped.
+        # Record, per victim, the connected-pad count it had when it was NOT
+        # fully connected; such a victim re-lands when it gets back at least
+        # that much ("no victim gets worse").  A victim that was complete
+        # (absent here) must re-land complete.
+        partial_victim_baseline: dict[int, int] = {}
+
+        def _snapshot_victim(v: int) -> None:
+            snapshot_nets.add(v)
+            original_routes[v] = list(net_routes.get(v, []))
+            ripped.append(v)
+            state = self._relief_victim_connected_pads(v, original_routes[v], pads_by_net)
+            if state is not None and not state[0]:
+                partial_victim_baseline[v] = state[1]
+
         failed_name = self.net_names.get(failed_net, f"Net_{failed_net}")
 
         # Issue #4255 (Track A / A2): a diff pair is an ATOMIC unit.  When the
@@ -14515,9 +14553,7 @@ class Autorouter:
         # (protects the per-net byte-lane identity / reservation-count tests).
         pair_partner: int | None = self._diff_pair_partner_net(failed_net)
         if pair_partner is not None and net_routes.get(pair_partner):
-            snapshot_nets.add(pair_partner)
-            original_routes[pair_partner] = list(net_routes.get(pair_partner, []))
-            ripped.append(pair_partner)
+            _snapshot_victim(pair_partner)
         else:
             pair_partner = None
 
@@ -14637,9 +14673,7 @@ class Autorouter:
                 return False
 
             for v in rippable:
-                snapshot_nets.add(v)
-                original_routes[v] = list(net_routes.get(v, []))
-                ripped.append(v)
+                _snapshot_victim(v)
             neg_router.rip_up_nets(list(rippable), net_routes, self.routes)
             rippable_names = sorted(self.net_names.get(v, f"Net_{v}") for v in rippable)
             flush_print_fn(
@@ -14697,6 +14731,12 @@ class Autorouter:
                     budget_bound.discard(rn)
                     escalated.add(rn)
                     rn_timeout = retry_timeout
+                    # Never let the escalated retry overrun the stage
+                    # deadline / transaction allowance (``_past_deadline``
+                    # already confirmed some of it remains).
+                    bounds = [b for b in (deadline, txn_deadline) if b is not None]
+                    if rn_timeout is not None and bounds:
+                        rn_timeout = min(rn_timeout, min(bounds) - _time.time())
                 # Issue #6151: a victim counts as re-landed only when EVERY
                 # connection landed.  ``_route_net_negotiated`` returns the
                 # edges it did commit when one fails, is refused by the
@@ -14707,6 +14747,9 @@ class Autorouter:
                 # (the no-net-loss guarantee below, violated).  The failed-edge
                 # count is the same per-net success test sequential_ripup uses
                 # (#5894), and the signal the negotiated loop's rip-up reads.
+                # A victim that was already partial when ripped is held to
+                # "no fewer connected pads than before" instead (see
+                # ``partial_victim_baseline``).
                 edge_failures: list[tuple[Pad, Pad]] = []
                 started = _time.monotonic()
                 rn_routes = self._route_net_negotiated(
@@ -14715,7 +14758,22 @@ class Autorouter:
                     per_net_timeout=rn_timeout,
                     failure_callback=lambda src, dst: edge_failures.append((src, dst)),
                 )
-                if rn_routes and not edge_failures:
+                accepted = bool(rn_routes) and not edge_failures
+                if rn_routes and edge_failures and rn in partial_victim_baseline:
+                    # Issue #6151 review: a victim that was ALREADY partial
+                    # before the rescue may come back partial, provided it
+                    # re-lands at least the pads it had connected -- the
+                    # pre-#6151 acceptance, bounded so it never gets worse.
+                    state = self._relief_victim_connected_pads(rn, rn_routes, pads_by_net)
+                    accepted = state is not None and state[1] >= partial_victim_baseline[rn]
+                    if state is not None and accepted:
+                        rn_name = self.net_names.get(rn, f"Net_{rn}")
+                        flush_print_fn(
+                            f"  Relief rescue: victim {rn_name} was partial before the "
+                            f"rescue; re-landed {state[1]} connected pad(s) "
+                            f"(was {partial_victim_baseline[rn]})"
+                        )
+                if accepted:
                     net_routes[rn] = rn_routes
                     for route in rn_routes:
                         self.grid.mark_route_usage(route)
