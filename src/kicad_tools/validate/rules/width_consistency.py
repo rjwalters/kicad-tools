@@ -136,6 +136,7 @@ def _run_item(run: _Run, layer: str, origin: tuple[float, float]) -> str:
         run.tracks[-1].points[-1],
         len(run.tracks),
         origin,
+        vertices=[pt for t in run.tracks for pt in t.points],
     )
 
 

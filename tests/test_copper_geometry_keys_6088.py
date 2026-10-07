@@ -116,6 +116,19 @@ class TestDescriptors:
         )
         assert run_ref("F.Cu", 0.2, (0.0, 1.0), (5.0, 1.0), 3) == "Run@F.Cu:w0.2:0/1~5/1:n3"
 
+    def test_run_ref_digest_covers_interior_vertices(self):
+        """Same end points and count, different bend: different key (review fix)."""
+        ends = ((0.0, 0.0), (4.0, 0.0))
+        bent_up = [(0.0, 0.0), (2.0, 1.0), (4.0, 0.0)]
+        bent_down = [(0.0, 0.0), (2.0, -1.0), (4.0, 0.0)]
+        up = run_ref("F.Cu", 0.2, *ends, 2, vertices=bent_up)
+        assert up != run_ref("F.Cu", 0.2, *ends, 2, vertices=bent_down)
+        assert up == run_ref("F.Cu", 0.2, *ends, 2, vertices=bent_up[::-1])
+        # Moving the interior vertex by less than the 1 um quantum keeps the key.
+        nudged = [(0.0, 0.0), (2.0, 1.0004), (4.0, 0.0)]
+        assert up == run_ref("F.Cu", 0.2, *ends, 2, vertices=nudged)
+        assert "," not in up and "|" not in up
+
     def test_descriptors_avoid_key_separators(self):
         for ref in (
             segment_ref(_seg((1.0, 2.0), (3.0, 2.0), layer="F,Cu|x")),
@@ -377,3 +390,42 @@ def test_unused_geometry_keyed_waiver_gets_no_rewaive_hint(tmp_path, capsys):
         },
     )
     assert "--waive" not in message
+
+
+_RUN_KEY = "width_consistency|Run@F.Cu:w0.2:0/0~4/0:n2:h0123456789ab|NET1|F.Cu"
+
+
+def test_legacy_uuid_run_items_waiver_matches_run_finding():
+    from kicad_tools.validate.rules.waivers import Waiver, _rewaive_candidates
+    from kicad_tools.validate.violations import DRCViolation
+
+    finding = DRCViolation(
+        rule_id="width_consistency",
+        severity="warning",
+        message="m",
+        location=(1.0, 1.0),
+        layer="F.Cu",
+        items=("Run@F.Cu:w0.2:0/0~4/0:n2:h0123456789ab",),
+        nets=("NET1",),
+    )
+    uuids = ("7ebe780f-1111-4222-8333-444455556666", "3b0d0dc9-1111-4222-8333-444455556666")
+    entry = Waiver(
+        rule="width_consistency",
+        items=frozenset(uuids),
+        nets=frozenset({"NET1"}),
+        reason="r",
+        issue="x#1",
+    )
+    assert _rewaive_candidates(entry, [finding]) == [finding.key]
+    other = Waiver(**{**entry.__dict__, "nets": frozenset({"OTHER"})})
+    assert _rewaive_candidates(other, [finding]) == []
+
+
+def test_legacy_uuid_keyed_run_waiver_matches_run_key():
+    from kicad_tools.validate.rules.waivers import _coarsen_key
+
+    legacy = (
+        "width_consistency|3b0d0dc9-1111-4222-8333-444455556666,"
+        "7ebe780f-1111-4222-8333-444455556666|NET1|F.Cu"
+    )
+    assert _coarsen_key(legacy) == _coarsen_key(_RUN_KEY) == "width_consistency|Run|NET1|F.Cu"

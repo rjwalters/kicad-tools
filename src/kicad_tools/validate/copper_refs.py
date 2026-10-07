@@ -10,6 +10,7 @@ below name the copper by **what it is**, not by its identity:
 
 * **Track** -- ``Trace@<layer>:w<width>:<x1>/<y1>~<x2>/<y2>``
 * **Arc** -- ``Arc@<layer>:w<width>:<start>~<mid>~<end>``
+* **Run** (``width_consistency``) -- ``Run@<layer>:w<width>:<end>~<end>:n<tracks>:h<digest>``
 * **Via** -- ``Via@<x>/<y>:<top>-<bottom>:d<drill>/s<size>``
 
 The net is not repeated in the descriptor: every finding already carries its
@@ -37,7 +38,9 @@ Every descriptor avoids ``,`` and ``|`` (the finding-key separators).
 
 from __future__ import annotations
 
+import hashlib
 import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -119,17 +122,31 @@ def run_ref(
     end: tuple[float, float],
     count: int,
     origin: Origin = _NO_ORIGIN,
+    vertices: Sequence[tuple[float, float]] | None = None,
 ) -> str:
     """Descriptor of a chain of ``count`` same-width tracks from ``start`` to ``end``.
 
     Used by ``width_consistency``, whose findings are about a whole run of
     tracks: naming each track would make the key grow with the run, so the
     run is named by its (canonically ordered) end points, width and length in
-    tracks.  The run's interior geometry is covered by the evidence hash
-    (location and measured length).
+    tracks.  End points and count alone do not pin a run's shape -- two runs
+    can bend through different intermediate points -- so when ``vertices``
+    (the run's polyline, in order) is given, a short digest of its quantised
+    vertices, canonically oriented, is appended as ``:h<digest>``.  Moving an
+    interior vertex by more than the 1 um quantum therefore changes the key.
     """
     a, b = sorted((_qpoint(start, origin), _qpoint(end, origin)))
-    return f"Run@{_clean(layer)}:w{_mm(_q(width))}:{_fmt_point(a)}~{_fmt_point(b)}:n{count}"
+    ref = f"Run@{_clean(layer)}:w{_mm(_q(width))}:{_fmt_point(a)}~{_fmt_point(b)}:n{count}"
+    if vertices:
+        path: list[tuple[int, int]] = []
+        for vertex in vertices:
+            point = _qpoint(vertex, origin)
+            if not path or path[-1] != point:
+                path.append(point)
+        canonical = min(path, path[::-1])
+        digest = hashlib.sha256(repr(canonical).encode()).hexdigest()[:12]
+        ref += f":h{digest}"
+    return ref
 
 
 def via_ref(via: Via, origin: Origin = _NO_ORIGIN) -> str:

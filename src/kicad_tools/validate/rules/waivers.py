@@ -160,8 +160,16 @@ _GEOMETRY_SUFFIX = re.compile(r"\b((?:fp|gr)_[a-z]+)@[^\s,|)]+")
 # older builds used (``Trace-1a2b3c4d`` / ``Via-1a2b3c4d``; arcs were
 # ``Trace-...`` too).  Both coarsen to the bare kind, so an unused UUID-named
 # waiver can point at the geometry keys that replaced it.
-_COPPER_GEOMETRY = re.compile(r"\b(Trace|Arc|Via)@[^\s,|)]+")
+_COPPER_GEOMETRY = re.compile(r"\b(Trace|Arc|Via|Run)@[^\s,|)]+")
 _LEGACY_COPPER = re.compile(r"\b(Trace|Via)-[^\s,|)]+")
+
+# ``width_consistency`` findings named every track of a run by its raw UUID
+# (no ``Trace-`` prefix) and now name the run as ``Run@...``.  A bare UUID
+# coarsens to ``Run`` too, and repeated ``Run`` items collapse to one, so a
+# legacy multi-UUID waiver lines up with the one-item run finding.
+_LEGACY_RUN_UUID = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
 
 # Cap on the replacement keys listed in one unused-waiver hint.
 _MAX_REWAIVE_HINT_KEYS = 5
@@ -170,7 +178,10 @@ _MAX_REWAIVE_HINT_KEYS = 5
 def _coarsen(text: str) -> str:
     """Strip per-primitive geometry / identity from an item name."""
     text = _GEOMETRY_SUFFIX.sub(r"\1", text)
-    text = _COPPER_GEOMETRY.sub(lambda m: "Via" if m.group(1) == "Via" else "Trace", text)
+    text = _COPPER_GEOMETRY.sub(
+        lambda m: m.group(1) if m.group(1) in ("Via", "Run") else "Trace", text
+    )
+    text = _LEGACY_RUN_UUID.sub("Run", text)
     return _LEGACY_COPPER.sub(r"\1", text)
 
 
@@ -178,7 +189,10 @@ def _coarsen_key(key: str) -> str:
     """:func:`_coarsen` every item of a finding key, re-sorting the items field."""
     parts = key.split(KEY_SEPARATOR)
     if len(parts) >= 2:
-        parts[1] = ",".join(sorted(_coarsen(item) for item in parts[1].split(",") if item))
+        items = sorted(_coarsen(item) for item in parts[1].split(",") if item)
+        if items and all(item == "Run" for item in items):
+            items = ["Run"]
+        parts[1] = ",".join(items)
     return KEY_SEPARATOR.join(parts)
 
 
