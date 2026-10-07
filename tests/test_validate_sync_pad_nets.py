@@ -337,3 +337,57 @@ def test_names_same_net_strict() -> None:
     assert _names_same_net_strict("/A/X", "A/X")
     assert not _names_same_net_strict("/A/X", "/B/X")
     assert not _names_same_net_strict("X", "Y")
+
+
+def _swap_check(sch_to_pcb: dict[str, str], sch_nets: set[str] | None = None) -> SyncResult:
+    result = SyncResult()
+    NetlistValidator.__new__(NetlistValidator)._check_swapped_net_names(
+        result, sch_to_pcb, set(sch_to_pcb) if sch_nets is None else sch_nets
+    )
+    return result
+
+
+def test_cross_sheet_same_leaf_swap_is_reported() -> None:
+    """``/A/CLK`` <-> ``/B/CLK`` exchanged wholesale is a swap (issue #5999)."""
+    result = _swap_check({"/A/CLK": "/B/CLK", "/B/CLK": "/A/CLK"})
+    assert len(result.errors) == 1, [i.message for i in result.issues]
+    issue = result.errors[0]
+    assert issue.severity == "error"
+    assert issue.message.startswith("Net names swapped")
+    assert {issue.net_schematic, issue.net_pcb} == {"/A/CLK", "/B/CLK"}
+
+    result = _swap_check({"/MCU_A/DBG_LED": "/MCU_B/DBG_LED", "/MCU_B/DBG_LED": "/MCU_A/DBG_LED"})
+    assert [i.message.split(":")[0] for i in result.errors] == ["Net names swapped"]
+
+
+def test_cross_sheet_one_way_rename_is_reported() -> None:
+    """``/A/CLK`` named ``/B/CLK`` while ``/B/CLK`` keeps an unclaimed name."""
+    result = _swap_check({"/A/CLK": "/B/CLK", "/B/CLK": "Net-(U1-Pad3)"})
+    assert [i.net_schematic for i in result.errors] == ["/A/CLK"]
+    assert "Net named after another net" in result.errors[0].message
+
+
+def test_self_name_spellings_stay_tolerated() -> None:
+    """``X``, ``/X``, ``/Sheet/X`` and an unclaimed cross-sheet label are S's own name."""
+    for pcb in ("CLK", "/CLK", "/A/CLK", "A/CLK"):
+        assert not _swap_check({"/A/CLK": pcb}).issues, pcb
+    # kct's identity and KiCad's label disagree on the sheet path (repeated
+    # sheet, hierarchical label) and no other schematic net owns that name.
+    assert not _swap_check({"/MCU_A/DBG_LED": "/MCU_B/DBG_LED", "/LED": "/LED"}).issues
+
+
+def test_unqualified_name_prefers_swap_partner_over_alphabetical_sheet() -> None:
+    """PCB ``CLK`` spells ``/A/CLK`` and ``/B/CLK``; the swap partner wins."""
+    result = _swap_check(
+        {"/DATA": "CLK", "/A/CLK": "/A/CLK", "/B/CLK": "DATA"},
+    )
+    assert len(result.errors) == 1, [i.message for i in result.issues]
+    assert result.errors[0].message.startswith("Net names swapped")
+    assert "'/B/CLK'" in result.errors[0].message
+    assert "'/A/CLK'" not in result.errors[0].message
+
+
+def test_unqualified_name_with_several_owners_names_them_all() -> None:
+    result = _swap_check({"/DATA": "CLK", "/A/CLK": "/A/CLK", "/B/CLK": "/B/CLK"})
+    assert len(result.errors) == 1
+    assert "schematic nets '/A/CLK', '/B/CLK'" in result.errors[0].message
