@@ -334,6 +334,184 @@ def _sync_at_angle(owner: object, at_node: SExp, angle: float) -> None:
         owner.__dict__["_at_angle_synthetic"] = True
 
 
+# A footprint's placement as the frame transform KiCad applies to its children:
+# ``(anchor_x, anchor_y, rotation_deg, is_back)``.
+_FootprintFrame = tuple[float, float, float, bool]
+
+# Children of a ``(zone ...)`` that hold a ``(pts ...)`` list in sheet
+# coordinates.  ``fill_segments`` is the pre-KiCad-6 hatch-fill spelling.
+_ZONE_PTS_PARENTS = frozenset({"polygon", "filled_polygon", "fill_segments"})
+
+
+def _flip_side_layer(name: str) -> str:
+    """Swap a KiCad layer name to the other board side (``F.* <-> B.*``).
+
+    Side-neutral names (``*.Cu``, ``F&B.Cu``, ``In1.Cu``, ``Edge.Cuts``) are
+    returned unchanged -- what KiCad's footprint flip does to them as well.
+    """
+    if name.startswith("F."):
+        return "B." + name[2:]
+    if name.startswith("B."):
+        return "F." + name[2:]
+    return name
+
+
+def _is_back_layer(layer: object) -> bool:
+    return isinstance(layer, str) and layer.startswith("B.")
+
+
+def _footprint_frame_mapper(old: _FootprintFrame, new: _FootprintFrame):
+    """Return ``f(x, y) -> (x', y')`` re-placing a point from *old* to *new*.
+
+    KiCad stores footprint-embedded zones in board coordinates with the
+    footprint's placement already applied::
+
+        board = anchor + R(rotation) . M(is_back) . local
+
+    where ``R(a)`` is KiCad's ``RotatePoint`` (Y-down, so ``x' = x cos a +
+    y sin a``, ``y' = -x sin a + y cos a``) and ``M`` mirrors ``y`` for a
+    back-side footprint.  Pulling a point back through *old* and pushing it
+    through *new* reproduces every ``FOOTPRINT`` operation exactly:
+    ``SetPosition`` (translate), ``SetOrientation`` (rotate about the anchor),
+    ``Flip(TOP_BOTTOM)`` (side swap, ``a -> -a``) and ``Flip(LEFT_RIGHT)``
+    (side swap, ``a -> 180 - a``).  Pinned against pcbnew 10.0.1 by
+    ``tests/fixtures/fp_zone_transform/`` (Issue #6119).
+
+    The map depends only on the two end states, so a sequence of single-field
+    updates (``position``, then ``rotation``, then ``layer``) composes to the
+    same result as one combined update, in any order.
+    """
+    ox, oy, orot, oback = old
+    nx, ny, nrot, nback = new
+    oa = math.radians(orot)
+    na = math.radians(nrot)
+    oc, os_ = math.cos(oa), math.sin(oa)
+    nc, ns = math.cos(na), math.sin(na)
+    mirror = oback != nback
+
+    def mapper(x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - ox, y - oy
+        # Inverse rotation R(-old) brings the point into the oriented local frame.
+        lx = dx * oc - dy * os_
+        ly = dx * os_ + dy * oc
+        if mirror:
+            ly = -ly
+        return (lx * nc + ly * ns + nx, -lx * ns + ly * nc + ny)
+
+    return mapper
+
+
+def _mm_atom(value: float) -> SExp:
+    """A numeric atom formatted like KiCad's own writer (up to 6 decimals).
+
+    The generic float serializer uses 6 *significant* digits, which would
+    round a transformed ``124.598076`` to ``124.598``.  The in-memory value
+    keeps full precision, so a move-and-restore (``check_placement_collision``,
+    placement-feedback rollback) puts the original text back exactly.
+    """
+    text = f"{round(value, 6):.6f}".rstrip("0").rstrip(".")
+    if text in ("-0", ""):
+        text = "0"
+    return SExp(value=value, _original_str=text)
+
+
+def _transform_zone_sexp(
+    zone_node: SExp,
+    mapper,
+    flip_layers: bool,
+) -> None:
+    """Re-place one footprint ``(zone ...)`` node in the S-expression tree."""
+    for child in zone_node.iter_children():
+        if child.tag in _ZONE_PTS_PARENTS:
+            pts = child.find_child("pts")
+            if pts is not None:
+                for point in pts.iter_children():
+                    # Zone outlines may carry ``(arc (start) (mid) (end))``
+                    # entries; a rigid motion maps them point-wise too.
+                    targets = (
+                        [point]
+                        if point.tag == "xy"
+                        else [n for n in point.iter_children() if n.tag in ("start", "mid", "end")]
+                        if point.tag == "arc"
+                        else []
+                    )
+                    for node in targets:
+                        x, y = node.get_float(0), node.get_float(1)
+                        if x is None or y is None:
+                            continue
+                        nx, ny = mapper(x, y)
+                        node.children[0] = _mm_atom(nx)
+                        node.children[1] = _mm_atom(ny)
+            if flip_layers and child.tag == "filled_polygon":
+                _flip_layer_node(child.find_child("layer"))
+        elif flip_layers and child.tag == "layer":
+            _flip_layer_node(child)
+        elif flip_layers and child.tag == "layers":
+            child.children = [
+                SExp.quoted_atom(_flip_side_layer(atom.value))
+                if atom.is_atom and isinstance(atom.value, str)
+                else atom
+                for atom in child.children
+            ]
+
+
+def _flip_layer_node(node: SExp | None) -> None:
+    if node is None:
+        return
+    name = node.get_string(0)
+    if name:
+        node.children[0] = SExp.quoted_atom(_flip_side_layer(name))
+
+
+def transform_footprint_zone_nodes(
+    footprint_node: SExp,
+    old_frame: _FootprintFrame,
+    new_frame: _FootprintFrame,
+) -> int:
+    """Re-place the ``(zone ...)`` children of a raw ``(footprint ...)`` node.
+
+    For code that edits a footprint's ``(at ...)`` directly in the
+    S-expression tree instead of going through :class:`Footprint` (whose
+    ``position``/``rotation``/``layer`` setters already do this).  Both
+    frames are **sheet-absolute** ``(x, y, rotation_deg, is_back)`` -- the
+    values in the footprint's ``(at ...)``/``(layer ...)`` before and after
+    the edit.  Returns the number of zones rewritten (Issue #6119).
+    """
+    if new_frame == old_frame:
+        return 0
+    zone_nodes = [child for child in footprint_node.iter_children() if child.tag == "zone"]
+    if not zone_nodes:
+        return 0
+    mapper = _footprint_frame_mapper(old_frame, new_frame)
+    flip_layers = old_frame[3] != new_frame[3]
+    for zone_node in zone_nodes:
+        _transform_zone_sexp(zone_node, mapper, flip_layers)
+    return len(zone_nodes)
+
+
+def footprint_node_frame(footprint_node: SExp) -> _FootprintFrame:
+    """Sheet-absolute ``(x, y, rotation, is_back)`` of a raw footprint node."""
+    at_node = footprint_node.find_child("at")
+    x = y = rot = 0.0
+    if at_node is not None:
+        x = at_node.get_float(0) or 0.0
+        y = at_node.get_float(1) or 0.0
+        rot = at_node.get_float(2) or 0.0
+    layer_node = footprint_node.find_child("layer")
+    layer = layer_node.get_string(0) if layer_node is not None else None
+    return (x, y, rot, _is_back_layer(layer))
+
+
+def _transform_zone_object(zone: Zone, mapper, flip_layers: bool) -> None:
+    """Re-place one parsed footprint :class:`Zone` (board-relative coords)."""
+    zone.polygon = [mapper(x, y) for x, y in zone.polygon]
+    zone.filled_polygons = [[mapper(x, y) for x, y in poly] for poly in zone.filled_polygons]
+    if flip_layers:
+        zone.layer = _flip_side_layer(zone.layer)
+        zone.layers = [_flip_side_layer(name) for name in zone.layers]
+        zone.filled_polygon_layers = [_flip_side_layer(name) for name in zone.filled_polygon_layers]
+
+
 @dataclass
 class Pad:
     """Component pad."""
@@ -923,6 +1101,13 @@ class Footprint:
         repr=False,
         compare=False,
     )
+    # Parsed zones embedded in this footprint (an RF module's antenna keepout,
+    # a footprint copper pour), the same objects ``PCB.footprint_rule_areas``
+    # returns.  KiCad stores them in board coordinates with the footprint's
+    # placement already applied, so ``__setattr__`` re-places them -- and
+    # their ``(zone ...)`` nodes -- whenever position/rotation/side change
+    # (Issue #6119).
+    _zones: list[Zone] = field(default_factory=list, repr=False, compare=False)
     # Tokens inside ``(attr ...)`` that the parser does not yet model
     # (e.g. ``board_only``, ``allow_missing_courtyard``,
     # ``allow_soldermask_bridges``). Preserved verbatim so that the
@@ -964,6 +1149,10 @@ class Footprint:
     # ------------------------------------------------------------------
 
     def __setattr__(self, name: str, value: object) -> None:
+        # Capture the pre-change placement so embedded zones can be moved
+        # from the old frame to the new one (Issue #6119).
+        old_frame = self._placement_frame() if name in ("position", "rotation", "layer") else None
+
         # Always store the Python value first via the default mechanism.
         super().__setattr__(name, value)
 
@@ -972,6 +1161,9 @@ class Footprint:
         sexp_node: SExp | None = self.__dict__.get("_sexp_node")
         if sexp_node is None:
             return
+
+        if old_frame is not None:
+            self._replace_embedded_zones(sexp_node, old_frame)
 
         # Direct children only for the (at)/(layer) lookups below:
         # properties, fp_texts and pads carry their own (at)/(layer)
@@ -1006,6 +1198,45 @@ class Footprint:
             # are preserved verbatim via ``_attr_unknown_tokens`` so we
             # don't drop tokens the parser doesn't yet model.
             self._sync_attr_node()
+
+    def _placement_frame(self) -> _FootprintFrame | None:
+        """Board-relative ``(x, y, rotation, is_back)``; None before init."""
+        state = self.__dict__
+        if "position" not in state or "rotation" not in state or "layer" not in state:
+            return None
+        x, y = cast("tuple[float, float]", state["position"])
+        return (float(x), float(y), float(state["rotation"]), _is_back_layer(state["layer"]))
+
+    def _replace_embedded_zones(self, sexp_node: SExp, old_frame: _FootprintFrame) -> None:
+        """Move this footprint's ``(zone ...)`` children with the footprint.
+
+        KiCad stores footprint zones in board coordinates with the
+        footprint's placement already applied (unlike pads, texts and
+        graphics, which are footprint-local), so a position/rotation/side
+        change must rewrite their polygons -- outline and fill -- or an RF
+        module's antenna keepout stays behind at the old location
+        (Issue #6119).  Both the ``(zone ...)`` nodes ``PCB.save`` writes and
+        the parsed :class:`Zone` objects (``PCB.footprint_rule_areas``) are
+        updated.
+        """
+        new_frame = self._placement_frame()
+        if new_frame is None or new_frame == old_frame:
+            return
+        # The parsed zones are board-relative, like ``position``.
+        zones: list[Zone] = self.__dict__.get("_zones") or []
+        if zones:
+            board_map = _footprint_frame_mapper(old_frame, new_frame)
+            flip_layers = old_frame[3] != new_frame[3]
+            for zone in zones:
+                _transform_zone_object(zone, board_map, flip_layers)
+
+        # The tree is sheet-absolute: shift both frames by the board origin.
+        ox, oy = self.__dict__.get("_board_origin", (0.0, 0.0))
+        transform_footprint_zone_nodes(
+            sexp_node,
+            (old_frame[0] + ox, old_frame[1] + oy, old_frame[2], old_frame[3]),
+            (new_frame[0] + ox, new_frame[1] + oy, new_frame[2], new_frame[3]),
+        )
 
     def _sync_attr_node(self) -> None:
         """Rebuild the ``(attr ...)`` child of ``_sexp_node`` from Python state.
@@ -2605,6 +2836,9 @@ class PCB:
                     fp_zone.parent_reference = fp.reference
                     fp_zone.parent_uuid = fp.uuid
                     self._footprint_zones.append(fp_zone)
+                    # Back-reference so moving the footprint moves the zone
+                    # with it (Issue #6119).
+                    fp._zones.append(fp_zone)
             elif tag == "segment":
                 seg = Segment.from_sexp(child)
                 self._segments.append(seg)
@@ -4940,10 +5174,19 @@ class PCB:
 
         # The Footprint.__setattr__ override automatically syncs the
         # board-relative position to the S-expression ``(at ...)`` node,
-        # adding the board origin offset.  For footprints with a linked
-        # _sexp_node this is all that's needed.
+        # adding the board origin offset, and re-places the footprint's
+        # embedded zones (keepouts), which KiCad stores in board coordinates
+        # (Issue #6119).
         fp.position = (x, y)
         if rotation is not None:
+            rotation_delta = float(rotation) - float(fp.rotation)
+            if rotation_delta != 0.0:
+                # A pad's ``(at x y ANGLE)`` angle is board-absolute -- it
+                # already includes the footprint rotation (#3902) -- so it
+                # turns with the footprint.  Pad *positions* are
+                # footprint-local and need no change (Issue #6119).
+                for pad in fp.pads:
+                    pad.rotation = (float(pad.rotation) + rotation_delta) % 360.0
             fp.rotation = rotation
 
         if fp._sexp_node is not None:

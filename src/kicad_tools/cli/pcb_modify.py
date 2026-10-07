@@ -32,7 +32,11 @@ import sys
 from pathlib import Path
 
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
-from kicad_tools.schema.pcb import _is_footprint_tag
+from kicad_tools.schema.pcb import (
+    _is_footprint_tag,
+    footprint_node_frame,
+    transform_footprint_zone_nodes,
+)
 from kicad_tools.sexp import SExp
 
 
@@ -72,8 +76,12 @@ def cmd_move(sexp: SExp, args) -> bool:
     print(f"  To:   ({args.x:.4f}, {args.y:.4f})")
 
     if not args.dry_run:
+        old_frame = footprint_node_frame(fp)
         at.set_value(0, args.x)
         at.set_value(1, args.y)
+        # Footprint-embedded zones (antenna keepouts) are stored in board
+        # coordinates and must move with the footprint (Issue #6119).
+        transform_footprint_zone_nodes(fp, old_frame, footprint_node_frame(fp))
 
     return True
 
@@ -101,13 +109,29 @@ def cmd_rotate(sexp: SExp, args) -> bool:
     print(f"  To:   {new_rotation}°")
 
     if not args.dry_run:
-        # Need to ensure the rotation value exists
-        if len(at.values) < 3:
-            at.values.append(new_rotation)
-        else:
-            at.set_value(2, new_rotation)
+        old_frame = footprint_node_frame(fp)
+        _set_at_angle(at, new_rotation)
+        # Pad angles are board-absolute (they include the footprint
+        # rotation), so they turn with the footprint; pad positions are
+        # footprint-local and stay put.
+        for pad in fp.find_children("pad"):
+            pad_at = pad.find_child("at")
+            if pad_at is not None:
+                _set_at_angle(pad_at, ((pad_at.get_float(2) or 0.0) + args.angle) % 360)
+        # Footprint-embedded zones (antenna keepouts) are stored in board
+        # coordinates and must rotate with the footprint (Issue #6119).
+        transform_footprint_zone_nodes(fp, old_frame, footprint_node_frame(fp))
 
     return True
+
+
+def _set_at_angle(at: SExp, angle: float) -> None:
+    """Write the third ``(at x y ANGLE)`` token, adding it when absent."""
+    if len(at.children) >= 3:
+        at.set_value(2, angle)
+    elif angle != 0:
+        # ``at.values`` is a computed copy -- appending to it is a no-op.
+        at.add(angle)
 
 
 def cmd_flip(sexp: SExp, args) -> bool:

@@ -1428,9 +1428,14 @@ class TestAnchorWeight:
         d_weighted = _u1_distance_to_j1(out_weighted)
 
         # The weighted run should not stretch NET_ANCHOR farther than the
-        # unweighted one. Allow a tiny tolerance for floating-point and
-        # CMA-ES non-determinism on the rounding boundary.
-        assert d_weighted <= d_unweighted + 1e-3, (
+        # unweighted one. This test was vacuous before issue #6119: the old
+        # text writer never persisted the optimizer's moves, so both runs
+        # compared the untouched input (24.0 vs 24.0). It now measures real
+        # CMA-ES output, which differs slightly across numpy/cma builds
+        # (CI saw 2.614 vs 2.623 mm where a dev box saw 2.729 vs 2.197), so
+        # allow a 0.25 mm tolerance -- well under the ~0.5 mm effect size
+        # but above cross-environment jitter.
+        assert d_weighted <= d_unweighted + 0.25, (
             f"anchor weight should keep U1 near J1: "
             f"unweighted={d_unweighted:.3f} mm, weighted={d_weighted:.3f} mm"
         )

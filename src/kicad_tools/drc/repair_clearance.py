@@ -25,7 +25,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..schema.pcb import _find_all_footprints
+from ..schema.pcb import (
+    _find_all_footprints,
+    footprint_node_frame,
+    transform_footprint_zone_nodes,
+)
 from ..sexp import SExp, parse_file
 from .net_compat import resolve_net_atom
 from .report import DRCReport
@@ -2030,9 +2034,13 @@ class ClearanceRepairer:
             abs_y = old_y + local_x * sin_a + local_y * cos_a
             pad_positions.append((abs_x, abs_y))
 
-        # Move the footprint
+        # Move the footprint, and the zones (keepouts) embedded in it: KiCad
+        # stores those in board coordinates, so they do not follow the
+        # ``(at ...)`` on their own (Issue #6119).
+        old_frame = footprint_node_frame(fp_node)
         at_node.set_value(0, new_x)
         at_node.set_value(1, new_y)
+        transform_footprint_zone_nodes(fp_node, old_frame, footprint_node_frame(fp_node))
 
         # Update connected trace segment endpoints
         for old_pad_x, old_pad_y in pad_positions:
