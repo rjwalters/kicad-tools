@@ -105,11 +105,18 @@ _COPPER_TAGS: frozenset[str] = frozenset({"segment", "via", "arc"})
 #: primitives, polygon point lists): never give their children a UUID.
 _OPAQUE_PARENTS: frozenset[str] = frozenset({"primitives", "pts", "polygon", "filled_polygon"})
 
-_UUID_RE = re.compile(r'\(uuid\s+"?([0-9A-Fa-f-]{36})"?\s*\)')
+#: Both identifier spellings: KiCad 8+ writes ``(uuid ...)``, KiCad 6/7 wrote
+#: ``(tstamp ...)`` for the same ``KIID`` (#6052 review).  Missing the
+#: legacy spelling would make every authored id on a KiCad 6/7 board look
+#: KiCad-invented and get it rewritten.
+_UUID_RE = re.compile(r'\((?:uuid|tstamp)\s+"?([0-9A-Fa-f-]{36})"?\s*\)')
+
+#: Every id-bearing child spelling.
+_ID_TAGS: tuple[str, ...] = ("uuid", "tstamp")
 
 
 def uuids_in_file(path: str | Path) -> set[str]:
-    """Every ``(uuid ...)`` value in a board file (cheap regex scan)."""
+    """Every ``(uuid ...)`` / legacy ``(tstamp ...)`` value in a board file (regex scan)."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -119,7 +126,7 @@ def uuids_in_file(path: str | Path) -> set[str]:
 
 def _id_child(node: SExp) -> SExp | None:
     for child in node.children:
-        if child.name in ("uuid", "tstamp"):
+        if child.name in _ID_TAGS:
             return child
     return None
 
@@ -147,12 +154,66 @@ def _wants_uuid(node: SExp, parent: SExp, root: SExp) -> bool:
     return True
 
 
-def _set_uuid(node: SExp, value: str) -> None:
+def _replace_atom(node: SExp, index: int, value: str) -> None:
+    """Set ``node``'s ``index``-th atom, keeping its quoted/bare spelling."""
+    old = node.children[index] if index < len(node.children) else None
+    node.set_value(index, value)
+    if old is not None and old.is_atom:
+        new = node.children[index]
+        new._originally_quoted = old._originally_quoted
+        new._originally_bare = old._originally_bare
+
+
+def _set_uuid(node: SExp, value: str, id_tag: str = "uuid") -> None:
+    """Give ``node`` the id ``value``: overwrite its existing id child in place.
+
+    A node that already carries an identifier -- ``(uuid ...)`` or the KiCad
+    6/7 ``(tstamp ...)`` -- has that child's value overwritten; a second id
+    child is never added.  Only a node with no id at all gets a new
+    ``(id_tag ...)`` child (the spelling the rest of the file uses).
+    """
     child = _id_child(node)
-    if child is not None and child.name == "uuid":
-        child.set_value(0, value)
+    if child is not None:
+        _replace_atom(child, 0, value)
         return
-    node.append(SExp.list("uuid", value))
+    atom = SExp.atom(value)
+    # KiCad 6/7 wrote ``tstamp`` values bare; KiCad 8+ quotes ``uuid``.
+    atom._originally_bare = id_tag == "tstamp"
+    node.append(SExp.list(id_tag, atom))
+
+
+def _file_id_tag(doc: SExp) -> str:
+    """``"tstamp"`` for a KiCad 6/7 board that spells every id that way, else ``"uuid"``."""
+    seen_tstamp = False
+    for node in doc.iter_all():
+        if node.name == "uuid":
+            return "uuid"
+        if node.name == "tstamp":
+            seen_tstamp = True
+    return "tstamp" if seen_tstamp else "uuid"
+
+
+def _remap_group_members(doc: SExp, renamed: dict[str, str]) -> int:
+    """Point ``(members ...)`` lists at items' new ids; return the edit count.
+
+    ``(group ... (members id ...))`` (and KiCad 9 ``generated`` tuning
+    patterns) reference board items by id, so any id this module changes
+    must be changed there too or the membership dangles.
+    """
+    if not renamed:
+        return 0
+    edits = 0
+    for node in doc.iter_all():
+        if node.name != "members":
+            continue
+        for i, atom in enumerate(node.children):
+            if not atom.is_atom or atom.value is None:
+                continue
+            new = renamed.get(str(atom.value).lower())
+            if new is not None:
+                _replace_atom(node, i, new)
+                edits += 1
+    return edits
 
 
 def _mint(key: str, taken: set[str]) -> str:
@@ -167,11 +228,7 @@ def _mint(key: str, taken: set[str]) -> str:
 
 def _content_key(node: SExp) -> str:
     """Whitespace-free text of ``node`` with its UUID child left out."""
-    parts = [
-        child.to_string(compact=True)
-        for child in node.children
-        if child.name not in ("uuid", "tstamp")
-    ]
+    parts = [child.to_string(compact=True) for child in node.children if child.name not in _ID_TAGS]
     return f"{node.name}:" + " ".join(parts)
 
 
@@ -181,9 +238,15 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
     Args:
         doc: A parsed ``kicad_pcb`` tree.
         keep: UUIDs to leave untouched -- pass the input board's UUIDs
-            (:func:`uuids_in_file`) so authored/preserved items keep their
+            (:func:`uuids_in_file`, which also reads KiCad 6/7
+            ``(tstamp ...)`` ids) so authored/preserved items keep their
             identity and only router-minted or KiCad-invented UUIDs are
-            re-keyed.  Missing UUIDs are filled in regardless.
+            re-keyed.  Missing UUIDs are filled in regardless.  Take this
+            snapshot *before* anything overwrites the input file.
+
+    An id is always changed in place (``uuid`` or legacy ``tstamp`` child),
+    never added alongside an existing one, and ``(members ...)`` lists of
+    groups follow every id this pass changes.
 
     The result depends only on the file's content and structure, so two
     boards that differ only in random UUIDs come out identical.  Safe to run
@@ -192,6 +255,10 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
     """
     keep_set = {k.lower() for k in keep}
     taken: set[str] = set()
+    id_tag = _file_id_tag(doc)
+    # old id -> new id for every id this pass changes, so group membership
+    # can follow (KiCad references grouped items by id).
+    renamed: dict[str, str] = {}
 
     def collect(node: SExp) -> None:
         value = _id_value(node)
@@ -222,7 +289,9 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
             taken.discard(current)
         new = _mint(f"copper:{key}:{ordinal}", taken)
         if new != current:
-            _set_uuid(child, new)
+            _set_uuid(child, new, id_tag)
+            if current is not None:
+                renamed[current] = new
             edits += 1
 
     # (3) Put top-level copper in UUID order, in the slots it already
@@ -250,10 +319,13 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
             if _wants_uuid(child, node, doc):
                 value = _id_value(child)
                 if value is None or _invented(child, node, value):
-                    if value is not None:
-                        taken.discard(value)
+                    old = value
+                    if old is not None:
+                        taken.discard(old)
                     value = _mint(f"item:{parent_key}/{child.name}[{ordinal}]", taken)
-                    _set_uuid(child, value)
+                    _set_uuid(child, value, id_tag)
+                    if old is not None and old != value:
+                        renamed[old] = value
                     edits += 1
                 child_key = value
             fill(child, child_key)
@@ -280,6 +352,7 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
             return True
 
     fill(doc, "board")
+    edits += _remap_group_members(doc, renamed)
     return edits
 
 

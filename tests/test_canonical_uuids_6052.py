@@ -246,3 +246,207 @@ def test_kicad_invented_uuids_are_rekeyed_but_authored_and_zone_uuids_kept():
     assert all(uuid.UUID(i).version == 5 for i in ids)
     assert _uuid_of(fp) == authored
     assert _uuid_of(doc.find("zone")) == zone_uuid
+
+
+# --- KiCad 6/7 ``(tstamp ...)`` boards (Issue #6052 review) -----------------
+
+_TSTAMP_BOARD = """(kicad_pcb (version 20221018) (generator pcbnew)
+  (net 0 "") (net 1 "SIG")
+  (footprint "R" (layer "F.Cu") (tstamp 11111111-1111-4111-8111-111111111111) (at 10 10)
+    (fp_text reference "R1" (at 0 -1) (layer "F.SilkS") (tstamp 12111111-1111-4111-8111-111111111111))
+    (fp_line (start 0 0) (end 1 0) (layer "F.SilkS") (tstamp 14111111-1111-4111-8111-111111111111))
+    (fp_line (start 0 1) (end 1 1) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG") (tstamp 15111111-1111-4111-8111-111111111111))
+  )
+  (gr_line (start 0 0) (end 30 0) (layer "Edge.Cuts") (tstamp 31111111-1111-4111-8111-111111111111))
+  (segment (start 10 10) (end 12 10) (width 0.25) (layer "F.Cu") (net 1) (tstamp 41111111-1111-4111-8111-111111111111))
+  (group "" (id 51111111-1111-4111-8111-111111111111)
+    (members
+      11111111-1111-4111-8111-111111111111
+      41111111-1111-4111-8111-111111111111
+    )
+  )
+  {router}
+)
+"""
+
+_ROUTER_SEGMENTS = [
+    '(segment (start 12 10) (end 14 10) (width 0.25) (layer "F.Cu") (net 1) (tstamp {u}))',
+    '(segment (start 14 10) (end 16 10) (width 0.25) (layer "F.Cu") (net 1) (tstamp {u}))',
+]
+
+_AUTHORED_TSTAMPS = {
+    "11111111-1111-4111-8111-111111111111",
+    "12111111-1111-4111-8111-111111111111",
+    "14111111-1111-4111-8111-111111111111",
+    "15111111-1111-4111-8111-111111111111",
+    "31111111-1111-4111-8111-111111111111",
+    "41111111-1111-4111-8111-111111111111",
+}
+
+
+def _tstamp_routed(seed: int) -> str:
+    rng = random.Random(seed)
+    segs = [
+        s.replace("{u}", str(uuid.UUID(int=rng.getrandbits(128), version=4)))
+        for s in _ROUTER_SEGMENTS
+    ]
+    rng.shuffle(segs)
+    return _TSTAMP_BOARD.replace("{router}", "\n  ".join(segs))
+
+
+def _id_children(node) -> list:
+    return [c for c in node.children if c.name in ("uuid", "tstamp")]
+
+
+def _all_ids(doc) -> list[str]:
+    return [
+        c.get_string(0).lower()
+        for n in doc.iter_all()
+        for c in n.children
+        if c.name in ("uuid", "tstamp")
+    ]
+
+
+def _members(doc) -> list[str]:
+    return [str(a.value).lower() for a in doc.find("members").children if a.is_atom]
+
+
+def test_uuids_in_file_reads_legacy_tstamps(tmp_path):
+    pcb = tmp_path / "k7.kicad_pcb"
+    pcb.write_text(_TSTAMP_BOARD.replace("{router}", ""))
+    assert uuids_in_file(pcb) >= _AUTHORED_TSTAMPS
+
+
+def test_tstamp_board_keeps_user_ids_without_duplicates_or_dangling_groups(tmp_path):
+    """A KiCad 6/7 board: authored tstamps survive, no node gains a second id."""
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text(_TSTAMP_BOARD.replace("{router}", ""))
+    keep = uuids_in_file(src)
+
+    texts = set()
+    for seed in (0, 1, 2):
+        doc = parse_string(_tstamp_routed(seed))
+        canonicalize_board_uuids(doc, keep=keep)
+        for node in doc.iter_all():
+            assert len(_id_children(node)) <= 1, f"{node.name} carries two id children"
+        ids = _all_ids(doc)
+        assert len(ids) == len(set(ids)), "duplicate ids after canonicalization"
+        assert set(ids) >= _AUTHORED_TSTAMPS, "an authored tstamp was rewritten"
+        # The file's own spelling is kept: no ``(uuid ...)`` sneaks into a
+        # tstamp board (the UUID-less fp_line gets a ``tstamp``).
+        assert not any(n.name == "uuid" for n in doc.iter_all())
+        # Group membership still resolves to items on the board.
+        assert set(_members(doc)) <= set(ids)
+        assert _members(doc) == [
+            "11111111-1111-4111-8111-111111111111",
+            "41111111-1111-4111-8111-111111111111",
+        ]
+        texts.add(doc.to_string())
+    # The router copper is still content-keyed: random tstamps converge.
+    assert len(texts) == 1
+
+
+def test_group_members_follow_a_rekeyed_item():
+    """If an id this pass changes is grouped, the group follows it."""
+    doc = parse_string(_tstamp_routed(0))
+    canonicalize_board_uuids(doc, keep=())  # nothing kept: every v4 id is re-keyed
+    ids = set(_all_ids(doc))
+    assert "11111111-1111-4111-8111-111111111111" not in ids
+    members = _members(doc)
+    assert len(members) == 2
+    assert set(members) <= ids, "group members dangle after re-keying"
+    for node in doc.iter_all():
+        assert len(_id_children(node)) <= 1
+
+
+def test_tstamp_board_after_kicad10_save_keeps_user_ids():
+    """KiCad 10 rewrites ``(tstamp X)`` as ``(uuid "X")`` -- same value.
+
+    Measured with kicad-cli 10.0.1 (``pcb drc --refill-zones --save-board``
+    on a version-20221018 board): every ``tstamp`` and the group ``id``
+    come back as ``(uuid ...)`` with the value unchanged, group members are
+    quoted, and KiCad adds ``Datasheet``/``Description`` footprint fields
+    with fresh v4 UUIDs.  The snapshot ``keep`` (taken from the tstamp input)
+    must therefore still protect the user's ids on the post-oracle pass,
+    while the KiCad-added fields are replaced.
+    """
+    keep = set(_AUTHORED_TSTAMPS)
+    doc = parse_string(_tstamp_routed(0))
+    canonicalize_board_uuids(doc, keep=keep)
+    # What KiCad 10 hands back: tstamp -> uuid, values preserved.
+    saved = re.sub(r"\(tstamp ([0-9a-f-]{36})\)", r'(uuid "\1")', doc.to_string())
+    doc2 = parse_string(saved)
+    invented = str(uuid.uuid4())
+    doc2.find("footprint").append(
+        parse_string(f'(property "Datasheet" "" (at 0 0 0) (uuid "{invented}"))')
+    )
+    canonicalize_board_uuids(doc2, keep=keep)
+    ids = set(_all_ids(doc2))
+    assert ids >= _AUTHORED_TSTAMPS
+    assert invented not in ids
+    assert set(_members(doc2)) <= ids
+
+
+# --- In-place routing: ``kct route X -o X`` (Issue #6052 review) ------------
+
+
+def test_in_place_route_canonicalizes_identically(tmp_path):
+    """Input == output: the keep set must come from the board *before* routing.
+
+    By the time the canonicalization passes run, an in-place route has
+    already overwritten the input file with the router's random-UUID copper.
+    Reading ``keep`` from it then would keep every router UUID and the pass
+    would change nothing.  ``_snapshot_input_uuids`` captures it up front.
+    """
+    from argparse import Namespace
+
+    from kicad_tools.cli import route_cmd
+
+    outputs = []
+    stale = []
+    for seed in (1, 2):
+        pcb = tmp_path / f"run{seed}" / "board.kicad_pcb"
+        pcb.parent.mkdir()
+        shutil.copy(FIXTURE, pcb)
+        args = Namespace(pcb=str(pcb))
+        route_cmd._snapshot_input_uuids(args)  # what _main_impl does first
+        _scramble(FIXTURE, pcb, seed)  # the router overwrites the input in place
+        route_cmd._canonicalize_routed_uuids(pcb, args=args)
+        route_cmd._canonicalize_routed_uuids(pcb, args=args)  # post-oracle pass
+        outputs.append(pcb.read_text())
+
+        # Control: the pre-fix behaviour (keep re-read from the file at pass
+        # time) leaves the run-dependent UUIDs in place.
+        ctrl = tmp_path / f"ctrl{seed}.kicad_pcb"
+        _scramble(FIXTURE, ctrl, seed)
+        canonicalize_pcb_file_uuids(ctrl, keep=uuids_in_file(ctrl))
+        stale.append(ctrl.read_text())
+
+    assert stale[0] != stale[1], "control did not reproduce the in-place defect"
+    assert outputs[0] == outputs[1], (
+        "in-place route canonicalization depends on the router's random UUIDs (Issue #6052)"
+    )
+
+
+def test_main_impl_snapshots_input_uuids_before_writing(tmp_path, monkeypatch):
+    """``_main_impl`` snapshots the input UUIDs while the file is still the input."""
+    from kicad_tools.cli import route_cmd
+
+    pcb = tmp_path / "board.kicad_pcb"
+    shutil.copy(FIXTURE, pcb)
+    original = pcb.read_bytes()
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def recorder(args):
+        seen["pcb"] = args.pcb
+        seen["unchanged"] = pcb.read_bytes() == original
+        raise _Stop
+
+    monkeypatch.setattr(route_cmd, "_snapshot_input_uuids", recorder)
+    with pytest.raises(_Stop):
+        route_cmd._main_impl([str(pcb), "-o", str(pcb)])
+    assert seen == {"pcb": str(pcb), "unchanged": True}

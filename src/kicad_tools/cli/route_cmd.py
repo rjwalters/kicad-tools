@@ -4686,6 +4686,29 @@ def _maybe_run_placement_delta_feedback_escalation(
     return moved if moved is not None else pcb_path
 
 
+def _snapshot_input_uuids(args) -> set[str]:
+    """The input board's UUIDs, read once and cached on ``args._input_uuids``.
+
+    ``_main_impl`` calls this before any route flow writes ``--output``, so
+    an in-place route (input == output) still records the *user's* UUIDs
+    rather than the router's (Issue #6052 review).  Callers that bypass
+    ``_main_impl`` get the snapshot on first use; both canonicalization
+    passes then reuse the same set.
+    """
+    if args is None:
+        return set()
+    cached = getattr(args, "_input_uuids", None)
+    if isinstance(cached, set):
+        return cached
+    from kicad_tools.core.canonical_uuids import uuids_in_file
+
+    src = getattr(args, "pcb", None)
+    snapshot = uuids_in_file(src) if src else set()
+    with contextlib.suppress(AttributeError):
+        args._input_uuids = snapshot
+    return snapshot
+
+
 def _canonicalize_routed_uuids(output_path: Path, *, args=None) -> None:
     """Make the routed board's UUIDs a function of its content (Issue #6052).
 
@@ -4696,14 +4719,15 @@ def _canonicalize_routed_uuids(output_path: Path, *, args=None) -> None:
     and graphics carry no UUID at all, so two routes with identical copper
     used to reach KiCad with different UUIDs and ship different pour fills.
     See :mod:`kicad_tools.core.canonical_uuids`.  UUIDs present in the input
-    board (``args.pcb``) are kept.  Never fails the route.
+    board are kept -- the set :func:`_snapshot_input_uuids` captured *before
+    routing wrote anything*, never a fresh read of ``args.pcb``: under
+    ``kct route X -o X`` that file already holds the router's random-UUID
+    copper by now, which would put every router UUID in ``keep`` and make
+    this pass a no-op.  Never fails the route.
     """
-    from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
+    from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids
 
-    keep: set[str] = set()
-    src = getattr(args, "pcb", None) if args is not None else None
-    if src:
-        keep = uuids_in_file(src)
+    keep = _snapshot_input_uuids(args)
     try:
         canonicalize_pcb_file_uuids(output_path, keep=keep)
     except Exception as exc:  # advisory: an unchanged board is still valid
@@ -17200,6 +17224,12 @@ def _run_main_impl(args, parser, argv) -> int:
     _ck_rc, pcb_path = _apply_checkpoint_and_resume(args, pcb_path)
     if _ck_rc != 0:
         return _ck_rc
+
+    # Issue #6052: capture the input board's UUIDs now, before any flow
+    # writes --output.  Under ``-o`` == input the file is overwritten with
+    # router copper before the UUID canonicalization passes run, so reading
+    # it then would mistake router UUIDs for authored ones.
+    _snapshot_input_uuids(args)
 
     # Issue #2996: Validate and load the optional --net-class-map sidecar
     # early -- before dispatching to any of the route_with_* sub-flows --

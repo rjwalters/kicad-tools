@@ -668,6 +668,9 @@ def test_board03_pour_fill_is_reproducible(tmp_path):
     # Issue #6052: identical copper must give the identical fill, not merely
     # the same copper to within a tolerance.  Compare every ring exactly.
     rings_a, rings_b = _fill_rings(a), _fill_rings(b)
+    assert set(rings_a) == set(rings_b), (
+        f"pours filled in only one run: {sorted(set(rings_a) ^ set(rings_b))} (Issue #6052)"
+    )
     for key in sorted(rings_a):
         assert rings_a[key] == rings_b.get(key), (
             f"two identical board-03 routes saved different {key} pour polygons "
