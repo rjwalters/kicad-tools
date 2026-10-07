@@ -56,13 +56,17 @@ KEY_SEPARATOR = "|"
 #
 # ``ev1`` (Issue #5946): every named net contributed its full pad membership.
 # ``ev2`` (Issue #6011): a located finding's nets contribute only the pads
-# within :func:`net_evidence_radius` of it, with their board positions.
+# within :func:`net_evidence_radius` of it, with their positions in sheet
+# (file) coordinates -- the frame ``kct check`` reports locations in
+# (Issue #6055 fixed ev2 in place, before any release carried it: pads used
+# to be compared in the board-relative frame, so on a board whose outline
+# does not start at (0, 0) the nearby-pad set came out empty).
 # Waivers recorded against an older version go stale exactly once after an
 # upgrade, and are reported as such (see :func:`is_outdated_evidence_hash`).
 EVIDENCE_HASH_VERSION = "ev2"
 EVIDENCE_HASH_PREFIX = EVIDENCE_HASH_VERSION + ":"
 
-# Default radius (mm, board coordinates) around a located finding within
+# Default radius (mm) around a located finding within
 # which a named net's pads count as evidence (Issue #6011).
 DEFAULT_NET_EVIDENCE_RADIUS_MM = 5.0
 
@@ -254,7 +258,7 @@ def _net_members(pcb: PCB) -> dict[str, list[str]]:
 #   axis (a stadium), exactly KiCad's oval.
 _PadShape = tuple[float, float, float, float]
 
-# (ident, board_x, board_y, shape) for one pad of a net.
+# (ident, sheet_x, sheet_y, shape) for one pad of a net.
 _NetPad = tuple[str, float, float, _PadShape]
 
 
@@ -272,14 +276,33 @@ def _pad_shape(pad: Any) -> _PadShape:
     return (rot, w / 2.0, h / 2.0, 0.0)
 
 
+def _board_origin(pcb: PCB) -> tuple[float, float]:
+    """``pcb.board_origin`` as floats, ``(0, 0)`` when absent or malformed."""
+    origin = getattr(pcb, "board_origin", None)
+    try:
+        return (float(origin[0]), float(origin[1])) if origin else (0.0, 0.0)
+    except (TypeError, ValueError, IndexError):
+        return (0.0, 0.0)
+
+
 def _net_pads(pcb: PCB) -> dict[str, list[_NetPad]]:
-    """Every net's pads in board coordinates (footprint position + rotation)."""
+    """Every net's pads in **sheet** coordinates (footprint position + rotation).
+
+    ``PCB.load()`` stores footprint positions *board-relative* (the Edge.Cuts
+    minimum corner is subtracted at load time), while ``kct check`` reports
+    finding locations in sheet coordinates -- the literal ``(at ...)`` values
+    of the file, see ``DRCChecker._absolutize`` -- and ``kct detect-mistakes``
+    shifts its locations to the same frame.  The board origin is added back
+    here so pads and findings are compared in one frame (Issue #6055).
+    """
     from kicad_tools.core.geometry import rotate_pad_offset
 
+    origin_x, origin_y = _board_origin(pcb)
     pads_by_net: dict[str, list[_NetPad]] = {}
     for fp in pcb.footprints:
         ref = getattr(fp, "reference", "")
-        fx, fy = fp.position
+        fx = fp.position[0] + origin_x
+        fy = fp.position[1] + origin_y
         for pad in getattr(fp, "pads", []) or []:
             if not pad.net_name:
                 continue
@@ -341,7 +364,7 @@ def _pad_bbox_distance(
 ) -> float:
     """Exact distance from a pad's copper outline to the anchor ``bbox`` (0 if they touch).
 
-    The bbox (a point, segment or rectangle in board coordinates) is moved
+    The bbox (a point, segment or rectangle in sheet coordinates) is moved
     into the pad's frame -- undoing the pad's absolute board rotation with
     the same KiCad convention used to place it -- and measured against the
     pad's core rectangle, less the shape's inflate radius.
@@ -386,7 +409,7 @@ def _anchor_bbox(violation: DRCViolation) -> tuple[float, float, float, float] |
 def _local_net_pads(
     pads: list[_NetPad], bbox: tuple[float, float, float, float], radius: float
 ) -> list[list[Any]]:
-    """Pads whose copper comes within ``radius`` of ``bbox``, with board positions."""
+    """Pads whose copper comes within ``radius`` of ``bbox``, with sheet positions."""
     x0, y0, x1, y1 = bbox
     local: list[list[Any]] = []
     for ident, x, y, shape in pads:
