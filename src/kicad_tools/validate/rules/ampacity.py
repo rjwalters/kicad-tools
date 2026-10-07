@@ -168,6 +168,10 @@ class AmpacityRule(DRCRule):
             current_a = self.specs[net_name]
             layer = getattr(segment, "layer", "F.Cu")
             external = self._is_external_layer(layer)
+            if not external and design_rules.inner_copper_oz <= 0:
+                # No inner copper on this stackup (2-layer); nothing to
+                # derive an internal width from (#6171).
+                continue
 
             cache_key = (net_name, external)
             required_width_mm = required_cache.get(cache_key)
