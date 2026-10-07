@@ -168,7 +168,7 @@ def label_node(text: str, x: float, y: float, rotation: float, uuid_str: str) ->
     """Build a complete label S-expression."""
     return SExp.list(
         "label",
-        text,
+        SExp.quoted_atom(str(text)),
         at(x, y, rotation),
         SExp.list("fields_autoplaced", "yes"),
         effects(justify="left bottom"),
@@ -183,7 +183,7 @@ def hier_label_node(
     justify = "right" if rotation == 180 else "left"
     return SExp.list(
         "hierarchical_label",
-        text,
+        SExp.quoted_atom(str(text)),
         SExp.list("shape", shape),
         at(x, y, rotation),
         SExp.list("fields_autoplaced", "yes"),
@@ -212,7 +212,7 @@ def global_label_node(
     justify = "right" if rotation == 180 else "left"
     return SExp.list(
         "global_label",
-        text,
+        SExp.quoted_atom(str(text)),
         SExp.list("shape", shape),
         at(x, y, rotation),
         SExp.list("fields_autoplaced", "yes"),
@@ -225,7 +225,7 @@ def text_node(text: str, x: float, y: float, uuid_str: str) -> SExp:
     """Build a complete text note S-expression."""
     return SExp.list(
         "text",
-        text,
+        SExp.quoted_atom(str(text)),
         SExp.list("exclude_from_sim", "no"),
         at(x, y, 0),
         effects(font_size=1.524, justify="left"),

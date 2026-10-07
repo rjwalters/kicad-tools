@@ -13,6 +13,7 @@ import pytest
 from kicad_tools.cli.sch_add_bypass_cap import (
     _auto_reference,
     _compute_cap_offset,
+    _effective_pin_rotation,
     _make_default_cap_lib_sym,
     _snap,
 )
@@ -313,6 +314,25 @@ class TestComputeCapOffset:
         dx, dy = _compute_cap_offset(180, 5.08)
         assert dx == pytest.approx(-5.08)
         assert dy == pytest.approx(0)
+
+
+class TestEffectivePinRotation:
+    """Pin direction goes through core/symbol_transform.py (issue #6048).
+
+    The table is the behaviour of the hand-rolled rotate-then-flip code this
+    replaced, which already agreed with KiCad for all 48 combinations.
+    """
+
+    @pytest.mark.parametrize("lib_rot", [0, 90, 180, 270])
+    @pytest.mark.parametrize("sym_rot", [0, 90, 180, 270])
+    @pytest.mark.parametrize("mirror", ["", "x", "y"])
+    def test_matches_rotate_then_mirror(self, lib_rot, sym_rot, mirror):
+        expected = (lib_rot + sym_rot) % 360
+        if mirror == "x":
+            expected = {90: 270, 270: 90}.get(expected, expected)
+        elif mirror == "y":
+            expected = {0: 180, 180: 0}.get(expected, expected)
+        assert _effective_pin_rotation(lib_rot, sym_rot, mirror) == expected
 
 
 class TestMakeDefaultCapLibSym:
