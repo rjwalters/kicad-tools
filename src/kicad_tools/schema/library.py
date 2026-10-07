@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
 from kicad_tools.core.version import (
     KICAD_GENERATOR_VERSION,
     KICAD_SYM_FORMAT_VERSION,
@@ -548,26 +549,13 @@ class LibrarySymbol:
         if not pin:
             return None
 
-        # Start with pin's local position in library coordinates (Y-up).
-        # Mirror and rotation are applied in library coordinate space,
-        # then Y is negated to convert to schematic coordinates (Y-down).
-        x, y = pin.position
-
-        # Apply mirror (in library coords, Y-up)
-        if mirror == "x":
-            x = -x
-        elif mirror == "y":
-            y = -y
-
-        # Apply rotation (in library coords, Y-up)
-        if instance_rot != 0:
-            angle_rad = math.radians(instance_rot)
-            cos_a = math.cos(angle_rad)
-            sin_a = math.sin(angle_rad)
-            x, y = x * cos_a - y * sin_a, x * sin_a + y * cos_a
-
-        # Convert from library coords (Y-up) to schematic coords (Y-down)
-        y = -y
+        # Pin's local position is in library coordinates (Y-up).  KiCad
+        # rotates, then mirrors (``(mirror x)`` negates the rotated Y,
+        # ``(mirror y)`` the rotated X), then Y is negated to convert to
+        # schematic coordinates (Y-down) -- issue #6005.  The previous
+        # mirror-first / swapped-axis transform was wrong for every mirrored
+        # symbol at 0 and 180 degrees.
+        x, y = symbol_to_sheet_offset(*pin.position, instance_rot, mirror)
 
         # Snap rotated offset to nearest 1.27mm grid point when close.
         # Pin offsets in library coordinates are exact multiples of 1.27mm.

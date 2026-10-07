@@ -11,6 +11,8 @@ import math
 import warnings
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
+
 from ..exceptions import StubPlacementError
 from ..grid import is_on_grid, snap_to_grid
 from ..logging import _log_debug, _log_info
@@ -952,8 +954,9 @@ class SchematicElementsMixin:
 
         The direction a stub travels *away* from a pin is the opposite of the
         pin's library ``angle`` (which points *into* the symbol body), rotated
-        by the symbol's placement ``rotation`` and converted from library Y-up
-        to schematic Y-down space -- the exact transform
+        by the symbol's placement ``rotation``, flipped by its ``mirror`` axis
+        (issue #6005) and converted from library Y-up to schematic Y-down
+        space -- the exact transform
         :meth:`SymbolInstance.pin_position` applies to the pin *position*, now
         applied to the pin's *direction vector* as well (issue #4161).
 
@@ -971,16 +974,9 @@ class SchematicElementsMixin:
         vx = math.cos(outward_lib)
         vy = math.sin(outward_lib)
 
-        # Apply the symbol rotation (standard CCW matrix, library Y-up).
-        rad = math.radians(symbol.rotation)
-        cos_r = math.cos(rad)
-        sin_r = math.sin(rad)
-        rvx = vx * cos_r - vy * sin_r
-        rvy = vx * sin_r + vy * cos_r
-
-        # Convert library Y-up to schematic Y-down by negating the Y component,
-        # mirroring pin_position()'s ``ry = -ry`` flip.
-        rvy = -rvy
+        # Rotate, mirror and flip to schematic Y-down with the same shared
+        # transform pin_position() applies to the pin's position.
+        rvx, rvy = symbol_to_sheet_offset(vx, vy, symbol.rotation, symbol.mirror)
 
         # Snap to the nearest cardinal direction (schematic Y-down space).
         best_dir = "right"

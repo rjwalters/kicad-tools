@@ -265,10 +265,14 @@ class TestPlacedBodyBbox:
         bbox = placed_body_bbox(lib, (0.0, 0.0))
         assert bbox[0] == pytest.approx(0.0)
         assert bbox[2] == pytest.approx(2.54)
-        # mirror "x" negates library x
-        bbox_m = placed_body_bbox(lib, (0.0, 0.0), mirror="x")
+        # mirror "y" (flip across the Y axis) negates library x (#6005)
+        bbox_m = placed_body_bbox(lib, (0.0, 0.0), mirror="y")
         assert bbox_m[0] == pytest.approx(-2.54)
         assert bbox_m[2] == pytest.approx(0.0)
+        # mirror "x" (flip across the X axis) negates library y instead:
+        # x extents unchanged, sheet y extents flip from [-1.27, 0] to [0, 1.27]
+        bbox_x = placed_body_bbox(lib, (0.0, 0.0), mirror="x")
+        assert bbox_x == pytest.approx((0.0, 0.0, 2.54, 1.27))
 
     def test_bbox_from_circle_graphics(self):
         text = """\

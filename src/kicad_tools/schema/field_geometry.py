@@ -12,9 +12,10 @@ Coordinate conventions
 * Library symbol geometry (``LibrarySymbol.graphics`` / ``pins``) is in
   library coordinates: Y-up, relative to the symbol origin.
 * Placed (sheet) coordinates are Y-down. The transform applied here matches
-  :meth:`LibrarySymbol.get_pin_position`: mirror, then rotation (both in
-  library coordinates), then Y negation, then translation to the instance
-  position.
+  :meth:`LibrarySymbol.get_pin_position` (both delegate to
+  :func:`kicad_tools.core.symbol_transform.symbol_to_sheet_offset`): rotation,
+  then mirror (both in library coordinates), then Y negation, then
+  translation to the instance position.
 * Bounding boxes are ``(min_x, min_y, max_x, max_y)`` in sheet coordinates,
   so "above the symbol" is *smaller* y and "below" is *larger* y.
 """
@@ -22,6 +23,8 @@ Coordinate conventions
 from __future__ import annotations
 
 import math
+
+from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
 
 from .library import (
     KICAD_GRID,
@@ -63,23 +66,12 @@ def _transform_point(
 ) -> tuple[float, float]:
     """Transform a library-coordinate point to a sheet-coordinate offset.
 
-    Applies mirror, then rotation (both in library Y-up coordinates), then
-    negates Y to convert to sheet Y-down coordinates. This mirrors the
-    transform in :meth:`LibrarySymbol.get_pin_position` so bboxes and pin
-    positions stay consistent.
+    Applies rotation, then mirror (both in library Y-up coordinates), then
+    negates Y to convert to sheet Y-down coordinates -- the shared transform
+    :meth:`LibrarySymbol.get_pin_position` uses, so bboxes and pin positions
+    stay consistent (issue #6005).
     """
-    if mirror == "x":
-        x = -x
-    elif mirror == "y":
-        y = -y
-
-    if rotation != 0:
-        angle_rad = math.radians(rotation)
-        cos_a = math.cos(angle_rad)
-        sin_a = math.sin(angle_rad)
-        x, y = x * cos_a - y * sin_a, x * sin_a + y * cos_a
-
-    return x, -y
+    return symbol_to_sheet_offset(x, y, rotation, mirror)
 
 
 def _local_extent_points(

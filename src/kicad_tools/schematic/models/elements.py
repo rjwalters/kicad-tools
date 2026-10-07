@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
+from kicad_tools.core.symbol_transform import normalize_mirror
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import (
     at,
@@ -353,6 +354,9 @@ class PowerSymbol:
     # exclude-from-BOM / do-not-populate power symbols (issue #4303).
     in_bom: bool = True
     dnp: bool = False
+    # ``(mirror x|y)`` axis, kept so a load/save round trip does not flip a
+    # mirrored power symbol back (issue #6005); ``""`` = unmirrored.
+    mirror: str = ""
 
     _symbol_def: Optional["SymbolDef"] = field(default=None, repr=False)
 
@@ -375,13 +379,18 @@ class PowerSymbol:
             "symbol",
             SExp.list("lib_id", self.lib_id),
             at(self.x, self.y, self.rotation),
+        )
+        if self.mirror:
+            sym.append(SExp.list("mirror", self.mirror))
+        for child in (
             SExp.list("unit", 1),
             SExp.list("exclude_from_sim", "no"),
             SExp.list("in_bom", "yes" if self.in_bom else "no"),
             SExp.list("on_board", "yes"),
             SExp.list("dnp", "yes" if self.dnp else "no"),
             uuid_node(self.uuid_str),
-        )
+        ):
+            sym.append(child)
 
         # Add properties - Reference (hidden), Value (visible), Footprint, Datasheet
         sym.append(
@@ -429,6 +438,8 @@ class PowerSymbol:
         x = round(float(atoms[0]), 2)
         y = round(float(atoms[1]), 2)
         rotation = float(atoms[2]) if len(atoms) > 2 else 0
+        mirror_node = node.get("mirror")
+        mirror = normalize_mirror(mirror_node.get_first_atom()) if mirror_node else ""
 
         # Get UUID
         uuid_node_elem = node.get("uuid")
@@ -458,6 +469,7 @@ class PowerSymbol:
             uuid_str=uuid_str,
             in_bom=in_bom,
             dnp=dnp,
+            mirror=mirror,
         )
 
     @staticmethod

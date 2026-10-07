@@ -4,13 +4,13 @@ KiCad Symbol Models
 Symbol definitions and instances for schematic generation.
 """
 
-import math
 import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.symbol_transform import normalize_mirror, symbol_to_sheet_offset
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import (
     at,
@@ -591,6 +591,10 @@ class SymbolInstance:
     # parts (issue #4303).
     in_bom: bool = True
     dnp: bool = False
+    # Placed mirror axis from ``(mirror x|y)``; ``""`` = unmirrored.  KiCad
+    # applies it after the rotation (issue #6005); see
+    # :func:`kicad_tools.core.symbol_transform.symbol_to_sheet_offset`.
+    mirror: str = ""
 
     def find_pin(self, pin_name_or_number: str) -> Pin:
         """Resolve a pin name/number to its :class:`Pin` on this instance.
@@ -696,7 +700,7 @@ class SymbolInstance:
         return pin
 
     def pin_position(self, pin_name_or_number: str) -> tuple[float, float]:
-        """Get absolute position of a pin after placement and rotation.
+        """Get absolute position of a pin after placement, rotation and mirror.
 
         Args:
             pin_name_or_number: Pin name (e.g., "SCK") or number (e.g., "20")
@@ -710,32 +714,18 @@ class SymbolInstance:
         """
         pin = self.find_pin(pin_name_or_number)
 
-        # Get the wire connection point (end of pin) in symbol-local coordinates.
-        # KiCad library symbols store pin positions in Y-UP coordinates (math
-        # convention: +Y is above origin in the library's drawing).  KiCad
-        # schematics use Y-DOWN screen coordinates (origin top-left, +Y is below).
-        # We rotate in library Y-up coords, then negate Y to convert to schematic
-        # Y-down before translating to the placed symbol position.  This matches
-        # the proven implementation in ``kicad_tools.schema.library.get_pin_position``.
+        # The wire connection point (end of pin) is in symbol-local library
+        # Y-UP coordinates; KiCad schematics are Y-DOWN.  The shared transform
+        # rotates, then applies ``(mirror x|y)`` (issue #6005), then negates Y
+        # (issue #2959) -- skipping the flip puts pins with non-zero library Y
+        # on the wrong side of the symbol, and skipping the mirror puts a
+        # mirrored symbol's pins at their mirror twins' positions.
         conn_x, conn_y = pin.connection_point()
-
-        # Apply rotation in library Y-up coordinates (standard CCW rotation matrix).
-        rad = math.radians(self.rotation)
-        cos_r = math.cos(rad)
-        sin_r = math.sin(rad)
-
-        rx = conn_x * cos_r - conn_y * sin_r
-        ry = conn_x * sin_r + conn_y * cos_r
-
-        # Convert from library Y-up to schematic Y-down by negating the Y offset.
-        # Without this flip, pins with non-zero library Y end up on the wrong
-        # side of the symbol (issue #2959), causing wires to terminate in empty
-        # space and ERC to report pin_not_connected.
-        ry = -ry
+        dx, dy = symbol_to_sheet_offset(conn_x, conn_y, self.rotation, self.mirror)
 
         # Translate to symbol position.  Round to 2 decimal places for
         # consistent wire matching.
-        return (round(self.x + rx, 2), round(self.y + ry, 2))
+        return (round(self.x + dx, 2), round(self.y + dy, 2))
 
     def all_pin_positions(self) -> dict[str, tuple[float, float]]:
         """Get positions of all pins."""
@@ -814,13 +804,18 @@ class SymbolInstance:
             "symbol",
             SExp.list("lib_id", self.symbol_def.lib_id),
             at(self.x, self.y, self.rotation),
+        )
+        if self.mirror:
+            sym.append(SExp.list("mirror", self.mirror))
+        for child in (
             SExp.list("unit", self.unit),
             SExp.list("exclude_from_sim", "no"),
             SExp.list("in_bom", "yes" if self.in_bom else "no"),
             SExp.list("on_board", "yes"),
             SExp.list("dnp", "yes" if self.dnp else "no"),
             uuid_node(self.uuid_str),
-        )
+        ):
+            sym.append(child)
 
         # Add properties
         sym.append(symbol_property_node("Reference", self.reference, self.x, self.y - 5.08))
@@ -855,6 +850,7 @@ class SymbolInstance:
         val_y = _fmt_coord(self.y - 2.54)
         in_bom_tok = "yes" if self.in_bom else "no"
         dnp_tok = "yes" if self.dnp else "no"
+        mirror_line = f"\t\t(mirror {self.mirror})\n" if self.mirror else ""
 
         # Generate custom properties (hidden by default)
         custom_props = ""
@@ -873,7 +869,7 @@ class SymbolInstance:
         return f'''\t(symbol
 \t\t(lib_id "{self.symbol_def.lib_id}")
 \t\t(at {x} {y} {int(self.rotation)})
-\t\t(unit {self.unit})
+{mirror_line}\t\t(unit {self.unit})
 \t\t(exclude_from_sim no)
 \t\t(in_bom {in_bom_tok})
 \t\t(on_board yes)
@@ -963,6 +959,11 @@ class SymbolInstance:
         y = round(float(atoms[1]), 2)
         rotation = float(atoms[2]) if len(atoms) > 2 else 0
 
+        # Get mirror axis (issue #6005): KiCad writes ``(mirror x)`` or
+        # ``(mirror y)`` right after ``(at ...)``; absent means unmirrored.
+        mirror_node = node.get("mirror")
+        mirror = normalize_mirror(mirror_node.get_first_atom()) if mirror_node else ""
+
         # Get unit
         unit_node = node.get("unit")
         unit = int(unit_node.get_first_atom()) if unit_node else 1
@@ -1041,4 +1042,5 @@ class SymbolInstance:
             footprint=footprint,
             in_bom=in_bom,
             dnp=dnp,
+            mirror=mirror,
         )
