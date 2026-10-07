@@ -47,8 +47,13 @@ class CopperSource:
     identity: str
 
 
-def _arc_geometry(node):
-    """Flatten a modern start/mid/end track arc with <=0.1um chord error."""
+def _arc_geometry(node, origin=(0.0, 0.0)):
+    """Flatten a modern start/mid/end track arc with <=0.1um chord error.
+
+    The raw s-expression is in sheet coordinates while the loaded ``PCB``
+    model is board-relative; ``origin`` (``pcb.board_origin``) is subtracted
+    so arcs share the frame of every other copper source (issue #6058).
+    """
     from shapely.geometry import LineString  # type: ignore[import-untyped]
 
     points = []
@@ -56,7 +61,7 @@ def _arc_geometry(node):
         point = node.find_child(key)
         if point is None:
             raise ValueError("unsupported legacy or incomplete copper arc")
-        points.append((point.get_float(0), point.get_float(1)))
+        points.append((point.get_float(0) - origin[0], point.get_float(1) - origin[1]))
     (x1, y1), (x2, y2), (x3, y3) = points
     determinant = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
     if abs(determinant) < 1e-12:
@@ -415,7 +420,7 @@ def _collect(pcb):
         if layer not in layer_names:
             continue
         try:
-            geom = _arc_geometry(node)
+            geom = _arc_geometry(node, tuple(getattr(pcb, "board_origin", (0.0, 0.0))))
         except (ValueError, TypeError) as exc:
             unsupported.append(str(exc))
             continue
@@ -447,6 +452,10 @@ def check_physical_copper_gap(pcb, minimum_mm: float) -> DRCResults:
     if not math.isfinite(minimum_mm) or minimum_mm <= 0:
         raise ValueError("Physical copper gap must be finite and positive")
     sources, unsupported = _collect(pcb)
+    # Measure in the board-relative frame; report coordinates in the message
+    # in sheet frame like every other finding (violation fields are shifted
+    # by DRCChecker._absolutize).
+    ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
     results = DRCResults(rules_checked=1)
     for detail in sorted(set(unsupported)):
         results.add(
@@ -546,7 +555,8 @@ def check_physical_copper_gap(pcb, minimum_mm: float) -> DRCResults:
                         "physical_copper_gap",
                         "error",
                         f"Physical copper gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
-                        f"closest boundaries ({a.x:.6f}, {a.y:.6f}) and ({b.x:.6f}, {b.y:.6f})",
+                        f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
+                        f"({b.x + ox:.6f}, {b.y + oy:.6f})",
                         location=((a.x + b.x) / 2, (a.y + b.y) / 2),
                         layer=layer,
                         actual_value=distance,
