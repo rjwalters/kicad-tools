@@ -370,3 +370,34 @@ def test_rules_unchanged_when_board_routes(tmp_path) -> None:
     router, _ = orchestrator._load_board_router(path, "/B", board_nets)
     assert router.rules.trace_clearance == pytest.approx(KICAD_DEFAULT_CLEARANCE_MM)
     assert (orchestrator.rules.trace_clearance, orchestrator.rules.via_clearance) == before
+
+
+def test_gate_ignores_a_bare_oval_npth_slot(tmp_path) -> None:
+    """An oval NPTH slot (``drill oval``) the size of its pad is a hole too."""
+    text = PAD.read_text().replace(
+        '(pad "1" smd rect (at 0 0) (size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "/A"))',
+        '(pad "" np_thru_hole oval (at 0 0) (size 3.0 1.0) (drill oval 3.0 1.0) (layers "*.Cu" "*.Mask"))',
+    )
+    assert text != PAD.read_text(), "fixture pad line changed; update the replacement"
+    board = tmp_path / "npth_slot.kicad_pcb"
+    board.write_text(text)
+    orchestrator = _orchestrator(board)
+    result = _straight_b()
+    orchestrator._enforce_no_foreign_shorts(result, RoutingStrategy.GLOBAL_WITH_REPAIR)
+    assert result.success is True, result.error_message
+
+
+def test_gate_refuses_copper_on_an_npth_pad_with_annular_copper(tmp_path) -> None:
+    """An NPTH pad larger than its drill carries copper and is still checked."""
+    text = PAD.read_text().replace(
+        '(pad "1" smd rect (at 0 0) (size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "/A"))',
+        '(pad "" np_thru_hole circle (at 0 0) (size 3.0 3.0) (drill 1.0) (layers "*.Cu" "*.Mask"))',
+    )
+    assert text != PAD.read_text(), "fixture pad line changed; update the replacement"
+    board = tmp_path / "npth_ring.kicad_pcb"
+    board.write_text(text)
+    orchestrator = _orchestrator(board)
+    result = _straight_b()
+    orchestrator._enforce_no_foreign_shorts(result, RoutingStrategy.GLOBAL_WITH_REPAIR)
+    assert result.success is False
+    assert result.segments == [] and result.vias == []

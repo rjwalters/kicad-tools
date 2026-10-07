@@ -155,6 +155,20 @@ def _copper_layers(names: Iterable[str]) -> frozenset[str] | None:
     return frozenset(layers)
 
 
+def _npth_is_bare(pad: Any, w: float, h: float) -> bool:
+    """Whether an NPTH pad's drill covers its whole pad, leaving no copper.
+
+    A round drill is ``(drill D)``; an oval slot is ``(drill oval DX DY)``,
+    whose dimensions live in ``drill_size`` (``drill`` is then 0).
+    """
+    slot = getattr(pad, "drill_size", None)
+    if slot:
+        dx, dy = float(slot[0] or 0.0), float(slot[1] or 0.0)
+        return dx > 0 and dy > 0 and w <= dx and h <= dy
+    drill = float(getattr(pad, "drill", 0.0) or 0.0)
+    return drill > 0 and max(w, h) <= drill
+
+
 def _shape_bbox(shape: KShape) -> tuple[float, float, float, float]:
     if isinstance(shape, KSegment):
         h = shape.width / 2.0
@@ -295,8 +309,7 @@ def board_copper(pcb: Any) -> list[ForeignItem]:
                     w, h = float(pad.size[0]), float(pad.size[1])
                     if w <= 0 or h <= 0:
                         continue
-                    drill = float(getattr(pad, "drill", 0.0) or 0.0)
-                    if str(getattr(pad, "type", "")) == "np_thru_hole" and max(w, h) <= drill:
+                    if str(getattr(pad, "type", "")) == "np_thru_hole" and _npth_is_bare(pad, w, h):
                         continue  # a bare NPTH hole carries no copper
                     cx, cy = pad_center(pad, fp)
                     pad_copper = make_pad(
