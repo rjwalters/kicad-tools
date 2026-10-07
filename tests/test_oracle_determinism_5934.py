@@ -411,7 +411,7 @@ class TestStaleFillStrip:
     """
 
     @staticmethod
-    def _run(tmp_path, monkeypatch, *, refills: bool, report: bool):
+    def _run(tmp_path, monkeypatch, *, refills: bool, report: bool, save: bool = True):
         import subprocess
 
         from kicad_tools.cli import runner
@@ -425,6 +425,9 @@ class TestStaleFillStrip:
             seen["cmd"] = cmd
             if report:
                 Path(cmd[cmd.index("--output") + 1]).write_text('{"violations": []}')
+            if report and save and "--save-board" in cmd:
+                # KiCad rewrites the board with fresh fills (Issue #6023).
+                Path(cmd[-1]).write_text(_BOARD)
             return subprocess.CompletedProcess(cmd, 5, "", "")
 
         monkeypatch.setattr(runner, "_kicad_drc_supports_refill", lambda _cli: refills)
@@ -444,6 +447,16 @@ class TestStaleFillStrip:
         board, seen, result = self._run(tmp_path, monkeypatch, refills=True, report=False)
         assert not result.success
         assert "filled_polygon" not in seen["board"]
+        assert board.read_text() == _BOARD
+
+    def test_no_report_run_restores_even_if_kicad_saved_nothing(self, tmp_path, monkeypatch):
+        """No report and no save: the stripped board must be put back (Issue #6023)."""
+        board, seen, result = self._run(
+            tmp_path, monkeypatch, refills=True, report=False, save=False
+        )
+        assert not result.success
+        assert "filled_polygon" not in seen["board"]
+        assert "filled_polygon" in board.read_text()
         assert board.read_text() == _BOARD
 
     def test_no_strip_when_kicad_cannot_save_a_refill(self, tmp_path, monkeypatch):

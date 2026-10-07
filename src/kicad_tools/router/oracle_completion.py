@@ -46,6 +46,7 @@ unit-testable without kicad-cli.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Callable, Iterable, Sequence
@@ -75,6 +76,8 @@ __all__ = [
     "links_from_violations",
     "run_oracle_completion",
 ]
+
+logger = logging.getLogger(__name__)
 
 #: Default number of oracle rounds (KRT uses 3 as well).
 DEFAULT_ORACLE_ROUNDS = 3
@@ -931,5 +934,20 @@ class PourLinkCloser:
                     attempt.notes.append(f"{lk.describe()}: no clearance-legal route")
                     continue
                 commit(route, _route_key(lk), net_number)
-        finally:
-            append_link_routes(pcb_path, committed, (ox, oy))
+        except BaseException:
+            # Routes committed before the failure are still written (their
+            # copper is already counted in ``attempt``).  A failure of that
+            # write must not replace the error that got us here (Issue #6023):
+            # log it and re-raise the original.
+            try:
+                append_link_routes(pcb_path, committed, (ox, oy))
+            except Exception:
+                logger.warning(
+                    "oracle closer: writing %d committed route(s) to %s failed while "
+                    "handling an earlier error",
+                    len(committed),
+                    pcb_path,
+                    exc_info=True,
+                )
+            raise
+        append_link_routes(pcb_path, committed, (ox, oy))
