@@ -1,4 +1,4 @@
-"""Generate KiCad-transformed goldens for footprint-embedded zones (#6119).
+"""Generate KiCad-transformed goldens for footprint-embedded zones and texts.
 
 KiCad writes the zones inside a ``(footprint ...)`` block -- an RF module's
 antenna keepout, a footprint copper pour -- in **sheet-absolute** coordinates
@@ -17,7 +17,16 @@ each move itself:
   ``Flip(anchor, FLIP_DIRECTION_LEFT_RIGHT)`` (what ``kct pcb modify flip`` /
   the mirror strategy do);
 * ``back_rot90.kicad_pcb`` -- ``flip_lr`` then ``SetOrientation(90)`` (rotating
-  a footprint that is already on the back).
+  a footprint that is already on the back);
+* ``rotate_tool30.kicad_pcb`` / ``rotate_tool200.kicad_pcb`` --
+  ``Rotate(anchor, 30)`` / ``Rotate(anchor, 200)``, the interactive rotate (``kct pcb modify rotate``, the recovery rotate strategy), which,
+  unlike ``SetOrientation``, also re-uprights "keep upright" texts.
+
+``AE1`` also carries texts (Issue #6126): KiCad stores a ``property`` /
+``fp_text`` ``(at x y ANGLE)`` angle **board-absolute** like a pad angle, while
+the position stays footprint-local.  The user texts mix keep-upright and
+``(unlocked yes)`` texts, upright and upside-down angles, and left/right/
+top/bottom justification, which the keep-upright step swaps.
 
 ``tests/test_footprint_zone_transform.py`` replays each operation through kct
 from ``base.kicad_pcb`` and asserts the zone geometry equals these files.
@@ -103,6 +112,30 @@ def build_base() -> pcbnew.BOARD:
     pad.SetOrientation(deg(20.0))
     fp.Add(pad)
 
+    # Texts (Issue #6126).  Reference/Value are keep-upright fields; the user
+    # texts cover both keep-upright states and justifications.
+    ref = fp.Reference()
+    ref.SetFPRelativePosition(VECTOR2I(mm(0.0), mm(-3.0)))
+    val = fp.Value()
+    val.SetFPRelativePosition(VECTOR2I(mm(0.5), mm(3.0)))
+    val.SetTextAngle(deg(90.0))
+    for text, angle, keep_upright, h_just, v_just in (
+        ("KU_L45", 45.0, True, pcbnew.GR_TEXT_H_ALIGN_LEFT, pcbnew.GR_TEXT_V_ALIGN_TOP),
+        ("FREE_R100", 100.0, False, pcbnew.GR_TEXT_H_ALIGN_RIGHT, pcbnew.GR_TEXT_V_ALIGN_BOTTOM),
+        ("KU_C170", 170.0, True, pcbnew.GR_TEXT_H_ALIGN_CENTER, pcbnew.GR_TEXT_V_ALIGN_CENTER),
+        ("FREE_0", 0.0, False, pcbnew.GR_TEXT_H_ALIGN_LEFT, pcbnew.GR_TEXT_V_ALIGN_CENTER),
+        ("KU_R0", 0.0, True, pcbnew.GR_TEXT_H_ALIGN_RIGHT, pcbnew.GR_TEXT_V_ALIGN_CENTER),
+    ):
+        user = pcbnew.PCB_TEXT(fp)
+        user.SetText(text)
+        user.SetLayer(pcbnew.F_SilkS)
+        fp.Add(user)
+        user.SetFPRelativePosition(VECTOR2I(mm(1.5), mm(-1.0)))
+        user.SetTextAngle(deg(angle))
+        user.SetKeepUpright(keep_upright)
+        user.SetHorizJustify(h_just)
+        user.SetVertJustify(v_just)
+
     # Asymmetric (chirality-revealing) keepout: a pentagon with one cut
     # corner, offset from the anchor.  Coordinates are absolute while the
     # footprint sits at rotation 0.
@@ -156,12 +189,22 @@ def op_back_rot90(fp: pcbnew.FOOTPRINT) -> None:
     fp.SetOrientation(deg(90.0))
 
 
+def op_rotate_tool30(fp: pcbnew.FOOTPRINT) -> None:
+    fp.Rotate(fp.GetPosition(), deg(30.0))
+
+
+def op_rotate_tool200(fp: pcbnew.FOOTPRINT) -> None:
+    fp.Rotate(fp.GetPosition(), deg(200.0))
+
+
 CASES: dict[str, Callable[[pcbnew.FOOTPRINT], None]] = {
     "move": op_move,
     "rot30": op_rot30,
     "move_rot90": op_move_rot90,
     "flip_lr": op_flip_lr,
     "back_rot90": op_back_rot90,
+    "rotate_tool30": op_rotate_tool30,
+    "rotate_tool200": op_rotate_tool200,
 }
 
 

@@ -89,12 +89,12 @@
 	)
 	(footprint ""
 		(layer "F.Cu")
-		(uuid "b5ce1fa9-3615-4898-bc01-05bd3bf079d9")
+		(uuid "da14dbf7-9712-4175-9b1a-b8628d291239")
 		(at 120 109 30)
 		(property "Reference" "AE1"
-			(at 0 0 30)
+			(at 0 -3 30)
 			(layer "F.SilkS")
-			(uuid "b0189664-d786-4967-a3f7-0845004e2a38")
+			(uuid "76724817-6889-4590-9765-10c430a9604a")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -102,9 +102,9 @@
 			)
 		)
 		(property "Value" "ANTENNA"
-			(at 0 0 30)
+			(at 0.5 3 120)
 			(layer "F.Fab")
-			(uuid "ef77a8e0-b3db-412b-8194-15979ba9a31d")
+			(uuid "7c401048-a388-4d4a-b303-e3d9f3693649")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -115,7 +115,7 @@
 			(at 0 0 30)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "25b8770f-e1b6-40a8-9216-edc63058c243")
+			(uuid "77f79f8f-4061-4b61-b11c-44de255b4ae7")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -126,7 +126,7 @@
 			(at 0 0 30)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "7dc9fe80-a0bd-4e71-9156-a371580efaba")
+			(uuid "031ebc38-ab49-4d51-8981-9b7203761450")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -134,16 +134,72 @@
 			)
 		)
 		(duplicate_pad_numbers_are_jumpers no)
+		(fp_text user "FREE_0"
+			(at 1.5 -1 30)
+			(unlocked yes)
+			(layer "F.SilkS")
+			(uuid "6795ba60-fc40-491c-9083-8f29820fe89f")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(fp_text user "KU_R0"
+			(at 1.5 -1 30)
+			(layer "F.SilkS")
+			(uuid "0ba05cd8-c2fe-4560-8d35-9f26bf20470c")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(fp_text user "KU_L45"
+			(at 1.5 -1 75)
+			(layer "F.SilkS")
+			(uuid "cd0c70ea-1054-4024-8d35-8eef9c1b76d5")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(fp_text user "FREE_R100"
+			(at 1.5 -1 130)
+			(unlocked yes)
+			(layer "F.SilkS")
+			(uuid "f0b26267-d0f3-4695-a434-adbe7517d2fd")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right bottom)
+			)
+		)
+		(fp_text user "KU_C170"
+			(at 1.5 -1 200)
+			(layer "F.SilkS")
+			(uuid "917933b5-e02f-4fe0-b138-e2e6ded8a496")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pad "1" smd rect
 			(at -2 1 50)
 			(size 1 0.5)
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(thermal_bridge_angle 45)
-			(uuid "f4b6d585-5fe3-4efb-a4b7-764653c11dfe")
+			(uuid "518b3e92-fab3-4914-8433-6d36a07e05ac")
 		)
 		(zone
 			(layer "F.Cu")
-			(uuid "30c0f7b0-0827-4609-84a2-1c55cb854f4a")
+			(uuid "d8a36481-0fb8-4508-a907-98f8e6e7eb16")
 			(name "FP_POUR")
 			(hatch edge 0.5)
 			(connect_pads
@@ -174,7 +230,7 @@
 		)
 		(zone
 			(layer "F.Cu")
-			(uuid "7de516cb-dac9-4eca-98ec-74962f7eed94")
+			(uuid "4698a4b4-6eac-4baf-a41e-6bb11c1fbc4d")
 			(name "ANT_KEEPOUT")
 			(hatch edge 0.5)
 			(connect_pads
@@ -215,7 +271,7 @@
 		)
 		(fill no)
 		(layer "Edge.Cuts")
-		(uuid "b7f3a693-a60c-4a87-bf7f-62a50684187a")
+		(uuid "4d88c15c-50eb-44fd-85f7-83c6b895e6ef")
 	)
 	(embedded_fonts no)
 )

@@ -35,6 +35,8 @@ from kicad_tools.core.sexp_file import load_pcb, save_pcb
 from kicad_tools.schema.pcb import (
     _is_footprint_tag,
     footprint_node_frame,
+    keep_footprint_texts_upright,
+    transform_footprint_text_nodes,
     transform_footprint_zone_nodes,
 )
 from kicad_tools.sexp import SExp
@@ -120,7 +122,13 @@ def cmd_rotate(sexp: SExp, args) -> bool:
                 _set_at_angle(pad_at, ((pad_at.get_float(2) or 0.0) + args.angle) % 360)
         # Footprint-embedded zones (antenna keepouts) are stored in board
         # coordinates and must rotate with the footprint (Issue #6119).
-        transform_footprint_zone_nodes(fp, old_frame, footprint_node_frame(fp))
+        new_frame = footprint_node_frame(fp)
+        transform_footprint_zone_nodes(fp, old_frame, new_frame)
+        # Property/fp_text angles are board-absolute too.  A relative rotate
+        # is KiCad's ``FOOTPRINT::Rotate``, which also re-uprights "keep
+        # upright" texts (Issue #6126).
+        transform_footprint_text_nodes(fp, old_frame, new_frame)
+        keep_footprint_texts_upright(fp)
 
     return True
 
