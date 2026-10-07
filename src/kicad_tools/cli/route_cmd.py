@@ -6478,6 +6478,7 @@ def _make_pour_oracle(args):
     """
     import shutil
     import tempfile
+    from concurrent.futures import ThreadPoolExecutor
 
     from kicad_tools.drc import run_geometric_drc
     from kicad_tools.router.oracle_completion import links_from_violations
@@ -6493,19 +6494,31 @@ def _make_pour_oracle(args):
         return links[0].net if links else None
 
     def oracle(path: Path):
-        geo = run_geometric_drc(path)
-        if not geo.ran or src_pro is None:
-            return geo
         out_pro = path.with_suffix(".kicad_pro")
         try:
-            if out_pro.is_file() and out_pro.read_bytes() == src_pro.read_bytes():
-                return geo
-            with tempfile.TemporaryDirectory(prefix="kct-oracle-") as td:
-                tmp = Path(td) / "board.kicad_pcb"
+            needs_alt = src_pro is not None and not (
+                out_pro.is_file() and out_pro.read_bytes() == src_pro.read_bytes()
+            )
+        except OSError:
+            needs_alt = False
+        if not needs_alt or src_pro is None:
+            return run_geometric_drc(path)
+        # Issue #5911: the two projects' DRCs are independent read-only
+        # kicad-cli runs on two copies of one board, so run them side by side
+        # instead of back to back.  Neither result depends on the other and
+        # both are combined exactly as before, so only the wall time changes.
+        with tempfile.TemporaryDirectory(prefix="kct-oracle-") as td:
+            tmp = Path(td) / "board.kicad_pcb"
+            try:
                 shutil.copy(path, tmp)
                 shutil.copy(src_pro, tmp.with_suffix(".kicad_pro"))
-                alt = run_geometric_drc(tmp)
-        except OSError:
+            except OSError:
+                return run_geometric_drc(path)
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="kct-oracle") as pool:
+                alt_future = pool.submit(run_geometric_drc, tmp)
+                geo = run_geometric_drc(path)
+                alt = alt_future.result()
+        if not geo.ran:
             return geo
         if alt.ran:
             geo.unconnected_items[:] = _merge_unconnected_per_net(

@@ -808,7 +808,7 @@ class PourLinkCloser:
             LinkTerminal,
             _build_model,
             _Item,
-            append_link_route,
+            append_link_routes,
             component_terminals,
             net_components,
             padless_components,
@@ -847,9 +847,14 @@ class PourLinkCloser:
             return None
 
         joined_nets: set[str] = set()
+        #: Routes committed this attempt, written to the file in ONE load/save
+        #: at the end (Issue #5911).  Nothing below re-reads ``pcb_path`` --
+        #: later links see earlier routes through ``model`` -- so deferring the
+        #: write changes no decision and the saved bytes are identical.
+        committed: list[Any] = []
 
         def commit(route: Any, key: str, net_number: int) -> None:
-            append_link_route(pcb_path, route, (ox, oy))
+            committed.append(route)
             # Later links in this attempt must see this copper.
             for x1, y1, x2, y2, layer in route.segments:
                 line = LineString([(x1, y1), (x2, y2)]) if (x1, y1) != (x2, y2) else Point(x1, y1)
@@ -863,63 +868,68 @@ class PourLinkCloser:
             )
             attempt.applied += 1
 
-        for lk in links:
-            net_number = net_ids.get(lk.net)
-            if net_number is None:
-                continue
-            ta, tb = terminal(lk.a, net_number), terminal(lk.b, net_number)
-            route = None
-            if lk.a.kind == "zone" and lk.b.kind == "zone":
-                # KiCad's zone anchor is just the outline corner, so it does not
-                # say WHICH fill island floats.  Our copper model cannot be
-                # trusted to name it either (it over-splits a pour), so bond
-                # every island of the net that no pad-bearing main body owns --
-                # pad-less ones first -- to the rest.  A DRC-neutral superset;
-                # the keep/restore rule discards it if KiCad does not improve.
-                if lk.net not in joined_nets:
-                    joined_nets.add(lk.net)
+        try:
+            for lk in links:
+                net_number = net_ids.get(lk.net)
+                if net_number is None:
+                    continue
+                ta, tb = terminal(lk.a, net_number), terminal(lk.b, net_number)
+                route = None
+                if lk.a.kind == "zone" and lk.b.kind == "zone":
+                    # KiCad's zone anchor is just the outline corner, so it does not
+                    # say WHICH fill island floats.  Our copper model cannot be
+                    # trusted to name it either (it over-splits a pour), so bond
+                    # every island of the net that no pad-bearing main body owns --
+                    # pad-less ones first -- to the rest.  A DRC-neutral superset;
+                    # the keep/restore rule discards it if KiCad does not improve.
+                    if lk.net not in joined_nets:
+                        joined_nets.add(lk.net)
+                        comps = net_components(model, net_number)
+                        first = padless_components(model, net_number, comps)
+                        islands = first + [c for c in comps[1:] if all(c is not f for f in first)]
+                        for n_isl, comp in enumerate(islands[:MAX_ISLAND_JOINS]):
+                            rest = [
+                                c
+                                for c in net_components(model, net_number)
+                                if not _same_comp(c, comp)
+                            ]
+                            pair = component_terminals(comp, rest, lk.net)
+                            if pair is None:
+                                continue
+                            r = route_link(
+                                pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
+                            )
+                            if r is not None:
+                                commit(r, f"route:{lk.net}:island{n_isl}", net_number)
+                    continue
+                if ta is not None and tb is not None:
+                    # Route from the pad end when there is one (its axis aligns the grid).
+                    if ta.label in ("via", "track") and tb.label not in ("via", "track"):
+                        ta, tb = tb, ta
+                    route = route_link(pcb, net_number, lk.net, ta, tb, rules, model=model)
+                if route is None and lk.net not in joined_nets:
+                    # Island join: KiCad says these two items are apart.  Grow from
+                    # the endpoint's island to the nearest other island of the net.
                     comps = net_components(model, net_number)
-                    first = padless_components(model, net_number, comps)
-                    islands = first + [c for c in comps[1:] if all(c is not f for f in first)]
-                    for n_isl, comp in enumerate(islands[:MAX_ISLAND_JOINS]):
-                        rest = [
-                            c for c in net_components(model, net_number) if not _same_comp(c, comp)
-                        ]
-                        pair = component_terminals(comp, rest, lk.net)
-                        if pair is None:
-                            continue
-                        r = route_link(
-                            pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
+                    if len(comps) >= 2:
+                        chosen = None
+                        for t in (ta, tb):
+                            idx = owning(comps, t) if t is not None else None
+                            if idx is not None and idx != 0:
+                                chosen = idx
+                                break
+                        if chosen is None:
+                            chosen = len(comps) - 1
+                        pair = component_terminals(
+                            comps[chosen], [c for k, c in enumerate(comps) if k != chosen], lk.net
                         )
-                        if r is not None:
-                            commit(r, f"route:{lk.net}:island{n_isl}", net_number)
-                continue
-            if ta is not None and tb is not None:
-                # Route from the pad end when there is one (its axis aligns the grid).
-                if ta.label in ("via", "track") and tb.label not in ("via", "track"):
-                    ta, tb = tb, ta
-                route = route_link(pcb, net_number, lk.net, ta, tb, rules, model=model)
-            if route is None and lk.net not in joined_nets:
-                # Island join: KiCad says these two items are apart.  Grow from
-                # the endpoint's island to the nearest other island of the net.
-                comps = net_components(model, net_number)
-                if len(comps) >= 2:
-                    chosen = None
-                    for t in (ta, tb):
-                        idx = owning(comps, t) if t is not None else None
-                        if idx is not None and idx != 0:
-                            chosen = idx
-                            break
-                    if chosen is None:
-                        chosen = len(comps) - 1
-                    pair = component_terminals(
-                        comps[chosen], [c for k, c in enumerate(comps) if k != chosen], lk.net
-                    )
-                    if pair is not None:
-                        route = route_link(
-                            pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
-                        )
-            if route is None:
-                attempt.notes.append(f"{lk.describe()}: no clearance-legal route")
-                continue
-            commit(route, _route_key(lk), net_number)
+                        if pair is not None:
+                            route = route_link(
+                                pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
+                            )
+                if route is None:
+                    attempt.notes.append(f"{lk.describe()}: no clearance-legal route")
+                    continue
+                commit(route, _route_key(lk), net_number)
+        finally:
+            append_link_routes(pcb_path, committed, (ox, oy))
