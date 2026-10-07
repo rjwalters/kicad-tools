@@ -6440,9 +6440,17 @@ def _merge_unconnected_per_net(primary: list, alternate: list, net_of) -> list:
     """Union two projects' ``unconnected_items`` net by net (Issue #5934).
 
     Each net's records come wholesale from whichever list holds more of them
-    (``primary`` on a tie); records whose net cannot be resolved are kept from
-    ``primary`` only.  The result depends only on the per-net counts, which
-    KiCad reports reproducibly, and never on which items KiCad named.
+    (``primary`` on a tie).  The result depends only on the per-net counts,
+    which KiCad reports reproducibly, and never on which items KiCad named.
+
+    Records whose net cannot be resolved (``net_of`` returns ``None``) are
+    kept from ``primary`` only; ``alternate``'s are **dropped on purpose**
+    (Issue #6023).  ``net_of`` resolves a net exactly when
+    :func:`~kicad_tools.router.oracle_completion.links_from_violations` turns
+    the record into a link, so a ``None`` record is one the completion loop
+    never counts or closes.  Taking ``alternate``'s too could only add
+    run-varying duplicates of ``primary``'s (KiCad names different items in
+    each run) to a list whose length nothing should then depend on.
     """
     by_net_primary: dict = {}
     by_net_alt: dict = {}

@@ -1901,6 +1901,14 @@ def _run_fill_zones_via_drc(
     # a KiCad 8/9 DRC refills in memory but persists nothing, so stripping
     # there would ship the board unfilled.
     unfilled_backup = _strip_stale_zone_fills(target_pcb) if refills else None
+    # Issue #6023: the stripped board's bytes.  KiCad's --save-board always
+    # rewrites the file (with fresh fills), so a board still holding exactly
+    # these bytes after a run that produced a report was never saved.
+    stripped = target_pcb.read_bytes() if unfilled_backup is not None else None
+    # Issue #6023: the stale fills are restored on EVERY path that does not
+    # end in a verified save -- including exceptions the handlers below do
+    # not name (PermissionError, KeyboardInterrupt, ...).
+    filled = False
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -1909,6 +1917,20 @@ def _run_fill_zones_via_drc(
         # are still filled.  We treat it as success when the DRC report
         # was actually produced (meaning the command ran to completion).
         if drc_report.exists() and drc_report.stat().st_size > 0:
+            if stripped is not None and _board_unchanged(target_pcb, stripped):
+                # The DRC ran (report written) but the board was not saved:
+                # without the restore it would ship with no fills at all.
+                return KiCadCLIResult(
+                    success=False,
+                    stdout=result.stdout,
+                    stderr=(
+                        "Zone fill via DRC failed — kicad-cli wrote the DRC report but did "
+                        "not save the refilled board"
+                        + (f": {result.stderr.strip()}" if result.stderr.strip() else "")
+                    ),
+                    return_code=result.returncode,
+                )
+            filled = True
             # Restore net declarations and per-element net assignments
             # if kicad-cli stripped them.
             _restore_net_declarations(target_pcb, input_net_nodes, input_element_nets)
@@ -1921,7 +1943,6 @@ def _run_fill_zones_via_drc(
                 return_code=result.returncode,
             )
         else:
-            _restore_stale_zone_fills(target_pcb, unfilled_backup)
             return KiCadCLIResult(
                 success=False,
                 stderr=result.stderr or "Zone fill via DRC failed — no report produced",
@@ -1929,14 +1950,27 @@ def _run_fill_zones_via_drc(
             )
 
     except FileNotFoundError as e:
-        _restore_stale_zone_fills(target_pcb, unfilled_backup)
         return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
     except subprocess.SubprocessError as e:
-        _restore_stale_zone_fills(target_pcb, unfilled_backup)
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
     finally:
+        if not filled:
+            _restore_stale_zone_fills(target_pcb, unfilled_backup)
         # Clean up the temporary DRC report.
         drc_report.unlink(missing_ok=True)
+
+
+def _board_unchanged(pcb_path: Path, expected: bytes) -> bool:
+    """Whether ``pcb_path`` still holds exactly ``expected`` (Issue #6023).
+
+    A file that cannot be read counts as changed: the caller only uses this
+    to detect a save that did not happen, and must not mistake an unreadable
+    board for an intact one.
+    """
+    try:
+        return pcb_path.read_bytes() == expected
+    except OSError:
+        return False
 
 
 def _strip_stale_zone_fills(pcb_path: Path) -> bytes | None:

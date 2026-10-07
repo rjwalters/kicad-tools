@@ -411,7 +411,7 @@ class TestStaleFillStrip:
     """
 
     @staticmethod
-    def _run(tmp_path, monkeypatch, *, refills: bool, report: bool):
+    def _run(tmp_path, monkeypatch, *, refills: bool, report: bool, save: bool = True):
         import subprocess
 
         from kicad_tools.cli import runner
@@ -425,6 +425,9 @@ class TestStaleFillStrip:
             seen["cmd"] = cmd
             if report:
                 Path(cmd[cmd.index("--output") + 1]).write_text('{"violations": []}')
+            if save and "--save-board" in cmd:
+                # KiCad rewrites the board with fresh fills (Issue #6023).
+                Path(cmd[-1]).write_text(_BOARD)
             return subprocess.CompletedProcess(cmd, 5, "", "")
 
         monkeypatch.setattr(runner, "_kicad_drc_supports_refill", lambda _cli: refills)
