@@ -290,8 +290,10 @@ def _batched_trial_mst_costs(
     ys[:, -1] = cand[:, 1]
 
     rows = np.arange(n_cand)
-    in_tree = np.zeros((n_cand, m), dtype=bool)
-    in_tree[:, 0] = True
+    # +inf on vertices already in the tree, 0.0 elsewhere; adding it to a
+    # (non-negative, finite) distance is exact and masks tree vertices.
+    in_tree_pen = np.zeros((n_cand, m), dtype=np.float64)
+    in_tree_pen[:, 0] = np.inf
     key = np.abs(xs - xs[:, :1]) + np.abs(ys - ys[:, :1])
     key[:, 0] = np.inf
     total = np.zeros(n_cand, dtype=np.float64)
@@ -303,50 +305,67 @@ def _batched_trial_mst_costs(
     replay: dict[int, list[Any]] = {}
 
     for step in range(1, m):
-        step_min = key.min(axis=1)
+        chosen = key.argmin(axis=1)  # lowest tied index; resolved below
+        step_min = key[rows, chosen]
         tied = key == step_min[:, None]
-        chosen = tied.argmax(axis=1)
-        ambiguous = np.flatnonzero(tied.sum(axis=1) > 1)
-        for r in ambiguous.tolist():
-            state = replay.get(r)
-            if state is None:
-                # Built exactly as ``_build_mst_edges`` builds them.
-                state = [{0}, set(range(1, m)), 1]
-                replay[r] = state
-            connected, unconnected, done = state
-            for j in order[r, done:step].tolist():
-                connected.add(j)
-                unconnected.remove(j)
-            state[2] = step
-
-            trial = points + [candidates[r]]
-            tied_js = set(np.flatnonzero(tied[r]).tolist())
-            unc_order = [j for j in unconnected if j in tied_js]
-            target = float(step_min[r])
-            pick = -1
-            for i in connected:
-                xi, yi = trial[i]
-                for j in unc_order:
-                    xj, yj = trial[j]
-                    if _manhattan(xi, yi, xj, yj) == target:
-                        pick = j
-                        break
-                if pick >= 0:
-                    break
-            if pick < 0:
+        n_tied = np.count_nonzero(tied, axis=1)
+        amb = np.flatnonzero(n_tied > 1)
+        if amb.size:
+            # Replay the scalar's sets for every ambiguous row and read the
+            # real ``connected`` iteration order (``step`` vertices each).
+            amb_rows = amb.tolist()
+            unconnected_of: list[set[int]] = []
+            conn_flat: list[int] = []
+            for r in amb_rows:
+                state = replay.get(r)
+                if state is None:
+                    # Built exactly as ``_build_mst_edges`` builds them.
+                    state = [{0}, set(range(1, m)), 1]
+                    replay[r] = state
+                connected, unconnected, done = state
+                for j in order[r, done:step].tolist():
+                    connected.add(j)
+                    unconnected.remove(j)
+                state[2] = step
+                conn_flat.extend(connected)
+                unconnected_of.append(unconnected)
+            k = len(amb_rows)
+            kr = np.arange(k)
+            conn = np.array(conn_flat, dtype=np.intp).reshape(k, step)
+            counts = n_tied[amb]
+            jmax = int(counts.max())
+            # Tied vertices in ascending index order, padded to ``jmax``.
+            tied_js = np.argsort(~tied[amb], axis=1, kind="stable")[:, :jmax]
+            j_valid = np.arange(jmax)[None, :] < counts[:, None]
+            ra = amb[:, None]
+            xc, yc = xs[ra, conn], ys[ra, conn]
+            xj, yj = xs[ra, tied_js], ys[ra, tied_js]
+            # (i connected, j unconnected) in the scalar's operand order.
+            d = np.abs(xc[:, :, None] - xj[:, None, :]) + np.abs(yc[:, :, None] - yj[:, None, :])
+            hit = (d == step_min[amb][:, None, None]) & j_valid[:, None, :]
+            i_hit = hit.any(axis=2)
+            if not bool(i_hit.any(axis=1).all()):
                 # Unreachable while ``step_min`` is an exact minimum of the
                 # same values; if that invariant ever broke, give up on
                 # batching rather than return a different tree.
                 return [_mst_cost(points + [c]) for c in candidates]
-            chosen[r] = pick
+            # First connected vertex (in set order) with a minimum edge ...
+            first_hits = hit[kr, i_hit.argmax(axis=1)]
+            picks = tied_js[kr, first_hits.argmax(axis=1)]
+            # ... then the first of its hits in ``unconnected`` set order.
+            for t in np.flatnonzero(first_hits.sum(axis=1) > 1).tolist():
+                hit_js = set(tied_js[t][first_hits[t]].tolist())
+                picks[t] = next(j for j in unconnected_of[t] if j in hit_js)
+            chosen[amb] = picks
 
         total += step_min
         order[:, step] = chosen
-        in_tree[rows, chosen] = True
-        cx = xs[rows, chosen][:, None]
-        cy = ys[rows, chosen][:, None]
-        np.minimum(key, np.abs(xs - cx) + np.abs(ys - cy), out=key)
-        key[in_tree] = np.inf
+        in_tree_pen[rows, chosen] = np.inf
+        key[rows, chosen] = np.inf
+        d = np.abs(xs - xs[rows, chosen][:, None])
+        d += np.abs(ys - ys[rows, chosen][:, None])
+        d += in_tree_pen
+        np.minimum(key, d, out=key)
 
     costs: list[float] = total.tolist()
     return costs
