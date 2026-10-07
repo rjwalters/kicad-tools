@@ -618,3 +618,18 @@ def test_block_aware_driver_honours_wall(tmp_path: Path, force_python: bool) -> 
     _assert_routes_across_open_board(tmp_path, _board(), force_python, run)
     router = _load(tmp_path, _board(_wall()), force_python)
     _assert_no_wall_crossing(run(router))
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_hierarchical_driver_default_honours_wall(tmp_path: Path, force_python: bool) -> None:
+    """Issue #6062: default (negotiated) hierarchical driver installs the areas."""
+
+    def run(router):
+        return list(router.route_all_hierarchical())
+
+    _assert_routes_across_open_board(tmp_path, _board(), force_python, run)
+    router = _load(tmp_path, _board(_wall()), force_python)
+    assert getattr(router.grid, "_rule_area_keepouts", None) is None
+    routes = run(router)
+    assert router.grid._rule_area_keepouts, "hierarchical driver must install the rule areas"
+    _assert_no_wall_crossing(routes)

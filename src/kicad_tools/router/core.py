@@ -16347,6 +16347,11 @@ class Autorouter:
         Returns:
             List of Route objects (may be partial if timeout reached)
         """
+        # Issue #6062: the corridor driver routes through
+        # ``_route_net_with_corridor`` and never reaches ``_prepare_routing``
+        # or ``route_net``, so install the board keepout rule areas here
+        # (idempotent per grid).
+        self._install_grid_rule_area_keepouts()
         h_router = self._create_hierarchical_router()
         result = h_router.route_all(
             num_cols=num_cols,
