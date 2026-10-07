@@ -993,7 +993,7 @@ generated from it: edit the registry, then run `loom-daemon labels generate
 `quickstarts/*/.github/labels.yml` subsets are deliberately NOT generated:
 they are standalone starter templates with no marker block, not held to the
 registry.
-The park, skip, hard-exclusion and champion-path sets are derived from the
-registry; the other daemon tables are still hand-listed, held equal to it by
-lockstep tests. Either way a change to a table's meaning goes in the registry.
+Every daemon table named by a boolean property above is derived from the
+registry; dep_classify's operator-only names stay consts, lockstep-tested
+against `requires_base`/`remove_with` (#5671). Changes go in the registry.
 `stale_after_minutes`, `lifecycle` and `propagate` are inert.

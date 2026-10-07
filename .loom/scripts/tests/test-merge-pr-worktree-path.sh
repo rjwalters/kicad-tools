@@ -135,10 +135,12 @@ retired "the grep for the in-shell 'Bypassing sentinel guard' text" \
     "explicit --worktree-path logs the sentinel-bypass action" \
     "the sentinel test and its message left merge-pr.sh in the #8191 remove-gate slice; they are Rust in loom-daemon/src/merge_pr/remove_gate.rs, so no grep of this file can pass" \
     "loom-daemon/tests/merge_pr_remove_gate_differential.rs (frozen retired block vs the verb, allow=true/sentinel=absent) and an_unmarked_worktree_is_refused_unless_opted_in in src/merge_pr/remove_gate/tests.rs"
-assert_grep "Discovered worktree for branch" "$MERGE_PR" \
-    "discovery fallback emits a hint about the discovered path"
-assert_grep "re-run with: --worktree-path" "$MERGE_PR" \
-    "discovery fallback suggests --worktree-path in the hint"
+retired "the grep for the in-shell 'Discovered worktree for branch' / 're-run with: --worktree-path' text" \
+    "the discovery fallback emits a hint naming the discovered path and suggesting --worktree-path for a user-owned worktree" \
+    "the user-owned advice moved out of merge-pr.sh in the #8191 discovered-worktree slice; it is Rust in loom-daemon/src/merge_pr/discovered_worktree.rs, so no grep of this file can pass" \
+    "loom-daemon/tests/merge_pr_discovered_worktree_differential.rs (frozen retired block vs the verb, user-owned case byte for byte) and a_user_owned_worktree_is_never_decided_and_gets_four_warnings in src/merge_pr/discovered_worktree/tests.rs"
+assert_grep "_mp_worktree discovered-worktree" "$MERGE_PR" \
+    "discovery fallback delegates its classification to 'merge-pr discovered-worktree'"
 
 # --- Test 2b: async-close-race guard (#4186) source surface ---
 assert_grep "_issue_is_closed_for_cleanup" "$MERGE_PR" \
@@ -813,6 +815,9 @@ else
     cat > "$CP_TMP/no-verb-daemon" <<'FAKEDAEMON'
 #!/usr/bin/env bash
 cat >/dev/null
+# Answers ONLY discovered-worktree (DECIDE), so T9b's ungated control can still
+# reach a removal and prove the cleanup-paths gate is what stops it (#8191).
+[[ "$2" != "discovered-worktree" ]] || { echo "LOOM-DISCOVERED DECIDE"; exit 0; }
 echo "error: unrecognized subcommand 'cleanup-paths'" >&2
 exit 2
 FAKEDAEMON
@@ -842,6 +847,7 @@ FAKEDAEMON
         # must stop the fail-open path from reaching a removal.
         _find_worktree_by_branch() { echo "$CP_WT"; }
         _is_primary_worktree_path() { return 1; }
+        _mp_worktree() { "$LOOM_DAEMON_BIN" merge-pr "$@"; }
         _maybe_delete_local_branch() { echo "INFO: branch-delete considered for $1"; }
         eval "${2:-$WTC_CLEANUP}"
     )

@@ -367,19 +367,24 @@ fixture. A behaviour change is a new id registered beside the old one
      the candidate needs a lower mean `pinball4_loss_sec` over the cases both
      answered (an exact tie goes to the side that answered more). Its answer
      rate over the union may be at most `ANSWER_RATE_SLACK` below `current`'s,
-     and its late-surprise rate at most `LATE_SURPRISE_SLACK` above. The
-     win must also hold across the walk-forward daily folds: over at least
-     `MIN_FOLDS` (7) decided days, the 95% Wilson lower bound of its per-day
-     win rate must be above 50%. A heuristic that cannot win on history it
+     and its late-surprise rate at most `LATE_SURPRISE_SLACK` above. Then the
+     [primary test and day consistency check](#promotion-statistics-the-unit-of-independence)
+     (#10525): the paired `pinball4` difference's 95% issue-bootstrap
+     interval must lie below 0 over at least 100 distinct issues, and over at
+     least `MIN_FOLDS` (7) decided walk-forward days the candidate must win a
+     strict majority. A heuristic that cannot win on history it
      can be re-run against is not judged on a live sample nobody can replay,
      so a failure here means the live gate is not even consulted.
    - **Live** (#10233): every figure is read on the **common decidable
      subset** — a pair counts toward a figure only when *both* sides are
      decidable for it, so a candidate cannot improve its numbers by refusing
      the hard cases. All of the following, in this order:
-     - at least 50 paired observations carrying a p90 on both sides, and the
-       candidate's paired mean `pinball4_loss_sec` (q = .25, .5, .75, .9 —
-       the deciding loss) no worse than `current`'s;
+     - the **primary test** (#10525): the candidate's paired mean
+       `pinball4_loss_sec` (q = .25, .5, .75, .9 — the deciding loss) no worse
+       than `current`'s, and the paired difference's 95% item-clustered
+       bootstrap interval below 0 over at least 100 distinct items
+       (`repo#issue`). Every refresh is used, but each item counts once in the
+       uncertainty ([below](#promotion-statistics-the-unit-of-independence));
      - no **late surprise** regression: the candidate's `actual > p90` rate,
        over at least 50 pairs where both sides' late surprise is decided
        (`censored` outcomes included, see below), at most 2 points
@@ -391,11 +396,16 @@ fixture. A behaviour change is a new id registered beside the old one
        is emitted once and never refreshed while an answer is refreshed every
        few minutes;
      - its p25–p75 coverage inside `[40%, 60%]`;
-     - the win holds **day by day**: pairs are folded by the UTC day of their
-       `as_of`, a day goes to whichever side had the lower mean
+     - the **day consistency check**: pairs are folded by the UTC day of
+       their `as_of`, a day goes to whichever side had the lower mean
        `pinball4_loss_sec` (ties are left out), and over at least `MIN_FOLDS`
-       (7) decided days the 95% Wilson lower bound of the candidate's per-day
-       win rate must be above 50%. One lucky day cannot carry a pooled mean.
+       (7) decided days the candidate must win a strict majority. One lucky
+       day, or one regime, cannot carry a pooled mean. The Wilson interval of
+       the day win rate is still recorded but no longer gates (#10525).
+
+   Every decision also records the adaptation-time comparison
+   (`adaptation`): not gating today, because no build measures it yet
+   ([below](#promotion-statistics-the-unit-of-independence)).
 
    Either gate failing leaves `current` untouched, and `--apply` on a failing
    candidate is a refusal, not an override. Every evaluation writes a
@@ -789,14 +799,133 @@ is never
 an automatic cross product of wrappers × bases, so each one spends budget
 deliberately.
 
+**The promotion short-list (shipped, #10525).** `eta promote` evaluates a
+candidate only if it is one of the top 2 candidates by paired pinball against
+`current` over the newest 14 nightly fold days (`eta::shadow_lifecycle`,
+[nightly folds](#nightly-backtest-folds-autonomousetanightlyfolds-10492)).
+That limits multiple comparisons before any significance test runs. The rank
+is each candidate's pair-weighted mean `delta_pinball4_loss_sec`; ties break
+by id. It fails closed: the decision record carries the `shortlist` (ranked
+ids, newest fold day, refusals), and `current` stands when:
+
+- no nightly fold is saved on this host, or the newest is more than 2 days
+  behind the newest due day (stale);
+- a fold was compared against a different `current` (not comparable, so it is
+  left out; after a promotion nobody is short-listed until new folds exist);
+- the candidate has fewer than 3 comparable paired days (a day with a
+  non-finite delta is not a decided day and is not counted);
+- the id is unknown, a baseline, retired, or already `current`.
+
+With fewer than two rankable candidates, only those rankable are short-listed.
+Nightly folds score `land` only, so `eta promote --kind start|finish` always
+refuses until folds exist for those kinds.
+
+**Retirement proposals (shipped, #10525).** `loom-daemon eta retire` reads
+the same folds (the newest 28 days) and **proposes** a retirement, never a
+removal. Retiring stays a code change (#10484). A heuristic is proposed only
+when all of these hold:
+
+1. it is a registered `candidate` (never a baseline, a retired id or
+   `current`);
+2. over at least 14 decided fold days, its day-level paired pinball delta
+   against `current` is worse, with a 95% interval excluding 0. Each fold
+   day's cohort is a disjoint set of resolved items, so the day is the
+   independence unit here;
+3. another candidate **dominates** it over at least 14 common days: strictly
+   lower mean pinball, and coverage error (`|cov_25_75 - 0.5|`) and late
+   surprise no higher.
+
+Domination compares the folds' own aggregates, so it needs both folds to have
+scored the **whole** day cohort: a day counts only when the fold answered every
+case (`n_answered == n_cases`) and was paired on every case (`paired_pairs ==
+n_cases`, so a p90 was present). A fold that answered a subset, or lacked a p90
+somewhere, cannot be shown to share items with another, so that day refuses
+rather than comparing an easy subset to the full cohort.
+
+Missing or non-finite values refuse. Each proposal carries an `evidence_id`
+(a hash of the window, the numbers and the fold ids). The dedup key is the
+heuristic alone, so neither an unchanged window nor a slid one files a second
+issue. `eta retire --file` files each new proposal with
+`.loom/scripts/create-issue.sh` (label `loom:triage`). **Only the fleet
+captain files** (`fleet.captain`, #8848): any other host, or a fleet with no
+captain declared, refuses. Search-then-create is not atomic on the forge, so
+one owner is what prevents two hosts both finding nothing and both filing. The
+captain dedups twice:
+
+- first against its `.loom/state/eta/retirement-proposals.json`;
+- then against the forge, by a REST search for the key marker in any issue,
+  open or closed, counting only issues by a trusted author
+  (`comment-trust.md`: anyone else's copy of the marker is ignored), so a
+  declined proposal is not re-filed, and a change of captain does not re-file
+  once the first issue is indexed (GitHub's search index lags writes, so a
+  handover inside that window can still double-file).
+
+A failed search refuses the filing; it is retried on the next run.
+
+**Scheduled filing (shipped, #10525).** With
+`autonomous.eta.nightlyFolds.retirementFiling` (env
+`LOOM_ETA_RETIREMENT_FILING_ENABLED`, default **off**, read at start; needs
+`enabled` and `nightlyFolds.enabled` too), the captain's
+[nightly fold task](#nightly-backtest-folds-autonomousetanightlyfolds-10492)
+runs the same path as `eta retire --file` on each tick after the folds are
+saved. It is off by default because it is the one outward write the fold task
+makes (the folds themselves are CPU-only and local). It passes the
+`fleet.captain` gate (re-checked inside the filing, fail-closed), dedups
+through the same ledger and forge search, so reruns of an unchanged or slid
+window file nothing new, and a failed search or filing is logged at `warn` and
+retried next tick without affecting the folds. It never unregisters a
+heuristic. By hand, `eta retire --file` still works.
+
+### Promotion statistics: the unit of independence
+
+The tracker re-estimates every live item on every pass, so one landed PR
+contributes dozens of paired observations scored against the same outcome.
+Shocks such as a runner shortage also hit many consecutive hours. Counting
+refreshes, or hourly blocks, as independent multiplies `n` without adding
+evidence. On 2026-10-06 twin-otter's day-win Wilson lower bound was 0.61-0.65
+on 6-hour blocks but 0.34-0.44 on 2-3 day blocks. Both gate halves
+(`eta::shadow_stats`) therefore use:
+
+- **Primary test**: the paired `pinball4` difference (candidate minus
+  `current`) over every scored observation, with a 95% percentile bootstrap
+  that resamples whole items (`repo#issue`; 1,000 resamples, seed `0x10193`,
+  the estimator `eta backtest` and the offline evaluation share). It passes
+  only when the interval's upper bound is below 0 and there are at least 100
+  distinct items. Refreshes of one item add observations but no items, so
+  they cannot manufacture confidence. The live ledger keeps per-item sums for
+  this (`shadow.json` `items`, at most 2,000 per comparison, least recently
+  seen evicted). A ledger from before #10525 has none, so the live primary
+  test refuses until items accumulate.
+- **Why 100**: a percentile cluster bootstrap under-covers with few clusters
+  (Cameron, Gelbach and Miller 2008 report over-rejection below roughly 30-50
+  clusters), so the floor is twice the top of that range. It does not delay
+  an active repository: `rjwalters/loom` merged 16-123 PRs a day over
+  2026-09-30..10-06 (median 53), so the 7 decided days below already carry
+  several hundred items. On a quiet repository, the floor is what binds.
+- **Consistency check**: at least 7 decided UTC days, with a strict majority
+  won, so a win cannot come from one regime.
+- **Monitoring only**: hourly blocks and the nightly-fold scoreboard. They
+  are never the significance unit.
+
+Every decision records the test (`item_test` on `backtest` and on
+`live.stats`): the unit, the sampling method, distinct items, observations,
+the mean and interval, the threshold, and the verdict.
+
+**Adaptation time (#10528).** Every decision records `adaptation`, under the
+rule **no adaptation regression**: when both sides are measured, the
+candidate's `t_p50` and `t_cov` must each be no longer than `current`'s, so a
+marginal accuracy gain cannot buy slower recovery from a shift. A measured
+regression refuses the promotion. No build produces these figures yet, so
+today every decision reads `not_measured`. That status does not gate, and the
+record says so rather than implying the check passed.
+
 **Not yet built** (follow-ups on #10525):
-- Retirement proposals from the nightly walk-forward folds (#10492): an
-  auto-filed issue with the evidence, never a silent removal.
-- A top-2 short-list by nightly-fold pinball before the live gate, to limit
-  multiple comparisons.
-- Promotion statistics: an item-clustered bootstrap on the paired pinball
-  difference as the primary test, with day blocks as a consistency check.
-- Adaptation time (`t_p50`, `t_cov`) in promotion and retirement (#10528).
+
+- A producer of `t_p50` / `t_cov` per heuristic (#10528). Until one exists,
+  the adaptation check records `not_measured`. Retirement domination does not
+  yet consider adaptation either; the proposal body says so.
+- loom-ui's chooser filtering on `tier` is owned by loom-ui#2031 / #2097 and
+  is not verified here.
 
 ## Fitted coefficients (`eta-fit/v1`)
 
@@ -2110,9 +2239,10 @@ items which are not in it at all.
 
 ## CLI (`loom-daemon eta`)
 
-Eight subcommands. All are read-only except `eta promote --apply`, which writes
+Ten subcommands. All are read-only except `eta promote --apply`, which writes
 one config key, `eta fleet backfill|refresh`, which writes only the snapshot
-cache, and `eta fit`, which writes only a coefficient file. Nothing here writes
+cache, `eta fit`, which writes only a coefficient file, and `eta retire
+--file`, which files issues and records them. Nothing here writes
 an estimate to the journal or telemetry — that is the tracker's job, described
 above. Every subcommand but `offline` (which reads only its `--input`) also
 accepts `--repo-root PATH` (default: the current directory).
@@ -2181,7 +2311,15 @@ accepts `--repo-root PATH` (default: the current directory).
   and, with `--apply` and only when both gates pass, flips
   `autonomous.eta.current.<kind>` in the host-local config tier (#9328).
   Without `--apply` it changes nothing. Either way it appends the decision
-  record that explains the outcome.
+  record that explains the outcome. Only a short-listed candidate reaches the
+  gates ([Shadow fleet management](#shadow-fleet-management), #10525).
+- **`loom-daemon eta retire [--file] [--json]`** (#10525) — the retirement
+  proposals the saved nightly folds support, with their evidence
+  ([Shadow fleet management](#shadow-fleet-management)). Without `--file` it
+  only prints. With it, and only on the fleet captain (`fleet.captain`; other
+  hosts refuse), each proposal not already filed (in `.loom/state/eta/retirement-proposals.json`
+  or on the forge) is filed via `.loom/scripts/create-issue.sh`. It never
+  unregisters a heuristic.
 - **`loom-daemon eta fleet backfill|refresh|show [--repo OWNER/NAME] [--limit N] [--as-of RFC3339] [--progress] [--dry-run] [--json]`**
   — build, top up and inspect the fleet-wide forge-derived history snapshot
   (#9343), cached at `.loom/state/eta/fleet/fleet-<owner>-<repo>.json`.
@@ -2381,6 +2519,7 @@ of what is on disk and never needs a refetch.
 | `historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` (#9343) |
 | `fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily refit (#10245). It runs only with `enabled` too, is read at start, and is a no-op until a fleet snapshot is cached |
 | `nightlyFolds.enabled` | `LOOM_ETA_NIGHTLY_FOLDS_ENABLED` | `true` (#10492): the captain's nightly walk-forward backtest folds ([below](#nightly-backtest-folds-autonomousetanightlyfolds-10492)). Runs only with `enabled` too; read at start |
+| `nightlyFolds.retirementFiling` | `LOOM_ETA_RETIREMENT_FILING_ENABLED` | `false` (#10525): after the folds, the captain files retirement proposals as issues ([above](#shadow-fleet-management)). Needs `nightlyFolds.enabled`; read at start |
 | `current.start` / `current.finish` / `current.land` | none | `start-v1` / `finish-v1` / `land-v1` |
 | `shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `14` registered heuristics per kind (`current` + 13 alternates, #10549, #10521), floor 1. Over it, the tracker does not start (see [Shadow fleet management](#shadow-fleet-management)) |
 | `fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | `true` (#10263) |

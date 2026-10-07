@@ -109,10 +109,13 @@ echo "Test 1: merge-pr.sh source contains the primary-checkout helper and call s
 
 assert_grep '_is_primary_worktree_path\(\) \{' "$MERGE_PR" \
     "merge-pr.sh defines the _is_primary_worktree_path helper"
-assert_grep 'if _is_primary_worktree_path "\$DISCOVERED_WT"; then' "$MERGE_PR" \
+assert_grep '_is_primary_worktree_path "\$DISCOVERED_WT"' "$MERGE_PR" \
     "discovery-fallback checks whether the discovered worktree is the primary checkout"
-assert_grep 'not a removable worktree' "$MERGE_PR" \
-    "discovery-fallback reports the primary checkout as not removable"
+retired \
+    "the grep for the in-shell 'not a removable worktree' text" \
+    "the discovery fallback reports the primary checkout as not removable and never suggests worktree removal (#4171)" \
+    "#8191: the classification and its message text left merge-pr.sh for 'loom-daemon merge-pr discovered-worktree' (loom-daemon/src/merge_pr/discovered_worktree.rs), so no grep of this file can pass" \
+    "loom-daemon/tests/merge_pr_discovered_worktree_differential.rs (frozen retired block vs the verb, primary case byte for byte) and the_primary_checkout_is_noted_and_never_offers_removal_advice in src/merge_pr/discovered_worktree/tests.rs"
 retired \
     "_maybe_delete_local_branch resolves the branch's checkout location" \
     "a checked-out refusal is attributed to WHERE the branch is checked out, so the primary checkout gets primary-specific advice (#4171)" \
