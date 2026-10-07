@@ -118,7 +118,7 @@ class SchematicIOMixin:
         _synthesized_pwr_defs: dict[str, SExp]
         text_notes: list[tuple[str, float, float]]
         _source_doc: SExp | None
-        _source_consumed: set[int]
+        _source_consumed: list[SExp]
         _source_slots: dict[str, tuple[SExp | None, str]]
         _text_note_sources: dict[tuple[str, float, float], list[SExp]]
 
@@ -445,19 +445,19 @@ class SchematicIOMixin:
         fingerprints describe exactly what an unmodified save would generate.
         """
         self._source_doc = doc
-        consumed: set[int] = set()
+        consumed: list[SExp] = []
         for elem, node in self._element_nodes():
             src = getattr(elem, "_source_node", None)
             if src is not None:
                 elem._source_fp = _fingerprint(node)  # type: ignore[attr-defined]
-                consumed.add(id(src))
+                consumed.append(src)
         for nodes in self._text_note_sources.values():
-            consumed.update(id(n) for n in nodes)
+            consumed.extend(nodes)
         for name, node in self._header_slot_nodes().items():
             src = doc.get(name)
             self._source_slots[name] = (src, _fingerprint(node))
             if src is not None:
-                consumed.add(id(src))
+                consumed.append(src)
         self._source_consumed = consumed
 
     def to_sexp_node(self) -> SExp:
@@ -551,11 +551,14 @@ class SchematicIOMixin:
             else:
                 replaced[id(src)] = src
 
+        # Held as node references (not ``id()`` ints) so deepcopy/pickle remap
+        # them together with ``_source_doc`` (issue #6071).
+        consumed_ids = {id(n) for n in self._source_consumed}
         children: list[SExp] = []
         for child in doc.children:
             if id(child) in replaced:
                 children.append(replaced[id(child)])
-            elif id(child) not in self._source_consumed:
+            elif id(child) not in consumed_ids:
                 children.append(child)  # not modelled: pass through
             # else: removed from the model since load
 
