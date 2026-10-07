@@ -51,7 +51,42 @@ def _items(x, y, *, track=True, pad=False):
     return out
 
 
-def _build(base: Path, tmp_path: Path, items: list[str], *, drop_zones: bool = False) -> PCB:
+def _crop_copper(root, cx: float, cy: float, margin: float) -> None:
+    """Drop top-level copper whose anchor lies outside a window around (cx, cy).
+
+    The full-board physical-gap scan of Board 03 takes ~60s, which exceeds the
+    CI per-test timeout (issue #6128).  Edge.Cuts (which defines the board
+    origin) and all copper near the probe are retained, so the real sheet
+    frame is still exercised.  Coordinates are sheet-absolute.
+    """
+
+    def anchor(node):
+        if node.name in ("segment", "arc"):
+            tag = node.find("start")
+        else:  # via, footprint
+            tag = node.find("at")
+        if tag is None:
+            return None
+        return tag.get_float(0), tag.get_float(1)
+
+    kept = []
+    for child in root.children:
+        if child.name in ("segment", "arc", "via", "footprint"):
+            pt = anchor(child)
+            if pt is not None and not (abs(pt[0] - cx) <= margin and abs(pt[1] - cy) <= margin):
+                continue
+        kept.append(child)
+    root.children = kept
+
+
+def _build(
+    base: Path,
+    tmp_path: Path,
+    items: list[str],
+    *,
+    drop_zones: bool = False,
+    crop: tuple[float, float, float] | None = None,
+) -> PCB:
     text = base.read_text()
     m = re.search(r'\(net\s+(\d+)\s+"GND"\)', text)
     assert m
@@ -62,6 +97,8 @@ def _build(base: Path, tmp_path: Path, items: list[str], *, drop_zones: bool = F
         # Filled pours would union with the probe copper and hide its gaps.
         root = parse_string(text)
         root.children = [c for c in root.children if c.name != "zone"]
+        if crop is not None:
+            _crop_copper(root, *crop)
         return PCB(root)
     path = tmp_path / "b.kicad_pcb"
     path.write_text(text)
@@ -130,7 +167,8 @@ def test_fleet_board_origin_matches_sheet_frame(tmp_path):
     ox, oy = PCB.load(FLEET03).board_origin
     assert (ox, oy) != (0.0, 0.0)
     cx, cy = ox + 20.0, oy + 15.0
-    pcb = _build(FLEET03, tmp_path, _items(cx, cy), drop_zones=True)
+    pcb = _build(FLEET03, tmp_path, _items(cx, cy), drop_zones=True, crop=(cx, cy, 8.0))
+    assert pcb.board_origin == (ox, oy)
     found = _mine(pcb)
     assert len(found) == 1
     assert found[0].actual_value == pytest.approx(0.2, abs=0.002)
