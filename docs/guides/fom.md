@@ -96,8 +96,10 @@ Sample output:
 
 ```
 FOM breakdown for board.kicad_pcb
-  score:           0.123456
-  soft_score:      0.123456
+  penalty:         55.1635  (sum w*term; lower is better)
+  score:           1.2e-24  (= exp(-penalty) * gate)
+  soft_score:      1.2e-24
+  note:            scores rank placements of the SAME board; not comparable across boards
   hard_gate:       PASS
   predictor*beta:  1.0000 ** 0.0
 
@@ -108,6 +110,13 @@ weighted_via_count                     3.0000      1.000       3.0000
 turning_penalty                       51.9650      1.000      51.9650
 ...
 ```
+
+> **Reading scores.** The score is `exp(-penalty)` where `penalty = Σ w·term`,
+> so it is tiny on most boards (1e-7 or smaller; the exponent is capped at 60).
+> Text output therefore uses scientific notation and prints the linear
+> `penalty`, which JSON also carries as `penalty`. FOM scores rank placements
+> of the *same* board; they are **not comparable across boards** (raw terms
+> such as `net_congestion_variance` scale with board size).
 
 ## Python API
 

@@ -234,7 +234,10 @@ def _add_optim_parser(subparsers) -> None:
 
     fom_debug = optim_subs.add_parser(
         "fom-debug",
-        help="Print the per-term FOM breakdown for an existing placement",
+        help=(
+            "Print the per-term FOM breakdown for an existing placement. "
+            "Scores rank placements of the same board; not comparable across boards."
+        ),
     )
     fom_debug.add_argument("pcb", help="Path to .kicad_pcb file (placement or routed)")
     fom_debug.add_argument(

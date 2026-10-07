@@ -411,6 +411,11 @@ def compute_fom(
     short-circuits to ``score=0`` if any check fails.  Otherwise the
     composite is ``exp(-sum(w_j * term_j)) * predictor(pcb)^beta``.
 
+    The composite ranks placements of the *same* board; its absolute
+    magnitude depends on board size/complexity (often ~1e-7) and is not
+    comparable across boards.  Prefer the linear penalty ``sum(w*term)``
+    for human-readable comparison.
+
     Args:
         pcb: The PCB under evaluation.  Must be a parsed
             :class:`~kicad_tools.schema.pcb.PCB`, not a path.
