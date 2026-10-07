@@ -962,6 +962,12 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # own and never names the kernel directly, so it needs no entry here.
         "validate/clearance_shapes.py",
         "validate/rules/clearance.py",
+        # Issue #6107 (epic #5509): ``kct route-auto``'s foreign-copper gate.
+        # ``foreign_copper.py`` asks ``copper_gap`` for the exact pad / arc /
+        # track distance to other nets' copper, the same kernel the post-route
+        # ``kct check`` clearance family uses, so the gate and the checker
+        # cannot disagree about a gap.
+        "router/foreign_copper.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.
