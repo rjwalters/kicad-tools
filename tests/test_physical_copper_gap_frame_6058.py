@@ -51,7 +51,47 @@ def _items(x, y, *, track=True, pad=False):
     return out
 
 
-def _build(base: Path, tmp_path: Path, items: list[str], *, drop_zones: bool = False) -> PCB:
+#: Copper item kinds the crop window filters; everything else (header,
+#: layers, setup, nets, Edge.Cuts graphics) is kept so the board frame --
+#: ``board_origin`` is derived from the Edge.Cuts outline -- is untouched.
+_CROPPABLE = {"segment", "arc", "via", "footprint"}
+
+#: A footprint is kept when its anchor lies within this distance of the
+#: window, so pads offset from the anchor (connectors, QFNs) are not lost.
+_FOOTPRINT_REACH_MM = 15.0
+
+
+def _xy(node, key):
+    child = node.find_child(key)
+    if child is None:
+        return None
+    return child.get_float(0), child.get_float(1)
+
+
+def _in_window(node, window) -> bool:
+    x0, y0, x1, y1 = window
+    if node.name == "footprint":
+        at = _xy(node, "at")
+        r = _FOOTPRINT_REACH_MM
+        return at is not None and x0 - r <= at[0] <= x1 + r and y0 - r <= at[1] <= y1 + r
+    keys = ("at",) if node.name == "via" else ("start", "mid", "end")
+    pts = [p for p in (_xy(node, k) for k in keys) if p is not None]
+    if not pts:
+        return True  # unknown shape: keep rather than silently drop copper
+    # Bounding-box overlap, so a long segment crossing the window is kept.
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs) <= x1 and max(xs) >= x0 and min(ys) <= y1 and max(ys) >= y0
+
+
+def _build(
+    base: Path,
+    tmp_path: Path,
+    items: list[str],
+    *,
+    drop_zones: bool = False,
+    crop: tuple[float, float, float, float] | None = None,
+) -> PCB:
     text = base.read_text()
     m = re.search(r'\(net\s+(\d+)\s+"GND"\)', text)
     assert m
@@ -62,6 +102,15 @@ def _build(base: Path, tmp_path: Path, items: list[str], *, drop_zones: bool = F
         # Filled pours would union with the probe copper and hide its gaps.
         root = parse_string(text)
         root.children = [c for c in root.children if c.name != "zone"]
+        if crop is not None:
+            # Issue #6128: the full-board scan of fleet board 03 took ~50-70 s
+            # against CI's 60 s budget.  A finding on the probe arc needs
+            # copper within the gap minimum of it, so copper outside a
+            # generous window around the probe cannot change the arc's
+            # findings; dropping it only removes unrelated board-wide work.
+            root.children = [
+                c for c in root.children if c.name not in _CROPPABLE or _in_window(c, crop)
+            ]
         return PCB(root)
     path = tmp_path / "b.kicad_pcb"
     path.write_text(text)
@@ -130,7 +179,15 @@ def test_fleet_board_origin_matches_sheet_frame(tmp_path):
     ox, oy = PCB.load(FLEET03).board_origin
     assert (ox, oy) != (0.0, 0.0)
     cx, cy = ox + 20.0, oy + 15.0
-    pcb = _build(FLEET03, tmp_path, _items(cx, cy), drop_zones=True)
+    # Probe copper spans [cx, cx+2] x [cy, cy+1.5]; a 5 mm margin is 20x the
+    # 0.25 mm gap minimum, so every real-board item that could pair with the
+    # arc is retained (see _build's crop note, issue #6128).
+    window = (cx - 5.0, cy - 5.0, cx + 7.0, cy + 6.5)
+    pcb = _build(FLEET03, tmp_path, _items(cx, cy), drop_zones=True, crop=window)
+    # The crop must keep the real board frame and some real copper around
+    # the probe -- otherwise this degenerates into the zero-origin case.
+    assert pcb.board_origin == (ox, oy)
+    assert len(pcb.segments) > 2 or len(pcb.vias) > 0 or len(pcb.footprints) > 0
     found = _mine(pcb)
     assert len(found) == 1
     assert found[0].actual_value == pytest.approx(0.2, abs=0.002)

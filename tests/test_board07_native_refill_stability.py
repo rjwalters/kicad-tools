@@ -9,13 +9,23 @@ policy) to a stable state.
 
 The recipe's own in-loop audits had reported PASS for that run -- GND 156 /
 +1V2 8 / +1V8 18 pads, each in one copper component -- yet the native
-refill splits ``+1V2`` into 7+1: the recipe's fill engine keeps the In2.Cu
-``+1V2`` pocket under the U4 BGA attached to the net body, while KiCad's
-own engine severs it around the escape-via barrels, stranding ``U4.E6``
-(whose only net item is its stitching via).  A power pad that reads
-connected on the saved bytes but strands under the board's own authored
-refill rules is exactly the #5507 acceptance clause: connectivity "on saved
-AND plain-native-refilled outputs".
+refill splits ``+1V2`` into 7+1, severing the In2.Cu ``+1V2`` pocket under
+the U4 BGA and stranding ``U4.E6`` (whose only net item is its stitching
+via).  A power pad that reads connected on the saved bytes but strands under
+the board's own authored refill rules is exactly the #5507 acceptance
+clause: connectivity "on saved AND plain-native-refilled outputs".
+
+Issue #6129 correction: the split was never KiCad's.  KiCad's own fill of
+this fixture keeps ``+1V2`` whole (8); the 7+1 came from the post-fill
+foreign-pad carve ``run_fill_zones`` applies (``apply_foreign_pad_clearance``),
+whose old ``_vent_holes`` slit from each hole to the nearest exterior point
+cut through the BGA pocket's neck.  #6078 / PR #6097 replaced that with
+KiCad-style fracturing plus a refuse-a-split gate, so a plain native refill
+of this fixture is now whole and the stability pass has nothing to repair
+(pinned by ``test_native_refill_of_the_fixture_is_now_whole``).  The
+repair loop itself is still driven end to end by
+``test_stability_pass_repairs_the_split_and_verifies_clean``, with the
+refill stubbed to reproduce the pre-#6097 split.
 
 The stranded state also exposed a second, non-physical defect this module
 pins: ``_repair_pour_connectivity`` derived its keep-in-board bounds from
@@ -229,25 +239,76 @@ def test_repair_keeps_the_full_pad_inventory(generate_design_mod, fixture_pcb, t
     assert ("U4", "E6", "+1V2") in after
 
 
-@pytest.mark.skipif(find_kicad_cli() is None, reason="kicad-cli not installed")
-def test_stability_pass_repairs_the_split_and_verifies_clean(generate_design_mod, tmp_path):
-    """The recipe's stability pass converges on exactly this state.
-
-    Drives ``_native_refill_stability_pass`` with the fixture as the
-    artifact: round 1 must detect the 7+1 split under a plain native
-    refill, repair it, restore the recipe fills, and round 2's fresh native
-    refill must then audit clean -- the pass only returns True on a
-    verified-clean native refill, never on the saved-state audit alone.
-    """
+def _stage_fixture(tmp_path: Path) -> Path:
     work = tmp_path / ROUTED_STEM
     work.mkdir()
     for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
         shutil.copy2(FIXTURE_DIR / f"{ROUTED_STEM}{suffix}", work / f"{ROUTED_STEM}{suffix}")
-    pcb = work / f"{ROUTED_STEM}.kicad_pcb"
+    return work / f"{ROUTED_STEM}.kicad_pcb"
+
+
+@pytest.mark.skipif(find_kicad_cli() is None, reason="kicad-cli not installed")
+def test_stability_pass_repairs_the_split_and_verifies_clean(
+    generate_design_mod, tmp_path, monkeypatch
+):
+    """The recipe's stability pass converges when a native refill splits.
+
+    Drives ``_native_refill_stability_pass`` with the fixture as the
+    artifact: round 1 must detect the 7+1 split under the native refill,
+    repair it, restore the recipe fills, and round 2's fresh native refill
+    must then audit clean -- the pass only returns True on a
+    verified-clean native refill, never on the saved-state audit alone.
+
+    Since #6078 / PR #6097 the real ``run_fill_zones`` no longer splits this
+    fixture (see the module docstring), so the native refill is stubbed with
+    a no-op that leaves the scratch copy's saved fills in place.  Round 1
+    then sees exactly the pre-#6097 native-refill state -- the fixture
+    bytes ARE that state -- and round 2 sees the repaired artifact after the
+    REAL recipe re-fill (``fill_argv`` runs in a subprocess, unstubbed).
+    """
+    import kicad_tools.cli.runner as runner
+
+    pcb = _stage_fixture(tmp_path)
     fill_argv = [sys.executable, "-m", "kicad_tools.cli", "zones", "fill", str(pcb)]
 
+    refills: list[Path] = []
+
+    class _Result:
+        success = True
+        returncode = 0
+
+    def _split_preserving_refill(scratch: Path, *args, **kwargs):
+        refills.append(scratch)
+        return _Result()
+
+    monkeypatch.setattr(runner, "run_fill_zones", _split_preserving_refill)
+
     assert generate_design_mod._native_refill_stability_pass(pcb, list(POWER_NETS), fill_argv)
+    # Round 1 split -> repair -> round 2 clean: exactly two native refills.
+    assert len(refills) == 2
 
     groups = _groups(generate_design_mod, pcb)
     assert _group_sizes(groups) == {"GND": [156], "+1V2": [8], "+1V8": [18]}
     assert STRANDED_PAD in groups["+1V2"][0]
+
+
+@pytest.mark.skipif(find_kicad_cli() is None, reason="kicad-cli not installed")
+def test_native_refill_of_the_fixture_is_now_whole(generate_design_mod, tmp_path, capsys):
+    """Issue #6129: the real native refill keeps +1V2 whole on this fixture.
+
+    The documented 7+1 split was produced by the pre-#6097 slit-venting
+    foreign-pad carve, not by KiCad.  With the #6078 fracture encoding and
+    refuse-a-split gate, round 1's plain native refill audits clean, so the
+    stability pass returns True without placing repair copper -- the
+    artifact bytes are left untouched.  If this starts failing with a 7+1
+    split again, the carve has regressed to cutting connected copper.
+    """
+    pcb = _stage_fixture(tmp_path)
+    before = pcb.read_bytes()
+    fill_argv = [sys.executable, "-m", "kicad_tools.cli", "zones", "fill", str(pcb)]
+
+    assert generate_design_mod._native_refill_stability_pass(pcb, list(POWER_NETS), fill_argv)
+    out = capsys.readouterr().out
+    assert "[native r1] OK   +1V2: 8 pads in one copper component" in out
+    assert "Repairing" not in out
+    assert pcb.read_bytes() == before
