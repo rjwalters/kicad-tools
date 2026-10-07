@@ -30,14 +30,13 @@ Waivers
     ``kct detect-mistakes ... --waive KEY ...`` for ``mistake.*`` keys) --
     the exact command is printed.
 
-    **Copper waivers carry over only with the same ``--seed``.**  ``kct
-    check`` keys for copper findings name the track/via UUIDs, and an
-    unseeded route gives its copper fresh random UUIDs on every run, so a
-    copper waiver recorded against one run never matches the next one.  Re-run
-    with the **same ``--seed``** (and unchanged inputs, so the copper is
-    reproduced) for the waiver to apply; any change to the routed copper
-    invalidates it.  Footprint/pad-keyed findings and ``mistake.*`` keys are
-    not affected.  Geometry-based copper keys are tracked in Issue #6088.
+    **Copper waivers carry over when the routed geometry is the same.**
+    ``kct check`` keys for copper findings are built from the quantised
+    geometry of the offending copper (layer, width, endpoints, net), not its
+    UUIDs, so a waiver recorded against one run matches a re-run that routes
+    the same copper whatever ``--seed`` was used.  Any change to the routed
+    copper invalidates it.  Footprint/pad-keyed findings and ``mistake.*``
+    keys are not affected (Issue #6088).
     Stale waivers only make the gate stricter -- it never passes a board it
     should have rolled back.
 
@@ -1102,9 +1101,9 @@ class LintGate:
         self._err("  to accept a reviewed finding, waive it against the rejected board and re-run:")
         if check_keys:
             self._err(
-                "  (copper finding keys name track/via UUIDs: a copper waiver carries over "
-                "only to a re-run with the SAME --seed and unchanged inputs -- an unseeded "
-                "route gets new UUIDs every run; see Issue #6088)"
+                "  (copper finding keys are geometry-based: a copper waiver carries over "
+                "to a re-run that routes the same copper, regardless of UUIDs or --seed; "
+                "see Issue #6088)"
             )
         flags = " ".join(_quote(f) for f in self._flags)
         for tool, keys in (("kct check", check_keys), ("kct detect-mistakes", mistake_keys)):

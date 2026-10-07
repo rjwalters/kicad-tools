@@ -83,7 +83,7 @@ def test_seeded_short_is_rolled_back(board, capsys):
     assert _rejected(board).exists() and "seed-1" in _rejected(board).read_text()
     err = capsys.readouterr().err
     assert "ROLLED BACK" in err
-    assert "clearance_segment_segment|Trace-seed-1" in err
+    assert "clearance_segment_segment|Trace@F.Cu:w0.25:110/48~110/52" in err
     assert "--waive" in err
 
 

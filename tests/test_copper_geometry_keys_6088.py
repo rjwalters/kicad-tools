@@ -62,6 +62,20 @@ class TestDescriptors:
         # ... a move of more than the quantum changes it.
         assert segment_ref(_seg((1.002, 2.0), (3.0, 2.0))) != base
 
+    def test_half_micron_coordinates_survive_a_non_round_origin_move(self):
+        # Sheet coordinates sitting exactly on a half-um boundary must keep
+        # their key when only the board origin moves: PCB.load stores
+        # ``sheet - origin`` and the key adds the origin back, which leaves
+        # float noise that must not flip the rounding.
+        for i in range(2000):
+            sx, sy = 100.0005 + i * 0.001, 50.0015 + i * 0.002
+            keys = set()
+            for origin in ((0.0, 0.0), (108.5, 57.5), (12.3457, 98.7653), (0.1234, 0.0007)):
+                rel_a = (sx - origin[0], sy - origin[1])
+                rel_b = (sx + 10.0 - origin[0], sy - origin[1])
+                keys.add(segment_ref(_seg(rel_a, rel_b), origin))
+            assert len(keys) == 1, (sx, sy, keys)
+
     def test_segment_width_and_layer_discriminate(self):
         base = segment_ref(_seg((1.0, 2.0), (3.0, 2.0)))
         assert segment_ref(_seg((1.0, 2.0), (3.0, 2.0), width=0.3)) != base

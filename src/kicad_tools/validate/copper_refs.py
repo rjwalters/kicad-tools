@@ -52,9 +52,18 @@ _QUANTUM_PER_MM = 1000
 _INNER_LAYER = re.compile(r"^In(\d+)\.Cu$")
 
 
+_NM_PER_MM = 1_000_000
+
+
 def _q(value: float) -> int:
-    """Quantise a mm value to an integer number of micrometres."""
-    return round(float(value) * _QUANTUM_PER_MM)
+    """Quantise a mm value to an integer number of micrometres.
+
+    Snaps to whole nanometres (KiCad's internal unit) first, then rounds
+    half-up in integer arithmetic, so the float noise left by the origin
+    subtract/add round trip cannot flip a value that sits on a half-um boundary.
+    """
+    nanometres = round(float(value) * _NM_PER_MM)
+    return (nanometres + 500) // 1000
 
 
 def _mm(quantised: int) -> str:
