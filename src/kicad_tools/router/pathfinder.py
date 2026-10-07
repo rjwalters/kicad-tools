@@ -267,6 +267,20 @@ class Router:
         # to prevent.  The effective bound is ``min(cols*rows*4, override)``.
         self._max_iterations_override: int | None = None
 
+        # Issue #6098: True when the most recent ``route()`` returned ``None``
+        # because its A* open set DRAINED -- every cell reachable under this
+        # search's passability was expanded and no goal cell was ever popped
+        # (so no goal was reached and then rejected by path validation).  That
+        # is a proof the goal is unreachable on the current grid state for
+        # these endpoints / net class / mode, independent of cost knobs
+        # (``present_cost_factor``, ``weight``): passability here is a property
+        # of the (cell, neighbour) edge and the grid, never of search order.
+        # ``False`` for a success, a timeout, an iteration-cap stop, an early
+        # pre-search return, or a drain after a rejected goal -- none of those
+        # is a proof.  ``CppPathfinder`` memoizes the proof so the negotiated
+        # loop does not re-run this 10-100x-slower search on an unchanged grid.
+        self.last_route_exhausted: bool = False
+
         # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
         # Same layer moves - orthogonal directions
         self.neighbors_2d = [
@@ -3858,6 +3872,10 @@ class Router:
         # Keep cache valid within this route call for same-position checks
         self.clear_via_cache()
 
+        # Issue #6098: only a drained open set (set after the A* loop) proves
+        # unreachability; every other exit leaves this False.
+        self.last_route_exhausted = False
+
         # Issue #2330: Reset waypoint state for this route call
         self._waypoint_world_coords.clear()
         self._waypoint_id_counter = 0
@@ -4210,6 +4228,7 @@ class Router:
             effective_timeout = per_net_timeout * self._ESCAPE_HINT_DEADLINE_MULT
         deadline = time.monotonic() + effective_timeout if effective_timeout is not None else None
         timeout_check_interval = 1024
+        goal_rejected = False  # Issue #6098
 
         while open_set and iterations < max_iterations:
             iterations += 1
@@ -4245,6 +4264,10 @@ class Router:
                 # Geometric validation failed (Issue #750) - continue A* search
                 # This allows finding alternate paths (e.g., B.Cu when F.Cu fails)
                 # The node stays in closed_set, preventing re-exploration on this layer
+                # Issue #6098: a goal was reached and rejected -- which goal
+                # survives validation depends on search order, so a later drain
+                # is not an unreachability proof.
+                goal_rejected = True
                 continue
 
             # Issue #2306: Incremental Steiner goal check - terminate early when
@@ -4274,6 +4297,7 @@ class Router:
                 if route is not None:
                     return route
                 # Geometric validation failed - keep searching
+                goal_rejected = True  # Issue #6098: see the end-pad branch
                 continue
 
             # Batch pre-compute costs for all neighbors (Issue #963)
@@ -4767,7 +4791,10 @@ class Router:
                     )
                     heapq.heappush(open_set, neighbor_node)
 
-        # No path found
+        # No path found.  Issue #6098: the open set is empty only when the
+        # search drained (a timeout ``break`` or the iteration cap leaves
+        # frontier nodes behind).
+        self.last_route_exhausted = not open_set and not goal_rejected
         return None
 
     def get_last_failure_info(self) -> dict | None:
