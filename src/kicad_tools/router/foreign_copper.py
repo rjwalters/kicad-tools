@@ -97,7 +97,9 @@ class ForeignItem:
 
     @property
     def net_label(self) -> str:
-        return self.net_name or f"Net_{self.net}"
+        if self.net_name:
+            return self.net_name
+        return f"Net_{self.net}" if self.net else "<no net>"
 
 
 @dataclass(frozen=True)

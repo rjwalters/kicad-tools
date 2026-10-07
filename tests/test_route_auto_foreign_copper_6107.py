@@ -279,6 +279,7 @@ def test_gate_refuses_copper_on_a_no_net_pad(tmp_path) -> None:
     assert result.success is False
     assert result.segments == [] and result.vias == []
     assert "pad R5.1" in result.error_message
+    assert "'<no net>'" in result.error_message
 
 
 def test_gate_ignores_a_bare_npth_hole(tmp_path) -> None:
@@ -401,3 +402,37 @@ def test_gate_refuses_copper_on_an_npth_pad_with_annular_copper(tmp_path) -> Non
     orchestrator._enforce_no_foreign_shorts(result, RoutingStrategy.GLOBAL_WITH_REPAIR)
     assert result.success is False
     assert result.segments == [] and result.vias == []
+
+
+def test_no_net_pad_end_to_end(tmp_path) -> None:
+    """A no-connect pad on the path: ``global`` is refused, ``hierarchical``
+    routes around it (the judge's KiCad DRC repro on #6118)."""
+    text = PAD.read_text().replace(
+        '(size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "/A")',
+        '(size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask")',
+    )
+    assert text != PAD.read_text(), "fixture pad line changed; update the replacement"
+    src = tmp_path / "pad_net0.kicad_pcb"
+    src.write_text(text)
+
+    refused = tmp_path / "global.kicad_pcb"
+    result = route_net_auto(str(src), "/B", output_path=str(refused), strategy="global")
+    assert result["success"] is False
+    assert not refused.exists()
+
+    out = tmp_path / "hier.kicad_pcb"
+    result = route_net_auto(str(src), "/B", output_path=str(out), strategy="hierarchical")
+    assert result["success"] is True, result.get("error_message")
+    items = board_copper(PCB.load(str(out)))
+    mine = [i for i in items if i.net_name == "/B" and i.kind == "track"]
+    no_net_pads = [i for i in items if i.kind == "pad" and i.net == 0]
+    assert mine and no_net_pads
+    gap = min(
+        copper_gap(sa, sb)
+        for a in mine
+        for b in no_net_pads
+        if b.layers is None or a.layers is None or (a.layers & b.layers)
+        for sa in a.shapes
+        for sb in b.shapes
+    )
+    assert gap >= KICAD_DEFAULT_CLEARANCE_MM - CLEARANCE_EPSILON_MM, gap
