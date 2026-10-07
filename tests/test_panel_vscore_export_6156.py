@@ -291,6 +291,23 @@ def test_untagged_line_on_outline_edge_is_not_a_score(tmp_path: Path, line: str)
     assert pcb_vscore_layers(pcb) == []
 
 
+@pytest.mark.parametrize(
+    "layer,line",
+    [
+        ("Dwgs.User", "(start -5 -5) (end 45 -5)"),
+        ("Dwgs.User", "(start -5 35) (end 45 35)"),
+        ("Dwgs.User", "(start -5 -5) (end -5 35)"),
+        ("Dwgs.User", "(start 45 -5) (end 45 35)"),
+        ("Cmts.User", "(start -2 -4) (end 42 -4)"),
+    ],
+)
+def test_untagged_line_outside_outline_is_not_a_score(
+    tmp_path: Path, layer: str, line: str
+) -> None:
+    pcb = _board(tmp_path, f'(gr_line {line} (layer "{layer}"))')
+    assert pcb_vscore_layers(pcb) == []
+
+
 def test_tagged_line_on_edge_is_still_a_score(tmp_path: Path) -> None:
     from kicad_tools.sexp.vscore import make_vscore_uuid
 
@@ -339,12 +356,46 @@ def test_kct_panel_score_lines_are_tagged(tmp_path: Path, rows, cols, frame) -> 
     assert pcb_vscore_layers(pcb) == ["Cmts.User"]
 
 
-def test_mixed_panel_gapped_seams_still_detects_scored_seams(tmp_path: Path) -> None:
+def _vscore_lines(pcb: Path) -> list[tuple[float, float, float, float]]:
+    from kicad_tools.sexp import parse_string
+
+    out = []
+    for c in parse_string(pcb.read_text()).children:
+        if c.is_atom or c.name != "gr_line":
+            continue
+        layer = c.find_child("layer").get_string(0)
+        if layer != "Cmts.User":
+            continue
+        s, e = c.find_child("start"), c.find_child("end")
+        out.append(
+            (
+                float(s.get_float(0)),
+                float(s.get_float(1)),
+                float(e.get_float(0)),
+                float(e.get_float(1)),
+            )
+        )
+    return out
+
+
+@pytest.mark.parametrize("frame", [FrameConfig(), None], ids=["framed", "bare"])
+def test_mixed_panel_gapped_seams_still_detects_scored_seams(tmp_path: Path, frame) -> None:
+    """Gapped columns (spacing_x=2) are routed, butted rows (spacing_y=0) are scored."""
     cfg = PanelConfig(
-        rows=1,
+        rows=2,
         cols=3,
+        spacing_x=2.0,
+        spacing_y=0.0,
         cut_method=CutMethod.VCUT,
-        frame=FrameConfig(),
+        frame=frame,
     )
     pcb = Panel.from_config(FIXTURE, cfg).save(tmp_path / "m.kicad_pcb")
     assert pcb_vscore_layers(pcb) == ["Cmts.User"]
+    lines = _vscore_lines(pcb)
+    if frame is None:
+        # Only the butted row seam is scored; gapped column seams are not.
+        assert len(lines) == 1
+        x0, y0, x1, y1 = lines[0]
+        assert y0 == y1 and x0 != x1
+    else:
+        assert len(lines) > 1

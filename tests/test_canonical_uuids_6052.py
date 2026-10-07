@@ -450,3 +450,15 @@ def test_main_impl_snapshots_input_uuids_before_writing(tmp_path, monkeypatch):
     with pytest.raises(_Stop):
         route_cmd._main_impl([str(pcb), "-o", str(pcb)])
     assert seen == {"pcb": str(pcb), "unchanged": True}
+
+
+def test_vscore_marker_uuid_survives_empty_keep_set():
+    """#6165: the kct-panel V-score tag is never rewritten, even with keep=()."""
+    from kicad_tools.sexp.vscore import make_vscore_uuid
+
+    tag = make_vscore_uuid()
+    doc = parse_string(
+        f'(kicad_pcb (gr_line (start 0 0) (end 1 0) (layer "Cmts.User") (uuid "{tag}")))'
+    )
+    canonicalize_board_uuids(doc, keep=())
+    assert tag in doc.to_string()

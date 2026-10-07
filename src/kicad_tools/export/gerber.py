@@ -200,8 +200,9 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
     straight across the whole board outline: horizontal or vertical, reaching
     or passing the Edge.Cuts bounding box at both ends (KiKit overshoots the
     frame by ~3 mm).  Lines tagged by ``kct panel`` (see
-    :data:`VSCORE_UUID_MARKER`) are always accepted.  Untagged lines lying on
-    an outline edge (a drawing border) are not scores, and partial or jump
+    :data:`VSCORE_UUID_MARKER`) are always accepted.  Untagged lines must lie strictly
+    inside the outline on the perpendicular axis; borders on or outside the
+    outline and dimension extension lines are not scores, and partial or jump
     scores that stop short of an edge are not detected by geometry.  Ordinary
     notes and dimension lines on ``Cmts.User`` do not span the outline, so a
     normal board gains no extra Gerber.  Quoted and unquoted layer names (old
@@ -248,11 +249,11 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
             continue
         (x0, y0), (x1, y1) = a, b
         if abs(y0 - y1) <= tol:
-            on_edge = min(abs(y0 - min_y), abs(y0 - max_y)) <= tol
-            spans = not on_edge and min(x0, x1) <= min_x + tol and max(x0, x1) >= max_x - tol
+            inside = min_y + tol < y0 < max_y - tol
+            spans = inside and min(x0, x1) <= min_x + tol and max(x0, x1) >= max_x - tol
         elif abs(x0 - x1) <= tol:
-            on_edge = min(abs(x0 - min_x), abs(x0 - max_x)) <= tol
-            spans = not on_edge and min(y0, y1) <= min_y + tol and max(y0, y1) >= max_y - tol
+            inside = min_x + tol < x0 < max_x - tol
+            spans = inside and min(y0, y1) <= min_y + tol and max(y0, y1) >= max_y - tol
         else:
             spans = False
         if spans:

@@ -15,3 +15,9 @@ def make_vscore_uuid() -> str:
     parts = str(uuid.uuid4()).split("-")
     parts[3] = VSCORE_UUID_MARKER
     return "-".join(parts)
+
+
+def is_vscore_uuid(value: str | None) -> bool:
+    """True if *value* is a uuid carrying :data:`VSCORE_UUID_MARKER`."""
+    parts = (value or "").split("-")
+    return len(parts) == 5 and parts[3].lower() == VSCORE_UUID_MARKER
