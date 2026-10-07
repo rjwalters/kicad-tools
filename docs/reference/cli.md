@@ -916,8 +916,8 @@ resolution, the one the `hierarchical` strategy searches. When no strategy that 
 example `--strategy global`, whose copper comes from the coarse corridor
 planner), each connection is `unclassified` with a `note` that says so.
 
-route-auto never writes copper that shorts another net or violates the
-board's clearance to it (Issues #6001, #6107):
+route-auto never writes copper that shorts another net, violates the
+clearance to it or crowds a drilled hole (Issues #6001, #6107, #6122, #6139):
 
 - The `hierarchical` strategy routes on the board as `kct route --nets` loads
   it: every other net's pads (with their real shapes), tracks, vias and arcs
@@ -928,8 +928,9 @@ board's clearance to it (Issues #6001, #6107):
   `multi_resolution`, `full_pipeline`) cannot plan around copper. They warn
   once, like they do for keepout rule areas (#6059).
 - Every strategy's output is checked against every other net's pads, tracks,
-  arcs (true arc geometry) and vias. Copper that touches one, or comes closer
-  than the board's clearance, is refused and not written. The net fails, and
+  arcs (true arc geometry) and vias, and against every drilled hole. Copper
+  that touches one, or comes closer than the clearance KiCad requires for
+  that pair, is refused and not written. The net fails, and
   the error names the nets and items in the way, for example
   `shorts net(s) '/A' already on the board (e.g. pad R5.1 at (115.000, 108.000) of '/A')`
   or `comes within 0.050 mm of net(s) '/A' (closest: track ...), below the
@@ -937,14 +938,33 @@ board's clearance to it (Issues #6001, #6107):
   `congested` contender. Under `--strategy auto`, a refused corridor is retried
   with `hierarchical`.
 
-The clearance is the one KiCad's DRC measures. It is the strictest
-unconditional value in the board's `.kicad_dru` and `.kicad_pro` (the board
-minimum and the `Default` netclass), or KiCad's default of 0.2 mm when the
-board declares none. Per-net netclass assignments and conditional `.kicad_dru`
-rules are not resolved. Unassigned (net-0) tracks, vias, arcs and zones are
-not checked (floating copper is reassigned by connectivity, and a zone refill
+The clearance is the one KiCad's DRC measures, resolved **per item pair**
+the way KiCad resolves it (Issue #6122). The last matching `.kicad_dru` rule
+wins, overriding the netclass and the board minimum in both directions. If no
+rule matches, the requirement is the larger of the two nets' netclass
+clearances (from `netclass_assignments` / `netclass_patterns` in the
+`.kicad_pro`), floored by the board minimum. Without a project, it is KiCad's
+default of 0.2 mm. A rule condition can test `NetName`, `NetClass`, `Type`, `Pad_Type`,
+`hasNetclass()` and `isPlated()`, and it can carry a `(layer ...)` clause.
+A condition the gate cannot evaluate, such as `insideArea()` or
+`intersectsArea()`, is taken conservatively: the gate uses the larger of the
+rule's value and the value it would get otherwise, so it can refuse copper
+that KiCad would accept, but never the reverse. The `hierarchical` strategy
+routes each net at the largest pair clearance it needs from any net on the
+board.
+
+Every drilled hole counts too (Issue #6139): NPTH holes and slots, plated pad
+drills and via drills. New copper is kept at the board's `hole_clearance` from
+each hole's real outline, round or oval. `.kicad_pro` `min_hole_clearance`
+sets it (KiCad's default is 0.25 mm), and `.kicad_dru` `hole_clearance` rules
+override it. A non-plated slot is board edge to KiCad, so new copper must also
+keep `edge_clearance` from it: `min_copper_edge_clearance` (default 0.5 mm) or
+`.kicad_dru` `edge_clearance` rules. A new via's own drill is checked against
+other nets' copper at `hole_clearance`. Holes of the routed net's own pads and
+vias are exempt. Unassigned (net-0) tracks, vias, arcs and zones are not
+checked (floating copper is reassigned by connectivity, and a zone refill
 clears around the new copper). Net-0 pads, such as no-connect pins and plated
-mounting holes, are checked; a bare NPTH hole with no copper is not.
+mounting holes, are checked, and so are bare NPTH holes, as holes.
 
 #### Routing around invalid placement
 
