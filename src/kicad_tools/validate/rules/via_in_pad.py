@@ -71,6 +71,8 @@ from kicad_tools.router.via_in_pad_eligibility import (
     resolve_component_hole_context,
 )
 
+from ..copper_refs import board_origin
+from ..copper_refs import via_ref as copper_via_ref
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
 
@@ -145,6 +147,8 @@ class ViaInPadRule(DRCRule):
             distinct rule_ids this can emit.
         """
         results = DRCResults()
+        # Issue #6088: vias are named by sheet-frame geometry, not UUID.
+        self._origin = board_origin(pcb)
         results.rules_checked = 1
 
         supported = bool(getattr(design_rules, "via_in_pad_supported", False))
@@ -245,7 +249,7 @@ class ViaInPadRule(DRCRule):
     ) -> DRCViolation:
         """Build a DRCViolation for a single (via, pad) pair."""
         ref_label = f"{fp.reference}-{pad.number}"
-        via_ref = f"Via-{via.uuid[:8]}" if via.uuid else "Via"
+        via_ref = copper_via_ref(via, getattr(self, "_origin", (0.0, 0.0)))
         net_name = via.net_name or pad.net_name or ""
         return DRCViolation(
             rule_id="via_in_pad",
@@ -272,7 +276,7 @@ class ViaInPadRule(DRCRule):
     ) -> DRCViolation:
         """Build a violation for "supported but no eligible process declared"."""
         ref_label = f"{fp.reference}-{pad.number}"
-        via_ref = f"Via-{via.uuid[:8]}" if via.uuid else "Via"
+        via_ref = copper_via_ref(via, getattr(self, "_origin", (0.0, 0.0)))
         net_name = via.net_name or pad.net_name or ""
         detail = (
             f"unrecognized via_in_pad_process_id {process_id!r}"
@@ -309,7 +313,7 @@ class ViaInPadRule(DRCRule):
     ) -> DRCViolation:
         """Build a violation for "process declared but not satisfied"."""
         ref_label = f"{fp.reference}-{pad.number}"
-        via_ref = f"Via-{via.uuid[:8]}" if via.uuid else "Via"
+        via_ref = copper_via_ref(via, getattr(self, "_origin", (0.0, 0.0)))
         net_name = via.net_name or pad.net_name or ""
         reason_text = "; ".join(reasons)
         return DRCViolation(

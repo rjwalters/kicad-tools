@@ -41,6 +41,7 @@ from ..clearance_shapes import (
 from ..clearance_shapes import (
     pad_shape as _kernel_pad_shape,
 )
+from ..copper_refs import Origin, board_origin, segment_ref, via_ref
 from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
@@ -160,14 +161,20 @@ class CopperElement:
     _kernel_shape_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
 
     @classmethod
-    def from_segment(cls, seg: Segment) -> CopperElement:
-        """Create from a PCB segment."""
+    def from_segment(cls, seg: Segment, origin: Origin = (0.0, 0.0)) -> CopperElement:
+        """Create from a PCB segment.
+
+        ``origin`` is the board origin, so the geometry-based ``reference``
+        (Issue #6088) is in sheet coordinates; see
+        :mod:`kicad_tools.validate.copper_refs`.
+        """
         return cls(
             element_type="segment",
             layer=seg.layer,
             net_number=seg.net_number,
             geometry=(seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.width),
-            reference=f"Trace-{seg.uuid[:8]}" if seg.uuid else "Trace",
+            # Issue #6088: geometry, not the (unseeded-random) UUID.
+            reference=segment_ref(seg, origin),
             net_name=seg.net_name if seg.net_number != 0 else "",
         )
 
@@ -198,14 +205,14 @@ class CopperElement:
         )
 
     @classmethod
-    def from_via(cls, via: Via) -> CopperElement:
-        """Create from a PCB via."""
+    def from_via(cls, via: Via, origin: Origin = (0.0, 0.0)) -> CopperElement:
+        """Create from a PCB via (``origin``: see :meth:`from_segment`)."""
         return cls(
             element_type="via",
             layer="*",  # Vias span multiple layers
             net_number=via.net_number,
             geometry=(via.position[0], via.position[1], via.size, via.size),
-            reference=f"Via-{via.uuid[:8]}" if via.uuid else "Via",
+            reference=via_ref(via, origin),
             net_name=via.net_name if via.net_number != 0 else "",
             explicit_layers=tuple(via.layers),
         )
@@ -1644,10 +1651,11 @@ class ClearanceRule(DRCRule):
     def _collect_elements(self, pcb: PCB, layer_name: str) -> list[CopperElement]:
         """Collect all copper elements on a layer."""
         elements: list[CopperElement] = []
+        origin = board_origin(pcb)
 
         # Add segments on this layer
         for seg in pcb.segments_on_layer(layer_name):
-            elements.append(CopperElement.from_segment(seg))
+            elements.append(CopperElement.from_segment(seg, origin))
 
         # Add pads that are on this layer
         for fp in pcb.footprints:
@@ -1665,7 +1673,7 @@ class ClearanceRule(DRCRule):
         # on the softstart board were invisible to ``kct check``).
         for via in pcb.vias:
             if _via_spans_layer(via.layers, layer_name):
-                elements.append(CopperElement.from_via(via))
+                elements.append(CopperElement.from_via(via, origin))
 
         return elements
 
@@ -2094,6 +2102,7 @@ class SegmentZoneClearanceRule(DRCRule):
         from shapely.geometry import LineString
 
         min_clearance = design_rules.min_clearance_mm
+        origin = board_origin(pcb)
 
         for layer, fills in fills_by_layer.items():
             tree = STRtree([f.polygon for f in fills])
@@ -2111,7 +2120,9 @@ class SegmentZoneClearanceRule(DRCRule):
                     fill = fills[int(idx)]
                     if fill.net_number == seg.net_number:
                         continue
-                    violation = self._check_pair(seg, line, half_w, fill, min_clearance, layer)
+                    violation = self._check_pair(
+                        seg, line, half_w, fill, min_clearance, layer, origin
+                    )
                     if violation is not None:
                         results.add(violation)
 
@@ -2135,6 +2146,7 @@ class SegmentZoneClearanceRule(DRCRule):
         fill: _ZoneFill,
         min_clearance: float,
         layer: str,
+        origin: Origin = (0.0, 0.0),
     ) -> DRCViolation | None:
         """Check one segment against one foreign fill polygon."""
         from shapely.ops import nearest_points
@@ -2142,7 +2154,7 @@ class SegmentZoneClearanceRule(DRCRule):
         poly = fill.polygon
         centerline_dist = line.distance(poly)  # type: ignore[attr-defined]
         seg_net = seg.net_name if seg.net_number != 0 else ""
-        seg_ref = f"Trace-{seg.uuid[:8]}" if seg.uuid else "Trace"
+        seg_ref = segment_ref(seg, origin)
         zone_ref = f"ZoneFill-{fill.net_name}" if fill.net_name else "ZoneFill"
 
         if centerline_dist == 0.0:
@@ -2283,6 +2295,7 @@ class ViaZoneClearanceRule(DRCRule):
         from shapely.geometry import Point
 
         min_clearance = design_rules.min_clearance_mm
+        origin = board_origin(pcb)
 
         for layer, fills in fills_by_layer.items():
             tree = STRtree([f.polygon for f in fills])
@@ -2297,7 +2310,7 @@ class ViaZoneClearanceRule(DRCRule):
                 if radius <= 0:
                     continue
                 shape = Point(via.position).buffer(radius)
-                ref = f"Via-{via.uuid[:8]}" if via.uuid else "Via"
+                ref = via_ref(via, origin)
                 self._query_and_check(
                     tree,
                     fills,

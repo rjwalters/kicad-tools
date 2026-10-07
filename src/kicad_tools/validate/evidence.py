@@ -9,7 +9,10 @@ Two identities are attached to every :class:`~kicad_tools.validate.violations.DR
     location and measured values, so it survives a board edit that moves the
     finding a little or changes its message wording.  ``kct check --diff`` pairs
     findings across two revisions by key, and evidence-bound waivers name the
-    finding they acknowledge by key.
+    finding they acknowledge by key.  Tracks, arcs and vias appear in
+    ``items`` under geometry descriptors (``Trace@F.Cu:w0.25:1/2~3/2``,
+    Issue #6088; see :mod:`kicad_tools.validate.copper_refs`), not their
+    UUIDs, so a re-route that reproduces the same copper keeps its keys.
 
 ``evidence_hash``
     *The local evidence* that produced the finding: its rounded location and
