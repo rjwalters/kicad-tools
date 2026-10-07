@@ -19122,6 +19122,9 @@ class Autorouter:
             packages = router.detect_dense_packages()
             escape_routes = router.generate_escape_routes(packages)
         """
+        # Issue #6061: escape stubs are gated on the keepout rule areas, so a
+        # direct caller of this public method gets them installed too.
+        self._install_grid_rule_area_keepouts()
         if packages is None:
             packages = self.detect_dense_packages()
 
@@ -20061,6 +20064,9 @@ class Autorouter:
             # Then route normally
             routes = router.route_all()
         """
+        # Issue #6061: the sub-grid stubs are validated against keepout rule
+        # areas, so the areas must be on the grid before they are generated.
+        self._install_grid_rule_area_keepouts()
         pad_list = list(self.pads.values())
         return self._subgrid.route_with_subgrid(pad_list)
 
@@ -20137,6 +20143,10 @@ class Autorouter:
         uncovered = [p for p in self.pads.values() if not self._pad_metal_covers_grid_cell(p)]
         if not uncovered:
             return []
+
+        # Issue #6061: the stubs are gated on keepout rule areas; make sure
+        # they are on the grid whichever driver reached this pre-pass.
+        self._install_grid_rule_area_keepouts()
 
         subgrid_result = self._subgrid.route_with_subgrid(uncovered)
 
@@ -20582,6 +20592,9 @@ class Autorouter:
             stats = router.get_statistics()
             print(f"Routed {stats['nets_routed']} nets")
         """
+        # Issue #6061: the escape prepass runs before ``route_all*`` installs
+        # the keepout rule areas -- install them up front.
+        self._install_grid_rule_area_keepouts()
         print("\n=== Routing with Sub-Grid Escape (Fine-Pitch Support) ===")
 
         # Phase 1: Sub-grid escape routing for off-grid pads
@@ -20675,6 +20688,9 @@ class Autorouter:
         """
         from kicad_tools.cli.progress import flush_print
 
+        # Issue #6061: the adaptive escape prepass runs before ``route_all*``
+        # installs the keepout rule areas -- install them up front.
+        self._install_grid_rule_area_keepouts()
         flush_print("\n=== Adaptive Grid Routing (Fine Grid + Coarse Grid) ===")
 
         adaptive = AdaptiveGridRouter(

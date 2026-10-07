@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
+from .rule_area_grid import escape_copper_rule_area_hit
 
 logger = logging.getLogger(__name__)
 
@@ -402,8 +403,24 @@ class SubGridRouter:
         """
         result = SubGridResult(analysis=analysis)
 
+        check_rule_areas = bool(getattr(self.grid, "_rule_area_keepouts", None))
         for sgp in analysis.off_grid_pads:
             escape, reason = self._find_escape_for_pad(sgp)
+            if escape is not None and check_rule_areas:
+                # Issue #6061: catch-all keepout gate over the escape's
+                # emitted copper (lateral stub, dogleg legs, in-pad or
+                # multi-hop via).  ``_validate_leg`` already steers lateral
+                # candidates clear; this also covers the via rescues.
+                emitted = self.get_escape_routes(SubGridResult(analysis=analysis, escapes=[escape]))
+                hit = escape_copper_rule_area_hit(
+                    self.grid,
+                    [seg for r in emitted for seg in r.segments],
+                    [via for r in emitted for via in r.vias],
+                    escape.pad.net,
+                    self.rules,
+                )
+                if hit is not None:
+                    escape, reason = None, f"keepout_rule_area_{hit}"
             if escape is not None:
                 result.escapes.append(escape)
             else:
@@ -963,6 +980,11 @@ class SubGridRouter:
 
         def _validate_leg(seg: Segment) -> tuple[bool, tuple[float, float] | None]:
             """Clearance-check one escape leg (relaxed or normal mode)."""
+            # Issue #6061: a leg may not enter a keepout rule area -- same
+            # grid predicate the pathfinder uses; relaxed mode does not
+            # relax it.
+            if escape_copper_rule_area_hit(self.grid, [seg], [], pad.net, self.rules):
+                return False, (seg.x2, seg.y2)
             if min_clearance is not None:
                 # Relaxed mode: manually check clearance against neighbor
                 # pads using the reduced threshold, bypassing per-component

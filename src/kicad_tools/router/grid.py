@@ -3520,7 +3520,16 @@ class RoutingGrid:
                     cpp_grid._impl.mark_blocked(int(gx), int(gy), int(layer_idx), 0, False, False)
             return blocked_count
 
-    def rule_area_trace_blocked(self, gx: int, gy: int, layer: int, net: int, radius: int) -> bool:
+    def rule_area_trace_blocked(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int | None,
+        radius: int,
+        *,
+        include_static: bool = False,
+    ) -> bool:
         """``True`` when a trace of ``net`` at ``(gx, gy)`` would enter a
         net-filtered track-blocking keepout rule area (Issue #6008).
 
@@ -3528,12 +3537,19 @@ class RoutingGrid:
         all-nets track area is already static net-0 cells in the occupancy
         planes.  ``radius`` is the caller's trace kernel radius in cells.
         Mirrors ``Grid3D::rule_area_trace_blocked``.
+
+        ``include_static=True`` (Issue #6061) also consults the all-nets areas
+        stamped as static cells.  The escape-stub generator needs it: it
+        validates stubs geometrically rather than through the occupancy
+        planes, so it would otherwise never see those areas.
         """
         areas = self._rule_area_keepouts
         if not areas:
             return False
         for area in areas:
-            if not area.blocks_tracks or area.static_tracks or layer not in area.layers:
+            if not area.blocks_tracks or layer not in area.layers:
+                continue
+            if area.static_tracks and not include_static:
                 continue
             if area.applies_to(net) and area.hits_disc(gx, gy, radius):
                 return True
@@ -3578,7 +3594,15 @@ class RoutingGrid:
                 out[layer] |= plane
         return out
 
-    def rule_area_via_blocked(self, gx: int, gy: int, net: int, radius: int) -> bool:
+    def rule_area_via_blocked(
+        self,
+        gx: int,
+        gy: int,
+        net: int | None,
+        radius: int,
+        *,
+        include_static: bool = False,
+    ) -> bool:
         """``True`` when a through-via of ``net`` at ``(gx, gy)`` would enter a
         via-blocking keepout rule area (Issue #6008).
 
@@ -3586,12 +3610,21 @@ class RoutingGrid:
         through-via spans the whole stack, so an area on any copper layer
         intersects its barrel.  ``radius`` is the caller's via kernel radius
         in cells.  Mirrors ``Grid3D::rule_area_via_blocked``.
+
+        ``include_static=True`` (Issue #6061) also rejects a via whose disc
+        reaches an all-nets track area stamped as static cells -- exactly what
+        the pathfinder's occupancy-plane via check already does for those
+        cells (conservative for a tracks-only area, never a violation).  The
+        escape-via placer has no occupancy-disc check, so it asks for it here.
         """
         areas = self._rule_area_keepouts
         if not areas:
             return False
         for area in areas:
-            if area.blocks_vias and area.applies_to(net) and area.hits_disc(gx, gy, radius):
+            if area.blocks_vias:
+                if area.applies_to(net) and area.hits_disc(gx, gy, radius):
+                    return True
+            elif include_static and area.static_tracks and area.hits_disc(gx, gy, radius):
                 return True
         return False
 
