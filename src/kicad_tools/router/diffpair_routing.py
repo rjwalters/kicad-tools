@@ -1989,6 +1989,13 @@ class CoupledPathfinder:
         unverifiable ownership) fails ``cells_known`` and stays blocked.
         """
         if not self._is_cell_blocked(gx, gy, layer, net):
+            # Issue #6008: net-filtered keepout rule areas live outside the
+            # occupancy planes (C++ ``CoupledPathfinder::is_trace_blocked``
+            # mirror).
+            if getattr(self.grid, "_rule_area_keepouts", None):
+                return self.grid.rule_area_trace_blocked(
+                    gx, gy, layer, net, self._trace_half_width_cells
+                )
             return False
         return not self._halo_refiner.trace_clear([(gx, gy)], layer, gx, gy, net, from_cell)
 
@@ -2052,6 +2059,12 @@ class CoupledPathfinder:
             # No layer to sweep: the pre-#5720 per-layer loop fell straight
             # through to ``return False``.
             return False
+        # Issue #6008: via-blocking keepout rule areas (C++
+        # ``CoupledPathfinder::is_via_blocked`` mirror).
+        if getattr(grid, "_rule_area_keepouts", None) and grid.rule_area_via_blocked(
+            gx, gy, net, self._via_half_cells
+        ):
+            return True
         drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / grid.resolution)))
         extra_cells = self._via_extra_cells
 
@@ -10581,6 +10594,10 @@ class DiffPairRouter:
                 otherwise), so callers do not need a separate
                 code-path for budget exits.
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         # Issue #3089: reset the budget-exit flag at the start of each
         # call so callers see only the most-recent invocation's state.
         self._last_pair_budget_exit = False
@@ -11875,6 +11892,10 @@ class DiffPairRouter:
 
         Routes P and N traces separately using the standard router.
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         if pair.rules is None:
             return [], None
 
@@ -12145,6 +12166,11 @@ class DiffPairRouter:
             if route.net == pair_p_net or route.net == pair_n_net:
                 continue
             fine_grid.mark_route(route)
+
+        # Issue #6008: keepout rule areas on the coupled fine grid too.
+        install_areas = getattr(self.autorouter, "_install_grid_rule_area_keepouts", None)
+        if install_areas is not None:
+            install_areas(fine_grid)
 
         # Compute the same center-to-center spacing the main path uses
         # at line 2095-2140, but in fine-grid cells.
@@ -12602,6 +12628,10 @@ class DiffPairRouter:
             Tuple of (routes, warning) where warning is set if
             length matching failed.
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         if use_coupled_routing:
             return self.route_differential_pair_coupled(
                 pair,
@@ -12636,6 +12666,10 @@ class DiffPairRouter:
                 routed (and should therefore be skipped by the follow-up
                 strategy).
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         if diffpair_config is None or not diffpair_config.enabled:
             return [], [], set()
 
@@ -13242,6 +13276,10 @@ class DiffPairRouter:
                 ``None`` the legacy per-pair-only behaviour is
                 preserved.
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         # Issue #3089: prefer the explicit kwarg, otherwise fall back to
         # the config field so callers configuring everything via
         # ``DifferentialPairConfig(per_pair_timeout=60.0)`` work without
@@ -13736,3 +13774,10 @@ class DiffPairRouter:
                 print(f"    - {w}")
 
         return all_routes, warnings
+
+
+def _install_rule_area_keepouts_on(autorouter: object) -> None:
+    """Install board keepout rule areas on ``autorouter``'s grid (#6008)."""
+    install = getattr(autorouter, "_install_grid_rule_area_keepouts", None)
+    if install is not None:
+        install()

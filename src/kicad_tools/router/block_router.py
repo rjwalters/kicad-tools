@@ -16,6 +16,7 @@ Issue #1589: Per-block detail routing with sub-Pathfinder.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,10 @@ class BlockRouter:
         layer_stack: Layer stack for routing (default: 2-layer).
         margin: Extra margin around bounding box in mm (default: 1.0).
         force_python: Force Python pathfinder backend (default: False).
+        grid_setup: Optional ``callable(grid)`` run on the sub-grid once its
+            pads and boundary are registered, before any net is routed.  The
+            Autorouter passes ``_install_grid_rule_area_keepouts`` so board
+            keepout rule areas bind block-internal routes too (Issue #6008).
     """
 
     def __init__(
@@ -77,6 +82,7 @@ class BlockRouter:
         layer_stack: LayerStack | None = None,
         margin: float = 1.0,
         force_python: bool = False,
+        grid_setup: Callable[[RoutingGrid], object] | None = None,
     ):
         if not block.placed:
             raise ValueError(
@@ -91,6 +97,7 @@ class BlockRouter:
         self.layer_stack = layer_stack or LayerStack.two_layer()
         self.margin = margin
         self._force_python = force_python
+        self._grid_setup = grid_setup
 
         # Compute absolute bounding box with margin
         bbox = block.bounding_box
@@ -292,6 +299,11 @@ class BlockRouter:
 
         # Enforce boundary constraints
         self._mark_boundary_blocked()
+
+        # Issue #6008: board keepout rule areas (after the pads, so a pad
+        # halo reaching into an area is re-owned by net 0).
+        if self._grid_setup is not None:
+            self._grid_setup(self._grid)
 
         # Route each internal net
         from .algorithms import MSTRouter

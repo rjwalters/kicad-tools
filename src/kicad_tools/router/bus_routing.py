@@ -49,6 +49,10 @@ class BusRouter:
         spacing: float | None = None,
     ) -> list[Route]:
         """Route all signals in a bus group together."""
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         if not bus_group.signals:
             return []
 
@@ -117,6 +121,10 @@ class BusRouter:
         net_order: list[int] | None = None,
     ) -> list[Route]:
         """Route all nets with bus-aware routing."""
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         if bus_config is None or not bus_config.enabled:
             return self.autorouter.route_all(net_order)
 
@@ -170,3 +178,10 @@ class BusRouter:
         print(f"  Other nets: {len(non_bus_nets)}")
 
         return all_routes
+
+
+def _install_rule_area_keepouts_on(autorouter: object) -> None:
+    """Install board keepout rule areas on ``autorouter``'s grid (#6008)."""
+    install = getattr(autorouter, "_install_grid_rule_area_keepouts", None)
+    if install is not None:
+        install()

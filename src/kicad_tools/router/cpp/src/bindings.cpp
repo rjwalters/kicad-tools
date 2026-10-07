@@ -231,6 +231,18 @@ NB_MODULE(router_cpp, m) {
         // premise of the #4507 construction -- a board with no pour at all --
         // instead of asserting around it.
         .def("has_fixed_fills", &Grid3D::has_fixed_fills)
+        // Issue #6008: keepout rule areas the occupancy planes cannot hold
+        // (net-filtered track rules, every via rule).
+        .def("clear_rule_area_keepouts", &Grid3D::clear_rule_area_keepouts)
+        .def("add_rule_area_keepout", &Grid3D::add_rule_area_keepout,
+             "blocks_tracks"_a, "blocks_vias"_a, "layers"_a,
+             "x0"_a, "y0"_a, "w"_a, "h"_a, "cells"_a,
+             "has_only"_a, "only"_a, "exempt"_a)
+        .def("rule_area_keepout_count", &Grid3D::rule_area_keepout_count)
+        .def("rule_area_trace_blocked", &Grid3D::rule_area_trace_blocked,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "radius"_a)
+        .def("rule_area_via_blocked", &Grid3D::rule_area_via_blocked,
+             "x"_a, "y"_a, "net"_a, "radius"_a)
         .def("route_geometry_complete", &Grid3D::route_geometry_complete)
         .def("route_cell_has_geometry", &Grid3D::route_cell_has_geometry)
         .def("register_route_mark", &Grid3D::register_route_mark,

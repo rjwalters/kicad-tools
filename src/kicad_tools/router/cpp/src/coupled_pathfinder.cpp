@@ -124,7 +124,12 @@ bool CoupledPathfinder::via_route_geometry_clear(int x, int y, int net) const {
 
 bool CoupledPathfinder::is_trace_blocked(int gx, int gy, int layer, int net,
                                          int from_x, int from_y) const {
-    if (!is_cell_blocked(gx, gy, layer, net)) return false;
+    if (!is_cell_blocked(gx, gy, layer, net)) {
+        // Issue #6008: net-filtered keepout rule areas (Python
+        // ``DiffPairRouter._is_trace_blocked`` mirror).
+        return grid_.has_rule_area_keepouts() &&
+               grid_.rule_area_trace_blocked(gx, gy, layer, net, trace_half_width_cells_);
+    }
     return !trace_halo_cell_clear(gx, gy, layer,
                                   from_x >= 0 ? from_x : gx,
                                   from_y >= 0 ? from_y : gy,
@@ -133,6 +138,13 @@ bool CoupledPathfinder::is_trace_blocked(int gx, int gy, int layer, int net,
 
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
 bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
+    // Issue #6008: via-blocking keepout rule areas (Python
+    // ``DiffPairRouter._is_via_blocked`` mirror).
+    if (grid_.has_rule_area_keepouts()) {
+        const int via_half_cells = std::max(1, static_cast<int>(std::ceil(
+            (rules_.via_diameter / 2.0 + rules_.via_clearance) / grid_.resolution())));
+        if (grid_.rule_area_via_blocked(gx, gy, net, via_half_cells)) return true;
+    }
     // Issue #5410: the physical verdict for a THROUGH via is identical on
     // every layer -- compute it at most once per candidate.
     int physical_clear = -1;

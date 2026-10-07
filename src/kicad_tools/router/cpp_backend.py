@@ -63,7 +63,9 @@ logger = logging.getLogger(__name__)
 # v46 (Issue #5786): the pose-based centerline search
 # (``CoupledPathfinder.route_centerline`` and friends) and the
 # ``dubins_path_length`` bindings.  A v45 .so lacks them.
-_REQUIRED_CPP_BUILD_VERSION = 46
+# v47 (Issue #6008): ``Grid3D.add_rule_area_keepout`` and friends -- board-file
+# keepout rule areas enforced by the grid engine.  A v46 .so lacks them.
+_REQUIRED_CPP_BUILD_VERSION = 47
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1155,6 +1157,14 @@ class CppGrid:
         from .grid import _sync_pad_via_policies
 
         _sync_pad_via_policies(grid, cpp_grid)
+
+        # Issue #6008: keepout rule areas the occupancy planes cannot carry
+        # (net-filtered track rules, every via rule).  The all-nets track
+        # cells already crossed over with the blocked-cell bulk copy above.
+        if getattr(grid, "_rule_area_keepouts", None):
+            from .rule_area_grid import mirror_rule_areas_to_cpp
+
+            mirror_rule_areas_to_cpp(grid, cpp_grid)
         return cpp_grid
 
     def index_to_layer(self, index: int) -> int:

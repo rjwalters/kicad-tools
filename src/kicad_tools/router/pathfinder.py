@@ -1964,6 +1964,13 @@ class Router:
         # ``is_trace_blocked``.  No-op (single ``getattr`` + ``None`` test)
         # unless a pairwise voltage-map table is installed AND it projects
         # onto this board's net ids.
+        # Issue #6008: net-filtered keepout rule areas (``spatial_keepouts``)
+        # cannot live in the occupancy planes -- consult them here, mirroring
+        # the C++ ``Grid3D::rule_area_trace_blocked`` check.
+        if getattr(self.grid, "_rule_area_keepouts", None) and self.grid.rule_area_trace_blocked(
+            gx, gy, layer, net, radius
+        ):
+            return True
         return self._cross_domain_trace_blocked(gx, gy, layer, net, radius)
 
     def _is_foreign_pad_metal_within_radius(
@@ -2307,6 +2314,12 @@ class Router:
         blocked_cells = [cell for cell in blocked_cells if cell not in known_set]
         # Fast path: if no cells are blocked, via is not blocked
         if not blocked_cells:
+            # Issue #6008: via-blocking keepout rule areas (C++
+            # ``Grid3D::rule_area_via_blocked`` mirror).
+            if getattr(grid, "_rule_area_keepouts", None) and grid.rule_area_via_blocked(
+                gx, gy, net, radius if radius is not None else self._via_half_cells
+            ):
+                return True
             # Issue #4507: scalar disc clear -- consult the cross-domain
             # (HV-isolation) annulus (C++ ``cross_domain_via_blocked`` mirror).
             return self._cross_domain_via_blocked(
@@ -2367,6 +2380,11 @@ class Router:
                 if net_grid[layer, cy, cx] != net:
                     return True
 
+        # Issue #6008: via-blocking keepout rule areas.
+        if getattr(grid, "_rule_area_keepouts", None) and grid.rule_area_via_blocked(
+            gx, gy, net, radius if radius is not None else self._via_half_cells
+        ):
+            return True
         # Issue #4507: every scalar-disc cell is passable -- consult the
         # cross-domain (HV-isolation) annulus (C++ ``cross_domain_via_blocked``
         # mirror).
@@ -4028,6 +4046,20 @@ class Router:
         if pairwise_extra is not None:
             expanded_blocked = expanded_blocked | pairwise_extra
 
+        # Issue #6008: net-filtered keepout rule areas are not blocked cells,
+        # so OR them into the hot-loop gate (the dilated form, so
+        # ``_is_trace_blocked`` -- which re-checks them -- is consulted), and
+        # keep the bare area cells as a hard reject that no pad-approach
+        # relaxation can waive.  ``None`` when no such area governs this net.
+        rule_area_core: np.ndarray | None = None
+        if getattr(self.grid, "_rule_area_keepouts", None):
+            rule_area_extra = self.grid.rule_area_trace_bitmap(
+                start.net, net_trace_half_width_cells
+            )
+            if rule_area_extra is not None:
+                expanded_blocked = expanded_blocked | rule_area_extra
+                rule_area_core = self.grid.rule_area_trace_bitmap(start.net, 0)
+
         # Issue #4507: soft cross-domain (HV) avoidance gradient -- the C++
         # ``pairwise_avoidance_cost`` mirror.  The band gate is a cheap
         # superset bitmap (one bool lookup per neighbour); the exact kernel
@@ -4467,6 +4499,10 @@ class Router:
                                     f"reason=trace_clearance_envelope_overlap"
                                 )
                             continue
+
+                # Issue #6008: inside a net-filtered track keepout -- hard reject.
+                if rule_area_core is not None and rule_area_core[nlayer, ny, nx]:
+                    continue
 
                 # Issue #2430: Use pre-computed zone blocking array
                 if zone_blocked_arr[nlayer, ny, nx]:
