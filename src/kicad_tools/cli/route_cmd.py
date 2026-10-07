@@ -6504,13 +6504,11 @@ def _make_pour_oracle(args):
         # instead of back to back.  Neither result depends on the other and
         # both are combined exactly as before, so only the wall time changes.
         with tempfile.TemporaryDirectory(prefix="kct-oracle-") as td:
-            tmp: Path | None = Path(td) / "board.kicad_pcb"
+            tmp = Path(td) / "board.kicad_pcb"
             try:
                 shutil.copy(path, tmp)
                 shutil.copy(src_pro, tmp.with_suffix(".kicad_pro"))
             except OSError:
-                tmp = None
-            if tmp is None:
                 return run_geometric_drc(path)
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="kct-oracle") as pool:
                 alt_future = pool.submit(run_geometric_drc, tmp)
