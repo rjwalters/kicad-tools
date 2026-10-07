@@ -53,7 +53,7 @@
         "warnings": 147,
         "infos": 2,
         "waived": 0,
-        "rules_checked": 47,
+        "rules_checked": 58,
         "rules_checked_by_rule": {
           "connectivity": 1,
           "copper_sliver": 1,
@@ -63,20 +63,30 @@
           "doc_drift_stale_pin": 1,
           "doc_drift_unresolvable_pin": 1,
           "isolated_copper": 1,
+          "netclass_track_width": 1,
+          "netclass_clearance": 1,
+          "netclass_via_diameter": 1,
+          "netclass_via_drill": 1,
+          "netclass_annular_ring": 1,
           "sch_field_offset": 1,
           "sch_field_overlap": 1
         },
-        "passed": false
+        "passed": false,
+        "stale_waivers": 0,
+        "coverage_checked": 31,
+        "coverage_skipped": 4,
+        "coverage_unknown": [],
+        "coverage_blocking_unknown": []
       }
     },
     "net-status": {
-      "returncode": 2,
+      "returncode": 0,
       "summary": {
         "total_nets": 32,
-        "complete": 31,
-        "incomplete": 1,
+        "complete": 32,
+        "incomplete": 0,
         "unrouted": 0,
-        "total_unconnected_pads": 4
+        "total_unconnected_pads": 0
       }
     }
   },
@@ -116,10 +126,10 @@
     "Manufacturing export and independent refill identity"
   ],
   "sha256": {
-    "usbc_pd_power.kicad_sch": "8495152128796e849615d65dbea1db8d97334252ae7a4da5190c71057b6d73ae",
-    "usbc_pd_power.kicad_pcb": "39bf81159243f6827792cc0ce1fa23d907a419595d200edf478f25819905bdc7",
+    "usbc_pd_power.kicad_sch": "0a79feb589a2ad20a84679c1cd5946d765f8624f0f21a51b57f5f285c2a6abda",
+    "usbc_pd_power.kicad_pcb": "155cbecfa9c1c485e49577b983d1b025878703f9b4a519571246c45424c29b7f",
     "circuit.json": "8c5346506cd6bd6796e29cc368fae648df63b1ccaf7c651f61d4422ca8e8c8ef",
-    "net_class_map.json": "aecfc117903d74e544f93fa8f2ab29117130bc8a202b6f71830cfa2166535a61",
+    "net_class_map.json": "52ea7075492770de56fc8f9eff9d405f02a56f3c9bb2f6ba210919cf8123b5b0",
     "usbc_pd_power.kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
     "board09.kicad_sym": "36f1e94f721256abb4ab91d033f3d099e7aee1a49c81a25856ddfb67d36b9e52",
     "board09.pretty/SRP7050TA.kicad_mod": "0e5569968f48e2d3f7f09ec4814306e0d63792d71fd3ccf00564d053394dd947"

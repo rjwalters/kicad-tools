@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schematic.models.schematic import Schematic
@@ -970,6 +971,14 @@ def generate(output: Path) -> dict:
     add_host_bus_connections(pcb)
     sch.write(output / f"{NAME}.kicad_sch")
     pcb.save(output / f"{NAME}.kicad_pcb")
+    # Copy schematic pin names/electrical types onto the pads (issues #5985,
+    # #5998), as KiCad's "Update PCB from Schematic" does, so the committed
+    # board carries the ``(pintype ...)`` rail evidence ``kct detect-mistakes``
+    # reads.  check_design.py's native refill preserves it.
+    annotation = annotate_pcb_file_pintypes(
+        output / f"{NAME}.kicad_pcb", output / f"{NAME}.kicad_sch"
+    )
+    assert not annotation.missing_pads, annotation.missing_pads
     pro = create_minimal_project(NAME)
     pro.setdefault("text_variables", {})["KCT_PRESERVE_BOARD_RULES"] = "1"
     pro["board"]["design_settings"]["rules"].update(

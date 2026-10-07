@@ -32,7 +32,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "+5V_OUT": {
     "name": "OUTPUT_POWER",
@@ -67,7 +68,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "BOOT": {
     "name": "SIGNAL",
@@ -102,7 +104,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "BOOT_CAP": {
     "name": "SIGNAL",
@@ -137,7 +140,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "BUCK_EN": {
     "name": "SIGNAL",
@@ -172,7 +176,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "CC1": {
     "name": "SIGNAL",
@@ -207,7 +212,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "CC2": {
     "name": "SIGNAL",
@@ -242,7 +248,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "DISCHARGE": {
     "name": "SIGNAL",
@@ -277,7 +284,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "FB": {
     "name": "SIGNAL",
@@ -312,7 +320,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "GND": {
     "name": "GROUND",
@@ -344,7 +353,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "KELVIN_N": {
     "name": "SIGNAL",
@@ -379,7 +389,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "KELVIN_P": {
     "name": "SIGNAL",
@@ -414,7 +425,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LED_A": {
     "name": "SIGNAL",
@@ -449,7 +461,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "MON_ALERT": {
     "name": "SIGNAL",
@@ -484,7 +497,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "PD_ALERT": {
     "name": "SIGNAL",
@@ -519,7 +533,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "PD_OK2": {
     "name": "SIGNAL",
@@ -554,7 +569,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "PD_OK3": {
     "name": "SIGNAL",
@@ -589,7 +605,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "PMOS_GATE": {
     "name": "SIGNAL",
@@ -624,7 +641,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "PMOS_SOURCE": {
     "name": "INPUT_POWER",
@@ -659,7 +677,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "SCL": {
     "name": "SIGNAL",
@@ -694,7 +713,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "SDA": {
     "name": "SIGNAL",
@@ -729,7 +749,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "SENSE_N": {
     "name": "SIGNAL",
@@ -764,7 +785,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "SENSE_P": {
     "name": "SIGNAL",
@@ -799,7 +821,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "SINK_GATE": {
     "name": "SIGNAL",
@@ -834,7 +857,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "SW": {
     "name": "OUTPUT_POWER",
@@ -869,7 +893,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "VBUS_FUSED": {
     "name": "INPUT_POWER",
@@ -904,7 +929,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "VBUS_RAW": {
     "name": "INPUT_POWER",
@@ -939,7 +965,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "VBUS_SENSE": {
     "name": "SIGNAL",
@@ -974,7 +1001,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "VIN": {
     "name": "INPUT_POWER",
@@ -1009,7 +1037,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "VOUT_PRE": {
     "name": "OUTPUT_POWER",
@@ -1044,7 +1073,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "VREG_1V2": {
     "name": "SIGNAL",
@@ -1079,7 +1109,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "VREG_2V7": {
     "name": "SIGNAL",
@@ -1114,6 +1145,7 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   }
 }
