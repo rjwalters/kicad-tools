@@ -427,24 +427,67 @@ def test_crossing_order_escalation_installs_the_order():
     assert sorted(router._forced_net_order or []) == [1, 2, 3]
 
 
-@pytest.mark.parametrize("method", [None, "greedy", "critical_first", "congestion", "hybrid"])
-def test_crossing_order_escalation_leaves_other_methods_untouched(method):
-    """Deliberate narrowing: only ``crossing`` is safe inside an attempt loop.
-
-    The other four go through ``RoutingOptimizer.optimize_net_order``, which
-    evaluates its candidate with a throw-away full route and needs a
-    fresh-router factory the attempt loop does not build.  They stay no-ops on
-    this path, exactly as before #5787 -- never silently routed against the
-    live router.
-    """
+def test_crossing_order_escalation_is_noop_when_flag_absent():
+    """Flag-absent path: no order installed inside the attempt loop."""
     from kicad_tools.cli import route_cmd
 
     router = _FakeRouter()
     applied = route_cmd._apply_crossing_order_escalation(
-        router, SimpleNamespace(order_method=method), quiet=True
+        router, SimpleNamespace(order_method=None), quiet=True
     )
     assert applied is False
     assert router._forced_net_order is None
+
+
+@pytest.mark.parametrize("method", ["greedy", "critical_first", "congestion", "hybrid"])
+@pytest.mark.parametrize(
+    "dispatch_flags",
+    [
+        {"auto_layers": True},
+        {"auto_layers": False, "adaptive_rules": True},
+        {"auto_layers": True, "adaptive_rules": True},
+        {"auto_pcb_size": True},
+        {"auto_mfr_tier": True},
+    ],
+    ids=["layers", "rules", "combined", "size", "mfr_tier"],
+)
+def test_escalation_paths_reject_the_evaluation_route_methods(method, dispatch_flags, capsys):
+    """Issue #5908 (replaces the #5787 "leaves other methods untouched" pin).
+
+    The four ``RoutingOptimizer``-backed methods need a fresh-router factory
+    the escalation attempt loops do not build, so they used to be silently
+    discarded there.  They are now rejected with exit code 2 before routing
+    instead of being ignored.  End-to-end dispatch coverage (zero routing /
+    evaluation calls) lives in ``tests/test_cli_order_method.py``.
+    """
+    from kicad_tools.cli import route_cmd
+
+    args = SimpleNamespace(
+        order_method=method,
+        **{
+            "auto_layers": False,
+            "adaptive_rules": False,
+            "auto_pcb_size": False,
+            "auto_mfr_tier": False,
+            **dispatch_flags,
+        },
+    )
+    assert route_cmd._validate_order_method_for_dispatch(args) == 2
+    assert f"--order-method {method} is not supported" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("method", [None, "crossing"])
+def test_escalation_paths_accept_absent_and_crossing(method):
+    from kicad_tools.cli import route_cmd
+
+    args = SimpleNamespace(
+        order_method=method,
+        auto_layers=True,
+        adaptive_rules=True,
+        auto_pcb_size=True,
+        auto_mfr_tier=True,
+    )
+    assert route_cmd._validate_order_method_for_dispatch(args) == 0
 
 
 # ---------------------------------------------------------------------------
