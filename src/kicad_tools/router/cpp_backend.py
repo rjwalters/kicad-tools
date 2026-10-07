@@ -4186,15 +4186,20 @@ class CppPathfinder:
     def _project_via_spans(self, layers) -> list[tuple[int, int]]:
         """Project physical copper onto contiguous runs of selected grid indices.
 
-        CopperLayer values are in physical stack order (F through inner to B),
+        CopperLayer.stack_order is physical stack order (F through inner to B;
+        Issue #6099 -- ``value`` is not, past In4.Cu),
         unlike the dense indices of a selected-layer grid. Reordered stacks
         may require multiple runs: an intervening grid index is not necessarily
         an intervening physical layer. Keep an off-grid sentinel when no layer
         is selected; native global via/drill spacing still needs that hole.
         """
-        lo, hi = sorted(layer.value for layer in layers)
+        from .layers import Layer
+
+        lo, hi = sorted(layer.stack_order for layer in layers)
         indices = sorted(
-            index for value, index in self._grid._layer_to_index.items() if lo <= value <= hi
+            index
+            for value, index in self._grid._layer_to_index.items()
+            if lo <= Layer(value).stack_order <= hi
         )
         if not indices:
             return [(self._grid.num_layers, self._grid.num_layers)]
@@ -4207,7 +4212,7 @@ class CppPathfinder:
             previous = index
         spans.append((start, previous))
         # Preserve the original endpoint order on ordinary full-stack calls.
-        if layers[0].value > layers[1].value:
+        if layers[0].stack_order > layers[1].stack_order:
             spans = [(end, start) for start, end in reversed(spans)]
         return spans
 
@@ -4599,9 +4604,13 @@ def project_via_spans(cpp_grid: CppGrid, layers) -> list[tuple[int, int]]:
     pathfinder's own ``CppGrid`` can be populated without a ``CppPathfinder``
     (Issue #5410).
     """
-    lo, hi = sorted(layer.value for layer in layers)
+    from .layers import Layer
+
+    lo, hi = sorted(layer.stack_order for layer in layers)
     indices = sorted(
-        index for value, index in cpp_grid._layer_to_index.items() if lo <= value <= hi
+        index
+        for value, index in cpp_grid._layer_to_index.items()
+        if lo <= Layer(value).stack_order <= hi
     )
     if not indices:
         return [(cpp_grid.num_layers, cpp_grid.num_layers)]
@@ -4613,7 +4622,7 @@ def project_via_spans(cpp_grid: CppGrid, layers) -> list[tuple[int, int]]:
             start = index
         previous = index
     spans.append((start, previous))
-    if layers[0].value > layers[1].value:
+    if layers[0].stack_order > layers[1].stack_order:
         spans = [(end, start) for start, end in reversed(spans)]
     return spans
 

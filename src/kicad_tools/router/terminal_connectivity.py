@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
+from kicad_tools.core.types import copper_layers_in_span
+
 from .connectivity import _UnionFind
 from .kelvin_obstacles import _pad_outline
 from .layers import Layer
@@ -32,8 +34,7 @@ def physical_pad_components(pads: list[Pad], routes: list[Route]) -> list[int]:
             layers.append({segment.layer})
         for via in route.vias:
             shapes.append(Point(via.x, via.y).buffer(via.diameter / 2))
-            first, last = sorted(layer.value for layer in via.layers)
-            layers.append({layer for layer in Layer if first <= layer.value <= last})
+            layers.append(copper_layers_in_span(via.layers[0], via.layers[1]))
 
     uf = _UnionFind()
     # Explicitly configured internal jumpers have the same terminal key, even

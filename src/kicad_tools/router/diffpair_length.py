@@ -283,10 +283,9 @@ class DiffPairLengthTracker:
             return 0
         if layer == CopperLayer.B_CU:
             return num_copper_layers - 1
-        # Inner layers: IN1_CU=1, IN2_CU=2, etc.  Their enum values
-        # happen to match their stack positions for typical 4- and 6-layer
-        # stacks because the enum was designed that way (see core/types.py).
-        return layer.value
+        # Inner layers: InN.Cu sits at stack position N.  Issue #6099: read
+        # ``stack_order`` -- ``value`` stops matching past In4.Cu (In5.Cu=6).
+        return layer.stack_order
 
     # =========================================================================
     # Per-pair queries

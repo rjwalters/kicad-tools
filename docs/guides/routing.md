@@ -262,7 +262,8 @@ Defaults: **enabled**. Tries 2 → 4 → 6 layers until routing succeeds or
                       routing succeeds or --max-layers is reached. Use --no-
                       auto-layers to disable and route at a fixed layer
                       count.
---max-layers {2,4,6}  Maximum layer count for auto-escalation (default: 6)
+--max-layers {2,4,...,32}  Maximum layer count for auto-escalation (default: 6;
+                      above 6 the last rung is the board's own detected stack)
 ```
 
 Because this is the default, the opt-**out** is `--no-auto-layers`. Pin a

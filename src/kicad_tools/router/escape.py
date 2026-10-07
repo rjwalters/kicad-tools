@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from .rules import DesignRules, NetClassRouting
 
 from kicad_tools.core.geometry import point_to_segment_distance
+from kicad_tools.core.types import copper_span_contains
 
 from .layers import Layer, LayerType
 from .primitives import Pad, Route, Segment, Via
@@ -258,9 +259,7 @@ def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
             extent = max(extent, float(seg.width) - 2 * math.hypot(sx - ex, sy - ey))
     via = getattr(escape, "via", None)
     if via is not None and (
-        min(layer.value for layer in via.layers)
-        <= escape.escape_layer.value
-        <= max(layer.value for layer in via.layers)
+        copper_span_contains(via.layers[0], via.layers[1], escape.escape_layer)
     ):
         extent = max(extent, float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey))
     return extent if extent > 0.0 else None

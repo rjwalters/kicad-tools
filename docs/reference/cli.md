@@ -1159,7 +1159,7 @@ with the pre-move placement).
 | Option | Description |
 |--------|-------------|
 | `--auto-layers` / `--no-auto-layers` | Escalate layer count on routing failure. **Default: enabled.** Tries 2 → 4 → 6 until success or `--max-layers` is reached. Pass `--no-auto-layers` to opt out. |
-| `--max-layers {2,4,6}` | Upper bound for `--auto-layers` (default: 6) |
+| `--max-layers {2,4,...,32}` | Upper bound for `--auto-layers` (default: 6). Above 6, the last rung is the board's own auto-detected stack (Issue #6099) |
 | `--auto-mfr-tier` | Escalate to a tighter manufacturer tier when geometry blocks routing (e.g. `jlcpcb` → `jlcpcb-tier1` to gain via-in-pad). Default: disabled. |
 | `--mfr-tier-ladder LIST` | Explicit comma-separated tier ladder, e.g. `'jlcpcb,jlcpcb-tier1'`. Overrides the default ladder registered for `--mfr`. |
 | `--adaptive-rules` | Progressively relax trace width / clearance until routing succeeds or manufacturer limits are reached. |

@@ -183,7 +183,10 @@ class Point:
         if self.layer == other.layer:
             return abs(self.x - other.x) + abs(self.y - other.y)
         else:
-            # Include via cost estimate
+            # Include via cost estimate.  Deliberately ``value``, not
+            # ``stack_order`` (Issue #6099): this is a rough via-cost term and
+            # switching would change the F.Cu<->B.Cu cost on every 2/4/6-layer
+            # board; for In5.Cu+ it is merely a looser estimate.
             return (
                 abs(self.x - other.x)
                 + abs(self.y - other.y)

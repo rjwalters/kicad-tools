@@ -1810,10 +1810,10 @@ def _post_insertion_clearance_detail_group(
                 # their routing endpoints name only part of the stack. Only
                 # explicit microvias are limited to their declared span, which
                 # includes intermediate layers as well as both endpoints.
-                first_layer, last_layer = sorted(layer.value for layer in via.layers)
+                first_layer, last_layer = sorted(layer.stack_order for layer in via.layers)
                 via_shape_ = via_shape(via)
                 for new_seg in new_segments:
-                    if via.is_micro and not first_layer <= new_seg.layer.value <= last_layer:
+                    if via.is_micro and not first_layer <= new_seg.layer.stack_order <= last_layer:
                         continue
                     edge_clearance = copper_gap(segment_shape(new_seg), via_shape_)
                     if edge_clearance + 1e-9 < via_clearance_mm:

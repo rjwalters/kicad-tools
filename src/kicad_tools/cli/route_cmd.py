@@ -5246,6 +5246,22 @@ def _filter_layer_configs_for_pcb(
 
     detected_count, has_inner_planes = _detect_pcb_layer_profile(pcb_path)
 
+    # Issue #6099: the built-in ladder stops at the 6-layer preset, so an
+    # 8+-layer board had no rung at its own copper count -- the floor below
+    # emptied the ladder and the defensive fallback then re-ran 2..6L.  Add the
+    # board's own auto-detected stack as the top rung when the cap allows it.
+    # 2/4/6-layer boards already have a preset rung and are unaffected.
+    top_rung = max((n for n, _ in layer_configs), default=0)
+    if top_rung < detected_count <= max_layers:
+        from kicad_tools.router.io import detect_layer_stack
+
+        try:
+            board_stack = detect_layer_stack(Path(pcb_path).read_text())
+        except OSError:
+            board_stack = None
+        if board_stack is not None and board_stack.num_layers == detected_count:
+            layer_configs = [*layer_configs, (detected_count, board_stack)]
+
     # Honour ``--max-layers`` even when it falls below the declared count --
     # but warn loudly so the user knows their cap is structurally too low.
     effective_floor = detected_count
@@ -16392,9 +16408,13 @@ def _route_parser() -> argparse.ArgumentParser:
         "--max-layers",
         type=int,
         default=6,
-        choices=[2, 4, 6],
+        # Issue #6099: 8..32 escalate to the board's own auto-detected stack
+        # (the built-in ladder stops at the 6-layer preset).
+        choices=list(range(2, 33, 2)),
         help=(
-            "Maximum layer count for auto-escalation (default: 6). Only used with --auto-layers."
+            "Maximum layer count for auto-escalation (default: 6). Only used with "
+            "--auto-layers. Above 6, the ladder's last rung is the board's own "
+            "auto-detected stack."
         ),
     )
     # Issue #3400: ``--starting-layers`` lets boards opt out of the 2L tax.

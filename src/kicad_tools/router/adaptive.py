@@ -111,6 +111,7 @@ class AdaptiveAutorouter:
         max_layers: int = 6,
         verbose: bool = True,
         rule_area_specs: Sequence[RuleAreaSpec] | None = None,
+        board_layer_stack: LayerStack | None = None,
     ):
         """Initialize adaptive autorouter.
 
@@ -121,13 +122,21 @@ class AdaptiveAutorouter:
             rules: Design rules (optional)
             origin_x, origin_y: Board origin
             skip_nets: Nets to skip (e.g., power planes)
-            max_layers: Maximum layers to try (2, 4, or 6)
+            max_layers: Maximum layers to try.  The built-in ladder is 2, 4
+                and 6; a larger value only adds a rung when
+                ``board_layer_stack`` supplies one (Issue #6099).
             verbose: Print progress
             rule_area_specs: Board keepout rule areas (Issue #6059), in the
                 same frame as ``components``.  Their layer specs are resolved
                 against each layer stack this router tries, and the result is
                 handed to the inner :class:`Autorouter`, which enforces it on
                 its grid (#6008).  ``None`` means the board declares none.
+            board_layer_stack: The board's own copper stack (Issue #6099).
+                When its layer count has no preset in :attr:`LAYER_STACKS`
+                (8+ layers) and fits under ``max_layers``, it is tried as the
+                last rung, so an 8-layer board can escalate to all 8 layers
+                instead of stopping at the 6-layer preset.  Ignored for 2-,
+                4- and 6-layer boards, whose ladder is unchanged.
         """
         self.width = width
         self.height = height
@@ -145,6 +154,7 @@ class AdaptiveAutorouter:
         self.max_layers = max_layers
         self.verbose = verbose
         self.rule_area_specs = list(rule_area_specs) if rule_area_specs else None
+        self.board_layer_stack = board_layer_stack
 
         # Result after routing
         self.result: RoutingResult | None = None
@@ -261,6 +271,23 @@ class AdaptiveAutorouter:
 
         return nets_routed >= nets_requested and overflow == 0
 
+    def _stacks_to_try(self) -> list[LayerStack]:
+        """The escalation ladder: presets up to ``max_layers``, then the board's own stack.
+
+        Issue #6099: the presets stop at 6 layers.  A board stack with a
+        layer count no preset covers is appended as the final rung when it
+        fits under ``max_layers``.
+        """
+        stacks = [s for s in self.LAYER_STACKS if s.num_layers <= self.max_layers]
+        board = self.board_layer_stack
+        if (
+            board is not None
+            and board.num_layers <= self.max_layers
+            and board.num_layers not in {s.num_layers for s in self.LAYER_STACKS}
+        ):
+            stacks.append(board)
+        return stacks
+
     def route(self, method: str = "negotiated", max_iterations: int = 10) -> RoutingResult:
         """Route the board, increasing layers as needed.
 
@@ -272,7 +299,7 @@ class AdaptiveAutorouter:
             RoutingResult with convergence information
         """
         # Determine which layer stacks to try
-        stacks_to_try = [s for s in self.LAYER_STACKS if s.num_layers <= self.max_layers]
+        stacks_to_try = self._stacks_to_try()
 
         for stack in stacks_to_try:
             if self.verbose:

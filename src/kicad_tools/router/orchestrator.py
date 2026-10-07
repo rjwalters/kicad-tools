@@ -1443,6 +1443,9 @@ class RoutingOrchestrator:
                 skip_nets=skip_nets,
                 max_layers=max_layers,
                 rule_area_specs=self._rule_area_specs() or None,
+                # Issue #6099: an 8+-layer board has no preset rung; let the
+                # ladder end on the board's own stack.
+                board_layer_stack=known_stack,
             )
 
         adaptive_result = self._hierarchical.route()

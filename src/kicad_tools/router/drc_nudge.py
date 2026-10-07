@@ -48,6 +48,8 @@ if TYPE_CHECKING:
 
     from .core import Autorouter
 
+from kicad_tools.core.types import copper_layers_in_span, copper_span, copper_span_contains
+
 from .clearance_shapes import (
     KEdge,
     KSegment,
@@ -362,9 +364,7 @@ def _via_spans_segment_layer(via: Via, seg: Segment) -> bool:
     and the same gate ``Grid3D::trace_stored_vias_clear`` and the coupled
     search's ``rail_clear`` apply).
     """
-    v_lo = min(via.layers[0].value, via.layers[1].value)
-    v_hi = max(via.layers[0].value, via.layers[1].value)
-    return v_lo <= seg.layer.value <= v_hi
+    return copper_span_contains(via.layers[0], via.layers[1], seg.layer)
 
 
 def _post_nudge_introduces_foreign_via_violation(
@@ -564,20 +564,10 @@ def _expand_via_layers(surviving: Via, removed: Via) -> None:
     that either original via connected.  This converts the surviving via
     to a through-via (or wider span) when necessary.
     """
-    min_layer = min(
-        surviving.layers[0].value,
-        surviving.layers[1].value,
-        removed.layers[0].value,
-        removed.layers[1].value,
-    )
-    max_layer = max(
-        surviving.layers[0].value,
-        surviving.layers[1].value,
-        removed.layers[0].value,
-        removed.layers[1].value,
-    )
-    if min_layer != surviving.layers[0].value or max_layer != surviving.layers[1].value:
-        surviving.layers = (Layer(min_layer), Layer(max_layer))
+    # Issue #6099: physical stack order, not enum value (In5.Cu+ > B.Cu).
+    top, bottom = copper_span(*surviving.layers, *removed.layers)
+    if top != surviving.layers[0] or bottom != surviving.layers[1]:
+        surviving.layers = (top, bottom)
 
 
 def _compute_merge_threshold(router: Autorouter) -> float:
@@ -2007,8 +1997,7 @@ def _via_pad_copper(via: Via, router: Autorouter) -> list[tuple[int, set[Layer],
             line = LineString([(seg.x1, seg.y1), (seg.x2, seg.y2)])
             copper.append((id(seg), {seg.layer}, line, seg.width / 2))
         for other in route.vias:
-            lo, hi = sorted(layer.value for layer in other.layers)
-            layers = {layer for layer in Layer if lo <= layer.value <= hi}
+            layers = copper_layers_in_span(other.layers[0], other.layers[1])
             copper.append((id(other), layers, Point(other.x, other.y), other.diameter / 2))
     for pad in (getattr(router, "pads", None) or {}).values():
         if pad.net != via.net:

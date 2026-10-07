@@ -3501,6 +3501,20 @@ def detect_layer_stack(pcb_text: str) -> LayerStack:
     and excluded from signal routing. This allows proper handling of common
     4-layer configurations where In1.Cu and In2.Cu are GND/PWR planes.
 
+    Layer counts (Issue #6099):
+
+    * 2, 4 and 6 copper layers keep their historical presets exactly.
+    * Any other count up to KiCad's 32 (``F.Cu``, ``In1.Cu``..``In30.Cu``,
+      ``B.Cu``) is built from the board's *declared* copper layers by
+      :func:`_n_layer_stack_from_declared` -- never silently collapsed to a
+      2-layer stack.  There is no preset to copy for 8+ layers, so the stack
+      states only what the board itself says: an inner layer is a PLANE when
+      KiCad declares it ``power`` or when it carries a zone, otherwise SIGNAL.
+    * Layers are ordered physically (``F.Cu``, ``In1.Cu``, ..., ``B.Cu``) by
+      name, not by the ``(layers ...)`` ordinal, so the KiCad 10 format's
+      non-contiguous numbering (``F.Cu``=0, ``B.Cu``=2, ``In1.Cu``=4, ...)
+      yields the same stack as the legacy 0..31 numbering.
+
     Args:
         pcb_text: Contents of a .kicad_pcb file
 
@@ -3514,6 +3528,7 @@ def detect_layer_stack(pcb_text: str) -> LayerStack:
     """
     # Parse the (layers ...) section to find copper layers
     copper_layers: list[tuple[int, str]] = []
+    copper_kinds: dict[str, str] = {}  # layer name -> KiCad type (signal/power/mixed/jumper)
 
     layers_match = re.search(r"\(layers\s+(.*?)\n\s*\)", pcb_text, re.DOTALL)
     if layers_match:
@@ -3524,8 +3539,11 @@ def detect_layer_stack(pcb_text: str) -> LayerStack:
             layer_name = layer_match.group(2)
             # Only include copper layers (*.Cu)
             copper_layers.append((layer_num, layer_name))
+            copper_kinds[layer_name] = layer_match.group(3)
 
-    # Sort by layer number to get correct order
+    # Sort by layer number to get correct order.  (Only the 2/4/6 presets
+    # below rely on this list, and they read it by name; the N-layer builder
+    # re-sorts physically because KiCad 10 files number B.Cu=2, In1.Cu=4, ...)
     copper_layers.sort(key=lambda x: x[0])
     num_copper = len(copper_layers)
 
@@ -3599,9 +3617,101 @@ def detect_layer_stack(pcb_text: str) -> LayerStack:
         return LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()
 
     else:
-        # Unsupported layer count - fall back to 2-layer
-        # Could be extended to support 8+ layers in the future
+        # Issue #6099: 8+ layers (and malformed odd counts) used to fall back
+        # to a 2-layer stack here, silently routing an 8-layer board on
+        # F.Cu/B.Cu only and dropping every inner-layer keepout.
+        return _n_layer_stack_from_declared(
+            [name for _, name in copper_layers], copper_kinds, zone_layers
+        )
+
+
+def _n_layer_stack_from_declared(
+    names: list[str],
+    kinds: dict[str, str],
+    zone_layers: dict[str, str],
+) -> LayerStack:
+    """Build a :class:`LayerStack` from a board's declared copper layers (Issue #6099).
+
+    Used for every copper count without a preset (anything but 2, 4 and 6).
+    There is no 8+-layer convention worth guessing at, so each layer's role
+    comes only from the board itself:
+
+    * ``F.Cu`` and ``B.Cu`` are outer SIGNAL layers.
+    * An inner layer is a PLANE when KiCad declares it ``power`` or when a
+      zone sits on it (the same zone signal the 4-layer branch uses, applied
+      per layer); its ``plane_net`` is that zone's net, or ``""`` when the
+      layer is ``power`` but carries no zone yet.
+    * Every other inner layer is SIGNAL.
+    * A SIGNAL layer's ``reference_plane`` is an immediately adjacent PLANE
+      layer (the one above wins a tie), so impedance-aware code sees the
+      same adjacency a preset would declare.
+
+    Layers are sorted physically by name, so the ``(layers ...)`` ordinals
+    (legacy 0..31 or the KiCad 10 format's ``F.Cu``=0, ``B.Cu``=2, ``In1.Cu``=4, ...)
+    do not matter.  Names that are not KiCad copper layers are dropped with a
+    warning; if that leaves fewer than two layers the 2-layer stack is
+    returned, again with a warning -- never silently.
+    """
+    from kicad_tools.core.types import CopperLayer
+
+    known: dict[str, CopperLayer] = {}
+    for name in names:
+        try:
+            known[name] = CopperLayer.from_kicad_name(name)
+        except ValueError:
+            logger.warning(
+                "detect_layer_stack: ignoring unrecognised copper layer %r "
+                "(KiCad supports F.Cu, In1.Cu..In30.Cu, B.Cu)",
+                name,
+            )
+    ordered = sorted(known, key=lambda name: known[name].stack_order)
+    if len(ordered) < 2:
+        logger.warning(
+            "detect_layer_stack: could not build a stack from declared copper layers %r; "
+            "falling back to a 2-layer stack",
+            names,
+        )
         return LayerStack.two_layer()
+    if len(ordered) % 2:
+        logger.warning(
+            "detect_layer_stack: board declares an odd number of copper layers (%d: %s); "
+            "KiCad boards normally have an even count -- routing the declared layers as-is",
+            len(ordered),
+            ", ".join(ordered),
+        )
+
+    last = len(ordered) - 1
+    is_plane = [
+        0 < i < last and (kinds.get(name) == "power" or bool(zone_layers.get(name)))
+        for i, name in enumerate(ordered)
+    ]
+    layers: list[LayerDefinition] = []
+    for i, name in enumerate(ordered):
+        if is_plane[i]:
+            layers.append(
+                LayerDefinition(name, i, LayerType.PLANE, plane_net=zone_layers.get(name, ""))
+            )
+            continue
+        reference = ""
+        if i > 0 and is_plane[i - 1]:
+            reference = ordered[i - 1]
+        elif i < last and is_plane[i + 1]:
+            reference = ordered[i + 1]
+        layers.append(
+            LayerDefinition(
+                name, i, LayerType.SIGNAL, is_outer=i in (0, last), reference_plane=reference
+            )
+        )
+
+    n_planes = sum(is_plane)
+    return LayerStack(
+        name=f"{len(layers)}-Layer (auto-detected)",
+        description=(
+            f"{len(layers)}-layer from declared copper layers: "
+            f"{len(layers) - n_planes} signal, {n_planes} plane (auto-detected)"
+        ),
+        layers=layers,
+    )
 
 
 def route_pcb(

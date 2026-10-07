@@ -514,9 +514,10 @@ def segment_via_deficit(
         ``required - dist`` where ``required = via.diameter/2 +
         seg.width/2 (+ trace_clearance)``.
     """
-    v_lo = min(via.layers[0].value, via.layers[1].value)
-    v_hi = max(via.layers[0].value, via.layers[1].value)
-    if not (v_lo <= seg.layer.value <= v_hi):
+    # Issue #6099: physical stack order, not enum value.
+    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
+    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+    if not (v_lo <= seg.layer.stack_order <= v_hi):
         return -math.inf  # Via doesn't reach the segment's layer.
     dist = point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
     required = via.diameter / 2 + seg.width / 2
