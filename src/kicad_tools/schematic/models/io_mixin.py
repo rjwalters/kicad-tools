@@ -34,6 +34,79 @@ if TYPE_CHECKING:
     from .schematic import Schematic
 
 
+# --- Source-preserving round trip (issue #6051) ------------------------------
+#
+# The model keeps only the fields it edits, so regenerating a loaded file
+# from the model rewrites everything the model does not track: label and
+# text justification, text font size, symbol/power-symbol field positions,
+# ``Description`` properties, wire stroke types, junction diameters,
+# ``polyline``/``sheet``/``bus`` items, ``embedded_fonts``, the format
+# ``version`` ...  Instead, every element parsed from a file remembers its
+# source node plus a fingerprint of what the model would have generated for
+# it at load time.  On save, an element whose regenerated form still matches
+# that fingerprint has not been touched by the caller and is re-emitted
+# verbatim; anything edited is regenerated in place; anything the model does
+# not parse at all passes through unchanged.
+
+#: Top-level nodes that belong to the file header.  New header nodes (a
+#: ``title_block`` set on a file that had none) are inserted before the
+#: first node *not* in this set.
+_HEADER_NODES = frozenset(
+    {"version", "generator", "generator_version", "uuid", "paper", "title_block"}
+)
+
+#: Top-level nodes that close the file.  Elements added to a loaded
+#: schematic are inserted before the first of these.
+_TRAILER_NODES = frozenset({"sheet_instances", "symbol_instances", "embedded_fonts"})
+
+
+def _attach_source(elem, node: SExp):
+    """Record the node *elem* was parsed from (fingerprinted later)."""
+    elem._source_node = node
+    return elem
+
+
+def _source_format_version(doc: SExp) -> int:
+    """Return the file's ``(version N)``, or 0 when absent/unparseable."""
+    version_node = doc.get("version")
+    if version_node is None:
+        return 0
+    try:
+        return int(str(version_node.get_first_atom()))
+    except ValueError:
+        return 0
+
+
+def _fingerprint(node: SExp | None) -> str:
+    """Canonical text of a generated node, ignoring random pin UUIDs.
+
+    Symbol builders mint a fresh UUID for every pin on each call, so two
+    generations of an untouched symbol differ only there.  Element UUIDs
+    themselves are kept: re-assigning one is an edit.
+    """
+    if node is None:
+        return ""
+    parts: list[str] = []
+    stack: list[tuple[SExp, str | None] | str] = [(node, None)]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        n, parent = item
+        if n.name is None:
+            parts.append(repr(n.value))
+            continue
+        if n.name == "uuid" and parent == "pin":
+            parts.append("(uuid)")
+            continue
+        parts.append("(" + n.name)
+        stack.append(")")
+        for child in reversed(n.children):
+            stack.append((child, n.name))
+    return " ".join(parts)
+
+
 class SchematicIOMixin:
     """Mixin providing I/O operations for Schematic class."""
 
@@ -43,6 +116,11 @@ class SchematicIOMixin:
         # here so mypy can see them when this mixin references them.
         _PWR_SYNTH_LIB_PREFIX: str
         _synthesized_pwr_defs: dict[str, SExp]
+        text_notes: list[tuple[str, float, float]]
+        _source_doc: SExp | None
+        _source_consumed: set[int]
+        _source_slots: dict[str, tuple[SExp | None, str]]
+        _text_note_sources: dict[tuple[str, float, float], list[SExp]]
 
         # ``_from_sexp`` constructs the concrete ``Schematic`` via ``cls(...)``.
         # Declaring the constructor signature here lets mypy validate those
@@ -219,11 +297,13 @@ class SchematicIOMixin:
             if child.name == "symbol" and child.get("lib_id"):
                 if PowerSymbol.is_power_symbol(child):
                     pwr = PowerSymbol.from_sexp(child)
+                    _attach_source(pwr, child)
                     sch.power_symbols.append(pwr)
                 else:
                     sym = SymbolInstance.from_sexp(
                         child, symbol_defs=sch._symbol_defs, lib_symbols=embedded_lib_symbols
                     )
+                    _attach_source(sym, child)
                     sch.symbols.append(sym)
                     # Cache the symbol def
                     sch._symbol_defs[sym.symbol_def.lib_id] = sym.symbol_def
@@ -231,32 +311,32 @@ class SchematicIOMixin:
         # Parse wires
         for child in doc.children:
             if child.name == "wire":
-                sch.wires.append(Wire.from_sexp(child))
+                sch.wires.append(_attach_source(Wire.from_sexp(child), child))
 
         # Parse junctions
         for child in doc.children:
             if child.name == "junction":
-                sch.junctions.append(Junction.from_sexp(child))
+                sch.junctions.append(_attach_source(Junction.from_sexp(child), child))
 
         # Parse no-connects
         for child in doc.children:
             if child.name == "no_connect":
-                sch.no_connects.append(NoConnect.from_sexp(child))
+                sch.no_connects.append(_attach_source(NoConnect.from_sexp(child), child))
 
         # Parse labels
         for child in doc.children:
             if child.name == "label":
-                sch.labels.append(Label.from_sexp(child))
+                sch.labels.append(_attach_source(Label.from_sexp(child), child))
 
         # Parse hierarchical labels
         for child in doc.children:
             if child.name == "hierarchical_label":
-                sch.hier_labels.append(HierarchicalLabel.from_sexp(child))
+                sch.hier_labels.append(_attach_source(HierarchicalLabel.from_sexp(child), child))
 
         # Parse global labels
         for child in doc.children:
             if child.name == "global_label":
-                sch.global_labels.append(GlobalLabel.from_sexp(child))
+                sch.global_labels.append(_attach_source(GlobalLabel.from_sexp(child), child))
 
         # Parse text notes
         for child in doc.children:
@@ -268,6 +348,7 @@ class SchematicIOMixin:
                     x = round(float(atoms[0]), 2)
                     y = round(float(atoms[1]), 2)
                     sch.text_notes.append((text, x, y))
+                    sch._text_note_sources.setdefault((text, x, y), []).append(child)
 
         # Update power counter based on existing power symbols
         max_pwr = 0
@@ -280,6 +361,13 @@ class SchematicIOMixin:
                 except ValueError:
                     pass
         sch._pwr_counter = max_pwr + 1
+
+        # Remember the source tree so ``to_sexp_node`` can re-emit every
+        # element the caller did not touch verbatim (issue #6051).
+        if _source_format_version(doc) >= KICAD_SCH_FORMAT_VERSION:
+            sch._snapshot_source(doc)
+        else:
+            sch._text_note_sources = {}
 
         _log_info(
             f"Loaded schematic: {len(sch.symbols)} symbols, "
@@ -313,74 +401,181 @@ class SchematicIOMixin:
         """Build a text note as SExp node."""
         return text_node(text, x, y, str(uuid.uuid4()))
 
-    def to_sexp_node(self) -> SExp:
-        """Build complete schematic as SExp tree."""
-        # generator_version is a strict-typed string field in KiCad; emit the
-        # value as a quoted atom so kicad-cli accepts the file even though the
-        # version string textually parses as a number.
-        root = SExp.list(
-            "kicad_sch",
-            SExp.list("version", KICAD_SCH_FORMAT_VERSION),
-            SExp.list("generator", "eeschema"),
-            SExp.list("generator_version", SExp.quoted_atom(KICAD_GENERATOR_VERSION)),
-            uuid_node(self.sheet_uuid),
-            SExp.list("paper", self.paper),
-        )
-
-        # Title block
-        root.append(
-            title_block(
+    def _header_slot_nodes(self) -> dict[str, SExp]:
+        """Model-generated header/trailer nodes, keyed by node name."""
+        return {
+            "uuid": uuid_node(self.sheet_uuid),
+            "paper": SExp.list("paper", self.paper),
+            "title_block": title_block(
                 title=self.title,
                 date=self.date,
                 revision=self.revision,
                 company=self.company,
                 comment1=self.comment1,
                 comment2=self.comment2,
-            )
-        )
+            ),
+            "lib_symbols": self._build_lib_symbols_node(),
+            "sheet_instances": sheet_instances(self.sheet_path, self.page),
+        }
 
-        # Library symbols
-        root.append(self._build_lib_symbols_node())
-
-        # Symbol instances
+    def _element_nodes(self) -> list[tuple[object, SExp]]:
+        """``(element, generated node)`` for every placed element, in write order."""
+        out: list[tuple[object, SExp]] = []
         for sym in self.symbols:
-            root.append(sym.to_sexp_node(self.project_name, self.sheet_path))
-
-        # Power symbols
+            out.append((sym, sym.to_sexp_node(self.project_name, self.sheet_path)))
         for pwr in self.power_symbols:
-            root.append(pwr.to_sexp_node(self.project_name, self.sheet_path))
+            out.append((pwr, pwr.to_sexp_node(self.project_name, self.sheet_path)))
+        for group in (
+            self.wires,
+            self.junctions,
+            self.no_connects,
+            self.labels,
+            self.hier_labels,
+            self.global_labels,
+        ):
+            for elem in group:
+                out.append((elem, elem.to_sexp_node()))
+        return out
 
-        # Wires
-        for wire in self.wires:
-            root.append(wire.to_sexp_node())
+    def _snapshot_source(self, doc: SExp) -> None:
+        """Fingerprint every loaded element so untouched ones round-trip verbatim.
 
-        # Junctions
-        for junc in self.junctions:
-            root.append(junc.to_sexp_node())
+        Called once at the end of :meth:`_from_sexp`, after all model state
+        (``project_name``, ``page``, symbol defs) is populated, so the
+        fingerprints describe exactly what an unmodified save would generate.
+        """
+        self._source_doc = doc
+        consumed: set[int] = set()
+        for elem, node in self._element_nodes():
+            src = getattr(elem, "_source_node", None)
+            if src is not None:
+                elem._source_fp = _fingerprint(node)  # type: ignore[attr-defined]
+                consumed.add(id(src))
+        for nodes in self._text_note_sources.values():
+            consumed.update(id(n) for n in nodes)
+        for name, node in self._header_slot_nodes().items():
+            src = doc.get(name)
+            self._source_slots[name] = (src, _fingerprint(node))
+            if src is not None:
+                consumed.add(id(src))
+        self._source_consumed = consumed
 
-        # No-connects
-        for nc in self.no_connects:
-            root.append(nc.to_sexp_node())
+    def to_sexp_node(self) -> SExp:
+        """Build complete schematic as SExp tree.
 
-        # Labels
-        for label in self.labels:
-            root.append(label.to_sexp_node())
+        A schematic built from scratch is generated entirely from the model.
+        A loaded one (KiCad format ``version`` >= ``KICAD_SCH_FORMAT_VERSION``)
+        is written source-preserving: see :meth:`_to_sexp_node_preserving`.
+        """
+        if self._source_doc is not None:
+            return self._to_sexp_node_preserving(self._source_doc)
 
-        # Hierarchical labels
-        for hl in self.hier_labels:
-            root.append(hl.to_sexp_node())
+        # generator_version is a strict-typed string field in KiCad; emit the
+        # value as a quoted atom so kicad-cli accepts the file even though the
+        # version string textually parses as a number.
+        slots = self._header_slot_nodes()
+        root = SExp.list(
+            "kicad_sch",
+            SExp.list("version", KICAD_SCH_FORMAT_VERSION),
+            SExp.list("generator", "eeschema"),
+            SExp.list("generator_version", SExp.quoted_atom(KICAD_GENERATOR_VERSION)),
+            slots["uuid"],
+            slots["paper"],
+        )
+        root.append(slots["title_block"])
+        root.append(slots["lib_symbols"])
 
-        # Global labels
-        for gl in self.global_labels:
-            root.append(gl.to_sexp_node())
+        # Symbols, power symbols, wires, junctions, no-connects, labels,
+        # hierarchical labels, global labels
+        for _elem, node in self._element_nodes():
+            root.append(node)
 
         # Text notes
         for text, x, y in self.text_notes:
             root.append(self._build_text_note_node(text, x, y))
 
-        # Sheet instances
-        root.append(sheet_instances(self.sheet_path, self.page))
+        root.append(slots["sheet_instances"])
 
+        return root
+
+    def _to_sexp_node_preserving(self, doc: SExp) -> SExp:
+        """Write a loaded schematic, changing only what the caller edited (issue #6051).
+
+        * Elements whose generated form still matches their load-time
+          fingerprint are emitted as the original source node, in their
+          original position.
+        * Edited elements are regenerated from the model, in place.
+        * Elements removed from the model are dropped.
+        * Elements added to the model are appended before the trailer
+          (``sheet_instances`` / ``embedded_fonts``).
+        * Top-level nodes the model does not parse (``polyline``, ``sheet``,
+          ``bus``, ``rectangle``, ``image``, ``embedded_fonts`` ...) and the
+          ``version`` / ``generator`` / ``generator_version`` header pass
+          through unchanged.  The format ``version`` is deliberately kept:
+          the file is only preserving-loaded when its version is at least
+          ``KICAD_SCH_FORMAT_VERSION``, so every regenerated node is valid
+          under it, while relabelling verbatim newer-format content with an
+          older version would misdescribe it.
+        """
+        index = {id(child): i for i, child in enumerate(doc.children)}
+        replaced: dict[int, SExp] = {}
+        new_header: list[SExp] = []
+        new_body: list[SExp] = []
+        new_trailer: list[SExp] = []
+
+        def place(src: SExp | None, fp: str | None, node: SExp) -> bool:
+            if src is None or id(src) not in index or id(src) in replaced:
+                return False
+            replaced[id(src)] = src if _fingerprint(node) == fp else node
+            return True
+
+        for name, node in self._header_slot_nodes().items():
+            src, fp = self._source_slots.get(name, (None, None))
+            if src is not None:
+                place(src, fp, node)
+            elif _fingerprint(node) != fp:
+                # Absent from the source and set since load: add it.
+                (new_trailer if name in _TRAILER_NODES else new_header).append(node)
+
+        for elem, node in self._element_nodes():
+            src = getattr(elem, "_source_node", None)
+            if not place(src, getattr(elem, "_source_fp", None), node):
+                new_body.append(node)
+
+        pending = {key: list(nodes) for key, nodes in self._text_note_sources.items()}
+        for text, x, y in self.text_notes:
+            candidates = pending.get((text, x, y))
+            src = candidates.pop(0) if candidates else None
+            if src is None or id(src) not in index or id(src) in replaced:
+                new_body.append(self._build_text_note_node(text, x, y))
+            else:
+                replaced[id(src)] = src
+
+        children: list[SExp] = []
+        for child in doc.children:
+            if id(child) in replaced:
+                children.append(replaced[id(child)])
+            elif id(child) not in self._source_consumed:
+                children.append(child)  # not modelled: pass through
+            # else: removed from the model since load
+
+        def insert_before(nodes: list[SExp], stop: frozenset[str], invert: bool) -> None:
+            if not nodes:
+                return
+            for i, child in enumerate(children):
+                if (child.name in stop) != invert:
+                    children[i:i] = nodes
+                    return
+            children.extend(nodes)
+
+        # version must stay first; new header nodes go after the header.
+        insert_before(new_header, _HEADER_NODES, invert=True)
+        insert_before(new_body, _TRAILER_NODES, invert=False)
+        insert_before(new_trailer, frozenset({"embedded_fonts"}), invert=False)
+
+        root = SExp.list("kicad_sch")
+        for child in children:
+            root.append(child)
         return root
 
     def to_sexp(self) -> str:
