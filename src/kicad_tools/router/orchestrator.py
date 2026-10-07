@@ -1565,8 +1565,8 @@ class RoutingOrchestrator:
 
         Returns ``(router, net_id)``.  Every other net is skipped (its pads
         stay on the grid as obstacles) and every existing track, via and arc
-        is marked on the grid -- on the paired C++ grid too, which the loader
-        builds before it marks existing copper and so never sees it (#6103).
+        is marked on the grid -- on the paired C++ grid too (the loader mirrors
+        its tracks and vias itself since #6103; the arcs are mirrored here).
         """
         import contextlib
         import copy
@@ -1624,10 +1624,10 @@ class RoutingOrchestrator:
             ]
             route = Route(net=arc_net, net_name=arc_net_name, segments=segments, vias=[])
             router.grid.mark_route(route)
-            router.existing_routes.append(route)
-
-        for route in router.existing_routes:
+            # The loader mirrors its own tracks and vias onto the paired C++
+            # grid (#6103); these arcs it never saw, so mirror only them.
             router.grid._mark_route_on_cpp_cells(route)
+            router.existing_routes.append(route)
         return router, net_id
 
     def _route_hierarchical_on_board(self, net: str | int, pads: list[Pad]) -> RoutingResult | None:
