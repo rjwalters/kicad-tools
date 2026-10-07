@@ -968,6 +968,12 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # ``kct check`` clearance family uses, so the gate and the checker
         # cannot disagree about a gap.
         "router/foreign_copper.py",
+        # Issue #6164 (PR #6176): ``kct panel --cut vcut``'s copper-near-score
+        # warning.  ``panel/vscore.py`` builds a ``KSegment`` for each arc chord
+        # and asks the ``validate/clearance_shapes`` adapter for the exact
+        # copper-to-score-line gap, so the panel warning and ``kct check`` measure
+        # edge clearance with the same kernel.
+        "panel/vscore.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.
