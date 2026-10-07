@@ -7840,7 +7840,8 @@ class PCB:
                 ``<board>-PTH.drl`` / ``<board>-NPTH.drl`` (default: False)
 
         Returns:
-            Path to output directory containing drill files
+            Path to output directory containing only the drill files
+            (no Gerbers, no zip)
 
         Raises:
             ValueError: If PCB has no stored path
@@ -7860,12 +7861,10 @@ class PCB:
             drill_format=format,
             drill_units=units,
             merge_pth_npth=merge_pth_npth,
-            # Don't generate gerbers, only drill
-            layers=[],
-            include_edge_cuts=False,
-            include_silkscreen=False,
-            include_soldermask=False,
-            include_solderpaste=False,
+            # Drill only: no Gerber plot and no zip (Issue #6180)
+            generate_gerbers=False,
+            create_zip=False,
+            clean_after_zip=False,
         )
 
         exporter = GerberExporter(pcb_path)

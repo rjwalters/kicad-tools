@@ -250,6 +250,10 @@ class GerberConfig:
     # Output settings
     output_dir: Path | None = None
     create_zip: bool = True
+    # False skips the Gerber (copper/mask/silk/...) plot entirely, so only the
+    # drill step runs.  ``layers=[]`` cannot mean "none" -- it means "default
+    # layers" -- hence the explicit switch (Issue #6180).
+    generate_gerbers: bool = True
     zip_name: str = "gerbers.zip"
 
     # Layer selection
@@ -528,7 +532,7 @@ class GerberExporter:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Calculate total steps for progress
-        total_steps = 1  # Gerbers
+        total_steps = 1 if config.generate_gerbers else 0  # Gerbers
         if config.generate_drill:
             total_steps += 1
         if config.create_zip:
@@ -536,11 +540,14 @@ class GerberExporter:
         current_step = 0
 
         # Export Gerbers
-        if progress_callback is not None:
-            if not progress_callback(current_step / total_steps, "Exporting Gerber files", True):
-                return out_dir
-        self._export_gerbers(config, out_dir)
-        current_step += 1
+        if config.generate_gerbers:
+            if progress_callback is not None:
+                if not progress_callback(
+                    current_step / total_steps, "Exporting Gerber files", True
+                ):
+                    return out_dir
+            self._export_gerbers(config, out_dir)
+            current_step += 1
 
         # Export drill files
         if config.generate_drill:
