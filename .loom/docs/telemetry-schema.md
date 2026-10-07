@@ -903,7 +903,10 @@ never a fabricated `"unknown"`: a Claude/legacy-adapter spawn writes no launch
 record, so all three keys are simply absent, keeping "not a native pool spawn"
 distinguishable from "a pool spawn whose account could not be recovered". An
 env-sourced or unpooled spawn records `credential_source` alone, with no
-provider and no account. The sibling `sweep-outcomes.jsonl` record carries the
+provider and no account, and so does a launch routed through the host's LLM
+gateway (`credential_source: "gateway"`, #9473): its virtual key is a gateway
+credential, not a pool account, and its spend is measured by the gateway
+([`llm-gateway.md`](llm-gateway.md)). The sibling `sweep-outcomes.jsonl` record carries the
 same three values under one optional `credential` object
 (`{source, provider?, account?}`, `#[serde(default)]` so every pre-#8447 line
 still parses). Additive per #4703 — no `schema_version` bump.

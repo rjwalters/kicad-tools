@@ -1877,10 +1877,8 @@ list.
 ```bash
 PR_NUMBER=$1
 
-# Gather verification data. Plain `gh` throughout this block — NOT "$GH_READ":
-# every bullet in the comment below is a claim about a criterion's result in
-# THIS pass, and answering from cache is the same failure as restating it from
-# memory (#4613; see "Cached forge reads").
+# Plain `gh` here, NOT "$GH_READ": each bullet below claims a result from THIS
+# pass; a cached answer is restating from memory (#4613, "Cached forge reads").
 PR_DATA=$(gh pr view "$PR_NUMBER" --json additions,deletions,updatedAt)
 ADDITIONS=$(printf '%s\n' "$PR_DATA" | jq -r '.additions')
 DELETIONS=$(printf '%s\n' "$PR_DATA" | jq -r '.deletions')
@@ -1892,29 +1890,21 @@ UPDATED_TS=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$UPDATED_AT" +%s 2>/dev/null ||
 NOW_TS=$(date +%s)
 HOURS_AGO=$(( (NOW_TS - UPDATED_TS) / 3600 ))
 
-# Check CI status — re-read fresh in THIS pass rather than reusing criterion
-# #6's result (same "never restate from memory" discipline as every other
-# bullet here). Uses read_ci_checks() from criterion #6 above (empty stdout
-# alone is NOT proof of "no checks" — see that section's #6211 rationale for
-# why NO_CHECKS is only ever "true" on the confirmed no-checks signature).
+# CI re-read fresh, never criterion #6's result reused. read_ci_checks() is #6's:
+# NO_CHECKS is "true" only on the confirmed no-checks signature (#6211).
 read_ci_checks "$PR_NUMBER"
 if [ "$NO_CHECKS" = "true" ]; then
   CI_STATUS="No CI checks required"
 elif [ "$NO_CHECKS" = "unknown" ]; then
-  # Should not happen: criterion #6 already gated entry to this step and
-  # would have SKIPed on the same ambiguous-empty-read outcome. Fail closed
-  # defensively rather than post a comment claiming a status we never
-  # confirmed.
+  # Unreachable (#6 already SKIPs an ambiguous read); fail closed regardless.
   echo "ERROR: CI status re-read came back ambiguous after criterion #6 already passed — do not merge this pass; skip and retry next tick" >&2
   exit 1
 else
   CI_STATUS="All CI checks passing"
 fi
 
-# Generate comment with actual data. $HOLD_REVERSAL_BLOCK comes from criterion
-# #2's sticky-hold precheck: empty string on the never-held path (so this
-# comment is exactly what it always was), mandatory content when this merge
-# reverses a prior hold (#4742).
+# $HOLD_REVERSAL_BLOCK (criterion #2's sticky-hold precheck): empty when never
+# held, mandatory when this merge reverses a prior hold (#4742).
 ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$(cat <<EOF
 **Champion Auto-Merge**
 
@@ -1942,12 +1932,9 @@ EOF
   exit 1
 }
 
-# loom:operator removal (#5502) — the reversal companion to the hold-post
-# label add in criterion #2's "Hold behavior". Gated on the SAME
-# $HOLD_REVERSAL_BLOCK the comment above just posted (non-empty only when
-# PRIOR_HOLD=true AND the precheck found a genuine release — see "Reversal is
-# one mandatory comment" above), so this never fires on the never-held path
-# and always fires in the same pass as the reversal comment.
+# loom:operator removal (#5502), the reversal companion to criterion #2's hold
+# label add. Gated on the SAME $HOLD_REVERSAL_BLOCK just posted (non-empty only
+# on a genuine release), so it fires exactly in the reversal-comment pass.
 if [ -n "$HOLD_REVERSAL_BLOCK" ]; then
   gh pr edit "$PR_NUMBER" --remove-label "loom:operator" 2>/dev/null || true
 fi
@@ -1956,19 +1943,15 @@ fi
 
 ### Step 3: Merge the PR
 
-**Ordering invariant**: Step 2's comment is already on the PR before this runs.
-`merge-pr.sh` records no actor and posts no Champion-identifying comment, so a
-merge performed here without Step 2 having succeeded is indistinguishable after
-the fact from a human running the same script by hand — which is exactly how the
-#4742 incident's hold reversal became unattributable.
+**Ordering invariant**: Step 2's comment is on the PR before this runs.
+`merge-pr.sh` names no actor, so a merge without Step 2 looks like a human ran
+it (#4742's unattributable hold reversal).
 
 **Timeout invariant (#9096)**: run this block under a **600000 ms** Bash-tool
-timeout, keeping `LOOM_AUTO_MERGE_TIMEOUT` (420s below) **strictly under** it,
-so `merge-pr.sh` is what gives up and its exit 5 reaches the re-queue branch;
-the 180s gap absorbs the merge and cleanup that run *after* the wait. At the
-script's own 600s default the two are *equal*, the tool wins, and Step 2's
-"Proceeding with merge..." is the PR's last word (the #9096 stall). **Edit one
-number, edit both.**
+timeout, with `LOOM_AUTO_MERGE_TIMEOUT` (420s below) **strictly under** it, so
+`merge-pr.sh` gives up first and its exit 5 re-queues (the 180s gap covers the
+post-wait merge and cleanup). Equal values let the tool win, leaving Step 2's
+"Proceeding with merge..." as the PR's last word. **Edit one number, edit both.**
 
 ```bash
 PR_NUMBER=$1
@@ -1979,21 +1962,38 @@ echo "Attempting to merge PR #$PR_NUMBER..."
 # merge-pr.sh may not exist on PR branches checked out via gh pr checkout
 git checkout main 2>/dev/null || true
 
-# Worktree-safe merge via the forge API; deletes the branch after. --auto waits
-# then merges HERE, never arming a server-side queue (#8410); merge-pr.sh takes
-# its own fresh, uncached head-SHA read ("Cached forge reads" above) as the
-# merge API's optimistic-concurrency precondition (#5579); --redate-stale-checks
-# performs the #8248 guard's OWN remedy, bypassing nothing (#8508). Capture the
-# exit code, not a bare `||`: 3-6 are DISTINCT from 1, never failures (below).
-# 420s < this call's 600000 ms timeout ("Timeout invariant" above).
-MERGE_RC=0
-LOOM_AUTO_MERGE_TIMEOUT=420 \
-  ./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto --redate-stale-checks || MERGE_RC=$?
+# Queue mode (#10256): only a DIRECT first stdout line + rc 0 falls through.
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
+QE=$(mktemp); QOUT=$(loom-daemon forge merge-queue step "$PR_NUMBER" \
+  --approved-sha "$HEAD_SHA" 2>"$QE"); QRC=$?; QWHY=$(head -n1 "$QE"); rm -f "$QE"
+MERGE_RC=0; QCOMPAT=
+case "${QOUT%%$'\n'*}" in LOOM-MERGE-QUEUE-DIRECT*) [ "$QRC" -eq 0 ] || MERGE_RC=7 ;; *) MERGE_RC=7 ;; esac
+# #10628: a daemon without `step` merges directly only on PROVEN direct mode:
+# its own `mode` says direct, or it predates merge modes (no `merge-queue`).
+case "$QRC|$QOUT|$QWHY" in
+  "2||error: unrecognized subcommand 'step'") QMODE=$(loom-daemon forge merge-queue mode 2>/dev/null) &&
+    [ "${QMODE%% source=*}" = "merge-queue: mode=direct" ] && QCOMPAT=1 ;;
+  "2||error: unrecognized subcommand 'merge-queue'") QCOMPAT=1 ;;
+esac
+[ -n "$QCOMPAT" ] && { MERGE_RC=0; echo "LOOM-MERGE-QUEUE-COMPAT pr=$PR_NUMBER: $QWHY; direct mode proven, pre-#10256 merge"; }
+case "$MERGE_RC ${QOUT%%$'\n'*}" in "0 "*) ;; # direct: merge-pr.sh below
+  "7 LOOM-MERGE-QUEUE-"QUEUED*|"7 LOOM-MERGE-QUEUE-"DROPPED*|"7 LOOM-MERGE-QUEUE-"HANDED-OFF*|\
+  "7 LOOM-MERGE-QUEUE-"MERGED*) echo "$QOUT (rc=$QRC)" ;; # queue protocol working: silent
+  *) QWHY="$(printf '%s' "$QOUT" | head -n2 | tr '\n' ' ')$QWHY (rc=$QRC)" # a stall: surface it, 1 notice/head
+     echo "CHAMPION-MERGE-QUEUE-STALL pr=$PR_NUMBER: $QWHY"; QM="<!-- champion:merge-queue-stall pr=$PR_NUMBER sha=$HEAD_SHA -->"
+     gh pr view "$PR_NUMBER" --json comments -q '.comments[].body' 2>/dev/null | grep -qF "$QM" || gh pr comment "$PR_NUMBER" \
+       --body "**Champion: merge blocked** by \`forge merge-queue step\`: \`$QWHY\`. Not merged, still approved, retried next pass. \`unrecognized subcommand\`: upgrade \`loom-daemon\`.
 
-if [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ] || [ "$MERGE_RC" -eq 6 ]; then
-  # 3 head moved (#5579) / 4 re-dated (#8508) / 5 settle-wait expired (#8896)
-  # / 6 chain-head lock held (#10167). Not failures: nothing merged, the PR
-  # stays Judge-approved, nothing goes onto it. See "exit codes 3-6" below.
+$QM" >/dev/null ;;
+esac
+
+# Forge-API merge: --auto merges HERE (#8410), head-SHA precondition (#5579),
+# --redate-stale-checks = #8248's remedy (#8508). 420s < 600000 ms (above).
+[ "$MERGE_RC" -eq 0 ] && { LOOM_AUTO_MERGE_TIMEOUT=420 \
+  ./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto --redate-stale-checks || MERGE_RC=$?; }
+
+if [ "$MERGE_RC" -eq 7 ] || [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ] || [ "$MERGE_RC" -eq 6 ]; then
+  # Not failures: nothing merged, PR stays approved. See "exit codes 3-7" below.
   echo "PR #$PR_NUMBER not merged this pass (exit $MERGE_RC) — re-queuing instead of failing"
 elif [ "$MERGE_RC" -ne 0 ]; then
   echo "Merge failed for PR #$PR_NUMBER"
@@ -2005,10 +2005,10 @@ fi
 echo "CHAMPION-MERGE-OUTCOME pr=$PR_NUMBER rc=$MERGE_RC"
 ```
 
-**No `CHAMPION-MERGE-OUTCOME` line in that output** — timed out, killed, empty —
-means the outcome is **unknown**: not a failure and not a re-queue code. Never
-infer an `MERGE_RC`; re-read the PR state — a killed call may have merged and
-lost only its report — then go to "No exit code at all" in "Error Handling".
+**No `CHAMPION-MERGE-OUTCOME` line** (timed out, killed, empty) means the
+outcome is **unknown**: neither failure nor re-queue. Never infer `MERGE_RC`;
+re-read the PR (a killed call may have merged and lost only its report), then
+go to "No exit code at all" in "Error Handling".
 
 ### Step 4: Verify Issue Auto-Close
 
@@ -3238,51 +3238,46 @@ This PR met all safety criteria but the merge operation failed. A human will nee
 *Automated by Champion role*"
 ```
 
-### Exception: exit codes 3-6 — not merged, re-queue, not a failure (#5579, #8508, #8896, #10167)
+### Exception: exit codes 3-7 — not merged, re-queue, not a failure (#5579, #8508, #8896, #10167, #10256)
 
-`merge-pr.sh` reserves four codes (never the failure exit **1**) for
-"the merge did not happen and nothing is wrong":
+Never the failure exit **1**; each means "the merge did not happen":
 
-- **3** — the head moved between the fresh head-SHA read taken just before
-  merging and the merge call.
-- **4** — the #8248 required-check freshness guard blocked the merge and
-  `--redate-stale-checks` performed that guard's own remedy, a tree-identical
-  no-op commit. Nothing bypassed; a spent budget (#9590) escalates to
-  `loom:operator` and returns exit 1.
-- **5** — `--auto`'s bounded settle-wait expired; nothing merged, no required
-  check went red. **Do not "fix" a recurring exit 5 by raising
-  `LOOM_AUTO_MERGE_TIMEOUT`** — Step 3 pins it under the caller's own timeout
-  (#9096); re-queuing is cheap.
-- **6** — another PR on the base holds the chain-head merge lock: a defer
-  (bounded by its cap), not a failure; nothing written.
+- **3** — the head moved between the fresh head-SHA read and the merge call.
+- **4** — the #8248 freshness guard blocked the merge and `--redate-stale-checks`
+  ran that guard's own remedy (a tree-identical no-op commit). Nothing bypassed;
+  a spent budget (#9590) escalates to `loom:operator` and returns exit 1.
+- **5** — `--auto`'s bounded settle-wait expired; no required check went red.
+  **Do not "fix" a recurring 5 by raising `LOOM_AUTO_MERGE_TIMEOUT`** (pinned
+  under Step 3's own timeout, #9096); re-queuing is cheap.
+- **6** — another PR holds the base's chain-head merge lock: a bounded defer.
+- **7** — set by Step 3, not `merge-pr.sh`: `forge merge-queue step` gave no
+  direct verdict, so `merge-pr.sh` never ran (#10256). QUEUED / DROPPED /
+  HANDED-OFF / MERGED is the queue working. Anything else (UNDETERMINED,
+  REFUSED, invalid mode, a `loom-daemon` too old to prove direct mode) is a
+  **stall** Step 3 already surfaced (`CHAMPION-MERGE-QUEUE-STALL`, one
+  `champion:merge-queue-stall` notice per head, #10628): name it in the
+  summary, still not an error.
 
 **Do not follow the 5 failure steps above for any of these outcomes:**
 
-- Do **not** post the "Merge Failed" comment — the PR is still Judge-approved;
-  the merge just did not happen.
+- Do **not** post "Merge Failed": the PR is still Judge-approved.
 - Do **not** count it as an error in the completion summary.
-- Leave `loom:pr` in place, move to the next PR. A later pass picks it up
-  fresh, re-evaluating its safety criteria (`updatedAt`, CI) first.
+- Leave `loom:pr`, move on. A later pass re-evaluates its safety criteria
+  (`updatedAt`, CI) first.
 
-**Leaving `loom:pr` in place after exit 3 or 4 does NOT mean the approval still
-applies to the new head (#5686)** — a head move is exactly what invalidates a
-verdict; this exception only says "not an error". The next pass's Verdict-State
-Janitor Part 2 resolves it; never short-circuit it by re-merging on a later tick
-without re-running it. Exits 5 and 6 move no head, invalidate nothing.
+**`loom:pr` left after exit 3 or 4 does NOT carry the approval to the new head
+(#5686)**: the next pass's Verdict-State Janitor Part 2 resolves it; never
+re-merge on a later tick without it. Exits 5-7 move no head.
 
-**No exit code at all is a different case (#9096).** This silence is
-conditioned on *having* an outcome to be silent about; all four reported
-themselves. A killed call (no `CHAMPION-MERGE-OUTCOME` sentinel in Step 3's
-output) reported nothing, so — once a state re-read confirms it is not already
-merged — it gets a forge-visible **"Champion: Merge Outcome Unknown"** notice:
-neither "Merge Failed" (asserts an unobserved error, parks a mergeable PR on a
-human) nor this silence (leaving Step 2's "Proceeding with merge..." as the PR's
-last word — the #9096 stall). Marker-keyed to the head
-(`champion:merge-outcome-unknown`), it re-queues as 3-6 do, never firing on
-them.
+**No exit code at all (#9096) is different**: the silence above assumes an
+outcome to be silent about. A killed call (no `CHAMPION-MERGE-OUTCOME`
+sentinel), once a re-read confirms it is not merged, gets one head-keyed
+**"Champion: Merge Outcome Unknown"** notice (`champion:merge-outcome-unknown`),
+never "Merge Failed" (an unobserved error that parks a mergeable PR on a
+human), and re-queues. It never fires on 3-7.
 
-Exit 4's bound, exit 5's contract, why 3-6 are never commented on, the
-unknown-outcome recipe, and the merge-ancestry trap that defeats
+Rationale (4's bound, 5's contract, why 3-6 stay silent, 7's old-daemon
+path), the unknown-outcome recipe, and the merge-ancestry trap that defeats
 `git merge-base --is-ancestor` here:
 [`merge-pr-exit-code-exceptions.md`](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
 

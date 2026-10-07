@@ -1,4 +1,4 @@
-# `merge-pr.sh` exit codes 3, 4, 5 and 6 — the four "not a failure" outcomes
+# `merge-pr.sh` exit codes 3, 4, 5 and 6 — the four "not a failure" outcomes (plus Champion's 7)
 
 `merge-pr.sh` reserves four exit codes for outcomes that look like failures to
 a naive `|| handle_failure` caller but are not: the merge did not happen,
@@ -12,7 +12,9 @@ it does get a PR comment.
 
 Champion's operative handling lives in
 `.claude/commands/loom/champion-pr-merge.md` →
-"Exception: exit codes 3-6". This file holds the rationale, the design
+"Exception: exit codes 3-7". Exit 7 is not a `merge-pr.sh` code: Champion's
+Step 3 sets it when `loom-daemon forge merge-queue step` withholds the direct
+merge, so `merge-pr.sh` never runs (see "Exit 7" below). This file holds the rationale, the design
 decisions behind it, and the forensics notes — the parts a Champion session
 does not need loaded to act correctly.
 
@@ -22,6 +24,7 @@ does not need loaded to act correctly.
 | `4` | The #8248/#8919 required-check freshness guard blocked the merge and `--redate-stale-checks` re-dated the checks with a tree-identical no-op push (#8508). | this run |
 | `5` | `--auto`'s bounded settle-wait expired before this head's checks finished, or before the check-runs API became readable (#8896). | nobody |
 | `6` | Another PR on the same base holds the chain-head merge lock: it was just re-dated and has not landed, so merging now would move the base under it again (#10167). | nobody |
+| `7` | *(Champion Step 3, not `merge-pr.sh`)* `forge merge-queue step` gave no `LOOM-MERGE-QUEUE-DIRECT` verdict, so `merge-pr.sh` never ran (#10256). Queue outcomes are silent; anything else is a surfaced stall (#10628). | nobody |
 | `1` | Everything else, including a #8248 block with no remedy left. | — |
 | *(none)* | The caller was killed before the script could exit at all — not an exit code, and the only outcome that leaves no forge-visible trace (#9096). | unknown |
 
@@ -32,6 +35,7 @@ does not need loaded to act correctly.
 - [Exit 4 — this run re-dated the stale required checks (#8508)](#exit-4--this-run-re-dated-the-stale-required-checks-8508)
 - [Exit 5 — CI outlasted `--auto`'s bounded settle-wait (#8896)](#exit-5--ci-outlasted---autos-bounded-settle-wait-8896)
 - [Exit 6 — deferred behind a re-dating chain head (#10167)](#exit-6--deferred-behind-a-re-dating-chain-head-10167)
+- [Exit 7 — the merge-queue step withheld the direct merge (#10256, #10628)](#exit-7--the-merge-queue-step-withheld-the-direct-merge-10256-10628)
 - [No exit code at all — the caller was killed (#9096)](#no-exit-code-at-all--the-caller-was-killed-9096)
 - [Merge-ancestry detection trap (applies to all of them)](#merge-ancestry-detection-trap-applies-to-all-of-them)
 <!-- toc:end -->
@@ -428,6 +432,61 @@ wants the check sets `LOOM_CHAIN_LOCK_GUARD=1`.
 Exactly exit 3/4/5/6's: nothing merged, nothing failed, no comment, re-queue.
 The PR's head did not move, so its verdict stands. A hold costs one pass; it
 lasts at most one cap.
+
+## Exit 7 — the merge-queue step withheld the direct merge (#10256, #10628)
+
+Champion's Step 3 runs `loom-daemon forge merge-queue step <PR> --approved-sha
+<head>` before `merge-pr.sh`. Only a first **stdout** line of
+`LOOM-MERGE-QUEUE-DIRECT` with exit 0 lets `merge-pr.sh` run. Every other result
+sets `MERGE_RC=7`. Nothing was merged, the head did not move, and the verdict
+stands. The two kinds of 7 are handled differently:
+
+| `step`'s first stdout line | Meaning | Champion's handling |
+|---|---|---|
+| `LOOM-MERGE-QUEUE-QUEUED` / `-DROPPED` / `-HANDED-OFF` / `-MERGED` | The queue protocol is working | Silent, exactly like 3-6: the result is logged and the PR is re-queued |
+| anything else: `-UNDETERMINED`, `-REFUSED`, `-DIRECT` with rc≠0, empty output, an invalid `champion.mergeMode`, an old binary that cannot prove direct mode, `command not found` | **A stall.** In a direct-mode repo this stops *every* merge on the host | Logs `CHAMPION-MERGE-QUEUE-STALL pr=N: <stdout lines> <stderr first line> (rc=R)` and posts one PR notice per head (`<!-- champion:merge-queue-stall pr=N sha=HEAD -->`, the same dedup shape as `champion:merge-outcome-unknown`). Then re-queues; not an error |
+
+`step`'s stderr is captured, never discarded, so the cause is named. Before
+#10628, an old binary showed up only as ` (rc=2)` in the transcript.
+
+### Old daemons: direct merge only on proven direct mode
+
+Role prompts reach a host through `resync-installed.sh` / defaults sync
+separately from the `loom-daemon` binary. A host can therefore run the B3
+prompt on a binary that has no `step` verb. Two rules pull against each other
+here:
+
+- **Judge P1 on #10585.** A daemon from v0.19.791 (B2) onward has no `step`
+  verb but *does* honor `champion.mergeMode=queue`. So "unrecognized subcommand"
+  alone is never permission to merge directly. That would bypass the queue
+  authorization protocol.
+- **Fleet liveness.** Blocking every direct-mode merge on every un-upgraded host
+  is an outage, even when it is surfaced.
+
+Step 3 resolves this with an independent proof of direct mode. Only the anchored
+clap error counts (exit 2, empty stdout, stderr first line exactly as shown):
+
+| stderr first line | Proof attempted | Result |
+|---|---|---|
+| `error: unrecognized subcommand 'step'` (v0.19.761+, before B3) | `loom-daemon forge merge-queue mode`, which is the same binary's own env > tiered config > default resolver. It must exit 0 and print `merge-queue: mode=direct source=…` | direct: logs `LOOM-MERGE-QUEUE-COMPAT …` and runs the pre-#10256 `merge-pr.sh` call. queue / invalid / failed: stall |
+| `error: unrecognized subcommand 'merge-queue'` (before v0.19.761, e.g. 0.19.743) | None needed. The binary predates `champion.mergeMode`, so it cannot run the queue protocol. Its only merge path is direct | logs `LOOM-MERGE-QUEUE-COMPAT …` and runs the direct merge |
+
+The mode is deliberately **not** read with `jq` from `.loom/config.json`.
+`champion.mergeMode` is resolved across four config tiers (private defaults,
+`.loom/config.json`, `.loom-project/project.json`, `.loom-local/local.json`),
+so a shell mirror would miss a host-tier `queue`. Asking the binary's own
+resolver is the only proof that matches what the daemon will actually do.
+
+Accepted edge: a `queue` setting (env or config) on a host whose binary has no
+`merge-queue` verb still merges directly. That binary has no queue protocol to
+bypass. It cannot hand off, authorize, or reconcile, so a direct merge is the
+only thing it can do, and it is the merge this host performed before B3. Queue
+execution is also compile-time dormant in every build
+(`QUEUE_EXECUTION_ENABLED=false`). Before enabling it, set a fleet `loom-daemon`
+version floor that includes `step`, and then this row can become a stall.
+
+Regression: `defaults/scripts/tests/test-champion-merge-queue-step-no-fallthrough.sh`
+extracts the shipped Step 3 fence and runs every row above against stubs.
 
 ## No exit code at all — the caller was killed (#9096)
 

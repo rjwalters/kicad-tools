@@ -159,6 +159,14 @@ Containerized dispatch forwards `TRACEPARENT` and `OTEL_*` by name into the
 container (`spawn-claude.sh`'s containment allowlist); before #9215 it dropped
 both silently while bare-metal dispatch on the same host worked.
 
+The same opt-in covers the daemon's **scheduled** Claude sessions, not just
+sweeps (#10743): every role-runner tick (its launch carries the tick's
+`loom.role_attempt` context as `TRACEPARENT`, applied first) and every
+epic-supervisor role dispatch (no trace context of its own, so its spans are
+roots). With the opt-in on, those sessions' `OTEL_RESOURCE_ATTRIBUTES` is
+extended (never replaced) with `loom.role=<role>` and `loom.sweep_id=<tick or
+dispatch id>`, so per-request records group by role and tick.
+
 Phase timing has two explicit forms. An explicitly launched role has an observed
 start; its checkpoint completes that attempt. A role performed inside one
 third-party CLI session has only an observed checkpoint completion, represented

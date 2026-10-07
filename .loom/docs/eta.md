@@ -269,7 +269,7 @@ only.
 | `finish-v1` | `finish` | in-sweep phase durations (`sweep-outcome-telemetry.jsonl`) | after the in-sweep merge when at least half of the history's successful sweeps merged themselves, else at the verdict |
 | `land-v1` | `land` | in-sweep phases and the stage-sample journal (turnovers too, for an unstarted issue) | after `merge_wait` |
 | `land-v2` | `land` | the same, with **right-censored** stage samples folded in (Kaplan–Meier grids) | after `merge_wait` |
-| `land-2026-10-06-calm-plover` | `land` | `land-v2`'s path, then **each** of p25/p50/p75/p90 conformally calibrated against its own hit rate from `land-v2`'s landed **and** still-open (right-censored lower-bound) track record in a trailing 14-day window, per (stage, age bucket) → stage → pooled, with the per-day change of the shift rate-limited; fitted at the estimate's own `as_of` (recorded as `calibration`; #10489) | after `merge_wait` |
+| `land-2026-10-06-even-lark` | `land` | `land-v2`'s path, then **each** of p25/p50/p75/p90 conformally calibrated against its own hit rate from `land-v2`'s landed **and** still-open (right-censored lower-bound) track record in a trailing 14-day window, per (stage, age bucket) → stage → pooled. The score is in **seconds** (`actual − q_τ`), so each quantile moves by `+ c_τ` seconds; the shift changes by at most 2 h a day. Fitted at the estimate's own `as_of` (recorded as `calibration`, `method` `split_conformal_km_seconds`; replaced the retired log-scale `land-2026-10-06-calm-plover`; #10489) | after `merge_wait` |
 | `land-2026-10-06-quick-tern` | `land` | `land-2026-10-04-twin-otter-b`'s estimate, then each of p25/p50/p75/p90 calibrated by **IPCW** split-conformal over twin-otter-b's landed and still-open track record in a **short recent window** (6 h half-life, doubling when there are too few landings), per stage → pooled. There is no rate limit; a shift within 1.5 standard errors of zero is not applied. Fitted at the estimate's own `as_of`, recorded as `calibration` with `ipcw{…}` (#10524) | at the merge |
 | `land-2026-10-06-brisk-petrel` | `land` | `land-2026-10-04-twin-otter-b`'s estimate, with p25/p50/p75/p90 scaled by the **latent-regime residual factor** (`eta/regime.rs`): the 3 h half-life weighted mean of `ln(actual / p50)` over twin-otter-b's scored outcomes from the last 24 h, clamped to 0.25-4. It is applied **only while the drift check (6 h CUSUM against the 7-day baseline) has tripped** for the item's stage, so a calm stream is served twin-otter-b's estimate byte for byte. It is identity below the sample floor or when the mean is within 3 standard errors of zero. Recorded as `regime_adjustment{stage, factor, n_recent, half_life}` (#10528). Shadow, tier `candidate` | at the merge |
 | `land-2026-10-06-swift-tern` | `land` | quick-tern made **drift-aware** (#10524 slice 3, #10528): when the stage's CUSUM drift check trips (residuals centred on the shift quick-tern would serve), the half-life ladder starts at 1.5 h instead of 6 h. The interval inflation the check asks for is recorded but not applied. Otherwise quick-tern's answer. Recorded as `calibration` with `ipcw.drift{…}` | at the merge |
@@ -303,6 +303,7 @@ registry would be a second mechanism for dominated heuristics).
 | `land-2026-10-04-amber-heron` | 2026-10-06 | Dominated in live outcomes (same 48 h window): pinball4 8.97 h (the worst of any heuristic that answers broadly), p25-p75 coverage 0.147, late surprise 0.649, barely better than `land-v2`'s 0.71. On the small common subset all seven answered (6 items) it is last on pinball. | #10207, #10484 |
 | `land-2026-10-04-fresh-tide` | 2026-10-06 | Failed the backtest gate: on the 52-fold backtest over verified forge history (the evidence is on #10549) it was +0.49 h [+0.30, +0.69] pinball4 against `land-v2`, winning 17 of 52 days (Wilson lower bound 0.22). Its recency idea is covered by the recent-window calibration of #10541 and the planned regime adjustment of #10528. Its module and the `eta backtest --half-life-days` replay flag (#10325) were removed with it; the engine's recency weighting stays (`recalibrate` uses it). | #10209, #10549 |
 | `land-2026-10-04-twin-otter` | 2026-10-07 | Superseded by its fixed successor `land-2026-10-04-twin-otter-b` (the #10500 train/serve skew fix), the only heuristic that passed the backtest gate (−2.39 h pinball4 against `land-v2`). It answered PR stages only, which `-b` answers identically, so the chooser loses nothing. Retired to keep `land` within the 13-heuristic budget when `land-2026-10-06-brisk-petrel` landed: a 14th alternate would exceed the 3 KB `eta.snapshot` row guard. Only the registration went: `-b`, keen-wren, held-heron and the fit still use its module (`recompute`, `adapt_input`, `visit_*`, `DRAW_ORDER`), and `-b`'s PR-stage explanations still record and replay `twin_otter`. | #10243, #10528 |
+| `land-2026-10-06-calm-plover` | 2026-10-06 | Hit its rates but failed the backtest's deciding loss: on the walk-forward replay of 600 merged-PR timelines (1,144 common `land` cases) it was +4,810 s [+580, +9,230] `pinball4` against `land-v2`, at p25–p75 coverage 49.4% and late surprise 9.8%. Its one multiplicative shift per cell widened every item's range by the same factor. Replaced in the registry by `land-2026-10-06-even-lark`, the same calibration on the seconds scale; the log-scale code stays in `eta::conformal` so persisted calm-plover explanations still recompute. | #10489 |
 
 A shipped id is **immutable**: a golden test pins each id's output on a fixed
 fixture. A behaviour change is a new id registered beside the old one
@@ -425,16 +426,16 @@ The calibration log (`.loom/state/eta/calibration.jsonl`) and the
 recalibration machinery stay in the daemon. The log holds every landed
 outcome the tracker scored for a **calibration base**
 (`heuristics::CALIBRATION_BASES`): `land-v2` and, since #10524,
-`land-2026-10-04-twin-otter-b`. `land-2026-10-06-calm-plover` and
+`land-2026-10-04-twin-otter-b`. `land-2026-10-06-even-lark` and
 `land-2026-10-06-quick-tern` (below) read it, each filtering on its own base,
 so `eta view` loads it. `eta backtest` / `eta promote` derive the same
 evidence by replaying every base over the cases. That is leak-free because
 the calibration is refitted at each case's own `as_of`.
-`land-2026-10-06-calm-plover` (#10489) ships the same way: registered, not
-current, shadowed so it appears in every snapshot's `alternates` (the loom-ui
-ETA chooser), promotion only through the #10233 gate. It is a generic
-calibration layer; the registered id fixes its base at `land-v2`
-(`eta::conformal::calibrate` takes any base explanation and the base's
+`land-2026-10-06-calm-plover` (#10489) shipped the same way and was retired
+on 2026-10-06 in favour of `land-2026-10-06-even-lark` (below), which keeps
+its method except for the score scale. The method, as calm-plover shipped it,
+is a generic calibration layer; the registered id fixed its base at `land-v2`
+(`eta::conformal::calibrate_on` takes any base explanation and the base's
 observations).
 
 *Method.* A past base estimate with quantile `q_τ` and actual remaining time
@@ -495,6 +496,44 @@ three-quantile pinball delta is +336 s, with a 95% issue-bootstrap CI of
 the gate's deciding loss, is worse by 23,460 s [17,304, 29,266]: the wider
 p90 costs more than it saves. So the backtest does not make calm-plover a
 promotion candidate. The PR for #10489 records the full report.
+
+`land-2026-10-06-even-lark` (#10489) is calm-plover with one change. It ships
+registered, not current, tier `candidate`, shadowed into `alternates`, and
+promoted only through the #10233 gate. It takes calm-plover's place in the
+registry, so `land` stays at 13 registrations, exactly the default shadow
+budget (current + 12 alternates).
+
+*Why a second scale.* Calm-plover hits its rates and still loses on
+`pinball4`. On the backtest's `land` cases `land-v2`'s quantiles carry little
+information beyond a constant: a per-quantile *constant* scores about as well
+as `land-v2` itself. A single multiplicative shift per cell then has to make a
+narrow base range wide by a large factor (`merge_wait`'s p75 shift reached
+`ln 49`), and it applies that factor to every item, so a long base estimate
+becomes days. Pinball is linear in seconds, so what it prices is the time
+added, not the ratio. Even-lark scores `s = a − q_τ` (seconds) and reports
+`q_τ + c_τ`, where `c_τ` is the same censoring-aware, finite-sample-corrected
+split-conformal quantile on the same cells. Its rate limit is 2 h a day per
+quantile (`MAX_DAILY_STEP_SEC`), replayed from the same evidence-fixed anchor,
+and outputs are floored at zero and made monotone.
+
+*The record.* As calm-plover's, with `method` `split_conformal_km_seconds`;
+`shift`, `raw_shift` and `max_daily_step` are in **seconds**, so "why this
+range?" is `base_quantiles_sec + shift`.
+
+*Backtest* (2026-10-06, `eta backtest --heuristic land-2026-10-06-even-lark
+--compare land-v2`, 600 merged-PR label timelines of `rjwalters/loom`, 1,144
+common `land` cases, walk-forward daily folds). p25–p75 coverage is 50.3%
+(`land-v2`: 28.1%) and late surprise is 13.1% (`land-v2`: 29.4%). `pinball4`
+is 45,605 s against `land-v2`'s 46,901 s, a difference of −1,296 s with a 95%
+issue-bootstrap CI of [−3,818, +1,157] s: not distinguishable, and lower. The
+three-quantile pinball is +476 s [−114, +1,041]; also not distinguishable.
+`eta backtest` reports even-lark as `better`, and `land-v2` won 3 of 9 decided
+days. On the same replay calm-plover gets coverage 49.4% and late surprise
+9.8%, but `pinball4` +4,810 s [+580, +9,230] worse than `land-v2`. Two caveats.
+The scale and the 2 h step were chosen on this replay, though every step from
+30 min to unlimited met all three targets in a pre-implementation simulation.
+And it replays merged PRs only, so its most recent fold holds only the fast
+ones. Live shadow pairs through the #10233 gate are the real test.
 
 `land-2026-10-06-quick-tern` (#10524) ships the same way: registered, not
 current, tier `candidate`, shadowed into `alternates`, and promoted only
@@ -790,7 +829,7 @@ offers.
 
 **Wrappers are explicit compositions.** A calibration, conformal or
 dependency wrapper over a base is registered as its own id
-(`land-2026-10-06-calm-plover` is calibration over `land-v2`;
+(`land-2026-10-06-even-lark` is calibration over `land-v2`;
 `land-2026-10-06-quick-tern` is IPCW calibration over, and
 `land-2026-10-06-tandem-wren` the dependency wrapper over,
 `land-2026-10-04-twin-otter-b`; `land-2026-10-06-held-heron` is
@@ -922,7 +961,9 @@ record says so rather than implying the check passed.
 **Not yet built** (follow-ups on #10525):
 
 - A producer of `t_p50` / `t_cov` per heuristic (#10528). Until one exists,
-  the adaptation check records `not_measured`. Retirement domination does not
+  the adaptation check records `not_measured`. (`eta backtest --adaptation`
+  measures the shared regime layer on a heuristic's residuals, not the
+  heuristic's own recovery, so it is not that producer.) Retirement domination does not
   yet consider adaptation either; the proposal body says so.
 - loom-ui's chooser filtering on `tier` is owned by loom-ui#2031 / #2097 and
   is not verified here.
@@ -1270,8 +1311,10 @@ it links whose link **and** star were both known before `cutoff`.
   `label_removed`. This is rare while the linking PR is still open; it only
   affects the recorded `starred_any` / `star_source`, never the model.
 - **Unknown coverage**: a repo whose raw cache has no pulls (link) or
-  issue-events rows before `cutoff` gives an unknown state (`null`, counted in
-  `rows_star_unknown`), never "unstarred". `eta fit` also prints
+  issue-events rows before `cutoff`, or whose cache was last caught up before
+  `cutoff` (the listings' cursor `synced_through` stamp, set when a refresh
+  completes and frozen while SigNoz history covers the repo, #10520), gives an
+  unknown state (`null`, counted in `rows_star_unknown`), never "unstarred". `eta fit` also prints
   `rows_starred_any` and `rows_star_issue_only` (starred only through an issue). Serving records nothing for a repo
   with no star observation within the last hour.
 - **Not a model input.** Twin-otter's `starred` feature is still the PR's own
@@ -1401,13 +1444,35 @@ for a fit or backtest to report.
   revision's `repos.yml` is cached content-addressed under
   `.loom/state/eta/roster-history/`. The fit (`fit::run`) and the tracker's
   pass (`Tracker::set_fleet_history`) both load that one cache, so the two
-  sides read one history value.
+  sides read one history value. Requests go through the store's
+  `GhTransport` (reader App first, then the writer App), never the operator
+  token.
+  - *Forge budget.* The window's `since` is aligned down to UTC midnight
+    (`window_opens`), so each listing URL repeats all day. The index keeps
+    each listing's `ETag` and commits, and the next poll sends
+    `If-None-Match`. A `304` reuses the cached commits; a `304` with nothing
+    cached is an error. With `repos.yml` unchanged, a poll is two conditional
+    requests (first page and anchor) and no contents. An authorized `304`
+    does not count against GitHub's primary rate limit. A `304` poll still
+    counts as a successful poll. Each UTC day opens with one unconditional
+    listing.
   - *Knowability convention.* `committed_at` is the committer date.
     `observed_at` is set only for a commit first listed by a poll that
     follows an earlier successful poll: it is that poll's time, a bound that
     is never early. So a backdated or late-pushed edit counts only from when
     it was seen. Commits listed by a cache's first poll have no observation
     and use their commit date. `FitReport.roster_history` counts each basis.
+  - *Observation archive.* Each commit's first sighting is also appended,
+    before the index is written, to `observations.jsonl` in the cache
+    directory: store, ref, sha, committer date, blob, `first_listed_at`, and
+    `observed_at`. The archive is append-only, one line per commit, and it is
+    never pruned with the window. That keeps the record of when this host
+    saw each revision for backtests older than the window
+    (`roster_history::archive`). A listed commit takes its observation from
+    the index, else from the archive, so a lost index does not re-date a
+    commit. An archive line also proves an earlier poll, so a commit first
+    listed after an index loss is still observed at that poll. A torn or
+    corrupt line is skipped.
   - *Unknown, never today's file.* The history is `None` when there is no
     cache (no `fleet.repo`, or no successful poll yet), when any cached
     revision is unreadable or not a valid roster, or when the last
@@ -1421,12 +1486,54 @@ for a fit or backtest to report.
   `fleet_priority`, age, number. A starred, level-2, or higher-priority-repo
   issue is therefore earlier in the plan and gets an earlier start. No
   second ordering is defined for the ETA to drift from (#10528).
+- **Replayed priority inputs** (#10508). A replay case has no labels, so
+  keen-wren replayed priority-blind: its `features.priority` was absent.
+  `backtest::cases_from_pr_records_with_roster(records, history)` fills
+  `ReplayCase::priority` through the one builder
+  (`priority_inputs`), over the batch's own PR timelines: each PR's flags
+  and linked star are read strictly before the case's `as_of`, the roster
+  revision `KNOWABLE_LAG_SEC` earlier, and the neighbours are the PRs in
+  the batch standing in the case's stage at `as_of`. A `PrCaseRecord` may
+  carry `linked_star`, the instants a linked issue's star turned on and off
+  (alternating, first on). Absent means unread: an unstarred-by-label PR is
+  then unknown, never unstarred. `history = None` (no cache, stale, or
+  unreadable) leaves `repo_rank` and the fleet position unknown, never
+  today's `repos.yml`. `eta backtest --pr-history` / `--forge-pr-cases`
+  and the nightly folds pass the cached roster history. The plain
+  `cases_from_pr_records` is unchanged, and no case's other fields move.
+  Forge-fetched cases do not yet carry `linked_star`, so the star
+  inputs of the real walk-forward are known only through a PR's own labels
+  until a reader supplies it (remaining under #10508).
 - **Status.** keen-wren is registered in shadow (tier `candidate`,
-  after `held-heron`, before the twin-otter pair). Still open in #10508:
-  publishing the v2 file from the captain to other hosts (`fit::publish`
-  carries v1 only, so only the fitting host has a v2 file, #10586); the
-  walk-forward backtest against twin-otter-b; and live evidence that the ETA
-  authority, the loom-ui chooser and the nightly scoring pick the new id up.
+  after `held-heron`, before the twin-otter pair). The captain's v2 file is
+  published to the other hosts (see **Publishing the v2 file**, below).
+  Still open in #10508: the walk-forward backtest against twin-otter-b; and
+  live evidence that the ETA authority, the loom-ui chooser and the nightly
+  scoring pick the new id up.
+- **Publishing the v2 file** (`eta::fit::publish_v2`, #10508, item 3 of
+  #10586). Beside v1's publication (#10395, which moves only the v1 file),
+  the captain publishes its newest `eta-fit/v2` file on the same branch
+  (`fleet.etaFitRef`) as `eta/fit/v2/<fit_id>.json` (byte for byte) and
+  `eta/fit/v2/latest.json` (the same `eta-fit-pub/v1` envelope), written
+  last. Every other host fetches it in the same refresh step and installs
+  it into `<fit_dir>/v2`, which `Registry::load` reads
+  (`fit::v2::load_latest_v2`), so keen-wren answers its PR stages there
+  instead of `no_model`. The checks are v1's, in v1's order and equally
+  strict, with `eta-fit/v2` and `FEATURES_V2` in place of v1's: sha256 of
+  the exact bytes, envelope agreement, declared captain, feature set,
+  as-of not in the future, within `fleet.etaFitMaxAgeDays`, and not older
+  than the newest local v2 file; a 304 is honoured only while the same
+  captain's file is still the newest local one. The publisher refuses the
+  store's reviewed branch and `main`, republishes under a new captain or
+  destination, and refuses a non-v2 file on this lane. The v2 outcome is in
+  `fit-pub/status-v2.json`; v1's `status.json`, paths, envelope and loaders
+  (`fit::read`, `fit::load_latest`) are unchanged, and a v1 failure does not
+  stop v2 nor the reverse. `eta doctor` shows the v2 lane as its own
+  `fit.published_fit_v2` check beside v1's `fit.published_fit` (a warning
+  on a failed or stale v2 fetch or publish, a skip when nothing is
+  published); the two never mask each other. A captain with no v2 file
+  publishes nothing on this lane, and a store with no `eta/fit/v2/` is an `absent` outcome: the
+  host keeps whatever v2 file it has (or none) and v1 is unaffected.
 
 ### Friction predictors and cumulative stage age (#10521)
 
@@ -1439,7 +1546,7 @@ at `now - 120 s`, #10500) both call the one builder `loop_features`:
 
 | # | Feature (`LOOP_FEATURES`) | Meaning | Source |
 |---|---------------------------|---------|--------|
-| 1 | `log_overlap_prs`, `log_overlap_files`, `overlap_known` | Other open PRs in the repo whose changed files share a path with this PR's, and how many of this PR's paths they touch | Each PR's file list **as known at `as_of`**: the latest head-commit list read before `as_of`, never the final diff. If this PR's list or **any** open peer's list is not known before `as_of`, both counts are unknown (`overlap_known = 0`): a partly observed roster never reads as zero overlap. Not logged yet, so `overlap_known = 0` everywhere today |
+| 1 | `log_overlap_prs`, `log_overlap_files`, `overlap_known` | Other open PRs in the repo whose changed files share a path with this PR's, and how many of this PR's paths they touch | Each PR's file list **as known at `as_of`**: the latest head-commit list read before `as_of`, never the final diff. If this PR's list or **any** open peer's list is not known before `as_of`, both counts are unknown (`overlap_known = 0`): a partly observed roster never reads as zero overlap. Logged by the file-list reader (#10550, see [File-list log](#file-list-log-10550)); before a PR's first read, or for training rows older than the log, `overlap_known = 0` |
 | 2 | `log_review_requests`, `log_approvals_lost` | `review_wait` entries so far; approvals lost (`merge_wait`/`merge_hold` left for `review_wait`, a stale-main re-review) | Stage episodes |
 | 3 | `own_ci_failed`, `ci_known` | Whether the PR's last CI run that finished before `as_of` failed | SigNoz `ci.run` first, forge only to fill gaps (#10511). Not logged yet, so `ci_known = 0` today |
 | 4 | `judge_reject_rate_7d`, `judge_rate_known` | Share of the repo's Judge verdicts (`review_wait` exits to `doctor` vs to `merge_wait`/`merge_hold`) in the trailing 7 days that sent the PR to Doctor; unknown under 5 verdicts | Stage episodes |
@@ -1487,15 +1594,54 @@ at `now - 120 s`, #10500) both call the one builder `loop_features`:
   So loop-kite and twin-otter-b are scored on the same cases from the files
   each day would have served. With no v3 file, loop-kite refuses `no_model`
   and the v1-only replay is unchanged.
-- **Still open (#10550).** The live file-list reader (forge, ETag'd, reader
-  Apps, budgeted) and the SigNoz `ci.run` reader, so file overlap and own CI
-  stay unknown (indicators 0) in training and serving alike. The
-  loom-experiments walk-forward backtest and its results (pinball against
-  twin-otter-b, late surprise with paired CIs, starred / held / sequenced
-  subsets) have not been run. Promotion is the #10233 gate's decision.
+- **File-list log (#10550).** See [File-list log](#file-list-log-10550):
+  predictor 1 is logged and passed as `files: Some(..)` in the fit and in
+  serving.
+- **Still open (#10550).** The SigNoz `ci.run` reader (forge check runs only
+  to fill gaps), so own CI stays unknown (`ci_known = 0`) in training and
+  serving alike. The loom-experiments walk-forward backtest and its results
+  (pinball against twin-otter-b, late surprise with paired CIs, starred /
+  held / sequenced subsets) have not been run: they need loom-experiments and
+  fleet data, not the sweep host. Promotion is the #10233 gate's decision.
 - **v1 and v2 are unchanged.** None of these is in `eta-fit/v1`'s `FEATURES`
   or `eta-fit/v2`'s `FEATURES_V2`, so twin-otter, twin-otter-b and keen-wren
   rows, coefficient files and fixtures are unchanged.
+
+#### File-list log (#10550)
+
+Predictor 1 needs each open PR's changed-file list **as known at `as_of`**.
+`eta::pr_file_log` logs one `FileSnapshot {repo, pr, known_at, files, head_sha, complete}` per
+change of a PR's list, stamped with the instant the read returned, in
+`pr-files.jsonl` beside the fleet snapshots (`.loom/state/eta/fleet/`; the
+extension keeps `fleet::load_all`'s `*.json` listing to snapshots alone).
+
+- **Reads** are forge only: one ETag'd conditional GET of
+  `pulls/{n}/files?per_page=100` per PR through the shared ETag store and the
+  repo's reader App (`pr_features_forge::fetch_pr_files`), at most
+  `FILE_READ_BUDGET` (6) calls per ETA pass and none while the rate-limit
+  breaker suppresses polling. Never-read PRs go first, then the stalest; a PR
+  not updated since its last read is left alone, and an unchanged list (a
+  `304`, or an equal body) appends nothing.
+- **A full page logs unknown, not its paths.** 100 entries may be truncated,
+  and a partial list would read as a confident smaller overlap, so the read
+  logs an incomplete observation (`complete: false`) stamped at that
+  instant. From then on the PR's list is unknown; an older complete list
+  (before the PR grew past a page) still serves earlier cutoffs but is never
+  served as current after the incomplete read. A later whole page restores
+  it. Lines written before the field existed read as `complete`.
+- **Head identity.** Each snapshot carries `head_sha`, read from the page's
+  own entries (`contents_url` `?ref=` / `blob_url`). A page whose entries
+  name different heads (a push landed mid-read) logs incomplete, and a new
+  head is logged even when its paths equal the previous head's.
+- **Point in time.** The builder reads the latest snapshot strictly before
+  `as_of` (`t - lag` in the fit, `now - lag` serving), so a later push, or a
+  list first read later, moves no earlier row. The log starts when the reader
+  first runs: older rows keep `overlap_known = 0`.
+- **Both sides.** `eta fit` loads the log (`fit_snapshots_with_files`) and the
+  tracker is handed the same file each cycle
+  (`Tracker::set_file_snapshots`); both pass `files: Some(..)` to
+  `loop_features`. Snapshots older than 120 days are dropped when the log
+  grows past 20 000 entries.
 
 ### Dependency-aware ETAs (#10510)
 
@@ -2269,7 +2415,16 @@ accepts `--repo-root PATH` (default: the current directory).
   operator-held approval replays as `merge_hold` and its release as
   `merge_wait`; entries the resolver refuses (`blocked`, `unknown_stage`)
   yield no case and are reported as refused entries (#10305). Without either
-  flag the backtest makes no forge call.
+  flag the backtest makes no forge call. `--adaptation` (not with
+  `--compare`) adds `regime_adaptation` (#10528): on the busiest stage, a
+  synthetic x2 shift is injected into the heuristic's own scored residuals at
+  their median outcome, and the drift-gated regime layer (`eta::regime`) is
+  replayed hour by hour for 24 h, reporting `t_p50` (served p50 within 25% of
+  the new truth), `t_cov` (trailing-6 h p25–p75 coverage of post-shift
+  outcomes back in 40–60%), `t_alarm` (drift check trips) against the 6 h / 12 h / 3 h targets,
+  plus `false_alarm` on the unshifted stream. It measures the regime layer
+  on this heuristic's noise, not the heuristic's own adaptation, so it does
+  not feed the promotion gate's `adaptation` check.
 - **`loom-daemon eta view OWNER/NAME#ISSUE [--explain] [--json]`** — the
   current estimate(s) for one issue (#9327). State resolution, in order:
   1. An **open linked PR**: its review labels
@@ -2528,7 +2683,9 @@ of what is on disk and never needs a refetch.
 | `fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `600` (#10329; was `1500`) |
 | `fleetRefresh.reserveCalls` | `LOOM_ETA_FLEET_REFRESH_RESERVE` | `1500` |
 | `fleetRefresh.backfillDays` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_DAYS` | `21` (floor 15: the fit window + 1) |
+| `fleetRefresh.gapFillMaxCallsPerPass` | `LOOM_ETA_FLEET_REFRESH_GAP_FILL_MAX_CALLS` | `100` (floor `2`: one listing page + one timeline page): forge gap-fill reads per repo per cycle while SigNoz is the history source (#10520), snapshot and raw-event reads alike; a covered repo makes neither (its raw cache's star coverage is frozen, so later cutoffs read star-unknown). An interrupted timeline resumes at its next page |
 | `fleetRefresh.signoz.enabled` | `LOOM_ETA_FLEET_SIGNOZ_ENABLED` | `false` (#9758; see [SigNoz in-sweep half](#signoz-in-sweep-half-fleetrefreshsignoz-9758)) |
+| `fleetRefresh.signoz.historyPrimary` | `LOOM_ETA_FLEET_SIGNOZ_HISTORY_PRIMARY` | `false` (#10520, opt-in): with `signoz.enabled` and this set, each pass takes PR history from the SigNoz timeline and reads the forge only to gap-fill (every PR SigNoz knows, baseline-only label sets included, is planned); a failed or partial SigNoz walk degrades to the forge walk. Design, coverage rule and parity tolerance: `loom-daemon/src/eta/fleet_signoz_history.rs` |
 
 `historyScope` is one of:
 
@@ -2776,7 +2933,7 @@ day, catches up at most 7 missed days oldest first).
     the same gate function as `eta promote` (`shadow::backtest_gate`), not the
     same data: the summary also replays fleet snapshots and the offline PR
     cache, `eta promote` local data only.
-  - Both give `land-2026-10-06-calm-plover` the replay calibration evidence
+  - Both give `land-2026-10-06-even-lark` the replay calibration evidence
     `eta backtest` / `eta promote` do (`backtest::with_replay_calibration`,
     built from the already-cut cases), so it is not folded as plain `land-v2`.
 - **Strictly point-in-time.** Before replaying, the run drops every input

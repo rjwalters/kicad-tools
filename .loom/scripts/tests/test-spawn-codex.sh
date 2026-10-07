@@ -1613,11 +1613,12 @@ assert_not_contains "MOCK-SAW-STDIN" "$session_stderr" \
     "session-exec closes the exec'd process's stdin, same as bare-metal (never a hang)"
 
 assert_contains "loom-codex-session-session-acct codex exec" "$(cat "$SESSION_DOCKER_EXEC_ARGV")" "docker exec targets the account's own session container with the codex exec argv"
+# The real `session-exec host` took this container's dispatch lock, in the
+# sandbox, not under the real ~/.loom (lib/session-lock-sandbox.sh, #10661).
+lss_expect_lock loom-codex-session-session-acct
 
-set +e
-run_session_mock MOCK_RC=42 -- -p "hi" >/dev/null 2>&1
-session_exit_rc=$?
-set -e
+session_exit_rc=0
+run_session_mock MOCK_RC=42 -- -p "hi" >/dev/null 2>&1 || session_exit_rc=$?
 assert_eq "42" "$session_exit_rc" \
     "session-exec preserves exit-code passthrough (PIPESTATUS), identical to bare-metal"
 

@@ -70,6 +70,11 @@
 #                             the real host's in-flight sweep claims)
 #   LOOM_WATCHES_PATH      -> <dir>/watches.json         (#4556)
 #   LOOM_WATCH_RESULTS_LOG -> <dir>/watch-results.log    (#4556)
+#   LOOM_SESSION_FALLBACK_ROOT_FILE -> <dir>/session-reconcile-fallback-root.json
+#                             (#10661: a daemon records its fallback root there
+#                             at startup; the real one steers the operator CLI)
+#   LOOM_SESSION_RECONCILE -> 0 (#10661: a test daemon never reconciles the
+#                             host's real Codex session containers)
 #   LOOM_DAEMON_BIN        -> UNSET  (#4902: the ambient value names the REAL binary)
 #   LOOM_WORKSPACE         -> UNSET  (pid-file tier 3; each sub-invocation must
 #                             resolve its OWN fixture repo root instead)
@@ -163,7 +168,7 @@
 
 # State files that identify/steer a daemon and are written only at lifecycle
 # transitions — safe to compare before/after even while a real daemon runs.
-LIVE_STATE_SANDBOX_GUARDED_FILES=".daemon.pid .daemon.flags autonomy-desired"
+LIVE_STATE_SANDBOX_GUARDED_FILES=".daemon.pid .daemon.flags autonomy-desired session-reconcile-fallback-root.json"
 
 # The systemd --user unit name the production daemon is supervised by. Used by
 # the #8077 leak guard below to tell an EXPECTED supervised restart (auto_update
@@ -560,6 +565,10 @@ live_state_sandbox_init() {
     export LOOM_SWEEPS_JOURNAL_PATH="$dir/sweeps.json"
     export LOOM_WATCHES_PATH="$dir/watches.json"
     export LOOM_WATCH_RESULTS_LOG="$dir/watch-results.log"
+    # #10661: the session reconcile loop's startup record of the daemon's
+    # fallback root (written under the real ~/.loom otherwise), and the loop.
+    export LOOM_SESSION_FALLBACK_ROOT_FILE="$dir/session-reconcile-fallback-root.json"
+    export LOOM_SESSION_RECONCILE=0
 
     # #8077 AC2: a sandboxed suite never gets to drive the LIVE `systemctl
     # --user` manager implicitly. Blocks stay opt-in even here; an operator who
@@ -607,6 +616,7 @@ live_state_sandbox_describe() {
     printf 'LOOM_SWEEPS_JOURNAL_PATH=%s\n' "${LOOM_SWEEPS_JOURNAL_PATH:-}"
     printf 'LOOM_WATCHES_PATH=%s\n' "${LOOM_WATCHES_PATH:-}"
     printf 'LOOM_WATCH_RESULTS_LOG=%s\n' "${LOOM_WATCH_RESULTS_LOG:-}"
+    printf 'LOOM_SESSION_FALLBACK_ROOT_FILE=%s\n' "${LOOM_SESSION_FALLBACK_ROOT_FILE:-}"
     printf 'LOOM_TEST_ALLOW_SYSTEMD=%s\n' "${LOOM_TEST_ALLOW_SYSTEMD:-<unset>}"
     printf 'LOOM_WORKSPACE=%s\n' "${LOOM_WORKSPACE:-<unset>}"
     printf 'LOOM_MACHINE_CHECKOUT=%s\n' "${LOOM_MACHINE_CHECKOUT:-<unset>}"

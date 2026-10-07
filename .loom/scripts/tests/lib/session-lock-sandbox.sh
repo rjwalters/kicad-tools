@@ -20,6 +20,19 @@
 # real directory need not exist at all (a fresh CI runner). Every command is
 # safe under `set -euo pipefail` and bash 3.2. The suite's own exit status is
 # otherwise kept.
+#
+# That watch cannot see a regression that re-opens a fixture lock which
+# already exists under the real directory (left by an older run): opening it
+# again changes neither presence nor mtime. So a suite also calls
+#
+#   lss_expect_lock <fixture container>
+#
+# right after a step in which the real binary must have taken that
+# container's lock (at top level, not in a `$(...)` subshell). The lock must
+# then be in the suite's SANDBOX directory, which proves the redirect took
+# effect; if it is not, the suite fails at exit (#10661). Only suites pinned
+# to this checkout's build (lib/require-daemon-bin.sh) call it: a suite that
+# runs whatever `loom-daemon` is on PATH may get one predating the lock.
 
 _lss_root="$1"
 _lss_real="${HOME}/.loom/session-locks"
@@ -39,6 +52,16 @@ _lss_present() {
     printf '%s' "$found"
 }
 _lss_before="$(_lss_present)"
+_lss_missing=""
+
+# Positive check: `$1`'s lock was taken in the sandbox (see above).
+lss_expect_lock() {
+    if [[ -e "${LOOM_SESSION_LOCK_DIR}/${1}.lock" ]]; then
+        return 0
+    fi
+    _lss_missing="${_lss_missing} ${1}.lock"
+    echo "FAIL: ${1}.lock is not in this suite's sandbox ${LOOM_SESSION_LOCK_DIR}: the dispatch lock went somewhere else (#10661)" >&2
+}
 
 _lss_exit() {
     local rc=$?
@@ -56,6 +79,10 @@ _lss_exit() {
     done
     if [[ -n "$changed" ]]; then
         echo "FAIL: this suite wrote fixture locks under the real ${_lss_real}:${changed} (#10364)" >&2
+        rc=1
+    fi
+    if [[ -n "$_lss_missing" ]]; then
+        echo "FAIL: expected sandbox dispatch locks were never taken:${_lss_missing} (#10661)" >&2
         rc=1
     fi
     rm -rf "$_lss_root"

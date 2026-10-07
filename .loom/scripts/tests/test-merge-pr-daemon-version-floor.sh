@@ -297,6 +297,7 @@ zero-checks-settle open -
 check-runs-streak open -
 check-runs-rollup open -
 stacked-children open -
+retarget-children open -
 version-policy open -
 partial-reset open -
 partial-comment open -
@@ -307,6 +308,7 @@ dirty-guard open -
 worktree-contains open -
 worktree-preserve open -
 discovered-worktree open -
+retries-used open -
 cleanup-paths open -"
 
 # Shared comparison, so the controls below exercise the SAME logic the real
@@ -399,8 +401,8 @@ mkdir -p "$WORKDIR/rv-repo/.loom"
 REPO_ROOT_SAVED="$REPO_ROOT"
 REPO_ROOT="$WORKDIR/rv-repo"
 
-REV_OFF="$(LOOM_MERGE_REVERIFY_STALE_CHECKS="" LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"; REV_OFF_RC=$?
-assert_eq "" "$REV_OFF" "no warning while reverify is off (default)"
+REV_OFF="$(LOOM_MERGE_REVERIFY_STALE_CHECKS=off LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"; REV_OFF_RC=$?
+assert_eq "" "$REV_OFF" "no warning while reverify is explicitly off (env)"
 assert_eq "0" "$REV_OFF_RC" "off: returns 0"
 
 REV_ON="$(LOOM_MERGE_REVERIFY_STALE_CHECKS=1 LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"; REV_ON_RC=$?
@@ -414,6 +416,9 @@ assert_contains "$REV_ON" "$(hostname 2>/dev/null || echo unknown)" "the warning
 echo '{"merge":{"reverifyStaleChecks":true}}' >"$REPO_ROOT/.loom/config.json"
 REV_CFG="$(LOOM_MERGE_REVERIFY_STALE_CHECKS="" LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"
 assert_contains "$REV_CFG" "0.19.161" "the config key enables the check too"
+echo '{"merge":{"reverifyStaleChecks":false}}' >"$REPO_ROOT/.loom/config.json"
+REV_CFG_OFF="$(LOOM_MERGE_REVERIFY_STALE_CHECKS="" LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"
+assert_eq "" "$REV_CFG_OFF" "config false disables the warning"
 
 cat >"$WORKDIR/new-loom-daemon" <<'FAKE'
 #!/usr/bin/env bash

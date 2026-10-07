@@ -487,7 +487,7 @@ fi
 # on a PR whose only problem was that CI outran LOOM_AUTO_MERGE_TIMEOUT.
 TESTS_RUN=$((TESTS_RUN + 1))
 if [[ -f "$CHAMPION_MD" ]] && grep -q '"\$MERGE_RC" -eq 5' "$CHAMPION_MD" \
-   && grep -q 'Exception: exit codes 3-6' "$CHAMPION_MD"; then
+   && grep -q 'Exception: exit codes 3-7' "$CHAMPION_MD"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: champion-pr-merge.md branches on exit 5 and its exception section covers it (#8896)"
 else
@@ -508,6 +508,19 @@ if [[ -f "$CHAMPION_MD" ]] && grep -q '"\$MERGE_RC" -eq 6' "$CHAMPION_MD" \
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: exit 6 (chain-head merge lock defer) is not wired/documented (#10167)"
+fi
+
+# #10628: Champion's exit 7 (merge-queue step withheld the direct merge) is
+# listed next to 3-6 in the exception section AND in the exceptions doc.
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -f "$CHAMPION_MD" ]] && grep -q '"\$MERGE_RC" -eq 7' "$CHAMPION_MD" \
+   && grep -q '^- \*\*7\*\* — ' "$CHAMPION_MD" \
+   && [[ -f "$EXIT_CODE_DOC" ]] && grep -q '^| `7` |' "$EXIT_CODE_DOC"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: exit 7 (merge-queue step) is wired in Champion and documented next to 3-6 (#10628)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: exit 7 (merge-queue step) is not documented next to 3-6 (#10628)"
 fi
 
 TESTS_RUN=$((TESTS_RUN + 1))

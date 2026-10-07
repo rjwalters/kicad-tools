@@ -71,10 +71,32 @@ telemetry. Direct mode makes no forge call from any of these. Issue closure
 stays GitHub's `Closes #N` on the confirmed merge; worktree cleanup stays the
 reaper's merged-PR pass.
 
+## Champion wiring (#10256, B3)
+
+`champion-pr-merge.md` Step 3 calls `loom-daemon forge merge-queue step <PR>
+--approved-sha <head>` immediately before `merge-pr.sh`. `step` is `reconcile`
+then, only on `LOOM-MERGE-QUEUE-CONTINUE`, `handoff`. The Champion falls
+through to the unchanged direct `merge-pr.sh` call **only** when the first line
+is `LOOM-MERGE-QUEUE-DIRECT` on stdout with exit 0. A daemon that predates the
+`step` verb can already honor `champion.mergeMode=queue`, so an unrecognized
+subcommand alone is NOT permission to merge directly. #10628 allows the
+pre-#10256 direct merge, logged as `LOOM-MERGE-QUEUE-COMPAT`, only when direct
+mode is *proven*: the same binary's `forge merge-queue mode` prints
+`mode=direct`, or the binary has no `merge-queue` verb at all and so predates
+merge modes. Every other result (queued, dropped, merged, undetermined, invalid
+mode, unprovable mode, empty output) sets `MERGE_RC=7`: nothing merged, the PR
+stays approved, no direct merge. The non-queue 7s are surfaced as
+`CHAMPION-MERGE-QUEUE-STALL` plus one head-keyed PR notice. See
+`merge-pr-exit-code-exceptions.md` → "Exit 7". Because the Champion never calls `merge-pr.sh` in
+queue mode, the direct re-date remedy is never run there. Failure mode guarded:
+a queue-mode PR merged directly, bypassing the authorization protocol.
+
 ## Still not done
 
-Champion prompt (`champion-pr-merge.md`) and `merge-pr.sh` do not call the
-handoff yet; the grant store is comment-backed, not durable; no `merge_group`
-check workflow; the post-check-pass revocation window above is still open, so
-`INVARIANT_FULLY_DEMONSTRATED` and `QUEUE_EXECUTION_ENABLED` stay `false`.
-Production enablement also needs Phase C qualification (`merge-queue-ci.md`).
+The grant store is comment-backed, not durable; no `merge_group` check
+workflow; `judge.md` is not wired (review claims and revocations reach the
+queue through `forge disable-auto-merge`/claim-reconciliation revoke and the
+live `loom/merge-authorization` check); the post-check-pass revocation window
+above is still open, so `INVARIANT_FULLY_DEMONSTRATED` and
+`QUEUE_EXECUTION_ENABLED` stay `false`. Production enablement also needs Phase C
+qualification (`merge-queue-ci.md`).

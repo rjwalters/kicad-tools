@@ -1233,6 +1233,17 @@ Add to `.loom/config.json`:
 must have a matching `spawn-<value>.sh` runner on disk (e.g. `"claude"` →
 `spawn-claude.sh`).
 
+### LLM gateway routing (issue #9473)
+
+`runtimes.llmGateway` (or the `LOOM_LLM_GATEWAY_*` environment, which wins)
+routes named, API-key model profiles on the native harnesses through a
+self-hosted LLM gateway: the harness gets the gateway's base URL and a virtual
+key in place of the provider's endpoint and key. Claude and Codex never receive
+it; `spawn-worker` scrubs the variables from every process it execs, and the
+sweep, role-runner and epic dispatch surfaces strip them from any child that
+cannot use them. Contract, per-runtime mapping and the red line:
+[`llm-gateway.md`](llm-gateway.md).
+
 ### Ordered runtime preference with fall-through (issue #8436)
 
 The precedence chain above is **static**: it picks a runtime without asking
@@ -2213,6 +2224,8 @@ collaboration:
 
 ## Related
 
+- [`llm-gateway.md`](llm-gateway.md) — routing opted-in API-key profiles on
+  the native harnesses through a self-hosted LLM gateway (#9473).
 - [`configuring-resources.md`](configuring-resources.md) — operator runbook that
   combines this doc's `runtimes.*` keys with the model, credential-pool and
   spend-bound axes into copy-pasteable recipes.

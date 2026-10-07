@@ -271,6 +271,9 @@ host_refusal() {
 }
 out="$(host_refusal 'echo false')"
 assert_contains "$REFUSAL" "$out" "session-exec host announces SESSION_DOWN for a container that is not running"
+# It took the dispatch lock before its inspect, in the sandbox, not under the
+# real ~/.loom (lib/session-lock-sandbox.sh, #10661).
+lss_expect_lock loom-codex-session-acct
 assert_contains "rc=78" "$out" "…and still refuses with 78"
 out="$(host_refusal 'echo "Error: No such object" >&2; exit 1')"
 assert_contains "$REFUSAL" "$out" "…and for a container docker does not have"

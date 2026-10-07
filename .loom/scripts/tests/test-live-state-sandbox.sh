@@ -604,7 +604,8 @@ init8077_out=$(
 )
 for _var in LOOM_DAEMON_LOG:daemon.log LOOM_SHARED_TOKENS_DIR:tokens \
             LOOM_WORKSPACES_PATH:workspaces.json LOOM_SWEEPS_JOURNAL_PATH:sweeps.json \
-            LOOM_WATCHES_PATH:watches.json LOOM_WATCH_RESULTS_LOG:watch-results.log; do
+            LOOM_WATCHES_PATH:watches.json LOOM_WATCH_RESULTS_LOG:watch-results.log \
+            LOOM_SESSION_FALLBACK_ROOT_FILE:session-reconcile-fallback-root.json; do
     _name="${_var%%:*}"; _leaf="${_var#*:}"
     check "$([[ "$init8077_out" == *"$_name=$WORKDIR/sandbox8077/$_leaf"* ]] && echo 0 || echo 1)" \
         "init redirects $_name into the sandbox (#8077)" "$init8077_out"

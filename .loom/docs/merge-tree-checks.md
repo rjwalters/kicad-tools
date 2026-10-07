@@ -77,23 +77,27 @@ predates the `tree-checks` verb refuses merges until it is rolled.
 
 This is a separate mechanism from `merge.treeChecks`. It uses the same
 merge-tree machinery to satisfy the required-check freshness guard (#8248)
-without a CI round trip. It is **off by default**: a repository opts in.
+without a CI round trip. It is **on by default** (#10465) for the
+toolchain-free allowlisted checks (conflict markers first); a repository opts
+out by setting the flag to `false`.
 
 | Setting | Values | Default |
 |---|---|---|
 | env `LOOM_MERGE_REVERIFY_STALE_CHECKS` | `1`/`true`/`yes`/`on`, `0`/`false`/`no`/`off` | — (falls through) |
-| config `merge.reverifyStaleChecks` | `true` / `false` | `false` |
+| config `merge.reverifyStaleChecks` | `true` / `false` | `true` |
 
 Precedence is env > config > default. An unparseable value falls through to
-the next tier. When the flag is off, `stale-checks` behaves exactly as before:
+the next tier. When the flag is off (explicitly), `stale-checks` behaves exactly as before:
 no fetch, no temp dir, no extra output.
 
 **Version floor (#10465).** The flag only has an effect on a merging host whose
 `loom-daemon` is >= 0.19.741 (`_MP_REVERIFY_FLOOR` in `merge-pr.sh`). An older
-binary ignores it and falls back to re-dates, so with the flag on `merge-pr.sh`
+binary ignores it and falls back to re-dates, so with the flag on (explicitly or by default) `merge-pr.sh`
 prints one warning per invocation naming the host, the resolved daemon version
 and the floor. The warning never changes the exit code; roll the host with
-`cli/loom-daemon-update.sh --fetch`.
+`cli/loom-daemon-update.sh --fetch`. `loom-daemon guards status` reports the
+same condition as `REVERIFY-DAEMON-TOO-OLD`. An explicitly disabled flag is
+silent. The feature stays fail-open: no `requires-daemon` floor is raised.
 
 When it is on, `loom-daemon merge-pr stale-checks` finds required checks
 stale, and **every** stale component of every stale context is on the cheap

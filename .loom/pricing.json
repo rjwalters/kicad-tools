@@ -2,7 +2,7 @@
   "schema_version": 1,
   "verified_on": "2026-09-18",
   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
-  "notes": "Model rate card, USD per 1000 tokens (= the published $/MTok / 1000). Resync-delivered to .loom/pricing.json so a price change reaches the fleet without a Loom release (#8177, ask 2 of #8060). loom-daemon falls back to the compiled card in loom-daemon/src/activity/resource_usage.rs when this file is absent or fails validation, and the two are held in agreement by the shipped_pricing_asset_agrees_with_the_compiled_card test. Rows are an ORDERED cascade: the first row with a `match` substring contained in the (lowercased, alias-resolved) model id wins, exactly like the compiled card. Keep the trailing `claude-<family>-` catch-all of each family pointing at that family's NEWEST published row — an unrecognized id is far likelier to be newer than the card than to be a resurrected retired model. The Moonshot/Kimi rows (#8564) come from a SECOND vendor page, https://platform.moonshot.ai/docs/pricing/chat, verified 2026-09-22; `verified_on` above stays at the OLDER of the two dates so the staleness warning fires on whichever vendor has gone unchecked longest. Those rows are the platform API LIST price and are an estimate: a Kimi Code subscription is not billed per token, so for a subscription launch the derived cost is 'what these tokens would have cost on the API', not money that changed hands. The K2 table publishes no cache-write price, so the K2 rows' write rates are the published cache-miss input price rather than an invented surcharge.",
+  "notes": "Model rate card, USD per 1000 tokens (= the published $/MTok / 1000). Resync-delivered to .loom/pricing.json so a price change reaches the fleet without a Loom release (#8177, ask 2 of #8060). loom-daemon falls back to the compiled card in loom-daemon/src/activity/resource_usage.rs when this file is absent or fails validation, and the two are held in agreement by the shipped_pricing_asset_agrees_with_the_compiled_card test. Rows are an ORDERED cascade: the first row with a `match` substring contained in the (lowercased, alias-resolved) model id wins, exactly like the compiled card. Keep the trailing `claude-<family>-` catch-all of each family pointing at that family's NEWEST published row — an unrecognized id is far likelier to be newer than the card than to be a resurrected retired model. The Moonshot/Kimi rows (#8564) come from a SECOND vendor page, https://platform.moonshot.ai/docs/pricing/chat, verified 2026-09-22; `verified_on` above stays at the OLDER of the two dates so the staleness warning fires on whichever vendor has gone unchecked longest. Those rows are the platform API LIST price and are an estimate: a Kimi Code subscription is not billed per token, so for a subscription launch the derived cost is 'what these tokens would have cost on the API', not money that changed hands. The K2 table publishes no cache-write price, so the K2 rows' write rates are the published cache-miss input price rather than an invented surcharge. The OpenAI/Codex gpt-6 rows (#10750) come from a THIRD vendor page, https://platform.openai.com/docs/pricing (also served at https://developers.openai.com/api/docs/pricing), Standard tier, SHORT-context columns, read 2026-10-07; the 2026-09-18 `verified_on` above is still the older date. Published $/MTok (input / cached input / cache writes / output): gpt-6.1-sol 2 / 0.10 / 2.50 / 10; gpt-6-astra 10 / 1 / 12.50 / 50; gpt-6-sol 2 / 0.20 / 2.50 / 10; gpt-6-luna 0.10 / 0.01 / 0.125 / 0.50. The page publishes one cache-write price, used for both the 5m and 1h rates. These are API LIST prices and an estimate: Codex usage under a ChatGPT subscription is not billed per token. The Long-context column (higher rates above the context threshold), the Batch/Flex/Fast/Ultrafast tiers are NOT modelled (the card has no per-tier rows). There is deliberately NO trailing gpt-6 catch-all: gpt-6 variants differ up to 100x in price, so an unrecognized variant stays unpriced (and logs a WARN) rather than getting a guessed rate.",
   "cache_multipliers": {
     "read": 0.1,
     "read_reduced": 0.025,
@@ -167,6 +167,50 @@
         "read_per_1k": 0.00019,
         "write_5m_per_1k": 0.00095,
         "write_1h_per_1k": 0.00095
+      }
+    },
+    {
+      "id": "gpt-6-1-sol",
+      "match": ["gpt-6.1-sol"],
+      "input_per_1k": 0.002,
+      "output_per_1k": 0.01,
+      "cache_rates": {
+        "read_per_1k": 0.0001,
+        "write_5m_per_1k": 0.0025,
+        "write_1h_per_1k": 0.0025
+      }
+    },
+    {
+      "id": "gpt-6-astra",
+      "match": ["gpt-6-astra"],
+      "input_per_1k": 0.01,
+      "output_per_1k": 0.05,
+      "cache_rates": {
+        "read_per_1k": 0.001,
+        "write_5m_per_1k": 0.0125,
+        "write_1h_per_1k": 0.0125
+      }
+    },
+    {
+      "id": "gpt-6-sol",
+      "match": ["gpt-6-sol"],
+      "input_per_1k": 0.002,
+      "output_per_1k": 0.01,
+      "cache_rates": {
+        "read_per_1k": 0.0002,
+        "write_5m_per_1k": 0.0025,
+        "write_1h_per_1k": 0.0025
+      }
+    },
+    {
+      "id": "gpt-6-luna",
+      "match": ["gpt-6-luna"],
+      "input_per_1k": 0.0001,
+      "output_per_1k": 0.0005,
+      "cache_rates": {
+        "read_per_1k": 1e-05,
+        "write_5m_per_1k": 0.000125,
+        "write_1h_per_1k": 0.000125
       }
     },
     {
