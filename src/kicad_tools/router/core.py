@@ -4419,6 +4419,11 @@ class Autorouter:
         if getattr(self, "_strategy", "grid") == "lattice":
             return self._route_net_lattice(net)
 
+        # Issue #6008: callers that reach ``route_net`` without ``route_all*``
+        # (diff-pair, bus, block-aware, direct API) skip ``_prepare_routing``;
+        # the install is idempotent per grid, so make it unconditional here.
+        self._install_grid_rule_area_keepouts()
+
         # Issue #4170 (Phase 2b-1): bare boundary stub terminals are an additive
         # source of per-net targets.  A net may have only ONE in-region pad plus
         # a boundary stub (or even zero pads registered here but a stub target),

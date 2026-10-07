@@ -13304,6 +13304,12 @@ class DiffPairRouter:
                 return non_diffpair_strategy(), []
             return self.autorouter.route_all(net_order), []
 
+        # Issue #6008: this path reaches the coupled router and ``route_net``
+        # without ``_prepare_routing``, so install keepout rule areas up front.
+        install_areas = getattr(self.autorouter, "_install_grid_rule_area_keepouts", None)
+        if install_areas is not None:
+            install_areas()
+
         print("\n=== Differential Pair Routing ===")
 
         diff_pairs_with_source = self.detect_differential_pairs_with_source()

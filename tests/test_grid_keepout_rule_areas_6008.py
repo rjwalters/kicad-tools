@@ -476,3 +476,41 @@ def test_rule_area_grid_disc_matches_euclidean_kernel() -> None:
     assert area.hits_disc(13, 14, 5)  # 3-4-5: on the disc boundary
     assert not area.hits_disc(14, 14, 5)  # sqrt(32) > 5 even though |d|_inf = 4
     assert math.isclose(area.bbox[2], 1.0)
+
+
+# ---------------------------------------------------------------------------
+# route_net-driven paths that skip ``_prepare_routing`` (Judge review, #6008)
+# ---------------------------------------------------------------------------
+
+
+def _usb_pair_board() -> str:
+    text = _board(_wall(), two_nets=True)
+    return text.replace("/HV_A", "/USB_D+").replace("/HV_B", "/USB_D-")
+
+
+def _assert_no_wall_crossing(routes) -> None:
+    for seg in _segments(routes):
+        assert not _crosses_band(seg, WALL_X0, WALL_X1, seg.width / 2), (
+            f"segment crosses the tracks-not-allowed wall: {seg}"
+        )
+    for via in _vias(routes):
+        assert not (WALL_X0 - via.diameter / 2 < via.x < WALL_X1 + via.diameter / 2)
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_direct_route_net_installs_keepouts(tmp_path: Path, force_python: bool) -> None:
+    router = _load(tmp_path, _board(_wall()), force_python)
+    assert getattr(router.grid, "_rule_area_keepouts", None) is None
+    routes = router.route_net(1)
+    assert router.grid._rule_area_keepouts is not None
+    _assert_no_wall_crossing(routes)
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_diffpair_router_respects_keepout_wall(tmp_path: Path, force_python: bool) -> None:
+    from kicad_tools.router.diffpair import DifferentialPairConfig
+
+    router = _load(tmp_path, _usb_pair_board(), force_python)
+    routes, _warnings = router.route_all_with_diffpairs(DifferentialPairConfig(enabled=True))
+    assert router.grid._rule_area_keepouts, "keepouts must be installed on the grid"
+    _assert_no_wall_crossing(list(routes))
