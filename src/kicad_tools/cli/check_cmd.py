@@ -8,6 +8,7 @@ Usage:
     kct check board.kicad_pcb                      # Run all checks
     kct check board.kicad_pcb --mfr jlcpcb         # With manufacturer rules
     kct check board.kicad_pcb --format json        # JSON output for CI
+    kct check board.kicad_pcb --format sarif       # SARIF 2.1.0 for code scanning
     kct check board.kicad_pcb --only clearance     # Run specific checks
     kct check board.kicad_pcb --skip silkscreen    # Exclude checks
     kct check --diff OLD.kicad_pcb NEW.kicad_pcb   # Findings introduced/resolved
@@ -1427,9 +1428,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--format",
-        choices=["table", "json", "summary"],
+        choices=["table", "json", "summary", "sarif"],
         default="table",
-        help="Output format (default: table)",
+        help=(
+            "Output format (default: table). 'sarif' writes a SARIF 2.1.0 log "
+            "for CI code scanning (also with --diff), fingerprinted by finding "
+            "key and evidence hash (Issue #6006)"
+        ),
     )
     parser.add_argument(
         "--errors-only",
@@ -2501,7 +2506,9 @@ def main(argv: list[str] | None = None) -> int:
     if general_waivers is not None:
         from kicad_tools.validate.rules.waivers import apply_waivers
 
-        apply_waivers(results, general_waivers)
+        # Issue #6006: ``mistake.*`` entries belong to ``kct detect-mistakes``
+        # (same sidecar); they must not read as unused here.
+        apply_waivers(results, general_waivers.for_check())
 
     # Issue #4321 (Tier 3): fail loud when an ampacity target was declared
     # but never evaluated.  A declared ``target_ampacity`` that matched zero
@@ -2667,14 +2674,17 @@ def main(argv: list[str] | None = None) -> int:
     # boards 03/04's ad hoc ``fabrication_overrides`` block.  ``None`` when
     # no ``via_in_pad_process_id`` is declared (the common case).
     fabrication_process_dict = describe_selection(checker.design_rules)
-    if results.mask_copper_assessments and args.format != "json":
+    machine_output = args.format in ("json", "sarif")
+    if results.mask_copper_assessments and not machine_output:
         for assessment in results.mask_copper_assessments:
             print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
             for reason in assessment.reasons:
                 print(f"  {reason}")
 
     # Output results
-    if args.format == "json":
+    if args.format == "sarif":
+        output_sarif(violations, results, pcb_path, coverage=coverage_dict)
+    elif args.format == "json":
         output_json(
             violations,
             results,
@@ -2701,7 +2711,7 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #5946: "unknown is not pass" -- name every check that could not
     # evaluate this board.  Kept off the --drc-only legacy stdout and out of
     # the JSON stream (the JSON carries the full ``coverage`` map).
-    if args.format != "json" and not drc_only:
+    if not machine_output and not drc_only:
         print_coverage_stanza(coverage)
 
     # Write JSON report to file if --output specified
@@ -3577,6 +3587,40 @@ def output_json(
     if coverage is not None:
         data["coverage"] = coverage
     print(json.dumps(data, indent=2))
+
+
+def output_sarif(
+    violations: list[DRCViolation],
+    results: DRCResults,
+    pcb_path: Path,
+    coverage: dict | None = None,
+) -> None:
+    """Output the findings as a SARIF 2.1.0 log (Issue #6006).
+
+    See :mod:`kicad_tools.validate.sarif` for the severity, fingerprint and
+    location mapping.  Waived findings are included as suppressed results.
+    """
+    from kicad_tools.validate.sarif import sarif_log
+
+    summary: dict = {
+        "errors": sum(1 for v in violations if v.is_error),
+        "warnings": sum(1 for v in violations if v.is_warning),
+        "infos": sum(1 for v in violations if v.is_info),
+        "waived": sum(1 for v in violations if v.is_waived),
+        "stale_waivers": sum(
+            1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
+        ),
+        "rules_checked": results.rules_checked,
+    }
+    if coverage is not None:
+        summary.update(_coverage_summary(coverage))
+    log = sarif_log(
+        [v.to_dict() for v in violations],
+        tool_name="kct check",
+        artifact=pcb_path,
+        run_properties={"summary": summary},
+    )
+    print(json.dumps(log, indent=2))
 
 
 def write_json_report(

@@ -7,6 +7,8 @@ Provides command-line access to the mistake detection module:
     kct detect-mistakes board.kicad_pcb --format json
     kct detect-mistakes board.kicad_pcb --category bypass_capacitor
     kct detect-mistakes board.kicad_pcb --severity warning
+    kct detect-mistakes board.kicad_pcb --format sarif     # SARIF 2.1.0 for CI
+    kct detect-mistakes board.kicad_pcb --waive KEY --waive-reason R --waive-reviewer ME
 
 Usage:
     kicad-tools detect-mistakes <pcb_file>          # Detect all mistakes
@@ -19,12 +21,18 @@ Exit Codes:
     2 - Warnings found (only with --strict)
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.explain.mistakes import MistakeCategory
+
+if TYPE_CHECKING:
+    from kicad_tools.explain.mistake_waivers import MistakeWaiverResult
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,9 +71,40 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--format",
         "-f",
-        choices=["table", "json", "tree", "summary"],
+        choices=["table", "json", "tree", "summary", "sarif"],
         default="table",
-        help="Output format (default: table)",
+        help=(
+            "Output format (default: table). 'sarif' writes a SARIF 2.1.0 log "
+            "fingerprinted by finding key and evidence hash (Issue #6006)"
+        ),
+    )
+
+    # Issue #6006: evidence-bound waivers (same keyed v3 entries and sidecar
+    # as ``kct check``; see kicad_tools.explain.mistake_waivers).
+    parser.add_argument(
+        "--waive",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Record an evidence-bound waiver for every current finding with this "
+            "stable key (the 'key' field in --format json; repeatable), bound to "
+            "its current evidence_hash, then report with it applied. Requires "
+            "--waive-reason and --waive-reviewer. Written to --waivers PATH, else "
+            "the discovered sidecar, else <board>.kct-waivers.json next to the board."
+        ),
+    )
+    parser.add_argument("--waive-reason", dest="waive_reason", default=None)
+    parser.add_argument("--waive-reviewer", dest="waive_reviewer", default=None)
+    parser.add_argument("--waive-issue", dest="waive_issue", default=None)
+    parser.add_argument(
+        "--waivers",
+        default=None,
+        help=(
+            "Path to a waivers sidecar (schema version 3). Default: auto-discover "
+            "<board>.kct-waivers.json, then .kct_waivers.json, next to the board. "
+            "Only 'mistake.*' entries apply here; kct check applies the rest."
+        ),
     )
 
     # Strict mode
@@ -98,9 +137,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Require PCB file for other modes
     if not args.pcb_file:
-        parser.print_help()
+        parser.print_help(sys.stderr if args.format in ("json", "sarif") else None)
         print("\nError: pcb_file required", file=sys.stderr)
         return 1
+    if args.waive and not (
+        (args.waive_reason or "").strip() and (args.waive_reviewer or "").strip()
+    ):
+        parser.error("--waive requires --waive-reason and --waive-reviewer")
 
     # Load and analyze PCB
     return _analyze_pcb(args)
@@ -199,32 +242,51 @@ def _analyze_pcb(args) -> int:
     else:
         mistakes, coverage = detector.detect_with_coverage(pcb)
 
+    # Issue #6006: stable keys + evidence hashes, then evidence-bound waivers.
+    waiver_outcome, code = _apply_waivers(args, pcb, pcb_path, mistakes, coverage)
+    if code is not None:
+        return code
+
     # Filter by severity if specified
     if args.severity:
         severity_order = {"error": 0, "warning": 1, "info": 2}
         min_severity = severity_order[args.severity]
         mistakes = [m for m in mistakes if severity_order.get(m.severity, 99) <= min_severity]
 
+    advisories = waiver_outcome.advisories
+    active = [m for m in mistakes if not m.waived]
+    waived = [m for m in mistakes if m.waived]
+
     # Output results
     if args.format == "json":
-        _output_json(mistakes, coverage)
+        _output_json(mistakes, coverage, advisories)
+    elif args.format == "sarif":
+        from kicad_tools.explain.mistake_waivers import board_origin
+
+        _output_sarif(mistakes, coverage, advisories, pcb_path, board_origin(pcb))
     elif args.format == "tree":
-        _output_tree(mistakes)
+        _output_tree(active)
+        _print_waiver_notes(waived, advisories)
     elif args.format == "summary":
-        _output_summary(mistakes)
+        _output_summary(active)
+        _print_waiver_notes(waived, advisories)
     else:
-        _output_table(mistakes, args.verbose)
+        _output_table(active, args.verbose)
+        _print_waiver_notes(waived, advisories)
 
     incomplete = [c for c in coverage if c.status == "incomplete"]
-    if incomplete and args.format != "json":
+    if incomplete and args.format not in ("json", "sarif"):
         print("\n" + "-" * 60)
         print(f"INCOMPLETE COVERAGE: {len(incomplete)} check(s) could not run:")
         for c in incomplete:
             print(f"  - {c.check_name} ({c.category.value}): {c.reason}")
 
-    # Determine exit code
-    error_count = sum(1 for m in mistakes if m.severity == "error")
-    warning_count = sum(1 for m in mistakes if m.severity == "warning")
+    # Determine exit code.  Waived findings never count; a stale waiver
+    # leaves its finding active and adds a waiver_stale warning.
+    error_count = sum(1 for m in active if m.severity == "error")
+    warning_count = sum(1 for m in active if m.severity == "warning") + sum(
+        1 for a in advisories if a.severity == "warning"
+    )
 
     if error_count > 0:
         return 1
@@ -311,6 +373,13 @@ def _print_mistake(m, verbose: bool = False) -> None:
 
     if m.location:
         print(f"      Location: ({m.location[0]:.2f}, {m.location[1]:.2f}) mm")
+    if m.stale_waiver_hash:
+        print(
+            f"      Waiver: STALE (reviewed as {m.stale_waiver_hash}, now {m.evidence_hash});"
+            f" key {m.key}"
+        )
+    elif verbose and m.key:
+        print(f"      Key: {m.key}")
 
     if verbose:
         print(f"      Problem: {m.explanation}")
@@ -319,20 +388,201 @@ def _print_mistake(m, verbose: bool = False) -> None:
             print(f"      Learn more: {m.learn_more_url}")
 
 
-def _output_json(mistakes: list, coverage: list | None = None) -> None:
+def _apply_waivers(
+    args: argparse.Namespace, pcb: Any, pcb_path: Path, mistakes: list, coverage: list
+) -> tuple[MistakeWaiverResult, int | None]:
+    """Annotate evidence, record ``--waive`` entries and apply waivers (Issue #6006).
+
+    Returns ``(outcome, exit_code)``; ``exit_code`` is ``None`` to continue.
+    """
+    from kicad_tools.explain.mistake_waivers import (
+        MistakeWaiverResult,
+        annotate_mistakes,
+        apply_mistake_waivers,
+    )
+    from kicad_tools.validate.rules.waivers import (
+        discover_waivers_sidecar,
+        load_waivers,
+        shadowed_waivers_sidecars,
+        write_keyed_waivers,
+    )
+
+    adapters = annotate_mistakes(mistakes, pcb)
+
+    # Same load / degrade contract as ``kct check --waivers``: an explicit
+    # path must exist and parse; a discovered sidecar that fails to parse
+    # degrades to a warning.
+    waivers = None
+    explicit = args.waivers is not None
+    path: Path | None = Path(args.waivers).resolve() if explicit else None
+    if path is None:
+        path = discover_waivers_sidecar(pcb_path)
+        if path is not None:
+            for shadowed in shadowed_waivers_sidecars(pcb_path, path):
+                print(
+                    f"WARNING: waivers sidecar {shadowed} is NOT applied: {path} takes precedence.",
+                    file=sys.stderr,
+                )
+    if path is not None:
+        if explicit and not path.is_file():
+            print(f"Error: waivers file not found: {path}", file=sys.stderr)
+            return MistakeWaiverResult(), 1
+        if path.is_file():
+            try:
+                waivers = load_waivers(path)
+            except ValueError as e:
+                if explicit:
+                    print(f"Error: invalid waivers file {path}: {e}", file=sys.stderr)
+                    return MistakeWaiverResult(), 1
+                print(f"WARNING: ignoring malformed waivers sidecar {path}: {e}", file=sys.stderr)
+
+    if args.waive:
+        wanted = list(dict.fromkeys(args.waive))
+        targets = [v for v in adapters if v.key in wanted]
+        missing = [k for k in wanted if not any(v.key == k for v in targets)]
+        if missing:
+            print(
+                "Error: --waive names no current finding for key(s): "
+                + ", ".join(repr(k) for k in missing)
+                + ". Copy the 'key' field from `kct detect-mistakes --format json`.",
+                file=sys.stderr,
+            )
+            return MistakeWaiverResult(), 1
+        waive_path = (
+            path if path is not None else pcb_path.parent / f"{pcb_path.stem}.kct-waivers.json"
+        )
+        try:
+            written = write_keyed_waivers(
+                waive_path,
+                targets,
+                reason=args.waive_reason,
+                reviewer=args.waive_reviewer,
+                issue=args.waive_issue,
+            )
+            waivers = load_waivers(waive_path)
+        except (OSError, ValueError) as e:
+            print(f"Error: cannot record waiver(s) in {waive_path}: {e}", file=sys.stderr)
+            return MistakeWaiverResult(), 1
+        print(
+            f"[INFO] recorded {written} evidence-bound waiver(s) in {waive_path}",
+            file=sys.stderr,
+        )
+
+    if waivers is None:
+        return MistakeWaiverResult(), None
+    # Only the checks that ran: a --category run must not report every other
+    # category's waivers as unused.
+    ran = {c.rule_id for c in coverage if c.status == "ran" and c.rule_id}
+    return apply_mistake_waivers(mistakes, adapters, waivers.for_mistakes(ran)), None
+
+
+def _summary(mistakes: list, advisories: list) -> dict:
+    active = [m for m in mistakes if not m.waived]
+    return {
+        "errors": sum(1 for m in active if m.severity == "error"),
+        "warnings": sum(1 for m in active if m.severity == "warning"),
+        "info": sum(1 for m in active if m.severity == "info"),
+        # Issue #6006: waived findings are listed but never counted above.
+        "waived": sum(1 for m in mistakes if m.waived),
+        "stale_waivers": sum(1 for m in mistakes if m.stale_waiver_hash),
+        "waiver_advisories": len(advisories),
+    }
+
+
+def _output_json(
+    mistakes: list, coverage: list | None = None, advisories: list | None = None
+) -> None:
     """Output mistakes (and coverage, issue #4899) as JSON."""
     coverage = coverage or []
+    advisories = advisories or []
     data = {
-        "summary": {
-            "errors": sum(1 for m in mistakes if m.severity == "error"),
-            "warnings": sum(1 for m in mistakes if m.severity == "warning"),
-            "info": sum(1 for m in mistakes if m.severity == "info"),
-        },
+        "summary": _summary(mistakes, advisories),
         "mistakes": [m.to_dict() for m in mistakes],
+        # Issue #6006: waiver_stale / waiver_unused advisories (about the
+        # waivers sidecar, not the board).
+        "waiver_findings": [a.to_dict() for a in advisories],
         "coverage": [c.to_dict() for c in coverage],
         "coverage_complete": all(c.status == "ran" for c in coverage),
     }
     print(json.dumps(data, indent=2))
+
+
+def _mistake_finding(m, origin: tuple[float, float] = (0.0, 0.0)) -> dict:
+    """A mistake in the finding-dict shape the SARIF builder reads.
+
+    The location is converted to sheet (KiCad file) coordinates, the frame
+    ``kct check`` findings and their SARIF use.
+    """
+    from kicad_tools.explain.mistake_waivers import sheet_location, split_components
+
+    items, nets, layer = split_components(m.components, frozenset())
+    data: dict[str, Any] = m.to_dict()
+    key = m.key or ""
+    parts = key.split("|")
+    if len(parts) == 4:
+        # The key already split components into items / nets / layer.
+        items = tuple(p for p in parts[1].split(",") if p)
+        nets = tuple(p for p in parts[2].split(",") if p)
+        layer = parts[3] or None
+    message = m.title
+    if m.explanation:
+        message = f"{m.title}: {m.explanation.strip()}"
+    data.update(
+        {
+            "rule_id": m.rule_id or f"mistake.{m.category.value}",
+            "message": message,
+            "items": list(items),
+            "nets": list(nets),
+            "layer": layer,
+            "location": list(loc) if (loc := sheet_location(m, origin)) else None,
+        }
+    )
+    return data
+
+
+def _output_sarif(
+    mistakes: list,
+    coverage: list,
+    advisories: list,
+    pcb_path: Path,
+    origin: tuple[float, float] = (0.0, 0.0),
+) -> None:
+    """Output mistakes as a SARIF 2.1.0 log (Issue #6006)."""
+    from kicad_tools.validate.sarif import sarif_log
+
+    findings = [_mistake_finding(m, origin) for m in mistakes] + [a.to_dict() for a in advisories]
+    descriptions: dict[str, str] = {}
+    for m in mistakes:
+        descriptions.setdefault(m.rule_id or f"mistake.{m.category.value}", m.title)
+    summary = _summary(mistakes, advisories)
+    summary["coverage_complete"] = all(c.status == "ran" for c in coverage)
+    summary["incomplete_checks"] = [c.check_name for c in coverage if c.status == "incomplete"]
+    log = sarif_log(
+        findings,
+        tool_name="kct detect-mistakes",
+        artifact=pcb_path,
+        rule_descriptions=descriptions,
+        run_properties={"summary": summary},
+    )
+    print(json.dumps(log, indent=2))
+
+
+def _print_waiver_notes(waived: list, advisories: list) -> None:
+    """Human view of waived findings and waiver advisories (Issue #6006)."""
+    if waived:
+        print("\n" + "-" * 60)
+        print(f"WAIVED ({len(waived)}, non-blocking):")
+        for m in waived:
+            print(f"  [W] {m.title} ({', '.join(m.components)})")
+            if m.waiver_reason:
+                print(f"      Waiver reason: {m.waiver_reason}")
+            if m.waiver_issue:
+                print(f"      Waiver issue: {m.waiver_issue}")
+    if advisories:
+        print("\n" + "-" * 60)
+        print("WAIVER ADVISORIES:")
+        for a in advisories:
+            print(f"  [{a.severity}] {a.rule_id}: {a.message}")
 
 
 def _output_tree(mistakes: list) -> None:

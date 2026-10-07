@@ -70,6 +70,18 @@ class Mistake:
         explanation: Detailed explanation of why this is a problem
         fix_suggestion: Actionable suggestion for fixing the issue
         learn_more_url: Optional URL or path to educational documentation
+        rule_id: Stable id of the check that produced the finding, e.g.
+            ``"mistake.bypass_cap_distance"`` (set by
+            :class:`MistakeDetector`, Issue #6006).
+        key: Stable finding key ``rule_id|items|nets|layer`` and
+        evidence_hash: Local-evidence hash -- the same identities
+            ``kct check`` findings carry (Issue #5946), attached by
+            :func:`kicad_tools.explain.mistake_waivers.annotate_mistakes`.
+        waived / waiver_reason / waiver_issue: Set when an evidence-bound
+            waiver acknowledged the finding.
+        stale_waiver_hash / stale_waiver_reason: Set when a waiver names the
+            finding but its evidence changed since review (the finding stays
+            active).
     """
 
     category: MistakeCategory
@@ -80,10 +92,23 @@ class Mistake:
     fix_suggestion: str
     location: tuple[float, float] | None = None
     learn_more_url: str | None = None
+    rule_id: str = ""
+    key: str | None = None
+    evidence_hash: str | None = None
+    waived: bool = False
+    waiver_reason: str | None = None
+    waiver_issue: str | None = None
+    stale_waiver_hash: str | None = None
+    stale_waiver_reason: str | None = None
+
+    @property
+    def is_active(self) -> bool:
+        """True unless an (unstale) waiver acknowledged the finding."""
+        return not self.waived
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        return {
+        data: dict[str, Any] = {
             "category": self.category.value,
             "severity": self.severity,
             "title": self.title,
@@ -92,7 +117,29 @@ class Mistake:
             "explanation": self.explanation,
             "fix_suggestion": self.fix_suggestion,
             "learn_more_url": self.learn_more_url,
+            # Issue #6006: the same identity / evidence / waiver fields as a
+            # ``kct check`` finding.
+            "rule_id": self.rule_id or None,
+            "key": self.key,
+            "evidence_hash": self.evidence_hash,
+            "status": "waived" if self.waived else self.severity,
+            "waived": self.waived,
         }
+        if self.waived:
+            data["waiver_reason"] = self.waiver_reason
+            data["waiver_issue"] = self.waiver_issue
+        if self.stale_waiver_hash is not None:
+            from kicad_tools.validate.evidence import is_outdated_evidence_hash
+
+            data["waiver_status"] = "stale"
+            data["stale_waiver_evidence_hash"] = self.stale_waiver_hash
+            data["stale_waiver_reason"] = self.stale_waiver_reason
+            data["stale_waiver_cause"] = (
+                "outdated_evidence_version"
+                if is_outdated_evidence_hash(self.stale_waiver_hash)
+                else "evidence_changed"
+            )
+        return data
 
     def format_tree(self) -> str:
         """Format as a tree structure for terminal output."""
@@ -147,6 +194,7 @@ class CheckCoverage:
     category: MistakeCategory
     status: Literal["ran", "incomplete"]
     reason: str | None = None
+    rule_id: str | None = None  # Issue #6006: see :func:`mistake_rule_id`
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -155,6 +203,7 @@ class CheckCoverage:
             "category": self.category.value,
             "status": self.status,
             "reason": self.reason,
+            "rule_id": self.rule_id,
         }
 
 
@@ -182,6 +231,29 @@ class MistakeCheck(Protocol):
                 because required input data was unavailable.
         """
         ...
+
+
+def mistake_rule_id(check: object) -> str:
+    """Stable rule id of a mistake check (Issue #6006).
+
+    ``mistake.`` plus the snake-cased class name without its ``Check``
+    suffix (``BypassCapDistanceCheck`` -> ``mistake.bypass_cap_distance``),
+    unless the check declares its own ``rule_id``.  The ``mistake.`` prefix
+    keeps these ids apart from ``kct check`` rule ids in a shared waivers
+    sidecar.
+    """
+    from kicad_tools.validate.rules.waivers import MISTAKE_RULE_PREFIX
+
+    declared = getattr(check, "rule_id", None)
+    if isinstance(declared, str) and declared:
+        return (
+            declared if declared.startswith(MISTAKE_RULE_PREFIX) else MISTAKE_RULE_PREFIX + declared
+        )
+    name = type(check).__name__
+    if name.endswith("Check") and len(name) > len("Check"):
+        name = name[: -len("Check")]
+    snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", name).lower()
+    return MISTAKE_RULE_PREFIX + snake
 
 
 class MistakeDetector:
@@ -295,6 +367,7 @@ class MistakeDetector:
         coverage: list[CheckCoverage] = []
         for check in checks:
             check_name = type(check).__name__
+            rule_id = mistake_rule_id(check)
             try:
                 found = check.check(pcb)
             except CheckIncomplete as exc:
@@ -304,9 +377,13 @@ class MistakeDetector:
                         category=check.category,
                         status="incomplete",
                         reason=exc.reason,
+                        rule_id=rule_id,
                     )
                 )
                 continue
+            for m in found:
+                if not m.rule_id:
+                    m.rule_id = rule_id
             mistakes.extend(found)
             coverage.append(
                 CheckCoverage(
@@ -314,6 +391,7 @@ class MistakeDetector:
                     category=check.category,
                     status="ran",
                     reason=None,
+                    rule_id=rule_id,
                 )
             )
 

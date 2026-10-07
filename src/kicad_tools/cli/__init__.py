@@ -738,6 +738,18 @@ def _run_detect_mistakes_command(args) -> int:
         sub_argv.append("--strict")
     if hasattr(args, "mistakes_verbose") and args.mistakes_verbose:
         sub_argv.append("--verbose")
+    # Issue #6006: evidence-bound waivers.
+    for key in getattr(args, "mistakes_waive", None) or []:
+        sub_argv.extend(["--waive", key])
+    for flag, attr in (
+        ("--waive-reason", "mistakes_waive_reason"),
+        ("--waive-reviewer", "mistakes_waive_reviewer"),
+        ("--waive-issue", "mistakes_waive_issue"),
+        ("--waivers", "mistakes_waivers"),
+    ):
+        value = getattr(args, attr, None)
+        if value:
+            sub_argv.extend([flag, value])
 
     return mistakes_cmd(sub_argv)
 

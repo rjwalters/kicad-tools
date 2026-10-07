@@ -350,8 +350,55 @@ version)`, and the finding's JSON carries
 `"evidence_changed"`. Re-waive them once after upgrading.
 Re-running `--waive` replaces the old entry. Legacy
 `rule`/`items`/`nets` entries (schema 2) still work, and a schema-3 legacy entry
-may add its own `evidence_hash`. Keyed entries apply to `kct check` only;
-`kct drc` ignores them.
+may add its own `evidence_hash`. Keyed entries apply to `kct check` and
+`kct detect-mistakes`; `kct drc` ignores them.
+
+### Waiving `kct detect-mistakes` findings
+
+`kct detect-mistakes --format json` findings carry the same `key` and
+`evidence_hash`, and take the same keyed waivers in the same sidecar:
+
+```bash
+kct detect-mistakes board.kicad_pcb --waive 'mistake.bypass_cap_distance|C1,U1||' \
+    --waive-reason "C1 is a bulk cap, not a bypass cap" --waive-reviewer rjwalters
+```
+
+A mistake's rule id is `mistake.` plus its check name
+(`mistake.bypass_cap_distance`, `mistake.power_trace_width`, ...). Its
+`components` are split into the key's items, nets (names that are nets on the
+board) and layer (`F.Cu`). The evidence is the `kct check` recipe plus the
+numbers quoted in the finding's explanation, which are its measurements: a
+trace widened from 0.25 mm to 0.28 mm, still too narrow, makes a waiver stale.
+
+Each command applies only its own entries. `kct check` ignores `mistake.*`
+entries, and `kct detect-mistakes` ignores everything else, so neither reports
+the other's waivers as unused. Waived mistakes are listed with
+`"status": "waived"` and never counted in `summary.errors` / `warnings`. Stale
+and unused waivers are reported in a separate `waiver_findings` list, and a
+stale waiver's `waiver_stale` warning fails `--strict`.
+
+### SARIF output for CI
+
+`kct check`, `kct check --diff` and `kct detect-mistakes` accept
+`--format sarif`, a SARIF 2.1.0 log for code-scanning tools:
+
+```bash
+kct check board.kicad_pcb --format sarif > kct-check.sarif
+kct check --diff HEAD~1:b/b.kicad_pcb b/b.kicad_pcb --format sarif > kct-diff.sarif
+```
+
+- **Level.** `error` stays `error`, `warning` stays `warning`, `info` becomes
+  `note`. A waived finding keeps its level and gets an accepted suppression
+  with the waiver's reason. A stale waiver does not suppress.
+- **Fingerprints.** The finding `key` is `partialFingerprints["kctFindingKey/v1"]`,
+  so one alert is tracked across commits. The `evidence_hash` is
+  `fingerprints["kctEvidence/ev2"]`; the name follows the evidence version.
+- **Locations.** Each result points at the board file, at the line of the first
+  footprint (or else net) the finding names. The finding's board position, in
+  mm in the KiCad file's coordinates, and its layer are in the location's
+  `properties.boardLocation`. Closest points are `relatedLocations`.
+- **`--diff`.** Introduced findings have `baselineState: "new"`, changed ones
+  `"updated"`, and resolved ones `"absent"`.
 
 ### `kct check --diff OLD NEW`
 

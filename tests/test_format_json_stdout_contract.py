@@ -313,9 +313,29 @@ CONTRACT_ARGV: dict[str, list[str]] = {
 # document is (not just its contents), e.g. ``kct check --diff OLD NEW`` emits
 # a diff document instead of a check report and runs the leaf twice with its
 # own stdout diverted (issue #5946).  Full argv after ``kct``, before
-# ``--format json``; same placeholders as CONTRACT_ARGV.
+# ``--format json``; same placeholders as CONTRACT_ARGV.  A variant whose argv
+# already names ``--format`` (another JSON-based format such as ``sarif``,
+# issue #6006) is run as given.
 FLAG_VARIANT_ARGV: dict[str, list[str]] = {
     "check --diff": ["check", "--diff", "{pcb}", "{pcb}"],
+    "check --format sarif": ["check", "{pcb}", "--format", "sarif"],
+    "check --diff --format sarif": ["check", "--diff", "{pcb}", "{pcb}", "--format", "sarif"],
+    "detect-mistakes --format sarif": [
+        "detect-mistakes",
+        "{dir}/multilayer_zones.kicad_pcb",
+        "--format",
+        "sarif",
+    ],
+    "detect-mistakes --waive": [
+        "detect-mistakes",
+        "{dir}/multilayer_zones.kicad_pcb",
+        "--waive",
+        "mistake.bypass_cap_distance|C1,U1||",
+        "--waive-reason",
+        "contract test",
+        "--waive-reviewer",
+        "pytest",
+    ],
     "check --waive": [
         "check",
         "{pcb}",
@@ -450,7 +470,9 @@ def test_flag_variants_extend_registered_leaves():
 def test_format_json_flag_variant_stdout_is_a_single_json_document(variant, tmp_path):
     scratch = tmp_path / "proj"
     shutil.copytree(PROJECT_FIXTURE, scratch)
-    argv = [*_expand(FLAG_VARIANT_ARGV[variant], scratch), "--format", "json"]
+    argv = _expand(FLAG_VARIANT_ARGV[variant], scratch)
+    if "--format" not in argv:
+        argv = [*argv, "--format", "json"]
     # ``--diff`` checks the board twice.
     _assert_single_json_document(variant, argv, scratch, timeout_s=2 * _SUBPROCESS_TIMEOUT_S)
 

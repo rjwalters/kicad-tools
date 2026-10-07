@@ -277,6 +277,23 @@ def _render_text(result: dict, fmt: str) -> None:
             print(f"  {name}: {change['old']} -> {change['new']}")
 
 
+def _sarif_artifact(spec: str) -> str:
+    """The board path a ``--diff`` SARIF log points at (the NEW side).
+
+    A ``REV:path`` spec names a file in a revision; its path part is what a
+    code-scanning UI can resolve in the checkout.
+    """
+    if Path(spec).exists():
+        path = Path(spec)
+        if path.is_dir():
+            found = sorted(path.glob("*.kicad_pcb"))
+            if found:
+                return str(found[0])
+        return spec
+    _rev, sep, rel = spec.partition(":")
+    return rel if sep and rel else spec
+
+
 def run_diff(
     old_spec: str,
     new_spec: str,
@@ -327,6 +344,13 @@ def run_diff(
     }
     if fmt == "json":
         print(json.dumps(result, indent=2))
+    elif fmt == "sarif":
+        from kicad_tools.validate.sarif import diff_sarif_log
+
+        artifact = _sarif_artifact(new_spec)
+        print(
+            json.dumps(diff_sarif_log(result, tool_name="kct check", artifact=artifact), indent=2)
+        )
     else:
         _render_text(result, fmt)
     if output:
