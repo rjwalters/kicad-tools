@@ -19,30 +19,57 @@ from kicad_tools.manufacturers.dru_generator import (
 )
 
 # Rule-name families the fab-floors generator (Issue #4600) can emit that
-# this escape search knows how to fold into its physical minima.
-_KNOWN_FLOOR_FAMILY_FIELDS = {
-    "Trace Width": "width",
-    "Clearance": "clearance",
-    "Via Drill": "drill",
-    "Via Diameter": "diameter",
-    "Annular Ring": "annulus",
+# this escape search folds into its physical minima: family -> (the KiCad
+# constraint keyword the family must carry, the EscapeRules field it raises).
+# A family carrying any other constraint is not the generator's rule and
+# fails closed.
+#
+# The PTH-hole families (#6196) are ``hole_clearance`` floors between a
+# plated hole and copper.  Folding them into ``hole_copper`` applies them to
+# every hole and every layer -- stricter than the rules' own scope (PTH
+# holes only; ``(layer inner)`` for the inner-copper one), so the search
+# can only refuse copper KiCad would accept, never the reverse.  The legacy
+# pre-#4999 "Solder Mask Dam" rule was an unconditional
+# ``physical_hole_clearance``, i.e. a hole-to-copper floor too.
+_FOLDED_FLOOR_FAMILIES = {
+    "Trace Width": ("track_width", "width"),
+    "Clearance": ("clearance", "clearance"),
+    "Via Drill": ("hole_size", "drill"),
+    "Via Diameter": ("via_diameter", "diameter"),
+    "Annular Ring": ("annular_width", "annulus"),
+    "PTH Hole to Track": ("hole_clearance", "hole_copper"),
+    "Inner PTH Hole to Copper": ("hole_clearance", "hole_copper"),
+    "Solder Mask Dam": ("physical_hole_clearance", "hole_copper"),
 }
-# Families the generator can also emit that this recipe never routes near
-# (board edge, silkscreen, solder mask, ampacity, pad-only annular ring) --
-# recognized and safely ignored rather than folded in.
+# Families the generator can also emit that can never constrain the copper
+# this search adds (an F.Cu track and/or a through via, away from the board
+# edge): family -> (constraint keyword, the exact condition that makes the
+# family irrelevant, or ``None`` when the constraint itself is irrelevant).
+# A condition is pinned where only the scope makes ignoring it safe -- the
+# SMD floor is pad-to-pad, the PTH ring is pad-only, the hole floor is
+# hole-to-board-edge.  Any other shape fails closed.
 _IGNORED_FLOOR_FAMILIES = {
-    "PTH Annular Ring",
-    "Copper to Edge",
-    "Hole to Edge",
-    "Silkscreen Width",
-    "Silkscreen Height",
-    "Solder Mask Clearance",
-    "Solder Mask Dam",
+    "Silk to Pad": ("silk_clearance", None),
+    "SMD Pad Clearance": (
+        "clearance",
+        "A.Type == 'Pad' && B.Type == 'Pad' && A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'"
+        " && A.Net != B.Net && A.Reference != B.Reference",
+    ),
+    "PTH Annular Ring": ("annular_width", "A.Type == 'pad'"),
+    "Copper to Edge": ("edge_clearance", None),
+    "Hole to Edge": (
+        "physical_hole_clearance",
+        "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'",
+    ),
+    "Silkscreen Width": ("text_thickness", None),
+    "Silkscreen Height": ("text_height", None),
+    "Solder Mask Clearance": ("solder_mask_margin", None),
 }
 _DRU_RULE_RE = re.compile(
     r'\(rule "(?P<name>[^"]+)"\n'
-    r'(?:\s*\(condition "[^"]*"\)\n)?'
-    r"\s*\(constraint \w+ \(min (?P<value>[0-9.]+)mm\)\)\)"
+    r"(?:\s*\(layer (?P<layer>\w+)\)\n)?"
+    r'(?:\s*\(condition "(?P<condition>[^"]*)"\)\n)?'
+    r"\s*\(constraint (?P<constraint>\w+) \(min (?P<value>[0-9.]+)mm\)\)\)"
 )
 
 
@@ -53,9 +80,12 @@ def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
     *exactly* the sentinel-delimited managed block
     :func:`kicad_tools.manufacturers.dru_generator.generate_dru` writes
     (Issue #4600), with nothing else present (hand-authored rules, the
-    creepage exporter's separate block, ...). A file matching that shape is
-    safe to fold in even though it "exists": every rule family it can
-    contain is enumerated above, so nothing is silently ignored.
+    creepage exporter's separate block, ...), and every stanza in it is a
+    family enumerated above carrying that family's constraint. A file
+    matching that shape is safe to fold in even though it "exists": nothing
+    is silently ignored. Anything else -- an unknown family (e.g. the
+    net-class-scoped ampacity widths), a family with an unexpected
+    constraint, condition or ``(layer ...)`` clause -- fails closed.
     """
     body_lines = [
         line
@@ -74,11 +104,23 @@ def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
         if match is None:
             return None  # hand-edited or unrecognized stanza -- fail closed
         family = match.group("name").split(" - ")[0]
-        field = _KNOWN_FLOOR_FAMILY_FIELDS.get(family)
-        if field is not None:
+        constraint = match.group("constraint")
+        folded = _FOLDED_FLOOR_FAMILIES.get(family)
+        if folded is not None:
+            expected, field = folded
+            if constraint != expected:
+                return None
+            # A layer-scoped floor is folded board-wide: conservative.
             minima[field] = max(minima.get(field, 0.0), float(match.group("value")))
-        elif family not in _IGNORED_FLOOR_FAMILIES:
+            continue
+        ignored = _IGNORED_FLOOR_FAMILIES.get(family)
+        if ignored is None:
             return None  # unrecognized rule family -- fail closed
+        expected, scope = ignored
+        if constraint != expected or match.group("layer") is not None:
+            return None
+        if scope is not None and match.group("condition") != scope:
+            return None  # the scope that made it irrelevant is gone
     return minima
 
 

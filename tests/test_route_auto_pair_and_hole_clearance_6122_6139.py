@@ -112,6 +112,21 @@ SOLDER_MASK_MARGIN_RULE = (
 )
 
 
+#: ``kicad_flags`` of a scenario KiCad judges differently by release: flagged
+#: from this ``kicad-cli`` version on, not before (#6196).  KiCad 10.0.2 is
+#: where pads began inheriting their footprint's properties -- ``Layer``
+#: here, ``Reference`` for the SMD pad floor
+#: (``dru_generator.SMD_PAD_CLEARANCE_MIN_KICAD_VERSION``).
+PAD_LAYER_SINCE = (10, 0, 2)
+
+
+def _kicad_cli_version(cli: Path) -> tuple[int, ...] | None:
+    from kicad_tools.cli.runner import get_kicad_version
+    from kicad_tools.manufacturers.dru_generator import parse_kicad_cli_version
+
+    return parse_kicad_cli_version(get_kicad_version(cli))
+
+
 def _phys_hole(condition: str, mm: float = 0.4) -> str:
     return _dru(
         f'(rule "p" (condition "{condition}") (constraint physical_hole_clearance (min {mm}mm)))'
@@ -539,14 +554,50 @@ SCENARIOS = [
         False,
         False,
     ),
+    # A pad's Layer is KiCad's null on 10.0.1 and the pad's own layer from
+    # 10.0.2 (#6196: CI's 10.0.6 flags this, 10.0.1 does not).  The gate
+    # cannot know which kicad-cli will judge the board, so it refuses.
     (
-        "pad-layer-is-null",
+        "pad-layer-depends-on-kicad-release",
         PAD,
         ROUND_NPTH,
         _default_pro(0.1),
         _phys_hole("A.Type == 'pad' && A.Layer != 'Edge.Cuts'"),
         16.9,
         None,
+        True,
+        PAD_LAYER_SINCE,
+    ),
+    # ... but a comparison false under both readings stays decided: an SMD
+    # pad on F.Cu is never on B.Cu (0.2 mm gap, 0.3 mm rule not applied) ...
+    (
+        "smd-pad-layer-is-not-another-layer",
+        PAD,
+        None,
+        _default_pro(0.1),
+        _dru(
+            "(rule \"p\" (condition \"A.Type == 'pad' && A.Layer == 'B.Cu'\") "
+            "(constraint clearance (min 0.3mm)))"
+        ),
+        16.8,
+        None,
+        False,
+        False,
+    ),
+    # ... and no pad is on Edge.Cuts, so the generator's "Hole to Edge" rule
+    # never applies to a new via beside a pad's hole (0.30 mm drill gap).
+    (
+        "generator-hole-to-edge-rule-via-beside-pad",
+        PAD,
+        ROUND_NPTH,
+        None,
+        _dru(
+            H_SMALL_RULE,
+            "(rule \"e\" (condition \"(A.Type == 'via' || A.Type == 'pad') && "
+            "B.Layer == 'Edge.Cuts'\") (constraint physical_hole_clearance (min 0.4mm)))",
+        ),
+        None,
+        (16.95, 8.0, 0.3),
         False,
         False,
     ),
@@ -639,6 +690,10 @@ def test_gate_agrees_with_kicad_cli(
     cli = find_kicad_cli()
     if cli is None:
         pytest.skip("kicad-cli not installed; gate verdict checked, KiCad's not")
+    if isinstance(kicad_flags, tuple):
+        version = _kicad_cli_version(Path(cli))
+        assert version is not None, "kicad-cli version unreadable"
+        kicad_flags = version >= kicad_flags
     flags = _kicad_flags(Path(cli), path, segments, vias)
     assert bool(flags) is kicad_flags, flags
 
@@ -856,9 +911,13 @@ def test_net_requirement_is_the_largest_pair() -> None:
         ("A.insideArea('x')", None),
         ("A.insideArea('x') || A.NetClass == 'HV'", True),
         ("A.insideArea('x') && A.NetClass == 'Default'", False),
-        # A pad's Layer is KiCad's null (kicad-cli 10.0.1, #6150) ...
-        ("A.Layer == 'F.Cu'", False),
-        ("A.Layer != 'F.Cu'", False),
+        # A pad's Layer is KiCad's null on 10.0.1, its own layer from 10.0.2
+        # (#6196); this one may be on any copper layer, never Edge.Cuts ...
+        ("A.Layer == 'F.Cu'", None),
+        ("A.Layer != 'F.Cu'", None),
+        ("A.Layer == 'Edge.Cuts'", False),
+        ("A.Layer != 'Edge.Cuts'", None),
+        ("!(A.Layer == 'Edge.Cuts')", True),
         # ... a track's is its layer, unknown here.
         ("B.Layer == 'F.Cu'", None),
         ("A.NetName == '/mains'", True),  # KiCad compares case-insensitively
@@ -905,6 +964,23 @@ def test_gate_item_types_match_kicads() -> None:
     assert item_props_for_type("arc", "/A").type == "Track"
     assert item_props_for_type("pad", "/A", True, "thru_hole").pad_type == "Through-hole"
     assert item_props_for_type("track", "/A", None, "smd").pad_type is None
+
+
+def test_pad_layer_condition_is_false_only_under_both_releases() -> None:
+    """#6196: 10.0.1 reads a pad's Layer as null, 10.0.2+ as the pad's layer."""
+    smd = ItemProps("Pad", "/A", False, "SMD", layer="F.Cu")
+    track = ItemProps("Track", "/B", layer="B.Cu")
+    assert evaluate_condition("A.Layer == 'F.Cu'", smd, track) is None  # true on 10.0.2+
+    assert evaluate_condition("A.Layer == '*.Cu'", smd, track) is None
+    assert evaluate_condition("A.Layer == 'B.Cu'", smd, track) is False
+    assert evaluate_condition("A.Layer == 'f.cu'", smd, track) is False  # case-sensitive
+    assert evaluate_condition("A.Layer != 'F.Cu'", smd, track) is False
+    assert evaluate_condition("A.Layer != 'B.Cu'", smd, track) is None  # true on 10.0.2+
+    # The gate's pad items keep their single copper layer; a via has none.
+    from kicad_tools.router.board_clearance_rules import item_props_for_type
+
+    assert item_props_for_type("pad", "/A", False, "smd", "F.Cu").layer == "F.Cu"
+    assert item_props_for_type("via", "/A", True, None, "F.Cu").layer is None
 
 
 def test_track_layer_condition() -> None:
