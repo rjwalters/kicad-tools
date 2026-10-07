@@ -640,6 +640,11 @@ class NetClassification:
         return f"NetClassification({self.net_class.value}, {self.confidence:.0%}, {self.source})"
 
 
+def _pin_name(pin: object) -> str:
+    """Pin name of a schematic pin (or a duck-typed stand-in without one)."""
+    return getattr(pin, "name", "") or ""
+
+
 def classify_net(
     net_name: str,
     connected_pins: list[tuple[str, Pin]] | None = None,
@@ -666,7 +671,7 @@ def classify_net(
         # A switching regulator's switch node carries a ``power_out`` pin
         # (KiCad types SW/LX that way) but is a high-current switching
         # signal, never a rail to pour or decouple (issue #5998).
-        if any(is_switch_node_name(pin.name or "") for _, pin in connected_pins):
+        if any(is_switch_node_name(_pin_name(pin)) for _, pin in connected_pins):
             return NetClassification(
                 net_class=NetClass.HIGH_CURRENT_SIGNAL,
                 confidence=0.90,
@@ -675,7 +680,7 @@ def classify_net(
             )
 
         # Power pins are definitive (switch-node / bootstrap pins excluded)
-        if any(is_power_rail_pin(pin.pin_type, pin.name or "") for _, pin in connected_pins):
+        if any(is_power_rail_pin(pin.pin_type, _pin_name(pin)) for _, pin in connected_pins):
             pin_types = {pin.pin_type for _, pin in connected_pins}
             # Determine if it's power or ground
             name_lower = net_name.lower()
