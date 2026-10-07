@@ -2845,9 +2845,16 @@ class NegotiatedRouter:
         """
         blocker_scores: dict[int, int] = {}
 
-        with self.grid.temporarily_unblock_routed_nets() as unblocker:
-            saved_blocked = unblocker._saved_blocked
-            saved_net = unblocker._saved_net
+        # Issue #6009: the unblocker lifts committed routes off the Python
+        # grid, the paired C++ grid AND the route R-trees (the old plane-only
+        # clear left the latter two holding every trace, so the relaxed search
+        # found nothing on either backend).  Attribution reads ``copper_net``
+        # -- cells the lift actually freed -- so a pad's or keepout's own
+        # net-tagged halo next to the relaxed path is not mistaken for a
+        # rip-up-able blocker.
+        with self.grid.temporarily_unblock_routed_nets(self.router) as unblocker:
+            saved_net = unblocker.copper_net
+            saved_blocked = saved_net != 0
 
             for net_id in failed_nets:
                 pads = pads_by_net.get(net_id, [])
