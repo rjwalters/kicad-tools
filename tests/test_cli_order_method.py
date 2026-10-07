@@ -587,13 +587,30 @@ def test_absent_and_crossing_still_dispatch_on_escalation_paths(
     assert "5908" not in captured.out
 
 
-@pytest.mark.parametrize("method", _SINGLE_ATTEMPT_ONLY)
-def test_single_attempt_path_still_accepts_the_four_methods(tmp_path, monkeypatch, capsys, method):
-    """``--no-auto-layers`` alone keeps the supported single-attempt path.
+# Single-attempt invocations: ``--no-auto-layers`` and the documented
+# fixed-layer path ``--layers N`` (which turns the default --auto-layers off,
+# Issue #2388).
+_SINGLE_ATTEMPT_PATHS = [
+    ("no_auto_layers", ["--no-auto-layers"]),
+    ("fixed_layers_2", ["--layers", "2"]),
+    ("fixed_layers_4", ["--layers", "4"]),
+]
 
-    The gate must not reject it: the invocation loads the board for real and
-    reaches ``_apply_order_method`` with the requested method (our spy stops
-    it there, before the evaluation/real route) without touching any
+
+@pytest.mark.parametrize("method", _SINGLE_ATTEMPT_ONLY)
+@pytest.mark.parametrize(
+    ("path_id", "extra"),
+    _SINGLE_ATTEMPT_PATHS,
+    ids=[p[0] for p in _SINGLE_ATTEMPT_PATHS],
+)
+def test_single_attempt_path_still_accepts_the_four_methods(
+    tmp_path, monkeypatch, capsys, path_id, extra, method
+):
+    """``--no-auto-layers`` / ``--layers N`` keep the single-attempt path.
+
+    The gate must not reject them: the invocation loads the board for real
+    and reaches ``_apply_order_method`` with the requested method (our spy
+    stops it there, before the evaluation/real route) without touching any
     escalation entry point.
     """
     pcb = _fixture_board(tmp_path)
@@ -601,7 +618,7 @@ def test_single_attempt_path_still_accepts_the_four_methods(tmp_path, monkeypatc
         str(pcb),
         "-o",
         str(tmp_path / "out.kicad_pcb"),
-        "--no-auto-layers",
+        *extra,
         "--quiet",
         "--order-method",
         method,
@@ -628,3 +645,93 @@ def test_validate_order_method_single_attempt_namespace_is_allowed(method):
         auto_mfr_tier=False,
     )
     assert _validate_order_method_for_dispatch(args) == 0
+
+
+# ``--layers N --adaptive-rules`` is genuinely rule relaxation, not the
+# fixed-layer single attempt, so the four methods must still be rejected.
+_FIXED_LAYER_ESCALATION_PATHS = [
+    ("fixed_layers_2_adaptive_rules", ["--layers", "2", "--adaptive-rules"], "--adaptive-rules"),
+    ("fixed_layers_4_adaptive_rules", ["--layers", "4", "--adaptive-rules"], "--adaptive-rules"),
+    ("fixed_layers_2_auto_mfr_tier", ["--layers", "2", "--auto-mfr-tier"], "--auto-mfr-tier"),
+]
+
+
+@pytest.mark.parametrize("method", _SINGLE_ATTEMPT_ONLY)
+@pytest.mark.parametrize(
+    ("path_id", "extra", "flag"),
+    _FIXED_LAYER_ESCALATION_PATHS,
+    ids=[p[0] for p in _FIXED_LAYER_ESCALATION_PATHS],
+)
+def test_fixed_layers_with_escalation_flag_still_rejected(
+    tmp_path, monkeypatch, capsys, path_id, extra, flag, method
+):
+    pcb = _fixture_board(tmp_path)
+    argv = [
+        str(pcb),
+        "-o",
+        str(tmp_path / "out.kicad_pcb"),
+        "--quiet",
+        "--order-method",
+        method,
+        *extra,
+    ]
+
+    rc, spies = _run_main_with_spies(argv, monkeypatch)
+
+    assert rc == 2
+    for name, spy in spies.items():
+        assert spy.calls == 0, f"{name} was called {spy.calls}x for a rejected invocation"
+    err = capsys.readouterr().err
+    assert f"--order-method {method} is not supported" in err
+    assert flag in err
+    # The user never selected --auto-layers: --layers N turned it off.
+    assert "--auto-layers (the default)" not in err
+    assert "--layers N" in err
+    assert "--order-method crossing" in err
+
+
+@pytest.mark.parametrize("method", _SINGLE_ATTEMPT_ONLY)
+def test_explicit_auto_layers_with_layers_conflict_keeps_priority(
+    tmp_path, monkeypatch, capsys, method
+):
+    """``--auto-layers --layers N`` still fails with the #2388 exit-1 error."""
+    pcb = _fixture_board(tmp_path)
+    argv = [
+        str(pcb),
+        "-o",
+        str(tmp_path / "out.kicad_pcb"),
+        "--quiet",
+        "--auto-layers",
+        "--layers",
+        "2",
+        "--order-method",
+        method,
+    ]
+
+    rc, spies = _run_main_with_spies(argv, monkeypatch)
+
+    assert rc == 1
+    for name in _DISPATCH_FUNCS:
+        assert spies[name].calls == 0, name
+    assert spies["optimize_net_order"].calls == 0
+    err = capsys.readouterr().err
+    assert "--auto-layers cannot be used with --layers 2" in err
+    assert "5908" not in err
+
+
+@pytest.mark.parametrize("method", _SINGLE_ATTEMPT_ONLY)
+@pytest.mark.parametrize("layers", ["2", "4"])
+def test_validate_order_method_fixed_layers_namespace_is_allowed(method, layers):
+    """Default --auto-layers plus an explicit --layers N is a single attempt."""
+    from kicad_tools.cli.route_cmd import _validate_order_method_for_dispatch
+
+    args = SimpleNamespace(
+        order_method=method,
+        auto_layers=True,
+        layers=layers,
+        adaptive_rules=False,
+        auto_pcb_size=False,
+        auto_mfr_tier=False,
+    )
+    argv = ["b.kicad_pcb", "--layers", layers, "--order-method", method]
+    assert _validate_order_method_for_dispatch(args, argv) == 0

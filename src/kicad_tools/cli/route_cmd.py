@@ -7942,54 +7942,83 @@ def _apply_crossing_order_escalation(
 _SINGLE_ATTEMPT_ONLY_ORDER_METHODS = frozenset({"greedy", "critical_first", "congestion", "hybrid"})
 
 
-def _escalation_dispatch_flags(args) -> list[str]:
+def _effective_auto_layers(args, argv=None) -> bool:
+    """Return the ``--auto-layers`` value the dispatch block will actually use.
+
+    Mirrors the Issue #2388 normalisation in :func:`_run_main_impl`:
+    ``--auto-layers`` is on by default, but an explicit ``--layers N`` (any
+    value other than ``auto``) silently turns it off unless the user *also*
+    typed ``--auto-layers`` (that conflict is reported later with exit 1).
+    The #5908 gate runs before that block -- and before any board load -- so
+    it must apply the same rule itself rather than read the raw default.
+    """
+    if not getattr(args, "auto_layers", False):
+        return False
+    if getattr(args, "layers", "auto") == "auto":
+        return True
+    _argv = argv if argv is not None else sys.argv
+    # Explicit --auto-layers with --layers N stays "on" here; the gate defers
+    # that conflict to the dedicated exit-1 error (see the validator below).
+    return "--auto-layers" in _argv
+
+
+def _escalation_dispatch_flags(args, argv=None) -> list[str]:
     """Return the flags that send ``_run_main_impl`` down an escalation path.
 
     Mirrors the dispatch order in :func:`_run_main_impl`: ``--auto-pcb-size``
     and ``--auto-mfr-tier`` both wrap :func:`route_with_layer_escalation`,
     and ``--auto-layers`` / ``--adaptive-rules`` select the layer, rule or
-    combined escalation loops.  An empty list means the invocation reaches
-    the single-attempt tail, where every ``--order-method`` is supported.
+    combined escalation loops.  ``--auto-layers`` is read through
+    :func:`_effective_auto_layers`, so an explicit ``--layers N`` (the
+    documented fixed-layer path) is not mistaken for layer escalation.  An
+    empty list means the invocation reaches the single-attempt tail, where
+    every ``--order-method`` is supported.
     """
     flags: list[str] = []
     if getattr(args, "auto_pcb_size", False):
         flags.append("--auto-pcb-size")
     if getattr(args, "auto_mfr_tier", False):
         flags.append("--auto-mfr-tier")
-    if getattr(args, "auto_layers", False):
+    if _effective_auto_layers(args, argv):
         flags.append("--auto-layers (the default)")
     if getattr(args, "adaptive_rules", False):
         flags.append("--adaptive-rules")
     return flags
 
 
-def _validate_order_method_for_dispatch(args) -> int:
+def _validate_order_method_for_dispatch(args, argv=None) -> int:
     """Reject ``--order-method`` values the selected routing path ignores (#5908).
 
     ``greedy``, ``critical_first``, ``congestion`` and ``hybrid`` are honoured
-    only on the single-attempt path (``--no-auto-layers`` without
-    ``--adaptive-rules`` / ``--auto-pcb-size`` / ``--auto-mfr-tier``).  On the
-    escalation paths -- including the default ``--auto-layers`` recipe -- they
-    were silently discarded.  This gate fails the invocation with exit code 2
-    and an actionable stderr message *before* any board is loaded or routed.
-    The message is printed even under ``--quiet``.
+    only on the single-attempt path (``--layers N`` or ``--no-auto-layers``,
+    without ``--adaptive-rules`` / ``--auto-pcb-size`` / ``--auto-mfr-tier``).
+    On the escalation paths -- including the default ``--auto-layers`` recipe
+    -- they were silently discarded.  This gate fails the invocation with exit
+    code 2 and an actionable stderr message *before* any board is loaded or
+    routed.  The message is printed even under ``--quiet``.
 
     Strict no-op (returns 0) when ``--order-method`` is absent or
     ``crossing``, or when the invocation reaches the single-attempt tail.
+    Also a no-op for the explicit ``--auto-layers --layers N`` conflict, so
+    the existing exit-1 error for that combination keeps priority.
     """
     method = getattr(args, "order_method", None)
     if method not in _SINGLE_ATTEMPT_ONLY_ORDER_METHODS:
         return 0
-    flags = _escalation_dispatch_flags(args)
+    if getattr(args, "auto_layers", False) and getattr(args, "layers", "auto") != "auto":
+        _argv = argv if argv is not None else sys.argv
+        if "--auto-layers" in _argv:
+            return 0
+    flags = _escalation_dispatch_flags(args, argv)
     if not flags:
         return 0
     print(
         f"Error: --order-method {method} is not supported on the escalation "
         f"routing path selected by {', '.join(flags)} (Issue #5908).  It "
-        "would be silently ignored there.  Either pass --no-auto-layers "
-        "(without --adaptive-rules, --auto-pcb-size or --auto-mfr-tier) to "
-        f"route a single attempt with --order-method {method}, or use "
-        "--order-method crossing, which is supported on every path.",
+        "would be silently ignored there.  Either route a single attempt with "
+        f"--order-method {method} by passing --layers N or --no-auto-layers "
+        "(without --adaptive-rules, --auto-pcb-size or --auto-mfr-tier), or "
+        "use --order-method crossing, which is supported on every path.",
         file=sys.stderr,
     )
     return 2
@@ -15423,7 +15452,8 @@ def _route_parser() -> argparse.ArgumentParser:
             "degree -- most-contended first -- within each net-class priority "
             "band, without spending an evaluation route. 'crossing' works on "
             "every routing path; the other four are supported only on the "
-            "single-attempt path (--no-auto-layers without --adaptive-rules, "
+            "single-attempt path (--layers N or --no-auto-layers, without "
+            "--adaptive-rules, "
             "--auto-pcb-size or --auto-mfr-tier) and are rejected with exit "
             "code 2 on the escalation paths (Issue #5908). When "
             "omitted, ordering is byte-identical to the default behaviour."
@@ -16911,8 +16941,11 @@ def _run_main_impl(args, parser, argv) -> int:
     # only wired on the single-attempt tail.  On every escalation path it
     # used to be silently discarded; reject it here, before any board is
     # loaded or routed, instead of shipping copper that ignored the flag.
-    # Strict no-op when --order-method is absent or 'crossing'.
-    _order_gate_rc = _validate_order_method_for_dispatch(args)
+    # Strict no-op when --order-method is absent or 'crossing'.  The gate
+    # applies the Issue #2388 --layers N / --auto-layers normalisation
+    # itself (it runs before that block, and before every board load), so
+    # the fixed-layer path `--layers N` stays a supported single attempt.
+    _order_gate_rc = _validate_order_method_for_dispatch(args, argv)
     if _order_gate_rc != 0:
         return _order_gate_rc
 
