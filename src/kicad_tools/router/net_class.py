@@ -253,12 +253,16 @@ POWER_PIN_TYPES: frozenset[str] = frozenset({"power_in", "power_out"})
 _SWITCH_NODE_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"^(?:SW|LX|PHASE|SWN)(?:_?\d+|[A-D])?$",
+        # No letter suffix: SWD/SWA/SWC are debug/generic names, not switch nodes.
+        r"^(?:SW|LX|PHASE|SWN)(?:_?\d+)?$",
         # TI's "PH" (phase) pin, bare only: PH0..PH15 are STM32 port-H pins.
         r"^PH$",
         r"^SW_?NODE\d*$",
-        # Trailing word on a net name: BUCK_SW, VREG_LX, U2_SW1
-        r"_(?:SW|LX|PHASE|SW_?NODE)\d*$",
+        # Trailing word on a net name, only after a regulator-context prefix
+        # (BUCK_SW, BOOST_LX, VREG_SW, U2_SW1).  Rail prefixes (3V3_SW,
+        # VBUS_SW) are load-switched rails and button prefixes (BTN_SW) are
+        # signals, so a bare ``*_SW`` is not enough.
+        r"^(?:BUCK|BOOST|VREG|REG|DCDC|BB|U\d+)_(?:SW|LX|PHASE|SW_?NODE)\d*$",
     )
 )
 
