@@ -15,7 +15,15 @@ def footprint_keys(footprints: Sequence[Footprint]) -> list[str]:
     document. Callers must carry these keys through reconstruction, rather
     than recomputing them from a filtered pad population. No key is written
     into the authored Reference property.
+
+    ``kct route`` stamps every UUID-less footprint with
+    :func:`~kicad_tools.core.canonical_uuids.canonical_footprint_uuid` of its
+    index (Issue #6052). That UUID carries only the footprint's position, so
+    it keeps the legacy ``index:N`` key: a routed board's footprints keep the
+    keys its source computed (Issue #6175).
     """
+    from kicad_tools.core.canonical_uuids import canonical_footprint_uuid
+
     refs = Counter(fp.reference for fp in footprints)
     uuids = Counter(getattr(fp, "uuid", "") for fp in footprints)
     reserved = set(refs)
@@ -25,7 +33,9 @@ def footprint_keys(footprints: Sequence[Footprint]) -> list[str]:
             key = fp.reference
         else:
             uuid = getattr(fp, "uuid", "")
-            identity = f"uuid:{uuid}" if uuid and uuids[uuid] == 1 else f"index:{index}"
+            positional = uuid and str(uuid).lower() == canonical_footprint_uuid(index)
+            unique = uuid and uuids[uuid] == 1 and not positional
+            identity = f"uuid:{uuid}" if unique else f"index:{index}"
             key = f"@kct-footprint:{identity}"
             while key in reserved:
                 key = "@" + key

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import json
 import os
 import signal
@@ -35,7 +36,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, ParamSpec, Sequence, TypeVar
 
 from kicad_tools.cli.format_options import emit_json
 from kicad_tools.placement.cost import (
@@ -672,6 +673,42 @@ def _write_placements_to_pcb(
     )
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _restores_interrupt_handlers(func: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Restore SIGINT/SIGTERM when ``func`` returns or raises (Issue #6175).
+
+    :func:`run_optimize_placement` installs :func:`_handle_placement_interrupt`
+    for both signals, but several early ``return`` paths (no components, a
+    bad ``--weights``, ``--dry-run``, ...) skipped the restore at the end.
+    In-process callers -- the MCP server, ``kct`` called from Python, a pytest
+    worker -- then kept a handler that answers a later SIGTERM with
+    ``sys.exit(130)``.  A handler is put back only if it is still ours, so one
+    installed by someone else mid-run is never clobbered.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        saved = {}
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(ValueError):  # not on the main thread
+                saved[signum] = signal.getsignal(signum)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            for signum, previous in saved.items():
+                if previous is None:
+                    continue  # installed from C; cannot be reinstalled
+                with contextlib.suppress(ValueError):
+                    if signal.getsignal(signum) is _handle_placement_interrupt:
+                        signal.signal(signum, previous)
+
+    return wrapper
+
+
+@_restores_interrupt_handlers
 def run_optimize_placement(
     pcb_path: str,
     *,

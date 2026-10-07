@@ -15,6 +15,21 @@ from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks, parse_net_names
 from kicad_tools.sexp import parse_string
 
+#: How much of the worker's stderr a failure message carries (its tail holds
+#: the traceback's final frames and the exception itself).
+_STDERR_TAIL_CHARS = 2000
+
+
+class NativeFillWorkerError(RuntimeError):
+    """The KiCad-Python fill worker exited non-zero; carries its stderr tail."""
+
+    def __init__(self, returncode: int, stderr: str | None) -> None:
+        self.returncode = returncode
+        self.stderr = stderr or ""
+        tail = self.stderr.strip()[-_STDERR_TAIL_CHARS:]
+        detail = f":\n{tail}" if tail else " (no stderr output)"
+        super().__init__(f"native selective zone-fill worker exited {returncode}{detail}")
+
 
 def find_kicad_python() -> Path | None:
     """Find an interpreter with the native APIs this selective fill needs."""
@@ -121,12 +136,23 @@ def fill_around_fixed_copper(
             if settings.exists():
                 shutil.copy2(settings, stage.with_suffix(suffix))
         worker = Path(__file__).with_name("_fixed_fill_worker.py")
-        subprocess.run(
-            [str(python), str(worker), str(stage), str(output), json.dumps(sorted(protected_nets))],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            subprocess.run(
+                [
+                    str(python),
+                    str(worker),
+                    str(stage),
+                    str(output),
+                    json.dumps(sorted(protected_nets)),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            # CalledProcessError's message omits the captured streams, which
+            # hid the worker's traceback entirely (Issue #6101).
+            raise NativeFillWorkerError(exc.returncode, exc.stderr or exc.stdout) from exc
         filled = output.read_text()
     replacements = []
     observed = set()

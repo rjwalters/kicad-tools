@@ -8,10 +8,33 @@ from shapely.ops import unary_union
 
 from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp import parse_string
 from kicad_tools.zones.placement_fill import fill_around_fixed_copper, find_kicad_python
 from tests.test_routing_placement_disposition import board_text
 
 NATIVE_PYTHON = find_kicad_python()
+
+
+def _zone_content(zone_text: str) -> str:
+    """A zone's content with its identity and source formatting dropped.
+
+    ``kct route`` canonicalizes the routed board's UUIDs before KiCad first
+    loads it (Issue #6052): it re-serializes the board and gives every
+    UUID-less node -- including an authored zone -- a deterministic ``uuid5``.
+    The excluded zone's *content* (net, layer, settings, outline and fill)
+    must survive untouched; its byte formatting and new identity need not.
+    """
+    tree = parse_string(zone_text)
+    tree.children = [c for c in tree.children if c.name not in {"uuid", "tstamp"}]
+    return tree.to_string(compact=True)
+
+
+def _count_zone(board_text: str, zone_text: str) -> int:
+    expected = _zone_content(zone_text)
+    return sum(
+        _zone_content(zone) == expected
+        for _, _, zone in _extract_balanced_blocks(board_text, "zone")
+    )
 
 
 @pytest.mark.skipif(NATIVE_PYTHON is None, reason="KiCad Python runtime unavailable")
@@ -211,7 +234,9 @@ def test_real_cli_routes_and_fills_without_changing_excluded_zone(
     if auto_fix:
         assert "Auto-Fix DRC Violations" in capsys.readouterr().out
     assert source.read_text() == original
-    assert output.read_text().count(fixed) == 1
+    # Content equality, not byte equality: Issue #6052's UUID canonicalization
+    # re-serializes the routed board and stamps a uuid5 on the UUID-less zone.
+    assert _count_zone(output.read_text(), fixed) == 1
     pcb = PCB.load(output)
     assert any(s.net_name == "GOOD" for s in pcb.segments)
     assert any(z.net_name == "PLANE" and z.filled_polygons for z in pcb.zones)
@@ -247,3 +272,19 @@ def test_cli_fill_failure_retains_routes_and_cannot_report_success(tmp_path, mon
     assert disposition["zone_fill_status"] == "failed"
     assert disposition["clean_success"] is False
     assert "SUCCESS:" not in capsys.readouterr().out
+
+
+def test_worker_failure_surfaces_its_stderr(tmp_path):
+    """A failing fill worker's traceback reaches the error message (Issue #6101)."""
+    from kicad_tools.zones.placement_fill import NativeFillWorkerError
+
+    fake = tmp_path / "fake_python.sh"
+    fake.write_text("#!/bin/sh\necho 'Traceback: pcbnew exploded' >&2\nexit 1\n")
+    fake.chmod(0o755)
+    board = tmp_path / "board.kicad_pcb"
+    source = board_text()[:-1] + '(zone (net 2) (net_name "GOOD") (layer "F.Cu")))'
+    board.write_text(source)
+    with pytest.raises(NativeFillWorkerError, match="pcbnew exploded") as info:
+        fill_around_fixed_copper(board, frozenset({"BAD"}), python=fake)
+    assert info.value.returncode == 1
+    assert board.read_text() == source

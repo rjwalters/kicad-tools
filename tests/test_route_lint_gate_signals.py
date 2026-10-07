@@ -267,12 +267,19 @@ def test_sigterm_during_promotion_never_half_promotes_output(board, tmp_path):
             sent.append(dst)
             os.kill(os.getpid(), signal.SIGTERM)
 
-    with (
-        patch.object(route_cmd, "_run_main_impl", _stub("", publish=False)),
-        patch.object(route_lint_gate.os, "replace", replace_then_term),
-        pytest.raises(SystemExit) as exc,
-    ):
-        kct_main(["route", str(board), "-o", str(out), "--lint-gate", "--no-current-paths"])
+    # The gate only converts SIGTERM over the default disposition; pin it so a
+    # handler leaked by an earlier in-process test cannot answer instead
+    # (Issue #6175: a leaked placement handler exited 130 here).
+    previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        with (
+            patch.object(route_cmd, "_run_main_impl", _stub("", publish=False)),
+            patch.object(route_lint_gate.os, "replace", replace_then_term),
+            pytest.raises(SystemExit) as exc,
+        ):
+            kct_main(["route", str(board), "-o", str(out), "--lint-gate", "--no-current-paths"])
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
     assert sent, "SIGTERM was never sent mid-promotion"
     assert exc.value.code == SIGTERM_EXIT

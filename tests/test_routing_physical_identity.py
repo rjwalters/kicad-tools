@@ -329,3 +329,37 @@ def test_explicit_identity_promotes_legacy_registration():
     with pytest.raises(ValueError, match="already exists"):
         router.add_component("U1", [{"number": "2", "x": 3, "y": 4, "net": 2}])
     assert len(router.all_pads) == 1
+
+
+@pytest.mark.parametrize("style", ["missing", "empty", "duplicate", "escaped"])
+def test_uuid_canonicalization_keeps_physical_footprint_keys(tmp_path, style):
+    """Issue #6175: #6052's canonical footprint UUIDs are positional.
+
+    ``kct route`` stamps every UUID-less footprint with a uuid5 of its index.
+    ``footprint_keys`` must map that back to the ``index:N`` key the source
+    board computed, or a placement disposition built from the source no
+    longer names the routed board's footprints.
+    """
+    from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids
+    from kicad_tools.schema.physical_identity import footprint_keys
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(repeated_reference_board(invalid=True, style=style))
+    before = footprint_keys(PCB.load(board).footprints)
+    assert canonicalize_pcb_file_uuids(board) > 0
+    after = PCB.load(board)
+    assert all(fp.uuid for fp in after.footprints)
+    assert footprint_keys(after.footprints) == before
+
+
+def test_authored_unique_footprint_uuid_still_keys_by_uuid():
+    from kicad_tools.core.canonical_uuids import canonical_footprint_uuid
+    from kicad_tools.schema.physical_identity import footprint_keys
+
+    class Fp:
+        def __init__(self, uuid):
+            self.reference, self.uuid = "DUP", uuid
+
+    authored = "11111111-2222-4333-8444-555555555555"
+    keys = footprint_keys([Fp(authored), Fp(canonical_footprint_uuid(1))])
+    assert keys == [f"@kct-footprint:uuid:{authored}", "@kct-footprint:index:1"]

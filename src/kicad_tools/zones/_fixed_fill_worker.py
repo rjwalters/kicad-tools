@@ -6,6 +6,18 @@ import sys
 from pathlib import Path
 
 
+def _duplicate(zone):
+    """Copy ``zone`` without adding the copy to the source's group.
+
+    KiCad >= 10.0.2 takes ``Duplicate(addToParentGroup, ...)``; 10.0.1's
+    binding takes no arguments (and adds to no group).  Issue #6101.
+    """
+    try:
+        return zone.Duplicate(False)
+    except TypeError:
+        return zone.Duplicate()
+
+
 def main():
     import pcbnew  # type: ignore[import-not-found]  # Supplied by KiCad Python.
 
@@ -35,7 +47,7 @@ def main():
             # Preserve zone identity/type for custom clearance predicates.
             # Its temporary outline is the existing copper, not the pour intent.
             # Higher priority makes eligible zones clear this immutable outline.
-            fixed = pcbnew.Cast_to_ZONE(zone.Duplicate(False))
+            fixed = pcbnew.Cast_to_ZONE(_duplicate(zone))
             layers = pcbnew.LSET()
             layers.AddLayer(layer)
             fixed.SetLayerSetAndRemoveUnusedFills(layers)
