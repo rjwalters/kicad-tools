@@ -1478,6 +1478,7 @@ def _handler_route_net_auto(params: dict[str, Any]) -> dict[str, Any]:
         strategy=params.get("strategy", "auto"),
         enable_repair=params.get("enable_repair", True),
         enable_via_resolution=params.get("enable_via_resolution", True),
+        diagnose_unrouted_budget=params.get("diagnose_unrouted_budget"),
     )
 
 
@@ -1524,6 +1525,16 @@ register_tool(
                 "type": "boolean",
                 "description": "Enable via conflict resolution (default: true)",
                 "default": True,
+            },
+            "diagnose_unrouted_budget": {
+                "type": "number",
+                "description": (
+                    "Seconds to spend classifying what a partial or failed net left "
+                    "unrouted as 'congested' (contenders: the nets in the way) or "
+                    "'blocked' (blockers: pads, keepouts, board edge), reported "
+                    "under 'unrouted' / 'unrouted_diagnosis' (Issue #6001). "
+                    "Omit or 0 to skip."
+                ),
             },
         },
         required=["pcb_path", "net_name"],

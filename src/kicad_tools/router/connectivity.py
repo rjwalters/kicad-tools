@@ -119,38 +119,21 @@ def _seg_layer_key(seg: Any) -> object:
     return layer
 
 
-def check_net_pad_connectivity(
+def pad_copper_components(
     pad_positions: list[tuple[float, float]],
     segments: list[Any],
     vias: list[Any] | None = None,
     existing_segments: list[Any] | None = None,
     existing_vias: list[Any] | None = None,
-) -> tuple[int, int]:
-    """Count how many pads of a net are joined by continuous copper.
+) -> list[int]:
+    """Per pad, a label of the copper component it belongs to.
 
-    Performs a **real** per-pad reachability walk over the union of the
-    freshly-produced copper (``segments`` / ``vias``) and any pre-existing
-    same-net copper (``existing_segments`` / ``existing_vias``).  Two copper
-    elements are adjacent only when they geometrically touch (shared endpoint,
-    point-on-segment, or crossing) within :data:`EPS`; vias join copper on the
-    two layers they connect at their drill location.
-
-    Args:
-        pad_positions: (x, y) centres of every pad of the net.
-        segments: Newly produced trace segments (objects with x1/y1/x2/y2/layer).
-        vias: Newly produced vias (objects with x/y[/layers]).
-        existing_segments: Pre-existing same-net trace segments, same shape.
-        existing_vias: Pre-existing same-net vias, same shape.
-
-    Returns:
-        ``(pads_connected, pads_total)`` where ``pads_connected`` is the size
-        of the largest single copper component that contains pads, and
-        ``pads_total`` is ``len(pad_positions)``.  If the net has <2 pads the
-        result is ``(pads_total, pads_total)`` (trivially connected).
+    Two pads carry the same label exactly when continuous copper joins them,
+    judged by the same walk :func:`check_net_pad_connectivity` counts with
+    (Issue #6001 uses the labels to find which pad islands are still apart).
+    Arguments as for :func:`check_net_pad_connectivity`.
     """
     n = len(pad_positions)
-    if n < 2:
-        return (n, n)
 
     # Collect all segments (new + existing) as layer-annotated _Seg records.
     # Accepts two segment shapes: the router primitive (x1/y1/x2/y2 + Layer
@@ -222,13 +205,46 @@ def check_net_pad_connectivity(
             if _segments_touch(probe, s) or _point_on_segment(vx, vy, s):
                 uf.union(vnode, seg_base + si)
 
-    # Group pads by their copper component; the net is "complete" only when all
-    # pads share one component.  Report the size of the largest pad-bearing
-    # component as pads_connected.
-    comp_counts: dict[int, int] = {}
-    for pi in range(n):
-        root = uf.find(pi)
-        comp_counts[root] = comp_counts.get(root, 0) + 1
+    return [uf.find(pi) for pi in range(n)]
 
+
+def check_net_pad_connectivity(
+    pad_positions: list[tuple[float, float]],
+    segments: list[Any],
+    vias: list[Any] | None = None,
+    existing_segments: list[Any] | None = None,
+    existing_vias: list[Any] | None = None,
+) -> tuple[int, int]:
+    """Count how many pads of a net are joined by continuous copper.
+
+    Performs a **real** per-pad reachability walk over the union of the
+    freshly-produced copper (``segments`` / ``vias``) and any pre-existing
+    same-net copper (``existing_segments`` / ``existing_vias``).  Two copper
+    elements are adjacent only when they geometrically touch (shared endpoint,
+    point-on-segment, or crossing) within :data:`EPS`; vias join copper on the
+    two layers they connect at their drill location.
+
+    Args:
+        pad_positions: (x, y) centres of every pad of the net.
+        segments: Newly produced trace segments (objects with x1/y1/x2/y2/layer).
+        vias: Newly produced vias (objects with x/y[/layers]).
+        existing_segments: Pre-existing same-net trace segments, same shape.
+        existing_vias: Pre-existing same-net vias, same shape.
+
+    Returns:
+        ``(pads_connected, pads_total)`` where ``pads_connected`` is the size
+        of the largest single copper component that contains pads, and
+        ``pads_total`` is ``len(pad_positions)``.  If the net has <2 pads the
+        result is ``(pads_total, pads_total)`` (trivially connected).
+    """
+    n = len(pad_positions)
+    if n < 2:
+        return (n, n)
+    labels = pad_copper_components(pad_positions, segments, vias, existing_segments, existing_vias)
+    # The net is "complete" only when all pads share one component.  Report
+    # the size of the largest pad-bearing component as pads_connected.
+    comp_counts: dict[int, int] = {}
+    for root in labels:
+        comp_counts[root] = comp_counts.get(root, 0) + 1
     pads_connected = max(comp_counts.values()) if comp_counts else 0
     return (pads_connected, n)

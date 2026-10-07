@@ -5374,6 +5374,22 @@ def _add_route_auto_parser(subparsers) -> None:
         action="store_true",
         help="Show full traceback on error",
     )
+    route_auto_parser.add_argument(
+        "--diagnose-unrouted-budget",
+        type=float,
+        default=20.0,
+        metavar="SECONDS",
+        help=(
+            "Issue #6001: wall-clock budget for classifying each connection a "
+            "partial or failed net left unrouted as 'congested' (routable once "
+            "other nets' copper is removed -- the JSON lists those nets as "
+            "'contenders') or 'blocked' (no path even then -- the JSON lists the "
+            "pads/keepouts/edge closing it off as 'blockers'), on the board at "
+            "the strategies' fine grid resolution. A net no fine-grid strategy "
+            "searched is 'unclassified'. Reported per net under 'unrouted' in "
+            "--format json output. 0 disables the pass. Default: 20."
+        ),
+    )
     add_format_flag(route_auto_parser)
 
 
