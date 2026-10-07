@@ -625,11 +625,16 @@ class DRCChecker:
             return results
         shifted: list[DRCViolation] = []
         for v in results.violations:
-            if v.location is None:
-                shifted.append(v)
-                continue
-            lx, ly = v.location
-            shifted.append(replace(v, location=(round(lx + ox, 3), round(ly + oy, 3))))
+            changes: dict = {}
+            if v.location is not None:
+                lx, ly = v.location
+                changes["location"] = (round(lx + ox, 3), round(ly + oy, 3))
+            closest = getattr(v, "closest_locations", None)
+            if closest:
+                changes["closest_locations"] = tuple(
+                    (round(cx + ox, 3), round(cy + oy, 3)) for cx, cy in closest
+                )
+            shifted.append(replace(v, **changes) if changes else v)
         results.violations = shifted
         return results
 
@@ -688,7 +693,7 @@ class DRCChecker:
             return DRCResults()
         from .rules.physical_gap import check_physical_copper_gap
 
-        return check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm)
+        return self._absolutize(check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm))
 
     def check_clearances(self) -> DRCResults:
         """Check clearance rules (trace-to-trace, trace-to-pad, etc.).
