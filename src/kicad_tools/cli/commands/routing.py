@@ -506,6 +506,7 @@ def run_route_auto_command(args) -> int:
     # before _RouteAutoPasses seeds --output), and judges --output after the
     # last one -- one whole-run verdict over every net.
     gate = None
+    requested_output = args.output
     if getattr(args, "lint_gate", False):
         if not args.output:
             print(
@@ -523,12 +524,28 @@ def run_route_auto_command(args) -> int:
                 if as_json:
                     _emit([], 1, gate.baseline_error_outcome().to_dict())
                 return 1
+            # Issue #6090: every pass writes a staging file next to --output;
+            # only the judged final board is promoted onto it.
+            staged = gate.stage()
+            if staged is not None:
+                args.output = str(staged)
+
+    def _unstage_args() -> None:
+        if gate is not None:
+            args.output = requested_output
 
     # Issue #5945: --resume / --checkpoint / regressing-pass rollback.
-    passes, rc = _RouteAutoPasses.create(args, net_list, as_json=as_json)
+    try:
+        passes, rc = _RouteAutoPasses.create(args, net_list, as_json=as_json)
+    except BaseException:
+        if gate is not None:
+            gate.abort()
+            _unstage_args()
+        raise
     if rc != 0:
         if gate is not None:
             gate.abort()
+            _unstage_args()
         return rc
     base_pcb = passes.base_pcb
     working = passes.working
@@ -562,10 +579,15 @@ def run_route_auto_command(args) -> int:
     except BaseException:
         if gate is not None:
             gate.abort()
+            _unstage_args()
         raise
     gate_doc = None
     if gate is not None:
-        outcome = gate.finish()
+        try:
+            outcome = gate.finish()
+        finally:
+            _unstage_args()
+        net_docs = gate.relocate(net_docs)
         overall_rc = outcome.exit_code(overall_rc)
         gate_doc = outcome.to_dict()
         if outcome.rolled_back:

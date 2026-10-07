@@ -15474,7 +15474,9 @@ def _route_parser() -> argparse.ArgumentParser:
             "`kct check --diff`); if routing introduced new error findings, roll "
             "the output back (restore its pre-run contents, keep the routed board "
             "as <output>.lint-rejected.kicad_pcb) and exit 3. Waived findings never "
-            "count (Issue #6054)."
+            "count (Issue #6054). Routing writes a staging file next to the output "
+            "and only a judged board is moved onto it, so SIGTERM/SIGKILL never "
+            "leave an unjudged board at --output (Issue #6090)."
         ),
     )
     parser.add_argument(
@@ -17015,6 +17017,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             # placement feedback, --complete, --resume) because they all
             # write the same --output.
             gate = None
+            requested_output = args.output
             if getattr(args, "lint_gate", False) and not getattr(args, "dry_run", False):
                 from .route_lint_gate import LintGate
 
@@ -17031,6 +17034,13 @@ def _main_impl(argv: list[str] | None = None) -> int:
                         )
                         json_stream.flush()
                     return 1
+                # Issue #6090: route into a staging file next to --output and
+                # promote it only once judged, so no kill -- SIGTERM, SIGKILL
+                # -- can leave an unjudged board at --output.
+                staged = gate.stage()
+                if staged is not None:
+                    args._lint_gate_output = str(gate.output)
+                    args.output = str(staged)
             capture = (
                 json_stream.capture()
                 if gate is not None and json_stream is not None
@@ -17043,30 +17053,34 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     if gate is not None:
                         # Never leave an unjudged board at --output.
                         gate.abort()
+                        _lint_gate_unstage_args(args, gate, requested_output)
                     raise
                 outcome = None
                 if gate is not None:
-                    outcome = gate.finish()
+                    try:
+                        outcome = gate.finish()
+                    finally:
+                        _lint_gate_unstage_args(args, gate, requested_output)
                     result = outcome.exit_code(result)
-                    if outcome.output_restored is not None and hasattr(
-                        args, "_placement_output_before"
-                    ):
-                        # The routed board was rolled back: route_placement.finish
-                        # must not report the restored (pre-run) board as written.
-                        restored = Path(args._placement_output)
-                        args._placement_output_before = (
-                            restored.stat() if restored.exists() else None
-                        )
                 exit_code = finish(args, result)
                 if json_stream is not None and not json_stream.written:
                     # The layer/rule-escalation paths (the default) never reached
                     # the direct-route JSON emitter; publish the same document
                     # for the final router so --format json always yields one.
                     _emit_route_json_fallback(args, exit_code)
-            if held is not None and json_stream is not None and outcome is not None:
+            if (
+                held is not None
+                and json_stream is not None
+                and outcome is not None
+                and gate is not None
+            ):
                 from .route_lint_gate import merge_into_json_document
 
-                json_stream.write(merge_into_json_document(held.getvalue(), outcome, exit_code))
+                json_stream.write(
+                    merge_into_json_document(
+                        held.getvalue(), outcome, exit_code, relocate=gate.relocate
+                    )
+                )
                 json_stream.flush()
             return exit_code
     except DRCConstraintPropagationError as exc:
@@ -17094,6 +17108,28 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 args._placement_output_before = output.stat() if output.exists() else None
             finish(args, TIMEOUT_EXIT)
         raise
+
+
+def _lint_gate_unstage_args(args, gate, requested_output) -> None:
+    """Point ``args`` back at the real ``--output`` after the gate (Issue #6090).
+
+    Routing ran against the staging file; everything after the gate
+    (``route_placement.finish``, the deadline handler) must describe the file
+    that actually sits at ``--output`` now.
+    """
+    args.output = requested_output
+    if hasattr(args, "_lint_gate_output"):
+        del args._lint_gate_output
+    if hasattr(args, "_placement_output_before"):
+        output = gate.output
+        args._placement_output = output
+        if gate.promoted:
+            # Compared against the pre-run identity: a promoted board is fresh.
+            args._placement_output_before = gate._output_stat_before
+        else:
+            # Rolled back / never written: route_placement.finish must not
+            # report the (pre-run) board as this run's output.
+            args._placement_output_before = output.stat() if output.exists() else None
 
 
 def _emit_route_json_fallback(args, exit_code: int) -> None:

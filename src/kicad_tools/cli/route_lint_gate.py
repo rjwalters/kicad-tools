@@ -57,10 +57,32 @@ Verdict and rollback
     1 when they *find* errors, which is an ordinary result.  Success is
     judged by whether the report parses as the expected JSON document.
 
-    When routing itself raises or exits (Ctrl+C, a deadline, a strict
-    connectivity exit) after writing ``--output``, that board was never
+    When routing itself raises or exits (Ctrl+C, SIGTERM, a deadline, a
+    strict connectivity exit) after writing a board, that board was never
     judged: it is moved aside to ``<output-stem>.lint-rejected.kicad_pcb``
-    and ``--output`` is restored as for a rollback.
+    and ``--output`` is left as for a rollback.
+
+Staging (Issue #6090)
+    Routing never writes ``--output`` directly.  :meth:`LintGate.stage`
+    creates a private directory next to it
+    (``.<output-name>.lint-gate-<pid>-<random>/``) and the router writes the
+    board -- and every artifact it derives from the output name (``_partial``,
+    ``.kicad_pro``/``.kicad_dru``, ``_4layer`` siblings, ...) -- in there,
+    under the same file names.  Only after the gate passes is the board moved
+    onto ``--output`` with :func:`os.replace` (atomic: same directory, same
+    filesystem).  An unjudged board therefore can never sit at ``--output``,
+    even after SIGKILL: a killed run leaves ``--output`` at its pre-run bytes
+    and its unjudged work in the hidden staging directory, which is safe to
+    delete.  The project files beside ``--output`` are copied into the
+    staging directory first, so the routed board is checked against the same
+    rules it would have seen in place.
+
+    While the gate is active and nothing else owns SIGTERM, a SIGTERM (what
+    ``timeout`` and CI job cancellations send) becomes a
+    :class:`LintGateTerminated` exit (code 143), so the gate can still move
+    the unjudged board aside and say so.  The supervised ``--timeout`` worker
+    and the adaptive/rule-relaxation windows install their own SIGTERM
+    handlers; those are left alone and unwind through the same abort path.
 
 Not gated
     ``--checkpoint`` files (best-so-far intermediates; a later ``--resume``
@@ -83,8 +105,10 @@ import io
 import json
 import os
 import shutil
+import signal
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,9 +125,33 @@ REJECTED_INFIX = ".lint-rejected"
 
 _PROJECT_SUFFIXES = (".kicad_pro", ".kicad_dru")
 
+#: Output-name siblings copied into the staging directory before routing, so
+#: the staged board sees the same project rules and the escalation path's
+#: stale-sibling cleanup (``_4layer``/``_6layer``) is mirrored back.
+_SEEDED_SUFFIXES = (".kicad_pro", ".kicad_dru", ".kicad_prl")
+
+#: Exit code of a run terminated by SIGTERM while the gate was active
+#: (128 + SIGTERM, what the default disposition reports).
+SIGTERM_EXIT = 143
+
 
 class LintGateError(Exception):
     """A board could not be linted."""
+
+
+class LintGateTerminated(SystemExit):
+    """SIGTERM arrived while ``--lint-gate`` was active (Issue #6090).
+
+    A ``SystemExit`` so the CLI exits with :data:`SIGTERM_EXIT` once the gate
+    has cleaned up, without a traceback.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(SIGTERM_EXIT)
+
+
+def _raise_terminated(signum, frame) -> None:
+    raise LintGateTerminated()
 
 
 @dataclass
@@ -180,6 +228,7 @@ class LintGate:
         strict: bool = False,
         quiet: bool = False,
         command: str = "kct route",
+        checkpoint: Path | None = None,
         check_main: Callable[[list[str]], int] | None = None,
         mistakes_main: Callable[[list[str]], int] | None = None,
     ) -> None:
@@ -200,6 +249,20 @@ class LintGate:
         self._flags: list[str] = []
         #: Why the baseline could not be linted (set by :meth:`begin`).
         self.baseline_error: str | None = None
+        self.checkpoint = Path(checkpoint) if checkpoint is not None else None
+        # -- staging (Issue #6090) --
+        self._staging_dir: Path | None = None
+        #: The board routing writes (inside the staging directory), or None.
+        self.staged: Path | None = None
+        self._seeded: dict[str, bytes] = {}
+        self._output_stat_before: os.stat_result | None = None
+        self._prev_sigterm: Any = None
+        self._sigterm_installed = False
+        #: Staged path -> final path (``None``: not promoted), for receipts/JSON.
+        self.moves: dict[Path, Path | None] = {}
+        #: True once a judged board was promoted onto ``--output``.
+        self.promoted = False
+        self._staging_root: Path | None = None
 
     # -- construction ------------------------------------------------------
     @classmethod
@@ -222,6 +285,7 @@ class LintGate:
         elif getattr(args, "no_current_paths", False):
             flags.append("--no-current-paths")
         waivers = getattr(args, "lint_gate_waivers", None)
+        checkpoint = getattr(args, "checkpoint", None)
         return cls(
             source,
             output,
@@ -230,12 +294,14 @@ class LintGate:
             strict=bool(getattr(args, "lint_gate_strict", False) or getattr(args, "strict", False)),
             quiet=bool(getattr(args, "quiet", False)),
             command="kct route",
+            checkpoint=Path(checkpoint) if checkpoint else None,
         )
 
     @classmethod
     def from_route_auto_args(cls, args) -> LintGate:
         """Build the gate for ``kct route-auto`` (requires ``--output``)."""
         waivers = getattr(args, "lint_gate_waivers", None)
+        checkpoint = getattr(args, "checkpoint", None)
         return cls(
             Path(args.pcb),
             Path(args.output),
@@ -243,6 +309,7 @@ class LintGate:
             strict=bool(getattr(args, "lint_gate_strict", False)),
             quiet=bool(getattr(args, "quiet", False) or getattr(args, "global_quiet", False)),
             command="kct route-auto",
+            checkpoint=Path(checkpoint) if checkpoint else None,
         )
 
     # -- output ------------------------------------------------------------
@@ -302,6 +369,8 @@ class LintGate:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
                     code = main(argv)
+                except LintGateTerminated:
+                    raise  # SIGTERM while linting: unwind, never a lint result
                 except SystemExit as exc:
                     code = exc.code if isinstance(exc.code, int) else 1
         except BaseException:
@@ -378,9 +447,18 @@ class LintGate:
 
         if not self.source.is_file():
             return None  # the router reports the missing input itself
+        if self.checkpoint is not None and _same_path(self.checkpoint, self.output):
+            # A checkpoint is written unjudged, after every improving pass.
+            self.baseline_error = (
+                f"--checkpoint {self.checkpoint} is the --output path; checkpoints are "
+                "written unjudged, so under --lint-gate they need a separate file. "
+                "Nothing was routed"
+            )
+            return f"[lint-gate] {self.baseline_error}"
         self._scratch = tempfile.TemporaryDirectory(prefix="kct-lint-gate-")
         try:
             self._before = self.output.read_bytes() if self.output.is_file() else None
+            self._output_stat_before = self.output.stat() if self.output.is_file() else None
             self._pin_sidecars(Path(self._scratch.name))
             record_stage("lint-gate-baseline")
             self._say(f"linting input board {self.source} (kct check + detect-mistakes)")
@@ -393,6 +471,62 @@ class LintGate:
         self._say(f"baseline: {active} active finding(s); waivers: {self._waivers_label()}")
         return None
 
+    def stage(self) -> Path | None:
+        """Create the staging directory; return the board path routing must write.
+
+        Call after a successful :meth:`begin` and point the router's output at
+        the returned path.  Returns ``None`` when no staging directory can be
+        created next to ``--output``; the run is then gated in place (the
+        pre-#6090 behaviour, which SIGKILL can defeat) and the caller keeps
+        routing to ``--output``.  Either way SIGTERM is turned into a clean
+        :class:`LintGateTerminated` exit while the gate is active.
+        """
+        if self._baseline is None:
+            return None
+        self._install_sigterm()
+        parent = self.output.parent.absolute()
+        try:
+            directory = Path(
+                tempfile.mkdtemp(prefix=f".{self.output.name}.lint-gate-{os.getpid()}-", dir=parent)
+            )
+        except OSError as e:
+            self._err(
+                f"cannot create a staging directory next to {self.output} ({e}); gating it in place"
+            )
+            return None
+        self._staging_dir = directory
+        self.staged = directory / self.output.name
+        try:
+            for name in self._seed_names():
+                src = parent / name
+                if src.is_file():
+                    data = src.read_bytes()
+                    (directory / name).write_bytes(data)
+                    self._seeded[name] = data
+        except OSError as e:
+            self._err(f"cannot seed the staging directory ({e}); gating {self.output} in place")
+            shutil.rmtree(directory, ignore_errors=True)
+            self._staging_dir = self.staged = None
+            self._seeded = {}
+            return None
+        self._staging_root = directory
+        return self.staged
+
+    def _seed_names(self) -> list[str]:
+        stem = self.output.stem
+        names = [f"{stem}{suffix}" for suffix in _SEEDED_SUFFIXES]
+        names += [
+            f"{stem}_{layers}layer{suffix}"
+            for layers in (4, 6)
+            for suffix in (".kicad_pcb", ".kicad_prl")
+        ]
+        return names
+
+    @property
+    def board(self) -> Path:
+        """The board routing writes: the staged file, or ``--output`` in place."""
+        return self.staged if self.staged is not None else self.output
+
     def baseline_error_outcome(self) -> GateOutcome:
         """The verdict for a run :meth:`begin` refused (for ``--format json``)."""
         return GateOutcome("error", self.baseline_error or "", self.strict)
@@ -401,61 +535,195 @@ class LintGate:
         return "none" if self._waivers_pinned_empty else str(self.waivers)
 
     def finish(self) -> GateOutcome:
-        """Lint the routed board and roll it back when it regressed."""
+        """Lint the routed board; promote it to ``--output`` or roll it back."""
         try:
             return self._finish()
         except BaseException:
-            # A deadline or interrupt while judging must not leave an
+            # A deadline, SIGTERM or interrupt while judging must not leave an
             # unjudged board at --output.
-            with contextlib.suppress(Exception):
-                if self._fresh():
-                    self._restore()
+            self.abort(judging=True)
             raise
         finally:
             self.close()
 
-    def abort(self) -> None:
-        """Routing raised: move the unjudged ``--output`` aside and restore it.
+    def abort(self, *, judging: bool = False) -> None:
+        """Routing raised: move the unjudged board aside; ``--output`` keeps its pre-run state.
 
         The router may have saved a best-so-far board before exiting (Ctrl+C
         during adaptive routing saves ``best_completed_attempt`` and exits 5);
         it is kept at :attr:`rejected_path` rather than discarded.
         """
+        exc = sys.exc_info()[1]
+        why = " (SIGTERM)" if isinstance(exc, LintGateTerminated) else ""
         try:
-            if self._baseline is not None and self._fresh():
-                rejected, restored = self._reject()
-                self._err(
-                    f"routing aborted before the routed board was linted; it is kept "
-                    f"(unjudged) at {rejected}, {self._restored_text(restored)}"
-                )
+            if self._baseline is not None:
+                self._recover_stray()
+                if self._fresh():
+                    rejected, restored = self._reject()
+                    stage = (
+                        "while the routed board was being linted"
+                        if judging
+                        else "before the routed board was linted"
+                    )
+                    self._err(
+                        f"routing aborted{why} {stage}; it is kept "
+                        f"(unjudged) at {rejected}, {self._restored_text(restored)}"
+                    )
+                else:
+                    self._unstage(None)
+                    if why:
+                        self._err(
+                            f"routing aborted{why} before a routed board was written; "
+                            f"{self.output} is untouched"
+                        )
         except OSError:
             pass
         finally:
             self.close()
 
     def close(self) -> None:
+        self._restore_sigterm()
+        if self._staging_dir is not None:
+            directory, self._staging_dir = self._staging_dir, None
+            try:
+                directory.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                self._err(
+                    f"left unjudged routing artifacts in {directory} (never promoted to "
+                    f"{self.output}); safe to delete"
+                )
         if self._scratch is not None:
             self._scratch.cleanup()
             self._scratch = None
 
-    def _fresh(self) -> bool:
-        if not self.output.is_file():
-            return False
-        return self.output.read_bytes() != self._before
+    # -- SIGTERM (Issue #6090) ---------------------------------------------
+    def _install_sigterm(self) -> None:
+        """Turn SIGTERM into :class:`LintGateTerminated` unless something owns it.
 
+        The supervised ``--timeout`` worker installs ``_deadline_signal`` (its
+        :class:`RouteDeadlineExpired` unwind is left intact); only the default
+        disposition -- which would kill the process with no cleanup at all --
+        is replaced.
+        """
+        if self._sigterm_installed or threading.current_thread() is not threading.main_thread():
+            return
+        try:
+            previous = signal.getsignal(signal.SIGTERM)
+            if previous is not signal.SIG_DFL:
+                return
+            signal.signal(signal.SIGTERM, _raise_terminated)
+        except (ValueError, OSError):
+            return
+        self._prev_sigterm = previous
+        self._sigterm_installed = True
+
+    def _restore_sigterm(self) -> None:
+        if not self._sigterm_installed:
+            return
+        self._sigterm_installed = False
+        with contextlib.suppress(ValueError, OSError):
+            if signal.getsignal(signal.SIGTERM) is _raise_terminated:
+                signal.signal(signal.SIGTERM, self._prev_sigterm)
+
+    # -- staged board ------------------------------------------------------
+    def _fresh(self) -> bool:
+        board = self.board
+        if not board.is_file():
+            return False
+        return board.read_bytes() != self._before
+
+    def _recover_stray(self) -> None:
+        """Undo a write that bypassed staging and landed on ``--output`` itself.
+
+        Every routing path writes the output name it is given, so this is a
+        safety net: the stray board is judged as the staged one (when routing
+        staged nothing) and ``--output`` goes back to its pre-run bytes.
+        """
+        if self.staged is None:
+            return
+        current = self.output.read_bytes() if self.output.is_file() else None
+        if current == self._before:
+            return
+        if current is not None and not self.staged.exists():
+            os.replace(self.output, self.staged)
+        self._restore()
+
+    def _unstage(self, board_to: Path | None) -> None:
+        """Move the staging directory's contents to their final places.
+
+        ``board_to`` is ``--output`` (promote), :attr:`rejected_path`
+        (reject) or ``None`` (nothing new was routed: drop the staged board).
+        Other artifacts go next to ``--output`` under the names the router
+        gave them; project files go beside a rejected board instead, so
+        ``--output``'s own rules are not touched by a rejected route.  Seeded
+        copies that routing did not change are dropped, and seeded siblings
+        routing deleted (stale ``_4layer`` boards) are deleted for real.
+        """
+        directory = self._staging_dir
+        if directory is None or self.staged is None:
+            return
+        parent = self.output.parent
+        receipt: dict[Path, Path | None] = {}
+        deleted = [name for name in self._seeded if not (directory / name).exists()]
+        rejecting = board_to is not None and board_to != self.output
+        if self.staged.is_file():
+            if board_to is None:
+                self.staged.unlink()
+            else:
+                os.replace(self.staged, board_to)
+                self.moves[self.staged] = board_to
+                receipt[self.staged] = None if rejecting else board_to
+        if rejecting:
+            assert board_to is not None
+            for suffix in _PROJECT_SUFFIXES:
+                staged_side = self.staged.with_suffix(suffix)
+                if staged_side.is_file():
+                    os.replace(staged_side, board_to.with_suffix(suffix))
+                    self.moves[staged_side] = board_to.with_suffix(suffix)
+                    receipt[staged_side] = None
+                else:
+                    src = self._project_sidecar_source(suffix)
+                    if src is not None:
+                        shutil.copyfile(src, board_to.with_suffix(suffix))
+        for item in sorted(directory.iterdir()):
+            name = item.name
+            if name in self._seeded and item.is_file() and item.read_bytes() == self._seeded[name]:
+                item.unlink()
+                continue
+            target = parent / name
+            try:
+                if item.is_dir() and target.exists():
+                    continue  # never merge directories; left in staging (reported)
+                os.replace(item, target)
+            except OSError:
+                continue
+            self.moves[item] = target
+            receipt[item] = target
+        for name in deleted:
+            (parent / name).unlink(missing_ok=True)
+        from .route_receipt import relocate
+
+        relocate(receipt)
+
+    # -- verdict -----------------------------------------------------------
     def _finish(self) -> GateOutcome:
         from .route_deadline import record_stage
 
         waivers = None if self._waivers_pinned_empty else str(self.waivers)
         if self._baseline is None:
             return GateOutcome("skipped", "input board was not linted", self.strict)
+        self._recover_stray()
         if not self._fresh():
+            self._unstage(None)
             self._say("no routed board was written; nothing to gate")
             return GateOutcome("skipped", "no routed board written", self.strict, waivers=waivers)
         record_stage("lint-gate")
-        self._say(f"linting routed board {self.output}")
+        where = f" (staged at {self.staged})" if self.staged is not None else ""
+        self._say(f"linting routed board {self.output}{where}")
         try:
-            candidate = self.lint(self.output, "candidate")
+            candidate = self.lint(self.board, "candidate")
         except (LintGateError, OSError, ValueError) as e:
             rejected, restored = self._reject()
             self._err(
@@ -479,9 +747,12 @@ class LintGate:
         ]
         if not blocking:
             self._discard_stale_rejected()
+            self._unstage(self.output)
+            self.promoted = True
             self._say(
                 f"PASS: no new error findings{' or warnings' if self.strict else ''} "
-                f"({summary['introduced']} introduced, {summary['resolved']} resolved)"
+                f"({summary['introduced']} introduced, {summary['resolved']} resolved); "
+                f"wrote {self.output}"
             )
             return GateOutcome(
                 "pass",
@@ -518,6 +789,10 @@ class LintGate:
 
     def _reject(self) -> tuple[Path, str]:
         rejected = self.rejected_path
+        if self.staged is not None:
+            # --output was never written: it still holds its pre-run state.
+            self._unstage(rejected)
+            return rejected, ("previous" if self._before is not None else "removed")
         shutil.copyfile(self.output, rejected)
         # Keep the project rules beside it so `kct check <rejected>` judges it
         # under the same rules (and records waivers against the same findings).
@@ -537,6 +812,10 @@ class LintGate:
         return "previous"
 
     def _restored_text(self, restored: str) -> str:
+        if self.staged is not None:
+            if restored == "removed":
+                return f"{self.output} was not written (it did not exist before this run)"
+            return f"{self.output} was not touched (it keeps its pre-run contents)"
         if restored == "removed":
             return f"{self.output} removed (it did not exist before this run)"
         return f"{self.output} restored to its pre-run contents"
@@ -547,6 +826,40 @@ class LintGate:
             rejected.unlink()
             for suffix in _PROJECT_SUFFIXES:
                 rejected.with_suffix(suffix).unlink(missing_ok=True)
+
+    # -- machine output ----------------------------------------------------
+    def relocate(self, value: Any) -> Any:
+        """Rewrite staged paths inside a JSON-able ``value`` to where the files ended up."""
+        pairs = self._path_pairs()
+        if not pairs:
+            return value
+
+        def fix(v: Any) -> Any:
+            if isinstance(v, str):
+                for old, new in pairs:
+                    if old in v:
+                        v = v.replace(old, new)
+                return v
+            if isinstance(v, dict):
+                return {k: fix(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [fix(x) for x in v]
+            return v
+
+        return fix(value)
+
+    def _path_pairs(self) -> list[tuple[str, str]]:
+        root = self._staging_root
+        if root is None or self.staged is None:
+            return []
+        files: dict[Path, Path] = {self.staged: self.output}
+        files.update({k: v for k, v in self.moves.items() if v is not None})
+        pairs = [(str(k), str(v)) for k, v in files.items()]
+        pairs.sort(key=lambda p: len(p[0]), reverse=True)
+        parent = str(self.output.parent)
+        pairs.append((str(root) + os.sep, "" if parent == "." else parent + os.sep))
+        pairs.append((str(root), parent))
+        return pairs
 
     def _report_rollback(
         self, blocking: list[dict], summary: dict, rejected: Path, restored: str
@@ -590,13 +903,27 @@ class LintGate:
             )
 
 
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve() or (
+            left.exists() and right.exists() and left.samefile(right)
+        )
+    except OSError:
+        return False
+
+
 def _quote(text: str) -> str:
     import shlex
 
     return shlex.quote(text)
 
 
-def merge_into_json_document(text: str, outcome: GateOutcome, exit_code: int) -> str:
+def merge_into_json_document(
+    text: str,
+    outcome: GateOutcome,
+    exit_code: int,
+    relocate: Callable[[Any], Any] | None = None,
+) -> str:
     """Add ``lint_gate`` to the single ``--format json`` document in ``text``.
 
     ``text`` is what the command would have written to stdout.  When it is
@@ -606,6 +933,9 @@ def merge_into_json_document(text: str, outcome: GateOutcome, exit_code: int) ->
     else is returned unchanged -- adding a second document would break the
     single-document contract (#5938) worse than omitting the verdict, which
     the exit code and stderr still carry.
+
+    ``relocate`` (:meth:`LintGate.relocate`) rewrites the staging paths the
+    router reported into the names the files ended up under (Issue #6090).
     """
     if not text.strip():
         doc: dict[str, Any] = {"exit_code": exit_code}
@@ -616,7 +946,7 @@ def merge_into_json_document(text: str, outcome: GateOutcome, exit_code: int) ->
             return text
         if not isinstance(parsed, dict):
             return text
-        doc = parsed
+        doc = relocate(parsed) if relocate is not None else parsed
     doc["lint_gate"] = outcome.to_dict()
     if outcome.rolled_back:
         if "exit_code" in doc:

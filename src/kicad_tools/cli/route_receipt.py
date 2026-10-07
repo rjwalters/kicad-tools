@@ -64,6 +64,35 @@ def record_constraint_publication(board: Path, source: Path | None) -> None:
             invocation.propagated.add(Path(board).absolute())
 
 
+def relocate(moves: dict[Path, Path | None]) -> None:
+    """Follow artifacts moved after routing published them (Issue #6090).
+
+    ``--lint-gate`` routes into a staging directory and moves the judged
+    artifacts to their final names afterwards.  ``moves`` maps each staged
+    path to where it now lives, or to ``None`` when it was not promoted (a
+    rejected board): such a board must never get a receipt as if it shipped.
+    """
+    invocation = _current.get()
+    if invocation is None:
+        return
+    for old, new in moves.items():
+        old = Path(old).absolute()
+        was_published = old in invocation.published
+        was_propagated = old in invocation.propagated
+        invocation.published.discard(old)
+        invocation.propagated.discard(old)
+        invocation.outputs.pop(old, None)
+        if new is None:
+            continue
+        new = Path(new).absolute()
+        if was_published:
+            invocation.published.add(new)
+        if was_propagated:
+            invocation.propagated.add(new)
+        # The staged name was absent before the run, so the moved file is new.
+        invocation.outputs.setdefault(new, None)
+
+
 def configure(args: Any) -> None:
     """Capture output identity before routing and invalidate prior receipts."""
     if getattr(args, "dry_run", False):
