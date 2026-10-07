@@ -84,13 +84,18 @@ def run_panel_command(args) -> int:
         spacing=getattr(args, "panel_mousebite_spacing", 0.8),
     )
 
-    vcut = VCutConfig(layer=getattr(args, "panel_vcut_layer", None) or VCutConfig.layer)
+    vscore_clearance = getattr(args, "panel_vscore_clearance", None)
+    vcut = VCutConfig(
+        layer=getattr(args, "panel_vcut_layer", None) or VCutConfig.layer,
+        clearance=VCutConfig.clearance if vscore_clearance is None else vscore_clearance,
+    )
 
     frame = None
     if getattr(args, "panel_frame", False):
         frame = FrameConfig(
             width=getattr(args, "panel_frame_width", 5.0),
-            space=getattr(args, "panel_frame_space", 2.0),
+            # None: the cut method's default (0 for vcut, 2.0 otherwise).
+            space=getattr(args, "panel_frame_space", None),
         )
 
     tooling = None
@@ -104,7 +109,10 @@ def run_panel_command(args) -> int:
     config = PanelConfig(
         rows=getattr(args, "panel_rows", 2),
         cols=getattr(args, "panel_cols", 2),
-        spacing=getattr(args, "panel_spacing", 2.0),
+        # None: the cut method's default (0 for vcut, 2.0 otherwise).
+        spacing=getattr(args, "panel_spacing", None),
+        spacing_x=getattr(args, "panel_spacing_x", None),
+        spacing_y=getattr(args, "panel_spacing_y", None),
         cut_method=cut_method,
         tabs=tabs,
         mousebite=mousebite,
@@ -125,6 +133,10 @@ def run_panel_command(args) -> int:
             text=f"Error creating panel: {exc}",
         )
 
+    gap_x, gap_y = config.resolved_spacing()
+    frame_space = config.frame.resolved_space(config.cut_method) if config.frame else None
+    is_vcut = config.cut_method == CutMethod.VCUT
+
     if as_json:
         emit_json(
             {
@@ -134,7 +146,11 @@ def run_panel_command(args) -> int:
                 "grid": {
                     "rows": config.rows,
                     "cols": config.cols,
-                    "spacing_mm": config.spacing,
+                    # A single number when both axes match; null for a
+                    # mixed panel (see spacing_x_mm / spacing_y_mm).
+                    "spacing_mm": gap_x if gap_x == gap_y else None,
+                    "spacing_x_mm": gap_x,
+                    "spacing_y_mm": gap_y,
                 },
                 "board_count": panel.board_count,
                 "tabs": len(panel.tabs),
@@ -143,6 +159,9 @@ def run_panel_command(args) -> int:
                 "tab_width_mm": config.tabs.width,
                 "tab_count": config.tabs.count,
                 "frame": config.frame is not None,
+                "frame_space_mm": frame_space,
+                "vscore_clearance_mm": config.vcut.clearance if is_vcut else None,
+                "warnings": panel.warnings,
                 "tooling_holes": config.tooling_holes is not None,
                 "fiducials": config.fiducials is not None,
                 "success": True,
@@ -152,8 +171,14 @@ def run_panel_command(args) -> int:
 
     print(f"Panel created: {result_path}")
     print(f"  Grid: {config.rows}x{config.cols} ({panel.board_count} boards)")
+    if gap_x == gap_y:
+        print(f"  Spacing: {gap_x:g} mm")
+    else:
+        print(f"  Spacing: {gap_x:g} mm between columns, {gap_y:g} mm between rows")
     print(f"  Tabs: {len(panel.tabs)}")
     print(f"  Cut method: {config.cut_method.value}")
-    if config.cut_method == CutMethod.VCUT:
+    if is_vcut:
         print(f"  V-score layer: {config.vcut.layer}")
+    for message in panel.warnings:
+        print(f"Warning: {message}", file=sys.stderr)
     return 0

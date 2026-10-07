@@ -26,7 +26,7 @@ from typing import Any
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
 from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
-from kicad_tools.sexp.builders import gr_line_node
+from kicad_tools.sexp.builders import gr_line_node, keepout_node
 from kicad_tools.sexp.parser import SExp
 
 from .config import (
@@ -51,7 +51,13 @@ from .furniture import (
     fiducial_to_sexp,
     tooling_hole_to_sexp,
 )
-from .tabs import Tab, compute_tabs_between_boards, compute_tabs_to_frame
+from .tabs import BUTT_TOLERANCE_MM, Tab, compute_tabs_between_boards, compute_tabs_to_frame
+from .vscore import (
+    EdgeCopper,
+    VScoreClearanceFinding,
+    edge_copper_clearances,
+    source_side_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +134,11 @@ class Panel:
         self._vcut_config: VCutConfig | None = None
         self._tooling_config: ToolingHoleConfig | None = None
         self._fiducial_config: FiducialConfig | None = None
+        self._source_pcb: Any = None
+        self._source_rel_bounds: tuple[float, float, float, float] = (0, 0, 0, 0)
+        self._edge_copper: dict[str, EdgeCopper] | None = None
+        self._warnings: list[str] = []
+        self._vscore_findings: list[VScoreClearanceFinding] = []
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -137,6 +148,14 @@ class Panel:
     def from_config(cls, board_path: str | Path, config: PanelConfig) -> Panel:
         """Build a complete panel from a config in one call.
 
+        V-cut panels are butted by default: copies sit edge to edge (and
+        against the rails when there is a frame), score lines go on the
+        shared edges and there are no tabs (Issue #6164).  A seam given a
+        gap -- ``spacing``, ``spacing_x``/``spacing_y`` or ``frame.space``
+        -- cannot be V-scored, so it is tab-routed with mousebites
+        instead and :attr:`warnings` says so.  Different gaps per axis
+        make a mixed panel: one axis scored, the other tabbed.
+
         Args:
             board_path: Path to the source ``.kicad_pcb`` file.
             config: Full panel configuration.
@@ -145,18 +164,20 @@ class Panel:
             A fully configured Panel ready for ``save()``.
         """
         panel = cls()
+        gap_x, gap_y = config.resolved_spacing()
         panel.append_board(
             board_path,
             rows=config.rows,
             cols=config.cols,
-            spacing=config.spacing,
             rotation=config.rotation,
+            spacing_x=gap_x,
+            spacing_y=gap_y,
         )
 
         if config.frame is not None:
             panel.make_frame(
                 width=config.frame.width,
-                space=config.frame.space,
+                space=config.frame.resolved_space(config.cut_method),
             )
 
         panel.make_tabs(
@@ -175,7 +196,16 @@ class Panel:
             panel.make_vcuts(
                 line_width=config.vcut.line_width,
                 layer=config.vcut.layer,
+                clearance=config.vcut.clearance,
             )
+            if panel.tabs:
+                # Gapped seams (mixed panel or a spacing override) are
+                # tab-routed; perforate their tabs so they still break.
+                panel.make_mousebites(
+                    diameter=config.mousebite.diameter,
+                    spacing=config.mousebite.spacing,
+                    offset=config.mousebite.offset,
+                )
 
         if config.tooling_holes is not None:
             panel.make_tooling_holes(
@@ -204,6 +234,8 @@ class Panel:
         cols: int = 1,
         spacing: float = 2.0,
         rotation: float = 0.0,
+        spacing_x: float | None = None,
+        spacing_y: float | None = None,
     ) -> Panel:
         """Load a board and place it in a grid layout.
 
@@ -215,11 +247,14 @@ class Panel:
             board_path: Path to the source ``.kicad_pcb``.
             rows: Number of rows in the grid.
             cols: Number of columns in the grid.
-            spacing: Gap between board edges in mm.
+            spacing: Gap between board edges in mm.  0 butts the copies
+                edge to edge, as a V-scored panel needs.
             rotation: Per-board rotation in degrees, a multiple of 90
                 (KiCad's CCW-positive convention).  Each copy is rotated
                 rigidly about its own bounding box, then translated into
                 its grid cell.
+            spacing_x: Gap between columns in mm, overriding *spacing*.
+            spacing_y: Gap between rows in mm, overriding *spacing*.
 
         Returns:
             ``self`` for method chaining.
@@ -230,6 +265,10 @@ class Panel:
                 assume an axis-aligned board rectangle.
         """
         rotation = _normalize_rotation(rotation)
+        gap_x = spacing if spacing_x is None else spacing_x
+        gap_y = spacing if spacing_y is None else spacing_y
+        if gap_x < 0 or gap_y < 0:
+            raise ValueError(f"Panel spacing must be >= 0 mm, got ({gap_x}, {gap_y})")
         board_path = Path(board_path)
         self._source_sexp = load_pcb(board_path)
         self._source_path = board_path
@@ -250,6 +289,9 @@ class Panel:
         board_w = max_x - min_x
         board_h = max_y - min_y
         self._board_bounds = (min_x, min_y, max_x, max_y)
+        self._source_pcb = pcb
+        self._source_rel_bounds = (rel_min_x, rel_min_y, rel_max_x, rel_max_y)
+        self._edge_copper = None
         if rotation in (90.0, 270.0):
             # A quarter turn swaps the footprint the copy occupies.
             board_w, board_h = board_h, board_w
@@ -259,8 +301,8 @@ class Panel:
         for row in range(rows):
             for col in range(cols):
                 idx = row * cols + col
-                offset_x = col * (board_w + spacing)
-                offset_y = row * (board_h + spacing)
+                offset_x = col * (board_w + gap_x)
+                offset_y = row * (board_h + gap_y)
 
                 inst_bounds = (
                     offset_x,
@@ -419,22 +461,35 @@ class Panel:
         self,
         line_width: float = 0.1,
         layer: str = VCutConfig.layer,
+        clearance: float = VCutConfig.clearance,
     ) -> Panel:
-        """Generate V-cut score lines between board rows/columns.
+        """Generate V-cut score lines on the panel's butted seams.
 
         V-cuts are straight lines that span the entire panel width
         or height.  They are drawn on a documentation layer
         (``Cmts.User`` by default), not Edge.Cuts: an open score line on
         Edge.Cuts is a malformed outline (Issue #6143).
 
+        A score line goes exactly on each edge two solids share: two
+        butted copies, or a copy and a butted rail.  A seam with a gap is
+        a routed slot; scoring across it would cut mostly air, so it gets
+        no score line (Issue #6164) -- bridge it with :meth:`make_tabs`
+        and :meth:`make_mousebites`.
+
         Args:
             line_width: Score line width in mm.
             layer: Layer the score lines are drawn on.
+            clearance: Copper clearance to each score line in mm.  Board
+                copper closer than this is reported in :attr:`warnings`,
+                and a copper-pour keepout this wide is added each side of
+                every score line.  0 disables both.
 
         Returns:
             ``self`` for method chaining.
         """
-        self._vcut_config = VCutConfig(line_width=line_width, layer=layer)
+        if clearance < 0:
+            raise ValueError(f"V-score clearance must be >= 0 mm, got {clearance}")
+        self._vcut_config = VCutConfig(line_width=line_width, layer=layer, clearance=clearance)
         return self
 
     # ------------------------------------------------------------------
@@ -514,6 +569,9 @@ class Panel:
         if self._source_sexp is None:
             raise ValueError("No board loaded. Call append_board() before build().")
 
+        self._warnings = []
+        self._vscore_findings = []
+
         # Start with a skeleton PCB based on the source
         panel_sexp = self._build_skeleton()
 
@@ -533,19 +591,7 @@ class Panel:
 
         # Add V-cut lines
         if self._vcut_config is not None:
-            vcut_positions_h, vcut_positions_v = self._compute_vcut_positions()
-            lines = generate_vcut_lines(
-                self._panel_bounds, vcut_positions_h, "horizontal", self._vcut_config
-            )
-            lines.extend(
-                generate_vcut_lines(
-                    self._panel_bounds, vcut_positions_v, "vertical", self._vcut_config
-                )
-            )
-            if lines:
-                self._ensure_layer(panel_sexp, self._vcut_config.layer)
-            for line in lines:
-                panel_sexp.append(vcut_line_to_sexp(line, self._vcut_config))
+            self._add_vcuts(panel_sexp, self._vcut_config)
 
         # Add tooling holes
         if self._tooling_config is not None:
@@ -776,6 +822,133 @@ class Panel:
                     )
                 )
 
+    def _add_vcuts(self, panel_sexp: SExp, config: VCutConfig) -> None:
+        """Draw score lines on butted seams, plus their copper keepouts."""
+        vcut_positions_h, vcut_positions_v = self._compute_vcut_positions()
+        lines = generate_vcut_lines(self._panel_bounds, vcut_positions_h, "horizontal", config)
+        lines.extend(generate_vcut_lines(self._panel_bounds, vcut_positions_v, "vertical", config))
+        if lines:
+            self._ensure_layer(panel_sexp, config.layer)
+        for line in lines:
+            panel_sexp.append(vcut_line_to_sexp(line, config))
+
+        if config.clearance > 0:
+            c = config.clearance
+            for line in lines:
+                x0 = min(line.start_x, line.end_x)
+                x1 = max(line.start_x, line.end_x)
+                y0 = min(line.start_y, line.end_y)
+                y1 = max(line.start_y, line.end_y)
+                if y0 == y1:
+                    y0, y1 = y0 - c, y1 + c
+                else:
+                    x0, x1 = x0 - c, x1 + c
+                # Rule area, not copper: forbids zone fill near the score so
+                # a refill stops short of the blade (KiKit's V-cut
+                # ``clearance``).  Tracks/vias stay legal -- the source
+                # board's own placement is reported, not rewritten.
+                panel_sexp.append(
+                    keepout_node(
+                        [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+                        layers=["*.Cu"],
+                        no_tracks=False,
+                        no_vias=False,
+                        no_pour=True,
+                        uuid_str=str(uuid.uuid4()),
+                        name="V-score clearance",
+                    )
+                )
+            self._vscore_findings = self._check_vscore_clearance(
+                vcut_positions_h, vcut_positions_v, c
+            )
+            self._warnings.extend(f.message() for f in self._vscore_findings)
+
+        gapped = self._gapped_seam_count()
+        if gapped:
+            self._warnings.append(
+                f"V-cut panel: {gapped} seam(s) keep a gap, so they are tab-routed "
+                f"({len(self._tabs)} tab(s)), not V-scored; fabs V-score only butted "
+                "boards -- use spacing 0 (and frame space 0) to score every seam"
+            )
+        if not lines:
+            self._warnings.append("V-cut panel has no butted seams, so no score lines were drawn")
+        # ``warnings`` is the reporting channel (the CLI prints it); log at
+        # info so library callers can opt in without the CLI echoing twice.
+        for message in self._warnings:
+            logger.info(message)
+
+    def _gapped_seam_count(self) -> int:
+        """Board/board and board/rail seams that keep a non-zero gap."""
+        count = 0
+        by_pos = {(i.row, i.col): i for i in self._instances}
+        for (row, col), inst in by_pos.items():
+            right = by_pos.get((row, col + 1))
+            if right is not None and right.bounds[0] - inst.bounds[2] > BUTT_TOLERANCE_MM:
+                count += 1
+            below = by_pos.get((row + 1, col))
+            if below is not None and below.bounds[1] - inst.bounds[3] > BUTT_TOLERANCE_MM:
+                count += 1
+        if self._frame_config is not None and self._instances:
+            fx0, fy0, fx1, fy1 = self._get_frame_inner_bounds()
+            bx0 = min(i.bounds[0] for i in self._instances)
+            by0 = min(i.bounds[1] for i in self._instances)
+            bx1 = max(i.bounds[2] for i in self._instances)
+            by1 = max(i.bounds[3] for i in self._instances)
+            gaps = (bx0 - fx0, by0 - fy0, fx1 - bx1, fy1 - by1)
+            count += sum(1 for g in gaps if g > BUTT_TOLERANCE_MM)
+        return count
+
+    def _check_vscore_clearance(
+        self,
+        horizontal: list[float],
+        vertical: list[float],
+        clearance: float,
+    ) -> list[VScoreClearanceFinding]:
+        """Report source-board copper closer than *clearance* to a score.
+
+        Each copy edge lying on a score line is mapped back, through the
+        copy's rotation, to the source board edge it came from; that edge's
+        closest copper is measured once on the source board.
+        """
+        if self._source_pcb is None:
+            return []
+        if self._edge_copper is None:
+            self._edge_copper = edge_copper_clearances(self._source_pcb, self._source_rel_bounds)
+
+        scored: dict[str, set[int]] = {}
+        tol = BUTT_TOLERANCE_MM
+        for inst in self._instances:
+            x0, y0, x1, y1 = inst.bounds
+            panel_sides = []
+            for y in horizontal:
+                if abs(y - y0) <= tol:
+                    panel_sides.append("top")
+                if abs(y - y1) <= tol:
+                    panel_sides.append("bottom")
+            for x in vertical:
+                if abs(x - x0) <= tol:
+                    panel_sides.append("left")
+                if abs(x - x1) <= tol:
+                    panel_sides.append("right")
+            for side in panel_sides:
+                scored.setdefault(source_side_for(side, inst.rotation), set()).add(inst.index)
+
+        findings = []
+        for side, copies in sorted(scored.items()):
+            copper = self._edge_copper.get(side)
+            if copper is None or copper.gap >= clearance - 1e-4:
+                continue
+            findings.append(
+                VScoreClearanceFinding(
+                    source_side=side,
+                    gap=copper.gap,
+                    required=clearance,
+                    item=copper.item,
+                    copies=tuple(sorted(copies)),
+                )
+            )
+        return findings
+
     def _ensure_layer(self, panel_sexp: SExp, layer_name: str) -> None:
         """Add *layer_name* to the panel's layer table if it is missing.
 
@@ -816,41 +989,55 @@ class Panel:
     def _compute_vcut_positions(
         self,
     ) -> tuple[list[float], list[float]]:
-        """Compute V-cut line positions from the board grid.
+        """Compute V-cut line positions: every butted seam.
+
+        A position is scored when solid material lies on both sides of it
+        with no gap: two butted copies, or a copy butted against the rail
+        (frame space 0).  The score goes exactly on the shared edge.  The
+        old midpoint-of-the-gap placement scored across an empty routed
+        slot (Issue #6164).
 
         Returns:
             (horizontal_positions, vertical_positions) -- lists of Y and
             X coordinates where V-cut lines should be placed.
         """
-        horizontal: list[float] = []
-        vertical: list[float] = []
+        tol = BUTT_TOLERANCE_MM
+        inner = self._get_frame_inner_bounds() if self._frame_config is not None else None
 
-        # Group instances by row/col to find boundaries
-        rows_set: dict[int, list[BoardInstance]] = {}
-        cols_set: dict[int, list[BoardInstance]] = {}
-        for inst in self._instances:
-            rows_set.setdefault(inst.row, []).append(inst)
-            cols_set.setdefault(inst.col, []).append(inst)
+        def scored(
+            low_edges: list[float],
+            high_edges: list[float],
+            rail_low: float | None,
+            rail_high: float | None,
+        ) -> list[float]:
+            # ``low_edges``: where a solid *ends* (copy's max side);
+            # ``high_edges``: where a solid *starts* (copy's min side).
+            ends = list(low_edges)
+            starts = list(high_edges)
+            if rail_low is not None:
+                ends.append(rail_low)  # the near rail ends at the inner edge
+            if rail_high is not None:
+                starts.append(rail_high)  # the far rail starts at the inner edge
+            out: list[float] = []
+            for pos in sorted(set(ends)):
+                if any(abs(pos - other) <= tol for other in starts) and not any(
+                    abs(pos - p) <= tol for p in out
+                ):
+                    out.append(pos)
+            return out
 
-        # Horizontal V-cuts between rows
-        sorted_rows = sorted(rows_set.keys())
-        for i in range(len(sorted_rows) - 1):
-            top_row = rows_set[sorted_rows[i]]
-            bottom_row = rows_set[sorted_rows[i + 1]]
-            # V-cut at midpoint between rows
-            top_max_y = max(inst.bounds[3] for inst in top_row)
-            bottom_min_y = min(inst.bounds[1] for inst in bottom_row)
-            horizontal.append((top_max_y + bottom_min_y) / 2.0)
-
-        # Vertical V-cuts between columns
-        sorted_cols = sorted(cols_set.keys())
-        for i in range(len(sorted_cols) - 1):
-            left_col = cols_set[sorted_cols[i]]
-            right_col = cols_set[sorted_cols[i + 1]]
-            left_max_x = max(inst.bounds[2] for inst in left_col)
-            right_min_x = min(inst.bounds[0] for inst in right_col)
-            vertical.append((left_max_x + right_min_x) / 2.0)
-
+        horizontal = scored(
+            [i.bounds[3] for i in self._instances],
+            [i.bounds[1] for i in self._instances],
+            inner[1] if inner else None,
+            inner[3] if inner else None,
+        )
+        vertical = scored(
+            [i.bounds[2] for i in self._instances],
+            [i.bounds[0] for i in self._instances],
+            inner[0] if inner else None,
+            inner[2] if inner else None,
+        )
         return horizontal, vertical
 
     # ------------------------------------------------------------------
@@ -871,6 +1058,16 @@ class Panel:
     def panel_bounds(self) -> tuple[float, float, float, float]:
         """Return (min_x, min_y, max_x, max_y) of the full panel."""
         return self._panel_bounds
+
+    @property
+    def warnings(self) -> list[str]:
+        """Warnings from the last :meth:`build` (V-score gaps, clearance)."""
+        return list(self._warnings)
+
+    @property
+    def vscore_findings(self) -> list[VScoreClearanceFinding]:
+        """Copper-to-score clearance findings from the last :meth:`build`."""
+        return list(self._vscore_findings)
 
     @property
     def board_count(self) -> int:

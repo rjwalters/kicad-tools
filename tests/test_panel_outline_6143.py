@@ -97,7 +97,11 @@ if BOARD01.exists():
 )
 def test_edge_cuts_form_closed_loops(source: Path, frame: bool, cut: CutMethod) -> None:
     panel = _panel(source, frame=frame, cut=cut)
-    assert panel.tabs, "expected tabs on a 2x2 panel"
+    if cut == CutMethod.MOUSEBITE:
+        assert panel.tabs, "expected tabs on a 2x2 panel"
+    else:
+        # V-cut panels are butted: the score is the separation (#6164).
+        assert not panel.tabs
     _assert_closed_loops(panel.build())
 
 

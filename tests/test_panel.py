@@ -510,7 +510,8 @@ class TestPanelIntegration:
             pytest.skip("Test PCB fixture not found")
 
         panel = Panel()
-        panel.append_board(TEST_PCB, rows=2, cols=2, spacing=2.0)
+        # V-scored boards are butted; a gapped seam gets no score (#6164).
+        panel.append_board(TEST_PCB, rows=2, cols=2, spacing=0)
         panel.make_tabs(width=3.0, count=2)
         panel.make_vcuts()
         sexp = panel.build()

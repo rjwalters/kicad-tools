@@ -10,6 +10,10 @@ from dataclasses import dataclass
 
 from .config import TabConfig
 
+# Gaps at or below this are butted seams: there is no slot to bridge, so
+# no tab (Issue #6164).  Matches the panel outline's 1 nm snap grid.
+BUTT_TOLERANCE_MM = 1e-6
+
 
 @dataclass
 class Tab:
@@ -76,13 +80,16 @@ def compute_tabs_between_boards(
             span the horizontal gap).
 
     Returns:
-        List of Tab instances.
+        List of Tab instances -- empty when the boards are butted (a
+        V-scored seam has no slot to bridge).
     """
     tabs: list[Tab] = []
 
     if orientation == "horizontal":
         # Boards are side by side (A left, B right)
         gap_x = board_b_bounds[0] - board_a_bounds[2]
+        if gap_x <= BUTT_TOLERANCE_MM:
+            return tabs
         gap_center_x = board_a_bounds[2] + gap_x / 2.0
         edge_min_y = max(board_a_bounds[1], board_b_bounds[1])
         edge_max_y = min(board_a_bounds[3], board_b_bounds[3])
@@ -106,6 +113,8 @@ def compute_tabs_between_boards(
     else:
         # Boards are stacked (A top, B bottom)
         gap_y = board_b_bounds[1] - board_a_bounds[3]
+        if gap_y <= BUTT_TOLERANCE_MM:
+            return tabs
         gap_center_y = board_a_bounds[3] + gap_y / 2.0
         edge_min_x = max(board_a_bounds[0], board_b_bounds[0])
         edge_max_x = min(board_a_bounds[2], board_b_bounds[2])
