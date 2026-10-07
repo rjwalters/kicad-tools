@@ -33,6 +33,10 @@ def test_fom_debug_text_output(capsys, voltage_divider_pcb_path: Path):
     assert "FOM breakdown" in captured.out
     assert "trace_length_excess" in captured.out
     assert "weighted_via_count" in captured.out
+    assert "penalty:" in captured.out
+    assert "not comparable across boards" in captured.out
+    score_line = next(l for l in captured.out.splitlines() if l.strip().startswith("score:"))
+    assert "e" in score_line.split()[1].lower()
 
 
 def test_fom_debug_json_output_parses(capsys, voltage_divider_pcb_path: Path):
@@ -43,6 +47,7 @@ def test_fom_debug_json_output_parses(capsys, voltage_divider_pcb_path: Path):
     out = capsys.readouterr().out
     data = json.loads(out)
     assert "score" in data
+    assert data["penalty"] == pytest.approx(sum(data["weighted_soft_terms"].values()))
     assert "soft_terms" in data
     assert "hard_gate_passed" in data
     assert isinstance(data["soft_terms"], dict)

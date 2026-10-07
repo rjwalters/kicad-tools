@@ -34,6 +34,11 @@ def run_optim_fom_debug(
             (footprint count, pad count, net count) above the FOM
             breakdown.
 
+    Scores are ``exp(-penalty)`` and are tiny on most boards, so the text
+    output uses scientific notation and also shows the linear ``penalty``
+    (``sum(w * term)``), also emitted in JSON.  Scores rank placements of
+    the *same* board and are not comparable across boards.
+
     Returns:
         Process exit code (0 on success, non-zero on error).
     """
@@ -67,12 +72,16 @@ def run_optim_fom_debug(
         weights = default_weights()
 
     result = compute_fom(pcb, weights=weights, pcb_path=pcb_path)
+    # Linear penalty sum(w*term) (-log soft_score before the 60 cap).  Far
+    # more readable than the exponentiated score, which is ~1e-7 on most boards.
+    penalty = sum(result.weighted_soft_terms.values())
 
     if output_format == "json":
         out = {
             "pcb": str(Path(pcb_path).resolve()),
             "score": result.score,
             "soft_score": result.soft_score,
+            "penalty": penalty,
             "hard_gate_passed": result.hard_gate_passed,
             "hard_failures": result.hard_failures,
             "soft_terms": result.soft_terms,
@@ -95,8 +104,10 @@ def run_optim_fom_debug(
 
     # Text format
     print(f"FOM breakdown for {pcb_path}")
-    print(f"  score:           {result.score:.6f}")
-    print(f"  soft_score:      {result.soft_score:.6f}")
+    print(f"  penalty:         {penalty:.4f}  (sum w*term; lower is better)")
+    print(f"  score:           {result.score:.3e}  (= exp(-penalty) * gate)")
+    print(f"  soft_score:      {result.soft_score:.3e}")
+    print("  note:            scores rank placements of the SAME board; not comparable across boards")
     print(f"  hard_gate:       {'PASS' if result.hard_gate_passed else 'FAIL'}")
     if result.hard_failures:
         print(f"  hard_failures:   {', '.join(result.hard_failures)}")
