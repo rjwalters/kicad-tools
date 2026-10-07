@@ -1414,6 +1414,7 @@ and whose `.loom-local/local.json` is the host-local tier.
 | `repos.yml` | `roster` | YAML, below |
 | `fleet/state.yml` | `state` | YAML, below |
 | `fleet/admins.json` | comment trust | JSON `{"admins": ["login", ...]}`: fleet admins trusted as comment authors in every fleet repo; unreadable means empty (fails closed). See [comment-trust](comment-trust.md) (#10303) |
+| `fleet.json` | version floor | JSON object, the compiled fleet document (#10705). Optional — fetched when present; absent is not an error. Only its top-level `loom_min_version` is read today (#10711) |
 
 Other files in the store (a README, a host inventory) are never fetched.
 
@@ -1434,6 +1435,16 @@ The desired workspace set is every record with `fleet: true` and not
 `firewall: true`. A record with **both** is a hard error for the whole roster,
 never a silent exclusion — so is a non-boolean `fleet`/`firewall`, a
 non-integer `fleet_priority`, a duplicate `name` or `dir`, or an unsafe `dir`.
+
+**`loom_min_version`** (#10711): an optional top-level `"X.Y.Z"` string, the
+fleet-wide minimum Loom version. Read from `fleet.json` when that file carries
+the key, else from the top level of `repos.yml` (an extra key there, which the
+roster ignores). Every fleet-sync pass reads it into a process-wide value, not
+the config tiers, so a change takes effect on the next tick without a restart.
+Absent means no floor; a malformed value (not a string, not `X.Y.Z`) keeps the
+last good floor and is reported as a fleet-sync error. It appears as
+`floor` in `fleet-sync-status.json` and on the `Fleet store:` status block.
+Nothing acts on it yet (#10698).
 
 **`fleet/state.yml`**:
 
