@@ -38,7 +38,9 @@ Two entry points share one schematic-derived map:
 from __future__ import annotations
 
 import logging
+import math
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -140,6 +142,92 @@ def _segments_touch(a: _Segment, b: _Segment) -> bool:
     return _at_wire_end(a[0], a[1], b) or _at_wire_end(a[2], a[3], b)
 
 
+#: Cell size (mm) of the point hash grid.  Four times the tolerance, so two
+#: points within the tolerance box always land in the same or an adjacent
+#: cell, with a wide margin for float rounding in ``x / cell``.
+_POINT_CELL = 4 * _POINT_TOLERANCE
+
+#: Cell size (mm) of the wire hash grid used to find the wires a junction
+#: lies on.  One schematic grid step: a typical wire spans a handful of cells.
+_WIRE_CELL = 2.54
+
+#: A wire whose bounding box covers more grid cells than this (absurd
+#: coordinates) is checked against every junction instead of being bucketed.
+_MAX_WIRE_CELLS = 4096
+
+
+def _finite(*values: float) -> bool:
+    return all(math.isfinite(v) for v in values)
+
+
+class _PointIndex:
+    """Hash grid of points, answering "which stored points are within the
+    tolerance box of ``(x, y)``" with the exact same test as
+    :func:`_at_wire_end` (``abs(dx) <= tol and abs(dy) <= tol``).
+
+    The 3x3 neighbourhood of cells covers every point the box test can
+    accept, and each candidate is re-checked exactly, so the index changes
+    the cost of a lookup but never its answer.  A non-finite coordinate
+    never passes the box test, so such points are simply not stored.
+    """
+
+    def __init__(self) -> None:
+        self._grid: dict[tuple[int, int], list[tuple[float, float, int]]] = {}
+
+    def add(self, x: float, y: float, item: int) -> None:
+        if _finite(x, y):
+            key = (math.floor(x / _POINT_CELL), math.floor(y / _POINT_CELL))
+            self._grid.setdefault(key, []).append((x, y, item))
+
+    def near(self, x: float, y: float, tol: float = _POINT_TOLERANCE) -> Iterator[int]:
+        if not _finite(x, y):
+            return
+        cx, cy = math.floor(x / _POINT_CELL), math.floor(y / _POINT_CELL)
+        grid = self._grid
+        for i in (cx - 1, cx, cx + 1):
+            for j in (cy - 1, cy, cy + 1):
+                for px, py, item in grid.get((i, j), ()):
+                    if abs(px - x) <= tol and abs(py - y) <= tol:
+                        yield item
+
+
+def _wires_through_junctions(wires: list[_Segment], junctions: list[_Point]) -> Iterator[list[int]]:
+    """For each junction, the indices of the wires it lies on (:func:`_on_segment`).
+
+    Wires are bucketed into a coarse grid by their bounding box, grown by a
+    margin larger than the tolerance; a point within the tolerance of a
+    segment lies inside that box, so only the junction's own cell needs
+    checking.  Candidates are re-checked with :func:`_on_segment` exactly.
+    """
+    margin = 2 * _POINT_TOLERANCE
+    grid: dict[tuple[int, int], list[int]] = {}
+    unbucketed: list[int] = []
+    for idx, (x1, y1, x2, y2) in enumerate(wires):
+        if not _finite(x1, y1, x2, y2):
+            unbucketed.append(idx)
+            continue
+        i0 = math.floor((min(x1, x2) - margin) / _WIRE_CELL)
+        i1 = math.floor((max(x1, x2) + margin) / _WIRE_CELL)
+        j0 = math.floor((min(y1, y2) - margin) / _WIRE_CELL)
+        j1 = math.floor((max(y1, y2) + margin) / _WIRE_CELL)
+        if (i1 - i0 + 1) * (j1 - j0 + 1) > _MAX_WIRE_CELLS:
+            unbucketed.append(idx)
+            continue
+        for i in range(i0, i1 + 1):
+            for j in range(j0, j1 + 1):
+                grid.setdefault((i, j), []).append(idx)
+    for jx, jy in junctions:
+        # _on_segment never accepts a non-finite junction.
+        if not _finite(jx, jy):
+            continue
+        key = (math.floor(jx / _WIRE_CELL), math.floor(jy / _WIRE_CELL))
+        candidates = grid.get(key, [])
+        on = [i for i in candidates if _on_segment(jx, jy, wires[i])]
+        on.extend(i for i in unbucketed if _on_segment(jx, jy, wires[i]))
+        if len(on) > 1:
+            yield on
+
+
 @dataclass
 class _NoConnectZone:
     """Everything on one sheet that a no-connect flag electrically reaches.
@@ -155,40 +243,71 @@ class _NoConnectZone:
     pins and flags join a wire only at its end points; wires join at shared
     end points, or where a junction sits on both.  A pin or flag on a wire's
     interior, or a bare "T" without a junction, does not connect.
+
+    :meth:`build` runs in near-linear time (issue #6016): wire end points and
+    wires are bucketed in hash grids, connectivity is a union-find over the
+    wires, and :meth:`covers` is a grid lookup.  Every grid hit is re-checked
+    with the same tolerance test as before, so results are unchanged.
     """
 
     points: list[_Point]
     wires: list[_Segment]
+    _index: _PointIndex = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Everything a pin end may touch to be flagged: the flags themselves
+        # and the end points of every reached wire.
+        index = _PointIndex()
+        for x, y in self.points:
+            index.add(x, y, 0)
+        for x1, y1, x2, y2 in self.wires:
+            index.add(x1, y1, 0)
+            index.add(x2, y2, 0)
+        self._index = index
 
     @classmethod
     def build(
         cls, points: list[_Point], wires: list[_Segment], junctions: list[_Point]
     ) -> _NoConnectZone:
-        reached: list[_Segment] = []
+        parent = list(range(len(wires)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        ends = _PointIndex()
+        for idx, (x1, y1, x2, y2) in enumerate(wires):
+            ends.add(x1, y1, idx)
+            ends.add(x2, y2, idx)
+
+        # Wires sharing an end point (_segments_touch).
+        for idx, (x1, y1, x2, y2) in enumerate(wires):
+            for other in ends.near(x1, y1):
+                union(idx, other)
+            for other in ends.near(x2, y2):
+                union(idx, other)
+
+        # Wires joined by a junction sitting on both.
+        for on in _wires_through_junctions(wires, junctions):
+            for other in on[1:]:
+                union(on[0], other)
+
         # Like a pin, a flag joins a wire only at one of the wire's end points.
-        pending = [w for w in wires if any(_at_wire_end(x, y, w) for x, y in points)]
-        remaining = [w for w in wires if w not in pending]
-        while pending:
-            wire = pending.pop()
-            reached.append(wire)
-            nxt = []
-            for other in remaining:
-                if _segments_touch(wire, other) or any(
-                    _on_segment(jx, jy, wire) and _on_segment(jx, jy, other) for jx, jy in junctions
-                ):
-                    pending.append(other)
-                else:
-                    nxt.append(other)
-            remaining = nxt
+        seeds = {find(idx) for x, y in points for idx in ends.near(x, y)}
+        reached = [w for idx, w in enumerate(wires) if find(idx) in seeds]
         return cls(points, reached)
 
     def covers(self, x: float, y: float) -> bool:
-        tol = _POINT_TOLERANCE
-        if any(abs(x - px) <= tol and abs(y - py) <= tol for px, py in self.points):
-            return True
         # A pin joins a wire only at the wire's end points; one lying on a
         # wire's interior is not connected (KiCad's own netlist agrees).
-        return any(_at_wire_end(x, y, w) for w in self.wires)
+        return next(self._index.near(x, y), None) is not None
 
 
 @dataclass(frozen=True)
