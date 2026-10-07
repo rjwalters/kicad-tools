@@ -56,12 +56,14 @@ if TYPE_CHECKING:
 
 from .adaptive import AdaptiveAutorouter
 from .adaptive_grid import identify_fine_pitch_components
+from .board_clearance_rules import BoardClearanceRules
 from .escape import EscapeRouter, is_dense_package
 from .foreign_copper import (
     ConflictReport,
     ForeignItem,
+    board_clearance_rules,
     board_copper,
-    board_required_clearance,
+    board_holes,
     find_conflicts,
     summarize_conflicts,
 )
@@ -199,7 +201,12 @@ class RoutingOrchestrator:
         # board, for the short/clearance gate (lazily parsed, cached), and the
         # copper clearance KiCad measures the board against.
         self._board_copper_cache: list[ForeignItem] | None = None
+        self._board_holes_cache: list[ForeignItem] | None = None
         self._required_clearance_cache: float | None = None
+        # Issue #6122: the board's per-pair clearance rules (netclasses and
+        # .kicad_dru rules); ``None`` without a board file.
+        self._clearance_rules_cache: BoardClearanceRules | None = None
+        self._clearance_rules_resolved = False
         self._copper_warned = False
         # Issue #6107: the board-loaded Autorouter the hierarchical strategy
         # last routed on (``None`` when it ran the legacy own-pads-only grid).
@@ -524,6 +531,41 @@ class RoutingOrchestrator:
             self._board_copper_cache = board_copper(self.pcb)
         return self._board_copper_cache
 
+    def _board_holes(self) -> list[ForeignItem]:
+        """Every drilled hole on the board -- pad and via drills (cached, #6139)."""
+        if self._board_holes_cache is None:
+            self._board_holes_cache = board_holes(self.pcb)
+        return self._board_holes_cache
+
+    def _clearance_rules(self) -> BoardClearanceRules | None:
+        """The board's per-pair clearance rules (cached, #6122); ``None`` without a file."""
+        if not self._clearance_rules_resolved:
+            self._clearance_rules_resolved = True
+            try:
+                self._clearance_rules_cache = board_clearance_rules(self._board_path())
+            except Exception:  # defensive: rule reading must never crash routing
+                self._clearance_rules_cache = None
+        return self._clearance_rules_cache
+
+    def _net_required_clearance(self, net_name: str) -> float:
+        """The largest copper clearance ``net_name`` needs from any net on the board.
+
+        What a router must keep this net's new copper from every other net's
+        copper so that no pair the output gate measures is too close: each
+        pair is resolved per netclass and ``.kicad_dru`` rule (#6122), and
+        the largest wins.  The board-wide clearance without a board file.
+        """
+        rules = self._clearance_rules()
+        if rules is None:
+            return self._required_clearance()
+        counterparts = {
+            item.net_name for item in self._board_copper() if item.net_name or item.net == 0
+        }
+        try:
+            return rules.net_requirement(net_name or None, counterparts)
+        except Exception:  # defensive
+            return self._required_clearance()
+
     def _board_path(self) -> Path | None:
         """The ``.kicad_pcb`` the orchestrator's schema ``PCB`` was loaded from."""
         path = getattr(self.pcb, "path", None)
@@ -541,9 +583,12 @@ class RoutingOrchestrator:
         Without a board file it is the routing rules' own ``trace_clearance``.
         """
         if self._required_clearance_cache is None:
+            rules = self._clearance_rules()
             try:
-                self._required_clearance_cache = board_required_clearance(
-                    self._board_path(), float(self.rules.trace_clearance)
+                self._required_clearance_cache = (
+                    rules.board_clearance()
+                    if rules is not None
+                    else float(self.rules.trace_clearance)
                 )
             except Exception:  # defensive: rule reading must never crash routing
                 self._required_clearance_cache = float(self.rules.trace_clearance)
@@ -568,20 +613,24 @@ class RoutingOrchestrator:
 
     def _foreign_copper_conflicts(self, result: RoutingResult) -> ConflictReport:
         """Copper in ``result`` that shorts, or violates clearance to, another
-        net's existing pad, track, arc or via.
+        net's existing pad, track, arc or via, or crowds a drilled hole.
 
         Pads are measured with their real shapes (the clearance kernel's exact
-        pad model), arcs along their true circle.  Copper of the routed net
-        itself never counts.  No-net pads do count (they are foreign to every
-        net); net-0 tracks, vias and arcs stay exempt.
+        pad model), arcs along their true circle, holes and slots along their
+        drill outline (#6139).  Each pair's requirement is resolved from the
+        board's netclasses and ``.kicad_dru`` rules (#6122).  Copper of the
+        routed net itself never counts.  No-net pads and NPTH holes do count
+        (they are foreign to every net); net-0 tracks, vias and arcs stay
+        exempt.
         """
         required = self._required_clearance()
         if not (result.segments or result.vias):
             return ConflictReport(required_mm=required)
-        items = self._board_copper()
+        items = [*self._board_copper(), *self._board_holes()]
         if not items:
             return ConflictReport(required_mm=required)
         own_ids, own_names = self._own_net_identity(result)
+        net_name = next(iter(own_names)) if len(own_names) == 1 else None
         return find_conflicts(
             items,
             result.segments,
@@ -589,6 +638,8 @@ class RoutingOrchestrator:
             own_ids=own_ids,
             own_names=own_names,
             required_mm=required,
+            rules=self._clearance_rules(),
+            net_name=net_name,
         )
 
     def _enforce_no_foreign_shorts(self, result: RoutingResult, strategy: RoutingStrategy) -> None:
@@ -1578,9 +1629,11 @@ class RoutingOrchestrator:
         from .primitives import Route, Segment
 
         rules = copy.copy(self.rules)
-        # Route at no less than the clearance KiCad will measure the board at,
-        # so a clean route is one the output gate (and kicad-cli) accepts.
-        required = self._required_clearance()
+        # Route at no less than the clearance KiCad will measure this net
+        # against -- the largest per-pair requirement between it and any net
+        # on the board (#6122: netclasses and .kicad_dru rules) -- so a clean
+        # route is one the output gate (and kicad-cli) accepts.
+        required = self._net_required_clearance(net_name)
         if required > rules.trace_clearance:
             rules = _replace(rules, trace_clearance=required)
         if required > rules.via_clearance:

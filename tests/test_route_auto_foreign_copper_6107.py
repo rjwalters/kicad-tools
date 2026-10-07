@@ -282,8 +282,9 @@ def test_gate_refuses_copper_on_a_no_net_pad(tmp_path) -> None:
     assert "'<no net>'" in result.error_message
 
 
-def test_gate_ignores_a_bare_npth_hole(tmp_path) -> None:
-    """An NPTH pad with no annular copper is a hole, not copper."""
+def test_gate_refuses_a_bare_npth_hole_by_hole_clearance(tmp_path) -> None:
+    """An NPTH pad with no annular copper is a hole, not copper -- so it is no
+    short, but KiCad measures it at ``hole_clearance`` (#6139)."""
     text = PAD.read_text().replace(
         '(pad "1" smd rect (at 0 0) (size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "/A"))',
         '(pad "" np_thru_hole circle (at 0 0) (size 3.0 3.0) (drill 3.0) (layers "*.Cu" "*.Mask"))',
@@ -294,7 +295,12 @@ def test_gate_ignores_a_bare_npth_hole(tmp_path) -> None:
     orchestrator = _orchestrator(board)
     result = _straight_b()
     orchestrator._enforce_no_foreign_shorts(result, RoutingStrategy.GLOBAL_WITH_REPAIR)
-    assert result.success is True, result.error_message
+    assert result.success is False
+    assert "shorts" not in result.error_message
+    assert "crosses drilled hole(s) (NPTH hole of pad R5 at (115.000, 108.000))" in (
+        result.error_message
+    )
+    assert "0.250 mm hole clearance" in result.error_message
 
 
 def test_gate_respects_pad_layers(tmp_path) -> None:
@@ -373,8 +379,8 @@ def test_rules_unchanged_when_board_routes(tmp_path) -> None:
     assert (orchestrator.rules.trace_clearance, orchestrator.rules.via_clearance) == before
 
 
-def test_gate_ignores_a_bare_oval_npth_slot(tmp_path) -> None:
-    """An oval NPTH slot (``drill oval``) the size of its pad is a hole too."""
+def test_gate_refuses_a_bare_oval_npth_slot_by_hole_clearance(tmp_path) -> None:
+    """An oval NPTH slot (``drill oval``) the size of its pad is a hole too (#6139)."""
     text = PAD.read_text().replace(
         '(pad "1" smd rect (at 0 0) (size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "/A"))',
         '(pad "" np_thru_hole oval (at 0 0) (size 3.0 1.0) (drill oval 3.0 1.0) (layers "*.Cu" "*.Mask"))',
@@ -385,7 +391,9 @@ def test_gate_ignores_a_bare_oval_npth_slot(tmp_path) -> None:
     orchestrator = _orchestrator(board)
     result = _straight_b()
     orchestrator._enforce_no_foreign_shorts(result, RoutingStrategy.GLOBAL_WITH_REPAIR)
-    assert result.success is True, result.error_message
+    assert result.success is False
+    assert "shorts" not in result.error_message
+    assert "NPTH slot of pad R5" in result.error_message
 
 
 def test_gate_refuses_copper_on_an_npth_pad_with_annular_copper(tmp_path) -> None:
