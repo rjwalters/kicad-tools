@@ -246,48 +246,78 @@ def _no_post_route_kicad_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(route_cmd, "_run_pour_oracle_stage", _no_oracle)
 
 
-@pytest.mark.parametrize("extra", [[], ["--no-optimize"]], ids=["default", "no-optimize"])
-def test_cli_lattice_skips_both_passes_and_demotes_nothing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture,
-    extra: list[str],
-) -> None:
-    """Board-02 lattice run: 8/8, no optimize, no nudge, no backstop demotion.
+@pytest.fixture(scope="module")
+def lattice_default_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Route board 02 once with the lattice engine and default flags (#6182).
 
-    Covers both holes: the optimizer pass (NODE_A short, default flags) and
-    the nudge pass, which is NOT covered by ``--no-optimize`` (the LINE_A
-    demotion) -- hence the parametrization.
+    The skip-both-passes assertions all read this single route.  Previously a
+    ``[default]`` / ``[no-optimize]`` parametrization ran the ~10 s pure-Python
+    lattice route twice.  ``--no-optimize`` cannot change the outcome: the
+    gate (``_engine_post_passes_enabled``) keys only on ``route_engine`` /
+    ``lattice_optimize`` and skips optimize AND nudge together, so the
+    ``--no-optimize`` hole (nudge not covered by the flag) is pinned cheaply by
+    ``test_no_optimize_flag_does_not_reenable_nudge`` against the predicate.
+    Module scope means the function-scoped kicad-cli stubs are applied here.
     """
+    import contextlib
+    import io
+
     from kicad_tools.cli import route_cmd
 
-    calls = _spy_post_passes(monkeypatch)
-    out_pcb = tmp_path / "routed.kicad_pcb"
-    rc = route_cmd.main(
-        [
-            str(_CHARLIEPLEX),
-            "--route-engine",
-            "lattice",
-            "--strategy",
-            "basic",
-            "--seed",
-            "42",
-            "--skip-drc",
-            "-o",
-            str(out_pcb),
-            *extra,
-        ]
-    )
-    out = capsys.readouterr().out
+    out_pcb = tmp_path_factory.mktemp("lattice_default") / "routed.kicad_pcb"
+    buf = io.StringIO()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(route_cmd, "_fill_zones_after_route", lambda *a, **k: None)
 
-    assert rc == 0
-    assert calls == {"optimize": 0, "nudge": 0}, "post-passes must not touch lattice copper"
+        def _no_oracle(output_path, *, args, quiet=False):
+            args._stranded_pour_links = 0
+            return 0
+
+        mp.setattr(route_cmd, "_run_pour_oracle_stage", _no_oracle)
+        calls = _spy_post_passes(mp)
+        with contextlib.redirect_stdout(buf):
+            rc = route_cmd.main(
+                [
+                    str(_CHARLIEPLEX),
+                    "--route-engine",
+                    "lattice",
+                    "--strategy",
+                    "basic",
+                    "--seed",
+                    "42",
+                    "--skip-drc",
+                    "-o",
+                    str(out_pcb),
+                ]
+            )
+    return {"rc": rc, "calls": calls, "out": buf.getvalue(), "pcb": out_pcb}
+
+
+def test_no_optimize_flag_does_not_reenable_nudge(capsys: pytest.CaptureFixture) -> None:
+    """``--no-optimize`` must not change the gate for non-grid engines.
+
+    Covers the second hole of #4281 (LINE_A demoted under ``--no-optimize``
+    because the nudge is not covered by that flag) without a second route.
+    """
+    for engine in ("lattice", "mesh"):
+        args = argparse.Namespace(route_engine=engine, no_optimize=True)
+        assert _engine_post_passes_enabled(args) is False
+    assert "Skipping optimize/nudge post-passes" in capsys.readouterr().out
+
+
+def test_cli_lattice_skips_both_passes_and_demotes_nothing(lattice_default_run: dict) -> None:
+    """Board-02 lattice run: 8/8, no optimize, no nudge, no backstop demotion."""
+    run = lattice_default_run
+    out = run["out"]
+
+    assert run["rc"] == 0
+    assert run["calls"] == {"optimize": 0, "nudge": 0}, "post-passes must not touch lattice copper"
     assert "Skipping optimize/nudge post-passes for --route-engine lattice" in out
     # The unconditional #4208 backstop ran and found nothing to demote
     # (pre-fix: 'Post-optimize backstop demoted 1 net(s) ...' -> 7/8).
     assert "Post-optimize backstop demoted" not in out
     assert "Nets routed:     8/8" in out
-    assert out_pcb.exists()
+    assert run["pcb"].exists()
 
 
 def test_cli_lattice_optimize_runs_passes_without_demotion(
