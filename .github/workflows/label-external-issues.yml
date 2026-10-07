@@ -25,13 +25,21 @@ jobs:
             }
             const username = author.login;
 
-            // Verified GitHub App account (app ID 4486636, owned by rjwalters).
+            // Verified Loom fleet GitHub App accounts (writer app ID 4486636,
+            // owned by rjwalters; reader Apps documented in
+            // .loom/docs/github-authentication.md, forge.identities).
             // App installation actors do not pass the user collaborator API.
             // Pin the immutable account ID as well as login/type: other bots
             // and similarly named accounts still require collaborator checks.
-            if (author.id === 313063438 &&
-                author.login === 'loom-fleet-dispatch[bot]' &&
-                author.type === 'Bot') {
+            // Do NOT use a wildcard like 'loom-fleet-*[bot]': App slugs are
+            // globally registered by anyone, so only explicit ids are safe.
+            const trustedApps = [
+              { id: 313063438, login: 'loom-fleet-dispatch[bot]' },
+              { id: 334699997, login: 'loom-fleet-reader-1[bot]' },
+              { id: 334704706, login: 'loom-fleet-reader-2[bot]' },
+            ];
+            if (author.type === 'Bot' &&
+                trustedApps.some(a => a.id === author.id && a.login === author.login)) {
               console.log(`${username} is trusted Loom automation`);
               return { isCollaborator: true };
             }
