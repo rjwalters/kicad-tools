@@ -511,6 +511,8 @@ def run_route_auto_command(args) -> int:
             gate_error = gate.begin()
             if gate_error is not None:
                 print(gate_error, file=sys.stderr)
+                if as_json:
+                    _emit([], 1, gate.baseline_error_outcome().to_dict())
                 return 1
 
     # Issue #5945: --resume / --checkpoint / regressing-pass rollback.

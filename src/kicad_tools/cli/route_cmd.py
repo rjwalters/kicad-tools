@@ -16908,6 +16908,14 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 gate_error = gate.begin()
                 if gate_error is not None:
                     print(gate_error, file=sys.stderr)
+                    if json_stream is not None:
+                        # --format json always yields one document (#5938).
+                        from .route_lint_gate import merge_into_json_document
+
+                        json_stream.write(
+                            merge_into_json_document("", gate.baseline_error_outcome(), 1)
+                        )
+                        json_stream.flush()
                     return 1
             capture = (
                 json_stream.capture()
@@ -16926,6 +16934,15 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 if gate is not None:
                     outcome = gate.finish()
                     result = outcome.exit_code(result)
+                    if outcome.output_restored is not None and hasattr(
+                        args, "_placement_output_before"
+                    ):
+                        # The routed board was rolled back: route_placement.finish
+                        # must not report the restored (pre-run) board as written.
+                        restored = Path(args._placement_output)
+                        args._placement_output_before = (
+                            restored.stat() if restored.exists() else None
+                        )
                 exit_code = finish(args, result)
                 if json_stream is not None and not json_stream.written:
                     # The layer/rule-escalation paths (the default) never reached

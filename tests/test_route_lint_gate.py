@@ -214,7 +214,153 @@ def test_router_crash_never_leaves_an_unjudged_board(board, capsys):
     # The CLI's top-level handler turns the crash into a non-zero exit.
     assert _route(board, SHORT, raise_after=True) != 0
     assert not _routed(board).exists()
+    # The unjudged board (e.g. a Ctrl+C best-attempt save) is kept aside.
+    assert _rejected(board).exists() and "seed-1" in _rejected(board).read_text()
     assert "routing aborted" in capsys.readouterr().err
+
+
+# -- linter exit codes are not success signals (judge review of #6084) ------
+
+
+def _mistakes_with(extra: list[dict], *, only_candidate: bool = False):
+    """Wrap the real ``detect-mistakes`` main, adding error-level findings.
+
+    Like the real command it exits **1** whenever an error-severity finding is
+    reported -- an ordinary result the gate must not treat as a tool failure.
+    """
+    import contextlib
+    import io
+
+    from kicad_tools.cli import mistakes_cmd
+
+    real = mistakes_cmd.main
+
+    def fake(argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = real(argv)
+        doc = json.loads(buf.getvalue())
+        if not only_candidate or "_routed" in argv[0]:
+            doc["mistakes"] = doc["mistakes"] + extra
+        print(json.dumps(doc))
+        if any(m["severity"] == "error" for m in doc["mistakes"] if not m.get("waived")):
+            return 1
+        return code
+
+    return patch.object(mistakes_cmd, "main", fake)
+
+
+ERROR_MISTAKE = {
+    "key": "mistake.thermal_pad_connection|U9||",
+    "rule_id": "mistake.thermal_pad_connection",
+    "category": "thermal_pad_connection",
+    "severity": "error",
+    "title": "Thermal pad not connected",
+    "location": [110.0, 50.0],
+    "evidence_hash": "deadbeef",
+    "waived": False,
+}
+
+
+def test_input_board_with_error_mistake_routes_with_it_as_baseline(board, capsys):
+    """An unwaived error-level mistake on the INPUT is baseline, not a blocker."""
+    with _mistakes_with([ERROR_MISTAKE]):
+        rc = _route(board, HARMLESS, "--format", "json")
+    assert rc == 0, capsys.readouterr().err
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["lint_gate"]["status"] == "pass"
+    assert ERROR_MISTAKE["key"] not in [r["key"] for r in doc["lint_gate"]["introduced"]]
+    assert _routed(board).exists()
+
+
+def test_real_board_with_error_mistakes_is_gated_not_refused(tmp_path, capsys):
+    """Repro from the review: a real board on which detect-mistakes exits 1."""
+    src = Path(__file__).parent / "fixtures" / "pin1_marker.kicad_pcb"
+    pcb = tmp_path / src.name
+    shutil.copy(src, pcb)
+    assert kct_main(["detect-mistakes", str(pcb), "--format", "json"]) == 1
+    capsys.readouterr()
+    rc = _route(pcb, HARMLESS)
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "nothing was routed" not in err
+    assert "PASS" in err
+
+
+def test_route_introducing_error_mistake_is_rolled_back_with_waive_hint(board, capsys):
+    with _mistakes_with([ERROR_MISTAKE], only_candidate=True):
+        rc = _route(board, HARMLESS, "--format", "json")
+    assert rc == 3
+    captured = capsys.readouterr()
+    gate = json.loads(captured.out)["lint_gate"]
+    assert gate["status"] == "rolled_back"
+    assert ERROR_MISTAKE["key"] in [r["key"] for r in gate["introduced"]]
+    assert ERROR_MISTAKE["key"] in captured.err
+    assert "kct detect-mistakes" in captured.err
+    assert f"--waive '{ERROR_MISTAKE['key']}'" in captured.err
+    assert not _routed(board).exists()
+    assert _rejected(board).exists()
+
+
+def _broken_mistakes(*, only_candidate: bool = False):
+    from kicad_tools.cli import mistakes_cmd
+
+    real = mistakes_cmd.main
+
+    def fake(argv):
+        if only_candidate and "_routed" not in argv[0]:
+            return real(argv)
+        print("Traceback: something broke")
+        return 1
+
+    return patch.object(mistakes_cmd, "main", fake)
+
+
+def test_unparseable_linter_output_on_input_is_a_tool_failure(board, capsys):
+    calls: list = []
+    with _broken_mistakes():
+        rc = _route(board, SHORT, "--format", "json", calls=calls)
+    assert rc == 1
+    assert calls == []
+    captured = capsys.readouterr()
+    assert "nothing was routed" in captured.err
+    # --format json still yields exactly one document.
+    doc = json.loads(captured.out)
+    assert doc["exit_code"] == 1
+    assert doc["lint_gate"]["status"] == "error"
+    assert "detect-mistakes" in doc["lint_gate"]["reason"]
+
+
+def test_unparseable_linter_output_on_routed_board_fails_closed(board, capsys):
+    with _broken_mistakes(only_candidate=True):
+        rc = _route(board, HARMLESS, "--format", "json")
+    assert rc == 3
+    gate = json.loads(capsys.readouterr().out)["lint_gate"]
+    assert gate["status"] == "error"
+    assert not _routed(board).exists()
+    assert _rejected(board).exists()
+
+
+def test_check_without_report_is_a_tool_failure(board, capsys):
+    """``kct check`` exiting 2 (its error-findings code) without a report still fails."""
+    from kicad_tools.cli import check_cmd
+
+    with patch.object(check_cmd, "main", lambda argv: 2):
+        rc = _route(board, HARMLESS)
+    assert rc == 1
+    assert "wrote no report" in capsys.readouterr().err
+
+
+def test_route_auto_baseline_failure_emits_json(board, capsys):
+    out = board.with_name("auto_out.kicad_pcb")
+    argv = ["route-auto", str(board), "--net", "GND", "-o", str(out), "--lint-gate"]
+    with _broken_mistakes():
+        rc = kct_main([*argv, "--format", "json"])
+    assert rc == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["success"] is False
+    assert doc["lint_gate"]["status"] == "error"
+    assert not out.exists()
 
 
 def test_route_auto_lint_gate_rolls_back(board, capsys):

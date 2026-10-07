@@ -28,10 +28,18 @@ Waivers
     board at ``<output-stem>.lint-rejected.kicad_pcb``; review it, then
     ``kct check <rejected> --waivers <W> --waive KEY ...`` (or
     ``kct detect-mistakes ... --waive KEY ...`` for ``mistake.*`` keys) --
-    the exact command is printed.  The next run with the same copper passes.
-    ``kct check`` keys for copper findings name the track/via UUIDs, so a
-    waiver recorded against one routing run matches a later run only when
-    that run reproduces the same copper.
+    the exact command is printed.
+
+    **Copper waivers carry over only with the same ``--seed``.**  ``kct
+    check`` keys for copper findings name the track/via UUIDs, and an
+    unseeded route gives its copper fresh random UUIDs on every run, so a
+    copper waiver recorded against one run never matches the next one.  Re-run
+    with the **same ``--seed``** (and unchanged inputs, so the copper is
+    reproduced) for the waiver to apply; any change to the routed copper
+    invalidates it.  Footprint/pad-keyed findings and ``mistake.*`` keys are
+    not affected.  Geometry-based copper keys are tracked in Issue #6088.
+    Stale waivers only make the gate stricter -- it never passes a board it
+    should have rolled back.
 
 Verdict and rollback
     ``introduced_errors > 0`` rolls back; with ``--lint-gate-strict`` (or
@@ -41,7 +49,18 @@ Verdict and rollback
     the input board) and exits **3**, the route rollback exit code shared
     with the connectivity rollback (Issue #2839).  A routed board that
     cannot be linted fails closed: it is rolled back too, also exit 3.  A
-    baseline that cannot be linted aborts before routing with exit 1.
+    baseline that cannot be linted aborts before routing with exit 1 (under
+    ``--format json`` with a ``lint_gate`` document of status ``error``).
+
+    "Cannot be linted" means the linter produced no report, not that it
+    exited non-zero: ``kct check`` exits 2 and ``kct detect-mistakes`` exits
+    1 when they *find* errors, which is an ordinary result.  Success is
+    judged by whether the report parses as the expected JSON document.
+
+    When routing itself raises or exits (Ctrl+C, a deadline, a strict
+    connectivity exit) after writing ``--output``, that board was never
+    judged: it is moved aside to ``<output-stem>.lint-rejected.kicad_pcb``
+    and ``--output`` is restored as for a rollback.
 
 Not gated
     ``--checkpoint`` files (best-so-far intermediates; a later ``--resume``
@@ -179,6 +198,8 @@ class LintGate:
         self.waivers: Path | None = None
         self._waivers_pinned_empty = False
         self._flags: list[str] = []
+        #: Why the baseline could not be linted (set by :meth:`begin`).
+        self.baseline_error: str | None = None
 
     # -- construction ------------------------------------------------------
     @classmethod
@@ -267,7 +288,15 @@ class LintGate:
         self._flags = flags
 
     # -- linting -----------------------------------------------------------
-    def _run(self, main: Callable[[list[str]], int], argv: list[str], what: str) -> tuple[int, str]:
+    def _run(
+        self, main: Callable[[list[str]], int], argv: list[str]
+    ) -> tuple[int, str, io.StringIO]:
+        """Run a linter in-process; return ``(exit code, stdout, stderr buffer)``.
+
+        The exit code is NOT a success signal: ``kct check`` exits 2 and
+        ``kct detect-mistakes`` exits 1 when they find error-severity
+        findings.  Callers judge success by whether the report parses.
+        """
         out, err = io.StringIO(), io.StringIO()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -278,11 +307,13 @@ class LintGate:
         except BaseException:
             _replay(err)
             raise
-        if code == 1:
-            # Tool failure: the captured diagnostics are the only clue.
-            _replay(err)
-            raise LintGateError(f"{what} failed (exit 1)")
-        return int(code or 0), out.getvalue()
+        return int(code or 0), out.getvalue(), err
+
+    @staticmethod
+    def _failed(what: str, code: int, err: io.StringIO, problem: str) -> LintGateError:
+        # Tool failure: the captured diagnostics are the only clue.
+        _replay(err)
+        return LintGateError(f"{what} failed (exit {code}): {problem}")
 
     def lint(self, board: Path, label: str) -> dict:
         """Merged ``kct check`` + ``detect-mistakes`` findings for ``board``."""
@@ -306,20 +337,28 @@ class LintGate:
             "--output",
             str(report_path),
         ]
-        self._run(check_main, argv, f"kct check on the {label} board {board}")
+        what = f"kct check on the {label} board {board}"
+        code, _text, err = self._run(check_main, argv)
         if not report_path.is_file():
-            raise LintGateError(f"kct check wrote no report for the {label} board {board}")
-        report = json.loads(report_path.read_text())
+            raise self._failed(what, code, err, "it wrote no report")
+        try:
+            report = json.loads(report_path.read_text())
+        except json.JSONDecodeError as e:
+            raise self._failed(what, code, err, f"unparseable report ({e})") from e
+        if not isinstance(report, dict) or not isinstance(report.get("violations"), list):
+            raise self._failed(what, code, err, "report has no 'violations' list")
 
-        _code, text = self._run(
+        what = f"kct detect-mistakes on the {label} board {board}"
+        code, text, err = self._run(
             mistakes_main,
             [str(board), "--format", "json", "--waivers", str(self.waivers)],
-            f"kct detect-mistakes on the {label} board {board}",
         )
         try:
-            mistakes = json.loads(text) if text.strip() else {}
+            mistakes = json.loads(text)
         except json.JSONDecodeError as e:
-            raise LintGateError(f"kct detect-mistakes JSON for the {label} board: {e}") from e
+            raise self._failed(what, code, err, f"no JSON document on stdout ({e})") from e
+        if not isinstance(mistakes, dict) or not isinstance(mistakes.get("mistakes"), list):
+            raise self._failed(what, code, err, "JSON document has no 'mistakes' list")
 
         violations = list(report.get("violations", []))
         violations += [_mistake_violation(m) for m in mistakes.get("mistakes", [])]
@@ -348,10 +387,15 @@ class LintGate:
             self._baseline = self.lint(self.source, "baseline")
         except (LintGateError, OSError, ValueError) as e:
             self.close()
-            return f"[lint-gate] cannot lint the input board, nothing was routed: {e}"
+            self.baseline_error = f"cannot lint the input board, nothing was routed: {e}"
+            return f"[lint-gate] {self.baseline_error}"
         active = sum(1 for v in self._baseline["violations"] if not v.get("waived"))
         self._say(f"baseline: {active} active finding(s); waivers: {self._waivers_label()}")
         return None
+
+    def baseline_error_outcome(self) -> GateOutcome:
+        """The verdict for a run :meth:`begin` refused (for ``--format json``)."""
+        return GateOutcome("error", self.baseline_error or "", self.strict)
 
     def _waivers_label(self) -> str:
         return "none" if self._waivers_pinned_empty else str(self.waivers)
@@ -371,11 +415,19 @@ class LintGate:
             self.close()
 
     def abort(self) -> None:
-        """Routing raised: restore ``--output`` (it was never judged) and clean up."""
+        """Routing raised: move the unjudged ``--output`` aside and restore it.
+
+        The router may have saved a best-so-far board before exiting (Ctrl+C
+        during adaptive routing saves ``best_completed_attempt`` and exits 5);
+        it is kept at :attr:`rejected_path` rather than discarded.
+        """
         try:
             if self._baseline is not None and self._fresh():
-                restored = self._restore()
-                self._err(f"routing aborted; {self._restored_text(restored)}")
+                rejected, restored = self._reject()
+                self._err(
+                    f"routing aborted before the routed board was linted; it is kept "
+                    f"(unjudged) at {rejected}, {self._restored_text(restored)}"
+                )
         except OSError:
             pass
         finally:
@@ -520,6 +572,12 @@ class LintGate:
         check_keys = [r["key"] for r in blocking if not str(r.get("key")).startswith("mistake.")]
         mistake_keys = [r["key"] for r in blocking if str(r.get("key")).startswith("mistake.")]
         self._err("  to accept a reviewed finding, waive it against the rejected board and re-run:")
+        if check_keys:
+            self._err(
+                "  (copper finding keys name track/via UUIDs: a copper waiver carries over "
+                "only to a re-run with the SAME --seed and unchanged inputs -- an unseeded "
+                "route gets new UUIDs every run; see Issue #6088)"
+            )
         flags = " ".join(_quote(f) for f in self._flags)
         for tool, keys in (("kct check", check_keys), ("kct detect-mistakes", mistake_keys)):
             if not keys:
