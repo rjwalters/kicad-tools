@@ -21,19 +21,14 @@ perturbation-sampling noise between arms.  On them it reports:
    several seeds, because the fitted weight is a pick from a rank-consistency
    plateau and a single seed is not evidence.
 
-Speed: ``trace_length_excess`` calls the router's iterated 1-Steiner RSMT,
-whose pure-Python Prim is O(n^3) per trial MST; the 44-pad GND net on board
-03 takes ~2 min per placement, so 7 boards x 41 placements runs for hours.
-By default this script installs a numpy Prim batched across all Hanan
-candidates (same candidate order, same strict ``gain > best_gain`` rule).
-It is *not* bit-identical in general: Prim's float summation order differs,
-so on near-tied gains it can pick a different Steiner point (about 2% of
-random small point sets in review, final tree length usually equal, at most
-one 0.635 mm grid step apart).  On the calibration boards it matched the
-production solver exactly: all 41x10 board-04 term values, board 03's GND
-net (243.5965 mm both ways, 111 s vs 0.6 s), and spot-checks of boards 01,
-02 and 06.  Only ``trace_length_excess`` uses it, a column shared by both
-A/B arms.  ``--exact-steiner`` disables it.
+Speed: ``trace_length_excess`` calls the router's iterated 1-Steiner RSMT.
+Its candidate scoring used to be a pure-Python O(n^3) Prim per candidate
+(board 03's 44-pad GND net took ~2 min per placement), so this script once
+monkeypatched in a numpy approximation.  Issue #6019 moved a batched Prim into
+``router.algorithms.steiner`` that is *bit-identical* to the scalar solver
+(it replays CPython ``set`` order on tied Prim steps), so the script now uses
+the production solver unchanged.  ``--exact-steiner`` is accepted for
+compatibility and is a no-op.
 
 Usage::
 
@@ -58,7 +53,6 @@ import calibrate_fom as cf  # noqa: E402
 from kicad_tools.optim import fom_electrical as fe  # noqa: E402
 from kicad_tools.optim.fom import SOFT_TERM_NAMES, compute_soft_terms  # noqa: E402
 from kicad_tools.optim.fom_features import extract_features  # noqa: E402
-from kicad_tools.router.algorithms import steiner as st  # noqa: E402
 from kicad_tools.schema.pcb import PCB  # noqa: E402
 
 DI = SOFT_TERM_NAMES.index("decoupling_proximity")
@@ -74,59 +68,6 @@ _OLD_POWER_RAIL_HINTS = (
 def old_looks_like_power_net(net_name: str) -> bool:
     name = (net_name or "").upper()
     return any(hint in name for hint in _OLD_POWER_RAIL_HINTS)
-
-
-# ----------------------------------------------------------------------
-# Measurement-only batched 1-Steiner (exact on the calibration boards; see module docstring)
-# ----------------------------------------------------------------------
-
-_exact_one_steiner = st._iterative_one_steiner
-
-
-def _batched_mst_cost(points, candidates) -> np.ndarray:
-    """Manhattan MST cost of ``points + [c]`` for every candidate ``c``."""
-    p = np.asarray(points, float)
-    cand = np.asarray(candidates, float)
-    c_n, m = len(cand), len(p)
-    x = np.concatenate([np.broadcast_to(p, (c_n, m, 2)), cand[:, None, :]], axis=1)
-    rows = np.arange(c_n)
-    connected = np.zeros((c_n, m + 1), bool)
-    connected[:, 0] = True
-    best = np.abs(x[:, :, 0] - x[:, :1, 0]) + np.abs(x[:, :, 1] - x[:, :1, 1])
-    best[connected] = np.inf
-    total = np.zeros(c_n)
-    for _ in range(m):
-        j = np.argmin(best, axis=1)
-        total += best[rows, j]
-        connected[rows, j] = True
-        xj = x[rows, j]
-        d = np.abs(x[:, :, 0] - xj[:, None, 0]) + np.abs(x[:, :, 1] - xj[:, None, 1])
-        np.minimum(best, d, out=best)
-        best[connected] = np.inf
-    return total
-
-
-def _batched_one_steiner(terminals, cost_fn=None, max_iterations=50):
-    if cost_fn is not None:
-        return _exact_one_steiner(terminals, cost_fn, max_iterations)
-    all_points = list(terminals)
-    current_cost = st._mst_cost(all_points, None)
-    for _ in range(max_iterations):
-        candidates = st._hanan_grid(all_points)
-        if not candidates:
-            break
-        best_gain, best_candidate = 0.0, None
-        for cand, trial in zip(
-            candidates, _batched_mst_cost(all_points, candidates).tolist(), strict=True
-        ):
-            gain = current_cost - trial
-            if gain > best_gain:
-                best_gain, best_candidate = gain, cand
-        if best_candidate is None or best_gain <= 0:
-            break
-        all_points.append(best_candidate)
-        current_cost -= best_gain
-    return all_points, st._build_mst_edges(all_points, None)
 
 
 # ----------------------------------------------------------------------
@@ -300,12 +241,12 @@ def main(argv: list[str] | None = None) -> int:
         "--board", action="append", help="Collect only this board (repeatable); skips analysis"
     )
     ap.add_argument(
-        "--exact-steiner", action="store_true", help="Use the production (slow) 1-Steiner solver"
+        "--exact-steiner",
+        action="store_true",
+        help="No-op since #6019: the production 1-Steiner solver is now fast and exact",
     )
     args = ap.parse_args(argv)
 
-    if not args.exact_steiner:
-        st._iterative_one_steiner = _batched_one_steiner
     args.out.mkdir(parents=True, exist_ok=True)
     for board, path in cf.BOARDS:
         if args.board and board not in args.board:
