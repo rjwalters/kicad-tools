@@ -11,7 +11,9 @@ tests keep it that way:
   fails here instead of silently doing nothing;
 * a real kicad-cli export through each preset yields kicad-cli's own
   ``<board>-<Layer>.<protel ext>`` names, keeps the X2 ``%TF.FileFunction``
-  attributes, and the ``.gbrjob`` only references files that are in the zip.
+  attributes, and the ``.gbrjob`` only references files that are in the zip;
+* each preset's drill files come out merged or split as it declares
+  (Issue #6167).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import ast
 import dataclasses
 import json
 import re
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -79,20 +82,7 @@ _GERBER_RE = re.compile(r"-(?P<layer>[A-Za-z0-9_]+)\.(?:gtl|gbl|gts|gbs|gto|gbo|
 
 
 @pytest.mark.skipif(find_kicad_cli() is None, reason="kicad-cli not installed")
-@pytest.mark.parametrize(
-    "manufacturer",
-    [
-        pytest.param(
-            key,
-            marks=pytest.mark.xfail(
-                reason="Issue #6167: --merge-npth is not a kicad-cli flag", strict=False
-            ),
-        )
-        if MANUFACTURER_PRESETS[key].config.merge_pth_npth
-        else key
-        for key in sorted(MANUFACTURER_PRESETS)
-    ],
-)
+@pytest.mark.parametrize("manufacturer", sorted(MANUFACTURER_PRESETS))
 def test_preset_export_uses_kicad_cli_names(manufacturer, tmp_path):
     zip_path = GerberExporter(SIMPLE_LED).export_for_manufacturer(manufacturer, tmp_path / "out")
     stem = SIMPLE_LED.stem
@@ -107,7 +97,26 @@ def test_preset_export_uses_kicad_cli_names(manufacturer, tmp_path):
         assert names == gerbers | jobs | drills, sorted(names - gerbers - jobs - drills)
         assert all(n.startswith(f"{stem}-") for n in gerbers | jobs)
         assert jobs == {f"{stem}-job.gbrjob"}
-        assert drills and all(n.startswith(stem) for n in drills)
+        # Issue #6167: the preset's PTH/NPTH choice reaches kicad-cli.  OSH
+        # Park asks for one merged drill file; the others get KiCad's default
+        # separate plated / non-plated files.
+        if MANUFACTURER_PRESETS[manufacturer].config.merge_pth_npth:
+            assert drills == {f"{stem}.drl"}
+        else:
+            assert drills == {f"{stem}-PTH.drl", f"{stem}-NPTH.drl"}
+        plated = zf.read(f"{stem}.drl" if len(drills) == 1 else f"{stem}-PTH.drl")
+        assert plated.startswith(b"M48") and b"\nT1" in plated
+
+        try:
+            from gerbonara import ExcellonFile
+        except ImportError:
+            ExcellonFile = None
+        if ExcellonFile is not None:
+            for name in drills:
+                with warnings.catch_warnings():
+                    # gerbonara notes KiCad's G90 after the header; harmless.
+                    warnings.simplefilter("ignore", SyntaxWarning)
+                    ExcellonFile.from_string(zf.read(name).decode(), filename=name)
 
         layers = {_GERBER_RE.search(n)["layer"] for n in gerbers}
         assert {"F_Cu", "B_Cu", "F_Mask", "B_Mask", "Edge_Cuts"} <= layers

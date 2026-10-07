@@ -410,7 +410,7 @@ class TestGetDrillOriginValue:
 
 
 class TestDrillExportCommand:
-    """Tests verifying _export_drill builds the correct command."""
+    """Tests verifying _drill_command builds the correct command."""
 
     @pytest.fixture
     def mock_exporter(self, tmp_path):
@@ -431,16 +431,12 @@ class TestDrillExportCommand:
         config = GerberConfig(use_aux_origin=True)
 
         version_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
-        drill_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
         with patch("kicad_tools.export.gerber.subprocess.run") as mock_run:
-            # First call is version check, second is the drill export
-            mock_run.side_effect = [version_result, drill_result]
-            mock_exporter._export_drill(config, output_dir)
+            # The only subprocess call is the version check
+            mock_run.side_effect = [version_result]
+            cmd = mock_exporter._drill_command(config, output_dir)
 
-        # The drill export call is the second one
-        drill_call = mock_run.call_args_list[1]
-        cmd = drill_call[0][0]
         origin_idx = cmd.index("--drill-origin")
         assert cmd[origin_idx + 1] == "plot"
 
@@ -451,14 +447,11 @@ class TestDrillExportCommand:
         config = GerberConfig(use_aux_origin=True)
 
         version_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="9.0.2\n")
-        drill_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
         with patch("kicad_tools.export.gerber.subprocess.run") as mock_run:
-            mock_run.side_effect = [version_result, drill_result]
-            mock_exporter._export_drill(config, output_dir)
+            mock_run.side_effect = [version_result]
+            cmd = mock_exporter._drill_command(config, output_dir)
 
-        drill_call = mock_run.call_args_list[1]
-        cmd = drill_call[0][0]
         origin_idx = cmd.index("--drill-origin")
         assert cmd[origin_idx + 1] == "aux"
 
@@ -468,13 +461,12 @@ class TestDrillExportCommand:
         output_dir.mkdir()
         config = GerberConfig(use_aux_origin=False)
 
-        drill_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        with patch("kicad_tools.export.gerber.subprocess.run") as mock_run:
+            cmd = mock_exporter._drill_command(config, output_dir)
 
-        with patch("kicad_tools.export.gerber.subprocess.run", return_value=drill_result):
-            mock_exporter._export_drill(config, output_dir)
-
-        # Should have been called only once (no version check needed)
-        # and the command should not contain --drill-origin
+        # No version check is needed, and the command has no --drill-origin
+        mock_run.assert_not_called()
+        assert "--drill-origin" not in cmd
 
 
 # Import assembly module

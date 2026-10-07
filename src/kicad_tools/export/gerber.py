@@ -11,6 +11,7 @@ import math
 import re
 import subprocess
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -268,11 +269,19 @@ class GerberConfig:
     subtract_soldermask: bool = False
     disable_aperture_macros: bool = False
 
-    # Drill options
+    # Drill options (Issue #6167: each maps onto a real
+    # ``kicad-cli pcb export drill`` flag -- see ``_drill_command``).
     generate_drill: bool = True
-    drill_format: str = "excellon"  # excellon or gerber_x2
+    # "excellon" or "gerber" ("gerber_x2" is accepted as an alias).
+    drill_format: str = "excellon"
+    # False -> separate ``<board>-PTH.drl`` + ``<board>-NPTH.drl``
+    # (``--excellon-separate-th``); True -> one merged ``<board>.drl``
+    # (kicad-cli's default).  Gerber-format drill is always split.
     merge_pth_npth: bool = False
-    minimal_header: bool = False
+    minimal_header: bool = False  # --excellon-min-header
+    drill_units: str = "mm"  # --excellon-units: "mm" or "in" ("inch" alias)
+    # --excellon-zeros-format: decimal, suppressleading, suppresstrailing, keep
+    drill_zeros_format: str = "decimal"
 
     # Post-zip cleanup: when True (default), remove individual gerber and
     # drill files after creating the zip archive so only the zip remains.
@@ -338,7 +347,10 @@ OSHPARK_PRESET = GerberManufacturerPreset(
         use_aux_origin=False,
         include_solderpaste=False,
         generate_drill=True,
-        merge_pth_npth=True,  # OSH Park prefers merged drill
+        # OSH Park's KiCad guide asks for plated and non-plated holes merged
+        # into a single drill file; the other presets ship KiCad's default
+        # separate PTH/NPTH files, which their KiCad guides show.
+        merge_pth_npth=True,
     ),
 )
 
@@ -433,6 +445,16 @@ def get_drill_origin_value(kicad_cli: Path) -> str:
         return "plot"
 
     return "plot" if major >= 10 else "aux"
+
+
+# ``kicad-cli pcb export drill`` option values (Issue #6167).
+_DRILL_FORMATS: dict[str, str] = {
+    "excellon": "excellon",
+    "gerber": "gerber",
+    "gerber_x2": "gerber",
+}
+_DRILL_UNITS: dict[str, str] = {"mm": "mm", "in": "in", "inch": "in"}
+_DRILL_ZEROS_FORMATS: tuple[str, ...] = ("decimal", "suppressleading", "suppresstrailing", "keep")
 
 
 class GerberExporter:
@@ -720,8 +742,48 @@ class GerberExporter:
                 ],
             )
 
-    def _export_drill(self, config: GerberConfig, output_dir: Path) -> None:
-        """Export drill files using kicad-cli."""
+    def _drill_command(self, config: GerberConfig, output_dir: Path) -> list[str]:
+        """Build the ``kicad-cli pcb export drill`` argv for ``config``.
+
+        Every option maps onto a flag ``kicad-cli pcb export drill --help``
+        lists (KiCad 7 through 10).  ``--merge-npth`` and
+        ``--minimal-header`` never existed and made kicad-cli reject the
+        whole command (Issue #6167): kicad-cli merges PTH and NPTH by
+        default, ``--excellon-separate-th`` splits them, and the minimal
+        header is ``--excellon-min-header``.  Values kicad-cli would reject
+        raise :class:`ConfigurationError` before anything runs.
+        """
+        fmt = _DRILL_FORMATS.get(config.drill_format.lower())
+        if fmt is None:
+            raise ConfigurationError(
+                f"Unknown drill format: {config.drill_format}",
+                context={"drill_format": config.drill_format},
+                suggestions=["Use 'excellon' or 'gerber'"],
+            )
+        units = _DRILL_UNITS.get(config.drill_units.lower())
+        if units is None:
+            raise ConfigurationError(
+                f"Unknown drill units: {config.drill_units}",
+                context={"drill_units": config.drill_units},
+                suggestions=["Use 'mm' or 'in'"],
+            )
+        zeros = config.drill_zeros_format.lower()
+        if zeros not in _DRILL_ZEROS_FORMATS:
+            raise ConfigurationError(
+                f"Unknown drill zeros format: {config.drill_zeros_format}",
+                context={"drill_zeros_format": config.drill_zeros_format},
+                suggestions=[f"Use one of: {', '.join(_DRILL_ZEROS_FORMATS)}"],
+            )
+        if fmt == "gerber" and config.merge_pth_npth:
+            raise ConfigurationError(
+                "Gerber-format drill files cannot merge PTH and NPTH holes",
+                context={"drill_format": config.drill_format, "merge_pth_npth": True},
+                suggestions=[
+                    "Use drill_format='excellon' for a merged drill file",
+                    "Or set merge_pth_npth=False",
+                ],
+            )
+
         cmd = [
             str(self.kicad_cli),
             "pcb",
@@ -731,21 +793,57 @@ class GerberExporter:
             "--output",
             str(output_dir) + "/",
             "--format",
-            config.drill_format,
+            fmt,
         ]
-
-        if config.merge_pth_npth:
-            cmd.append("--merge-npth")
-
-        if config.minimal_header:
-            cmd.append("--minimal-header")
+        if fmt == "excellon":
+            if not config.merge_pth_npth:
+                cmd.append("--excellon-separate-th")
+            if config.minimal_header:
+                cmd.append("--excellon-min-header")
+            cmd.extend(["--excellon-units", units, "--excellon-zeros-format", zeros])
 
         if config.use_aux_origin:
             origin_value = get_drill_origin_value(self.kicad_cli)
             cmd.append("--drill-origin")
             cmd.append(origin_value)
+        return cmd
+
+    def _expected_drill_files(self, config: GerberConfig) -> list[str]:
+        """kicad-cli's drill file names for ``config`` (Excellon only).
+
+        Gerber-format drill writes one ``<board>-<span>-drl.gbr`` per
+        non-empty hole class, so there is no fixed set to expect.
+        """
+        stem = self.pcb_path.stem
+        if _DRILL_FORMATS.get(config.drill_format.lower()) != "excellon":
+            return []
+        if config.merge_pth_npth:
+            return [f"{stem}.drl"]
+        return [f"{stem}-PTH.drl", f"{stem}-NPTH.drl"]
+
+    def _export_drill(self, config: GerberConfig, output_dir: Path) -> None:
+        """Export drill files using kicad-cli.
+
+        Raises :class:`ExportError` when kicad-cli fails *or* exits cleanly
+        without writing the drill files the config asks for -- a fab package
+        must never ship without drill data (Issue #6167).
+        """
+        cmd = self._drill_command(config, output_dir)
+        expected = self._expected_drill_files(config)
+
+        # A drill file from an earlier export in the other PTH/NPTH mode
+        # (``board.drl`` next to a fresh ``board-PTH.drl``) would be zipped
+        # and sent to the fab as extra holes.  Remove kicad-cli's drill
+        # names for this board that this export will not rewrite.
+        stem = self.pcb_path.stem
+        for name in (f"{stem}.drl", f"{stem}-PTH.drl", f"{stem}-NPTH.drl"):
+            stale = output_dir / name
+            if name not in expected and stale.is_file():
+                logger.info("Drill export: removing stale %s", stale)
+                stale.unlink()
 
         logger.debug(f"Running: {' '.join(cmd)}")
+        started = time.time()
 
         try:
             result = subprocess.run(
@@ -766,6 +864,7 @@ class GerberExporter:
                 "Drill export failed",
                 context={
                     "pcb": str(self.pcb_path),
+                    "command": " ".join(cmd),
                     "exit_code": e.returncode,
                     "stderr": error_output or "(empty)",
                     "stdout": stdout_output or "(empty)",
@@ -773,7 +872,31 @@ class GerberExporter:
                 suggestions=[
                     "Check the KiCad log for details",
                     "Verify the PCB file is valid and can be opened in KiCad",
+                    "Compare the flags with `kicad-cli pcb export drill --help`",
                 ],
+            ) from e
+
+        # kicad-cli can exit 0 without writing anything; check the files.
+        # Allow 2 s of slack for filesystems with coarse mtimes.
+        def fresh(path: Path) -> bool:
+            return path.is_file() and path.stat().st_mtime >= started - 2
+
+        if expected:
+            missing = [name for name in expected if not fresh(output_dir / name)]
+        elif any(fresh(f) for f in output_dir.glob(f"{stem}*-drl.gbr")):
+            missing = []
+        else:
+            missing = [f"{stem}-*-drl.gbr"]
+        if missing:
+            raise ExportError(
+                "Drill export wrote no drill file",
+                context={
+                    "pcb": str(self.pcb_path),
+                    "command": " ".join(cmd),
+                    "missing": ", ".join(missing),
+                    "stdout": result.stdout.strip() or "(empty)",
+                },
+                suggestions=["Run the command above by hand and check its output"],
             )
 
     def _get_default_layers(self, config: GerberConfig) -> list[str]:

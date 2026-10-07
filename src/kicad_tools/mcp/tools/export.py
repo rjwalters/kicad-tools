@@ -6,6 +6,7 @@ Provides tools for exporting PCB manufacturing files (Gerbers, drill files, BOM,
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import zipfile
 from pathlib import Path
@@ -178,14 +179,14 @@ def export_gerbers(
         exporter = GerberExporter(pcb)
 
         # Configure based on manufacturer
-        if manufacturer_lower in MANUFACTURER_PRESETS:
-            config = MANUFACTURER_PRESETS[manufacturer_lower].config
-        else:
-            config = GerberConfig()
-
-        # Override settings based on parameters
-        config.generate_drill = include_drill
-        config.create_zip = zip_output
+        # Copy the preset: assigning to the shared preset object would leak
+        # this call's overrides into every later export in the process.
+        base = (
+            MANUFACTURER_PRESETS[manufacturer_lower].config
+            if manufacturer_lower in MANUFACTURER_PRESETS
+            else GerberConfig()
+        )
+        config = dataclasses.replace(base, generate_drill=include_drill, create_zip=zip_output)
 
         # Export
         result_path = exporter.export(config, out_dir)
