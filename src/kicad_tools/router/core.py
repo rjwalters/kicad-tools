@@ -4419,9 +4419,11 @@ class Autorouter:
         if getattr(self, "_strategy", "grid") == "lattice":
             return self._route_net_lattice(net)
 
-        # Issue #6008: callers that reach ``route_net`` without ``route_all*``
-        # (diff-pair, bus, block-aware, direct API) skip ``_prepare_routing``;
-        # the install is idempotent per grid, so make it unconditional here.
+        # Issue #6008: board-file keepout rule areas.  ``_prepare_routing``
+        # installs them for the ``route_all*`` family, but the diff-pair,
+        # bus and block-aware drivers -- and any direct caller of this public
+        # API -- reach ``route_net`` without it.  Installing here covers every
+        # caller; after the first call it is a single ``getattr`` per net.
         self._install_grid_rule_area_keepouts()
 
         # Issue #4170 (Phase 2b-1): bare boundary stub terminals are an additive
@@ -16729,6 +16731,11 @@ class Autorouter:
         flush_print("\n=== Block-Aware Routing ===")
         flush_print(f"  Blocks: {len(block_list)}")
 
+        # Issue #6008: keepout rule areas on the main grid (Phase B routes
+        # through ``_route_net_with_corridor`` / ``route_net`` without the
+        # ``route_all*`` preamble) and on every block sub-grid (Phase A).
+        self._install_grid_rule_area_keepouts()
+
         all_routes: list[Route] = []
 
         # Create a RegionGraph for inter-block routing guidance
@@ -16766,6 +16773,7 @@ class Autorouter:
                 layer_stack=self.layer_stack,
                 margin=block_margin,
                 force_python=self._force_python,
+                grid_setup=self._install_grid_rule_area_keepouts,
             )
 
             # Feed pads from main router into block router
@@ -19811,6 +19819,9 @@ class Autorouter:
             ``self.routing_failures`` are populated as a side effect so the CLI
             escalation reach-measurement logic is unchanged.
         """
+        # Issue #6008: escape stubs are committed before ``route_all*`` runs
+        # its preamble, so install board keepout rule areas up front.
+        self._install_grid_rule_area_keepouts()
         print("\n=== Routing with Escape Pattern Generation + Differential Pairs ===")
 
         # Reset the one-shot escape guard for this run so a reused Autorouter
@@ -19944,6 +19955,9 @@ class Autorouter:
             stats = router.get_statistics()
             print(f"Routed {stats['nets_routed']} nets")
         """
+        # Issue #6008: escape stubs are committed before ``route_all*`` runs
+        # its preamble, so install board keepout rule areas up front.
+        self._install_grid_rule_area_keepouts()
         print("\n=== Routing with Escape Pattern Generation ===")
 
         # Issue #3952: the escape pre-phase (sub-grid pre-pass, dense

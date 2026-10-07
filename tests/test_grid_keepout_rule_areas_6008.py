@@ -479,13 +479,29 @@ def test_rule_area_grid_disc_matches_euclidean_kernel() -> None:
 
 
 # ---------------------------------------------------------------------------
-# route_net-driven paths that skip ``_prepare_routing`` (Judge review, #6008)
+# Entry points that bypass the ``route_all*`` preamble (PR #6034 review)
 # ---------------------------------------------------------------------------
+#
+# ``_prepare_routing`` installs the rule areas for the ``route_all*`` family.
+# The diff-pair, bus and block-aware drivers -- and direct ``route_net``
+# callers -- route without it, so before the review fix they crossed a wall
+# the plain ``route_all`` path refused to cross.
 
 
-def _usb_pair_board() -> str:
-    text = _board(_wall(), two_nets=True)
-    return text.replace("/HV_A", "/USB_D+").replace("/HV_B", "/USB_D-")
+def _pair_board(extra: str, names: tuple[str, str]) -> str:
+    """Two nets, each with a pad on both sides of the wall, 2 mm apart."""
+    a, b = names
+    parts = [
+        _fp("J1", 10, 104.0, 107.0, _pad("1", 0, 0, 1, a)),
+        _fp("J2", 11, 104.0, 109.0, _pad("1", 0, 0, 2, b)),
+        _fp("J3", 12, 126.0, 107.0, _pad("1", 0, 0, 1, a)),
+        _fp("J4", 13, 126.0, 109.0, _pad("1", 0, 0, 2, b)),
+    ]
+    single = _board()
+    nets = f'  (net 0 "")\n  (net 1 "{a}")\n  (net 2 "{b}")\n'
+    head, rest = single.split('  (net 0 "")\n  (net 1 "/SIG")\n', 1)
+    outline = rest[: rest.index("  (footprint")]
+    return f"{head}{nets}{outline}{''.join(parts)}{extra})\n"
 
 
 def _assert_no_wall_crossing(routes) -> None:
@@ -494,23 +510,111 @@ def _assert_no_wall_crossing(routes) -> None:
             f"segment crosses the tracks-not-allowed wall: {seg}"
         )
     for via in _vias(routes):
-        assert not (WALL_X0 - via.diameter / 2 < via.x < WALL_X1 + via.diameter / 2)
+        assert not (WALL_X0 - via.diameter / 2 < via.x < WALL_X1 + via.diameter / 2), via
+
+
+def _assert_routes_across_open_board(tmp_path: Path, text: str, force_python: bool, run) -> None:
+    """Sanity: with the wall stripped, the same driver DOES cross the band.
+
+    Guards the wall assertions against passing vacuously (e.g. the driver
+    routing nothing at all on this synthetic board).
+    """
+    open_dir = tmp_path / "open"
+    open_dir.mkdir()
+    router = _load(open_dir, text, force_python)
+    routes = run(router)
+    assert any(_crosses_band(s, WALL_X0, WALL_X1, 0.1) for s in _segments(routes)), (
+        "baseline: without the wall this driver must route across the band"
+    )
 
 
 @pytest.mark.parametrize("force_python", BACKENDS)
-def test_direct_route_net_installs_keepouts(tmp_path: Path, force_python: bool) -> None:
+def test_direct_route_net_honours_wall(tmp_path: Path, force_python: bool) -> None:
+    def run(router):
+        return router.route_net(1)
+
+    _assert_routes_across_open_board(tmp_path, _board(), force_python, run)
     router = _load(tmp_path, _board(_wall()), force_python)
     assert getattr(router.grid, "_rule_area_keepouts", None) is None
-    routes = router.route_net(1)
-    assert router.grid._rule_area_keepouts is not None
+    routes = run(router)
+    assert router.grid._rule_area_keepouts, "route_net must install the rule areas"
     _assert_no_wall_crossing(routes)
+    assert not any(r.segments and _spans(r) for r in routes)
 
 
 @pytest.mark.parametrize("force_python", BACKENDS)
-def test_diffpair_router_respects_keepout_wall(tmp_path: Path, force_python: bool) -> None:
+def test_route_net_install_is_idempotent(tmp_path: Path, force_python: bool, monkeypatch) -> None:
+    router = _load(tmp_path, _board(_wall()), force_python)
+    router.route_net(1)
+    calls: list[int] = []
+    original = router._rule_area_keepout_areas
+    monkeypatch.setattr(router, "_rule_area_keepout_areas", lambda: calls.append(1) or original())
+    router.route_net(1)
+    router.route_net(1)
+    assert calls == [], "a second route_net must not re-resolve the rule areas"
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_diff_pair_driver_honours_wall(tmp_path: Path, force_python: bool) -> None:
     from kicad_tools.router.diffpair import DifferentialPairConfig
 
-    router = _load(tmp_path, _usb_pair_board(), force_python)
+    def run(router):
+        routes, _warnings = router.route_all_with_diffpairs(DifferentialPairConfig(enabled=True))
+        return list(routes)
+
+    names = ("/USB_D+", "/USB_D-")
+    _assert_routes_across_open_board(tmp_path, _pair_board("", names), force_python, run)
+    # Front-only wall: the pair can legally detour through B.Cu via vias, so
+    # the assertion is about WHERE copper lands, not just "nothing routed".
+    router = _load(
+        tmp_path, _pair_board(_wall(layers='"F.Cu"', vias="allowed"), names), force_python
+    )
+    assert router.detect_differential_pairs(), "fixture must form a diff pair"
+    routes = run(router)
+    assert router.grid._rule_area_keepouts
+    for seg in _segments(routes, Layer.F_CU):
+        assert not _crosses_band(seg, WALL_X0, WALL_X1, seg.width / 2), seg
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_diff_pair_driver_full_wall_leaves_pair_unrouted(
+    tmp_path: Path, force_python: bool
+) -> None:
+    from kicad_tools.router.diffpair import DifferentialPairConfig
+
+    router = _load(tmp_path, _pair_board(_wall(), ("/USB_D+", "/USB_D-")), force_python)
     routes, _warnings = router.route_all_with_diffpairs(DifferentialPairConfig(enabled=True))
-    assert router.grid._rule_area_keepouts, "keepouts must be installed on the grid"
     _assert_no_wall_crossing(list(routes))
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_bus_driver_honours_wall(tmp_path: Path, force_python: bool) -> None:
+    from kicad_tools.router.bus import BusRoutingConfig
+
+    def run(router):
+        return list(router.route_all_with_buses(BusRoutingConfig(enabled=True)))
+
+    names = ("/DATA[0]", "/DATA[1]")
+    _assert_routes_across_open_board(tmp_path, _pair_board("", names), force_python, run)
+    router = _load(tmp_path, _pair_board(_wall(), names), force_python)
+    assert router._bus.detect_buses(2), "fixture must form a bus group"
+    _assert_no_wall_crossing(run(router))
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_block_aware_driver_honours_wall(tmp_path: Path, force_python: bool) -> None:
+    from kicad_tools.pcb.blocks.base import PCBBlock
+
+    def run(router):
+        # One block spanning both pads, so net 1 is block-internal and is
+        # routed on the BlockRouter's own sub-grid (Phase A).
+        block = PCBBlock(name="span", block_id="span")
+        block.add_component("R1", "R_0603", 0, 0, pads={"1": (0, 0)})
+        block.add_component("R2", "R_0603", 22, 0, pads={"1": (22, 0)})
+        block.place(104.0, 108.0)
+        router.register_block(block)
+        return list(router.route_all_block_aware())
+
+    _assert_routes_across_open_board(tmp_path, _board(), force_python, run)
+    router = _load(tmp_path, _board(_wall()), force_python)
+    _assert_no_wall_crossing(run(router))

@@ -10594,6 +10594,10 @@ class DiffPairRouter:
                 otherwise), so callers do not need a separate
                 code-path for budget exits.
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         # Issue #3089: reset the budget-exit flag at the start of each
         # call so callers see only the most-recent invocation's state.
         self._last_pair_budget_exit = False
@@ -11888,6 +11892,10 @@ class DiffPairRouter:
 
         Routes P and N traces separately using the standard router.
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         if pair.rules is None:
             return [], None
 
@@ -12620,6 +12628,10 @@ class DiffPairRouter:
             Tuple of (routes, warning) where warning is set if
             length matching failed.
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         if use_coupled_routing:
             return self.route_differential_pair_coupled(
                 pair,
@@ -12654,6 +12666,10 @@ class DiffPairRouter:
                 routed (and should therefore be skipped by the follow-up
                 strategy).
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         if diffpair_config is None or not diffpair_config.enabled:
             return [], [], set()
 
@@ -13260,6 +13276,10 @@ class DiffPairRouter:
                 ``None`` the legacy per-pair-only behaviour is
                 preserved.
         """
+        # Issue #6008: this driver can route without the ``route_all*``
+        # preamble that installs board keepout rule areas, so install them
+        # here (idempotent; one ``getattr`` once installed).
+        _install_rule_area_keepouts_on(self.autorouter)
         # Issue #3089: prefer the explicit kwarg, otherwise fall back to
         # the config field so callers configuring everything via
         # ``DifferentialPairConfig(per_pair_timeout=60.0)`` work without
@@ -13303,12 +13323,6 @@ class DiffPairRouter:
             if callable(non_diffpair_strategy):
                 return non_diffpair_strategy(), []
             return self.autorouter.route_all(net_order), []
-
-        # Issue #6008: this path reaches the coupled router and ``route_net``
-        # without ``_prepare_routing``, so install keepout rule areas up front.
-        install_areas = getattr(self.autorouter, "_install_grid_rule_area_keepouts", None)
-        if install_areas is not None:
-            install_areas()
 
         print("\n=== Differential Pair Routing ===")
 
@@ -13760,3 +13774,10 @@ class DiffPairRouter:
                 print(f"    - {w}")
 
         return all_routes, warnings
+
+
+def _install_rule_area_keepouts_on(autorouter: object) -> None:
+    """Install board keepout rule areas on ``autorouter``'s grid (#6008)."""
+    install = getattr(autorouter, "_install_grid_rule_area_keepouts", None)
+    if install is not None:
+        install()
