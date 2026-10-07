@@ -91,6 +91,11 @@ class DifferentialPairSkewCheck:
                             f"for both traces."
                         ),
                         learn_more_url="docs/mistakes/differential-pair-matching.md",
+                        measurements={
+                            "positive_length_mm": round(pos_length, 1),
+                            "negative_length_mm": round(neg_length, 1),
+                            "skew_mm": round(skew, 1),
+                        },
                     )
                 )
             elif skew > max_skew * 0.5:
@@ -112,6 +117,11 @@ class DifferentialPairSkewCheck:
                             f"Current: {pos_length:.1f}mm / {neg_length:.1f}mm."
                         ),
                         learn_more_url="docs/mistakes/differential-pair-matching.md",
+                        measurements={
+                            "positive_length_mm": round(pos_length, 1),
+                            "negative_length_mm": round(neg_length, 1),
+                            "skew_mm": round(skew, 1),
+                        },
                     )
                 )
 

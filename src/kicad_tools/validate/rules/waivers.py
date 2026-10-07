@@ -109,7 +109,7 @@ from pathlib import Path
 from typing import Any
 
 from kicad_tools.validate.evidence import (
-    EVIDENCE_HASH_VERSION,
+    current_evidence_hash_version,
     evidence_hash_version,
     is_outdated_evidence_hash,
 )
@@ -133,6 +133,18 @@ WAIVER_UNUSED_RULE_ID = "waiver_unused"
 # Rule id for the warning emitted when an evidence-bound waiver names a finding
 # whose local evidence has changed since review (Issue #5946).
 WAIVER_STALE_RULE_ID = "waiver_stale"
+
+# Rule-id namespace of ``kct detect-mistakes`` findings (Issue #6006).  The
+# mistake checks share the ``.kct_waivers.json`` sidecar with ``kct check``;
+# each command applies only its own entries, so a mistake waiver never reads
+# as "unused" in ``kct check`` (and vice versa).
+MISTAKE_RULE_PREFIX = "mistake."
+
+
+def is_mistake_rule(rule: str) -> bool:
+    """True when ``rule`` names a ``kct detect-mistakes`` check (Issue #6006)."""
+    return rule.startswith(MISTAKE_RULE_PREFIX)
+
 
 # A silk primitive item name that carries its own geometry, e.g.
 # ``fp_line@-2.11/-2.11~-1.635/-2.11`` or ``J1 (fp_line@-1.62/6~-1.62/8.73)``
@@ -309,6 +321,26 @@ class Waivers:
 
     def __len__(self) -> int:
         return len(self.entries)
+
+    def for_check(self) -> Waivers:
+        """The entries ``kct check`` applies: everything but mistake entries."""
+        return Waivers(entries=[e for e in self.entries if not is_mistake_rule(e.rule)])
+
+    def for_mistakes(self, rules: Iterable[str] | None = None) -> Waivers:
+        """The entries ``kct detect-mistakes`` applies (Issue #6006).
+
+        Only ``mistake.*`` entries; when ``rules`` is given, only those whose
+        rule is in it (the checks that actually ran, so a ``--category``
+        filter does not report every other category's waivers as unused).
+        """
+        wanted = None if rules is None else set(rules)
+        return Waivers(
+            entries=[
+                e
+                for e in self.entries
+                if is_mistake_rule(e.rule) and (wanted is None or e.rule in wanted)
+            ]
+        )
 
 
 def waivers_from_dict(data: Any) -> Waivers:
@@ -517,7 +549,9 @@ def discover_waivers_sidecar(pcb_path: Path) -> Path | None:
     return None
 
 
-def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
+def apply_waivers(
+    results: DRCResults, waivers: Waivers, *, waive_command: str = "kct check --waive"
+) -> None:
     """Apply general waivers to ``results`` in place (post-check step).
 
     For each non-waived violation that a waiver entry names *and* whose
@@ -538,6 +572,10 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
     Any waiver entry that named no finding at all gets a
     :data:`WAIVER_UNUSED_RULE_ID` ``info`` advisory appended so leftover
     entries stay visible without failing the gate.
+
+    ``waive_command`` is the command the stale / unused advisories tell the
+    user to re-waive with (``kct detect-mistakes --waive`` for mistake
+    findings, Issue #6006).
     """
     if not waivers.entries:
         return
@@ -600,11 +638,11 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
                     f" ({entry.scope}){tracking}: it was recorded{reviewed}{dated} as"
                     f" {entry.evidence_hash}, an"
                     f" {evidence_hash_version(entry.evidence_hash)!s} hash, but this kct"
-                    f" computes {EVIDENCE_HASH_VERSION} hashes (now"
+                    f" computes {current_evidence_hash_version(entry.evidence_hash)} hashes (now"
                     f" {', '.join(current)}). The evidence recipe changed in a kct"
                     " upgrade, so every older waiver goes stale once even if the"
                     " board is unchanged; re-review the finding and re-waive it"
-                    " (kct check --waive) to record the new hash."
+                    f" ({waive_command}) to record the new hash."
                 )
             else:
                 message = (
@@ -612,7 +650,7 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
                     f" the evidence{reviewed}{dated} was {entry.evidence_hash}, the"
                     f" board now gives {', '.join(current)}. The geometry or nets"
                     " under the finding changed, so the finding is active again;"
-                    " re-review it and re-waive (kct check --waive) if it is"
+                    f" re-review it and re-waive ({waive_command}) if it is"
                     " still intentional."
                 )
             rebuilt.append(
@@ -634,7 +672,7 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
             hint = (
                 " This rule now names each silk line by its geometry, so the old"
                 " coarse item name no longer matches; review and re-waive the"
-                f" matching finding(s) with kct check --waive KEY: {listed}."
+                f" matching finding(s) with {waive_command} KEY: {listed}."
             )
         else:
             hint = ""

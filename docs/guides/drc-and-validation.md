@@ -350,8 +350,76 @@ version)`, and the finding's JSON carries
 `"evidence_changed"`. Re-waive them once after upgrading.
 Re-running `--waive` replaces the old entry. Legacy
 `rule`/`items`/`nets` entries (schema 2) still work, and a schema-3 legacy entry
-may add its own `evidence_hash`. Keyed entries apply to `kct check` only;
-`kct drc` ignores them.
+may add its own `evidence_hash`. Keyed entries apply to `kct check` and
+`kct detect-mistakes`; `kct drc` ignores them.
+
+### Waiving `kct detect-mistakes` findings
+
+`kct detect-mistakes --format json` findings carry the same `key` and
+`evidence_hash`, and take the same keyed waivers in the same sidecar:
+
+```bash
+kct detect-mistakes board.kicad_pcb --waive 'mistake.bypass_cap_distance|C1,U1||' \
+    --waive-reason "C1 is a bulk cap, not a bypass cap" --waive-reviewer rjwalters
+```
+
+A mistake's rule id is `mistake.` plus its check name
+(`mistake.bypass_cap_distance`, `mistake.power_trace_width`, ...). Its
+`components` are split into the key's items, nets (names that are nets on the
+board) and layer (`F.Cu`). The evidence is the `kct check` recipe plus the
+check's structured `measurements` (also in the JSON finding), rounded to the
+precision the explanation quotes: `distance_mm` for bypass caps and crystals,
+`min_width_mm` and `segment_count` for power traces, the two lengths and
+`skew_mm` for differential pairs, `angle_deg` for acid traps, `via_count` for
+thermal pads and the pad sizes for tombstoning. A trace widened from 0.25 mm
+to 0.28 mm, still too narrow, makes a waiver stale. Rewording the explanation
+does not, and neither does tuning a policy threshold (the 3 mm bypass limit,
+the 0.3 mm power-trace minimum): thresholds are not hashed, because a waiver
+records that someone accepted *this* measurement.
+
+Mistake hashes carry their own compound prefix, `ev2.m1:`: the `kct check`
+evidence version plus the measurement recipe version. An upgrade that changes
+either part reports existing mistake waivers as `outdated_evidence_version`;
+an upgrade that changes only the measurement recipe leaves `kct check`
+waivers alone.
+
+Each command applies only its own entries. `kct check` ignores `mistake.*`
+entries, and `kct detect-mistakes` ignores everything else, so neither reports
+the other's waivers as unused. Waived mistakes are listed with
+`"status": "waived"` and never counted in `summary.errors` / `warnings`. Stale
+and unused waivers are reported in a separate `waiver_findings` list, and a
+stale waiver's `waiver_stale` warning fails `--strict`.
+
+### SARIF output for CI
+
+`kct check`, `kct check --diff` and `kct detect-mistakes` accept
+`--format sarif`, a SARIF 2.1.0 log for code-scanning tools:
+
+```bash
+kct check board.kicad_pcb --format sarif > kct-check.sarif
+kct check --diff HEAD~1:b/b.kicad_pcb b/b.kicad_pcb --format sarif > kct-diff.sarif
+```
+
+- **Level.** `error` stays `error`, `warning` stays `warning`, `info` becomes
+  `note`. A waived finding keeps its level and gets an accepted suppression
+  with the waiver's reason. A stale waiver does not suppress.
+- **Fingerprints.** The finding `key` is `partialFingerprints["kctFindingKey/v1"]`,
+  so one alert is tracked across commits. The `evidence_hash` is
+  `fingerprints["kctEvidence/<version>"]`, where `<version>` is the hash's
+  prefix (`ev2` for `kct check`, `ev2.m1` for `kct detect-mistakes`), so the
+  name follows the evidence version.
+- **Locations.** Each result points at the board file, at the line of the first
+  footprint (or else net) the finding names. The finding's position, in mm in
+  the KiCad file's (sheet) coordinates, and its layer are in the location's
+  `properties.boardLocation` (`"frame": "sheet"`). Closest points are
+  `relatedLocations`.
+- **`--diff`.** Introduced findings have `baselineState: "new"`, changed ones
+  `"updated"`, and resolved ones `"absent"`. Absent results carry no line
+  region, since the finding is gone from the new board file. The diff log
+  leaves out unchanged findings, so it is **not** a full analysis: do not
+  upload it to GitHub code scanning (or similar) as the run for a branch, or
+  every unchanged alert will be closed. Upload the plain
+  `kct check --format sarif` log for that.
 
 ### `kct check --diff OLD NEW`
 

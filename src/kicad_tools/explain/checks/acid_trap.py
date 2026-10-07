@@ -85,6 +85,7 @@ class AcidTrapCheck:
                                     "at the junction to eliminate the sharp corner."
                                 ),
                                 learn_more_url="docs/mistakes/acid-traps.md",
+                                measurements={"angle_deg": float(round(angle))},
                             )
                         )
 

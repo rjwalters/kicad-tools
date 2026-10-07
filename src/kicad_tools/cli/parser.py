@@ -722,7 +722,9 @@ def _add_check_parser(subparsers) -> None:
         "--mask-copper-config",
         help="Path to explicit mask-to-copper process policy and native runtime JSON",
     )
-    check_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    check_parser.add_argument(
+        "--format", choices=["table", "json", "summary", "sarif"], default="table"
+    )
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
     check_parser.add_argument(
@@ -9754,9 +9756,28 @@ def _add_detect_mistakes_parser(subparsers) -> None:
         "--format",
         "-f",
         dest="mistakes_format",
-        choices=["table", "json", "tree", "summary"],
+        choices=["table", "json", "tree", "summary", "sarif"],
         default="table",
-        help="Output format (default: table)",
+        help="Output format (default: table; 'sarif' = SARIF 2.1.0 for CI)",
+    )
+
+    # Issue #6006: evidence-bound waivers, shared sidecar with ``kct check``.
+    mistakes_parser.add_argument(
+        "--waive",
+        action="append",
+        default=None,
+        dest="mistakes_waive",
+        metavar="KEY",
+        help="Record an evidence-bound waiver for the findings with this key (repeatable)",
+    )
+    mistakes_parser.add_argument("--waive-reason", dest="mistakes_waive_reason", default=None)
+    mistakes_parser.add_argument("--waive-reviewer", dest="mistakes_waive_reviewer", default=None)
+    mistakes_parser.add_argument("--waive-issue", dest="mistakes_waive_issue", default=None)
+    mistakes_parser.add_argument(
+        "--waivers",
+        dest="mistakes_waivers",
+        default=None,
+        help="Path to a waivers sidecar (default: auto-discover next to the board)",
     )
 
     # Strict mode

@@ -151,6 +151,10 @@ class PowerTraceWidthCheck:
                         f"power distribution. Consider the expected current draw."
                     ),
                     learn_more_url="docs/mistakes/power-trace-width.md",
+                    measurements={
+                        "min_width_mm": round(worst.width, 2),
+                        "segment_count": float(count),
+                    },
                 )
             )
         return mistakes

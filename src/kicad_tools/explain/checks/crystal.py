@@ -92,6 +92,7 @@ class CrystalTraceLengthCheck:
                                 f"capacitors close to the crystal pins."
                             ),
                             learn_more_url="docs/mistakes/crystal-layout.md",
+                            measurements={"trace_length_mm": round(length, 1)},
                         )
                     )
 
@@ -170,6 +171,7 @@ class CrystalNoiseProximityCheck:
                                 f"guard ring around the crystal if space is limited."
                             ),
                             learn_more_url="docs/mistakes/crystal-layout.md",
+                            measurements={"distance_mm": round(dist, 1)},
                         )
                     )
 
