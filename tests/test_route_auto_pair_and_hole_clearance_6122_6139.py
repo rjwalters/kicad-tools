@@ -32,6 +32,7 @@ import pytest
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.mcp.tools.routing import route_net_auto
 from kicad_tools.router.board_clearance_rules import (
+    KICAD_CONSTRAINT_KEYWORDS,
     BoardClearanceRules,
     DruRule,
     ItemProps,
@@ -960,6 +961,53 @@ def test_parse_dru_reads_severity_and_new_constraints(tmp_path) -> None:
     ]
     assert rules[1].value("hole_to_hole") == pytest.approx(0.3)
     assert rules[2].value("physical_hole_clearance") == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    "keyword", ["mechanical_clearance", "mechanical_hole_clearance", "solder_mask_sliver"]
+)
+def test_parse_dru_accepts_kicad_keywords_the_gate_once_dropped(tmp_path, keyword) -> None:
+    """kicad-cli 10.0.1 accepts and enforces these; the gate must not discard the file."""
+    assert keyword in KICAD_CONSTRAINT_KEYWORDS
+    dru = tmp_path / "b.kicad_dru"
+    dru.write_text(
+        _dru(
+            '(rule "c" (constraint clearance (min 0.3mm)))',
+            f'(rule "k" (constraint {keyword} (min 0.2mm)))',
+        )
+    )
+    rules, error = parse_dru(dru)
+    assert error is None
+    assert rules[0].name == "c"
+
+
+def test_mechanical_constraints_alias_the_physical_ones(tmp_path) -> None:
+    dru = tmp_path / "b.kicad_dru"
+    dru.write_text(
+        _dru(
+            '(rule "m" (constraint mechanical_clearance (min 0.4mm))'
+            " (constraint mechanical_hole_clearance (min 0.5mm)))",
+        )
+    )
+    rules, error = parse_dru(dru)
+    assert error is None
+    assert rules[0].constraints == (
+        ("physical_clearance", 0.4),
+        ("physical_hole_clearance", 0.5),
+    )
+    a, b = ItemProps("Track", "/A"), ItemProps("Pad", "/B")
+    mech = _rules(dru_rules=rules)
+    phys = _rules(
+        dru_rules=[
+            DruRule(
+                "p", None, None, (("physical_clearance", 0.4), ("physical_hole_clearance", 0.5))
+            )
+        ]
+    )
+    assert mech.physical_clearance(a, b) == pytest.approx(0.4)
+    assert mech.physical_clearance(a, b) == phys.physical_clearance(a, b)
+    assert mech.physical_hole_clearance(a, b) == phys.physical_hole_clearance(a, b)
+    assert mech.physical_hole_clearance(a, b) == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(

@@ -116,6 +116,13 @@ EDGE_CLEARANCE = "edge_clearance"
 HOLE_TO_HOLE = "hole_to_hole"
 PHYSICAL_CLEARANCE = "physical_clearance"
 PHYSICAL_HOLE_CLEARANCE = "physical_hole_clearance"
+#: KiCad's older spellings of the two physical constraints; it reports them
+#: under the same violation types (``clearance`` / ``hole_clearance``), so the
+#: gate evaluates them as the ``physical_*`` equivalents.
+_CONSTRAINT_ALIASES = {
+    "mechanical_clearance": PHYSICAL_CLEARANCE,
+    "mechanical_hole_clearance": PHYSICAL_HOLE_CLEARANCE,
+}
 _CONSTRAINTS = (
     CLEARANCE,
     HOLE_CLEARANCE,
@@ -146,12 +153,15 @@ KICAD_CONSTRAINT_KEYWORDS = frozenset(
         "hole_size",
         "hole_to_hole",
         "length",
+        "mechanical_clearance",
+        "mechanical_hole_clearance",
         "min_resolved_spokes",
         "physical_clearance",
         "physical_hole_clearance",
         "silk_clearance",
         "skew",
         "solder_mask_expansion",
+        "solder_mask_sliver",
         "solder_paste_abs_margin",
         "solder_paste_rel_margin",
         "text_height",
@@ -297,7 +307,10 @@ def parse_dru(dru_path: str | Path) -> tuple[list[DruRule], str | None]:
         constraints: list[tuple[str, float]] = []
         for constraint in rule.find_all("constraint"):
             c_atoms = constraint.get_atoms()
-            if not c_atoms or str(c_atoms[0]) not in _CONSTRAINTS:
+            if not c_atoms:
+                continue
+            c_name = _CONSTRAINT_ALIASES.get(str(c_atoms[0]), str(c_atoms[0]))
+            if c_name not in _CONSTRAINTS:
                 continue
             minimum = constraint.find_child("min")
             if minimum is None:
@@ -305,7 +318,7 @@ def parse_dru(dru_path: str | Path) -> tuple[list[DruRule], str | None]:
             value = _parse_length_mm(minimum.get_first_atom())
             if value is None or value < 0:
                 continue
-            constraints.append((str(c_atoms[0]), value))
+            constraints.append((c_name, value))
         if constraints:
             rules.append(DruRule(name, condition, layer, tuple(constraints), severity))
     return rules, None
