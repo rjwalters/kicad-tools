@@ -391,3 +391,77 @@ def test_unqualified_name_with_several_owners_names_them_all() -> None:
     result = _swap_check({"/DATA": "CLK", "/A/CLK": "/A/CLK", "/B/CLK": "/B/CLK"})
     assert len(result.errors) == 1
     assert "schematic nets '/A/CLK', '/B/CLK'" in result.errors[0].message
+
+
+# --- issue #6032: a root-sheet local ``/X`` is not ``/Sheet/X`` -----------
+
+
+def test_root_qualified_name_is_not_a_sub_sheet_name() -> None:
+    """``/SENSE`` (root-sheet local label) is a different net from ``/ChildA/SENSE``."""
+    assert not _names_same_net_strict("/SENSE", "/ChildA/SENSE")
+    assert not _names_same_net_strict("/ChildA/SENSE", "/SENSE")
+    # The unqualified (global) spelling still names the sheet net, and the
+    # root-qualified spelling still names the unqualified one.
+    assert _names_same_net_strict("SENSE", "/ChildA/SENSE")
+    assert _names_same_net_strict("SENSE", "/SENSE")
+
+
+def test_root_local_and_sub_sheet_swap_is_reported() -> None:
+    """``/SENSE`` <-> ``/ChildA/SENSE`` exchanged wholesale is a swap (issue #6032)."""
+    result = _swap_check({"/SENSE": "/ChildA/SENSE", "/ChildA/SENSE": "/SENSE"})
+    assert len(result.errors) == 1, [i.message for i in result.issues]
+    issue = result.errors[0]
+    assert issue.message.startswith("Net names swapped")
+    assert {issue.net_schematic, issue.net_pcb} == {"/SENSE", "/ChildA/SENSE"}
+
+
+def test_root_local_one_way_rename_is_reported() -> None:
+    """Root ``/SENSE`` named ``/ChildA/SENSE`` while that net keeps its own name."""
+    result = _swap_check({"/SENSE": "/ChildA/SENSE", "/ChildA/SENSE": "/ChildA/SENSE"})
+    assert [i.net_schematic for i in result.errors] == ["/SENSE"]
+    assert "Net named after another net" in result.errors[0].message
+
+
+def test_root_and_sheet_spellings_stay_tolerated_when_unclaimed() -> None:
+    """With no other owner, ``/X`` <-> ``/Sheet/X`` path disagreements stay clean."""
+    assert not _swap_check({"/SENSE": "/ChildA/SENSE", "/LED": "/LED"}).issues
+    assert not _swap_check({"/ChildA/SENSE": "/SENSE", "/LED": "/LED"}).issues
+    for pcb in ("SENSE", "/SENSE"):
+        assert not _swap_check({"/SENSE": pcb}).issues, pcb
+    # An unqualified PCB name still spells a sub-sheet net.
+    assert not _swap_check({"/ChildA/SENSE": "SENSE"}).issues
+
+
+_COLLISION = Path(__file__).resolve().parent / "fixtures" / "sheet_qualified_lvs"
+
+
+def _collision_with_swapped_names(tmp_path: Path, a: str, b: str) -> tuple[Path, Path]:
+    """Copy the collision hierarchy with PCB nets ``a`` and ``b`` exchanged."""
+    for sch in _COLLISION.glob("collision_*.kicad_sch"):
+        shutil.copy(sch, tmp_path / sch.name)
+    text = (_COLLISION / "collision_board.kicad_pcb").read_text()
+    pcb = tmp_path / "collision_board.kicad_pcb"
+    pcb.write_text(_rename_nets(text, {a: b, b: a}))
+    return tmp_path / "collision_root.kicad_sch", pcb
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [("/SENSE", "/ChildA/SENSE"), ("/SENSE", "/ChildB/SENSE"), ("/ChildA/SENSE", "/ChildB/SENSE")],
+)
+def test_collision_board_swap_is_reported(tmp_path: Path, a: str, b: str) -> None:
+    """End-to-end: every pairwise exchange of the three ``SENSE`` nets is caught."""
+    assert (
+        NetlistValidator(
+            _COLLISION / "collision_root.kicad_sch", _COLLISION / "collision_board.kicad_pcb"
+        )
+        .validate()
+        .in_sync
+    )
+
+    sch, pcb = _collision_with_swapped_names(tmp_path, a, b)
+    result = NetlistValidator(sch, pcb).validate()
+    assert not result.in_sync
+    swaps = [i for i in result.errors if i.message.startswith("Net names swapped")]
+    assert len(swaps) == 1, [i.message for i in result.issues]
+    assert {swaps[0].net_schematic, swaps[0].net_pcb} == {a, b}

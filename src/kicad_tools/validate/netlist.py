@@ -214,10 +214,15 @@ def _names_same_net_strict(name_a: str, name_b: str) -> bool:
     Stricter than :func:`_same_net_spelling`, for deciding that a PCB net
     carries the *name of another* schematic net (issue #5980).  Accepts
     equality after stripping the leading ``/`` (``X`` / ``/X``), and a leaf
-    match only when one side has no sheet path (``X`` vs ``/Sheet/X``).
+    match only when one side is unqualified (``X`` vs ``/Sheet/X``).
     Two fully sheet-qualified names on different sheets (``/A/CLK`` vs
     ``/B/CLK``) are different nets -- a net class or zone keyed on one does
     not apply to the other -- so they never match.
+
+    A leading ``/`` with no further sheet path (``/SENSE``) is
+    *root*-qualified: KiCad's name for a local label on the root sheet,
+    distinct from a global ``SENSE``.  It is therefore a different net from
+    ``/ChildA/SENSE``, just as ``/A/CLK`` is from ``/B/CLK`` (issue #6032).
     """
     a = name_a.lstrip("/")
     b = name_b.lstrip("/")
@@ -225,7 +230,15 @@ def _names_same_net_strict(name_a: str, name_b: str) -> bool:
         return True
     if "/" in a and "/" in b:
         return False
+    # ``/X`` (root sheet) vs ``/Sheet/X``: both qualified, different sheets.
+    if _is_root_qualified(name_a) or _is_root_qualified(name_b):
+        return False
     return a.rsplit("/", 1)[-1] == b.rsplit("/", 1)[-1]
+
+
+def _is_root_qualified(name: str) -> bool:
+    """True for a root-sheet local net name: ``/X`` (but not ``X`` or ``/S/X``)."""
+    return name.startswith("/") and "/" not in name.lstrip("/")
 
 
 def _spelling_tier(sch_net: str, pcb_net: str) -> int:
@@ -823,7 +836,8 @@ class NetlistValidator:
         A schematic net ``S`` is reported when its paired PCB net ``P``:
 
         * is not strictly a spelling of ``S`` itself (``/X``, ``X``,
-          ``/Sheet/X``; :func:`_names_same_net_strict`), and
+          ``/Sheet/X``; :func:`_names_same_net_strict` -- the root-qualified
+          ``/X`` does not strictly spell ``/Sheet/X``, issue #6032), and
         * is unambiguously the name of another schematic net ``S2`` that has
           pads here (:func:`_names_same_net_strict`: ``/A/CLK`` is not the
           name of ``/B/CLK``, but it *is* the name of ``/A/CLK``, so a
