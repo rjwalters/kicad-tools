@@ -7442,6 +7442,42 @@ def _flag_passed_explicitly(argv: list[str] | None, options: tuple[str, ...]) ->
     return False
 
 
+def _resolve_route_manufacturer(args, argv: list[str] | None) -> None:
+    """Default ``--manufacturer`` from the board's ``project.kct`` (Issue #6155).
+
+    ``--manufacturer`` keeps its ``"jlcpcb"`` value default (see
+    :func:`_flag_passed_explicitly` for why it is not a ``None`` sentinel), so
+    an unflagged run used to route a ``target_fab: jlcpcb-tier1`` board under
+    base-tier rules -- rejecting its tier-scoped ``fabrication_overrides.json``
+    (#5006) and disagreeing with bare ``kct check`` on the same board.
+
+    Resolution is shared with ``kct check`` via
+    :func:`kicad_tools.cli.check_cmd._resolve_effective_check_mfr`, minus its
+    ``fab_profile.json`` tier (route *writes* that sidecar; reading it back
+    would make a previous run's tier sticky).  Precedence: explicit
+    ``--manufacturer`` / ``--mfr`` > ``project.kct`` ``target_fab`` (next to
+    the input board, then one directory up) > ``jlcpcb``.
+
+    Rewrites ``args.manufacturer`` in place, stamps the winning tier on
+    ``args._manufacturer_source`` (``"cli"`` / ``"project_kct"`` /
+    ``"default"``) and prints the resolver's ``[INFO] auto-loaded ...`` /
+    ``WARNING: ignoring ...`` lines to stderr, exactly as ``kct check`` does.
+    """
+    from .check_cmd import _resolve_effective_check_mfr
+
+    explicit = _flag_passed_explicitly(argv, ("--manufacturer", "--mfr"))
+    resolved = _resolve_effective_check_mfr(
+        args.manufacturer if explicit else None,
+        Path(args.pcb),
+        default=args.manufacturer,
+        consult_sidecar=False,
+    )
+    for line in resolved.messages:
+        print(line, file=sys.stderr)
+    args.manufacturer = resolved.mfr
+    args._manufacturer_source = resolved.source
+
+
 def _board_declared_net_classes(pcb_path) -> dict:
     """Parse the board's legacy top-level ``(net_class …)`` blocks, if any.
 
@@ -16254,8 +16290,11 @@ def _route_parser() -> argparse.ArgumentParser:
         "--mfr",
         default="jlcpcb",
         help=(
-            "Manufacturer profile for DRC validation (default: jlcpcb). "
-            "Determines minimum clearances, trace widths, and other design rules."
+            "Manufacturer profile for DRC validation. Determines minimum "
+            "clearances, trace widths, and other design rules. Default: the "
+            "board's project.kct target_fab (next to the input board, or one "
+            "directory up), else jlcpcb -- the same resolution `kct check` "
+            "uses (Issue #6155). An explicit flag always wins."
         ),
     )
     parser.add_argument(
@@ -17026,6 +17065,9 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    # Issue #6155: resolve --manufacturer against the board's project.kct
+    # before anything (the lint gate included) reads it.
+    _resolve_route_manufacturer(args, argv)
     from kicad_tools.json_stdout import prose_to_stderr
     from kicad_tools.router.routing_plan import RoutingPlanGateAbort
 

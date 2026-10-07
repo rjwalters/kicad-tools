@@ -4392,7 +4392,10 @@ def _add_route_parser(subparsers) -> None:
         "--manufacturer",
         "--mfr",
         default="jlcpcb",
-        help="Manufacturer for DRC validation and adaptive rules (default: jlcpcb)",
+        help=(
+            "Manufacturer for DRC validation and adaptive rules (default: the "
+            "board's project.kct target_fab, else jlcpcb; Issue #6155)"
+        ),
     )
     route_parser.add_argument(
         "--copper",

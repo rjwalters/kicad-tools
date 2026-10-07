@@ -394,6 +394,8 @@ def _resolve_effective_check_mfr(
     cli_mfr: str | None,
     pcb_path: Path,
     default: str = "jlcpcb",
+    *,
+    consult_sidecar: bool = True,
 ) -> ResolvedMfr:
     """Resolve the manufacturer profile ``kct check`` judges against (#3920).
 
@@ -410,6 +412,13 @@ def _resolve_effective_check_mfr(
     2. Auto-discovered ``fab_profile.json`` sidecar written by ``kct route``.
     3. Discovered ``project.kct`` ``target_fab``.
     4. The historical ``default`` (``"jlcpcb"``).
+
+    ``consult_sidecar=False`` skips tier 2.  ``kct route`` resolves its
+    ``--manufacturer`` through this same function (#6155) but must not read
+    ``fab_profile.json``: that sidecar is route's own *output* record, so
+    consuming it as an input would make a previous run's tier (including a
+    ``--mfr-tier-ladder`` escalation result) sticky across re-routes and
+    shadow a later ``project.kct`` edit.
 
     A malformed / empty sidecar, or an unknown profile id from either the
     sidecar or ``project.kct``, degrades gracefully: warn and fall back to the
@@ -433,7 +442,7 @@ def _resolve_effective_check_mfr(
     valid_ids = set(get_manufacturer_ids())
 
     # Precedence 2: fab_profile.json sidecar.
-    sidecar = _discover_fab_profile_sidecar(pcb_path)
+    sidecar = _discover_fab_profile_sidecar(pcb_path) if consult_sidecar else None
     if sidecar is not None:
         mfr: str | None = None
         try:

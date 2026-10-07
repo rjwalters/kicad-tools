@@ -46,6 +46,12 @@ def main():
             "0.075",
             "--net-class-map",
             str(out / "net_class_map.json"),
+            # Issue #6155: kct route now defaults --manufacturer from
+            # project.kct (target_fab: jlcpcb-tier1 here).  This recipe has
+            # always routed -- and generate_design.py checks -- at base
+            # jlcpcb, so pin it to keep the committed outputs reproducible.
+            "--manufacturer",
+            "jlcpcb",
         ]
     )
     if not routed.exists():

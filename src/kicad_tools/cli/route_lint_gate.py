@@ -367,7 +367,13 @@ class LintGate:
         output = Path(args.output) if args.output else source.with_stem(source.stem + "_routed")
         flags: list[str] = []
         argv_list = list(argv) if argv is not None else None
-        if _flag_passed_explicitly(argv_list, ("--manufacturer", "--mfr")):
+        # Issue #6155: a project.kct-resolved tier is forwarded too -- the
+        # staged/relocated --output may sit where kct check cannot find the
+        # board's project.kct, and route + lint must judge the same tier.
+        if (
+            _flag_passed_explicitly(argv_list, ("--manufacturer", "--mfr"))
+            or getattr(args, "_manufacturer_source", None) == "project_kct"
+        ):
             flags += ["--mfr", str(args.manufacturer)]
         if getattr(args, "copper", None):
             flags += ["--copper", str(args.copper)]
