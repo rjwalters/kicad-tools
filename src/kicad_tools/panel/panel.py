@@ -174,6 +174,7 @@ class Panel:
         elif config.cut_method == CutMethod.VCUT:
             panel.make_vcuts(
                 line_width=config.vcut.line_width,
+                layer=config.vcut.layer,
             )
 
         if config.tooling_holes is not None:
@@ -374,7 +375,11 @@ class Panel:
             frame_inner = self._get_frame_inner_bounds()
             for inst in self._instances:
                 tabs = compute_tabs_to_frame(inst.bounds, frame_inner, config)
-                self._tabs.extend(tabs)
+                # Only edges that face the rail get a rail tab.  An
+                # interior edge's "tab to frame" would run straight through
+                # the neighbouring board copies (Issue #6143).
+                others = [o.bounds for o in self._instances if o is not inst]
+                self._tabs.extend(t for t in tabs if not _tab_crosses_any(t, others))
 
         return self
 
@@ -413,19 +418,23 @@ class Panel:
     def make_vcuts(
         self,
         line_width: float = 0.1,
+        layer: str = VCutConfig.layer,
     ) -> Panel:
         """Generate V-cut score lines between board rows/columns.
 
         V-cuts are straight lines that span the entire panel width
-        or height.
+        or height.  They are drawn on a documentation layer
+        (``Cmts.User`` by default), not Edge.Cuts: an open score line on
+        Edge.Cuts is a malformed outline (Issue #6143).
 
         Args:
-            line_width: Line width on Edge.Cuts in mm.
+            line_width: Score line width in mm.
+            layer: Layer the score lines are drawn on.
 
         Returns:
             ``self`` for method chaining.
         """
-        self._vcut_config = VCutConfig(line_width=line_width)
+        self._vcut_config = VCutConfig(line_width=line_width, layer=layer)
         return self
 
     # ------------------------------------------------------------------
@@ -514,10 +523,6 @@ class Panel:
         for inst in self._instances:
             self._place_board_copy(panel_sexp, inst)
 
-        # Add tabs as Edge.Cuts lines
-        for tab in self._tabs:
-            self._render_tab(panel_sexp, tab)
-
         # Add mousebite holes
         if self._mousebite_config is not None:
             for tab in self._tabs:
@@ -536,12 +541,10 @@ class Panel:
                     self._panel_bounds, vcut_positions_v, "vertical", self._vcut_config
                 )
             )
+            if lines:
+                self._ensure_layer(panel_sexp, self._vcut_config.layer)
             for line in lines:
                 panel_sexp.append(vcut_line_to_sexp(line, self._vcut_config))
-
-        # Add frame outline
-        if self._frame_config is not None:
-            self._render_frame(panel_sexp)
 
         # Add tooling holes
         if self._tooling_config is not None:
@@ -555,8 +558,8 @@ class Panel:
             for fid in fiducials:
                 panel_sexp.append(fiducial_to_sexp(fid))
 
-        # Add panel-level Edge.Cuts outline
-        self._render_panel_outline(panel_sexp)
+        # Edge.Cuts: closed boundary of boards + tabs (+ frame rail)
+        self._render_outline(panel_sexp)
 
         self._panel_sexp = panel_sexp
         return panel_sexp
@@ -705,122 +708,107 @@ class Panel:
         ty = inst.offset_y + half_h
         return _rigid_mapper(cx, cy, inst.rotation, tx, ty)
 
-    def _render_tab(self, panel_sexp: SExp, tab: Tab) -> None:
-        """Render a tab as Edge.Cuts line segments.
+    def outline_geometry(self) -> Any:
+        """Return the panel's solid region as a Shapely geometry.
 
-        Draws the two edge lines of the tab (the sides perpendicular
-        to the board edge).  The board-edge portion of the tab is
-        implicit -- it replaces a section of the original board outline.
+        The region is the union of every board copy's rectangle, every
+        tab's rectangle and (when configured) the frame rail ring.  Its
+        boundary is exactly what Edge.Cuts must trace: each tab splices
+        into the board edge it attaches to (and into the rail or the
+        neighbouring board on its far side), so the result is a set of
+        closed rings with no dangling segments (Issue #6143).
+
+        Coordinates are snapped to KiCad's 1 nm internal grid before the
+        union so that tab and board edges computed by different float
+        expressions still coincide exactly.
         """
-        tab_uuid1 = str(uuid.uuid4())
-        tab_uuid2 = str(uuid.uuid4())
+        from shapely import set_precision  # type: ignore[import-untyped]
+        from shapely.geometry import box  # type: ignore[import-untyped]
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
 
-        if tab.orientation == "horizontal":
-            # Tab spans horizontally -- draw vertical side lines
-            panel_sexp.append(
-                gr_line_node(
-                    tab.min_x,
-                    tab.min_y,
-                    tab.min_x,
-                    tab.max_y,
-                    layer="Edge.Cuts",
-                    uuid_str=tab_uuid1,
-                )
-            )
-            panel_sexp.append(
-                gr_line_node(
-                    tab.max_x,
-                    tab.min_y,
-                    tab.max_x,
-                    tab.max_y,
-                    layer="Edge.Cuts",
-                    uuid_str=tab_uuid2,
-                )
-            )
-        else:
-            # Tab spans vertically -- draw horizontal side lines
-            panel_sexp.append(
-                gr_line_node(
-                    tab.min_x,
-                    tab.min_y,
-                    tab.max_x,
-                    tab.min_y,
-                    layer="Edge.Cuts",
-                    uuid_str=tab_uuid1,
-                )
-            )
-            panel_sexp.append(
-                gr_line_node(
-                    tab.min_x,
-                    tab.max_y,
-                    tab.max_x,
-                    tab.max_y,
-                    layer="Edge.Cuts",
-                    uuid_str=tab_uuid2,
-                )
-            )
-
-    def _render_frame(self, panel_sexp: SExp) -> None:
-        """Render the panel frame as Edge.Cuts lines."""
-        if self._frame_config is None:
-            return
-
-        px0, py0, px1, py1 = self._panel_bounds
-        w = self._frame_config.width
-
-        # Outer frame rectangle
-        outer = [
-            (px0, py0, px1, py0),  # top
-            (px1, py0, px1, py1),  # right
-            (px1, py1, px0, py1),  # bottom
-            (px0, py1, px0, py0),  # left
-        ]
-        for sx, sy, ex, ey in outer:
-            panel_sexp.append(
-                gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts", uuid_str=str(uuid.uuid4()))
-            )
-
-        # Inner frame rectangle
-        inner = [
-            (px0 + w, py0 + w, px1 - w, py0 + w),
-            (px1 - w, py0 + w, px1 - w, py1 - w),
-            (px1 - w, py1 - w, px0 + w, py1 - w),
-            (px0 + w, py1 - w, px0 + w, py0 + w),
-        ]
-        for sx, sy, ex, ey in inner:
-            panel_sexp.append(
-                gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts", uuid_str=str(uuid.uuid4()))
-            )
-
-    def _render_panel_outline(self, panel_sexp: SExp) -> None:
-        """Render per-board Edge.Cuts outlines (without frame)."""
+        parts = [box(*inst.bounds) for inst in self._instances]
+        parts.extend(box(tab.min_x, tab.min_y, tab.max_x, tab.max_y) for tab in self._tabs)
         if self._frame_config is not None:
-            # Frame handles the outer outline; render individual board outlines
-            for inst in self._instances:
-                bx0, by0, bx1, by1 = inst.bounds
-                edges = [
-                    (bx0, by0, bx1, by0),
-                    (bx1, by0, bx1, by1),
-                    (bx1, by1, bx0, by1),
-                    (bx0, by1, bx0, by0),
-                ]
-                for sx, sy, ex, ey in edges:
-                    panel_sexp.append(
-                        gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts", uuid_str=str(uuid.uuid4()))
-                    )
-        else:
-            # No frame -- render a simple outline around the entire panel
-            px0, py0, px1, py1 = self._panel_bounds
-            edges = [
-                (px0, py0, px1, py0),
-                (px1, py0, px1, py1),
-                (px1, py1, px0, py1),
-                (px0, py1, px0, py0),
-            ]
-            for sx, sy, ex, ey in edges:
+            outer = box(*self._panel_bounds)
+            inner = box(*self._get_frame_inner_bounds())
+            parts.append(outer.difference(inner))
+
+        snapped = [set_precision(p, _OUTLINE_GRID_MM) for p in parts]
+        region = set_precision(unary_union(snapped), _OUTLINE_GRID_MM)
+        # Drop the collinear vertices the union leaves behind, so each
+        # straight edge is one segment.
+        return region.simplify(0)
+
+    def _outline_rings(self) -> list[list[tuple[float, float]]]:
+        """Return the closed Edge.Cuts rings (exteriors and holes)."""
+        region = self.outline_geometry()
+        polygons = list(getattr(region, "geoms", [region]))
+        rings: list[list[tuple[float, float]]] = []
+        for poly in polygons:
+            if poly.is_empty or poly.geom_type != "Polygon":
+                continue
+            for ring in (poly.exterior, *poly.interiors):
+                rings.append([(float(x), float(y)) for x, y in ring.coords])
+        return rings
+
+    def _render_outline(self, panel_sexp: SExp) -> None:
+        """Render the panel's Edge.Cuts as closed loops.
+
+        Previously each board rectangle, the frame and every tab's two
+        side lines were drawn independently.  The board rectangles were
+        never opened where a tab joined them, so the tab sides dangled
+        as T-junctions and ``kicad-cli pcb drc`` rejected the outline as
+        malformed (Issue #6143).  Drawing the boundary of the unioned
+        solid region instead guarantees every segment endpoint is shared
+        by exactly two segments.
+        """
+        for ring in self._outline_rings():
+            for (sx, sy), (ex, ey) in zip(ring[:-1], ring[1:], strict=True):
                 panel_sexp.append(
-                    gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts", uuid_str=str(uuid.uuid4()))
+                    gr_line_node(
+                        sx,
+                        sy,
+                        ex,
+                        ey,
+                        layer="Edge.Cuts",
+                        uuid_str=str(uuid.uuid4()),
+                    )
                 )
+
+    def _ensure_layer(self, panel_sexp: SExp, layer_name: str) -> None:
+        """Add *layer_name* to the panel's layer table if it is missing.
+
+        Only the KiCad user-comment / user-drawing layers are supported;
+        their ordinal depends on the file's layer numbering scheme
+        (KiCad 9+ renumbered layers so ``Edge.Cuts`` is 25, not 44).
+        """
+        layers = panel_sexp.find_child("layers")
+        if layers is None:
+            return
+        # Each entry is ``(<ordinal> "<canonical>" <type> ["<user name>"])``
+        # -- the ordinal is the list's name.
+        names: set[str | None] = set()
+        edge_id: str | None = None
+        for child in layers.children:
+            if child.is_atom:
+                continue
+            name = child.get_string(0)
+            names.add(name)
+            if len(child.children) > 2:
+                names.add(child.get_string(2))
+            if name == "Edge.Cuts":
+                edge_id = child.name
+        if layer_name in names:
+            return
+        modern = edge_id == "25"
+        table = {
+            "Dwgs.User": (17 if modern else 40, "User.Drawings"),
+            "Cmts.User": (19 if modern else 41, "User.Comments"),
+        }
+        if layer_name not in table:
+            return
+        ordinal, user_name = table[layer_name]
+        layers.append(SExp.list(str(ordinal), layer_name, "user", user_name))
 
     def _compute_vcut_positions(
         self,
@@ -890,6 +878,20 @@ class Panel:
 # ======================================================================
 # S-expression manipulation helpers
 # ======================================================================
+
+
+def _tab_crosses_any(tab: Tab, boxes: list[tuple[float, float, float, float]]) -> bool:
+    """True if *tab*'s rectangle overlaps the interior of any of *boxes*."""
+    eps = 1e-6
+    for x0, y0, x1, y1 in boxes:
+        if (
+            tab.min_x < x1 - eps
+            and tab.max_x > x0 + eps
+            and tab.min_y < y1 - eps
+            and tab.max_y > y0 + eps
+        ):
+            return True
+    return False
 
 
 def _deep_copy_sexp(node: SExp) -> SExp:
@@ -981,6 +983,9 @@ _FP_ABSOLUTE_ANGLE_TAGS = frozenset({"pad", "property", "fp_text"})
 _TEXT_TAGS = frozenset({"gr_text", "gr_text_box"})
 
 _PointMapper = Any  # Callable[[float, float], tuple[float, float]]
+
+# Snap grid for the Edge.Cuts union: KiCad's internal unit is 1 nm.
+_OUTLINE_GRID_MM = 1e-6
 
 
 def _normalize_rotation(rotation: float) -> float:

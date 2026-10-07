@@ -51,16 +51,18 @@ class VCutConfig:
     """Configuration for V-cut score lines.
 
     V-cuts are straight horizontal or vertical score lines across the
-    full panel width/height. They are rendered as graphic lines on the
-    Edge.Cuts layer.
+    full panel width/height.  They are rendered as graphic lines on a
+    documentation layer (``Cmts.User``), the convention fabs and KiKit
+    use.  They must not go on Edge.Cuts: an open score line there makes
+    the board outline malformed (Issue #6143).
 
     Attributes:
-        line_width: Width of the V-cut line on Edge.Cuts in mm.
+        line_width: Width of the V-cut line in mm.
         layer: Layer name for V-cut lines.
     """
 
     line_width: float = 0.1
-    layer: str = "Edge.Cuts"
+    layer: str = "Cmts.User"
 
 
 @dataclass
