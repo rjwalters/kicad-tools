@@ -524,11 +524,6 @@ def run_route_auto_command(args) -> int:
                 if as_json:
                     _emit([], 1, gate.baseline_error_outcome().to_dict())
                 return 1
-            # Issue #6090: every pass writes a staging file next to --output;
-            # only the judged final board is promoted onto it.
-            staged = gate.stage()
-            if staged is not None:
-                args.output = str(staged)
 
     def _unstage_args() -> None:
         if gate is not None:
@@ -536,6 +531,13 @@ def run_route_auto_command(args) -> int:
 
     # Issue #5945: --resume / --checkpoint / regressing-pass rollback.
     try:
+        if gate is not None:
+            # Issue #6090: every pass writes a staging file next to --output;
+            # only the judged final board is promoted onto it.  Staged inside
+            # the guard so a SIGTERM right after it still cleans up.
+            staged = gate.stage()
+            if staged is not None:
+                args.output = str(staged)
         passes, rc = _RouteAutoPasses.create(args, net_list, as_json=as_json)
     except BaseException:
         if gate is not None:

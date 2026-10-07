@@ -15,6 +15,7 @@ signal lands exactly where the issue's repro put it.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import signal
 import subprocess
@@ -389,3 +390,187 @@ def test_deadline_worker_handler_is_preserved_in_a_supervised_run(board, tmp_pat
     args.output = str(tmp_path / ".o.kicad_pcb.lint-gate-1-x" / "o.kicad_pcb")
     identity = route_deadline._output_identity(args)
     assert identity["output"] == str((tmp_path / "o.kicad_pcb").absolute())
+
+
+# -- SIGTERM during promotion / rollback (Issue #6090 review) ----------------
+
+_NEW_PRO_KEY = "lint_gate_test"
+
+
+def _promotion_stub(args, parser, argv, *, new_pro: bool = True):
+    """A passing route that rewrites the project files and leaves linter debris."""
+    from kicad_tools.cli.route_receipt import configure, record_publication
+
+    configure(args)
+    src, out = Path(args.pcb), Path(args.output)
+    out.write_text(src.read_text() + "\n")
+    if new_pro:
+        pro = json.loads(src.with_suffix(".kicad_pro").read_text())
+        pro[_NEW_PRO_KEY] = "new"
+        out.with_suffix(".kicad_pro").write_text(json.dumps(pro))
+    else:
+        out.with_suffix(".kicad_pro").write_bytes(src.with_suffix(".kicad_pro").read_bytes())
+    out.with_suffix(".kicad_dru").write_text("(version 1)\n")
+    out.with_name(f"~{out.stem}.kicad_pro.lck").write_text("lock\n")
+    out.with_name(f"{out.stem}.routing_plan.json").write_text(
+        json.dumps({"source": {"pcb": str(out)}})
+    )
+    record_publication(out)
+    return 0
+
+
+def _seed_previous_output(work: Path) -> tuple[Path, dict[str, bytes]]:
+    out = work / "out.kicad_pcb"
+    out.write_text("previous board\n")
+    pro = json.loads((work / "test_project.kicad_pro").read_text())
+    pro["prev"] = "pro"
+    out.with_suffix(".kicad_pro").write_text(json.dumps(pro))
+    out.with_suffix(".kicad_dru").write_text("(version 1)\n(rule prev)\n")
+    previous = {p.name: p.read_bytes() for p in work.iterdir() if p.name.startswith("out.")}
+    return out, previous
+
+
+def _run_with_sigterm_on_replace(work: Path, out: Path, stub, should_fire) -> tuple[int, list]:
+    """Run a gated route; send SIGTERM right after the moves ``should_fire`` picks.
+
+    ``should_fire(index)`` is asked after each ``os.replace`` out of the
+    staging directory has happened; ``index`` counts those moves from 0.
+    """
+    real_replace = os.replace
+    moves: list[Path] = []
+    fired: list[tuple[Path, Path]] = []
+
+    def replace(src, dst, *a, **kw):
+        real_replace(src, dst, *a, **kw)
+        if ".lint-gate-" not in str(src):
+            return
+        moves.append(Path(dst))
+        if signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, signal.SIG_IGN, None):
+            return  # never kill the test process
+        if should_fire(len(moves) - 1):
+            fired.append((Path(src), Path(dst)))
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        with patch.object(route_cmd, "_run_main_impl", stub), patch.object(os, "replace", replace):
+            try:
+                rc = kct_main(
+                    ["route", str(work / "test_project.kicad_pcb"), "-o", str(out)]
+                    + ["--lint-gate", "--no-current-paths"]
+                )
+            except SystemExit as exc:
+                rc = exc.code
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    return rc, fired
+
+
+def _fresh_work(tmp_path: Path, name: str) -> Path:
+    work = tmp_path / name
+    work.mkdir()
+    for fixture in ("test_project.kicad_pcb", "test_project.kicad_pro"):
+        shutil.copy(FIXTURE / fixture, work / fixture)
+    return work
+
+
+def test_sigterm_at_every_promotion_step_keeps_output_consistent(tmp_path):
+    """The judge's repro: SIGTERM after each promotion move, sidecars and board.
+
+    Promotion is held against SIGTERM, so it always completes (all new) and
+    the run then exits 143; it must never mix old and new files or delete one
+    the user had before.
+    """
+    step = 0
+    destinations: list[Path] = []
+    while True:
+        work = _fresh_work(tmp_path, f"step{step}")
+        out, previous = _seed_previous_output(work)
+
+        rc, fired = _run_with_sigterm_on_replace(
+            work, out, _promotion_stub, lambda index, step=step: index == step
+        )
+        if not fired:
+            break  # past the last promotion move
+        destinations.append(fired[0][1])
+
+        assert rc == SIGTERM_EXIT, f"step {step}"
+        # Nothing the user had is gone.
+        for name in previous:
+            assert (work / name).exists(), f"step {step}: {name} was deleted"
+        board = out.read_text()
+        pro = json.loads(out.with_suffix(".kicad_pro").read_text())
+        dru = out.with_suffix(".kicad_dru").read_text()
+        all_new = board != "previous board\n" and _NEW_PRO_KEY in pro and dru == "(version 1)\n"
+        all_old = {n: (work / n).read_bytes() for n in previous} == previous
+        assert all_new or all_old, f"step {step}: mixed old/new output {board!r} {pro} {dru!r}"
+        assert all_new, f"step {step}: a held SIGTERM must let the promotion finish"
+        assert not _rejected(out).exists()
+        assert _staging_dirs(work) == []
+        step += 1
+    assert step >= 3, f"expected sidecar moves and the board move, saw {destinations}"
+    # The board is the last (committing) move.
+    assert destinations[-1].name == "out.kicad_pcb"
+    assert all(d.name != "out.kicad_pcb" for d in destinations[:-1])
+
+
+def test_repeated_sigterm_during_rollback_does_not_escape(tmp_path):
+    """A second SIGTERM mid-rollback must not cut the rollback short."""
+    work = _fresh_work(tmp_path, "w")
+    out, previous = _seed_previous_output(work)
+
+    def killed_route(args, parser, argv):
+        _promotion_stub(args, parser, argv)
+        os.kill(os.getpid(), signal.SIGTERM)  # the first SIGTERM, while routing
+        time.sleep(5)
+        return 0
+
+    # A SIGTERM after every move of the rollback.
+    rc, fired = _run_with_sigterm_on_replace(work, out, killed_route, lambda index: True)
+    assert fired, "the rollback moved nothing out of staging"
+    assert rc == SIGTERM_EXIT
+    assert {n: (work / n).read_bytes() for n in previous} == previous
+    assert _NEW_PRO_KEY in _rejected(out).with_suffix(".kicad_pro").read_text()
+    assert _staging_dirs(work) == []
+
+
+def test_promotion_relocates_json_sidecars_and_drops_kicad_locks(tmp_path):
+    work = _fresh_work(tmp_path, "w")
+    out = work / "out.kicad_pcb"
+
+    def stub(args, parser, argv):
+        return _promotion_stub(args, parser, argv, new_pro=False)
+
+    with patch.object(route_cmd, "_run_main_impl", stub):
+        rc = kct_main(
+            ["route", str(work / "test_project.kicad_pcb"), "-o", str(out)]
+            + ["--lint-gate", "--no-current-paths"]
+        )
+    assert rc == 0
+    plan = json.loads((work / "out.routing_plan.json").read_text())
+    assert plan["source"]["pcb"] == str(out.absolute())
+    assert not list(work.glob("~*.lck"))
+    from kicad_tools.cli.route_receipt import verify_route_receipt
+
+    assert verify_route_receipt(out.with_suffix(".route.json")) == []
+
+
+def test_stale_staging_of_a_dead_run_is_reaped(board, tmp_path):
+    out = tmp_path / "out.kicad_pcb"
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    stale = tmp_path / f".out.kicad_pcb.lint-gate-{dead.pid}-abc123"
+    stale.mkdir()
+    (stale / "out.kicad_pcb").write_text("unjudged\n")
+    live = tmp_path / f".out.kicad_pcb.lint-gate-{os.getppid()}-def456"
+    live.mkdir()
+    other = tmp_path / f".other.kicad_pcb.lint-gate-{dead.pid}-ghi789"
+    other.mkdir()
+
+    with patch.object(route_cmd, "_run_main_impl", _stub("")):
+        rc = kct_main(["route", str(board), "-o", str(out), "--lint-gate", "--no-current-paths"])
+    assert rc == 0
+    assert not stale.exists(), "a dead run's staging directory is removed"
+    assert live.exists(), "a live process's staging directory is left alone"
+    assert other.exists(), "another output's staging directory is not ours"

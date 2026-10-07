@@ -17034,13 +17034,6 @@ def _main_impl(argv: list[str] | None = None) -> int:
                         )
                         json_stream.flush()
                     return 1
-                # Issue #6090: route into a staging file next to --output and
-                # promote it only once judged, so no kill -- SIGTERM, SIGKILL
-                # -- can leave an unjudged board at --output.
-                staged = gate.stage()
-                if staged is not None:
-                    args._lint_gate_output = str(gate.output)
-                    args.output = str(staged)
             capture = (
                 json_stream.capture()
                 if gate is not None and json_stream is not None
@@ -17048,6 +17041,16 @@ def _main_impl(argv: list[str] | None = None) -> int:
             )
             with capture as held:
                 try:
+                    if gate is not None:
+                        # Issue #6090: route into a staging file next to
+                        # --output and promote it only once judged, so no kill
+                        # -- SIGTERM, SIGKILL -- can leave an unjudged board at
+                        # --output.  Staged inside the guard: a SIGTERM right
+                        # after the handler is installed still cleans up.
+                        staged = gate.stage()
+                        if staged is not None:
+                            args._lint_gate_output = str(gate.output)
+                            args.output = str(staged)
                     result = _run_main_impl(args, parser, argv)
                 except BaseException:
                     if gate is not None:

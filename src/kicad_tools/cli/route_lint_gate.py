@@ -77,12 +77,27 @@ Staging (Issue #6090)
     staging directory first, so the routed board is checked against the same
     rules it would have seen in place.
 
+    Promotion moves the sidecars first and the board **last**: the board's
+    ``os.replace`` onto ``--output`` is the step that commits it.  A SIGKILL
+    part-way therefore leaves at worst the old (judged) board beside some new
+    sidecars, never a new board beside old or missing ones.  Staging
+    directories left by a SIGKILLed run are removed by the next gated run to
+    the same ``--output`` once their process (the pid in the name) is gone.
+    JSON sidecars the router wrote (``routing_plan.json``) have the staging
+    path rewritten on promotion; the router's own stderr hints, printed while
+    it ran, still name the staging path.
+
     While the gate is active and nothing else owns SIGTERM, a SIGTERM (what
     ``timeout`` and CI job cancellations send) becomes a
     :class:`LintGateTerminated` exit (code 143), so the gate can still move
     the unjudged board aside and say so.  The supervised ``--timeout`` worker
     and the adaptive/rule-relaxation windows install their own SIGTERM
     handlers; those are left alone and unwind through the same abort path.
+    Seeding, promotion and rollback are not interruptible: a SIGTERM (or a
+    second one) arriving during them is held until the files are consistent
+    -- all old or all new -- and then acted on.  A Python handler runs only
+    between bytecodes, so a SIGTERM that lands inside a long native router
+    call is handled when that call returns; use ``timeout -k`` to bound it.
 
 Not gated
     ``--checkpoint`` files (best-so-far intermediates; a later ``--resume``
@@ -109,7 +124,7 @@ import signal
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -154,23 +169,77 @@ def _raise_terminated(signum, frame) -> None:
     raise LintGateTerminated()
 
 
-@contextlib.contextmanager
-def _sigterm_blocked() -> Iterator[None]:
-    """Hold SIGTERM pending across a multi-file promotion or rollback.
+class _HeldSigterm:
+    """Defer SIGTERM across a critical section of the gate (Issue #6090).
 
-    A SIGTERM landing between two ``os.replace`` calls would leave ``--output``
-    half-promoted; the signal is delivered once the section ends.
+    Promoting the judged board, rolling it back and seeding the staging
+    directory each move several files; a SIGTERM that unwound them half-way
+    could leave ``--output`` with a mix of old and new files, or delete one.
+    Inside ``with _HeldSigterm() as held:`` a SIGTERM -- the first or a
+    repeated one -- only records that it arrived; :meth:`redeliver` hands it
+    to the handler that was installed before (``_raise_terminated``, the
+    supervised worker's deadline handler, ...) once the files are consistent.
+
+    The deferral swaps the Python-level handler, which always runs on the main
+    thread, so it holds however many threads the router started.  Off the main
+    thread, or under a handler installed from C (``getsignal`` returns
+    ``None``, which cannot be reinstalled), the section is not deferred.
+    Nesting composes: an inner section redelivers to the outer one.
     """
-    if threading.current_thread() is not threading.main_thread() or not hasattr(
-        signal, "pthread_sigmask"
-    ):
-        yield
-        return
-    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+
+    def __init__(self) -> None:
+        self.pending = False
+        self._previous: Any = None
+        self._active = False
+
+    def _defer(self, signum, frame) -> None:
+        self.pending = True
+
+    def __enter__(self) -> _HeldSigterm:
+        if threading.current_thread() is not threading.main_thread():
+            return self
+        with contextlib.suppress(ValueError, OSError, TypeError):
+            previous = signal.getsignal(signal.SIGTERM)
+            if previous is not None:
+                signal.signal(signal.SIGTERM, self._defer)
+                self._previous = previous
+                self._active = True
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._active:
+            self._active = False
+            with contextlib.suppress(ValueError, OSError, TypeError):
+                signal.signal(signal.SIGTERM, self._previous)
+
+    def redeliver(self) -> None:
+        """Act on a SIGTERM that arrived inside the section, as it would have."""
+        if not self.pending:
+            return
+        self.pending = False
+        handler = self._previous
+        if handler is signal.SIG_IGN:
+            return
+        if callable(handler):
+            handler(signal.SIGTERM, None)
+        else:  # SIG_DFL
+            os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _pid_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        return True  # os.kill(pid, 0) would terminate it; never reap there
     try:
-        yield
-    finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM: alive, owned by someone else
+    return True
+
+
+def _is_kicad_lock(name: str) -> bool:
+    return name.startswith("~") and name.endswith(".lck")
 
 
 @dataclass
@@ -281,6 +350,12 @@ class LintGate:
         self.moves: dict[Path, Path | None] = {}
         #: True once a judged board was promoted onto ``--output``.
         self.promoted = False
+        #: True once the run's board was promoted or rejected: nothing left to undo.
+        self._settled = False
+        #: Staging-directory names already moved out (or dropped as unchanged
+        #: seeded copies) by :meth:`_unstage` -- never mistaken for siblings
+        #: routing deleted.
+        self._unstaged: set[str] = set()
         self._staging_root: Path | None = None
 
     # -- construction ------------------------------------------------------
@@ -504,9 +579,18 @@ class LintGate:
             return None
         self._install_sigterm()
         parent = self.output.parent.absolute()
+        self._reap_stale_staging(parent)
+        # A SIGTERM while seeding must not leave a half-written seed copy that
+        # the abort path would mistake for a routing artifact.
+        with _HeldSigterm() as held:
+            staged = self._create_staging(parent)
+        held.redeliver()
+        return staged
+
+    def _create_staging(self, parent: Path) -> Path | None:
         try:
             directory = Path(
-                tempfile.mkdtemp(prefix=f".{self.output.name}.lint-gate-{os.getpid()}-", dir=parent)
+                tempfile.mkdtemp(prefix=f"{self._staging_prefix()}{os.getpid()}-", dir=parent)
             )
         except OSError as e:
             self._err(
@@ -530,6 +614,35 @@ class LintGate:
             return None
         self._staging_root = directory
         return self.staged
+
+    def _staging_prefix(self) -> str:
+        return f".{self.output.name}.lint-gate-"
+
+    def _reap_stale_staging(self, parent: Path) -> None:
+        """Remove staging directories left by gated runs that were SIGKILLed.
+
+        The directory name embeds the routing process's pid; one whose process
+        is gone holds only unjudged work that was never promoted.  Directories
+        of live processes (a concurrent run) are left alone.
+        """
+        prefix = self._staging_prefix()
+        try:
+            entries = [e for e in parent.iterdir() if e.name.startswith(prefix)]
+        except OSError:
+            return
+        for entry in entries:
+            pid_text = entry.name[len(prefix) :].split("-", 1)[0]
+            if not pid_text.isdigit() or entry.is_symlink() or not entry.is_dir():
+                continue
+            pid = int(pid_text)
+            if pid == os.getpid() or _pid_alive(pid):
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            if not entry.exists():
+                self._say(
+                    f"removed stale staging directory {entry} (unjudged work of a killed "
+                    f"run, pid {pid}; it was never promoted to {self.output})"
+                )
 
     def _seed_names(self) -> list[str]:
         stem = self.output.stem
@@ -572,39 +685,54 @@ class LintGate:
         during adaptive routing saves ``best_completed_attempt`` and exits 5);
         it is kept at :attr:`rejected_path` rather than discarded.
         """
-        if self.promoted:
-            # A SIGTERM held back through the promotion arrives after it
-            # completed: the judged board is already at --output.
-            self.close()
-            return
         exc = sys.exc_info()[1]
         why = " (SIGTERM)" if isinstance(exc, LintGateTerminated) else ""
-        with _sigterm_blocked():
-            try:
-                if self._baseline is not None:
-                    self._recover_stray()
-                    if self._fresh():
-                        rejected, restored = self._reject()
-                        stage = (
-                            "while the routed board was being linted"
-                            if judging
-                            else "before the routed board was linted"
-                        )
-                        self._err(
-                            f"routing aborted{why} {stage}; it is kept "
-                            f"(unjudged) at {rejected}, {self._restored_text(restored)}"
-                        )
-                    else:
-                        self._unstage(None)
-                        if why:
-                            self._err(
-                                f"routing aborted{why} before a routed board was written; "
-                                f"{self.output} is untouched"
-                            )
-            except OSError:
-                pass
-            finally:
-                self.close()
+        # The rollback moves several files: a repeated SIGTERM (CI often sends
+        # more than one) must not interrupt it half-way.
+        held = _HeldSigterm()
+        try:
+            with held:
+                self._abort(why, judging)
+        except OSError:
+            pass
+        finally:
+            self.close()
+        if exc is None:
+            # Not unwinding (route-auto's early return): honour the signal.
+            held.redeliver()
+        # Otherwise the run is already exiting non-zero; a SIGTERM that
+        # arrived during the rollback is absorbed.
+
+    def _abort(self, why: str, judging: bool) -> None:
+        if self._settled:
+            if self.promoted and why:
+                self._err(
+                    f"SIGTERM after the routed board passed the gate and was promoted; "
+                    f"{self.output} holds the judged board"
+                )
+            return
+        if self._baseline is None:
+            return
+        self._recover_stray()
+        if self._fresh():
+            rejected, restored = self._reject()
+            stage = (
+                "while the routed board was being linted"
+                if judging
+                else "before the routed board was linted"
+            )
+            self._err(
+                f"routing aborted{why} {stage}; it is kept "
+                f"(unjudged) at {rejected}, {self._restored_text(restored)}"
+            )
+        else:
+            self._unstage(None)
+            self._settled = True
+            if why:
+                self._err(
+                    f"routing aborted{why} before a routed board was written; "
+                    f"{self.output} is untouched"
+                )
 
     def close(self) -> None:
         self._restore_sigterm()
@@ -685,38 +813,36 @@ class LintGate:
         ``--output``'s own rules are not touched by a rejected route.  Seeded
         copies that routing did not change are dropped, and seeded siblings
         routing deleted (stale ``_4layer`` boards) are deleted for real.
+        KiCad lock files (``~*.lck``) left by the linters are dropped.
+
+        **The board moves last.**  Its :func:`os.replace` onto ``--output``
+        is the step that commits a promotion: every sidecar is already in
+        place when it lands.  Several renames are never atomic together, so a
+        SIGKILL part-way leaves at worst the old, already-judged board beside
+        some new sidecars -- never a new board beside old or missing ones.
+        (SIGTERM cannot split it: callers run this under :class:`_HeldSigterm`.)
         """
         directory = self._staging_dir
         if directory is None or self.staged is None:
             return
         parent = self.output.parent
         receipt: dict[Path, Path | None] = {}
-        # Names already promoted out of staging are not routing deletions.
+        # Seeded names routing deleted -- not ones this gate already moved out
+        # (a partially finished earlier unstage) or dropped as unchanged.
         deleted = [
             name
             for name in self._seeded
-            if not (directory / name).exists() and (directory / name) not in self.moves
+            if name not in self._unstaged and not (directory / name).exists()
         ]
         rejecting = board_to is not None and board_to != self.output
         promoting = board_to is not None and not rejecting
-
-        def move_board() -> None:
-            assert board_to is not None and self.staged is not None
-            os.replace(self.staged, board_to)
-            self.moves[self.staged] = board_to
-            receipt[self.staged] = None if rejecting else board_to
-
-        if self.staged.is_file():
-            if board_to is None:
-                self.staged.unlink()
-            elif not promoting:
-                move_board()
         if rejecting:
             assert board_to is not None
             for suffix in _PROJECT_SUFFIXES:
                 staged_side = self.staged.with_suffix(suffix)
                 if staged_side.is_file():
                     os.replace(staged_side, board_to.with_suffix(suffix))
+                    self._unstaged.add(staged_side.name)
                     self.moves[staged_side] = board_to.with_suffix(suffix)
                     receipt[staged_side] = None
                 else:
@@ -726,26 +852,59 @@ class LintGate:
         for item in sorted(directory.iterdir()):
             name = item.name
             if item == self.staged:
-                continue  # promoted last: its arrival means everything arrived
+                continue  # last, below
+            if _is_kicad_lock(name):
+                item.unlink(missing_ok=True)
+                continue
             if name in self._seeded and item.is_file() and item.read_bytes() == self._seeded[name]:
                 item.unlink()
+                self._unstaged.add(name)
                 continue
             target = parent / name
             try:
                 if item.is_dir() and target.exists():
                     continue  # never merge directories; left in staging (reported)
+                if promoting and item.suffix == ".json":
+                    self._relocate_text(item, directory, parent)
                 os.replace(item, target)
             except OSError:
                 continue
+            self._unstaged.add(name)
             self.moves[item] = target
             receipt[item] = target
         for name in deleted:
             (parent / name).unlink(missing_ok=True)
-        if promoting and self.staged.is_file():
-            move_board()
+        if self.staged.is_file():
+            if board_to is None:
+                self.staged.unlink()
+            else:
+                os.replace(self.staged, board_to)  # commits a promotion
+                self.moves[self.staged] = board_to
+                receipt[self.staged] = None if rejecting else board_to
+            self._unstaged.add(self.staged.name)
         from .route_receipt import relocate
 
         relocate(receipt)
+
+    @staticmethod
+    def _relocate_text(item: Path, directory: Path, parent: Path) -> None:
+        """Point a promoted JSON sidecar's staging paths at ``--output``'s directory.
+
+        The router names its output inside sidecars it writes (e.g.
+        ``routing_plan.json`` ``source.pcb``); those paths stop existing once
+        the staging directory is gone.  None of these files is hashed by the
+        route receipt (which covers board/project/rules only).
+        """
+        try:
+            text = item.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return
+        root = str(directory)
+        if root not in text:
+            return
+        tmp = item.with_name(item.name + ".relocate.tmp")
+        tmp.write_text(text.replace(root, str(parent.absolute())), encoding="utf-8")
+        os.replace(tmp, item)
 
     # -- verdict -----------------------------------------------------------
     def _finish(self) -> GateOutcome:
@@ -754,9 +913,14 @@ class LintGate:
         waivers = None if self._waivers_pinned_empty else str(self.waivers)
         if self._baseline is None:
             return GateOutcome("skipped", "input board was not linted", self.strict)
-        self._recover_stray()
-        if not self._fresh():
-            self._unstage(None)
+        with _HeldSigterm() as held:
+            self._recover_stray()
+            fresh = self._fresh()
+            if not fresh:
+                self._unstage(None)
+                self._settled = True
+        held.redeliver()
+        if not fresh:
             self._say("no routed board was written; nothing to gate")
             return GateOutcome("skipped", "no routed board written", self.strict, waivers=waivers)
         record_stage("lint-gate")
@@ -765,11 +929,13 @@ class LintGate:
         try:
             candidate = self.lint(self.board, "candidate")
         except (LintGateError, OSError, ValueError) as e:
-            rejected, restored = self._reject()
+            with _HeldSigterm() as held:
+                rejected, restored = self._reject()
             self._err(
                 f"ROLLED BACK: the routed board could not be linted ({e}); "
                 f"kept at {rejected}, {self._restored_text(restored)}"
             )
+            held.redeliver()
             return GateOutcome(
                 "error",
                 f"routed board could not be linted: {e}",
@@ -786,15 +952,18 @@ class LintGate:
             if row.get("severity") == "error" or (self.strict and row.get("severity") == "warning")
         ]
         if not blocking:
-            with _sigterm_blocked():
+            # Promotion is not interruptible: a SIGTERM waits until --output
+            # and every sidecar are in their final state, then exits 143.
+            with _HeldSigterm() as held:
                 self._discard_stale_rejected()
                 self._unstage(self.output)
-                self.promoted = True
+                self.promoted = self._settled = True
             self._say(
                 f"PASS: no new error findings{' or warnings' if self.strict else ''} "
                 f"({summary['introduced']} introduced, {summary['resolved']} resolved); "
                 f"wrote {self.output}"
             )
+            held.redeliver()
             return GateOutcome(
                 "pass",
                 "",
@@ -803,8 +972,10 @@ class LintGate:
                 introduced=diff["introduced"],
                 waivers=waivers,
             )
-        rejected, restored = self._reject()
+        with _HeldSigterm() as held:
+            rejected, restored = self._reject()
         self._report_rollback(blocking, summary, rejected, restored)
+        held.redeliver()
         return GateOutcome(
             "rolled_back",
             f"routing introduced {len(blocking)} blocking finding(s)",
@@ -833,6 +1004,7 @@ class LintGate:
         if self.staged is not None:
             # --output was never written: it still holds its pre-run state.
             self._unstage(rejected)
+            self._settled = True
             return rejected, ("previous" if self._before is not None else "removed")
         shutil.copyfile(self.output, rejected)
         # Keep the project rules beside it so `kct check <rejected>` judges it
@@ -841,7 +1013,9 @@ class LintGate:
             src = self._project_sidecar_source(suffix)
             if src is not None:
                 shutil.copyfile(src, rejected.with_suffix(suffix))
-        return rejected, self._restore()
+        restored = self._restore()
+        self._settled = True
+        return rejected, restored
 
     def _restore(self) -> str:
         if self._before is None:
