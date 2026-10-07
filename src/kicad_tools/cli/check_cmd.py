@@ -33,7 +33,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal
 
 from kicad_tools.analysis.routing_quality import (
     FRAGMENT_LENGTH_MM,
@@ -50,6 +50,12 @@ from kicad_tools.manufacturers import (
     resolve_pcb_fabrication_overrides,
 )
 from kicad_tools.manufacturers.fabrication_process import describe_selection
+from kicad_tools.manufacturers.resolve import (  # noqa: F401  (re-exported; shared resolver, #6169)
+    MfrResolutionSource,
+    ResolvedMfr,
+    _discover_fab_profile_sidecar,
+    _resolve_effective_check_mfr,
+)
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     current_paths_sidecar_candidates,
@@ -58,7 +64,6 @@ from kicad_tools.router.current_paths import (
 )
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
-from kicad_tools.sync.discover import resolve_target_fab_for_pcb
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 from kicad_tools.validate.coverage import coverage_to_dict
 from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
@@ -340,142 +345,6 @@ def _discover_net_class_map_sidecar(pcb_path: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
-
-
-def _discover_fab_profile_sidecar(pcb_path: Path) -> Path | None:
-    """Probe conventional locations for a ``fab_profile.json`` sidecar (#3920).
-
-    ``kct route`` writes a ``fab_profile.json`` sidecar next to the routed PCB
-    recording the resolved manufacturer profile (``--manufacturer``).  ``kct
-    check`` should auto-load it so the effective ``--mfr`` matches the tier the
-    board was routed against -- without the user having to pass ``--mfr`` by
-    hand.  Mirrors :func:`_discover_net_class_map_sidecar`'s probe locations
-    exactly.
-
-    Returns:
-        The first existing candidate path, or ``None`` when no sidecar is
-        found.
-    """
-    pcb_dir = pcb_path.parent
-    candidates = [
-        pcb_dir / "fab_profile.json",
-        pcb_dir / "output" / "fab_profile.json",
-        pcb_dir.parent / "output" / "fab_profile.json",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-MfrResolutionSource = Literal["cli", "sidecar", "project_kct", "default"]
-"""Where an effective ``--mfr`` value came from (#4701).
-
-Mirrors the four precedence tiers of :func:`_resolve_effective_check_mfr` 1:1,
-so downstream consumers (e.g. the via-in-pad advisory) can word their output
-without re-deriving how the tier was resolved.
-"""
-
-
-class ResolvedMfr(NamedTuple):
-    """Result of :func:`_resolve_effective_check_mfr` (#4701).
-
-    ``source`` records which precedence tier produced ``mfr`` so callers can
-    report *how* the tier was resolved (declared vs. defaulted) instead of
-    only *what* it resolved to.
-    """
-
-    mfr: str
-    messages: list[str]
-    source: MfrResolutionSource
-
-
-def _resolve_effective_check_mfr(
-    cli_mfr: str | None,
-    pcb_path: Path,
-    default: str = "jlcpcb",
-    *,
-    consult_sidecar: bool = True,
-) -> ResolvedMfr:
-    """Resolve the manufacturer profile ``kct check`` judges against (#3920).
-
-    A routed ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct
-    check`` used to hard-default to the base ``jlcpcb`` tier and report a false
-    ``FAILED`` on boards that route legal, tier-gated geometry (e.g.
-    via-in-pad, legal at ``jlcpcb-tier1``).  This resolves the effective
-    profile from every available source with a documented precedence.
-
-    Precedence (highest first):
-
-    1. Explicit ``--mfr`` flag (``cli_mfr is not None``).  Always wins, mirroring
-       ``build_cmd._resolve_effective_mfr``'s "explicit flag wins" contract.
-    2. Auto-discovered ``fab_profile.json`` sidecar written by ``kct route``.
-    3. Discovered ``project.kct`` ``target_fab``.
-    4. The historical ``default`` (``"jlcpcb"``).
-
-    ``consult_sidecar=False`` skips tier 2.  ``kct route`` resolves its
-    ``--manufacturer`` through this same function (#6155) but must not read
-    ``fab_profile.json``: that sidecar is route's own *output* record, so
-    consuming it as an input would make a previous run's tier (including a
-    ``--mfr-tier-ladder`` escalation result) sticky across re-routes and
-    shadow a later ``project.kct`` edit.
-
-    A malformed / empty sidecar, or an unknown profile id from either the
-    sidecar or ``project.kct``, degrades gracefully: warn and fall back to the
-    next precedence tier (mirroring the net-class-map malformed-sidecar
-    handling).
-
-    Returns:
-        A :class:`ResolvedMfr` of ``(effective_mfr, messages, source)`` where
-        ``messages`` are stderr lines (``[INFO] auto-loaded ...`` /
-        ``WARNING: ignoring ...``) the caller should print, and ``source``
-        names which precedence tier produced ``effective_mfr`` (#4701). Kept
-        as return values (not printed here) so the resolution is
-        unit-testable in isolation.
-    """
-    messages: list[str] = []
-
-    # Precedence 1: an explicit flag always wins.
-    if cli_mfr is not None:
-        return ResolvedMfr(cli_mfr, messages, "cli")
-
-    valid_ids = set(get_manufacturer_ids())
-
-    # Precedence 2: fab_profile.json sidecar.
-    sidecar = _discover_fab_profile_sidecar(pcb_path) if consult_sidecar else None
-    if sidecar is not None:
-        mfr: str | None = None
-        try:
-            data = json.loads(sidecar.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            messages.append(f"WARNING: ignoring malformed fab-profile sidecar {sidecar}: {e}")
-        else:
-            mfr = data.get("mfr") if isinstance(data, dict) else None
-            if not mfr:
-                messages.append(f"WARNING: ignoring fab-profile sidecar {sidecar}: no 'mfr' field")
-            elif mfr not in valid_ids:
-                messages.append(
-                    f"WARNING: ignoring fab-profile sidecar {sidecar}: unknown profile {mfr!r}"
-                )
-            else:
-                messages.append(f"[INFO] auto-loaded fab profile: {mfr} (from {sidecar})")
-                return ResolvedMfr(mfr, messages, "sidecar")
-
-    # Precedence 3: project.kct target_fab.
-    target_fab = resolve_target_fab_for_pcb(pcb_path)
-    if target_fab:
-        if target_fab not in valid_ids:
-            messages.append(
-                f"WARNING: ignoring project.kct target_fab {target_fab!r}: unknown profile"
-            )
-        else:
-            messages.append(
-                f"[INFO] auto-loaded fab profile: {target_fab} (from project.kct target_fab)"
-            )
-            return ResolvedMfr(target_fab, messages, "project_kct")
-
-    # Precedence 4: historical default.
-    return ResolvedMfr(default, messages, "default")
 
 
 def _profile_supports_via_in_pad(mfr: str) -> bool:

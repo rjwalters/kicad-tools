@@ -3559,6 +3559,11 @@ def run_fix_drc(pcb_path: Path) -> bool:
         "kicad_tools.cli",
         "fix-drc",
         str(pcb_path),
+        # Issue #6169: this directory's project.kct declares jlcpcb-tier1, which a
+        # bare fix-drc now picks up.  Pin the historical base tier so the
+        # committed output is unchanged.
+        "--mfr",
+        "jlcpcb",
         "--max-passes",
         "3",
         "--margin",

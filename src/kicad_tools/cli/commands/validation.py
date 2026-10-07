@@ -19,6 +19,17 @@ __all__ = [
 ]
 
 
+def _resolve_mfr(cli_mfr: str | None, path, *, consult_sidecar: bool = True) -> str:
+    """Resolve an unflagged ``--mfr`` from ``project.kct`` (Issue #6169).
+
+    Shared with ``kct check`` / ``kct route`` via
+    :func:`kicad_tools.manufacturers.resolve.resolve_cli_manufacturer`.
+    """
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    return resolve_cli_manufacturer(cli_mfr, path, consult_sidecar=consult_sidecar)
+
+
 def run_validate_footprints_command(args) -> int:
     """Handle validate-footprints command."""
     from ..footprint_cmd import main_validate
@@ -67,8 +78,7 @@ def run_fix_vias_command(args) -> int:
     from ..fix_vias_cmd import main as fix_vias_main
 
     sub_argv = [args.pcb]
-    if args.mfr != "jlcpcb":
-        sub_argv.extend(["--mfr", args.mfr])
+    sub_argv.extend(["--mfr", _resolve_mfr(args.mfr, args.pcb)])
     if args.layers is not None:
         sub_argv.extend(["--layers", str(args.layers)])
     if args.copper != 1.0:
@@ -102,8 +112,7 @@ def run_fix_silkscreen_command(args) -> int:
     from ..fix_silkscreen_cmd import main as fix_silkscreen_main
 
     sub_argv = [args.pcb]
-    if args.mfr != "jlcpcb":
-        sub_argv.extend(["--mfr", args.mfr])
+    sub_argv.extend(["--mfr", _resolve_mfr(args.mfr, args.pcb)])
     if args.layers != 2:
         sub_argv.extend(["--layers", str(args.layers)])
     if args.copper != 1.0:
@@ -193,8 +202,7 @@ def run_fix_drc_command(args) -> int:
     sub_argv = [args.pcb]
     if getattr(args, "drc_report", None):
         sub_argv.extend(["--drc-report", args.drc_report])
-    if getattr(args, "mfr", "jlcpcb") != "jlcpcb":
-        sub_argv.extend(["--mfr", args.mfr])
+    sub_argv.extend(["--mfr", _resolve_mfr(getattr(args, "mfr", None), args.pcb)])
     if getattr(args, "layers", 2) != 2:
         sub_argv.extend(["--layers", str(args.layers)])
     if args.max_displacement != 0.5:
@@ -599,8 +607,7 @@ def run_audit_command(args) -> int:
 
     if getattr(args, "audit_format", "table") != "table":
         sub_argv.extend(["--format", args.audit_format])
-    if getattr(args, "audit_mfr", "jlcpcb") != "jlcpcb":
-        sub_argv.extend(["--mfr", args.audit_mfr])
+    sub_argv.extend(["--mfr", _resolve_mfr(getattr(args, "audit_mfr", None), args.audit_project)])
     if getattr(args, "audit_layers", None):
         sub_argv.extend(["--layers", str(args.audit_layers)])
     if getattr(args, "audit_copper", 1.0) != 1.0:
