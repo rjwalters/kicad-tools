@@ -15355,6 +15355,35 @@ def _route_parser() -> argparse.ArgumentParser:
             "(Issue #5945)."
         ),
     )
+    # Issue #6054: --lint-gate.  Mirror of the outer parser flags in
+    # parser.py; tests/test_cli_parser_drift.py keeps them in sync.
+    parser.add_argument(
+        "--lint-gate",
+        action="store_true",
+        help=(
+            "Lint the input board before routing and the routed board after it "
+            "(kct check + kct detect-mistakes, paired by stable finding key as in "
+            "`kct check --diff`); if routing introduced new error findings, roll "
+            "the output back (restore its pre-run contents, keep the routed board "
+            "as <output>.lint-rejected.kicad_pcb) and exit 3. Waived findings never "
+            "count (Issue #6054)."
+        ),
+    )
+    parser.add_argument(
+        "--lint-gate-waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Waivers sidecar applied to both lint runs of --lint-gate. Default: "
+            "the one `kct check` discovers for the INPUT board "
+            "(<board>.kct-waivers.json, then .kct_waivers.json)."
+        ),
+    )
+    parser.add_argument(
+        "--lint-gate-strict",
+        action="store_true",
+        help="With --lint-gate, new warning findings also roll the route back.",
+    )
     # Issue #2819: declare --max-search-iterations on the inner parser so the
     # forwarding shim in ``commands/routing.py`` can hand it through.  Default
     # 0 = use the historical ``cols * rows * 4`` heuristic (matches the outer
@@ -16867,13 +16896,66 @@ def _main_impl(argv: list[str] | None = None) -> int:
         # from the (very chatty) routing pipeline goes to stderr; only the
         # JSON emitters write to the real stdout via ``json_stdout()``.
         with prose_to_stderr(getattr(args, "format", "text") == "json") as json_stream:
-            result = _run_main_impl(args, parser, argv)
-            exit_code = finish(args, result)
-            if json_stream is not None and not json_stream.written:
-                # The layer/rule-escalation paths (the default) never reached
-                # the direct-route JSON emitter; publish the same document
-                # for the final router so --format json always yields one.
-                _emit_route_json_fallback(args, exit_code)
+            # Issue #6054: --lint-gate lints the input before routing and the
+            # routed board after it, rolling the output back when routing
+            # introduced findings.  ONE hook around _run_main_impl covers every
+            # routing path (direct, the escalation wrappers, --auto-fix,
+            # placement feedback, --complete, --resume) because they all
+            # write the same --output.
+            gate = None
+            if getattr(args, "lint_gate", False) and not getattr(args, "dry_run", False):
+                from .route_lint_gate import LintGate
+
+                gate = LintGate.from_route_args(args, argv)
+                gate_error = gate.begin()
+                if gate_error is not None:
+                    print(gate_error, file=sys.stderr)
+                    if json_stream is not None:
+                        # --format json always yields one document (#5938).
+                        from .route_lint_gate import merge_into_json_document
+
+                        json_stream.write(
+                            merge_into_json_document("", gate.baseline_error_outcome(), 1)
+                        )
+                        json_stream.flush()
+                    return 1
+            capture = (
+                json_stream.capture()
+                if gate is not None and json_stream is not None
+                else contextlib.nullcontext(None)
+            )
+            with capture as held:
+                try:
+                    result = _run_main_impl(args, parser, argv)
+                except BaseException:
+                    if gate is not None:
+                        # Never leave an unjudged board at --output.
+                        gate.abort()
+                    raise
+                outcome = None
+                if gate is not None:
+                    outcome = gate.finish()
+                    result = outcome.exit_code(result)
+                    if outcome.output_restored is not None and hasattr(
+                        args, "_placement_output_before"
+                    ):
+                        # The routed board was rolled back: route_placement.finish
+                        # must not report the restored (pre-run) board as written.
+                        restored = Path(args._placement_output)
+                        args._placement_output_before = (
+                            restored.stat() if restored.exists() else None
+                        )
+                exit_code = finish(args, result)
+                if json_stream is not None and not json_stream.written:
+                    # The layer/rule-escalation paths (the default) never reached
+                    # the direct-route JSON emitter; publish the same document
+                    # for the final router so --format json always yields one.
+                    _emit_route_json_fallback(args, exit_code)
+            if held is not None and json_stream is not None and outcome is not None:
+                from .route_lint_gate import merge_into_json_document
+
+                json_stream.write(merge_into_json_document(held.getvalue(), outcome, exit_code))
+                json_stream.flush()
             return exit_code
     except DRCConstraintPropagationError as exc:
         print(f"Error: {exc}", file=sys.stderr)

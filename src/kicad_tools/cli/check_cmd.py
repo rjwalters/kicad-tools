@@ -2142,7 +2142,12 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
-    if gw_path is not None:
+    if gw_path is not None and not gw_path.exists() and gw_explicit and args.waive:
+        # Issue #6054: ``--waivers NEW --waive KEY`` creates NEW (e.g. the
+        # input board's sidecar named by ``kct route --lint-gate``) instead of
+        # refusing because there is nothing to load yet.
+        pass
+    elif gw_path is not None:
         if not gw_path.exists():
             print(f"Error: waivers file not found: {gw_path}", file=sys.stderr)
             return 1

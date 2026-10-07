@@ -424,7 +424,8 @@ def _apply_waivers(
                     file=sys.stderr,
                 )
     if path is not None:
-        if explicit and not path.is_file():
+        if explicit and not path.is_file() and not args.waive:
+            # (Issue #6054: with --waive, a missing --waivers PATH is created.)
             print(f"Error: waivers file not found: {path}", file=sys.stderr)
             return MistakeWaiverResult(), 1
         if path.is_file():
