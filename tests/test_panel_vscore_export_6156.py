@@ -398,4 +398,4 @@ def test_mixed_panel_gapped_seams_still_detects_scored_seams(tmp_path: Path, fra
         x0, y0, x1, y1 = lines[0]
         assert y0 == y1 and x0 != x1
     else:
-        assert len(lines) > 1
+        assert len(lines) == 5
