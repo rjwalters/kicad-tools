@@ -21,7 +21,11 @@ from kicad_tools.explain.mistakes import (
     power_pin_nets,
 )
 from kicad_tools.optim.fom_electrical import _looks_like_power_net
-from kicad_tools.router.net_class import is_power_rail_name
+from kicad_tools.router.net_class import (
+    is_power_rail_name,
+    is_power_rail_pin,
+    is_switch_node_name,
+)
 from kicad_tools.schema.pcb import PCB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -314,3 +318,129 @@ def test_decoupling_cap_value_threshold(value: str, counts: bool) -> None:
 
     assert _is_decoupling_cap("C1", value) is counts
     assert not _is_decoupling_cap("R1", value)
+
+
+# ---------------------------------------------------------------------------
+# Switching-regulator switch node is not a rail (issue #5998)
+# ---------------------------------------------------------------------------
+
+_BUCK_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu") (31 "B.Cu") (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SW")
+  (net 3 "VIN")
+  (net 4 "BOOT")
+  (net 5 "NODE_A")
+  (net 6 "MCU_PH0")
+  (footprint "Package_TO_SOT_SMD:SOT-23-6"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "U2")
+    (property "Value" "TPS54302")
+    (pad "1" smd rect (at -2 0) (size 1 1) (layers "F.Cu") (net 1 "GND") (pinfunction "GND") (pintype "power_in"))
+    (pad "2" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 2 "SW") (pinfunction "SW") (pintype "power_out"))
+    (pad "3" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 3 "VIN") (pinfunction "VIN") (pintype "power_in"))
+    (pad "6" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 4 "BOOT") (pinfunction "BOOT") (pintype "power_in"))
+  )
+  (footprint "Package_TO_SOT_SMD:SOT-23-5"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "U5")
+    (property "Value" "BOOST")
+    (pad "1" smd rect (at -2 0) (size 1 1) (layers "F.Cu") (net 5 "NODE_A") (pinfunction "LX") (pintype "power_out"))
+    (pad "2" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 3 "VIN") (pinfunction "VIN") (pintype "power_in"))
+  )
+  (footprint "Package_QFP:LQFP-48"
+    (layer "F.Cu")
+    (at 30 10)
+    (property "Reference" "U9")
+    (property "Value" "MCU")
+    (pad "1" smd rect (at -2 0) (size 1 1) (layers "F.Cu") (net 6 "MCU_PH0") (pinfunction "PH0") (pintype "power_in"))
+    (pad "2" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 5 "NODE_A") (pinfunction "VDD") (pintype "power_in"))
+  )
+)
+"""
+
+
+def test_switch_node_is_not_power_pin_evidence(tmp_path: Path) -> None:
+    """TPS54302 ``SW`` (power_out) and a boost ``LX`` are not rails.
+
+    ``NODE_A`` carries a VDD ``power_in`` pin as well as the ``LX`` pin, but
+    a net that carries a switch node is never a rail.  ``BOOT`` is a
+    bootstrap pin; ``PH0`` is an MCU port pin and still counts.
+    """
+    path = tmp_path / "buck.kicad_pcb"
+    path.write_text(_BUCK_BOARD)
+    pcb = PCB.load(str(path))
+    u2 = pcb.get_footprint("U2")
+    assert u2 is not None
+    assert {p.number: p.pinfunction for p in u2.pads}["2"] == "SW"
+
+    assert power_pin_nets(pcb) == {"VIN", "MCU_PH0"}
+    decoupling = MissingDecouplingCapCheck().check(pcb)
+    assert not any("SW" in m.explanation.split("'") for m in decoupling), decoupling
+
+
+def test_switch_node_net_name_disqualifies_power_out_without_pinfunction(
+    tmp_path: Path,
+) -> None:
+    """Older annotations without ``pinfunction`` fall back to the net name."""
+    path = tmp_path / "buck.kicad_pcb"
+    path.write_text(_BUCK_BOARD.replace('(pinfunction "SW") ', ""))
+    assert "SW" not in power_pin_nets(PCB.load(str(path)))
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("SW", True),
+        ("SW1", True),
+        ("SW_2", True),
+        ("LX", True),
+        ("LX2", True),
+        ("PH", True),
+        ("PHASE", True),
+        ("/power/SW", True),
+        ("BUCK_SW", True),
+        ("SW_NODE", True),
+        ("PH0", False),
+        ("SWDIO", False),
+        ("SWCLK", False),
+        ("SW_3V3", False),
+        ("+3V3", False),
+        ("", False),
+    ],
+)
+def test_is_switch_node_name(name: str, expected: bool) -> None:
+    assert is_switch_node_name(name) is expected
+
+
+@pytest.mark.parametrize(
+    ("pintype", "pin_name", "expected"),
+    [
+        ("power_out", "VO", True),
+        ("power_in", "VDD", True),
+        ("power_out", "SW", False),
+        ("power_out", "LX1", False),
+        ("power_in", "BOOT", False),
+        ("passive", "BST", False),
+        ("power_in", "BOOT0", True),  # MCU strap pin name, not a bootstrap
+        ("input", "VDD", False),
+    ],
+)
+def test_is_power_rail_pin(pintype: str, pin_name: str, expected: bool) -> None:
+    assert is_power_rail_pin(pintype, pin_name) is expected
+
+
+def test_classify_net_switch_node_is_not_power() -> None:
+    from kicad_tools.router.net_class import NetClass, classify_net
+    from kicad_tools.schematic.models.pin import Pin
+
+    sw = Pin(name="SW", number="2", x=0, y=0, angle=0, length=2.54, pin_type="power_out")
+    vo = Pin(name="VO", number="1", x=0, y=0, angle=0, length=2.54, pin_type="power_out")
+    assert classify_net("SW", [("U2", sw)]).net_class is NetClass.HIGH_CURRENT_SIGNAL
+    assert classify_net("+3V3", [("U4", vo)]).net_class is NetClass.POWER

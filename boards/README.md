@@ -253,9 +253,14 @@ themselves ([#5985]):
 
 - **Board 04** calls `annotate_pcb_file_pintypes(pcb_path, sch_path)` right
   after it writes the unrouted PCB. The router merges tracks into that text,
-  so the routed PCB inherits the annotation.
+  so the routed PCB inherits the annotation. Its committed outputs have not
+  been regenerated yet ([#6025]).
+- **Board 09** calls it right after it writes the PCB, and its committed
+  output carries `pintype` ([#5998]). A buck converter's switch-node pin
+  (`SW`, `LX`, `PH`) is typed `power_out`, but `kct detect-mistakes` does not
+  treat the switch node as a rail.
 - **Other boards** are not wired yet, and their committed outputs carry no
-  `pintype` ([#5998]). To annotate a board by hand, run this on its unrouted
+  `pintype` ([#6025]). To annotate a board by hand, run this on its unrouted
   and routed PCBs. It edits only the pads' `pinfunction`/`pintype` children
   and keeps every other byte:
 
@@ -270,6 +275,7 @@ themselves ([#5985]):
 
 [#5985]: https://github.com/rjwalters/kicad-tools/issues/5985
 [#5998]: https://github.com/rjwalters/kicad-tools/issues/5998
+[#6025]: https://github.com/rjwalters/kicad-tools/issues/6025
 
 ## Project Files (.kct)
 
