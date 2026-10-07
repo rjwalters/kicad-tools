@@ -28,7 +28,11 @@ clearance, 0.2 mm, because that is what ``kicad-cli pcb drc`` then applies.
 The netclass is the project's ``Default`` class (or, without one, the
 strictest class); a per-net class assignment is not resolved.
 
-Unassigned copper (net 0) is exempt, as is the routed net's own copper.
+The routed net's own copper is exempt.  Unassigned (net 0) tracks, vias and
+arcs are exempt too: KiCad reassigns floating copper through connectivity on
+load.  Unassigned **pads** are not -- KiCad reports copper across a no-connect
+pin as a short -- except an NPTH hole with no annular copper, which KiCad
+measures as a hole, not as copper.
 
 Frames
 ------
@@ -291,6 +295,9 @@ def board_copper(pcb: Any) -> list[ForeignItem]:
                     w, h = float(pad.size[0]), float(pad.size[1])
                     if w <= 0 or h <= 0:
                         continue
+                    drill = float(getattr(pad, "drill", 0.0) or 0.0)
+                    if str(getattr(pad, "type", "")) == "np_thru_hole" and max(w, h) <= drill:
+                        continue  # a bare NPTH hole carries no copper
                     cx, cy = pad_center(pad, fp)
                     pad_copper = make_pad(
                         str(pad.shape),
@@ -413,13 +420,16 @@ def find_conflicts(
     ``segments`` / ``vias`` are router primitives (``x1``/``y1``/``x2``/``y2``
     + ``width`` + ``layer``; ``x``/``y`` + ``diameter``).  A via is treated as
     a through via (on every layer), which errs toward refusing.  Copper of the
-    routed net (``own_ids`` / ``own_names``) and net-0 copper are exempt.
+    routed net (``own_ids`` / ``own_names``) and net-0 tracks, vias and arcs are
+    exempt; net-0 pads are not.
     """
     report = ConflictReport(required_mm=required_mm)
 
     def _foreign(item: ForeignItem) -> bool:
         if item.net_name and item.net_name in own_names:
             return False
+        if item.kind == "pad":
+            return item.net == 0 or item.net not in own_ids
         return item.net > 0 and item.net not in own_ids
 
     others = [i for i in items if _foreign(i)]

@@ -252,7 +252,7 @@ def test_gate_checks_vias_against_pads(tmp_path) -> None:
     assert "(0 segment(s), 1 via(s))" in result.error_message
 
 
-def test_gate_spares_own_net_and_unassigned_pads(tmp_path) -> None:
+def test_gate_spares_own_net_and_unassigned_copper(tmp_path) -> None:
     # /A crossing its own pad is not a conflict.
     orchestrator = _orchestrator(_copy(tmp_path, PAD))
     own = RoutingResult(
@@ -264,7 +264,9 @@ def test_gate_spares_own_net_and_unassigned_pads(tmp_path) -> None:
     orchestrator._enforce_no_foreign_shorts(own, RoutingStrategy.GLOBAL_WITH_REPAIR)
     assert own.success is True, own.error_message
 
-    # A net-0 pad on the path is exempt too.
+
+def test_gate_refuses_copper_on_a_no_net_pad(tmp_path) -> None:
+    """KiCad reports copper across a net-0 pad as a short (#6107 review)."""
     text = PAD.read_text().replace(
         '(size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "/A")',
         '(size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask")',
@@ -272,6 +274,23 @@ def test_gate_spares_own_net_and_unassigned_pads(tmp_path) -> None:
     unassigned = tmp_path / "unassigned.kicad_pcb"
     unassigned.write_text(text)
     orchestrator = _orchestrator(unassigned)
+    result = _straight_b()
+    orchestrator._enforce_no_foreign_shorts(result, RoutingStrategy.GLOBAL_WITH_REPAIR)
+    assert result.success is False
+    assert result.segments == [] and result.vias == []
+    assert "pad R5.1" in result.error_message
+
+
+def test_gate_ignores_a_bare_npth_hole(tmp_path) -> None:
+    """An NPTH pad with no annular copper is a hole, not copper."""
+    text = PAD.read_text().replace(
+        '(pad "1" smd rect (at 0 0) (size 3.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "/A"))',
+        '(pad "" np_thru_hole circle (at 0 0) (size 3.0 3.0) (drill 3.0) (layers "*.Cu" "*.Mask"))',
+    )
+    assert text != PAD.read_text(), "fixture pad line changed; update the replacement"
+    board = tmp_path / "npth.kicad_pcb"
+    board.write_text(text)
+    orchestrator = _orchestrator(board)
     result = _straight_b()
     orchestrator._enforce_no_foreign_shorts(result, RoutingStrategy.GLOBAL_WITH_REPAIR)
     assert result.success is True, result.error_message

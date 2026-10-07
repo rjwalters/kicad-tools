@@ -941,8 +941,9 @@ The clearance is the one KiCad's DRC measures. It is the strictest
 unconditional value in the board's `.kicad_dru` and `.kicad_pro` (the board
 minimum and the `Default` netclass), or KiCad's default of 0.2 mm when the
 board declares none. Per-net netclass assignments and conditional `.kicad_dru`
-rules are not resolved. Unassigned (net-0) copper and zones are not checked:
-a zone refill clears around the new copper.
+rules are not resolved. Unassigned (net-0) tracks, vias, arcs and zones are not checked (floating
+copper is reassigned by connectivity, and a zone refill clears around the new
+copper); net-0 pads, such as no-connect pins, are checked.
 
 #### Routing around invalid placement
 
