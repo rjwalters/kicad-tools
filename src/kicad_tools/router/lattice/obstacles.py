@@ -623,8 +623,27 @@ class CommittedCopper:
         # clearance alone (the old form composed a centreline gap and
         # compared distances -- algebraically the same comparison).
         probe = ka.LatticeProbe(ka.trace(a, b, own_half, layer), net)
+        # Perf (#6182): the spatial query returns every segment in the padded
+        # bucket window, most of which are far beyond any requirement.  The
+        # centreline distance is >= the axis-aligned bbox separation, so when
+        # ``bbox_sep - half-widths`` already exceeds the largest requirement
+        # (plus a float-safety slack) the exact kernel gap necessarily passes
+        # every comparison below and the kernel call can be skipped without
+        # changing any verdict.
+        ax0, ax1 = (a[0], b[0]) if a[0] <= b[0] else (b[0], a[0])
+        ay0, ay1 = (a[1], b[1]) if a[1] <= b[1] else (b[1], a[1])
         for c, d, cnet, hw, iclr in self.copper[layer].query_seg(a, b, pad=pad):
             if not probe.foreign(cnet):
+                continue
+            need = own_clr if own_clr > iclr else iclr
+            if pw is not None:
+                req = pw.required(net, cnet)
+                if req > need:
+                    need = req
+            cx0, cx1 = (c[0], d[0]) if c[0] <= d[0] else (d[0], c[0])
+            cy0, cy1 = (c[1], d[1]) if c[1] <= d[1] else (d[1], c[1])
+            sep = max(cx0 - ax1, ax0 - cx1, cy0 - ay1, ay0 - cy1)
+            if sep - own_half - hw > need + 1e-6:
                 continue
             edge_gap = probe.gap(ka.trace(c, d, hw, layer))
             if not ka.satisfies(edge_gap, max(own_clr, iclr)):
@@ -647,6 +666,15 @@ class CommittedCopper:
         # floor is cleared at ``own_clr`` and is byte-identical.
         for point, vnet, vclr in self.vias:
             if probe.foreign(vnet):
+                # Perf (#6182): same exact bbox lower-bound skip as above.
+                need = own_clr if own_clr > vclr else vclr
+                if pw is not None:
+                    vreq = pw.required(net, vnet)
+                    if vreq > need:
+                        need = vreq
+                vsep = max(ax0 - point[0], point[0] - ax1, ay0 - point[1], point[1] - ay1)
+                if vsep - own_half - self.via_radius > need + 1e-6:
+                    continue
                 via_gap = probe.gap(ka.site(point, self.via_radius))
                 if not ka.satisfies(via_gap, max(own_clr, vclr)):
                     return False
@@ -760,6 +788,16 @@ class CommittedCopper:
         for layer in range(self.num_layers):
             for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
                 if not probe.foreign(cnet):
+                    continue
+                # Perf (#6182): exact bbox lower-bound skip (see ``seg_clear``).
+                need = own_clr if own_clr > iclr else iclr
+                if pw is not None:
+                    preq = pw.required(net, cnet)
+                    if preq > need:
+                        need = preq
+                sx = max(min(c[0], d[0]) - point[0], point[0] - max(c[0], d[0]), 0.0)
+                sy = max(min(c[1], d[1]) - point[1], point[1] - max(c[1], d[1]), 0.0)
+                if max(sx, sy) - self.via_radius - hw > need + 1e-6:
                     continue
                 edge_gap = probe.gap(ka.trace(c, d, hw, layer))
                 if not ka.satisfies(edge_gap, max(own_clr, iclr)):

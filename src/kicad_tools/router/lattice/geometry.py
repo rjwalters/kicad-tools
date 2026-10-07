@@ -173,10 +173,26 @@ class SegHash:
         self, a: Pt, b: Pt, pad: float = 1.0
     ) -> Iterator[tuple[Pt, Pt, int, float, float]]:
         """Yield stored segments near ``a-b`` (each item exactly once)."""
+        # Perf (#6182): this is the A* inner loop's hottest generator.  Inline
+        # the cell enumeration (same floor arithmetic as ``_cells_for_seg``) and
+        # skip the dedupe set when the window is a single cell, where each
+        # stored item can appear at most once.  Iteration order is unchanged.
+        c = self.cell
+        x0 = min(a[0], b[0]) - pad
+        x1 = max(a[0], b[0]) + pad
+        y0 = min(a[1], b[1]) - pad
+        y1 = max(a[1], b[1]) + pad
+        ix0, ix1 = int(math.floor(x0 / c)), int(math.floor(x1 / c))
+        iy0, iy1 = int(math.floor(y0 / c)), int(math.floor(y1 / c))
+        buckets = self.buckets
+        if ix0 == ix1 and iy0 == iy1:
+            yield from buckets[(ix0, iy0)]
+            return
         seen: set[int] = set()
-        for key in self._cells_for_seg(a, b, pad=pad):
-            for item in self.buckets[key]:
-                iid = id(item)
-                if iid not in seen:
-                    seen.add(iid)
-                    yield item
+        for ix in range(ix0, ix1 + 1):
+            for iy in range(iy0, iy1 + 1):
+                for item in buckets[(ix, iy)]:
+                    iid = id(item)
+                    if iid not in seen:
+                        seen.add(iid)
+                        yield item
