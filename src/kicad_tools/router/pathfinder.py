@@ -107,6 +107,11 @@ class _PairwiseSearchState:
 # rather than growing without bound.
 _PAIRWISE_MASK_CACHE_MAX = 64
 
+# Issue #6117: tolerance for the post-route via-vs-foreign-pad check in
+# ``Router._validate_route_clearance``.  Matches the C++ validator's
+# ``CLEARANCE_EPSILON_MM`` (grid.cpp) so both backends reject the same vias.
+_VIA_PAD_CLEARANCE_EPSILON_MM = 1e-4
+
 
 @dataclass(frozen=True)
 class _SegmentAdapter:
@@ -5353,6 +5358,30 @@ class Router:
                 via, exclude_net=exclude_net
             )
             if not is_valid:
+                return False
+
+        # Issue #6117: Validate vias against foreign-net PADS.  This
+        # validator previously checked vias only against segments, vias,
+        # same-net drills and component holes -- never against pads -- so
+        # the via-pad quadrant relied entirely on the grid-quantised
+        # search-time via check.  On board 03 the C++ validator
+        # (``Grid3D::validate_route`` via-pad branch, #5182) rejected a
+        # BTN1 via 0.125 mm from BTN2's U1.19 (0.15 mm required); the
+        # pure-Python fallback then accepted and committed the SAME via.
+        # ``worst_via_pad_deficit`` is the exact Python twin of that C++
+        # branch: same component trace-clearance floor, same net-aware
+        # same-component carve-out (only "skip"-mode refs with positive
+        # clearance are exempt; "clamp" refs enforce their authored
+        # floor; plane-net pads are never exempt), and no net-0
+        # exemption.  The epsilon matches C++ ``CLEARANCE_EPSILON_MM``.
+        for via in route.vias:
+            deficit, _loc = self.grid.worst_via_pad_deficit(
+                via,
+                exclude_net=exclude_net,
+                component_pitches=component_pitches,
+                exclude_refs=exclude_refs,
+            )
+            if deficit > _VIA_PAD_CLEARANCE_EPSILON_MM:
                 return False
 
         # Issue #1693: Validate vias against other-net vias
