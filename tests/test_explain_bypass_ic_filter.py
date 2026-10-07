@@ -208,6 +208,111 @@ def test_is_ic_footprint_non_u_active_parts(ref: str, name: str, pads: int, expe
     assert is_ic_footprint(_fp(ref, name, pads)) is expected
 
 
+# --- Issue #5995 review: the many-pad fallback must not catch connectors -----
+
+
+@pytest.mark.parametrize(
+    ("ref", "name", "pads"),
+    [
+        # Connectors / board-to-board in project libraries (judge probes).
+        ("BRD1", "myproj:B2B_40pin", 40),
+        ("CONN1", "myproj:Hirose_DF40_40", 40),
+        ("CON1", "myproj:Edge_40", 40),
+        # A bare header footprint name with no library.
+        ("CONN1", "PinHeader_2x20_P2.54mm", 40),
+        # Connector-looking package names with an otherwise-allowed prefix.
+        ("A3", "PinHeader_2x20_P2.54mm", 40),
+        ("MOD4", "myproj:Conn_02x20", 40),
+        ("M2", "myproj:B2B_DF40C-60DP", 60),
+        ("A4", "myproj:Hirose_DF40_40", 40),
+        # Lower-case connector library.
+        ("CONN1", "connector_generic:Conn_02x10", 20),
+        ("A5", "connector_generic:Conn_02x10", 20),
+        # Shield cans, mounting hardware, heatsinks.
+        ("SH1", "RF_Shielding:Laird_BMI-S-230", 20),
+        ("A6", "RF_Shielding:Laird_BMI-S-230", 20),
+        ("SHLD1", "myproj:Shield_Can_20x20", 20),
+        ("MOD5", "MountingEquipment:DINRailAdapter_3xM3", 16),
+        ("A7", "Heatsink:Heatsink_Fischer_SK104-STC-STIC_35x13mm_2xDrill2.5mm", 16),
+        # Magnetics, mechanical parts, antennas in project libraries.
+        ("T1", "myproj:H1102NL", 16),
+        ("TR1", "myproj:H1102NL", 16),
+        ("MP1", "myproj:Bracket", 16),
+        ("E1", "myproj:antenna", 16),
+        ("ANT1", "myproj:Chip_Antenna_Array", 16),
+        ("H2", "myproj:Standoff_Grid", 16),
+        # Unknown prefixes no longer reach the many-pad fallback.
+        ("X10", "myproj:Thing_40", 40),
+        ("ZZ1", "myproj:Thing_40", 40),
+        ("S4", "myproj:Thing_40", 40),
+    ],
+)
+def test_many_pad_fallback_rejects_non_modules(ref: str, name: str, pads: int) -> None:
+    assert is_ic_footprint(_fp(ref, name, pads)) is False
+
+
+@pytest.mark.parametrize(
+    ("ref", "name", "pads"),
+    [
+        ("MOD2", "myproj:RPi_CM4", 100),
+        ("A1", "myproj:Arduino_Nano_Every", 30),
+        ("M1", "myproj:SIM7600_LCC", 87),
+        ("MCU1", "myproj:STM32_Blue_Pill", 40),
+        ("SOM1", "myproj:Jetson_Nano_SODIMM", 260),
+        ("CM1", "myproj:RPi_CM5", 200),
+    ],
+)
+def test_many_pad_fallback_accepts_module_prefixes(ref: str, name: str, pads: int) -> None:
+    assert is_ic_footprint(_fp(ref, name, pads)) is True
+
+
+@pytest.mark.parametrize(
+    ("ref", "name", "pads", "expected"),
+    [
+        ("X3", "oscillator:Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm", 4, True),
+        ("X4", "OSCILLATOR:Some_Clock_4pin", 4, True),
+        ("A8", "package_qfp:LQFP-48_7x7mm_P0.5mm", 48, True),
+        ("S5", "sensor_humidity:Sensirion_DFN-4-1EP_2x2mm_P1mm_EP0.7x1.6mm", 5, True),
+        ("S6", "button_switch_tht:SW_DIP_SPSTx04_Slide_9.78x12.34mm_W7.62mm_P2.54mm", 8, False),
+        ("Y6", "crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm", 4, False),
+    ],
+)
+def test_library_matching_is_case_insensitive(
+    ref: str, name: str, pads: int, expected: bool
+) -> None:
+    assert is_ic_footprint(_fp(ref, name, pads)) is expected
+
+
+def test_u_reference_in_connector_library_is_not_an_ic() -> None:
+    """Intentional (issue #5995): the excluded-library check runs before the
+    ``U``/``IC`` prefix check, so a ``U1`` placed in a connector footprint --
+    a mis-annotated connector or a plug-in module socket -- is not an IC.
+    """
+    assert is_ic_footprint(_fp("U1", "Connector_Generic:Conn_02x10_Odd_Even", 20)) is False
+    assert is_ic_footprint(_fp("IC1", "connector_generic:Conn_02x10_Odd_Even", 20)) is False
+    # The same reference in a real IC package is still an IC.
+    assert is_ic_footprint(_fp("U1", "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", 8)) is True
+
+
+def test_ic_in_socket_package_is_still_an_ic() -> None:
+    """The connector package-name check is anchored at the start of the name."""
+    assert is_ic_footprint(_fp("A9", "Package_DIP:DIP-28_W7.62mm_Socket", 28)) is True
+
+
+def test_connector_with_many_rail_pins_is_not_a_bypass_partner(tmp_path: Path) -> None:
+    """A 40-pin B2B connector on +3V3 must not produce bypass-distance findings."""
+    pads = "".join(
+        f'    (pad "{i}" smd rect (at {i * 0.5} 0) (size 0.3 1) (layers "F.Cu") (net 1 "+3V3"))\n'
+        for i in range(1, 41)
+    )
+    b2b = (
+        '\n  (footprint "myproj:B2B_40pin"\n    (layer "F.Cu")\n    (at 80 10)\n'
+        '    (property "Reference" "BRD1")\n    (property "Value" "DF40")\n' + pads + "  )\n"
+    )
+    body = _two_pad("Capacitor_SMD:C_0402", "C1", "100nF", 10) + b2b
+    assert BypassCapDistanceCheck().check(_load(tmp_path, body)) == []
+
+
 def test_power_in_pintype_promotes_unconventional_reference() -> None:
     """A symbol-derived ``power_in`` pad marks an active part (issue #5995)."""
     fp = _fp("Y5", "custom:SMD_Clock_5032", 4)
