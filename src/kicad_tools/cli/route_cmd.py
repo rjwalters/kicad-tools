@@ -6544,6 +6544,14 @@ def _merge_unconnected_per_net(primary: list, alternate: list, net_of) -> list:
     never counts or closes.  Taking ``alternate``'s too could only add
     run-varying duplicates of ``primary``'s (KiCad names different items in
     each run) to a list whose length nothing should then depend on.
+
+    Records that read identically are **not** deduplicated (Issue #6095).
+    KiCad anchors every zone end at the zone outline's first corner, so links
+    to two different islands of one net's pour can print the same text and
+    coordinates.  On board 03 under the source project, KiCad reported
+    ``Pad 2 [GND] of C10 <-> Zone [GND] on F.Cu`` twice while the fill really
+    held three GND clusters (the plane, C8.2's island and C10.2's island):
+    two genuine links.  Collapsing them would undercount.
     """
     by_net_primary: dict = {}
     by_net_alt: dict = {}
@@ -6562,20 +6570,30 @@ def _make_pour_oracle(args):
     """kicad-cli oracle for the pour completion loop (Issue #5785).
 
     Runs ``kicad-cli pcb drc --refill-zones`` against the routed board under
-    the project kct emitted next to it (the board's deliverable), and -- when
-    the source board carries a different ``.kicad_pro`` -- once more under
-    that source project, because the zone fill (and so which pour islands
-    float) depends on the project's clearances.  A link is "unconnected" if
-    EITHER project's fill leaves it so; the DRC *error* count stays the
-    emitted project's.
+    the project that ships with it.  The zone fill (and so which pour islands
+    float) depends on the project's clearances, so the verdict is only
+    meaningful under the rules the board is delivered with.
 
-    The union is taken **per net** (Issue #5934): for each net, the project
-    reporting more links wins (the emitted one on a tie).  KiCad's link count
-    per net is reproducible, but which items it names is not -- two runs on
-    one board name different spanning trees -- so a union of the raw records
-    double-counted a link whenever the two runs happened to name it
-    differently, and the loop's keep/no-progress rule then compared counts
-    that varied from run to run.
+    **The emitted project is authoritative (Issue #6095).**  When a
+    ``.kicad_pro`` sits next to the routed board -- ``kct route`` writes the
+    manufacturer sidecars before the zone fill since #6078 -- the oracle
+    judges under that project alone.  The source board's project is not
+    consulted: on board 03 its wider clearance (0.15 mm net class vs the
+    emitted 0.1016 mm fab floor) pinches the F.Cu GND pour around C8/C10 and
+    strands two pad islands that the shipped fill connects.  Counting those
+    links failed a board that is fully connected under its own rules, and the
+    closer -- whose copper model reads the emitted project's fill -- could
+    never close them (``no_closer``).
+
+    Only when **no** project ships next to the board (KiCad would then judge
+    it under its built-in defaults, and a user is likely to pair it with the
+    source project) does the oracle also run under the source project.  A
+    link is then "unconnected" if EITHER fill leaves it so, merged **per net**
+    (Issue #5934, :func:`_merge_unconnected_per_net`): for each net, the run
+    reporting more links wins (the board's own on a tie).  KiCad's link count
+    per net is reproducible, but which items it names is not, so a union of
+    the raw records double-counted a link whenever the two runs named it
+    differently.  The DRC *error* count is always the board's own run's.
     """
     import shutil
     import tempfile
@@ -6595,13 +6613,9 @@ def _make_pour_oracle(args):
         return links[0].net if links else None
 
     def oracle(path: Path):
-        out_pro = path.with_suffix(".kicad_pro")
-        try:
-            needs_alt = src_pro is not None and not (
-                out_pro.is_file() and out_pro.read_bytes() == src_pro.read_bytes()
-            )
-        except OSError:
-            needs_alt = False
+        # Issue #6095: a project shipped next to the board is the authority;
+        # the source project only stands in when the board ships without one.
+        needs_alt = src_pro is not None and not path.with_suffix(".kicad_pro").is_file()
         if not needs_alt or src_pro is None:
             return run_geometric_drc(path)
         # Issue #5911: the two projects' DRCs are independent read-only
