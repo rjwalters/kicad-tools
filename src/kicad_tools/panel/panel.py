@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,10 +26,7 @@ from typing import Any
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
 from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
-from kicad_tools.sexp.builders import (
-    fmt,
-    gr_line_node,
-)
+from kicad_tools.sexp.builders import gr_line_node
 from kicad_tools.sexp.parser import SExp
 
 from .config import (
@@ -116,6 +114,8 @@ class Panel:
 
         self._source_sexp: SExp | None = None
         self._source_path: Path | None = None
+        # Source board bounds in sheet-absolute coordinates (the frame of
+        # the raw S-expression nodes that get cloned).
         self._board_bounds: tuple[float, float, float, float] = (0, 0, 0, 0)
         self._instances: list[BoardInstance] = []
         self._tabs: list[Tab] = []
@@ -215,11 +215,20 @@ class Panel:
             rows: Number of rows in the grid.
             cols: Number of columns in the grid.
             spacing: Gap between board edges in mm.
-            rotation: Per-board rotation in degrees.
+            rotation: Per-board rotation in degrees, a multiple of 90
+                (KiCad's CCW-positive convention).  Each copy is rotated
+                rigidly about its own bounding box, then translated into
+                its grid cell.
 
         Returns:
             ``self`` for method chaining.
+
+        Raises:
+            ValueError: If *rotation* is not a multiple of 90 degrees --
+                the per-board Edge.Cuts outline, tabs and V-cuts all
+                assume an axis-aligned board rectangle.
         """
+        rotation = _normalize_rotation(rotation)
         board_path = Path(board_path)
         self._source_sexp = load_pcb(board_path)
         self._source_path = board_path
@@ -229,10 +238,20 @@ class Panel:
 
         pcb = PCB.load(board_path)
         geom = BoardGeometry.from_pcb(pcb)
-        min_x, min_y, max_x, max_y = geom.bounds
+        # ``BoardGeometry`` bounds are board-relative (the board origin is
+        # subtracted), but the cloned S-expression nodes are sheet-absolute.
+        # Mixing the two left every copy's content displaced from its own
+        # Edge.Cuts rectangle by the board origin (Issue #6125).
+        ox, oy = pcb.board_origin
+        rel_min_x, rel_min_y, rel_max_x, rel_max_y = geom.bounds
+        min_x, min_y = rel_min_x + ox, rel_min_y + oy
+        max_x, max_y = rel_max_x + ox, rel_max_y + oy
         board_w = max_x - min_x
         board_h = max_y - min_y
         self._board_bounds = (min_x, min_y, max_x, max_y)
+        if rotation in (90.0, 270.0):
+            # A quarter turn swaps the footprint the copy occupies.
+            board_w, board_h = board_h, board_w
 
         # Place board copies in grid
         self._instances.clear()
@@ -630,24 +649,21 @@ class Panel:
         content_tags = {
             *FOOTPRINT_TAGS,
             "segment",
+            "arc",
             "via",
             "zone",
-            "gr_line",
-            "gr_arc",
-            "gr_rect",
-            "gr_circle",
             "gr_text",
-            "gr_poly",
+            *_GRAPHIC_TAGS,
         }
 
-        src_min_x, src_min_y = self._board_bounds[0], self._board_bounds[1]
+        mapper = self._instance_mapper(inst)
 
         for child in src.children:
             if child.name not in content_tags:
                 continue
 
             # Skip Edge.Cuts graphics (we generate our own panel outline)
-            if child.name in ("gr_line", "gr_arc", "gr_rect", "gr_circle", "gr_poly"):
+            if child.name in _GRAPHIC_TAGS:
                 layer_node = child.find_child("layer")
                 if layer_node and layer_node.get_string(0) == "Edge.Cuts":
                     continue
@@ -660,14 +676,34 @@ class Panel:
             # Remap net numbers
             _remap_nets(cloned, inst.index, self._get_panel_net)
 
-            # Offset positions
-            _offset_positions(cloned, inst.offset_x - src_min_x, inst.offset_y - src_min_y)
-
-            # Remap reference designators for footprints
+            # Rigidly move the copy into its panel cell (Issue #6125).
             if _is_footprint_tag(child.name):
+                _transform_footprint(cloned, mapper, inst.rotation)
+                # Remap reference designators for footprints
                 _remap_reference(cloned, inst.index)
+            else:
+                _transform_board_item(cloned, mapper, inst.rotation)
 
             panel_sexp.append(cloned)
+
+    def _instance_mapper(self, inst: BoardInstance) -> _PointMapper:
+        """Return the source-board -> panel point map for *inst*.
+
+        The copy is rotated by ``inst.rotation`` about the source board's
+        bounding-box centre (KiCad's Y-down ``RotatePoint``, so positive
+        angles turn counter-clockwise on screen), then translated so its
+        bounding box lands on ``inst.bounds``.  A rigid motion: every copy
+        is congruent to the source board (Issue #6125).
+        """
+        min_x, min_y, max_x, max_y = self._board_bounds
+        cx, cy = (min_x + max_x) / 2.0, (min_y + max_y) / 2.0
+        half_w, half_h = (max_x - min_x) / 2.0, (max_y - min_y) / 2.0
+        if inst.rotation in (90.0, 270.0):
+            half_w, half_h = half_h, half_w
+        # Centre of the copy's cell in panel coordinates.
+        tx = inst.offset_x + half_w
+        ty = inst.offset_y + half_h
+        return _rigid_mapper(cx, cy, inst.rotation, tx, ty)
 
     def _render_tab(self, panel_sexp: SExp, tab: Tab) -> None:
         """Render a tab as Edge.Cuts line segments.
@@ -892,16 +928,28 @@ def _remap_nets(
     instance_index: int,
     net_lookup: Any,  # Callable[[int, int], int]
 ) -> None:
-    """Remap (net N) nodes using the panel net lookup function."""
+    """Remap net references using the panel net lookup function.
+
+    Handles every spelling a cloned item can carry: ``(net N)``,
+    ``(net N "name")`` (pads -- KiCad matches the name against the net
+    table, so an unprefixed name leaves the pad on ``<no net>``) and the
+    KiCad 10 name-only ``(net "name")`` (zones).  Names get the same
+    ``B{index}/`` prefix as the panel net table (Issue #6125).
+    """
     if node.name == "net" and node.children:
         first = node.children[0]
-        if first.is_atom and isinstance(first.value, int):
+        if first.is_atom and isinstance(first.value, int) and not isinstance(first.value, bool):
             new_net = net_lookup(instance_index, first.value)
             node.children[0] = SExp(value=new_net)
-            # Also remap net_name if present
-            if len(node.children) > 1 and node.children[1].is_atom:
-                # This is a net definition node, skip
-                pass
+            if len(node.children) > 1:
+                name = node.children[1]
+                if name.is_atom and isinstance(name.value, str):
+                    new_name = f"B{instance_index}/{name.value}" if new_net else ""
+                    node.children[1] = SExp.quoted_atom(new_name)
+            return
+        if first.is_atom and isinstance(first.value, str):
+            if first.value:
+                node.children[0] = SExp.quoted_atom(f"B{instance_index}/{first.value}")
             return
 
     # Also handle (net_name ...) inside pads
@@ -916,24 +964,156 @@ def _remap_nets(
             _remap_nets(child, instance_index, net_lookup)
 
 
-def _offset_positions(node: SExp, dx: float, dy: float) -> None:
-    """Offset all position-bearing nodes by (dx, dy).
+_GRAPHIC_TAGS = frozenset(
+    {"gr_line", "gr_arc", "gr_rect", "gr_circle", "gr_poly", "gr_curve", "gr_text_box"}
+)
 
-    Handles (at X Y ...), (start X Y), (end X Y), (mid X Y).
+# Point-bearing nodes in board coordinates: ``(at X Y [A])`` for vias and
+# texts, ``start``/``mid``/``end``/``center`` for tracks and graphics, and
+# ``xy`` vertices of zone, ``gr_poly`` and text render-cache outlines.
+_POINT_TAGS = frozenset({"at", "start", "mid", "end", "center", "xy"})
+
+# Footprint children whose ``(at X Y A)`` angle is board-absolute in the
+# KiCad file format (it already includes the footprint orientation), so a
+# rotated copy must turn it too.  Their *positions* are footprint-local.
+_FP_ABSOLUTE_ANGLE_TAGS = frozenset({"pad", "property", "fp_text"})
+
+_TEXT_TAGS = frozenset({"gr_text", "gr_text_box"})
+
+_PointMapper = Any  # Callable[[float, float], tuple[float, float]]
+
+
+def _normalize_rotation(rotation: float) -> float:
+    """Validate a per-board rotation and fold it into ``{0, 90, 180, 270}``."""
+    folded = float(rotation) % 360.0
+    quarter = round(folded / 90.0)
+    if not math.isclose(folded, quarter * 90.0, abs_tol=1e-9):
+        raise ValueError(f"Panel board rotation must be a multiple of 90 degrees, got {rotation!r}")
+    return float((quarter % 4) * 90)
+
+
+def _rigid_mapper(cx: float, cy: float, rotation: float, tx: float, ty: float) -> _PointMapper:
+    """Map a point: rotate about ``(cx, cy)`` by *rotation*, then move the
+    centre to ``(tx, ty)``.
+
+    Uses KiCad's Y-down ``RotatePoint`` (``x' = x cos a + y sin a``,
+    ``y' = -x sin a + y cos a``).  Quarter turns use exact integer
+    cos/sin so a 90-degree copy has no floating-point drift.
     """
-    position_tags = {"at", "start", "end", "mid"}
+    quarter: dict[float, tuple[float, float]] = {
+        0.0: (1.0, 0.0),
+        90.0: (0.0, 1.0),
+        180.0: (-1.0, 0.0),
+        270.0: (0.0, -1.0),
+    }
+    c: float
+    s: float
+    if rotation in quarter:
+        c, s = quarter[rotation]
+    else:  # pragma: no cover - append_board rejects non-quarter angles
+        a = math.radians(rotation)
+        c, s = math.cos(a), math.sin(a)
 
-    if node.name in position_tags and len(node.children) >= 2:
-        x_child = node.children[0]
-        y_child = node.children[1]
-        if x_child.is_atom and isinstance(x_child.value, (int, float)):
-            if y_child.is_atom and isinstance(y_child.value, (int, float)):
-                node.children[0] = SExp(value=fmt(float(x_child.value) + dx))
-                node.children[1] = SExp(value=fmt(float(y_child.value) + dy))
+    def mapper(x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - cx, y - cy
+        return (dx * c + dy * s + tx, -dx * s + dy * c + ty)
 
+    return mapper
+
+
+def _mm_atom(value: float) -> SExp:
+    """A numeric atom with KiCad's own 6-decimal precision.
+
+    ``builders.fmt`` rounds to 0.01 mm, which would snap a 0.0254 mm grid
+    copy off its source geometry -- the copy must stay congruent.
+    """
+    text = f"{round(value, 6):.6f}".rstrip("0").rstrip(".")
+    if text in ("-0", ""):
+        text = "0"
+    return SExp(value=float(text), _original_str=text)
+
+
+def _numeric(node: SExp, index: int) -> float | None:
+    if len(node.children) <= index:
+        return None
+    child = node.children[index]
+    if (
+        child.is_atom
+        and isinstance(child.value, (int, float))
+        and not isinstance(child.value, bool)
+    ):
+        return float(child.value)
+    return None
+
+
+def _map_point_node(node: SExp, mapper: _PointMapper) -> None:
+    """Map the leading ``X Y`` atoms of a point node in place."""
+    x, y = _numeric(node, 0), _numeric(node, 1)
+    if x is None or y is None:
+        return
+    nx, ny = mapper(x, y)
+    node.children[0] = _mm_atom(nx)
+    node.children[1] = _mm_atom(ny)
+
+
+def _rotate_at_angle(at_node: SExp, rotation: float) -> None:
+    """Add *rotation* to the angle of an ``(at X Y [A])`` node."""
+    if rotation == 0.0:
+        return
+    if _numeric(at_node, 0) is None or _numeric(at_node, 1) is None:
+        return
+    angle = _numeric(at_node, 2)
+    new_angle = ((angle or 0.0) + rotation) % 360.0
+    atom = _mm_atom(new_angle)
+    if angle is None:
+        at_node.children.insert(2, atom)
+    else:
+        at_node.children[2] = atom
+
+
+def _transform_board_item(node: SExp, mapper: _PointMapper, rotation: float) -> None:
+    """Rigidly move a board-level item (track, via, arc, zone, ``gr_*``).
+
+    Every point-bearing node in the subtree is in board coordinates, so
+    each is mapped -- including the ``(xy ...)`` vertices of zone and
+    ``gr_poly`` outlines and zone fills, which the old offset walk missed
+    (Issue #6125).  Text ``(at)`` angles turn with the copy; a via's
+    angle-less ``(at X Y)`` keeps its shape.
+    """
     for child in node.children:
-        if not child.is_atom:
-            _offset_positions(child, dx, dy)
+        if child.is_atom:
+            continue
+        if child.name in _POINT_TAGS:
+            _map_point_node(child, mapper)
+            if child.name == "at" and (node.name in _TEXT_TAGS or _numeric(child, 2) is not None):
+                _rotate_at_angle(child, rotation)
+        else:
+            _transform_board_item(child, mapper, rotation)
+
+
+def _transform_footprint(node: SExp, mapper: _PointMapper, rotation: float) -> None:
+    """Rigidly move a footprint copy.
+
+    Only the footprint's own ``(at ...)`` moves; pad, text and ``fp_*``
+    coordinates are footprint-local and stay put (Issue #6125).  Embedded
+    ``(zone ...)`` children -- an RF module's antenna keepout -- are stored
+    in board coordinates with the placement already applied, so they move
+    point-for-point, the same frame change as
+    ``transform_footprint_zone_nodes`` (Issue #6119).  For a rotated copy,
+    the board-absolute angles of pads and texts turn with the footprint.
+    """
+    for child in node.children:
+        if child.is_atom:
+            continue
+        if child.name == "at":
+            _map_point_node(child, mapper)
+            _rotate_at_angle(child, rotation)
+        elif child.name == "zone":
+            _transform_board_item(child, mapper, rotation)
+        elif child.name in _FP_ABSOLUTE_ANGLE_TAGS and rotation != 0.0:
+            at_node = child.find_child("at")
+            if at_node is not None:
+                _rotate_at_angle(at_node, rotation)
 
 
 def _remap_reference(footprint_node: SExp, instance_index: int) -> None:
