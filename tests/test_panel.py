@@ -232,7 +232,7 @@ class TestVCuts:
         assert lines[0].end_y == pytest.approx(80.0)
 
     def test_vcut_to_sexp(self):
-        """V-cut line S-expression is a gr_line on Edge.Cuts."""
+        """V-cut line is a gr_line on Cmts.User, never Edge.Cuts (#6143)."""
         from kicad_tools.panel.cuts import VCutLine
 
         line = VCutLine(start_x=0, start_y=30, end_x=100, end_y=30)
@@ -241,7 +241,7 @@ class TestVCuts:
 
         assert sexp.name == "gr_line"
         layer = sexp.find_child("layer")
-        assert layer.get_string(0) == "Edge.Cuts"
+        assert layer.get_string(0) == "Cmts.User"
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +505,7 @@ class TestPanelIntegration:
         assert content.startswith("(kicad_pcb")
 
     def test_panel_with_vcuts(self, tmp_path):
-        """Panel with V-cuts generates gr_line on Edge.Cuts."""
+        """Panel with V-cuts generates score lines plus an Edge.Cuts outline."""
         if not TEST_PCB.exists():
             pytest.skip("Test PCB fixture not found")
 
@@ -515,7 +515,7 @@ class TestPanelIntegration:
         panel.make_vcuts()
         sexp = panel.build()
 
-        # Should have gr_line nodes on Edge.Cuts
+        # Should have gr_line nodes on Edge.Cuts (outline) and Cmts.User (scores)
         gr_lines = sexp.find_children("gr_line")
         edge_cuts = [
             l
@@ -523,6 +523,12 @@ class TestPanelIntegration:
             if l.find_child("layer") and l.find_child("layer").get_string(0) == "Edge.Cuts"
         ]
         assert len(edge_cuts) > 0
+        scores = [
+            l
+            for l in gr_lines
+            if l.find_child("layer") and l.find_child("layer").get_string(0) == "Cmts.User"
+        ]
+        assert len(scores) == 2  # one between the rows, one between the columns
 
     def test_panel_with_frame(self, tmp_path):
         """Panel with frame generates inner and outer outline."""

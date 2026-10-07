@@ -98,8 +98,8 @@ def compute_tabs_between_boards(
                 Tab(
                     x=gap_center_x,
                     y=y,
-                    width=gap_x,
-                    height=config.width,
+                    width=config.width,
+                    height=gap_x,
                     orientation="vertical",
                 )
             )
@@ -202,8 +202,8 @@ def compute_tabs_to_frame(
                 Tab(
                     x=fx0 + gap / 2.0,
                     y=y,
-                    width=gap,
-                    height=config.width,
+                    width=config.width,
+                    height=gap,
                     orientation="vertical",
                 )
             )
@@ -217,8 +217,8 @@ def compute_tabs_to_frame(
                 Tab(
                     x=bx1 + gap / 2.0,
                     y=y,
-                    width=gap,
-                    height=config.width,
+                    width=config.width,
+                    height=gap,
                     orientation="vertical",
                 )
             )
