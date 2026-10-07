@@ -4994,6 +4994,10 @@ def load_pcb_for_routing(
             if net_name in preserve_placement:
                 router.placement_neutral_routes += (route,)
             router.grid.mark_route(route)
+            # Issue #6103: the paired C++ grid was built before this copper
+            # was loaded; mirror it so C++ A* detours instead of routing
+            # through it (no-op on the pure-Python backend).
+            router.grid._mark_route_on_cpp_cells(route)
             router.existing_routes.append(route)
             route_count += 1
 

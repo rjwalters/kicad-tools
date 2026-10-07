@@ -4246,6 +4246,23 @@ class TestLoadExistingRoutes:
                 "when load_existing_routes=True"
             )
 
+    def test_existing_routes_reach_cpp_grid(self, tmp_path):
+        """Issue #6103: preserved copper is blocked on the C++ grid too."""
+        pcb_file = self._write_pcb(tmp_path)
+        router, _ = load_pcb_for_routing(
+            str(pcb_file), validate_drc=False, load_existing_routes=True
+        )
+        cpp_grid = router.grid._cpp_grid
+        if cpp_grid is None:
+            pytest.skip("C++ backend not available")
+        layer_idx = router.grid.layer_to_index(Layer.F_CU.value)
+        gx, gy = router.grid.world_to_grid(116.0, 113.095)
+        assert router.grid.grid[layer_idx][gy][gx].blocked
+        assert cpp_grid._impl.at(gx, gy, layer_idx).blocked
+        vx, vy = router.grid.world_to_grid(125.0, 120.0)
+        for li in range(router.grid.num_layers):
+            assert cpp_grid._impl.at(vx, vy, li).blocked
+
     def test_single_pass_unchanged(self, routing_test_pcb):
         """Regression: load_existing_routes=False behaves identically to before."""
         # Load with default (False)

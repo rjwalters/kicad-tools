@@ -153,13 +153,6 @@ def load_diagnosis_router(
             force_python=force_python,
         )
         router._install_grid_rule_area_keepouts()
-    # The loader marks existing copper on the Python grid only; the paired C++
-    # grid was built before it and never sees it (#6103; a routing run papers over
-    # that with post-route validation, but this router never routes).  Mirror
-    # it with the same cell math the classifier's restore uses, so the solo
-    # search and the restore both start from a grid whose two halves agree.
-    for route in getattr(router.grid, "routes", None) or []:
-        router.grid._mark_route_on_cpp_cells(route)
     return router
 
 
