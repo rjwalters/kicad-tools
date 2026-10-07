@@ -899,3 +899,30 @@ def minimal_symbol_library(tmp_path: Path) -> Path:
 def hierarchical_schematic(fixtures_dir: Path) -> Path:
     """Return the path to the hierarchical test schematic."""
     return fixtures_dir / "projects" / "hierarchical_main.kicad_sch"
+
+
+# Issue #6013: the slow tail of the bulk pool runs in "Test (extended)", not
+# in "Test", so "Test" fits a GitHub-hosted runner on every PR. The list is
+# generated from measured times by scripts/ci/update_ci_extended.py; matching
+# is on the exact node id, so a renamed test simply drops back into "Test".
+_CI_EXTENDED_LIST = Path(__file__).with_name("ci_extended.txt")
+
+
+def _ci_extended_ids() -> frozenset[str]:
+    if not _CI_EXTENDED_LIST.is_file():
+        return frozenset()
+    return frozenset(
+        line.strip()
+        for line in _CI_EXTENDED_LIST.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    ids = _ci_extended_ids()
+    if not ids:
+        return
+    marker = pytest.mark.ci_extended
+    for item in items:
+        if item.nodeid in ids:
+            item.add_marker(marker)

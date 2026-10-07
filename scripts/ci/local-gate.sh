@@ -72,6 +72,7 @@ CHEAP_JOBS=(
 )
 
 LONG_JOBS=(
+  test-extended
   diffpair-routing-regression
   matchgroup-routing-regression
   board-00-end-to-end
@@ -130,8 +131,17 @@ job_test() {
   # `--ignore` below is what stops the suite running twice. Skips itself
   # without kicad-cli (module skipif), exactly as in CI.
   uv run pytest tests/conformance -o addopts= --benchmark-disable --timeout=120 -m "not slow"
-  uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
+  # Issue #6013: as in ci.yml, the ci_extended slow tail runs in its own job.
+  uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow and not ci_extended" \
     --ignore=tests/conformance
+}
+
+job_test_extended() {
+  uv run kct build-native
+  # ci.yml's `test-extended` job (Issue #6013): the tests tests/ci_extended.txt
+  # marks, which `test` deselects. CI runs it on main pushes and the nightly
+  # schedule only; locally it is a long job.
+  uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "ci_extended and not slow"
 }
 
 job_cpp_build_check() {

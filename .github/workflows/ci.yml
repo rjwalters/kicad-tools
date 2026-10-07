@@ -259,30 +259,15 @@ jobs:
     name: Test
     needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
-    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
-    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
-    # fork PRs route back to GitHub-hosted instead of being skipped, so no
-    # outside fork ever executes on our host and required checks never go
-    # missing.
-    #
-    # Measured cost of that fallback (Issue #5747, re-measured 2026-09-28 --
-    # the "Test 17 vs 40 min" figure this comment used to quote was stale in
-    # both directions):
-    # - self-hosted: 23m27s end to end (job 107504917412, main, 2026-09-24),
-    #   of which "Run tests" is 15m24s.
-    # - ubuntu-latest: did NOT finish. Fork run 36282355031 (PR #5736) was
-    #   cancelled by this job's timeout at 45m06s, 28m17s into "Run tests".
-    #   Every step that DID complete there ran ~2.2x its self-hosted time
-    #   (conformance 3m51s -> 8m34s, stitch 2m25s -> 5m15s, zones 21s -> 45s,
-    #   pre-"Run tests" total 7m59s -> 16m43s), which projects the hosted
-    #   total at ~50 min -- structurally above a 45-minute budget, not
-    #   marginally under it. Five Test runs across the fork batch
-    #   #5736/#5737/#5739 were cancelled this way; none could ever go green.
-    # See timeout-minutes below for the split budget that fixes this. The
-    # other two jobs that share this fork fallback had wide margin in that
-    # same fork run (Board 06 15 min vs 35, Diff-Pair 9 min vs 30), so their
-    # timeouts are deliberately left alone.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    # GitHub-hosted for every event (Issue #6013). It used to run on a
+    # self-hosted runner for main pushes and same-repo PRs, where it took
+    # ~30 min; on ubuntu-latest every step runs ~2.2x slower (#5747), so the
+    # full bulk pool could not fit. The fix is to run less here, not to run
+    # it on bigger hardware: tests listed in tests/ci_extended.txt (>= 3 s
+    # each in a measured run, ~72% of the bulk pool's test-time) carry the
+    # `ci_extended` marker, are deselected below, and run in the
+    # "Test (extended)" job on main pushes and the nightly schedule.
+    runs-on: ubuntu-latest
     env:
       # Pin -n auto's worker count at GitHub-hosted parity (4 vCPU) so memory
       # stays bounded (the self-hosted container is not CPU-pinned and would
@@ -368,21 +353,12 @@ jobs:
       # into shell or retained. Pushes/absent markers leave the wrapper inert.
       KCT_NATIVE_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->') }}
       KCT_OBSERVER_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-    # Issue #5747: the budget follows the runner, using the same fork-routing
-    # predicate as runs-on/container.options above (GitHub allows expressions
-    # in timeout-minutes with the same context set as container.image:
-    # github/inputs/matrix/needs/strategy/vars -- no env, hence the repeated
-    # literal rather than a shared variable).
-    # - self-hosted: 45, unchanged -- ~1.9x the 23m27s measured median, so a
-    #   real hang is still caught in a bounded time on our own hardware.
-    # - ubuntu-latest (fork PRs): 90, ~1.8x the ~50 min projected above and
-    #   the same value the other 90-minute jobs in this file use. A blanket
-    #   raise to 90 was rejected: it would double the time a genuinely hung
-    #   self-hosted job holds one of this repo's ten runner slots, and the
-    #   self-hosted path has never needed more than 45. Hosted minutes are
-    #   free on this public repo, and pytest's own --timeout=60 per test
-    #   still bounds a hang long before the job timeout fires.
-    timeout-minutes: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 45 || 90 }}
+    # Issue #5747/#6013: one runner now, so one budget. The projected
+    # hosted job is ~30 min (setup and the native gates ~17, the bulk pool
+    # ~13 after the ci_extended deselection); 60 leaves room for a slow
+    # hosted VM while still catching a hang. pytest's own --timeout=60 per
+    # test bounds a hung test long before the job timeout fires.
+    timeout-minutes: 60
     # Issue #3436: run inside the official KiCad 10 container (same image
     # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
     # are NOT used). The container provides what dozens of tests need and
@@ -408,7 +384,10 @@ jobs:
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 12g' || '--user 0:0' }}
+      # The 12 GiB cap stays on hosted (a 16 GB VM): the native-concurrency
+      # bound and the workload audit are calibrated against this cgroup
+      # (#5501, #5616).
+      options: --user 0:0 --memory 12g
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the smoke job).
@@ -599,7 +578,17 @@ jobs:
           if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
             test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
           fi
-          python3 scripts/ci/run_observed.py bulk -- uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" "${test_args[@]}"
+          python3 scripts/ci/run_observed.py bulk -- uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow and not ci_extended" --junitxml "$RUNNER_TEMP/junit/bulk.xml" "${test_args[@]}"
+
+      - name: Retain test timings
+        # Input for scripts/ci/update_ci_extended.py (Issue #6013).
+        if: ${{ always() && github.event_name == 'push' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-bulk-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/junit/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Audit native workload observations
         # Issue #5501: when the observations exist, assert what they show --
@@ -623,6 +612,83 @@ jobs:
           path: ${{ runner.temp }}/native-observer/
           if-no-files-found: warn
           retention-days: 7
+
+
+  test-extended:
+    # Issue #6013: the slow tail of the bulk pool. "Test" deselects every test
+    # listed in tests/ci_extended.txt so it fits a GitHub-hosted runner on
+    # every PR; this job runs exactly those tests, in the same KiCad
+    # container with the same native-concurrency bound and per-test timeout,
+    # on main pushes and the nightly schedule. Never on pull requests: a PR
+    # gets the fast subset, and main keeps full coverage on every merge.
+    name: Test (extended)
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'schedule') }}
+    runs-on: ubuntu-latest
+    env:
+      PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
+      # Same bound and rationale as the "Test" job (#5501, #5616, #5572).
+      KCT_NATIVE_MAX_CONCURRENCY: "2"
+    # ~3,900 test-seconds in the measured run; ~2.2x on hosted over 4
+    # workers is ~36 min, plus setup.
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0 --memory 12g
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential nodejs
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+        with:
+          # Same as "Test": the release repo-introspection tests need tags.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Run ci_extended tests
+        # The tests tests/ci_extended.txt marks: the slow tail of the bulk
+        # pool that "Test" deselects. Same container, same native-concurrency
+        # bound, same per-test timeout.
+        run: |
+          uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "ci_extended and not slow" \
+            --junitxml "$RUNNER_TEMP/junit/extended.xml"
+
+      - name: Retain test timings
+        # Input for scripts/ci/update_ci_extended.py, which regenerates
+        # tests/ci_extended.txt from measured CI times.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-extended-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/junit/
+          if-no-files-found: ignore
+          retention-days: 14
 
   cpp-build-check:
     # Issue #2501: catch source/.so drift by rebuilding the C++ extension
@@ -988,7 +1054,9 @@ jobs:
     # outside fork ever executes on our host and required checks never go
     # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
     # 19 vs 27, Diff-Pair ~15 vs 25.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    # GitHub-hosted for every event (Issue #6013); the fork-run measurement
+    # in #5747 has this job well inside its timeout on ubuntu-latest.
+    runs-on: ubuntu-latest
     # Issue #3509: run inside the official KiCad 10 container (same image
     # as the test + kicad-cli-smoke jobs).  The board 06 recipe's pour
     # pipeline (zone fill -> stitch -> pour-connectivity repair -> re-fill
@@ -1016,7 +1084,7 @@ jobs:
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 8g' || '--user 0:0' }}
+      options: --user 0:0
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the test job).
@@ -2074,7 +2142,9 @@ jobs:
     # outside fork ever executes on our host and required checks never go
     # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
     # 19 vs 27, Diff-Pair ~15 vs 25.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    # GitHub-hosted for every event (Issue #6013); the fork-run measurement
+    # in #5747 has this job well inside its timeout on ubuntu-latest.
+    runs-on: ubuntu-latest
     # The measured recipe takes 28m; allow the independent synthetic/LVS,
     # plane-net and artifact gates to finish within the whole-job deadline.
     # Internal routing budgets and all validation gates remain unchanged.
@@ -2091,7 +2161,7 @@ jobs:
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 8g' || '--user 0:0' }}
+      options: --user 0:0
     defaults:
       run:
         shell: bash
