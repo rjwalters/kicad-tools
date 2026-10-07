@@ -16,13 +16,26 @@ findings carry (Issue #5946, :mod:`kicad_tools.validate.evidence`):
     The ``kct check`` evidence recipe (:func:`evidence_payload`: rounded
     location, the placement and pads of every footprint named, the local pad
     membership of every net named, and the key's multiplicity) plus the
-    *measurements* quoted in the finding's explanation (``C1 is 13.3mm from
-    U1 pin 2``, ``only 0.25mm wide (2 segments ...)``).  Mistake checks have
-    no ``actual_value`` field; the numbers they report are their measured
-    values, so a trace widened from 0.25 mm to 0.28 mm -- still too narrow --
+    check's structured :attr:`~kicad_tools.explain.mistakes.Mistake.measurements`
+    (``{"distance_mm": 13.3}``, ``{"min_width_mm": 0.25, "segment_count":
+    2.0}``), each rounded by its check to the precision the explanation
+    quotes.  A trace widened from 0.25 mm to 0.28 mm -- still too narrow --
     changes the hash and makes a waiver reviewed at 0.25 mm go **stale**.
-    The hash carries the same ``ev2:`` version prefix, so outdated-recipe
-    waivers are reported exactly as for ``kct check``.
+
+    Only measured values are hashed.  The explanation text is not: rewording
+    it, or the digits it happens to contain (reference designators, pin
+    numbers, net names such as ``+3V3``, boilerplate like "1A at 1oz"), never
+    invalidates a waiver.  Policy thresholds (``MAX_BYPASS_DISTANCE_MM``)
+    are not hashed either, so tuning one does not make reviewed waivers
+    stale; a waiver records that a human accepted *this* measurement.
+
+    The hash carries its own compound version prefix,
+    :data:`~kicad_tools.validate.evidence.MISTAKE_EVIDENCE_HASH_PREFIX`
+    (``ev2.m1:``): the ``kct check`` evidence version plus the measurement
+    recipe version.  Changing the shared evidence recipe (``ev2`` -> ``ev3``)
+    or only the measurement recipe (``m1`` -> ``m2``) reports existing
+    mistake waivers as ``outdated_evidence_version``; the latter leaves every
+    ``kct check`` waiver untouched.
 
 Waivers are the keyed version-3 entries of the shared ``.kct_waivers.json``
 / ``<board>.kct-waivers.json`` sidecar, applied by the very same
@@ -42,7 +55,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from kicad_tools.validate.evidence import (
-    EVIDENCE_HASH_PREFIX,
+    MISTAKE_EVIDENCE_HASH_PREFIX,
     EvidenceContext,
     evidence_payload,
     finding_key,
@@ -59,7 +72,6 @@ if TYPE_CHECKING:
 WAIVE_COMMAND = "kct detect-mistakes --waive"
 
 _COPPER_LAYER = re.compile(r"^(F|B|In\d+)\.Cu$")
-_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def _board_net_names(pcb: PCB | None) -> frozenset[str]:
@@ -144,9 +156,23 @@ def to_violation(
     )
 
 
-def measurements(mistake: Mistake) -> list[str]:
-    """The numbers quoted in the finding's explanation, in order."""
-    return _NUMBER.findall(mistake.explanation or "")
+def _measurement_value(value: float) -> float:
+    number = float(value)
+    # Normalize -0.0 so the canonical JSON is stable.
+    return 0.0 if number == 0 else number
+
+
+def measurements(mistake: Mistake) -> dict[str, float]:
+    """The check's structured measurements, canonicalized for hashing.
+
+    Values are already rounded by the check to the precision it reports;
+    here they are only coerced to ``float`` (so ``2`` and ``2.0`` hash the
+    same) and keyed in sorted order.
+    """
+    return {
+        str(name): _measurement_value(value)
+        for name, value in sorted((mistake.measurements or {}).items())
+    }
 
 
 def mistake_evidence_hash(
@@ -161,7 +187,7 @@ def mistake_evidence_hash(
     payload["measurements"] = measurements(mistake)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-    return EVIDENCE_HASH_PREFIX + digest
+    return MISTAKE_EVIDENCE_HASH_PREFIX + digest
 
 
 def annotate_mistakes(mistakes: list[Mistake], pcb: PCB | None) -> list[DRCViolation]:

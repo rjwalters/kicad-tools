@@ -80,6 +80,12 @@ class TombstoningRiskCheck:
                             f"Check the footprint definition for errors."
                         ),
                         learn_more_url="docs/mistakes/tombstoning.md",
+                        measurements={
+                            "pad1_width_mm": round(pad1.size[0], 2),
+                            "pad1_height_mm": round(pad1.size[1], 2),
+                            "pad2_width_mm": round(pad2.size[0], 2),
+                            "pad2_height_mm": round(pad2.size[1], 2),
+                        },
                     )
                 )
 

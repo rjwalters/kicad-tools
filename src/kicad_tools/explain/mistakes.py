@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -70,6 +70,13 @@ class Mistake:
         explanation: Detailed explanation of why this is a problem
         fix_suggestion: Actionable suggestion for fixing the issue
         learn_more_url: Optional URL or path to educational documentation
+        measurements: What the check measured, by name, rounded to the
+            precision the explanation quotes (``{"distance_mm": 13.3}``,
+            ``{"min_width_mm": 0.25, "segment_count": 2}``).  Policy
+            thresholds are deliberately excluded.  Part of the evidence hash
+            (Issue #6006): a changed measurement makes a waiver stale, a
+            reworded explanation or a tuned threshold does not.  Empty for
+            presence/absence checks.
         rule_id: Stable id of the check that produced the finding, e.g.
             ``"mistake.bypass_cap_distance"`` (set by
             :class:`MistakeDetector`, Issue #6006).
@@ -92,6 +99,7 @@ class Mistake:
     fix_suggestion: str
     location: tuple[float, float] | None = None
     learn_more_url: str | None = None
+    measurements: dict[str, float] = field(default_factory=dict)
     rule_id: str = ""
     key: str | None = None
     evidence_hash: str | None = None
@@ -117,6 +125,7 @@ class Mistake:
             "explanation": self.explanation,
             "fix_suggestion": self.fix_suggestion,
             "learn_more_url": self.learn_more_url,
+            "measurements": dict(self.measurements),
             # Issue #6006: the same identity / evidence / waiver fields as a
             # ``kct check`` finding.
             "rule_id": self.rule_id or None,

@@ -106,6 +106,7 @@ class ThermalPadConnectionCheck:
                                     f"with filling if assembly process allows."
                                 ),
                                 learn_more_url="docs/mistakes/thermal-pad-connection.md",
+                                measurements={"via_count": float(vias_count)},
                             )
                         )
 

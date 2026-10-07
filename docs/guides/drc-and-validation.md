@@ -367,8 +367,21 @@ A mistake's rule id is `mistake.` plus its check name
 (`mistake.bypass_cap_distance`, `mistake.power_trace_width`, ...). Its
 `components` are split into the key's items, nets (names that are nets on the
 board) and layer (`F.Cu`). The evidence is the `kct check` recipe plus the
-numbers quoted in the finding's explanation, which are its measurements: a
-trace widened from 0.25 mm to 0.28 mm, still too narrow, makes a waiver stale.
+check's structured `measurements` (also in the JSON finding), rounded to the
+precision the explanation quotes: `distance_mm` for bypass caps and crystals,
+`min_width_mm` and `segment_count` for power traces, the two lengths and
+`skew_mm` for differential pairs, `angle_deg` for acid traps, `via_count` for
+thermal pads and the pad sizes for tombstoning. A trace widened from 0.25 mm
+to 0.28 mm, still too narrow, makes a waiver stale. Rewording the explanation
+does not, and neither does tuning a policy threshold (the 3 mm bypass limit,
+the 0.3 mm power-trace minimum): thresholds are not hashed, because a waiver
+records that someone accepted *this* measurement.
+
+Mistake hashes carry their own compound prefix, `ev2.m1:`: the `kct check`
+evidence version plus the measurement recipe version. An upgrade that changes
+either part reports existing mistake waivers as `outdated_evidence_version`;
+an upgrade that changes only the measurement recipe leaves `kct check`
+waivers alone.
 
 Each command applies only its own entries. `kct check` ignores `mistake.*`
 entries, and `kct detect-mistakes` ignores everything else, so neither reports
@@ -392,13 +405,21 @@ kct check --diff HEAD~1:b/b.kicad_pcb b/b.kicad_pcb --format sarif > kct-diff.sa
   with the waiver's reason. A stale waiver does not suppress.
 - **Fingerprints.** The finding `key` is `partialFingerprints["kctFindingKey/v1"]`,
   so one alert is tracked across commits. The `evidence_hash` is
-  `fingerprints["kctEvidence/ev2"]`; the name follows the evidence version.
+  `fingerprints["kctEvidence/<version>"]`, where `<version>` is the hash's
+  prefix (`ev2` for `kct check`, `ev2.m1` for `kct detect-mistakes`), so the
+  name follows the evidence version.
 - **Locations.** Each result points at the board file, at the line of the first
-  footprint (or else net) the finding names. The finding's board position, in
-  mm in the KiCad file's coordinates, and its layer are in the location's
-  `properties.boardLocation`. Closest points are `relatedLocations`.
+  footprint (or else net) the finding names. The finding's position, in mm in
+  the KiCad file's (sheet) coordinates, and its layer are in the location's
+  `properties.boardLocation` (`"frame": "sheet"`). Closest points are
+  `relatedLocations`.
 - **`--diff`.** Introduced findings have `baselineState: "new"`, changed ones
-  `"updated"`, and resolved ones `"absent"`.
+  `"updated"`, and resolved ones `"absent"`. Absent results carry no line
+  region, since the finding is gone from the new board file. The diff log
+  leaves out unchanged findings, so it is **not** a full analysis: do not
+  upload it to GitHub code scanning (or similar) as the run for a branch, or
+  every unchanged alert will be closed. Upload the plain
+  `kct check --format sarif` log for that.
 
 ### `kct check --diff OLD NEW`
 

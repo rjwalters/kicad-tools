@@ -97,6 +97,7 @@ class BypassCapDistanceCheck:
                                     f"trace to both {cap_power_net} and GND."
                                 ),
                                 learn_more_url="docs/mistakes/bypass-cap-placement.md",
+                                measurements={"distance_mm": round(dist, 1)},
                             )
                         )
                     elif dist > MAX_BYPASS_DISTANCE_MM:
@@ -117,6 +118,7 @@ class BypassCapDistanceCheck:
                                     f"pin {pad.number} if space permits."
                                 ),
                                 learn_more_url="docs/mistakes/bypass-cap-placement.md",
+                                measurements={"distance_mm": round(dist, 1)},
                             )
                         )
 

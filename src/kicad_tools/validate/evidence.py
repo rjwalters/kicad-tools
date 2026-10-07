@@ -66,6 +66,17 @@ KEY_SEPARATOR = "|"
 EVIDENCE_HASH_VERSION = "ev2"
 EVIDENCE_HASH_PREFIX = EVIDENCE_HASH_VERSION + ":"
 
+# ``kct detect-mistakes`` hashes (Issue #6006) add the check's structured
+# measurements to the recipe above, so they carry a compound version
+# ``<evidence version>.<measurement recipe>`` (``ev2.m1``).  Bumping either
+# part makes mistake waivers report ``outdated_evidence_version``; bumping
+# only the ``m`` part leaves every ``kct check`` waiver untouched.
+#
+# ``m1``: the structured ``Mistake.measurements`` mapping, thresholds excluded.
+MISTAKE_MEASUREMENT_RECIPE = "m1"
+MISTAKE_EVIDENCE_HASH_VERSION = f"{EVIDENCE_HASH_VERSION}.{MISTAKE_MEASUREMENT_RECIPE}"
+MISTAKE_EVIDENCE_HASH_PREFIX = MISTAKE_EVIDENCE_HASH_VERSION + ":"
+
 # Default radius (mm) around a located finding within
 # which a named net's pads count as evidence (Issue #6011).
 DEFAULT_NET_EVIDENCE_RADIUS_MM = 5.0
@@ -166,6 +177,20 @@ def evidence_hash_version(evidence_hash: str | None) -> str | None:
     return evidence_hash.split(":", 1)[0]
 
 
+def current_evidence_hash_version(evidence_hash: str | None) -> str:
+    """The version this kct computes for hashes of ``evidence_hash``'s family.
+
+    A compound version (``ev1.m1``, ``ev2.m1``) is a ``kct detect-mistakes``
+    hash, compared against :data:`MISTAKE_EVIDENCE_HASH_VERSION`; anything
+    else is a ``kct check`` hash, compared against
+    :data:`EVIDENCE_HASH_VERSION`.
+    """
+    version = evidence_hash_version(evidence_hash)
+    if version is not None and "." in version:
+        return MISTAKE_EVIDENCE_HASH_VERSION
+    return EVIDENCE_HASH_VERSION
+
+
 def is_outdated_evidence_hash(evidence_hash: str | None) -> bool:
     """True when ``evidence_hash`` was computed by an older evidence recipe.
 
@@ -174,7 +199,7 @@ def is_outdated_evidence_hash(evidence_hash: str | None) -> bool:
     not (necessarily) because the board changed.
     """
     version = evidence_hash_version(evidence_hash)
-    return version is not None and version != EVIDENCE_HASH_VERSION
+    return version is not None and version != current_evidence_hash_version(evidence_hash)
 
 
 def _round(value: float | None, digits: int) -> float | None:

@@ -6,8 +6,9 @@ import json
 import shutil
 from pathlib import Path
 
-import jsonschema
 import pytest
+
+jsonschema = pytest.importorskip("jsonschema")  # dev extra; skip under a plain `uv sync`
 
 from kicad_tools.cli import check_cmd, mistakes_cmd
 from kicad_tools.explain.mistake_waivers import (
@@ -16,6 +17,15 @@ from kicad_tools.explain.mistake_waivers import (
     split_components,
 )
 from kicad_tools.explain.mistakes import Mistake, MistakeCategory, mistake_rule_id
+from kicad_tools.validate.evidence import (
+    EVIDENCE_HASH_PREFIX,
+    EVIDENCE_HASH_VERSION,
+    MISTAKE_EVIDENCE_HASH_PREFIX,
+    MISTAKE_EVIDENCE_HASH_VERSION,
+    MISTAKE_MEASUREMENT_RECIPE,
+    current_evidence_hash_version,
+    is_outdated_evidence_hash,
+)
 from kicad_tools.validate.rules.waivers import (
     WAIVER_STALE_RULE_ID,
     WAIVER_UNUSED_RULE_ID,
@@ -26,6 +36,7 @@ from kicad_tools.validate.sarif import (
     KEY_FINGERPRINT,
     TextAnchors,
     diff_sarif_log,
+    evidence_fingerprint_name,
     sarif_level,
     sarif_log,
 )
@@ -84,6 +95,7 @@ def _m(**kw) -> Mistake:
         "explanation": "C1 is 13.3mm from U1 pin 2 (+3V3).",
         "fix_suggestion": "Move C1.",
         "location": (15.0, 20.0),
+        "measurements": {"distance_mm": 13.3},
         "rule_id": "mistake.bypass_cap_distance",
     }
     base.update(kw)
@@ -119,19 +131,105 @@ class TestMistakeIdentity:
         assert layer == "F.Cu"
 
     def test_key_is_stable_and_hash_tracks_measurements(self):
-        a, b, c = _m(), _m(), _m(explanation="C1 is 12.9mm from U1 pin 2 (+3V3).")
+        a, b, c = _m(), _m(), _m(measurements={"distance_mm": 12.9})
         annotate_mistakes([a], None)
         annotate_mistakes([b], None)
         annotate_mistakes([c], None)
         assert a.key == b.key == c.key == BYPASS_C1
         assert a.evidence_hash == b.evidence_hash
-        assert a.evidence_hash.startswith("ev2:")
-        # The reported measurement is evidence: 13.3 mm -> 12.9 mm is new.
+        assert a.evidence_hash.startswith(MISTAKE_EVIDENCE_HASH_PREFIX)
+        # The measured value is evidence: 13.3 mm -> 12.9 mm is new.
         assert c.evidence_hash != a.evidence_hash
         # Wording outside the numbers (title) is not.
         d = _m(title="Bypass cap far away")
         annotate_mistakes([d], None)
         assert d.evidence_hash == a.evidence_hash
+
+    def test_rewording_the_explanation_keeps_the_hash(self):
+        """Explanation text -- digits included -- is never hashed (judge, PR #6056)."""
+        a = _m()
+        reworded = _m(
+            explanation=(
+                "Rewritten copy: C1 sits 13.3mm away from pin 7 of U1 on net +5V0; "
+                "keep it under 2.5mm (rule of thumb for 1A at 2oz, 100nF, 0402)."
+            ),
+            fix_suggestion="Move C1 to within 1mm of U1 pin 14.",
+        )
+        annotate_mistakes([a], None)
+        annotate_mistakes([reworded], None)
+        assert reworded.evidence_hash == a.evidence_hash
+
+    def test_measurements_are_canonicalized(self):
+        a = _m(measurements={"segment_count": 2, "min_width_mm": 0.25})
+        b = _m(measurements={"min_width_mm": 0.25, "segment_count": 2.0})
+        annotate_mistakes([a], None)
+        annotate_mistakes([b], None)
+        assert a.evidence_hash == b.evidence_hash
+
+    def test_changing_a_ref_or_net_changes_the_hash(self):
+        """Subjects stay evidence through the key, not through scraped text."""
+        a = _m()
+        other_ref = _m(components=["C2", "U1"])
+        other_net = _m(components=["+5V"], rule_id="mistake.power_trace_width")
+        other_net2 = _m(components=["+3V3"], rule_id="mistake.power_trace_width")
+        for m in (a, other_ref, other_net, other_net2):
+            annotate_mistakes([m], None)
+        assert other_ref.evidence_hash != a.evidence_hash
+        assert other_net.evidence_hash != other_net2.evidence_hash
+
+    def test_real_checks_report_structured_measurements(self, board):
+        from kicad_tools.explain.mistakes import MistakeDetector
+        from kicad_tools.schema.pcb import PCB
+
+        mistakes = MistakeDetector().detect(PCB.load(str(board)))
+        by_rule = {m.rule_id: m for m in mistakes}
+        bypass = by_rule["mistake.bypass_cap_distance"]
+        assert set(bypass.measurements) == {"distance_mm"}
+        # The quoted distance, at the quoted precision -- not the 3.0 mm limit,
+        # the pin number or the digits of "C1" / "U1" / "+3V3".
+        assert f"{bypass.measurements['distance_mm']:.1f}mm" in bypass.explanation
+        power = by_rule["mistake.power_trace_width"]
+        assert set(power.measurements) == {"min_width_mm", "segment_count"}
+        assert f"{power.measurements['min_width_mm']:.2f}mm" in power.explanation
+
+    def test_mistake_hashes_have_their_own_version(self):
+        assert f"{MISTAKE_EVIDENCE_HASH_VERSION}:" == MISTAKE_EVIDENCE_HASH_PREFIX
+        assert (
+            f"{EVIDENCE_HASH_VERSION}.{MISTAKE_MEASUREMENT_RECIPE}"
+        ) == MISTAKE_EVIDENCE_HASH_VERSION
+        current = MISTAKE_EVIDENCE_HASH_PREFIX + "0"
+        assert not is_outdated_evidence_hash(current)
+        assert current_evidence_hash_version(current) == MISTAKE_EVIDENCE_HASH_VERSION
+        # Either part of the compound version moving makes a mistake hash outdated ...
+        assert is_outdated_evidence_hash(f"ev0.{MISTAKE_MEASUREMENT_RECIPE}:0")
+        assert is_outdated_evidence_hash(f"{EVIDENCE_HASH_VERSION}.m0:0")
+        # ... while kct check hashes are judged against their own version only.
+        assert not is_outdated_evidence_hash(EVIDENCE_HASH_PREFIX + "0")
+        assert current_evidence_hash_version(EVIDENCE_HASH_PREFIX + "0") == EVIDENCE_HASH_VERSION
+        assert evidence_fingerprint_name(current) == f"kctEvidence/{MISTAKE_EVIDENCE_HASH_VERSION}"
+
+    def test_outdated_measurement_recipe_is_reported_as_such(self):
+        reviewed = _m()
+        adapters = annotate_mistakes([reviewed], None)
+        old = f"{EVIDENCE_HASH_VERSION}.m0:" + reviewed.evidence_hash.split(":", 1)[1]
+        waivers = waivers_from_dict(
+            {
+                "version": 3,
+                "waivers": [
+                    {
+                        "key": reviewed.key,
+                        "evidence_hash": old,
+                        "reason": "r",
+                        "reviewer": "ee",
+                        "date": "2026-10-06",
+                    }
+                ],
+            }
+        )
+        outcome = apply_mistake_waivers([reviewed], adapters, waivers.for_mistakes())
+        assert not reviewed.waived
+        assert reviewed.to_dict()["stale_waiver_cause"] == "outdated_evidence_version"
+        assert MISTAKE_EVIDENCE_HASH_VERSION in outcome.advisories[0].message
 
     def test_waiver_applies_and_goes_stale(self):
         reviewed = _m()
@@ -169,7 +267,7 @@ class TestMistakeIdentity:
                 "waivers": [
                     {
                         "key": BYPASS_C1,
-                        "evidence_hash": "ev2:0",
+                        "evidence_hash": MISTAKE_EVIDENCE_HASH_PREFIX + "0",
                         "reason": "r",
                         "reviewer": "ee",
                         "date": "2026-10-06",
@@ -194,7 +292,8 @@ def test_json_findings_carry_key_and_evidence_hash(board, capsys):
     for m in data["mistakes"]:
         assert m["key"].startswith(m["rule_id"] + "|")
         assert m["rule_id"].startswith("mistake.")
-        assert m["evidence_hash"].startswith("ev2:")
+        assert m["evidence_hash"].startswith(MISTAKE_EVIDENCE_HASH_PREFIX)
+        assert isinstance(m["measurements"], dict)
         assert m["waived"] is False
     assert {c["rule_id"] for c in data["coverage"]} >= {"mistake.bypass_cap_distance"}
     assert data["waiver_findings"] == []
@@ -294,7 +393,7 @@ def test_check_sarif_validates_with_stable_fingerprints(check_board, capsys):
         assert r["ruleId"] == v["rule_id"]
         assert r["level"] == sarif_level(v["severity"])
         assert r["partialFingerprints"][KEY_FINGERPRINT] == v["key"]
-        assert r["fingerprints"] == {"kctEvidence/ev2": v["evidence_hash"]}
+        assert r["fingerprints"] == {f"kctEvidence/{EVIDENCE_HASH_VERSION}": v["evidence_hash"]}
         assert run["tool"]["driver"]["rules"][r["ruleIndex"]]["id"] == v["rule_id"]
         if v["location"]:
             board_loc = r["locations"][0]["properties"]["boardLocation"]
@@ -367,12 +466,14 @@ def test_detect_mistakes_sarif_validates(board, capsys):
     by_key = {m["key"]: m for m in data["mistakes"]}
     for r in run["results"]:
         key = r["partialFingerprints"][KEY_FINGERPRINT]
-        assert r["fingerprints"]["kctEvidence/ev2"] == by_key[key]["evidence_hash"]
+        name = f"kctEvidence/{MISTAKE_EVIDENCE_HASH_VERSION}"
+        assert r["fingerprints"][name] == by_key[key]["evidence_hash"]
     # Mistake locations are reported in sheet coordinates, like kct check:
     # the fixture's board origin is (100, 100) and C1 sits at (115, 120).
     c1 = next(r for r in run["results"] if r["partialFingerprints"][KEY_FINGERPRINT] == BYPASS_C1)
     loc = c1["locations"][0]["properties"]["boardLocation"]
     assert (loc["x"], loc["y"]) == (115.0, 120.0)
+    assert loc["frame"] == "sheet"
 
 
 def test_sarif_builder_unit():
@@ -384,7 +485,7 @@ def test_sarif_builder_unit():
             "items": ["U1.3"],
             "nets": [],
             "key": "r1|U1.3||",
-            "evidence_hash": "ev2:abc",
+            "evidence_hash": EVIDENCE_HASH_PREFIX + "abc",
             "location": [1.0, 2.0],
             "closest_locations": [[1.0, 2.0], [3.0, 4.0]],
         },
@@ -407,6 +508,23 @@ def test_sarif_builder_unit():
     dlog = diff_sarif_log(diff, tool_name="t", artifact=None)
     _validate_sarif(dlog)
     assert [r["baselineState"] for r in dlog["runs"][0]["results"]] == ["new", "updated", "absent"]
+
+
+def test_absent_results_carry_no_line_region(tmp_path):
+    """A resolved finding is gone from the new file: no line to point at."""
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(
+        '(kicad_pcb\n\t(footprint "R"\n\t\t(at 1 2)\n'
+        '\t\t(property "Reference" "R7" (at 0 0))\n\t)\n)\n'
+    )
+    row = {"rule_id": "r1", "severity": "error", "message": "m", "items": ["R7"], "key": "r1|R7||"}
+    diff = {"introduced": [row], "resolved": [row]}
+    log = diff_sarif_log(diff, tool_name="t", artifact=pcb)
+    _validate_sarif(log)
+    new, absent = log["runs"][0]["results"]
+    assert new["locations"][0]["physicalLocation"]["region"] == {"startLine": 2}
+    assert "region" not in absent["locations"][0]["physicalLocation"]
+    assert absent["locations"][0]["logicalLocations"][0]["name"] == "R7"
 
 
 def test_text_anchors(tmp_path):

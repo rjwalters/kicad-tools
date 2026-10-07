@@ -109,7 +109,7 @@ from pathlib import Path
 from typing import Any
 
 from kicad_tools.validate.evidence import (
-    EVIDENCE_HASH_VERSION,
+    current_evidence_hash_version,
     evidence_hash_version,
     is_outdated_evidence_hash,
 )
@@ -638,7 +638,7 @@ def apply_waivers(
                     f" ({entry.scope}){tracking}: it was recorded{reviewed}{dated} as"
                     f" {entry.evidence_hash}, an"
                     f" {evidence_hash_version(entry.evidence_hash)!s} hash, but this kct"
-                    f" computes {EVIDENCE_HASH_VERSION} hashes (now"
+                    f" computes {current_evidence_hash_version(entry.evidence_hash)} hashes (now"
                     f" {', '.join(current)}). The evidence recipe changed in a kct"
                     " upgrade, so every older waiver goes stale once even if the"
                     " board is unchanged; re-review the finding and re-waive it"

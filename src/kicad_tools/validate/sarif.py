@@ -14,15 +14,19 @@ carry into one SARIF ``run``:
   Issue #5946) is the ``partialFingerprints`` entry ``kctFindingKey/v1``:
   it survives small edits, so a CI system tracks one alert across commits.
   The ``evidence_hash`` is the result ``fingerprints`` entry
-  ``kctEvidence/<version>`` (``kctEvidence/ev2``): it changes exactly when the
-  local evidence does, and its name changes with the evidence recipe.
+  ``kctEvidence/<version>`` (``kctEvidence/ev2`` for ``kct check``,
+  ``kctEvidence/ev2.m1`` for ``kct detect-mistakes``): it changes exactly when
+  the local evidence does, and its name changes with the evidence recipe.
 * **Locations.**  SARIF regions are text positions, so each result points at
   the board file and, when a finding names a footprint (or a net), at the
-  line where that footprint (or net) is defined.  The finding's position in
-  **board coordinates** -- millimetres, KiCad's board frame (+Y down) -- and
+  line where that footprint (or net) is defined.  The finding's position --
+  millimetres in KiCad's **sheet** frame (the file's own coordinates, +Y
+  down, *not* origin-subtracted; ``boardLocation.frame == "sheet"``) -- and
   its layer ride in the location's ``properties`` (``boardLocation``), with
   the footprints / nets named as ``logicalLocations`` and any closest points
-  as ``relatedLocations``.
+  as ``relatedLocations``.  A ``--diff`` result that is ``absent`` (resolved)
+  gets no line region: the line would come from the *new* board file, where
+  the finding no longer exists.
 
 The builder is fed plain dicts (the shape of ``DRCViolation.to_dict()``),
 so the same code serves a live check, a ``--diff`` result (where each result
@@ -63,7 +67,7 @@ def sarif_level(severity: str | None) -> str:
 
 
 def evidence_fingerprint_name(evidence_hash: str) -> str:
-    """``kctEvidence/<version>`` for an ``ev2:...`` hash."""
+    """``kctEvidence/<version>`` for a ``<version>:<digest>`` evidence hash."""
     version = evidence_hash.split(":", 1)[0] if ":" in evidence_hash else "v1"
     return f"kctEvidence/{version}"
 
@@ -133,14 +137,18 @@ def _point(raw: Any) -> tuple[float, float] | None:
 
 
 def _board_location(point: tuple[float, float], layer: str | None) -> dict[str, Any]:
-    loc: dict[str, Any] = {"x": point[0], "y": point[1], "units": "mm", "frame": "board"}
+    loc: dict[str, Any] = {"x": point[0], "y": point[1], "units": "mm", "frame": "sheet"}
     if layer:
         loc["layer"] = layer
     return loc
 
 
 def _location(
-    finding: Mapping[str, Any], uri: str | None, anchors: TextAnchors
+    finding: Mapping[str, Any],
+    uri: str | None,
+    anchors: TextAnchors,
+    *,
+    with_region: bool = True,
 ) -> dict[str, Any] | None:
     items = [str(i) for i in finding.get("items") or []]
     nets = [str(n) for n in finding.get("nets") or []]
@@ -149,7 +157,7 @@ def _location(
     location: dict[str, Any] = {}
     if uri is not None:
         physical: dict[str, Any] = {"artifactLocation": {"uri": uri}}
-        line = anchors.line_for(items, nets)
+        line = anchors.line_for(items, nets) if with_region else None
         if line is not None:
             physical["region"] = {"startLine": line}
         location["physicalLocation"] = physical
@@ -181,7 +189,9 @@ def sarif_result(
         "level": sarif_level(finding.get("severity")),
         "message": {"text": str(finding.get("message") or rule_id)},
     }
-    location = _location(finding, uri, anchors)
+    # A resolved (``absent``) diff finding is gone from the artifact, so a
+    # line looked up there would point at unrelated (or moved) text.
+    location = _location(finding, uri, anchors, with_region=baseline_state != "absent")
     if location is not None:
         result["locations"] = [location]
     related = []
@@ -320,9 +330,10 @@ def diff_sarif_log(
     """SARIF for a ``kct check --diff`` result: introduced / changed / resolved.
 
     Introduced findings are ``baselineState: "new"``, changed ones (same key,
-    evidence moved) ``"updated"`` and resolved ones ``"absent"``.  Unchanged
-    findings are counted in the run properties only (the diff does not list
-    them).
+    evidence moved) ``"updated"`` and resolved ones ``"absent"`` (with no line
+    region).  Unchanged findings are counted in the run properties only (the
+    diff does not list them), so this log is *not* a full analysis: uploading
+    it to a code-scanning service as one would close every unchanged alert.
     """
     findings: list[Mapping[str, Any]] = []
     states: list[str | None] = []
