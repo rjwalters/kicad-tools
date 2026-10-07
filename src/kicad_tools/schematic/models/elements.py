@@ -357,6 +357,14 @@ class PowerSymbol:
     # ``(mirror x|y)`` axis, kept so a load/save round trip does not flip a
     # mirrored power symbol back (issue #6005); ``""`` = unmirrored.
     mirror: str = ""
+    # The placed symbol's ``Value`` property.  KiCad names the global net a
+    # power symbol drives after this field, not after the lib_id, and the two
+    # legitimately differ (``power:+3.3V`` placed with Value ``+3V3``, or a
+    # rescued ``Proj-rescue:+16V-power`` with Value ``+16V``).  ``""`` means
+    # "derive from the lib_id", which is what programmatic placement wants;
+    # a loaded schematic keeps the original so a load/save round trip does not
+    # rename nets (issue #6048).
+    value: str = ""
 
     _symbol_def: Optional["SymbolDef"] = field(default=None, repr=False)
 
@@ -368,11 +376,16 @@ class PowerSymbol:
     @property
     def net_name(self) -> str | None:
         """Global rail name, absent for a PWR_FLAG driver declaration."""
-        return None if self.is_power_flag else self.lib_id.split(":", 1)[-1]
+        return None if self.is_power_flag else self.value_text
+
+    @property
+    def value_text(self) -> str:
+        """The ``Value`` property written for this symbol (see ``value``)."""
+        return self.value or self.lib_id.split(":", 1)[-1]
 
     def to_sexp_node(self, project_name: str, sheet_path: str) -> SExp:
         """Build S-expression tree for this power symbol."""
-        value = self.lib_id.split(":")[1]
+        value = self.value_text
 
         # Build symbol node with all standard fields
         sym = SExp.list(
@@ -447,11 +460,13 @@ class PowerSymbol:
 
         # Get reference from properties
         reference = "#PWR?"
+        value = ""
         for prop_node in node.find_all("property"):
             atoms = prop_node.get_atoms()
             if len(atoms) >= 2 and str(atoms[0]) == "Reference":
                 reference = str(atoms[1])
-                break
+            elif len(atoms) >= 2 and str(atoms[0]) == "Value":
+                value = str(atoms[1])
 
         # Get BOM / DNP flags (issue #4303); default to historical values
         # when the token is absent so older schematics round-trip unchanged.
@@ -470,6 +485,7 @@ class PowerSymbol:
             in_bom=in_bom,
             dnp=dnp,
             mirror=mirror,
+            value=value,
         )
 
     @staticmethod

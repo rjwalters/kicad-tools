@@ -25,6 +25,7 @@ Options:
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import shutil
 import sys
@@ -33,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.core.symbol_transform import normalize_mirror, symbol_to_sheet_offset
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.instances import build_instance_path, find_project_name
@@ -102,6 +104,23 @@ def _auto_reference(sch: Schematic, prefix: str = "C") -> str:
             if num > max_num:
                 max_num = num
     return f"{prefix}{max_num + 1}"
+
+
+def _effective_pin_rotation(lib_pin_rotation: float, rotation: float, mirror: str) -> float:
+    """Sheet direction of a library pin once its symbol is placed.
+
+    Maps the pin's library direction vector through the shared placed-symbol
+    transform (:func:`kicad_tools.core.symbol_transform.symbol_to_sheet_offset`,
+    rotation then mirror, issue #6005) and returns it in the same CCW-degrees
+    Y-up convention as a library pin rotation (0 right, 90 up, 180 left,
+    270 down), snapped to the nearest whole degree.
+    """
+    rad = math.radians(lib_pin_rotation)
+    dx, dy = symbol_to_sheet_offset(
+        math.cos(rad), math.sin(rad), rotation, normalize_mirror(mirror)
+    )
+    # Sheet offsets are Y-down; flip back to the Y-up angle convention.
+    return round(math.degrees(math.atan2(-dy, dx))) % 360
 
 
 def _compute_cap_offset(pin_rotation: float, offset_distance: float) -> tuple[float, float]:
@@ -235,20 +254,9 @@ def run_add_bypass_cap(args) -> int:
     # rotation and mirror.
     lib_pin = lib_sym.get_pin(args.pin)
     if lib_pin is not None:
-        # Adjust pin rotation for instance rotation
-        effective_pin_rot = (lib_pin.rotation + target_sym.rotation) % 360
-        if target_sym.mirror == "x":
-            # X mirror flips vertical direction
-            if abs(effective_pin_rot - 90) < 1:
-                effective_pin_rot = 270
-            elif abs(effective_pin_rot - 270) < 1:
-                effective_pin_rot = 90
-        elif target_sym.mirror == "y":
-            # Y mirror flips horizontal direction
-            if abs(effective_pin_rot - 0) < 1:
-                effective_pin_rot = 180
-            elif abs(effective_pin_rot - 180) < 1:
-                effective_pin_rot = 0
+        effective_pin_rot = _effective_pin_rotation(
+            lib_pin.rotation, target_sym.rotation, target_sym.mirror
+        )
     else:
         # Fallback: place below
         effective_pin_rot = 270
