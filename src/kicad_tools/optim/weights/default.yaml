@@ -15,18 +15,31 @@
 # and an 8-seed Pareto re-fit (range [0.0103, 0.0485], geo-mean 0.0183).
 # Re-run with scripts/research/fom_decoupling_ab.py.
 #
+# Issue #6021 re-ran the full calibration on the October 2026 boards
+# (4 perturbation samples x 8 NSGA-II seeds + 8 pooled fits = 40 fits).
+# Three weights moved to the 40-fit geometric mean, because the old value
+# sat outside the range of every fit on every perturbation sample:
+#   net_congestion_variance 0.2226 -> 3.0319  (fits 1.26 - 7.56)
+#   trace_length_excess     1.6126 -> 0.8591  (fits 0.46 - 1.59)
+#   compactness             0.0968 -> 0.0114  (fits 0.0100 - 0.0157; the
+#                                              search floor is 0.01)
+# The other seven are unchanged: each sits inside its fitted range, or the
+# term does not move under perturbation on the train boards, so the data
+# cannot fit it. Rank-consistency evidence: docs/research/fom_calibration.md,
+# "Addendum: full re-calibration (issue #6021)".
+#
 # Use --fom-config legacy.yaml for the pre-#3188 wirelength-only baseline.
 #
 # Regenerate with:
 #   uv run python scripts/research/calibrate_fom.py
 weights:
-  trace_length_excess: 1.6126
+  trace_length_excess: 0.8591
   weighted_via_count: 0.0107
   turning_penalty: 0.0116
-  net_congestion_variance: 0.2226
+  net_congestion_variance: 3.0319
   match_group_skew: 1.5237
   diff_pair_clearance_margin: 0.9995
   decoupling_proximity: 0.0181
   crossing_count: 0.0145
   thermal_spread: 0.0221
-  compactness: 0.0968
+  compactness: 0.0114

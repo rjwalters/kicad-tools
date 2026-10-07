@@ -228,3 +228,38 @@ def test_run_calibration_smoke(tmp_path: Path):
     # At least one per-board YAML.
     assert any(p.name.endswith(".yaml") and p.name != "default.yaml" for p in tmp_path.iterdir())
     assert report.global_weights is not None
+
+
+def test_markdown_report_carries_addenda_forward(tmp_path: Path):
+    """Regenerating the report must keep hand-written ``## Addendum`` sections.
+
+    Issue #6021: re-running ``calibrate_fom.py`` used to overwrite
+    ``docs/research/fom_calibration.md`` and drop the #5984 addendum.
+    """
+    from calibrate_fom import CalibrationReport, write_markdown_report
+
+    report_path = tmp_path / "fom_calibration.md"
+    addenda = (
+        "## Addendum: first re-check (issue #1)\n\nKeep 0.0181.\n\n"
+        "## Addendum: second re-check (issue #2)\n\nMoved three weights.\n"
+    )
+    report_path.write_text("# stale generated body\n\nold numbers\n\n" + addenda)
+
+    write_markdown_report(CalibrationReport(), report_path, n_perturbations=3, sigma_mm=2.5)
+    text = report_path.read_text()
+    assert "old numbers" not in text
+    assert text.startswith("# FOM Weight Calibration Report")
+    assert text.endswith(addenda)
+    assert text.count("## Addendum") == 2
+
+    # Idempotent: a second regeneration does not duplicate the addenda.
+    write_markdown_report(CalibrationReport(), report_path, n_perturbations=3, sigma_mm=2.5)
+    assert report_path.read_text().count("## Addendum") == 2
+
+
+def test_markdown_report_without_existing_file(tmp_path: Path):
+    from calibrate_fom import CalibrationReport, write_markdown_report
+
+    report_path = tmp_path / "new.md"
+    write_markdown_report(CalibrationReport(), report_path, n_perturbations=3, sigma_mm=2.5)
+    assert "## Addendum" not in report_path.read_text()

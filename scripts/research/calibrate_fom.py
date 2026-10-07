@@ -29,6 +29,13 @@ The pipeline runs in three phases:
 4. **Cross-board holdout validation (Phase 3)**:
    Fit weights on boards {01, 02, 03, 04, 05}; evaluate rank consistency on
    held-out {06, 07}. Report to ``docs/research/fom_calibration.md``.
+   Hand-written ``## Addendum`` sections already in that file are carried
+   forward on regeneration (issue #6021).
+
+The global default this script writes to ``--output-dir`` is a *single*
+Pareto draw.  The shipped ``src/kicad_tools/optim/weights/default.yaml`` is
+promoted from it by hand, term by term, after a multi-seed check (see the
+#6021 addendum in the report): never copy one draw over it wholesale.
 
 The script is deterministic given ``--seed``. Perturbations and weight-search
 candidates use the same seeded RNG sequence across runs.
@@ -699,6 +706,23 @@ def run_calibration(
 # ----------------------------------------------------------------------
 
 
+ADDENDUM_HEADING = "## Addendum"
+
+
+def _existing_addenda(path: Path) -> str:
+    """Return everything from the first ``## Addendum`` heading in *path* on.
+
+    Returns ``""`` when the file does not exist or has no addendum.
+    """
+    if not path.is_file():
+        return ""
+    lines = path.read_text().splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith(ADDENDUM_HEADING):
+            return "".join(lines[i:])
+    return ""
+
+
 def write_markdown_report(
     report: CalibrationReport,
     output_path: Path,
@@ -969,8 +993,15 @@ def write_markdown_report(
     lines.append("")
     lines.append("The script is deterministic given `--seed` (default: 42).")
     lines.append("")
+    text = "\n".join(lines)
+    # Hand-written ``## Addendum`` sections (e.g. the #5984 decoupling re-check
+    # and the #6021 multi-seed re-calibration) record decisions this generator
+    # cannot reproduce. Carry them forward instead of silently dropping them.
+    addenda = _existing_addenda(output_path)
+    if addenda:
+        text = text.rstrip("\n") + "\n\n" + addenda
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines))
+    output_path.write_text(text)
     logger.info("Markdown report -> %s", output_path)
 
 
