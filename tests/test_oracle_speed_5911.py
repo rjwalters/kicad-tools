@@ -6,9 +6,11 @@ decides:
 * :func:`append_link_routes` writes every route an attempt commits with one
   load and one save of the board, instead of one per route.  It must produce
   exactly the bytes the per-route writes did.
-* ``_make_pour_oracle`` runs the emitted and the source project's
+* ``_make_pour_oracle`` runs the board's own and the source project's
   ``kicad-cli pcb drc`` side by side.  It must call both, on the right
-  projects, and combine them exactly as the sequential version did.
+  projects, and combine them exactly as the sequential version did.  Since
+  Issue #6095 that two-project run only happens when no project ships next
+  to the routed board; a shipped (emitted) project is the sole authority.
 
 The end-to-end check (an oracle-only replay of board 03 leaving a
 byte-identical board, round by round) needs kicad-cli and is reported in the
@@ -97,7 +99,7 @@ def _unconnected(net: str, x: float) -> DRCViolation:
 
 
 class TestParallelOracleProjects:
-    def _setup(self, tmp_path, src_pro_text: str = "source"):
+    def _setup(self, tmp_path, src_pro_text: str = "source", *, emitted: bool = True):
         src_dir = tmp_path / "src"
         out_dir = tmp_path / "out"
         src_dir.mkdir()
@@ -106,24 +108,31 @@ class TestParallelOracleProjects:
         (src_dir / "board.kicad_pro").write_text(src_pro_text)
         board = out_dir / "routed.kicad_pcb"
         board.write_text("(kicad_pcb)")
-        board.with_suffix(".kicad_pro").write_text("emitted")
+        if emitted:
+            board.with_suffix(".kicad_pro").write_text("emitted")
         return Namespace(pcb=str(src_dir / "board.kicad_pcb")), board
 
+    @staticmethod
+    def _project_of(path) -> str:
+        """The project a fake DRC run sees: ``"none"`` when no sidecar ships."""
+        pro = Path(path).with_suffix(".kicad_pro")
+        return pro.read_text() if pro.is_file() else "none"
+
     def test_both_projects_run_concurrently_and_merge_per_net(self, tmp_path, monkeypatch):
+        """No project ships with the board: the source project stands in."""
         import kicad_tools.drc as drc_pkg
         from kicad_tools.cli import route_cmd
 
-        args, board = self._setup(tmp_path)
+        args, board = self._setup(tmp_path, emitted=False)
         seen: list[str] = []
         both_running = threading.Barrier(2, timeout=10)
 
         def fake_drc(path):
-            path = Path(path)
-            pro = path.with_suffix(".kicad_pro").read_text()
+            pro = self._project_of(path)
             seen.append(pro)
             # Each call waits for the other: only passes if they overlap.
             both_running.wait()
-            if pro == "emitted":
+            if pro == "none":
                 return GeometricDRCResult(
                     ran=True, error_count=4, unconnected_items=[_unconnected("GND", 1.0)]
                 )
@@ -140,8 +149,8 @@ class TestParallelOracleProjects:
         monkeypatch.setattr(drc_pkg, "run_geometric_drc", fake_drc)
         geo = route_cmd._make_pour_oracle(args)(board)
 
-        assert sorted(seen) == ["emitted", "source"]
-        # The error count is the emitted project's; links are the per-net union.
+        assert sorted(seen) == ["none", "source"]
+        # The error count is the board's own run's; links are the per-net union.
         assert geo.error_count == 4
         nets = sorted(v.items[0].split("[")[1].split("]")[0] for v in geo.unconnected_items)
         assert nets == ["GND", "GND", "VCC"]
@@ -161,14 +170,47 @@ class TestParallelOracleProjects:
         route_cmd._make_pour_oracle(args)(board)
         assert calls == [board]
 
-    def test_emitted_project_failure_is_returned_untouched(self, tmp_path, monkeypatch):
+    def test_emitted_project_is_authoritative(self, tmp_path, monkeypatch):
+        """Issue #6095: links only the source project's fill strands don't count.
+
+        Board 03 shipped fully connected under its emitted project, but the
+        source project's wider clearance stranded C8.2 / C10.2 on the F.Cu GND
+        pour, so the merged count failed the route with links the closer
+        (modelling the emitted fill) could never close.
+        """
         import kicad_tools.drc as drc_pkg
         from kicad_tools.cli import route_cmd
 
         args, board = self._setup(tmp_path)
+        seen: list[str] = []
 
         def fake_drc(path):
-            if Path(path).with_suffix(".kicad_pro").read_text() == "emitted":
+            pro = self._project_of(path)
+            seen.append(pro)
+            if pro == "emitted":
+                return GeometricDRCResult(ran=True, error_count=4)
+            return GeometricDRCResult(
+                ran=True,
+                error_count=22,
+                unconnected_items=[_unconnected("GND", 5.0), _unconnected("GND", 6.0)],
+            )
+
+        monkeypatch.setattr(drc_pkg, "run_geometric_drc", fake_drc)
+        geo = route_cmd._make_pour_oracle(args)(board)
+
+        assert seen == ["emitted"]
+        assert geo.error_count == 4 and geo.unconnected_items == []
+
+    def test_board_failure_without_shipped_project_is_returned_untouched(
+        self, tmp_path, monkeypatch
+    ):
+        import kicad_tools.drc as drc_pkg
+        from kicad_tools.cli import route_cmd
+
+        args, board = self._setup(tmp_path, emitted=False)
+
+        def fake_drc(path):
+            if self._project_of(path) == "none":
                 time.sleep(0.05)
                 return GeometricDRCResult(ran=False, note="timed out")
             return GeometricDRCResult(ran=True, unconnected_items=[_unconnected("GND", 1.0)])
