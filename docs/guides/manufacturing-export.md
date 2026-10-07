@@ -156,7 +156,7 @@ from kicad_tools.export import GerberExporter
 # Create exporter
 exporter = GerberExporter("board.kicad_pcb")
 
-# Export with JLCPCB naming conventions
+# Export with the JLCPCB preset (layer set, origin, drill options)
 result = exporter.export_for_manufacturer("jlcpcb", "output/gerbers/")
 
 print(f"Generated {len(result.files)} Gerber files")
@@ -164,19 +164,29 @@ for f in result.files:
     print(f"  {f}")
 ```
 
-JLCPCB expects these files:
+The zip holds kicad-cli's own file names, with Protel extensions and X2
+`%TF.FileFunction` attributes, plus a `.gbrjob` job file:
 ```
 output/gerbers/
-├── board-F_Cu.gtl        # Front copper
-├── board-B_Cu.gbl        # Back copper
-├── board-F_Mask.gts      # Front soldermask
-├── board-B_Mask.gbs      # Back soldermask
-├── board-F_SilkS.gto     # Front silkscreen
-├── board-B_SilkS.gbo     # Back silkscreen
-├── board-Edge_Cuts.gm1   # Board outline
-├── board.drl             # Drill file
-└── board-NPTH.drl        # Non-plated holes
+├── board-F_Cu.gtl           # Front copper
+├── board-B_Cu.gbl           # Back copper
+├── board-In1_Cu.g1          # Inner copper (4-layer boards: In1/In2)
+├── board-F_Mask.gts         # Front soldermask
+├── board-B_Mask.gbs         # Back soldermask
+├── board-F_Silkscreen.gto   # Front silkscreen
+├── board-B_Silkscreen.gbo   # Back silkscreen
+├── board-Edge_Cuts.gm1      # Board outline
+├── board-job.gbrjob         # Gerber job file (references every layer)
+└── board.drl                # Drill file
 ```
+
+Every manufacturer preset (`jlcpcb`, `pcbway`, `seeed`, `oshpark`) keeps
+these names. A preset chooses the layer set, origin and drill options. It
+never renames files (Issue #6163). The fab KiCad guides for JLCPCB, PCBWay
+and OSH Park take this output as-is, and Seeed's own KiCad tooling exports
+the same kicad-cli names. Fab-specific renames such as `.GKO` for the outline
+are unnecessary, and they would break the kicad-tools consumers that read
+layers from these names.
 
 ### Step 2: Generate BOM
 
@@ -259,7 +269,7 @@ U1,ATmega328P,TQFP-32,50.00,40.00,0,top
 ### Export Gerbers
 
 ```bash
-# Export with JLCPCB naming
+# Export with the JLCPCB preset
 kct export gerbers board.kicad_pcb --mfr jlcpcb -o output/
 
 # Generic export
