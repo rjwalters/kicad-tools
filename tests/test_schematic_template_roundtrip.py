@@ -602,6 +602,153 @@ def test_patch_does_not_mutate_the_source_tree(tmp_path: Path):
     assert _tree(sch._source_doc.to_string()) == _tree(_EDIT_SCH)
 
 
+def _field_at(saved, name):
+    return _first(saved, "property", name)["at"].get_atoms()
+
+
+def test_patch_keeps_pin_uuid_when_pin_changes(tmp_path: Path):
+    """_patch_node called on a pin keeps the source UUID (issue #6085)."""
+    from kicad_tools.schematic.models.io_mixin import _patch_node
+
+    src = parse_string('(pin "1" (uuid "keep-me") (alternate "A"))')
+    old = parse_string('(pin "1" (uuid "old-random") (alternate "A"))')
+    new = parse_string('(pin "1" (uuid "new-random") (alternate "B"))')
+    patched = _patch_node(src, old, new)
+    assert patched["uuid"].get_first_atom() == "keep-me"
+    assert patched["alternate"].get_first_atom() == "B"
+
+
+def test_symbol_rotation_rotates_fields_about_origin(tmp_path: Path):
+    """Fields turn with the symbol, counter-clockwise on screen (issue #6085)."""
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    sch.power_symbols[0].rotation = 180  # was 90: a further quarter turn CCW
+    _, saved = _sole_change(_EDIT_SCH, sch.to_sexp())
+    assert saved["at"].get_atoms() == [257.81, 50.8, 180]
+    # Offsets (3.81, 0) -> (0, -3.81); (-3.2512, -0.381) -> (-0.381, 3.2512).
+    assert _field_at(saved, "Reference") == [257.81, 46.99, 90]
+    assert _field_at(saved, "Value") == [257.429, 54.0512, 0]
+    # Everything else about the fields survives.
+    assert _first(saved, "property", "Value")["effects"]["justify"].get_first_atom() == "left"
+    assert saved["pin"]["uuid"].get_first_atom() == "06301014-7222-4948-969d-d91f20ce12fd"
+
+
+def test_symbol_move_and_rotate_applies_rotation_after_move(tmp_path: Path):
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    sym = sch.power_symbols[0]
+    sym.x += 2.54
+    sym.rotation = 180
+    _, saved = _sole_change(_EDIT_SCH, sch.to_sexp())
+    assert saved["at"].get_atoms() == [260.35, 50.8, 180]
+    assert _field_at(saved, "Reference") == [260.35, 46.99, 90]
+    assert _field_at(saved, "Value") == [259.969, 54.0512, 0]
+
+
+_PWR_AT = '(symbol (lib_id "power:+48V") (at 257.81 50.8 90) (unit 1)'
+
+
+def _mirrored_edit_sch(mirror: str) -> str:
+    assert _PWR_AT in _EDIT_SCH
+    return _EDIT_SCH.replace(_PWR_AT, _PWR_AT + f"\n    (mirror {mirror})", 1)
+
+
+def _lib_vector(offset, rotation, mirror):
+    """The library vector that the placed transform sends to *offset*."""
+    from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
+
+    mags = (abs(offset[0]), abs(offset[1]))
+    for a, b in ((mags[0], mags[1]), (mags[1], mags[0])):
+        for sa in (1, -1):
+            for sb in (1, -1):
+                got = symbol_to_sheet_offset(sa * a, sb * b, rotation, mirror)
+                if abs(got[0] - offset[0]) < 1e-3 and abs(got[1] - offset[1]) < 1e-3:
+                    return sa * a, sb * b
+    raise AssertionError("no library vector")
+
+
+def _parse_saved(text):
+    return parse_string(text)
+
+
+def _power_node(doc, _name=None):
+    return next(
+        c
+        for c in doc.children
+        if c.name == "symbol" and c["lib_id"].get_first_atom() == "power:+48V"
+    )
+
+
+def _field_offset(saved, name):
+    x, y = _field_at(saved, name)[:2]
+    ax, ay = saved["at"].get_atoms()[:2]
+    return x - ax, y - ay
+
+
+@pytest.mark.parametrize("mirror", ["x", "y"])
+@pytest.mark.parametrize("new_rot", [90, 180, 270, 0])
+def test_mirrored_symbol_fields_follow_symbol_transform(mirror, new_rot, tmp_path: Path):
+    """Each field moves like a pin at the same library offset (issue #6085)."""
+    from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
+
+    src = _mirrored_edit_sch(mirror)
+    base = _load_text(tmp_path, src)
+    base_saved = base.to_sexp()
+    sch = _load_text(tmp_path, src)
+    sch.power_symbols[0].rotation = new_rot
+    saved = _power_node(_parse_saved(sch.to_sexp()))
+    before = _power_node(_parse_saved(base_saved))
+    for name in ("Reference", "Value"):
+        lib = _lib_vector(_field_offset(before, name), 90, mirror)
+        want = symbol_to_sheet_offset(*lib, new_rot, mirror)
+        got = _field_offset(saved, name)
+        assert got == pytest.approx(want, abs=1e-3), (name, mirror, new_rot)
+
+
+def test_mirrored_quarter_turn_is_clockwise(tmp_path: Path):
+    """mirror x, 90 -> 180: the symbol turns CW, so does its Reference."""
+    sch = _load_text(tmp_path, _mirrored_edit_sch("x"))
+    sch.power_symbols[0].rotation = 180
+    saved = _power_node(_parse_saved(sch.to_sexp()))
+    # Unmirrored this edit gives (0, -3.81); mirrored it is the opposite turn.
+    assert _field_offset(saved, "Reference") == pytest.approx((0, 3.81), abs=1e-3)
+    assert _field_at(saved, "Reference")[2] == 90
+
+
+@pytest.mark.parametrize("old_m,new_m", [("", "x"), ("x", ""), ("x", "y"), ("y", "")])
+def test_mirror_change_with_rotation_applies_new_mirror_state(old_m, new_m, tmp_path: Path):
+    """Mirror and angle changed together: fields land per the *new* transform."""
+    from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
+
+    src = _mirrored_edit_sch(old_m) if old_m else _EDIT_SCH
+    sch = _load_text(tmp_path, src)
+    before = _power_node(_parse_saved(sch.to_sexp()))
+    lib = {n: _lib_vector(_field_offset(before, n), 90, old_m) for n in ("Reference", "Value")}
+    sch.power_symbols[0].rotation = 270
+    sch.power_symbols[0].mirror = new_m
+    saved = _power_node(_parse_saved(sch.to_sexp()))
+    for name, vec in lib.items():
+        want = symbol_to_sheet_offset(*vec, 270, new_m)
+        assert _field_offset(saved, name) == pytest.approx(want, abs=1e-3)
+
+
+def test_retyped_note_keeps_its_own_source_when_text_collides(tmp_path: Path):
+    """Retyping note A to "B" while another note "B" is deleted keeps A's node."""
+    two = _EDIT_SCH.replace(
+        "  (polyline",
+        '  (text "B" (exclude_from_sim no) (at 10 10 0)\n'
+        "    (effects (font (size 1.0 1.0)))\n"
+        '    (uuid "bbbbbbbb-0000-0000-0000-000000000000"))\n  (polyline',
+        1,
+    )
+    sch = _load_text(tmp_path, two)
+    sch.text_notes = [("B", 245.11, 66.04)]  # note A retyped; the original B deleted
+    out = parse_string(sch.to_sexp())
+    texts = out.find_all("text")
+    assert len(texts) == 1
+    assert texts[0].get_first_atom() == "B"
+    assert texts[0]["uuid"].get_first_atom() == "c47a68c0-ec3e-4aaa-803c-2ea9d781766e"
+    assert texts[0]["effects"]["font"]["size"].get_atoms() == [2.54, 2.54]
+
+
 def _netlist_values(net: Path) -> dict[str, str]:
     root = parse_string(net.read_text())
     return {
