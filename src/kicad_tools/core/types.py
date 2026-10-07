@@ -183,8 +183,17 @@ class CopperLayer(Enum):
     """Copper layer indices for routing algorithms.
 
     This enum provides integer values for copper layers, useful for routing
-    algorithms that operate on layer indices. The integer values correspond
-    to the layer's position in a 6-layer stack (0 = top, 5 = bottom).
+    algorithms that operate on layer indices.  ``F_CU``..``B_CU`` keep their
+    historical values (0..5, the positions in a 6-layer stack) so every
+    existing 2/4/6-layer artifact is unchanged.  ``IN5_CU``..``IN30_CU``
+    (Issue #6099) extend the enum to KiCad's full 32-copper-layer limit; their
+    values (6..31) come *after* ``B_CU`` and are therefore NOT in physical
+    stack order.
+
+    Code that needs physical top-to-bottom order (via spans, "is this layer
+    between these two") must compare :attr:`stack_order`, never ``value``.
+    For the six historical members the two orders agree, so switching a
+    comparison to ``stack_order`` is a no-op on 2/4/6-layer boards.
 
     For general layer references using KiCad names, use Layer instead.
     """
@@ -195,18 +204,57 @@ class CopperLayer(Enum):
     IN3_CU = 3  # Inner 3
     IN4_CU = 4  # Inner 4
     B_CU = 5  # Bottom copper (outer)
+    # Issue #6099: inner layers 5..30 for 8+-layer boards (values after B_CU).
+    IN5_CU = 6  # Inner 5
+    IN6_CU = 7  # Inner 6
+    IN7_CU = 8  # Inner 7
+    IN8_CU = 9  # Inner 8
+    IN9_CU = 10  # Inner 9
+    IN10_CU = 11  # Inner 10
+    IN11_CU = 12  # Inner 11
+    IN12_CU = 13  # Inner 12
+    IN13_CU = 14  # Inner 13
+    IN14_CU = 15  # Inner 14
+    IN15_CU = 16  # Inner 15
+    IN16_CU = 17  # Inner 16
+    IN17_CU = 18  # Inner 17
+    IN18_CU = 19  # Inner 18
+    IN19_CU = 20  # Inner 19
+    IN20_CU = 21  # Inner 20
+    IN21_CU = 22  # Inner 21
+    IN22_CU = 23  # Inner 22
+    IN23_CU = 24  # Inner 23
+    IN24_CU = 25  # Inner 24
+    IN25_CU = 26  # Inner 25
+    IN26_CU = 27  # Inner 26
+    IN27_CU = 28  # Inner 27
+    IN28_CU = 29  # Inner 28
+    IN29_CU = 30  # Inner 29
+    IN30_CU = 31  # Inner 30
 
     @property
     def kicad_name(self) -> str:
         """Get the KiCad layer name for this copper layer."""
-        return {
-            CopperLayer.F_CU: "F.Cu",
-            CopperLayer.IN1_CU: "In1.Cu",
-            CopperLayer.IN2_CU: "In2.Cu",
-            CopperLayer.IN3_CU: "In3.Cu",
-            CopperLayer.IN4_CU: "In4.Cu",
-            CopperLayer.B_CU: "B.Cu",
-        }[self]
+        return _COPPER_KICAD_NAMES[self]
+
+    @property
+    def inner_number(self) -> int:
+        """``N`` of ``InN.Cu`` for an inner layer; 0 for ``F.Cu``/``B.Cu``."""
+        if self is CopperLayer.F_CU or self is CopperLayer.B_CU:
+            return 0
+        return int(self.name[2:-3])  # "IN12_CU" -> 12
+
+    @property
+    def stack_order(self) -> int:
+        """Physical top-to-bottom order key (Issue #6099).
+
+        ``F.Cu`` is 0, ``InN.Cu`` is ``N`` and ``B.Cu`` is 31 (after KiCad's
+        last possible inner layer, ``In30.Cu``).  Only the relative order is
+        meaningful: use it to sort layers or to test whether a layer lies in a
+        via's span.  It agrees with ``value`` ordering on the six historical
+        members, so 2/4/6-layer behaviour is unchanged.
+        """
+        return _COPPER_STACK_ORDER[self]
 
     @property
     def is_outer(self) -> bool:
@@ -226,14 +274,57 @@ class CopperLayer(Enum):
         Raises:
             ValueError: If the name doesn't match any known copper layer.
         """
-        for layer in cls:
-            if layer.kicad_name == name:
-                return layer
-        raise ValueError(f"Unknown KiCad copper layer name: {name}")
+        layer = _COPPER_BY_KICAD_NAME.get(name)
+        if layer is None:
+            raise ValueError(f"Unknown KiCad copper layer name: {name}")
+        return layer
 
     def to_layer(self) -> Layer:
         """Convert to the corresponding Layer enum value."""
         return Layer.from_string(self.kicad_name)
+
+
+_COPPER_KICAD_NAMES: dict[CopperLayer, str] = {
+    layer: (
+        "F.Cu"
+        if layer is CopperLayer.F_CU
+        else "B.Cu"
+        if layer is CopperLayer.B_CU
+        else f"In{layer.inner_number}.Cu"
+    )
+    for layer in CopperLayer
+}
+_COPPER_STACK_ORDER: dict[CopperLayer, int] = {
+    layer: 31 if layer is CopperLayer.B_CU else layer.inner_number for layer in CopperLayer
+}
+_COPPER_BY_KICAD_NAME: dict[str, CopperLayer] = {
+    name: layer for layer, name in _COPPER_KICAD_NAMES.items()
+}
+
+
+def copper_span(*layers: CopperLayer) -> tuple[CopperLayer, CopperLayer]:
+    """Topmost and bottommost of ``layers`` in physical stack order.
+
+    Issue #6099: a via's ``layers`` pair (or the union of several pairs when
+    merging vias) spans every copper layer between these two.  Uses
+    :attr:`CopperLayer.stack_order`, so ``In5.Cu`` and deeper sort above
+    ``B.Cu`` even though their enum values are larger.
+    """
+    return (
+        min(layers, key=lambda layer: layer.stack_order),
+        max(layers, key=lambda layer: layer.stack_order),
+    )
+
+
+def copper_span_contains(first: CopperLayer, last: CopperLayer, layer: CopperLayer) -> bool:
+    """True when ``layer`` lies between ``first`` and ``last`` (inclusive, either order)."""
+    lo, hi = sorted((first.stack_order, last.stack_order))
+    return lo <= layer.stack_order <= hi
+
+
+def copper_layers_in_span(first: CopperLayer, last: CopperLayer) -> set[CopperLayer]:
+    """Every :class:`CopperLayer` between ``first`` and ``last`` (inclusive)."""
+    return {layer for layer in CopperLayer if copper_span_contains(first, last, layer)}
 
 
 class LayoutStyle(str, Enum):
@@ -261,6 +352,9 @@ __all__ = [
     "RiskLevel",
     "Layer",
     "CopperLayer",
+    "copper_span",
+    "copper_span_contains",
+    "copper_layers_in_span",
     "LayoutStyle",
     "ViolationSeverity",
 ]

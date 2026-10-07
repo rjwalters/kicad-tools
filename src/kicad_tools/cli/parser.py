@@ -4282,8 +4282,13 @@ def _add_route_parser(subparsers) -> None:
         "--max-layers",
         type=int,
         default=6,
-        choices=[2, 4, 6],
-        help="Maximum layer count for auto-escalation (default: 6)",
+        # Issue #6099: 8..32 escalate to the board's own auto-detected stack
+        # (the built-in ladder stops at the 6-layer preset).
+        choices=list(range(2, 33, 2)),
+        help=(
+            "Maximum layer count for auto-escalation (default: 6). Above 6, the "
+            "ladder's last rung is the board's own auto-detected stack."
+        ),
     )
     # Issue #3400: ``--starting-layers`` lets boards opt out of the 2L tax.
     # CLI flag > project.kct EscalationPolicy.starting_layers > default 2.

@@ -32,6 +32,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 import numpy as np
 
+from kicad_tools.core.types import copper_span
+
 from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
@@ -5419,23 +5421,10 @@ class Router:
 
                     # Issue #1802: expand surviving via layers to cover
                     # all layers from both vias (cross-layer-pair merge)
-                    min_layer = min(
-                        existing_via.layers[0].value,
-                        existing_via.layers[1].value,
-                        new_via.layers[0].value,
-                        new_via.layers[1].value,
-                    )
-                    max_layer = max(
-                        existing_via.layers[0].value,
-                        existing_via.layers[1].value,
-                        new_via.layers[0].value,
-                        new_via.layers[1].value,
-                    )
-                    if (
-                        min_layer != existing_via.layers[0].value
-                        or max_layer != existing_via.layers[1].value
-                    ):
-                        existing_via.layers = (Layer(min_layer), Layer(max_layer))
+                    # Issue #6099: physical stack order, not enum value.
+                    top, bottom = copper_span(*existing_via.layers, *new_via.layers)
+                    if top != existing_via.layers[0] or bottom != existing_via.layers[1]:
+                        existing_via.layers = (top, bottom)
 
                     # Remove the new via since we're reusing the existing one
                     vias_to_remove.add(i)

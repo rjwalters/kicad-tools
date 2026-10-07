@@ -687,11 +687,11 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
             # Via endpoints describe the physical span, independently of
             # which layers this routing trial selected. A through via still
             # blocks F.Cu during a front-only trial with no B.Cu grid index.
-            lo, hi = sorted(Layer.from_kicad_name(layer).value for layer in item.layers)
+            lo, hi = sorted(Layer.from_kicad_name(layer).stack_order for layer in item.layers)
             indices = [
                 layer.index
                 for layer in grid.layer_stack.layers
-                if lo <= layer.layer_enum.value <= hi
+                if lo <= layer.layer_enum.stack_order <= hi
             ]
             kind = "via"
         for layer in indices:

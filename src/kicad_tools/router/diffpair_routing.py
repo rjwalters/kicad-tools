@@ -416,9 +416,10 @@ def _via_spans_layer(via: Via, layer: Layer) -> bool:
     on the C++ side.  Lifted out of the individual gates so the three of them
     cannot drift.
     """
-    lo = min(via.layers[0].value, via.layers[1].value)
-    hi = max(via.layers[0].value, via.layers[1].value)
-    return lo <= layer.value <= hi
+    # Issue #6099: physical stack order, not enum value.
+    lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
+    hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+    return lo <= layer.stack_order <= hi
 
 
 # Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
@@ -5922,13 +5923,13 @@ class DiffPairRouter:
             deficit = gap_deficit(shape, segment_shape(seg), clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
-        v_lo = min(via.layers[0].value, via.layers[1].value)
-        v_hi = max(via.layers[0].value, via.layers[1].value)
+        v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
+        v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
         for other in universe.vias:
             if other.net == via.net:
                 continue
-            o_lo = min(other.layers[0].value, other.layers[1].value)
-            o_hi = max(other.layers[0].value, other.layers[1].value)
+            o_lo = min(other.layers[0].stack_order, other.layers[1].stack_order)
+            o_hi = max(other.layers[0].stack_order, other.layers[1].stack_order)
             if o_hi < v_lo or o_lo > v_hi:
                 continue  # barrels never share a layer
             deficit = gap_deficit(shape, via_shape(other), clearance)

@@ -945,7 +945,7 @@ def _dedupe_sibling_route_vias(
     if len(routes) < 2:
         return 0
 
-    from ..layers import Layer
+    from kicad_tools.core.types import copper_span
 
     inv_res = 1.0 / resolution_mm
     seen: dict[tuple[int, int], Via] = {}
@@ -969,20 +969,10 @@ def _dedupe_sibling_route_vias(
                 # duplicate's layer range, in case the two edges had
                 # different layer pairs at the same tap (mid-layer
                 # buried via on one edge, full-stack on the other).
-                min_layer = min(
-                    existing.layers[0].value,
-                    existing.layers[1].value,
-                    via.layers[0].value,
-                    via.layers[1].value,
-                )
-                max_layer = max(
-                    existing.layers[0].value,
-                    existing.layers[1].value,
-                    via.layers[0].value,
-                    via.layers[1].value,
-                )
-                if min_layer != existing.layers[0].value or max_layer != existing.layers[1].value:
-                    existing.layers = (Layer(min_layer), Layer(max_layer))
+                # Issue #6099: physical stack order, not enum value.
+                top, bottom = copper_span(*existing.layers, *via.layers)
+                if top != existing.layers[0] or bottom != existing.layers[1]:
+                    existing.layers = (top, bottom)
                 removed += 1
 
         if len(keep_indices) != len(route.vias):
@@ -1864,16 +1854,17 @@ class NegotiatedRouter:
         # is a 4x reduction.
         #
         # ``vias_on_layer[L]`` is the list of ``(net, via)`` tuples
-        # whose layer span includes layer L.  Layer values are read
-        # from ``via.layers[0/1].value`` so they're plain ints.
+        # whose layer span includes layer L.  Layers are keyed by
+        # ``CopperLayer.stack_order`` (plain ints in physical order; Issue
+        # #6099 -- enum values are not physical order past In4.Cu).
         vias_on_layer: dict[int, list[tuple[int, Via]]] = {}
         total_vias = 0
         for net_id, routes in net_routes.items():
             for route in routes:
                 for via in route.vias:
                     total_vias += 1
-                    v_lo = min(via.layers[0].value, via.layers[1].value)
-                    v_hi = max(via.layers[0].value, via.layers[1].value)
+                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
+                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
                     for layer_val in range(v_lo, v_hi + 1):
                         vias_on_layer.setdefault(layer_val, []).append((net_id, via))
 
@@ -1889,8 +1880,8 @@ class NegotiatedRouter:
             for route in extra_routes:
                 for via in route.vias:
                     total_vias += 1
-                    v_lo = min(via.layers[0].value, via.layers[1].value)
-                    v_hi = max(via.layers[0].value, via.layers[1].value)
+                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
+                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
                     for layer_val in range(v_lo, v_hi + 1):
                         vias_on_layer.setdefault(layer_val, []).append((route.net, via))
 
@@ -1907,7 +1898,7 @@ class NegotiatedRouter:
                 if net_done:
                     break
                 for seg in route.segments:
-                    layer_vias = vias_on_layer.get(seg.layer.value)
+                    layer_vias = vias_on_layer.get(seg.layer.stack_order)
                     if not layer_vias:
                         continue  # No foreign via on this segment's layer.
 
@@ -2089,7 +2080,7 @@ class NegotiatedRouter:
             for route in routes:
                 for seg in route.segments:
                     total_segs += 1
-                    segs_on_layer.setdefault(seg.layer.value, []).append((net_id, seg))
+                    segs_on_layer.setdefault(seg.layer.stack_order, []).append((net_id, seg))
 
         # Issue #3077: extend the foreign-segment universe with
         # ``extra_routes`` (typically escape-phase routes).  Their
@@ -2100,7 +2091,7 @@ class NegotiatedRouter:
             for route in extra_routes:
                 for seg in route.segments:
                     total_segs += 1
-                    segs_on_layer.setdefault(seg.layer.value, []).append((route.net, seg))
+                    segs_on_layer.setdefault(seg.layer.stack_order, []).append((route.net, seg))
 
         # Fast path: no segments at all -> no violations possible.
         if total_segs == 0:
@@ -2118,8 +2109,8 @@ class NegotiatedRouter:
                     # Iterate every layer the via spans -- a through-hole
                     # via on a 4-layer board can clip segments on any of
                     # the four layers it crosses.
-                    v_lo = min(via.layers[0].value, via.layers[1].value)
-                    v_hi = max(via.layers[0].value, via.layers[1].value)
+                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
+                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
                     via_radius = via.diameter / 2
 
                     for layer_val in range(v_lo, v_hi + 1):
