@@ -218,7 +218,9 @@ CONTRACT_ARGV: dict[str, list[str]] = {
         "--no-auto-pour",
         "--no-auto-layers",
     ],
-    "route-auto": ["{pcb}"],
+    # Issue #6093: a valid tiny net (NET1, 3 pads), so the success path's
+    # document is checked, not just the missing-``--net`` error (~1.5 s).
+    "route-auto": ["{pcb}", "--net", "NET1"],
     "reason": ["{pcb}"],
     "optimize-traces": ["{pcb}", "--dry-run"],
     "validate-footprints": ["{pcb}"],
@@ -378,6 +380,17 @@ FLAG_VARIANT_ARGV: dict[str, list[str]] = {
         "-o",
         "{dir}/auto_routed.kicad_pcb",
         "--lint-gate",
+    ],
+    # Issue #6001: a net that fails (it would short an already-routed net), so
+    # the unrouted-cause pass really runs -- its board load and summary line
+    # must stay off stdout.
+    "route-auto --diagnose-unrouted-budget": [
+        "route-auto",
+        "{fixtures}/route_auto_6001/crossing.kicad_pcb",
+        "--net",
+        "/B",
+        "--diagnose-unrouted-budget",
+        "10",
     ],
 }
 

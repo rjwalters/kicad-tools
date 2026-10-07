@@ -72,6 +72,36 @@ from .via_conflict import ViaConflictManager, ViaConflictStrategy
 logger = logging.getLogger(__name__)
 
 
+def _segment_distance(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+) -> float:
+    """Minimum distance between segments ``ab`` and ``cd`` (points allowed)."""
+
+    def _point_seg(
+        p: tuple[float, float], s0: tuple[float, float], s1: tuple[float, float]
+    ) -> float:
+        vx, vy = s1[0] - s0[0], s1[1] - s0[1]
+        seg2 = vx * vx + vy * vy
+        t = (
+            0.0
+            if seg2 == 0
+            else max(0.0, min(1.0, ((p[0] - s0[0]) * vx + (p[1] - s0[1]) * vy) / seg2))
+        )
+        return math.hypot(p[0] - (s0[0] + t * vx), p[1] - (s0[1] + t * vy))
+
+    def _cross(o: tuple[float, float], p: tuple[float, float], q: tuple[float, float]) -> float:
+        return (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+
+    d1, d2 = _cross(c, d, a), _cross(c, d, b)
+    d3, d4 = _cross(a, b, c), _cross(a, b, d)
+    if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 and d2 and d3 and d4:
+        return 0.0  # proper crossing
+    return min(_point_seg(a, c, d), _point_seg(b, c, d), _point_seg(c, a, b), _point_seg(d, a, b))
+
+
 class RoutingOrchestrator:
     """Intelligently coordinate routing strategies based on net characteristics.
 
@@ -180,6 +210,15 @@ class RoutingOrchestrator:
         self._keepout_mask_cache: Any = None
         self._keepout_mask_resolved = False
         self._keepout_warned = False
+
+        # Issue #6001: every strategy ``_execute_strategy`` ran during the
+        # latest ``route_net`` call, in order (retries included).  The
+        # unrouted-cause diagnosis reads it to tell whether any of them
+        # searched a fine routing grid.
+        self.strategies_attempted: list[RoutingStrategy] = []
+        # Issue #6001: other nets' copper already on the board, for the
+        # short gate (lazily parsed, cached).
+        self._board_copper_cache: tuple[list, list] | None = None
 
         logger.info(
             f"RoutingOrchestrator initialized: backend={backend}, "
@@ -477,6 +516,173 @@ class RoutingOrchestrator:
                 )
             ]
 
+    # ------------------------------------------------------------------
+    # Other nets' copper already on the board (Issue #6001)
+    #
+    # No route-auto strategy sees the board's existing copper: the corridor
+    # planner has no obstacle model, and the hierarchical strategy's
+    # AdaptiveAutorouter is built from the routed net's own pads only.  Every
+    # strategy therefore drew straight through an already-routed net and
+    # reported success -- writing a short.  Like the keepout gate above, the
+    # guarantee is an OUTPUT check: copper that touches another net's track or
+    # via is refused, never written.  (It is also what lets the unrouted-cause
+    # diagnosis report such a net as ``congested`` instead of never seeing it
+    # fail.)
+    # ------------------------------------------------------------------
+
+    def _board_copper(self) -> tuple[list, list]:
+        """Existing tracks and vias on the board, as plain tuples.
+
+        ``segments``: ``(x1, y1, x2, y2, half_width, layer_name, net, name)``;
+        ``vias``: ``(x, y, radius, net, name)``.  Same frame as the pads the
+        orchestrator routes (a schema ``PCB`` is board-relative).  Empty for a
+        PCB that exposes no copper lists (the lightweight test mocks).
+        """
+        if self._board_copper_cache is not None:
+            return self._board_copper_cache
+        segments: list = []
+        vias: list = []
+        all_segs = getattr(self.pcb, "segments", None)
+        all_vias = getattr(self.pcb, "vias", None)
+        if isinstance(all_segs, list):
+            for s in all_segs:
+                try:
+                    (x1, y1), (x2, y2) = s.start, s.end
+                    segments.append(
+                        (
+                            float(x1),
+                            float(y1),
+                            float(x2),
+                            float(y2),
+                            float(s.width) / 2.0,
+                            str(s.layer),
+                            int(getattr(s, "net_number", 0) or 0),
+                            str(getattr(s, "net_name", "") or ""),
+                        )
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    continue
+        if isinstance(all_vias, list):
+            for v in all_vias:
+                try:
+                    x, y = v.position
+                    vias.append(
+                        (
+                            float(x),
+                            float(y),
+                            float(v.size) / 2.0,
+                            int(getattr(v, "net_number", 0) or 0),
+                            str(getattr(v, "net_name", "") or ""),
+                        )
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    continue
+        self._board_copper_cache = (segments, vias)
+        return self._board_copper_cache
+
+    def _foreign_copper_shorts(self, result: RoutingResult) -> tuple[int, int, list[str]]:
+        """Copper in ``result`` that touches another net's existing copper.
+
+        A trace touches a track on the same layer when their centrelines come
+        closer than the sum of their half-widths; a via (treated as a through
+        via, so on every layer) touches any track or via it overlaps.  Copper
+        of the routed net itself, and unassigned (net 0) copper, never counts.
+
+        Returns:
+            ``(segments_shorting, vias_shorting, other_net_names)``.
+        """
+        if not (result.segments or result.vias):
+            return (0, 0, [])
+        board_segs, board_vias = self._board_copper()
+        if not board_segs and not board_vias:
+            return (0, 0, [])
+        own_ids: set[int] = set()
+        own_names: set[str] = set()
+        for item in (*result.segments, *result.vias):
+            item_net = int(getattr(item, "net", 0) or 0)
+            item_name = str(getattr(item, "net_name", "") or "")
+            if item_net:
+                own_ids.add(item_net)
+            if item_name:
+                own_names.add(item_name)
+        if isinstance(result.net, int) and result.net:
+            own_ids.add(result.net)
+        elif isinstance(result.net, str) and result.net:
+            own_names.add(result.net)
+
+        def _foreign(net: int, name: str) -> bool:
+            if name and name in own_names:
+                return False
+            return net > 0 and net not in own_ids
+
+        other_segs = [s for s in board_segs if _foreign(s[6], s[7])]
+        other_vias = [v for v in board_vias if _foreign(v[3], v[4])]
+        if not other_segs and not other_vias:
+            return (0, 0, [])
+
+        names: dict[str, None] = {}
+        eps = 1e-6
+
+        def _label(net: int, name: str) -> str:
+            return name or f"Net_{net}"
+
+        seg_hits = 0
+        for seg in result.segments:
+            layer = getattr(getattr(seg, "layer", None), "kicad_name", None)
+            half = float(getattr(seg, "width", 0.0) or 0.0) / 2.0
+            a, b = (seg.x1, seg.y1), (seg.x2, seg.y2)
+            hit = False
+            for x1, y1, x2, y2, ohalf, olayer, onet, oname in other_segs:
+                if layer is not None and olayer != layer:
+                    continue
+                if _segment_distance(a, b, (x1, y1), (x2, y2)) < half + ohalf - eps:
+                    hit = True
+                    names[_label(onet, oname)] = None
+            for vx, vy, radius, onet, oname in other_vias:
+                if _segment_distance(a, b, (vx, vy), (vx, vy)) < half + radius - eps:
+                    hit = True
+                    names[_label(onet, oname)] = None
+            seg_hits += hit
+        via_hits = 0
+        for via in result.vias:
+            p = (via.x, via.y)
+            radius = float(getattr(via, "diameter", 0.0) or 0.0) / 2.0
+            hit = False
+            for x1, y1, x2, y2, ohalf, _layer, onet, oname in other_segs:
+                if _segment_distance(p, p, (x1, y1), (x2, y2)) < radius + ohalf - eps:
+                    hit = True
+                    names[_label(onet, oname)] = None
+            for vx, vy, oradius, onet, oname in other_vias:
+                if math.hypot(p[0] - vx, p[1] - vy) < radius + oradius - eps:
+                    hit = True
+                    names[_label(onet, oname)] = None
+            via_hits += hit
+        return (seg_hits, via_hits, list(names))
+
+    def _enforce_no_foreign_shorts(self, result: RoutingResult, strategy: RoutingStrategy) -> None:
+        """Refuse a result whose copper shorts another net's existing copper.
+
+        The result becomes a failure with no geometry, so the short is never
+        persisted.  Its alternatives are left to ``_suggest_alternatives``.
+        """
+        seg_hits, via_hits, names = self._foreign_copper_shorts(result)
+        if not seg_hits and not via_hits:
+            return
+        name = self._STRATEGY_CLI_NAMES.get(strategy, strategy.name)
+        result.success = False
+        result.partial = False
+        result.segments = []
+        result.vias = []
+        result.metrics = RoutingMetrics()
+        result.alternative_strategies = []
+        result.error_message = (
+            f"route-auto '{name}' strategy produced copper that shorts net(s) "
+            f"{', '.join(repr(n) for n in names)} already on the board "
+            f"({seg_hits} segment(s), {via_hits} via(s)); route-auto's strategies "
+            "do not route around other nets' copper, so it is refused rather than "
+            "written (issue #6001)."
+        )
+
     def _get_net_class_routing(self, net: str | int) -> NetClassRouting | None:
         """Look up the NetClassRouting for a net by name.
 
@@ -651,6 +857,7 @@ class RoutingOrchestrator:
         """
         start_time = time.time()
         perf = PerformanceStats(backend_type=self.backend or "cpu")
+        self.strategies_attempted = []  # Issue #6001
 
         # Check for pour nets (power/ground handled by zone fill, not traces)
         net_class_routing = self._get_net_class_routing(net)
@@ -970,6 +1177,7 @@ class RoutingOrchestrator:
         Returns:
             RoutingResult from the strategy execution
         """
+        self.strategies_attempted.append(strategy)  # Issue #6001
         # Issue #6059: a corridor strategy cannot route around keepout rule
         # areas -- say so once, before it runs.
         keepout_warning = self._warn_corridor_keepouts(strategy)
@@ -1012,6 +1220,8 @@ class RoutingOrchestrator:
             if keepout_warning is not None:
                 result.warnings.append(keepout_warning)
             self._enforce_keepouts(result, strategy)
+            # Issue #6001: nor copper that shorts another net's existing copper.
+            self._enforce_no_foreign_shorts(result, strategy)
 
             # Ensure failed results always carry alternative suggestions so
             # the retry loop in route_net() has candidates to try.

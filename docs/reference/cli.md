@@ -840,7 +840,7 @@ Common flags (the full surface lives in `kct route --help`):
 | `--no-routing-plan` | Skip the report-only routing-plan stage (on by default; see [`routing-plan.md`](routing-plan.md)) |
 | `--plan-gate` | Refuse to start detailed routing (exit 9) when the routing plan reports overflow, printing the per-edge overflow report and its computed relief first. Off by default. Overridden by `--force` |
 | `--force` | Route even when the grid resolution exceeds clearance — **and** override `--plan-gate`. Also disables grid/DRC validation, so to simply not gate, omit `--plan-gate` rather than adding `--force` |
-| `--diagnose-unrouted-budget SEC` | Time budget for classifying each unrouted connection as `congested` or `blocked` in `--format json` output (default: 20; `0` disables). See [Why a connection is unrouted](#why-a-connection-is-unrouted) |
+| `--diagnose-unrouted-budget SEC` | Time budget for classifying each unrouted connection as `congested` or `blocked` in `--format json` output (default: 20; `0` disables). Also on `route-auto` (Issue #6001). See [Why a connection is unrouted](#why-a-connection-is-unrouted) |
 
 #### Post-route sidecars
 
@@ -902,7 +902,27 @@ connecting. The pass has a total time limit
 up as its own `unrouted-diagnosis` stage in the route deadline supervisor and
 in `scripts/research/route_phase_profile.py`. A one-line summary goes to
 stderr. Both keys are absent when everything routed, when the output is text,
-or when the budget is `0`. `kct route-auto` does not report causes yet (#6001).
+or when the budget is `0`.
+
+`kct route-auto --format json` reports the same entries per net (Issue #6001):
+a partial or failed `nets[]` entry carries its own `unrouted` array and
+`unrouted_diagnosis` summary, with the same `--diagnose-unrouted-budget` flag.
+The connections are the pad islands the strategy left apart (pads already
+joined by the net's existing copper count as one island). route-auto's
+strategies route on different grids, so the pass runs on the board loaded the
+way `kct route` loads it — every pad, existing track and via, the board-edge
+keepout and the keepout rule areas — at the design rules' fine grid
+resolution, the one the `hierarchical` strategy searches. It does not reuse
+that strategy's own grid, which holds only the routed net's pads and would
+never show a contender. When no strategy that ran searched a fine grid (for
+example `--strategy global`, whose copper comes from the coarse corridor
+planner), each connection is `unclassified` with a `note` that says so.
+
+route-auto's strategies do not route around other nets' copper. Before #6001
+they drew straight through an already-routed net and reported success, which
+wrote a short. Copper that touches another net's existing track or via is now
+refused, like copper inside a keepout rule area (#6059). The net fails and its
+diagnosis names the net in the way as a `congested` contender.
 
 #### Routing around invalid placement
 

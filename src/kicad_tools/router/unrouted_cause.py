@@ -646,6 +646,7 @@ def diagnose_unrouted(
     net_names: Mapping[int, str] | None = None,
     budget_s: float = DEFAULT_BUDGET_S,
     per_connection_s: float = DEFAULT_PER_CONNECTION_S,
+    connections: Iterable[tuple[int, Pad, Pad]] | None = None,
 ) -> UnroutedDiagnosis | None:
     """Classify every unrouted connection as congested / blocked.
 
@@ -659,6 +660,11 @@ def diagnose_unrouted(
         net_names: Net id -> name, for the report.
         budget_s: Total wall-clock budget for the pass (seconds).
         per_connection_s: Cap on one connection's solo search (seconds).
+        connections: Explicit ``(net_id, source_pad, target_pad)`` pairs to
+            diagnose instead of enumerating them from the router's failure
+            records / MST edges.  ``kct route-auto`` (Issue #6001) passes the
+            pad islands its strategy left apart; the pads must be the
+            ``router``'s own.
 
     Returns:
         The diagnosis, or ``None`` when the router has no grid-A* engine to
@@ -687,7 +693,10 @@ def diagnose_unrouted(
 
     unrouted = {int(n) for n in unrouted_net_ids}
     partial = {int(n) for n in partial_net_ids} - unrouted
-    connections = _connections_for(router, unrouted | partial, mst_fallback_nets=unrouted)
+    if connections is not None:
+        connections = list(connections)
+    else:
+        connections = _connections_for(router, unrouted | partial, mst_fallback_nets=unrouted)
     if not connections:
         return None
 

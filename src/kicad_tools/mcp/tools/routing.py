@@ -482,6 +482,7 @@ def route_net_auto(
     allow_partial: bool = False,
     via_drill: float | None = None,
     via_diameter: float | None = None,
+    diagnose_unrouted_budget: float | None = None,
 ) -> dict:
     """Route a specific net using the RoutingOrchestrator.
 
@@ -540,6 +541,13 @@ def route_net_auto(
                 When given, overrides the via diameter derived from the board's
                 net-class via constraints.  When None, the board-derived value
                 is used.
+        diagnose_unrouted_budget: Issue #6001.  When a positive number of
+                seconds and the net ends partial or failed, classify each
+                connection it left unrouted as ``congested`` / ``blocked`` /
+                ``unclassified`` (the ``kct route`` #5944 classifier, on the
+                board at route-auto's fine grid resolution) and add the
+                ``unrouted`` list and ``unrouted_diagnosis`` summary to the
+                result.  ``None`` / ``0`` (the default) skips it.
 
     Returns:
         Dictionary with routing result including:
@@ -831,6 +839,21 @@ def route_net_auto(
     result_dict = result.to_dict()
     result_dict["net_name"] = net_name
 
+    # Issue #6001: why is the net (still) unrouted -- congested or blocked?
+    if diagnose_unrouted_budget and diagnose_unrouted_budget > 0 and not result.success:
+        _attach_unrouted_diagnosis(
+            result_dict,
+            pcb_path=pcb_path,
+            net_id=net_number,
+            net_name=net_name,
+            pads=pads,
+            result=result,
+            orchestrator=orchestrator,
+            rules=design_rules,
+            layer_stack=detect_layer_stack(pcb_text),
+            budget_s=float(diagnose_unrouted_budget),
+        )
+
     # Issue #4165: decide whether the produced copper is persistable.  A fully
     # successful route always persists; a PARTIAL route (multi-pad net with
     # stranded pads) persists only when the caller opts in via ``allow_partial``
@@ -889,6 +912,36 @@ def route_net_auto(
             ]
 
     return result_dict
+
+
+def _attach_unrouted_diagnosis(result_dict: dict, *, orchestrator, pads, **kwargs) -> None:
+    """Add ``unrouted`` / ``unrouted_diagnosis`` to a route-auto result (#6001).
+
+    Never raises a regular exception -- a diagnostic must not fail the route
+    it explains -- and writes only to stderr: ``route-auto --format json`` and
+    the MCP server both own stdout (#5938).
+    """
+    import sys
+
+    from kicad_tools.router.route_auto_diagnosis import diagnose_route_auto_net
+
+    try:
+        existing_segments, existing_vias = orchestrator._existing_net_copper(pads or [])
+        diagnosis = diagnose_route_auto_net(
+            pads=pads or [],
+            strategies_attempted=list(getattr(orchestrator, "strategies_attempted", [])),
+            existing_segments=existing_segments,
+            existing_vias=existing_vias,
+            **kwargs,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"Warning: unrouted diagnosis failed: {exc}", file=sys.stderr)
+        return
+    if diagnosis is None:
+        return
+    result_dict["unrouted"] = [conn.to_dict() for conn in diagnosis.connections]
+    result_dict["unrouted_diagnosis"] = diagnosis.summary_dict()
+    print(diagnosis.summary_line(), file=sys.stderr)
 
 
 def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int, int, int, int]:

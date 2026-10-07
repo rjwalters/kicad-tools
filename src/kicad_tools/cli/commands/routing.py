@@ -233,6 +233,11 @@ def _route_auto_one(
                 # Issue #4247: explicit via-geometry overrides (None => board-derived).
                 via_drill=via_drill,
                 via_diameter=via_diameter,
+                # Issue #6001: classify what a partial / failed net left
+                # unrouted -- JSON only, like ``kct route`` (#5944).
+                diagnose_unrouted_budget=(
+                    getattr(args, "diagnose_unrouted_budget", 20.0) if as_json else None
+                ),
             )
     except FileNotFoundError as e:
         if not as_json:
@@ -267,6 +272,10 @@ def _route_auto_one(
         "alternative_strategies": list(result.get("alternative_strategies", [])),
         "source": pcb_path,
     }
+    if "unrouted" in result:
+        # Issue #6001: same entries / summary ``kct route`` emits (#5944).
+        doc["unrouted"] = result["unrouted"]
+        doc["unrouted_diagnosis"] = result.get("unrouted_diagnosis")
 
     if as_json:
         # The caller prints the single document; per-net prose is suppressed.
