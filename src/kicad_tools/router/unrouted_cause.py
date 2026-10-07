@@ -478,6 +478,16 @@ class _Attributor:
                     },
                 )
         if registry_less or not pad_blocked:
+            # Issue #6008: a board-file keepout rule area, now on the grid --
+            # name it rather than reporting an anonymous keepout.
+            rule_area_at = getattr(grid, "rule_area_at", None)
+            area = rule_area_at(layer_idx, gx, gy) if rule_area_at is not None else None
+            if area is not None:
+                bbox = [round(v, 3) for v in area.bbox]
+                info: dict[str, Any] = {"kind": "keepout", "source": "rule_area", "bbox": bbox}
+                if area.name:
+                    info["name"] = area.name
+                return (("keepout", "rule_area", area.name, tuple(bbox)), info)
             if self._near_edge(wx, wy):
                 return (("board_edge",), {"kind": "board_edge"})
             obs = self._obstacle_at(wx, wy, layer_idx)
@@ -537,6 +547,31 @@ def _flood(free: np.ndarray, seeds: np.ndarray, allow_layer_change: bool) -> np.
     return reach
 
 
+def _close_filtered_rule_areas(
+    grid: Any, free: np.ndarray, layers: list[int], net: int, x0: int, y0: int
+) -> None:
+    """Mark net-filtered track keepout cells as not free for ``net`` (#6008).
+
+    All-nets rule areas are already blocked cells; an area narrowed by a
+    ``spatial_keepouts`` filter lives outside the occupancy planes, so the
+    flood fill would otherwise walk straight through one that applies to
+    this net.
+    """
+    for area in getattr(grid, "_rule_area_keepouts", None) or ():
+        if not area.blocks_tracks or area.static_tracks or not area.applies_to(net):
+            continue
+        h, w = area.mask.shape
+        _, rows, cols = free.shape
+        ax0, ay0 = max(area.gx0, x0), max(area.gy0, y0)
+        ax1, ay1 = min(area.gx0 + w, x0 + cols), min(area.gy0 + h, y0 + rows)
+        if ax0 >= ax1 or ay0 >= ay1:
+            continue
+        window = area.mask[ay0 - area.gy0 : ay1 - area.gy0, ax0 - area.gx0 : ax1 - area.gx0]
+        for li, layer in enumerate(layers):
+            if layer in area.layers:
+                free[li, ay0 - y0 : ay1 - y0, ax0 - x0 : ax1 - x0] &= ~window
+
+
 def _frontier_for_endpoint(
     grid: Any,
     pad: Pad,
@@ -564,6 +599,7 @@ def _frontier_for_endpoint(
         blocked = to_numpy(grid._blocked)[layers, y0 : y1 + 1, x0 : x1 + 1]
         cell_net = to_numpy(grid._net)[layers, y0 : y1 + 1, x0 : x1 + 1]
         free = ~blocked | (cell_net == net)
+        _close_filtered_rule_areas(grid, free, layers, net, x0, y0)
         seeds = np.zeros_like(free)
         # Seed the whole pad footprint, so a pad whose centre cell happens to
         # sit on a neighbour's halo is still seeded from its free metal.

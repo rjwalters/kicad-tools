@@ -1989,6 +1989,13 @@ class CoupledPathfinder:
         unverifiable ownership) fails ``cells_known`` and stays blocked.
         """
         if not self._is_cell_blocked(gx, gy, layer, net):
+            # Issue #6008: net-filtered keepout rule areas live outside the
+            # occupancy planes (C++ ``CoupledPathfinder::is_trace_blocked``
+            # mirror).
+            if getattr(self.grid, "_rule_area_keepouts", None):
+                return self.grid.rule_area_trace_blocked(
+                    gx, gy, layer, net, self._trace_half_width_cells
+                )
             return False
         return not self._halo_refiner.trace_clear([(gx, gy)], layer, gx, gy, net, from_cell)
 
@@ -2052,6 +2059,12 @@ class CoupledPathfinder:
             # No layer to sweep: the pre-#5720 per-layer loop fell straight
             # through to ``return False``.
             return False
+        # Issue #6008: via-blocking keepout rule areas (C++
+        # ``CoupledPathfinder::is_via_blocked`` mirror).
+        if getattr(grid, "_rule_area_keepouts", None) and grid.rule_area_via_blocked(
+            gx, gy, net, self._via_half_cells
+        ):
+            return True
         drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / grid.resolution)))
         extra_cells = self._via_extra_cells
 
@@ -12145,6 +12158,11 @@ class DiffPairRouter:
             if route.net == pair_p_net or route.net == pair_n_net:
                 continue
             fine_grid.mark_route(route)
+
+        # Issue #6008: keepout rule areas on the coupled fine grid too.
+        install_areas = getattr(self.autorouter, "_install_grid_rule_area_keepouts", None)
+        if install_areas is not None:
+            install_areas(fine_grid)
 
         # Compute the same center-to-center spacing the main path uses
         # at line 2095-2140, but in fine-grid cells.

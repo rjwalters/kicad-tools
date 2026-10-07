@@ -5845,16 +5845,18 @@ def _stash_spatial_keepout_filters(router: "Autorouter", args, quiet: bool = Fal
 def _warn_rule_areas_other_engine(pcb_path: Path, engine: str) -> None:
     """One-line warning when rule areas exist but the engine ignores them.
 
-    Issue #4605: only the LATTICE engine honors ``(tracks not_allowed)`` /
-    ``(vias not_allowed)`` keepout rule areas at search time.  Routing such a
-    board with grid/mesh silently commits copper straight through the
-    declared areas, so say so once -- a warning, not a gate (KiCad's own DRC
-    still catches the violation downstream).  Pour-void-only rule areas (the
+    Issue #4605 added this when only the LATTICE engine honored
+    ``(tracks not_allowed)`` / ``(vias not_allowed)`` keepout rule areas.
+    Issue #6008 taught the default GRID engine to enforce the same areas
+    (one shared parse, ``Autorouter._lattice_keepout_projection``), so only
+    the experimental MESH engine still commits copper straight through them
+    -- say so once.  A warning, not a gate (KiCad's own DRC still catches the
+    violation downstream).  Pour-void-only rule areas (the
     ``kct zones hv-keepout`` output) trigger nothing: they never constrain
     routing on any engine.  A cheap text scan on purpose -- no board model is
     built this early.
     """
-    if engine == "lattice":
+    if engine in ("lattice", "grid"):
         return
     try:
         text = pcb_path.read_text()
@@ -5866,8 +5868,8 @@ def _warn_rule_areas_other_engine(pcb_path: Path, engine: str) -> None:
             print(
                 "Warning: board declares track/via-blocking keepout rule areas, "
                 f"but --route-engine {engine} does not honor them (only the "
-                "lattice engine does; see issue #4605). Routed copper may "
-                "cross the declared areas.",
+                "grid and lattice engines do; see issues #4605/#6008). Routed "
+                "copper may cross the declared areas.",
                 file=sys.stderr,
             )
             return

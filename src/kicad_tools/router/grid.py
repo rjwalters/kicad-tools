@@ -1027,6 +1027,13 @@ class RoutingGrid:
         # attribute is loosely typed (``Any``) so this module does not
         # need to import the optional cpp backend.
         self._cpp_grid: object | None = None
+        # Issue #6008: board-file keepout rule areas projected onto this grid
+        # (``rule_area_grid.install_rule_area_keepouts``).  ``None`` until the
+        # router installs them.  ``rule_area_trace_blocked`` /
+        # ``rule_area_via_blocked`` consult the parts the occupancy planes
+        # cannot hold (net-filtered track rules, every via rule); all-nets
+        # track rules are stamped as static net-0 cells.
+        self._rule_area_keepouts: list[Any] | None = None
         from .component_hole_index import ComponentHoleIndex
 
         self._component_hole_index = ComponentHoleIndex()
@@ -3512,6 +3519,97 @@ class RoutingGrid:
                 if cpp_grid is not None:
                     cpp_grid._impl.mark_blocked(int(gx), int(gy), int(layer_idx), 0, False, False)
             return blocked_count
+
+    def rule_area_trace_blocked(self, gx: int, gy: int, layer: int, net: int, radius: int) -> bool:
+        """``True`` when a trace of ``net`` at ``(gx, gy)`` would enter a
+        net-filtered track-blocking keepout rule area (Issue #6008).
+
+        Only areas carrying a ``spatial_keepouts`` filter are consulted: an
+        all-nets track area is already static net-0 cells in the occupancy
+        planes.  ``radius`` is the caller's trace kernel radius in cells.
+        Mirrors ``Grid3D::rule_area_trace_blocked``.
+        """
+        areas = self._rule_area_keepouts
+        if not areas:
+            return False
+        for area in areas:
+            if not area.blocks_tracks or area.static_tracks or layer not in area.layers:
+                continue
+            if area.applies_to(net) and area.hits_disc(gx, gy, radius):
+                return True
+        return False
+
+    def rule_area_trace_bitmap(self, net: int, radius: int) -> np.ndarray | None:
+        """``(layers, rows, cols)`` bitmap of the cells where a trace of
+        ``net`` would enter a net-filtered track keepout (Issue #6008).
+
+        The bitmap form of :meth:`rule_area_trace_blocked` for the pure-Python
+        A*'s ``expanded_blocked`` hot-loop gate (#2430): each applicable
+        area's cells dilated by the Euclidean disc of ``radius`` cells.
+        ``radius=0`` gives the area cells themselves.  ``None`` when no such
+        area applies to ``net``.
+        """
+        areas = [
+            a
+            for a in self._rule_area_keepouts or ()
+            if a.blocks_tracks and not a.static_tracks and a.applies_to(net)
+        ]
+        if not areas:
+            return None
+        out = np.zeros((self.num_layers, self.rows, self.cols), dtype=bool)
+        r = max(0, int(radius))
+        offsets = [
+            (dx, dy)
+            for dy in range(-r, r + 1)
+            for dx in range(-r, r + 1)
+            if dx * dx + dy * dy <= r * r
+        ]
+        for area in areas:
+            h, w = area.mask.shape
+            plane = np.zeros((self.rows, self.cols), dtype=bool)
+            for dx, dy in offsets:
+                x0, y0 = area.gx0 + dx, area.gy0 + dy
+                cx0, cy0 = max(x0, 0), max(y0, 0)
+                cx1, cy1 = min(x0 + w, self.cols), min(y0 + h, self.rows)
+                if cx0 >= cx1 or cy0 >= cy1:
+                    continue
+                plane[cy0:cy1, cx0:cx1] |= area.mask[cy0 - y0 : cy1 - y0, cx0 - x0 : cx1 - x0]
+            for layer in area.layers:
+                out[layer] |= plane
+        return out
+
+    def rule_area_via_blocked(self, gx: int, gy: int, net: int, radius: int) -> bool:
+        """``True`` when a through-via of ``net`` at ``(gx, gy)`` would enter a
+        via-blocking keepout rule area (Issue #6008).
+
+        Layer-agnostic, like the lattice ``LatticeKeepoutMask.via_blocked``: a
+        through-via spans the whole stack, so an area on any copper layer
+        intersects its barrel.  ``radius`` is the caller's via kernel radius
+        in cells.  Mirrors ``Grid3D::rule_area_via_blocked``.
+        """
+        areas = self._rule_area_keepouts
+        if not areas:
+            return False
+        for area in areas:
+            if area.blocks_vias and area.applies_to(net) and area.hits_disc(gx, gy, radius):
+                return True
+        return False
+
+    def rule_area_at(self, layer: int, gx: int, gy: int, *, tracks: bool = True) -> Any | None:
+        """The keepout rule area covering cell ``(gx, gy)`` on ``layer``.
+
+        Used by diagnostics (the unrouted-cause classifier) to name the rule
+        area behind a blocked cell.  ``tracks=True`` matches track-blocking
+        areas on ``layer``; ``tracks=False`` matches via-blocking areas.
+        """
+        for area in self._rule_area_keepouts or ():
+            if tracks and not (area.blocks_tracks and layer in area.layers):
+                continue
+            if not tracks and not area.blocks_vias:
+                continue
+            if area.contains(gx, gy):
+                return area
+        return None
 
     def reopen_stub_terminal(self, x: float, y: float, layer: Layer, net: int) -> tuple[int, int]:
         """Carve a bare boundary stub endpoint open as a same-net A* target.

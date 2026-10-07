@@ -378,6 +378,10 @@ class ParallelRouter:
             # Copy pads to new grid
             for pad in self.router.pads.values():
                 self.router.grid.add_pad(pad)
+            # Issue #6008: replay the keepout rule areas on the new grid.
+            install_areas = getattr(self.router, "_install_grid_rule_area_keepouts", None)
+            if install_areas is not None:
+                install_areas()
 
         # Find independent groups
         clearance = self.router.rules.trace_clearance * 2

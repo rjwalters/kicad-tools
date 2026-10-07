@@ -276,7 +276,11 @@ namespace router {
 // / ``CenterlineEndpoint`` / ``CenterlineRouteResult`` types and the
 // ``dubins_path_length`` functions.  A v45 .so lacks them and the pose rescue
 // would raise ``AttributeError``, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 46;
+// v47 (Issue #6008): ``Grid3D.add_rule_area_keepout`` /
+// ``clear_rule_area_keepouts`` / ``rule_area_*_blocked`` -- keepout rule areas
+// the grid engine now enforces.  A v46 .so would route straight through
+// via-blocking and net-filtered areas, so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 47;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

@@ -15,8 +15,9 @@ sidecar.  Assertions:
 3. a ``spatial_keepouts`` entry naming an unknown net class fails loud
    (exit 1) before any routing work;
 4. a structurally malformed ``spatial_keepouts`` block fails at preload;
-5. a non-lattice engine warns (once, stderr) when the board declares
-   track/via-blocking rule areas it will not honor.
+5. the mesh engine warns (once, stderr) when the board declares
+   track/via-blocking rule areas it will not honor (the grid engine honors
+   them since #6008).
 
 Boards are fully synthetic S-expression strings (the
 ``test_route_pairwise_gate_4588.py`` approach) and deliberately NOT at sheet
@@ -373,11 +374,13 @@ def test_malformed_spatial_keepouts_block_fails_at_preload(tmp_path: Path, capsy
 
 
 def test_non_lattice_engine_warns_about_unhonored_rule_areas(tmp_path: Path, capsys) -> None:
+    # Issue #6008: the grid engine now honors rule areas too, so only the
+    # mesh engine is left to warn about.
     pcb = tmp_path / "two_domain.kicad_pcb"
     pcb.write_text(_board(_two_domain_guards()))
     out = tmp_path / "routed.kicad_pcb"
 
-    rc = route_main(_route_args(pcb, out, engine="grid"))
+    rc = route_main(_route_args(pcb, out, engine="mesh"))
     captured = capsys.readouterr()
     assert rc == 0, captured.out
     assert "does not honor" in captured.err

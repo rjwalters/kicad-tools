@@ -353,6 +353,9 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
         // Issue #4511: the scalar disc is clear -- consult the cross-domain
         // (HV-isolation) annulus.  No-op unless the grid has an active
         // pairwise matrix that widens beyond ``radius``.
+        // Issue #6008: net-filtered keepout rule areas live outside the planes.
+        if (grid_.has_rule_area_keepouts() &&
+            grid_.rule_area_trace_blocked(x, y, layer, net, radius)) return true;
         return cross_domain_trace_blocked(x, y, layer, net, radius);
     }
 
@@ -428,6 +431,9 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
     }
     // Issue #4511: cross-domain (HV-isolation) annulus check -- see the fast
     // path above.  No-op unless a widening pairwise matrix is installed.
+    // Issue #6008: net-filtered keepout rule areas live outside the planes.
+    if (grid_.has_rule_area_keepouts() &&
+        grid_.rule_area_trace_blocked(x, y, layer, net, radius)) return true;
     return cross_domain_trace_blocked(x, y, layer, net, radius);
 }
 
@@ -495,6 +501,9 @@ bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
         // (HV) copper sits in the widened annulus beyond ``radius`` -- so a
         // relaxed exit step cannot hug foreign HV metal below the pairwise
         // requirement.  No-op unless a widening pairwise matrix is installed.
+        // Issue #6008: net-filtered keepout rule areas live outside the planes.
+        if (grid_.has_rule_area_keepouts() &&
+            grid_.rule_area_trace_blocked(x, y, layer, net, radius)) return true;
         return cross_domain_trace_blocked(x, y, layer, net, radius);
     }
 
@@ -520,6 +529,9 @@ bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
         }
     }
     // Issue #4511: cross-domain annulus tail (see the fast path above).
+    // Issue #6008: net-filtered keepout rule areas live outside the planes.
+    if (grid_.has_rule_area_keepouts() &&
+        grid_.rule_area_trace_blocked(x, y, layer, net, radius)) return true;
     return cross_domain_trace_blocked(x, y, layer, net, radius);
 }
 
@@ -1070,6 +1082,9 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
     // consult the cross-domain (HV-isolation) annulus against foreign copper
     // cells the scalar disc could not reach.  No-op unless a widening pairwise
     // matrix is installed.
+    // Issue #6008: via-blocking keepout rule areas (layer-agnostic).
+    if (grid_.has_rule_area_keepouts() &&
+        grid_.rule_area_via_blocked(x, y, net, radius)) return true;
     return cross_domain_via_blocked(x, y, net);
 }
 

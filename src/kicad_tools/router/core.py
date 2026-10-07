@@ -945,6 +945,13 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     # reach this worker via the "obstacles" key of the serialized config.
     install_serialized_obstacles(router, config)
 
+    # Issue #6008: keepout rule areas resolved by the parent.  Installed by
+    # ``_prepare_routing`` at the start of the worker's ``route_all_*`` call;
+    # an absent key (older payload) leaves the worker without a source and
+    # therefore with no areas, as before.
+    if "rule_area_keepouts" in config:
+        router._rule_area_keepouts_payload = list(config["rule_area_keepouts"] or ())
+
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
         net_order = base_order.copy()
@@ -1463,6 +1470,10 @@ class Autorouter:
             frozenset(),
             frozenset(),
         )
+        # Issue #6008: resolved rule areas handed to a parallel worker by its
+        # parent (``_serialize_for_parallel``); ``None`` = resolve from the
+        # source board (see ``_rule_area_keepout_areas``).
+        self._rule_area_keepouts_payload: list[Any] | None = None
         # Issue #2610: stored so _create_grid_and_routers can pass it to
         # create_hybrid_router on the initial construction.
         self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
@@ -3730,6 +3741,17 @@ class Autorouter:
         if pcb_path is None:
             return self._keepout_rule_areas_cache
 
+        # Issue #6008: the grid engine now resolves rule areas on every
+        # route, so skip the full board parse when the file cannot contain
+        # one (a rule area is a zone carrying a ``(keepout`` block).
+        try:
+            with open(pcb_path, encoding="utf-8", errors="replace") as fh:
+                if "(keepout" not in fh.read():
+                    self._keepout_rule_area_zone_names = (frozenset(), frozenset())
+                    return self._keepout_rule_areas_cache
+        except OSError:
+            pass  # fall through: the parse below reports the problem
+
         try:
             from kicad_tools.schema.pcb import PCB as _SchemaPCB
 
@@ -3931,6 +3953,45 @@ class Autorouter:
         mask = LatticeKeepoutMask(areas)
         self._lattice_keepouts_cache = mask if mask else None
         return self._lattice_keepouts_cache
+
+    def _rule_area_keepout_areas(self) -> tuple[Any, ...]:
+        """Resolved keepout rule areas, with ``spatial_keepouts`` filters.
+
+        Issue #6008: the ONE source both engines read -- the lattice mask's
+        ``KeepoutArea`` list from :meth:`_lattice_keepout_projection` (itself
+        the shared #5575 parse).  A parallel worker has no source board, so
+        its parent hands the resolved list over in the serialized config
+        (``_rule_area_keepouts_payload``), which wins when present.
+        """
+        payload = getattr(self, "_rule_area_keepouts_payload", None)
+        if payload is not None:
+            return tuple(payload)
+        mask = self._lattice_keepout_projection()
+        return tuple(mask.areas) if mask else ()
+
+    def _install_grid_rule_area_keepouts(self, grid: Any = None) -> int:
+        """Enforce board-file keepout rule areas on a routing grid (#6008).
+
+        Idempotent per grid object, so every place that builds or rebuilds a
+        grid can call it: the ``route_all_*`` preamble (:meth:`_prepare_routing`),
+        the Monte Carlo / evolutionary trial reset and the multi-resolution
+        fine grid.  Runs lazily rather than at board load because the CLI
+        attaches the ``spatial_keepouts`` filters after the router exists.
+
+        Returns:
+            Number of rule areas registered on the grid.
+        """
+        target = self.grid if grid is None else grid
+        if target is None or getattr(target, "_rule_area_keepouts", None) is not None:
+            return len(getattr(target, "_rule_area_keepouts", None) or ())
+        areas = self._rule_area_keepout_areas()
+        if not areas:
+            target._rule_area_keepouts = []
+            return 0
+        from .rule_area_grid import install_rule_area_keepouts
+
+        registered = install_rule_area_keepouts(target, areas)
+        return len(registered)
 
     @staticmethod
     def _snap_lattice_region(
@@ -6352,6 +6413,11 @@ class Autorouter:
         #    ``dataclasses.replace`` builds on the impedance-resolved
         #    class instead of clobbering the resolver's output.
         self._resolve_impedance_for_net_classes()
+
+        # Issue #6008: enforce the board's keepout rule areas on the routing
+        # grid (static cells + net-aware masks, mirrored to the C++ grid)
+        # before the first search.  Idempotent per grid.
+        self._install_grid_rule_area_keepouts()
 
         # 1. Build name -> id reverse map from self.net_names.  First
         #    occurrence wins (matches diffpair_detection._name_to_id_map
@@ -10622,6 +10688,9 @@ class Autorouter:
                 # refinement consumer could re-decide cells it cannot measure.
                 if old_grid._raster_only_blocked is not None:
                     self.grid._raster_only_blocked = old_grid._raster_only_blocked.copy()
+                # Issue #6008: the net-aware keepout rule areas (the static
+                # ones rode across with ``_blocked`` / ``_net`` above).
+                self.grid._rule_area_keepouts = old_grid._rule_area_keepouts
                 self.grid._pads = old_grid._pads.copy()
                 self.grid._component_hole_index = old_grid._component_hole_index.refreshed()
                 # Issue #4794: the occupancy planes were replaced wholesale
@@ -16346,6 +16415,9 @@ class Autorouter:
         if self.placement_disposition is not None:
             for route in self.existing_routes:
                 self.grid.mark_route(route)
+        # Issue #6008: the fresh grid has no keepout rule areas yet -- replay
+        # them, after the pads so pad metal keeps its own-net ownership.
+        self._install_grid_rule_area_keepouts()
         self.routes = []
 
     def _shuffle_within_tiers(self, net_order: list[int], promotion_rate: float = 0.0) -> list[int]:
@@ -16470,6 +16542,11 @@ class Autorouter:
             # route straight through obstacles the parent had blocked.
             # Plain dicts (layer as its KiCad name) keep the payload
             # transport-safe and isolated from later parent-side edits.
+            # Issue #6008: resolved keepout rule areas (frozen dataclasses,
+            # picklable).  A worker has no source board to re-parse, so it
+            # installs exactly the areas -- and ``spatial_keepouts`` filters --
+            # the parent resolved.
+            "rule_area_keepouts": list(self._rule_area_keepout_areas()),
             "obstacles": [
                 {
                     "x": obs.x,
@@ -20819,6 +20896,10 @@ class Autorouter:
             if pad.net not in failed_net_ids:
                 if bbox_min_x <= pad.x <= bbox_max_x and bbox_min_y <= pad.y <= bbox_max_y:
                     fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.component_key))
+
+        # Issue #6008: keepout rule areas on the fine grid too (after the pads,
+        # so pad metal keeps its own-net ownership).
+        self._install_grid_rule_area_keepouts(fine_grid)
 
         # Create a fine-grid router
         fine_router = create_hybrid_router(

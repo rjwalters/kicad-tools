@@ -17,6 +17,7 @@
 #include <set>
 #include <tuple>
 #include <optional>
+#include <cstdint>
 
 namespace router {
 
@@ -263,6 +264,87 @@ public:
                  float clearance_override,
                  bool is_plane_net = false, float rotation = 0.0f,
                  bool is_circular = false);
+
+    // Issue #6008: board-file keepout rule areas the occupancy planes cannot
+    // hold -- net-filtered track rules (``spatial_keepouts``) and every via
+    // rule.  All-nets track rules arrive as ordinary static net-0 cells via
+    // ``mark_blocked``.  Mirrors ``RoutingGrid.rule_area_trace_blocked`` /
+    // ``rule_area_via_blocked`` (``router/rule_area_grid.py``).
+    struct RuleAreaKeepout {
+        bool blocks_tracks = false;
+        bool blocks_vias = false;
+        std::vector<char> layer_on;     // per grid layer
+        int x0 = 0, y0 = 0, w = 0, h = 0;
+        std::vector<char> mask;         // h * w, row-major
+        bool has_only = false;
+        std::set<int> only;
+        std::set<int> exempt;
+
+        bool applies_to(int net) const {
+            if (has_only && only.find(net) == only.end()) return false;
+            return exempt.find(net) == exempt.end();
+        }
+        bool hits_disc(int x, int y, int radius) const {
+            const int r = radius < 0 ? 0 : radius;
+            const int lx = std::max(x - r, x0), hx = std::min(x + r, x0 + w - 1);
+            const int ly = std::max(y - r, y0), hy = std::min(y + r, y0 + h - 1);
+            if (lx > hx || ly > hy) return false;
+            const int r2 = r * r;
+            for (int cy = ly; cy <= hy; ++cy) {
+                const int dy = cy - y;
+                const char* row = &mask[static_cast<size_t>(cy - y0) * w];
+                for (int cx = lx; cx <= hx; ++cx) {
+                    const int dx = cx - x;
+                    if (dx * dx + dy * dy > r2) continue;
+                    if (row[cx - x0]) return true;
+                }
+            }
+            return false;
+        }
+    };
+    void clear_rule_area_keepouts() { rule_areas_.clear(); }
+    void add_rule_area_keepout(bool blocks_tracks, bool blocks_vias,
+                               const std::vector<int>& layers,
+                               int x0, int y0, int w, int h,
+                               const std::vector<int64_t>& cells,
+                               bool has_only,
+                               const std::vector<int>& only,
+                               const std::vector<int>& exempt) {
+        RuleAreaKeepout area;
+        area.blocks_tracks = blocks_tracks;
+        area.blocks_vias = blocks_vias;
+        area.layer_on.assign(static_cast<size_t>(layers_), 0);
+        for (int layer : layers)
+            if (layer >= 0 && layer < layers_) area.layer_on[layer] = 1;
+        area.x0 = x0; area.y0 = y0;
+        area.w = std::max(w, 0); area.h = std::max(h, 0);
+        area.mask.assign(static_cast<size_t>(area.w) * area.h, 0);
+        for (int64_t idx : cells)
+            if (idx >= 0 && static_cast<size_t>(idx) < area.mask.size()) area.mask[idx] = 1;
+        area.has_only = has_only;
+        area.only.insert(only.begin(), only.end());
+        area.exempt.insert(exempt.begin(), exempt.end());
+        rule_areas_.push_back(std::move(area));
+    }
+    size_t rule_area_keepout_count() const { return rule_areas_.size(); }
+    bool has_rule_area_keepouts() const { return !rule_areas_.empty(); }
+    bool rule_area_trace_blocked(int x, int y, int layer, int net, int radius) const {
+        for (const auto& area : rule_areas_) {
+            if (!area.blocks_tracks) continue;
+            if (layer < 0 || layer >= static_cast<int>(area.layer_on.size()) ||
+                !area.layer_on[layer]) continue;
+            if (area.applies_to(net) && area.hits_disc(x, y, radius)) return true;
+        }
+        return false;
+    }
+    // Layer-agnostic: a through-via spans the whole stack (lattice parity).
+    bool rule_area_via_blocked(int x, int y, int net, int radius) const {
+        for (const auto& area : rule_areas_) {
+            if (!area.blocks_vias) continue;
+            if (area.applies_to(net) && area.hits_disc(x, y, radius)) return true;
+        }
+        return false;
+    }
 
     void set_component_holes_known(bool known) { component_holes_known_ = known; }
     void clear_component_holes();
@@ -526,6 +608,7 @@ private:
     }
 
     std::vector<GridCell> cells_;  // Flat array for cache efficiency
+    std::vector<RuleAreaKeepout> rule_areas_;  // Issue #6008
     // Issue #4071: grid-wide fast-path flag -- true once any cell has a
     // non-empty reservation owner set.  ``mark_via`` and the A* cost loop
     // skip the per-cell reservation read entirely when this is false, so
