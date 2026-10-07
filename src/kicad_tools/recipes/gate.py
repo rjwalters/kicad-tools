@@ -47,7 +47,12 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.drc.geometric import GeometricDRCResult, run_geometric_drc
+from kicad_tools.drc.geometric import (
+    GeometricDRCResult,
+    SavedFillCheck,
+    check_saved_fill,
+    run_geometric_drc,
+)
 
 __all__ = [
     "DEFAULT_ADVISORY_DRC_TYPES",
@@ -107,6 +112,12 @@ class PipelineGateResult:
             board's ``kct check --net-class-map`` result for diffpair /
             match-group rules kicad-cli cannot express), or ``None`` when
             not provided.
+        saved_fill_ok: Issue #6078 saved-fill leg.  ``True`` when DRC on
+            the fill SAVED in the board (``kicad-cli pcb drc`` without
+            ``--refill-zones``, the copper Gerber export plots) finds no
+            more unconnected items, ``isolated_copper`` or ``copper_sliver``
+            than a fresh refill.  ``False`` means a fragmented saved fill;
+            it fails ``drc_ok``.  ``None`` when the leg was not evaluated.
         reasons: human-readable explanations for every failing / skipped
             leg, suitable for printing under the SUMMARY.
     """
@@ -121,6 +132,7 @@ class PipelineGateResult:
     drc_blocking: dict[str, int] = field(default_factory=dict)
     drc_top_types: list[tuple[str, int]] = field(default_factory=list)
     supplemental_drc_ok: bool | None = None
+    saved_fill_ok: bool | None = None
     reasons: list[str] = field(default_factory=list)
 
     @property
@@ -187,7 +199,9 @@ def evaluate_pipeline_gate(
     supplemental_reason: str = "",
     require_drc: bool = True,
     drc_timeout: int = 180,
+    check_saved_fill_leg: bool = True,
     _drc_result: GeometricDRCResult | None = None,
+    _saved_fill_check: SavedFillCheck | None = None,
 ) -> PipelineGateResult:
     """Evaluate a board recipe's success gate into one structured verdict.
 
@@ -235,8 +249,16 @@ def evaluate_pipeline_gate(
             check.  Set ``False`` only for environments that legitimately
             lack kicad-cli and accept an unverified DRC leg.
         drc_timeout: Seconds before the kicad-cli DRC run is abandoned.
+        check_saved_fill_leg: Issue #6078.  Also run kicad-cli DRC on the
+            fill SAVED in the board, without ``--refill-zones``, and fail
+            ``drc_ok`` when it is less connected than the refilled run.  The
+            refill-only leg cannot see a saved pour that was split after
+            KiCad filled it, yet Gerber export plots exactly that copper.
         _drc_result: Test seam -- inject a pre-built
-            :class:`GeometricDRCResult` instead of shelling kicad-cli.
+            :class:`GeometricDRCResult` instead of shelling kicad-cli.  When
+            set without ``_saved_fill_check``, the saved-fill leg is skipped
+            so an injected verdict never shells kicad-cli.
+        _saved_fill_check: Test seam for the saved-fill leg.
 
     Returns:
         A :class:`PipelineGateResult` whose :meth:`~PipelineGateResult.passed`
@@ -298,7 +320,37 @@ def evaluate_pipeline_gate(
             detail = ", ".join(f"{t}={c}" for t, c in sorted(drc_blocking.items()))
             reasons.append(f"geometric DRC blocking errors (kicad-cli --refill-zones): {detail}")
 
-    drc_ok = geometric_ok and (supplemental_drc_ok is not False)
+    # ---- Saved-fill leg (Issue #6078) ------------------------------------
+    # The leg above refills before checking, so it judges KiCad's fresh fill.
+    # Gerber export plots the fill saved in the board instead.  Check that
+    # saved copper too, and fail when it is split where a refill is not.
+    saved_fill_ok: bool | None = None
+    saved_check = _saved_fill_check
+    if saved_check is None and check_saved_fill_leg and drc.ran and _drc_result is None:
+        saved_check = check_saved_fill(routed_pcb, refilled=drc, timeout=drc_timeout)
+    if saved_check is not None:
+        if not saved_check.ran:
+            saved_fill_ok = not require_drc
+            reasons.append(
+                f"saved-fill DRC did not run ({saved_check.note or 'no report'}); "
+                + (
+                    "cannot certify the saved copper (require_drc=True)"
+                    if require_drc
+                    else "saved-fill leg unverified (require_drc=False)"
+                )
+            )
+        elif saved_check.regressions:
+            saved_fill_ok = False
+            reasons.append(
+                "saved zone fill is split where a refill is not "
+                "(kicad-cli pcb drc without --refill-zones): "
+                + "; ".join(saved_check.regressions)
+                + ". Gerber export plots this saved copper; re-run `kct zones fill`."
+            )
+        else:
+            saved_fill_ok = True
+
+    drc_ok = geometric_ok and (saved_fill_ok is not False) and (supplemental_drc_ok is not False)
     if supplemental_drc_ok is False:
         reasons.append(
             supplemental_reason
@@ -320,5 +372,6 @@ def evaluate_pipeline_gate(
         drc_blocking=drc_blocking,
         drc_top_types=drc.top_types(),
         supplemental_drc_ok=supplemental_drc_ok,
+        saved_fill_ok=saved_fill_ok,
         reasons=reasons,
     )

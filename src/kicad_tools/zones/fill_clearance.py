@@ -319,70 +319,81 @@ def _strip_close(coords: list[tuple[float, float]]) -> list[tuple[float, float]]
     return out
 
 
-# Width of the zero-area "slit" used to vent a hole out to the polygon
-# exterior so the result is simply-connected (KiCad ``filled_polygon``
-# rings cannot carry holes).  1e-4 mm is far below fab resolution and the
-# DRC's tolerance, so it changes neither copper nor clearance, but it is
-# wide enough to survive coordinate rounding to 6 decimals.
-_SLIT_WIDTH_MM = 1e-4
-
-# Area tolerance (mm^2) for the rewrite-safety gates.  Slits and 6-decimal
-# coordinate rounding perturb areas by ~1e-6 mm^2; anything below this is
+# Area tolerance (mm^2) for the rewrite-safety gates.  6-decimal coordinate
+# rounding perturbs areas by ~1e-6 mm^2; anything below this is
 # numerical noise, not real copper.
 _AREA_EPS = 1e-4
 
 
-def _vent_holes(poly):
-    """Return a list of hole-free shapely Polygons equivalent to ``poly``.
+def _fracture_polygon(poly) -> list[tuple[float, float]]:
+    """Encode a holed Polygon as ONE ring with zero-width bridges (Issue #6078).
 
-    A KiCad ``filled_polygon`` ring cannot represent interior holes
-    directly, and hand-stitched seams are fragile (a seam between distant
-    vertices can cross copper and re-add a spurious lobe).  Instead, every
-    hole is vented out to the polygon exterior with a hair-thin slit so the
-    result is simply-connected.  All slits are built up front (one per
-    interior) and subtracted in a single pass to avoid the re-scan
-    instability of an iterative approach.  Each slit's endpoints are nudged
-    slightly past the hole and exterior boundaries so the cut reliably
-    separates.
+    This is KiCad's own ``filled_polygon`` encoding ("fracture"): every hole
+    is spliced into the outline by a zero-width bridge, so the ring walks
+    out along the bridge, around the hole, and back along the same bridge.
+    No copper is removed, and the result stays a single connected region.
 
-    Returns the list of resulting hole-free Polygons.
+    It replaces the former ``_vent_holes``, which cut a hair-thin slit from
+    each hole to its *nearest exterior point*.  On a pour with many holes
+    those slits crossed other holes and each other, so board 03's 3987 mm2
+    F.Cu GND region was cut into 131 pieces.  The island filter then dropped
+    about 1550 mm2 of connected copper and left a 16-piece pour.
+
+    Holes are bridged in order of their leftmost vertex, each by a horizontal
+    ray cast leftward to the nearest edge of the ring built so far (the
+    exterior plus the holes already spliced in).  Every hole that is not yet
+    spliced lies wholly to the right of the current hole's leftmost vertex,
+    so the ray cannot cross one, and two bridges never cross.  This is the
+    ordering KiCad's ``SHAPE_POLY_SET::Fracture`` uses.  The function is pure
+    and deterministic: the same polygon always gives the same ring.
+
+    Readers rebuild the holed polygon with ``make_valid``, as they already
+    do for KiCad's own fractured rings (see :func:`_reconstruct_fill`).
     """
-    from shapely.geometry import LineString
-    from shapely.ops import nearest_points  # type: ignore[import-untyped]
+    from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
 
-    polys = _iter_polygons(poly)
-    if not any(p.interiors for p in polys):
-        return [p for p in polys if not p.is_empty and p.area > 0]
+    poly = orient(poly, sign=1.0)  # exterior CCW, holes CW
+    ring = _strip_close(list(poly.exterior.coords))
+    holes = [_strip_close(list(interior.coords)) for interior in poly.interiors]
+    holes = [h for h in holes if len(h) >= 3]
 
-    slits = []
-    for part in polys:
-        for interior in part.interiors:
-            p_hole, p_ext = nearest_points(LineString(interior.coords), part.exterior)
-            dx = p_ext.x - p_hole.x
-            dy = p_ext.y - p_hole.y
-            length = (dx * dx + dy * dy) ** 0.5
-            if length < 1e-12:
-                # Hole boundary touches the exterior already; a tiny stub
-                # still vents it.
-                ux, uy = 0.0, 1.0
+    def _leftmost(points: list[tuple[float, float]]) -> int:
+        return min(range(len(points)), key=lambda i: (points[i][0], points[i][1]))
+
+    holes.sort(key=lambda h: (h[_leftmost(h)][0], h[_leftmost(h)][1]))
+
+    for hole in holes:
+        start = _leftmost(hole)
+        vx, vy = hole[start]
+        best_x: float | None = None
+        best_i = -1
+        n = len(ring)
+        for i in range(n):
+            ax, ay = ring[i]
+            bx, by = ring[(i + 1) % n]
+            if ay == by:
+                if ay != vy:
+                    continue
+                x = max(ax, bx) if max(ax, bx) <= vx else min(ax, bx)
+                if x > vx:
+                    continue
             else:
-                ux, uy = dx / length, dy / length
-            pad = _SLIT_WIDTH_MM * 2.0
-            seg = LineString(
-                [
-                    (p_hole.x - ux * pad, p_hole.y - uy * pad),
-                    (p_ext.x + ux * pad, p_ext.y + uy * pad),
-                ]
-            )
-            slits.append(seg.buffer(_SLIT_WIDTH_MM, cap_style=2))
-
-    if not slits:
-        return [p for p in polys if not p.is_empty and p.area > 0]
-
-    import shapely  # type: ignore[import-untyped]
-
-    vented = poly.difference(shapely.unary_union(slits))
-    return [p for p in _iter_polygons(vented) if not p.is_empty and p.area > 0]
+                if not (min(ay, by) <= vy <= max(ay, by)):
+                    continue
+                x = ax + (vy - ay) * (bx - ax) / (by - ay)
+                if x > vx:
+                    continue
+            if best_x is None or x > best_x:
+                best_x, best_i = x, i
+        if best_x is None:
+            # Degenerate geometry (no edge to the left); the caller's
+            # reconstruction gate rejects a ring that loses the hole.
+            continue
+        bridge = (best_x, vy)
+        cycle = hole[start:] + hole[:start] + [hole[start]]
+        insert = [bridge, *cycle, bridge]
+        ring = ring[: best_i + 1] + insert + ring[best_i + 1 :]
+    return ring
 
 
 def _iter_polygons(geom):
@@ -739,7 +750,7 @@ def force_solid_on_isolated_island_pads(doc: SExp, zone_uuids: set[str]) -> int:
     if not zone_uuids:
         return 0
     require_shapely("isolated-copper island remediation")
-    import shapely
+    import shapely  # type: ignore[import-untyped]
     from shapely.geometry import Polygon
 
     name_map = _build_net_name_map(doc)
@@ -1032,34 +1043,45 @@ def apply_foreign_pad_clearance(
                 continue
 
             # The difference keeps the original thermal/pad holes AND adds
-            # the new foreign-net antipads as holes.  KiCad fill rings can't
-            # carry holes, so vent every hole out to the exterior with a
-            # hair-thin slit, producing simply-connected polygons; emit one
-            # filled_polygon per resulting region, all on the original layer.
-            rings: list[list[tuple[float, float]]] = []
-            for part in parts:
-                for vented in _vent_holes(part):
-                    rings.append(_strip_close(list(vented.exterior.coords)))
-            rings = [r for r in rings if len(r) >= 3]
+            # the new foreign-net antipads as holes.  Encode each connected
+            # region as ONE KiCad-style fractured ring, with zero-width bridges
+            # to its holes (Issue #6078).  Slit-venting each hole to the
+            # exterior cut connected copper apart; fracturing removes no copper.
+            pairs = [(part, _fracture_polygon(part)) for part in parts]
+            rings: list[list[tuple[float, float]]] = [r for _, r in pairs if len(r) >= 3]
             if not rings:
                 continue
 
-            # Island removal (matches KiCad ``island_removal_mode 0``).
-            # Subtracting the foreign antipads — and venting the resulting
-            # holes out to the exterior — can shed thin sliver lobes that are
-            # no longer electrically tied to the pour.  Emitting them produces
+            # Island removal (matches KiCad ``island_removal_mode 0``).  An
+            # antipad can cut a lobe off the pour.  Emitting that lobe produces
             # ``isolated_copper`` warnings (the board-06 split-fill regression
-            # class).  Keep only rings that overlap a same-net pad/via/track so
-            # the rewritten pour stays a single connected copper component.
+            # class), so keep only rings that overlap a same-net pad/via/track.
+            anchors = _collect_same_net_anchors(doc, shapely, name_map, zone_net, fill_layer)
             if len(rings) > 1:
-                anchors = _collect_same_net_anchors(doc, shapely, name_map, zone_net, fill_layer)
                 rings = _keep_connected_rings(rings, anchors, Polygon)
+
+            # Connectivity gate (Issue #6078): a clearance-margin carve must
+            # never split copper that KiCad's fill had joined.  If an antipad
+            # cuts a neck and leaves more anchored regions than the original
+            # fill had, the saved pour would be split into separate pieces.
+            # KiCad reports those pieces as unconnected items without
+            # ``--refill-zones``, and the fab receives them as split copper.
+            # Keep KiCad's connected fill instead: the fill is always KiCad's
+            # own, which keeps KiCad's clearance, and ``--refill-zones`` DRC
+            # accepts it.  (Do not try to exempt "real shorts" by testing the
+            # fill against the obstacles: pads are modelled by their bounding
+            # box, and KiCad's legal fill sits inside the corners of every
+            # round or rotated pad's box, so that test fires on every pour.)
+            if anchors and _anchored_part_count(rings, anchors, make_valid) > _anchored_part_count(
+                [ring], anchors, make_valid
+            ):
+                continue
 
             # Safety gate: reconstruct exactly what the DRC will read from
             # the rewritten rings (via the same _repair_fill_polygon path)
             # and accept the rewrite ONLY when it (a) removes the foreign
             # overlap and (b) adds no copper the original fill did not have
-            # (no spurious lobe from a degenerate vent).  If the re-encode
+            # (no spurious lobe from a degenerate encoding).  If the re-encode
             # is not faithful, leave the original fill untouched so the
             # correction can only ever improve a board, never regress it.
             recon = _reconstruct_fill(rings, make_valid)
@@ -1069,6 +1091,12 @@ def apply_foreign_pad_clearance(
                 continue  # still overlaps a foreign antipad -> reject
             if recon.difference(fill_poly).area > _AREA_EPS:
                 continue  # gained copper outside the original -> reject
+            # Lost copper beyond the antipads and the islands we dropped on
+            # purpose -> the encoding was not faithful (Issue #6078).
+            kept_ids = {id(r) for r in rings}
+            expected = shapely.unary_union([p for p, r in pairs if id(r) in kept_ids])
+            if expected.difference(recon).area > _AREA_EPS:
+                continue
 
             _replace_pts(filled, rings[0])
             modified += 1
@@ -1082,6 +1110,19 @@ def apply_foreign_pad_clearance(
                 modified += 1
 
     return modified
+
+
+def _anchored_part_count(rings, anchors: list, make_valid_fn) -> int:
+    """Count the connected copper regions of ``rings`` that touch an anchor.
+
+    Used by the Issue #6078 connectivity gate.  Rings are rebuilt the way
+    the DRC reads them (``make_valid`` for fractured rings) and unioned, so
+    two rings that touch count as one region.
+    """
+    recon = _reconstruct_fill(rings, make_valid_fn)
+    if recon is None:
+        return 0
+    return sum(1 for part in _iter_polygons(recon) if any(part.intersects(a) for a in anchors))
 
 
 def _reconstruct_fill(rings, make_valid_fn):

@@ -53,6 +53,18 @@ def _pcb_has_unfilled_zones(pcb_path: Path) -> bool:
     return "filled_polygon" not in text
 
 
+def _pcb_has_filled_zones(pcb_path: Path) -> bool:
+    """Return True if the PCB carries saved zone fill copper (Issue #6078).
+
+    Cheap text scan, as in :func:`_pcb_has_unfilled_zones`.  Boards with no
+    ``filled_polygon`` have no saved fill to verify, so no kicad-cli DRC run.
+    """
+    try:
+        return "(filled_polygon" in pcb_path.read_text()
+    except OSError:
+        return False
+
+
 # Board-level copper layer definitions inside the top-level ``(layers ...)``
 # table look like ``(0 "F.Cu" signal)`` / ``(4 "In1.Cu" signal)`` -- an
 # integer ordinal, a quoted layer name, then a layer type token.  The integer
@@ -147,6 +159,13 @@ class GerberConfig:
     # Post-zip cleanup: when True (default), remove individual gerber and
     # drill files after creating the zip archive so only the zip remains.
     clean_after_zip: bool = True
+
+    # Issue #6078: kicad-cli plots the zone fill SAVED in the board (we do
+    # not pass ``--check-zones``).  Before plotting, check that the saved
+    # copper is no less connected than a fresh fill, and refuse to export a
+    # fill that is split where a refill is not.  Set False only to export a
+    # deliberately fixed fill.
+    verify_zone_fill: bool = True
 
 
 @dataclass
@@ -470,10 +489,39 @@ class GerberExporter:
                         fill_result.stderr or "(no stderr)",
                     )
 
+            if config.verify_zone_fill and _pcb_has_filled_zones(pcb_for_export):
+                self._verify_saved_fill(pcb_for_export)
             self._export_gerbers_impl(config, output_dir, pcb_for_export)
         finally:
             if tmpdir is not None:
                 tmpdir.cleanup()
+
+    def _verify_saved_fill(self, pcb_path: Path) -> None:
+        """Refuse to plot a saved zone fill that a refill would join (Issue #6078).
+
+        Raises :class:`ExportError` when ``kicad-cli pcb drc`` on the saved
+        fill finds more unconnected items, ``isolated_copper`` or
+        ``copper_sliver`` than the same board after ``--refill-zones``.  A
+        check that cannot run (kicad-cli DRC unavailable) only logs a
+        warning, as the safety-net fill above does.
+        """
+        from kicad_tools.drc.geometric import check_saved_fill
+
+        check = check_saved_fill(pcb_path, kicad_cli=self.kicad_cli)
+        if not check.ran:
+            logger.warning(
+                "Gerber export: saved zone fill not verified (%s)", check.note or "no DRC report"
+            )
+            return
+        if check.regressions:
+            raise ExportError(
+                "Saved zone fill is split where a refill is not; refusing to export Gerbers",
+                context={"pcb": str(self.pcb_path), "saved_fill": "; ".join(check.regressions)},
+                suggestions=[
+                    f"Re-run `kct zones fill {self.pcb_path}` to rewrite the fill, then export again",
+                    "Compare `kicad-cli pcb drc` with and without --refill-zones on the board",
+                ],
+            )
 
     def _export_gerbers_impl(
         self,

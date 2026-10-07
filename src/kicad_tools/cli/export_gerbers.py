@@ -59,6 +59,22 @@ def export_gerbers(pcb_path: Path, output_dir: Path, kicad_cli: Path) -> bool:
     """Export Gerber files using kicad-cli."""
     print(f"Exporting Gerbers from: {pcb_path}")
 
+    # Issue #6078: kicad-cli plots the zone fill SAVED in the board.  Refuse
+    # a saved fill that is split where a refill is not.
+    from kicad_tools.drc.geometric import check_saved_fill
+    from kicad_tools.export.gerber import _pcb_has_filled_zones
+
+    if _pcb_has_filled_zones(pcb_path):
+        check = check_saved_fill(pcb_path, kicad_cli=kicad_cli)
+        if check.regressions:
+            print("Error: saved zone fill is split where a refill is not:")
+            for line in check.regressions:
+                print(f"  {line}")
+            print(f"Re-run `kct zones fill {pcb_path}` and export again.")
+            return False
+        if not check.ran:
+            print(f"Warning: saved zone fill not verified ({check.note or 'no DRC report'})")
+
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
 
