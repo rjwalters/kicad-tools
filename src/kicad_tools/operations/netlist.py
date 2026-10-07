@@ -768,30 +768,16 @@ def build_pin_to_pad_map(
         ``pad_number``.  Missing entries should be treated as identity
         (pin number == pad number).
     """
-    from kicad_tools.schematic.models import Schematic
+    from kicad_tools.lvs.board_lvs import _iter_instance_symbols
 
     sch_path = Path(sch_path)
     pin_pad_map: dict[tuple[str, str], str] = {}
 
-    # Recursively collect all schematic symbols across sheets
-    all_symbols: list = []
-
-    def _collect_symbols(path: Path, visited: set[Path] | None = None) -> None:
-        if visited is None:
-            visited = set()
-        resolved = path.resolve()
-        if resolved in visited or not path.exists():
-            return
-        visited.add(resolved)
-
-        sch = Schematic.load(str(path))
-        all_symbols.extend(sch.symbols)
-
-        # Recurse into sub-sheets
-        for entry in _get_sheet_entries(path):
-            _collect_symbols(path.parent / entry.filename, visited)
-
-    _collect_symbols(sch_path)
+    # Every placed symbol across the hierarchy, under the reference of its
+    # own placement: a sheet file placed twice contributes its symbols once
+    # per placement (``R1`` and ``R11``), resolved from each symbol's
+    # ``(instances ...)`` block (issues #5815 / #6004).
+    all_symbols = [(ref, sym) for ref, sym, _visit in _iter_instance_symbols(sch_path)]
 
     # Build pad lookup for each PCB footprint: ref -> {pad_number: pad}
     pcb_pad_lookup: dict[str, dict[str, object]] = {}
@@ -801,8 +787,7 @@ def build_pin_to_pad_map(
         pcb_pad_lookup[fp.reference] = {pad.number: pad for pad in fp.pads}
 
     # For each schematic symbol, build pin->pad mapping
-    for sym in all_symbols:
-        ref = sym.reference
+    for ref, sym in all_symbols:
         if not ref or ref.startswith("#"):
             continue
         if ref not in pcb_pad_lookup:

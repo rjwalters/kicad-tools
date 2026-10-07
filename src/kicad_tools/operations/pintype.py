@@ -363,42 +363,39 @@ def _read_sheet_geometry(
 
 
 def _iter_schematic_symbols(sch_path: Path):
-    """Yield ``(symbol, placement, no_connect_zone)`` across the hierarchy.
+    """Yield ``(reference, symbol, placement, no_connect_zone)`` across the hierarchy.
+
+    ``reference`` is the designator of this *placement* of the symbol.  The
+    walk is per sheet placement, not per sheet file (issue #6004): a sheet
+    file placed twice yields its symbols twice, each under the reference its
+    ``(instances (project ... (path "/<root>/<sheet-uuid>" (reference ...))))``
+    entry records for that placement (``R1`` under ``MCU_A``, ``R11`` under
+    ``MCU_B``) -- the same resolution board LVS uses (issue #5815).
 
     ``placement`` is the symbol's raw position, rotation and mirror axis
     (``None`` when the sheet has no no-connect flags, so nothing needs it);
     ``no_connect_zone`` is the sheet's :class:`_NoConnectZone` or ``None``.
-
-    A sheet *file* is read once even when it is placed several times; the
-    extra placements' references are not resolved (follow-up to #5985).
+    Both are properties of the sheet *file*, so they are read once per file
+    and shared by its placements.
     """
-    from kicad_tools.operations.netlist import _get_sheet_entries
-    from kicad_tools.schematic.models import Schematic
+    from kicad_tools.lvs.board_lvs import _iter_instance_symbols
 
-    visited: set[Path] = set()
-    stack = [sch_path]
-    while stack:
-        path = stack.pop()
-        resolved = path.resolve()
-        if resolved in visited or not path.exists():
-            continue
-        visited.add(resolved)
-        sch = Schematic.load(str(path))
-        raw: dict[str, tuple[float, float, float]] = {}
-        zone: _NoConnectZone | None = None
-        if sch.no_connects:
-            raw, zone = _read_sheet_geometry(path)
-        for sym in sch.symbols:
-            placement = None
-            if zone is not None:
-                x, y, rotation = raw.get(
-                    getattr(sym, "uuid_str", ""),
-                    (sym.x, sym.y, getattr(sym, "rotation", 0) or 0),
-                )
-                placement = _Placement(x, y, rotation, getattr(sym, "mirror", "") or "")
-            yield sym, placement, zone
-        for entry in _get_sheet_entries(path):
-            stack.append(path.parent / entry.filename)
+    geometry: dict[Path, tuple[dict[str, tuple[float, float, float]], _NoConnectZone | None]] = {}
+    for ref, sym, visit in _iter_instance_symbols(sch_path):
+        source = visit.source.resolve()
+        if source not in geometry:
+            geometry[source] = (
+                _read_sheet_geometry(visit.source) if visit.schematic.no_connects else ({}, None)
+            )
+        raw, zone = geometry[source]
+        placement = None
+        if zone is not None:
+            x, y, rotation = raw.get(
+                getattr(sym, "uuid_str", ""),
+                (sym.x, sym.y, getattr(sym, "rotation", 0) or 0),
+            )
+            placement = _Placement(x, y, rotation, getattr(sym, "mirror", "") or "")
+        yield ref, sym, placement, zone
 
 
 def _pinfunction_for(name: str) -> str:
@@ -466,8 +463,7 @@ def schematic_pin_info(sch_path: str | Path) -> dict[tuple[str, str], PadPinInfo
     info: dict[tuple[str, str], PadPinInfo] = {}
     # (ref, pin) -> (lowest placed unit seen, that copy's flag) for unit-0 pins.
     common_flags: dict[tuple[str, str], tuple[int, bool]] = {}
-    for sym, placement, zone in _iter_schematic_symbols(Path(sch_path)):
-        ref = getattr(sym, "reference", "") or ""
+    for ref, sym, placement, zone in _iter_schematic_symbols(Path(sch_path)):
         if not ref or ref.startswith("#"):
             continue
         symbol_def = getattr(sym, "symbol_def", None)
