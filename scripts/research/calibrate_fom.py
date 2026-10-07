@@ -65,6 +65,7 @@ import math
 import random
 import sys
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -616,6 +617,15 @@ class CalibrationReport:
         return out
 
 
+def board_seed(seed: int, board: str) -> int:
+    """Derive a per-board seed that is stable across processes.
+
+    Python's builtin ``hash()`` of a str is salted per process
+    (PYTHONHASHSEED), so it must not feed RNG seeds (issue #6111).
+    """
+    return seed + zlib.crc32(board.encode("utf-8")) % 2**16
+
+
 def run_calibration(
     output_dir: Path,
     *,
@@ -642,7 +652,7 @@ def run_calibration(
 
     # Phase 1b: per-board random search
     for board, terms in cache.items():
-        w, metrics = per_board_search(board, terms, n_candidates, seed + hash(board) % 2**16)
+        w, metrics = per_board_search(board, terms, n_candidates, board_seed(seed, board))
         report.per_board_weights[board] = w
         report.per_board_metrics[board] = metrics
         write_weights_yaml(
