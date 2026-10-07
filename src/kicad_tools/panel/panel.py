@@ -498,6 +498,7 @@ class Panel:
             The resolved output path.
         """
         output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         sexp = self.build()
         save_pcb(sexp, output_path)
         logger.info("Panel saved to %s", output_path)
@@ -804,6 +805,8 @@ class Panel:
         table = {
             "Dwgs.User": (17 if modern else 40, "User.Drawings"),
             "Cmts.User": (19 if modern else 41, "User.Comments"),
+            "Eco1.User": (21 if modern else 42, "User.Eco1"),
+            "Eco2.User": (23 if modern else 43, "User.Eco2"),
         }
         if layer_name not in table:
             return

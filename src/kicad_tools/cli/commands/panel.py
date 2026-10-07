@@ -84,7 +84,7 @@ def run_panel_command(args) -> int:
         spacing=getattr(args, "panel_mousebite_spacing", 0.8),
     )
 
-    vcut = VCutConfig()
+    vcut = VCutConfig(layer=getattr(args, "panel_vcut_layer", None) or VCutConfig.layer)
 
     frame = None
     if getattr(args, "panel_frame", False):
@@ -139,6 +139,7 @@ def run_panel_command(args) -> int:
                 "board_count": panel.board_count,
                 "tabs": len(panel.tabs),
                 "cut_method": config.cut_method.value,
+                "vcut_layer": (config.vcut.layer if config.cut_method == CutMethod.VCUT else None),
                 "tab_width_mm": config.tabs.width,
                 "tab_count": config.tabs.count,
                 "frame": config.frame is not None,
@@ -153,4 +154,6 @@ def run_panel_command(args) -> int:
     print(f"  Grid: {config.rows}x{config.cols} ({panel.board_count} boards)")
     print(f"  Tabs: {len(panel.tabs)}")
     print(f"  Cut method: {config.cut_method.value}")
+    if config.cut_method == CutMethod.VCUT:
+        print(f"  V-score layer: {config.vcut.layer}")
     return 0

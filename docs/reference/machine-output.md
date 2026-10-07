@@ -284,7 +284,7 @@ Shapes:
 |---|---|
 | `board-metrics` | `{"command": "board-metrics", "mode": "single"\|"all", "dry_run", "boards": [{"slug", "status", "output_path", "metrics"}], "success"}` — `metrics` is the board's full `board.json`; `output_path` is `null` under `--dry-run` |
 | `create-pcb` | `{"command": "create-pcb", "schematic", "output", "board": {width_mm, height_mm, layers}, "components_found", "placement": {skipped, placed, failed[], warnings[]}, "nets": {assigned, missing_footprints[]}, "summary", "dry_run", "saved", "success"}` |
-| `panel` | `{"command": "panel", "input", "output", "grid": {rows, cols, spacing_mm}, "board_count", "tabs", "cut_method", "tab_width_mm", "tab_count", "frame", "tooling_holes", "fiducials", "success"}` |
+| `panel` | `{"command": "panel", "input", "output", "grid": {rows, cols, spacing_mm}, "board_count", "tabs", "cut_method", "vcut_layer", "tab_width_mm", "tab_count", "frame", "tooling_holes", "fiducials", "success"}` (`vcut_layer` is `null` unless `--cut vcut`) |
 | `report generate` | `{"command": "generate", "input", "manufacturer", "output_dir", "project_name", "report_path", "pdf_path", "data_source": "auto-collect"\|"data-dir"\|"skeleton", "figures": {generated, skipped_reason}, "success"}` |
 | `screenshot` | `{"command": "screenshot", "input", "output", "width_px", "height_px", "layers_rendered", "success"}` |
 

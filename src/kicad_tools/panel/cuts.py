@@ -56,7 +56,9 @@ def generate_mousebite_holes(
     """Generate NPTH holes along the center line of a tab.
 
     Holes are placed along the center of the tab perpendicular to the
-    board edge, evenly spaced at the configured interval.
+    board edge, evenly spaced at the configured interval.  The end holes
+    stay inside the tab: their edges sit ``config.offset`` mm in from the
+    tab's side edges, never overlapping the routed slot.
 
     Args:
         tab: The tab to perforate.
@@ -67,19 +69,25 @@ def generate_mousebite_holes(
     """
     holes: list[MousebiteHole] = []
 
+    # The tab's two side edges border the routed slot.  Inset the first and
+    # last hole *centres* by the hole radius so each hole sits wholly inside
+    # the tab, tangent to the slot edge at ``offset == 0``; centring them on
+    # the edge left half of each end hole straddling the slot (Issue #6156).
+    inset = config.offset + config.diameter / 2.0
     if tab.orientation == "horizontal":
         # Tab spans horizontally -- holes along horizontal center line
         line_y = tab.y
-        line_start = tab.min_x + config.offset
-        line_end = tab.max_x - config.offset
+        line_start = tab.min_x + inset
+        line_end = tab.max_x - inset
     else:
         # Tab spans vertically -- holes along vertical center line
         line_y = None  # type: ignore[assignment]
-        line_start = tab.min_y + config.offset
-        line_end = tab.max_y - config.offset
+        line_start = tab.min_y + inset
+        line_end = tab.max_y - inset
 
     length = line_end - line_start
-    if length <= 0:
+    if length < 0:
+        # Tab narrower than one hole (plus offsets): no room to perforate.
         return holes
 
     n_holes = max(1, int(math.floor(length / config.spacing)) + 1)

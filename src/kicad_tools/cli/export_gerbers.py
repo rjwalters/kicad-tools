@@ -78,8 +78,14 @@ def export_gerbers(pcb_path: Path, output_dir: Path, kicad_cli: Path) -> bool:
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build layer list for export
-    layers = ",".join(FOUR_LAYER_STACK)
+    # Build layer list for export.  A V-cut panel's score lines live on a
+    # user layer (Cmts.User by default) and must reach the fab (Issue #6156).
+    from kicad_tools.export.gerber import pcb_vscore_layers
+
+    vscore = pcb_vscore_layers(pcb_path)
+    for layer in vscore:
+        print(f"Including V-score layer: {layer}")
+    layers = ",".join(FOUR_LAYER_STACK + vscore)
 
     try:
         # Export Gerbers

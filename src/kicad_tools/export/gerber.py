@@ -7,13 +7,14 @@ Wraps kicad-cli for generating Gerber files with manufacturer presets.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import subprocess
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
@@ -128,6 +129,119 @@ def _pcb_copper_layers(pcb_path: Path) -> list[str]:
     return layers
 
 
+# Layers a V-score drawing may live on.  ``kct panel --cut vcut`` draws its
+# score lines on ``Cmts.User`` by default (``--vcut-layer`` picks another of
+# these), never on Edge.Cuts, where an open line breaks the outline (#6143).
+_VSCORE_CANDIDATE_RE = re.compile(r"^(?:(?:Dwgs|Cmts|Eco1|Eco2)\.User|User\.\d+)$")
+
+# How close (mm) a score line's ends must come to the board outline's
+# bounding box to count as spanning it.  V-scores are cut edge to edge.
+_VSCORE_SPAN_TOL_MM = 0.01
+
+
+def _xy(node: Any) -> tuple[float, float] | None:
+    """Return a ``(start|end|mid|center|xy x y)`` node's point, or None."""
+    if node is None:
+        return None
+    x, y = node.get_float(0), node.get_float(1)
+    if x is None or y is None:
+        return None
+    return x, y
+
+
+def _edge_cuts_bbox(root: Any) -> tuple[float, float, float, float] | None:
+    """Bounding box of the top-level Edge.Cuts graphics of a parsed board."""
+    pts: list[tuple[float, float]] = []
+    for child in root.children:
+        if child.is_atom or not child.name.startswith("gr_"):
+            continue
+        layer = child.find_child("layer")
+        if layer is None or layer.get_string(0) != "Edge.Cuts":
+            continue
+        for tag in ("start", "end", "mid", "center"):
+            pt = _xy(child.find_child(tag))
+            if pt is not None:
+                pts.append(pt)
+        if child.name == "gr_circle":
+            center = _xy(child.find_child("center"))
+            rim = _xy(child.find_child("end"))
+            if center is not None and rim is not None:
+                cx, cy = center
+                r = math.hypot(rim[0] - cx, rim[1] - cy)
+                pts.extend(((cx - r, cy - r), (cx + r, cy + r)))
+        poly = child.find_child("pts")
+        if poly is not None:
+            for xy in poly.children:
+                if not xy.is_atom and xy.name == "xy":
+                    pt = _xy(xy)
+                    if pt is not None:
+                        pts.append(pt)
+    if not pts:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def pcb_vscore_layers(pcb_path: Path) -> list[str]:
+    """Return the user layers that carry V-score lines, in file order (#6156).
+
+    A V-score line is a top-level ``gr_line`` on a user drawing layer
+    (``Cmts.User``, ``Dwgs.User``, ``Eco1/2.User``, ``User.N``) that runs
+    straight across the whole board outline: horizontal or vertical, with both
+    ends on the Edge.Cuts bounding box.  That is exactly what
+    ``kct panel --cut vcut`` draws, and what a fab needs to see.  Ordinary
+    notes and dimension lines on ``Cmts.User`` do not span the outline, so a
+    normal board gains no extra Gerber.
+
+    Returns an empty list if the file cannot be read or has no outline.
+    """
+    try:
+        text = pcb_path.read_text()
+    except OSError:
+        return []
+    # Cheap guard: skip the full parse for boards with no user-layer lines.
+    if "gr_line" not in text or not re.search(
+        r'\(layer\s+"(?:(?:Dwgs|Cmts|Eco1|Eco2)\.User|User\.\d+)"', text
+    ):
+        return []
+
+    from kicad_tools.sexp.parser import parse_sexp
+
+    try:
+        root = parse_sexp(text)
+    except Exception:  # pragma: no cover - a malformed board fails elsewhere
+        logger.debug("Could not parse %s to look for V-score lines", pcb_path)
+        return []
+    bbox = _edge_cuts_bbox(root)
+    if bbox is None:
+        return []
+    min_x, min_y, max_x, max_y = bbox
+    tol = _VSCORE_SPAN_TOL_MM
+
+    layers: list[str] = []
+    for child in root.children:
+        if child.is_atom or child.name != "gr_line":
+            continue
+        layer_node = child.find_child("layer")
+        layer = layer_node.get_string(0) if layer_node is not None else None
+        if layer is None or layer in layers or not _VSCORE_CANDIDATE_RE.match(layer):
+            continue
+        a, b = _xy(child.find_child("start")), _xy(child.find_child("end"))
+        if a is None or b is None:
+            continue
+        (x0, y0), (x1, y1) = a, b
+        if abs(y0 - y1) <= tol:
+            spans = abs(min(x0, x1) - min_x) <= tol and abs(max(x0, x1) - max_x) <= tol
+        elif abs(x0 - x1) <= tol:
+            spans = abs(min(y0, y1) - min_y) <= tol and abs(max(y0, y1) - max_y) <= tol
+        else:
+            spans = False
+        if spans:
+            layers.append(layer)
+    return layers
+
+
 @dataclass
 class GerberConfig:
     """Configuration for Gerber export."""
@@ -143,6 +257,10 @@ class GerberConfig:
     include_silkscreen: bool = True
     include_soldermask: bool = True
     include_solderpaste: bool = False
+    # Issue #6156: plot the user layer(s) holding V-score lines (see
+    # :func:`pcb_vscore_layers`).  A V-cut panel exported without them
+    # tells the fab nothing about where to score.
+    include_vscore: bool = True
 
     # Format options
     use_protel_extensions: bool = True  # .GTL/.GBL vs .gbr
@@ -199,6 +317,9 @@ JLCPCB_PRESET = GerberManufacturerPreset(
         "F.Mask": "F_Mask",
         "B.Mask": "B_Mask",
         "Edge.Cuts": "Edge_Cuts",
+        # V-score drawing (Issue #6156): kicad-cli writes Cmts.User as
+        # ``<board>-User_Comments.gbr`` (FileFunction ``Other,Comment``).
+        "Cmts.User": "User_Comments",
     },
 )
 
@@ -692,6 +813,12 @@ class GerberExporter:
 
         if config.include_edge_cuts:
             layers.append("Edge.Cuts")
+
+        if config.include_vscore:
+            vscore = pcb_vscore_layers(self.pcb_path)
+            for layer in vscore:
+                logger.info("Gerber export: including V-score layer %s", layer)
+            layers.extend(vscore)
 
         return layers
 

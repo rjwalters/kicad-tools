@@ -38,7 +38,8 @@ class MousebiteConfig:
     Attributes:
         diameter: NPTH hole diameter in mm.
         spacing: Center-to-center distance between holes in mm.
-        offset: Offset from tab edge in mm (inward).
+        offset: Gap in mm between the tab's side edges and the edge of the
+            first/last hole (0 = tangent; holes never overlap the slot).
     """
 
     diameter: float = 0.5
