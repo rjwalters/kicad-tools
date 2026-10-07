@@ -247,3 +247,104 @@ def test_namespace_without_vcut_layer_uses_default(tmp_path: Path) -> None:
     args = SimpleNamespace(panel_input=str(FIXTURE), panel_output=str(out), panel_cut="vcut")
     assert run_panel_command(args) == 0
     assert pcb_vscore_layers(out) == ["Cmts.User"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #6165: overshoot, unquoted layers, edge lines, explicit tagging
+# ---------------------------------------------------------------------------
+
+
+def _board(tmp_path: Path, extra: str, name: str = "b.kicad_pcb") -> Path:
+    pcb = tmp_path / name
+    pcb.write_text(_NOTE_BOARD.format(extra=extra))
+    return pcb
+
+
+def test_overshooting_score_line_is_detected(tmp_path: Path) -> None:
+    """KiKit draws score lines ~3 mm past the frame."""
+    pcb = _board(tmp_path, '(gr_line (start -3 15) (end 43 15) (layer "Eco1.User"))')
+    assert pcb_vscore_layers(pcb) == ["Eco1.User"]
+    pcb = _board(tmp_path, '(gr_line (start 20 -3) (end 20 33) (layer "Eco1.User"))', "v.kicad_pcb")
+    assert pcb_vscore_layers(pcb) == ["Eco1.User"]
+
+
+def test_unquoted_layer_token_is_detected(tmp_path: Path) -> None:
+    pcb = tmp_path / "old.kicad_pcb"
+    pcb.write_text(
+        "(kicad_pcb\n  (gr_rect (start 0 0) (end 40 30) (layer Edge.Cuts))\n"
+        "  (gr_line (start 20 -3) (end 20 33) (layer Cmts.User))\n)\n"
+    )
+    assert pcb_vscore_layers(pcb) == ["Cmts.User"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "(start 0 0) (end 40 0)",
+        "(start -2 30) (end 42 30)",
+        "(start 0 -1) (end 0 31)",
+        "(start 40 0) (end 40 30)",
+    ],
+)
+def test_untagged_line_on_outline_edge_is_not_a_score(tmp_path: Path, line: str) -> None:
+    pcb = _board(tmp_path, f'(gr_line {line} (layer "Dwgs.User"))')
+    assert pcb_vscore_layers(pcb) == []
+
+
+def test_tagged_line_on_edge_is_still_a_score(tmp_path: Path) -> None:
+    from kicad_tools.sexp.vscore import make_vscore_uuid
+
+    pcb = _board(
+        tmp_path,
+        f'(gr_line (start 0 0) (end 40 0) (layer "Dwgs.User") (uuid "{make_vscore_uuid()}"))',
+    )
+    assert pcb_vscore_layers(pcb) == ["Dwgs.User"]
+
+
+def test_tagged_partial_line_is_detected_untagged_is_not(tmp_path: Path) -> None:
+    from kicad_tools.sexp.vscore import make_vscore_uuid
+
+    partial = "(start 0 15) (end 25 15)"
+    assert pcb_vscore_layers(_board(tmp_path, f'(gr_line {partial} (layer "Eco2.User"))')) == []
+    tagged = _board(
+        tmp_path,
+        f'(gr_line {partial} (layer "Eco2.User") (uuid "{make_vscore_uuid()}"))',
+        "t.kicad_pcb",
+    )
+    assert pcb_vscore_layers(tagged) == ["Eco2.User"]
+
+
+def _cfg(rows: int, cols: int, frame, spacing: float = 0.0) -> PanelConfig:
+    kwargs = {"spacing_x": spacing, "spacing_y": spacing} if spacing else {}
+    return PanelConfig(
+        rows=rows,
+        cols=cols,
+        cut_method=CutMethod.VCUT,
+        frame=frame,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "rows,cols,frame",
+    [(2, 2, None), (1, 3, None), (2, 2, FrameConfig())],
+    ids=["butted", "butted-row", "framed"],
+)
+def test_kct_panel_score_lines_are_tagged(tmp_path: Path, rows, cols, frame) -> None:
+    from kicad_tools.sexp.vscore import VSCORE_UUID_MARKER
+
+    pcb = Panel.from_config(FIXTURE, _cfg(rows, cols, frame)).save(tmp_path / "p.kicad_pcb")
+    text = pcb.read_text()
+    assert f"-{VSCORE_UUID_MARKER}-" in text
+    assert pcb_vscore_layers(pcb) == ["Cmts.User"]
+
+
+def test_mixed_panel_gapped_seams_still_detects_scored_seams(tmp_path: Path) -> None:
+    cfg = PanelConfig(
+        rows=1,
+        cols=3,
+        cut_method=CutMethod.VCUT,
+        frame=FrameConfig(),
+    )
+    pcb = Panel.from_config(FIXTURE, cfg).save(tmp_path / "m.kicad_pcb")
+    assert pcb_vscore_layers(pcb) == ["Cmts.User"]
