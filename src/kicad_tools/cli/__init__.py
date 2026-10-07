@@ -924,8 +924,13 @@ def _run_export_command(args) -> int:
 
     sub_argv = [args.export_pcb]
 
-    if hasattr(args, "export_mfr") and args.export_mfr:
-        sub_argv.extend(["--mfr", args.export_mfr])
+    # Issue #6169: an unflagged --mfr defaults from project.kct target_fab
+    # (looked up next to the board, or in the project directory when given).
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    sub_argv.extend(
+        ["--mfr", resolve_cli_manufacturer(getattr(args, "export_mfr", None), args.export_pcb)]
+    )
     if hasattr(args, "export_output") and args.export_output:
         sub_argv.extend(["-o", args.export_output])
     if hasattr(args, "export_sch") and args.export_sch:

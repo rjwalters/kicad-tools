@@ -29,6 +29,10 @@ def run_reason_command(args) -> int:
         sub_argv.extend(["--max-nets", str(args.max_nets)])
     if args.drc:
         sub_argv.extend(["--drc", args.drc])
+    # Issue #6169: an unflagged --mfr defaults from project.kct target_fab.
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    sub_argv.extend(["--mfr", resolve_cli_manufacturer(getattr(args, "mfr", None), args.pcb)])
     if args.verbose:
         sub_argv.append("--verbose")
     if args.dry_run:

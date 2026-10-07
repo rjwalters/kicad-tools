@@ -23,8 +23,20 @@ def run_pipeline_command(args) -> int:
         sub_argv.extend(["--step", args.pipeline_step])
 
     # Manufacturer
-    if getattr(args, "pipeline_mfr", "jlcpcb") != "jlcpcb":
-        sub_argv.extend(["--mfr", args.pipeline_mfr])
+    # Issue #6169: an unflagged --mfr defaults from project.kct target_fab.  The
+    # route step writes fab_profile.json, so pipeline does not read it back.
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    sub_argv.extend(
+        [
+            "--mfr",
+            resolve_cli_manufacturer(
+                getattr(args, "pipeline_mfr", None),
+                getattr(args, "pipeline_input", None) or ".",
+                consult_sidecar=False,
+            ),
+        ]
+    )
 
     # Layers (string value, e.g. "4", "4-sig", "4-all")
     if getattr(args, "pipeline_layers", None) is not None:

@@ -57,6 +57,11 @@ def _run_cost_command(args) -> int:
         else:
             print("Warning: CSV BOM import not yet implemented, using PCB only")
 
+    # Issue #6169: an unflagged --mfr defaults from project.kct target_fab.
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    args.mfr = resolve_cli_manufacturer(args.mfr, pcb_path)
+
     # Create estimator
     use_lcsc = not getattr(args, "no_lcsc", False)
     estimator = ManufacturingCostEstimator(manufacturer=args.mfr, use_lcsc_pricing=use_lcsc)

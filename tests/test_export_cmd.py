@@ -187,7 +187,7 @@ class TestExportCmdFromMainParser:
 
         parser = create_parser()
         args = parser.parse_args(["export", "board.kicad_pcb"])
-        assert args.export_mfr == "jlcpcb"
+        assert args.export_mfr is None  # resolved at dispatch (Issue #6169)
         assert args.export_output is None
         assert args.export_dry_run is False
         assert args.export_no_report is False

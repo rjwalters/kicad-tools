@@ -538,6 +538,8 @@ class TestKctAuditForwardsHvFlags:
         )
         assert sub_argv == [
             "b.kicad_pcb",
+            "--mfr",
+            "jlcpcb",
             "--hv-net-class",
             "MAINS",
             "--hv-min",
@@ -553,4 +555,5 @@ class TestKctAuditForwardsHvFlags:
         ]
 
     def test_defaults_forward_nothing(self, monkeypatch):
-        assert self._forwarded(monkeypatch, ["b.kicad_pcb"]) == ["b.kicad_pcb"]
+        # Only the resolved --mfr (default jlcpcb, Issue #6169) is forwarded.
+        assert self._forwarded(monkeypatch, ["b.kicad_pcb"]) == ["b.kicad_pcb", "--mfr", "jlcpcb"]

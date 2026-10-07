@@ -5439,6 +5439,16 @@ def _add_reason_parser(subparsers) -> None:
         help="Maximum nets to auto-route (default: 10)",
     )
     reason_parser.add_argument("--drc", help="Path to DRC report file")
+    reason_parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Target manufacturer for DRC rules (default: the board's project.kct "
+            "target_fab, else jlcpcb; Issue #6169)"
+        ),
+    )
     reason_parser.add_argument("-v", "--verbose", action="store_true")
     reason_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
     add_format_flag(reason_parser)
@@ -5580,8 +5590,8 @@ def _add_fix_vias_parser(subparsers) -> None:
     fix_vias_parser.add_argument(
         "--mfr",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
-        help="Manufacturer to use for design rules (default: jlcpcb)",
+        default=None,
+        help="Manufacturer to use for design rules (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
     )
     fix_vias_parser.add_argument(
         "--layers",
@@ -5659,8 +5669,8 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
     fix_silk_parser.add_argument(
         "--mfr",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
-        help="Manufacturer to use for design rules (default: jlcpcb)",
+        default=None,
+        help="Manufacturer to use for design rules (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
     )
     fix_silk_parser.add_argument(
         "--layers",
@@ -5855,9 +5865,10 @@ def _add_fix_drc_parser(subparsers) -> None:
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
+        default=None,
         help=(
-            "Target manufacturer for design rules (default: jlcpcb). "
+            "Target manufacturer for design rules (default: the board's "
+            "project.kct target_fab, else jlcpcb; Issue #6169). "
             "Only used when fix-drc generates a DRC report internally "
             "(no --drc-report given, or with --verify); ignored when "
             "--drc-report is supplied since clearances come from the report."
@@ -7294,8 +7305,8 @@ def _add_estimate_parser(subparsers) -> None:
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
-        help="Target manufacturer (default: jlcpcb)",
+        default=None,
+        help="Target manufacturer (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
     )
     estimate_cost.add_argument(
         "--format",
@@ -7362,8 +7373,8 @@ def _add_audit_parser(subparsers) -> None:
         "-m",
         dest="audit_mfr",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
-        help="Target manufacturer (default: jlcpcb)",
+        default=None,
+        help="Target manufacturer (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
     )
     audit_parser.add_argument(
         "--layers",
@@ -8657,8 +8668,8 @@ def _add_pipeline_parser(subparsers) -> None:
         "-m",
         dest="pipeline_mfr",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
-        help="Target manufacturer (default: jlcpcb)",
+        default=None,
+        help="Target manufacturer (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
     )
     pipeline_parser.add_argument(
         "--layers",
@@ -10113,9 +10124,9 @@ def _add_export_parser(subparsers) -> None:
         "--mfr",
         "-m",
         dest="export_mfr",
-        default="jlcpcb",
+        default=None,
         choices=[*get_all_manufacturer_names(), "generic"],
-        help="Target manufacturer (default: jlcpcb)",
+        help="Target manufacturer (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
     )
     export_parser.add_argument(
         "-o",
