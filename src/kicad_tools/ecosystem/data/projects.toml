@@ -639,14 +639,15 @@ repo_url = "https://github.com/punkfab/circuit-skills"
 vcs = "github"
 category = "agent-interface"
 relation = "peer"
-verdict = "watch"
+verdict = "complementary"
 # No LICENSE file is committed; treat as all-rights-reserved -- ideas only.
 license = "NONE"
 license_compat = "unlicensed"
 language = "Python"
 stars = 9
 last_push = "2026-10-06"
-last_verified = "2026-10-06"
+last_verified = "2026-10-07"
+research_docs = ["docs/research/circuit-skills-evaluation.md"]
 # The commit read for issue #5941 (22 commits past the previous pin
 # bc1322f9). HEAD has since moved two commits, both placement-only.
 pinned_commit = "f6ed02104137f7b8a1cb9d0bd447dd3a11deccac"
@@ -665,9 +666,9 @@ opposite of our fully automated bar. No LICENSE committed, so ideas \
 only; mining tracked in issue #5886.\
 """
 reeval_trigger = """
-Once issue #5886 lands its evaluation note, move the verdict to \
-`ideas-adopted` or `complementary`. If a permissive LICENSE file lands, \
-`license_compat` moves accordingly.\
+Once the follow-ups from the #5886 evaluation land (#6043, #6044, \
+#6045), move the verdict to `ideas-adopted`. If a permissive LICENSE \
+file lands, `license_compat` moves accordingly.\
 """
 
 [projects.kicadmium]
