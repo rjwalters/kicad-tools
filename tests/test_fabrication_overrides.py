@@ -610,9 +610,7 @@ def test_route_sidecar_emission_reads_input_board_sidecar_for_scratch_output(tmp
     out = scratch / "routed.kicad_pcb"
     out.write_text("(kicad_pcb)")
 
-    _write_drc_constraint_sidecars(
-        out, JLC_TIER1_MFR, layers=4, quiet=True, source_pcb_path=source
-    )
+    _write_drc_constraint_sidecars(out, JLC_TIER1_MFR, layers=4, quiet=True, source_pcb_path=source)
 
     pro = json.loads(out.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
     assert pro["board"]["design_settings"]["rules"]["min_hole_to_hole"] == 0.45
@@ -633,9 +631,7 @@ def test_route_sidecar_emission_output_sidecar_wins_over_input(tmp_path: Path):
     out = scratch / "routed.kicad_pcb"
     out.write_text("(kicad_pcb)")
 
-    _write_drc_constraint_sidecars(
-        out, JLC_TIER1_MFR, layers=4, quiet=True, source_pcb_path=source
-    )
+    _write_drc_constraint_sidecars(out, JLC_TIER1_MFR, layers=4, quiet=True, source_pcb_path=source)
 
     pro = json.loads(out.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
     assert pro["board"]["design_settings"]["rules"]["min_hole_to_hole"] == 0.48
