@@ -31,18 +31,11 @@ def test_opt_in_and_resources_and_artifact_retention():
     assert (
         "contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->')" in expression
     )
-    # Issue #5747: the job budget follows the runner. A fork PR routes to
-    # ubuntu-latest, where this job projects to ~50 min and a flat 45 cancelled
-    # five runs in a row (#5736/#5737/#5739), so the hosted branch gets 90
-    # while the self-hosted branch keeps 45. The predicate MUST stay identical
-    # to the one runs-on selects the runner with -- a drift between them would
-    # hand one branch the other's budget.
-    fork_predicate = (
-        "(github.event_name != 'pull_request' "
-        "|| github.event.pull_request.head.repo.full_name == github.repository)"
-    )
-    assert fork_predicate in str(JOB["runs-on"])
-    assert JOB["timeout-minutes"] == f"${{{{ {fork_predicate} && 45 || 90 }}}}"
+    # Issue #6013: one runner (GitHub-hosted) for every event, so one budget.
+    # The fork-routing predicate and its split 45/90 budget (#5747) are gone
+    # with the self-hosted branch they selected.
+    assert JOB["runs-on"] == "ubuntu-latest"
+    assert JOB["timeout-minutes"] == 60
     # #5682: the KiCad image is pinned by digest at the workflow level.
     # container.image cannot reference the env context (GitHub allows only
     # github/inputs/matrix/needs/strategy/vars there), so the kicad_pin
@@ -133,7 +126,16 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             "pytest",
             "-n",
             "auto",
-            *common,
+            # Issue #6013: the ci_extended slow tail runs in "Test (extended)",
+            # and the bulk pool's timings are kept for update_ci_extended.py.
+            "-o",
+            "addopts=",
+            "--benchmark-disable",
+            "--timeout=60",
+            "-m",
+            "not slow and not ci_extended",
+            "--junitxml",
+            str(tmp_path / "junit/bulk.xml"),
             *[
                 "--ignore=tests/" + name
                 for name in [

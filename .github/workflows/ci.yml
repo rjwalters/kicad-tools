@@ -384,9 +384,10 @@ jobs:
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      # A GitHub-hosted VM runs one job, so there is no neighbour to protect
-      # with a --memory cap.
-      options: --user 0:0
+      # The 12 GiB cap stays on hosted (a 16 GB VM): the native-concurrency
+      # bound and the workload audit are calibrated against this cgroup
+      # (#5501, #5616).
+      options: --user 0:0 --memory 12g
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the smoke job).
@@ -633,7 +634,7 @@ jobs:
     timeout-minutes: 90
     container:
       image: ${{ needs.kicad_pin.outputs.image }}
-      options: --user 0:0
+      options: --user 0:0 --memory 12g
     defaults:
       run:
         shell: bash
