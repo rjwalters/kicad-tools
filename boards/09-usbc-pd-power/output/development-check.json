@@ -119,7 +119,6 @@
   ],
   "pending": [
     "Resolve manufacturer ampacity findings through branch-current and thermal review",
-    "Reconcile strict GND connectivity disagreement with native KiCad (#5061)",
     "Power-path, Kelvin, switch-loop, thermal and capacitor bias review",
     "Complete procurement and assembly-library package verification",
     "PD configuration readback and attach/inrush/unsupported-source tests",
@@ -127,7 +126,7 @@
   ],
   "sha256": {
     "usbc_pd_power.kicad_sch": "0a79feb589a2ad20a84679c1cd5946d765f8624f0f21a51b57f5f285c2a6abda",
-    "usbc_pd_power.kicad_pcb": "155cbecfa9c1c485e49577b983d1b025878703f9b4a519571246c45424c29b7f",
+    "usbc_pd_power.kicad_pcb": "5008464afec9b8e9fe58e385013423ce72b41f7b345a2b08e305a26e6abff077",
     "circuit.json": "8c5346506cd6bd6796e29cc368fae648df63b1ccaf7c651f61d4422ca8e8c8ef",
     "net_class_map.json": "52ea7075492770de56fc8f9eff9d405f02a56f3c9bb2f6ba210919cf8123b5b0",
     "usbc_pd_power.kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",

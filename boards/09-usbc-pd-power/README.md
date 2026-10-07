@@ -42,10 +42,10 @@ signal traces on the inner ground layers.
 
 Manufacturing remains blocked. The manufacturer check reports 51 ampacity
 errors requiring branch-current and thermal review, and 22 component MPNs
-remain unselected. Strict KiCad-tools net status still reports four USB ground
-pads disconnected despite native KiCad's clean result; this disagreement is
-tracked in [#5061](https://github.com/rjwalters/kicad-tools/issues/5061).
-Physical copper LVS does not independently prove plane connectivity.
+remain unselected. Strict KiCad-tools net status now agrees with native KiCad
+(32/32 nets complete; resolved by
+[#5061](https://github.com/rjwalters/kicad-tools/issues/5061)), and
+`check_design.py` recomputes that agreement on every run. Physical copper LVS does not independently prove plane connectivity.
 
 The fleet 45-degree angle census
 (`tests/test_fleet_45_census.py`) now discovers `output/usbc_pd_power.kicad_pcb`

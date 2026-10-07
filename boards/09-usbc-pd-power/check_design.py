@@ -205,6 +205,28 @@ def check(output):
     component_stress_clean, component_stress_blockers = evaluate_component_stress(
         schematic, COMPONENT_STRESS_MANIFEST
     )
+    # Computed, not hardcoded: only block when strict net-status disagrees with
+    # native KiCad (native DRC has no unconnected items, but strict net-status
+    # reports incomplete nets / unconnected pads).  Issue #6027.
+    net_status = tool_reports["net-status"]
+    strict_summary = net_status["summary"]
+    native_connected = (
+        drc.returncode == 0 and drc_report is not None and not drc_report["unconnected_items"]
+    )
+    strict_connected = (
+        net_status["returncode"] == 0
+        and strict_summary.get("incomplete", 0) == 0
+        and strict_summary.get("unrouted", 0) == 0
+        and strict_summary.get("total_unconnected_pads", 0) == 0
+    )
+    strict_connectivity_blockers = (
+        []
+        if strict_connected or not native_connected
+        else [
+            "Reconcile strict net-status connectivity disagreement with native KiCad: "
+            f"{strict_summary.get('total_unconnected_pads', 0)} unconnected pad(s)"
+        ]
+    )
     report = {
         "scope": "Routed development checkpoint; no manufacturing release",
         "native_erc_clean": erc.returncode == 0 and erc_path.exists(),
@@ -226,9 +248,9 @@ def check(output):
         "manufacturing_ready": False,
         "hardware_tested": False,
         "unselected_mpn_refs": [p["ref"] for p in circuit["parts"] if not p["mpn"]],
-        "pending": [
+        "pending": strict_connectivity_blockers
+        + [
             "Resolve manufacturer ampacity findings through branch-current and thermal review",
-            "Reconcile strict GND connectivity disagreement with native KiCad (#5061)",
             "Power-path, Kelvin, switch-loop, thermal and capacitor bias review",
             "Complete procurement and assembly-library package verification",
             "PD configuration readback and attach/inrush/unsupported-source tests",

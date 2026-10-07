@@ -1,5 +1,5 @@
 {
-  "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5998/boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+  "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6027/boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
   "connectivity_model": "strict",
   "summary": {
     "total_nets": 32,
