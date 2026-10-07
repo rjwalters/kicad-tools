@@ -50,7 +50,7 @@ assert_eq() {
 }
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+source "$TEST_DIR/lib/session-lock-sandbox.sh" "$WORK"
 mkdir -p "$WORK/bin" "$WORK/ws/.loom"
 
 PROFILE="$WORK/profiles/acct"

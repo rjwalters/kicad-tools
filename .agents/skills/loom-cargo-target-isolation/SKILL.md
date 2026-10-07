@@ -96,8 +96,8 @@ replace either:
 - `.loom/docs/verification-recipes.md` → "One shared build directory makes
   'the binary under test' ambiguous" and `tests/lib/require-daemon-bin.sh`
   protect **stub-driven shell suites** that reference a pinned binary by path
-  — they resolve the freshest candidate and copy it to a private per-suite
-  path before pinning it. That covers suites built on that harness; it does
+  — they pin a private copy of this checkout's own build (that recipe has the
+  rule). That covers suites built on that harness; it does
   not cover a Judge/Doctor/Builder's own direct `cargo test`/`cargo build`
   invocation of `loom-daemon/tests/*.rs`, which is what this recipe is for.
 - A genuine **per-worktree** `CARGO_TARGET_DIR` (so builds never share a

@@ -244,10 +244,17 @@ export PATH="$STUB_DIR:$PATH"
 # stub above stays the path under test, deterministically.
 cat > "$STUB_DIR/loom-daemon" <<'MOCK'
 #!/usr/bin/env bash
+# #10485: approvals also pass the exact-head CI gate; this suite is about review
+# reconciliation, so the reader reports the reviewed head green.
+if [[ "${1:-} ${2:-}" == "forge wait-checks" ]]; then
+  echo "LOOM-CHECKS-GREEN ${LOOM_TEST_HEAD_SHA:?}"
+  exit 0
+fi
 echo "mock loom-daemon: forge comment not under test here" >&2
 exit 127
 MOCK
 chmod +x "$STUB_DIR/loom-daemon"
+export LOOM_TEST_HEAD_SHA="$HEAD_SHA"
 export LOOM_DAEMON_SELF_BIN="$STUB_DIR/loom-daemon"
 # #9548: post-verdict.sh vets its write target through the write scope before it
 # writes. It runs from a checkout registered as owner/repo (origin, .loom/, push

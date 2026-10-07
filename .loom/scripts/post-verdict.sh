@@ -65,6 +65,24 @@
 # resynced — so it degrades to the pre-#7647 behaviour with a loud stderr
 # warning and a `state=gate-unavailable` reconciliation marker on the comment.
 #
+# EXACT-HEAD ALL-CI GATE (#10485)
+#
+# Every `approved` verdict (fast paths included, same single chokepoint) also
+# requires every check on the exact reviewed head to be settled green. After the
+# review gate, this runs `loom-daemon forge wait-checks <pr> --timeout 20` (bounded
+# snapshot; override: LOOM_POST_VERDICT_CI_TIMEOUT; the one status reader, never a second policy here) and branches on
+# its first output LINE, never its exit code: GREEN proceeds; NONE proceeds
+# (the reader's zero-row settle: no required contexts, ~3 empty polls, so the
+# timeout must stay >= the ~10 s settle window; 0 would read as TIMEOUT);
+# RED (any failing check, required or not; cancelled, timed_out,
+# action_required, stale and startup_failure count as failing; success,
+# neutral and skipped count as green) refuses with exit 6; TIMEOUT (pending,
+# or empty with required contexts, e.g. approval-required workflows), ERROR,
+# HEAD-MOVED, a head other than <sha>, no sentinel (older/missing daemon) or a
+# failed head read all refuse with exit 5. Immediately before posting, the PR
+# head is re-read and must still be <sha>. Nothing is posted on a refusal, so
+# the caller's `&&`-chained `loom:pr` label edit cannot run either.
+#
 # Usage:
 #   post-verdict.sh <pr-number> <approved|changes-requested> <sha> \
 #       (--body TEXT | --body-file PATH) [--reviews-reconciled TEXT]
@@ -84,6 +102,10 @@
 #   1 - the `gh pr comment` call failed
 #   2 - invalid arguments (bad PR number, verdict token, or SHA; missing body)
 #   3 - approval refused by the formal-review reconciliation gate (#7647)
+#   5 - approval refused, CI not settled or unverifiable on <sha> (#10485):
+#       pending, head moved, reader error/absent. Post nothing approving,
+#       leave loom:review-requested, retry on a later pass.
+#   6 - approval refused, a check on <sha> is red (#10485), required or not.
 #   4 - refused: the PR's repo is not one this installation may write to
 #       (loom_write_repo, lib/forge-helpers.sh, #9548); nothing was posted
 #
@@ -94,7 +116,7 @@
 set -uo pipefail
 
 usage() {
-  sed -n '2,88p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+  sed -n '2,112p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -326,6 +348,41 @@ $RECONCILED"
   fi
 fi
 
+# --- Exact-head all-CI gate (#10485) ---------------------------------------
+# Approvals only. Fails closed on EVERY unread/unsettled state; the daemon's
+# wait-checks reader is the sole status policy (non-required red is RED there).
+# stderr is merged into stdout: the reader prints the sentinel first, then any
+# failing-check detail lines.
+# requires-daemon: forge >= 0.19.707   #10330 added `forge wait-checks` (PR #10351, first shipped in 0.19.707). Approvals only: an older or absent binary prints no sentinel, so the gate refuses the approval (exit 5) naming this floor. Changes-requested verdicts never reach this call.
+REPO=""
+if [[ "$VERDICT" == "approved" ]]; then
+  REPO="$(source "$SCRIPT_DIR/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}")" || { echo "post-verdict.sh: not posting the verdict on PR #$PR: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 4; }
+  CI_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge wait-checks "$PR" --repo "$REPO" --timeout "${LOOM_POST_VERDICT_CI_TIMEOUT:-20}" 2>&1)" || true
+  CI_FIRST="${CI_OUT%%$'\n'*}"
+  CI_TOKEN="${CI_FIRST%% *}"
+  CI_SHA="$(printf '%s' "$CI_FIRST" | awk '{print $2}')"
+  CI_DETAIL=""
+  [[ "$CI_OUT" == *$'\n'* ]] && CI_DETAIL="${CI_OUT#*$'\n'}"
+  ci_refuse() {
+    {
+      echo "post-verdict.sh: REFUSING to post an approval — exact-head CI gate: $1 (#10485)"
+      [[ -n "$CI_FIRST" ]] && echo "  reader: ${CI_FIRST:0:500}"
+      [[ -n "$CI_DETAIL" ]] && printf '%s\n' "${CI_DETAIL:0:4000}" | sed 's/^/  /'
+      echo "$2"
+    } >&2
+    exit "$3"
+  }
+  PENDING_NEXT="Nothing was posted. Do NOT add loom:pr: release your claim, leave loom:review-requested, and re-evaluate once CI settles on this head."
+  case "$CI_TOKEN" in
+    LOOM-CHECKS-GREEN|LOOM-CHECKS-NONE) [[ -n "$CI_SHA" && "$CI_SHA" == "$SHA"* ]] || ci_refuse "checks were read for ${CI_SHA:-an unknown head}, not the reviewed head $SHA" "$PENDING_NEXT" 5 ;;
+    LOOM-CHECKS-RED) ci_refuse "a check on $SHA is failing (required or not — an all-CI policy refuses both)" "Nothing was posted. Post changes-requested naming the checks above (loom:ci-failure); if the only failure is an external approval-required workflow, point at the operator rather than the Doctor." 6 ;;
+    LOOM-CHECKS-TIMEOUT) ci_refuse "checks on $SHA are pending (or empty while contexts are required)" "$PENDING_NEXT" 5 ;;
+    LOOM-CHECKS-HEAD-MOVED) ci_refuse "the PR head moved during inspection" "$PENDING_NEXT" 5 ;;
+    LOOM-CHECKS-ERROR) ci_refuse "the checks could not be read" "$PENDING_NEXT" 5 ;;
+    *) ci_refuse "no checks sentinel from '${LOOM_DAEMON_BIN:-loom-daemon} forge wait-checks' (missing daemon, or older than 0.19.707?) — an unread CI state is never green. Run ./.loom/scripts/resync-installed.sh / roll loom-daemon" "$PENDING_NEXT" 5 ;;
+  esac
+fi
+
 # --- The marker is appended HERE, never accepted as part of $BODY ----------
 # This is the entire point of the script: omission becomes structurally
 # impossible instead of a matter of remembering to type it. Format must stay
@@ -349,7 +406,17 @@ FULL_BODY="$FULL_BODY
 # explicitly, so gh's preference for an `upstream` remote cannot redirect the
 # verdict onto another project's PR with the same number. forge-helpers.sh is
 # sourced inside the command substitution because it turns on `set -e`.
-REPO="$(source "$SCRIPT_DIR/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}")" || { echo "post-verdict.sh: not posting the verdict on PR #$PR: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 4; }
+# (An approval already vetted it above, before the CI read.)
+[[ -n "$REPO" ]] || REPO="$(source "$SCRIPT_DIR/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}")" || { echo "post-verdict.sh: not posting the verdict on PR #$PR: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 4; }
+# Final compare (#10485): the head must still be the reviewed one right before
+# the write; an unreadable head is a refusal, never a pass.
+if [[ "$VERDICT" == "approved" ]]; then
+  FINAL_HEAD="$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha' 2>/dev/null)" || FINAL_HEAD=""
+  if [[ -z "$FINAL_HEAD" || "$FINAL_HEAD" != "$SHA"* ]]; then
+    echo "post-verdict.sh: REFUSING to post an approval — PR head is ${FINAL_HEAD:-unreadable}, not the reviewed $SHA (moved or unreadable between the CI read and the post, #10485). Nothing was posted; re-review the new head." >&2
+    exit 5
+  fi
+fi
 # #9774: through the shared transport (never a bare `gh pr comment`), so the
 # verdict posts via the daemon chokepoint when a binary resolves — dashboard
 # footer included — and via the gh ladder when it does not.

@@ -54,7 +54,6 @@ source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -87,7 +86,8 @@ assert_not_contains() {
 unset SAFEHOUSED_SOCKET LOOM_SAFEHOUSE_SOCKET SAFEHOUSE_PERSONA 2>/dev/null || true
 
 if ! command -v "$PY" >/dev/null 2>&1; then
-    echo -e "  ${YELLOW}SKIP${NC}: python3 not available; fleet-send.sh tests need it"
+    loom_test_skip "python3 not available; fleet-send.sh tests need it"
+    echo "Test Results: Total: 0, skipped: $TESTS_SKIPPED (the whole suite)"
     exit 0
 fi
 
@@ -302,7 +302,7 @@ fi
 echo ""
 echo "========================================"
 echo "Test Results:"
-echo "  Total:  $TESTS_RUN"
+echo "  Total:  $TESTS_RUN (skipped: ${TESTS_SKIPPED:-0})"
 echo -e "  ${GREEN}Passed: $TESTS_PASSED${NC}"
 if [[ "$TESTS_FAILED" -gt 0 ]]; then
     echo -e "  ${RED}Failed: $TESTS_FAILED${NC}"

@@ -611,8 +611,23 @@ treats it the same way. `stale_mounts` means the container's workspace mounts
 differ from what `accounts session start --mount-workspace <its loom.workspace
 label>` would mount today, in either direction (#10364): a registered root
 under the label is not mounted, or a mount is no longer registered (a
-deregistered repository that Codex can still write with its own sandbox off).
-Private-clone containers never get this verdict. If docker cannot be queried at all
+deregistered repository that Codex can still write with its own sandbox off),
+or a mount `session start` would refuse today although it is still registered
+(the home directory, a `firewall: true` repository). That is the session
+reconciler's own drift definition, shared since #10600, so a container the
+reconciler is about to remove never reads `running`. While the workspace
+registry cannot be read there is no verdict, never `stale_mounts`.
+Private-clone containers never get this verdict. The watch covers every
+registered root's session-managed accounts, not only the daemon's own, and is
+registered with task liveness as `codex_session_watch`; while such accounts
+exist and the newest snapshot is older than 120 s it WARNs on the same 15 min
+cadence. Two more per-account gauges ride the same pass:
+`loom.codex_session.record{account,kind,container}` (`hold`, `drift_removal`:
+1 while that on-disk record stands) and
+`loom.codex_session.mount_drift{account,kind,container}` (`missing`, `extra`,
+`denied`: path counts). `loom-daemon status` shows the same per-account view
+(state, mounts, posture, hold, removal record, the reconciler's last action)
+under `Session containers:`. If docker cannot be queried at all
 (CLI missing, Docker daemon unreachable, timeout), nothing about any container
 is known. The tracker holds each account's last state and no gauge point is
 emitted, so nothing reads that as `missing`. Because it is still a host-wide
@@ -647,8 +662,9 @@ the tick's record, as for `SESSION_DOWN`. The tick carries
 `loom.admission.reason="session-mount-stale"` and records no account hold
 (the container is stale, not the account). `loom-daemon workspace add` /
 `remove` print every host-mode session container the registry change left
-drifted, with the manual recreate, until the reconciler recreates idle ones
-itself.
+drifted. The session reconciler recreates idle ones itself (busy ones on a
+later pass; see `daemon-reference.md`), so the manual recreate it prints is an
+override for a stopped daemon or an opted-out reconciler.
 
 **Uncovered `gh` callers (#10343, tracked in #10618).** Spend from `safehouse.rs`,
 `auto_update`/`release_resolve`, `credential_preflight`, `sweep-lease-renew.sh`,

@@ -78,6 +78,9 @@ if [[ "${1:-} ${2:-}" == "lease renewer" ]]; then
             echo "${2:-}"
             ;;
         check) exit "$(cat "$d/renewer-check-rc" 2> /dev/null || echo 0)" ;;
+        # #10203: a stub answers as a binary predating `sanitize-exec`, so
+        # `start` skips its re-entry and stays fail-open.
+        sanitize-exec) exit 2 ;;
     esac
     exit 0
 fi

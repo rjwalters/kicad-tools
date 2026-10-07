@@ -12,6 +12,16 @@
 
 ## Common Issues
 
+### A stopped daemon keeps coming back (#10179)
+
+`loom-daemon-stop.sh` is "stopped for now"; the watchdog, a supervised relaunch, the
+auto-update roll or `loom update` can bring a daemon back. For a durable opt-out run
+`loom-daemon host disable --reason "<why>"` (writes `~/.loom/autonomy-disabled`, stops
+the daemon and removes its jobs). Every start/re-provision path then refuses with the
+reason, who and when; `loom-daemon status` shows `disabled by operator: <reason>
+(<when>)`. Undo with `loom-daemon host enable` (it does not start anything). Agents must
+not start or repair a daemon on such a host. See `daemon-reference.md`.
+
 ### Hooks not firing (`guard-destructive.sh` not blocking commands)
 
 **Symptom**: Commands that should be blocked or confirmed by `guard-destructive.sh` (e.g., `git reset --hard`, `gh issue close`) are executing without any prompt or denial.

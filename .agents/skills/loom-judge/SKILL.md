@@ -1468,7 +1468,7 @@ FEEDBACK
 
 ## CI Status Check (REQUIRED Before Approval)
 
-**CRITICAL: Never approve a PR until all CI checks pass.**
+**CRITICAL: Never approve a PR until ALL checks on the exact reviewed head pass, required or not (#10485).** `post-verdict.sh ... approved` enforces this itself: it reads the head via `loom-daemon forge wait-checks` and refuses an approval — exit **5** (pending, empty-with-required-contexts, head moved, unreadable reader) or **6** (any red check) — posting nothing. **The script, not you, is the authority:** never approve "because the required checks passed", never accept a red or skipped-for-approval non-required check, never weaken a check to get green. Exit 5: do not add `loom:pr`; follow "When CI is Pending". Exit 6: post `changes-requested` per "When CI Fails" (an external approval-required workflow: say so and point at the operator, not the Doctor). The gate lives in the script, so every approval path (full, Docs-Only, conflict-only, minor-description-fix, trivial-fix) is covered. The `&&` chain means `loom:pr` is unreachable after a refusal.
 
 Local tests passing is not sufficient - you MUST verify that GitHub Actions CI workflows have completed successfully. This prevents situations where a PR is approved while CI is still running or failing.
 
@@ -1502,7 +1502,7 @@ gh pr view <PR_NUMBER> --json mergeStateStatus --jq '.mergeStateStatus'
 |--------|---------|--------|
 | `CLEAN` | All checks pass, no conflicts | Safe to approve |
 | `BLOCKED` | Required checks failing | Request changes |
-| `UNSTABLE` | Non-required checks failing | Assess if acceptable |
+| `UNSTABLE` | Non-required checks failing | Do not approve (all-CI policy) |
 | `BEHIND` | Branch needs rebase | Attempt rebase |
 | `DIRTY` | Merge conflicts | Attempt automated rebase (see Rebase Check section) |
 | `UNKNOWN` | Status not computed yet | Wait and retry |
@@ -1593,36 +1593,9 @@ esac
 
 **Never substitute an armed `Monitor`/`ScheduleWakeup` timer or a `run_in_background` watcher for either path above.** A timer or background task that is still armed when you end your turn is not "waiting" — in headless `-p` mode it is simply killed along with the process, and the PR is orphaned with a stale claim and no verdict. If you have not personally observed the CI result (a CI result you read in this turn), you have not verified it, and you MUST NOT write a final message that implies the verdict is settled or "in progress elsewhere."
 
-### Example CI Verification Workflow
-
-```bash
-# 1. Check CI status (Step 1 mapping)
-loom-daemon forge wait-checks 42 --timeout 20
-# Should output: LOOM-CHECKS-GREEN <sha>
-
-# 2. Verify merge state
-gh pr view 42 --json mergeStateStatus --jq '.mergeStateStatus'
-# Should output: CLEAN
-
-# 3. Run the Verdict-Time CAS Recheck, then approve (BOTH commands in one chain)
-VERDICT_SHA=$(gh pr view 42 --json headRefOid --jq '.headRefOid')
-./.loom/scripts/post-verdict.sh 42 approved "$VERDICT_SHA" \
-    --body "✅ **Approved!** All CI checks pass, code looks great." && \
-  gh pr edit 42 --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
-```
-
 ### Why CI Verification Matters
 
-**Scenario that caused this requirement (Issue #1441):**
-1. Doctor fixed a Rust test, pushed changes
-2. Judge evaluated, saw local tests pass, approved with `loom:pr`
-3. CI was still failing (shellcheck, frontend tests)
-4. Had to run multiple doctor passes to fix remaining failures
-
-**The lesson:** local tests can pass while CI fails (more checks, lint not run
-locally, CI-only integration tests, a different OS).
-
-**Always verify CI (`forge wait-checks`) before approving.**
+Issue #1441: a Judge approved on local-test green while CI was still failing, costing several Doctor passes. Approve only after `post-verdict.sh` accepts the head; `forge wait-checks` is for evidence, not authority.
 
 ## Formal Review & Inline Thread Reconciliation (REQUIRED Before Approval, #7647)
 

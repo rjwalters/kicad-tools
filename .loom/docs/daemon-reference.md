@@ -3017,7 +3017,7 @@ rules with `git check-ignore`.
 | `autonomous.eta.historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` — `local` (this host's journals), `augment` (plus the cached fleet snapshot) or `fleet` (the snapshot alone). A no-op until a snapshot is cached (#9343); since #10263 the fleet refresh task below caches one by default, so live estimates switch to `scope = fleet` on a host with reader Apps. `local` opts out |
 | `autonomous.eta.fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily coefficient refit (#10245). It checks hourly, fits at most once per UTC day into `.loom/state/eta/fit/`, makes no forge call, and runs only with `autonomous.eta.enabled`. A no-op until a snapshot is cached. With `fleetRefresh.enabled` (below, #10263) the check runs at the end of every fleet refresh cycle instead of on its own task, so it always sees fresh snapshots. Read at start |
 | `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
-| `autonomous.eta.shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `13` registered heuristics per kind (floor 1, #10525): `current` plus the 12 `eta.snapshot` alternates (#10549, was 10). A build over it does not start the ETA tracker; the error names the excess heuristics. Read at start. See [eta → shadow fleet management](eta.md#shadow-fleet-management) |
+| `autonomous.eta.shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `14` registered heuristics per kind (floor 1, #10525): `current` plus the 13 `eta.snapshot` alternates (#10521; 13 since #10549, was 10). A build over it does not start the ETA tracker; the error names the excess heuristics. Read at start. See [eta → shadow fleet management](eta.md#shadow-fleet-management) |
 | `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. **Restart required**. **On a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
 | `fleet.etaAuthority` | `LOOM_ETA_AUTHORITY` | unset (#10498). The one host that computes and emits `eta.*` records and fits locally. Unset: the declared `fleet.captain`, else the host whose own `fleetRefresh.enabled` is on; several candidates fall back to the lowest host id with a warning. Re-read every pass. See [eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498) |
 | `autonomous.eta.fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor `900`); first cycle 120 s after start |
@@ -9111,9 +9111,18 @@ across the registered roots:
 | stopped, host-mounted | `docker start`, via the `accounts session start` path |
 | missing, host-mounted | recreated with the workspace and image of the last operator `session start`; otherwise the label last seen on it; otherwise the registered roots' common parent, logged as a guess. Never `/`: that is refused and reported |
 | stopped or missing, private-clone | skipped with one WARN; never recreated host-mounted |
+| running, workspace mounts drifted, idle | stopped, removed and recreated with the current registry (#10364, below) |
+| running, workspace mounts drifted, in-flight exec or a dispatch starting | deferred and re-checked next pass; never stopped |
+| running, drift that cannot be decided | left running (rule 1 below) |
+| missing after a recorded denial removal | not recreated while the denial stands (rule 3 below) |
 
-- The pass never stops, removes or restarts a container. A container with an
-  in-flight `docker exec` is never touched (#5119).
+- The pass never stops or removes a container except an **idle** one whose
+  mounts drifted: to recreate it, or, when it mounts a positively denied path
+  and nothing would be accepted in its place, to remove it. A container with
+  an in-flight `docker exec`, or a dispatch that is only starting, is never
+  stopped (#5119).
+- The pass reads every container once: one bounded `docker ps -a` plus one
+  `docker inspect`, taken fresh on the first account that needs it.
 - After a resume or recreate, the account is re-probed at once, bypassing the
   300 s probe cache.
 - A failed start backs off per account: 120 s, doubling, capped at 30 min. It
@@ -9162,6 +9171,165 @@ across the registered roots:
 |---|---|---|---|
 | `LOOM_SESSION_RECONCILE` | `autonomous.sessionReconcile.enabled` | env > config > default | `true` (on) |
 | `LOOM_SESSION_RECONCILE_INTERVAL_SECS` | `autonomous.sessionReconcile.intervalSecs` | env > config > default | `60` |
+
+**Seeing it: `loom-daemon status` (#10600).** `status` lists every
+session-managed Codex account across the registered roots under `Session
+containers:`, one line each: the state (`running`, `stopped`, `missing`,
+`restarting`); the mounts (`ok`, or `stale (missing N, extra M, denied K)`,
+where `denied` is a mount `session start` refuses today and is not counted in
+`extra`); the posture (`host`, `private-clone`, or `unverified` when the
+container is not running or not hardened); `held (operator stop)`; `removed
+(denied mount: <path>)` while a removal record stands; and the reconciler's
+last action in this daemon process (`started`, `recreated`, `recreated (mount
+drift)`, `deferred (in-flight)`, `backoff until <time>`, …). `status --json`
+carries the same as `session_containers`. A seat that is not running, has
+stale mounts or has a standing removal record makes the block read
+`DEGRADED`, with one line naming the accounts. So does a host whose
+containers cannot be observed. A held seat is listed but does not degrade it:
+the operator stopped it on purpose. `loom-daemon health` has the same verdict
+as its conditional `session_containers` section. A host without a
+session-managed account shows neither.
+
+`status` makes no `docker` call. It reads the snapshot the session watch
+publishes every 60 s, with the drift verdict computed there. That verdict is
+the reconciler's own definition, so a container the reconciler is about to
+remove never reads `running` (the `loom.codex_session.state` gauge and the
+`workspace add/remove` report use it too). With no snapshot, or one older than
+120 s, the block reads `unavailable`, never a container state. The watch reads
+every registered root's accounts, not only the daemon root's. It is registered
+with task liveness as `codex_session_watch` (`Task liveness:` in `status`), and
+WARNs every 15 min while seats exist and its newest snapshot is older than
+120 s. After a pass starts or recreates a container it publishes a fresh
+snapshot, so dispatch selection sees the container at once. An operator's
+`accounts session start` runs in another process and cannot publish, so
+selection sees that container at the watch's next pass, within 60 s.
+
+**Acting by hand.** The reconciler replaces the hand-recreate steps. Check
+`loom-daemon status` first. The one manual override, for a daemon that is down,
+a reconciler that is opted out, or a restart the reconciler does not make
+(changed profile control files), is in
+[`guardrail-parity-codex.md`](guardrail-parity-codex.md#restarting-or-recreating-session-containers-by-hand).
+
+**Mount drift (#10364).** A host-mode container's workspace mounts are fixed
+when it is created, so a later `loom-daemon workspace add` never reaches it
+(every Codex tick in the new repository fails `chdir to cwd`) and a later
+`workspace remove` leaves the old repository mounted read-write. Each pass
+compares every running container's mounts with what `accounts session start
+--mount-workspace <its loom.workspace label>` would mount **now**:
+
+- Containers that still mount something they may no longer mount (`extra`, a
+  containment gap, logged at WARN with the container and path) are handled
+  before those that only lack a new one (`missing`), across every registered
+  root. `extra` is a mounted path that left the registry, **or** one
+  `session start` would refuse today even though it is still registered: the
+  home directory, or anything overlapping a `firewall: true` repository in
+  the cached fleet roster.
+- An idle one is stopped (graceful, 15 s), removed and recreated against the
+  workspace and image of the last operator `session start`
+  (`.session-last-start.json`, so a daemon restart does not lose it),
+  otherwise its own `loom.workspace` label. No hold is written. A busy one is
+  left running and re-checked next pass.
+- Held, disabled, private-clone (`loom.workspace-mode=private-clone`, or
+  configured under `.private-sessions`, or a mode that cannot be read, which
+  WARNs once) and non-session-managed accounts are never drift-recreated.
+- A freshly recreated container that still drifts is WARNed about once and
+  left alone until the drift changes, instead of being recreated every
+  interval. A failed stop or recreate takes the per-account backoff above; a
+  timed-out one ends the pass like any other timeout.
+
+The drift path follows four safety rules:
+
+1. **Missing information means no action.** A container is stopped with
+   nothing put in its place only for a *positively established denial*: a
+   specific mounted path that is the home directory or overlaps a `firewall:
+   true` repository, read from a roster that parsed. Anything that cannot be
+   decided leaves the container running:
+   - the workspace registry cannot be read or parsed: no drift decision for
+     the whole pass, one WARN, repeated on the backoff schedule;
+   - the registry is readable but lists nothing under the container's
+     workspace (an emptied or truncated file): deferred with a WARN. "Nothing
+     is intended" never removes a container;
+   - a registered root under the workspace is not a directory right now (an
+     unmounted volume): deferred with a WARN;
+   - the fleet roster cannot be read: no mount counts as denied, and no
+     recreate counts as accepted, so nothing is torn down;
+   - a recreate that would be refused, with no mounted path positively
+     denied: WARN once, left running.
+2. **One acceptance check.** Before stopping anything the pass asks whether
+   the recreate would be accepted, using the same function `session start`'s
+   `docker run` path uses, with the same workspace
+   (`tokens_pool/session_mount_gate.rs`). There is no second implementation.
+3. **A removal is recorded, finished, and never undone by the pass.**
+   When an idle container mounts a positively denied path and no start would
+   be accepted, it is stopped and removed, with a WARN naming the container
+   and the path, and `.session-drift-removed.json` is written in the account's
+   profile directory first (if that write fails, nothing is removed). While
+   the record stands the pass never `docker start`s or recreates the
+   container, across daemon restarts. If the container is still present and
+   **stopped** (the `docker rm` failed after the `docker stop`), the pass
+   finishes the removal. If it is **running** (something outside the pass
+   started it), the pass stops it only on a positive, current finding: its
+   own mounts include a path the loaded roster denies. If the registry or
+   roster cannot be read it is left running, with a WARN; if none of its
+   mounts is denied it is left running too, the record is kept (it still
+   blocks any recreate) and a WARN on a backoff cadence says so, so an
+   operator can clear it with `accounts session start`. A stale record alone
+   never stops a running container. A removal runs when idle, under the
+   dispatch lock, with a WARN on every attempt and the per-account backoff
+   while it keeps failing. A stopped container whose own mounts include a
+   positively denied path is never resumed: it is recorded and removed the
+   same way. The trade-off is deliberate: the pass never leaves a denied
+   mount running to avoid churn. Churn stays bounded because the pass itself
+   never brings such a container back. The record is cleared when the denial
+   positively no longer applies (the repository was deregistered, or the
+   roster no longer marks it), or by an operator `accounts session start`.
+   `accounts session status` shows it as `removed (denied mount: <path>) at
+   unix_ms=<ms>`, and `--json` carries it as `drift_removal`. It is not an
+   operator hold: `session status` does not show the account as held, and the pass never writes or lifts `.session-hold.json`. Until it
+   clears, Codex ticks for that account fall through to the next
+   `rolePreference` runtime.
+4. **A dispatch is never stopped, including one that is only starting.**
+   `docker top` cannot see a dispatch between its preflight inspect and its
+   worker exec. `session-exec host` therefore holds a per-container advisory
+   lock (a shared `flock` on `~/.loom/session-locks/<container>.lock`;
+   `LOOM_SESSION_LOCK_DIR` overrides the directory) from before its first
+   inspect until its worker exec has exited. The drift teardown takes it
+   exclusively, without blocking, right before `docker stop`, and keeps it
+   until the container is recreated. If a dispatch holds it the teardown is
+   deferred to the next pass; if the lock file cannot be created or opened
+   the teardown is deferred too. A dispatch that finds a teardown in progress
+   waits up to 30 s for it, and proceeds unlocked if the lock is unusable.
+   `accounts session stop` without `--force` takes the same lock and refuses
+   while a dispatch holds it; if the lock is unusable it says so and falls
+   back to the `docker top` check alone. Lock files persist: one empty file
+   per session container that has ever been dispatched to or torn down,
+   never deleted (deleting a `flock`ed file would split later holders onto a
+   new inode), so the directory stays small and bounded by the number of
+   accounts. The lock is per `$HOME` (or per `LOOM_SESSION_LOCK_DIR`): the
+   daemon and the dispatches it launches must resolve the same one, which
+   holds when they run as the same user with the same environment. If they
+   differ, each side silently locks its own file and only `docker top`
+   protects a starting dispatch. Test suites set `LOOM_SESSION_LOCK_DIR` to a
+   temporary directory and fail if the real one changed. The `docker top` check remains as the second
+   line.
+
+**Known gap: a session started on one checkout.** A container started with
+`--mount-workspace <one git checkout>` is not `extra` when that checkout is
+unregistered: `session start` accepts an unregistered checkout as an explicit
+operator grant, and a recreate would mount it again. So `loom-daemon
+workspace remove <repo>` does **not** unmount that repository from a
+container started on it; it stays mounted until an operator runs
+`loom-daemon accounts session stop <acct>`. The `workspace remove` report
+names each such container and that command.
+
+A drifted container keeps taking dispatches for the repositories it does
+mount until it is recreated: selection (#10454) checks only that a container
+is running.
+
+`loom-daemon workspace add`/`remove` lists the containers the change left
+drifted, says the reconciler will recreate them, and prints the manual
+`session stop` / `session start` pair for when the daemon is down or the
+reconciler is opted out.
 
 Docker reports a crash-looping container as `Running=true, Restarting=true`.
 `accounts session status`, `start`, the login probe and `session-exec posture`
@@ -10165,6 +10333,26 @@ loop is not reusable as the reporter). It has three cooperating parts:
    capture into the same log via the rendered job/unit's stdout/stderr redirect)
    — **and, since #5391, recovers**: see "The watchdog recovers, it is not a
    report-only detector" below.
+
+**Host opt-out: `autonomy-disabled` (#10179).** The strongest state, above the
+marker and the `.stopped` operator-stop record (#9588). `loom-daemon host disable
+--reason "<why>"` writes `<loom_dir>/autonomy-disabled` (`reason=`/`who=`/`when=`;
+the machine-level `~/.loom`, so it covers every repo on the host; a
+`LOOM_AUTONOMY_MARKER` override moves it too), removes `autonomy-desired`, and runs
+`loom-daemon-stop.sh` to stop the daemon and its launchd/systemd daemon + watchdog
+jobs. While it exists each of these exits non-zero naming reason, who, when and
+`loom-daemon host enable`, with no side effects: `daemon-start` /
+`loom-daemon-start.sh`, the watchdog tick (no recovery, no page), the watchdog
+provisioning guard, `daemon-update` (restart / relaunch / provision, and so the
+auto-update roll), daemon startup itself (supervised relaunch), and
+`resync-installed.sh` / `install-loom.sh` (via `loom-daemon host check`, which
+exits **10** when disabled; the shell guards refuse only on 10, so an older binary
+that exits 1/2 for the unknown `host` subcommand never reads as an opt-out).
+`heal_marker` never re-arms the marker, and `loom-daemon status` / `health` print
+`disabled by operator: <reason> (<when>)` and exit 0 instead of reporting an
+outage. An unreadable marker still counts as disabled (fail closed).
+`loom-daemon host enable` removes it (idempotent) and starts nothing; `host status`
+prints the state. Agents must never start or repair a daemon on a marked host.
 
 **The watchdog recovers, it is not a report-only detector (#5391).** Through
 #5118 the only automatic remediation was two deliberately narrow gates

@@ -989,7 +989,10 @@ it with `loom-daemon labels list --property park` / `labels get <name>`
 The Loom block of `.github/labels.yml` and `defaults/.github/labels.yml` is
 generated from it: edit the registry, then run `loom-daemon labels generate
 --write`. The `label_registry` tests fail on registry drift;
-`check-labels-drift.sh` only keeps the two copies byte-identical.
+`check-labels-drift.sh` only keeps the two copies byte-identical. The
+`quickstarts/*/.github/labels.yml` subsets are deliberately NOT generated:
+they are standalone starter templates with no marker block, not held to the
+registry.
 The park, skip, hard-exclusion and champion-path sets are derived from the
 registry; the other daemon tables are still hand-listed, held equal to it by
 lockstep tests. Either way a change to a table's meaning goes in the registry.

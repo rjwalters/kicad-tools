@@ -398,6 +398,57 @@ assert_worktree_json_shape "$OUT" "stale-reset"
 rm -f "$OUT"
 cleanup_repo "$REPO"
 
+# --- Test 10: `worktree.sh N | cat` returns while a lease renewer runs (#10203)
+#
+# fd 3 is the caller's saved stdout. `lease ensure` starts a renewer that
+# outlives worktree.sh by up to 4h; if it inherits fd 3, a `worktree.sh N | tail`
+# pipe stays open that long. The stub stands in for a daemon whose `lease`
+# subcommand leaves a long-lived background child with every inherited fd intact
+# (stdout/stderr already sent to /dev/null, as worktree.sh does) and answers
+# every other subcommand like an old binary. Bounded: a regression fails in ~30s.
+echo ""
+echo "Test 10: worktree.sh N | cat returns while a lease renewer keeps running (#10203)"
+REPO=$(setup_repo leasefd)
+RENEWER_DAEMON=$(mktemp /tmp/loom-wtjson-leasedaemon.XXXXXX)
+RENEWER_PIDFILE=$(mktemp /tmp/loom-wtjson-leasepid.XXXXXX)
+cat > "$RENEWER_DAEMON" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "lease" ]]; then
+    sleep 30 &
+    echo \$! > "$RENEWER_PIDFILE"
+    exit 0
+fi
+echo "error: unrecognized subcommand '\$1'" >&2
+exit 2
+STUB
+chmod +x "$RENEWER_DAEMON"
+RENEWER_DONE=$(mktemp /tmp/loom-wtjson-leasedone.XXXXXX)
+# Time from worktree.sh's own exit to the pipe closing — not worktree.sh's own
+# runtime, which varies with host load.
+(
+    cd "$REPO" || exit 1
+    {
+        LOOM_DAEMON_SELF_BIN="$RENEWER_DAEMON" LOOM_DAEMON_BIN="$RENEWER_DAEMON" \
+            ./.loom/scripts/worktree.sh 109 2>&1
+        date +%s > "$RENEWER_DONE"
+    } | cat >/dev/null
+)
+ELAPSED=$(($(date +%s) - $(cat "$RENEWER_DONE")))
+RENEWER_PID=$(cat "$RENEWER_PIDFILE" 2>/dev/null)
+if [[ -n "$RENEWER_PID" ]] && kill -0 "$RENEWER_PID" 2>/dev/null; then
+    pass "lease-fd: the stub renewer was started and is still running"
+else
+    fail "lease-fd: the stub renewer is not running (never started, so the test is vacuous, or the pipe held long enough for it to exit)"
+fi
+if [[ "$ELAPSED" -lt 5 ]]; then
+    pass "lease-fd: the pipe closed when worktree.sh exited (${ELAPSED}s after)"
+else
+    fail "lease-fd: the pipe stayed open ${ELAPSED}s after worktree.sh exited — the renewer inherited its fd 3"
+fi
+[[ -n "$RENEWER_PID" ]] && kill "$RENEWER_PID" 2>/dev/null
+rm -f "$RENEWER_DAEMON" "$RENEWER_PIDFILE" "$RENEWER_DONE"
+cleanup_repo "$REPO"
+
 # --- Summary ---
 echo ""
 echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"

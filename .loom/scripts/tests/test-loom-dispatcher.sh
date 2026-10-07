@@ -258,7 +258,7 @@ if command -v jq >/dev/null 2>&1; then
     out=$(cd "$RTIER" && LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" status 2>&1)
     assert_contains "$out" "autonomous.workFinder.enabled = true" ".loom-local/local.json overrides .loom/config.json (resolver, not direct read)"
 else
-    echo "Test 6: SKIP (jq not on PATH)"
+    loom_test_skip "Test 6: jq not on PATH"
 fi
 
 echo "Test 7: status is explicit when jq is unavailable — not masqueraded as 'no config' (AC5)"
@@ -556,7 +556,7 @@ EOF
     assert_contains "$out" "LOOM_MAIN_HEALTH_GATE=[1]" "harvested LOOM_MAIN_HEALTH_GATE from a real plist reaches start_target's re-render"
     assert_contains "$out" "preserved 2 LOOM_*/token env var(s)" "dispatcher reports the harvested count (real plist)"
 else
-    echo "Test 16f: SKIP (plutil and/or jq not on PATH — harvest_plist_env is a macOS-only production path)"
+    loom_test_skip "Test 16f: plutil and/or jq not on PATH — harvest_plist_env is a macOS-only production path"
 fi
 
 echo "Test 16e: 'loom restart --machine' still falls back cleanly when this checkout predates daemon-env-harvest.sh (#4581 backward-compat)"
@@ -648,7 +648,7 @@ if command -v jq >/dev/null 2>&1; then
     assert_contains "$out" "STUB_CODEX" "runtimes.default=codex (no env) resolves to spawn-codex.sh"
     assert_not_contains "$out" "STUB_CLAUDE" "config-selected codex path does not touch the claude runner"
 else
-    echo "Test 21: SKIP (jq not on PATH)"
+    loom_test_skip "Test 21: jq not on PATH"
 fi
 
 echo "Test 22: 'loom sweep' with an unknown runtime exits 78 naming runtime, source, and runners present"
@@ -690,6 +690,6 @@ assert_not_contains "$src" "'claude' CLI not found on PATH; cannot dispatch a sw
 
 echo ""
 echo "======================================"
-echo "test-loom-dispatcher.sh: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
+echo "test-loom-dispatcher.sh: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed, ${TESTS_SKIPPED:-0} skipped"
 echo "======================================"
 [[ "$TESTS_FAILED" -eq 0 ]]

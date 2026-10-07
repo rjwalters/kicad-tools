@@ -69,10 +69,11 @@ MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
     "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
-    "merge-pr worktree-find-by-branch"
+    "merge-pr worktree-find-by-branch" "merge-pr worktree-teardown"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -81,6 +82,19 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why it could not
+# survive, and what proves the property now. Counted as run so the totals stay
+# honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
@@ -94,16 +108,28 @@ echo "Test 1: merge-pr.sh source retains the #6372 worktree-removal diagnosis"
 
 assert_grep '#6372' "$MERGE_PR" \
     "_remove_loom_worktree documents the #6372 fix"
-assert_grep 'worktree remove "\$worktree_path" --force 2>&1' "$MERGE_PR" \
-    "the first removal attempt captures stderr instead of discarding it"
-assert_grep 'git -C "\$REPO_ROOT" worktree prune' "$MERGE_PR" \
-    "a prune is attempted before giving up"
+retired "the grep for the first removal attempt's captured stderr (worktree remove \"\$worktree_path\" --force 2>&1)" \
+    "git's real error is captured, not discarded via 2>/dev/null" \
+    "the remove/prune/retry ladder left merge-pr.sh in the #8191 worktree-teardown slice; it is Rust in loom-daemon/src/merge_pr/worktree_teardown.rs, so no grep of this file can pass" \
+    "Test 3 below (the simulated git error text must reach the operator, behavioural, unchanged), plus loom-daemon/tests/merge_pr_worktree_teardown_differential.rs, which compares the port against a FROZEN copy of the retired ladder over stderr-only, stdout/stderr-interleaved, multi-line and empty git output"
+retired "the grep for the prune-before-giving-up call (git -C \"\$REPO_ROOT\" worktree prune)" \
+    "a failed first removal is followed by exactly one git worktree prune and one retry" \
+    "same slice: the prune call is made by loom-daemon merge-pr worktree-teardown, not by this file" \
+    "Tests 2 and 3 below (the wrapper's prune marker must be written, behavioural, unchanged), plus the differential's git call log (remove/prune/remove, and remove/prune with no retry when prune fails) and a_failed_first_try_prunes_once_then_retries_once / a_failed_prune_skips_the_retry_and_keeps_the_first_error in src/merge_pr/worktree_teardown/tests.rs"
+assert_grep '_mp_worktree worktree-teardown' "$MERGE_PR" \
+    "_remove_loom_worktree delegates the removal to 'merge-pr worktree-teardown'"
+# Since the worktree-teardown slice these two greps match the wrapper's own
+# fail-closed message (the verb could not run, so nothing was removed), which
+# keeps the same best-effort wording and remediation; git's failure report is
+# rendered by the Rust verb and pinned behaviourally by Test 3.
 assert_grep 'Could not remove worktree at \$worktree_path \(best-effort cleanup' "$MERGE_PR" \
     "the terminal failure message states the best-effort decision"
 assert_grep 'Remediation: git worktree prune' "$MERGE_PR" \
     "the terminal failure message names the remediation command"
-assert_grep 'removed \(after pruning a stale worktree registration\)' "$MERGE_PR" \
-    "a successful prune-then-retry is reported distinctly from a first-try success"
+retired "the grep for the distinct prune-then-retry success text" \
+    "a successful prune-then-retry is reported distinctly from a first-try success" \
+    "same slice: the success text is rendered by loom-daemon merge-pr worktree-teardown and replayed through success(), so it no longer appears in this file" \
+    "Test 2 below (asserts 'removed (after pruning a stale worktree registration)' in the output and Test 4 asserts its absence on a first-try success, both behavioural, unchanged), plus success_texts_distinguish_a_pruned_retry in src/merge_pr/worktree_teardown/tests.rs and the differential"
 
 # --- Extract the ACTUAL function bodies from the live source (no drift) ---
 extract_fn() {

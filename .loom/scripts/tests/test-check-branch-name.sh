@@ -172,7 +172,7 @@ if [[ -n "$UTF8_LOCALE" ]]; then
         fi
     done
 else
-    echo "  SKIP: no non-C UTF-8 locale on this host — cannot exercise the locale-collation case"
+    loom_test_skip "no non-C UTF-8 locale on this host — cannot exercise the locale-collation case"
 fi
 
 # The refusal has to be usable: it names the offending ref (so a log grep and a
@@ -549,5 +549,5 @@ rm -rf "$MP"
 
 # --- Summary ----------------------------------------------------------------
 echo ""
-echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"
+echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED, Skipped: ${TESTS_SKIPPED:-0}"
 [[ $TESTS_FAILED -eq 0 ]] || exit 1

@@ -366,11 +366,12 @@ it explicitly when sizing a multi-account Codex pool):
 #    a throwaway container with the profile writable, then restart the session
 #    (the posture gate refuses dispatch until the container sees the new file).
 #    This is the current method while hook trust remains interactive.
+#    The session reconciler does NOT restart a running container because its
+#    control files changed: restart it by hand, see "Restarting or recreating
+#    session containers by hand" below.
 docker run --rm -it --user 1000:1000 -w /tmp \
   -v ~/.loom/codex-profiles/alice:/home/loom/.codex-profile \
   ghcr.io/rjwalters/loom-worker-session:latest codex          # session-managed
-loom-daemon accounts session stop alice && \
-  loom-daemon accounts session start alice --mount-workspace ~/GitHub
 CODEX_HOME=~/.loom/codex-profiles/alice codex                 # bare-metal only
 
 # 3. gate the pool: exit 0 only when EVERY profile is ready
@@ -489,16 +490,9 @@ does:
 ```bash
 cd <daemon root>                       # e.g. ~/GitHub/loom (workers: ~/loom-daemon)
 .loom/scripts/provision-codex-hooks.sh install --all-profiles --workspace "$PWD"
-# Read-only binds don't follow a host-side replace, so restart each host-mode
-# session once. Restart only already-adopted seats: `session start` ADOPTS a
-# profile. Skip private-clone seats, which keep their pinned registration.
-# `stop` refuses while a job runs; retry it later.
-for d in ~/.loom/codex-profiles/*/; do
-  p="$(basename "$d")"
-  [[ -f "$d/.session-managed.json" && ! -e ~/.loom/codex-profiles/.private-sessions/$p ]] || continue
-  loom-daemon accounts session stop "$p" && \
-    loom-daemon accounts session start "$p" --mount-workspace ~/GitHub
-done
+# Read-only binds don't follow a host-side replace, and the session reconciler
+# does not restart a running container for that: restart each host-mode seat
+# once with the loop in "Restarting or recreating session containers by hand".
 .loom/scripts/provision-codex-hooks.sh verify --all-profiles --workspace "$PWD" --allow-sealed --json \
   | jq -c '{profile, ready, trustSignal, bypassHookTrust, sealReason}'
 ```
@@ -719,15 +713,48 @@ step.
 
 **Rollout.** Existing session containers keep their old mounts until they are
 recreated. `spawn-codex.sh` refuses to use them (exit 78) instead of dropping
-the sandbox in them. Recreate each one from the daemon's workspace, so the
-App-token dir is found (the accounts `--workspace`, which defaults to the
+the sandbox in them. The daemon's session reconciler handles this: a container
+whose workspace mounts differ from what `session start` would mount today (a
+pre-#9979 whole-parent mount, a repository admitted or removed later, a mount
+now denied) is recreated once it is idle, and a stopped or missing one is
+restarted ([`daemon-reference.md`](daemon-reference.md#codex-session-container-reconciler-10453)).
+Check it with `loom-daemon status`, whose `Session containers:` block lists
+each seat's state, mounts, posture and the reconciler's last action. Act by
+hand only as the override below describes.
+
+### Restarting or recreating session containers by hand
+
+The one manual procedure, for three cases: the daemon is down; the reconciler
+is opted out (`LOOM_SESSION_RECONCILE=0` or
+`autonomous.sessionReconcile.enabled=false`); or a running container must be
+restarted for a reason the reconciler does not act on, such as profile control
+files that changed on the host (provisioning, hook trust) or an unhardened
+container whose mounts already match. Run it from the daemon's workspace, so
+the App-token dir is found (the accounts `--workspace`, which defaults to the
 current checkout, is one of the token-dir owners alongside the mount and
 `LOOM_WORKSPACE`; before #10103 a session started without `LOOM_WORKSPACE`
-mounted no token dir and posture reported `gh=skip`):
-`cd <daemon root> && loom-daemon accounts session stop <name> && loom-daemon
-accounts session start <name> --mount-workspace <checkout parent>`. A
-repository admitted later becomes visible only after its account's container
-is recreated.
+mounted no token dir and posture reported `gh=skip`). `stop` refuses while a
+job runs; retry it later.
+
+```bash
+cd <daemon root>                       # e.g. ~/GitHub/loom (workers: ~/loom-daemon)
+# One seat:
+loom-daemon accounts session stop <name> && \
+  loom-daemon accounts session start <name> --mount-workspace <checkout parent>
+# Every host-mode seat. Restart only already-adopted seats: `session start`
+# ADOPTS a profile. Skip private-clone seats, which keep their pinned
+# registration (restart those with `--private-clone <URL> --base <BRANCH>`).
+for d in ~/.loom/codex-profiles/*/; do
+  p="$(basename "$d")"
+  [[ -f "$d/.session-managed.json" && ! -e ~/.loom/codex-profiles/.private-sessions/$p ]] || continue
+  loom-daemon accounts session stop "$p" && \
+    loom-daemon accounts session start "$p" --mount-workspace ~/GitHub
+done
+```
+
+`accounts session stop` leaves an operator hold, so the reconciler keeps the
+seat down until the `start`. With the daemon up, confirm the result with
+`loom-daemon status`.
 
 **Evidence.** `docker/session/test-image.sh` check 13 drives the real `codex
 exec` through one tool call under these exact flags (credential-free,

@@ -99,6 +99,12 @@ STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub gh: LOOM_TEST_STUB_DIR not set}"
 # with a clean, complete, EMPTY review state -> the gate reports CLEAR and the
 # marker assertions below exercise exactly what they did before.
 if [[ "$1" == "api" ]]; then
+  # #10485: the final head compare reads `repos/O/R/pulls/N --jq .head.sha`.
+  if [[ "$2" =~ ^repos/[^/]+/[^/]+/pulls/[0-9]+$ ]]; then
+    [[ -f "$LOOM_TEST_STUB_DIR/final-head-fail" ]] && exit 1
+    if [[ -f "$LOOM_TEST_STUB_DIR/final-head" ]]; then cat "$LOOM_TEST_STUB_DIR/final-head"; else cat "$LOOM_TEST_STUB_DIR/cur-sha"; fi
+    exit 0
+  fi
   if [[ "$2" == "graphql" ]]; then
     printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n'
     exit 0
@@ -166,11 +172,39 @@ export PATH="$STUB_DIR:$PATH"
 # under test, deterministically, whatever binary the host happens to have.
 cat > "$STUB_DIR/loom-daemon" <<'MOCK'
 #!/usr/bin/env bash
+# #10485: `forge wait-checks` is the exact-head CI reader the approval gate
+# calls. Scenario files drive it: ci-stdout (sentinel line), ci-stderr (detail
+# lines), ci-garbage / ci-absent (no sentinel / "unknown subcommand" like an
+# older binary). Default: GREEN on the SHA under test.
+if [[ "${1:-} ${2:-}" == "forge wait-checks" ]]; then
+  printf '%s\n' "$*" >> "$LOOM_TEST_STUB_DIR/wait-checks-calls.log"
+  [[ -f "$LOOM_TEST_STUB_DIR/ci-absent" ]] && { echo "error: unrecognized subcommand 'wait-checks'" >&2; exit 2; }
+  [[ -f "$LOOM_TEST_STUB_DIR/ci-garbage" ]] && { echo "<html>502 Bad Gateway</html>"; exit 0; }
+  # models the real reader: an empty rollup settles to NONE only given time
+  # for ~3 polls (--timeout >= 10); below that it reports TIMEOUT
+  if [[ -f "$LOOM_TEST_STUB_DIR/ci-empty" ]]; then
+    t=0; prev=""
+    for a in "$@"; do [[ "$prev" == "--timeout" ]] && t="$a"; prev="$a"; done
+    if [[ -f "$LOOM_TEST_STUB_DIR/ci-required" || "$t" -lt 10 ]]; then
+      echo "LOOM-CHECKS-TIMEOUT $(cat "$LOOM_TEST_STUB_DIR/cur-sha")"; exit 1
+    fi
+    echo "LOOM-CHECKS-NONE $(cat "$LOOM_TEST_STUB_DIR/cur-sha")"; exit 1
+  fi
+  if [[ -f "$LOOM_TEST_STUB_DIR/ci-stdout" ]]; then
+    cat "$LOOM_TEST_STUB_DIR/ci-stdout"
+    [[ -f "$LOOM_TEST_STUB_DIR/ci-stderr" ]] && cat "$LOOM_TEST_STUB_DIR/ci-stderr" >&2
+    exit 1
+  fi
+  echo "LOOM-CHECKS-GREEN $(cat "$LOOM_TEST_STUB_DIR/cur-sha")"
+  exit 0
+fi
 echo "mock loom-daemon: forge comment not under test here" >&2
 exit 127
 MOCK
 chmod +x "$STUB_DIR/loom-daemon"
 export LOOM_DAEMON_SELF_BIN="$STUB_DIR/loom-daemon"
+# #10485: the CI gate invokes the reader through LOOM_DAEMON_BIN (or PATH).
+export LOOM_DAEMON_BIN="$STUB_DIR/loom-daemon"
 # #9548: post-verdict.sh vets its write target through the write scope before it
 # writes. It runs from a checkout registered as owner/repo (origin, .loom/, push
 # reported to the permission probe), so the real decision admits it.
@@ -178,11 +212,14 @@ write_scope_register "$STUB_DIR/checkout" owner/repo
 cd "$STUB_DIR/checkout"
 
 reset_state() {
-  rm -f "$STUB_DIR"/comment-fail-* "$STUB_DIR/last-pr.txt" "$STUB_DIR/last-body.txt"
+  rm -f "$STUB_DIR"/comment-fail-* "$STUB_DIR/last-pr.txt" "$STUB_DIR/last-body.txt" \
+    "$STUB_DIR"/ci-stdout "$STUB_DIR"/ci-stderr "$STUB_DIR"/ci-garbage "$STUB_DIR"/ci-absent "$STUB_DIR"/ci-empty "$STUB_DIR"/ci-required \
+    "$STUB_DIR"/final-head "$STUB_DIR"/final-head-fail "$STUB_DIR/wait-checks-calls.log"
 }
 
 run_pv() {
   set +e
+  printf '%s' "${3:-}" > "$STUB_DIR/cur-sha"
   OUTPUT=$("$POST_VERDICT" "$@" 2>&1)
   EXIT_CODE=$?
   set -e
@@ -219,6 +256,7 @@ assert_contains "$LAST_BODY" "<!-- loom:verdict-sha sha=cafe123 verdict=approved
 reset_state
 run_pv_stdin() {
   set +e
+  printf '%s' "${3:-}" > "$STUB_DIR/cur-sha"
   OUTPUT=$(printf 'Approved via stdin.' | "$POST_VERDICT" "$@" 2>&1)
   EXIT_CODE=$?
   set -e
@@ -324,6 +362,146 @@ else
     TESTS_RUN=$((TESTS_RUN + 1))
   done
 fi
+
+
+# --- T14: exact-head all-CI gate (#10485) ------------------------------------
+# Every denial must exit non-zero AND post nothing (no comment => the caller's
+# `&&`-chained loom:pr edit cannot run). Fake reader sentinels drive each case.
+CI_SHA_FULL="0123456789abcdef0123456789abcdef01234567"
+no_comment() {
+  assert_eq "" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "$1: no comment posted"
+}
+
+# green on the exact head: approval posted, reader asked for one snapshot of this PR
+reset_state
+run_pv 300 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "0" "$EXIT_CODE" "CI green on exact head -> approval posted"
+assert_contains "$LAST_BODY" "<!-- loom:verdict-sha sha=$CI_SHA_FULL verdict=approved -->" "green: marker preserved"
+assert_contains "$(cat "$STUB_DIR/wait-checks-calls.log")" "forge wait-checks 300 --repo owner/repo --timeout 20" "green: bounded snapshot read of the PR"
+
+# NONE (legitimately no CI, per the reader's zero-row settle) is accepted
+reset_state
+echo "LOOM-CHECKS-NONE $CI_SHA_FULL" > "$STUB_DIR/ci-stdout"
+run_pv 301 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "0" "$EXIT_CODE" "reader NONE (settled: no required contexts) -> approval posted"
+
+# checkless repo against the real reader's settle behaviour (regression: a
+# --timeout 0 read of an empty rollup is TIMEOUT, which refused every approval)
+reset_state
+touch "$STUB_DIR/ci-empty"
+run_pv 310 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "0" "$EXIT_CODE" "checkless repo settles to NONE within the default timeout -> approval posted"
+reset_state
+touch "$STUB_DIR/ci-empty" "$STUB_DIR/ci-required"
+run_pv 311 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "empty rollup with required contexts stays TIMEOUT -> exit 5"
+no_comment "empty rollup + required"
+
+# pending
+reset_state
+echo "LOOM-CHECKS-TIMEOUT $CI_SHA_FULL build,test" > "$STUB_DIR/ci-stdout"
+run_pv 302 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "pending checks -> exit 5"
+assert_contains "$OUTPUT" "LOOM-CHECKS-TIMEOUT" "pending: reader evidence shown"
+assert_contains "$OUTPUT" "leave loom:review-requested" "pending: next action named"
+no_comment "pending"
+
+# non-required failure is RED too (the reader folds every observed check)
+reset_state
+echo "LOOM-CHECKS-RED $CI_SHA_FULL optional-lint" > "$STUB_DIR/ci-stdout"
+printf 'optional-lint\thttps://example.test/run/9\t9\n' > "$STUB_DIR/ci-stderr"
+run_pv 303 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "6" "$EXIT_CODE" "failed (non-required) check -> exit 6"
+assert_contains "$OUTPUT" "optional-lint" "red: failing check named"
+assert_contains "$OUTPUT" "https://example.test/run/9" "red: failing check url shown"
+no_comment "red"
+
+# cancelled / timed_out / action_required are classified failing by the reader -> RED
+reset_state
+echo "LOOM-CHECKS-RED $CI_SHA_FULL deploy-preview" > "$STUB_DIR/ci-stdout"
+run_pv 304 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "6" "$EXIT_CODE" "cancelled check (reader RED) -> exit 6"
+no_comment "cancelled"
+
+# reader ERROR
+reset_state
+echo "LOOM-CHECKS-ERROR read-failed: HTTP 502" > "$STUB_DIR/ci-stdout"
+run_pv 305 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "reader ERROR -> exit 5"
+no_comment "reader error"
+
+# empty rollup with required contexts / approval-required fork workflow: the
+# reader holds it at TIMEOUT (never NONE) with the required names pending
+reset_state
+echo "LOOM-CHECKS-TIMEOUT $CI_SHA_FULL ci/required" > "$STUB_DIR/ci-stdout"
+run_pv 306 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "empty rollup, required contexts / approval-required -> exit 5"
+no_comment "empty/approval-required"
+
+# HEAD-MOVED reported by the reader
+reset_state
+echo "LOOM-CHECKS-HEAD-MOVED $CI_SHA_FULL fedcba9876543210fedcba9876543210fedcba98" > "$STUB_DIR/ci-stdout"
+run_pv 307 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "reader HEAD-MOVED -> exit 5"
+no_comment "reader head-moved"
+
+# green was read for a DIFFERENT head than the one reviewed
+reset_state
+echo "LOOM-CHECKS-GREEN fedcba9876543210fedcba9876543210fedcba98" > "$STUB_DIR/ci-stdout"
+run_pv 308 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "green for a different head than reviewed -> exit 5"
+no_comment "wrong-head green"
+
+# SHA moves between the CI read and the post (final compare)
+reset_state
+echo "fedcba9876543210fedcba9876543210fedcba98" > "$STUB_DIR/final-head"
+run_pv 309 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "head moved between CI read and post -> exit 5"
+assert_contains "$OUTPUT" "moved or unreadable" "final compare: reason shown"
+no_comment "final compare"
+
+# head unreadable at the final compare fails closed
+reset_state
+touch "$STUB_DIR/final-head-fail"
+run_pv 310 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "final head read failure -> exit 5"
+no_comment "final head read failure"
+
+# status read failure: older daemon (no wait-checks), garbage output, no binary
+reset_state
+touch "$STUB_DIR/ci-absent"
+run_pv 311 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "daemon without wait-checks -> exit 5 (fail closed)"
+assert_contains "$OUTPUT" "resync-installed.sh" "older daemon: resync hint shown"
+no_comment "older daemon"
+
+reset_state
+touch "$STUB_DIR/ci-garbage"
+run_pv 312 approved "$CI_SHA_FULL" --body "ok"
+assert_eq "5" "$EXIT_CODE" "garbage reader output (no sentinel) -> exit 5"
+no_comment "garbage output"
+
+reset_state
+OLD_DAEMON_BIN="$LOOM_DAEMON_BIN"
+export LOOM_DAEMON_BIN="$STUB_DIR/does-not-exist"
+run_pv 313 approved "$CI_SHA_FULL" --body "ok"
+export LOOM_DAEMON_BIN="$OLD_DAEMON_BIN"
+assert_eq "5" "$EXIT_CODE" "missing daemon binary -> exit 5"
+no_comment "missing daemon"
+
+# fast path (docs-only style body) goes through the same single gate
+reset_state
+echo "LOOM-CHECKS-TIMEOUT $CI_SHA_FULL docs-lint" > "$STUB_DIR/ci-stdout"
+run_pv 314 approved "$CI_SHA_FULL" --body "Docs-only fast path: approved."
+assert_eq "5" "$EXIT_CODE" "fast-path approval is gated by the same CI check"
+no_comment "fast path"
+
+# changes-requested is never gated on CI (it cannot merge anything)
+reset_state
+echo "LOOM-CHECKS-RED $CI_SHA_FULL build" > "$STUB_DIR/ci-stdout"
+run_pv 315 changes-requested "$CI_SHA_FULL" --body "CI failing: build"
+assert_eq "0" "$EXIT_CODE" "changes-requested posts even when CI is red"
+assert_eq "" "$(cat "$STUB_DIR/wait-checks-calls.log" 2>/dev/null || true)" "changes-requested does not read CI"
 
 # --- Summary ---
 echo ""

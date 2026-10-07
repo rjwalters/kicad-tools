@@ -876,6 +876,10 @@ cmd_renew_once() {
 # --- start ---------------------------------------------------------------
 
 cmd_start() {
+    # Issue #10203: re-enter once through the daemon, which marks every fd the
+    # caller leaked (above 2) close-on-exec before exec'ing us again. Skipped
+    # when the binary predates `sanitize-exec` (--check) so `start` stays fail-open.
+    [[ -n "${LOOM_RENEW_FDS_CLEAN:-}" ]] || ! "${LOOM_DAEMON_BIN:-loom-daemon}" lease renewer sanitize-exec --check > /dev/null 2>&1 || LOOM_RENEW_FDS_CLEAN=1 exec "${LOOM_DAEMON_BIN:-loom-daemon}" lease renewer sanitize-exec -- "$SELF" start "$@"
     local issue="${1:-}"
     shift || true
     [[ "$issue" =~ ^[0-9]+$ ]] || {
@@ -1030,6 +1034,13 @@ cmd_start() {
     local loop_started_at lease_cache_re='lease-cache=([0-9]+@[0-9TZ:-]+)'
     loop_started_at="$(date -u +%s)"
     #
+    # Issue #10203: the loop (and its `sleep` children) must hold no fd it
+    # inherited from the caller except its own log (fd 9), so the closing
+    # redirect below also closes 3-8. An inherited fd 3 -- worktree.sh's saved
+    # stdout, i.e. a `worktree.sh N | tail` pipe -- otherwise kept that pipe
+    # open for the loop's whole 4h lifetime. `cmd_start` re-enters itself
+    # through `loom-daemon lease renewer sanitize-exec` so fds 10+ are
+    # closed too; `loom-daemon lease ensure` does the same marking before `start`.
     # Issue #10229: one renewer per (repo, host, sweep, issue), and a cycle
     # that ends the loop once the issue is closed, even while the watched
     # interactive parent lives on. The decisions live in `loom-daemon lease
@@ -1082,7 +1093,7 @@ cmd_start() {
             case "$renew_rc" in 0) misses=0 ;; 2) misses=$((misses + 1)) ;; esac
             ((misses < 2)) || { echo "sweep-lease-renew: renewal loop for issue #${issue} exiting: no lease comment to renew on two consecutive cycles (#10229)" >&9; break; }
         done
-    ) < /dev/null > /dev/null 2>&1 &
+    ) < /dev/null > /dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- &
     local loop_pid=$! owner_pid=""
     # A live renewer already owns this key: drop the loop just forked (still in
     # its first sleep, no forge call made) and report the owner's pid instead.

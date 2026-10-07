@@ -968,7 +968,7 @@ EOF
         kill "$(cat "$SH3_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
     fi
 else
-    echo "  (skipping SH3: python3 AF_UNIX bind unavailable on this host)"
+    loom_test_skip "SH3: python3 AF_UNIX bind unavailable on this host"
 fi
 rm -rf "$SH3_HOME"
 
@@ -1007,7 +1007,7 @@ EOF
         kill "$(cat "$SH4_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
     fi
 else
-    echo "  (skipping SH4: python3 AF_UNIX bind unavailable on this host)"
+    loom_test_skip "SH4: python3 AF_UNIX bind unavailable on this host"
 fi
 rm -rf "$SH4_HOME"
 
@@ -1360,7 +1360,7 @@ EOF
         kill "$(cat "$SH5_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
     fi
 else
-    echo "  (skipping SH5: python3 AF_UNIX bind unavailable on this host)"
+    loom_test_skip "SH5: python3 AF_UNIX bind unavailable on this host"
 fi
 rm -rf "$SH5_HOME"
 
@@ -2883,5 +2883,5 @@ fi
 
 # ---------- summary ----------
 echo
-echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"
+echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed, ${TESTS_SKIPPED:-0} skipped"
 [[ "$TESTS_FAILED" -eq 0 ]]

@@ -59,6 +59,15 @@ assert_grep() {
 
 [[ -x "$MERGE_PR" ]] || { echo "ERROR: $MERGE_PR not executable" >&2; exit 1; }
 
+# #8191 slice: Test 1 reads --help, whose text is `loom-daemon merge-pr usage`
+# now. --self-only pins ONLY LOOM_DAEMON_SELF_BIN (the seam --help resolves
+# first), so Tests 5/6's PATH stub and per-invocation LOOM_DAEMON_BIN keep
+# their meaning and no assertion changes. FAILS rather than skips without a
+# binary.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$SCRIPTS_DIR" "merge-pr usage"
+
 # --- Test 1: --help mentions --merge-method ---
 echo "Test 1: --help documents --merge-method"
 

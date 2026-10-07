@@ -49,7 +49,7 @@ check() { # <description> <command...>: passes when the command succeeds
 }
 
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"' EXIT
+source "$SCRIPT_DIR/lib/session-lock-sandbox.sh" "$TMPROOT"
 WS="$TMPROOT/ws"
 mkdir -p "$WS/.loom/hooks"
 cp "$SCRIPTS_DIR/../hooks/guard-codex-bridge.sh" "$WS/.loom/hooks/"
@@ -166,20 +166,20 @@ SPAWN_ENV=()
 # A daemon predating #10102 rejects --allow-sealed (exit 2): judged on recorded
 # trust alone, so the sealed-but-untrusted seat is refused, not waived.
 OLD="$TMPROOT/old-daemon"
-REAL_BIN="${LOOM_DAEMON_SELF_BIN:-}"
+REAL_BIN="$LOOM_DAEMON_SELF_BIN"
 cat > "$OLD" <<OLD_DAEMON
 #!/usr/bin/env bash
 for a in "\$@"; do [[ "\$a" == --allow-sealed ]] && { echo "error: unexpected argument '--allow-sealed'" >&2; exit 2; }; done
 exec "$REAL_BIN" "\$@"
 OLD_DAEMON
 chmod +x "$OLD"
-if [[ -n "$REAL_BIN" ]]; then
-    SPAWN_ENV=(LOOM_DAEMON_SELF_BIN="$OLD")
-    spawn judge
-    check "an older daemon: falls back to recorded trust and refuses the untrusted seat" rc_is 78
-    check "…without ever passing the waiver" lacks "$WAIVER"
-    SPAWN_ENV=()
-fi
+# Unconditional: the harness above already failed the suite if no binary
+# resolved, so a guard here could only ever hide this case (#10662).
+SPAWN_ENV=(LOOM_DAEMON_SELF_BIN="$OLD")
+spawn judge
+check "an older daemon: falls back to recorded trust and refuses the untrusted seat" rc_is 78
+check "…without ever passing the waiver" lacks "$WAIVER"
+SPAWN_ENV=()
 
 echo ""
 echo "Tests run: $TESTS_RUN, failed: $TESTS_FAILED"

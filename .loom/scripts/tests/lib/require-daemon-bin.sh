@@ -4,12 +4,14 @@
 #
 # Source this file (do not exec). Defines:
 #
-#   loom_test_require_daemon_bin [--self-only] <scripts-dir> <subcommand> [<subcommand>...]
-#       Resolves a loom-daemon, snapshots it to a private per-suite path,
-#       exports LOOM_DAEMON_SELF_BIN (and, by default, LOOM_DAEMON_BIN) so
-#       every stub this suite invokes execs THAT binary, and verifies it knows
-#       each named subcommand. Never returns on failure — it exits 1 with an
-#       actionable message.
+#   loom_test_require_daemon_bin [--self-only] [--path] <scripts-dir> <subcommand> [<subcommand>...]
+#       Resolves a loom-daemon, proves it was built from this checkout
+#       (#10662, below), snapshots it to a private per-suite path, exports
+#       LOOM_DAEMON_SELF_BIN (and, by default, LOOM_DAEMON_BIN) so every stub
+#       this suite invokes execs THAT binary, and verifies it knows each named
+#       subcommand. Never returns on failure — it exits 1 with an actionable
+#       message. `--path` also puts the pinned binary's directory first on
+#       $PATH, for a subject that reaches a bare `loom-daemon` somewhere.
 #
 # WHICH VARIABLE PINS THE STUB (#8134)
 #
@@ -103,7 +105,81 @@
 # LOOM_TEST_DAEMON_BIN_STRICT_FRESHNESS=1 to make it fatal where the caller
 # knows a build just ran.
 #
+# WHICH BUILD, AND PROOF THAT IT IS THIS CHECKOUT'S (#10662)
+#
+# Freshest-wins and the snapshot still left the question that matters: is the
+# binary under test built from the source under test? Twice in one week the
+# answer was no and nothing said so. A suite with no build for its checkout
+# fell through to the installed release on $PATH and passed 267/267 on a change
+# only CI's fresh build could fail; and on a host whose target dir is shared by
+# every checkout, "freshest" was another checkout's build, reported as "the
+# fresh daemon" for three review rounds.
+#
+# So, in a checkout that carries the daemon's source (`loom-daemon/Cargo.toml`
+# at the repo root), resolution is ONE rule for every suite on this harness:
+#
+#   1. $LOOM_DAEMON_SELF_BIN, if it names an executable (and, without
+#      --self-only, $LOOM_DAEMON_BIN — the same explicit operator pin it has
+#      always been here);
+#   2. else a build for THIS checkout: among the build outputs cargo could have
+#      written for it ($CARGO_TARGET_DIR/{release,debug}, <repo>/target/...,
+#      <repo>/loom-daemon/target/..., a ~/.cargo/config.toml target-dir), the
+#      freshest one whose `--version` names this checkout's HEAD. In a shared
+#      target dir the source commit is the only thing that says whose build a
+#      file is; mtime cannot.
+#   3. else FAIL. Never the installed `loom-daemon` on $PATH, and never "the
+#      freshest build anywhere".
+#
+# Whatever tier answered, the source commit of the PRIVATE SNAPSHOT the suite
+# will exec (not the shared file it was copied from, which a concurrent build
+# can replace in between) is then checked against `git rev-parse HEAD` of the
+# checkout, and the suite prints — once, up front,
+# on stderr, and (when checked) regardless of LOOM_TEST_DAEMON_BIN_QUIET:
+#
+#   daemon under test: <path> (<its --version line>) — <verdict>
+#
+# `loom-daemon --version` prints
+# `loom-daemon <ver> (commit <short>, built <ts>, source <40-hex> clean|dirty|unknown)`.
+#   * source == HEAD, clean or dirty: accepted. A dirty-tree build at the same
+#     HEAD is the normal state of a change in progress; the verdict says
+#     "dirty". The clean/dirty stamp is weak evidence: build.rs re-derives it
+#     only when HEAD or the index changes, so an unstaged edit after the last
+#     re-run still stamps "clean". The older-than-source warning below is the
+#     only guard against "built at HEAD, but before the edits under test".
+#   * source != HEAD: FATAL, naming both commits.
+#   * no source commit at all (a binary predating #9027, `source unknown`, or
+#     anything that is not a loom-daemon build): the same FATAL — a binary that
+#     cannot say where it came from is not evidence about this checkout.
+#   * LOOM_TEST_ALLOW_DAEMON_MISMATCH=1 turns both FATALs into a stated
+#     verdict, for a deliberate cross-version run. It also lets tier 2 take a
+#     build whose commit does not match. It never re-enables $PATH.
+#
+# CI needs no special case, and the check is not weakened for it. Every job
+# uses the default `actions/checkout`, so the job that builds the binary and
+# the job that runs a suite are both at $GITHUB_SHA — for a `pull_request`
+# event that is the synthetic MERGE commit, not the PR head. build.rs stamps
+# `git rev-parse HEAD` of the build job and the harness reads `git rev-parse
+# HEAD` of the suite's job: the same commit by construction. Comparing against
+# the PR head SHA instead would be wrong (CI does not build it). A job that
+# ever checks out a different `ref:` than the one it downloads a build for
+# should fail here, and now does.
+#
+# A checkout WITHOUT the daemon's source — an installed consumer repo running
+# its `.loom/scripts/tests/` copy — has no build of its own and no commit a
+# daemon could match, so it resolves as before (repo-local build if any, else
+# the installed binary) and its line says so instead of a verdict.
+#
+# NO SILENT SKIPS (#10662)
+#
+#   loom_test_skip <reason...>
+#       Prints `  SKIP: <reason>` and counts it in $TESTS_SKIPPED, which the
+#       suite's summary reports. A case that cannot run says so and is
+#       counted; it never just returns.
+#
 # Knobs (all default-off; the defaults are the behaviour described above):
+#   LOOM_TEST_ALLOW_DAEMON_MISMATCH=1         accept a daemon whose source
+#                                             commit is not this checkout's
+#                                             HEAD (see above).
 #   LOOM_TEST_DAEMON_BIN_NO_SNAPSHOT=1        pin the resolved path itself, no
 #                                             private copy. For a suite whose
 #                                             subject depends on the binary's
@@ -173,6 +249,104 @@ _loom_test_daemon_bin_mtime_human() {
 }
 
 # ---------------------------------------------------------------------------
+# Provenance: which source was this binary built from? (#10662)
+# ---------------------------------------------------------------------------
+
+# _loom_test_daemon_bin_version <bin> -- first line of `<bin> --version`, or "".
+_loom_test_daemon_bin_version() {
+    local out line=""
+    out="$("$1" --version 2>/dev/null || true)"
+    IFS= read -r line <<<"$out" || true
+    printf '%s\n' "$line"
+}
+
+# _loom_test_version_source <version-line> -- echo "<40-hex> <clean|dirty>"
+# from a `--version` line, or return 1 when it names no source commit (a build
+# predating #9027 prints none; a build without git prints `source unknown`).
+_loom_test_version_source() {
+    local re='source ([0-9a-f]{40}) (clean|dirty|unknown)\)'
+    [[ "$1" =~ $re ]] || return 1
+    printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
+# _loom_test_no_checkout_build <repo_root> <head> -- the tier-3 failure. Names
+# every build output that was looked at and what it was built from, and the
+# installed binary that was deliberately NOT used. Never returns.
+_loom_test_no_checkout_build() {
+    local root="$1" head="$2" candidate installed seen=""
+    {
+        echo "FATAL: no loom-daemon build for this checkout, so this suite cannot test it."
+        echo "  checkout: $root (HEAD ${head:-unknown})"
+        while IFS= read -r candidate; do
+            [[ -n "$candidate" && -x "$candidate" && "$seen" != *"|$candidate|"* ]] || continue
+            seen="$seen|$candidate|"
+            echo "  not this checkout's: $candidate ($(_loom_test_daemon_bin_version "$candidate"))"
+        done < <(_loom_daemon_repo_candidates "$root" 2>/dev/null || true)
+        [[ -n "$seen" ]] || echo "  no build output found in \$CARGO_TARGET_DIR or the checkout's target dir"
+        installed="$(command -v loom-daemon 2>/dev/null || true)"
+        [[ -z "$installed" ]] || echo "  NOT used: the installed $installed on \$PATH — it is not a build of this checkout (#10662)"
+        echo "  Build it:  cargo build --package loom-daemon   (a commit moves HEAD: rebuild after committing)"
+        echo "  Or pin:    LOOM_DAEMON_SELF_BIN=/path/to/loom-daemon"
+        echo "  Deliberate cross-version run: LOOM_TEST_ALLOW_DAEMON_MISMATCH=1"
+    } >&2
+    exit 1
+}
+
+# _loom_test_report_daemon_under_test <pinned> <origin> <strict> <head> <repo_root>
+# -- print the one `daemon under test:` line and, in a daemon-source checkout
+# (<strict> = 1), exit 1 unless <pinned> was built from <head>.
+#
+# <pinned> is the PRIVATE SNAPSHOT the suite will actually exec, never the
+# shared <origin> it was copied from: a concurrent build can replace <origin>
+# between any check of it and the copy, and the snapshot's stability check
+# proves only that the copy was not torn, not that it is the file that was
+# checked (the #8176 clobber, found again in review of #10676). The tier-2
+# commit filter on the shared candidates only CHOOSES among them; this is the
+# verdict. With LOOM_TEST_DAEMON_BIN_NO_SNAPSHOT=1 there is no private copy and
+# <pinned> is the shared path, so the check is best-effort there.
+_loom_test_report_daemon_under_test() {
+    local bin="$1" origin="$2" strict="$3" head="$4" root="$5" version src verdict fatal=0
+    version="$(_loom_test_daemon_bin_version "$bin")"
+    src="$(_loom_test_version_source "$version" || true)"
+    if [[ "$strict" -ne 1 ]]; then
+        verdict="not checked: this checkout carries no loom-daemon source"
+    elif [[ -n "$head" && "${src%% *}" == "$head" ]]; then
+        verdict="source matches HEAD"
+        [[ "${src##* }" == "clean" ]] || verdict="source matches HEAD (built from a ${src##* } tree)"
+    else
+        verdict="source ${src%% *} is NOT this checkout's HEAD ${head:-unknown}"
+        [[ -n "$src" ]] || verdict="reports NO source commit; this checkout's HEAD is ${head:-unknown}"
+        if [[ "${LOOM_TEST_ALLOW_DAEMON_MISMATCH:-}" == "1" ]]; then
+            verdict="$verdict — allowed by LOOM_TEST_ALLOW_DAEMON_MISMATCH=1"
+        else
+            fatal=1
+        fi
+    fi
+    # Unchecked (no daemon source here) is the one case LOOM_TEST_DAEMON_BIN_QUIET
+    # may silence; a checked verdict always prints.
+    [[ "$strict" -eq 1 || "${LOOM_TEST_DAEMON_BIN_QUIET:-}" != "1" ]] || return 0
+    if [[ -z "${_LOOM_TEST_DAEMON_UNDER_TEST_SHOWN:-}" || "$fatal" -eq 1 ]]; then
+        echo "daemon under test: $origin (${version:-no --version output}) — $verdict" >&2
+    fi
+    _LOOM_TEST_DAEMON_UNDER_TEST_SHOWN=1
+    [[ "$fatal" -eq 1 ]] || return 0
+    {
+        echo "FATAL: that loom-daemon was not built from this checkout ($root)."
+        [[ "$bin" == "$origin" ]] || echo "  checked: $bin, this suite's private copy of candidate $origin"
+        echo "  A pass or a failure against it says nothing about the source under test (#10662)."
+        echo "  Rebuild:   cargo build --package loom-daemon   (a commit moves HEAD: rebuild after committing)"
+        echo "  Deliberate cross-version run: LOOM_TEST_ALLOW_DAEMON_MISMATCH=1"
+    } >&2
+    exit 1
+}
+
+# loom_test_skip <reason...> -- a case that cannot run says so and is counted.
+loom_test_skip() {
+    TESTS_SKIPPED=$(( ${TESTS_SKIPPED:-0} + 1 ))
+    echo "  SKIP: $*"
+}
+
+# ---------------------------------------------------------------------------
 # Resolution: freshest repo-local build wins (#8176 case 1)
 # ---------------------------------------------------------------------------
 
@@ -187,10 +361,18 @@ _loom_test_daemon_bin_mtime_human() {
 # the CHOICE among them differs here — newest mtime rather than first listed —
 # and a tie keeps the generator's order, so a host with exactly one build
 # resolves precisely what it resolved before.
+#
+# With a second argument (#10662) only a candidate whose `--version` names that
+# source commit is eligible: "freshest" alone picks another checkout's build
+# out of a shared target dir.
 _loom_test_freshest_repo_build() {
-    local root="$1" candidate best="" best_epoch=0 epoch
+    local root="$1" want="${2:-}" candidate best="" best_epoch=0 epoch src
     while IFS= read -r candidate; do
         [[ -n "$candidate" && -x "$candidate" ]] || continue
+        if [[ -n "$want" ]]; then
+            src="$(_loom_test_version_source "$(_loom_test_daemon_bin_version "$candidate")" || true)"
+            [[ "${src%% *}" == "$want" ]] || continue
+        fi
         epoch="$(_loom_test_daemon_bin_mtime "$candidate")"
         [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=0
         if [[ -z "$best" ]] || (( epoch > best_epoch )); then
@@ -302,10 +484,11 @@ _loom_test_snapshot_daemon_bin() {
 # ---------------------------------------------------------------------------
 
 loom_test_require_daemon_bin() {
-    local self_only=0
+    local self_only=0 on_path=0
     while [[ "${1:-}" == --* ]]; do
         case "$1" in
             --self-only) self_only=1; shift ;;
+            --path) on_path=1; shift ;;
             *) echo "FATAL: loom_test_require_daemon_bin: unknown option '$1'" >&2; exit 1 ;;
         esac
     done
@@ -320,8 +503,14 @@ loom_test_require_daemon_bin() {
     LOOM_PREFER_REPO_BUILD=1
     export LOOM_LOCATE_DAEMON_BIN_QUIET LOOM_PREFER_REPO_BUILD
 
-    local repo_root bin="" via=""
+    local repo_root bin="" via="" strict=0 head=""
     repo_root="$(cd "$scripts_dir/../.." && pwd)"
+    # A checkout that carries the daemon's source has a build of its own to
+    # test and a HEAD that build must name (#10662, header).
+    if [[ -f "$repo_root/loom-daemon/Cargo.toml" ]]; then
+        strict=1
+        head="$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null || true)"
+    fi
 
     # Precedence, deliberately mirroring loom_locate_daemon_bin's own first two
     # tiers so an operator's pin still wins, then diverging only in WHICH
@@ -335,6 +524,17 @@ loom_test_require_daemon_bin() {
         # in this condition.
         bin="${LOOM_DAEMON_BIN}"
         via="\$LOOM_DAEMON_BIN"
+    elif [[ "$strict" -eq 1 ]]; then
+        # This checkout's build or nothing: never $PATH, never another
+        # checkout's build out of a shared target dir.
+        via="this checkout's build"
+        if [[ "${LOOM_TEST_ALLOW_DAEMON_MISMATCH:-}" == "1" ]]; then
+            via="freshest repo-local build, any commit (LOOM_TEST_ALLOW_DAEMON_MISMATCH=1)"
+            bin="$(_loom_test_freshest_repo_build "$repo_root" || true)"
+        else
+            bin="$(_loom_test_freshest_repo_build "$repo_root" "${head:-unknown}" || true)"
+        fi
+        [[ -n "$bin" ]] || _loom_test_no_checkout_build "$repo_root" "$head"
     elif bin="$(_loom_test_freshest_repo_build "$repo_root")"; then
         via="freshest repo-local build"
     else
@@ -400,12 +600,20 @@ loom_test_require_daemon_bin() {
         esac
     fi
 
+    # The verdict is on the copy this suite will exec, not on the shared path
+    # it came from (see _loom_test_report_daemon_under_test).
+    _loom_test_report_daemon_under_test "$pinned" "$bin" "$strict" "$head" "$repo_root"
+
     # Always pin the IMPLEMENTATION (#8134) — this is what every stub this
     # suite invokes now resolves first, whatever LOOM_DAEMON_BIN happens to
     # mean in this suite.
     export LOOM_DAEMON_SELF_BIN="$pinned"
     if [[ "$self_only" -eq 0 ]]; then
         export LOOM_DAEMON_BIN="$pinned"
+    fi
+    if [[ "$on_path" -eq 1 ]]; then
+        PATH="$(dirname "$pinned"):$PATH"
+        export PATH
     fi
 
     if [[ "${LOOM_TEST_DAEMON_BIN_QUIET:-}" != "1" ]]; then

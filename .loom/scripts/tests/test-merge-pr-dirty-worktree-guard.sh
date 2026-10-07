@@ -63,10 +63,11 @@ MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
     "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
-    "merge-pr worktree-find-by-branch"
+    "merge-pr worktree-find-by-branch" "merge-pr worktree-teardown"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -75,6 +76,19 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why it could not
+# survive, and what proves the property now. Counted as run so the totals stay
+# honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
@@ -93,10 +107,14 @@ assert_grep 'git -C "\$worktree_path" status --porcelain' "$MERGE_PR" \
 assert_grep 'Refusing to remove worktree at \$worktree_path' "$MERGE_PR" \
     "_remove_loom_worktree refuses removal when uncommitted changes are present"
 # The refusal must sit BEFORE the actual removal, not after.
-guard_line="$(grep -n 'Refusing to remove worktree at \$worktree_path' "$MERGE_PR" | head -1 | cut -d: -f1)"
-remove_line="$(grep -n 'git -C "\$REPO_ROOT" worktree remove "\$worktree_path" --force' "$MERGE_PR" | head -1 | cut -d: -f1)"
+retired "the line-order check against the literal 'git -C \"\$REPO_ROOT\" worktree remove \"\$worktree_path\" --force' call" \
+    "the dirty-worktree refusal precedes the force-remove" \
+    "the #8191 worktree-teardown slice moved the force-remove into loom-daemon (src/merge_pr/worktree_teardown.rs), so that literal no longer exists in merge-pr.sh and its grep finds nothing" \
+    "the same ordering check, re-anchored on the call that now performs the removal ('_mp_worktree worktree-teardown', immediately below), plus Tests 2-4 below (dirty worktrees refused and surviving, behavioural, unchanged)"
+guard_line="$(grep -n 'Refusing to remove worktree at \$worktree_path' "$MERGE_PR" | head -1 | cut -d: -f1 || true)"
+remove_line="$(grep -n '_mp_worktree worktree-teardown' "$MERGE_PR" | head -1 | cut -d: -f1 || true)"
 if [[ -n "$guard_line" && -n "$remove_line" && "$guard_line" -lt "$remove_line" ]]; then
-    pass "the dirty-worktree refusal precedes the force-remove call"
+    pass "the dirty-worktree refusal precedes the force-remove call (merge-pr worktree-teardown)"
 else
     fail "guard must precede force-remove (guard@$guard_line remove@$remove_line)"
 fi

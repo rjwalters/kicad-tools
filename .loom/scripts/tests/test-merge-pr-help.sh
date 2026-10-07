@@ -14,6 +14,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MERGE_PR="$(cd "$SCRIPT_DIR/.." && pwd)/merge-pr.sh"
 
+# #8191 slice: the help text is `loom-daemon merge-pr usage` now, so this
+# suite pins the binary built from this checkout (LOOM_DAEMON_SELF_BIN, the
+# seam merge-pr.sh's --help resolves first) and FAILS rather than skips
+# without one. Every assertion below is unchanged: they are the equivalence
+# proof for the port, beside tests/merge_pr_usage_differential.rs.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$(cd "$SCRIPT_DIR/.." && pwd)" "merge-pr usage"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'

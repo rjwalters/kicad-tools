@@ -586,11 +586,19 @@ regression in the change under test (#8176):
 - **Cross-worktree clobber.** Another worktree's `cargo build` replaced the
   resolved file *after* resolution and *before* the assertions ran.
 
-**The rule: resolve to a binary, then take it out of the shared namespace.**
-`tests/lib/require-daemon-bin.sh` now picks the *freshest* repo-local candidate
-rather than the first listed, copies it to a private per-suite path, and pins
-that copy — a copy has its own inode, so a later rebuild cannot reach it. What
-neither can fix (a build genuinely older than the checkout's sources) is
+**The rule: resolve to THIS checkout's build, take it out of the shared
+namespace, then prove what was taken.** In a checkout carrying the daemon
+source, `tests/lib/require-daemon-bin.sh` takes `$LOOM_DAEMON_SELF_BIN` if set,
+else the freshest build output whose `--version` source commit is this
+checkout's `HEAD` (in a shared target dir mtime cannot say whose build a file
+is), else fails — never the installed `loom-daemon` on `$PATH` (#10662). It
+copies the choice to a private per-suite path and pins that copy — a copy has
+its own inode, so a later rebuild cannot reach it — and the source-commit
+verdict is taken on the **copy**, not the shared file: a clobber between the
+choice and the copy otherwise certifies a binary that was never tested. Each
+suite prints `daemon under test: <path> (<--version>) — <verdict>` up front;
+`LOOM_TEST_ALLOW_DAEMON_MISMATCH=1` is the explicit cross-version override.
+What none of this can fix (a build at `HEAD` but older than later edits) is
 *reported*: every resolution prints path, mtime and a content fingerprint, and
 a binary older than `loom-daemon/src/**` warns by name.
 
