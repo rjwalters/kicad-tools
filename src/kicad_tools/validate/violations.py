@@ -155,6 +155,15 @@ class DRCViolation:
             data["waiver_status"] = "stale"
             data["stale_waiver_evidence_hash"] = self.stale_waiver_hash
             data["stale_waiver_reason"] = self.stale_waiver_reason
+            # Issue #6011: tell an upgrade-induced stale (the waiver's hash
+            # was computed by an older evidence recipe) from a board edit.
+            from .evidence import is_outdated_evidence_hash
+
+            data["stale_waiver_cause"] = (
+                "outdated_evidence_version"
+                if is_outdated_evidence_hash(self.stale_waiver_hash)
+                else "evidence_changed"
+            )
         return data
 
 

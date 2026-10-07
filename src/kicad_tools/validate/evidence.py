@@ -16,7 +16,12 @@ Two identities are attached to every :class:`~kicad_tools.validate.violations.DR
     closest points, its measured and required values, the placement and pad
     geometry (with pad nets) of every footprint it names, and the pad
     membership of every net it names (and, when several findings share one
-    key, how many do -- see :func:`evidence_payload`).  When the copper or nets under a finding
+    key, how many do -- see :func:`evidence_payload`).  For a finding with a
+    location, a net's membership is limited to the pads *near the finding*
+    (Issue #6011, see :func:`net_evidence_radius`), so adding a ``GND`` pad
+    across the board does not re-stale every waiver that names ``GND``;
+    whole-net rules and findings without a location keep the full
+    membership.  When the copper or nets under a finding
     change, the hash changes -- that is what makes an evidence-bound waiver go
     **stale** instead of silently suppressing a finding whose geometry nobody
     has reviewed.
@@ -31,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections import Counter
 from dataclasses import replace
@@ -47,7 +53,65 @@ KEY_SEPARATOR = "|"
 
 # Hash prefix so a reader can tell the algorithm at a glance, and so a future
 # change to the evidence recipe can be versioned without ambiguity.
-EVIDENCE_HASH_PREFIX = "ev1:"
+#
+# ``ev1`` (Issue #5946): every named net contributed its full pad membership.
+# ``ev2`` (Issue #6011): a located finding's nets contribute only the pads
+# within :func:`net_evidence_radius` of it, with their board positions.
+# Waivers recorded against an older version go stale exactly once after an
+# upgrade, and are reported as such (see :func:`is_outdated_evidence_hash`).
+EVIDENCE_HASH_VERSION = "ev2"
+EVIDENCE_HASH_PREFIX = EVIDENCE_HASH_VERSION + ":"
+
+# Default radius (mm, board coordinates) around a located finding within
+# which a named net's pads count as evidence (Issue #6011).
+DEFAULT_NET_EVIDENCE_RADIUS_MM = 5.0
+
+# Per-rule radius overrides.  Clearance / width / dimension style findings
+# are about the copper right at the finding, so a few mm is plenty.
+#
+# Exact rule ids first (Issue #6041): the bare ids below would otherwise miss
+# every prefix (``clearance`` is not ``clearance_*``) and fall through to the
+# 5 mm default, contradicting the documented 3 mm for these rules.
+NET_EVIDENCE_RADIUS_BY_RULE: dict[str, float] = {
+    "clearance": 3.0,
+    "dimensions": 3.0,
+    "mask_to_copper": 3.0,
+    "width_consistency": 3.0,
+}
+
+# Then by rule-id prefix (first match wins).
+NET_EVIDENCE_RADIUS_BY_PREFIX: tuple[tuple[str, float], ...] = (
+    ("clearance_", 3.0),
+    ("edge_clearance_", 3.0),
+    ("dimension_", 3.0),
+    ("netclass_", 3.0),
+    ("hole_to_hole", 3.0),
+    ("pth_", 3.0),
+    ("solder_mask", 3.0),
+)
+
+# Rules whose verdict depends on the topology of the whole net: their
+# findings keep the full pad membership of every named net, wherever the
+# finding is located (Issue #6011).
+GLOBAL_NET_EVIDENCE_RULES = frozenset(
+    {
+        "ampacity",
+        "connectivity",
+        "dangling_copper",
+        "diffpair_length_skew",
+        "diffpair_routing_continuity",
+        "impedance",
+        "isolated_copper",
+        "match_group_length_skew",
+        "net_undeclared",
+        "path_ampacity",
+        "single_pad_net",
+        "track_dangling",
+        "via_dangling",
+        "zone_no_net",
+    }
+)
+GLOBAL_NET_EVIDENCE_PREFIXES: tuple[str, ...] = ("unconnected",)
 
 _POS_DIGITS = 3  # 1 um
 _VALUE_DIGITS = 4  # 0.1 um
@@ -72,6 +136,41 @@ def finding_key(
             layer or "",
         )
     )
+
+
+def net_evidence_radius(rule_id: str) -> float | None:
+    """Radius (mm) of the net-membership evidence for ``rule_id``.
+
+    ``None`` means the rule depends on whole-net topology and keeps the full
+    membership of every net it names.
+    """
+    if rule_id in GLOBAL_NET_EVIDENCE_RULES or rule_id.startswith(GLOBAL_NET_EVIDENCE_PREFIXES):
+        return None
+    exact = NET_EVIDENCE_RADIUS_BY_RULE.get(rule_id)
+    if exact is not None:
+        return exact
+    for prefix, radius in NET_EVIDENCE_RADIUS_BY_PREFIX:
+        if rule_id.startswith(prefix):
+            return radius
+    return DEFAULT_NET_EVIDENCE_RADIUS_MM
+
+
+def evidence_hash_version(evidence_hash: str | None) -> str | None:
+    """Return the version tag (``"ev1"``, ``"ev2"``, ...) of an evidence hash."""
+    if not evidence_hash or ":" not in evidence_hash:
+        return None
+    return evidence_hash.split(":", 1)[0]
+
+
+def is_outdated_evidence_hash(evidence_hash: str | None) -> bool:
+    """True when ``evidence_hash`` was computed by an older evidence recipe.
+
+    Such a hash can never match a hash computed today, whatever the board
+    looks like, so a waiver carrying it is stale *because kct was upgraded*,
+    not (necessarily) because the board changed.
+    """
+    version = evidence_hash_version(evidence_hash)
+    return version is not None and version != EVIDENCE_HASH_VERSION
 
 
 def _round(value: float | None, digits: int) -> float | None:
@@ -143,13 +242,166 @@ def _net_members(pcb: PCB) -> dict[str, list[str]]:
     return members
 
 
+# Copper outline of one pad, in the pad's own frame, as a (possibly
+# degenerate) axis-aligned core rectangle inflated by a radius:
+# (board_rotation_deg, core_half_w, core_half_h, inflate_radius).
+#
+# * ``rect`` / ``roundrect`` / ``trapezoid`` / ``custom`` / unknown: the full
+#   rectangle, radius 0.  A roundrect's copper lies inside it, so this is
+#   exact for rect and conservative (never excludes copper) for the rest.
+# * ``circle``: a point core inflated by the radius.
+# * ``oval``: a segment core along the major axis inflated by half the minor
+#   axis (a stadium), exactly KiCad's oval.
+_PadShape = tuple[float, float, float, float]
+
+# (ident, board_x, board_y, shape) for one pad of a net.
+_NetPad = tuple[str, float, float, _PadShape]
+
+
+def _pad_shape(pad: Any) -> _PadShape:
+    size = getattr(pad, "size", None) or (0.0, 0.0)
+    w = max(float(size[0]), 0.0)
+    h = max(float(size[1]), 0.0)
+    rot = float(getattr(pad, "rotation", 0.0) or 0.0)
+    shape = str(getattr(pad, "shape", "") or "").lower()
+    if shape == "circle":
+        return (rot, 0.0, 0.0, max(w, h) / 2.0)
+    if shape in ("oval", "obround"):
+        r = min(w, h) / 2.0
+        return (rot, w / 2.0 - r, h / 2.0 - r, r)
+    return (rot, w / 2.0, h / 2.0, 0.0)
+
+
+def _net_pads(pcb: PCB) -> dict[str, list[_NetPad]]:
+    """Every net's pads in board coordinates (footprint position + rotation)."""
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    pads_by_net: dict[str, list[_NetPad]] = {}
+    for fp in pcb.footprints:
+        ref = getattr(fp, "reference", "")
+        fx, fy = fp.position
+        for pad in getattr(fp, "pads", []) or []:
+            if not pad.net_name:
+                continue
+            ox, oy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation or 0.0)
+            pads_by_net.setdefault(pad.net_name, []).append(
+                (f"{ref}.{pad.number}", fx + ox, fy + oy, _pad_shape(pad))
+            )
+    return pads_by_net
+
+
+def _point_rect_distance(x: float, y: float, hx: float, hy: float) -> float:
+    """Distance from ``(x, y)`` to the solid rectangle ``[-hx, hx] x [-hy, hy]``."""
+    return math.hypot(max(abs(x) - hx, 0.0), max(abs(y) - hy, 0.0))
+
+
+def _point_segment_distance(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> float:
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy
+    t = 0.0 if length2 == 0.0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length2))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _segment_hits_rect(ax: float, ay: float, bx: float, by: float, hx: float, hy: float) -> bool:
+    """Liang-Barsky: does segment ``a-b`` touch ``[-hx, hx] x [-hy, hy]``?"""
+    dx, dy = bx - ax, by - ay
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, ax + hx), (dx, hx - ax), (-dy, ay + hy), (dy, hy - ay)):
+        if p == 0.0:
+            if q < 0.0:
+                return False
+            continue
+        t = q / p
+        if p < 0.0:
+            t0 = max(t0, t)
+        else:
+            t1 = min(t1, t)
+        if t0 > t1:
+            return False
+    return True
+
+
+def _segment_rect_distance(
+    ax: float, ay: float, bx: float, by: float, hx: float, hy: float
+) -> float:
+    """Distance from segment ``a-b`` to the solid rectangle ``[-hx, hx] x [-hy, hy]``."""
+    if _segment_hits_rect(ax, ay, bx, by, hx, hy):
+        return 0.0
+    # Disjoint convex sets: the closest pair involves a vertex of one of them.
+    best = min(_point_rect_distance(ax, ay, hx, hy), _point_rect_distance(bx, by, hx, hy))
+    for cx, cy in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
+        best = min(best, _point_segment_distance(cx, cy, ax, ay, bx, by))
+    return best
+
+
+def _pad_bbox_distance(
+    x: float, y: float, shape: _PadShape, bbox: tuple[float, float, float, float]
+) -> float:
+    """Exact distance from a pad's copper outline to the anchor ``bbox`` (0 if they touch).
+
+    The bbox (a point, segment or rectangle in board coordinates) is moved
+    into the pad's frame -- undoing the pad's absolute board rotation with
+    the same KiCad convention used to place it -- and measured against the
+    pad's core rectangle, less the shape's inflate radius.
+    """
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    rot, hx, hy, inflate = shape
+    x0, y0, x1, y1 = bbox
+    if x0 <= x <= x1 and y0 <= y <= y1:
+        return 0.0  # pad centre inside the bbox
+    corners = [
+        rotate_pad_offset(cx - x, cy - y, -rot) if rot else (cx - x, cy - y)
+        for cx, cy in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+    ]
+    dist = min(
+        _segment_rect_distance(*a, *b, hx, hy)
+        for a, b in zip(corners, corners[1:] + corners[:1], strict=True)
+    )
+    return max(dist - inflate, 0.0)
+
+
 class EvidenceContext:
     """Per-board lookup tables shared by every hash computed for one run."""
 
     def __init__(self, pcb: PCB | None) -> None:
         self.footprints: dict[str, Any] = _footprint_index(pcb) if pcb is not None else {}
         self.net_members: dict[str, list[str]] = _net_members(pcb) if pcb is not None else {}
+        self.net_pads: dict[str, list[_NetPad]] = _net_pads(pcb) if pcb is not None else {}
         self.has_board = pcb is not None
+
+
+def _anchor_bbox(violation: DRCViolation) -> tuple[float, float, float, float] | None:
+    """Bounding box of the finding's ``location`` and ``closest_locations``."""
+    points = [p for p in (violation.location, *violation.closest_locations) if p is not None]
+    if not points:
+        return None
+    xs = [float(p[0]) for p in points]
+    ys = [float(p[1]) for p in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _local_net_pads(
+    pads: list[_NetPad], bbox: tuple[float, float, float, float], radius: float
+) -> list[list[Any]]:
+    """Pads whose copper comes within ``radius`` of ``bbox``, with board positions."""
+    x0, y0, x1, y1 = bbox
+    local: list[list[Any]] = []
+    for ident, x, y, shape in pads:
+        # Cheap reject on the pad's enclosing circle, then the exact outline
+        # distance (Issue #6011 review: a rectangle's corner reaches further
+        # than ``max(w, h) / 2``).
+        dx = max(x0 - x, 0.0, x - x1)
+        dy = max(y0 - y, 0.0, y - y1)
+        _rot, hx, hy, inflate = shape
+        if math.hypot(dx, dy) - (math.hypot(hx, hy) + inflate) > radius:
+            continue
+        if _pad_bbox_distance(x, y, shape, bbox) <= radius:
+            local.append([ident, _round(x, _POS_DIGITS), _round(y, _POS_DIGITS)])
+    local.sort(key=lambda row: (row[0], str(row[1:])))
+    return local
 
 
 def evidence_payload(
@@ -185,7 +437,20 @@ def evidence_payload(
             if ref is not None and ref not in footprints:
                 footprints[ref] = _footprint_evidence(ctx.footprints[ref])
         payload["footprints"] = dict(sorted(footprints.items()))
-        payload["nets"] = {net: ctx.net_members.get(net, []) for net in sorted(set(violation.nets))}
+        nets = sorted(set(violation.nets))
+        radius = net_evidence_radius(violation.rule_id)
+        bbox = _anchor_bbox(violation)
+        if radius is None or bbox is None or not nets:
+            # Whole-net rules and unlocated findings: full membership (ev1 recipe).
+            payload["nets"] = {net: ctx.net_members.get(net, []) for net in nets}
+        else:
+            # Issue #6011: only the pads near the finding, with positions, so a
+            # far-away pad on the same net leaves the hash alone while a
+            # nearby pad that is added, removed or moved still changes it.
+            payload["nets"] = {
+                net: _local_net_pads(ctx.net_pads.get(net, []), bbox, radius) for net in nets
+            }
+            payload["net_radius"] = _round(radius, _VALUE_DIGITS)
     return payload
 
 
