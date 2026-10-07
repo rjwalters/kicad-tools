@@ -7,11 +7,13 @@ if routing fails, trying 2 → 4 → 6 layers until convergence.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .core import Autorouter, RoutingFailure
+    from .rule_area_resolve import RuleAreaSpec
 
 from .layers import Layer, LayerStack
 from .primitives import Route
@@ -108,6 +110,7 @@ class AdaptiveAutorouter:
         skip_nets: list[str] | None = None,
         max_layers: int = 6,
         verbose: bool = True,
+        rule_area_specs: Sequence[RuleAreaSpec] | None = None,
     ):
         """Initialize adaptive autorouter.
 
@@ -120,6 +123,11 @@ class AdaptiveAutorouter:
             skip_nets: Nets to skip (e.g., power planes)
             max_layers: Maximum layers to try (2, 4, or 6)
             verbose: Print progress
+            rule_area_specs: Board keepout rule areas (Issue #6059), in the
+                same frame as ``components``.  Their layer specs are resolved
+                against each layer stack this router tries, and the result is
+                handed to the inner :class:`Autorouter`, which enforces it on
+                its grid (#6008).  ``None`` means the board declares none.
         """
         self.width = width
         self.height = height
@@ -136,6 +144,7 @@ class AdaptiveAutorouter:
         self.skip_nets = skip_nets or []
         self.max_layers = max_layers
         self.verbose = verbose
+        self.rule_area_specs = list(rule_area_specs) if rule_area_specs else None
 
         # Result after routing
         self.result: RoutingResult | None = None
@@ -163,6 +172,18 @@ class AdaptiveAutorouter:
             layer_stack=layer_stack,
             physics_enabled=False,
         )
+
+        # Issue #6059: this Autorouter has no source board file, so its own
+        # ``_keepout_rule_areas()`` lookup finds nothing.  Hand it the areas
+        # through the payload a parallel worker uses (``_rule_area_keepout_areas``
+        # prefers it), resolved against THIS stack: ``*.Cu`` and ``F&B.Cu``
+        # cover different indices on a 2-, 4- and 6-layer stack.
+        if self.rule_area_specs:
+            from .rule_area_resolve import keepout_areas_for_stack
+
+            autorouter._rule_area_keepouts_payload = keepout_areas_for_stack(
+                self.rule_area_specs, layer_stack
+            )
 
         # Add components
         for comp in self.components:
