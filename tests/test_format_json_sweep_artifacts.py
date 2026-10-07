@@ -450,7 +450,13 @@ class TestPanelEmission:
         assert payload["command"] == "panel"
         assert payload["input"] == str(board_copy)
         assert payload["output"].endswith("board_panel.kicad_pcb")
-        assert payload["grid"] == {"rows": 2, "cols": 2, "spacing_mm": 2.0}
+        assert payload["grid"] == {
+            "rows": 2,
+            "cols": 2,
+            "spacing_mm": 2.0,
+            "spacing_x_mm": 2.0,
+            "spacing_y_mm": 2.0,
+        }
         assert payload["board_count"] == 4
         assert payload["cut_method"] == "mousebite"
         assert payload["tabs"] >= 1
