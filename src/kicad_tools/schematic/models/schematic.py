@@ -173,7 +173,7 @@ class Schematic(
         # write path.  See ``SchematicIOMixin._snapshot_source``.
         self._source_doc: SExp | None = None
         self._source_consumed: list[SExp] = []
-        self._source_slots: dict[str, tuple[SExp | None, str]] = {}
+        self._source_slots: dict[str, tuple[SExp | None, str, SExp]] = {}
         self._text_note_sources: dict[tuple[str, float, float], list[SExp]] = {}
 
         # Synthesized power-symbol lib_symbol definitions (per net name).

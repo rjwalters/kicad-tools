@@ -19,8 +19,9 @@ of an unedited schematic must reproduce the original s-expression tree
 exactly (whitespace aside) -- label justification, text font size and UUID,
 power-symbol field positions, the format ``version``, ``embedded_fonts``,
 ``polyline`` and every other construct the model does not track.  The
-allowlist of tolerated differences is empty.  Edits still regenerate only
-the edited element.
+allowlist of tolerated differences is empty.  Issue #6057 tightens edits
+the same way: an edited element keeps its source node and only the edited
+atoms change (see the "edited elements" section below).
 
 The KiCad-backed tests skip when KiCad or its bundled templates are absent.
 """
@@ -393,3 +394,268 @@ def test_edited_template_still_loads_in_kicad(template: Path, tmp_path: Path):
     sch.write(str(rt_dir / template.name), auto_size_paper=False)
 
     _netlist(cli, rt_dir / template.name, tmp_path / "after.net")
+
+
+# --- edited elements keep their untouched attributes (issue #6057) -----------
+#
+# An edit is replayed onto the element's source node instead of rebuilding it
+# from builder defaults, so each test below states the *expected* node as
+# "the source node with exactly the edited atom(s) changed" and requires the
+# saved file to equal the source everywhere else.
+
+_EXTRA_NODES = """
+  (global_label "SDA" (shape bidirectional) (at 100.33 40.64 0) (fields_autoplaced yes)
+    (effects (font (size 1.524 1.524)) (justify left))
+    (uuid "9a6a0c37-1f6c-4bb1-9d0e-2a8c9e8f2d10")
+    (property "Intersheetrefs" "${INTERSHEET_REFS}" (at 108.2 40.64 0)
+      (effects (font (size 1.27 1.27)) (justify left) (hide yes))))
+  (hierarchical_label "EN" (shape input) (at 50.8 60.96 180)
+    (effects (font (size 1.778 1.778)) (justify right))
+    (uuid "4d0b3b9b-7f39-4e55-b2a9-55f7c1c2d0a1"))
+  (no_connect (at 88.9 88.9) (uuid "7c2b2b6e-0a0a-4f7e-8f53-8b3f4d6b9e11"))
+"""
+
+_EDIT_SCH = _KICAD9_SCH.replace("  (sheet_instances", _EXTRA_NODES + "  (sheet_instances", 1)
+
+
+def _set_atoms(node, *path_and_values):
+    """Set ``node[path...]`` atom *i* to *v*: args are ``(path, i, v)`` triples.
+
+    A path step is a child name, ``(name, first_atom)`` (a property by name)
+    or ``(name, n)`` (the n-th child of that name).
+    """
+    from kicad_tools.sexp import SExp
+
+    for path, i, v in path_and_values:
+        target = node
+        for step in path:
+            if isinstance(step, tuple) and isinstance(step[1], int):  # ("xy", 1)
+                target = target.find_all(step[0])[step[1]]
+            elif isinstance(step, tuple):  # ("property", "Value")
+                target = next(c for c in target.find_all(step[0]) if c.get_first_atom() == step[1])
+            else:
+                target = target[step]
+        atom_slots = [j for j, c in enumerate(target.children) if c.name is None]
+        old = target.children[atom_slots[i]]
+        quoted = isinstance(v, str) and old._originally_quoted
+        target.children[atom_slots[i]] = SExp.quoted_atom(v) if quoted else SExp.atom(v)
+
+
+def _first(node, name, text=None):
+    return next(
+        c for c in node.children if c.name == name and (text is None or c.get_first_atom() == text)
+    )
+
+
+def _sole_change(src_text: str, out_text: str):
+    """Return ``(source node, saved node)`` for the single top-level change."""
+    before, after = parse_string(src_text).children, parse_string(out_text).children
+    assert len(after) == len(before)
+    changed = [(a, b) for a, b in zip(before, after, strict=True) if a.to_string() != b.to_string()]
+    assert len(changed) == 1, [b.to_string()[:80] for _, b in changed]
+    return changed[0]
+
+
+def _edit_label_move(sch):
+    next(lbl for lbl in sch.labels if lbl.text == "SC_LINK").x = 260.35
+    return lambda n: _set_atoms(n, (["at"], 0, 260.35))
+
+
+def _edit_label_rename(sch):
+    next(lbl for lbl in sch.labels if lbl.text == "SC_LINK").text = "SC_LINK2"
+    return lambda n: _set_atoms(n, ([], 0, "SC_LINK2"))
+
+
+def _edit_global_label_move(sch):
+    sch.global_labels[0].y = 43.18
+    return lambda n: _set_atoms(n, (["at"], 1, 43.18))
+
+
+def _edit_global_label_shape(sch):
+    sch.global_labels[0].shape = "output"
+    return lambda n: _set_atoms(n, (["shape"], 0, "output"))
+
+
+def _edit_hier_label_move(sch):
+    sch.hier_labels[0].x = 53.34
+    return lambda n: _set_atoms(n, (["at"], 0, 53.34))
+
+
+def _edit_text_retext(sch):
+    _, x, y = sch.text_notes[0]
+    sch.text_notes[0] = ("Edited note", x, y)
+    return lambda n: _set_atoms(n, ([], 0, "Edited note"))
+
+
+def _edit_text_move(sch):
+    text, x, y = sch.text_notes[0]
+    sch.text_notes[0] = (text, x, 71.12)
+    return lambda n: _set_atoms(n, (["at"], 1, 71.12))
+
+
+def _edit_wire_endpoint(sch):
+    sch.wires[0].x2 = 80.01
+    return lambda n: _set_atoms(n, (["pts", ("xy", 1)], 0, 80.01))
+
+
+def _edit_junction_move(sch):
+    sch.junctions[0].x = 24.13
+    return lambda n: _set_atoms(n, (["at"], 0, 24.13))
+
+
+def _edit_no_connect_move(sch):
+    sch.no_connects[0].y = 91.44
+    return lambda n: _set_atoms(n, (["at"], 1, 91.44))
+
+
+def _edit_power_value(sch):
+    sch.power_symbols[0].value = "+48VA"
+    return lambda n: _set_atoms(n, ([("property", "Value")], 1, "+48VA"))
+
+
+def _edit_power_move(sch):
+    sch.power_symbols[0].x += 2.54
+    # Fields move with the symbol, keeping their own offsets.
+    return lambda n: _set_atoms(
+        n,
+        (["at"], 0, 260.35),
+        ([("property", "Reference"), "at"], 0, 264.16),
+        ([("property", "Value"), "at"], 0, 257.0988),
+    )
+
+
+def _edit_power_reference(sch):
+    sch.power_symbols[0].reference = "#PWR0200"
+    return lambda n: _set_atoms(
+        n,
+        ([("property", "Reference")], 1, "#PWR0200"),
+        (["instances", "project", "path", "reference"], 0, "#PWR0200"),
+    )
+
+
+_EDITS = {
+    "label-move": ("label", "SC_LINK", _edit_label_move),
+    "label-rename": ("label", "SC_LINK", _edit_label_rename),
+    "global-label-move": ("global_label", None, _edit_global_label_move),
+    "global-label-shape": ("global_label", None, _edit_global_label_shape),
+    "hier-label-move": ("hierarchical_label", None, _edit_hier_label_move),
+    "text-retext": ("text", None, _edit_text_retext),
+    "text-move": ("text", None, _edit_text_move),
+    "wire-endpoint": ("wire", None, _edit_wire_endpoint),
+    "junction-move": ("junction", None, _edit_junction_move),
+    "no-connect-move": ("no_connect", None, _edit_no_connect_move),
+    "power-value": ("symbol", None, _edit_power_value),
+    "power-move": ("symbol", None, _edit_power_move),
+    "power-reference": ("symbol", None, _edit_power_reference),
+}
+
+
+@pytest.mark.parametrize("edit", sorted(_EDITS))
+def test_edit_changes_only_the_edited_atoms(edit: str, tmp_path: Path):
+    name, text, apply = _EDITS[edit]
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    patch_expected = apply(sch)
+    src, saved = _sole_change(_EDIT_SCH, sch.to_sexp())
+    assert src.name == name and (text is None or src.get_first_atom() == text)
+    expected = parse_string(src.to_string())
+    patch_expected(expected)
+    assert saved.to_string() == expected.to_string()
+
+
+def test_wire_endpoint_edit_keeps_stroke(tmp_path: Path):
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    sch.wires[0].x2 = 80.01
+    _, saved = _sole_change(_EDIT_SCH, sch.to_sexp())
+    assert [p.get_atoms() for p in saved["pts"].find_all("xy")] == [
+        [62.23, 77.47],
+        [80.01, 77.47],
+    ]
+    assert saved["stroke"]["type"].get_first_atom() == "solid"
+
+
+def test_label_rotation_edit_keeps_font(tmp_path: Path):
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    next(lbl for lbl in sch.labels if lbl.text == "SC_LINK").rotation = 0
+    _, saved = _sole_change(_EDIT_SCH, sch.to_sexp())
+    assert saved["at"].get_atoms() == [257.81, 27.94, 0]
+    assert saved["effects"]["font"]["size"].get_atoms() == [1.27, 1.27]
+    assert saved["uuid"].get_first_atom() == "5d97dcd9-09a3-4fac-9dba-e9b66af562da"
+
+
+def test_deleted_and_readded_element_is_built_fresh(tmp_path: Path):
+    """A new model element has no source node: it is generated from defaults."""
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    old = next(lbl for lbl in sch.labels if lbl.text == "SC_LINK")
+    sch.labels.remove(old)
+    sch.global_labels.append(GlobalLabel("SC_LINK", old.x, old.y, rotation=old.rotation))
+    out = parse_string(sch.to_sexp())
+    assert [c.get_first_atom() for c in out.find_all("label")] == ["+IN-2"]
+    assert [c.get_first_atom() for c in out.find_all("global_label")] == ["SDA", "SC_LINK"]
+
+
+def test_patch_does_not_mutate_the_source_tree(tmp_path: Path):
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    _edit_power_move(sch)
+    _edit_label_rename(sch)
+    first = sch.to_sexp()
+    assert sch.to_sexp() == first
+    assert _tree(sch._source_doc.to_string()) == _tree(_EDIT_SCH)
+
+
+def _netlist_values(net: Path) -> dict[str, str]:
+    root = parse_string(net.read_text())
+    return {
+        str(c["ref"].get_first_atom()): str(c["value"].get_first_atom())
+        for c in root["components"].find_all("comp")
+    }
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "template",
+    _TEMPLATES or [pytest.param(None, marks=pytest.mark.skip(reason="no KiCad templates"))],
+    ids=[p.parent.name for p in _TEMPLATES] or ["no-templates"],
+)
+def test_template_value_edit_changes_only_that_atom(template: Path, tmp_path: Path):
+    """Changing one symbol's value keeps its fields, pins and instances (#6057).
+
+    kicad-cli still loads the result, every net keeps its connections, and
+    the netlist reports the new value.
+    """
+    sch = Schematic.load(str(template))
+    if not sch.symbols:
+        pytest.skip("template has no symbols")
+    cli = _kicad_cli()
+
+    sym = sch.symbols[0]
+    sym.value = "kct-edited"
+    if sch.text_notes:
+        _, x, y = sch.text_notes[0]
+        sch.text_notes[0] = ("kct edited note", x, y)
+
+    rt_dir = tmp_path / "rt"
+    shutil.copytree(template.parent, rt_dir)
+    out_path = rt_dir / template.name
+    sch.write(str(out_path), auto_size_paper=False)
+
+    before = parse_file(template).children
+    after = parse_file(out_path).children
+    assert len(after) == len(before)
+    changed = [(a, b) for a, b in zip(before, after, strict=True) if a.to_string() != b.to_string()]
+    assert len(changed) == (2 if sch.text_notes else 1)
+    for src, saved in changed:
+        expected = parse_string(src.to_string())
+        if src.name == "symbol":
+            _set_atoms(expected, ([("property", "Value")], 1, "kct-edited"))
+        else:
+            _set_atoms(expected, ([], 0, "kct edited note"))
+        assert saved.to_string() == expected.to_string()
+
+    if cli is None:
+        pytest.skip("kicad-cli not installed")
+    orig_dir = tmp_path / "orig"
+    shutil.copytree(template.parent, orig_dir)
+    nets_before = _netlist(cli, orig_dir / template.name, tmp_path / "before.net")
+    nets_after = _netlist(cli, out_path, tmp_path / "after.net")
+    assert nets_after == nets_before
+    assert _netlist_values(tmp_path / "after.net")[sym.reference] == "kct-edited"

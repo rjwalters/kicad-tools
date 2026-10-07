@@ -45,8 +45,9 @@ if TYPE_CHECKING:
 # source node plus a fingerprint of what the model would have generated for
 # it at load time.  On save, an element whose regenerated form still matches
 # that fingerprint has not been touched by the caller and is re-emitted
-# verbatim; anything edited is regenerated in place; anything the model does
-# not parse at all passes through unchanged.
+# verbatim; anything edited is patched in place (only the atoms the edit
+# changed, issue #6057); anything the model does not parse at all passes
+# through unchanged.
 
 #: Top-level nodes that belong to the file header.  New header nodes (a
 #: ``title_block`` set on a file that had none) are inserted before the
@@ -77,12 +78,13 @@ def _source_format_version(doc: SExp) -> int:
         return 0
 
 
-def _fingerprint(node: SExp | None) -> str:
+def _fingerprint(node: SExp | None, skip: frozenset[str] = frozenset()) -> str:
     """Canonical text of a generated node, ignoring random pin UUIDs.
 
     Symbol builders mint a fresh UUID for every pin on each call, so two
     generations of an untouched symbol differ only there.  Element UUIDs
-    themselves are kept: re-assigning one is an edit.
+    themselves are kept: re-assigning one is an edit.  Child nodes named in
+    *skip* are left out entirely.
     """
     if node is None:
         return ""
@@ -100,11 +102,169 @@ def _fingerprint(node: SExp | None) -> str:
         if n.name == "uuid" and parent == "pin":
             parts.append("(uuid)")
             continue
+        if parent is not None and n.name in skip:
+            continue
         parts.append("(" + n.name)
         stack.append(")")
         for child in reversed(n.children):
             stack.append((child, n.name))
     return " ".join(parts)
+
+
+# --- Patching an edited element's source node (issue #6057) -----------------
+#
+# An edited element is not rebuilt from builder defaults.  Instead the edit is
+# replayed onto its source node as a three-way merge: ``old`` is what the
+# model generated at load time, ``new`` is what it generates now, and only the
+# atoms/children that differ between the two are changed in ``src``.  Every
+# attribute the model does not track (label justify, font sizes, field
+# positions and effects, ``Description`` properties, pin UUIDs, the instances
+# ``project`` name, wire stroke type ...) therefore survives the edit.
+
+#: Repeated children told apart by their first atom (a property's name, a
+#: pin's number, a lib symbol's id, a title-block comment's index) rather than
+#: by their order of appearance.
+_KEYED_BY_FIRST_ATOM = frozenset({"property", "pin", "symbol", "comment"})
+
+#: Nodes whose first two atoms are an X/Y coordinate.  When the source value
+#: differs from the model's (a field placed away from the builder default),
+#: a moved element translates it by the same delta instead of snapping it to
+#: the builder default.
+_COORD_NODES = frozenset({"at", "xy", "start", "end", "center", "mid"})
+
+#: The model rounds loaded coordinates to 0.01 mm; a source coordinate within
+#: this distance of the model's is the same coordinate.
+_COORD_TOL = 0.006
+
+
+def _child_keys(node: SExp) -> list[tuple[str, str | None, int] | None]:
+    """A stable key per child of *node*; ``None`` for atoms."""
+    seen: dict[tuple[str, str | None], int] = {}
+    keys: list[tuple[str, str | None, int] | None] = []
+    for child in node.children:
+        if child.name is None:
+            keys.append(None)
+            continue
+        disc = None
+        if child.name in _KEYED_BY_FIRST_ATOM:
+            first = child.get_first_atom()
+            disc = None if first is None else repr(first)
+        base = (child.name, disc)
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        keys.append((child.name, disc, n))
+    return keys
+
+
+def _keyed(node: SExp) -> dict[tuple[str, str | None, int], SExp]:
+    return {key: child for key, child in zip(_child_keys(node), node.children, strict=True) if key}
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _atom_eq(a: SExp, b: SExp) -> bool:
+    if _is_number(a.value) and _is_number(b.value):
+        return float(a.value) == float(b.value)  # type: ignore[arg-type]
+    return repr(a.value) == repr(b.value)
+
+
+def _coord_atom(value: float) -> SExp:
+    rounded = round(value, 4)
+    return SExp.atom(int(rounded) if rounded == int(rounded) else rounded)
+
+
+def _patch_atoms(name: str, src: list[SExp], old: list[SExp], new: list[SExp]) -> list[SExp]:
+    """Replay the model's ``old`` -> ``new`` atom change onto ``src``."""
+    if len(old) == len(new) and all(_atom_eq(o, n) for o, n in zip(old, new, strict=True)):
+        return src
+    if not len(src) == len(old) == len(new):
+        return new
+    out: list[SExp] = []
+    for i, (s, o, n) in enumerate(zip(src, old, new, strict=True)):
+        if _atom_eq(o, n):
+            out.append(s)  # not edited: keep the source token
+        elif _atom_eq(s, o):
+            out.append(n)
+        elif _is_number(s.value) and _is_number(o.value) and _is_number(n.value):
+            sv, ov, nv = float(s.value), float(o.value), float(n.value)  # type: ignore[arg-type]
+            if abs(sv - ov) <= _COORD_TOL or name not in _COORD_NODES or i >= 2:
+                out.append(n)
+            else:
+                out.append(_coord_atom(sv + (nv - ov)))
+        else:
+            out.append(n)
+    return out
+
+
+def _patch_node(src: SExp, old: SExp, new: SExp, parent: str | None = None) -> SExp:
+    """Return *src* with the model's ``old`` -> ``new`` change applied.
+
+    *src* is never mutated: changed nodes are rebuilt, unchanged subtrees are
+    shared with the source tree.
+    """
+    if _fingerprint(old) == _fingerprint(new):
+        return src
+    if src.name is None or src.name != old.name or old.name != new.name:
+        return new
+
+    def atoms(node: SExp) -> list[SExp]:
+        return [c for c in node.children if c.name is None]
+
+    patched_atoms = _patch_atoms(src.name, atoms(src), atoms(old), atoms(new))
+    old_map, new_map = _keyed(old), _keyed(new)
+
+    out: list[tuple[tuple[str, str | None, int] | None, SExp]] = []
+    atom_iter = iter(patched_atoms)
+    atoms_placed = False
+    for key, child in zip(_child_keys(src), src.children, strict=True):
+        if key is None:
+            if not atoms_placed and len(patched_atoms) != len(atoms(src)):
+                out.extend((None, a) for a in patched_atoms)
+                atoms_placed = True
+            elif not atoms_placed:
+                out.append((None, next(atom_iter)))
+            continue
+        if parent == "pin" and key[0] == "uuid":
+            out.append((key, child))  # pin UUIDs are regenerated randomly
+        elif key in old_map and key in new_map:
+            out.append((key, _patch_node(child, old_map[key], new_map[key], src.name)))
+        elif key in old_map:
+            continue  # removed by the edit
+        elif key in new_map:
+            out.append((key, new_map[key]))
+        else:
+            out.append((key, child))  # not modelled: keep
+    if not atoms_placed and not any(k is None for k, _ in out) and patched_atoms:
+        out[0:0] = [(None, a) for a in patched_atoms]
+
+    # Children the edit added that the source lacks go after their nearest
+    # preceding sibling in the generated order.
+    present = {k for k, _ in out if k is not None}
+    prev: tuple[str, str | None, int] | None = None
+    for key in (k for k in _child_keys(new) if k is not None):
+        if key not in present:
+            # A child the source omits stays omitted unless the edit changed
+            # its content -- not merely its builder-derived position.
+            o = old_map.get(key)
+            if o is None or _fingerprint(o, _COORD_NODES) != _fingerprint(
+                new_map[key], _COORD_NODES
+            ):
+                at = next(
+                    (i + 1 for i, (k, _) in enumerate(out) if prev is not None and k == prev),
+                    sum(1 for k, _ in out if k is None),
+                )
+                out.insert(at, (key, new_map[key]))
+                present.add(key)
+            else:
+                continue  # the source deliberately lacks it; unchanged
+        prev = key
+
+    node = SExp.list(src.name)
+    node._inline = src._inline
+    node.children = [child for _, child in out]
+    return node
 
 
 class SchematicIOMixin:
@@ -119,7 +279,7 @@ class SchematicIOMixin:
         text_notes: list[tuple[str, float, float]]
         _source_doc: SExp | None
         _source_consumed: list[SExp]
-        _source_slots: dict[str, tuple[SExp | None, str]]
+        _source_slots: dict[str, tuple[SExp | None, str, SExp]]
         _text_note_sources: dict[tuple[str, float, float], list[SExp]]
 
         # ``_from_sexp`` constructs the concrete ``Schematic`` via ``cls(...)``.
@@ -363,7 +523,12 @@ class SchematicIOMixin:
         sch._pwr_counter = max_pwr + 1
 
         # Remember the source tree so ``to_sexp_node`` can re-emit every
-        # element the caller did not touch verbatim (issue #6051).
+        # element the caller did not touch verbatim (issue #6051) and patch
+        # edited ones in place (issue #6057).  Older-format files are still
+        # regenerated wholesale at kct's version: their verbatim nodes would
+        # skip KiCad's legacy-format conversions once restamped, and keeping
+        # the old version would misdescribe kct-generated nodes (#6057 left
+        # this unchanged deliberately).
         if _source_format_version(doc) >= KICAD_SCH_FORMAT_VERSION:
             sch._snapshot_source(doc)
         else:
@@ -450,12 +615,13 @@ class SchematicIOMixin:
             src = getattr(elem, "_source_node", None)
             if src is not None:
                 elem._source_fp = _fingerprint(node)  # type: ignore[attr-defined]
+                elem._source_gen = node  # type: ignore[attr-defined]
                 consumed.append(src)
         for nodes in self._text_note_sources.values():
             consumed.extend(nodes)
         for name, node in self._header_slot_nodes().items():
             src = doc.get(name)
-            self._source_slots[name] = (src, _fingerprint(node))
+            self._source_slots[name] = (src, _fingerprint(node), node)
             if src is not None:
                 consumed.append(src)
         self._source_consumed = consumed
@@ -504,7 +670,8 @@ class SchematicIOMixin:
         * Elements whose generated form still matches their load-time
           fingerprint are emitted as the original source node, in their
           original position.
-        * Edited elements are regenerated from the model, in place.
+        * Edited elements keep their source node with only the edited atoms
+          changed (issue #6057, see :func:`_patch_node`), in place.
         * Elements removed from the model are dropped.
         * Elements added to the model are appended before the trailer
           (``sheet_instances`` / ``embedded_fonts``).
@@ -523,33 +690,71 @@ class SchematicIOMixin:
         new_body: list[SExp] = []
         new_trailer: list[SExp] = []
 
-        def place(src: SExp | None, fp: str | None, node: SExp) -> bool:
+        def place(src: SExp | None, fp: str | None, gen: SExp | None, node: SExp) -> bool:
             if src is None or id(src) not in index or id(src) in replaced:
                 return False
-            replaced[id(src)] = src if _fingerprint(node) == fp else node
+            if _fingerprint(node) == fp:
+                replaced[id(src)] = src
+            elif gen is None:
+                replaced[id(src)] = node
+            else:
+                # Edited: replay the edit onto the source node (issue #6057).
+                replaced[id(src)] = _patch_node(src, gen, node)
             return True
 
         for name, node in self._header_slot_nodes().items():
-            src, fp = self._source_slots.get(name, (None, None))
+            src, fp, gen = self._source_slots.get(name, (None, None, None))
             if src is not None:
-                place(src, fp, node)
+                place(src, fp, gen, node)
             elif _fingerprint(node) != fp:
                 # Absent from the source and set since load: add it.
                 (new_trailer if name in _TRAILER_NODES else new_header).append(node)
 
         for elem, node in self._element_nodes():
             src = getattr(elem, "_source_node", None)
-            if not place(src, getattr(elem, "_source_fp", None), node):
+            fp = getattr(elem, "_source_fp", None)
+            if not place(src, fp, getattr(elem, "_source_gen", None), node):
                 new_body.append(node)
 
-        pending = {key: list(nodes) for key, nodes in self._text_note_sources.items()}
-        for text, x, y in self.text_notes:
-            candidates = pending.get((text, x, y))
+        # Text notes are plain ``(text, x, y)`` tuples, so an edited note is a
+        # removed tuple plus an added one.  Notes matching a source exactly
+        # are kept; a leftover added note is then paired with a leftover
+        # source note of the same text (moved) or position (retyped) and
+        # patched onto it, keeping its font, justify and UUID (issue #6057).
+        live = [
+            (key, src)
+            for key, nodes in self._text_note_sources.items()
+            for src in nodes
+            if id(src) in index
+        ]
+        pending: dict[tuple[str, float, float], list[SExp]] = {}
+        for key, src in live:
+            pending.setdefault(key, []).append(src)
+        unmatched: list[tuple[str, float, float]] = []
+        for note in self.text_notes:
+            candidates = pending.get(note)
             src = candidates.pop(0) if candidates else None
-            if src is None or id(src) not in index or id(src) in replaced:
-                new_body.append(self._build_text_note_node(text, x, y))
+            if src is None or id(src) in replaced:
+                unmatched.append(note)
             else:
                 replaced[id(src)] = src
+        leftover = [(key, src) for key, src in live if id(src) not in replaced]
+        for text, x, y in unmatched:
+            pair = next((p for p in leftover if p[0][0] == text), None) or next(
+                (p for p in leftover if p[0][1:] == (x, y)), None
+            )
+            if pair is None:
+                new_body.append(self._build_text_note_node(text, x, y))
+                continue
+            leftover.remove(pair)
+            (old_text, old_x, old_y), src = pair
+            uuid_child = src.get("uuid")
+            note_uuid = str(uuid_child.get_first_atom()) if uuid_child else str(uuid.uuid4())
+            replaced[id(src)] = _patch_node(
+                src,
+                text_node(old_text, old_x, old_y, note_uuid),
+                text_node(text, x, y, note_uuid),
+            )
 
         # Held as node references (not ``id()`` ints) so deepcopy/pickle remap
         # them together with ``_source_doc`` (issue #6071).
