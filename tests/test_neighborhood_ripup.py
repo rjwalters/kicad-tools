@@ -19,68 +19,83 @@ from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 from kicad_tools.router.grid import RoutedNetsUnblocker
 
 
+def _real_grid_with_route_and_pad():
+    """A real grid holding one routed trace (net 5) and one pad (net 3).
+
+    Issue #6009: the unblocker lifts *routes* (``grid.routes``) through
+    ``resync_route_occupancy``; it no longer infers copper from a cell mask,
+    so these tests need a real grid rather than a MagicMock.
+    """
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad, Route, Segment
+    from kicad_tools.router.rules import DesignRules
+
+    grid = RoutingGrid(10, 10, DesignRules(grid_resolution=0.25))
+    grid.add_pad(Pad(8.0, 8.0, 1.0, 1.0, 3, "P3", ref="U1", pin="1"))
+    route = Route(5, "N5", [Segment(1.0, 3.0, 9.0, 3.0, 0.2, Layer.F_CU, 5)], [])
+    grid.mark_route(route)
+    return grid, route
+
+
 class TestRoutedNetsUnblocker:
     """Tests for the RoutedNetsUnblocker context manager."""
 
     def test_saves_and_restores_blocked_array(self):
-        """Context manager should save blocked state on entry and restore on exit."""
-        grid = MagicMock()
-        grid._congestion = np.zeros((1, 1, 1), dtype=np.int32)
-        grid._congestion_counted = None
-        grid._blocked = np.array([[[True, False, True]]], dtype=np.bool_)
-        grid._pad_blocked = np.array([[[False, False, True]]], dtype=np.bool_)
-        grid._net = np.array([[[5, 0, 0]]], dtype=np.int32)
+        """Routed copper is lifted on entry and the planes restored on exit."""
+        grid, route = _real_grid_with_route_and_pad()
+        gx, gy = grid.world_to_grid(5.0, 3.0)
+        assert grid._blocked[0, gy, gx] and grid._net[0, gy, gx] == 5
 
         original_blocked = grid._blocked.copy()
         original_net = grid._net.copy()
 
-        unblocker = RoutedNetsUnblocker(grid)
+        with RoutedNetsUnblocker(grid) as unblocker:
+            assert not grid._blocked[0, gy, gx]
+            assert grid._net[0, gy, gx] == 0
+            assert grid.routes == []
+            assert unblocker.lifted == [route]
+            assert unblocker.copper_net[0, gy, gx] == 5
 
-        with unblocker:
-            # Cell (0,0,0): blocked=True, pad_blocked=False, net=5 -> should be unblocked
-            assert not grid._blocked[0, 0, 0]
-            assert grid._net[0, 0, 0] == 0
-            # Cell (0,0,1): blocked=False -> unchanged
-            assert not grid._blocked[0, 0, 1]
-            # Cell (0,0,2): blocked=True but pad_blocked=True -> unchanged (static obstacle)
-            assert grid._blocked[0, 0, 2]
-
-        # After exit, arrays should be fully restored
         np.testing.assert_array_equal(grid._blocked, original_blocked)
         np.testing.assert_array_equal(grid._net, original_net)
+        assert grid.routes == [route]
 
     def test_preserves_static_obstacles(self):
-        """Pad-blocked cells should remain blocked even when they have a net."""
-        grid = MagicMock()
-        grid._congestion = np.zeros((1, 1, 1), dtype=np.int32)
-        grid._congestion_counted = None
-        # Cell with pad_blocked=True should never be unblocked
-        grid._blocked = np.array([[[True]]], dtype=np.bool_)
-        grid._pad_blocked = np.array([[[True]]], dtype=np.bool_)
-        grid._net = np.array([[[3]]], dtype=np.int32)
+        """Pad cells stay blocked with their own net, and are not 'copper'."""
+        grid, _route = _real_grid_with_route_and_pad()
+        px, py = grid.world_to_grid(8.0, 8.0)
+        assert grid._blocked[0, py, px] and grid._net[0, py, px] == 3
 
-        with RoutedNetsUnblocker(grid):
-            assert grid._blocked[0, 0, 0]
-            assert grid._net[0, 0, 0] == 3
+        with RoutedNetsUnblocker(grid) as unblocker:
+            assert grid._blocked[0, py, px]
+            assert grid._net[0, py, px] == 3
+            assert unblocker.copper_net[0, py, px] == 0
 
-    def test_unblocks_only_routed_net_cells(self):
-        """Only cells with blocked=True, pad_blocked=False, net!=0 should be unblocked."""
-        grid = MagicMock()
-        grid._congestion = np.zeros((1, 1, 1), dtype=np.int32)
-        grid._congestion_counted = None
-        grid._blocked = np.array([[[True, True, False, True]]], dtype=np.bool_)
-        grid._pad_blocked = np.array([[[False, True, False, False]]], dtype=np.bool_)
-        grid._net = np.array([[[2, 3, 0, 0]]], dtype=np.int32)
+    def test_copper_net_marks_only_lifted_route_cells(self):
+        """``copper_net`` is non-zero exactly where the lift freed a cell."""
+        grid, _route = _real_grid_with_route_and_pad()
+        before_blocked = grid._blocked.copy()
+        before_net = grid._net.copy()
 
-        with RoutedNetsUnblocker(grid):
-            # (0,0,0): blocked + !pad_blocked + net=2 -> unblocked
-            assert not grid._blocked[0, 0, 0]
-            # (0,0,1): blocked + pad_blocked -> stays blocked
-            assert grid._blocked[0, 0, 1]
-            # (0,0,2): not blocked -> stays
-            assert not grid._blocked[0, 0, 2]
-            # (0,0,3): blocked + !pad_blocked + net=0 -> stays (no net)
-            assert grid._blocked[0, 0, 3]
+        with RoutedNetsUnblocker(grid) as unblocker:
+            freed = before_blocked & ~grid._blocked
+            copper = unblocker.copper_net
+            np.testing.assert_array_equal(copper != 0, freed)
+            assert set(np.unique(copper[copper != 0]).tolist()) == {5}
+            np.testing.assert_array_equal(copper[freed], before_net[freed])
+
+    def test_copper_net_unavailable_outside_context(self):
+        grid, _route = _real_grid_with_route_and_pad()
+        unblocker = RoutedNetsUnblocker(grid)
+        import pytest
+
+        with pytest.raises(RuntimeError):
+            _ = unblocker.copper_net
+        with unblocker:
+            pass
+        with pytest.raises(RuntimeError):
+            _ = unblocker.copper_net
 
 
 class TestFindBlockingNetsRelaxed:
@@ -522,17 +537,13 @@ class TestGridTemporarilyUnblockRoutedNets:
 
     def test_returns_context_manager(self):
         """temporarily_unblock_routed_nets should return a RoutedNetsUnblocker."""
-        grid = MagicMock()
-        grid._blocked = np.zeros((1, 5, 5), dtype=np.bool_)
-        grid._pad_blocked = np.zeros((1, 5, 5), dtype=np.bool_)
-        grid._net = np.zeros((1, 5, 5), dtype=np.int32)
-
-        # Import the actual method
-
-        # Use the class method via a real-ish approach
-        unblocker = RoutedNetsUnblocker(grid)
-        assert hasattr(unblocker, "__enter__")
-        assert hasattr(unblocker, "__exit__")
+        grid, _route = _real_grid_with_route_and_pad()
+        pathfinder = MagicMock()
+        unblocker = grid.temporarily_unblock_routed_nets(pathfinder)
+        assert isinstance(unblocker, RoutedNetsUnblocker)
+        with unblocker:
+            pathfinder.clear_routed_segments.assert_called_once()
+        pathfinder.add_routed_segments.assert_called_once()
 
 
 class TestAcceptanceCriterion:

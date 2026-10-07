@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from kicad_tools.acceleration import to_numpy
+from kicad_tools.router.grid import RoutedNetsUnblocker
 
 if TYPE_CHECKING:
     from .core import Autorouter
@@ -233,79 +234,19 @@ def _connections_for(
 # ---------------------------------------------------------------------------
 
 
-class _CopperLift:
-    """Context manager: remove every committed route from the grid, then restore.
+class _CopperLift(RoutedNetsUnblocker):
+    """Lift every committed route off the grid for the duration of a ``with``.
 
-    Uses :meth:`RoutingGrid.resync_route_occupancy` in both directions, which
-    is the one grid API that unmarks *and* re-marks on the Python grid and its
-    paired C++ grid together and keeps ``grid.routes`` / the R-trees coherent.
-    The grid's access-witness journal (``commit_observer``, #5517) is detached
-    for the duration so the diagnostic leaves no trace in the replay, and the
-    pathfinder's crossing-cost segment cache (#1250) is emptied so the solo
-    search is priced as if the board were empty of signal copper.
-
-    ``resync_route_occupancy`` re-derives the owner of every cell a route
-    touches from the *current* route order, so lifting and re-adding the
-    routes is not by itself an exact inverse: overlapping clearance halos and
-    pad-halo cells can change owner, and the congestion planes can drift.
-    The four occupancy planes it writes (``_blocked``, ``_net``,
-    ``_congestion``, ``_congestion_counted``) are therefore snapshotted on
-    entry and copied back on exit -- the same pattern as
-    :class:`~kicad_tools.router.grid.RoutedNetsUnblocker`.  The paired C++
-    grid is already restored exactly by the re-add.
+    A thin alias for :class:`~kicad_tools.router.grid.RoutedNetsUnblocker`
+    (Issue #6009 moved the lift there so the relaxed rip-up blocker search
+    shares it): every route in ``grid.routes`` comes off the Python grid, its
+    paired C++ grid and the R-trees through ``resync_route_occupancy``; the
+    pathfinder's crossing-cost cache is emptied; the access-witness journal is
+    detached; and on exit the grid is restored exactly.
     """
 
     def __init__(self, router: Autorouter) -> None:
-        self._router = router
-        self._grid = router.grid
-        self._routes: list[Route] = []
-        self._observer: Any = None
-        self._saved_blocked: Any = None
-        self._saved_net: Any = None
-        self._saved_congestion: Any = None
-        self._saved_congestion_counted: Any = None
-
-    def __enter__(self) -> _CopperLift:
-        grid = self._grid
-        self._routes = list(getattr(grid, "routes", []) or [])
-        self._observer = getattr(grid, "commit_observer", None)
-        grid.commit_observer = None
-        self._saved_blocked = grid._blocked.copy()
-        self._saved_net = grid._net.copy()
-        self._saved_congestion = grid._congestion.copy()
-        counted = getattr(grid, "_congestion_counted", None)
-        self._saved_congestion_counted = None if counted is None else counted.copy()
-        if self._routes:
-            grid.resync_route_occupancy([(route, None) for route in self._routes])
-        pathfinder = self._router.router
-        if hasattr(pathfinder, "clear_routed_segments"):
-            pathfinder.clear_routed_segments()
-        return self
-
-    @property
-    def lifted(self) -> list[Route]:
-        return self._routes
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        grid = self._grid
-        try:
-            if self._routes:
-                grid.resync_route_occupancy([(None, route) for route in self._routes])
-            # Exact restore of the Python occupancy planes (see class doc).
-            if self._saved_blocked is not None:
-                grid._blocked[...] = self._saved_blocked
-                grid._net[...] = self._saved_net
-                grid._congestion[...] = self._saved_congestion
-                grid._congestion_counted = self._saved_congestion_counted
-                grid.bump_occupancy_generation()  # Issue #4794
-            pathfinder = self._router.router
-            if hasattr(pathfinder, "add_routed_segments"):
-                for route in grid.routes:
-                    pathfinder.add_routed_segments(route.segments)
-            if hasattr(pathfinder, "update_layer_fill_ratios"):
-                pathfinder.update_layer_fill_ratios()
-        finally:
-            grid.commit_observer = self._observer
+        super().__init__(router.grid, router.router)
 
 
 # ---------------------------------------------------------------------------
@@ -756,18 +697,8 @@ def diagnose_unrouted(
     results: list[UnroutedConnection] = []
     budget_exhausted = False
 
-    saved_blocked = np.array(to_numpy(grid._blocked), dtype=bool, copy=True)
-    saved_net = np.array(to_numpy(grid._net), dtype=np.int32, copy=True)
-
     with _CopperLift(router) as lift:
-        lifted_blocked = to_numpy(grid._blocked)
-        lifted_net = to_numpy(grid._net)
-        # A cell held committed copper iff it was blocked by a net before the
-        # lift and that occupancy did not survive it (pads, keepouts and pours
-        # restore their own owner, so they are not mistaken for copper).
-        is_copper = saved_blocked & (saved_net > 0) & ~(lifted_blocked & (lifted_net == saved_net))
-        copper_net = np.where(is_copper, saved_net, 0).astype(np.int32)
-        del saved_blocked, saved_net
+        copper_net = lift.copper_net
         attributor = _Attributor(router, names)
 
         for net, src, dst in connections:

@@ -672,61 +672,147 @@ logger = logging.getLogger(__name__)
 
 
 class RoutedNetsUnblocker:
-    """Context manager that temporarily unblocks routed-net cells.
+    """Context manager: lift every committed route off the grid, then restore.
 
-    Used by relaxed A* (Issue #2274) to find a path ignoring routed nets.
-    Static obstacles (pads, board edges) are preserved; only cells blocked
-    by routed traces are cleared on entry and restored on exit.
+    Used by the relaxed A* blocker search (Issue #2274 / #2386) and by the
+    unrouted-cause classifier (Issue #5944) to search a "solo" grid on which
+    no other net's copper exists.  Pads, keepouts / obstacles, pours and the
+    board-edge keepout stay, because none of them are routes.
+
+    Issue #6009: the lift goes through :meth:`RoutingGrid.resync_route_occupancy`
+    rather than clearing cells in the Python ``_blocked`` / ``_net`` planes.
+    That is the one grid API that unmarks *and* re-marks the Python grid and
+    its paired C++ grid together and keeps ``grid.routes`` and the segment /
+    via R-trees coherent.  The previous plane-only clear left the C++ grid and
+    the R-trees still holding every routed trace, so the relaxed search on
+    *both* backends kept seeing the copper it was meant to ignore and returned
+    no blockers at all.
+
+    ``resync_route_occupancy`` re-derives the owner of every cell a route
+    touches from the *current* route order, so lifting and re-adding the routes
+    is not by itself an exact inverse: overlapping clearance halos and pad-halo
+    cells can change owner, and the congestion planes can drift.  The four
+    occupancy planes it writes (``_blocked``, ``_net``, ``_congestion``,
+    ``_congestion_counted``) are therefore snapshotted on entry and copied back
+    on exit.  The paired C++ grid is restored exactly by the re-add, and
+    ``grid.routes`` comes back in its original order.
+
+    The grid's access-witness journal (``commit_observer``, #5517) is detached
+    for the duration so the lift leaves no trace in the replay.  When a
+    ``pathfinder`` is given its crossing-cost segment cache (#1250) is emptied
+    on entry and rebuilt from ``grid.routes`` on exit, so the solo search is
+    priced as if the board held no signal copper.
+
+    Attributes available inside the ``with`` body:
+
+    * ``_saved_blocked`` / ``_saved_net`` -- the planes as they were on entry.
+    * :attr:`copper_net` -- per cell, the net whose *committed copper* (trace,
+      via or its clearance halo) occupied it on entry, else 0.  Cells held by
+      pads, keepouts or pours are 0 even when they carry a net id, because the
+      lift did not free them; this is the plane blocker attribution wants.
+    * :attr:`lifted` -- the routes taken off the grid.
     """
 
-    def __init__(self, grid: RoutingGrid) -> None:
+    def __init__(self, grid: RoutingGrid, pathfinder: Any = None) -> None:
         self._grid = grid
+        self._pathfinder = pathfinder
+        self._routes: list[Route] = []
+        self._observer: Any = None
         self._saved_blocked: np.ndarray | None = None
         self._saved_net: np.ndarray | None = None
         self._saved_congestion: np.ndarray | None = None
         self._saved_congestion_counted: np.ndarray | None = None
+        self._copper_net: np.ndarray | None = None
+        self._entered = False
+
+    @property
+    def lifted(self) -> list[Route]:
+        """The committed routes lifted off the grid on entry."""
+        return self._routes
+
+    @property
+    def copper_net(self) -> np.ndarray:
+        """Net id of the committed copper that held each cell on entry (0 = none)."""
+        if self._copper_net is None:
+            raise RuntimeError("copper_net is only available inside the context")
+        return self._copper_net
 
     def __enter__(self) -> RoutedNetsUnblocker:
-        # Save full copies of the blocked and net arrays
-        self._saved_blocked = self._grid._blocked.copy()
-        self._saved_net = self._grid._net.copy()
-        self._saved_congestion = self._grid._congestion.copy()
-        counted = self._grid._congestion_counted
+        grid = self._grid
+        self._routes = list(getattr(grid, "routes", None) or [])
+        self._observer = getattr(grid, "commit_observer", None)
+        grid.commit_observer = None
+        self._saved_blocked = grid._blocked.copy()
+        self._saved_net = grid._net.copy()
+        self._saved_congestion = grid._congestion.copy()
+        counted = getattr(grid, "_congestion_counted", None)
         self._saved_congestion_counted = None if counted is None else counted.copy()
-
-        # Build mask: cells that are blocked by routed nets (not by pads/obstacles)
-        # A routed-net cell has: blocked=True, pad_blocked=False, net != 0
-        routed_mask = self._grid._blocked & ~self._grid._pad_blocked & (self._grid._net != 0)
-
-        # This bulk rollback path already copies full occupancy planes. Update
-        # only the removed cells' coarse bins; normal mark/unmark stays local.
-        if counted is not None:
-            removed = counted & to_numpy(routed_mask)
-            layers, ys, xs = np.nonzero(removed)
-            cy = np.minimum(ys // self._grid.congestion_size, self._grid.congestion_rows - 1)
-            cx = np.minimum(xs // self._grid.congestion_size, self._grid.congestion_cols - 1)
-            np.add.at(self._grid._congestion, (layers, cy, cx), -1)
-            counted[removed] = False
-
-        # Clear those cells
-        self._grid._blocked[routed_mask] = False
-        self._grid._net[routed_mask] = 0
-        self._grid.bump_occupancy_generation()  # Issue #4794
-
+        self._entered = True
+        try:
+            if self._routes:
+                grid.resync_route_occupancy([(route, None) for route in self._routes])
+            pathfinder = self._pathfinder
+            if pathfinder is not None and hasattr(pathfinder, "clear_routed_segments"):
+                pathfinder.clear_routed_segments()
+            saved_blocked = to_numpy(self._saved_blocked)
+            saved_net = to_numpy(self._saved_net)
+            lifted_blocked = to_numpy(grid._blocked)
+            lifted_net = to_numpy(grid._net)
+            # A cell held committed copper iff it was blocked by a net before
+            # the lift and that occupancy did not survive it (pads, keepouts
+            # and pours restore their own owner, so they are not mistaken for
+            # copper).
+            is_copper = (
+                saved_blocked & (saved_net > 0) & ~(lifted_blocked & (lifted_net == saved_net))
+            )
+            self._copper_net = np.where(is_copper, saved_net, 0).astype(np.int32)
+            grid.bump_occupancy_generation()  # Issue #4794
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        # Restore saved arrays
-        if self._saved_blocked is not None:
-            np.copyto(self._grid._blocked, self._saved_blocked)
-        if self._saved_net is not None:
-            np.copyto(self._grid._net, self._saved_net)
-        if self._saved_congestion is not None:
-            np.copyto(self._grid._congestion, self._saved_congestion)
-        self._grid._congestion_counted = self._saved_congestion_counted
-        # Issue #4794: the restore is itself an occupancy change (the grid
-        # inside the ``with`` body was NOT the grid outside it).
-        self._grid.bump_occupancy_generation()
+        if not self._entered:
+            return
+        self._entered = False
+        grid = self._grid
+        try:
+            # Re-add whatever is no longer on the grid (all of it after a
+            # complete lift; the remainder after a lift that raised midway).
+            present = {id(route) for route in getattr(grid, "routes", None) or []}
+            missing = [route for route in self._routes if id(route) not in present]
+            if missing:
+                grid.resync_route_occupancy([(None, route) for route in missing])
+            # Restore the original route order (the re-add appends).
+            if self._routes and [id(r) for r in grid.routes] != [id(r) for r in self._routes]:
+                original = {id(r) for r in self._routes}
+                extra = [r for r in grid.routes if id(r) not in original]
+                grid.routes = list(self._routes) + extra
+                grid._rebuild_segment_index()
+                grid.rebuild_via_index()
+            # Exact restore of the Python occupancy planes (see class doc).
+            saved_blocked = self._saved_blocked
+            saved_net = self._saved_net
+            saved_congestion = self._saved_congestion
+            if saved_blocked is not None and saved_net is not None and saved_congestion is not None:
+                grid._blocked[...] = saved_blocked
+                grid._net[...] = saved_net
+                grid._congestion[...] = saved_congestion
+                grid._congestion_counted = self._saved_congestion_counted
+            # Issue #4794: the restore is itself an occupancy change (the grid
+            # inside the ``with`` body was NOT the grid outside it).
+            grid.bump_occupancy_generation()
+            pathfinder = self._pathfinder
+            if pathfinder is not None:
+                if hasattr(pathfinder, "add_routed_segments"):
+                    for route in grid.routes:
+                        pathfinder.add_routed_segments(route.segments)
+                if hasattr(pathfinder, "update_layer_fill_ratios"):
+                    pathfinder.update_layer_fill_ratios()
+        finally:
+            grid.commit_observer = self._observer
+            self._copper_net = None
 
 
 class _CellView:
@@ -7153,21 +7239,26 @@ class RoutingGrid:
     # NEIGHBORHOOD RIP-UP SUPPORT (Issue #2274)
     # =========================================================================
 
-    def temporarily_unblock_routed_nets(self) -> RoutedNetsUnblocker:
-        """Return a context manager that temporarily unblocks routed-net cells.
+    def temporarily_unblock_routed_nets(self, pathfinder: Any = None) -> RoutedNetsUnblocker:
+        """Return a context manager that lifts every committed route off the grid.
 
-        Static obstacles (pads, board edges, zones marked with ``pad_blocked``)
-        are preserved.  Only cells that are blocked by routed traces
-        (``blocked=True``, ``pad_blocked=False``, ``net != 0``) are cleared
-        on entry and restored on exit.
+        Static obstacles (pads, keepouts, pours, the board-edge keepout) are
+        preserved; every route in ``self.routes`` is removed from the Python
+        grid, the paired C++ grid and the segment / via R-trees on entry, and
+        the grid is restored exactly on exit (Issue #6009 -- see
+        :class:`RoutedNetsUnblocker`).
 
         This is used by relaxed A* to find a path ignoring routed nets so
         that neighborhood rip-up can identify true blockers.
 
+        Args:
+            pathfinder: Optional pathfinder whose crossing-cost segment cache
+                should be emptied for the duration.
+
         Returns:
-            A context manager that saves/restores blocked and net arrays.
+            A :class:`RoutedNetsUnblocker`.
         """
-        return RoutedNetsUnblocker(self)
+        return RoutedNetsUnblocker(self, pathfinder)
 
     # =========================================================================
     # ZONE (COPPER POUR) SUPPORT
