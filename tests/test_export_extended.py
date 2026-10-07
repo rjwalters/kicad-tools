@@ -313,9 +313,7 @@ class TestGetKicadCliVersion:
     def test_memoised_per_path(self):
         """Second call for the same path must not spawn a subprocess (#5910)."""
         mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
-        with patch(
-            "kicad_tools.export.gerber.subprocess.run", return_value=mock_result
-        ) as run:
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result) as run:
             assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
             assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
             assert run.call_count == 1
