@@ -55,6 +55,7 @@ from kicad_tools.sexp import SExp
 
 __all__ = [
     "UUID_BEARING_TAGS",
+    "canonical_footprint_uuid",
     "canonicalize_board_uuids",
     "canonicalize_pcb_file_uuids",
     "uuids_in_file",
@@ -226,6 +227,22 @@ def _mint(key: str, taken: set[str]) -> str:
     return candidate
 
 
+def _item_key(parent_key: str, tag: str, ordinal: int) -> str:
+    return f"item:{parent_key}/{tag}[{ordinal}]"
+
+
+def canonical_footprint_uuid(ordinal: int) -> str:
+    """The UUID this module gives the ``ordinal``-th UUID-less ``footprint``.
+
+    It encodes nothing but the footprint's position among its siblings, i.e.
+    exactly what the legacy ``index:N`` physical key does, so
+    :func:`kicad_tools.schema.physical_identity.footprint_keys` maps it back
+    to that key and a footprint's physical identity survives
+    canonicalization (Issue #6175).
+    """
+    return str(uuid.uuid5(_NAMESPACE, _item_key("board", "footprint", ordinal)))
+
+
 def _content_key(node: SExp) -> str:
     """Whitespace-free text of ``node`` with its UUID child left out."""
     parts = [child.to_string(compact=True) for child in node.children if child.name not in _ID_TAGS]
@@ -322,7 +339,7 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
                     old = value
                     if old is not None:
                         taken.discard(old)
-                    value = _mint(f"item:{parent_key}/{child.name}[{ordinal}]", taken)
+                    value = _mint(_item_key(parent_key, child.name, ordinal), taken)
                     _set_uuid(child, value, id_tag)
                     if old is not None and old != value:
                         renamed[old] = value

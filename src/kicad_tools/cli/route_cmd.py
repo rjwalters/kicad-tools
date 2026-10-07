@@ -2397,9 +2397,12 @@ def _process_state_guard() -> "Iterator[None]":
     * the global ``random`` state -- restored only when ``--seed`` was
       actually applied (see ``_process_run_state``); an unseeded run leaves
       the global RNG untouched, exactly as before.
-    * the ``SIGINT`` handler installed for the Ctrl+C partial-save path --
-      restored only if it is still ``_handle_interrupt`` on exit, so a
-      handler installed by someone else mid-run is never clobbered.
+    * the ``SIGINT`` and ``SIGTERM`` handlers installed for the partial-save
+      path -- each restored only if it is still ``_handle_interrupt`` on
+      exit, so a handler installed by someone else mid-run is never
+      clobbered.  The rule-relaxation and combined-escalation flows restore
+      SIGTERM themselves, but not when they raise; a leaked handler answers
+      a later in-process SIGTERM with ``sys.exit(130)`` (Issue #6175).
     * ``_interrupt_state`` -- the router/output references are dropped so a
       completed run does not pin an ``Autorouter`` (and its grid) alive for
       the rest of the process.
@@ -2410,10 +2413,10 @@ def _process_state_guard() -> "Iterator[None]":
     """
     saved_environ = dict(os.environ)
     saved_rng_state = random.getstate()
-    try:
-        saved_sigint = signal.getsignal(signal.SIGINT)
-    except ValueError:  # pragma: no cover -- not on the main thread
-        saved_sigint = None
+    saved_signals = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(ValueError):  # not on the main thread
+            saved_signals[signum] = signal.getsignal(signum)
     _process_run_state["rng_seeded"] = False
     try:
         yield
@@ -2422,10 +2425,12 @@ def _process_state_guard() -> "Iterator[None]":
         os.environ.update(saved_environ)
         if _process_run_state["rng_seeded"]:
             random.setstate(saved_rng_state)
-        if saved_sigint is not None:
+        for signum, saved_handler in saved_signals.items():
+            if saved_handler is None:
+                continue  # installed from C; cannot be reinstalled
             try:
-                if signal.getsignal(signal.SIGINT) is _handle_interrupt:
-                    signal.signal(signal.SIGINT, saved_sigint)
+                if signal.getsignal(signum) is _handle_interrupt:
+                    signal.signal(signum, saved_handler)
             except ValueError:  # pragma: no cover -- not on the main thread
                 pass
         # Release the router/grid pinned for the SIGINT partial-save path.
