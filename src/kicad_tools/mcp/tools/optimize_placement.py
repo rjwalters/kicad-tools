@@ -43,6 +43,7 @@ from kicad_tools.placement.wirelength import (
     compare_wirelength_estimators,
     compute_per_footprint_ratsnest,
 )
+from kicad_tools.placement.writeback import write_footprint_placements
 
 if TYPE_CHECKING:
     from kicad_tools.placement.bo_strategy import BayesianOptStrategy
@@ -748,61 +749,17 @@ def _write_placements_to_pcb(
     coordinates; the board origin offset is added back to produce the
     sheet-absolute values expected in the ``.kicad_pcb`` file.
     """
-    import re
-
     placed = decode(vector, components)
     ox, oy = board_origin
-    ref_to_placement = {p.reference: p for p in placed}
-
-    pcb_content = Path(pcb_path).read_text()
-
-    lines = pcb_content.split("\n")
-    output_lines: list[str] = []
-    current_ref: str | None = None
-    in_footprint = False
-    paren_depth = 0
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.startswith("(footprint "):
-            in_footprint = True
-            paren_depth = 0
-            current_ref = None
-
-        if in_footprint:
-            paren_depth += stripped.count("(") - stripped.count(")")
-
-            ref_match = re.match(r'\s*\(fp_text\s+reference\s+"?([^")\s]+)"?\s', stripped)
-            if not ref_match:
-                ref_match = re.match(r'\s*\(property\s+"Reference"\s+"([^"]+)"', stripped)
-            if ref_match:
-                current_ref = ref_match.group(1)
-
-            if current_ref and current_ref in ref_to_placement:
-                at_match = re.match(
-                    r"(\s*)\(at\s+[\d.eE+-]+\s+[\d.eE+-]+(?:\s+[\d.eE+-]+)?\)", stripped
-                )
-                if at_match:
-                    p = ref_to_placement[current_ref]
-                    indent = at_match.group(1)
-                    # Convert board-relative back to sheet-absolute.
-                    abs_x = p.x + ox
-                    abs_y = p.y + oy
-                    new_at = f"{indent}(at {abs_x:.6f} {abs_y:.6f} {p.rotation:.0f})"
-                    output_lines.append(new_at)
-                    if paren_depth <= 0:
-                        in_footprint = False
-                        current_ref = None
-                    continue
-
-            if paren_depth <= 0:
-                in_footprint = False
-                current_ref = None
-
-        output_lines.append(line)
-
-    Path(output_path).write_text("\n".join(output_lines))
+    # Through the PCB model, not text patching: it also moves the footprint's
+    # board-absolute geometry -- embedded keepout zones and pad angles --
+    # and edits the footprint's own ``(at ...)`` rather than the first
+    # ``(at ...)`` line after the reference (Issue #6119).
+    write_footprint_placements(
+        pcb_path,
+        output_path,
+        ((p.reference, p.x + ox, p.y + oy, p.rotation) for p in placed),
+    )
 
 
 # ---------------------------------------------------------------------------

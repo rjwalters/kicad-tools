@@ -986,7 +986,11 @@ class PlacementFixer:
             abs_end = fp_start + at_match.end()
             content = content[:abs_start] + new_at + content[abs_end:]
 
-            return content
+            # Zones embedded in the footprint (antenna keepouts) are stored
+            # in board coordinates and must move with it (Issue #6119).
+            from .writeback import translate_embedded_zones_in_text
+
+            return translate_embedded_zones_in_text(content, fp_start, new_x - old_x, new_y - old_y)
 
         return content
 

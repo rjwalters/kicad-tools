@@ -6,7 +6,6 @@ This module provides:
 - update_pcb_placements: Update component positions in existing PCB files
 """
 
-import re
 import uuid
 from pathlib import Path
 
@@ -332,32 +331,17 @@ def update_pcb_placements(source_pcb: str, layout: PCBLayout, output_pcb: str):
     exporter = KiCadPCBExporter(layout)
     positions = exporter.generate_placement_update()
 
-    # Read existing PCB
-    content = Path(source_pcb).read_text()
+    # Through the PCB model rather than a regex over the file: the regex
+    # could match from an earlier footprint up to this reference and rewrite
+    # the wrong (at ...), and it never moved the footprint's board-absolute
+    # geometry (embedded keepout zones, pad angles) -- Issue #6119.
+    from kicad_tools.placement.writeback import write_footprint_placements
 
-    # For each component, find and update its position
-    for ref, (x, y, rotation) in positions.items():
-        # Pattern to find this component's footprint block and its position
-        # Looking for: (property "Reference" "REF" ...) within a footprint
-        # Then finding the (at X Y R) line above it
-
-        # Find footprint containing this reference
-        pattern = (
-            rf'(\(footprint\s+"[^"]+"\s+.*?\(property\s+"Reference"\s+"{re.escape(ref)}".*?\))'
-        )
-
-        def update_position(match):
-            footprint_text = match.group(1)
-            # Update the (at ...) line within this footprint
-            at_pattern = r"\(at\s+[\d.-]+\s+[\d.-]+(?:\s+[\d.-]+)?\)"
-            new_at = f"(at {x:.4f} {y:.4f} {rotation})"
-            updated = re.sub(at_pattern, new_at, footprint_text, count=1)
-            return updated
-
-        content = re.sub(pattern, update_position, content, flags=re.DOTALL)
-
-    # Write result
-    Path(output_pcb).write_text(content)
+    write_footprint_placements(
+        source_pcb,
+        output_pcb,
+        ((ref, x, y, rotation) for ref, (x, y, rotation) in positions.items()),
+    )
     print(f"Updated PCB placements: {output_pcb}")
     print(f"  Updated {len(positions)} components")
 
