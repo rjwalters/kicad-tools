@@ -1562,9 +1562,11 @@ class TestOverflowTolerantCollisionChecker:
         assert result is False
 
     def test_ignore_overflow_allows_overused_soft_block(self, grid_and_rules):
-        """With ignore_overflow=True, a path crossing OVERUSED cells
-        (usage_count > 1, i.e. cells already shared by multiple nets)
-        is allowed -- the Issue #2303 anti-fragmentation contract.
+        """With ignore_overflow=True, OVERUSED cells (usage_count > 1, i.e.
+        cells already shared by multiple nets) do not refuse a path off the
+        raster -- the Issue #2303 contract.  A path whose copper clears the
+        foreign trace but whose clearance buffer runs through that trace's
+        overused halo is allowed.
 
         Issue #3433: the tolerance is decided per cell on the SAME
         predicate ``get_total_overflow`` uses (``usage_count > 1``).
@@ -1578,6 +1580,31 @@ class TestOverflowTolerantCollisionChecker:
         grid._usage_count[:] = 2
 
         checker = GridCollisionChecker(grid, ignore_overflow=True)
+        # Passes just beyond the blocking trace's end at (3.0, 5.0):
+        # centreline distance 0.5 mm, edge gap 0.3 mm >= 0.15 mm.
+        result = checker.path_is_clear(
+            x1=1.0,
+            y1=5.5,
+            x2=5.0,
+            y2=5.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result is True
+
+    def test_ignore_overflow_still_refuses_crossing_overused_trace(self, grid_and_rules):
+        """Issue #6184: overused cells waive only the RASTER verdict.  A path
+        that physically crosses the foreign trace is still refused by the
+        exact kernel measurement, as ``VectorCollisionChecker`` (the rtree
+        path) always refused it.  Before #6184 this returned True: the
+        rtree-less fallback skipped overused cells with no exact check, the
+        hole board 03's USB_D+ fell through."""
+        grid, _rules = grid_and_rules
+        self._mark_blocking_route(grid, net_id=2, usage=2)
+        grid._usage_count[:] = 2
+
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
         result = checker.path_is_clear(
             x1=1.0,
             y1=2.5,
@@ -1587,7 +1614,7 @@ class TestOverflowTolerantCollisionChecker:
             width=0.2,
             exclude_net=1,
         )
-        assert result is True
+        assert result is False
 
     def test_ignore_overflow_still_blocks_clean_foreign_trace(self, grid_and_rules):
         """Issue #3433: with ignore_overflow=True, a CLEAN foreign trace
