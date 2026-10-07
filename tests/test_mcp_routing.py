@@ -563,11 +563,11 @@ class TestRouteNetAuto:
         The guard is that the pads DO reach the orchestrator (a strategy is
         selected and applied) — NOT that every fixture net completes.
 
-        Post-#4165 this fixture's NET1 is a genuine 2/3 partial: the emitted
-        two-terminal corridor joins the two most-distant pads but strands the
-        middle pad P1=(7.05, 8.45). We document that corrected behavior here by
-        asserting the honest partial signal, while still proving the pads were
-        passed through (a real strategy ran, not the "Insufficient pads" guard).
+        Post-#4165 the first strategy's two-terminal corridor joins the two
+        most-distant pads but strands the middle pad P1=(7.05, 8.45), so it is
+        demoted to a 2/3 partial and auto mode retries ``hierarchical``.  Since
+        #6107 that retry routes on the real board (every pad on its grid) and
+        completes the net, so the final result is a success *on the retry*.
         """
         from kicad_tools.mcp.tools.routing import route_net_auto
 
@@ -584,13 +584,13 @@ class TestRouteNetAuto:
         assert "Insufficient pads" not in (result.get("error_message") or "")
         assert "strategy_used" in result
         assert result["strategy_used"] != "unknown"
-        # #4165: NET1 is genuinely partial on this fixture. A two-terminal
-        # corridor cannot join all three pads, so the honest completion check
-        # demotes to a 2/3 partial instead of the old false success.
-        assert result["success"] is False
-        assert result.get("partial") is True
-        assert result.get("pads_connected") == 2
+        # #4165: the corridor alone is a 2/3 partial, so it is not what
+        # succeeded -- the hierarchical retry completed the net (#6107).
+        assert result["success"] is True, result.get("error_message")
+        assert result["strategy_used"] == "HIERARCHICAL_DIFF_PAIR"
         assert result.get("pads_total") == 3
+        assert result.get("pads_connected") == 3
+        assert any("Succeeded on retry" in w for w in result.get("warnings", []))
 
     def test_route_net_auto_single_pad_net_graceful_failure(self, tmp_path: Path) -> None:
         """A net with only 1 pad should fail gracefully, not crash."""

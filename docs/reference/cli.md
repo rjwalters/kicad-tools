@@ -912,17 +912,39 @@ joined by the net's existing copper count as one island). route-auto's
 strategies route on different grids, so the pass runs on the board loaded the
 way `kct route` loads it — every pad, existing track and via, the board-edge
 keepout and the keepout rule areas — at the design rules' fine grid
-resolution, the one the `hierarchical` strategy searches. It does not reuse
-that strategy's own grid, which holds only the routed net's pads and would
-never show a contender. When no strategy that ran searched a fine grid (for
+resolution, the one the `hierarchical` strategy searches. When no strategy that ran searched a fine grid (for
 example `--strategy global`, whose copper comes from the coarse corridor
 planner), each connection is `unclassified` with a `note` that says so.
 
-route-auto's strategies do not route around other nets' copper. Before #6001
-they drew straight through an already-routed net and reported success, which
-wrote a short. Copper that touches another net's existing track or via is now
-refused, like copper inside a keepout rule area (#6059). The net fails and its
-diagnosis names the net in the way as a `congested` contender.
+route-auto never writes copper that shorts another net or violates the
+board's clearance to it (Issues #6001, #6107):
+
+- The `hierarchical` strategy routes on the board as `kct route --nets` loads
+  it: every other net's pads (with their real shapes), tracks, vias and arcs
+  are obstacles on its grid, so it routes around them. On a schema PCB with no
+  board file (library use), it falls back to a grid holding only the net's own
+  pads.
+- The corridor strategies (`global`, `escape`, `subgrid`, `via_resolution`,
+  `multi_resolution`, `full_pipeline`) cannot plan around copper. They warn
+  once, like they do for keepout rule areas (#6059).
+- Every strategy's output is checked against every other net's pads, tracks,
+  arcs (true arc geometry) and vias. Copper that touches one, or comes closer
+  than the board's clearance, is refused and not written. The net fails, and
+  the error names the nets and items in the way, for example
+  `shorts net(s) '/A' already on the board (e.g. pad R5.1 at (115.000, 108.000) of '/A')`
+  or `comes within 0.050 mm of net(s) '/A' (closest: track ...), below the
+  board's 0.200 mm clearance`. The diagnosis reports the net in the way as a
+  `congested` contender. Under `--strategy auto`, a refused corridor is retried
+  with `hierarchical`.
+
+The clearance is the one KiCad's DRC measures. It is the strictest
+unconditional value in the board's `.kicad_dru` and `.kicad_pro` (the board
+minimum and the `Default` netclass), or KiCad's default of 0.2 mm when the
+board declares none. Per-net netclass assignments and conditional `.kicad_dru`
+rules are not resolved. Unassigned (net-0) tracks, vias, arcs and zones are
+not checked (floating copper is reassigned by connectivity, and a zone refill
+clears around the new copper). Net-0 pads, such as no-connect pins and plated
+mounting holes, are checked; a bare NPTH hole with no copper is not.
 
 #### Routing around invalid placement
 

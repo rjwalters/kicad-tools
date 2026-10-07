@@ -44,6 +44,7 @@ import math
 import sys
 import time
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -56,6 +57,14 @@ if TYPE_CHECKING:
 from .adaptive import AdaptiveAutorouter
 from .adaptive_grid import identify_fine_pitch_components
 from .escape import EscapeRouter, is_dense_package
+from .foreign_copper import (
+    ConflictReport,
+    ForeignItem,
+    board_copper,
+    board_required_clearance,
+    find_conflicts,
+    summarize_conflicts,
+)
 from .global_router import GlobalRouter
 from .region_graph import RegionGraph
 from .strategies import (
@@ -70,36 +79,6 @@ from .subgrid import SubGridRouter
 from .via_conflict import ViaConflictManager, ViaConflictStrategy
 
 logger = logging.getLogger(__name__)
-
-
-def _segment_distance(
-    a: tuple[float, float],
-    b: tuple[float, float],
-    c: tuple[float, float],
-    d: tuple[float, float],
-) -> float:
-    """Minimum distance between segments ``ab`` and ``cd`` (points allowed)."""
-
-    def _point_seg(
-        p: tuple[float, float], s0: tuple[float, float], s1: tuple[float, float]
-    ) -> float:
-        vx, vy = s1[0] - s0[0], s1[1] - s0[1]
-        seg2 = vx * vx + vy * vy
-        t = (
-            0.0
-            if seg2 == 0
-            else max(0.0, min(1.0, ((p[0] - s0[0]) * vx + (p[1] - s0[1]) * vy) / seg2))
-        )
-        return math.hypot(p[0] - (s0[0] + t * vx), p[1] - (s0[1] + t * vy))
-
-    def _cross(o: tuple[float, float], p: tuple[float, float], q: tuple[float, float]) -> float:
-        return (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
-
-    d1, d2 = _cross(c, d, a), _cross(c, d, b)
-    d3, d4 = _cross(a, b, c), _cross(a, b, d)
-    if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 and d2 and d3 and d4:
-        return 0.0  # proper crossing
-    return min(_point_seg(a, c, d), _point_seg(b, c, d), _point_seg(c, a, b), _point_seg(d, a, b))
 
 
 class RoutingOrchestrator:
@@ -216,9 +195,15 @@ class RoutingOrchestrator:
         # unrouted-cause diagnosis reads it to tell whether any of them
         # searched a fine routing grid.
         self.strategies_attempted: list[RoutingStrategy] = []
-        # Issue #6001: other nets' copper already on the board, for the
-        # short gate (lazily parsed, cached).
-        self._board_copper_cache: tuple[list, list] | None = None
+        # Issues #6001 / #6107: every pad, track, arc and via already on the
+        # board, for the short/clearance gate (lazily parsed, cached), and the
+        # copper clearance KiCad measures the board against.
+        self._board_copper_cache: list[ForeignItem] | None = None
+        self._required_clearance_cache: float | None = None
+        self._copper_warned = False
+        # Issue #6107: the board-loaded Autorouter the hierarchical strategy
+        # last routed on (``None`` when it ran the legacy own-pads-only grid).
+        self._hierarchical_board_router: Any = None
 
         logger.info(
             f"RoutingOrchestrator initialized: backend={backend}, "
@@ -517,85 +502,55 @@ class RoutingOrchestrator:
             ]
 
     # ------------------------------------------------------------------
-    # Other nets' copper already on the board (Issue #6001)
+    # Other nets' copper already on the board (Issues #6001, #6107)
     #
-    # No route-auto strategy sees the board's existing copper: the corridor
-    # planner has no obstacle model, and the hierarchical strategy's
-    # AdaptiveAutorouter is built from the routed net's own pads only.  Every
-    # strategy therefore drew straight through an already-routed net and
-    # reported success -- writing a short.  Like the keepout gate above, the
-    # guarantee is an OUTPUT check: copper that touches another net's track or
-    # via is refused, never written.  (It is also what lets the unrouted-cause
-    # diagnosis report such a net as ``congested`` instead of never seeing it
-    # fail.)
+    # The corridor strategies plan on the coarse GlobalRouter / RegionGraph,
+    # which has no obstacle model at all.  The hierarchical strategy now routes
+    # on a grid loaded from the board file (``_route_hierarchical_on_board``),
+    # with every other net's pads, tracks, vias and arcs on it, so it routes
+    # around them.  The guarantee for every strategy is still an OUTPUT check:
+    # copper that shorts another net's pad, track, arc or via, or comes closer
+    # to it than the board's clearance, is refused and never written.
     # ------------------------------------------------------------------
 
-    def _board_copper(self) -> tuple[list, list]:
-        """Existing tracks and vias on the board, as plain tuples.
+    def _board_copper(self) -> list[ForeignItem]:
+        """Every track, arc, via and pad on the board (cached).
 
-        ``segments``: ``(x1, y1, x2, y2, half_width, layer_name, net, name)``;
-        ``vias``: ``(x, y, radius, net, name)``.  Same frame as the pads the
-        orchestrator routes (a schema ``PCB`` is board-relative).  Empty for a
-        PCB that exposes no copper lists (the lightweight test mocks).
+        Same frame as the pads the orchestrator routes (a schema ``PCB`` is
+        board-relative).  Empty for a PCB that exposes no copper lists (the
+        lightweight test mocks).
         """
-        if self._board_copper_cache is not None:
-            return self._board_copper_cache
-        segments: list = []
-        vias: list = []
-        all_segs = getattr(self.pcb, "segments", None)
-        all_vias = getattr(self.pcb, "vias", None)
-        if isinstance(all_segs, list):
-            for s in all_segs:
-                try:
-                    (x1, y1), (x2, y2) = s.start, s.end
-                    segments.append(
-                        (
-                            float(x1),
-                            float(y1),
-                            float(x2),
-                            float(y2),
-                            float(s.width) / 2.0,
-                            str(s.layer),
-                            int(getattr(s, "net_number", 0) or 0),
-                            str(getattr(s, "net_name", "") or ""),
-                        )
-                    )
-                except (AttributeError, TypeError, ValueError):
-                    continue
-        if isinstance(all_vias, list):
-            for v in all_vias:
-                try:
-                    x, y = v.position
-                    vias.append(
-                        (
-                            float(x),
-                            float(y),
-                            float(v.size) / 2.0,
-                            int(getattr(v, "net_number", 0) or 0),
-                            str(getattr(v, "net_name", "") or ""),
-                        )
-                    )
-                except (AttributeError, TypeError, ValueError):
-                    continue
-        self._board_copper_cache = (segments, vias)
+        if self._board_copper_cache is None:
+            self._board_copper_cache = board_copper(self.pcb)
         return self._board_copper_cache
 
-    def _foreign_copper_shorts(self, result: RoutingResult) -> tuple[int, int, list[str]]:
-        """Copper in ``result`` that touches another net's existing copper.
+    def _board_path(self) -> Path | None:
+        """The ``.kicad_pcb`` the orchestrator's schema ``PCB`` was loaded from."""
+        path = getattr(self.pcb, "path", None)
+        if not isinstance(path, (str, Path)):
+            return None
+        path = Path(path)
+        if path.suffix != ".kicad_pcb" or not path.is_file():
+            return None
+        return path
 
-        A trace touches a track on the same layer when their centrelines come
-        closer than the sum of their half-widths; a via (treated as a through
-        via, so on every layer) touches any track or via it overlaps.  Copper
-        of the routed net itself, and unassigned (net 0) copper, never counts.
+    def _required_clearance(self) -> float:
+        """The copper clearance KiCad's DRC measures this board against (cached).
 
-        Returns:
-            ``(segments_shorting, vias_shorting, other_net_names)``.
+        See :func:`~kicad_tools.router.foreign_copper.board_required_clearance`.
+        Without a board file it is the routing rules' own ``trace_clearance``.
         """
-        if not (result.segments or result.vias):
-            return (0, 0, [])
-        board_segs, board_vias = self._board_copper()
-        if not board_segs and not board_vias:
-            return (0, 0, [])
+        if self._required_clearance_cache is None:
+            try:
+                self._required_clearance_cache = board_required_clearance(
+                    self._board_path(), float(self.rules.trace_clearance)
+                )
+            except Exception:  # defensive: rule reading must never crash routing
+                self._required_clearance_cache = float(self.rules.trace_clearance)
+        return self._required_clearance_cache
+
+    @staticmethod
+    def _own_net_identity(result: RoutingResult) -> tuple[set[int], set[str]]:
         own_ids: set[int] = set()
         own_names: set[str] = set()
         for item in (*result.segments, *result.vias):
@@ -609,64 +564,43 @@ class RoutingOrchestrator:
             own_ids.add(result.net)
         elif isinstance(result.net, str) and result.net:
             own_names.add(result.net)
+        return own_ids, own_names
 
-        def _foreign(net: int, name: str) -> bool:
-            if name and name in own_names:
-                return False
-            return net > 0 and net not in own_ids
+    def _foreign_copper_conflicts(self, result: RoutingResult) -> ConflictReport:
+        """Copper in ``result`` that shorts, or violates clearance to, another
+        net's existing pad, track, arc or via.
 
-        other_segs = [s for s in board_segs if _foreign(s[6], s[7])]
-        other_vias = [v for v in board_vias if _foreign(v[3], v[4])]
-        if not other_segs and not other_vias:
-            return (0, 0, [])
-
-        names: dict[str, None] = {}
-        eps = 1e-6
-
-        def _label(net: int, name: str) -> str:
-            return name or f"Net_{net}"
-
-        seg_hits = 0
-        for seg in result.segments:
-            layer = getattr(getattr(seg, "layer", None), "kicad_name", None)
-            half = float(getattr(seg, "width", 0.0) or 0.0) / 2.0
-            a, b = (seg.x1, seg.y1), (seg.x2, seg.y2)
-            hit = False
-            for x1, y1, x2, y2, ohalf, olayer, onet, oname in other_segs:
-                if layer is not None and olayer != layer:
-                    continue
-                if _segment_distance(a, b, (x1, y1), (x2, y2)) < half + ohalf - eps:
-                    hit = True
-                    names[_label(onet, oname)] = None
-            for vx, vy, radius, onet, oname in other_vias:
-                if _segment_distance(a, b, (vx, vy), (vx, vy)) < half + radius - eps:
-                    hit = True
-                    names[_label(onet, oname)] = None
-            seg_hits += hit
-        via_hits = 0
-        for via in result.vias:
-            p = (via.x, via.y)
-            radius = float(getattr(via, "diameter", 0.0) or 0.0) / 2.0
-            hit = False
-            for x1, y1, x2, y2, ohalf, _layer, onet, oname in other_segs:
-                if _segment_distance(p, p, (x1, y1), (x2, y2)) < radius + ohalf - eps:
-                    hit = True
-                    names[_label(onet, oname)] = None
-            for vx, vy, oradius, onet, oname in other_vias:
-                if math.hypot(p[0] - vx, p[1] - vy) < radius + oradius - eps:
-                    hit = True
-                    names[_label(onet, oname)] = None
-            via_hits += hit
-        return (seg_hits, via_hits, list(names))
+        Pads are measured with their real shapes (the clearance kernel's exact
+        pad model), arcs along their true circle.  Copper of the routed net
+        itself never counts.  No-net pads do count (they are foreign to every
+        net); net-0 tracks, vias and arcs stay exempt.
+        """
+        required = self._required_clearance()
+        if not (result.segments or result.vias):
+            return ConflictReport(required_mm=required)
+        items = self._board_copper()
+        if not items:
+            return ConflictReport(required_mm=required)
+        own_ids, own_names = self._own_net_identity(result)
+        return find_conflicts(
+            items,
+            result.segments,
+            result.vias,
+            own_ids=own_ids,
+            own_names=own_names,
+            required_mm=required,
+        )
 
     def _enforce_no_foreign_shorts(self, result: RoutingResult, strategy: RoutingStrategy) -> None:
-        """Refuse a result whose copper shorts another net's existing copper.
+        """Refuse a result that shorts, or violates clearance to, other nets' copper.
 
-        The result becomes a failure with no geometry, so the short is never
-        persisted.  Its alternatives are left to ``_suggest_alternatives``.
+        The result becomes a failure with no geometry, so the conflict is never
+        persisted.  The message names the conflicting nets and items.  A
+        corridor strategy is offered the hierarchical strategy -- which routes
+        around other nets' copper -- as its retry.
         """
-        seg_hits, via_hits, names = self._foreign_copper_shorts(result)
-        if not seg_hits and not via_hits:
+        report = self._foreign_copper_conflicts(result)
+        if not report:
             return
         name = self._STRATEGY_CLI_NAMES.get(strategy, strategy.name)
         result.success = False
@@ -674,14 +608,42 @@ class RoutingOrchestrator:
         result.segments = []
         result.vias = []
         result.metrics = RoutingMetrics()
-        result.alternative_strategies = []
-        result.error_message = (
-            f"route-auto '{name}' strategy produced copper that shorts net(s) "
-            f"{', '.join(repr(n) for n in names)} already on the board "
-            f"({seg_hits} segment(s), {via_hits} via(s)); route-auto's strategies "
-            "do not route around other nets' copper, so it is refused rather than "
-            "written (issue #6001)."
+        result.error_message = summarize_conflicts(report, name)
+        if strategy != RoutingStrategy.HIERARCHICAL_DIFF_PAIR:
+            result.alternative_strategies = [
+                AlternativeStrategy(
+                    strategy=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+                    reason="Routes on a grid that holds other nets' pads and copper",
+                    estimated_cost=1.5,
+                    success_probability=0.6,
+                )
+            ]
+        else:
+            result.alternative_strategies = []
+
+    def _warn_corridor_copper(self, strategy: RoutingStrategy) -> str | None:
+        """Warn once that a corridor strategy cannot route around other nets' copper.
+
+        The copper counterpart of :meth:`_warn_corridor_keepouts`.  Returns the
+        message (also printed to stderr) the first time, ``None`` afterwards or
+        when the board holds no copper of another net.
+        """
+        if strategy not in self._CORRIDOR_STRATEGIES or self._copper_warned:
+            return None
+        nets = {item.net for item in self._board_copper() if item.net > 0}
+        if len(nets) < 2:
+            return None  # at most the routed net itself
+        self._copper_warned = True
+        name = self._STRATEGY_CLI_NAMES.get(strategy, strategy.name)
+        message = (
+            f"route-auto's '{name}' strategy plans coarse corridors that cannot "
+            "route around other nets' pads, tracks, arcs and vias (only the "
+            "'hierarchical' strategy routes around them; see issue #6107). A "
+            "corridor that shorts another net or violates the board's "
+            f"{self._required_clearance():.3f} mm clearance is refused, not written."
         )
+        print(f"Warning: {message}", file=sys.stderr)
+        return message
 
     def _get_net_class_routing(self, net: str | int) -> NetClassRouting | None:
         """Look up the NetClassRouting for a net by name.
@@ -1181,6 +1143,8 @@ class RoutingOrchestrator:
         # Issue #6059: a corridor strategy cannot route around keepout rule
         # areas -- say so once, before it runs.
         keepout_warning = self._warn_corridor_keepouts(strategy)
+        # Issue #6107: nor around other nets' pads and copper.
+        copper_warning = self._warn_corridor_copper(strategy)
 
         try:
             if strategy == RoutingStrategy.GLOBAL_WITH_REPAIR:
@@ -1219,8 +1183,11 @@ class RoutingOrchestrator:
             # search; this output check is the guarantee for the rest.
             if keepout_warning is not None:
                 result.warnings.append(keepout_warning)
+            if copper_warning is not None:
+                result.warnings.append(copper_warning)
             self._enforce_keepouts(result, strategy)
-            # Issue #6001: nor copper that shorts another net's existing copper.
+            # Issues #6001 / #6107: nor copper that shorts another net's pad,
+            # track, arc or via, or violates the board's clearance to it.
             self._enforce_no_foreign_shorts(result, strategy)
 
             # Ensure failed results always carry alternative suggestions so
@@ -1573,6 +1540,208 @@ class RoutingOrchestrator:
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Hierarchical routing on the real board (Issue #6107)
+    #
+    # The legacy hierarchical strategy built an AdaptiveAutorouter from the
+    # routed net's own pads only, so its grid held none of the other nets'
+    # pads or copper: it drew straight through them, and the output gate then
+    # refused the short (or, before #6107, missed it).  When the board file is
+    # known, the strategy instead loads the board the way ``kct route --nets``
+    # does -- every pad with its real shape (other nets' as obstacles), every
+    # existing track and via, the edge keepout and the keepout rule areas --
+    # adds the board's arcs, which that loader does not read, and routes the
+    # one net on it.
+    # ------------------------------------------------------------------
+
+    #: Wall-clock cap on one net's board-grid route (the router's own
+    #: ``per_net_timeout`` / ``timeout``; issue #2794).
+    HIERARCHICAL_BOARD_NET_TIMEOUT_S = 120.0
+
+    def _load_board_router(
+        self, path: Path, net_name: str, board_nets: set[str]
+    ) -> tuple[Any, int]:
+        """The board as ``kct route --nets <net>`` loads it, plus its arcs.
+
+        Returns ``(router, net_id)``.  Every other net is skipped (its pads
+        stay on the grid as obstacles) and every existing track, via and arc
+        is marked on the grid -- on the paired C++ grid too, which the loader
+        builds before it marks existing copper and so never sees it (#6103).
+        """
+        import contextlib
+        import copy
+        from dataclasses import replace as _replace
+
+        from .foreign_copper import ARC_FLATTEN_ERROR_MM, flatten_arc
+        from .io import load_pcb_for_routing
+        from .layers import Layer
+        from .primitives import Route, Segment
+
+        rules = copy.copy(self.rules)
+        # Route at no less than the clearance KiCad will measure the board at,
+        # so a clean route is one the output gate (and kicad-cli) accepts.
+        required = self._required_clearance()
+        if required > rules.trace_clearance:
+            rules = _replace(rules, trace_clearance=required)
+        if required > rules.via_clearance:
+            rules = _replace(rules, via_clearance=required)
+
+        with contextlib.redirect_stdout(sys.stderr):
+            router, net_map = load_pcb_for_routing(
+                str(path),
+                skip_nets=sorted(board_nets - {net_name}),
+                rules=rules,
+                use_pcb_rules=False,
+                validate_drc=False,
+                layer_stack=self._known_layer_stack(),
+                load_existing_routes=True,
+            )
+        net_id = int(net_map.get(net_name, 0) or 0)
+
+        # Arcs: ``load_pcb_for_routing`` reads only straight tracks and vias.
+        ox, oy = getattr(self.pcb, "_board_origin", (0.0, 0.0)) or (0.0, 0.0)
+        for arc in getattr(self.pcb, "arcs", None) or []:
+            try:
+                points = flatten_arc(arc)
+                layer = Layer.from_kicad_name(str(arc.layer))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            arc_net_name = str(getattr(arc, "net_name", "") or "")
+            arc_net = int(net_map.get(arc_net_name, 0) or getattr(arc, "net_number", 0) or 0)
+            width = float(arc.width) + 2 * ARC_FLATTEN_ERROR_MM
+            segments = [
+                Segment(
+                    x1=p[0] + ox,
+                    y1=p[1] + oy,
+                    x2=q[0] + ox,
+                    y2=q[1] + oy,
+                    width=width,
+                    layer=layer,
+                    net=arc_net,
+                    net_name=arc_net_name,
+                )
+                for p, q in zip(points, points[1:], strict=False)
+            ]
+            route = Route(net=arc_net, net_name=arc_net_name, segments=segments, vias=[])
+            router.grid.mark_route(route)
+            router.existing_routes.append(route)
+
+        for route in router.existing_routes:
+            router.grid._mark_route_on_cpp_cells(route)
+        return router, net_id
+
+    def _route_hierarchical_on_board(self, net: str | int, pads: list[Pad]) -> RoutingResult | None:
+        """Route ``net`` on the board-loaded grid; ``None`` when not applicable.
+
+        Not applicable (the legacy own-pads grid runs instead, with the output
+        gate as the guarantee) when the orchestrator's PCB has no board file,
+        or when it routes synthetic ``--region`` stub terminals, which are not
+        pads of the board.
+        """
+        path = self._board_path()
+        if path is None:
+            return None
+        if any(not getattr(p, "ref", "") or getattr(p, "pin", "") == "stub" for p in pads):
+            return None
+        net_name = net if isinstance(net, str) else ""
+        if not net_name:
+            net_name = next((p.net_name for p in pads if getattr(p, "net_name", "")), "")
+        board_nets_raw = getattr(self.pcb, "nets", None)
+        if not net_name or not isinstance(board_nets_raw, dict):
+            return None
+        board_nets = {str(getattr(n, "name", "") or "") for n in board_nets_raw.values()} - {""}
+        if net_name not in board_nets:
+            return None
+
+        try:
+            router, net_id = self._load_board_router(path, net_name, board_nets)
+        except Exception as exc:
+            message = (
+                f"hierarchical: could not load the board for net '{net_name}' "
+                f"({type(exc).__name__}: {exc}); routing on the net's own pads only, "
+                "where other nets' copper is checked only after routing."
+            )
+            logger.warning(message)
+            print(f"Warning: {message}", file=sys.stderr)
+            return None
+        self._hierarchical_board_router = router
+        if net_id <= 0 or net_id not in router.nets:
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+                error_message=f"Net '{net_name}' has no routable pads on the board grid",
+            )
+
+        import contextlib
+        from dataclasses import replace as _replace
+
+        from .observability import validate_net_connectivity
+
+        with contextlib.redirect_stdout(sys.stderr):
+            router.route_all(
+                per_net_timeout=self.HIERARCHICAL_BOARD_NET_TIMEOUT_S,
+                timeout=self.HIERARCHICAL_BOARD_NET_TIMEOUT_S,
+            )
+
+        new_routes = [r for r in router.routes if r.net == net_id]
+        own_existing = [r for r in router.existing_routes if r.net == net_id]
+        net_pads = [router.pads[k] for k in router.nets.get(net_id, []) if k in router.pads]
+        pads_total = len(net_pads)
+        info = (
+            validate_net_connectivity(new_routes + own_existing, {net_id: net_pads}).get(net_id)
+            if pads_total >= 2
+            else None
+        )
+        if pads_total < 2:
+            connected, pads_connected = True, pads_total
+        elif info is None:
+            connected, pads_connected = False, 1 if pads_total else 0
+        else:
+            connected = bool(info.get("connected"))
+            pads_connected = int(info.get("connected_pads", 0))
+
+        # The loader routes in the sheet frame; the orchestrator's pads, and
+        # ``route_net_auto``'s writer, use the board-relative one.
+        ox, oy = getattr(self.pcb, "_board_origin", (0.0, 0.0)) or (0.0, 0.0)
+        segments: list = []
+        vias: list = []
+        total_length = 0.0
+        for route in new_routes:
+            for seg in route.segments:
+                segments.append(
+                    _replace(seg, x1=seg.x1 - ox, y1=seg.y1 - oy, x2=seg.x2 - ox, y2=seg.y2 - oy)
+                )
+                total_length += math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+            for via in route.vias:
+                vias.append(_replace(via, x=via.x - ox, y=via.y - oy))
+
+        partial = not connected and bool(segments or vias)
+        return RoutingResult(
+            success=connected,
+            partial=partial,
+            pads_connected=pads_connected,
+            pads_total=pads_total,
+            net=net,
+            strategy_used=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+            error_message=(
+                ""
+                if connected
+                else (
+                    f"Hierarchical router connected {pads_connected}/{pads_total} pads of "
+                    f"'{net_name}' on the board grid, where every other net's pads, "
+                    "tracks, arcs and vias are obstacles"
+                )
+            ),
+            segments=segments,
+            vias=vias,
+            metrics=RoutingMetrics(
+                total_length_mm=total_length,
+                via_count=len(vias),
+                layer_changes=len(vias),
+            ),
+        )
+
     def _route_hierarchical(
         self, net: str | int, intent: NetIntent | None, pads: list[Pad] | None
     ) -> RoutingResult:
@@ -1597,6 +1766,13 @@ class RoutingOrchestrator:
                 strategy_used=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
                 error_message="Insufficient pads for hierarchical routing",
             )
+
+        # Issue #6107: with the board file known, route on the real board --
+        # other nets' pads, tracks, arcs and vias included -- not on a grid
+        # holding only this net's pads.
+        board_result = self._route_hierarchical_on_board(net, pads)
+        if board_result is not None:
+            return board_result
 
         if self._hierarchical is None:
             width = getattr(self.pcb, "width", 65.0)

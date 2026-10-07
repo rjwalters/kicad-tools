@@ -376,9 +376,35 @@ def _hierarchical(tmp_path: Path, n: int):
         rules=DesignRules(),
         layer_stack=detect_layer_stack(text),
     )
+    # Issue #6107: with a board file the strategy routes on the board's own
+    # stack and never builds the ``AdaptiveAutorouter`` ladder these tests pin;
+    # disable it to exercise the legacy own-pads path (the one that has a ladder).
+    orchestrator._board_path = lambda: None  # type: ignore[method-assign]
     orchestrator._route_hierarchical("/SIG", None, _build_pads_for_net(pcb, 1, "/SIG"))
     assert orchestrator._hierarchical is not None
     return orchestrator._hierarchical
+
+
+@pytest.mark.parametrize("n", [2, 4, 8, 10])
+def test_hierarchical_board_grid_uses_board_copper_count(tmp_path: Path, n: int) -> None:
+    from kicad_tools.mcp.tools.routing import _build_pads_for_net
+    from kicad_tools.router.orchestrator import RoutingOrchestrator
+    from kicad_tools.router.rules import DesignRules
+    from kicad_tools.schema.pcb import PCB
+
+    text = _board()
+    if n != 2:
+        text = _with_copper(text, n)
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(text)
+    pcb = PCB.load(str(path))
+    orchestrator = RoutingOrchestrator(
+        pcb=pcb,  # type: ignore[arg-type]
+        rules=DesignRules(),
+        layer_stack=detect_layer_stack(text),
+    )
+    orchestrator._route_hierarchical("/SIG", None, _build_pads_for_net(pcb, 1, "/SIG"))
+    assert orchestrator._hierarchical_board_router.grid.num_layers == n
 
 
 @pytest.mark.parametrize("n", [8, 10])

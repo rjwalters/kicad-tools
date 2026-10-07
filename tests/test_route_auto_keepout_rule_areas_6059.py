@@ -249,6 +249,17 @@ def test_hierarchical_layer_escalation_capped_at_board_copper(tmp_path: Path) ->
     from kicad_tools.mcp.tools.routing import _build_pads_for_net
 
     pads = _build_pads_for_net(pcb, 1, "/SIG")
+    # Issue #6107: with a board file, the strategy routes on the board as
+    # loaded -- its real 2-layer stack, with the keepout areas installed.
+    orchestrator._route_hierarchical("/SIG", None, pads)
+    board_router = orchestrator._hierarchical_board_router
+    assert board_router is not None
+    assert board_router.layer_stack.num_layers == 2
+    assert board_router.grid._rule_area_keepouts
+    assert orchestrator._hierarchical is None
+
+    # Without one (the legacy own-pads grid), escalation is capped too.
+    orchestrator._board_path = lambda: None  # type: ignore[method-assign]
     orchestrator._route_hierarchical("/SIG", None, pads)
     assert orchestrator._hierarchical is not None
     assert orchestrator._hierarchical.max_layers == 2
@@ -414,16 +425,23 @@ def test_autorouter_pcb_delegates_install_to_its_own_resolution(tmp_path: Path) 
 def test_route_auto_bga_net_routes_around_keepout(tmp_path: Path) -> None:
     """End to end: a BGA ball wired to a test point beyond ``bga_east`` (all
     layers, tracks and vias).  The corridor runs straight through the area and
-    is refused; auto mode retries hierarchical, which goes around."""
+    is refused; auto mode retries hierarchical, which goes around.
+
+    The ball is A6, on the BGA's north edge, so it can escape.  This test used
+    ball C6 until #6107: C6 is boxed in by its neighbours (0.4 mm apart, too
+    narrow for a 0.2 mm track at 0.2 mm clearance) and by ``bga_east``, and
+    the hierarchical route that "succeeded" for it shorted balls A6 and B6 --
+    its grid held only the routed net's own pads.
+    """
     from tests import test_escape_keepout_rule_areas_6061 as esc
 
-    # Ball C6 of the 6x6 BGA sits at (112.0, 109.6) on net /B18.
-    tp = _fp_tp("TP1", 121.0, 109.6, 18, "/B18")
+    # Ball A6 of the 6x6 BGA sits at (112.0, 108.0) on net /B6.
+    tp = _fp_tp("TP1", 121.0, 108.0, 6, "/B6")
     text = esc._board(True).rstrip().removesuffix(")") + tp + ")\n"
     src = tmp_path / "bga.kicad_pcb"
     src.write_text(text)
     out = tmp_path / "bga_out.kicad_pcb"
-    result = route_net_auto(str(src), "/B18", output_path=str(out), strategy="auto")
+    result = route_net_auto(str(src), "/B6", output_path=str(out), strategy="auto")
     assert result["success"] is True, result["error_message"]
     assert result["strategy_used"] == "HIERARCHICAL_DIFF_PAIR"
 
