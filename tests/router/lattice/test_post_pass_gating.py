@@ -51,6 +51,12 @@ from kicad_tools.cli.route_cmd import _engine_post_passes_enabled
 # observed -- while staying short enough to reap a genuine hang.  For
 # reference, the same three cost 33.5s/30.7s/28.8s when run locally *with*
 # `--cov=kicad_tools`, so a local coverage run also stays inside this budget.
+#
+# Issue #6134: the 180 s cap still tripped on main under load.  Profiling shows
+# ~19.5 s of pure-Python lattice pathfinding per CLI run (not C++-accelerated,
+# so the backend cannot be swapped without changing what is tested) plus ~7 s
+# of post-route kicad-cli zone fill / pour oracle that no assertion reads.  The
+# latter is now stubbed (autouse fixture below): ~22 s -> ~14.7 s per test.
 pytestmark = pytest.mark.timeout(180)
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -216,6 +222,28 @@ def _spy_post_passes(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     monkeypatch.setattr(optimizer_mod, "optimize_routes_grid_synced", spy_optimize)
     monkeypatch.setattr(drc_nudge_mod, "drc_verify_and_nudge", spy_nudge)
     return calls
+
+
+@pytest.fixture(autouse=True)
+def _no_post_route_kicad_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the post-route zone fill and pour-oracle kicad-cli stages (#6134).
+
+    Every CLI test here asserts on the route result (rc, spy counts, report
+    text, ``Nets routed``, output exists); none reads the zone fill or the
+    pour oracle, which run AFTER routing as serialized ``kicad-cli`` launches
+    (~2-7 s locally, and subject to native-slot waits under CI load).  Both
+    stubs reproduce the documented "kicad-cli unavailable" behaviour: the
+    fill is skipped and the oracle leaves the board untouched with 0
+    stranded links (same approach as tests/test_route_plan_gate_5521.py).
+    """
+    from kicad_tools.cli import route_cmd
+
+    def _no_oracle(output_path, *, args, quiet=False):
+        args._stranded_pour_links = 0
+        return 0
+
+    monkeypatch.setattr(route_cmd, "_fill_zones_after_route", lambda *a, **k: None)
+    monkeypatch.setattr(route_cmd, "_run_pour_oracle_stage", _no_oracle)
 
 
 @pytest.mark.parametrize("extra", [[], ["--no-optimize"]], ids=["default", "no-optimize"])

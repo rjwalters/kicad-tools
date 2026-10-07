@@ -34,6 +34,13 @@ import pytest
 
 from kicad_tools.cli.route_cmd import main as route_main
 
+# Issue #6134: each CLI test here costs ~2.7 s locally (the --complete
+# lattice search on the walled link), but hit CI's 60 s default under
+# xdist/native-slot contention (>20x inflation).  Match the 180 s
+# convention used by the sibling lattice CLI tests
+# (tests/router/lattice/test_post_pass_gating.py).
+pytestmark = pytest.mark.timeout(180)
+
 # ---------------------------------------------------------------------------
 # Walled-pocket fixture: NET1 fully routed (preserved-copper control), NET2's
 # second pad walled in by the closed WALL picture-frame (genuinely
@@ -115,6 +122,28 @@ WALLED_POCKET_BOARD = """(kicad_pcb
   (segment (start 39 21) (end 39 19) (width 0.6) (layer "F.Cu") (net 3))
 )
 """
+
+
+@pytest.fixture(autouse=True)
+def _no_post_route_kicad_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the post-route zone fill and pour-oracle kicad-cli stages (#6134).
+
+    Every CLI test here asserts on the route result (rc, spy counts, report
+    text, ``Nets routed``, output exists); none reads the zone fill or the
+    pour oracle, which run AFTER routing as serialized ``kicad-cli`` launches
+    (~2-7 s locally, and subject to native-slot waits under CI load).  Both
+    stubs reproduce the documented "kicad-cli unavailable" behaviour: the
+    fill is skipped and the oracle leaves the board untouched with 0
+    stranded links (same approach as tests/test_route_plan_gate_5521.py).
+    """
+    from kicad_tools.cli import route_cmd
+
+    def _no_oracle(output_path, *, args, quiet=False):
+        args._stranded_pour_links = 0
+        return 0
+
+    monkeypatch.setattr(route_cmd, "_fill_zones_after_route", lambda *a, **k: None)
+    monkeypatch.setattr(route_cmd, "_run_pour_oracle_stage", _no_oracle)
 
 
 @pytest.fixture
