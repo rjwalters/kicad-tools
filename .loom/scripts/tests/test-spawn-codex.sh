@@ -1559,8 +1559,12 @@ cat > "$SESSION_DOCKER_BIN/docker" <<DOCKERSHIM
 # docker inspect --type container <c>; answer as a hardened host-mode
 # container would (unprivileged, bridge, CapDrop ALL, no-new-privileges, RO
 # profile controls), and \`exec <c> sha256sum\` with the host profile's hashes.
+# It also binds this suite's working directory at path parity, as
+# \`session start\` binds each registered repo: \`session-exec host\` refuses a
+# dispatch whose --workdir no mount covers (#10364). The path is expanded when
+# this shim is written, so it is the directory the dispatches below run in.
 [[ "\$1" == exec && "\$3" == sha256sum ]] && { for p in "\${@:5}"; do printf '%s  %s\n' "\$(shasum -a 256 < "\$CODEX_HOME/\${p##*/}" | cut -d' ' -f1)" "\$p"; done; exit 0; }
-case "\$1" in inspect) [[ "\$*" == *"--type container"* ]] && echo '[{"State":{"Running":true},"Config":{"Labels":{"loom.session-posture":"container-boundary-v1"}},"HostConfig":{"Privileged":false,"NetworkMode":"bridge","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"]},"Mounts":[{"Type":"bind","Destination":"/home/loom/.codex-profile/hooks.json","RW":false},{"Type":"bind","Destination":"/home/loom/.codex-profile/config.toml","RW":false},{"Type":"bind","Destination":"/home/loom/.codex-profile/loom-codex-hooks.json","RW":false}]}]' || echo true; exit 0;; exec) shift;; *) exit 1;; esac
+case "\$1" in inspect) [[ "\$*" == *"--type container"* ]] && echo '[{"State":{"Running":true},"Config":{"Labels":{"loom.session-posture":"container-boundary-v1"}},"HostConfig":{"Privileged":false,"NetworkMode":"bridge","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"]},"Mounts":[{"Type":"bind","Destination":"/home/loom/.codex-profile/hooks.json","RW":false},{"Type":"bind","Destination":"/home/loom/.codex-profile/config.toml","RW":false},{"Type":"bind","Destination":"/home/loom/.codex-profile/loom-codex-hooks.json","RW":false},{"Type":"bind","Destination":"$PWD","RW":true}]}]' || echo true; exit 0;; exec) shift;; *) exit 1;; esac
 while [[ "\$1" == -* ]]; do
     case "\$1" in -i) shift;; --workdir) cd "\$2"; shift 2;; *) export "\$2"; shift 2;; esac
 done

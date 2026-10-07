@@ -17,7 +17,23 @@ source; the full both-legs send (inbox + Matrix) stays in
   It costs one `gh pr list` (a `merged:>=` search, not creation order) and
   re-resolving is idempotent. A forged marker can only resolve a mail for a PR
   that is already merged.
-- **No-op when unconfigured**: `LOOM_UI_INBOX_URL` or `LOOM_UI_INGEST_KEY` unset
+- **Config resolves like the daemon** (#10137): `LOOM_UI_INBOX_URL` /
+  `LOOM_UI_INGEST_KEY` win when set; otherwise `loom-daemon forge inbox-config`
+  supplies the URL -- the origin of the observability endpoint, but **only** an
+  `https` endpoint whose path is `/ingest` (a daemon exporting straight to the
+  dashboard); an `http`, loopback, collector-port, bare-origin or other-path
+  endpoint leaves it unresolved -- and the ingest key *file*, first of:
+  `$LOOM_UI_INGEST_KEY_FILE`, `~/.config/loom-ui/ingest.key` (preferred: the
+  per-host dashboard key; loom-ui `docs/operator-mail-onboarding.md`), then the
+  telemetry tiers (`$LOOM_OBSERVABILITY_INGEST_KEY_FILE`,
+  `observability.ingestKeyFile`, `~/.loom/observability/ingest.key`) -- but
+  only when the endpoint is that direct `https://.../ingest` dashboard (and
+  `LOOM_UI_INBOX_URL`, if set, is the same origin); a collector host's
+  telemetry key is never borrowed. An older daemon without the subcommand
+  gives the env-only behavior. `loom-daemon health` reports an unresolved
+  mail-meant host on every run (`inbox_mail` section); a placeholder endpoint
+  or `enabled: false` observability does not make a host mail-meant.
+- **No-op when unconfigured**: neither the env vars nor the daemon resolve a URL and key
   prints one note and returns 0, with no forge read. `inbox_mail on` is the same
   test (status only), for gating a caller's own reads. A failed POST warns and
   returns 0; a mail problem never breaks a role's tick.
@@ -32,14 +48,25 @@ type inbox_mail >/dev/null 2>&1 || inbox_mail() { [ "$1" != on ]; }
 ```
 
 ```bash inbox-mail
+# _inbox_resolve: sets _im_url and _im_keyfile (empty = key comes from the env). Env wins;
+# otherwise ask the daemon (paths only, never the key). Old daemon: prints nothing.
+_inbox_resolve() {
+  local o; _im_url=${LOOM_UI_INBOX_URL:-}; _im_keyfile=
+  if [ -z "$_im_url" ] || [ -z "${LOOM_UI_INGEST_KEY:-}" ]; then
+    o=$(loom-daemon forge inbox-config 2>/dev/null)
+    [ -n "$_im_url" ] || _im_url=$(sed -n 's/^url=//p' <<<"$o" | head -1)
+    [ -n "${LOOM_UI_INGEST_KEY:-}" ] || _im_keyfile=$(sed -n 's/^key_file=//p' <<<"$o" | head -1)
+  fi
+  [ -n "$_im_url" ] && { [ -n "${LOOM_UI_INGEST_KEY:-}" ] || [ -n "$_im_keyfile" ]; }
+}
 # inbox_mail send|resolve KEY [BODY] | key KIND N | on | resolve-merged KIND MARKER
 #   (BODY required for send; optional TITLE, TO)
 inbox_mail() {
-  local mode="${1:-}" key="${2:-}" body="${3:-}" pf out rc code r n
+  local mode="${1:-}" key="${2:-}" body="${3:-}" pf out rc code r n k=
   case "$mode" in
     key) r=$(git remote get-url origin 2>/dev/null); r=${r%/}; r=${r%.git}; r=${r##*/}; r=${r##*:}
       echo "mail-${r:-repo}-$key-$body"; return 0 ;;
-    on) [ -n "${LOOM_UI_INBOX_URL:-}" ] && [ -n "${LOOM_UI_INGEST_KEY:-}" ]; return ;;
+    on) _inbox_resolve; return ;;
   esac
   if ! inbox_mail on; then
     echo "inbox not configured — mail $mode skipped (key $key)"; return 0
@@ -65,10 +92,11 @@ inbox_mail() {
     resolve) jq -n --arg key "$key" '{key: $key, resolve: true}' >"$pf" ;;
     *) echo "inbox mail: unknown mode $mode"; rm -f "$pf"; return 0 ;;
   esac
-  out=$(printf 'header = "Authorization: Bearer %s"\n' "$LOOM_UI_INGEST_KEY" |
+  [ -n "${LOOM_UI_INGEST_KEY:-}" ] || k=$(tr -d '\r\n' <"$_im_keyfile" 2>/dev/null)
+  out=$(printf 'header = "Authorization: Bearer %s"\n' "${LOOM_UI_INGEST_KEY:-$k}" |
     curl -sS --max-time 30 --config - -X POST -H 'Content-Type: application/json' \
-      --data-binary @"$pf" -w '\n%{http_code}' "${LOOM_UI_INBOX_URL%/}/api/inbox" 2>&1); rc=$?
-  rm -f "$pf"; code=${out##*$'\n'}
+      --data-binary @"$pf" -w '\n%{http_code}' "${_im_url%/}/api/inbox" 2>&1); rc=$?
+  k=; rm -f "$pf"; code=${out##*$'\n'}
   case "$rc:$code" in
     0:2??) echo "inbox mail $mode ok (key $key)" ;;
     *) echo "inbox mail $mode FAILED (curl exit $rc, HTTP ${code:-none}, key $key) — continuing" ;;

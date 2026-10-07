@@ -1874,8 +1874,10 @@ Terminal policy is intentionally conservative:
 - Success records freshness and clears transient counters.
 - Timeouts, fatal/configuration failures, refusals, deleted-cwd outcomes and
   `SANDBOX_UNAVAILABLE` (#10003: the session exited 0 but its sandbox refused
-  every tool call) do not poison account health. `SANDBOX_UNAVAILABLE` also
-  records no freshness, because nothing ran.
+  every tool call), `SESSION_DOWN` (#10455: the session container was not
+  running) and `SESSION_MOUNT_STALE` (#10364: it was running but did not mount
+  the tick's working directory) do not poison account health. Those three also
+  record no freshness, because nothing ran.
 
 Codex exposes no trustworthy quota-headroom percentage here. Status/capacity
 therefore reports raw, enabled, healthy, cooldown, and reauth-required counts;

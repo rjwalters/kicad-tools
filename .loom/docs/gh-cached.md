@@ -225,13 +225,30 @@ prepends a private shim dir; `loom-daemon gh-shim path` prints it). Plain
 current and costs no primary quota, so it is **never stale** and the
 gating carve-outs above stay correct. There is deliberately no identical-call
 TTL in the front; the TTL stays opt-in via `gh-cached`. Everything else
-(mutations, `api`, `run`, `pr diff|checks`, `repo view`, unknown or
+(mutations, `api`, `run`, `pr diff`, `repo view`, unknown or
 ambiguous argv, a TTY on stdout, hosts other than GitHub) execs the next `gh`
 with argv, streams and exit status untouched. The next `gh` is `LOOM_GH_BIN`,
 else the next `gh` on `PATH` (the managed launcher, #9987, when installed), so
 its policy and telemetry are composed with, not replaced. Any cache error
 degrades to that real `gh`.
 
+- **`gh pr checks <N>` (#10516)**: non-TTY text and `--json` over
+  `name,state,bucket,link,startedAt,completedAt,description` are rebuilt from
+  the ETag'd REST reads `forge wait-checks` makes (PR, check-runs, combined
+  status), with `gh`'s exit codes (`1` fail, `8` pending; `--json` exits `0`)
+  and its zero-checks stderr line. Exactness is the contract, so the front
+  only answers when the output is provable. `gh` orders rows by GraphQL order,
+  which REST does not expose, through Go's unstable `sort.Slice` and a
+  comparator that is not a strict weak order. The front therefore ports Go's
+  sort and tries every order of rows sharing a `startedAt`. Text is served
+  only when all of those orders print the same thing, and JSON only when
+  tied rows project identically. Calls pass through on a duplicated check
+  name, more than 8! orders, `--watch`, `--required`, `--jq`/`--template`,
+  `event`/`workflow`, a branch/URL selector, `GH_FORCE_TTY`, `CLICOLOR_FORCE`
+  or `GH_DEBUG`/`DEBUG`. Golden fixtures from `gh` 2.100.0 pin the output
+  (`loom-daemon/src/agent_gh/fixtures/pr_checks/`). `gh pr view --json
+  statusCheckRollup` still **passes through**: `gh` prints GraphQL's
+  `contexts` order, which no REST read exposes (#10629).
 - **Escape hatch**: `LOOM_GH_NO_CACHE=1` (also `GH_CACHE_DISABLE=1`) forces a
   real call. Env-only: there is no `--fresh` flag, since plain `gh` rejects it (#3547).
 - **Opt out of the shim**: `LOOM_GH_SHIM=0` at worker spawn or session start.

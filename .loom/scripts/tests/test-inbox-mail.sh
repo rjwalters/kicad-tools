@@ -35,7 +35,15 @@ since=; while [ $# -gt 0 ]; do [ "$1" = --search ] && since=$(sed -n 's/.*merged
 [ -n "$since" ] || { echo '[]'; exit 0; }
 jq --arg s "$since" '[.[] | select(.mergedAt >= $s)]' "$GH_FIXTURE" 2>/dev/null || cat "$GH_FIXTURE"
 STUB
-chmod +x "$T/bin/curl" "$T/bin/gh"
+# loom-daemon stub (#10137): `forge inbox-config` prints $STUB_CFG's contents (paths only);
+# unset/absent -> prints nothing (an older daemon without the subcommand).
+cat >"$T/bin/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+echo "loom-daemon $*" >>"${DAEMON_LOG:-/dev/null}"
+[ "$1 $2" = "forge inbox-config" ] && [ -n "${STUB_CFG:-}" ] && cat "$STUB_CFG"
+exit 0
+STUB
+chmod +x "$T/bin/curl" "$T/bin/gh" "$T/bin/loom-daemon"
 export PATH="$T/bin:$PATH" STUB_LOG="$T/log" GH_LOG="$T/ghlog" GH_FIXTURE="$T/prs.json"
 # shellcheck disable=SC1091
 . "$T/fn.sh"
@@ -103,5 +111,62 @@ grep -q 'inbox_mail send' "$HOLD" && ok "hold sends mail" || bad "hold send miss
 grep -q 'inbox_mail on &&' "$HOLD" && ok "hold gates its forge read on inbox config" || bad "hold read ungated"
 grep -qF 'inbox_mail resolve-merged crithold-pr "<!-- champion:critical-file-hold -->"' \
   "$ROOT/defaults/.claude/commands/loom/champion-pr-merge.md" && ok "Champion runs resolve-merged per pass" || bad "resolve-merged not wired"
+
+# --- #10137: resolve the key file and inbox URL like the daemon does --------
+unset LOOM_UI_INBOX_URL LOOM_UI_INGEST_KEY
+printf 'TOPSECRETKEY\n' >"$T/ingest.key"
+printf 'url=https://dashboard.example.com\nkey_file=%s\n' "$T/ingest.key" >"$T/cfg"
+export STUB_CFG="$T/cfg" DAEMON_LOG="$T/dlog"
+inbox_mail on && ok "on: true via daemon-resolved url + key file" || bad "on via daemon"
+: >"$STUB_LOG"; out=$(inbox_mail send k10 "hi" 2>&1)
+grep -qx 'argv: https://dashboard.example.com/api/inbox' "$STUB_LOG" && ok "fallback: URL derived from endpoint" || bad "fallback url: $(cat "$STUB_LOG")"
+grep -qx 'config: header = "Authorization: Bearer TOPSECRETKEY"' "$STUB_LOG" && ok "fallback: header carries the key file's key" || bad "fallback header"
+grep -q '^argv: .*TOPSECRETKEY' "$STUB_LOG" && bad "key on argv (fallback)" || ok "fallback: key not on argv"
+grep -q TOPSECRETKEY <<<"$out" && bad "key echoed in output" || ok "key never in output"
+grep -q TOPSECRETKEY "$DAEMON_LOG" && bad "key reached daemon argv" || ok "key never given to the daemon"
+# Env vars win: the daemon is not consulted when both are set.
+: >"$STUB_LOG"; : >"$DAEMON_LOG"
+LOOM_UI_INBOX_URL=http://env.test LOOM_UI_INGEST_KEY=envkey inbox_mail send k11 "hi" >/dev/null
+{ grep -qx 'argv: http://env.test/api/inbox' "$STUB_LOG" && grep -q 'Bearer envkey' "$STUB_LOG" && [ ! -s "$DAEMON_LOG" ]; } \
+  && ok "env vars take precedence; daemon not consulted" || bad "env precedence"
+# Only the URL in env: key still comes from the file.
+: >"$STUB_LOG"; LOOM_UI_INBOX_URL=http://env.test inbox_mail send k12 "hi" >/dev/null
+{ grep -qx 'argv: http://env.test/api/inbox' "$STUB_LOG" && grep -q 'Bearer TOPSECRETKEY' "$STUB_LOG"; } && ok "mixed: env URL + file key" || bad "mixed"
+# Nothing resolves (daemon reports only missing=…): no curl, no-op.
+printf 'missing=ingest key: x\n' >"$T/cfg"; : >"$STUB_LOG"
+out=$(inbox_mail send k13 "hi"); { grep -q "not configured" <<<"$out" && [ ! -s "$STUB_LOG" ]; } && ok "unresolved: no-op" || bad "unresolved"
+# Old daemon / no subcommand: today's env-only behavior.
+unset STUB_CFG; inbox_mail on && bad "old daemon: on" || ok "old daemon: falls back to env-only (off)"
+
+# mail-send.md Phase 2 block: delivers the inbox leg via file+endpoint fallback.
+awk '/^```bash$/{n++; f=(n==1)} /^```$/{f=0} f&&!/^```bash$/' "$ROOT/defaults/.claude/commands/loom/mail-send.md" >"$T/send.sh"
+[ -s "$T/send.sh" ] || bad "mail-send fence not found"
+printf 'url=https://dashboard.example.com\nkey_file=%s\n' "$T/ingest.key" >"$T/cfg"; export STUB_CFG="$T/cfg"
+printf '#!/usr/bin/env bash\necho "$$event"\n' | sed 's/\$\$/\\$/' >"$T/post.sh"; chmod +x "$T/post.sh"
+: >"$STUB_LOG"
+out=$(MATRIX_POST="$T/post.sh" TO=@op:x BODY="need a token" bash "$T/send.sh" 2>&1); rc=$?
+{ [ $rc -eq 0 ] && grep -q '^loom-ui: ok' <<<"$out"; } && ok "mail-send: delivered via fallback" || bad "mail-send fallback rc=$rc: $out"
+grep -qx 'argv: https://dashboard.example.com/api/inbox' "$STUB_LOG" && grep -q 'Bearer TOPSECRETKEY' "$STUB_LOG" && ok "mail-send: URL + header from fallback" || bad "mail-send url/header"
+grep -q '^argv: .*TOPSECRETKEY' "$STUB_LOG" && bad "mail-send: key on argv" || ok "mail-send: key not on argv"
+grep -q TOPSECRETKEY <<<"$out" && bad "mail-send: key in output" || ok "mail-send: key not in output"
+# Env vars win over whatever the daemon resolves.
+: >"$STUB_LOG"
+out=$(LOOM_UI_INBOX_URL=http://env.test LOOM_UI_INGEST_KEY=envkey MATRIX_POST="$T/post.sh" TO=@op:x BODY=b bash "$T/send.sh" 2>&1); rc=$?
+{ [ $rc -eq 0 ] && grep -qx 'argv: http://env.test/api/inbox' "$STUB_LOG" && grep -q 'Bearer envkey' "$STUB_LOG" && ! grep -q TOPSECRETKEY "$STUB_LOG"; } \
+  && ok "mail-send: env vars take precedence" || bad "mail-send env precedence rc=$rc"
+unset STUB_CFG
+out=$(MATRIX_POST="$T/post.sh" TO=@op:x BODY=b bash "$T/send.sh" 2>&1); rc=$?
+{ [ $rc -eq 2 ] && grep -q 'SEND NOT ATTEMPTED' <<<"$out" && grep -q 'ingest.key' <<<"$out"; } && ok "mail-send: names what is missing (exit 2)" || bad "mail-send missing rc=$rc"
+# shellcheck disable=SC2088 # the literal "~/..." is the documented path text being matched, not a path to expand
+grep -qF '~/.config/loom-ui/ingest.key' <<<"$out" && ok "mail-send: missing names the dashboard key file first" || bad "mail-send missing location: $out"
+
+# Key-file tier order (#10137 builder caution) is resolved daemon-side (stubbed here);
+# pin the documented order: dashboard tiers before every telemetry tier.
+tiers=$(tr '\n' ' ' <"$DOC" | grep -o 'LOOM_UI_INGEST_KEY_FILE.*observability/ingest\.key' | head -1)
+# shellcheck disable=SC2088 # the literal "~/..." is the documented path text being matched, not a path to expand
+{ [ -n "$tiers" ] && grep -qF '~/.config/loom-ui/ingest.key' <<<"$tiers" && grep -qF 'LOOM_OBSERVABILITY_INGEST_KEY_FILE' <<<"$tiers"; } \
+  && ok "doc: dashboard key tiers precede telemetry tiers" || bad "doc tier order"
+grep -q 'https.*/ingest' "$DOC" && ok "doc: URL derived only from https /ingest" || bad "doc URL rule"
+
 
 [ "$fails" -eq 0 ] && echo "ALL PASSED" || { echo "$fails failed"; exit 1; }

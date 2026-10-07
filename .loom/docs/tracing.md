@@ -261,7 +261,7 @@ Linux exposes no compression figure) is absent, never zero — the "unknown !=
 zero" contract the telemetry schema states for every measured field.
 
 Role-attempt completion attributes close the same gap on the *why*: a fixed
-`loom.admission.reason` literal — `failure`, `runtime-rejected`,
+`loom.admission.reason` literal — `failure`, `session-down` (#10455), `session-mount-stale` (#10364), `runtime-rejected`,
 `no-token-pool`, `pool-exhausted`, `model-runtime-mismatch`, `load-ceiling`,
 plus `preflight-rejected` (stamped on the runtime-preflight span itself, not a
 role-attempt finish) — plus the measured context that distinguishes them: the

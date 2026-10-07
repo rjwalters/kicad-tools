@@ -459,6 +459,9 @@ minutes plus at most 8 per-item reads per sample, never per tick. With
 dispatchers stand down while its published data is fresh
 (`loom.captain.gauge_age_seconds`, `loom.captain.gauge_fallback`; see
 [`daemon-reference.md`](daemon-reference.md#fleet-gauges-produced-by-the-captain-w12)).
+The same heartbeat can carry two forge facts (`starFacts`, `queueBlocked`), so
+the liveness pass's idle operator-label listings and the snapshot's
+`loom:blocked` listing are made by the captain alone.
 Details are in [`telemetry-schema.md`](telemetry-schema.md#metricpoints).
 
 **Merge-chain re-date pressure (#10163).** Three gauges track the #8508
@@ -587,6 +590,65 @@ shadow on a bucket means spend from outside this fleet's daemons (agent `gh`
 calls, another host, an operator) or an uninstrumented caller. A negative
 shadow means the bucket's readings undercount it (sparse readings, or the
 readings describe another bucket — #10571), not that Loom over-spent.
+
+**Codex session-container state (#10455).** An always-on daemon task (started
+with the other observers, whether or not any telemetry exporter is configured)
+reads every enabled, session-managed Codex account's container once a minute.
+Each pass is one bounded snapshot of all `loom-codex-session-*` containers (one
+`docker ps -a` plus one `docker inspect`, killed after 8 s), never a call per
+account, and none at all on a host without such an account. The daemon logs a
+WARN on each state change (recovery included) and repeats it every 15 min while
+the container stays down; it is per account, outside the role runner's
+per-root DEBUG demotion. When telemetry is configured, each collector pass
+exports the newest observations as
+`loom.codex_session.state{account,state,container}`: one point per `state` in
+`running`, `stopped`, `restarting`, `missing`, `stale_mounts` (1 for the
+current state, 0 for the rest), with the standard `host.id` / `service.version`
+resource attributes. The collector never calls docker itself. `restarting` is
+a crash loop Docker is backing off (`State.Restarting`, which Docker reports
+alongside `Running=true`); it counts as down, and the spawn-time posture check
+treats it the same way. `stale_mounts` means the container's workspace mounts
+differ from what `accounts session start --mount-workspace <its loom.workspace
+label>` would mount today, in either direction (#10364): a registered root
+under the label is not mounted, or a mount is no longer registered (a
+deregistered repository that Codex can still write with its own sandbox off).
+Private-clone containers never get this verdict. If docker cannot be queried at all
+(CLI missing, Docker daemon unreachable, timeout), nothing about any container
+is known. The tracker holds each account's last state and no gauge point is
+emitted, so nothing reads that as `missing`. Because it is still a host-wide
+Codex outage on a host with session-managed accounts, the daemon WARNs once
+when docker becomes unqueryable, repeats that every 15 min while it lasts, and
+WARNs again when docker answers. A failed `docker inspect` counts as an answer
+only when every error says the container does not exist. Readers of the
+published snapshot on the dispatch path should use `LATEST_MAX_AGE` (120 s, two
+watch intervals) and treat an older, absent or unavailable snapshot as "cannot
+observe". A tick refused because the container was not running is read by
+the daemon as `category=SESSION_DOWN` (exit 78 kept): `session-exec host`
+announces the cause on stderr as `# LOOM_SESSION_REFUSAL v=1
+category=SESSION_DOWN`, and the terminal-record parser applies it to the
+adapter's generic `RECOVERABLE`/78 record, so no adapter script carries a
+per-cause arm. It is carried as
+`loom.admission.reason="session-down"` on the `loom.role_attempt` span; it
+records no account hold. `session-down` on the span includes "Docker did not
+answer at spawn" (a failed `docker inspect`), not only a stopped, restarting or
+missing container; the watch's unqueryable-docker WARN is what tells the two
+apart. A spawn-time probe that was abandoned (deadline, signal) is not labelled
+`session-down`.
+
+**Stale-mount dispatch refusal (#10364).** Before `docker exec --workdir`,
+`session-exec host` checks that one of the running container's mounts covers
+the workdir, reading the same single `docker inspect` that tells it the
+container is running, so dispatch makes no extra docker call. If no mount
+covers it (the repository was registered after the container was created), it
+does not exec: it prints the recreate command, announces
+`# LOOM_SESSION_REFUSAL v=1 category=SESSION_MOUNT_STALE` and exits 78. The
+adapter passes both through unchanged and the terminal-record parser relabels
+the tick's record, as for `SESSION_DOWN`. The tick carries
+`loom.admission.reason="session-mount-stale"` and records no account hold
+(the container is stale, not the account). `loom-daemon workspace add` /
+`remove` print every host-mode session container the registry change left
+drifted, with the manual recreate, until the reconciler recreates idle ones
+itself.
 
 **Uncovered `gh` callers (#10343, tracked in #10618).** Spend from `safehouse.rs`,
 `auto_update`/`release_resolve`, `credential_preflight`, `sweep-lease-renew.sh`,

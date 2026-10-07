@@ -9,6 +9,32 @@ the label, re-evaluates them every tick, and removes the label when the
 recorded predecessor lands, closes, or the ordering no longer applies.
 Read-only inspection: `loom-daemon merge-pr sequence-plan`.
 
+## One landing-order comment per PR (#10634)
+
+The "Landing order recorded" comment is upserted, not appended. It carries a
+hidden key, `<!-- loom:landing-order v1 after=N after_head=… follower_head=… -->`:
+the PR's order (after #N) pinned at both heads. The component's `plan=` id is
+not part of the key, because any push to any PR in a large component changes
+it. On each pass the PR's trusted comments are read once and:
+
+- the same key already on the thread, with no sequencing note after it, is
+  left alone (no write);
+- a changed key edits that comment in place;
+- otherwise (no landing comment yet, or a release/replan note or newer marker
+  follows it) one new comment is posted;
+- an older fleet-authored landing comment whose key a newer one repeats is
+  deleted, a few per pass. This is how two hosts that both posted converge.
+
+Comments written before the key existed are recognized by their heading and
+`source=pass` marker. Only fleet-authored comments are edited or deleted. A
+failed comments read skips the PR for that pass rather than posting.
+
+One host per workspace runs the pass: the role-runner shard
+(`autonomous.roleRunner` `shardIndex`/`shardCount` or the roster) that already
+decides which host owns a workspace. An unsharded host owns every workspace, so
+a single daemon is unaffected, and the duplicate cleanup above covers a fleet
+that is not sharded.
+
 ## A pinned head that moves
 
 By default a hold whose follower head moved since the marker was written is

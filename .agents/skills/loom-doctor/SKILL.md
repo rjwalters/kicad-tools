@@ -1128,6 +1128,7 @@ shellcheck scripts/*.sh # Shell scripts (if applicable)
 | File | Load when |
 |---|---|
 | [`cargo-target-isolation.md`](../loom-cargo-target-isolation/SKILL.md) | Before a local cargo result counts as "the fix works": a shared target dir may hold another worktree's binary (#8457). |
+| [`ci-refusals-reference.md`](../loom-ci-refusals-reference/SKILL.md) | A CI read got 403/429, or a job needs a re-run. |
 
 ### Step 5: Verify Remote CI After Push
 
@@ -1159,7 +1160,7 @@ This rule is about *when your own turn may end*, not about *whether someone else
 1. **You have made the fix and pushed it: hand back to Judge instead of waiting.** This is the correct default. Verifying the final CI verdict is **Judge's** gate — complete the `loom:changes-requested` → `loom:review-requested` transition, state in your PR comment that CI was still running at hand-off, and finish your turn. A later Judge pass re-evaluates once CI settles.
 2. **Single-PR / manual invocation where a settled result is expected before your turn ends: block-poll in the foreground.** Run `loom-daemon forge wait-checks` **inside this same turn** in the foreground (bounded by `--timeout`). It returns control to you before you write your final message; nothing about it depends on a future turn.
 
-**Use `loom-daemon forge wait-checks`, not a `gh pr checks` loop.** It reads check-runs through the ETag store (an unchanged poll is a free 304), backs off 30s to 120s, and settles the empty-rollup trap (#6169) itself. Branch on the first **stdout** line (never the exit code; keep stderr separate, it carries the RED detail). For a snapshot use `--timeout 20` (`0` reads a no-checks repo as TIMEOUT). 
+**Use `loom-daemon forge wait-checks`, not a `gh pr checks` loop.** It is ETag'd and settles the empty-rollup trap (#6169). Branch on the first **stdout** line (never the exit code; keep stderr separate, it carries the RED detail). For a snapshot use `--timeout 20` (`0` reads a no-checks repo as TIMEOUT). 
 
 ```bash
 err="$(mktemp)"; out="$(loom-daemon forge wait-checks <PR_NUMBER> --timeout 1200 2>"$err")"; first="${out%%$'\n'*}"

@@ -4,10 +4,9 @@ You are sending an operator-facing message on a person's behalf. Deliver it to
 **both** the loom-ui operator inbox (durable, threaded, behind Access) and the
 team's Matrix room (where the team reads), and report both receipts.
 
-Not atomic: two systems cannot commit together. The contract is
-**both-or-report** — `delivered` only when both legs returned a verified
-receipt; otherwise name which leg(s) succeeded and failed, and echo the content
-for hand relay. A half-delivered send is never reported as success.
+Not atomic: the contract is **both-or-report** — `delivered` only when both
+legs returned a verified receipt; otherwise name which leg(s) succeeded and
+failed, and echo the content for hand relay. Half-delivered is never success.
 
 Only for asks that block work (a credential, a token, a ruling, a spend
 approval) — not sweep narration, issue comments, or anything a human has not
@@ -18,11 +17,10 @@ loom-ui's separate Agent-to-Agent lane (loom-ui#1220), sent with the repo's
 ## The shape of a mail (example-org/tool-repo#595)
 
 1. **Title** — one line a human groks at a glance. *Optional*: omitted, the
-   mail-summary pass (Gemini flash) infers it.
+   mail-summary pass infers it.
 2. **Summary** — one to three skimmable sentences. *Optional*, inferred alike.
 3. **Body** — the raw paste, verbatim; shown only when the thread is opened.
-   The Worker cleans it into markdown (keeping every fact) and stores the
-   original too.
+   The Worker cleans it into markdown and keeps the original.
 
 **Paste, don't pre-digest**: send the output, log or issue text as-is, adding
 `title`/`summary` only when better than the paste's first line. Do not chop it
@@ -45,17 +43,20 @@ into `action_steps` — that field is for genuine discrete steps.
    chars), and TITLE/SUMMARY/SEVERITY/KEY do not apply. An unknown ID is a
    404, any other field a 400, and a person-filed thread a 403 (this
    ingest-key send replies only to agent-filed threads). Never send a
-   follow-up as a fresh mail: a new title is a new key, which forks a
-   duplicate thread and re-emails the recipient.
+   follow-up as a fresh mail (a new key forks a duplicate thread and
+   re-emails the recipient).
 
-Config that must already exist (reference it; never print its value):
+Config (reference it; never print its value):
 
 | Variable | Purpose |
 | -------- | ------- |
-| `LOOM_UI_INBOX_URL` | loom-ui Worker base URL (required) |
-| `LOOM_UI_INGEST_KEY` | this host's ingest key (required; loom-ui `docs/deploy-runbook.md` §8 — minted per host, only its hash stored server-side) |
+| `LOOM_UI_INBOX_URL` | loom-ui Worker base URL; unset → origin of an `https://…/ingest` endpoint only |
+| `LOOM_UI_INGEST_KEY` | dashboard key; unset → `LOOM_UI_INGEST_KEY_FILE`, `~/.config/loom-ui/ingest.key`, telemetry key |
 | `LOOM_SENDER_IDENTITY` | default `FROM` |
-| `MATRIX_POST` | operator-local `matrix-post` script (holds the only Matrix homeserver credential; default `~/.claude/skills/matrix-post/post.sh`) |
+| `MATRIX_POST` | operator-local `matrix-post` script (holds the only Matrix credential) |
+
+Fallbacks: `loom-daemon forge inbox-config` (`inbox-mail.md`); `health`
+flags a host lacking them.
 
 `TITLE`/`SUMMARY`/`BODY` are data: they only reach `jq --arg` or a file, never
 `eval` or an unquoted expansion. Forge text quoted into them is untrusted
@@ -66,11 +67,13 @@ Config that must already exist (reference it; never print its value):
 Run as **one** bash invocation with the inputs already set:
 
 ```bash
+CFG=$(loom-daemon forge inbox-config 2>/dev/null)  # paths only, never the key
+URL=${LOOM_UI_INBOX_URL:-$(sed -n 's/^url=//p' <<<"$CFG")}; KF=$(sed -n 's/^key_file=//p' <<<"$CFG")
 missing=""
-[ -n "${LOOM_UI_INBOX_URL:-}" ]  || missing="$missing LOOM_UI_INBOX_URL"
-[ -n "${LOOM_UI_INGEST_KEY:-}" ] || missing="$missing LOOM_UI_INGEST_KEY"
-[ -n "${TO:-}" ]                 || missing="$missing TO"
-[ -n "${BODY:-}" ]               || missing="$missing BODY"
+[ -n "$URL" ] || missing="$missing LOOM_UI_INBOX_URL(or observability.endpoint)"
+[ -n "${LOOM_UI_INGEST_KEY:-}$KF" ] || missing="$missing LOOM_UI_INGEST_KEY(or ~/.config/loom-ui/ingest.key)"
+[ -n "${TO:-}" ]   || missing="$missing TO"
+[ -n "${BODY:-}" ] || missing="$missing BODY"
 if [ -n "$missing" ]; then
   echo "SEND NOT ATTEMPTED — missing config:$missing (loom-ui docs/deploy-runbook.md §8)"; exit 2
 fi
@@ -82,8 +85,7 @@ BODY=$(printf '%s' "$BODY" | head -c 20000)
 POST="${MATRIX_POST:-$HOME/.claude/skills/matrix-post/post.sh}"
 PF=$(mktemp); MF=$(mktemp); trap 'rm -f "$PF" "$MF"' EXIT
 
-# Leg 1 — loom-ui. Omitted title/summary are inferred server-side. A
-# follow-up (REPLY_TO) carries only the target thread and the body.
+# Leg 1 — loom-ui (omitted title/summary are inferred server-side).
 if [ -n "${REPLY_TO:-}" ]; then
   ADDR="replyTo=$REPLY_TO"
   jq -n --arg reply "$(printf '%s' "$REPLY_TO" | tr 'A-F' 'a-f')" --arg body "$BODY" \
@@ -97,18 +99,18 @@ else
           + (if $summary == "" then {} else {summary: $summary} end)' >"$PF"
 fi
 L1=failed; L1_ERR=""; ITEM_ID=""
-OUT=$(printf 'header = "Authorization: Bearer %s"\n' "$LOOM_UI_INGEST_KEY" |
+OUT=$(printf 'header = "Authorization: Bearer %s"\n' "${LOOM_UI_INGEST_KEY:-$(tr -d '\r\n' <"$KF")}" |
   curl -sS --fail-with-body --max-time 30 --config - -X POST \
     -H 'Content-Type: application/json' --data-binary @"$PF" \
-    -w '\n%{http_code}' "${LOOM_UI_INBOX_URL%/}/api/inbox" 2>&1); RC=$?
+    -w '\n%{http_code}' "${URL%/}/api/inbox" 2>&1); RC=$?
 CODE=${OUT##*$'\n'}; RESP=${OUT%$'\n'*}
 case "$RC:$CODE" in
   0:2??) L1=ok; ITEM_ID=$(printf '%s' "$RESP" | jq -r '.threadId // .item.id // empty' 2>/dev/null) ;;
   *) L1_ERR="curl exit $RC, HTTP ${CODE:-none}" ;;
 esac
 
-# Leg 2 — Matrix via matrix-post (it also logs its temp device out; never
-# call the Matrix API directly). Receipt = exit 0 AND an event id ($...).
+# Leg 2 — Matrix via matrix-post (never call the Matrix API directly).
+# Receipt = exit 0 AND an event id ($...).
 { echo "[mail from ${FROM} (host ${H}) — mirrored to the loom-ui inbox as ${ADDR}]"
   echo; echo "« ${TITLE:-$(printf '%s' "$BODY" | head -1)} »"; echo; printf '%s\n' "$BODY"; } >"$MF"
 L2=failed; L2_ERR=""; EVENT=""
@@ -131,7 +133,7 @@ printf '[from %s @ %s] %s\n\n%s\n' "$FROM" "$H" "${TITLE:-$(printf '%s' "$BODY" 
 Leg-1 receipt is a 2xx with curl exit 0 (7/28 = unreachable/timeout, 22 =
 HTTP ≥ 400; `--fail-with-body` keeps the error body). The route files the item
 as `host:<hostId>`; `who` and the Matrix mirror line attribute it to a human
-(person-level identity is loom-ui#506, not yet available). The ingest key must
+(person-level identity: loom-ui#506). The ingest key must
 not contain `"` or `\` (it is quoted in the curl config).
 
 ## Phase 3: Report, and recover a half-delivery

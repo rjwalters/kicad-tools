@@ -271,6 +271,7 @@ only.
 | `land-2026-10-06-calm-plover` | `land` | `land-v2`'s path, then **each** of p25/p50/p75/p90 conformally calibrated against its own hit rate from `land-v2`'s landed **and** still-open (right-censored lower-bound) track record in a trailing 14-day window, per (stage, age bucket) → stage → pooled, with the per-day change of the shift rate-limited; fitted at the estimate's own `as_of` (recorded as `calibration`; #10489) | after `merge_wait` |
 | `land-2026-10-06-quick-tern` | `land` | `land-2026-10-04-twin-otter-b`'s estimate, then each of p25/p50/p75/p90 calibrated by **IPCW** split-conformal over twin-otter-b's landed and still-open track record in a **short recent window** (6 h half-life, doubling when there are too few landings), per stage → pooled. There is no rate limit; a shift within 1.5 standard errors of zero is not applied. Fitted at the estimate's own `as_of`, recorded as `calibration` with `ipcw{…}` (#10524) | at the merge |
 | `land-2026-10-06-swift-tern` | `land` | quick-tern made **drift-aware** (#10524 slice 3, #10528): when the stage's CUSUM drift check trips (residuals centred on the shift quick-tern would serve), the half-life ladder starts at 1.5 h instead of 6 h. The interval inflation the check asks for is recorded but not applied. Otherwise quick-tern's answer. Recorded as `calibration` with `ipcw.drift{…}` | at the merge |
+| `land-2026-10-06-bold-lark` | `land` | keen-wren's priority-aware estimate (#10508) wrapped by the same IPCW split-conformal calibrator as quick-tern (#10524 slice 4). Only keen-wren's logged rows are evidence. Recorded as `calibration` with `base = land-2026-10-06-keen-wren` | at the merge |
 | `land-2026-10-06-held-heron` | `land` | `land-2026-10-04-twin-otter-b`'s estimate, except a PR that is **held** (`merge_hold`) or **sequenced** (`merge_wait` with `loom:sequenced`) at `as_of`. That PR is answered by a competing-risks hold and sequencing chain whose hazards are events ÷ exposure over the 14 days before `as_of`, read from the stage episodes and the PR flag timeline; there are no draws. Too little evidence answers as twin-otter-b. Recorded as `held_heron` (#10523) | at the merge |
 | `land-v4` | `land` | the retired `land-v3`'s grid calibration (widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored; recorded per stage as `distribution.adjustment`; #9970), plus the binding stall's term added to every path, operator-held PRs estimated from the stage under the hold, and no `beyond_history` refusal (a flagged residual-life tail instead; #10210) | after `merge_wait` |
 | `little-v0` | `land` | **floor baseline, never promoted** (#10208): Little's law. For a PR in `review_wait` / `doctor` / `merge_wait`, `items_ahead / drain_rate` for the current stage plus the recency-weighted mean duration of each later stage; interval from a Gamma posterior on the rate (shape = observed exits, 400 seeded draws). Refuses with a zero drain rate and items ahead, or with no queue context; a held PR (`merge_hold`) is refused `blocked`, as by every heuristic that does not model the hold | after `merge_wait` |
@@ -2335,6 +2336,7 @@ of what is on disk and never needs a refetch.
 | `refreshSecs` | `LOOM_ETA_REFRESH_SECS` | `300` (floor 60) |
 | `historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` (#9343) |
 | `fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily refit (#10245). It runs only with `enabled` too, is read at start, and is a no-op until a fleet snapshot is cached |
+| `nightlyFolds.enabled` | `LOOM_ETA_NIGHTLY_FOLDS_ENABLED` | `true` (#10492): the captain's nightly walk-forward backtest folds ([below](#nightly-backtest-folds-autonomousetanightlyfolds-10492)). Runs only with `enabled` too; read at start |
 | `current.start` / `current.finish` / `current.land` | none | `start-v1` / `finish-v1` / `land-v1` |
 | `shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `13` registered heuristics per kind (`current` + 12 alternates, #10549), floor 1. Over it, the tracker does not start (see [Shadow fleet management](#shadow-fleet-management)) |
 | `fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | `true` (#10263) |
@@ -2558,6 +2560,61 @@ them with a daemon restart.
   wins. A `LOOM_ETA_FLEET_SNAPSHOT_DIR` shared between hosts works. Declare
   `fleet.captain` so only one of them refreshes it; the others fit from it.
 
+### Nightly backtest folds (`autonomous.eta.nightlyFolds`, #10492)
+
+The promotion gate's backtest half (#10233: at least 7 walk-forward daily
+folds) used to run only when someone invoked `eta backtest` / `eta promote`.
+A daemon task now computes it every day, on the **fleet captain**, after 00:30
+UTC (`observability::eta_nightly_folds`; checked hourly, folds once per UTC
+day, catches up at most 7 missed days oldest first).
+
+- **Gate.** Each check passes `fleet.captain` first; the captain arms the
+  `eta-nightly-folds` singleton job and folds, every other host stands down and
+  emits nothing. With no captain declared **no host folds** (fail-closed, like
+  ci-telemetry; logged at `warn` and listed in
+  `host.health.captainless_singleton_jobs`), so set `fleet.captain` for the
+  scoreboard to exist. Records are keyed on `(heuristic, day)`, so a duplicate is detectable.
+- **Records** (OTLP-only, `loom.eta.backtest.*` attributes, body = the JSON):
+  - `eta.backtest.fold` — one per registered `land` heuristic per UTC day,
+    over that day's **cohort**: the cases first known (resolved) on it,
+    whichever day they were predicted on, so a case crossing midnight is
+    folded exactly once, on the day it resolves:
+    `heuristic`, `day`, `n_cases`, `answer_rate`, `pinball4_loss_sec`,
+    `cov_25_75`, `late_surprise`, the paired deltas against `current`
+    (`delta_pinball4_loss_sec`, `delta_answer_rate`, `delta_late_surprise`,
+    `paired_pairs`, `win`) and `fit_id`. A rate over no cases is omitted, not `0`.
+  - `eta.backtest.summary` — one per non-`current` heuristic: the rolling
+    per-day wins against `current` (`days`, `wins`, `ties`), the 95% Wilson
+    bounds, `gate_ready` and the gate's own `gate_detail`. Every case is
+    scored as its daily fold scored it, with its prediction day's coefficient
+    file; cases predicted before the oldest retained file (the fitter keeps
+    14) are left out and counted (`fitted_from`, `cases_before_fit`), not
+    charged a `no_model` refusal. `gate_ready` uses
+    the same gate function as `eta promote` (`shadow::backtest_gate`), not the
+    same data: the summary also replays fleet snapshots and the offline PR
+    cache, `eta promote` local data only.
+  - Both give `land-2026-10-06-calm-plover` the replay calibration evidence
+    `eta backtest` / `eta promote` do (`backtest::with_replay_calibration`,
+    built from the already-cut cases), so it is not folded as plain `land-v2`.
+- **Strictly point-in-time.** Before replaying, the run drops every input
+  observed at or after the day's cutoff (the end of the day): outcome
+  envelopes, journal rows, history samples, and cases not yet resolved. Each
+  case's coefficient file is the newest cut off strictly before its prediction
+  day began, and its estimate reads only history before its own `as_of`.
+  Perturbing post-cutoff data leaves the day's records bit-identical (pinned by
+  a test). A case still open at the cutoff joins the cohort of the day it
+  resolves.
+- **No forge call.** Inputs are this host's journals, the cached fleet
+  snapshots (through `historyScope`) and, if present, the offline merged-PR
+  cache `.loom/state/eta/backtest/pr-history.json` (what
+  `eta backtest --forge-pr-cases --save-pr-history` writes); without it only
+  cases a local sweep witnessed are replayed.
+- **State.** `.loom/state/eta/backtest/fold-<day>.json` (one per day; its
+  existence makes a restart idempotent) and `summary.json` (the newest run).
+- **`eta doctor`** prints the `backtest` link: the newest fold day, then one
+  `scoreboard <heuristic>` line per challenger (wins/days, lower bound,
+  READY / not ready, the gate's reason).
+
 ### SigNoz in-sweep half (`fleetRefresh.signoz`, #9758)
 
 The forge snapshot cannot see inside a sweep, so `finish` refuses at `scope =
@@ -2601,6 +2658,36 @@ of snapshot together.
   --credential-file PATH | --from-file export.jsonl] [--as-of T] [--dry-run]`,
   `… signoz show`, and `… signoz query` (the SQL, for a manual
   `clickhouse-client --format JSONEachRow` export).
+
+### SigNoz timeline reader (#10519)
+
+`eta::fleet_signoz_timeline` builds, from SigNoz rows alone, each PR's and
+issue's label timeline, its merge and close instants, CI state per `(repo,
+ref)` (the latest run of each workflow, with its jobs) and the latest ready
+queue. It is a pure reader. The query (`TIMELINE_SQL`), row admission and the
+page walk are in `eta::fleet_signoz_timeline_rows`. Slice 3 (#10520) makes it
+the primary history source, with forge reads only filling gaps.
+
+- **Two sources.** The loom-ui webhook export (`service.name =
+  loom-ui-d1-export`) carries exact receipt times. The daemon's rows are
+  polling-time: stage-journal label sets (diffed into changes; an item's first
+  set is a baseline), `pr.resolved`, `ci.*` and `queue.snapshot`. When both
+  saw one change of one `(repo, number, label, transition)`, it is one event
+  dated by the webhook. A daemon change with no webhook partner keeps the
+  daemon time. Repeats within a source collapse.
+- **Merge and close instants.** Webhook `closed` rows are primary. The daemon's
+  `pr.resolved` record (see [telemetry-schema](telemetry-schema.md)) covers
+  windows and repos the export does not. It is built from the pass's existing
+  reads, with no new forge read.
+- **Point-in-time.** Every row is filtered by `observed_at <= cutoff`
+  (`eta::point_in_time`) before anything else, so a later row cannot change an
+  earlier answer. A webhook row is knowable at its receipt time. A daemon row
+  is knowable at its own `observed_at` field, else at the SigNoz
+  `observed_timestamp`. A row with neither is never knowable.
+- **Coverage.** `Timeline::coverage` gives the earliest knowable row per
+  family and source. `covers(family, cutoff, WINDOW_DAYS)` is true only once
+  the whole fit window (60 days) lies after it. For `ci.*` and `queue.snapshot`
+  that is about 2026-11-27.
 
 ## Queries
 

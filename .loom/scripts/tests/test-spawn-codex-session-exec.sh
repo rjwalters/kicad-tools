@@ -251,6 +251,31 @@ assert_not_contains "danger-full-access" "$out" "…and the sandbox is not dropp
 out="$(session_run "$(state false "$HOST_LABEL")" bash "$SPAWN_CODEX" -p "hi" --dangerously-skip-permissions)"
 assert_not_contains "danger-full-access" "$out" "a stopped container is not treated as hardened either"
 
+# #10455: the REAL `session-exec host` names why it refuses. It announces
+# SESSION_DOWN when docker answered that the container cannot take a dispatch
+# (not running, restarting, or no such container), and only then: a probe it
+# had to abandon says nothing about the container, so that refusal stays
+# generic. Exit 78 in every case. `host` runs the `docker` on PATH.
+REFUSAL='# LOOM_SESSION_REFUSAL v=1 category=SESSION_DOWN'
+HOST_DOCKER_DIR="$TMPROOT/host-docker"
+mkdir -p "$HOST_DOCKER_DIR"
+host_refusal() {
+    # $1 = body of the fake docker; prints host's stderr then "rc=<code>"
+    printf '#!/usr/bin/env bash\n%s\n' "$1" > "$HOST_DOCKER_DIR/docker"
+    chmod +x "$HOST_DOCKER_DIR/docker"
+    ( { PATH="$HOST_DOCKER_DIR:$PATH" "$LOOM_DAEMON_SELF_BIN" session-exec host \
+          --container loom-codex-session-acct --workdir "$WS" -- true >/dev/null; } 2>&1; echo "rc=$?")
+}
+out="$(host_refusal 'echo false')"
+assert_contains "$REFUSAL" "$out" "session-exec host announces SESSION_DOWN for a container that is not running"
+assert_contains "rc=78" "$out" "…and still refuses with 78"
+out="$(host_refusal 'echo "Error: No such object" >&2; exit 1')"
+assert_contains "$REFUSAL" "$out" "…and for a container docker does not have"
+out="$(host_refusal 'exec sleep 30')"
+assert_contains "probe abandoned (trigger=probe-deadline" "$out" "a wedged docker makes host abandon the probe"
+assert_not_contains "LOOM_SESSION_REFUSAL" "$out" "…which is NOT announced as SESSION_DOWN: the container may be running"
+assert_contains "rc=78" "$out" "…and refuses with 78 as it always did"
+
 # Escape hatch: keep the requested Codex sandbox (needs a userns-capable profile).
 out="$(session_run "$(state true "$HOST_LABEL")" env LOOM_CODEX_CONTAINER_SANDBOX=codex bash "$SPAWN_CODEX" -p "hi" --dangerously-skip-permissions)"
 assert_contains "-s workspace-write" "$out" "LOOM_CODEX_CONTAINER_SANDBOX=codex keeps the requested sandbox"

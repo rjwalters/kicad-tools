@@ -284,6 +284,33 @@ exploration) starves the daemon.
   `gh-config-by-owner/<owner>/<app-id>` = a reader); an env token is booked
   `env-token` and anything else `ambient`. It reads local files only, so it
   is safe to run on a rate-limited host.
+- Pages (W5, **off by default**): GitHub charges a `gh api --paginate` read
+  one request per page, but the call is one ledger row flagged "pages
+  unknown" (`pu`); the report's `unattributed` line counts those. Setting
+  `LOOM_GH_PAGE_WALK=1` (exactly `1`; anything else is off) makes the `gh`
+  facade walk a REST `--paginate` read itself: one `gh api --include`
+  execution and one ledger row per page, page 1 asking for `per_page=100`
+  as `gh --paginate` does. GraphQL cursor pagination is never walked and
+  stays `pu`. The walk changes how reads that gate decisions are fetched,
+  so validate it on one host before enabling it more widely: with the
+  switch on, compare each site's `gh` spawn count (the `invoke github`
+  spans per operation) and each bucket's `x-ratelimit-used` delta over the
+  same window against what `forge calls --by caller|bucket` charged. With
+  the walk on, every page's `x-ratelimit-*` reading also feeds the bucket
+  book (`forge_bucket_book::observe`). A walk never passes a partial
+  listing off as complete: a page without a header block, a next link that
+  is not `https://`, or more than 1000 pages is an error, and a deadline
+  mid-walk is a timeout whose output is not a well-formed array.
+- Agent sessions (W5): an agent session's own `gh` calls are rows too. The
+  `gh` front books each passthrough before it execs the real `gh`, as
+  caller `agent.gh.<command>` (never the argv), under the session's
+  credential bucket, with the role `agent-<LOOM_ROLE>` (`agent-session`
+  outside a role) — so `forge calls --by role` lists agent spend beside
+  `reader` / `writer`. Those rows are booked on intent (the exec replaces
+  the process), so they always count as charged, and a paginated agent
+  call is `pu`. A session's `TMPDIR` is private, so the spawner exports the
+  host's sink directory to it as `LOOM_FORGE_CALL_STATS_DIR`; without that
+  the rows would land where no host rollup reads.
 
 ## GitHub App identity (#4430)
 
@@ -314,9 +341,15 @@ hard-failing.
 1. Create a GitHub App (under whichever account/org owns the target repos)
    with **Contents: Read & write**, **Issues: Read & write**, **Pull
    requests: Read & write**, **Metadata: Read** permissions, plus
-   **Actions: Read** (optional: lets the #8248/#8919 freshness guard read the
-   base each required check actually tested, instead of falling back to the
-   timestamp rule). GitHub has no API for changing an App's
+   **Checks: Read** and **Commit statuses: Read** (CI verdicts:
+   `forge wait-checks` reads `commits/{sha}/check-runs` and
+   `commits/{sha}/status`; without Commit statuses the wait degrades to
+   check-runs only, #10633), and **Actions: Read & write** (Read lets the
+   #8248/#8919 freshness guard read the base each required check actually
+   tested, instead of falling back to the timestamp rule; write lets
+   `forge rerun` re-run a cancelled or flaky job in place, #10633). Reader
+   Apps in a read pool need the same read permissions: a reader refused for
+   one falls back to the writer, an extra call per read. GitHub has no API for changing an App's
    permissions: add it in the App's settings, then accept the updated
    permission request on each installation.
 2. Generate a private key for the app (downloads a `.pem` file) and copy it to

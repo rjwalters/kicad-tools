@@ -48,8 +48,8 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | `dispatch` | `maxAdmissionsPerTick` | 3 | 1–64 | Ramp cap: new sweeps admitted per tick (#4234) | `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` |
 | `lifecycle` | `leaseTtlMinutes` | 15.0 | >0–1440 | Lease-freshness TTL (#6286) | — | `LOOM_LEASE_TTL_MINUTES` |
 | `lifecycle` | `idleExitMinutes` | 60 | 1–10080 | Idle-exit turnaround (#4467) | `autonomous.idleExit.idleMinutes` | `LOOM_AUTONOMOUS_IDLE_EXIT_MINUTES` |
-| `rework` | `buildBackoffHigh` | 40 | 1–100000 | PR-debt level that engages the build back-off (#9410) | `autonomous.workFinder.buildBackoff.high` | — |
-| `rework` | `buildBackoffLow` | 25 | 0–100000, `< high` | PR-debt level that releases it | `autonomous.workFinder.buildBackoff.low` | — |
+| `rework` | `buildBackoffHigh` | 40 | 1–100000 | Per-repo PR-debt level that engages a repo's build back-off (#9410, #10624) | `autonomous.workFinder.buildBackoff.high` | — |
+| `rework` | `buildBackoffLow` | 25 | 0–100000, `< high` | Per-repo PR-debt level that releases it | `autonomous.workFinder.buildBackoff.low` | — |
 
 ## Precedence
 

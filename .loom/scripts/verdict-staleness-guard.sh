@@ -618,27 +618,8 @@ if [[ "$CLEAR" -eq 1 ]]; then
       '[.[] | select(.body != null and (.body | contains($m)))] | length' \
       <<<"$COMMENTS_JSON" 2>/dev/null || echo 0)"
 
-    if [[ "${ALREADY_ANNOUNCED:-0}" -eq 0 ]]; then
-      # #9709: the notice is rendered by the daemon's own template (`forge
-      # verdict-stale-notice`), so the two stale-clear paths cannot drift. It is
-      # fed the RAW listing: when a newer marker was dropped as untrusted, the
-      # notice names its login + author_association and forge.trustedCommenters
-      # instead of asserting a head move that may not have happened.
-      # requires-daemon: forge optional   Without the `verdict-stale-notice` verb (a binary predating #9709: clap exits non-zero with nothing on stdout) the one-line fallback below is posted — same stale marker, so dedup holds; only the #9709 attribution is lost. No version floor: the clear itself is unaffected.
-      STALE_BODY="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-stale-notice --label "$VERDICT_LABEL" --marker-sha "$MARKER_SHA" --head-sha "$HEAD_SHA" <<<"$RAW_COMMENTS_JSON" 2>/dev/null)"
-      [[ "$STALE_BODY" == "$STALE_MARKER"* ]] || STALE_BODY="$STALE_MARKER
-**Stale review verdict cleared — head SHA moved**: \`$VERDICT_LABEL\` was rendered against \`$MARKER_SHA\`, head is now \`$HEAD_SHA\`; returned to \`loom:review-requested\`. *Automated by verdict-staleness-guard.sh (#5686)*"
-      gh pr comment "$PR" --repo "$WRITE_REPO" --body "$STALE_BODY" >/dev/null 2>"$GH_STDERR" || {
-        echo "ERROR: failed to post stale-verdict comment on PR #$PR: $(cat "$GH_STDERR" 2>/dev/null)" >&2
-        emit "STALE" "$REASON; comment failed, labels left untouched" \
-          "$HEAD_SHA" "$VERDICT_LABEL" "$MARKER_SHA" 0
-        exit 1
-      }
-    fi
-
-    # Comment first, then labels — the same ordering the roles use for their
-    # own verdict writes, so the audit trail can never show a label flip with
-    # no explanation attached.
+    # Labels first, then the comment (#10601) — the announcement claims a
+    # state change, so it is only posted after the flip is verified (below).
     #
     # Strip BOTH terminal verdict labels here, not just the one this pass
     # detected as stale ($VERDICT_LABEL) — issue #7018. current_verdict_label()
@@ -664,6 +645,23 @@ if [[ "$CLEAR" -eq 1 ]]; then
     if gh pr edit "$PR" --repo "$WRITE_REPO" "${EDIT_ARGS[@]}" >/dev/null 2>"$GH_STDERR"; then
       CLEARED=1
       REASON="$REASON; cleared and re-queued as loom:review-requested"
+    if [[ "${ALREADY_ANNOUNCED:-0}" -eq 0 ]]; then
+      # #9709: the notice is rendered by the daemon's own template (`forge
+      # verdict-stale-notice`), so the two stale-clear paths cannot drift. It is
+      # fed the RAW listing: when a newer marker was dropped as untrusted, the
+      # notice names its login + author_association and forge.trustedCommenters
+      # instead of asserting a head move that may not have happened.
+      # requires-daemon: forge optional   Without the `verdict-stale-notice` verb (a binary predating #9709: clap exits non-zero with nothing on stdout) the one-line fallback below is posted — same stale marker, so dedup holds; only the #9709 attribution is lost. No version floor: the clear itself is unaffected.
+      STALE_BODY="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-stale-notice --label "$VERDICT_LABEL" --marker-sha "$MARKER_SHA" --head-sha "$HEAD_SHA" <<<"$RAW_COMMENTS_JSON" 2>/dev/null)"
+      [[ "$STALE_BODY" == "$STALE_MARKER"* ]] || STALE_BODY="$STALE_MARKER
+**Stale review verdict cleared — head SHA moved**: \`$VERDICT_LABEL\` was rendered against \`$MARKER_SHA\`, head is now \`$HEAD_SHA\`; returned to \`loom:review-requested\`. *Automated by verdict-staleness-guard.sh (#5686)*"
+      if ! gh pr comment "$PR" --repo "$WRITE_REPO" --body "$STALE_BODY" >/dev/null 2>"$GH_STDERR"; then
+        # The flip already happened and the label state is the source of truth:
+        # report it, do not revert (#10601).
+        echo "ERROR: failed to post stale-verdict comment on PR #$PR (labels already flipped): $(cat "$GH_STDERR" 2>/dev/null)" >&2
+        REASON="$REASON; announcement comment failed"
+      fi
+    fi
     else
       echo "ERROR: failed to clear $VERDICT_LABEL on PR #$PR: $(cat "$GH_STDERR" 2>/dev/null)" >&2
       emit "STALE" "$REASON; label clear failed" \

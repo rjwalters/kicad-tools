@@ -17,6 +17,9 @@
 #                         evidence row);
 #   (c) a GENUINELY still-blocked issue — reports nothing, which is the whole
 #                         reason this advisory can run on every sweep;
+#   (d) an ARCHIVED repository (#10562) — skipped and reported as archived,
+#                         never as clear; a probe that does not answer is
+#                         UNKNOWN, and nothing is read after either;
 #   plus the advisory contract itself: always exit 0 (including with no
 #   loom-daemon, no `gh`, and a forge read that fails), `--quiet` suppresses the
 #   stdout one-liner, and the script never mutates a label.
@@ -143,9 +146,10 @@ mkdir -p "$STUB_DIR"
 
 cat >"$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
-# The check reads the forge in bulk (#10480): one REST `loom:blocked` listing
-# (issues AND PRs), REST comment / single-issue / pull reads, and one aliased
-# GraphQL query per 100 issues for the closing PRs. This stub answers each of
+# The check reads the forge in bulk (#10480): one REST `repos/{owner}/{repo}`
+# archived probe first (#10562), one REST `loom:blocked` listing (issues AND
+# PRs), REST comment / single-issue / pull reads, and one aliased GraphQL
+# query per 100 issues for the closing PRs. This stub answers each of
 # those from the SAME fixture files the per-artifact `gh issue|pr view` shape
 # used, so every case below keeps its meaning. Any `gh issue|pr view|list` is
 # unhandled on purpose: the batch path must never make one.
@@ -214,6 +218,21 @@ if [[ "${1:-}" == "api" ]]; then
   fi
 
   path="${url%%\?*}"
+
+  # The archived-repository probe (#10562): `GET repos/{owner}/{repo}`, sent
+  # before anything is listed. A live repository by default; `repo.json`
+  # overrides the answer body, and `repo.fail` makes the read fail outright.
+  # Matched exactly (two segments), never as a prefix of the paths below.
+  if [[ "$path" =~ ^repos/[^/]+/[^/]+$ ]]; then
+    [[ -f "$D/repo.fail" ]] && { echo "stub gh: HTTP 502 Bad Gateway" >&2; exit 1; }
+    if [[ -f "$D/repo.json" ]]; then
+      http "200 OK" "$(cat "$D/repo.json")"
+    else
+      http "200 OK" "{\"full_name\":\"${path#repos/}\",\"archived\":false}"
+    fi
+    exit 0
+  fi
+
   case "$path" in
     repos/*/*/issues)
       [[ "$url" == *"&page="* ]] && { http "200 OK" '[]'; exit 0; }
@@ -672,8 +691,9 @@ assert_eq "1" "$(jq -r '.forge_cost.graphql_points' <<<"$LAST_STDOUT")" \
     "T8k: forge_cost takes the points from rateLimit.cost"
 assert_eq "500" "$(jq -r '.forge_cost.budget_before.graphql_remaining' <<<"$LAST_STDOUT")" \
     "T8l: forge_cost records the probe's reading"
-assert_eq "1" "$(jq -r '.forge_cost.rest_requests' <<<"$LAST_STDOUT")" \
-    "T8m: forge_cost counts the REST blocker read"
+# Two REST reads: the archived-repository probe (#10562) and the blocker.
+assert_eq "2" "$(jq -r '.forge_cost.rest_requests' <<<"$LAST_STDOUT")" \
+    "T8m: forge_cost counts the archived probe and the REST blocker read"
 
 # Overwritten rather than removed: an empty fixture is unparseable, so both
 # probe legs fail exactly as with no fixture at all.
@@ -687,6 +707,77 @@ assert_eq "null" "$(jq -c '.forge_cost.budget_before' <<<"$LAST_STDOUT")" \
 HELP="$("$SCRIPT" --help 2>&1)"
 assert_contains "$HELP" "--min-graphql-remaining" "T8p: --help documents --min-graphql-remaining"
 assert_contains "$HELP" "--min-core-remaining" "T8q: --help documents --min-core-remaining"
+
+# --- Group 9: the archived-repository probe (#10562) ------------------------
+# The probe runs before anything is listed. An archived repository is
+# read-only, so it is skipped and reported as such — never as clear — and a
+# probe that does not answer is UNKNOWN, never archived and never clear. In
+# neither case is anything listed, queried or read after the probe.
+echo "Group 9: archived repositories"
+rm -f "$STUB_DIR/rate_limit.json"
+set_population '[{"number":178,"title":"Comment moderation"}]'
+set_pr_population '[]'
+issue_fixture 178 "Blocked by #7 (user authentication)."
+state_fixture issue 7 "CLOSED"
+
+# probe_calls / later_calls: the probe itself, and every read after it.
+probe_calls() { grep -cE '(^| )repos/owner/repo( |$)' "$STUB_DIR/calls.log"; }
+later_calls() {
+    grep -cE '(^| )graphql( |$)|repos/owner/repo/(issues|pulls)' "$STUB_DIR/calls.log"
+}
+
+# The live default: the probe answers `archived: false` and the run proceeds.
+run_check --json
+assert_eq "false" "$(jq -c '.archived' <<<"$LAST_STDOUT")" \
+    "T9a: a live repository reports archived: false"
+assert_eq "1" "$(jq -r '.stale | length' <<<"$LAST_STDOUT")" "T9b: a live repository is evaluated"
+assert_eq "1" "$(probe_calls)" "T9c: the repository is probed exactly once"
+
+# Archived: one stdout line, nothing on stderr, nothing read after the probe.
+printf '{"full_name":"owner/repo","archived":true}' >"$STUB_DIR/repo.json"
+run_check
+assert_eq "0" "$LAST_RC" "T9d: an archived repository exits 0"
+assert_contains "$LAST_STDOUT" "repository is archived" "T9e: an archived repository says so"
+assert_not_contains "$LAST_STDOUT" "no stale" "T9f: an archived repository is never reported clear"
+assert_eq "" "$LAST_STDERR" "T9g: an archived repository writes nothing to stderr"
+assert_eq "1" "$(probe_calls)" "T9h: the archived repository is probed once"
+assert_eq "0" "$(later_calls)" "T9i: nothing is listed, queried or read after an archived answer"
+
+run_check --json
+assert_eq "true" "$(jq -c '.archived' <<<"$LAST_STDOUT")" "T9j: --json reports archived: true"
+assert_eq "0" "$(jq -r '.stale | length' <<<"$LAST_STDOUT")" "T9k: --json lists no findings for it"
+assert_eq "null" "$(jq -c '.enumerate_error' <<<"$LAST_STDOUT")" \
+    "T9l: an archived repository is not an enumeration failure"
+assert_eq "1" "$(jq -r '.forge_cost.rest_requests' <<<"$LAST_STDOUT")" \
+    "T9m: forge_cost counts only the probe"
+
+run_check --quiet
+assert_eq "" "$LAST_STDOUT" "T9n: --quiet silences the archived line"
+assert_eq "0" "$(later_calls)" "T9o: --quiet reads nothing after an archived answer either"
+
+# A probe answer with no `archived` flag is unknown, never "not archived".
+printf '{"full_name":"owner/repo"}' >"$STUB_DIR/repo.json"
+run_check --json
+assert_eq "null" "$(jq -c '.archived' <<<"$LAST_STDOUT")" \
+    "T9p: an answer with no archived flag is archived: null"
+assert_contains "$(jq -r '.enumerate_error' <<<"$LAST_STDOUT")" "archived-repository probe failed" \
+    "T9q: an answer with no archived flag is an enumeration failure"
+assert_eq "0" "$(later_calls)" "T9r: nothing is read after a flagless answer"
+rm -f "$STUB_DIR/repo.json"
+
+# A probe that fails outright: UNKNOWN, reported on stderr, never clear.
+: >"$STUB_DIR/repo.fail"
+run_check
+assert_eq "0" "$LAST_RC" "T9s: a failed probe still exits 0"
+assert_contains "$LAST_STDERR" "archived-repository probe failed" "T9t: a failed probe names itself"
+assert_contains "$LAST_STDERR" "UNKNOWN, not clear" "T9u: a failed probe is reported unknown"
+assert_not_contains "$LAST_STDOUT" "no stale" "T9v: a failed probe is never reported clear"
+assert_not_contains "$LAST_STDOUT" "repository is archived" "T9w: a failed probe is never archived"
+assert_eq "0" "$(later_calls)" "T9x: nothing is listed, queried or read after a failed probe"
+run_check --json
+assert_eq "null" "$(jq -c '.archived' <<<"$LAST_STDOUT")" "T9y: --json reports a failed probe as archived: null"
+assert_eq "0" "$(jq -r '.stale | length' <<<"$LAST_STDOUT")" "T9z: a failed probe yields no findings"
+rm -f "$STUB_DIR/repo.fail"
 
 # --- summary ---------------------------------------------------------------
 echo ""

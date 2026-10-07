@@ -158,7 +158,12 @@ These writers differ from `apply` in two documented ways:
   stops part-way rather than draining the bucket. `--json` adds a
   `forge_cost` object (`graphql_queries`, `graphql_points` from
   `rateLimit.cost`, `rest_requests`, `rest_not_modified`, `budget_before`,
-  `projected`, `floor`, `budget_refused`, `budget_stopped`).
+  `projected`, `floor`, `budget_refused`, `budget_stopped`). It first reads
+  the repository's `archived` flag (#10562, one REST + ETag read shared with
+  `release-stale-blocked` and the role runner): an archived repository is
+  read-only, so nothing is listed, `--json` reports `archived: true` and the
+  human report is one line. A probe that fails is NOT EVALUATED, never
+  archived and never clear (`archived: null`).
 - `guide.md`'s `check_and_unblock` / `check_and_unblock_prs` — the active
   unblock sweep. A rendered park record's `Blocked by: #N` line already
   matches `parse_dependencies`'s existing pattern, so no separate parser is
