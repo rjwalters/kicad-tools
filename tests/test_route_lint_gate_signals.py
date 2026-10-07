@@ -247,6 +247,41 @@ def test_pass_promotes_the_staged_board_and_its_artifacts(board, tmp_path, capsy
     assert _staging_dirs(tmp_path) == []
 
 
+def test_sigterm_during_promotion_never_half_promotes_output(board, tmp_path):
+    """SIGTERM mid-promotion must not delete ``--output``'s project file (#6090)."""
+    import os
+
+    from kicad_tools.cli import route_lint_gate
+
+    out = tmp_path / "out.kicad_pcb"
+    out.write_text("prevpcb")
+    out.with_suffix(".kicad_pro").write_text('{"prev":"pro"}')
+    out.with_suffix(".kicad_dru").write_text("(prev)\n")
+    real_replace = os.replace
+    sent = []
+
+    def replace_then_term(src, dst, *a, **kw):
+        real_replace(src, dst, *a, **kw)
+        if Path(dst) == out.with_suffix(".kicad_dru") and not sent:
+            sent.append(dst)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    with (
+        patch.object(route_cmd, "_run_main_impl", _stub("", publish=False)),
+        patch.object(route_lint_gate.os, "replace", replace_then_term),
+        pytest.raises(SystemExit) as exc,
+    ):
+        kct_main(["route", str(board), "-o", str(out), "--lint-gate", "--no-current-paths"])
+
+    assert sent, "SIGTERM was never sent mid-promotion"
+    assert exc.value.code == SIGTERM_EXIT
+    assert out.read_text() != "prevpcb", "the judged board arrived (promotion completed)"
+    assert out.with_suffix(".kicad_dru").read_text() == "(version 1)\n"
+    assert out.with_suffix(".kicad_pro").exists(), "pre-existing project file must survive"
+    assert not _rejected(out).exists()
+    assert _staging_dirs(tmp_path) == []
+
+
 def test_rollback_writes_no_receipt_and_leaves_output_dir_rules_alone(board, tmp_path):
     out = tmp_path / "out.kicad_pcb"
     with patch.object(route_cmd, "_run_main_impl", _stub(SHORT, publish=True)):

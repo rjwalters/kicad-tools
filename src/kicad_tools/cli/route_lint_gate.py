@@ -109,7 +109,7 @@ import signal
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -152,6 +152,25 @@ class LintGateTerminated(SystemExit):
 
 def _raise_terminated(signum, frame) -> None:
     raise LintGateTerminated()
+
+
+@contextlib.contextmanager
+def _sigterm_blocked() -> Iterator[None]:
+    """Hold SIGTERM pending across a multi-file promotion or rollback.
+
+    A SIGTERM landing between two ``os.replace`` calls would leave ``--output``
+    half-promoted; the signal is delivered once the section ends.
+    """
+    if threading.current_thread() is not threading.main_thread() or not hasattr(
+        signal, "pthread_sigmask"
+    ):
+        yield
+        return
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 @dataclass
@@ -553,33 +572,39 @@ class LintGate:
         during adaptive routing saves ``best_completed_attempt`` and exits 5);
         it is kept at :attr:`rejected_path` rather than discarded.
         """
+        if self.promoted:
+            # A SIGTERM held back through the promotion arrives after it
+            # completed: the judged board is already at --output.
+            self.close()
+            return
         exc = sys.exc_info()[1]
         why = " (SIGTERM)" if isinstance(exc, LintGateTerminated) else ""
-        try:
-            if self._baseline is not None:
-                self._recover_stray()
-                if self._fresh():
-                    rejected, restored = self._reject()
-                    stage = (
-                        "while the routed board was being linted"
-                        if judging
-                        else "before the routed board was linted"
-                    )
-                    self._err(
-                        f"routing aborted{why} {stage}; it is kept "
-                        f"(unjudged) at {rejected}, {self._restored_text(restored)}"
-                    )
-                else:
-                    self._unstage(None)
-                    if why:
-                        self._err(
-                            f"routing aborted{why} before a routed board was written; "
-                            f"{self.output} is untouched"
+        with _sigterm_blocked():
+            try:
+                if self._baseline is not None:
+                    self._recover_stray()
+                    if self._fresh():
+                        rejected, restored = self._reject()
+                        stage = (
+                            "while the routed board was being linted"
+                            if judging
+                            else "before the routed board was linted"
                         )
-        except OSError:
-            pass
-        finally:
-            self.close()
+                        self._err(
+                            f"routing aborted{why} {stage}; it is kept "
+                            f"(unjudged) at {rejected}, {self._restored_text(restored)}"
+                        )
+                    else:
+                        self._unstage(None)
+                        if why:
+                            self._err(
+                                f"routing aborted{why} before a routed board was written; "
+                                f"{self.output} is untouched"
+                            )
+            except OSError:
+                pass
+            finally:
+                self.close()
 
     def close(self) -> None:
         self._restore_sigterm()
@@ -666,15 +691,26 @@ class LintGate:
             return
         parent = self.output.parent
         receipt: dict[Path, Path | None] = {}
-        deleted = [name for name in self._seeded if not (directory / name).exists()]
+        # Names already promoted out of staging are not routing deletions.
+        deleted = [
+            name
+            for name in self._seeded
+            if not (directory / name).exists() and (directory / name) not in self.moves
+        ]
         rejecting = board_to is not None and board_to != self.output
+        promoting = board_to is not None and not rejecting
+
+        def move_board() -> None:
+            assert board_to is not None and self.staged is not None
+            os.replace(self.staged, board_to)
+            self.moves[self.staged] = board_to
+            receipt[self.staged] = None if rejecting else board_to
+
         if self.staged.is_file():
             if board_to is None:
                 self.staged.unlink()
-            else:
-                os.replace(self.staged, board_to)
-                self.moves[self.staged] = board_to
-                receipt[self.staged] = None if rejecting else board_to
+            elif not promoting:
+                move_board()
         if rejecting:
             assert board_to is not None
             for suffix in _PROJECT_SUFFIXES:
@@ -689,6 +725,8 @@ class LintGate:
                         shutil.copyfile(src, board_to.with_suffix(suffix))
         for item in sorted(directory.iterdir()):
             name = item.name
+            if item == self.staged:
+                continue  # promoted last: its arrival means everything arrived
             if name in self._seeded and item.is_file() and item.read_bytes() == self._seeded[name]:
                 item.unlink()
                 continue
@@ -703,6 +741,8 @@ class LintGate:
             receipt[item] = target
         for name in deleted:
             (parent / name).unlink(missing_ok=True)
+        if promoting and self.staged.is_file():
+            move_board()
         from .route_receipt import relocate
 
         relocate(receipt)
@@ -746,9 +786,10 @@ class LintGate:
             if row.get("severity") == "error" or (self.strict and row.get("severity") == "warning")
         ]
         if not blocking:
-            self._discard_stale_rejected()
-            self._unstage(self.output)
-            self.promoted = True
+            with _sigterm_blocked():
+                self._discard_stale_rejected()
+                self._unstage(self.output)
+                self.promoted = True
             self._say(
                 f"PASS: no new error findings{' or warnings' if self.strict else ''} "
                 f"({summary['introduced']} introduced, {summary['resolved']} resolved); "
