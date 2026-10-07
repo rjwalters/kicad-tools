@@ -37,6 +37,20 @@ against the hole's real outline (round or oval) at the board's
 ``edge_clearance``, because KiCad treats a non-plated slot as board edge.
 A new via's own drill is measured against other nets' copper at
 ``hole_clearance`` too.  A bare NPTH hole still contributes no *copper*.
+Copper that **crosses** a hole is always refused, even where an ``ignore``
+rule switches ``hole_clearance`` off: the drill would sever it.
+
+Hole to hole, physical clearance (issue #6150)
+----------------------------------------------
+A new via's drill is measured against **every** drilled hole on the board,
+the routed net's own included, and against the other new vias' drills, at
+``hole_to_hole`` (KiCad checks that constraint regardless of net).  New
+copper is also measured at ``physical_clearance`` against other nets' copper
+and holes, and at ``physical_hole_clearance`` against their holes (and a new
+via's drill against their copper).  Those two constraints exist only as
+``.kicad_dru`` rules.  KiCad applies them within a net too, which the gate
+does not: a rule that reaches the routed net's own pads is broken by every
+connection to them, so no route could pass it.
 
 The routed net's own copper is exempt.  Unassigned (net 0) tracks, vias and
 arcs are exempt too: KiCad reassigns floating copper through connectivity on
@@ -60,9 +74,15 @@ from pathlib import Path
 from typing import Any
 
 from .board_clearance_rules import (
+    EDGE_CLEARANCE,
+    HOLE_CLEARANCE,
+    HOLE_TO_HOLE,
     KICAD_DEFAULT_CLEARANCE_MM,
     KICAD_DEFAULT_EDGE_CLEARANCE_MM,
     KICAD_DEFAULT_HOLE_CLEARANCE_MM,
+    KICAD_DEFAULT_HOLE_TO_HOLE_MM,
+    PHYSICAL_CLEARANCE,
+    PHYSICAL_HOLE_CLEARANCE,
     BoardClearanceRules,
     ItemProps,
     item_props_for_type,
@@ -133,7 +153,10 @@ class ForeignItem:
             plated = True
         if plated is None and kind == "pad":
             plated = {"thru_hole": True, "np_thru_hole": False, "smd": False}.get(self.pad_type)
-        return item_props_for_type(kind, name, plated, self.pad_type or None)
+        layer = (
+            next(iter(self.layers)) if self.layers is not None and len(self.layers) == 1 else None
+        )
+        return item_props_for_type(kind, name, plated, self.pad_type or None, layer)
 
     @property
     def net_label(self) -> str:
@@ -146,7 +169,9 @@ class ForeignItem:
 class CopperConflict:
     """New copper that shorts, or is too close to, another net's copper or a hole."""
 
-    kind: str  # "short", "clearance", "hole_clearance" or "edge_clearance"
+    #: "short", "clearance", "hole_clearance", "edge_clearance", "hole_to_hole",
+    #: "physical_clearance" or "physical_hole_clearance"
+    kind: str
     new_item: str  # "segment" or "via"
     other: ForeignItem
     gap_mm: float
@@ -177,6 +202,18 @@ class ConflictReport:
     @property
     def edge_clearance(self) -> list[CopperConflict]:
         return [c for c in self.conflicts if c.kind == "edge_clearance"]
+
+    @property
+    def hole_to_hole(self) -> list[CopperConflict]:
+        return [c for c in self.conflicts if c.kind == "hole_to_hole"]
+
+    @property
+    def physical_clearance(self) -> list[CopperConflict]:
+        return [c for c in self.conflicts if c.kind == "physical_clearance"]
+
+    @property
+    def physical_hole_clearance(self) -> list[CopperConflict]:
+        return [c for c in self.conflicts if c.kind == "physical_hole_clearance"]
 
     def __bool__(self) -> bool:
         return bool(self.conflicts)
@@ -586,6 +623,9 @@ def _layer_name(layer: Any) -> str | None:
     return str(name) if name else None
 
 
+_HOLE_KINDS = frozenset({HOLE_CLEARANCE, PHYSICAL_HOLE_CLEARANCE, EDGE_CLEARANCE, HOLE_TO_HOLE})
+
+
 def find_conflicts(
     items: Sequence[ForeignItem],
     segments: Sequence[Any],
@@ -596,6 +636,7 @@ def find_conflicts(
     required_mm: float,
     rules: BoardClearanceRules | None = None,
     net_name: str | None = None,
+    origin: tuple[float, float] = (0.0, 0.0),
 ) -> ConflictReport:
     """New router copper that shorts, or crowds, another net's copper or a hole.
 
@@ -607,13 +648,18 @@ def find_conflicts(
 
     ``items`` may mix copper (:func:`board_copper`) and holes
     (:func:`board_holes`).  New copper is measured against copper at the
-    pair's ``clearance``, against a hole at its ``hole_clearance`` and
-    against an NPTH slot also at its ``edge_clearance``; a new via's drill is
-    measured against other nets' copper at ``hole_clearance``.
+    pair's ``clearance`` and ``physical_clearance``, against a hole at its
+    ``hole_clearance``, ``physical_hole_clearance`` and ``physical_clearance``,
+    and against an NPTH slot also at its ``edge_clearance``; a new via's drill
+    is measured against other nets' copper at ``hole_clearance`` and
+    ``physical_hole_clearance``, and against every hole -- the routed net's
+    own and the other new vias' included -- at ``hole_to_hole`` (#6150).
 
     With ``rules`` every requirement is resolved per pair, with ``net_name``
     (the routed net; ``None`` when unknown) as the new copper's net (issue
-    #6122).  Without, copper uses ``required_mm`` and holes KiCad's defaults.
+    #6122).  Without, copper uses ``required_mm``, holes KiCad's defaults,
+    and the physical constraints (``.kicad_dru``-only) are not checked.
+    ``origin`` is the board origin, for the labels of new vias.
     """
     report = ConflictReport(required_mm=required_mm)
 
@@ -626,33 +672,61 @@ def find_conflicts(
         return item.net > 0 and item.net not in own_ids
 
     others = [i for i in items if _foreign(i)]
-    if not others or not (segments or vias):
+    # hole_to_hole is checked regardless of net (verified with kicad-cli 10.0.1).
+    all_holes = [i for i in items if i.kind == "hole"] if vias else []
+    if not (others or vias) or not (segments or vias):
         return report
     margin = max(
         required_mm,
         rules.max_requirement()
         if rules is not None
-        else max(KICAD_DEFAULT_HOLE_CLEARANCE_MM, KICAD_DEFAULT_EDGE_CLEARANCE_MM),
+        else max(
+            KICAD_DEFAULT_HOLE_CLEARANCE_MM,
+            KICAD_DEFAULT_EDGE_CLEARANCE_MM,
+            KICAD_DEFAULT_HOLE_TO_HOLE_MM,
+        ),
     )
     index = _Index(others, margin)
+    hole_index = _Index(all_holes, margin)
 
-    def _need(kind: str, new: ItemProps, other: ForeignItem, layer: str | None) -> float:
+    def _need(kind: str, new: ItemProps, other: ItemProps, layer: str | None) -> float:
         if rules is None:
             return {
                 "clearance": required_mm,
-                "hole_clearance": KICAD_DEFAULT_HOLE_CLEARANCE_MM,
-                "edge_clearance": KICAD_DEFAULT_EDGE_CLEARANCE_MM,
-            }[kind]
-        return rules.required(kind, new, other.props(), layer)
+                HOLE_CLEARANCE: KICAD_DEFAULT_HOLE_CLEARANCE_MM,
+                EDGE_CLEARANCE: KICAD_DEFAULT_EDGE_CLEARANCE_MM,
+                HOLE_TO_HOLE: KICAD_DEFAULT_HOLE_TO_HOLE_MM,
+            }.get(kind, 0.0)
+        return rules.required(kind, new, other, layer)
 
     def _record(kind: str, new_kind: str, other: ForeignItem, gap: float, need: float) -> bool:
         if kind == "clearance" and gap <= CLEARANCE_EPSILON_MM:
             report.conflicts.append(CopperConflict("short", new_kind, other, gap, need))
             return True
-        if gap < need - CLEARANCE_EPSILON_MM:
+        if kind in _HOLE_KINDS and gap <= CLEARANCE_EPSILON_MM:
+            # Copper (or a drill) across a hole: refused even where an
+            # ``ignore`` rule switches the check off -- the drill severs it.
+            report.conflicts.append(CopperConflict(kind, new_kind, other, gap, need))
+            return True
+        if need > 0 and gap < need - CLEARANCE_EPSILON_MM:
             report.conflicts.append(CopperConflict(kind, new_kind, other, gap, need))
             return True
         return False
+
+    def _measure(
+        kinds: Sequence[str],
+        new_kind: str,
+        new_props: ItemProps,
+        other: ForeignItem,
+        gap: float,
+        layer: str | None,
+    ) -> bool:
+        """Record the first of ``kinds`` the gap breaks, if any."""
+        other_props = other.props()
+        return any(
+            _record(kind, new_kind, other, gap, _need(kind, new_props, other_props, layer))
+            for kind in kinds
+        )
 
     def _check(
         new: KShape,
@@ -673,47 +747,47 @@ def find_conflicts(
                 if other.parent in in_conflict:
                     continue
                 gap = min(copper_gap(new, shape) for shape in other.shapes)
-                found = _record(
-                    "hole_clearance",
-                    new_kind,
-                    other,
-                    gap,
-                    _need("hole_clearance", new_props, other, layer),
-                )
-                if not found and other.slot_edge:
-                    found = _record(
-                        "edge_clearance",
-                        new_kind,
-                        other,
-                        gap,
-                        _need("edge_clearance", new_props, other, layer),
-                    )
-                hit |= found
+                kinds = [HOLE_CLEARANCE, PHYSICAL_HOLE_CLEARANCE]
+                if other.slot_edge:
+                    kinds.append(EDGE_CLEARANCE)
+                # A bare NPTH hole is no copper, but physical_clearance
+                # measures to it (verified with kicad-cli 10.0.1).
+                kinds.append(PHYSICAL_CLEARANCE)
+                if _measure(kinds, new_kind, new_props, other, gap, layer):
+                    in_conflict.add(other.label)
+                    hit = True
                 continue
             if layer is not None and other.layers is not None and layer not in other.layers:
                 found = False
             else:
                 gap = min(copper_gap(new, shape) for shape in other.shapes)
-                found = _record(
-                    "clearance", new_kind, other, gap, _need("clearance", new_props, other, layer)
+                found = _measure(
+                    ("clearance", PHYSICAL_CLEARANCE), new_kind, new_props, other, gap, layer
                 )
             if not found and new_hole is not None:
                 # The new via's drill, through every layer, against this copper.
                 gap = min(copper_gap(new_hole, shape) for shape in other.shapes)
-                found = _record(
-                    "hole_clearance",
+                found = _measure(
+                    (HOLE_CLEARANCE, PHYSICAL_HOLE_CLEARANCE),
                     new_kind,
+                    new_props,
                     other,
                     gap,
-                    _need("hole_clearance", new_props, other, None),
+                    None,
                 )
             if found:
                 in_conflict.add(other.label)
                 hit = True
+        if new_hole is not None:
+            # The new via's drill against every drilled hole, any net (#6150).
+            for other in hole_index.near(_shape_bbox(new_hole)):
+                if other.label in in_conflict or other.parent in in_conflict:
+                    continue
+                gap = min(copper_gap(new_hole, shape) for shape in other.shapes)
+                if _measure((HOLE_TO_HOLE,), new_kind, new_props, other, gap, None):
+                    hit = True
         return hit
 
-    seg_props = ItemProps("Track", net_name)
-    via_props = ItemProps("Via", net_name, True)
     for seg in segments:
         try:
             shape = KSegment(
@@ -725,10 +799,15 @@ def find_conflicts(
             )
         except (AttributeError, TypeError, ValueError):
             continue
+        layer = _layer_name(getattr(seg, "layer", None))
         report.segments_in_conflict += _check(
-            shape, _layer_name(getattr(seg, "layer", None)), "segment", seg_props
+            shape, layer, "segment", ItemProps("Track", net_name, layer=layer)
         )
-    for via in vias:
+
+    via_props = ItemProps("Via", net_name, True)
+    new_holes: list[tuple[int, KVia]] = []
+    via_hits: dict[int, bool] = {}
+    for i, via in enumerate(vias):
         try:
             x, y = float(via.x), float(via.y)
             new_via = KVia(x, y, float(getattr(via, "diameter", 0.0) or 0.0))
@@ -736,7 +815,33 @@ def find_conflicts(
         except (AttributeError, TypeError, ValueError):
             continue
         new_hole = KVia(x, y, drill) if drill > 0 else None
-        report.vias_in_conflict += _check(new_via, None, "via", via_props, new_hole)
+        via_hits[i] = _check(new_via, None, "via", via_props, new_hole)
+        if new_hole is not None:
+            new_holes.append((i, new_hole))
+
+    # The new vias' drills against each other: KiCad checks hole_to_hole
+    # within a net too.
+    if len(new_holes) > 1:
+        need = _need(HOLE_TO_HOLE, via_props, via_props, None)
+        for k, (i, hole_i) in enumerate(new_holes):
+            for j, hole_j in new_holes[k + 1 :]:
+                gap = copper_gap(hole_i, hole_j)
+                if gap > need + CLEARANCE_EPSILON_MM:
+                    continue
+                other = ForeignItem(
+                    kind="hole",
+                    net=0,
+                    net_name=net_name or "",
+                    label=f"drill of new via at {describe_point(hole_j.x, hole_j.y, origin)}",
+                    shapes=(hole_j,),
+                    layers=None,
+                    bbox=_shape_bbox(hole_j),
+                    owner="via",
+                    plated=True,
+                )
+                if _record(HOLE_TO_HOLE, "via", other, gap, need):
+                    via_hits[j] = True
+    report.vias_in_conflict += sum(via_hits.values())
     return report
 
 
@@ -764,28 +869,49 @@ def summarize_conflicts(report: ConflictReport, strategy_name: str) -> str:
             f"{', '.join(repr(n) for n in nets)} (closest: {worst.other.label} of "
             f"'{worst.other.net_label}'), {rule}"
         )
+    physical = report.physical_clearance
+    if physical:
+        worst = min(physical, key=lambda c: c.gap_mm - c.required_mm)
+        examples = list(dict.fromkeys(c.other.label for c in physical))
+        parts.append(
+            f"comes within {worst.gap_mm:.3f} mm of {'; '.join(examples[:3])}, below the "
+            f"{worst.required_mm:.3f} mm physical clearance"
+        )
     for conflicts, rule_name in (
         (report.hole_clearance, "hole clearance"),
+        (report.physical_hole_clearance, "physical hole clearance"),
         (report.edge_clearance, "board-edge clearance (an NPTH slot is board edge)"),
+        (report.hole_to_hole, "hole-to-hole clearance"),
     ):
         if not conflicts:
             continue
-        worst = min(conflicts, key=lambda c: c.gap_mm - c.required_mm)
-        examples = list(dict.fromkeys(c.other.label for c in conflicts))
-        how = (
-            "crosses"
-            if worst.gap_mm <= CLEARANCE_EPSILON_MM
-            else f"comes within {worst.gap_mm:.3f} mm of"
-        )
-        parts.append(
-            f"{how} drilled hole(s) ({'; '.join(examples[:3])}), below the "
-            f"{worst.required_mm:.3f} mm {rule_name}"
-        )
+        # A new via's drill against copper, or against another hole.
+        for group, subject, target in (
+            ([c for c in conflicts if c.other.kind != "hole"], "drills a via that ", "copper"),
+            (
+                [c for c in conflicts if c.other.kind == "hole"],
+                "drills a via that " if rule_name == "hole-to-hole clearance" else "",
+                "drilled hole(s)",
+            ),
+        ):
+            if not group:
+                continue
+            worst = min(group, key=lambda c: c.gap_mm - c.required_mm)
+            examples = list(dict.fromkeys(c.other.label for c in group))
+            how = (
+                "crosses"
+                if worst.gap_mm <= CLEARANCE_EPSILON_MM
+                else f"comes within {worst.gap_mm:.3f} mm of"
+            )
+            parts.append(
+                f"{subject}{how} {target} ({'; '.join(examples[:3])}), below the "
+                f"{worst.required_mm:.3f} mm {rule_name}"
+            )
     return (
         f"route-auto '{strategy_name}' strategy produced copper that "
         + "; and ".join(parts)
         + f" ({report.segments_in_conflict} segment(s), {report.vias_in_conflict} via(s)); "
-        "refusing it rather than writing it (issues #6001, #6107, #6122, #6139)."
+        "refusing it rather than writing it (issues #6001, #6107, #6122, #6139, #6150)."
     )
 
 

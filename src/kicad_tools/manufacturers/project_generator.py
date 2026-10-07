@@ -80,9 +80,12 @@ _NON_BLOCKING_SEVERITIES: dict[str, str] = {
 # rules as the standard-via backstop.  #3736 (board-04 judge) found that
 # backstop is non-functional under kicad-cli 10.0.1: any custom
 # ``solder_mask_margin`` rule (the unconditional "Solder Mask Clearance" rule
-# this generator always emits) SILENTLY SUPPRESSES ``via_diameter`` /
-# ``annular_width`` reporting from the other custom DRU rules -- a kicad-cli
-# bug, reproduced in tests/test_drc_constraints_export.py.  Net effect: a
+# this generator then emitted) SILENTLY SUPPRESSES ``via_diameter`` /
+# ``annular_width`` reporting from the other custom DRU rules, reproduced in
+# tests/test_drc_constraints_export.py.  The cause (#4999, re-verified in
+# #6150): ``solder_mask_margin`` is not a KiCad constraint keyword, so
+# kicad-cli discards the WHOLE ``.kicad_dru`` -- every custom rule -- without
+# an error.  The generator no longer emits it.  Net effect at the time: a
 # genuinely sub-spec STANDARD via passed kicad-cli silently.
 #
 # Fix: keep the BUILT-IN ``min_via_diameter`` / ``min_via_hole`` at the
