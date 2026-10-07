@@ -14,10 +14,22 @@ from kicad_tools.cli import runner
 def _isolate(monkeypatch):
     runner.find_kicad_cli.cache_clear()
     monkeypatch.delenv(runner.KICAD_CLI_PROBE_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(runner.KICAD_CLI_PROBE_FAILED_TTL_ENV, raising=False)
     monkeypatch.setattr(runner, "KICAD_CLI_PROBE_TIMEOUT", 0.5)
+    monkeypatch.setattr(runner, "_monotonic", _CLOCK)
+    _CLOCK.now = 1000.0
     yield
     runner.find_kicad_cli.cache_clear()
 
+
+class _FakeClock:
+    now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+_CLOCK = _FakeClock()
 
 FAKE = Path("/fake/kicad-cli")
 
@@ -64,7 +76,8 @@ def test_persistent_timeout_is_not_cached_as_absent(monkeypatch):
     # No stale negative cache entry.
     assert runner._lookup_cache == []
 
-    # The next call re-probes and now finds it.
+    # Once the probe_failed TTL (#5992) expires the next call re-probes.
+    _CLOCK.now += runner.KICAD_CLI_PROBE_FAILED_TTL + 1
     assert runner.find_kicad_cli() == FAKE
     assert len(probe.timeouts) == 3
     assert runner.locate_kicad_cli().found
@@ -185,3 +198,81 @@ def test_pipeline_zones_reports_probe_failure_distinctly(monkeypatch, tmp_path, 
     err = capsys.readouterr().err
     assert "WARNING: zones fill skipped" in err
     assert "WARNING: zones refill skipped" in err
+
+
+def test_probe_failed_reused_within_ttl_then_reprobed(monkeypatch):
+    probe = _ScriptedProbe([None, None, None, None, True])
+    _one_candidate(monkeypatch, probe)
+
+    first = runner.locate_kicad_cli()
+    assert first.probe_failed and len(probe.timeouts) == 2
+    # Within the TTL: no further probing, same (still probe_failed) verdict.
+    _CLOCK.now += runner.KICAD_CLI_PROBE_FAILED_TTL - 1
+    again = runner.locate_kicad_cli()
+    assert again is first and len(probe.timeouts) == 2
+    assert "not installed" not in again.reason
+    # After expiry: re-probed (and fails again -> new TTL window).
+    _CLOCK.now += 2
+    assert runner.locate_kicad_cli().probe_failed
+    assert len(probe.timeouts) == 4
+    _CLOCK.now += runner.KICAD_CLI_PROBE_FAILED_TTL + 1
+    assert runner.locate_kicad_cli().found
+
+
+def test_probe_failed_ttl_env_override(monkeypatch):
+    probe = _ScriptedProbe([None, None, None, None])
+    _one_candidate(monkeypatch, probe)
+    monkeypatch.setenv(runner.KICAD_CLI_PROBE_FAILED_TTL_ENV, "5")
+    runner.locate_kicad_cli()
+    _CLOCK.now += 4
+    runner.locate_kicad_cli()
+    assert len(probe.timeouts) == 2
+    _CLOCK.now += 2
+    runner.locate_kicad_cli()
+    assert len(probe.timeouts) == 4
+
+
+def test_found_not_cleared_by_clock(monkeypatch):
+    probe = _ScriptedProbe([True])
+    _one_candidate(monkeypatch, probe)
+    assert runner.locate_kicad_cli().found
+    _CLOCK.now += 10_000
+    assert runner.locate_kicad_cli().found
+    assert len(probe.timeouts) == 1
+
+
+def test_concurrent_lookups_share_one_probe(monkeypatch):
+    import threading
+
+    probe = _ScriptedProbe([None, None])
+    _one_candidate(monkeypatch, probe)
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(runner.locate_kicad_cli())) for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(results) == 4 and all(r.probe_failed for r in results)
+    assert len(probe.timeouts) == 2
+
+
+def test_real_hanging_cli_second_lookup_is_instant(tmp_path, monkeypatch):
+    """A kicad-cli that really hangs costs the probe once, then is cached."""
+    import time
+
+    d = tmp_path / "bin"
+    d.mkdir()
+    cli = d / "kicad-cli"
+    # exec so the hung process is the direct child that subprocess.run kills
+    # on timeout; no grandchild can leak.
+    cli.write_text("#!/bin/sh\nexec sleep 30\n")
+    cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(runner, "_kicad_cli_candidates", lambda: [cli])
+    monkeypatch.setattr(runner, "KICAD_CLI_PROBE_TIMEOUT", 0.3)
+
+    assert runner.locate_kicad_cli().probe_failed
+    t0 = time.monotonic()
+    assert runner.locate_kicad_cli().probe_failed
+    assert time.monotonic() - t0 < 0.2
