@@ -50,8 +50,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "GridRuleArea",
+    "escape_copper_rule_area_hit",
     "install_rule_area_keepouts",
     "rasterise_polygon",
+    "segment_hits_rule_area",
+    "via_hits_rule_area",
 ]
 
 
@@ -104,8 +107,14 @@ class GridRuleArea:
         ys = [p[1] for p in self.polygon]
         return (min(xs), min(ys), max(xs), max(ys))
 
-    def applies_to(self, net: int) -> bool:
-        """Same rule as ``lattice.obstacles.KeepoutArea.applies_to``."""
+    def applies_to(self, net: int | None) -> bool:
+        """Same rule as ``lattice.obstacles.KeepoutArea.applies_to``.
+
+        ``net=None`` (a caller with no net context) is treated as matching
+        every area -- the conservative answer.
+        """
+        if net is None:
+            return True
         if self.only is not None and net not in self.only:
             return False
         return net not in self.exempt
@@ -345,3 +354,128 @@ def mirror_rule_areas_to_cpp(grid: RoutingGrid, cpp_grid: Any) -> None:
             sorted(area.only or ()),
             sorted(area.exempt),
         )
+
+
+# ---------------------------------------------------------------------------
+# Escape-copper checks (Issue #6061)
+# ---------------------------------------------------------------------------
+#
+# The escape-stub generators (``escape.EscapeRouter``, ``subgrid.SubGridRouter``)
+# place copper by world-coordinate geometry, not by walking the occupancy
+# planes, so neither the static net-0 keepout cells nor the net-aware masks
+# reached them.  These helpers put the escape copper through the SAME grid
+# predicates the pathfinder uses (``RoutingGrid.rule_area_trace_blocked`` /
+# ``rule_area_via_blocked``, mirrored by the C++ ``Grid3D`` methods), with
+# ``include_static=True`` so the all-nets areas count too, and the same
+# clearance-inclusive kernel radii (``trace_width / 2 + trace_clearance`` and
+# ``via_diameter / 2 + via_clearance``, in cells).
+
+
+def _kernel_radius_cells(grid: RoutingGrid, half_extent_mm: float) -> int:
+    """Pathfinder kernel radius: ``max(1, ceil(round(mm / res, 6)))``."""
+    return max(1, math.ceil(round(float(half_extent_mm) / float(grid.resolution), 6)))
+
+
+def _has_rule_areas(grid: Any) -> bool:
+    return bool(getattr(grid, "_rule_area_keepouts", None))
+
+
+def _segment_cells(
+    grid: RoutingGrid, x1: float, y1: float, x2: float, y2: float
+) -> list[tuple[int, int]]:
+    """Grid cells under the segment's centreline, sampled at half a cell."""
+    length = math.hypot(x2 - x1, y2 - y1)
+    steps = max(1, math.ceil(length / (float(grid.resolution) * 0.5)))
+    seen: dict[tuple[int, int], None] = {}
+    for i in range(steps + 1):
+        t = i / steps
+        seen[grid.world_to_grid(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)] = None
+    return list(seen)
+
+
+def segment_hits_rule_area(
+    grid: RoutingGrid,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    layer_index: int,
+    net: int | None,
+    width: float,
+    clearance: float,
+) -> bool:
+    """``True`` when a trace segment on grid layer ``layer_index`` would enter
+    a track-blocking keepout rule area that applies to ``net`` (Issue #6061).
+
+    Both the all-nets areas (static cells) and the ``spatial_keepouts``-
+    filtered ones are consulted.  No-op (``False``) on a grid with no areas.
+    """
+    if not _has_rule_areas(grid):
+        return False
+    radius = _kernel_radius_cells(grid, width / 2.0 + clearance)
+    return any(
+        grid.rule_area_trace_blocked(gx, gy, layer_index, net, radius, include_static=True)
+        for gx, gy in _segment_cells(grid, x1, y1, x2, y2)
+    )
+
+
+def via_hits_rule_area(
+    grid: RoutingGrid,
+    x: float,
+    y: float,
+    net: int | None,
+    diameter: float,
+    clearance: float,
+) -> bool:
+    """``True`` when a via at ``(x, y)`` would enter a via-blocking keepout
+    rule area that applies to ``net``, or an all-nets track keepout (the
+    pathfinder rejects that site too) -- Issue #6061.
+    """
+    if not _has_rule_areas(grid):
+        return False
+    gx, gy = grid.world_to_grid(x, y)
+    radius = _kernel_radius_cells(grid, diameter / 2.0 + clearance)
+    return grid.rule_area_via_blocked(gx, gy, net, radius, include_static=True)
+
+
+def escape_copper_rule_area_hit(
+    grid: RoutingGrid,
+    segments: Iterable[Any],
+    vias: Iterable[Any],
+    net: int | None,
+    rules: Any,
+) -> str | None:
+    """Check a whole escape's copper against the grid's keepout rule areas.
+
+    Returns ``"via"`` / ``"track"`` naming the first offending primitive, or
+    ``None`` when the escape is clear (always ``None`` on a grid without
+    areas).  ``segments`` are ``primitives.Segment``-shaped (``x1..y2``,
+    ``width``, ``layer``); ``vias`` are ``primitives.Via``-shaped.
+    """
+    if not _has_rule_areas(grid):
+        return None
+    via_clearance = float(getattr(rules, "via_clearance", 0.0))
+    trace_clearance = float(getattr(rules, "trace_clearance", 0.0))
+    for via in vias:
+        if via is None:
+            continue
+        if via_hits_rule_area(grid, via.x, via.y, net, float(via.diameter), via_clearance):
+            return "via"
+    for seg in segments:
+        try:
+            layer_index = grid.layer_to_index(seg.layer.value)
+        except Exception:  # noqa: BLE001 -- a layer off the stack carries no area
+            continue
+        if segment_hits_rule_area(
+            grid,
+            seg.x1,
+            seg.y1,
+            seg.x2,
+            seg.y2,
+            layer_index,
+            net,
+            float(seg.width),
+            trace_clearance,
+        ):
+            return "track"
+    return None

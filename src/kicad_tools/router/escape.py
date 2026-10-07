@@ -7039,6 +7039,23 @@ class EscapeRouter:
         ):
             return False
 
+        # Issue #6061: keepout rule areas.  An all-nets track keepout is
+        # stamped as static net-0 cells WITHOUT ``is_obstacle``, and a
+        # via keepout lives only in the net-aware mask -- the cell test below
+        # sees neither.  Ask the pathfinder's own predicates instead.
+        if getattr(self.grid, "_rule_area_keepouts", None):
+            from .rule_area_grid import via_hits_rule_area
+
+            if via_hits_rule_area(
+                self.grid,
+                x,
+                y,
+                net,
+                via_diameter if via_diameter is not None else self.rules.via_diameter,
+                self.rules.via_clearance,
+            ):
+                return False
+
         # Check for obstacles in grid
         #
         # Issue #2963: Post-PR #2928, isolated pad-metal cells are
@@ -8881,6 +8898,11 @@ class EscapeRouter:
 
         # Issue #2998: counters for diagnostics on dropped escapes.
         skipped_seg_vs_via = 0
+        # Issue #6061: escapes whose stub or via lands in a keepout rule area.
+        skipped_rule_area = 0
+        check_rule_areas = bool(getattr(self.grid, "_rule_area_keepouts", None))
+        if check_rule_areas:
+            from .rule_area_grid import escape_copper_rule_area_hit
 
         # Issue #2998: track which escapes survived the gate so we can
         # mutate ``escapes`` in place after iteration (Python list
@@ -8900,6 +8922,40 @@ class EscapeRouter:
         # universe is visible to every segment validated in Pass B
         # regardless of escape order.
         probe_via_routes: list[Route] = []
+        if check_rule_areas:
+            # Issue #6061: the commit-time keepout gate.  Every escape
+            # dispatcher (BGA rings, QFP alternating, fine-pitch rows, SOP
+            # stagger, in-pad rescues, ...) funnels through here, so this is
+            # the one place that guarantees no escape copper lands inside a
+            # track- or via-blocking rule area applying to its net.  It runs
+            # BEFORE Pass A so a rejected escape's via never enters the probe
+            # list.  A dropped escape leaves its pad to the main router,
+            # whose A* honours the same areas.
+            kept: list[EscapeRoute] = []
+            for escape in escapes:
+                hit = escape_copper_rule_area_hit(
+                    self.grid,
+                    escape.segments,
+                    [escape.via] if escape.via is not None else [],
+                    escape.pad.net,
+                    self.rules,
+                )
+                if hit is None:
+                    kept.append(escape)
+                    continue
+                skipped_rule_area += 1
+                logger.info(
+                    "Escape commit: deferred %s pin %s (ref=%s) to main "
+                    "router -- escape %s enters a keepout rule area "
+                    "(Issue #6061).",
+                    escape.pad.net_name,
+                    escape.pad.pin,
+                    escape.pad.ref,
+                    hit,
+                )
+            if skipped_rule_area:
+                escapes[:] = kept
+
         for escape in escapes:
             if escape.via is None:
                 continue
