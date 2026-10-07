@@ -296,8 +296,12 @@ Every `kct check` finding in `--format json` carries two handles:
 - `evidence_hash` is a hash of the *local evidence*: the finding's location and
   measured values, the placement and pads of the footprints it names, and the
   pad membership of the nets it names. For a finding with a location, a net's
-  membership is limited to the pads near the finding: within 3 mm for
-  clearance, width and dimension rules, 5 mm otherwise, in board coordinates.
+  membership is limited to the pads near the finding: pads whose copper
+  outline (rotation and shape included, so a rectangle's corners count) comes
+  within 3 mm for clearance, width and dimension rules (for example
+  `clearance`, `clearance_*`, `dimensions`, `dimension_*`,
+  `width_consistency`, `mask_to_copper`), 5 mm otherwise, in board
+  coordinates.
   Adding a `GND` pad across the board therefore leaves a `GND` clearance
   waiver alone, while adding, removing or moving a nearby pad still makes it
   stale. Whole-net rules (`connectivity`, `single_pad_net`, `ampacity`,

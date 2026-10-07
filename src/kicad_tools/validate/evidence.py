@@ -66,9 +66,20 @@ EVIDENCE_HASH_PREFIX = EVIDENCE_HASH_VERSION + ":"
 # which a named net's pads count as evidence (Issue #6011).
 DEFAULT_NET_EVIDENCE_RADIUS_MM = 5.0
 
-# Per-rule radius overrides, matched by rule-id prefix (first match wins).
-# Clearance / width style findings are about the copper right at the
-# finding, so a few mm is plenty.
+# Per-rule radius overrides.  Clearance / width / dimension style findings
+# are about the copper right at the finding, so a few mm is plenty.
+#
+# Exact rule ids first (Issue #6041): the bare ids below would otherwise miss
+# every prefix (``clearance`` is not ``clearance_*``) and fall through to the
+# 5 mm default, contradicting the documented 3 mm for these rules.
+NET_EVIDENCE_RADIUS_BY_RULE: dict[str, float] = {
+    "clearance": 3.0,
+    "dimensions": 3.0,
+    "mask_to_copper": 3.0,
+    "width_consistency": 3.0,
+}
+
+# Then by rule-id prefix (first match wins).
 NET_EVIDENCE_RADIUS_BY_PREFIX: tuple[tuple[str, float], ...] = (
     ("clearance_", 3.0),
     ("edge_clearance_", 3.0),
@@ -135,6 +146,9 @@ def net_evidence_radius(rule_id: str) -> float | None:
     """
     if rule_id in GLOBAL_NET_EVIDENCE_RULES or rule_id.startswith(GLOBAL_NET_EVIDENCE_PREFIXES):
         return None
+    exact = NET_EVIDENCE_RADIUS_BY_RULE.get(rule_id)
+    if exact is not None:
+        return exact
     for prefix, radius in NET_EVIDENCE_RADIUS_BY_PREFIX:
         if rule_id.startswith(prefix):
             return radius
@@ -228,8 +242,34 @@ def _net_members(pcb: PCB) -> dict[str, list[str]]:
     return members
 
 
-# (ident, board_x, board_y, half_extent) for one pad of a net.
-_NetPad = tuple[str, float, float, float]
+# Copper outline of one pad, in the pad's own frame, as a (possibly
+# degenerate) axis-aligned core rectangle inflated by a radius:
+# (board_rotation_deg, core_half_w, core_half_h, inflate_radius).
+#
+# * ``rect`` / ``roundrect`` / ``trapezoid`` / ``custom`` / unknown: the full
+#   rectangle, radius 0.  A roundrect's copper lies inside it, so this is
+#   exact for rect and conservative (never excludes copper) for the rest.
+# * ``circle``: a point core inflated by the radius.
+# * ``oval``: a segment core along the major axis inflated by half the minor
+#   axis (a stadium), exactly KiCad's oval.
+_PadShape = tuple[float, float, float, float]
+
+# (ident, board_x, board_y, shape) for one pad of a net.
+_NetPad = tuple[str, float, float, _PadShape]
+
+
+def _pad_shape(pad: Any) -> _PadShape:
+    size = getattr(pad, "size", None) or (0.0, 0.0)
+    w = max(float(size[0]), 0.0)
+    h = max(float(size[1]), 0.0)
+    rot = float(getattr(pad, "rotation", 0.0) or 0.0)
+    shape = str(getattr(pad, "shape", "") or "").lower()
+    if shape == "circle":
+        return (rot, 0.0, 0.0, max(w, h) / 2.0)
+    if shape in ("oval", "obround"):
+        r = min(w, h) / 2.0
+        return (rot, w / 2.0 - r, h / 2.0 - r, r)
+    return (rot, w / 2.0, h / 2.0, 0.0)
 
 
 def _net_pads(pcb: PCB) -> dict[str, list[_NetPad]]:
@@ -244,14 +284,83 @@ def _net_pads(pcb: PCB) -> dict[str, list[_NetPad]]:
             if not pad.net_name:
                 continue
             ox, oy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation or 0.0)
-            size = getattr(pad, "size", None) or (0.0, 0.0)
-            # Half the diagonal bounds the pad's copper at every rotation
-            # (a rectangle's corner is farther out than max(w, h) / 2).
-            half = math.hypot(float(size[0]), float(size[1])) / 2.0
             pads_by_net.setdefault(pad.net_name, []).append(
-                (f"{ref}.{pad.number}", fx + ox, fy + oy, half)
+                (f"{ref}.{pad.number}", fx + ox, fy + oy, _pad_shape(pad))
             )
     return pads_by_net
+
+
+def _point_rect_distance(x: float, y: float, hx: float, hy: float) -> float:
+    """Distance from ``(x, y)`` to the solid rectangle ``[-hx, hx] x [-hy, hy]``."""
+    return math.hypot(max(abs(x) - hx, 0.0), max(abs(y) - hy, 0.0))
+
+
+def _point_segment_distance(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> float:
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy
+    t = 0.0 if length2 == 0.0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length2))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _segment_hits_rect(ax: float, ay: float, bx: float, by: float, hx: float, hy: float) -> bool:
+    """Liang-Barsky: does segment ``a-b`` touch ``[-hx, hx] x [-hy, hy]``?"""
+    dx, dy = bx - ax, by - ay
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, ax + hx), (dx, hx - ax), (-dy, ay + hy), (dy, hy - ay)):
+        if p == 0.0:
+            if q < 0.0:
+                return False
+            continue
+        t = q / p
+        if p < 0.0:
+            t0 = max(t0, t)
+        else:
+            t1 = min(t1, t)
+        if t0 > t1:
+            return False
+    return True
+
+
+def _segment_rect_distance(
+    ax: float, ay: float, bx: float, by: float, hx: float, hy: float
+) -> float:
+    """Distance from segment ``a-b`` to the solid rectangle ``[-hx, hx] x [-hy, hy]``."""
+    if _segment_hits_rect(ax, ay, bx, by, hx, hy):
+        return 0.0
+    # Disjoint convex sets: the closest pair involves a vertex of one of them.
+    best = min(_point_rect_distance(ax, ay, hx, hy), _point_rect_distance(bx, by, hx, hy))
+    for cx, cy in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
+        best = min(best, _point_segment_distance(cx, cy, ax, ay, bx, by))
+    return best
+
+
+def _pad_bbox_distance(
+    x: float, y: float, shape: _PadShape, bbox: tuple[float, float, float, float]
+) -> float:
+    """Exact distance from a pad's copper outline to the anchor ``bbox`` (0 if they touch).
+
+    The bbox (a point, segment or rectangle in board coordinates) is moved
+    into the pad's frame -- undoing the pad's absolute board rotation with
+    the same KiCad convention used to place it -- and measured against the
+    pad's core rectangle, less the shape's inflate radius.
+    """
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    rot, hx, hy, inflate = shape
+    x0, y0, x1, y1 = bbox
+    if x0 <= x <= x1 and y0 <= y <= y1:
+        return 0.0  # pad centre inside the bbox
+    corners = [
+        rotate_pad_offset(cx - x, cy - y, -rot) if rot else (cx - x, cy - y)
+        for cx, cy in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+    ]
+    dist = min(
+        _segment_rect_distance(*a, *b, hx, hy)
+        for a, b in zip(corners, corners[1:] + corners[:1], strict=True)
+    )
+    return max(dist - inflate, 0.0)
 
 
 class EvidenceContext:
@@ -280,10 +389,16 @@ def _local_net_pads(
     """Pads whose copper comes within ``radius`` of ``bbox``, with board positions."""
     x0, y0, x1, y1 = bbox
     local: list[list[Any]] = []
-    for ident, x, y, half in pads:
+    for ident, x, y, shape in pads:
+        # Cheap reject on the pad's enclosing circle, then the exact outline
+        # distance (Issue #6011 review: a rectangle's corner reaches further
+        # than ``max(w, h) / 2``).
         dx = max(x0 - x, 0.0, x - x1)
         dy = max(y0 - y, 0.0, y - y1)
-        if (dx * dx + dy * dy) ** 0.5 - half <= radius:
+        _rot, hx, hy, inflate = shape
+        if math.hypot(dx, dy) - (math.hypot(hx, hy) + inflate) > radius:
+            continue
+        if _pad_bbox_distance(x, y, shape, bbox) <= radius:
             local.append([ident, _round(x, _POS_DIGITS), _round(y, _POS_DIGITS)])
     local.sort(key=lambda row: (row[0], str(row[1:])))
     return local
