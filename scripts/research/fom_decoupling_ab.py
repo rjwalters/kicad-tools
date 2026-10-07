@@ -25,10 +25,15 @@ Speed: ``trace_length_excess`` calls the router's iterated 1-Steiner RSMT,
 whose pure-Python Prim is O(n^3) per trial MST; the 44-pad GND net on board
 03 takes ~2 min per placement, so 7 boards x 41 placements runs for hours.
 By default this script installs a numpy Prim batched across all Hanan
-candidates (same candidate order, same strict ``gain > best_gain`` rule,
-same final MST).  It was verified bit-identical to the production solver on
-all 41x10 board-04 term values and on board 03's GND net (243.5965 mm both
-ways, 111 s vs 0.6 s).  ``--exact-steiner`` disables it.
+candidates (same candidate order, same strict ``gain > best_gain`` rule).
+It is *not* bit-identical in general: Prim's float summation order differs,
+so on near-tied gains it can pick a different Steiner point (about 2% of
+random small point sets in review, final tree length usually equal, at most
+one 0.635 mm grid step apart).  On the calibration boards it matched the
+production solver exactly: all 41x10 board-04 term values, board 03's GND
+net (243.5965 mm both ways, 111 s vs 0.6 s), and spot-checks of boards 01,
+02 and 06.  Only ``trace_length_excess`` uses it, a column shared by both
+A/B arms.  ``--exact-steiner`` disables it.
 
 Usage::
 
@@ -72,7 +77,7 @@ def old_looks_like_power_net(net_name: str) -> bool:
 
 
 # ----------------------------------------------------------------------
-# Measurement-only batched 1-Steiner (bit-identical, see module docstring)
+# Measurement-only batched 1-Steiner (exact on the calibration boards; see module docstring)
 # ----------------------------------------------------------------------
 
 _exact_one_steiner = st._iterative_one_steiner
