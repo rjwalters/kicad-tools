@@ -24,6 +24,7 @@ import logging
 import math
 import os
 import time
+import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -1451,6 +1452,23 @@ class CppPathfinder:
         # existing ``_fallback_count`` / ``_resume_diagnostics`` lifetime.
         self._resume_loop_exhausted_seconds: float = 0.0
         self._python_fallback_seconds_by_reason: dict[str, float] = {}
+
+        # Issue #6098: memo of nets the pure-Python fallback has PROVEN
+        # unreachable.  When the Python A* drains its open set without ever
+        # popping a goal (``Router.last_route_exhausted``), the goal is
+        # unreachable under the Python search's own passability on that exact
+        # grid state.  The negotiated loop re-presents an unroutable net on
+        # every iteration, rescue pass and rip-up probe; re-running the
+        # 10-100x-slower search on an UNCHANGED grid can only repeat the proof
+        # (one walled-in net cost ~70 s of a 73 s ``route-auto
+        # --strategy hierarchical`` run).  Keyed by the request (pads, net
+        # class, mode, extra goals) and stamped with a fingerprint of the
+        # grid's passability state (:meth:`_py_grid_state_stamp`); any
+        # occupancy change misses the memo and the fallback runs again.
+        # Value: ``(stamp, seconds the proving search took)``.
+        self._python_unreachable: dict[tuple, tuple[tuple, float]] = {}
+        self._python_fallback_proven_skips: int = 0
+        self._python_fallback_seconds_saved: float = 0.0
 
         # Issue #3545: lazy cache for ``compute_component_pitches`` used
         # by the net-aware same-component carve-out gate in
@@ -3972,6 +3990,40 @@ class CppPathfinder:
                 )
                 return None
 
+        # Issue #6098: the Python A* already PROVED this exact request
+        # unreachable on this exact grid state (its open set drained with no
+        # goal popped).  The search is deterministic in passability, so the
+        # rerun can only fail again, 10-100x slower than the C++ search that
+        # just failed.  This runs only after a real C++ give-up, so the first
+        # failure of every request on every grid state still gets its Python
+        # attempt -- the fallback keeps its rescue value (#3456) wherever the
+        # Python search could genuinely do better.  Opt out with
+        # KICAD_ROUTER_SKIP_PROVEN_FALLBACK=0.
+        _memo_enabled = os.environ.get("KICAD_ROUTER_SKIP_PROVEN_FALLBACK", "1").strip() != "0"
+        _memo_key = (
+            self._python_unreachable_key(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                extra_goal_cells=extra_goal_cells,
+            )
+            if _memo_enabled
+            else None
+        )
+        _proof = self._python_unreachable.get(_memo_key) if _memo_key is not None else None
+        if _proof is not None and _proof[0] == self._py_grid_state_stamp(py_grid):
+            self._python_fallback_proven_skips += 1
+            self._python_fallback_seconds_saved += _proof[1]
+            logger.debug(
+                "Net %s: C++ pathfinder gave up (%s); skipping Python fallback "
+                "-- the Python A* already drained its open set for this request "
+                "on an unchanged grid (issue #6098)",
+                net_name,
+                reason,
+            )
+            return None
+
         # Issue #3456: the silent C++ -> Python downgrade is the bug.
         # A net grinding 3-7 minutes in the pure-Python A* is otherwise
         # indistinguishable from "router is slow" at default verbosity.
@@ -4082,6 +4134,16 @@ class CppPathfinder:
             self._python_fallback_seconds_by_reason.get(_fallback_bucket, 0.0) + dt
         )
 
+        # Issue #6098: record a drained search as an unreachability proof for
+        # this request on the current grid state.  ``route`` does not mutate
+        # the grid, so the post-search stamp is the state it searched.
+        if (
+            route is None
+            and _memo_key is not None
+            and getattr(self._py_router, "last_route_exhausted", False) is True
+        ):
+            self._python_unreachable[_memo_key] = (self._py_grid_state_stamp(py_grid), dt)
+
         if route is not None:
             self._fallback_count += 1
             self._fallback_nets.append(net_name)
@@ -4098,6 +4160,84 @@ class CppPathfinder:
             )
 
         return route
+
+    def _python_unreachable_key(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        net_class: NetClassRouting | None,
+        negotiated_mode: bool,
+        extra_goal_cells: set[tuple[int, int, int]] | None,
+    ) -> tuple:
+        """Identify a Python fallback request for the #6098 proof memo.
+
+        Covers every input that shapes the Python search's PASSABILITY: the
+        two pads (full dataclass ``repr`` -- position, size, layers, net), the
+        net class (trace width / clearance / avoided layers), negotiated
+        sharing, relief-probe mode and the Steiner extra goals.  Pure cost
+        knobs (``present_cost_factor``, ``weight``) are deliberately absent:
+        they reorder a drained search but cannot change which cells it
+        reaches.
+        """
+        return (
+            repr(start),
+            repr(end),
+            repr(net_class),
+            bool(negotiated_mode),
+            bool(self._relief_mode),
+            frozenset(extra_goal_cells) if extra_goal_cells else None,
+        )
+
+    # Grid arrays that only feed search COSTS, never passability, and change
+    # on every negotiated iteration -- fingerprinting them would defeat the
+    # #6098 memo without making it any safer.  ``_saved_*`` are rip-up
+    # snapshots the search never reads.
+    _COST_ONLY_GRID_ARRAYS = frozenset(
+        {"_history_cost", "_congestion", "_congestion_counted", "_present_cost_ema"}
+    )
+
+    @classmethod
+    def _py_grid_state_stamp(cls, py_grid) -> tuple:
+        """Fingerprint the Python grid state a fallback search reads (#6098).
+
+        Fingerprints CONTENT, not the #4794 occupancy generation: the
+        negotiated loop's rip-up/restore bumps the generation every iteration
+        even when the restored planes are byte-identical, which would make
+        every unroutable net miss the memo.  Covered state:
+
+        * a CRC of every passability array on the grid (``_blocked``,
+          ``_net``, pad copper, obstacles, zones, usage counts, ...);
+        * the stored-route halo registry (``_route_halo.marks``: every
+          committed segment / via and its radius), which the search's
+          route-aware clearance test reads beyond the rasterised planes;
+        * the identity of the fixed-fill obstacles and keepout rule areas,
+          installed once per grid.
+
+        Cheap next to the fallback it guards (~tens of ms on a 70x90 mm
+        4-layer board vs. seconds of pure-Python A*), and only computed after
+        a C++ give-up.
+        """
+        import numpy as np
+
+        crcs = tuple(
+            (name, zlib.crc32(np.ascontiguousarray(value).data))
+            for name, value in sorted(vars(py_grid).items())
+            if isinstance(value, np.ndarray)
+            and name not in cls._COST_ONLY_GRID_ARRAYS
+            and not name.startswith("_saved")
+        )
+        halo = getattr(py_grid, "_route_halo", None)
+        marks = getattr(halo, "marks", None)
+        halo_print = hash(frozenset(marks.items())) if marks is not None else None
+        rule_areas = getattr(py_grid, "_rule_area_keepouts", None)
+        return (
+            id(py_grid),
+            crcs,
+            halo_print,
+            id(getattr(py_grid, "fixed_fills", None)),
+            (id(rule_areas), len(rule_areas)) if rule_areas is not None else None,
+        )
 
     def set_relief_mode(self, enabled: bool) -> None:
         """Enable/disable the relief-probe mode (Issue #3438).
@@ -4157,6 +4297,13 @@ class CppPathfinder:
                   from ``resume_loop_exhausted_seconds`` -- that aggregate is
                   the discarded C++ search time *before* the fallback is
                   even invoked; this one is the fallback's own run time.
+                - python_fallback_proven_skips: Issue #6098.  Number of
+                  fallbacks skipped because the Python A* had already
+                  drained its open set for the same request on an unchanged
+                  grid (an unreachability proof).
+                - python_fallback_seconds_saved: Issue #6098.  Summed run time
+                  of the proving searches those skips did not repeat -- an
+                  estimate of the wall time saved.
         """
         return {
             "fallback_count": self._fallback_count,
@@ -4171,6 +4318,8 @@ class CppPathfinder:
             },
             "resume_loop_exhausted_seconds": self._resume_loop_exhausted_seconds,
             "python_fallback_seconds_by_reason": dict(self._python_fallback_seconds_by_reason),
+            "python_fallback_proven_skips": self._python_fallback_proven_skips,
+            "python_fallback_seconds_saved": self._python_fallback_seconds_saved,
         }
 
     @property

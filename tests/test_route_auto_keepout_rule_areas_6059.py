@@ -101,25 +101,8 @@ def _copper_in_rect(seg, rect: tuple[float, float, float, float]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def no_python_fallback(monkeypatch):
-    """Skip the pure-Python A* retry after the C++ search gives up.
-
-    The wall makes the net unroutable, and the hierarchical strategy's
-    negotiated loop re-tries it every iteration, rescue and rip-up probe.  Each
-    C++ "open set exhausted" then falls back to the pure-Python A*, which
-    exhausts the same grid 10-100x slower -- about 5 minutes per test.  The
-    keepouts live on the shared grid both searches read, so the C++ search
-    alone still exercises the enforcement under test.  Without the C++
-    backend the Python router is the primary search and this is a no-op.
-    """
-    from kicad_tools.router.cpp_backend import CppPathfinder
-
-    monkeypatch.setattr(CppPathfinder, "_try_python_fallback", lambda *a, **k: None)
-
-
 @pytest.mark.parametrize("strategy", ALL_STRATEGIES)
-def test_wall_is_never_crossed(tmp_path: Path, strategy: str, no_python_fallback) -> None:
+def test_wall_is_never_crossed(tmp_path: Path, strategy: str) -> None:
     result, out = _route(tmp_path, _board(_wall()), strategy)
 
     segments, vias = _written_copper(out)
@@ -147,7 +130,7 @@ def test_corridor_strategy_warns_once(tmp_path: Path, capsys) -> None:
     assert "#6059" in err
 
 
-def test_cli_route_auto_wall(tmp_path: Path, capsys, no_python_fallback) -> None:
+def test_cli_route_auto_wall(tmp_path: Path, capsys) -> None:
     """End to end through ``kct route-auto``: non-zero exit, nothing written."""
     src = _write(tmp_path, _board(_wall()))
     out = tmp_path / "cli_out.kicad_pcb"
