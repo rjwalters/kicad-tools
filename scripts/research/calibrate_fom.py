@@ -42,7 +42,11 @@ Usage::
         --candidates 2000 \\
         --pareto-gens 80
 
-A typical run on 7 in-repo boards takes ~5-15 minutes on a modern laptop.
+A default run on the 7 in-repo boards costs about 10 CPU-minutes, almost all
+of it Phase 1a term collection (41 placements x 7 boards); the weight search
+and Pareto sweep take seconds.  Measured after issue #6019: 580 s user time,
+29 min wall on a heavily loaded 8-core host.  Before #6019 the 1-Steiner
+solver behind ``trace_length_excess`` made the same run take many hours.
 """
 
 from __future__ import annotations
