@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     import numpy as np
 
     from .grid import CarveoutMode, RoutingGrid
+    from .pairwise_clearance import AttachZone
     from .pathfinder import Router
     from .primitives import Pad, Route
     from .rules import DesignRules, NetClassRouting
@@ -1510,7 +1511,7 @@ class CppPathfinder:
         # :meth:`_resolve_net_id` so a blocker-naming failure can report the
         # board's net NAME rather than a raw id.  ``None`` = not built yet.
         self._net_id_to_name_cache: dict[int, str] | None = None
-        self._attach_zones = ()
+        self._attach_zones: tuple[AttachZone, ...] = ()
 
         # Issue #4510 / Epic #4431 Phase 2a: lazily-built C++ payload for the
         # pairwise (HV-isolation) domain matrix + net-id-translated attach
@@ -4274,10 +4275,12 @@ class CppPathfinder:
             return None
         cached = getattr(self, "_fixed_fills_print_cache", None)
         if cached is not None and cached[0] is fills:
-            return cached[1]
+            cached_print: tuple[int, int] = cached[1]
+            return cached_print
         parts = []
         for fill in fills:
             geometry = fill.geometry
+            geom_key: bytes | str
             try:
                 geom_key = bytes(geometry.wkb)
             except Exception:
