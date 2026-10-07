@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any
 from kicad_tools._shapely import require_shapely
 from kicad_tools.core.layers import via_spans_layer as _via_spans_layer
 
+from ..copper_refs import board_origin, run_ref
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 from .clearance import _pad_on_layer, _pad_polygon
@@ -126,6 +127,18 @@ class _Obstacle:
     label: str
 
 
+def _run_item(run: _Run, layer: str, origin: tuple[float, float]) -> str:
+    """Geometry-based item for a run (Issue #6088; was the tracks' UUIDs)."""
+    return run_ref(
+        layer,
+        run.width,
+        run.tracks[0].points[0],
+        run.tracks[-1].points[-1],
+        len(run.tracks),
+        origin,
+    )
+
+
 class WidthConsistencyRule(DRCRule):
     """Flag width islands and unjustified width transitions on routed copper.
 
@@ -179,6 +192,7 @@ class WidthConsistencyRule(DRCRule):
         self.report_justified = report_justified
         self.node_tolerance_mm = node_tolerance_mm
         self._net_names: dict[int, str] = {}
+        self._origin: tuple[float, float] = (0.0, 0.0)
 
     # ------------------------------------------------------------------
     # Entry point
@@ -189,6 +203,7 @@ class WidthConsistencyRule(DRCRule):
         require_shapely("trace width-consistency audit")
 
         results = DRCResults()
+        self._origin = board_origin(pcb)  # sheet-frame item names (Issue #6088)
         results.rules_checked = 1
         results.rules_checked_by_rule[self.rule_id] = 1
         clearance = (
@@ -522,7 +537,7 @@ class WidthConsistencyRule(DRCRule):
             layer=layer,
             actual_value=round(run.length, 4),
             required_value=self.max_island_length_mm,
-            items=tuple(t.uuid for t in run.tracks if t.uuid),
+            items=(_run_item(run, layer, self._origin),),
             nets=(net,),
         )
 
@@ -597,6 +612,6 @@ class WidthConsistencyRule(DRCRule):
             layer=layer,
             actual_value=round(nearest[1], 4) if nearest is not None else None,
             required_value=clearance,
-            items=tuple(t.uuid for t in narrow.tracks if t.uuid),
+            items=(_run_item(narrow, layer, self._origin),),
             nets=(net,),
         )

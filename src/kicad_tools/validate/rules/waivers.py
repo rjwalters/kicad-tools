@@ -109,6 +109,7 @@ from pathlib import Path
 from typing import Any
 
 from kicad_tools.validate.evidence import (
+    KEY_SEPARATOR,
     current_evidence_hash_version,
     evidence_hash_version,
     is_outdated_evidence_hash,
@@ -154,38 +155,74 @@ def is_mistake_rule(rule: str) -> bool:
 # the per-line keys that replaced it.
 _GEOMETRY_SUFFIX = re.compile(r"\b((?:fp|gr)_[a-z]+)@[^\s,|)]+")
 
+# Copper tracks, arcs and vias named by geometry (``Trace@F.Cu:w0.25:...``,
+# ``Via@25.2/14.9:F.Cu-B.Cu:d0.3/s0.6``, Issue #6088) and by the UUID prefix
+# older builds used (``Trace-1a2b3c4d`` / ``Via-1a2b3c4d``; arcs were
+# ``Trace-...`` too).  Both coarsen to the bare kind, so an unused UUID-named
+# waiver can point at the geometry keys that replaced it.
+_COPPER_GEOMETRY = re.compile(r"\b(Trace|Arc|Via)@[^\s,|)]+")
+_LEGACY_COPPER = re.compile(r"\b(Trace|Via)-[^\s,|)]+")
+
 # Cap on the replacement keys listed in one unused-waiver hint.
 _MAX_REWAIVE_HINT_KEYS = 5
 
 
 def _coarsen(text: str) -> str:
-    """Strip per-primitive geometry suffixes from an item name or finding key."""
-    return _GEOMETRY_SUFFIX.sub(r"\1", text)
+    """Strip per-primitive geometry / identity from an item name."""
+    text = _GEOMETRY_SUFFIX.sub(r"\1", text)
+    text = _COPPER_GEOMETRY.sub(lambda m: "Via" if m.group(1) == "Via" else "Trace", text)
+    return _LEGACY_COPPER.sub(r"\1", text)
+
+
+def _coarsen_key(key: str) -> str:
+    """:func:`_coarsen` every item of a finding key, re-sorting the items field."""
+    parts = key.split(KEY_SEPARATOR)
+    if len(parts) >= 2:
+        parts[1] = ",".join(sorted(_coarsen(item) for item in parts[1].split(",") if item))
+    return KEY_SEPARATOR.join(parts)
+
+
+def _is_legacy_name(text: str) -> bool:
+    """True when ``text`` (a key or item) uses a pre-geometry item name."""
+    return bool(_LEGACY_COPPER.search(text)) or (
+        not _COPPER_GEOMETRY.search(text) and not _GEOMETRY_SUFFIX.search(text)
+    )
 
 
 def _rewaive_candidates(entry: Waiver, findings: Iterable[DRCViolation]) -> list[str]:
-    """Keys of active findings this unused ``entry`` named before per-line keys.
+    """Keys of active findings this unused ``entry`` named before geometry keys.
 
     Issue #6015: ``silkscreen_line_width`` (#5946) and ``silk_edge_clearance``
     (#6015) now name each offending silk line by its geometry, so a waiver
     written against the old coarse name (``fp_line`` / ``J1 (fp_line)``)
-    matches nothing.  Return the finding keys that *would* have matched had
-    their items been named the old way, so the unused advisory can tell the
-    user exactly what to re-waive.  Empty when nothing qualifies.
+    matches nothing.  Issue #6088 did the same for copper: tracks and vias
+    used to be named by UUID prefix (``Trace-1a2b3c4d``).  Return the finding
+    keys that *would* have matched had their items been named the old way
+    (for copper: same rule, nets, layer and item kinds), so the unused
+    advisory can tell the user exactly what to re-waive.  Empty when nothing
+    qualifies.
     """
     keys: list[str] = []
+    if entry.key is not None:
+        if not _is_legacy_name(entry.key):
+            return keys
+        entry_coarse = _coarsen_key(entry.key)
+    else:
+        if not all(_is_legacy_name(i) for i in entry.items):
+            return keys
+        entry_items = frozenset(_coarsen(i) for i in entry.items)
     for v in findings:
         if v.waived or not isinstance(v, DRCViolation):
             continue
         key = getattr(v, "key", "")
         if entry.key is not None:
-            hit = key != entry.key and _coarsen(key) == entry.key
+            hit = key != entry.key and _coarsen_key(key) == entry_coarse
         else:
             coarse = frozenset(_coarsen(i) for i in v.items)
             hit = (
                 v.rule_id == entry.rule
                 and coarse != frozenset(v.items)
-                and (not entry.items or coarse == entry.items)
+                and (not entry.items or coarse == entry_items)
                 and (not entry.nets or frozenset(v.nets) == entry.nets)
             )
         if hit and key not in keys:
@@ -670,8 +707,8 @@ def apply_waivers(
             more = len(candidates) - len(shown)
             listed = ", ".join(repr(k) for k in shown) + (f" (+{more} more)" if more else "")
             hint = (
-                " This rule now names each silk line by its geometry, so the old"
-                " coarse item name no longer matches; review and re-waive the"
+                " This rule now names silk lines, tracks and vias by their geometry,"
+                " so the old item name no longer matches; review and re-waive the"
                 f" matching finding(s) with {waive_command} KEY: {listed}."
             )
         else:

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..copper_refs import board_origin
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
 from .clearance import CopperElement, _segment_segment_clearance
@@ -238,10 +239,11 @@ class DiffPairClearanceIntraRule(DRCRule):
         separation is below the pair's intra threshold.
         """
         violations: list[DRCViolation] = []
+        origin = board_origin(pcb)  # sheet-frame item names (Issue #6088)
 
         # Segments only (segment-to-segment scope per Issue #2560).
         segments: list[CopperElement] = [
-            CopperElement.from_segment(seg) for seg in pcb.segments_on_layer(layer_name)
+            CopperElement.from_segment(seg, origin) for seg in pcb.segments_on_layer(layer_name)
         ]
 
         for i, elem1 in enumerate(segments):

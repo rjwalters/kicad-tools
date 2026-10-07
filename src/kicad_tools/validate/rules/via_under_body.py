@@ -52,6 +52,8 @@ from typing import TYPE_CHECKING, Any
 from kicad_tools._shapely import require_shapely
 from kicad_tools.geometry.package_body import footprint_side, package_body_polygon
 
+from ..copper_refs import board_origin
+from ..copper_refs import via_ref as copper_via_ref
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
 
@@ -215,6 +217,8 @@ class ViaUnderBodyRule(DRCRule):
         """
         del design_rules
         results = DRCResults()
+        # Issue #6088: vias are named by sheet-frame geometry, not UUID.
+        self._origin = board_origin(pcb)
         results.rules_checked = 1
 
         bodies: list[tuple[Footprint, Any, str, list[tuple[int, Any]]]] = []
@@ -272,7 +276,7 @@ class ViaUnderBodyRule(DRCRule):
         return any(via.net_number == net and polygon.covers(center) for net, polygon in thermal)
 
     def _make_violation(self, via: Via, footprint: Footprint, source: str) -> DRCViolation:
-        via_ref = f"Via-{via.uuid[:8]}" if via.uuid else "Via"
+        via_ref = copper_via_ref(via, getattr(self, "_origin", (0.0, 0.0)))
         net_name = via.net_name or ""
         net_text = f" (net '{net_name}')" if net_name else ""
         outline = "fab outline" if source == "fab" else "courtyard (no fab outline)"

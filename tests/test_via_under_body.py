@@ -9,10 +9,13 @@ Fixture layout (sheet-absolute):
 * U1 ``QFN-8-1EP_3x3mm`` at (110, 115): F.Fab body +-1.5mm (pin-1 chamfer),
   1.5x1.5mm exposed pad "9" on GND.
 * U2 ``SOIC-8`` at (122, 115): not selected by the default pattern.
-* Via-aaaaaaaa (SIG) at (110, 116.1): under U1's body, clear of the EP.
-* Via-bbbbbbbb (SIG) at (110, 116.85): 0.05mm outside U1's body.
-* Via-cccccccc (GND) at (110.3, 115.3): thermal via inside U1's EP.
-* Via-dddddddd (SIG) at (122, 115): under U2 (SOIC, not selected).
+* via aaaaaaaa (SIG) at (110, 116.1): under U1's body, clear of the EP.
+* via bbbbbbbb (SIG) at (110, 116.85): 0.05mm outside U1's body.
+* via cccccccc (GND) at (110.3, 115.3): thermal via inside U1's EP.
+* via dddddddd (SIG) at (122, 115): under U2 (SOIC, not selected).
+
+Findings name a via by its geometry (``Via@x/y:span:d<drill>/s<size>``,
+Issue #6088), not by its UUID.
 """
 
 from __future__ import annotations
@@ -151,7 +154,7 @@ class TestGeometry:
         assert len(found) == 1
         v = found[0]
         assert v.severity == "warning"
-        assert v.items == ("Via-aaaaaaaa", "U1")
+        assert v.items == ("Via@50/51.1:F.Cu-B.Cu:d0.3/s0.6", "U1")
         assert v.nets == ("SIG",)
         assert "U1" in v.message
 
@@ -408,14 +411,14 @@ class TestFixtureBoard:
     def test_fixture_default(self):
         pcb = PCB.load(str(FIXTURE))
         found = _run(pcb)
-        assert [v.items for v in found] == [("Via-aaaaaaaa", "U1")]
+        assert [v.items for v in found] == [("Via@110/116.1:F.Cu-B.Cu:d0.3/s0.6", "U1")]
 
     def test_fixture_thermal_disallowed(self):
         pcb = PCB.load(str(FIXTURE))
         found = _run(pcb, allow_thermal_pad_vias=False)
         assert sorted(v.items for v in found) == [
-            ("Via-aaaaaaaa", "U1"),
-            ("Via-cccccccc", "U1"),
+            ("Via@110.3/115.3:F.Cu-B.Cu:d0.3/s0.6", "U1"),
+            ("Via@110/116.1:F.Cu-B.Cu:d0.3/s0.6", "U1"),
         ]
 
     def test_checker_reports_sheet_absolute_location(self):
@@ -446,7 +449,7 @@ class TestCLI:
         assert rc == 0  # warnings never fail the plain gate
         found = [v for v in data["violations"] if v["rule_id"] == VIA_UNDER_BODY_RULE_ID]
         assert len(found) == 1
-        assert found[0]["items"] == ["Via-aaaaaaaa", "U1"]
+        assert found[0]["items"] == ["Via@110/116.1:F.Cu-B.Cu:d0.3/s0.6", "U1"]
         assert found[0]["severity"] == "warning"
         assert found[0]["location"] == [110.0, 116.1]
 
@@ -470,7 +473,7 @@ class TestCLI:
                     "waivers": [
                         {
                             "rule": VIA_UNDER_BODY_RULE_ID,
-                            "items": ["Via-aaaaaaaa", "U1"],
+                            "items": ["Via@110/116.1:F.Cu-B.Cu:d0.3/s0.6", "U1"],
                             "reason": "debug-only via, tented",
                             "issue": "test",
                         }

@@ -50,6 +50,7 @@ class _StubVia:
     net_number: int = 1
     net_name: str = "DATA"
     uuid: str = "abcdef12"
+    layers: tuple[str, ...] = ("F.Cu", "B.Cu")
 
 
 @dataclass
@@ -90,7 +91,8 @@ class TestViaInPadRule:
         v = violations[0]
         assert v.severity == "error"
         assert v.location == (10.0, 10.0)
-        assert v.items == ("Via-abcdef12", "U1-1")
+        # Issue #6088: vias are named by geometry, not by UUID.
+        assert v.items == ("Via@10/10:F.Cu-B.Cu:d0.3/s0.6", "U1-1")
         assert v.nets == ("DATA",)
         assert "U1-1" in v.message
         assert "via-in-pad" in v.message.lower()
@@ -190,7 +192,10 @@ class TestViaInPadRule:
         violations = [v for v in results.violations if v.rule_id == "via_in_pad"]
         assert len(violations) == 2
         via_refs = {v.items[0] for v in violations}
-        assert via_refs == {"Via-aaaa1111", "Via-bbbb2222"}
+        assert via_refs == {
+            "Via@9.7/10:F.Cu-B.Cu:d0.3/s0.6",
+            "Via@10.3/10:F.Cu-B.Cu:d0.3/s0.6",
+        }
 
     def test_rotated_footprint_pad_bbox_swapped(self):
         """A footprint rotated 90 deg swaps pad width/height when computing the bbox."""
@@ -438,7 +443,7 @@ def test_partial_drill_detection_honors_round_pad_outline():
         ],
     )
     result = ViaInPadRule().check(pcb, _StubDesignRules())
-    assert [v.items[0] for v in result.violations] == ["Via-overlap"]
+    assert [v.items[0] for v in result.violations] == ["Via@10.55/10:F.Cu-B.Cu:d0.2/s0.6"]
 
 
 def test_drill_overlap_uses_absolute_pad_angle():
@@ -455,7 +460,7 @@ def test_drill_overlap_uses_absolute_pad_angle():
         ],
     )
     result = ViaInPadRule().check(pcb, _StubDesignRules())
-    assert [v.items[0] for v in result.violations] == ["Via-overlap"]
+    assert [v.items[0] for v in result.violations] == ["Via@10/10.55:F.Cu-B.Cu:d0.2/s0.6"]
 
 
 class TestPhysicalHoleCensus:

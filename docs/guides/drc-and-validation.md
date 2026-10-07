@@ -292,7 +292,16 @@ Every `kct check` finding in `--format json` carries two handles:
 
 - `key` names *what* the finding is about: `rule_id|items|nets|layer`, sorted
   and independent of location or wording. For example,
-  `courtyards_overlap|C52,U10||F.Cu`.
+  `courtyards_overlap|C52,U10||F.Cu`. Tracks, arcs and vias are named by
+  their geometry, not their UUID, so a re-route that lays down the same
+  copper (seeded or not) keeps the same keys:
+  `Trace@<layer>:w<width>:<x1>/<y1>~<x2>/<y2>`,
+  `Arc@<layer>:w<width>:<start>~<mid>~<end>` and
+  `Via@<x>/<y>:<top>-<bottom>:d<drill>/s<size>`, in sheet coordinates
+  rounded to 1 µm with the end points in a fixed order. For example,
+  `clearance_segment_via|Trace@F.Cu:w0.25:24.2/15~24.7/15.5,Via@25.2/14.9:F.Cu-B.Cu:d0.3/s0.6|GND,NET1|F.Cu`.
+  Copper that moves by more than 1 µm gets a new key, so its waiver stops
+  matching (Issue #6088).
 - `evidence_hash` is a hash of the *local evidence*: the finding's location and
   measured values, the placement and pads of the footprints it names, and the
   pad membership of the nets it names. For a finding with a location, a net's
@@ -702,7 +711,7 @@ Increase via pad size or use larger drill.
 
 ### Via Under Package Body
 
-**Warning:** `via_under_body` — `Via-1a2b3c4d (net 'SDA') ... is under the package body of U3 (Package_DFN_QFN:QFN-24-1EP_4x4mm...)`
+**Warning:** `via_under_body` — `Via@112.5/80.25:F.Cu-B.Cu:d0.3/s0.6 (net 'SDA') ... is under the package body of U3 (Package_DFN_QFN:QFN-24-1EP_4x4mm...)`
 
 KiCad's DRC accepts a via hidden under a QFN/DFN/SON/LGA body as long as it
 clears the pads, but after assembly it can't be probed, inspected or
@@ -713,7 +722,8 @@ outline. Thermal vias inside the part's own exposed pad, on that pad's
 net, are allowed.
 
 **Fix:** Move the via outside the package outline, or waive it in
-`.kct_waivers.json` with `"items": ["Via-1a2b3c4d", "U3"]`. The rule is
+`.kct_waivers.json` with `"items": ["Via@112.5/80.25:F.Cu-B.Cu:d0.3/s0.6", "U3"]`
+(the via is named by its position, layer span, drill and size). The rule is
 advisory (warning severity), so it only fails `kct check` under `--strict`.
 It is on by default, so a board that passed `--strict` (or any gate that
 counts warnings) before upgrading can newly fail on it. To opt out of the
