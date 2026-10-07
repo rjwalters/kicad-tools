@@ -538,13 +538,21 @@ class RoutingOrchestrator:
         return self._board_holes_cache
 
     def _clearance_rules(self) -> BoardClearanceRules | None:
-        """The board's per-pair clearance rules (cached, #6122); ``None`` without a file."""
+        """The board's per-pair clearance rules (cached, #6122); ``None`` without a file.
+
+        Warns once when the board's ``.kicad_dru`` is one ``kicad-cli`` would
+        discard whole, so its rules are not applied (#6150).
+        """
         if not self._clearance_rules_resolved:
             self._clearance_rules_resolved = True
             try:
                 self._clearance_rules_cache = board_clearance_rules(self._board_path())
             except Exception:  # defensive: rule reading must never crash routing
                 self._clearance_rules_cache = None
+            error = getattr(self._clearance_rules_cache, "dru_error", None)
+            if error:
+                logger.warning(error)
+                print(f"Warning: {error}", file=sys.stderr)
         return self._clearance_rules_cache
 
     def _net_required_clearance(self, net_name: str) -> float:
@@ -640,6 +648,7 @@ class RoutingOrchestrator:
             required_mm=required,
             rules=self._clearance_rules(),
             net_name=net_name,
+            origin=tuple(getattr(self.pcb, "_board_origin", (0.0, 0.0)) or (0.0, 0.0)),
         )
 
     def _enforce_no_foreign_shorts(self, result: RoutingResult, strategy: RoutingStrategy) -> None:

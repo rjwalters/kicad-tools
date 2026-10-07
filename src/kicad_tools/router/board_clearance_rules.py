@@ -16,12 +16,16 @@ or against an NPTH **slot**, which KiCad treats as board edge
 
 The model, verified against ``kicad-cli pcb drc`` 10.0.1
 ---------------------------------------------------------
-For each constraint (``clearance``, ``hole_clearance``, ``edge_clearance``):
+For each constraint (``clearance``, ``hole_clearance``, ``edge_clearance``,
+``hole_to_hole``, ``physical_clearance``, ``physical_hole_clearance``):
 
 1. The ``.kicad_dru`` rules are tried **last to first**; the last rule whose
    ``(condition ...)`` and ``(layer ...)`` match the pair wins outright -- it
    overrides the netclass *and* the board minimum, in both directions.  A
    condition is tried with the items in both orders (``A``/``B`` swapped).
+   A winning rule with ``(severity ignore)`` switches the check off for
+   that pair: it does **not** fall through to a lower rule or the default
+   (issue #6150).  Its requirement is 0.
 2. With no matching rule:
 
    * ``clearance`` is ``max(netclass(A), netclass(B), board min_clearance)``;
@@ -29,7 +33,21 @@ For each constraint (``clearance``, ``hole_clearance``, ``edge_clearance``):
      default 0.25 mm when the project does not declare it).  Netclass
      clearance does not apply to a bare hole;
    * ``edge_clearance`` is ``.kicad_pro`` ``min_copper_edge_clearance``
-     (KiCad's default 0.5 mm).
+     (KiCad's default 0.5 mm);
+   * ``hole_to_hole`` (drill edge to drill edge) is ``.kicad_pro``
+     ``min_hole_to_hole`` (KiCad's default 0.25 mm);
+   * ``physical_clearance`` and ``physical_hole_clearance`` have no default:
+     only a ``.kicad_dru`` rule sets them.
+
+``physical_clearance``, ``physical_hole_clearance`` and ``hole_to_hole`` apply
+between items of the **same** net too.  KiCad reports the first two as
+``clearance`` / ``hole_clearance`` violations.
+
+A ``.kicad_dru`` that ``kicad-cli`` cannot parse -- a syntax error, a
+constraint keyword or severity it does not know (``solder_mask_margin`` is
+one) -- makes it ignore **every** custom rule in the file, silently.  The
+gate does the same, but says so: :attr:`BoardClearanceRules.dru_error`
+carries the reason and ``kct route-auto`` prints it as a warning.
 
 Conditions
 ----------
@@ -43,12 +61,15 @@ these item properties:
 * ``A.Pad_Type`` of a pad (``'SMD'``, ``'Through-hole'``,
   ``'NPTH, mechanical'``) -- the fleet's JLCPCB ``.kicad_dru`` keys its hole
   rules on it;
-* ``A.hasNetclass('X')``, ``A.isPlated()``.
+* ``A.hasNetclass('X')``, ``A.isPlated()``;
+* ``A.Layer`` of a track: its layer, compared **case-sensitively** with
+  ``*`` / ``?`` wildcards (``'F.*'`` and ``'*.Cu'`` match ``F.Cu``,
+  ``'f.cu'`` does not).  A via's or pad's ``Layer`` is KiCad's null.
 
 Everything else -- ``A.insideArea(...)`` / ``intersectsArea`` /
-``enclosedByArea``, ``A.Layer``, numeric properties -- evaluates to
-**unknown**.  A track's or via's ``Pad_Type`` is KiCad's null, which compares
-false under both ``==`` and ``!=``.  The evaluator is
+``enclosedByArea``, numeric properties -- evaluates to **unknown**.  A track's
+or via's ``Pad_Type``, and a via's or pad's ``Layer``, is KiCad's null, which
+compares false under both ``==`` and ``!=``.  The evaluator is
 three-valued, and an unknown rule is handled **conservatively**: it is
 treated as possibly applying, so the requirement is the *largest* of the
 values it could resolve to (the unknown rule's own value and whatever a
@@ -71,6 +92,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import logging
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -83,11 +105,81 @@ KICAD_DEFAULT_CLEARANCE_MM = 0.2
 KICAD_DEFAULT_HOLE_CLEARANCE_MM = 0.25
 #: KiCad's default board-setup ``min_copper_edge_clearance``, in mm.
 KICAD_DEFAULT_EDGE_CLEARANCE_MM = 0.5
+#: KiCad's default board-setup ``min_hole_to_hole``, in mm.
+KICAD_DEFAULT_HOLE_TO_HOLE_MM = 0.25
+
+logger = logging.getLogger(__name__)
 
 CLEARANCE = "clearance"
 HOLE_CLEARANCE = "hole_clearance"
 EDGE_CLEARANCE = "edge_clearance"
-_CONSTRAINTS = (CLEARANCE, HOLE_CLEARANCE, EDGE_CLEARANCE)
+HOLE_TO_HOLE = "hole_to_hole"
+PHYSICAL_CLEARANCE = "physical_clearance"
+PHYSICAL_HOLE_CLEARANCE = "physical_hole_clearance"
+#: KiCad's older spellings of the two physical constraints; it reports them
+#: under the same violation types (``clearance`` / ``hole_clearance``), so the
+#: gate evaluates them as the ``physical_*`` equivalents.
+_CONSTRAINT_ALIASES = {
+    "mechanical_clearance": PHYSICAL_CLEARANCE,
+    "mechanical_hole_clearance": PHYSICAL_HOLE_CLEARANCE,
+}
+_CONSTRAINTS = (
+    CLEARANCE,
+    HOLE_CLEARANCE,
+    EDGE_CLEARANCE,
+    HOLE_TO_HOLE,
+    PHYSICAL_CLEARANCE,
+    PHYSICAL_HOLE_CLEARANCE,
+)
+
+#: Every ``(constraint ...)`` keyword ``kicad-cli`` 10.0.1 accepts, each
+#: verified by probing it beside a rule it would otherwise drop (issue #6150).
+#: Any other keyword -- ``solder_mask_margin``, ``max_uncoupled`` -- makes
+#: KiCad discard the whole file.
+KICAD_CONSTRAINT_KEYWORDS = frozenset(
+    {
+        "annular_width",
+        "assertion",
+        "bridged_mask",
+        "clearance",
+        "connection_width",
+        "courtyard_clearance",
+        "creepage",
+        "diff_pair_gap",
+        "diff_pair_uncoupled",
+        "disallow",
+        "edge_clearance",
+        "hole_clearance",
+        "hole_size",
+        "hole_to_hole",
+        "length",
+        "mechanical_clearance",
+        "mechanical_hole_clearance",
+        "min_resolved_spokes",
+        "physical_clearance",
+        "physical_hole_clearance",
+        "silk_clearance",
+        "skew",
+        "solder_mask_expansion",
+        "solder_mask_sliver",
+        "solder_paste_abs_margin",
+        "solder_paste_rel_margin",
+        "text_height",
+        "text_thickness",
+        "thermal_relief_gap",
+        "thermal_spoke_width",
+        "track_angle",
+        "track_segment_length",
+        "track_width",
+        "via_count",
+        "via_dangling",
+        "via_diameter",
+        "zone_connection",
+    }
+)
+#: The ``(severity ...)`` values ``kicad-cli`` 10.0.1 accepts; any other
+#: (``info``) makes it discard the whole file.
+KICAD_RULE_SEVERITIES = frozenset({"error", "warning", "ignore", "exclusion"})
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +202,15 @@ class ItemProps:
             ``False`` for an NPTH pad.
         pad_type: KiCad's ``Pad_Type`` of a pad (``"SMD"``,
             ``"Through-hole"``, ``"NPTH, mechanical"``).
+        layer: A track's copper layer (``"F.Cu"``), its ``Layer`` property.
+            Ignored for a via or pad, whose ``Layer`` is KiCad's null.
     """
 
     type: str | None
     net_name: str | None
     plated: bool | None = None
     pad_type: str | None = None
+    layer: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +226,12 @@ class DruRule:
     condition: str | None
     layer: str | None
     constraints: tuple[tuple[str, float], ...]
+    severity: str | None = None
+
+    @property
+    def ignored(self) -> bool:
+        """``(severity ignore)``: where this rule wins, KiCad checks nothing."""
+        return self.severity == "ignore"
 
     def value(self, constraint: str) -> float | None:
         for kind, value in self.constraints:
@@ -158,24 +259,41 @@ def _parse_length_mm(raw: object) -> float | None:
         return None
 
 
-def read_dru_rules(dru_path: str | Path) -> list[DruRule]:
-    """The ``clearance`` / ``hole_clearance`` / ``edge_clearance`` rules of a
-    ``.kicad_dru``, in file order.  Missing or malformed files give ``[]``."""
+def parse_dru(dru_path: str | Path) -> tuple[list[DruRule], str | None]:
+    """The gate's rules of a ``.kicad_dru``, in file order, and why it was rejected.
+
+    Returns ``(rules, None)`` for a file ``kicad-cli`` accepts, and
+    ``([], reason)`` for one it would discard whole -- a syntax error, or a
+    constraint keyword or severity it does not know (issue #6150).  A
+    missing file gives ``([], None)``.
+    """
     try:
         text = Path(dru_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return []
+        return [], None
     try:
         from kicad_tools.sexp import parse_string
 
         tree = parse_string("(rules " + text + ")")
-    except Exception:
-        return []
+    except Exception as exc:
+        return [], f"it does not parse ({type(exc).__name__}: {exc})"
 
     rules: list[DruRule] = []
     for rule in tree.find_all("rule"):
         atoms = rule.get_atoms()
         name = str(atoms[0]) if atoms else ""
+        for constraint in rule.find_all("constraint"):
+            c_atoms = constraint.get_atoms()
+            keyword = str(c_atoms[0]) if c_atoms else ""
+            if keyword not in KICAD_CONSTRAINT_KEYWORDS:
+                return [], f"rule {name!r} has an unknown constraint {keyword!r}"
+        severity_node = rule.find_child("severity")
+        severity = None
+        if severity_node is not None:
+            raw = severity_node.get_first_atom()
+            severity = str(raw).casefold() if raw is not None else ""
+            if severity not in KICAD_RULE_SEVERITIES:
+                return [], f"rule {name!r} has an unknown severity {severity!r}"
         cond_node = rule.find_child("condition")
         condition = None
         if cond_node is not None:
@@ -189,7 +307,10 @@ def read_dru_rules(dru_path: str | Path) -> list[DruRule]:
         constraints: list[tuple[str, float]] = []
         for constraint in rule.find_all("constraint"):
             c_atoms = constraint.get_atoms()
-            if not c_atoms or str(c_atoms[0]) not in _CONSTRAINTS:
+            if not c_atoms:
+                continue
+            c_name = _CONSTRAINT_ALIASES.get(str(c_atoms[0]), str(c_atoms[0]))
+            if c_name not in _CONSTRAINTS:
                 continue
             minimum = constraint.find_child("min")
             if minimum is None:
@@ -197,10 +318,32 @@ def read_dru_rules(dru_path: str | Path) -> list[DruRule]:
             value = _parse_length_mm(minimum.get_first_atom())
             if value is None or value < 0:
                 continue
-            constraints.append((str(c_atoms[0]), value))
+            constraints.append((c_name, value))
         if constraints:
-            rules.append(DruRule(name, condition, layer, tuple(constraints)))
+            rules.append(DruRule(name, condition, layer, tuple(constraints), severity))
+    return rules, None
+
+
+def read_dru_rules(dru_path: str | Path) -> list[DruRule]:
+    """The gate's rules of a ``.kicad_dru`` (see :func:`parse_dru`), in file order.
+
+    A file ``kicad-cli`` would discard gives ``[]`` -- as KiCad applies none
+    of its rules -- and logs a warning saying why.
+    """
+    rules, error = parse_dru(dru_path)
+    if error is not None:
+        logger.warning(dru_error_message(dru_path, error))
     return rules
+
+
+def dru_error_message(dru_path: str | Path, error: str) -> str:
+    """The warning for a ``.kicad_dru`` that ``kicad-cli`` discards whole."""
+    return (
+        f"{Path(dru_path).name}: {error}. kicad-cli ignores every custom rule in a "
+        ".kicad_dru it cannot parse, without an error; route-auto's clearance gate "
+        "does the same and falls back to the .kicad_pro netclasses and board "
+        "minimums (issue #6150). Fix the file to have its rules enforced."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +374,15 @@ class _Null:
 
 
 _NULL = _Null()
+
+
+class _LayerName(str):
+    """A track's ``Layer``: compared case-sensitively, with wildcards.
+
+    Verified with ``kicad-cli`` 10.0.1: ``A.Layer == 'F.*'`` and ``'*.Cu'``
+    match a track on ``F.Cu``; ``'f.cu'`` does not.
+    """
+
 
 _TOKEN_RE = re.compile(
     r"""
@@ -370,7 +522,15 @@ class _Evaluator:
         if left is _NULL or right is _NULL:
             return False
         if op in ("==", "!="):
-            if isinstance(left, str) and isinstance(right, str):
+            if isinstance(left, _LayerName) or isinstance(right, _LayerName):
+                if not (isinstance(left, str) and isinstance(right, str)):
+                    return None
+                eq = (
+                    left == right
+                    or fnmatch.fnmatchcase(left, right)
+                    or fnmatch.fnmatchcase(right, left)
+                )
+            elif isinstance(left, str) and isinstance(right, str):
                 eq = _strings_equal(left, right)
             elif isinstance(left, (int, float)) and isinstance(right, (int, float)):
                 eq = left == right
@@ -447,6 +607,12 @@ class _PairContext:
             if item.type in ("Track", "Via"):
                 return _NULL
             return _UNKNOWN if item.pad_type is None else item.pad_type
+        if name == "layer":
+            if item.type in ("Via", "Pad"):
+                return _NULL  # verified with kicad-cli 10.0.1 (issue #6150)
+            if item.type == "Track" and item.layer is not None:
+                return _LayerName(item.layer)
+            return _UNKNOWN
         return _UNKNOWN
 
     def call(self, text: str, args: list[Any]) -> Any:
@@ -518,7 +684,10 @@ class BoardClearanceRules:
     min_clearance: float | None = None
     min_hole_clearance: float = KICAD_DEFAULT_HOLE_CLEARANCE_MM
     min_edge_clearance: float = KICAD_DEFAULT_EDGE_CLEARANCE_MM
+    min_hole_to_hole: float = KICAD_DEFAULT_HOLE_TO_HOLE_MM
     dru_rules: list[DruRule] = field(default_factory=list)
+    #: Why the ``.kicad_dru`` was discarded (see :func:`parse_dru`), else ``None``.
+    dru_error: str | None = None
     _cache: dict[tuple[Any, ...], float] = field(default_factory=dict, repr=False)
 
     # -- loading ------------------------------------------------------------
@@ -527,7 +696,12 @@ class BoardClearanceRules:
     def from_board(cls, pcb_path: str | Path) -> BoardClearanceRules:
         """Read the ``.kicad_pro`` / ``.kicad_dru`` beside ``pcb_path``.  Never raises."""
         path = Path(pcb_path)
-        rules = cls(dru_rules=read_dru_rules(path.with_suffix(".kicad_dru")))
+        dru_path = path.with_suffix(".kicad_dru")
+        dru_rules, error = parse_dru(dru_path)
+        rules = cls(
+            dru_rules=dru_rules,
+            dru_error=None if error is None else dru_error_message(dru_path, error),
+        )
         try:
             data = json.loads(path.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -551,6 +725,9 @@ class BoardClearanceRules:
                 value = _parse_length_mm(section.get("min_copper_edge_clearance"))
                 if value is not None and value >= 0:
                     self.min_edge_clearance = value
+                value = _parse_length_mm(section.get("min_hole_to_hole"))
+                if value is not None and value >= 0:
+                    self.min_hole_to_hole = value
         net_settings = data.get("net_settings")
         if not isinstance(net_settings, dict):
             return
@@ -616,7 +793,11 @@ class BoardClearanceRules:
             return value
         if constraint == HOLE_CLEARANCE:
             return self.min_hole_clearance
-        return self.min_edge_clearance
+        if constraint == EDGE_CLEARANCE:
+            return self.min_edge_clearance
+        if constraint == HOLE_TO_HOLE:
+            return self.min_hole_to_hole
+        return 0.0  # physical_clearance / physical_hole_clearance: rules only
 
     def required(
         self, constraint: str, a: ItemProps, b: ItemProps, layer: str | None = None
@@ -624,7 +805,7 @@ class BoardClearanceRules:
         """The ``constraint`` minimum KiCad applies between ``a`` and ``b`` on ``layer``.
 
         The largest value it could be when a rule's condition is unknown
-        (see the module docstring).
+        (see the module docstring).  0 where an ``ignore`` rule wins.
         """
         key = (constraint, a, b, layer)
         cached = self._cache.get(key)
@@ -647,7 +828,7 @@ class BoardClearanceRules:
                 )
             if applies is False:
                 continue
-            candidates.append(value)
+            candidates.append(0.0 if rule.ignored else value)
             if applies is True:
                 settled = True
                 break
@@ -666,6 +847,17 @@ class BoardClearanceRules:
     def edge_clearance(self, a: ItemProps, b: ItemProps, layer: str | None = None) -> float:
         return self.required(EDGE_CLEARANCE, a, b, layer)
 
+    def hole_to_hole(self, a: ItemProps, b: ItemProps, layer: str | None = None) -> float:
+        return self.required(HOLE_TO_HOLE, a, b, layer)
+
+    def physical_clearance(self, a: ItemProps, b: ItemProps, layer: str | None = None) -> float:
+        return self.required(PHYSICAL_CLEARANCE, a, b, layer)
+
+    def physical_hole_clearance(
+        self, a: ItemProps, b: ItemProps, layer: str | None = None
+    ) -> float:
+        return self.required(PHYSICAL_HOLE_CLEARANCE, a, b, layer)
+
     def board_clearance(self) -> float:
         """Copper clearance between two unassigned (``Default``-class) tracks.
 
@@ -680,7 +872,8 @@ class BoardClearanceRules:
 
         What a router must keep that net's new tracks and vias from every other
         net on the board (``""`` stands for unassigned copper and is always
-        included) so that no pair the gate measures is too close.
+        included) so that no pair the gate measures is too close: the larger
+        of each pair's ``clearance`` and ``physical_clearance``.
         """
         best = 0.0
         names = set(counterparts) | {""}
@@ -689,9 +882,11 @@ class BoardClearanceRules:
         for other in names:
             for ta in ("Track", "Via"):
                 for tb in ("Track", "Via", "Pad"):
+                    a, b = ItemProps(ta, net_name), ItemProps(tb, other)
                     best = max(
                         best,
-                        self.clearance(ItemProps(ta, net_name), ItemProps(tb, other), None),
+                        self.clearance(a, b, None),
+                        self.physical_clearance(a, b, None),
                     )
         return best
 
@@ -701,6 +896,7 @@ class BoardClearanceRules:
             self.default_class_clearance(),
             self.min_hole_clearance,
             self.min_edge_clearance,
+            self.min_hole_to_hole,
             *self.class_clearance.values(),
         ]
         if self.min_clearance is not None:
@@ -723,16 +919,24 @@ PAD_TYPE_NAMES = {
 
 
 def item_props_for_type(
-    kind: str, net_name: str | None, plated: bool | None = None, pad_type: str | None = None
+    kind: str,
+    net_name: str | None,
+    plated: bool | None = None,
+    pad_type: str | None = None,
+    layer: str | None = None,
 ) -> ItemProps:
     """:class:`ItemProps` for a gate item kind (``track``/``arc``/``via``/``pad``).
 
     KiCad reports an arc's ``Type`` as ``'Track'`` (verified with ``kicad-cli``
-    10.0.1).
+    10.0.1).  ``layer`` is kept for a track or arc only.
     """
     dru_type = {"track": "Track", "arc": "Track", "via": "Via", "pad": "Pad"}.get(kind)
     return ItemProps(
-        dru_type, net_name, plated, PAD_TYPE_NAMES.get(pad_type or "") if kind == "pad" else None
+        dru_type,
+        net_name,
+        plated,
+        PAD_TYPE_NAMES.get(pad_type or "") if kind == "pad" else None,
+        layer if dru_type == "Track" else None,
     )
 
 
@@ -740,14 +944,22 @@ __all__: Sequence[str] = [
     "CLEARANCE",
     "EDGE_CLEARANCE",
     "HOLE_CLEARANCE",
+    "HOLE_TO_HOLE",
+    "KICAD_CONSTRAINT_KEYWORDS",
     "KICAD_DEFAULT_CLEARANCE_MM",
     "KICAD_DEFAULT_EDGE_CLEARANCE_MM",
     "KICAD_DEFAULT_HOLE_CLEARANCE_MM",
+    "KICAD_DEFAULT_HOLE_TO_HOLE_MM",
+    "KICAD_RULE_SEVERITIES",
     "PAD_TYPE_NAMES",
+    "PHYSICAL_CLEARANCE",
+    "PHYSICAL_HOLE_CLEARANCE",
     "BoardClearanceRules",
     "DruRule",
     "ItemProps",
+    "dru_error_message",
     "evaluate_condition",
     "item_props_for_type",
+    "parse_dru",
     "read_dru_rules",
 ]

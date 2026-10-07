@@ -1,4 +1,5 @@
-"""route-auto's foreign-copper gate: per-pair clearance (#6122) and holes (#6139).
+"""route-auto's foreign-copper gate: per-pair clearance (#6122), holes (#6139)
+and the #6150 follow-ups.
 
 Follow-ups to #6107.  The gate used to measure new copper at one board-wide
 clearance, and not against drilled holes at all:
@@ -9,6 +10,9 @@ clearance, and not against drilled holes at all:
 * #6122 -- the single clearance was too loose for an ``HV`` netclass and for
   conditional ``.kicad_dru`` rules, and too strict when an unconditional
   custom rule is below ``Default`` (KiCad lets the custom rule win).
+* #6150 -- ``(severity ignore)`` rules, ``.kicad_dru`` files KiCad discards
+  whole, ``A.Layer``, and the ``hole_to_hole``, ``physical_clearance`` and
+  ``physical_hole_clearance`` constraints.
 
 The centrepiece is :func:`test_gate_agrees_with_kicad_cli`: one scenario per
 rule, each a single new ``/B`` track or via, where the gate's verdict must
@@ -28,10 +32,12 @@ import pytest
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.mcp.tools.routing import route_net_auto
 from kicad_tools.router.board_clearance_rules import (
+    KICAD_CONSTRAINT_KEYWORDS,
     BoardClearanceRules,
     DruRule,
     ItemProps,
     evaluate_condition,
+    parse_dru,
     read_dru_rules,
 )
 from kicad_tools.router.foreign_copper import board_holes, board_required_clearance
@@ -68,12 +74,48 @@ JLC_PTH_HOLE_RULE = (
     " (constraint hole_clearance (min 0.28mm)))"
 )
 
+# physical_clearance holds within a net too (KiCad flags /B's track against
+# its own R3 / R4 pads), so the parity rules are scoped away from /B's own
+# copper.
+PHYS_A = (
+    "(version 1)\n(rule \"p\" (condition \"A.NetName == '/A' || B.NetName == '/A'\")"
+    " (constraint physical_clearance (min 0.3mm)))\n"
+)
+PHYS_NPTH = (
+    "(version 1)\n"
+    '(rule "h" (constraint hole_clearance (min 0.01mm)))\n'
+    "(rule \"p\" (condition \"(A.Type == 'Track' && B.Pad_Type == 'NPTH, mechanical') || "
+    "(B.Type == 'Track' && A.Pad_Type == 'NPTH, mechanical')\")"
+    " (constraint physical_clearance (min 0.3mm)))\n"
+)
+# hole_clearance down to 0.01 mm, so a via's copper may come close to a hole
+# and only hole_to_hole is measured.
+H_SMALL_RULE = '(rule "h" (constraint hole_clearance (min 0.01mm)))'
+H_SMALL = "(version 1)\n" + H_SMALL_RULE + "\n"
+
 HV_PRO = {
     "net_settings": {
         "classes": [{"name": "Default", "clearance": 0.1}, {"name": "HV", "clearance": 0.5}],
         "netclass_patterns": [{"netclass": "HV", "pattern": "/A"}],
     }
 }
+
+
+# A plated /B pad: a 1.0 mm drill in a 2.0 mm ring, centred on (15, 8).
+PTH_B = (
+    '(pad "1" thru_hole circle (at 0 0) (size 2.0 2.0) (drill 1.0) '
+    '(layers "*.Cu" "*.Mask") (net 2 "/B"))'
+)
+# Not a KiCad constraint: kicad-cli 10.0.1 discards the whole file (#4999).
+SOLDER_MASK_MARGIN_RULE = (
+    '(rule "Solder Mask Clearance - jlcpcb" (constraint solder_mask_margin (min 0.05mm)))'
+)
+
+
+def _phys_hole(condition: str, mm: float = 0.4) -> str:
+    return _dru(
+        f'(rule "p" (condition "{condition}") (constraint physical_hole_clearance (min {mm}mm)))'
+    )
 
 
 def _default_pro(clearance: float) -> dict:
@@ -136,9 +178,10 @@ def _gate_refuses(path: Path, segments=(), vias=()) -> tuple[bool, str]:
 
 
 _DRC_TYPES = {
-    "clearance",
-    "hole_clearance",
+    "clearance",  # physical_clearance violations are reported as this too
+    "hole_clearance",  # ... and physical_hole_clearance ones as this
     "copper_edge_clearance",
+    "hole_to_hole",
     "shorting_items",
     "tracks_crossing",
 }
@@ -182,7 +225,7 @@ def _kicad_flags(cli: Path, path: Path, segments=(), vias=()) -> set[str]:
 # track at x has a gap of 15.05 - x.  The holes (PAD with R5.1 replaced) are
 # centred on (15, 8) and reach x = 16.5; a /B track at x has a gap of x - 16.6.
 SCENARIOS = [
-    # id, base, pad, pro, dru, segment x, via, gate refuses, kicad flags
+    # id, base, pad, pro, dru, segment x, via (x, y[, drill]), gate refuses, kicad flags
     # --- #6139: holes ---
     ("round-hole-crossed", PAD, ROUND_NPTH, None, None, 15.0, None, True, True),
     ("slot-crossed", PAD, OVAL_NPTH, None, None, 15.0, None, True, True),
@@ -330,6 +373,251 @@ SCENARIOS = [
         False,
         False,
     ),
+    # --- #6150: (severity ignore) wins and switches the check off for the
+    # pair; it does not fall through to a lower rule or the default ---
+    (
+        "ignore-rule-overrides-default",
+        NEAR,
+        None,
+        _default_pro(0.2),
+        _dru('(rule "i" (constraint clearance (min 0.05mm)) (severity ignore))'),
+        14.9,
+        None,
+        False,
+        False,
+    ),
+    (
+        "ignore-rule-not-enforced",
+        NEAR,
+        None,
+        _default_pro(0.1),
+        _dru('(rule "i" (constraint clearance (min 0.5mm)) (severity ignore))'),
+        14.9,
+        None,
+        False,
+        False,
+    ),
+    (
+        "ignore-rule-shadows-earlier-rule",
+        NEAR,
+        None,
+        _default_pro(0.1),
+        _dru(
+            '(rule "a" (constraint clearance (min 0.3mm)))',
+            '(rule "i" (constraint clearance (min 0.05mm)) (severity ignore))',
+        ),
+        14.9,
+        None,
+        False,
+        False,
+    ),
+    (
+        "warning-rule-still-enforced",
+        NEAR,
+        None,
+        _default_pro(0.1),
+        _dru('(rule "w" (constraint clearance (min 0.3mm)) (severity warning))'),
+        14.9,
+        None,
+        True,
+        True,
+    ),
+    (
+        "ignore-hole-rule",
+        PAD,
+        ROUND_NPTH,
+        None,
+        _dru('(rule "h" (constraint hole_clearance (min 0.05mm)) (severity ignore))'),
+        16.8,
+        None,
+        False,
+        False,
+    ),
+    # --- #6150: a .kicad_dru KiCad cannot parse is discarded whole ---
+    (
+        "malformed-dru-discarded",
+        NEAR,
+        None,
+        _default_pro(0.1),
+        '(version 1)\n(rule "c" (constraint clearance (min 0.3mm))\n',
+        14.9,
+        None,
+        False,
+        False,
+    ),
+    (
+        "unknown-constraint-discards-dru",
+        NEAR,
+        None,
+        _default_pro(0.1),
+        _dru('(rule "c" (constraint clearance (min 0.3mm)))', SOLDER_MASK_MARGIN_RULE),
+        14.9,
+        None,
+        False,
+        False,
+    ),
+    # --- #6150: physical_clearance (other nets' copper and bare holes) ---
+    ("physical-clearance-0.15mm", NEAR, None, _default_pro(0.1), PHYS_A, 14.9, None, True, True),
+    ("physical-clearance-0.35mm", NEAR, None, _default_pro(0.1), PHYS_A, 14.7, None, False, False),
+    (
+        "physical-clearance-npth-0.20mm",
+        PAD,
+        ROUND_NPTH,
+        _default_pro(0.1),
+        PHYS_NPTH,
+        16.8,
+        None,
+        True,
+        True,
+    ),
+    (
+        "physical-clearance-npth-0.35mm",
+        PAD,
+        ROUND_NPTH,
+        _default_pro(0.1),
+        PHYS_NPTH,
+        16.95,
+        None,
+        False,
+        False,
+    ),
+    # --- #6150: physical_hole_clearance, and A.Layer ---
+    (
+        "physical-hole-0.30mm",
+        PAD,
+        ROUND_NPTH,
+        _default_pro(0.1),
+        _phys_hole("A.Type == 'Track' || B.Type == 'Track'"),
+        16.9,
+        None,
+        True,
+        True,
+    ),
+    (
+        "physical-hole-0.45mm",
+        PAD,
+        ROUND_NPTH,
+        _default_pro(0.1),
+        _phys_hole("A.Type == 'Track' || B.Type == 'Track'"),
+        17.05,
+        None,
+        False,
+        False,
+    ),
+    # The project generator's "Hole to Edge" rule: B.Layer of a track is its
+    # copper layer, of a pad KiCad's null -- never Edge.Cuts.
+    (
+        "generator-hole-to-edge-rule",
+        PAD,
+        ROUND_NPTH,
+        _default_pro(0.1),
+        _phys_hole("(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'"),
+        16.9,
+        None,
+        False,
+        False,
+    ),
+    (
+        "track-layer-wildcard",
+        PAD,
+        ROUND_NPTH,
+        _default_pro(0.1),
+        _phys_hole("A.Layer == 'F.*' || B.Layer == 'F.*'"),
+        16.9,
+        None,
+        True,
+        True,
+    ),
+    (
+        "track-layer-case-sensitive",
+        PAD,
+        ROUND_NPTH,
+        _default_pro(0.1),
+        _phys_hole("A.Layer == 'f.cu' || B.Layer == 'f.cu'"),
+        16.9,
+        None,
+        False,
+        False,
+    ),
+    (
+        "pad-layer-is-null",
+        PAD,
+        ROUND_NPTH,
+        _default_pro(0.1),
+        _phys_hole("A.Type == 'pad' && A.Layer != 'Edge.Cuts'"),
+        16.9,
+        None,
+        False,
+        False,
+    ),
+    # A new via's drill, 0.2 mm from /A's track, against copper.
+    (
+        "new-via-drill-physical-hole",
+        NEAR,
+        None,
+        _default_pro(0.1),
+        _dru(
+            '(rule "h" (constraint hole_clearance (min 0.1mm)))',
+            "(rule \"p\" (condition \"A.Type == 'Via' || B.Type == 'Via'\") "
+            "(constraint physical_hole_clearance (min 0.25mm)))",
+        ),
+        None,
+        (14.7, 8.0),
+        True,
+        True,
+    ),
+    # --- #6150: hole_to_hole.  A 0.6 / 0.3 mm via beside R5's 3 mm NPTH
+    # hole (edge at x = 16.5): drill edge to drill edge is x - 16.65 ---
+    ("hole-to-hole-0.20mm", PAD, ROUND_NPTH, None, H_SMALL, None, (16.85, 8.0, 0.3), True, True),
+    (
+        "hole-to-hole-0.30mm",
+        PAD,
+        ROUND_NPTH,
+        None,
+        H_SMALL,
+        None,
+        (16.95, 8.0, 0.3),
+        False,
+        False,
+    ),
+    (
+        "hole-to-hole-pro-minimum",
+        PAD,
+        ROUND_NPTH,
+        {"board": {"design_settings": {"rules": {"min_hole_to_hole": 0.5}}}},
+        H_SMALL,
+        None,
+        (16.95, 8.0, 0.3),
+        True,
+        True,
+    ),
+    (
+        "hole-to-hole-dru-rule",
+        PAD,
+        ROUND_NPTH,
+        None,
+        _dru(H_SMALL_RULE, '(rule "hh" (constraint hole_to_hole (min 0.1mm)))'),
+        None,
+        (16.85, 8.0, 0.3),
+        False,
+        False,
+    ),
+    (
+        "hole-to-hole-ignored",
+        PAD,
+        ROUND_NPTH,
+        None,
+        _dru(
+            H_SMALL_RULE,
+            '(rule "hh" (constraint hole_to_hole (min 0.5mm)) (severity ignore))',
+        ),
+        None,
+        (16.85, 8.0, 0.3),
+        False,
+        False,
+    ),
+    # hole_to_hole holds within a net: the via is in /B's own PTH pad.
+    ("hole-to-hole-own-net", PAD, PTH_B, None, H_SMALL, None, (15.85, 8.0, 0.3), True, True),
 ]
 
 
@@ -342,7 +630,8 @@ def test_gate_agrees_with_kicad_cli(
 ) -> None:
     path = _board(tmp_path, base, pad=pad, pro=pro, dru=dru)
     segments = [_b_track(x)] if x is not None else []
-    vias = [Via(via[0], via[1], 0.5, 0.6, (Layer.F_CU, Layer.B_CU), 2, "/B")] if via else []
+    drill = via[2] if via and len(via) > 2 else 0.5
+    vias = [Via(via[0], via[1], drill, 0.6, (Layer.F_CU, Layer.B_CU), 2, "/B")] if via else []
 
     refused, message = _gate_refuses(path, segments, vias)
     assert refused is gate_refuses, message
@@ -567,7 +856,11 @@ def test_net_requirement_is_the_largest_pair() -> None:
         ("A.insideArea('x')", None),
         ("A.insideArea('x') || A.NetClass == 'HV'", True),
         ("A.insideArea('x') && A.NetClass == 'Default'", False),
-        ("A.Layer == 'F.Cu'", None),
+        # A pad's Layer is KiCad's null (kicad-cli 10.0.1, #6150) ...
+        ("A.Layer == 'F.Cu'", False),
+        ("A.Layer != 'F.Cu'", False),
+        # ... a track's is its layer, unknown here.
+        ("B.Layer == 'F.Cu'", None),
         ("A.NetName == '/mains'", True),  # KiCad compares case-insensitively
         ("A.NetName == '/S?G'", False),
         ("this is not ( valid", None),
@@ -612,3 +905,308 @@ def test_gate_item_types_match_kicads() -> None:
     assert item_props_for_type("arc", "/A").type == "Track"
     assert item_props_for_type("pad", "/A", True, "thru_hole").pad_type == "Through-hole"
     assert item_props_for_type("track", "/A", None, "smd").pad_type is None
+
+
+def test_track_layer_condition() -> None:
+    track = ItemProps("Track", "/SIG", layer="B.Cu")
+    via = ItemProps("Via", "/SIG", True)
+    assert evaluate_condition("A.Layer == 'B.Cu'", track, via) is True
+    assert evaluate_condition("A.Layer == '*.Cu'", track, via) is True
+    assert evaluate_condition("A.Layer == 'b.cu'", track, via) is False  # case-sensitive
+    assert evaluate_condition("A.Layer != 'F.Cu'", track, via) is True
+    assert evaluate_condition("B.Layer == 'F.Cu'", track, via) is False  # a via's is null
+    assert evaluate_condition("B.Layer != 'F.Cu'", track, via) is False
+
+
+# ---------------------------------------------------------------------------
+# #6150: severity, discarded .kicad_dru files
+# ---------------------------------------------------------------------------
+
+
+def test_ignore_rule_settles_the_pair_at_zero() -> None:
+    a, b = ItemProps("Track", "/A"), ItemProps("Track", "/B")
+    rules = _rules(
+        class_clearance={"Default": 0.2},
+        dru_rules=[
+            DruRule("big", None, None, (("clearance", 0.5),)),
+            DruRule("i", None, None, (("clearance", 0.05),), "ignore"),
+        ],
+    )
+    assert rules.clearance(a, b) == 0.0
+    # An ignore rule whose condition is unknown may or may not switch the
+    # check off: the larger reading (the default) is kept.
+    unknown = _rules(
+        class_clearance={"Default": 0.2},
+        dru_rules=[DruRule("i", "A.insideArea('x')", None, (("clearance", 0.5),), "ignore")],
+    )
+    assert unknown.clearance(a, b) == pytest.approx(0.2)
+
+
+def test_parse_dru_reads_severity_and_new_constraints(tmp_path) -> None:
+    dru = tmp_path / "b.kicad_dru"
+    dru.write_text(
+        _dru(
+            '(rule "i" (constraint clearance (min 0.1mm)) (severity ignore))',
+            '(rule "w" (constraint hole_to_hole (min 0.3mm)) (severity warning))',
+            '(rule "p" (constraint physical_clearance (min 0.2mm))'
+            " (constraint physical_hole_clearance (min 0.25mm)))",
+        )
+    )
+    rules, error = parse_dru(dru)
+    assert error is None
+    assert [(r.name, r.severity, r.ignored) for r in rules] == [
+        ("i", "ignore", True),
+        ("w", "warning", False),
+        ("p", None, False),
+    ]
+    assert rules[1].value("hole_to_hole") == pytest.approx(0.3)
+    assert rules[2].value("physical_hole_clearance") == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    "keyword", ["mechanical_clearance", "mechanical_hole_clearance", "solder_mask_sliver"]
+)
+def test_parse_dru_accepts_kicad_keywords_the_gate_once_dropped(tmp_path, keyword) -> None:
+    """kicad-cli 10.0.1 accepts and enforces these; the gate must not discard the file."""
+    assert keyword in KICAD_CONSTRAINT_KEYWORDS
+    dru = tmp_path / "b.kicad_dru"
+    dru.write_text(
+        _dru(
+            '(rule "c" (constraint clearance (min 0.3mm)))',
+            f'(rule "k" (constraint {keyword} (min 0.2mm)))',
+        )
+    )
+    rules, error = parse_dru(dru)
+    assert error is None
+    assert rules[0].name == "c"
+
+
+def test_mechanical_constraints_alias_the_physical_ones(tmp_path) -> None:
+    dru = tmp_path / "b.kicad_dru"
+    dru.write_text(
+        _dru(
+            '(rule "m" (constraint mechanical_clearance (min 0.4mm))'
+            " (constraint mechanical_hole_clearance (min 0.5mm)))",
+        )
+    )
+    rules, error = parse_dru(dru)
+    assert error is None
+    assert rules[0].constraints == (
+        ("physical_clearance", 0.4),
+        ("physical_hole_clearance", 0.5),
+    )
+    a, b = ItemProps("Track", "/A"), ItemProps("Pad", "/B")
+    mech = _rules(dru_rules=rules)
+    phys = _rules(
+        dru_rules=[
+            DruRule(
+                "p", None, None, (("physical_clearance", 0.4), ("physical_hole_clearance", 0.5))
+            )
+        ]
+    )
+    assert mech.physical_clearance(a, b) == pytest.approx(0.4)
+    assert mech.physical_clearance(a, b) == phys.physical_clearance(a, b)
+    assert mech.physical_hole_clearance(a, b) == phys.physical_hole_clearance(a, b)
+    assert mech.physical_hole_clearance(a, b) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    "text,reason",
+    [
+        ('(version 1)\n(rule "c" (constraint clearance (min 0.3mm))\n', "does not parse"),
+        (_dru(SOLDER_MASK_MARGIN_RULE), "unknown constraint 'solder_mask_margin'"),
+        (
+            _dru('(rule "x" (constraint hole_size (min 0.1mm)) (severity info))'),
+            "unknown severity 'info'",
+        ),
+    ],
+    ids=["syntax", "constraint", "severity"],
+)
+def test_dru_kicad_discards_is_reported(tmp_path, caplog, text, reason) -> None:
+    dru = tmp_path / "b.kicad_dru"
+    dru.write_text(_dru('(rule "ok" (constraint clearance (min 0.3mm)))') + text)
+    rules, error = parse_dru(dru)
+    assert rules == [] and error is not None and reason in error
+    with caplog.at_level("WARNING"):
+        assert read_dru_rules(dru) == []
+    assert "kicad-cli ignores every custom rule" in caplog.text
+    assert parse_dru(tmp_path / "missing.kicad_dru") == ([], None)
+
+
+def test_route_auto_warns_about_a_discarded_dru(tmp_path, capsys) -> None:
+    """The gate falls back to the netclasses, as kicad-cli does, and says so."""
+    path = _board(
+        tmp_path,
+        NEAR,
+        pro=_default_pro(0.1),
+        dru=_dru('(rule "c" (constraint clearance (min 0.3mm)))', SOLDER_MASK_MARGIN_RULE),
+    )
+    orchestrator = _orchestrator(path)
+    rules = orchestrator._clearance_rules()
+    assert rules is not None and rules.dru_rules == []
+    assert "solder_mask_margin" in (rules.dru_error or "")
+    err = capsys.readouterr().err
+    assert "Warning: board.kicad_dru: rule 'Solder Mask Clearance - jlcpcb'" in err
+    orchestrator._clearance_rules()  # cached: warned once
+    assert "Warning" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# #6150: hole to hole, crossing a hole, physical-clearance messages
+# ---------------------------------------------------------------------------
+
+
+def test_two_new_vias_too_close_are_refused(tmp_path) -> None:
+    """KiCad checks hole_to_hole between two vias of the same net."""
+    path = _board(tmp_path, PAD, pro=_default_pro(0.1))
+    vias = [
+        Via(5.0, 8.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "/B"),
+        Via(5.4, 8.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "/B"),
+    ]
+    refused, message = _gate_refuses(path, vias=vias)
+    assert refused
+    assert "drills a via that comes within 0.100 mm of drilled hole(s)" in message
+    assert "drill of new via at (105.400, 108.000)" in message
+    assert "0.250 mm hole-to-hole clearance" in message
+    assert "(0 segment(s), 1 via(s))" in message
+
+    refused, message = _gate_refuses(
+        path, vias=[vias[0], Via(5.6, 8.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "/B")]
+    )
+    assert not refused, message
+
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("kicad-cli not installed; gate verdict checked, KiCad's not")
+    assert _kicad_flags(Path(cli), path, vias=vias) == {"hole_to_hole"}
+
+
+def test_crossing_a_hole_is_refused_even_when_ignored(tmp_path) -> None:
+    """KiCad accepts it under an ``ignore`` rule, but the drill would sever the
+    track: the gate errs toward refusing."""
+    path = _board(
+        tmp_path,
+        PAD,
+        pad=ROUND_NPTH,
+        dru=_dru('(rule "h" (constraint hole_clearance (min 0.25mm)) (severity ignore))'),
+    )
+    refused, message = _gate_refuses(path, [_b_track(15.0)])
+    assert refused and "crosses drilled hole(s)" in message
+    refused, message = _gate_refuses(path, [_b_track(16.7)])
+    assert not refused, message
+
+
+def test_physical_refusals_name_the_rule(tmp_path) -> None:
+    path = _board(tmp_path, NEAR, pro=_default_pro(0.1), dru=PHYS_A)
+    refused, message = _gate_refuses(path, [_b_track(14.9)])
+    assert refused
+    assert "comes within 0.150 mm of track (115.250, 104.000)-(115.250, 112.000) on F.Cu" in message
+    assert "below the 0.300 mm physical clearance" in message
+
+    path = _board(
+        tmp_path,
+        PAD,
+        pad=ROUND_NPTH,
+        pro=_default_pro(0.1),
+        dru=_phys_hole("A.Type == 'Track' || B.Type == 'Track'"),
+        name="hole",
+    )
+    refused, message = _gate_refuses(path, [_b_track(16.9)])
+    assert refused
+    assert "comes within 0.300 mm of drilled hole(s) (NPTH hole of pad R5" in message
+    assert "0.400 mm physical hole clearance" in message
+
+
+def test_net_requirement_includes_physical_clearance() -> None:
+    rules = _rules(
+        class_clearance={"Default": 0.15},
+        dru_rules=[
+            DruRule(
+                "p",
+                "A.NetName == '/MAINS' || B.NetName == '/MAINS'",
+                None,
+                (("physical_clearance", 0.6),),
+            )
+        ],
+    )
+    assert rules.net_requirement("/SIG", {"/OTHER"}) == pytest.approx(0.15)
+    assert rules.net_requirement("/SIG", {"/MAINS"}) == pytest.approx(0.6)
+
+
+# ---------------------------------------------------------------------------
+# #6150 item 5: the board 06 / 07 regression fixtures
+# ---------------------------------------------------------------------------
+
+BOARDS = Path(__file__).resolve().parent.parent / "boards"
+REGRESSION_FIXTURES = [
+    BOARDS / "06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb",
+    BOARDS / "07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb",
+]
+
+
+@pytest.mark.parametrize("pcb", REGRESSION_FIXTURES, ids=["board06", "board07"])
+def test_regression_fixture_drus_are_current(pcb) -> None:
+    """Regenerated with the project generator: no stale 0.4 mm hole_clearance
+    rule labelled "Hole to Edge", nothing kicad-cli discards the file over."""
+    rules = BoardClearanceRules.from_board(pcb)
+    assert rules.dru_error is None
+    assert rules.dru_rules
+    [hole_to_edge] = [r for r in rules.dru_rules if r.name.startswith("Hole to Edge")]
+    assert hole_to_edge.value("hole_clearance") is None
+    assert hole_to_edge.value("physical_hole_clearance") == pytest.approx(0.4)
+    # It is a hole-to-Edge.Cuts rule: it never reaches a track or a via.
+    hole = ItemProps("Pad", "", False, "NPTH, mechanical")
+    for item in (ItemProps("Track", "/X", layer="F.Cu"), ItemProps("Via", "/X", True)):
+        assert rules.physical_hole_clearance(item, hole, "F.Cu") == 0.0
+
+
+@pytest.mark.parametrize("pcb", REGRESSION_FIXTURES, ids=["board06", "board07"])
+def test_gate_accepts_every_routed_net_of_the_regression_fixtures(pcb) -> None:
+    """Each net's routed copper, fed back through the gate as if it were new,
+    is accepted -- with the stale DRU the gate refused 16 of board 06's 26
+    nets and 1 of board 07's 30 (#6150)."""
+    from kicad_tools.router.io import detect_layer_stack, parse_pcb_design_rules
+
+    text = pcb.read_text()
+    orchestrator = RoutingOrchestrator(
+        pcb=PCB.load(str(pcb)),  # type: ignore[arg-type]
+        rules=parse_pcb_design_rules(text).to_design_rules(),
+        layer_stack=detect_layer_stack(text),
+    )
+    layers = {layer.kicad_name: layer for layer in Layer}
+    by_net: dict[int, tuple[list, list]] = {}
+    for s in orchestrator.pcb.segments:
+        if s.net_number:
+            (x1, y1), (x2, y2) = s.start, s.end
+            by_net.setdefault(s.net_number, ([], []))[0].append(
+                Segment(x1, y1, x2, y2, s.width, layers[s.layer], s.net_number, s.net_name)
+            )
+    for v in orchestrator.pcb.vias:
+        if v.net_number:
+            by_net.setdefault(v.net_number, ([], []))[1].append(
+                Via(
+                    *v.position, v.drill, v.size, (Layer.F_CU, Layer.B_CU), v.net_number, v.net_name
+                )
+            )
+    copper, holes = list(orchestrator._board_copper()), list(orchestrator._board_holes())
+    assert len(by_net) >= 26
+    refused = []
+    for net, (segments, vias) in by_net.items():
+        # The net's routed copper is what is fed in as new: take it off the board.
+        orchestrator._board_copper_cache = [
+            i for i in copper if not (i.net == net and i.kind in ("track", "arc", "via"))
+        ]
+        orchestrator._board_holes_cache = [
+            i for i in holes if not (i.net == net and i.owner == "via")
+        ]
+        name = (segments or vias)[0].net_name
+        result = RoutingResult(
+            success=True,
+            net=name,
+            strategy_used=RoutingStrategy.GLOBAL_WITH_REPAIR,
+            segments=segments,
+            vias=vias,
+        )
+        if orchestrator._foreign_copper_conflicts(result):
+            refused.append(name)
+    assert refused == []
