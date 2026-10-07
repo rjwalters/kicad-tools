@@ -4809,7 +4809,11 @@ def _add_route_parser(subparsers) -> None:
             "be obtained the command warns and falls back to 'greedy'. "
             "'crossing' (Issue #5787) ranks nets by flight-line crossing "
             "degree -- most-contended first -- within each net-class priority "
-            "band, without spending an evaluation route. When "
+            "band, without spending an evaluation route. 'crossing' works on "
+            "every routing path; the other four are supported only on the "
+            "single-attempt path (--no-auto-layers without --adaptive-rules, "
+            "--auto-pcb-size or --auto-mfr-tier) and are rejected with exit "
+            "code 2 on the escalation paths (Issue #5908). When "
             "omitted, ordering is byte-identical to the default behaviour."
         ),
     )

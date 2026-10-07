@@ -381,3 +381,250 @@ def test_route_all_default_order_unchanged_without_forced_order(monkeypatch):
     router.route_all(suppress_no_timeout_warning=True)
 
     assert captured["net_order"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Issue #5908 — greedy|critical_first|congestion|hybrid on escalation paths
+#
+# ``_apply_order_method`` for these four evaluates the candidate order with a
+# throw-away full route and needs a fresh-router factory that the escalation
+# attempt loops do not build.  They used to be silently discarded on every
+# escalation path (including the default ``--auto-layers`` recipe).  The fix
+# rejects them with exit code 2 and an actionable stderr message *before* any
+# board is loaded, evaluated or routed.  These tests drive the real
+# ``route_cmd.main`` dispatch and count every routing consumer.
+# ---------------------------------------------------------------------------
+
+_SINGLE_ATTEMPT_ONLY = ["greedy", "critical_first", "congestion", "hybrid"]
+
+_DISPATCH_FUNCS = [
+    "route_with_layer_escalation",
+    "route_with_rule_relaxation",
+    "route_with_combined_escalation",
+    "route_with_size_escalation",
+    "route_with_mfr_tier_escalation",
+]
+
+# (path id, extra argv, dispatch function main() selects for that argv)
+_ESCALATION_PATHS = [
+    ("layer_escalation_default", [], "route_with_layer_escalation"),
+    ("layer_escalation_explicit", ["--auto-layers"], "route_with_layer_escalation"),
+    (
+        "rule_relaxation",
+        ["--no-auto-layers", "--adaptive-rules"],
+        "route_with_rule_relaxation",
+    ),
+    ("combined_escalation", ["--adaptive-rules"], "route_with_combined_escalation"),
+    ("size_escalation", ["--auto-pcb-size"], "route_with_size_escalation"),
+    (
+        "size_escalation_no_auto_layers",
+        ["--auto-pcb-size", "--no-auto-layers"],
+        "route_with_size_escalation",
+    ),
+    ("mfr_tier_escalation", ["--auto-mfr-tier"], "route_with_mfr_tier_escalation"),
+    (
+        "mfr_tier_no_auto_layers",
+        ["--auto-mfr-tier", "--no-auto-layers"],
+        "route_with_mfr_tier_escalation",
+    ),
+]
+
+
+class _CallCounter:
+    def __init__(self, name: str, rc=0):
+        self.name = name
+        self.calls = 0
+        self.rc = rc
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return self.rc
+
+
+def _fixture_board(tmp_path):
+    import shutil
+    from pathlib import Path
+
+    src = Path(__file__).parent / "fixtures" / "stale_nets.kicad_pcb"
+    dst = tmp_path / "board.kicad_pcb"
+    shutil.copy(src, dst)
+    return dst
+
+
+class _ApplyReached(BaseException):
+    """Raised by the ``_apply_order_method`` spy to stop before the real route.
+
+    ``BaseException`` so ``main``'s broad ``except Exception`` handlers cannot
+    swallow it.
+    """
+
+
+def _run_main_with_spies(argv, monkeypatch, *, real_load=False, stop_at_apply=False):
+    """Run ``route_cmd.main(argv)`` with every routing consumer replaced by a counter.
+
+    Returns ``(rc, spies)`` where ``spies`` maps a consumer name to its counter:
+    the five escalation dispatch targets, ``load_pcb_for_routing`` (every
+    attempt loads through it), the optimizer's evaluation entry point
+    ``RoutingOptimizer.optimize_net_order`` and ``_apply_order_method``.
+    """
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.optim import routing as optim_routing
+    from kicad_tools.router import io as router_io
+
+    spies: dict[str, _CallCounter] = {}
+    for name in _DISPATCH_FUNCS:
+        spies[name] = _CallCounter(name)
+        monkeypatch.setattr(route_cmd, name, spies[name])
+
+    class _LoadReached(Exception):
+        pass
+
+    def _load_spy(*args, **kwargs):
+        spies["load_pcb_for_routing"].calls += 1
+        raise _LoadReached("load reached")
+
+    spies["load_pcb_for_routing"] = _CallCounter("load_pcb_for_routing")
+    if real_load:
+        _real_load = router_io.load_pcb_for_routing
+
+        def _load_spy(*args, **kwargs):  # noqa: F811 - counting passthrough
+            spies["load_pcb_for_routing"].calls += 1
+            return _real_load(*args, **kwargs)
+
+    monkeypatch.setattr(router_io, "load_pcb_for_routing", _load_spy)
+
+    spies["optimize_net_order"] = _CallCounter("optimize_net_order")
+    monkeypatch.setattr(
+        optim_routing.RoutingOptimizer,
+        "optimize_net_order",
+        lambda self, *a, **k: (spies["optimize_net_order"](), ([], 0.0))[1],
+    )
+    real_apply = route_cmd._apply_order_method
+    spies["_apply_order_method"] = _CallCounter("_apply_order_method")
+
+    def _apply_spy(router, args, *a, **kwargs):
+        spies["_apply_order_method"].calls += 1
+        if stop_at_apply:
+            raise _ApplyReached(args.order_method)
+        return real_apply(router, args, *a, **kwargs)
+
+    monkeypatch.setattr(route_cmd, "_apply_order_method", _apply_spy)
+
+    try:
+        rc = route_cmd.main(argv)
+    except _LoadReached:
+        rc = "load-reached"
+    except _ApplyReached as exc:
+        rc = f"apply-reached:{exc.args[0]}"
+    return rc, spies
+
+
+@pytest.mark.parametrize("quiet", [False, True], ids=["verbose", "quiet"])
+@pytest.mark.parametrize("method", _SINGLE_ATTEMPT_ONLY)
+@pytest.mark.parametrize(
+    ("path_id", "extra", "dispatch"),
+    _ESCALATION_PATHS,
+    ids=[p[0] for p in _ESCALATION_PATHS],
+)
+def test_unsupported_order_method_rejected_before_routing_on_escalation_paths(
+    tmp_path, monkeypatch, capsys, path_id, extra, dispatch, method, quiet
+):
+    """Every escalation path (and wrapper) rejects the four methods up front.
+
+    Exit code 2, an actionable stderr message naming a supported alternative
+    -- printed even under ``--quiet`` -- and zero calls into every routing
+    consumer: no dispatch, no board load, no evaluation route.
+    """
+    pcb = _fixture_board(tmp_path)
+    argv = [str(pcb), "-o", str(tmp_path / "out.kicad_pcb"), "--order-method", method, *extra]
+    if quiet:
+        argv.append("--quiet")
+
+    rc, spies = _run_main_with_spies(argv, monkeypatch)
+
+    assert rc == 2
+    for name, spy in spies.items():
+        assert spy.calls == 0, f"{name} was called {spy.calls}x for a rejected invocation"
+    err = capsys.readouterr().err
+    assert f"--order-method {method} is not supported" in err
+    assert "Issue #5908" in err
+    # Actionable: names both supported alternatives.
+    assert "--no-auto-layers" in err
+    assert "--order-method crossing" in err
+
+
+@pytest.mark.parametrize("method", [None, "crossing"])
+@pytest.mark.parametrize(
+    ("path_id", "extra", "dispatch"),
+    _ESCALATION_PATHS,
+    ids=[p[0] for p in _ESCALATION_PATHS],
+)
+def test_absent_and_crossing_still_dispatch_on_escalation_paths(
+    tmp_path, monkeypatch, capsys, path_id, extra, dispatch, method
+):
+    """Flag-absent and ``crossing`` are untouched by the #5908 gate.
+
+    The invocation reaches exactly the expected dispatch target, with no
+    evaluation route, no ``_apply_order_method`` at dispatch time and no new
+    diagnostic.
+    """
+    pcb = _fixture_board(tmp_path)
+    argv = [str(pcb), "-o", str(tmp_path / "out.kicad_pcb"), "--quiet", *extra]
+    if method is not None:
+        argv += ["--order-method", method]
+
+    rc, spies = _run_main_with_spies(argv, monkeypatch)
+
+    assert rc == 0
+    assert spies[dispatch].calls == 1
+    for name in _DISPATCH_FUNCS:
+        if name != dispatch:
+            assert spies[name].calls == 0, name
+    assert spies["optimize_net_order"].calls == 0
+    assert spies["_apply_order_method"].calls == 0
+    captured = capsys.readouterr()
+    assert "5908" not in captured.err
+    assert "5908" not in captured.out
+
+
+@pytest.mark.parametrize("method", _SINGLE_ATTEMPT_ONLY)
+def test_single_attempt_path_still_accepts_the_four_methods(tmp_path, monkeypatch, capsys, method):
+    """``--no-auto-layers`` alone keeps the supported single-attempt path.
+
+    The gate must not reject it: the invocation loads the board for real and
+    reaches ``_apply_order_method`` with the requested method (our spy stops
+    it there, before the evaluation/real route) without touching any
+    escalation entry point.
+    """
+    pcb = _fixture_board(tmp_path)
+    argv = [
+        str(pcb),
+        "-o",
+        str(tmp_path / "out.kicad_pcb"),
+        "--no-auto-layers",
+        "--quiet",
+        "--order-method",
+        method,
+    ]
+
+    rc, spies = _run_main_with_spies(argv, monkeypatch, real_load=True, stop_at_apply=True)
+
+    assert rc == f"apply-reached:{method}"
+    assert spies["_apply_order_method"].calls == 1
+    for name in _DISPATCH_FUNCS:
+        assert spies[name].calls == 0, name
+    assert "5908" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("method", [None, "crossing", *_SINGLE_ATTEMPT_ONLY])
+def test_validate_order_method_single_attempt_namespace_is_allowed(method):
+    from kicad_tools.cli.route_cmd import _validate_order_method_for_dispatch
+
+    args = SimpleNamespace(
+        order_method=method,
+        auto_layers=False,
+        adaptive_rules=False,
+        auto_pcb_size=False,
+        auto_mfr_tier=False,
+    )
+    assert _validate_order_method_for_dispatch(args) == 0
