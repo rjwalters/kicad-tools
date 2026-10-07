@@ -109,6 +109,20 @@ Deliberately out of scope, tracked separately
 * **#5591** -- the fleet boards emit pads with no ``(uuid ...)``, so KiCad
   invents a random one per pad on load.  That is what
   :data:`_UNION_AREA_TOLERANCE_MM2` exists to absorb.
+
+Issue #6052: identical copper must give a byte-identical fill
+-------------------------------------------------------------
+
+Even with identical routed copper the slow test's two routes still split
+between two union signatures.  KiCad's fill depends on the order it loads
+tracks in, ``--save-board`` writes tracks sorted by UUID, and router-minted
+segment/via UUIDs were not a function of the copper, so every refill after
+the first one could see a different track order.  ``kct route`` now
+canonicalizes the routed board's UUIDs before KiCad first loads it
+(:mod:`kicad_tools.core.canonical_uuids`), which also closes #5591's
+invented pad UUIDs.  :func:`test_board03_pour_fill_is_reproducible` therefore
+also requires the two fills to be *exactly* equal -- ring for ring, vertex
+for vertex -- so a roughly 60/40 split can no longer pass by chance.
 """
 
 from __future__ import annotations
@@ -312,7 +326,11 @@ def _island_counts(path: Path) -> dict[tuple[str, str], int]:
 #: / 7659 / 7660 and areas 3793.945551 / 3793.945555 / 3793.945554 mm^2 --
 #: a spread of 4e-6 mm^2 (4 um^2, ~1e-9 relative).  The bounds and the
 #: island counts were identical on all three, so both are asserted exactly.
-#: Tighten this to ``0.0`` once #5591 lands.
+#: Since #6052 the routed board's UUIDs are canonical, so two identical
+#: board-03 routes no longer show this wobble, and
+#: :func:`test_board03_pour_fill_is_reproducible` asserts exact ring
+#: equality on top of this check.  The constant stays for comparisons
+#: between genuinely different inputs (``test_pour_overlap_starvation_5590``).
 _UNION_AREA_TOLERANCE_MM2 = 1e-3
 
 
@@ -646,6 +664,18 @@ def test_board03_pour_fill_is_reproducible(tmp_path):
         assert sig_a[key][0] > 0.0, f"{key} pour has zero area: {sig_a[key]}"
 
     _assert_same_fill_copper(sig_a, sig_b, context="board 03, two identical routes")
+
+    # Issue #6052: identical copper must give the identical fill, not merely
+    # the same copper to within a tolerance.  Compare every ring exactly.
+    rings_a, rings_b = _fill_rings(a), _fill_rings(b)
+    for key in sorted(rings_a):
+        assert rings_a[key] == rings_b.get(key), (
+            f"two identical board-03 routes saved different {key} pour polygons "
+            f"({[len(r) for r in rings_a[key]]} vs "
+            f"{[len(r) for r in rings_b.get(key, [])]} vertices per ring).  KiCad's "
+            "fill depends on track load order; check that the routed board's "
+            "UUIDs were canonicalized before the fill (Issue #6052)."
+        )
 
     counts_a = _island_counts(a)
     counts_b = _island_counts(b)
