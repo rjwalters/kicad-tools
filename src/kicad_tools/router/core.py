@@ -3772,17 +3772,21 @@ class Autorouter:
         # RoutingOrchestrator) reads exactly the same areas as this engine.
         from .layers import LayerStack as _LayerStack
         from .rule_area_resolve import (
+            all_rule_area_zones,
             keepout_rule_area_specs,
             resolve_keepout_rule_areas,
             track_via_blocking_zones,
         )
 
+        # Issue #6087: footprint-embedded keepouts are included alongside
+        # board-level ones (``all_rule_area_zones``).
+        all_areas = all_rule_area_zones(pcb)
         raw_areas = track_via_blocking_zones(pcb)
         # Zone-name sets the ``spatial_keepouts`` warning pass in
         # ``_lattice_keepout_projection`` needs: (kept, all-on-board).
         self._keepout_rule_area_zone_names = (
             frozenset(zone.name for zone in raw_areas if zone.name),
-            frozenset(zone.name for zone in pcb.rule_areas if zone.name),
+            frozenset(zone.name for zone in all_areas if zone.name),
         )
         if not raw_areas:
             return self._keepout_rule_areas_cache
