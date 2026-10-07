@@ -101,6 +101,35 @@ class TestLocalNetEvidence:
         near = _fp("C9", (12.0, 21.0), [_pad("1", "GND")])
         assert _hash(_board([near])) != base
 
+    def test_rect_pad_corner_within_radius_changes_hash(self):
+        # Finding at (10.5, 20), radius 3 mm. Nearest corner of this 1x1 pad
+        # is (12.6, 22.1): 2.97 mm away, inside the radius, though
+        # center-distance minus max(w, h) / 2 would be 3.18 mm.
+        base = _hash(_board())
+        pad = _fp("J9", (13.1, 22.6), [_pad("1", "GND", size=(1, 1))])
+        assert _hash(_board([pad])) != base
+
+    @pytest.mark.parametrize(
+        ("side", "offset"),
+        [(1.0, 2.5), (1.5, 2.7), (2.0, 3.0)],
+    )
+    @pytest.mark.parametrize("rotation", [0.0, 30.0, 45.0, 90.0, 135.0, 270.0])
+    def test_square_pad_corner_within_radius_changes_hash_at_any_rotation(
+        self, side, offset, rotation
+    ):
+        # Pad centre sits at (offset, offset) from the finding, diagonally, so
+        # only its near corner is inside the 3 mm radius: centre distance minus
+        # max(w, h) / 2 would exclude it. The footprint is rotated about its own
+        # origin, with the pad offset chosen so the pad centre lands on target.
+        from kicad_tools.core.geometry import rotate_pad_offset
+
+        target = (10.5 + offset, 20.0 + offset)
+        ox, oy = rotate_pad_offset(1.0, 0.5, rotation)
+        fp_pos = (target[0] - ox, target[1] - oy)
+        base = _hash(_board())
+        pad = _fp("J9", fp_pos, [_pad("1", "GND", at=(1.0, 0.5), size=(side, side))], rotation)
+        assert _hash(_board([pad])) != base
+
     def test_moving_a_nearby_pad_changes_hash(self):
         a = _hash(_board([_fp("C9", (12.0, 21.0), [_pad("1", "GND")])]))
         b = _hash(_board([_fp("C9", (12.2, 21.0), [_pad("1", "GND")])]))

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections import Counter
 from dataclasses import replace
@@ -244,7 +245,9 @@ def _net_pads(pcb: PCB) -> dict[str, list[_NetPad]]:
                 continue
             ox, oy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation or 0.0)
             size = getattr(pad, "size", None) or (0.0, 0.0)
-            half = max(float(size[0]), float(size[1])) / 2.0
+            # Half the diagonal bounds the pad's copper at every rotation
+            # (a rectangle's corner is farther out than max(w, h) / 2).
+            half = math.hypot(float(size[0]), float(size[1])) / 2.0
             pads_by_net.setdefault(pad.net_name, []).append(
                 (f"{ref}.{pad.number}", fx + ox, fy + oy, half)
             )
