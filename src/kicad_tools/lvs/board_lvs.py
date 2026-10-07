@@ -43,6 +43,7 @@ from kicad_tools.sexp import SExp, parse_file
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, types only
     from kicad_tools.schematic.models.schematic import Schematic
+    from kicad_tools.schematic.models.symbol import SymbolInstance
 
 # An auto-generated ("placeholder") net name: the synthetic name a netlister
 # invents for a connected component that carries no label or power symbol.
@@ -422,6 +423,32 @@ def _instance_reference_map(visit: _SheetVisit) -> dict[str, str]:
                 if inst_ref and inst_ref != prop_ref:
                     renames[prop_ref] = inst_ref
     return renames
+
+
+def _iter_instance_symbols(sch_path: Path) -> Iterator[tuple[str, SymbolInstance, _SheetVisit]]:
+    """Yield ``(reference, symbol, visit)`` for every placed symbol in a hierarchy.
+
+    ``reference`` is the designator of *this placement* of the symbol: the
+    ``(property "Reference")`` value, renamed through
+    :func:`_instance_reference_map` when the symbol's sheet file is placed
+    more than once (issue #5815).  A sheet placed twice therefore yields
+    each of its symbols twice -- once as ``R1`` (``MCU_A``) and once as
+    ``R11`` (``MCU_B``) -- so per-pin consumers (pin-type annotation,
+    pin-to-pad mapping; issue #6004) see both footprints.
+
+    Singly placed sheets -- every sheet in a non-reusing design -- are
+    neither re-parsed nor renamed, so the common case is unchanged.
+    """
+    visits = list(_walk_hierarchy_schematics(Path(sch_path)))
+    placements: dict[Path, int] = {}
+    for visit in visits:
+        key_path = visit.source.resolve()
+        placements[key_path] = placements.get(key_path, 0) + 1
+    for visit in visits:
+        renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
+        for sym in visit.schematic.symbols:
+            ref = getattr(sym, "reference", "") or ""
+            yield renames.get(ref, ref), sym, visit
 
 
 def _sheet_net_identities(
