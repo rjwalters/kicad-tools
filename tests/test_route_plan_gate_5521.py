@@ -51,6 +51,31 @@ def no_detailed_routing(monkeypatch):
     monkeypatch.setattr(Autorouter, "route_with_escape", _forbidden)
 
 
+@pytest.fixture
+def no_post_route_kicad_cli(monkeypatch):
+    """Skip the post-route zone fill and pour-oracle kicad-cli stages.
+
+    Issue #6129: the three tests that let routing run spent ~10 s each
+    locally -- and hit CI's 60 s per-test timeout, a different one per run --
+    almost entirely in ~10 serialized ``kicad-cli`` launches (zone fill,
+    thermal remediation, oracle DRC rounds) that happen AFTER routing.  The
+    plan gate is a pre-route CLI preflight; none of those stages can change
+    its verdict or the exit codes asserted here.  Both stubs reproduce the
+    documented "kicad-cli unavailable" behaviour of each stage: the fill is
+    skipped and the oracle leaves the board untouched with a stranded count
+    of 0.  The rest of ``_complete_pour_nets_with_oracle`` (UUID
+    canonicalization) still runs, and auto-pour is left ON so the gate sees
+    exactly the default-path board.
+    """
+
+    def _no_oracle(output_path, *, args, quiet=False):
+        args._stranded_pour_links = 0
+        return 0
+
+    monkeypatch.setattr(route_cmd, "_fill_zones_after_route", lambda *a, **k: None)
+    monkeypatch.setattr(route_cmd, "_run_pour_oracle_stage", _no_oracle)
+
+
 def _argv(pcb, out, *extra: str) -> list[str]:
     return [str(pcb), "-o", str(out), "--skip-drc", *extra]
 
@@ -80,7 +105,7 @@ class TestPlanGateExitCode:
         assert "[plan-gate] NO-GO" in capsys.readouterr().err
 
     def test_force_overrides_the_gate_and_routes(
-        self, routing_test_pcb, tmp_path, capsys, infeasible_plan
+        self, routing_test_pcb, tmp_path, capsys, infeasible_plan, no_post_route_kicad_cli
     ):
         out = tmp_path / "out.kicad_pcb"
         rc = route_cmd.main(_argv(routing_test_pcb, out, "--plan-gate", "--force"))
@@ -90,7 +115,7 @@ class TestPlanGateExitCode:
         assert out.exists()
 
     def test_without_the_flag_an_infeasible_plan_changes_nothing(
-        self, routing_test_pcb, tmp_path, capsys, infeasible_plan
+        self, routing_test_pcb, tmp_path, capsys, infeasible_plan, no_post_route_kicad_cli
     ):
         out = tmp_path / "out.kicad_pcb"
         rc = route_cmd.main(_argv(routing_test_pcb, out))
@@ -99,7 +124,9 @@ class TestPlanGateExitCode:
         assert "[plan-gate]" not in err
         assert out.exists()
 
-    def test_feasible_board_passes_the_gate(self, routing_test_pcb, tmp_path, capsys):
+    def test_feasible_board_passes_the_gate(
+        self, routing_test_pcb, tmp_path, capsys, no_post_route_kicad_cli
+    ):
         out = tmp_path / "out.kicad_pcb"
         rc = route_cmd.main(_argv(routing_test_pcb, out, "--plan-gate"))
         assert rc != GATE_EXIT
