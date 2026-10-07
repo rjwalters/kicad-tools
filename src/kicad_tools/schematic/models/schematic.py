@@ -172,7 +172,7 @@ class Schematic(
         # schematic built from scratch, which keeps the fully-regenerated
         # write path.  See ``SchematicIOMixin._snapshot_source``.
         self._source_doc: SExp | None = None
-        self._source_consumed: set[int] = set()
+        self._source_consumed: list[SExp] = []
         self._source_slots: dict[str, tuple[SExp | None, str]] = {}
         self._text_note_sources: dict[tuple[str, float, float], list[SExp]] = {}
 

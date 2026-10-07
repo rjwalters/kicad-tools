@@ -190,6 +190,44 @@ def test_removed_and_added_elements(tmp_path: Path):
     assert out.find("polyline") is not None
 
 
+def test_deepcopy_removed_elements_stay_removed(tmp_path: Path):
+    """Issue #6071: a deepcopy must not resurrect elements removed from it."""
+    import copy
+
+    sch = _load_text(tmp_path, _KICAD9_SCH)
+    dup = copy.deepcopy(sch)
+    dup.wires.clear()
+    dup.labels.clear()
+    out = parse_string(dup.to_sexp())
+    assert out.find("wire") is None
+    assert out.find("label") is None
+    # The original is unaffected by edits to the copy.
+    assert _children(sch.to_sexp()) == _children(_KICAD9_SCH)
+
+
+def test_deepcopy_and_original_save_independently(tmp_path: Path):
+    import copy
+
+    sch = _load_text(tmp_path, _KICAD9_SCH)
+    dup = copy.deepcopy(sch)
+    sch.wires.clear()
+    next(lbl for lbl in dup.labels if lbl.text == "SC_LINK").x = 260.35
+    a, b = parse_string(sch.to_sexp()), parse_string(dup.to_sexp())
+    assert a.find("wire") is None and b.find("wire") is not None
+    assert "260.35" not in a.to_string() and "260.35" in b.to_string()
+
+
+def test_pickle_roundtrip_saves_like_original(tmp_path: Path):
+    import pickle
+
+    sch = _load_text(tmp_path, _KICAD9_SCH)
+    dup = pickle.loads(pickle.dumps(sch))
+    assert _children(dup.to_sexp()) == _children(sch.to_sexp()) == _children(_KICAD9_SCH)
+    dup.wires.clear()
+    assert parse_string(dup.to_sexp()).find("wire") is None
+    assert parse_string(sch.to_sexp()).find("wire") is not None
+
+
 def test_header_edit_regenerates_only_that_node(tmp_path: Path):
     sch = _load_text(tmp_path, _KICAD9_SCH)
     sch.title = "Renamed"
