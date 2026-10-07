@@ -240,7 +240,7 @@ def _add_optim_parser(subparsers) -> None:
     fom_debug.add_argument(
         "--weights",
         default=None,
-        help="Path to weights YAML (default: uniform 1.0)",
+        help="Path to weights YAML (default: the calibrated optim/weights/default.yaml)",
     )
     fom_debug.add_argument(
         "--format",

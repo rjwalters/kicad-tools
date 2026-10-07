@@ -26,7 +26,9 @@ def run_optim_fom_debug(
     Args:
         pcb_path: Path to the routed PCB (.kicad_pcb).
         weights_path: Optional path to a weights YAML.  When ``None``,
-            uniform 1.0 weights are used.
+            the calibrated package default
+            (``kicad_tools/optim/weights/default.yaml``, via
+            :func:`kicad_tools.optim.fom.default_weights`) is used.
         output_format: ``"text"`` (default) or ``"json"``.
         verbose: When True, also dump the raw feature counts
             (footprint count, pad count, net count) above the FOM
