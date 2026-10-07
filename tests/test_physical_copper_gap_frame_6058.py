@@ -122,7 +122,7 @@ def _mine(pcb, minimum=0.25):
     return [
         v
         for v in checker.check_physical_copper_gap().violations
-        if v.rule_id == "physical_copper_gap" and "arc-6058" in v.items
+        if v.rule_id == "physical_copper_gap" and any(i.startswith("Arc@") for i in v.items)
     ]
 
 
@@ -133,7 +133,11 @@ def test_arc_to_track_gap_and_sheet_frame(tmp_path):
     assert len(found) == 1
     v = found[0]
     assert v.actual_value == pytest.approx(0.2, abs=0.002)
-    assert set(v.items) == {"arc-6058", "trk-6058"}
+    # Issue #6106: copper is named by sheet-frame geometry, not UUID.
+    assert set(v.items) == {
+        "Arc@F.Cu:w0.2:170/150~171/151~172/150",
+        "Trace@F.Cu:w0.2:170/151.4~172/151.4",
+    }
     # Sheet frame: gap is at x=171 between y=151.1 and y=151.3.
     assert v.location == pytest.approx((171.0, 151.2), abs=0.01)
     for p in v.closest_locations:

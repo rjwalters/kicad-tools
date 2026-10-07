@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...schema.pcb import _fill_token_is_filled
+from ..copper_refs import board_origin, segment_ref, via_ref
 from ..violations import DRCResults, DRCViolation
 from .clearance import _pad_on_layer, _pad_polygon, _repair_fill_polygon
 
@@ -336,13 +337,17 @@ def _collect(pcb):
     def net_name(number):
         return pcb.nets[number].name if number in pcb.nets else str(number)
 
+    # Issue #6106: tracks, arcs and vias are named by sheet-frame geometry
+    # (``copper_refs``, Issue #6088), not UUID, so a re-route that reproduces
+    # the same copper keeps its finding keys and evidence hashes.
+    origin = board_origin(pcb)
     for index, segment in enumerate(pcb.segments):
         sources.append(
             CopperSource(
                 LineString([segment.start, segment.end]).buffer(segment.width / 2, quad_segs=64),
                 segment.layer,
                 net_name(segment.net_number),
-                segment.uuid or f"segment:{index}",
+                segment_ref(segment, origin),
             )
         )
     for fp in pcb.footprints:
@@ -394,7 +399,7 @@ def _collect(pcb):
                     Point(via.position).buffer(via.size / 2, quad_segs=64),
                     layer,
                     net_name(via.net_number),
-                    via.uuid or f"via:{index}",
+                    via_ref(via, origin),
                 )
             )
     for index, zone in enumerate(pcb.zones):
@@ -424,7 +429,14 @@ def _collect(pcb):
         except (ValueError, TypeError) as exc:
             unsupported.append(str(exc))
             continue
-        identifier = node.find_child("uuid")
+        try:
+            # The raw node is already in the sheet frame: no origin shift.
+            from ...schema.pcb import Arc
+
+            arc_name = segment_ref(Arc.from_sexp(node))
+        except (ValueError, TypeError):
+            identifier = node.find_child("uuid")
+            arc_name = identifier.get_string(0) if identifier else f"arc:{index}"
         net = node.find_child("net")
         value = net.get_first_atom() if net else 0
         sources.append(
@@ -432,7 +444,7 @@ def _collect(pcb):
                 geom,
                 layer,
                 net_name(value) if isinstance(value, int) else str(value),
-                identifier.get_string(0) if identifier else f"arc:{index}",
+                arc_name,
             )
         )
     return sources, unsupported
