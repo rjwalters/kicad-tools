@@ -596,6 +596,51 @@ def test_route_sidecar_emission_rejects_unsafe_override(tmp_path: Path, capsys):
     assert pro["board"]["design_settings"]["rules"]["min_hole_to_hole"] == default_floor
 
 
+def test_route_sidecar_emission_reads_input_board_sidecar_for_scratch_output(tmp_path: Path):
+    """Issue #6147: ``-o <scratch>`` must honour the INPUT board's sidecar."""
+    from kicad_tools.cli.route_cmd import _write_drc_constraint_sidecars
+
+    src_dir = tmp_path / "boardtree"
+    src_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    source = src_dir / "board.kicad_pcb"
+    source.write_text("(kicad_pcb)")
+    _write_sidecar(src_dir)
+    out = scratch / "routed.kicad_pcb"
+    out.write_text("(kicad_pcb)")
+
+    _write_drc_constraint_sidecars(
+        out, JLC_TIER1_MFR, layers=4, quiet=True, source_pcb_path=source
+    )
+
+    pro = json.loads(out.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+    assert pro["board"]["design_settings"]["rules"]["min_hole_to_hole"] == 0.45
+
+
+def test_route_sidecar_emission_output_sidecar_wins_over_input(tmp_path: Path):
+    """When both exist, the sidecar beside the output wins (nearest-wins)."""
+    from kicad_tools.cli.route_cmd import _write_drc_constraint_sidecars
+
+    src_dir = tmp_path / "boardtree"
+    src_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    source = src_dir / "board.kicad_pcb"
+    source.write_text("(kicad_pcb)")
+    _write_sidecar(src_dir, value=0.45)
+    _write_sidecar(scratch, value=0.48)
+    out = scratch / "routed.kicad_pcb"
+    out.write_text("(kicad_pcb)")
+
+    _write_drc_constraint_sidecars(
+        out, JLC_TIER1_MFR, layers=4, quiet=True, source_pcb_path=source
+    )
+
+    pro = json.loads(out.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+    assert pro["board"]["design_settings"]["rules"]["min_hole_to_hole"] == 0.48
+
+
 # ---------------------------------------------------------------------------
 # kct mfr apply-rules: the fourth native-emission call site named in this
 # module's own docstring, sharing the exact same contract (#5006).

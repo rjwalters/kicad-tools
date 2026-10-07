@@ -3429,9 +3429,22 @@ def _write_drc_constraint_sidecars(
         # --emit-drc-constraints` and the manufacturing export path use --
         # so a route-triggered re-emit cannot silently revert a reviewed
         # floor back to the profile's conservative default.
+        # Issue #6147: the sidecar belongs to the *authored* board.  Probe the
+        # output location first (nearest-wins, preserves the in-tree contract
+        # and lets an explicit sidecar beside the output take precedence),
+        # then fall back to the input board so ``-o <scratch>`` does not drop
+        # a reviewed floor.
         rules, fab_override_msg = resolve_pcb_fabrication_overrides(
             output_path, rules, manufacturer_id=profile.id
         )
+        if (
+            fab_override_msg is None
+            and source_pcb_path is not None
+            and Path(source_pcb_path).resolve() != Path(output_path).resolve()
+        ):
+            rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+                source_pcb_path, rules, manufacturer_id=profile.id
+            )
         if fab_override_msg is not None and not quiet:
             prefix = "  Warning: " if fab_override_msg.startswith("ignoring") else "  "
             print(prefix + fab_override_msg)
