@@ -4090,6 +4090,35 @@ def _add_route_parser(subparsers) -> None:
             "(Issue #5945)."
         ),
     )
+    # Issue #6054: --lint-gate.  Mirror of the outer parser flags in
+    # parser.py; tests/test_cli_parser_drift.py keeps them in sync.
+    route_parser.add_argument(
+        "--lint-gate",
+        action="store_true",
+        help=(
+            "Lint the input board before routing and the routed board after it "
+            "(kct check + kct detect-mistakes, paired by stable finding key as in "
+            "`kct check --diff`); if routing introduced new error findings, roll "
+            "the output back (restore its pre-run contents, keep the routed board "
+            "as <output>.lint-rejected.kicad_pcb) and exit 3. Waived findings never "
+            "count (Issue #6054)."
+        ),
+    )
+    route_parser.add_argument(
+        "--lint-gate-waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Waivers sidecar applied to both lint runs of --lint-gate. Default: "
+            "the one `kct check` discovers for the INPUT board "
+            "(<board>.kct-waivers.json, then .kct_waivers.json)."
+        ),
+    )
+    route_parser.add_argument(
+        "--lint-gate-strict",
+        action="store_true",
+        help="With --lint-gate, new warning findings also roll the route back.",
+    )
     # Issue #2610: --max-search-iterations override for the C++ A* memory
     # backstop (default 0 = use the historical ``cols * rows * 4`` heuristic).
     # Documented as an escape hatch for dense boards where the cap fires
@@ -5294,6 +5323,33 @@ def _add_route_auto_parser(subparsers) -> None:
             "requested nets it already completed are kept and skipped. Its "
             "footprints and nets must match the input board (Issue #5945)."
         ),
+    )
+    # Issue #6054: whole-run lint gate (see kicad_tools.cli.route_lint_gate).
+    route_auto_parser.add_argument(
+        "--lint-gate",
+        action="store_true",
+        help=(
+            "Lint the input board before routing and --output after the last "
+            "net (kct check + kct detect-mistakes, paired by stable finding key); "
+            "if routing introduced new error findings, restore --output to its "
+            "pre-run contents, keep the routed board as "
+            "<output>.lint-rejected.kicad_pcb and exit 3. Requires --output "
+            "(Issue #6054)."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--lint-gate-waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Waivers sidecar for both --lint-gate runs. Default: the one "
+            "`kct check` discovers for the INPUT board."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--lint-gate-strict",
+        action="store_true",
+        help="With --lint-gate, new warning findings also roll the run back.",
     )
     route_auto_parser.add_argument(
         "--no-rollback",

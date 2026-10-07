@@ -464,20 +464,22 @@ def run_route_auto_command(args) -> int:
         return rc
     assert net_list is not None  # rc == 0 guarantees a list
 
-    def _emit(nets: list[dict], overall_rc: int) -> None:
-        emit_json(
-            {
-                "command": "route-auto",
-                "pcb": args.pcb,
-                "output": args.output,
-                "strategy": args.strategy,
-                "dry_run": bool(args.dry_run),
-                "nets": nets,
-                "nets_requested": len(net_list),
-                "nets_routed": sum(1 for entry in nets if entry.get("success")),
-                "success": overall_rc == 0,
-            }
-        )
+    def _emit(nets: list[dict], overall_rc: int, lint_gate: dict | None = None) -> None:
+        doc = {
+            "command": "route-auto",
+            "pcb": args.pcb,
+            "output": args.output,
+            "strategy": args.strategy,
+            "dry_run": bool(args.dry_run),
+            "nets": nets,
+            "nets_requested": len(net_list),
+            "nets_routed": sum(1 for entry in nets if entry.get("success")),
+            "success": overall_rc == 0,
+        }
+        if lint_gate is not None:
+            # Issue #6054: present only under --lint-gate.
+            doc["lint_gate"] = lint_gate
+        emit_json(doc)
 
     # Dry-run: preview strategy selection without routing (per net).
     if args.dry_run:
@@ -491,40 +493,78 @@ def run_route_auto_command(args) -> int:
     overall_rc = 0
     net_docs: list[dict] = []
 
+    # Issue #6054: --lint-gate baselines the input board BEFORE any pass (and
+    # before _RouteAutoPasses seeds --output), and judges --output after the
+    # last one -- one whole-run verdict over every net.
+    gate = None
+    if getattr(args, "lint_gate", False):
+        if not args.output:
+            print(
+                "Warning: --lint-gate has no effect without --output "
+                "(route-auto persists nothing to gate).",
+                file=sys.stderr,
+            )
+        else:
+            from ..route_lint_gate import LintGate
+
+            gate = LintGate.from_route_auto_args(args)
+            gate_error = gate.begin()
+            if gate_error is not None:
+                print(gate_error, file=sys.stderr)
+                return 1
+
     # Issue #5945: --resume / --checkpoint / regressing-pass rollback.
     passes, rc = _RouteAutoPasses.create(args, net_list, as_json=as_json)
     if rc != 0:
+        if gate is not None:
+            gate.abort()
         return rc
     base_pcb = passes.base_pcb
     working = passes.working
 
     routed_so_far = 0
-    for net_name in net_list:
-        skip_doc = passes.resumed_skip(net_name)
-        if skip_doc is not None:
-            net_docs.append(skip_doc)
-            continue
-        # Chain outputs so multi-net copper accumulates: the first net routes
-        # from the original board; subsequent nets route from the prior output
-        # (only possible when an output path was given -- otherwise nothing is
-        # persisted and each net routes independently against the input).
-        source = base_pcb
-        if working and (routed_so_far > 0 or passes.seeded_working):
-            # Later nets chain from the accumulated output; a private
-            # --checkpoint working copy already holds the base board.
-            source = working
-        routed_so_far += 1
-        net_rc, net_doc = _route_auto_one(args, net_name, source, working, as_json=as_json)
-        if passes.after_pass(routed_so_far, net_name, net_doc):
-            # The pass made the board worse and was undone -- its copper is
-            # not in the output, so it cannot count as routed.
-            net_rc = 1
-        net_docs.append(net_doc)
-        if net_rc != 0:
-            overall_rc = 1
-    passes.finish()
+    try:
+        for net_name in net_list:
+            skip_doc = passes.resumed_skip(net_name)
+            if skip_doc is not None:
+                net_docs.append(skip_doc)
+                continue
+            # Chain outputs so multi-net copper accumulates: the first net routes
+            # from the original board; subsequent nets route from the prior output
+            # (only possible when an output path was given -- otherwise nothing is
+            # persisted and each net routes independently against the input).
+            source = base_pcb
+            if working and (routed_so_far > 0 or passes.seeded_working):
+                # Later nets chain from the accumulated output; a private
+                # --checkpoint working copy already holds the base board.
+                source = working
+            routed_so_far += 1
+            net_rc, net_doc = _route_auto_one(args, net_name, source, working, as_json=as_json)
+            if passes.after_pass(routed_so_far, net_name, net_doc):
+                # The pass made the board worse and was undone -- its copper is
+                # not in the output, so it cannot count as routed.
+                net_rc = 1
+            net_docs.append(net_doc)
+            if net_rc != 0:
+                overall_rc = 1
+        passes.finish()
+    except BaseException:
+        if gate is not None:
+            gate.abort()
+        raise
+    gate_doc = None
+    if gate is not None:
+        outcome = gate.finish()
+        overall_rc = outcome.exit_code(overall_rc)
+        gate_doc = outcome.to_dict()
+        if outcome.rolled_back:
+            # None of this run's copper shipped.
+            for entry in net_docs:
+                if entry.get("success") and not entry.get("resumed"):
+                    entry["success"] = False
+                    entry["lint_gate_rolled_back"] = True
     if as_json:
-        _emit(net_docs, overall_rc)
+        _emit(net_docs, overall_rc, gate_doc)
     return overall_rc
 
 
@@ -976,6 +1016,13 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--checkpoint", args.checkpoint])
     if getattr(args, "resume", None):
         sub_argv.extend(["--resume", args.resume])
+    # Issue #6054: forward --lint-gate / --lint-gate-waivers / --lint-gate-strict.
+    if getattr(args, "lint_gate", False):
+        sub_argv.append("--lint-gate")
+    if getattr(args, "lint_gate_waivers", None):
+        sub_argv.extend(["--lint-gate-waivers", args.lint_gate_waivers])
+    if getattr(args, "lint_gate_strict", False):
+        sub_argv.append("--lint-gate-strict")
     # Issue #2819: forward --max-search-iterations to the inner parser.
     # Both defaults are 0 (= use cols*rows*4 heuristic), so only forward
     # when the user passed a non-default value (matches the per-net-timeout

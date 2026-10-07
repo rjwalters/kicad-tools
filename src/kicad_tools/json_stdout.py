@@ -24,6 +24,7 @@ written this way behave identically when the guard is not active.
 from __future__ import annotations
 
 import contextlib
+import io
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -46,6 +47,23 @@ class JsonStream:
 
     def flush(self) -> None:
         self._stream.flush()
+
+    @contextmanager
+    def capture(self) -> Iterator[io.StringIO]:
+        """Hold the JSON document back instead of writing it (issue #6054).
+
+        A post-processing step (``kct route --lint-gate``) may need to amend
+        the document after the emitter ran.  ``written`` is still recorded,
+        so emitters that check it behave as usual; the caller writes the
+        (amended) buffer to the real stream itself.
+        """
+        real = self._stream
+        buffer = io.StringIO()
+        self._stream = buffer
+        try:
+            yield buffer
+        finally:
+            self._stream = real
 
     def __getattr__(self, name: str):
         return getattr(self._stream, name)

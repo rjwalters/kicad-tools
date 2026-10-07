@@ -346,6 +346,18 @@ FLAG_VARIANT_ARGV: dict[str, list[str]] = {
         "--waive-reviewer",
         "pytest",
     ],
+    # Issue #6054: the gate's two lint runs must not leak onto stdout; the
+    # verdict is merged into the command's one document as ``lint_gate``.
+    "route --lint-gate": ["route", "{pcb}", "--no-current-paths", "--lint-gate"],
+    "route-auto --lint-gate": [
+        "route-auto",
+        "{pcb}",
+        "--net",
+        "GND",
+        "-o",
+        "{dir}/auto_routed.kicad_pcb",
+        "--lint-gate",
+    ],
 }
 
 # Leaves that cannot be run hermetically inside a unit test.  Keep each

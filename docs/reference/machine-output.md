@@ -324,9 +324,21 @@ an improvement or an enforceable rule set from it: `optimize-placement`,
 |---|---|
 | `optimize-placement` | `{"command": "optimize-placement", "pcb", "output", "strategy", "seed_method", "max_iterations", "board": {width_mm, height_mm, components, nets}, "mode": "evaluate"\|"optimize", "scores": {…}, "feasible", "infeasible_detail", "iterations", "wall_time_s", "interrupted", "overlaps_remaining", "allow_infeasible", "dry_run", "saved", "written_to", "success"}` — `scores` is `{"current": …}` under `--dry-run` and `{"initial", "final"}` otherwise; each score is `{total, feasible, breakdown}` with the breakdown taken straight off the cost dataclass. The `--dry-run` document additionally carries `"wirelength_estimators": {centre_anchored_mm, pad_anchored_mm, delta_mm, delta_pct, scored, pads_available, pad_count}` — the same layout measured both ways (issue #4831 M5); `scored` names the one the objective used (`--pad-anchored-wirelength` switches it), the other is report-only and `delta_pct` is `null` when the centre-anchored estimate is 0 |
 | `optimize-traces` | `{"command": "optimize-traces", "pcb", "output", "net_filter", "optimizations": {merge_collinear, eliminate_zigzags, convert_45_corners, chamfer_size_mm}, "drc_aware", "manufacturer", "layers", "copper_oz", "stats": {segments_before/after, corners_before/after, length_before_mm/after_mm, …}, "dry_run", "saved", "written_to", "success"}` |
-| `route-auto` | `{"command": "route-auto", "pcb", "output", "strategy", "dry_run", "nets": [...], "nets_requested", "nets_routed", "success"}` — one `nets[]` entry per requested net in request order: routed entries carry `success`/`partial`/`strategy_used`/`metrics`/`segments_written`/`warnings`/`pads_connected`/`pads_total`/`error`/`alternative_strategies` (plus `rolled_back`/`rolled_back_to_pass` when a regressing pass was undone -- such an entry reports `success: false`, and `resumed: true` for a net skipped because the `--resume` checkpoint already completed it, Issue #5945), `--dry-run` entries carry the preview (`would_route`, `via_drill_mm` + `via_drill_source`, …) |
+| `route-auto` | `{"command": "route-auto", "pcb", "output", "strategy", "dry_run", "nets": [...], "nets_requested", "nets_routed", "success"}` — one `nets[]` entry per requested net in request order: routed entries carry `success`/`partial`/`strategy_used`/`metrics`/`segments_written`/`warnings`/`pads_connected`/`pads_total`/`error`/`alternative_strategies` (plus `rolled_back`/`rolled_back_to_pass` when a regressing pass was undone -- such an entry reports `success: false`, and `resumed: true` for a net skipped because the `--resume` checkpoint already completed it, Issue #5945), `--dry-run` entries carry the preview (`would_route`, `via_drill_mm` + `via_drill_source`, …). Under `--lint-gate` the document also carries `lint_gate` (below) and, on a rollback, every routed entry reports `success: false` with `lint_gate_rolled_back: true` |
 | `reason` | `{"command": "reason", "pcb", "output", "dry_run", "warnings", "drc": {ran, source, …}, "board": {…}, "mode": "prompt"\|"analyze"\|"export-state"\|"auto-route", …, "success"}` — plus the mode's own payload: `prompt`, `analysis`, `state` + `state_output`, or `auto_route` (`attempted`/`routed`/`nets[]`) with `saved`/`written_to` |
 | `creepage-export-rules` | `{"command": "creepage-export-rules", "project", "pcb", "dru", "voltage_map", "standard", "pollution_degree", "material_group", "hv_threshold_v", "dru_floor_mm", "domains", "net_domains", "nets_assigned", "rules": [{name, condition, min_mm}], "bridging_exemptions", "dru_block", "dry_run", "written", "skipped_reason", "success"}` — `dru_block` is carried only on the `--dry-run` path (mirroring the prose that prints it instead of writing it) |
+
+### `--lint-gate` verdict (`kct route`, `kct route-auto`)
+
+With `--lint-gate` (Issue #6054) the command's single document gains
+`lint_gate: {status, reason, strict, summary, introduced, rejected_board,
+output_restored, waivers}`. `status` is `pass`, `rolled_back` (routing
+introduced blocking findings), `error` (the routed board could not be linted;
+also rolled back) or `skipped` (no routed board was written). `summary` and
+`introduced` are the `kct check --diff` shapes, over the merged `kct check` +
+`kct detect-mistakes` findings. On a rollback `exit_code` (when present) is 3
+and `success` (when present) is `false`. The two lint runs write nothing to
+stdout.
 
 ### Physical power completion
 
