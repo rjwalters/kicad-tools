@@ -526,10 +526,17 @@ def generate_dru(
                 copper_weight_oz=rules.outer_copper_oz,
                 layer="external",
             )
-            internal_width_mm = width_for_current(
-                nc.target_ampacity,
-                copper_weight_oz=rules.inner_copper_oz,
-                layer="internal",
+            # 2-layer profiles have no inner copper (inner_copper_oz == 0):
+            # there is no internal layer to constrain (#6171).
+            has_inner = rules.inner_copper_oz > 0
+            internal_width_mm = (
+                width_for_current(
+                    nc.target_ampacity,
+                    copper_weight_oz=rules.inner_copper_oz,
+                    layer="internal",
+                )
+                if has_inner
+                else 0.0
             )
 
             # External copper: front and back layers.
@@ -539,6 +546,8 @@ def generate_dru(
                 f" && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
                 f"  (constraint track_width (min {external_width_mm:.4f}mm)))"
             )
+            if not has_inner:
+                continue
             # Internal copper: any track that is not on an external layer.
             lines.append(
                 f'(rule "Ampacity Min Width ({nc.name}, internal){label_suffix}"\n'
