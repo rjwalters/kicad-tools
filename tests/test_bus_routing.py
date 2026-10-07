@@ -1,5 +1,7 @@
 """Tests for bus routing module."""
 
+import pytest
+
 from kicad_tools.router.bus import (
     BusGroup,
     BusRoutingConfig,
@@ -371,3 +373,50 @@ class TestAnalyzeBuses:
         assert analysis["total_signals"] == 0
         assert analysis["total_groups"] == 0
         assert len(analysis["groups"]) == 0
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("DATA0", ("DATA", 0, "numeric")),
+        ("/DATA0", ("/DATA", 0, "numeric")),
+        ("/sub/DATA0", ("/sub/DATA", 0, "numeric")),
+        ("/sub/ADDR12", ("/sub/ADDR", 12, "numeric")),
+        ("/a/b/ADDR15", ("/a/b/ADDR", 15, "numeric")),
+        ("/DATA[0]", ("/DATA", 0, "bracket")),
+        ("/DATA_0", ("/DATA", 0, "underscore")),
+        ("+3V3", None),
+        ("/+3V3", None),
+        ("/sub/", None),
+        ("/123", None),
+    ],
+)
+def test_parse_bus_signal_sheet_prefixed(name, expected):
+    from kicad_tools.router.bus import parse_bus_signal
+
+    assert parse_bus_signal(name) == expected
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["VCC3V3"],
+        ["/USB2"],
+        ["/I2C1_SCL", "/I2C1_SDA"],
+        ["SPI1"],
+        ["/R1"],
+        ["/DATA0", "/other/DATA1"],
+    ],
+)
+def test_prefixed_non_buses_not_grouped(names):
+    from kicad_tools.router.bus import detect_bus_signals
+
+    assert detect_bus_signals(dict(enumerate(names))) == []
+
+
+def test_prefixed_numeric_bus_groups():
+    from kicad_tools.router.bus import detect_bus_signals, group_buses
+
+    sigs = detect_bus_signals({1: "/sub/DATA0", 2: "/sub/DATA1", 3: "/DATA0"})
+    groups = group_buses(sigs)
+    assert [(g.name, g.width) for g in groups] == [("/sub/DATA", 2)]
