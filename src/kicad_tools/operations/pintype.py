@@ -329,12 +329,14 @@ def _xy(node) -> _Point | None:
     return (x, y)
 
 
-def _read_sheet_geometry(path: Path) -> tuple[dict[str, _Placement], _NoConnectZone | None]:
-    """Raw placements (by symbol UUID) and the no-connect zone of one sheet.
+def _read_sheet_geometry(
+    path: Path,
+) -> tuple[dict[str, tuple[float, float, float]], _NoConnectZone | None]:
+    """Raw ``(x, y, rotation)`` (by symbol UUID) and the no-connect zone of one sheet.
 
-    Read from the raw file rather than the
-    :class:`~kicad_tools.schematic.models.Schematic` model, which rounds
-    coordinates to 0.01 mm and does not keep a symbol's mirror.
+    Coordinates are read from the raw file rather than the
+    :class:`~kicad_tools.schematic.models.Schematic` model, which rounds them
+    to 0.01 mm.  The mirror axis comes from the model (issue #6005).
     """
     from kicad_tools.sexp import parse_file
 
@@ -342,20 +344,14 @@ def _read_sheet_geometry(path: Path) -> tuple[dict[str, _Placement], _NoConnectZ
     points = [p for p in (_xy(n.find_child("at")) for n in root.find_children("no_connect")) if p]
     if not points:
         return {}, None
-    placements: dict[str, _Placement] = {}
+    placements: dict[str, tuple[float, float, float]] = {}
     for node in root.find_children("symbol"):
         uuid_node = node.find_child("uuid")
         at = node.find_child("at")
         xy = _xy(at)
         if uuid_node is None or at is None or xy is None:
             continue
-        mirror_node = node.find_child("mirror")
-        placements[uuid_node.get_string(0) or ""] = _Placement(
-            xy[0],
-            xy[1],
-            at.get_float(2) or 0.0,
-            (mirror_node.get_string(0) or "") if mirror_node is not None else "",
-        )
+        placements[uuid_node.get_string(0) or ""] = (xy[0], xy[1], at.get_float(2) or 0.0)
     wires: list[_Segment] = []
     for node in root.find_children("wire"):
         pts = node.find_child("pts")
@@ -388,14 +384,18 @@ def _iter_schematic_symbols(sch_path: Path):
             continue
         visited.add(resolved)
         sch = Schematic.load(str(path))
-        placements: dict[str, _Placement] = {}
+        raw: dict[str, tuple[float, float, float]] = {}
         zone: _NoConnectZone | None = None
         if sch.no_connects:
-            placements, zone = _read_sheet_geometry(path)
+            raw, zone = _read_sheet_geometry(path)
         for sym in sch.symbols:
-            placement = placements.get(getattr(sym, "uuid_str", ""))
-            if zone is not None and placement is None:
-                placement = _Placement(sym.x, sym.y, getattr(sym, "rotation", 0) or 0, "")
+            placement = None
+            if zone is not None:
+                x, y, rotation = raw.get(
+                    getattr(sym, "uuid_str", ""),
+                    (sym.x, sym.y, getattr(sym, "rotation", 0) or 0),
+                )
+                placement = _Placement(x, y, rotation, getattr(sym, "mirror", "") or "")
             yield sym, placement, zone
         for entry in _get_sheet_entries(path):
             stack.append(path.parent / entry.filename)
@@ -409,24 +409,16 @@ def _pinfunction_for(name: str) -> str:
 def _placed_pin_xy(placement: _Placement, pin) -> _Point:
     """Schematic (Y-down) position of *pin*'s connection point on a placed symbol.
 
-    KiCad builds the placed symbol's transform as rotation *then* mirror, in
-    library (Y-up) coordinates: rotate the library point by the symbol's
-    angle, then ``(mirror x)`` negates the rotated Y and ``(mirror y)`` the
-    rotated X.  At 0 and 180 degrees the order does not matter (an axis flip
-    commutes with a half turn); at 90 and 270 degrees mirroring first lands
-    on the mirror-twin pin instead.
+    Delegates to the shared rotate-then-mirror transform
+    (:func:`kicad_tools.core.symbol_transform.symbol_to_sheet_offset`), the
+    same one :meth:`SymbolInstance.pin_position` uses; unlike that method the
+    result is not rounded, since *placement* keeps the raw coordinates.
     """
-    import math
+    from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
 
     x, y = pin.connection_point()
-    rad = math.radians(placement.rotation)
-    rx = x * math.cos(rad) - y * math.sin(rad)
-    ry = x * math.sin(rad) + y * math.cos(rad)
-    if placement.mirror == "x":
-        ry = -ry
-    elif placement.mirror == "y":
-        rx = -rx
-    return (placement.x + rx, placement.y - ry)
+    dx, dy = symbol_to_sheet_offset(x, y, placement.rotation, placement.mirror)
+    return (placement.x + dx, placement.y + dy)
 
 
 def _pin_has_no_connect_flag(

@@ -980,11 +980,11 @@ class TestResolvePinMap:
         assert abs(pos2[1] - 50.0) < 0.01
 
     def test_mirrored_symbol_positions(self, tmp_path):
-        """Symbol mirrored in X: for a symmetric resistor with pins on the Y-axis,
-        mirror X (which negates X) does not change pin positions.
+        """``(mirror x)`` flips across the X axis, so it negates library Y.
 
-        After Y-negation, pin 1 is at (0, -3.81) and pin 2 at (0, 3.81).
-        Mirror X negates X which is 0, so positions are unchanged.
+        The resistor's pins sit on the Y axis at library (0, +-3.81), so the
+        mirror swaps them: pin 1 lands where pin 2 sits unmirrored and vice
+        versa (issue #6005; KiCad rotates, then mirrors).
         """
         sch = Schematic.load(_write_sch(tmp_path, MIRRORED_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
@@ -992,11 +992,10 @@ class TestResolvePinMap:
         assert "R1" in pin_map
         pos1 = pin_map["R1"]["pins"]["1"]["position"]
         pos2 = pin_map["R1"]["pins"]["2"]["position"]
-        # Mirror X on symmetric resistor: positions same as non-mirrored (with Y fix)
         assert abs(pos1[0] - 100.0) < 0.01
-        assert abs(pos1[1] - 46.19) < 0.01
+        assert abs(pos1[1] - 53.81) < 0.01
         assert abs(pos2[0] - 100.0) < 0.01
-        assert abs(pos2[1] - 53.81) < 0.01
+        assert abs(pos2[1] - 46.19) < 0.01
 
 
 # ---------------------------------------------------------------------------

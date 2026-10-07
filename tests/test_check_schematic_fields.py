@@ -211,7 +211,10 @@ class TestFieldOffset:
     def test_mirror_consumed_from_field_geometry(self, tmp_path: Path) -> None:
         """Mirroring an asymmetric body must move the measured bbox."""
         base = _symbol("A1", (100, 100), (107, 100), lib_id="Test:Asym")
-        mirrored = _symbol("A1", (100, 100), (107, 100), lib_id="Test:Asym", mirror="x")
+        # ``(mirror y)`` flips across the Y axis, moving the body (library
+        # x 0..4) to the left of the origin, away from the field at x=107.
+        # ``(mirror x)`` would only flip it vertically (issue #6005).
+        mirrored = _symbol("A1", (100, 100), (107, 100), lib_id="Test:Asym", mirror="y")
 
         sch_base = _write_sch(tmp_path, base, name="base.kicad_sch")
         sch_mirrored = _write_sch(tmp_path, mirrored, name="mirrored.kicad_sch")
