@@ -107,7 +107,9 @@ def run_optim_fom_debug(
     print(f"  penalty:         {penalty:.4f}  (sum w*term; lower is better)")
     print(f"  score:           {result.score:.3e}  (= exp(-penalty) * gate)")
     print(f"  soft_score:      {result.soft_score:.3e}")
-    print("  note:            scores rank placements of the SAME board; not comparable across boards")
+    print(
+        "  note:            scores rank placements of the SAME board; not comparable across boards"
+    )
     print(f"  hard_gate:       {'PASS' if result.hard_gate_passed else 'FAIL'}")
     if result.hard_failures:
         print(f"  hard_failures:   {', '.join(result.hard_failures)}")
