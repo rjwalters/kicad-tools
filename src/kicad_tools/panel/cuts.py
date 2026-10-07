@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from kicad_tools.sexp.builders import fmt, gr_line_node, uuid_node
 from kicad_tools.sexp.parser import SExp
+from kicad_tools.sexp.vscore import make_vscore_uuid
 
 from .config import MousebiteConfig, VCutConfig
 from .tabs import Tab
@@ -209,5 +210,5 @@ def vcut_line_to_sexp(line: VCutLine, config: VCutConfig) -> SExp:
         line.end_y,
         layer=config.layer,
         width=config.line_width,
-        uuid_str=str(uuid.uuid4()),
+        uuid_str=make_vscore_uuid(),
     )

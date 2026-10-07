@@ -26,6 +26,7 @@ from kicad_tools.exceptions import (
     ExportError,
 )
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.sexp.vscore import VSCORE_UUID_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,13 @@ _VSCORE_CANDIDATE_RE = re.compile(r"^(?:(?:Dwgs|Cmts|Eco1|Eco2)\.User|User\.\d+)
 _VSCORE_SPAN_TOL_MM = 0.01
 
 
+def _is_tagged_vscore(node: Any) -> bool:
+    uuid_node = node.find_child("uuid") or node.find_child("tstamp")
+    value = uuid_node.get_string(0) if uuid_node is not None else None
+    parts = (value or "").split("-")
+    return len(parts) == 5 and parts[3].lower() == VSCORE_UUID_MARKER
+
+
 def _xy(node: Any) -> tuple[float, float] | None:
     """Return a ``(start|end|mid|center|xy x y)`` node's point, or None."""
     if node is None:
@@ -189,11 +197,16 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
 
     A V-score line is a top-level ``gr_line`` on a user drawing layer
     (``Cmts.User``, ``Dwgs.User``, ``Eco1/2.User``, ``User.N``) that runs
-    straight across the whole board outline: horizontal or vertical, with both
-    ends on the Edge.Cuts bounding box.  That is exactly what
-    ``kct panel --cut vcut`` draws, and what a fab needs to see.  Ordinary
+    straight across the whole board outline: horizontal or vertical, reaching
+    or passing the Edge.Cuts bounding box at both ends (KiKit overshoots the
+    frame by ~3 mm).  Lines tagged by ``kct panel`` (see
+    :data:`VSCORE_UUID_MARKER`) are always accepted.  Untagged lines must lie strictly
+    inside the outline on the perpendicular axis; borders on or outside the
+    outline and dimension extension lines are not scores, and partial or jump
+    scores that stop short of an edge are not detected by geometry.  Ordinary
     notes and dimension lines on ``Cmts.User`` do not span the outline, so a
-    normal board gains no extra Gerber.
+    normal board gains no extra Gerber.  Quoted and unquoted layer names (old
+    file formats) are both accepted.
 
     Returns an empty list if the file cannot be read or has no outline.
     """
@@ -203,7 +216,7 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
         return []
     # Cheap guard: skip the full parse for boards with no user-layer lines.
     if "gr_line" not in text or not re.search(
-        r'\(layer\s+"(?:(?:Dwgs|Cmts|Eco1|Eco2)\.User|User\.\d+)"', text
+        r'\(layer\s+"?(?:(?:Dwgs|Cmts|Eco1|Eco2)\.User|User\.\d+)\b', text
     ):
         return []
 
@@ -215,9 +228,6 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
         logger.debug("Could not parse %s to look for V-score lines", pcb_path)
         return []
     bbox = _edge_cuts_bbox(root)
-    if bbox is None:
-        return []
-    min_x, min_y, max_x, max_y = bbox
     tol = _VSCORE_SPAN_TOL_MM
 
     layers: list[str] = []
@@ -228,14 +238,22 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
         layer = layer_node.get_string(0) if layer_node is not None else None
         if layer is None or layer in layers or not _VSCORE_CANDIDATE_RE.match(layer):
             continue
+        if _is_tagged_vscore(child):
+            layers.append(layer)
+            continue
+        if bbox is None:
+            continue
+        min_x, min_y, max_x, max_y = bbox
         a, b = _xy(child.find_child("start")), _xy(child.find_child("end"))
         if a is None or b is None:
             continue
         (x0, y0), (x1, y1) = a, b
         if abs(y0 - y1) <= tol:
-            spans = abs(min(x0, x1) - min_x) <= tol and abs(max(x0, x1) - max_x) <= tol
+            inside = min_y + tol < y0 < max_y - tol
+            spans = inside and min(x0, x1) <= min_x + tol and max(x0, x1) >= max_x - tol
         elif abs(x0 - x1) <= tol:
-            spans = abs(min(y0, y1) - min_y) <= tol and abs(max(y0, y1) - max_y) <= tol
+            inside = min_x + tol < x0 < max_x - tol
+            spans = inside and min(y0, y1) <= min_y + tol and max(y0, y1) >= max_y - tol
         else:
             spans = False
         if spans:

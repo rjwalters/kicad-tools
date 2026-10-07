@@ -52,6 +52,7 @@ from collections.abc import Collection
 from pathlib import Path
 
 from kicad_tools.sexp import SExp
+from kicad_tools.sexp.vscore import is_vscore_uuid
 
 __all__ = [
     "UUID_BEARING_TAGS",
@@ -360,6 +361,10 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
         handled by step (2).
         """
         if child.name == "zone" or value in keep_set:
+            return False
+        # ``kct panel`` V-score tag (#6165): its 4th group is not an RFC
+        # variant, so ``.version`` is None; never rewrite it.
+        if is_vscore_uuid(value):
             return False
         if parent is doc and child.name in _COPPER_TAGS:
             return False
