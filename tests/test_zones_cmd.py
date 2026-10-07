@@ -383,7 +383,7 @@ class TestRunFillZones:
         with patch(_FIND_CLI, return_value=None):
             result = run_fill_zones(Path("/some/board.kicad_pcb"))
         assert result.success is False
-        assert "kicad-cli not found" in result.stderr
+        assert "kicad-cli not installed" in result.stderr
 
     def test_file_not_found_error(self):
         from kicad_tools.cli.runner import run_fill_zones

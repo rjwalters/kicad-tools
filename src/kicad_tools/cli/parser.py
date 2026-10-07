@@ -690,7 +690,33 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
 def _add_check_parser(subparsers) -> None:
     """Add check subcommand parser (pure Python DRC)."""
     check_parser = subparsers.add_parser("check", help="Pure Python DRC (no kicad-cli)")
-    check_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    check_parser.add_argument(
+        "pcb",
+        nargs="?",
+        default=None,
+        help="Path to .kicad_pcb file (omit when using --diff OLD NEW)",
+    )
+    # Issue #5946: revision diff + evidence-bound waiver recording.
+    check_parser.add_argument(
+        "--diff",
+        nargs=2,
+        metavar=("OLD", "NEW"),
+        default=None,
+        help=(
+            "Report findings introduced/resolved between two revisions (paths "
+            "or git REV:path specs), paired by stable finding key"
+        ),
+    )
+    check_parser.add_argument(
+        "--waive",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help="Record an evidence-bound waiver for the findings with this key (repeatable)",
+    )
+    check_parser.add_argument("--waive-reason", dest="waive_reason", default=None)
+    check_parser.add_argument("--waive-reviewer", dest="waive_reviewer", default=None)
+    check_parser.add_argument("--waive-issue", dest="waive_issue", default=None)
     check_parser.add_argument("--physical-copper-gap", type=float, default=None, metavar="MM")
     check_parser.add_argument(
         "--mask-copper-config",
@@ -917,11 +943,13 @@ def _add_check_parser(subparsers) -> None:
         dest="waivers",
         default=None,
         help=(
-            "Path to a general .kct_waivers.json sidecar (schema version 2) "
-            "waiving findings for ANY rule by matching the violation's items "
-            "(and optional nets) set.  Matched findings report as WAIVED "
-            "instead of failing the gate.  Auto-discovered next to the board "
-            "when this flag is omitted (Issue #4417)."
+            "Path to a general waivers sidecar (schema version 2, or 3 for "
+            "evidence-bound keyed entries, Issue #5946) waiving findings for "
+            "ANY rule.  Matched findings report as WAIVED instead of failing "
+            "the gate; an evidence-bound entry whose evidence changed is STALE "
+            "and does not suppress its finding.  Auto-discovered next to the "
+            "board (<board>.kct-waivers.json, then .kct_waivers.json) when "
+            "this flag is omitted (Issue #4417)."
         ),
     )
     # Issue #3061: per-board auto-derive of the pad_grid tolerance is the
@@ -2366,6 +2394,34 @@ def _add_pcb_parser(subparsers) -> None:
             "the failed attempt is preserved as a <file>.failed-<timestamp> "
             "sidecar"
         ),
+    )
+
+    # pcb annotate-pintypes (issue #5985)
+    pcb_annotate_pintypes = pcb_subparsers.add_parser(
+        "annotate-pintypes",
+        help="Copy schematic pin names/electrical types onto PCB pads",
+        description="Write (pinfunction ...) and (pintype ...) on every pad from "
+        "the schematic symbol pins, as KiCad's 'Update PCB from Schematic' does. "
+        "Only those pad children change; the rest of the file is preserved "
+        "byte-for-byte. kct detect-mistakes reads pintype power_in/power_out "
+        "as power-rail evidence.",
+    )
+    pcb_annotate_pintypes.add_argument("pcb", help="Path to .kicad_pcb file (edited in place)")
+    pcb_annotate_pintypes.add_argument(
+        "--schematic",
+        required=True,
+        help="Path to root .kicad_sch file",
+    )
+    pcb_annotate_pintypes.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report how many pads would change without writing the file",
+    )
+    pcb_annotate_pintypes.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
     )
 
     # pcb zones
@@ -4000,6 +4056,38 @@ def _add_route_parser(subparsers) -> None:
             "--output. Default: 30. Use 0 to disable."
         ),
     )
+    # Issue #5945: best-so-far checkpoint file + resume.  Mirror of the inner
+    # parser flags in route_cmd.py; tests/test_cli_parser_drift.py keeps them in
+    # sync.
+    route_parser.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write the best result so far to PATH (.kicad_pcb) every time a "
+            "pass improves the score (nets complete, then DRC/clearance count, "
+            "then overflow, wirelength and vias), plus a PATH-stem "
+            ".checkpoint.json sidecar with the score and pass number. A pass "
+            "that is not better never overwrites it, so a killed run leaves the "
+            "best state on disk. Unthrottled, independent of "
+            "--checkpoint-interval (Issue #5945)."
+        ),
+    )
+    route_parser.add_argument(
+        "--resume",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Seed routing with the copper of a checkpoint board (e.g. from "
+            "--checkpoint). Nets the checkpoint already completed are kept "
+            "verbatim and locked; only the rest are routed (implies "
+            "--preserve-existing; with --nets, --complete or --region the "
+            "lock does not apply and listed nets may be re-routed). The "
+            "checkpoint's footprints and nets must "
+            "match the input board. Output defaults to <input>_routed "
+            "(Issue #5945)."
+        ),
+    )
     # Issue #2610: --max-search-iterations override for the C++ A* memory
     # backstop (default 0 = use the historical ``cols * rows * 4`` heuristic).
     # Documented as an escape hatch for dense boards where the cap fires
@@ -5178,6 +5266,40 @@ def _add_route_auto_parser(subparsers) -> None:
         ),
     )
     route_auto_parser.add_argument("-o", "--output", help="Output PCB file path")
+    route_auto_parser.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write the board to PATH (.kicad_pcb) after every net pass that "
+            "improves the score (nets complete, then wirelength and vias), "
+            "plus a PATH-stem .checkpoint.json sidecar with the score and pass "
+            "number. Works without --output (copper accumulates in a private "
+            "working file). Enables regressing-pass rollback (Issue #5945)."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--resume",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Start from a checkpoint board's copper instead of the input; "
+            "requested nets it already completed are kept and skipped. Its "
+            "footprints and nets must match the input board (Issue #5945)."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--no-rollback",
+        action="store_true",
+        default=False,
+        help=(
+            "Keep a net pass even when it lowers the number of complete nets. "
+            "By default a multi-net --nets run with --output (or any "
+            "--checkpoint/--resume run) undoes such a pass, reports the net "
+            "as failed (rolled_back in --format json) and exits 1 "
+            "(Issue #5945)."
+        ),
+    )
     route_auto_parser.add_argument(
         "--dry-run",
         action="store_true",

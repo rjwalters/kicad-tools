@@ -58,6 +58,9 @@ class SyncResult:
     removed: list[SyncAction] = field(default_factory=list)
     pin_mismatches: list[PinMismatch] = field(default_factory=list)
     net_updated: list[SyncAction] = field(default_factory=list)
+    # Pads whose ``pinfunction``/``pintype`` were written from the schematic
+    # pin data (issue #5985), mirroring KiCad's "Update PCB from Schematic".
+    pintype_updated: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -70,6 +73,7 @@ class SyncResult:
             or self.removed
             or self.pin_mismatches
             or self.net_updated
+            or self.pintype_updated
         )
 
 
@@ -384,6 +388,7 @@ def sync_netlist(
         net_actions, net_errors = _assign_nets_from_schematic(pcb, schematic_path)
         result.net_updated.extend(net_actions)
         result.errors.extend(net_errors)
+        _annotate_pintypes(pcb, schematic_path, result)
 
         # Optionally remove nets that have no pad references
         if remove_orphan_nets:
@@ -404,6 +409,7 @@ def sync_netlist(
         net_actions, net_errors = _assign_nets_from_schematic(pcb, schematic_path)
         result.net_updated.extend(net_actions)
         result.errors.extend(net_errors)
+        _annotate_pintypes(pcb, schematic_path, result)
 
     return result
 
@@ -553,6 +559,26 @@ def _assign_nets_from_schematic(pcb, schematic_path: Path) -> tuple[list[SyncAct
             )
 
     return actions, errors
+
+
+def _annotate_pintypes(pcb, schematic_path: Path, result: SyncResult) -> None:
+    """Copy schematic pin names/types onto pads (issue #5985).
+
+    KiCad's "Update PCB from Schematic" writes ``(pinfunction ...)`` and
+    ``(pintype ...)`` on every pad; ``kct detect-mistakes`` reads ``pintype``
+    as power-rail evidence (issue #5939).  The ``+no_connect`` suffix comes
+    from the schematic's no-connect flags, not from the pad nets, so the
+    ``unconnected-(...)`` nets assigned above do not affect it and the result
+    matches ``kct pcb annotate-pintypes`` on the same design.
+    """
+    from kicad_tools.operations.pintype import annotate_pcb_pintypes
+
+    try:
+        annotation = annotate_pcb_pintypes(pcb, schematic_path)
+    except Exception as exc:
+        result.warnings.append(f"Failed to annotate pad pin types: {exc}")
+        return
+    result.pintype_updated = annotation.updated
 
 
 def _remove_unused_nets(pcb, result: SyncResult) -> None:
@@ -740,6 +766,10 @@ def format_text(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             lines.append(f"    {action.detail}")
         lines.append("")
 
+    if result.pintype_updated:
+        lines.append(f"  Pad pin types updated: {result.pintype_updated}")
+        lines.append("")
+
     if result.orphaned:
         lines.append(f"  Orphaned footprints ({len(result.orphaned)}):")
         for action in result.orphaned:
@@ -828,6 +858,7 @@ def format_json(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             }
             for a in result.net_updated
         ],
+        "pintype_updated": result.pintype_updated,
         "warnings": result.warnings,
         "errors": result.errors,
     }

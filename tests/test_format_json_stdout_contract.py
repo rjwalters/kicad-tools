@@ -152,6 +152,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb dedupe": ["{pcb}", "--dry-run"],
     "pcb reannotate": ["{pcb}", "--map", "{dir}/missing_map.json", "--dry-run"],
     "pcb sync-netlist": ["{pcb}", "--schematic", "{sch}", "--dry-run"],
+    "pcb annotate-pintypes": ["{pcb}", "--schematic", "{sch}", "--dry-run"],
     "pcb zones": ["{pcb}"],
     "pcb add-3d-models": ["{pcb}", "--dry-run"],
     "pcb remove-footprint": ["{pcb}", "--ref", "R1", "--dry-run"],
@@ -308,6 +309,25 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "optim fom-debug": ["{pcb}"],
 }
 
+# Flag variants of an already-registered leaf that change what the JSON
+# document is (not just its contents), e.g. ``kct check --diff OLD NEW`` emits
+# a diff document instead of a check report and runs the leaf twice with its
+# own stdout diverted (issue #5946).  Full argv after ``kct``, before
+# ``--format json``; same placeholders as CONTRACT_ARGV.
+FLAG_VARIANT_ARGV: dict[str, list[str]] = {
+    "check --diff": ["check", "--diff", "{pcb}", "{pcb}"],
+    "check --waive": [
+        "check",
+        "{pcb}",
+        "--waive",
+        "connectivity|D1.2|GND|",
+        "--waive-reason",
+        "contract test",
+        "--waive-reviewer",
+        "pytest",
+    ],
+}
+
 # Leaves that cannot be run hermetically inside a unit test.  Keep each
 # reason specific: an entry here is a hole in the contract, not a pass.
 EXEMPT: dict[str, str] = {
@@ -419,6 +439,22 @@ def test_discovery_finds_the_issue_5938_repros():
     assert len(discovered) > 150
 
 
+def test_flag_variants_extend_registered_leaves():
+    for variant, argv in FLAG_VARIANT_ARGV.items():
+        leaf = variant.split(" --", 1)[0]
+        assert leaf in CONTRACT_ARGV, variant
+        assert argv[: len(leaf.split())] == leaf.split(), variant
+
+
+@pytest.mark.parametrize("variant", sorted(FLAG_VARIANT_ARGV))
+def test_format_json_flag_variant_stdout_is_a_single_json_document(variant, tmp_path):
+    scratch = tmp_path / "proj"
+    shutil.copytree(PROJECT_FIXTURE, scratch)
+    argv = [*_expand(FLAG_VARIANT_ARGV[variant], scratch), "--format", "json"]
+    # ``--diff`` checks the board twice.
+    _assert_single_json_document(variant, argv, scratch, timeout_s=2 * _SUBPROCESS_TIMEOUT_S)
+
+
 @pytest.mark.parametrize("leaf", sorted(CONTRACT_ARGV))
 def test_format_json_stdout_is_a_single_json_document(leaf, tmp_path):
     if leaf in NEEDS_KICAD_CLI and not _kicad_cli_available():
@@ -427,7 +463,12 @@ def test_format_json_stdout_is_a_single_json_document(leaf, tmp_path):
     scratch = tmp_path / "proj"
     shutil.copytree(PROJECT_FIXTURE, scratch)
     argv = [*leaf.split(), *_expand(CONTRACT_ARGV[leaf], scratch), "--format", "json"]
+    _assert_single_json_document(leaf, argv, scratch)
 
+
+def _assert_single_json_document(
+    leaf: str, argv: list[str], scratch: Path, timeout_s: int = _SUBPROCESS_TIMEOUT_S
+) -> None:
     # Own process group: a hung grandchild (e.g. kicad-cli, #5877) would keep the
     # pipes open after killing only the direct child, blocking communicate()
     # forever. Kill the whole group on timeout instead.
@@ -442,11 +483,11 @@ def test_format_json_stdout_is_a_single_json_document(leaf, tmp_path):
         start_new_session=True,
     )
     try:
-        stdout, stderr = child.communicate(timeout=_SUBPROCESS_TIMEOUT_S)
+        stdout, stderr = child.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         os.killpg(child.pid, signal.SIGKILL)
         child.communicate()
-        pytest.fail(f"kct {' '.join(argv)} did not finish within {_SUBPROCESS_TIMEOUT_S}s")
+        pytest.fail(f"kct {' '.join(argv)} did not finish within {timeout_s}s")
     proc = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
 
     if proc.returncode != 0 and not proc.stdout.strip():

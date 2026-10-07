@@ -119,3 +119,24 @@ uv run python scripts/research/calibrate_fom.py
 ```
 
 The script is deterministic given `--seed` (default: 42).
+
+## Addendum: `decoupling_proximity` re-check after the #5939 classifier change (issue #5984)
+
+PR #5971 (issue #5939) replaced the term's substring power-rail match with the shared whole-token `router.net_class.is_power_rail_name`. Only two calibration boards change: `stm32_devboard` (`+3.3V` was never in the old hint list) and `bldc_controller` (`VIN`, `VM`, `V3P3`). `scripts/research/fom_decoupling_ab.py` scores the same seed-42 perturbations once and computes the term under both classifiers, so the two arms differ only in that column. Boards are the current committed `*_routed.kicad_pcb` files, which have moved since the May calibration above.
+
+| Board | committed / perturbed median (old) | committed / perturbed median (new) | rank consistency at 0.0181 (old -> new) |
+|---|---|---|---|
+| stm32_devboard | 5.99 / 7.36 | 70.24 / 62.86 | 0.975 -> 0.950 |
+| bldc_controller | 31.51 / 34.59 | 67.87 / 75.97 | 0.900 -> 0.875 |
+| other 5 boards | unchanged | unchanged | unchanged |
+
+On `stm32_devboard` the term is now *anti-informative*: the committed placement scores worse than 70% of random jitters, because U2's VDD pins sit 6-14 mm from the nearest `+3.3V` cap. Fitting therefore pulls the weight **down**:
+
+| Fit (train boards 01-05) | old classifier | new classifier |
+|---|---|---|
+| 1-D re-fit, other weights fixed, argmax | 0.178 | 0.036 |
+| 1-D re-fit, band within 0.01 of best score | [0.106, 0.237] | [0.0045, 0.0708] |
+| NSGA-II, 8 seeds, median / geo-mean | 0.054 / 0.055 | 0.012 / 0.018 |
+| NSGA-II, 8 seeds, range | [0.032, 0.124] | [0.010, 0.049] |
+
+**Decision: keep 0.0181.** It is inside both post-#5939 near-optimal bands, and it equals the 8-seed Pareto geo-mean (0.0183). Its selection score (0.784) is within 0.008 of the 1-D best (0.792), which is less than two perturbations on one board. Moving only this weight would also be a partial re-fit, because the full Pareto vectors on today's boards differ from `default.yaml` in other terms too (for example, `net_congestion_variance` is about 10x higher). A full ten-weight re-calibration is a separate decision.

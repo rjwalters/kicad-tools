@@ -141,6 +141,40 @@ def is_library_footprint(footprint: Footprint) -> bool:
     return ":" in footprint.name
 
 
+def _graphic_descriptor(prefix: str, graphic: Any) -> str:
+    """Item descriptor that pins a finding to *one* silk primitive (Issue #5946).
+
+    ``fp_line`` alone names the primitive *type*, so every under-width line of
+    one footprint shared a finding key (and, since they report the footprint
+    origin as their location, an evidence hash too): waiving one waived them
+    all, and a newly drawn under-width line on that footprint was silently
+    covered by the old waiver.  Appending the primitive's own geometry -- in
+    its native frame (footprint-local for ``fp_*``), so the key survives the
+    footprint being moved or rotated -- makes the key name the line itself.
+
+    The descriptor avoids ``,`` and ``|`` (the finding-key separators).
+    """
+
+    def fmt(point: tuple[float, float] | None) -> str | None:
+        if point is None:
+            return None
+        x = round(float(point[0]), 3) + 0.0
+        y = round(float(point[1]), 3) + 0.0
+        return f"{x:g}/{y:g}"
+
+    gtype = graphic.graphic_type
+    if gtype == "poly" and getattr(graphic, "points", None):
+        pts = list(graphic.points)
+    elif gtype == "circle":
+        pts = [getattr(graphic, "center", None), graphic.end]
+    elif gtype == "arc":
+        pts = [graphic.start, getattr(graphic, "mid", None), graphic.end]
+    else:
+        pts = [graphic.start, graphic.end]
+    geometry = "~".join(f for f in (fmt(p) for p in pts) if f is not None)
+    return f"{prefix}_{gtype}@{geometry}" if geometry else f"{prefix}_{gtype}"
+
+
 def check_silkscreen_line_width(
     pcb: PCB,
     design_rules: DesignRules,
@@ -182,7 +216,7 @@ def check_silkscreen_line_width(
                     layer=graphic.layer,
                     actual_value=graphic.stroke_width,
                     required_value=min_width,
-                    items=(f"gr_{graphic.graphic_type}",),
+                    items=(_graphic_descriptor("gr", graphic),),
                 )
             )
 
@@ -213,7 +247,7 @@ def check_silkscreen_line_width(
                         layer=graphic.layer,
                         actual_value=graphic.stroke_width,
                         required_value=min_width,
-                        items=(footprint.reference, f"fp_{graphic.graphic_type}"),
+                        items=(footprint.reference, _graphic_descriptor("fp", graphic)),
                     )
                 )
 

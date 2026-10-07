@@ -8,6 +8,13 @@
 # methodology, per-board weight breakdowns, and acceptance criteria
 # discussion.
 #
+# decoupling_proximity was re-checked in issue #5984 after #5939 switched
+# its power-rail classifier to router.net_class.is_power_rail_name (which
+# raised the term on boards 04 and 05). 0.0181 was kept: it sits inside
+# the post-#5939 near-optimal band of both a 1-D re-fit ([0.0045, 0.0708])
+# and an 8-seed Pareto re-fit (range [0.0103, 0.0485], geo-mean 0.0183).
+# Re-run with scripts/research/fom_decoupling_ab.py.
+#
 # Use --fom-config legacy.yaml for the pre-#3188 wirelength-only baseline.
 #
 # Regenerate with:
