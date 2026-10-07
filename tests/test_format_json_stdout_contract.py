@@ -81,7 +81,16 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "sch replace": ["{sch}", "R1", "Device:R_Small", "--dry-run"],
     "sch set-footprint": ["{sch}", "--ref", "R1", "--footprint", "Resistor_SMD:R_0402"],
     "sch assign-footprints": ["{sch}"],
-    "sch suggest-footprint": ["{sch}", "--ref", "R1", "--no-project-lib"],
+    # Issue #5994: without a package hint this parses up to 5000 global
+    # footprints (~20-40 s); a library-name hint narrows it to ~1 s.
+    "sch suggest-footprint": [
+        "{sch}",
+        "--ref",
+        "R1",
+        "--no-project-lib",
+        "--package",
+        "Resistor_SMD",
+    ],
     "sch set-value": ["{sch}", "--ref", "R1", "--value", "10k"],
     "sch set-reference": ["{sch}", "--ref", "R1", "--new-ref", "R9"],
     "sch set-symbol-property": [
@@ -196,7 +205,19 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "zones fill": ["{pcb}"],
     "stitch": ["{pcb}", "--dry-run"],
     # -- routing / repair drivers ------------------------------------------
-    "route": ["{pcb}", "--no-current-paths"],
+    # Issue #5994: the default route run spends ~45 s in kicad-cli (oracle
+    # completion rounds, auto-pour zone refills, layer-escalation retries) which
+    # blows the 50 s subprocess budget under load. None of that changes what is
+    # written to stdout; post-route DRC is kept because it is a real stdout
+    # writer. Measured ~45 s -> ~12 s.
+    "route": [
+        "{pcb}",
+        "--no-current-paths",
+        "--oracle-rounds",
+        "0",
+        "--no-auto-pour",
+        "--no-auto-layers",
+    ],
     "route-auto": ["{pcb}"],
     "reason": ["{pcb}"],
     "optimize-traces": ["{pcb}", "--dry-run"],
