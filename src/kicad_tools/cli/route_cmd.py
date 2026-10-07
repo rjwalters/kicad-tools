@@ -4686,6 +4686,54 @@ def _maybe_run_placement_delta_feedback_escalation(
     return moved if moved is not None else pcb_path
 
 
+def _snapshot_input_uuids(args) -> set[str]:
+    """The input board's UUIDs, read once and cached on ``args._input_uuids``.
+
+    ``_main_impl`` calls this before any route flow writes ``--output``, so
+    an in-place route (input == output) still records the *user's* UUIDs
+    rather than the router's (Issue #6052 review).  Callers that bypass
+    ``_main_impl`` get the snapshot on first use; both canonicalization
+    passes then reuse the same set.
+    """
+    if args is None:
+        return set()
+    cached = getattr(args, "_input_uuids", None)
+    if isinstance(cached, set):
+        return cached
+    from kicad_tools.core.canonical_uuids import uuids_in_file
+
+    src = getattr(args, "pcb", None)
+    snapshot = uuids_in_file(src) if src else set()
+    with contextlib.suppress(AttributeError):
+        args._input_uuids = snapshot
+    return snapshot
+
+
+def _canonicalize_routed_uuids(output_path: Path, *, args=None) -> None:
+    """Make the routed board's UUIDs a function of its content (Issue #6052).
+
+    Runs once, before KiCad first loads the routed board.  KiCad orders
+    tracks by UUID on save and its zone filler walks items in that order, and
+    it invents a random UUID for every item that has none.  Router-minted
+    segment/via UUIDs come from the process-global RNG, and footprint pads
+    and graphics carry no UUID at all, so two routes with identical copper
+    used to reach KiCad with different UUIDs and ship different pour fills.
+    See :mod:`kicad_tools.core.canonical_uuids`.  UUIDs present in the input
+    board are kept -- the set :func:`_snapshot_input_uuids` captured *before
+    routing wrote anything*, never a fresh read of ``args.pcb``: under
+    ``kct route X -o X`` that file already holds the router's random-UUID
+    copper by now, which would put every router UUID in ``keep`` and make
+    this pass a no-op.  Never fails the route.
+    """
+    from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids
+
+    keep = _snapshot_input_uuids(args)
+    try:
+        canonicalize_pcb_file_uuids(output_path, keep=keep)
+    except Exception as exc:  # advisory: an unchanged board is still valid
+        logger.warning("UUID canonicalization skipped for %s: %s", output_path, exc)
+
+
 def _fill_zones_after_route(
     output_path: Path, quiet: bool = False, *, router=None, args=None
 ) -> None:
@@ -4719,6 +4767,7 @@ def _fill_zones_after_route(
     record_stage("native-zone-fill")
     if args is not None:
         args._placement_repair_error = None
+    _canonicalize_routed_uuids(output_path, args=args)
     disposition = getattr(router, "placement_disposition", None)
     if disposition is not None and disposition.preserve_copper_nets:
         from kicad_tools.zones.placement_fill import fill_around_fixed_copper
@@ -6566,6 +6615,23 @@ def _make_pour_oracle(args):
 
 
 def _complete_pour_nets_with_oracle(output_path: Path, *, args, quiet: bool = False) -> int:
+    """Run the oracle stage, then re-canonicalize the board's UUIDs (Issue #6052).
+
+    Every route flow calls this right after :func:`_fill_zones_after_route`,
+    so it is the last step that saves the board through kicad-cli.  KiCad
+    gives a random UUID to any footprint field it adds on load, and
+    ``--save-board`` persists it; the closing pass replaces those so the
+    shipped file, not just its copper and fill, is reproducible.  It only
+    touches UUIDs and the order of top-level copper, never geometry.
+    """
+    try:
+        return _run_pour_oracle_stage(output_path, args=args, quiet=quiet)
+    finally:
+        if not getattr(args, "dry_run", False) and Path(output_path).exists():
+            _canonicalize_routed_uuids(output_path, args=args)
+
+
+def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> int:
     """Run the KiCad-oracle completion loop on the pour nets (Issue #5785).
 
     Called right after the zone fill.  Asks ``kicad-cli pcb drc
@@ -17158,6 +17224,12 @@ def _run_main_impl(args, parser, argv) -> int:
     _ck_rc, pcb_path = _apply_checkpoint_and_resume(args, pcb_path)
     if _ck_rc != 0:
         return _ck_rc
+
+    # Issue #6052: capture the input board's UUIDs now, before any flow
+    # writes --output.  Under ``-o`` == input the file is overwritten with
+    # router copper before the UUID canonicalization passes run, so reading
+    # it then would mistake router UUIDs for authored ones.
+    _snapshot_input_uuids(args)
 
     # Issue #2996: Validate and load the optional --net-class-map sidecar
     # early -- before dispatching to any of the route_with_* sub-flows --
