@@ -177,8 +177,18 @@ output/gerbers/
 ├── board-B_Silkscreen.gbo   # Back silkscreen
 ├── board-Edge_Cuts.gm1      # Board outline
 ├── board-job.gbrjob         # Gerber job file (references every layer)
-└── board.drl                # Drill file
+├── board-PTH.drl            # Plated holes (Excellon)
+└── board-NPTH.drl           # Non-plated holes (Excellon)
 ```
+
+Drill files follow the preset's `merge_pth_npth` choice (Issue #6167).
+`jlcpcb`, `pcbway` and `seeed` ship KiCad's default separate
+`board-PTH.drl` + `board-NPTH.drl` (the NPTH file is written even when the
+board has no non-plated holes). `oshpark` ships one merged `board.drl`,
+which OSH Park's KiCad guide asks for. Set `GerberConfig(merge_pth_npth=...)`
+to override; `drill_units` (`mm`/`in`), `drill_zeros_format` and
+`minimal_header` map onto kicad-cli's `--excellon-*` flags. A drill export
+that kicad-cli rejects, or that writes no drill file, raises `ExportError`.
 
 Every manufacturer preset (`jlcpcb`, `pcbway`, `seeed`, `oshpark`) keeps
 these names. A preset chooses the layer set, origin and drill options. It

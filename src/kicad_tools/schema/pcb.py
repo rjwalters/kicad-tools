@@ -7834,9 +7834,10 @@ class PCB:
 
         Args:
             output_dir: Directory for output files
-            format: Drill format ("excellon" or "gerber_x2")
-            units: Units ("mm" or "inch")
-            merge_pth_npth: Merge plated and non-plated holes (default: False)
+            format: Drill format ("excellon" or "gerber"; "gerber_x2" is an alias)
+            units: Units ("mm" or "in"; "inch" is an alias)
+            merge_pth_npth: One merged ``<board>.drl`` instead of separate
+                ``<board>-PTH.drl`` / ``<board>-NPTH.drl`` (default: False)
 
         Returns:
             Path to output directory containing drill files
@@ -7857,6 +7858,7 @@ class PCB:
             output_dir=Path(output_dir),
             generate_drill=True,
             drill_format=format,
+            drill_units=units,
             merge_pth_npth=merge_pth_npth,
             # Don't generate gerbers, only drill
             layers=[],
