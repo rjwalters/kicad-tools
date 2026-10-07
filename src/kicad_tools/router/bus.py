@@ -116,8 +116,10 @@ _BRACKET_PATTERN = re.compile(r"^(.+)\[(\d+)\]$")
 _UNDERSCORE_PATTERN = re.compile(r"^(.+)_(\d+)$")
 
 # Pattern 3: Numeric suffix - DATA7, ADDR15, etc.
-# Must have at least one non-digit before the number
-_NUMERIC_PATTERN = re.compile(r"^([A-Za-z][A-Za-z0-9_]*[A-Za-z_])(\d+)$")
+# Must have at least one non-digit before the number. An optional KiCad
+# hierarchical sheet prefix ("/", "/sub/") is allowed and kept in the bus name
+# so buses on different sheets stay distinct.
+_NUMERIC_PATTERN = re.compile(r"^((?:/(?:[^/]*/)*)?[A-Za-z][A-Za-z0-9_]*[A-Za-z_])(\d+)$")
 
 
 def parse_bus_signal(net_name: str) -> tuple[str, int, str] | None:
