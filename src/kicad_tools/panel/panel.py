@@ -26,10 +26,11 @@ from typing import Any
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
 from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
-from kicad_tools.sexp.builders import gr_line_node, keepout_node
+from kicad_tools.sexp.builders import keepout_node
 from kicad_tools.sexp.parser import SExp
 
 from .config import (
+    DEFAULT_GAP_MM,
     CutMethod,
     FiducialConfig,
     FrameConfig,
@@ -50,6 +51,18 @@ from .furniture import (
     compute_tooling_holes,
     fiducial_to_sexp,
     tooling_hole_to_sexp,
+)
+from .outline import (
+    ArcRegistry,
+    OutlinePrimitive,
+    copy_region,
+    covers,
+    flat_intervals,
+    intersect_intervals,
+    parse_edge_cuts,
+    primitive_bounds,
+    render_ring,
+    weld_endpoints,
 )
 from .tabs import BUTT_TOLERANCE_MM, Tab, compute_tabs_between_boards, compute_tabs_to_frame
 from .vscore import (
@@ -139,6 +152,15 @@ class Panel:
         self._edge_copper: dict[str, EdgeCopper] | None = None
         self._warnings: list[str] = []
         self._vscore_findings: list[VScoreClearanceFinding] = []
+        # Source Edge.Cuts outline (sheet-absolute) and its per-copy
+        # placements; the panel outline is built from these, not from
+        # bounding boxes (Issue #6158).
+        self._outline: list[OutlinePrimitive] = []
+        self._copy_outlines: dict[int, list[OutlinePrimitive]] = {}
+        self._arc_registry: ArcRegistry | None = None
+        self._layout_warnings: list[str] = []
+        self._tab_warnings: list[str] = []
+        self._gaps: tuple[float, float] = (0.0, 0.0)
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -286,6 +308,18 @@ class Panel:
         rel_min_x, rel_min_y, rel_max_x, rel_max_y = geom.bounds
         min_x, min_y = rel_min_x + ox, rel_min_y + oy
         max_x, max_y = rel_max_x + ox, rel_max_y + oy
+        # Each copy keeps the source's real outline -- arcs, chamfers,
+        # cutouts -- rather than its bounding box (Issue #6158).
+        self._outline = _source_outline(self._source_sexp)
+        if self._outline:
+            # Exact extents: ``BoardGeometry`` facets arcs, which can
+            # undershoot an arc's extreme point.
+            min_x, min_y, max_x, max_y = primitive_bounds(self._outline)
+            rel_min_x, rel_min_y = min_x - ox, min_y - oy
+            rel_max_x, rel_max_y = max_x - ox, max_y - oy
+        else:
+            self._outline = _rect_outline((min_x, min_y, max_x, max_y))
+        self._copy_outlines = {}
         board_w = max_x - min_x
         board_h = max_y - min_y
         self._board_bounds = (min_x, min_y, max_x, max_y)
@@ -295,6 +329,20 @@ class Panel:
         if rotation in (90.0, 270.0):
             # A quarter turn swaps the footprint the copy occupies.
             board_w, board_h = board_h, board_w
+
+        # Butting needs the facing sides straight end to end.  A rounded
+        # or notched side only touches its neighbour part-way, leaving
+        # zero-width cusps no fab can rout -- so the seam gets a gap and
+        # is tab-routed instead (Issue #6158).
+        self._layout_warnings = []
+        straight = self._straight_sides(rotation, board_w, board_h)
+        if cols > 1 and gap_x <= BUTT_TOLERANCE_MM and not (straight["left"] and straight["right"]):
+            gap_x = DEFAULT_GAP_MM
+            self._layout_warnings.append(_unbuttable_message("columns", gap_x))
+        if rows > 1 and gap_y <= BUTT_TOLERANCE_MM and not (straight["top"] and straight["bottom"]):
+            gap_y = DEFAULT_GAP_MM
+            self._layout_warnings.append(_unbuttable_message("rows", gap_y))
+        self._gaps = (gap_x, gap_y)
 
         # Place board copies in grid
         self._instances.clear()
@@ -350,6 +398,13 @@ class Panel:
         Returns:
             ``self`` for method chaining.
         """
+        if space <= BUTT_TOLERANCE_MM and self._instances:
+            inst = self._instances[0]
+            x0, y0, x1, y1 = inst.bounds
+            straight = self._straight_sides(inst.rotation, x1 - x0, y1 - y0)
+            if not all(straight.values()):
+                space = DEFAULT_GAP_MM
+                self._layout_warnings.append(_unbuttable_message("frame rails", space))
         self._frame_config = FrameConfig(width=width, space=space)
 
         # Expand panel bounds to include frame
@@ -385,6 +440,7 @@ class Panel:
         """
         config = TabConfig(width=width, count=count, spacing=spacing)
         self._tabs.clear()
+        self._tab_warnings = []
 
         # Tabs between horizontally adjacent boards
         rows_set: dict[int, list[BoardInstance]] = {}
@@ -423,7 +479,106 @@ class Panel:
                 others = [o.bounds for o in self._instances if o is not inst]
                 self._tabs.extend(t for t in tabs if not _tab_crosses_any(t, others))
 
+        self._tabs = self._fit_tabs_to_outline(self._tabs)
         return self
+
+    def _fit_tabs_to_outline(self, tabs: list[Tab]) -> list[Tab]:
+        """Keep every tab on a straight run of the edges it joins.
+
+        Tabs are laid out on the copies' bounding boxes.  On a board with
+        rounded or chamfered corners, a tab there would meet a curve, not
+        the edge it was sized for: it would float clear of the board or
+        clip its arc.  Such a tab slides along the edge to the nearest
+        straight run both its ends share, and is dropped (with a warning)
+        when no run is wide enough (Issue #6158).
+        """
+        kept: list[Tab] = []
+        moved = dropped = 0
+        for tab in tabs:
+            if tab.orientation == "horizontal":  # bridges a gap along Y
+                ends = [("y", tab.min_y), ("y", tab.max_y)]
+                centre = tab.x
+            else:
+                ends = [("x", tab.min_x), ("x", tab.max_x)]
+                centre = tab.y
+            allowed: list[tuple[float, float]] | None = None
+            for axis, coord in ends:
+                runs = self._straight_runs(axis, coord)
+                allowed = runs if allowed is None else intersect_intervals(allowed, runs)
+            assert allowed is not None
+            half = tab.width / 2.0
+            best: float | None = None
+            if covers(allowed, centre - half, centre + half):
+                best = centre
+            else:
+                for lo, hi in allowed:
+                    if hi - lo < tab.width - 1e-9:
+                        continue
+                    c = min(max(centre, lo + half), hi - half)
+                    if best is None or abs(c - centre) < abs(best - centre):
+                        best = c
+            if best is None:
+                dropped += 1
+                continue
+            fitted = tab
+            if best != centre:
+                if tab.orientation == "horizontal":
+                    fitted = Tab(best, tab.y, tab.width, tab.height, tab.orientation)
+                else:
+                    fitted = Tab(tab.x, best, tab.width, tab.height, tab.orientation)
+                rect = (fitted.min_x, fitted.min_y, fitted.max_x, fitted.max_y)
+                if any(_tab_crosses_any(k, [rect]) for k in kept):
+                    dropped += 1  # slid onto a neighbouring tab
+                    continue
+                moved += 1
+            kept.append(fitted)
+        if moved:
+            logger.info("Moved %d tab(s) off curved board edges onto straight runs", moved)
+        if dropped:
+            self._tab_warnings.append(
+                f"Dropped {dropped} tab(s): the board outline has no straight run "
+                "wide enough where they would attach (tabs must not join a curved "
+                "or chamfered corner); use narrower tabs (--tab-width) or fewer"
+            )
+        return kept
+
+    def _straight_runs(self, axis: str, coord: float) -> list[tuple[float, float]]:
+        """Straight solid edge on the line ``axis = coord``: copies + rail."""
+        runs: list[tuple[float, float]] = []
+        for inst in self._instances:
+            runs.extend(flat_intervals(self._copy_outline(inst), axis, coord))
+        if self._frame_config is not None:
+            fx0, fy0, fx1, fy1 = self._get_frame_inner_bounds()
+            tol = BUTT_TOLERANCE_MM
+            if axis == "y" and (abs(coord - fy0) <= tol or abs(coord - fy1) <= tol):
+                runs.append((fx0, fx1))
+            if axis == "x" and (abs(coord - fx0) <= tol or abs(coord - fx1) <= tol):
+                runs.append((fy0, fy1))
+        return sorted(runs)
+
+    def _straight_sides(self, rotation: float, width: float, height: float) -> dict[str, bool]:
+        """Which sides of a copy's box are one straight edge end to end."""
+        min_x, min_y, max_x, max_y = self._board_bounds
+        mapper = _rigid_mapper(
+            (min_x + max_x) / 2.0, (min_y + max_y) / 2.0, rotation, width / 2.0, height / 2.0
+        )
+        prims = [p.mapped(mapper) for p in self._outline]
+        tol = 1e-6
+        return {
+            "top": covers(flat_intervals(prims, "y", 0.0), 0.0, width, tol),
+            "bottom": covers(flat_intervals(prims, "y", height), 0.0, width, tol),
+            "left": covers(flat_intervals(prims, "x", 0.0), 0.0, height, tol),
+            "right": covers(flat_intervals(prims, "x", width), 0.0, height, tol),
+        }
+
+    def _copy_outline(self, inst: BoardInstance) -> list[OutlinePrimitive]:
+        """The source Edge.Cuts outline, rigidly placed for *inst*."""
+        cached = self._copy_outlines.get(inst.index)
+        if cached is None:
+            mapper = self._instance_mapper(inst)
+            cached = [p.mapped(mapper) for p in self._outline]
+            self._copy_outlines[inst.index] = cached
+        return cached
 
     def _get_frame_inner_bounds(self) -> tuple[float, float, float, float]:
         """Get the inner edge of the frame."""
@@ -569,7 +724,7 @@ class Panel:
         if self._source_sexp is None:
             raise ValueError("No board loaded. Call append_board() before build().")
 
-        self._warnings = []
+        self._warnings = [*self._layout_warnings, *self._tab_warnings]
         self._vscore_findings = []
 
         # Start with a skeleton PCB based on the source
@@ -758,7 +913,8 @@ class Panel:
     def outline_geometry(self) -> Any:
         """Return the panel's solid region as a Shapely geometry.
 
-        The region is the union of every board copy's rectangle, every
+        The region is the union of every board copy's outline (the source
+        Edge.Cuts, arcs faceted on the 1 nm grid -- Issue #6158), every
         tab's rectangle and (when configured) the frame rail ring.  Its
         boundary is exactly what Edge.Cuts must trace: each tab splices
         into the board edge it attaches to (and into the rail or the
@@ -773,7 +929,9 @@ class Panel:
         from shapely.geometry import box  # type: ignore[import-untyped]
         from shapely.ops import unary_union  # type: ignore[import-untyped]
 
-        parts = [box(*inst.bounds) for inst in self._instances]
+        registry = ArcRegistry()
+        parts = [copy_region(self._copy_outline(inst), registry) for inst in self._instances]
+        self._arc_registry = registry
         parts.extend(box(tab.min_x, tab.min_y, tab.max_x, tab.max_y) for tab in self._tabs)
         if self._frame_config is not None:
             outer = box(*self._panel_bounds)
@@ -781,10 +939,9 @@ class Panel:
             parts.append(outer.difference(inner))
 
         snapped = [set_precision(p, _OUTLINE_GRID_MM) for p in parts]
-        region = set_precision(unary_union(snapped), _OUTLINE_GRID_MM)
-        # Drop the collinear vertices the union leaves behind, so each
-        # straight edge is one segment.
-        return region.simplify(0)
+        # No ``simplify``: it could merge arc facets.  The renderer merges
+        # collinear straight runs itself.
+        return set_precision(unary_union(snapped), _OUTLINE_GRID_MM)
 
     def _outline_rings(self) -> list[list[tuple[float, float]]]:
         """Return the closed Edge.Cuts rings (exteriors and holes)."""
@@ -808,19 +965,16 @@ class Panel:
         malformed (Issue #6143).  Drawing the boundary of the unioned
         solid region instead guarantees every segment endpoint is shared
         by exactly two segments.
+
+        The union is polygonal, so the boundary's arc facets are folded
+        back into ``gr_arc`` graphics -- the source arcs, verbatim where
+        nothing joined them (Issue #6158; see :mod:`.outline`).
         """
-        for ring in self._outline_rings():
-            for (sx, sy), (ex, ey) in zip(ring[:-1], ring[1:], strict=True):
-                panel_sexp.append(
-                    gr_line_node(
-                        sx,
-                        sy,
-                        ex,
-                        ey,
-                        layer="Edge.Cuts",
-                        uuid_str=str(uuid.uuid4()),
-                    )
-                )
+        rings = self._outline_rings()
+        registry = self._arc_registry or ArcRegistry()
+        for ring in rings:
+            for node in render_ring(ring, registry):
+                panel_sexp.append(node)
 
     def _add_vcuts(self, panel_sexp: SExp, config: VCutConfig) -> None:
         """Draw score lines on butted seams, plus their copper keepouts."""
@@ -1060,6 +1214,20 @@ class Panel:
         return self._panel_bounds
 
     @property
+    def spacing(self) -> tuple[float, float]:
+        """``(gap between columns, gap between rows)`` actually used, in mm.
+
+        Differs from the requested spacing when a butted seam had to be
+        gapped because the board's facing sides are not straight.
+        """
+        return self._gaps
+
+    @property
+    def frame_space(self) -> float | None:
+        """Board-to-rail gap actually used in mm (``None`` without a frame)."""
+        return self._frame_config.space if self._frame_config is not None else None
+
+    @property
     def warnings(self) -> list[str]:
         """Warnings from the last :meth:`build` (V-score gaps, clearance)."""
         return list(self._warnings)
@@ -1078,6 +1246,47 @@ class Panel:
 # ======================================================================
 # S-expression manipulation helpers
 # ======================================================================
+
+
+def _source_outline(src: SExp) -> list[OutlinePrimitive]:
+    """The source board's closed Edge.Cuts outline (sheet-absolute).
+
+    Strays that bound no area (a dangling construction line) are dropped,
+    as ``BoardGeometry`` drops them, so they cannot widen the copy's box.
+    """
+    from shapely.geometry import Point as ShapelyPoint
+
+    prims = weld_endpoints(parse_edge_cuts(src))
+    if not prims:
+        return []
+    region = copy_region(prims, ArcRegistry())
+    if region.is_empty:
+        return []
+    edge = region.boundary
+    kept = []
+    for prim in prims:
+        if prim.kind == "arc":
+            probe = prim.points[1]
+        else:
+            probe = ((prim.start[0] + prim.end[0]) / 2.0, (prim.start[1] + prim.end[1]) / 2.0)
+        # Arc facets sit up to ~1 um inside the true arc.
+        if edge.distance(ShapelyPoint(probe)) <= 1e-2:
+            kept.append(prim)
+    return kept
+
+
+def _rect_outline(bounds: tuple[float, float, float, float]) -> list[OutlinePrimitive]:
+    x0, y0, x1, y1 = bounds
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    return [OutlinePrimitive("line", (corners[i], corners[(i + 1) % 4])) for i in range(4)]
+
+
+def _unbuttable_message(what: str, gap: float) -> str:
+    return (
+        f"Board outline is not straight end to end on the sides that would butt "
+        f"(rounded/chamfered corners or a shaped edge), so the {what} cannot be butted "
+        f"for V-scoring: using a {gap:g} mm tab-routed gap instead"
+    )
 
 
 def _tab_crosses_any(tab: Tab, boxes: list[tuple[float, float, float, float]]) -> bool:

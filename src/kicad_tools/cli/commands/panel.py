@@ -133,8 +133,10 @@ def run_panel_command(args) -> int:
             text=f"Error creating panel: {exc}",
         )
 
-    gap_x, gap_y = config.resolved_spacing()
-    frame_space = config.frame.resolved_space(config.cut_method) if config.frame else None
+    # What the panel actually used: a butted seam between non-straight
+    # board sides is gapped instead (Issue #6158).
+    gap_x, gap_y = panel.spacing
+    frame_space = panel.frame_space
     is_vcut = config.cut_method == CutMethod.VCUT
 
     if as_json:
