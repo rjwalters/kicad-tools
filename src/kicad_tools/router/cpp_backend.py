@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     import numpy as np
 
     from .grid import CarveoutMode, RoutingGrid
+    from .pairwise_clearance import AttachZone
     from .pathfinder import Router
     from .primitives import Pad, Route
     from .rules import DesignRules, NetClassRouting
@@ -1510,7 +1511,7 @@ class CppPathfinder:
         # :meth:`_resolve_net_id` so a blocker-naming failure can report the
         # board's net NAME rather than a raw id.  ``None`` = not built yet.
         self._net_id_to_name_cache: dict[int, str] | None = None
-        self._attach_zones = ()
+        self._attach_zones: tuple[AttachZone, ...] = ()
 
         # Issue #4510 / Epic #4431 Phase 2a: lazily-built C++ payload for the
         # pairwise (HV-isolation) domain matrix + net-id-translated attach
@@ -4197,8 +4198,7 @@ class CppPathfinder:
         {"_history_cost", "_congestion", "_congestion_counted", "_present_cost_ema"}
     )
 
-    @classmethod
-    def _py_grid_state_stamp(cls, py_grid) -> tuple:
+    def _py_grid_state_stamp(self, py_grid) -> tuple:
         """Fingerprint the Python grid state a fallback search reads (#6098).
 
         Fingerprints CONTENT, not the #4794 occupancy generation: the
@@ -4211,8 +4211,9 @@ class CppPathfinder:
         * the stored-route halo registry (``_route_halo.marks``: every
           committed segment / via and its radius), which the search's
           route-aware clearance test reads beyond the rasterised planes;
-        * the identity of the fixed-fill obstacles and keepout rule areas,
-          installed once per grid.
+        * the content of the fixed-fill obstacles and keepout rule areas,
+          the corridor reservations, and the net-name map / attach zones
+          (#6133).
 
         Cheap next to the fallback it guards (~tens of ms on a 70x90 mm
         4-layer board vs. seconds of pure-Python A*), and only computed after
@@ -4220,6 +4221,7 @@ class CppPathfinder:
         """
         import numpy as np
 
+        cls = type(self)
         crcs = tuple(
             (name, zlib.crc32(np.ascontiguousarray(value).data))
             for name, value in sorted(vars(py_grid).items())
@@ -4235,8 +4237,103 @@ class CppPathfinder:
             id(py_grid),
             crcs,
             halo_print,
-            id(getattr(py_grid, "fixed_fills", None)),
-            (id(rule_areas), len(rule_areas)) if rule_areas is not None else None,
+            # Issue #6133: fills and keepouts by CONTENT (they were identity
+            # only), plus the corridor reservations and router-side maps.
+            self._reservation_print(py_grid),
+            self._fixed_fills_print(py_grid),
+            self._keepouts_print(rule_areas),
+            self._router_maps_print(),
+        )
+
+    @staticmethod
+    def _reservation_print(py_grid) -> tuple:
+        """Count + content hash of the corridor reservations (#4079, #2677).
+
+        Hard reservations fence foreign nets out of a cell outright and soft
+        ones only attract, so the owner sets, the soft-key set and the
+        C++-suppressed set all shape Python passability.
+        """
+        reserved = getattr(py_grid, "_reserved_for_nets", None) or {}
+        soft = getattr(py_grid, "_soft_reservations", None) or ()
+        suppressed = getattr(py_grid, "_cpp_suppressed_reservations", None) or ()
+        return (
+            len(reserved),
+            hash(frozenset(reserved.items())),
+            hash(frozenset(soft)),
+            hash(frozenset(suppressed)),
+        )
+
+    def _fixed_fills_print(self, py_grid) -> tuple | None:
+        """Content hash of the fixed-fill obstacles (geometry included).
+
+        The fills are frozen and their shapely geometry immutable, so the hash
+        is computed once per ``fills`` tuple.  The cache holds the tuple, which
+        keeps its ``id`` from being recycled by a different object.
+        """
+        fills = getattr(getattr(py_grid, "fixed_fills", None), "fills", None)
+        if fills is None:
+            return None
+        cached = getattr(self, "_fixed_fills_print_cache", None)
+        if cached is not None and cached[0] is fills:
+            cached_print: tuple[int, int] = cached[1]
+            return cached_print
+        parts = []
+        for fill in fills:
+            geometry = fill.geometry
+            geom_key: bytes | str
+            try:
+                geom_key = bytes(geometry.wkb)
+            except Exception:
+                geom_key = repr(geometry)
+            parts.append(
+                (
+                    fill.source_net,
+                    fill.source_net_id,
+                    fill.layer,
+                    fill.clearance,
+                    fill.source_zone_id,
+                    fill.source_kind,
+                    fill.source_object_id,
+                    geom_key,
+                )
+            )
+        print_ = (len(fills), hash(tuple(parts)))
+        self._fixed_fills_print_cache = (fills, print_)
+        return print_
+
+    @staticmethod
+    def _keepouts_print(rule_areas) -> tuple | None:
+        """Content hash of the keepout rule areas (fields and raster mask)."""
+        if rule_areas is None:
+            return None
+        import numpy as np
+
+        parts = []
+        for area in rule_areas:
+            mask = getattr(area, "mask", None)
+            parts.append(
+                (
+                    getattr(area, "name", None),
+                    getattr(area, "polygon", None),
+                    getattr(area, "layers", None),
+                    getattr(area, "blocks_tracks", None),
+                    getattr(area, "blocks_vias", None),
+                    getattr(area, "only", None),
+                    getattr(area, "exempt", None),
+                    getattr(area, "gx0", None),
+                    getattr(area, "gy0", None),
+                    getattr(area, "static_tracks", None),
+                    zlib.crc32(np.ascontiguousarray(mask).data) if mask is not None else None,
+                    getattr(mask, "shape", None),
+                )
+            )
+        return (len(parts), hash(tuple(parts)))
+
+    def _router_maps_print(self) -> tuple:
+        """Net-name map and attach zones the Python router consults."""
+        return (
+            hash(frozenset(self._net_name_to_id.items())),
+            hash(tuple(repr(z) for z in self._attach_zones)),
         )
 
     def set_relief_mode(self, enabled: bool) -> None:

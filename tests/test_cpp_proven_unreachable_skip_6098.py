@@ -197,3 +197,88 @@ def test_first_give_up_still_falls_back() -> None:
     pathfinder = _pathfinder(_grid())
     assert _count_python_runs(pathfinder, 1) == 1
     assert pathfinder.fallback_stats["python_fallback_proven_skips"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #6133: the fingerprint covers reservations and fill/keepout CONTENT
+# ---------------------------------------------------------------------------
+
+
+@requires_cpp
+def test_unchanged_board_with_extra_state_still_hits() -> None:
+    grid = _grid()
+    grid._reserved_for_nets[(0, 5, 5)] = frozenset({1, 2})
+    pathfinder = _pathfinder(grid)
+    assert _count_python_runs(pathfinder, 3) == 1
+
+
+@requires_cpp
+def test_a_changed_reservation_invalidates_the_proof() -> None:
+    grid = _grid()
+    pathfinder = _pathfinder(grid)
+    assert _count_python_runs(pathfinder, 1) == 1
+    grid._reserved_for_nets[(0, 5, 5)] = frozenset({1, 2})
+    assert _count_python_runs(pathfinder, 1) == 1
+    # Same key, different owners (e.g. a re-reservation) also invalidates.
+    grid._reserved_for_nets[(0, 5, 5)] = frozenset({3})
+    assert _count_python_runs(pathfinder, 1) == 1
+    # Hard -> soft flips the same cell from fence to attractor.
+    grid._soft_reservations.add((0, 5, 5))
+    assert _count_python_runs(pathfinder, 1) == 1
+    assert _count_python_runs(pathfinder, 1) == 0
+
+
+@requires_cpp
+def test_changed_fill_contents_invalidate_the_proof() -> None:
+    from shapely.geometry import box
+
+    from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+
+    def fills(x1: float) -> FixedFillObstacles:
+        return FixedFillObstacles(fills=(FixedFill("GND", 9, 0, 0.2, box(0.0, 0.0, x1, 1.0)),))
+
+    grid = _grid()
+    pathfinder = _pathfinder(grid)
+    grid.fixed_fills = fills(1.0)
+    assert _count_python_runs(pathfinder, 1) == 1
+    # Equal content in a NEW object keeps the proof; different content drops it.
+    grid.fixed_fills = fills(1.0)
+    assert _count_python_runs(pathfinder, 1) == 0
+    grid.fixed_fills = fills(2.0)
+    assert _count_python_runs(pathfinder, 1) == 1
+
+
+@requires_cpp
+def test_changed_keepout_contents_invalidate_the_proof() -> None:
+    import numpy as np
+
+    from kicad_tools.router.rule_area_grid import GridRuleArea
+
+    area = GridRuleArea(
+        name="k",
+        polygon=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0)),
+        layers=frozenset({0}),
+        blocks_tracks=True,
+        blocks_vias=False,
+        only=None,
+        exempt=frozenset(),
+        gx0=0,
+        gy0=0,
+        mask=np.zeros((4, 4), dtype=bool),
+    )
+    grid = _grid()
+    grid._rule_area_keepouts = [area]
+    pathfinder = _pathfinder(grid)
+    assert _count_python_runs(pathfinder, 1) == 1
+    assert _count_python_runs(pathfinder, 1) == 0
+    area.mask[1, 1] = True  # same list object, same length, new contents
+    assert _count_python_runs(pathfinder, 1) == 1
+
+
+@requires_cpp
+def test_changed_net_name_map_invalidates_the_proof() -> None:
+    pathfinder = _pathfinder(_grid())
+    assert _count_python_runs(pathfinder, 1) == 1
+    pathfinder.set_net_name_to_id({"SIG": 1})
+    assert _count_python_runs(pathfinder, 1) == 1
+    assert _count_python_runs(pathfinder, 1) == 0
