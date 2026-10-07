@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -53,6 +54,7 @@ __all__ = [
     "LinkRouteRules",
     "LinkTerminal",
     "append_link_route",
+    "append_link_routes",
     "padless_components",
     "route_link",
 ]
@@ -697,12 +699,35 @@ def append_link_route(pcb_path: Path, route: LinkRoute, origin: tuple[float, flo
     ``origin`` is the PCB model's ``board_origin``: the route is in
     board-relative coordinates and the file is absolute.
     """
-    from kicad_tools.cli.stitch_cmd import _stitch_uuid
+    append_link_routes(pcb_path, [route], origin)
+
+
+def append_link_routes(
+    pcb_path: Path, routes: Sequence[LinkRoute], origin: tuple[float, float]
+) -> None:
+    """Write several routes into the board file with ONE load and ONE save.
+
+    The result is byte-identical to calling :func:`append_link_route` once per
+    route in the same order: each call only appends nodes to the document
+    tail, and the serializer is a fixed point of load/save.  A board-03
+    oracle attempt commits ~20 routes, and each separate load+save of the
+    ~750 KB file cost ~0.4 s (Issue #5911).
+    """
+    if not routes:
+        return
     from kicad_tools.core.sexp_file import load_pcb, save_pcb
+
+    doc = load_pcb(pcb_path)
+    for route in routes:
+        _append_route_nodes(doc, route, origin)
+    save_pcb(doc, pcb_path)
+
+
+def _append_route_nodes(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> None:
+    from kicad_tools.cli.stitch_cmd import _stitch_uuid
     from kicad_tools.sexp.builders import segment_node, via_node
 
     ox, oy = origin
-    doc = load_pcb(pcb_path)
     for x_a, y_a, x_b, y_b, layer in route.segments:
         if (x_a, y_a) == (x_b, y_b):
             continue
@@ -730,4 +755,3 @@ def append_link_route(pcb_path: Path, route: LinkRoute, origin: tuple[float, flo
                 uuid_str=_stitch_uuid("oracle-via", vx, vy, route.net_number),
             )
         )
-    save_pcb(doc, pcb_path)
