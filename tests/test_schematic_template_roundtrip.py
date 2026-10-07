@@ -643,6 +643,93 @@ def test_symbol_move_and_rotate_applies_rotation_after_move(tmp_path: Path):
     assert _field_at(saved, "Value") == [259.969, 54.0512, 0]
 
 
+_PWR_AT = '(symbol (lib_id "power:+48V") (at 257.81 50.8 90) (unit 1)'
+
+
+def _mirrored_edit_sch(mirror: str) -> str:
+    assert _PWR_AT in _EDIT_SCH
+    return _EDIT_SCH.replace(_PWR_AT, _PWR_AT + f"\n    (mirror {mirror})", 1)
+
+
+def _lib_vector(offset, rotation, mirror):
+    """The library vector that the placed transform sends to *offset*."""
+    from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
+
+    mags = (abs(offset[0]), abs(offset[1]))
+    for a, b in ((mags[0], mags[1]), (mags[1], mags[0])):
+        for sa in (1, -1):
+            for sb in (1, -1):
+                got = symbol_to_sheet_offset(sa * a, sb * b, rotation, mirror)
+                if abs(got[0] - offset[0]) < 1e-3 and abs(got[1] - offset[1]) < 1e-3:
+                    return sa * a, sb * b
+    raise AssertionError("no library vector")
+
+
+def _parse_saved(text):
+    return parse_string(text)
+
+
+def _power_node(doc, _name=None):
+    return next(
+        c
+        for c in doc.children
+        if c.name == "symbol" and c["lib_id"].get_first_atom() == "power:+48V"
+    )
+
+
+def _field_offset(saved, name):
+    x, y = _field_at(saved, name)[:2]
+    ax, ay = saved["at"].get_atoms()[:2]
+    return x - ax, y - ay
+
+
+@pytest.mark.parametrize("mirror", ["x", "y"])
+@pytest.mark.parametrize("new_rot", [90, 180, 270, 0])
+def test_mirrored_symbol_fields_follow_symbol_transform(mirror, new_rot, tmp_path: Path):
+    """Each field moves like a pin at the same library offset (issue #6085)."""
+    from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
+
+    src = _mirrored_edit_sch(mirror)
+    base = _load_text(tmp_path, src)
+    base_saved = base.to_sexp()
+    sch = _load_text(tmp_path, src)
+    sch.power_symbols[0].rotation = new_rot
+    saved = _power_node(_parse_saved(sch.to_sexp()))
+    before = _power_node(_parse_saved(base_saved))
+    for name in ("Reference", "Value"):
+        lib = _lib_vector(_field_offset(before, name), 90, mirror)
+        want = symbol_to_sheet_offset(*lib, new_rot, mirror)
+        got = _field_offset(saved, name)
+        assert got == pytest.approx(want, abs=1e-3), (name, mirror, new_rot)
+
+
+def test_mirrored_quarter_turn_is_clockwise(tmp_path: Path):
+    """mirror x, 90 -> 180: the symbol turns CW, so does its Reference."""
+    sch = _load_text(tmp_path, _mirrored_edit_sch("x"))
+    sch.power_symbols[0].rotation = 180
+    saved = _power_node(_parse_saved(sch.to_sexp()))
+    # Unmirrored this edit gives (0, -3.81); mirrored it is the opposite turn.
+    assert _field_offset(saved, "Reference") == pytest.approx((0, 3.81), abs=1e-3)
+    assert _field_at(saved, "Reference")[2] == 90
+
+
+@pytest.mark.parametrize("old_m,new_m", [("", "x"), ("x", ""), ("x", "y"), ("y", "")])
+def test_mirror_change_with_rotation_applies_new_mirror_state(old_m, new_m, tmp_path: Path):
+    """Mirror and angle changed together: fields land per the *new* transform."""
+    from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
+
+    src = _mirrored_edit_sch(old_m) if old_m else _EDIT_SCH
+    sch = _load_text(tmp_path, src)
+    before = _power_node(_parse_saved(sch.to_sexp()))
+    lib = {n: _lib_vector(_field_offset(before, n), 90, old_m) for n in ("Reference", "Value")}
+    sch.power_symbols[0].rotation = 270
+    sch.power_symbols[0].mirror = new_m
+    saved = _power_node(_parse_saved(sch.to_sexp()))
+    for name, vec in lib.items():
+        want = symbol_to_sheet_offset(*vec, 270, new_m)
+        assert _field_offset(saved, name) == pytest.approx(want, abs=1e-3)
+
+
 def test_retyped_note_keeps_its_own_source_when_text_collides(tmp_path: Path):
     """Retyping note A to "B" while another note "B" is deleted keeps A's node."""
     two = _EDIT_SCH.replace(

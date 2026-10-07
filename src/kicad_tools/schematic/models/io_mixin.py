@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.symbol_transform import normalize_mirror, symbol_to_sheet_offset
 from kicad_tools.core.version import (
     KICAD_GENERATOR_VERSION,
     KICAD_SCH_FORMAT_VERSION,
@@ -209,29 +210,50 @@ def _at_atoms(node: SExp) -> list[float] | None:
     return [float(v) for v in vals]  # type: ignore[arg-type]
 
 
-def _rotate_fields_with_symbol(node: SExp, old: SExp, new: SExp) -> None:
-    """Rotate *node*'s fields about the symbol origin by the edit's angle change.
+def _quarter_angle(at: list[float]) -> float | None:
+    """The ``(at x y angle)`` angle if it is a right angle, else ``None``."""
+    angle = (at[2] if len(at) > 2 else 0.0) % 360
+    return angle if abs(angle - round(angle / 90.0) * 90.0) <= 1e-6 else None
 
-    KiCad rotates a symbol's fields around the symbol origin when the symbol
-    is rotated, and turns their text between horizontal and vertical.  The
-    model only tracks the symbol's own angle, so the field positions the
-    three-way merge produced (after any move delta) are rotated here by the
-    change in symbol angle, in place on the freshly built *node* (issue #6085).
-    Rotation is counter-clockwise on screen; the sheet's Y axis points down.
+
+def _node_mirror(node: SExp) -> str:
+    mirror_node = node.get("mirror")
+    return normalize_mirror(mirror_node.get_first_atom()) if mirror_node else ""
+
+
+def _rotate_fields_with_symbol(node: SExp, old: SExp, new: SExp) -> None:
+    """Carry *node*'s fields through the edit's change of symbol transform.
+
+    KiCad moves a symbol's fields with the symbol when it is rotated or
+    mirrored, and turns their text between horizontal and vertical.  The
+    model only tracks the symbol's own angle and mirror, so the field
+    positions the three-way merge produced (after any move delta) are
+    re-transformed here, in place on the freshly built *node* (issue #6085).
+
+    A field offset is held fixed in library space: the sheet offset is mapped
+    back through the *old* ``(rotation, mirror)`` with ``core.symbol_transform``
+    and forward through the *new* one.  That makes the direction right for
+    mirrored symbols too -- rotate-then-mirror means a file angle of +D turns a
+    mirrored symbol clockwise on screen -- and handles an edit that changes the
+    mirror and the angle together by applying the new mirror state.  If either
+    angle is not a right angle the fields are left as the merge produced them.
+    The text angle toggles only with the file-angle change; a mirror flip
+    alone does not turn text.
     """
     old_at, new_at, out_at = _at_atoms(old), _at_atoms(new), _at_atoms(node)
     if not old_at or not new_at or not out_at:
         return
-    delta = (
-        (new_at[2] if len(new_at) > 2 else 0.0) - (old_at[2] if len(old_at) > 2 else 0.0)
-    ) % 360
-    if delta == 0:
-        return
-    quarter = int(round(delta / 90.0)) % 4
-    if abs(delta - quarter * 90.0) > 1e-6:
+    old_rot, new_rot = _quarter_angle(old_at), _quarter_angle(new_at)
+    if old_rot is None or new_rot is None:
         return  # only the right-angle rotations KiCad's symbols use
+    old_mirror, new_mirror = _node_mirror(old), _node_mirror(new)
+    delta = (new_rot - old_rot) % 360
+    if delta == 0 and old_mirror == new_mirror:
+        return
+    # Orthogonal old transform: its inverse is the transpose of its columns.
+    c1 = symbol_to_sheet_offset(1, 0, old_rot, old_mirror)
+    c2 = symbol_to_sheet_offset(0, 1, old_rot, old_mirror)
     ox, oy = out_at[0], out_at[1]
-    cos, sin = (1, 0, -1, 0)[quarter], (0, 1, 0, -1)[quarter]
     for i, child in enumerate(node.children):
         if child.name != "property":
             continue
@@ -239,10 +261,13 @@ def _rotate_fields_with_symbol(node: SExp, old: SExp, new: SExp) -> None:
         if pos is None:
             continue
         dx, dy = pos[0] - ox, pos[1] - oy
+        lx = dx * c1[0] + dy * c1[1]
+        ly = dx * c2[0] + dy * c2[1]
+        ndx, ndy = symbol_to_sheet_offset(lx, ly, new_rot, new_mirror)
         angle = ((pos[2] if len(pos) > 2 else 0.0) + delta) % 180
         rotated = [
-            ox + dx * cos + dy * sin,
-            oy - dx * sin + dy * cos,
+            ox + ndx,
+            oy + ndy,
             int(angle) if angle == int(angle) else angle,
         ]
         new_prop = SExp.list(child.name)
