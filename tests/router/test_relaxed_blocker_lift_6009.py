@@ -22,6 +22,7 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+from kicad_tools.router.layers import Layer
 from tests.test_unrouted_cause import (
     BACKENDS,
     _assert_snapshots_equal,
@@ -150,3 +151,70 @@ def test_grid_restored_exactly_when_the_lift_itself_raises(
 
     monkeypatch.undo()
     _assert_snapshots_equal(before, _full_grid_snapshot(router))
+
+
+# ---------------------------------------------------------------------------
+# Keepout rule areas (#6008) survive the lift
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+@pytest.mark.parametrize("filtered", [False, True], ids=["all-nets", "net-filtered"])
+def test_lift_keeps_keepout_rule_areas(tmp_path, force_python: bool, filtered: bool) -> None:
+    """A lifted grid must still refuse a route through a keepout.
+
+    A front-only ``(tracks not_allowed)`` wall pushes both nets onto B.Cu, so
+    there is committed copper to lift.  An all-nets wall is stamped as static
+    net-0 cells; a ``spatial_keepouts``-filtered one lives only in
+    ``grid._rule_area_keepouts`` (and the C++ grid's area list).  Inside the
+    lift both kinds must still hold, and afterwards the grid is unchanged.
+    """
+    from kicad_tools.router.rules import NetClassRouting
+    from tests.test_grid_keepout_rule_areas_6008 import (
+        WALL_X0,
+        WALL_X1,
+        _board,
+        _crosses_band,
+        _load,
+        _wall,
+    )
+    from tests.test_grid_keepout_rule_areas_6008 import _route as _route_board
+
+    router = _load(
+        tmp_path, _board(_wall(layers='"F.Cu"', vias="allowed"), two_nets=True), force_python
+    )
+    if filtered:
+        router.net_class_map["/HV_A"] = NetClassRouting(name="HV_A")
+        router.net_class_map["/HV_B"] = NetClassRouting(name="HV_B")
+        router._spatial_keepout_filters = {"wall": {"only_classes": ["HV_A", "HV_B"]}}
+    _route_board(router)
+    grid = router.grid
+    assert {r.net for r in grid.routes if r.segments} == {1, 2}, "fixture: both nets route"
+    (area,) = grid._rule_area_keepouts
+    assert area.static_tracks is not filtered
+    areas_before = list(grid._rule_area_keepouts)
+    cpp = getattr(grid, "_cpp_grid", None)
+    cpp_areas_before = cpp._impl.rule_area_keepout_count() if cpp is not None else None
+    wx, wy = grid.world_to_grid((WALL_X0 + WALL_X1) / 2, 108.0)
+    before = _full_grid_snapshot(router)
+
+    src, dst = _pads(router, 1)[:2]
+    with grid.temporarily_unblock_routed_nets(router.router) as lift:
+        assert lift.lifted, "fixture: there is copper to lift"
+        if not filtered:
+            assert grid._blocked[0, wy, wx] and grid._net[0, wy, wx] == 0
+            assert lift.copper_net[0, wy, wx] == 0
+            if cpp is not None:
+                cell = cpp._impl.at(wx, wy, 0)
+                assert cell.blocked and cell.net == 0
+        assert grid._rule_area_keepouts == areas_before
+        if cpp is not None:
+            assert cpp._impl.rule_area_keepout_count() == cpp_areas_before
+        solo = router.router.route(src, dst, per_net_timeout=10.0)
+
+    assert solo is not None, "the back layer is open -- the lifted net must route"
+    for seg in solo.segments:
+        if seg.layer == Layer.F_CU:
+            assert not _crosses_band(seg, WALL_X0, WALL_X1, seg.width / 2), seg
+    _assert_snapshots_equal(before, _full_grid_snapshot(router))
+    assert grid._rule_area_keepouts == areas_before
