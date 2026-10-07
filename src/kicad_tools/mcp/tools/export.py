@@ -273,6 +273,15 @@ def _extract_layer_from_filename(filename: str) -> str:
             ("Edge_Cuts", "Edge.Cuts"),
             ("F_Silkscreen", "F.SilkS"),
             ("B_Silkscreen", "B.SilkS"),
+            # User drawing layers carry V-score lines on panels (Issue #6156)
+            ("User_Comments", "Cmts.User"),
+            ("Cmts_User", "Cmts.User"),
+            ("User_Drawings", "Dwgs.User"),
+            ("Dwgs_User", "Dwgs.User"),
+            ("User_Eco1", "Eco1.User"),
+            ("Eco1_User", "Eco1.User"),
+            ("User_Eco2", "Eco2.User"),
+            ("Eco2_User", "Eco2.User"),
         ]
         for pattern, layer in layer_candidates:
             if pattern in layer_part:

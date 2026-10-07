@@ -8537,6 +8537,17 @@ def _add_panel_parser(subparsers) -> None:
         help="Separation method (default: mousebite)",
     )
     panel_parser.add_argument(
+        "--vcut-layer",
+        dest="panel_vcut_layer",
+        choices=["Cmts.User", "Dwgs.User", "Eco1.User", "Eco2.User"],
+        default="Cmts.User",
+        help=(
+            "Layer for V-score lines with --cut vcut (default: Cmts.User). "
+            "Never Edge.Cuts: an open score line there breaks the outline. "
+            "`kct export` plots whichever layer holds the score lines."
+        ),
+    )
+    panel_parser.add_argument(
         "--tab-width",
         dest="panel_tab_width",
         type=float,
