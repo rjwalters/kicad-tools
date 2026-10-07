@@ -168,6 +168,14 @@ class Schematic(
         # Embedded lib_symbols from loaded schematics (preserved for round-trip)
         self._embedded_lib_symbols: dict[str, SExp] = {}
 
+        # Source tree of a loaded schematic (issue #6051).  ``None`` for a
+        # schematic built from scratch, which keeps the fully-regenerated
+        # write path.  See ``SchematicIOMixin._snapshot_source``.
+        self._source_doc: SExp | None = None
+        self._source_consumed: set[int] = set()
+        self._source_slots: dict[str, tuple[SExp | None, str]] = {}
+        self._text_note_sources: dict[tuple[str, float, float], list[SExp]] = {}
+
         # Synthesized power-symbol lib_symbol definitions (per net name).
         # Populated by ``add_pwr_symbol()`` so that #PWR symbols can publish
         # arbitrary global net names (e.g. ``VMOTOR``, ``+3.3V``) without
