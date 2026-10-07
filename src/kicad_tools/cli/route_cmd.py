@@ -4786,6 +4786,32 @@ def _fill_zones_after_route(
         print("\n--- Filling Copper Zones ---")
         print(f"  Filling zones in {output_path.name}...")
 
+    # Issue #6078: the saved fill must be computed under the rules it ships
+    # with.  KiCad's fill reads the board's sibling ``.kicad_pro`` /
+    # ``.kicad_dru``, but ``run_post_route_drc`` only emits the
+    # manufacturer sidecars after this fill and the oracle loop.  The fill
+    # therefore used the source project's (or KiCad's default) clearances,
+    # and on board 03 the saved F.Cu GND pour came out in 6 pieces.
+    # ``kicad-cli pcb drc`` under the shipped project then reported a GND
+    # link and a ``copper_sliver`` that every ``--refill-zones`` gate
+    # refilled away.  Emit the sidecars first, as the placement branch above
+    # already does.  The post-route DRC rewrites them identically (same
+    # inputs, preserve-and-merge semantics).
+    layer_stack = getattr(router, "layer_stack", None)
+    if (
+        layer_stack is not None
+        and getattr(args, "pcb", None)
+        and getattr(args, "manufacturer", None)
+    ):
+        _write_drc_constraint_sidecars(
+            output_path,
+            args.manufacturer,
+            layer_stack.num_layers,
+            copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            quiet=True,
+            source_pcb_path=Path(args.pcb),
+        )
+
     result = run_fill_zones(output_path, kicad_cli=kicad_cli)
 
     if not result.success:

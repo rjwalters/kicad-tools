@@ -242,11 +242,14 @@ class TestAuthoritativeEngine:
         board-05 defect).  We drive a real ``run_geometric_drc`` call
         through the gate with ``subprocess.run`` stubbed and assert the
         argv carried ``--refill-zones``.
+
+        Issue #6078: the gate then checks the SAVED fill with a second run
+        that must NOT refill -- that is the copper Gerber export plots.
         """
-        captured: dict[str, list[str]] = {}
+        calls: list[list[str]] = []
 
         def fake_run(cmd, **kwargs):
-            captured["cmd"] = list(cmd)
+            calls.append(list(cmd))
             out = cmd[cmd.index("--output") + 1]
             Path(out).write_text(
                 '{"source": "", "date": "", "coordinate_units": "mm", "violations": []}'
@@ -269,8 +272,11 @@ class TestAuthoritativeEngine:
 
         res = evaluate_pipeline_gate(pcb, route_ok=True)
 
-        assert "cmd" in captured, "run_geometric_drc did not shell kicad-cli"
-        assert "--refill-zones" in captured["cmd"]
-        assert "drc" in captured["cmd"]
+        assert calls, "run_geometric_drc did not shell kicad-cli"
+        assert "--refill-zones" in calls[0]
+        assert "drc" in calls[0]
+        assert len(calls) == 2, "clean saved fill: one saved-fill run, no second refill"
+        assert "drc" in calls[1] and "--refill-zones" not in calls[1]
         assert res.drc_ran is True
+        assert res.saved_fill_ok is True
         assert res.drc_ok is True

@@ -23,7 +23,13 @@ from .checker import (
     ManufacturerCheck,
     check_manufacturer_rules,
 )
-from .geometric import GeometricDRCResult, run_geometric_drc
+from .geometric import (
+    GeometricDRCResult,
+    SavedFillCheck,
+    check_saved_fill,
+    run_geometric_drc,
+    saved_fill_regressions,
+)
 from .incremental import (
     DRCDelta,
     DRCState,
@@ -92,4 +98,7 @@ __all__ = [
     # Native (kicad-cli) geometric DRC reconciliation
     "GeometricDRCResult",
     "run_geometric_drc",
+    "SavedFillCheck",
+    "check_saved_fill",
+    "saved_fill_regressions",
 ]

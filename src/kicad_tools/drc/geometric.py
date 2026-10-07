@@ -31,7 +31,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["GeometricDRCResult", "run_geometric_drc"]
+__all__ = [
+    "GeometricDRCResult",
+    "SavedFillCheck",
+    "check_saved_fill",
+    "run_geometric_drc",
+    "saved_fill_regressions",
+]
 
 
 # Machine-readable skip reasons (Issue #4178).  ``--strict-drc`` uses these
@@ -236,3 +242,96 @@ def run_geometric_drc(
     finally:
         if report_path is not None:
             report_path.unlink(missing_ok=True)
+
+
+# kicad-cli finding types that show a saved zone fill whose copper is split
+# apart (Issue #6078).  A fresh fill from KiCad never produces more of these
+# than the board's routing already implies.  So when the SAVED fill has more
+# of them than a ``--refill-zones`` run, the extra findings come from the
+# saved copper itself.
+SAVED_FILL_CONNECTIVITY_TYPES: tuple[str, ...] = ("isolated_copper", "copper_sliver")
+
+
+def saved_fill_regressions(saved: GeometricDRCResult, refilled: GeometricDRCResult) -> list[str]:
+    """Explain where the SAVED fill is worse-connected than a fresh fill.
+
+    ``saved`` is ``kicad-cli pcb drc`` *without* ``--refill-zones``: it reads
+    the copper stored in the board, which ``kicad-cli pcb export gerbers``
+    also plots without refilling.  ``refilled`` is the same board with
+    ``--refill-zones``, the view every refill-based gate checks.  Issue
+    #6078: a post-fill edit to the saved pours (the #3711 clearance carve)
+    split board 03's F.Cu GND pour into 16 pieces.  The refill-based gates
+    reported 1 GND link, but the copper sent to the fab had 17.
+
+    Returns one human-readable line per regressed measure (unconnected items,
+    ``isolated_copper``, ``copper_sliver``).  Returns ``[]`` when either run
+    did not happen, because a check that was not performed has no verdict.
+    """
+    if not (saved.ran and refilled.ran):
+        return []
+    out: list[str] = []
+    if saved.unconnected_count > refilled.unconnected_count:
+        out.append(
+            f"unconnected_items: {saved.unconnected_count} on the saved fill vs "
+            f"{refilled.unconnected_count} after a refill"
+        )
+    for type_str in SAVED_FILL_CONNECTIVITY_TYPES:
+        n_saved = saved.all_by_type.get(type_str, 0)
+        n_refilled = refilled.all_by_type.get(type_str, 0)
+        if n_saved > n_refilled:
+            out.append(f"{type_str}: {n_saved} on the saved fill vs {n_refilled} after a refill")
+    return out
+
+
+@dataclass
+class SavedFillCheck:
+    """Verdict of :func:`check_saved_fill` (Issue #6078).
+
+    Attributes:
+        ran: ``True`` when every DRC run the verdict needs actually ran.
+        regressions: :func:`saved_fill_regressions` lines; empty when clean.
+        note: Why the check did not run (``ran`` is ``False``).
+    """
+
+    ran: bool
+    regressions: list[str] = field(default_factory=list)
+    note: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """``True`` only when the check ran and found no regression."""
+        return self.ran and not self.regressions
+
+
+def check_saved_fill(
+    pcb_path: Path | str,
+    *,
+    refilled: GeometricDRCResult | None = None,
+    timeout: int = 120,
+    kicad_cli: Path | None = None,
+) -> SavedFillCheck:
+    """Check that the zone copper SAVED in ``pcb_path`` is as connected as a refill.
+
+    Gerber export plots the saved fill (it does not pass ``--check-zones``),
+    while ``kicad-cli pcb drc --refill-zones`` checks a fresh one.  This
+    check makes the difference visible (Issue #6078).  It runs kicad-cli DRC
+    without refill and compares the result with the refilled run.  Pass
+    ``refilled`` if you already have that run, so it is not repeated.
+
+    Fast path: if the saved run shows no unconnected items and none of the
+    :data:`SAVED_FILL_CONNECTIVITY_TYPES`, nothing can have regressed, and
+    the refill run is skipped.  The board file is never modified: neither
+    run passes ``--save-board``.
+    """
+    saved = run_geometric_drc(pcb_path, timeout=timeout, kicad_cli=kicad_cli, refill_zones=False)
+    if not saved.ran:
+        return SavedFillCheck(ran=False, note=saved.note)
+    if refilled is None:
+        if saved.unconnected_count == 0 and not any(
+            saved.all_by_type.get(t, 0) for t in SAVED_FILL_CONNECTIVITY_TYPES
+        ):
+            return SavedFillCheck(ran=True)
+        refilled = run_geometric_drc(pcb_path, timeout=timeout, kicad_cli=kicad_cli)
+    if not refilled.ran:
+        return SavedFillCheck(ran=False, note=refilled.note)
+    return SavedFillCheck(ran=True, regressions=saved_fill_regressions(saved, refilled))
