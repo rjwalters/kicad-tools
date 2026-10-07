@@ -177,11 +177,15 @@ def _extract_ref_from_items(items: list[str]) -> str | None:
     """Pull a component ref like 'U3' out of an item entry like 'U3-30'.
 
     Item entries are of the form ``"<ref>-<pin>"`` for pad references and
-    ``"Trace-<hex>"`` for trace IDs.  We only return the pad-side ref so
-    callers can map a violation to a footprint.
+    ``"Trace@<layer>:w<width>:<x1>/<y1>~<x2>/<y2>"`` (also ``Arc@``/``Via@``,
+    Issue #6088) for copper.  Geometry names can contain ``-`` (negative
+    coordinates), so they are skipped by prefix.  We only return the pad-side
+    ref so callers can map a violation to a footprint.
     """
     for it in items:
-        if "-" in it and not it.startswith("Trace-"):
+        if it.startswith(("Trace@", "Arc@", "Via@", "Run@", "Trace-", "Via-")):
+            continue
+        if "-" in it:
             return it.split("-", 1)[0]
     return None
 

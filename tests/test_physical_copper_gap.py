@@ -39,7 +39,7 @@ def test_parallel_gap_and_net_independence(net):
     result = gaps(board(track((0, 0), (4, 0), "a"), track((0, 0.3), (4, 0.3), "b", net)))
     assert result
     assert result[0].actual_value == pytest.approx(0.1, abs=0.001)
-    assert result[0].items == ("a", "b")
+    assert result[0].items == ("Trace@F.Cu:w0.2:0/0.3~4/0.3", "Trace@F.Cu:w0.2:0/0~4/0")
     assert result[0].layer == "F.Cu"
     assert result[0].nets == (("GND",) if net == 1 else ("GND", "VCC"))
 
@@ -103,12 +103,12 @@ def test_arc_and_zone_provenance():
     arc = """(arc (start 0 0) (mid 1 1) (end 2 0) (width .2)
         (layer "F.Cu") (net 1) (uuid "arc"))"""
     result = gaps(board(arc, track((0, 1.3), (2, 1.3), "track")))
-    assert result and "arc" in result[0].items
+    assert result and "Arc@F.Cu:w0.2:0/0~1/1~2/0" in result[0].items
     zone = """(zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone")
       (polygon (pts (xy 0 0) (xy 4 0) (xy 4 1) (xy 0 1)))
       (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 4 0) (xy 4 1) (xy 0 1))))"""
     result = gaps(board(zone, track((0, 1.2), (4, 1.2), "track")))
-    assert result and result[0].items == ("track", "zone")
+    assert result and result[0].items == ("Trace@F.Cu:w0.2:0/1.2~4/1.2", "zone")
 
 
 def test_unknown_geometry_does_not_claim_complete():
@@ -177,7 +177,10 @@ def test_via_gap_and_unfilled_zone():
     via = """(via (at 2 .5) (size .6) (drill .3) (layers "F.Cu" "B.Cu")
       (net 1) (uuid "via"))"""
     result = gaps(board(via, track((0, 0), (4, 0), "track")))
-    assert result and result[0].items == ("track", "via")
+    assert result and result[0].items == (
+        "Trace@F.Cu:w0.2:0/0~4/0",
+        "Via@2/0.5:F.Cu-B.Cu:d0.3/s0.6",
+    )
     zone = """(zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone")
       (polygon (pts (xy 0 0) (xy 4 0) (xy 4 1) (xy 0 1))))"""
     assert (

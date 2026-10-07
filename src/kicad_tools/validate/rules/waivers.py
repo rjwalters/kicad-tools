@@ -203,6 +203,46 @@ def _is_legacy_name(text: str) -> bool:
     )
 
 
+# ``physical_copper_gap`` (Issue #6106) named every copper source by its raw
+# UUID, whatever its kind, so a UUID cannot be coarsened to a kind.  Such a
+# waiver is matched to current findings of the same rule, nets and layer
+# whose items include a geometry-named track, arc or via instead.
+_PHYSICAL_GAP_RULE = "physical_copper_gap"
+
+
+def _has_copper_geometry(items: Iterable[str]) -> bool:
+    return any(_COPPER_GEOMETRY.search(i) for i in items)
+
+
+def _physical_gap_candidates(entry: Waiver, findings: Iterable[DRCViolation]) -> list[str]:
+    """Current ``physical_copper_gap`` keys a UUID-named ``entry`` would have matched."""
+    if entry.key is not None:
+        parts = entry.key.split(KEY_SEPARATOR)
+        if len(parts) < 4 or parts[0] != _PHYSICAL_GAP_RULE:
+            return []
+        if any(_COPPER_GEOMETRY.search(p) for p in parts[1].split(",")):
+            return []
+    else:
+        if entry.rule != _PHYSICAL_GAP_RULE or _has_copper_geometry(entry.items):
+            return []
+        parts = []
+    keys: list[str] = []
+    for v in findings:
+        if v.waived or not isinstance(v, DRCViolation) or v.rule_id != _PHYSICAL_GAP_RULE:
+            continue
+        key = getattr(v, "key", "")
+        if not _has_copper_geometry(v.items) or key == entry.key:
+            continue
+        if parts:
+            vparts = key.split(KEY_SEPARATOR)
+            hit = len(vparts) >= 4 and vparts[2:4] == parts[2:4]
+        else:
+            hit = not entry.nets or frozenset(v.nets) == entry.nets
+        if hit and key not in keys:
+            keys.append(key)
+    return sorted(keys)
+
+
 def _rewaive_candidates(entry: Waiver, findings: Iterable[DRCViolation]) -> list[str]:
     """Keys of active findings this unused ``entry`` named before geometry keys.
 
@@ -216,6 +256,10 @@ def _rewaive_candidates(entry: Waiver, findings: Iterable[DRCViolation]) -> list
     advisory can tell the user exactly what to re-waive.  Empty when nothing
     qualifies.
     """
+    findings = list(findings)
+    gap_keys = _physical_gap_candidates(entry, findings)
+    if gap_keys:
+        return gap_keys
     keys: list[str] = []
     if entry.key is not None:
         if not _is_legacy_name(entry.key):
