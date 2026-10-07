@@ -919,10 +919,12 @@ def _ci_extended_ids() -> frozenset[str]:
 
 
 def pytest_collection_modifyitems(config, items):
+    # Issue #6102: a `pr_required` test is a merge gate and must run in the PR
+    # "Test" job, so it is never marked ci_extended even if it is listed.
     ids = _ci_extended_ids()
     if not ids:
         return
     marker = pytest.mark.ci_extended
     for item in items:
-        if item.nodeid in ids:
+        if item.nodeid in ids and item.get_closest_marker("pr_required") is None:
             item.add_marker(marker)
