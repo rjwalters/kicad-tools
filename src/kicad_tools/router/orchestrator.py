@@ -41,12 +41,16 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 import time
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..design_intent import NetIntent
+    from .layers import LayerStack
     from .primitives import PCB, Pad
+    from .rule_area_resolve import RuleAreaSpec
     from .rules import DesignRules, NetClassRouting
 
 from .adaptive import AdaptiveAutorouter
@@ -105,6 +109,16 @@ class RoutingOrchestrator:
             this limit) before returning failure.  Set to ``0`` to disable
             automatic retry and preserve the legacy behaviour of returning
             immediately on failure.  Default is ``2``.
+        layer_stack: The board's copper stack-up.  Used to resolve keepout
+            rule-area layer specs and to cap the hierarchical strategy's layer
+            count at the layers the board actually has (Issue #6059).
+            ``None`` derives it from ``pcb.layer_stack`` or the schema PCB's
+            copper layers.
+        rule_areas: Track/via-blocking keepout rule areas, in the same frame
+            as the pads (Issue #6059).  ``None`` (the default) reads them from
+            ``pcb.rule_areas`` when ``pcb`` is a schema
+            :class:`~kicad_tools.schema.pcb.PCB`; pass ``[]`` to route as if
+            the board declared none.
     """
 
     def __init__(
@@ -118,6 +132,8 @@ class RoutingOrchestrator:
         enable_via_conflict_resolution: bool = True,
         net_class_map: dict[str, NetClassRouting] | None = None,
         max_strategy_retries: int = 2,
+        layer_stack: LayerStack | None = None,
+        rule_areas: Sequence[RuleAreaSpec] | None = None,
     ):
         self.pcb = pcb
         self.rules = rules
@@ -156,11 +172,310 @@ class RoutingOrchestrator:
         self._via_manager: ViaConflictManager | None = None
         self._region_graph: RegionGraph | None = None
 
+        # Issue #6059: board keepout rule areas.  Resolved lazily (a mock PCB
+        # in a unit test never pays for it) and cached.
+        self._layer_stack_override = layer_stack
+        self._rule_area_specs_override = list(rule_areas) if rule_areas is not None else None
+        self._rule_area_specs_cache: list[RuleAreaSpec] | None = None
+        self._keepout_mask_cache: Any = None
+        self._keepout_mask_resolved = False
+        self._keepout_warned = False
+
         logger.info(
             f"RoutingOrchestrator initialized: backend={backend}, "
             f"corridor_width={corridor_width}mm, density_threshold={density_threshold}, "
             f"max_strategy_retries={max_strategy_retries}"
         )
+
+    # ------------------------------------------------------------------
+    # Keepout rule areas (Issue #6059)
+    #
+    # ``kct route`` enforces board keepout rule areas on every engine (#4605
+    # lattice, #6008 grid).  ``kct route-auto`` reaches none of that code: its
+    # strategies plan on the coarse GlobalRouter / RegionGraph or build their
+    # own AdaptiveAutorouter with no source board file.  The helpers below
+    # give the orchestrator the SAME resolved areas (``rule_area_resolve``,
+    # the shared #5575 parse) and use them three ways:
+    #
+    # * the hierarchical strategy hands them to its inner Autorouter, which
+    #   enforces them on its grid exactly like ``kct route``;
+    # * any routing grid the escape / sub-grid / via-conflict phases use gets
+    #   them installed (``rule_area_grid``);
+    # * every strategy's OUTPUT is checked against them with the lattice
+    #   engine's own predicates, and copper inside an area is refused.  That
+    #   is the guarantee for the coarse corridor strategies, which cannot
+    #   route around an area -- they warn once, then fail rather than write.
+    # ------------------------------------------------------------------
+
+    # CLI spellings (``kct route-auto --strategy``) for user-facing messages.
+    _STRATEGY_CLI_NAMES = {
+        RoutingStrategy.GLOBAL_WITH_REPAIR: "global",
+        RoutingStrategy.ESCAPE_THEN_GLOBAL: "escape",
+        RoutingStrategy.HIERARCHICAL_DIFF_PAIR: "hierarchical",
+        RoutingStrategy.SUBGRID_ADAPTIVE: "subgrid",
+        RoutingStrategy.VIA_CONFLICT_RESOLUTION: "via_resolution",
+        RoutingStrategy.MULTI_RESOLUTION: "multi_resolution",
+        RoutingStrategy.FULL_PIPELINE: "full_pipeline",
+    }
+
+    # Strategies whose copper comes (at least partly) from the coarse corridor
+    # planner, which has no obstacle model and cannot route around an area.
+    _CORRIDOR_STRATEGIES = frozenset(
+        {
+            RoutingStrategy.GLOBAL_WITH_REPAIR,
+            RoutingStrategy.ESCAPE_THEN_GLOBAL,
+            RoutingStrategy.SUBGRID_ADAPTIVE,
+            RoutingStrategy.VIA_CONFLICT_RESOLUTION,
+            RoutingStrategy.MULTI_RESOLUTION,
+            RoutingStrategy.FULL_PIPELINE,
+        }
+    )
+
+    def _known_layer_stack(self) -> LayerStack | None:
+        """The board's copper stack, or ``None`` when it cannot be told.
+
+        Order: the ``layer_stack`` constructor argument, an Autorouter-like
+        ``pcb.layer_stack``, then the schema PCB's copper layer names.
+        """
+        from .layers import LayerDefinition, LayerType
+        from .layers import LayerStack as _LayerStack
+
+        if self._layer_stack_override is not None:
+            return self._layer_stack_override
+        stack = getattr(self.pcb, "layer_stack", None)
+        if isinstance(stack, _LayerStack):
+            return stack
+        copper = getattr(self.pcb, "copper_layers", None)
+        if not isinstance(copper, list):
+            return None
+        names = [n for n in (getattr(layer, "name", "") for layer in copper) if n.endswith(".Cu")]
+        if len(names) <= 2:
+            return _LayerStack.two_layer() if names else None
+
+        def _order(name: str) -> tuple[int, int]:
+            if name == "F.Cu":
+                return (0, 0)
+            if name == "B.Cu":
+                return (2, 0)
+            digits = "".join(ch for ch in name if ch.isdigit())
+            return (1, int(digits) if digits else 0)
+
+        ordered = sorted(dict.fromkeys(names), key=_order)
+        last = len(ordered) - 1
+        return _LayerStack(
+            layers=[
+                LayerDefinition(name, i, LayerType.SIGNAL, is_outer=i in (0, last))
+                for i, name in enumerate(ordered)
+            ],
+            name="Board copper",
+        )
+
+    def _board_layer_stack(self) -> LayerStack:
+        """:meth:`_known_layer_stack`, defaulting to a 2-layer stack."""
+        from .layers import LayerStack as _LayerStack
+
+        return self._known_layer_stack() or _LayerStack.two_layer()
+
+    def _rule_area_specs(self) -> list[RuleAreaSpec]:
+        """Track/via-blocking rule areas in the pads' frame (cached).
+
+        The constructor's ``rule_areas`` wins; otherwise they are read from a
+        schema ``PCB``'s ``rule_areas``.  Its polygons are board-relative,
+        which is the frame ``route_net_auto`` builds pads in, so no origin
+        shift is applied.
+        """
+        if self._rule_area_specs_cache is not None:
+            return self._rule_area_specs_cache
+        specs: list[RuleAreaSpec] = []
+        if self._rule_area_specs_override is not None:
+            specs = list(self._rule_area_specs_override)
+        elif isinstance(getattr(self.pcb, "rule_areas", None), list):
+            from .rule_area_resolve import keepout_rule_area_specs
+
+            try:
+                specs = keepout_rule_area_specs(self.pcb)
+            except Exception as exc:  # defensive: never crash routing on a bad board
+                print(
+                    "Warning: could not read keepout rule areas "
+                    f"({type(exc).__name__}: {exc}); rule areas will not "
+                    "constrain route-auto.",
+                    file=sys.stderr,
+                )
+                specs = []
+        self._rule_area_specs_cache = specs
+        return specs
+
+    def _keepout_mask(self) -> Any:
+        """The areas as a :class:`~.lattice.obstacles.LatticeKeepoutMask`.
+
+        ``None`` when the board declares no track/via-blocking area on any of
+        its copper layers.  Cached.
+        """
+        if self._keepout_mask_resolved:
+            return self._keepout_mask_cache
+        self._keepout_mask_resolved = True
+        specs = self._rule_area_specs()
+        if not specs:
+            return None
+        from .lattice.obstacles import LatticeKeepoutMask
+        from .rule_area_resolve import keepout_areas_for_stack
+
+        mask = LatticeKeepoutMask(keepout_areas_for_stack(specs, self._board_layer_stack()))
+        self._keepout_mask_cache = mask if mask else None
+        return self._keepout_mask_cache
+
+    def _install_grid_keepouts(self, grid: Any) -> None:
+        """Enforce the rule areas on a routing grid a strategy is about to use.
+
+        An Autorouter-like ``pcb`` installs its own resolution (which also
+        carries any ``spatial_keepouts`` filter); otherwise the orchestrator's
+        areas are rasterised onto ``grid``.  Idempotent per grid.
+        """
+        if grid is None:
+            return
+        installer = getattr(self.pcb, "_install_grid_rule_area_keepouts", None)
+        if callable(installer) and not isinstance(getattr(self.pcb, "rule_areas", None), list):
+            installer(grid)
+            return
+        mask = self._keepout_mask()
+        if mask is None:
+            return
+        from .rule_area_grid import install_rule_area_keepouts
+
+        install_rule_area_keepouts(grid, mask.areas)
+
+    def _drop_keepout_escapes(self, grid: Any, escapes: list) -> list:
+        """Escapes whose copper stays out of the grid's keepout rule areas.
+
+        The same check (``rule_area_grid.escape_copper_rule_area_hit``) the
+        #6061 commit gate in ``EscapeRouter.apply_escape_routes`` runs.
+        """
+        if not escapes or not getattr(grid, "_rule_area_keepouts", None):
+            return escapes
+        from .rule_area_grid import escape_copper_rule_area_hit
+
+        kept = []
+        for escape in escapes:
+            hit = escape_copper_rule_area_hit(
+                grid,
+                escape.segments,
+                [escape.via] if escape.via is not None else [],
+                escape.pad.net,
+                self.rules,
+            )
+            if hit is None:
+                kept.append(escape)
+            else:
+                logger.info(
+                    "route-auto escape: dropped %s pin %s (ref=%s) -- its %s "
+                    "enters a keepout rule area (Issue #6059)",
+                    escape.pad.net_name,
+                    escape.pad.pin,
+                    escape.pad.ref,
+                    hit,
+                )
+        return kept
+
+    def _warn_corridor_keepouts(self, strategy: RoutingStrategy) -> str | None:
+        """Warn once that a corridor strategy cannot route around the areas.
+
+        Mirrors ``kct route``'s #4605 warning for ``--route-engine mesh``.
+        Returns the message (also printed to stderr) the first time, ``None``
+        afterwards or when there is nothing to warn about.
+        """
+        if strategy not in self._CORRIDOR_STRATEGIES or self._keepout_warned:
+            return None
+        mask = self._keepout_mask()
+        if mask is None:
+            return None
+        self._keepout_warned = True
+        name = self._STRATEGY_CLI_NAMES.get(strategy, strategy.name)
+        message = (
+            f"board declares {len(mask.areas)} track/via-blocking keepout rule "
+            f"area(s), but route-auto's '{name}' strategy plans coarse corridors "
+            "that cannot route around them (only the 'hierarchical' strategy "
+            "enforces them during the search; see issue #6059). A corridor "
+            "that crosses an area is refused, not written."
+        )
+        print(f"Warning: {message}", file=sys.stderr)
+        return message
+
+    def _keepout_violations(self, result: RoutingResult) -> tuple[int, int, list[str]]:
+        """Copper in ``result`` that enters a rule area.
+
+        Uses the lattice engine's predicates (``segment_blocked`` /
+        ``via_blocked``): a trace's copper edge, not its centreline, must stay
+        out of a track-blocking area, and a via's pad out of a via-blocking
+        one.
+
+        Returns:
+            ``(segments_inside, vias_inside, area_names)``.
+        """
+        mask = self._keepout_mask()
+        if mask is None or not (result.segments or result.vias):
+            return (0, 0, [])
+        from .lattice.obstacles import LatticeKeepoutMask
+
+        stack = self._board_layer_stack()
+        per_area = [(area.name or "<unnamed>", LatticeKeepoutMask([area])) for area in mask.areas]
+        names: dict[str, None] = {}
+        seg_hits = 0
+        for seg in result.segments:
+            try:
+                layer = stack.layer_enum_to_index(seg.layer)
+            except Exception:
+                continue  # a layer this board does not have: no area covers it
+            a, b = (seg.x1, seg.y1), (seg.x2, seg.y2)
+            net = int(getattr(seg, "net", 0) or 0)
+            half = float(getattr(seg, "width", 0.0) or 0.0) / 2.0
+            if mask.segment_blocked(a, b, layer, net, half):
+                seg_hits += 1
+                for label, single in per_area:
+                    if single.segment_blocked(a, b, layer, net, half):
+                        names[label] = None
+        via_hits = 0
+        for via in result.vias:
+            point = (via.x, via.y)
+            net = int(getattr(via, "net", 0) or 0)
+            radius = float(getattr(via, "diameter", 0.0) or 0.0) / 2.0
+            if mask.via_blocked(point, net, radius):
+                via_hits += 1
+                for label, single in per_area:
+                    if single.via_blocked(point, net, radius):
+                        names[label] = None
+        return (seg_hits, via_hits, list(names))
+
+    def _enforce_keepouts(self, result: RoutingResult, strategy: RoutingStrategy) -> None:
+        """Refuse a result whose copper enters a keepout rule area.
+
+        The result becomes a failure with no geometry, so nothing inside an
+        area is ever persisted.  Unless the hierarchical strategy itself
+        produced it, the hierarchical strategy -- which enforces the areas
+        during the search -- is offered as the retry.
+        """
+        seg_hits, via_hits, names = self._keepout_violations(result)
+        if not seg_hits and not via_hits:
+            return
+        name = self._STRATEGY_CLI_NAMES.get(strategy, strategy.name)
+        result.success = False
+        result.partial = False
+        result.segments = []
+        result.vias = []
+        result.metrics = RoutingMetrics()
+        result.error_message = (
+            f"route-auto '{name}' strategy produced copper inside keepout rule "
+            f"area(s) {', '.join(repr(n) for n in names)} ({seg_hits} segment(s), "
+            f"{via_hits} via(s)); refusing it rather than writing it (issue #6059)."
+        )
+        if strategy != RoutingStrategy.HIERARCHICAL_DIFF_PAIR:
+            result.alternative_strategies = [
+                AlternativeStrategy(
+                    strategy=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+                    reason="Routes on a grid that enforces keepout rule areas",
+                    estimated_cost=1.5,
+                    success_probability=0.6,
+                )
+            ]
 
     def _get_net_class_routing(self, net: str | int) -> NetClassRouting | None:
         """Look up the NetClassRouting for a net by name.
@@ -655,6 +970,10 @@ class RoutingOrchestrator:
         Returns:
             RoutingResult from the strategy execution
         """
+        # Issue #6059: a corridor strategy cannot route around keepout rule
+        # areas -- say so once, before it runs.
+        keepout_warning = self._warn_corridor_keepouts(strategy)
+
         try:
             if strategy == RoutingStrategy.GLOBAL_WITH_REPAIR:
                 result = self._route_global(net, pads)
@@ -686,6 +1005,13 @@ class RoutingOrchestrator:
                     strategy_used=strategy,
                     error_message=error_msg,
                 )
+
+            # Issue #6059: no strategy may hand back copper inside a keepout
+            # rule area.  The hierarchical strategy avoids them during the
+            # search; this output check is the guarantee for the rest.
+            if keepout_warning is not None:
+                result.warnings.append(keepout_warning)
+            self._enforce_keepouts(result, strategy)
 
             # Ensure failed results always carry alternative suggestions so
             # the retry loop in route_net() has candidates to try.
@@ -954,6 +1280,7 @@ class RoutingOrchestrator:
         if self._escape is None:
             grid = getattr(self.pcb, "grid", None)
             if grid is not None:
+                self._install_grid_keepouts(grid)  # Issue #6059
                 self._escape = EscapeRouter(
                     grid=grid,
                     rules=self.rules,
@@ -991,9 +1318,20 @@ class RoutingOrchestrator:
                 )
 
         if self._escape is not None:
+            # Issue #6059/#6061: the escape generator gates stubs and vias on
+            # the keepout rule areas installed on its grid, so they must be
+            # there before it runs (idempotent per grid).
+            self._install_grid_keepouts(self._escape.grid)
             package_info = self._escape.analyze_package(pads)
             if package_info.is_dense:
                 escape_routes = self._escape.generate_escapes(package_info)
+                # Issue #6059: the #6061 commit-time keepout gate lives in
+                # ``EscapeRouter.apply_escape_routes``, which this path never
+                # calls (it hands the copper back instead of committing it).
+                # Apply the same gate here: an escape whose stub or via enters
+                # a keepout rule area is dropped, leaving its pad to the
+                # corridor phase.
+                escape_routes = self._drop_keepout_escapes(self._escape.grid, escape_routes)
                 escape_count = len(escape_routes)
                 for er in escape_routes:
                     escape_segments_list.extend(er.segments)
@@ -1087,6 +1425,14 @@ class RoutingOrchestrator:
             if intent and hasattr(intent, "skip_nets"):
                 skip_nets = intent.skip_nets
 
+            # Issue #6059: this AdaptiveAutorouter has no source board file,
+            # so hand it the board's keepout rule areas (resolved per tried
+            # stack inside).  Cap its layer escalation at the board's copper
+            # count: on a 2-layer board a 4-layer retry would otherwise route
+            # straight past a full-height F.Cu/B.Cu keepout on In1.Cu/In2.Cu
+            # -- layers the board does not have.
+            known_stack = self._known_layer_stack()
+            max_layers = max(2, known_stack.num_layers) if known_stack is not None else 6
             self._hierarchical = AdaptiveAutorouter(
                 width=width,
                 height=height,
@@ -1095,6 +1441,8 @@ class RoutingOrchestrator:
                 rules=self.rules,
                 verbose=False,
                 skip_nets=skip_nets,
+                max_layers=max_layers,
+                rule_area_specs=self._rule_area_specs() or None,
             )
 
         adaptive_result = self._hierarchical.route()
@@ -1117,6 +1465,16 @@ class RoutingOrchestrator:
             success=adaptive_result.converged,
             net=net,
             strategy_used=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+            error_message=(
+                ""
+                if adaptive_result.converged
+                else (
+                    "Hierarchical router did not converge "
+                    f"({getattr(adaptive_result, 'nets_routed', '?')}/"
+                    f"{getattr(adaptive_result, 'nets_requested', '?')} net(s) routed "
+                    f"at up to {getattr(adaptive_result, 'layer_count', '?')} layers)"
+                )
+            ),
             segments=all_segments,
             vias=all_vias,
             metrics=RoutingMetrics(
@@ -1169,12 +1527,16 @@ class RoutingOrchestrator:
         if fine_components:
             # Initialize sub-grid router for escape phase
             if self._subgrid is None:
+                self._install_grid_keepouts(getattr(self.pcb, "grid", None))  # Issue #6059
                 self._subgrid = SubGridRouter(
                     grid=self.pcb.grid if hasattr(self.pcb, "grid") else None,
                     rules=self.rules,
                 )
 
             if self._subgrid.grid is not None:
+                # Issue #6059/#6061: SubGridRouter gates each escape leg on the
+                # grid's keepout rule areas -- install them first.
+                self._install_grid_keepouts(self._subgrid.grid)
                 fine_pads = [p for p in pads if p.ref in fine_components]
                 if fine_pads:
                     subgrid_result = self._subgrid.route_with_subgrid(fine_pads)
@@ -1627,6 +1989,7 @@ class RoutingOrchestrator:
         if self._escape is None:
             grid = getattr(self.pcb, "grid", None)
             if grid is not None:
+                self._install_grid_keepouts(grid)  # Issue #6059
                 self._escape = EscapeRouter(
                     grid=grid,
                     rules=self.rules,
@@ -1660,5 +2023,6 @@ class RoutingOrchestrator:
         if self._via_manager is None:
             grid = getattr(self.pcb, "grid", None)
             if grid is not None:
+                self._install_grid_keepouts(grid)  # Issue #6059
                 self._via_manager = ViaConflictManager(grid=grid, rules=self.rules)
         return self._via_manager

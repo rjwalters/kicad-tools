@@ -3767,13 +3767,17 @@ class Autorouter:
             self._keepout_rule_area_zone_names = (frozenset(), frozenset())
             return self._keepout_rule_areas_cache
 
-        raw_areas = [
-            zone
-            for zone in pcb.rule_areas
-            if zone.keepout is not None
-            and (not zone.keepout.tracks_allowed or not zone.keepout.vias_allowed)
-            and len(zone.polygon) >= 3
-        ]
+        # Issue #6059: the filter, the board-origin shift and the layer-spec
+        # resolution live in ``rule_area_resolve`` so ``kct route-auto`` (the
+        # RoutingOrchestrator) reads exactly the same areas as this engine.
+        from .layers import LayerStack as _LayerStack
+        from .rule_area_resolve import (
+            keepout_rule_area_specs,
+            resolve_keepout_rule_areas,
+            track_via_blocking_zones,
+        )
+
+        raw_areas = track_via_blocking_zones(pcb)
         # Zone-name sets the ``spatial_keepouts`` warning pass in
         # ``_lattice_keepout_projection`` needs: (kept, all-on-board).
         self._keepout_rule_area_zone_names = (
@@ -3783,47 +3787,10 @@ class Autorouter:
         if not raw_areas:
             return self._keepout_rule_areas_cache
 
-        from .layers import LayerStack as _LayerStack
-
         stack = self.layer_stack or _LayerStack.two_layer()
-        all_indices = frozenset(layer.index for layer in stack.layers)
-
-        def _resolve_layers(names: list[str]) -> frozenset[int]:
-            indices: set[int] = set()
-            for name in names:
-                if name == "*.Cu":
-                    indices.update(all_indices)
-                elif name == "F&B.Cu":
-                    indices.update({0, stack.num_layers - 1})
-                elif name == "*.In.Cu":
-                    # KiCad's inner-copper wildcard: every layer that is
-                    # neither front nor back (#4672).  On a 2-layer stack it
-                    # legitimately resolves to the empty set -- there are no
-                    # inner layers -- which is correct, not an error.
-                    indices.update(i for i in all_indices if 0 < i < stack.num_layers - 1)
-                else:
-                    layer_def = stack.get_layer_by_name(name)
-                    if layer_def is not None:
-                        indices.add(layer_def.index)
-            return frozenset(indices)
-
-        ox, oy = pcb.board_origin
-        resolved: list[KeepoutRuleArea] = []
-        for zone in raw_areas:
-            layer_names = zone.layers or ([zone.layer] if zone.layer else [])
-            layer_indices = _resolve_layers(layer_names)
-            if not layer_indices:
-                continue  # rule area on no routable copper layer
-            assert zone.keepout is not None  # filtered above
-            resolved.append(
-                KeepoutRuleArea(
-                    polygon=tuple((x + ox, y + oy) for x, y in zone.polygon),
-                    layers=layer_indices,
-                    blocks_tracks=not zone.keepout.tracks_allowed,
-                    blocks_vias=not zone.keepout.vias_allowed,
-                    name=zone.name or "",
-                )
-            )
+        resolved = resolve_keepout_rule_areas(
+            keepout_rule_area_specs(pcb, offset=pcb.board_origin), stack
+        )
         self._keepout_rule_areas_cache = resolved
         return resolved
 

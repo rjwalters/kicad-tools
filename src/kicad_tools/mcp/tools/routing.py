@@ -727,12 +727,18 @@ def route_net_auto(
         logger.debug("Net classification unavailable, skipping pour-net detection")
 
     # Create orchestrator
+    # Issue #6059: the orchestrator reads the board's keepout rule areas from
+    # ``pcb.rule_areas`` (the shared ``rule_area_resolve`` parse ``kct route``
+    # uses) and resolves their layer specs against the board's real stack.
+    from kicad_tools.router.io import detect_layer_stack
+
     orchestrator = RoutingOrchestrator(
         pcb=pcb,  # type: ignore[arg-type]
         rules=design_rules,
         enable_repair=enable_repair,
         enable_via_conflict_resolution=enable_via_resolution,
         net_class_map=net_class_map,
+        layer_stack=detect_layer_stack(pcb_text),
     )
 
     # If a strategy override is requested, patch the strategy selection
