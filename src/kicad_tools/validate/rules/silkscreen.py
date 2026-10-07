@@ -743,6 +743,18 @@ def _iter_silk_geometries(
 ) -> Iterator[tuple[str, _Geometry, str, tuple[float, float], str, str]]:
     """Yield ``(side, geom, label, location, layer, uuid)`` for every silk element.
 
+    Thin projection of :func:`_iter_silk_elements` that drops the per-primitive
+    ``item`` name -- see there for the full contract.
+    """
+    for side, geom, label, location, layer, uuid, _item in _iter_silk_elements(pcb):
+        yield side, geom, label, location, layer, uuid
+
+
+def _iter_silk_elements(
+    pcb: PCB,
+) -> Iterator[tuple[str, _Geometry, str, tuple[float, float], str, str, str]]:
+    """Yield ``(side, geom, label, location, layer, uuid, item)`` for every silk element.
+
     ``side`` is ``"F"`` or ``"B"``.  ``geom`` is a shapely geometry in board
     coordinates.  Covers footprint texts/graphics (transformed from local) and
     board-level gr_text/gr_graphics (already board-relative).  Hidden text is
@@ -751,6 +763,12 @@ def _iter_silk_geometries(
     -- consumers that need to disambiguate same-label siblings (multiple
     ``fp_line`` strokes on one footprint all share the same generic label) can
     append it; most consumers ignore it.
+
+    ``item`` is the finding-key name for the element (Issue #6015).  For texts
+    it equals ``label``; for graphics it embeds the primitive's own geometry
+    via :func:`_graphic_descriptor` (footprint-local for ``fp_*``), e.g.
+    ``J1 (fp_line@-2.11/-2.11~-1.635/-2.11)``, so two strokes of one footprint
+    get distinct keys that survive the footprint being moved or rotated.
     """
     # Footprint silk
     for footprint in pcb.footprints:
@@ -767,7 +785,7 @@ def _iter_silk_geometries(
             if geom is None:
                 continue
             label = f"{footprint.reference} ({fp_text.text_type})"
-            yield side, geom, label, center, fp_text.layer, fp_text.uuid
+            yield side, geom, label, center, fp_text.layer, fp_text.uuid, label
 
         for graphic in footprint.graphics:
             side = _silk_side(graphic.layer)
@@ -777,7 +795,8 @@ def _iter_silk_geometries(
             if geom is None:
                 continue
             label = f"{footprint.reference} (fp_{graphic.graphic_type})"
-            yield side, geom, label, footprint.position, graphic.layer, graphic.uuid
+            item = f"{footprint.reference} ({_graphic_descriptor('fp', graphic)})"
+            yield side, geom, label, footprint.position, graphic.layer, graphic.uuid, item
 
     # Board-level silk (already board-relative)
     for text in pcb.texts:
@@ -788,7 +807,7 @@ def _iter_silk_geometries(
         if geom is None:
             continue
         label = text.text[:20] if text.text else "gr_text"
-        yield side, geom, label, text.position, text.layer, text.uuid
+        yield side, geom, label, text.position, text.layer, text.uuid, label
 
     for board_graphic in pcb.graphics:
         side = _silk_side(board_graphic.layer)
@@ -805,6 +824,7 @@ def _iter_silk_geometries(
             board_graphic.start,
             board_graphic.layer,
             board_graphic.uuid,
+            _graphic_descriptor("gr", board_graphic),
         )
 
 
@@ -1236,7 +1256,7 @@ def check_silk_edge_clearance(
 
     outline = MultiLineString([[seg_start, seg_end] for seg_start, seg_end in outline_segments])
 
-    for _side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
+    for _side, geom, silk_label, location, layer, _uuid, silk_item in _iter_silk_elements(pcb):
         distance = geom.distance(outline)
         if distance < SILK_EDGE_CLEARANCE_MM - _CLEARANCE_EPSILON_MM:
             results.add(
@@ -1251,7 +1271,9 @@ def check_silk_edge_clearance(
                     layer=layer,
                     actual_value=distance,
                     required_value=SILK_EDGE_CLEARANCE_MM,
-                    items=(silk_label, "Edge.Cuts"),
+                    # Per-primitive name (#6015): the generic ``J1 (fp_line)``
+                    # label gave every offending stroke of a footprint one key.
+                    items=(silk_item, "Edge.Cuts"),
                 )
             )
 

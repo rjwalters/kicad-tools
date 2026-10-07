@@ -98,6 +98,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -123,6 +124,52 @@ WAIVER_UNUSED_RULE_ID = "waiver_unused"
 # Rule id for the warning emitted when an evidence-bound waiver names a finding
 # whose local evidence has changed since review (Issue #5946).
 WAIVER_STALE_RULE_ID = "waiver_stale"
+
+# A silk primitive item name that carries its own geometry, e.g.
+# ``fp_line@-2.11/-2.11~-1.635/-2.11`` or ``J1 (fp_line@-1.62/6~-1.62/8.73)``
+# (Issues #5946, #6015).  Older builds named the same finding by the bare
+# primitive type (``fp_line`` / ``J1 (fp_line)``); stripping the ``@...``
+# suffix recovers that coarse name so an unused legacy waiver can point at
+# the per-line keys that replaced it.
+_GEOMETRY_SUFFIX = re.compile(r"\b((?:fp|gr)_[a-z]+)@[^\s,|)]+")
+
+# Cap on the replacement keys listed in one unused-waiver hint.
+_MAX_REWAIVE_HINT_KEYS = 5
+
+
+def _coarsen(text: str) -> str:
+    """Strip per-primitive geometry suffixes from an item name or finding key."""
+    return _GEOMETRY_SUFFIX.sub(r"\1", text)
+
+
+def _rewaive_candidates(entry: Waiver, findings: Iterable[DRCViolation]) -> list[str]:
+    """Keys of active findings this unused ``entry`` named before per-line keys.
+
+    Issue #6015: ``silkscreen_line_width`` (#5946) and ``silk_edge_clearance``
+    (#6015) now name each offending silk line by its geometry, so a waiver
+    written against the old coarse name (``fp_line`` / ``J1 (fp_line)``)
+    matches nothing.  Return the finding keys that *would* have matched had
+    their items been named the old way, so the unused advisory can tell the
+    user exactly what to re-waive.  Empty when nothing qualifies.
+    """
+    keys: list[str] = []
+    for v in findings:
+        if v.waived or not isinstance(v, DRCViolation):
+            continue
+        key = getattr(v, "key", "")
+        if entry.key is not None:
+            hit = key != entry.key and _coarsen(key) == entry.key
+        else:
+            coarse = frozenset(_coarsen(i) for i in v.items)
+            hit = (
+                v.rule_id == entry.rule
+                and coarse != frozenset(v.items)
+                and (not entry.items or coarse == entry.items)
+                and (not entry.nets or frozenset(v.nets) == entry.nets)
+            )
+        if hit and key not in keys:
+            keys.append(key)
+    return sorted(keys)
 
 
 @dataclass(frozen=True)
@@ -528,6 +575,7 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
             continue
         rebuilt.append(v)
 
+    findings = list(rebuilt)
     for idx, entry in enumerate(waivers.entries):
         if idx in used:
             continue
@@ -554,6 +602,18 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
             )
             continue
         tracking = f" (tracking {entry.issue})" if entry.issue else ""
+        candidates = _rewaive_candidates(entry, findings)
+        if candidates:
+            shown = candidates[:_MAX_REWAIVE_HINT_KEYS]
+            more = len(candidates) - len(shown)
+            listed = ", ".join(repr(k) for k in shown) + (f" (+{more} more)" if more else "")
+            hint = (
+                " This rule now names each silk line by its geometry, so the old"
+                " coarse item name no longer matches; review and re-waive the"
+                f" matching finding(s) with kct check --waive KEY: {listed}."
+            )
+        else:
+            hint = ""
         rebuilt.append(
             DRCViolation(
                 rule_id=WAIVER_UNUSED_RULE_ID,
@@ -561,7 +621,7 @@ def apply_waivers(results: DRCResults, waivers: Waivers) -> None:
                 message=(
                     f"Waiver for rule {entry.rule!r} ({entry.scope}) matched no finding"
                     f"{tracking}; the underlying defect may already "
-                    "be resolved, or the rule/refs may have changed."
+                    f"be resolved, or the rule/refs may have changed.{hint}"
                 ),
                 items=tuple(sorted(entry.items)),
                 nets=tuple(sorted(entry.nets)),
