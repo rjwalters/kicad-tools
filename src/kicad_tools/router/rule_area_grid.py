@@ -3,7 +3,10 @@
 KiCad rule areas -- ``(zone ... (keepout (tracks not_allowed) (vias
 not_allowed) ...))`` -- used to constrain only the lattice engine (#4605).
 The default grid engine rasterised nothing, so grid-routed copper could
-cross a declared keepout and only KiCad's DRC caught it afterwards.
+cross a declared keepout -- and headless ``kicad-cli pcb drc`` 10.0.1 did not
+catch it either, since it does not enforce rule areas on its own (kct now
+writes explicit per-area ``intersectsArea`` rules into the ``.kicad_dru``,
+Issue #6039).
 
 This module projects the SAME resolved areas the lattice engine consumes
 (:meth:`Autorouter._lattice_keepout_projection` -> ``KeepoutArea``: the shared

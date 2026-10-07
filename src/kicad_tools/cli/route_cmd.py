@@ -5850,13 +5850,15 @@ def _warn_rule_areas_other_engine(pcb_path: Path, engine: str) -> None:
     Issue #6008 taught the default GRID engine to enforce the same areas
     (one shared parse, ``Autorouter._lattice_keepout_projection``), so only
     the experimental MESH engine still commits copper straight through them
-    -- say so once.  A warning, not a gate.  Do not count on KiCad's DRC as
-    the backstop: headless ``kicad-cli pcb drc`` 10.0.1 does not flag copper
-    inside a keepout rule area unless a custom ``intersectsArea`` rule asks
-    it to.  Pour-void-only rule areas (the
-    ``kct zones hv-keepout`` output) trigger nothing: they never constrain
-    routing on any engine.  A cheap text scan on purpose -- no board model is
-    built this early.
+    -- say so once.  A warning, not a gate.  Headless ``kicad-cli pcb drc``
+    10.0.1 does not flag copper inside a keepout rule area on its own; the
+    backstop is the explicit per-area ``intersectsArea`` disallow rule kct
+    writes into the routed board's ``.kicad_dru`` (Issue #6039,
+    :mod:`kicad_tools.manufacturers.keepout_dru`), so the native DRC run
+    after routing reports any crossing as ``items_not_allowed``.
+    Pour-void-only rule areas (the ``kct zones hv-keepout`` output) trigger
+    nothing here: they never constrain routing on any engine.  A cheap text
+    scan on purpose -- no board model is built this early.
     """
     if engine in ("lattice", "grid"):
         return
