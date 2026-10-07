@@ -405,7 +405,11 @@ class SymbolDef:
                 flattened.append(parent_settings[name])
 
         # Add properties: child overrides parent
-        all_prop_names = set(parent_properties.keys()) | set(child_properties.keys())
+        # Deterministic order: parent order first, then child-only keys in child
+        # order (dicts preserve insertion order; sets would depend on PYTHONHASHSEED).
+        all_prop_names = list(parent_properties) + [
+            n for n in child_properties if n not in parent_properties
+        ]
         for prop_name in all_prop_names:
             if prop_name in child_properties:
                 flattened.append(child_properties[prop_name])

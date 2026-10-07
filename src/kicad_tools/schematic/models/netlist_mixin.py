@@ -356,7 +356,7 @@ class SchematicNetlistMixin:
 
         # Group all points by their root (connected component)
         root_to_points: dict[tuple, list[tuple]] = {}
-        all_points = set(parent.keys()) | set(point_to_pins.keys()) | set(point_to_net_names.keys())
+        all_points = list(dict.fromkeys([*parent, *point_to_pins, *point_to_net_names]))
         for point in all_points:
             root = find(point)
             if root not in root_to_points:
