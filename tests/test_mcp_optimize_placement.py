@@ -20,6 +20,21 @@ from kicad_tools.mcp.tools.optimize_placement import (
 )
 from kicad_tools.placement.cost import CostBreakdown, PlacementCostConfig
 
+# The default "cmaes" strategy needs the optional ``cmaes`` package (the
+# ``placement``/``dev``/``all`` extras). Without it optimize_placement returns
+# ``success: False`` with an install hint, so success-path tests must skip.
+try:
+    import cmaes  # noqa: F401
+
+    _HAS_CMAES = True
+except ImportError:
+    _HAS_CMAES = False
+
+requires_cmaes = pytest.mark.skipif(
+    not _HAS_CMAES,
+    reason="optional 'cmaes' package not installed (uv sync --extra placement)",
+)
+
 # Use the small voltage divider board for integration tests
 VOLTAGE_DIVIDER_PCB = str(
     Path(__file__).parent.parent
@@ -214,6 +229,7 @@ class TestEvaluatePlacement:
 class TestOptimizePlacement:
     """Tests for the optimize_placement MCP tool."""
 
+    @requires_cmaes
     @pytest.mark.skipif(
         not Path(VOLTAGE_DIVIDER_PCB).exists(),
         reason="Voltage divider board not available",
@@ -244,6 +260,7 @@ class TestOptimizePlacement:
         assert "convergence_data" in result
         assert isinstance(result["convergence_data"], list)
 
+    @requires_cmaes
     @pytest.mark.skipif(
         not Path(VOLTAGE_DIVIDER_PCB).exists(),
         reason="Voltage divider board not available",
@@ -271,6 +288,7 @@ class TestOptimizePlacement:
         distances = [entry["ratsnest_mm"] for entry in ratsnest]
         assert distances == sorted(distances, reverse=True)
 
+    @requires_cmaes
     @pytest.mark.skipif(
         not Path(VOLTAGE_DIVIDER_PCB).exists(),
         reason="Voltage divider board not available",
@@ -322,6 +340,7 @@ class TestOptimizePlacement:
         if isinstance(result, dict):
             assert result["success"] is False
 
+    @requires_cmaes
     @pytest.mark.skipif(
         not Path(VOLTAGE_DIVIDER_PCB).exists(),
         reason="Voltage divider board not available",
@@ -401,3 +420,17 @@ class TestRegistryIntegration:
 
         with pytest.raises(KiCadFileNotFoundError, match="PCB file not found"):
             tool.handler({"pcb_path": "/nonexistent/board.kicad_pcb"})
+
+
+@pytest.mark.skipif(
+    _HAS_CMAES,
+    reason="only meaningful when cmaes is absent",
+)
+def test_optimize_placement_missing_cmaes_reports_install_hint(tmp_path):
+    """Without cmaes, optimize_placement explains the missing optional extra."""
+    pcb_file = tmp_path / "board.kicad_pcb"
+    pcb_file.write_text(Path(VOLTAGE_DIVIDER_PCB).read_text())
+    result = optimize_placement(str(pcb_file))
+    assert result["success"] is False
+    assert "cmaes" in result["error_message"]
+    assert "placement" in result["error_message"]
