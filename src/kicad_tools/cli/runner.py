@@ -94,6 +94,11 @@ def _probe_timeout() -> float:
     return float(KICAD_CLI_PROBE_TIMEOUT)
 
 
+#: ``version`` stdout recorded by successful discovery probes, keyed by the
+#: resolved path string.  Consumed by ``export.gerber.get_kicad_cli_version``.
+PROBED_KICAD_CLI_VERSIONS: dict[str, str] = {}
+
+
 def _probe_kicad_cli(path: Path, timeout: float | None = None) -> bool | None:
     """Probe ``<path> version``.
 
@@ -116,7 +121,12 @@ def _probe_kicad_cli(path: Path, timeout: float | None = None) -> bool | None:
         return False
     except (subprocess.SubprocessError, OSError):
         return None
-    return result.returncode == 0
+    if result.returncode == 0:
+        # Remember the answer so ``get_kicad_cli_version`` need not launch
+        # kicad-cli a second time for the same path (#5910).
+        PROBED_KICAD_CLI_VERSIONS[str(path)] = result.stdout.strip()
+        return True
+    return False
 
 
 def _locate_kicad_cli_uncached() -> KiCadCLILookup:
