@@ -25,9 +25,10 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from ..router.net_class import (
-    POWER_PIN_TYPES,
     is_ground_rail_name,
     is_power_rail_name,
+    is_power_rail_pin,
+    is_switch_node_name,
     is_unconnected_net_name,
 )
 
@@ -455,21 +456,36 @@ def power_pin_nets(pcb: PCB) -> set[str]:
     excluded -- this set answers "non-ground supply rail?", matching
     :func:`is_power_net`.
 
+    A switching regulator's switch node is not a rail even though KiCad
+    types its ``SW``/``LX`` pin ``power_out`` (issue #5998): pins named as
+    switch-node or bootstrap pins (``pinfunction``, see
+    :func:`~kicad_tools.router.net_class.is_power_rail_pin`) are not
+    evidence, and a net that carries a switch-node pin is never reported.
+    When a pad has no ``pinfunction``, a switch-node *net* name (``SW``,
+    ``BUCK_SW``) disqualifies its ``power_out`` pins instead.
+
     Boards without pin-type data (pre-KiCad-6, or generated without a
     schematic) yield an empty set and the checks fall back to
     :func:`is_power_net`'s anchored name heuristic.
     """
     nets: set[str] = set()
+    switch_nodes: set[str] = set()
     for fp in pcb.footprints:
         for pad in fp.pads:
-            if (
-                pad.net_name
-                and getattr(pad, "pintype", "") in POWER_PIN_TYPES
-                and not is_unconnected_net_name(pad.net_name)
-                and not is_ground_rail_name(pad.net_name)
-            ):
-                nets.add(pad.net_name)
-    return nets
+            net = pad.net_name
+            if not net or is_unconnected_net_name(net) or is_ground_rail_name(net):
+                continue
+            pinfunction = getattr(pad, "pinfunction", "") or ""
+            if is_switch_node_name(pinfunction):
+                switch_nodes.add(net)
+                continue
+            pintype = getattr(pad, "pintype", "") or ""
+            if not is_power_rail_pin(pintype, pinfunction):
+                continue
+            if not pinfunction and pintype == "power_out" and is_switch_node_name(net):
+                continue
+            nets.add(net)
+    return nets - switch_nodes
 
 
 def is_power_net(net_name: str, power_pin_evidence: Collection[str] | None = None) -> bool:

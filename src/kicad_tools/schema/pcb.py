@@ -376,6 +376,10 @@ class Pad:
     # board predates KiCad 6 or was generated without schematic pin data.
     # Read-only: used as evidence for power-net classification (issue #5939).
     pintype: str = ""
+    # Schematic pin *name* written alongside ``pintype`` (``(pinfunction
+    # "SW")``).  Read-only; lets the rail-evidence check tell a buck's
+    # ``power_out`` switch-node pin from a regulator output (issue #5998).
+    pinfunction: str = ""
 
     def __setattr__(self, name: str, value: object) -> None:
         # Store the Python value first via the default mechanism.
@@ -506,6 +510,8 @@ class Pad:
         # Schematic pin electrical type (KiCad 6+), e.g. "power_in"
         if pintype := sexp.find_child("pintype"):
             pad.pintype = pintype.get_string(0) or ""
+        if pinfunction := sexp.find_child("pinfunction"):
+            pad.pinfunction = pinfunction.get_string(0) or ""
 
         return pad
 

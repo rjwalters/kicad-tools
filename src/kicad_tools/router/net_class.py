@@ -236,6 +236,76 @@ NET_CLASS_PATTERNS: dict[NetClass, list[str]] = {
 #: Pin electrical types that mark a net as a supply rail.
 POWER_PIN_TYPES: frozenset[str] = frozenset({"power_in", "power_out"})
 
+# --- Switching-regulator pins (issue #5998) ---------------------------------
+#
+# KiCad's libraries type a buck/boost converter's switch-node pin as
+# ``power_out`` (TPS54302 ``SW``, many ``LX`` pins), so "touches a
+# ``power_in``/``power_out`` pin" alone classifies the switch node as a supply
+# rail -- and ``kct detect-mistakes`` then asks for a decoupling capacitor
+# from the switch node to ground, which would short the converter's output
+# stage through the cap every cycle.  The bootstrap pin (``BOOT``/``BST``)
+# rides on top of the switch node and is not a rail either.
+#
+# Names are matched as whole pin/net names (after the sheet path), so the
+# STM32's ``PH0``/``PH1`` port pins and ``BOOT0`` are *not* switch-node pins.
+
+#: Switch-node pin/net names: SW, SW1, SW_2, LX, LX1, PH, PHASE, SWN, SW_NODE.
+_SWITCH_NODE_NAME_RES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"^(?:SW|LX|PHASE|SWN)(?:_?\d+|[A-D])?$",
+        # TI's "PH" (phase) pin, bare only: PH0..PH15 are STM32 port-H pins.
+        r"^PH$",
+        r"^SW_?NODE\d*$",
+        # Trailing word on a net name: BUCK_SW, VREG_LX, U2_SW1
+        r"_(?:SW|LX|PHASE|SW_?NODE)\d*$",
+    )
+)
+
+#: Bootstrap pin names: BOOT, BST, BS, CB, CBOOT.  Numbered forms are not
+#: matched -- ``BOOT0``/``BOOT1`` are MCU strap pins, which often sit on a
+#: rail.
+_BOOTSTRAP_PIN_NAME_RE = re.compile(r"^(?:BOOT|BST|BS|CB|CBOOT|BOOTSTRAP)$", re.IGNORECASE)
+
+
+def is_switch_node_name(name: str) -> bool:
+    """Whole-name match for a switching regulator's switch node.
+
+    Applies to both pin names (``pinfunction``: ``SW``, ``LX``, ``PH``,
+    ``PHASE``, ``SW1``) and net names (``SW``, ``/SW``, ``BUCK_SW``,
+    ``SW_NODE``).  ``PH0`` (an MCU port pin), ``SWDIO``/``SWCLK`` and
+    ``SW_3V3`` (a load-switched rail) do not match.
+    """
+    base = _rail_base_name(name)
+    if base is None:
+        return False
+    return any(rx.search(base) for rx in _SWITCH_NODE_NAME_RES)
+
+
+def is_switching_regulator_pin(pin_name: str) -> bool:
+    """True for a switch-node or bootstrap pin name (``SW``, ``LX``, ``BOOT``).
+
+    Such a pin is never evidence that its net is a supply rail, whatever its
+    electrical type: KiCad types switch-node pins ``power_out``.
+    """
+    if not pin_name:
+        return False
+    if is_switch_node_name(pin_name):
+        return True
+    return bool(_BOOTSTRAP_PIN_NAME_RE.match(pin_name.strip()))
+
+
+def is_power_rail_pin(pintype: str, pin_name: str = "") -> bool:
+    """Is this pin *evidence* that its net is a supply rail?
+
+    Combines the electrical type (``power_in``/``power_out``, see
+    :data:`POWER_PIN_TYPES`) with the pin name: a switch-node or bootstrap
+    pin (:func:`is_switching_regulator_pin`) is not evidence even when typed
+    ``power_out``.
+    """
+    return pintype in POWER_PIN_TYPES and not is_switching_regulator_pin(pin_name)
+
+
 _AUTO_NET_NAME_RE = re.compile(r"^(unconnected|net)-\(", re.IGNORECASE)
 
 _VOLTAGE = r"[+-]?\d+(?:\.\d+)?V\d*"
@@ -593,10 +663,20 @@ def classify_net(
     """
     # 1. Check pin electrical types (highest confidence for power)
     if connected_pins:
-        pin_types = {pin.pin_type for _, pin in connected_pins}
+        # A switching regulator's switch node carries a ``power_out`` pin
+        # (KiCad types SW/LX that way) but is a high-current switching
+        # signal, never a rail to pour or decouple (issue #5998).
+        if any(is_switch_node_name(pin.name or "") for _, pin in connected_pins):
+            return NetClassification(
+                net_class=NetClass.HIGH_CURRENT_SIGNAL,
+                confidence=0.90,
+                source="pin_type",
+                details="Switching-regulator switch node",
+            )
 
-        # Power pins are definitive
-        if "power_in" in pin_types or "power_out" in pin_types:
+        # Power pins are definitive (switch-node / bootstrap pins excluded)
+        if any(is_power_rail_pin(pin.pin_type, pin.name or "") for _, pin in connected_pins):
+            pin_types = {pin.pin_type for _, pin in connected_pins}
             # Determine if it's power or ground
             name_lower = net_name.lower()
             if any(g in name_lower for g in ["gnd", "vss", "ground", "agnd", "dgnd"]):
