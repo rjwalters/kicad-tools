@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
@@ -143,29 +145,69 @@ def _locate_kicad_cli_uncached() -> KiCadCLILookup:
     return KiCadCLILookup(None, KICAD_CLI_NOT_FOUND, "no candidate answered `kicad-cli version`")
 
 
+#: Env var overriding :data:`KICAD_CLI_PROBE_FAILED_TTL` (seconds, float; <=0 disables).
+KICAD_CLI_PROBE_FAILED_TTL_ENV = "KCT_KICAD_CLI_PROBE_FAILED_TTL"
+
+#: A ``probe_failed`` lookup is reused for this many seconds (issue #5992) so a
+#: hanging kicad-cli does not cost the full probe+retry (~30s) on every lookup.
+#: Deliberately short: a process-lifetime cache would resurrect #5932 in
+#: long-lived processes (MCP server, daemons).
+KICAD_CLI_PROBE_FAILED_TTL: float = 60.0
+
 _lookup_cache: list[KiCadCLILookup] = []
 _last_lookup: list[KiCadCLILookup] = []
+_probe_failed_cache: list[tuple[float, KiCadCLILookup]] = []  # (expiry, lookup)
+_lookup_lock = threading.Lock()
+_monotonic: Callable[[], float] = time.monotonic  # patchable fake clock for tests
+
+
+def _probe_failed_ttl() -> float:
+    raw = os.environ.get(KICAD_CLI_PROBE_FAILED_TTL_ENV)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return KICAD_CLI_PROBE_FAILED_TTL
 
 
 def locate_kicad_cli() -> KiCadCLILookup:
     """Locate a working kicad-cli and report *why* when there is none.
 
     Definitive results (``found`` / ``not_found``) are memoized for the
-    process lifetime; ``probe_failed`` is never cached, so the next call
-    re-probes (issue #5932). Clear with ``find_kicad_cli.cache_clear()``.
+    process lifetime. ``probe_failed`` is never reported as "not installed"
+    (#5932) and is cached only for a short TTL
+    (``KCT_KICAD_CLI_PROBE_FAILED_TTL``, default 60s; issue #5992), after
+    which the next call re-probes. Thread-safe: concurrent callers share one
+    probe. Clear with ``find_kicad_cli.cache_clear()``.
     """
     if _lookup_cache:
         return _lookup_cache[0]
-    lookup = _locate_kicad_cli_uncached()
-    _last_lookup[:] = [lookup]
-    if lookup.status != KICAD_CLI_PROBE_FAILED:
-        _lookup_cache[:] = [lookup]
-    return lookup
+    with _lookup_lock:
+        if _lookup_cache:
+            return _lookup_cache[0]
+        if _probe_failed_cache:
+            expiry, cached = _probe_failed_cache[0]
+            if _monotonic() < expiry:
+                return cached
+            _probe_failed_cache.clear()
+        lookup = _locate_kicad_cli_uncached()
+        _last_lookup[:] = [lookup]
+        if lookup.status != KICAD_CLI_PROBE_FAILED:
+            _lookup_cache[:] = [lookup]
+        else:
+            ttl = _probe_failed_ttl()
+            if ttl > 0:
+                # Expiry is measured from probe completion.
+                _probe_failed_cache[:] = [(_monotonic() + ttl, lookup)]
+        return lookup
 
 
 def _clear_kicad_cli_cache() -> None:
-    _lookup_cache.clear()
-    _last_lookup.clear()
+    with _lookup_lock:
+        _lookup_cache.clear()
+        _last_lookup.clear()
+        _probe_failed_cache.clear()
 
 
 def last_kicad_cli_lookup() -> KiCadCLILookup | None:
