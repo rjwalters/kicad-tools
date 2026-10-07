@@ -8529,8 +8529,29 @@ def _add_panel_parser(subparsers) -> None:
         "--spacing",
         dest="panel_spacing",
         type=float,
-        default=2.0,
-        help="Gap between boards in mm (default: 2.0)",
+        default=None,
+        help=(
+            "Gap between boards in mm (default: 0 with --cut vcut -- V-scored "
+            "boards are butted -- otherwise 2.0)"
+        ),
+    )
+    panel_parser.add_argument(
+        "--spacing-x",
+        dest="panel_spacing_x",
+        type=float,
+        default=None,
+        help=(
+            "Gap between columns in mm, overriding --spacing. With --cut vcut, "
+            "a gapped axis is tab-routed with mousebites and a 0 axis is "
+            "V-scored (mixed panel)"
+        ),
+    )
+    panel_parser.add_argument(
+        "--spacing-y",
+        dest="panel_spacing_y",
+        type=float,
+        default=None,
+        help="Gap between rows in mm, overriding --spacing (see --spacing-x)",
     )
     panel_parser.add_argument(
         "--cut",
@@ -8548,6 +8569,18 @@ def _add_panel_parser(subparsers) -> None:
             "Layer for V-score lines with --cut vcut (default: Cmts.User). "
             "Never Edge.Cuts: an open score line there breaks the outline. "
             "`kct export` plots whichever layer holds the score lines."
+        ),
+    )
+    panel_parser.add_argument(
+        "--vscore-clearance",
+        dest="panel_vscore_clearance",
+        type=float,
+        default=0.4,
+        help=(
+            "Minimum copper distance from a V-score line in mm, with --cut vcut "
+            "(default: 0.4; fabs typically ask 0.3-0.5). Closer copper is "
+            "warned about, and a copper-pour keepout this wide flanks each "
+            "score. 0 disables both"
         ),
     )
     panel_parser.add_argument(
@@ -8595,8 +8628,11 @@ def _add_panel_parser(subparsers) -> None:
         "--frame-space",
         dest="panel_frame_space",
         type=float,
-        default=2.0,
-        help="Gap between board and frame in mm (default: 2.0)",
+        default=None,
+        help=(
+            "Gap between board and frame in mm (default: 0 with --cut vcut -- "
+            "the rails are butted and V-scored off -- otherwise 2.0)"
+        ),
     )
     panel_parser.add_argument(
         "--tooling-holes",

@@ -13,6 +13,12 @@ class CutMethod(Enum):
     VCUT = "vcut"
 
 
+# Gap between copies (and between copies and the rail) for tab-routed
+# panels.  V-scored panels default to 0: the boards are butted and the
+# score is the separation (Issue #6164).
+DEFAULT_GAP_MM = 2.0
+
+
 @dataclass
 class TabConfig:
     """Configuration for breakaway tabs between boards.
@@ -57,13 +63,24 @@ class VCutConfig:
     use.  They must not go on Edge.Cuts: an open score line there makes
     the board outline malformed (Issue #6143).
 
+    A V-score only separates boards that are butted edge to edge, so
+    score lines go exactly on shared board edges (and on board/rail edges
+    when the frame is butted too); seams that keep a gap are tab-routed
+    instead (Issue #6164).
+
     Attributes:
         line_width: Width of the V-cut line in mm.
         layer: Layer name for V-cut lines.
+        clearance: Minimum copper distance from a score line in mm.  The
+            panel warns about board copper closer than this to a scored
+            edge and adds a copper-pour keepout this wide on each side of
+            every score line, so a zone refill stops short of the score.
+            Fabs typically ask for 0.3--0.5 mm; 0 disables both.
     """
 
     line_width: float = 0.1
     layer: str = "Cmts.User"
+    clearance: float = 0.4
 
 
 @dataclass
@@ -72,11 +89,20 @@ class FrameConfig:
 
     Attributes:
         width: Frame rail width in mm.
-        space: Gap between board edge and inner frame edge in mm.
+        space: Gap between board edge and inner frame edge in mm.  ``None``
+            picks the cut method's default: 0 for V-cut panels (the rails
+            butt against the boards and are V-scored off, KiKit's
+            ``space: 0mm`` convention) and 2.0 for mousebite panels.
     """
 
     width: float = 5.0
-    space: float = 2.0
+    space: float | None = None
+
+    def resolved_space(self, cut_method: CutMethod) -> float:
+        """The board-to-rail gap, applying the cut method's default."""
+        if self.space is not None:
+            return self.space
+        return 0.0 if cut_method == CutMethod.VCUT else DEFAULT_GAP_MM
 
 
 @dataclass
@@ -116,7 +142,13 @@ class PanelConfig:
     Attributes:
         rows: Number of board rows.
         cols: Number of board columns.
-        spacing: Gap between board instances in mm.
+        spacing: Gap between board instances in mm.  ``None`` picks the cut
+            method's default: 0 (butted) for V-cut, 2.0 for mousebite.
+        spacing_x: Gap between columns in mm, overriding *spacing*.
+        spacing_y: Gap between rows in mm, overriding *spacing*.  Giving
+            the two axes different gaps under V-cut builds a mixed panel:
+            the butted axis is V-scored, the gapped axis is tab-routed
+            with mousebites.
         rotation: Per-board rotation in degrees (0, 90, 180, 270).
         cut_method: Separation method (mousebite or vcut).
         tabs: Tab configuration.
@@ -129,7 +161,9 @@ class PanelConfig:
 
     rows: int = 2
     cols: int = 2
-    spacing: float = 2.0
+    spacing: float | None = None
+    spacing_x: float | None = None
+    spacing_y: float | None = None
     rotation: float = 0.0
     cut_method: CutMethod = CutMethod.MOUSEBITE
     tabs: TabConfig = field(default_factory=TabConfig)
@@ -138,3 +172,13 @@ class PanelConfig:
     frame: FrameConfig | None = None
     tooling_holes: ToolingHoleConfig | None = None
     fiducials: FiducialConfig | None = None
+
+    def resolved_spacing(self) -> tuple[float, float]:
+        """``(gap between columns, gap between rows)`` in mm."""
+        if self.spacing is not None:
+            base = self.spacing
+        else:
+            base = 0.0 if self.cut_method == CutMethod.VCUT else DEFAULT_GAP_MM
+        gap_x = self.spacing_x if self.spacing_x is not None else base
+        gap_y = self.spacing_y if self.spacing_y is not None else base
+        return gap_x, gap_y
