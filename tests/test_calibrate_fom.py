@@ -263,3 +263,23 @@ def test_markdown_report_without_existing_file(tmp_path: Path):
     report_path = tmp_path / "new.md"
     write_markdown_report(CalibrationReport(), report_path, n_perturbations=3, sigma_mm=2.5)
     assert "## Addendum" not in report_path.read_text()
+
+
+def test_board_seed_independent_of_pythonhashseed():
+    """Per-board seeds must not depend on PYTHONHASHSEED (issue #6111)."""
+    import os
+    import subprocess
+
+    code = (
+        "import sys; sys.path.insert(0, %r); "
+        "from calibrate_fom import board_seed; "
+        "print([board_seed(42, b) for b in ('01-foo', '02-bar', 'x')])"
+    ) % str(ROOT / "scripts" / "research")
+    outs = []
+    for hs in ("1", "12345"):
+        env = {**os.environ, "PYTHONHASHSEED": hs}
+        r = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+        )
+        outs.append(r.stdout)
+    assert outs[0] == outs[1]
