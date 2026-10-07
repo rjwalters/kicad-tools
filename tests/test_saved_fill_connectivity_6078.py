@@ -324,6 +324,7 @@ _SHIPPED_ROUTED_BOARDS = sorted(REPO_ROOT.glob("boards/*/output/*_routed.kicad_p
 # marker is deselected from the PR "Test" job and runs only on main pushes, so
 # a fragmented committed board would merge before this gate saw it.  The PR
 # "Test" job runs in the KiCad 10 container, so kicad-cli is available there.
+@pytest.mark.pr_required  # Issue #6102: update_ci_extended.py must never list this
 @pytest.mark.parametrize(
     "board", _SHIPPED_ROUTED_BOARDS, ids=[p.parent.parent.name for p in _SHIPPED_ROUTED_BOARDS]
 )
