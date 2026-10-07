@@ -1674,6 +1674,13 @@ class Zone:
     # an absent ``filled_areas_thickness``.  ``0`` when unknown, which is
     # treated as the modern (solid-fill) default (Issue #5362).
     file_version: int = 0
+    # Owning footprint of a zone embedded in a ``(footprint ...)`` block
+    # (e.g. an RF module's antenna keepout) -- its reference designator and
+    # UUID.  Both empty for board-level zones.  Footprint zones are exposed
+    # through :attr:`PCB.footprint_rule_areas`, never :attr:`PCB.zones`
+    # (Issue #6087).
+    parent_reference: str = ""
+    parent_uuid: str = ""
 
     def is_stroked_fill(self) -> bool:
         """Whether ``filled_polygons`` are centre-lines rather than final copper.
@@ -1820,7 +1827,9 @@ class Zone:
             ]
             if not zone.layer and zone.layers:
                 zone.layer = zone.layers[0]
-        if uuid := index.get("uuid"):
+        # Pre-KiCad-7 boards spell the zone's KIID ``(tstamp ...)``; KiCad
+        # loads it into the same UUID slot (Issue #6087).
+        if uuid := index.get("uuid") or index.get("tstamp"):
             zone.uuid = uuid.get_string(0) or ""
         if name := index.get("name"):
             zone.name = name.get_string(0) or ""
@@ -2196,6 +2205,10 @@ class PCB:
         self._segment_keys: set[_SegmentKey] | None = None
         self._via_keys: set[_ViaKey] | None = None
         self._zones: list[Zone] = []
+        # Issue #6087: zones embedded in footprints (antenna keepouts and
+        # the like).  Kept apart from ``_zones`` so pour/zone-count/save
+        # consumers keep seeing board-level zones only.
+        self._footprint_zones: list[Zone] = []
         self._graphic_lines: list[GraphicLine] = []
         self._graphic_arcs: list[GraphicArc] = []
         self._texts: list[GraphicText] = []
@@ -2582,6 +2595,16 @@ class PCB:
                 # same parser handles both (issue #4873).
                 fp = Footprint.from_sexp(child)
                 self._footprints.append(fp)
+                for fp_child in child.iter_children():
+                    if fp_child.tag != "zone":
+                        continue
+                    # Footprint zones are stored sheet-absolute in a board
+                    # file, exactly like top-level zones (Issue #6087).
+                    fp_zone = Zone.from_sexp(fp_child)
+                    fp_zone.file_version = self._file_version()
+                    fp_zone.parent_reference = fp.reference
+                    fp_zone.parent_uuid = fp.uuid
+                    self._footprint_zones.append(fp_zone)
             elif tag == "segment":
                 seg = Segment.from_sexp(child)
                 self._segments.append(seg)
@@ -3155,7 +3178,7 @@ class PCB:
                 via.position = (vx - ox, vy - oy)
 
             # Zones: convert boundary polygon AND every filled polygon.
-            for zone in self._zones:
+            for zone in (*self._zones, *self._footprint_zones):
                 if zone.polygon:
                     zone.polygon = [(x - ox, y - oy) for x, y in zone.polygon]
                 if zone.filled_polygons:
@@ -3520,6 +3543,7 @@ class PCB:
         self._vias = []
         self._invalidate_dedup_keys()
         self._zones = []
+        self._footprint_zones = []
         self._graphic_lines = []
         self._graphic_arcs = []
         self._texts = []
@@ -3657,6 +3681,9 @@ class PCB:
 
         # Remove from the in-memory list
         self._footprints = [fp for fp in self._footprints if fp.reference != reference]
+        self._footprint_zones = [
+            zone for zone in self._footprint_zones if zone.parent_reference != reference
+        ]
 
         return True
 
@@ -4134,6 +4161,19 @@ class PCB:
         Polygon vertices are board-relative, like every other zone polygon.
         """
         return [zone for zone in self._zones if zone.keepout is not None]
+
+    @property
+    def footprint_rule_areas(self) -> list[Zone]:
+        """Keepout rule areas embedded inside footprints (Issue #6087).
+
+        The usual case is an RF module's antenna keepout.  Same shape as
+        :attr:`rule_areas` (board-relative polygons, ``keepout`` flags,
+        multi-layer ``layers``), plus :attr:`Zone.parent_reference` /
+        :attr:`Zone.parent_uuid` naming the owning footprint -- KiCad exempts
+        that footprint's own items from its keepout.  Deliberately *not*
+        part of :attr:`rule_areas`/:attr:`zones`.
+        """
+        return [zone for zone in self._footprint_zones if zone.keepout is not None]
 
     @property
     def graphic_lines(self) -> list[GraphicLine]:

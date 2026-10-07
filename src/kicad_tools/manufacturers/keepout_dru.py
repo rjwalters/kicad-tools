@@ -1,4 +1,4 @@
-"""Explicit ``.kicad_dru`` rules for keepout rule areas (Issue #6039).
+r"""Explicit ``.kicad_dru`` rules for keepout rule areas (Issue #6039).
 
 Headless ``kicad-cli pcb drc`` **10.0.1** does not report copper inside a
 keepout rule area: a track routed straight through a ``(keepout (tracks
@@ -38,6 +38,31 @@ Behaviour measured against ``kicad-cli`` 10.0.1 (see
   than the later rule masking the earlier one).
 * ``disallow pad`` / ``disallow footprint`` are likewise not enforced
   natively on 10.0.1 and fire through the explicit rule.
+
+Footprint-embedded keepouts (Issue #6087) -- an RF module's antenna keepout,
+say -- are not enforced natively either.  Measured on 10.0.1:
+
+* ``intersectsArea('<uuid>')`` resolves a footprint-owned zone by the UUID
+  written in the board file (and by name), so they get the same rule.
+  Pre-KiCad-7 boards spell that id ``(tstamp ...)``; KiCad loads it into the
+  same slot, so the tstamp is used as the reference.
+* The parent footprint's own **pads** do trip a plain ``intersectsArea`` rule
+  (the parent *footprint* object itself does not), whereas KiCad's
+  implicit keepout exempts its parent.  The rule therefore adds
+  ``&& !A.memberOfFootprint('<parent reference>')``.  ``A.Reference`` is no
+  substitute: it is null on tracks/vias/pads, so ``A.Reference != 'AE1'``
+  silently disables the whole rule.  ``memberOfFootprint`` matches the
+  reference (wildcards allowed), not the footprint UUID.
+* When two zones share one UUID (a footprint copied verbatim), the
+  reference resolves to the **first** zone in board order only; later
+  duplicates cannot be addressed and are skipped with a warning.
+
+Expression strings: KiCad's DRC expression lexer knows exactly one escape,
+``\'``; every other backslash is literal (``'a\b'`` matches a zone named
+``a\b``; ``'a\\b'`` does not).  The s-expression layer around it decodes
+``\\`` and ``\"`` first.  A trailing backslash would escape the closing
+quote, so it is written as the ``?`` wildcard (``intersectsArea`` and
+``memberOfFootprint`` match names with wildcards).
 
 If a future KiCad restores the implicit keepout rule, a violation may be
 reported twice (implicit + explicit).  That is harmless for a
@@ -81,9 +106,14 @@ class KeepoutDruRule:
     reference: str  # UUID (preferred) or zone name, as passed to intersectsArea
     disallow: tuple[str, ...]
     layer: str | None = None  # explicit layer clause for single-layer areas
+    # Reference of the footprint that owns the area (footprint-embedded
+    # keepouts, Issue #6087): its own items are exempt, as in KiCad.
+    parent_footprint: str | None = None
 
     def render(self) -> str:
         expr = f"A.intersectsArea('{_escape_expr_string(self.reference)}')"
+        if self.parent_footprint:
+            expr += f" && !A.memberOfFootprint('{_escape_expr_string(self.parent_footprint)}')"
         lines = [f"(rule {_sexp_quote(self.name)}"]
         if self.layer:
             lines.append(f"  (layer {_sexp_quote(self.layer)})")
@@ -102,20 +132,35 @@ def _sexp_quote(value: str) -> str:
 
 
 def _escape_expr_string(value: str) -> str:
-    """Escape ``value`` for a single-quoted string inside a DRC expression."""
-    return value.replace("\\", "\\\\").replace("'", "\\'")
+    r"""Escape ``value`` for a single-quoted string inside a DRC expression.
+
+    Measured on kicad-cli 10.0.1 (Issue #6087): the expression lexer decodes
+    only ``\'``; any other backslash is kept literally, so backslashes must
+    NOT be doubled here (the old doubling made a backslash-named area
+    unmatchable).  A trailing backslash would swallow the closing quote and
+    becomes the single-character wildcard ``?`` instead.  The result is then
+    s-expression quoted by :func:`_sexp_quote`.
+    """
+    escaped = value.replace("'", "\\'")
+    if escaped.endswith("\\"):
+        escaped = escaped[:-1] + "?"
+    return escaped
 
 
 def keepout_rules_from_zones(zones: list) -> list[KeepoutDruRule]:
     """Build one :class:`KeepoutDruRule` per keepout rule area in ``zones``.
 
     ``zones`` are :class:`kicad_tools.schema.pcb.Zone` objects (normally
-    ``PCB.rule_areas`` -- the same #4605 parse the router's keepout
-    projection reads).  Non-rule-area zones, areas that forbid nothing, areas
-    with a degenerate polygon and areas with neither a UUID nor a name are
-    skipped.  Output order follows board order, so it is deterministic.
+    ``PCB.rule_areas + PCB.footprint_rule_areas`` -- the same #4605 parse
+    the router's keepout projection reads).  Non-rule-area zones, areas that
+    forbid nothing, areas with a degenerate polygon and areas with neither a
+    UUID nor a name are skipped.  A zone whose reference repeats an earlier
+    zone's is skipped with a warning: KiCad resolves the reference to the
+    first zone only.  Output order follows input order, so it is
+    deterministic.
     """
     rules: list[KeepoutDruRule] = []
+    seen: set[str] = set()
     for zone in zones:
         keepout = getattr(zone, "keepout", None)
         if keepout is None or len(getattr(zone, "polygon", []) or []) < 3:
@@ -128,7 +173,19 @@ def keepout_rules_from_zones(zones: list) -> list[KeepoutDruRule]:
         reference = uuid or name
         if not reference:
             continue
+        if reference in seen:
+            print(
+                f"Warning: keepout rule area {reference!r} shares its id with an "
+                "earlier rule area; KiCad DRC can only address the first, so no "
+                "rule was emitted for this one.",
+                file=sys.stderr,
+            )
+            continue
+        seen.add(reference)
         label = f"{name} [{uuid}]" if name and uuid else reference
+        parent = (getattr(zone, "parent_reference", "") or "").strip() or None
+        if parent:
+            label += f" in {parent}"
         layer_names = list(zone.layers) or ([zone.layer] if zone.layer else [])
         layer = (
             layer_names[0]
@@ -141,6 +198,7 @@ def keepout_rules_from_zones(zones: list) -> list[KeepoutDruRule]:
                 reference=reference,
                 disallow=disallow,
                 layer=layer,
+                parent_footprint=parent,
             )
         )
     return rules
@@ -170,13 +228,14 @@ def keepout_rules_for_board(pcb_path: str | Path) -> list[KeepoutDruRule]:
             file=sys.stderr,
         )
         return []
-    return keepout_rules_from_zones(pcb.rule_areas)
+    return keepout_rules_from_zones(pcb.rule_areas + pcb.footprint_rule_areas)
 
 
 def render_keepout_block_body(rules: list[KeepoutDruRule]) -> str:
     """Render the managed block body: a provenance comment + the rules."""
     lines = [
-        "# Generated from the board's keepout rule areas (Issue #6039).",
+        "# Generated from the board's keepout rule areas, board-level (Issue #6039)",
+        "# and footprint-embedded (Issue #6087).",
         "# kicad-cli 10.0.1 does not enforce rule areas on its own; these",
         "# explicit intersectsArea rules make `kicad-cli pcb drc` report them.",
     ]

@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "RuleAreaSpec",
+    "all_rule_area_zones",
     "keepout_areas_for_stack",
     "keepout_rule_area_specs",
     "resolve_keepout_rule_areas",
@@ -69,15 +70,29 @@ class RuleAreaSpec:
     name: str = ""
 
 
+def all_rule_area_zones(pcb: Any) -> list[Any]:
+    """Every keepout rule-area zone of ``pcb``: board-level and footprint-owned.
+
+    Footprint-embedded keepouts (an RF module's antenna keepout, Issue #6087)
+    constrain routing exactly like board-level ones -- KiCad's parent-footprint
+    exemption covers the footprint's own pads, never the tracks and vias the
+    router places.  Both ``kct route`` and ``kct route-auto`` read them through
+    here.  ``footprint_rule_areas`` is read with ``getattr`` so duck-typed
+    stand-ins that only expose ``rule_areas`` keep working.
+    """
+    return list(pcb.rule_areas) + list(getattr(pcb, "footprint_rule_areas", None) or [])
+
+
 def track_via_blocking_zones(pcb: Any) -> list[Any]:
     """The rule-area zones of ``pcb`` that block tracks and/or vias.
 
-    ``pcb`` is a :class:`kicad_tools.schema.pcb.PCB`.  Areas with fewer than
-    three vertices are dropped.
+    ``pcb`` is a :class:`kicad_tools.schema.pcb.PCB`.  Includes
+    footprint-embedded keepouts (Issue #6087, :func:`all_rule_area_zones`).
+    Areas with fewer than three vertices are dropped.
     """
     return [
         zone
-        for zone in pcb.rule_areas
+        for zone in all_rule_area_zones(pcb)
         if zone.keepout is not None
         and (not zone.keepout.tracks_allowed or not zone.keepout.vias_allowed)
         and len(zone.polygon) >= 3
