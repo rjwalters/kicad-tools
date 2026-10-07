@@ -827,9 +827,9 @@ class TestCorrectionBeforeDemotionOnTimeout:
 
         real_route = Autorouter._route_net_negotiated
 
-        def _slow_route(self, net, present_factor, per_net_timeout=None):
+        def _slow_route(self, net, present_factor, per_net_timeout=None, **kwargs):
             _FakeClock.t += 10.0
-            return real_route(self, net, present_factor, per_net_timeout=per_net_timeout)
+            return real_route(self, net, present_factor, per_net_timeout=per_net_timeout, **kwargs)
 
         monkeypatch.setattr(Autorouter, "_route_net_negotiated", _slow_route)
 

@@ -14086,6 +14086,45 @@ class Autorouter:
             return min(RELIEF_SUBSEARCH_BUDGET_S, per_net_timeout)
         return RELIEF_SUBSEARCH_BUDGET_S
 
+    def _relief_reland_retry_budget(
+        self, per_net_timeout: float | None, subsearch_budget: float | None
+    ) -> float | None:
+        """Budget for re-landing a victim whose reduced-budget re-land ran out of time.
+
+        Issue #6151.  The rescue re-lands its displaced victims under the
+        REDUCED :meth:`_relief_subsearch_budget` (10 s wall clock by default)
+        so a hopeless rescue fails fast.  A victim did originally land under
+        the caller's full ``per_net_timeout`` though, and on board 03 the
+        ``USB_D+`` re-land (a 5-pad net, two J1 rows plus the MCU side) needs
+        ~1.5 s idle but ~4.5 s at a load average of 60 and more beyond that --
+        the reduced budget straddles it, so the SAME rescue commits on an idle
+        machine and loses a net on a busy one.
+
+        A victim whose first re-land *consumed* its budget (a geometric
+        failure returns well before it -- the open set drains) is retried
+        once under the budget it originally routed with:
+
+        * the caller's ``per_net_timeout`` when one is set (the plain
+          ``kct route`` path: 30 s);
+        * otherwise, when a node-expansion cap is active
+          (``--deterministic-budget``), the non-binding
+          :data:`RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S` -- the expansion cap is
+          then the binding, machine-independent bound, exactly the
+          ``deterministic_rescue`` arm of :meth:`_relief_subsearch_budget`;
+        * otherwise the sub-search budget unchanged (no larger bound exists
+          that is not unbounded).
+
+        Never smaller than ``subsearch_budget``; ``None`` (unbounded) stays
+        ``None``.
+        """
+        if subsearch_budget is None:
+            return None
+        if per_net_timeout:
+            return max(subsearch_budget, per_net_timeout)
+        if self._active_expansion_cap():
+            return max(subsearch_budget, RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S)
+        return subsearch_budget
+
     def _relief_subsearch_bound_line(
         self, per_net_timeout: float | None, deterministic_rescue: bool
     ) -> str:
@@ -14555,9 +14594,21 @@ class Autorouter:
                 # would reject every probe; see CppPathfinder.route).
                 for route in probe_routes:
                     self.grid.unmark_route(route)
+                # Issue #6151: same completeness test as the victim re-land
+                # below -- a normal-mode re-route that dropped an edge is not
+                # better than the complete probe path it would replace.
+                normal_failures: list[tuple[Pad, Pad]] = []
                 normal_routes = self._route_net_negotiated(
-                    failed_net, present_factor, per_net_timeout=per_net_timeout, **direction
+                    failed_net,
+                    present_factor,
+                    per_net_timeout=per_net_timeout,
+                    failure_callback=lambda src, dst: normal_failures.append((src, dst)),
+                    **direction,
                 )
+                if normal_routes and normal_failures:
+                    for route in normal_routes:
+                        self.grid.unmark_route(route)
+                    normal_routes = []
                 if normal_routes:
                     committed_routes = normal_routes
                 else:
@@ -14620,6 +14671,11 @@ class Autorouter:
         # re-land rolls the WHOLE transaction back, so a wall-clock value
         # here decides routed reach on machine speed alone.
         restart_timeout = subsearch_budget
+        # Issue #6151: a victim whose re-land ran its reduced budget out is
+        # retried once under the budget it originally landed with.
+        retry_timeout = self._relief_reland_retry_budget(per_net_timeout, subsearch_budget)
+        budget_bound: set[int] = set()  # victims owed one retry at retry_timeout
+        escalated: set[int] = set()  # victims that already had it
         # Multi-pass re-land: a victim that fails while its displaced
         # siblings are still unplaced often lands cleanly once they have
         # settled (the run-5 measurements: rescues failed at exactly
@@ -14636,20 +14692,55 @@ class Autorouter:
                 if _past_deadline():
                     still_pending.append(rn)
                     continue
+                rn_timeout = restart_timeout
+                if rn in budget_bound:
+                    budget_bound.discard(rn)
+                    escalated.add(rn)
+                    rn_timeout = retry_timeout
+                # Issue #6151: a victim counts as re-landed only when EVERY
+                # connection landed.  ``_route_net_negotiated`` returns the
+                # edges it did commit when one fails, is refused by the
+                # pad-access invariant, or is short-circuited by the
+                # cumulative per-net deadline -- so ``if rn_routes`` accepted a
+                # 2-of-5-pad USB_D+ as "re-landed", the transaction committed,
+                # and the rescue traded the stranded net for a partial victim
+                # (the no-net-loss guarantee below, violated).  The failed-edge
+                # count is the same per-net success test sequential_ripup uses
+                # (#5894), and the signal the negotiated loop's rip-up reads.
+                edge_failures: list[tuple[Pad, Pad]] = []
+                started = _time.monotonic()
                 rn_routes = self._route_net_negotiated(
-                    rn, present_factor, per_net_timeout=restart_timeout
+                    rn,
+                    present_factor,
+                    per_net_timeout=rn_timeout,
+                    failure_callback=lambda src, dst: edge_failures.append((src, dst)),
                 )
-                if rn_routes:
+                if rn_routes and not edge_failures:
                     net_routes[rn] = rn_routes
                     for route in rn_routes:
                         self.grid.mark_route_usage(route)
                         self.routes.append(route)
                     relanded += 1
                     progress = True
-                else:
-                    still_pending.append(rn)
+                    continue
+                # Discard the partial copper: it was ``_mark_route``'d edge by
+                # edge but never had its usage counted, so only the blocking
+                # mark is reversed (mirrors sequential_ripup._discard_partial).
+                for route in rn_routes:
+                    self.grid.unmark_route(route)
+                still_pending.append(rn)
+                if (
+                    rn not in escalated
+                    and rn_timeout is not None
+                    and retry_timeout is not None
+                    and retry_timeout > rn_timeout
+                    and _time.monotonic() - started >= 0.9 * rn_timeout
+                ):
+                    budget_bound.add(rn)
             pending = still_pending
-            if not progress:
+            # A victim newly owed a larger budget is worth another pass even
+            # when nobody else landed in this one.
+            if not progress and not (budget_bound & set(pending)):
                 break
 
         # Depth-1 NESTED rescues for the last hold-outs: a victim whose
