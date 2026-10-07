@@ -1405,12 +1405,17 @@ def _native_refill_stability_pass(
     """Keep pour connectivity whole under a PLAIN native refill (#5507).
 
     The recipe's in-loop fills come from the repo fill engine, whose carve
-    model can keep a same-net pour pocket attached that KiCad's own engine
-    severs -- Board07's live case is the ``+1V2`` In2.Cu pocket under the U4
-    BGA, whose only net item is ``U4.E6``'s stitching via.  Such a pad reads
-    connected on the saved output and strands the moment anything refills
-    the board natively, which is exactly the acceptance contract this board
-    carries ("on saved and plain-native-refilled outputs").
+    model could keep a same-net pour pocket attached that a plain native
+    refill severs -- Board07's historical case was the ``+1V2`` In2.Cu pocket
+    under the U4 BGA, whose only net item is ``U4.E6``'s stitching via.  Such
+    a pad reads connected on the saved output and strands the moment anything
+    refills the board natively, which is exactly the acceptance contract this
+    board carries ("on saved and plain-native-refilled outputs").
+
+    The +1V2 split was NOT a KiCad behaviour: it was produced by the old kct
+    slit-venting carve, fixed by #6097, so a native refill of that pocket is
+    now whole.  The loop is kept as a guard for any other kct-vs-native
+    divergence.
 
     Each round: refill a scratch copy with the plain native filler
     (``run_fill_zones`` default policy -- the board's own project/.kicad_dru
