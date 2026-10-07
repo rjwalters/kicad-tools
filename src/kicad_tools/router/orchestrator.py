@@ -572,7 +572,8 @@ class RoutingOrchestrator:
 
         Pads are measured with their real shapes (the clearance kernel's exact
         pad model), arcs along their true circle.  Copper of the routed net
-        itself, and unassigned (net 0) copper, never counts.
+        itself never counts.  No-net pads do count (they are foreign to every
+        net); net-0 tracks, vias and arcs stay exempt.
         """
         required = self._required_clearance()
         if not (result.segments or result.vias):
