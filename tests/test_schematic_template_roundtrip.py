@@ -602,6 +602,66 @@ def test_patch_does_not_mutate_the_source_tree(tmp_path: Path):
     assert _tree(sch._source_doc.to_string()) == _tree(_EDIT_SCH)
 
 
+def _field_at(saved, name):
+    return _first(saved, "property", name)["at"].get_atoms()
+
+
+def test_patch_keeps_pin_uuid_when_pin_changes(tmp_path: Path):
+    """_patch_node called on a pin keeps the source UUID (issue #6085)."""
+    from kicad_tools.schematic.models.io_mixin import _patch_node
+
+    src = parse_string('(pin "1" (uuid "keep-me") (alternate "A"))')
+    old = parse_string('(pin "1" (uuid "old-random") (alternate "A"))')
+    new = parse_string('(pin "1" (uuid "new-random") (alternate "B"))')
+    patched = _patch_node(src, old, new)
+    assert patched["uuid"].get_first_atom() == "keep-me"
+    assert patched["alternate"].get_first_atom() == "B"
+
+
+def test_symbol_rotation_rotates_fields_about_origin(tmp_path: Path):
+    """Fields turn with the symbol, counter-clockwise on screen (issue #6085)."""
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    sch.power_symbols[0].rotation = 180  # was 90: a further quarter turn CCW
+    _, saved = _sole_change(_EDIT_SCH, sch.to_sexp())
+    assert saved["at"].get_atoms() == [257.81, 50.8, 180]
+    # Offsets (3.81, 0) -> (0, -3.81); (-3.2512, -0.381) -> (-0.381, 3.2512).
+    assert _field_at(saved, "Reference") == [257.81, 46.99, 90]
+    assert _field_at(saved, "Value") == [257.429, 54.0512, 0]
+    # Everything else about the fields survives.
+    assert _first(saved, "property", "Value")["effects"]["justify"].get_first_atom() == "left"
+    assert saved["pin"]["uuid"].get_first_atom() == "06301014-7222-4948-969d-d91f20ce12fd"
+
+
+def test_symbol_move_and_rotate_applies_rotation_after_move(tmp_path: Path):
+    sch = _load_text(tmp_path, _EDIT_SCH)
+    sym = sch.power_symbols[0]
+    sym.x += 2.54
+    sym.rotation = 180
+    _, saved = _sole_change(_EDIT_SCH, sch.to_sexp())
+    assert saved["at"].get_atoms() == [260.35, 50.8, 180]
+    assert _field_at(saved, "Reference") == [260.35, 46.99, 90]
+    assert _field_at(saved, "Value") == [259.969, 54.0512, 0]
+
+
+def test_retyped_note_keeps_its_own_source_when_text_collides(tmp_path: Path):
+    """Retyping note A to "B" while another note "B" is deleted keeps A's node."""
+    two = _EDIT_SCH.replace(
+        "  (polyline",
+        '  (text "B" (exclude_from_sim no) (at 10 10 0)\n'
+        "    (effects (font (size 1.0 1.0)))\n"
+        '    (uuid "bbbbbbbb-0000-0000-0000-000000000000"))\n  (polyline',
+        1,
+    )
+    sch = _load_text(tmp_path, two)
+    sch.text_notes = [("B", 245.11, 66.04)]  # note A retyped; the original B deleted
+    out = parse_string(sch.to_sexp())
+    texts = out.find_all("text")
+    assert len(texts) == 1
+    assert texts[0].get_first_atom() == "B"
+    assert texts[0]["uuid"].get_first_atom() == "c47a68c0-ec3e-4aaa-803c-2ea9d781766e"
+    assert texts[0]["effects"]["font"]["size"].get_atoms() == [2.54, 2.54]
+
+
 def _netlist_values(net: Path) -> dict[str, str]:
     root = parse_string(net.read_text())
     return {

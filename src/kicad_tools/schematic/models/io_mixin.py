@@ -198,6 +198,70 @@ def _patch_atoms(name: str, src: list[SExp], old: list[SExp], new: list[SExp]) -
     return out
 
 
+def _at_atoms(node: SExp) -> list[float] | None:
+    """The numeric atoms of *node*'s ``(at x y [angle])`` child, if any."""
+    at_node = node.get("at")
+    if at_node is None:
+        return None
+    vals = [a.value for a in at_node.children if a.name is None]
+    if len(vals) < 2 or not all(_is_number(v) for v in vals):
+        return None
+    return [float(v) for v in vals]  # type: ignore[arg-type]
+
+
+def _rotate_fields_with_symbol(node: SExp, old: SExp, new: SExp) -> None:
+    """Rotate *node*'s fields about the symbol origin by the edit's angle change.
+
+    KiCad rotates a symbol's fields around the symbol origin when the symbol
+    is rotated, and turns their text between horizontal and vertical.  The
+    model only tracks the symbol's own angle, so the field positions the
+    three-way merge produced (after any move delta) are rotated here by the
+    change in symbol angle, in place on the freshly built *node* (issue #6085).
+    Rotation is counter-clockwise on screen; the sheet's Y axis points down.
+    """
+    old_at, new_at, out_at = _at_atoms(old), _at_atoms(new), _at_atoms(node)
+    if not old_at or not new_at or not out_at:
+        return
+    delta = (
+        (new_at[2] if len(new_at) > 2 else 0.0) - (old_at[2] if len(old_at) > 2 else 0.0)
+    ) % 360
+    if delta == 0:
+        return
+    quarter = int(round(delta / 90.0)) % 4
+    if abs(delta - quarter * 90.0) > 1e-6:
+        return  # only the right-angle rotations KiCad's symbols use
+    ox, oy = out_at[0], out_at[1]
+    cos, sin = (1, 0, -1, 0)[quarter], (0, 1, 0, -1)[quarter]
+    for i, child in enumerate(node.children):
+        if child.name != "property":
+            continue
+        pos = _at_atoms(child)
+        if pos is None:
+            continue
+        dx, dy = pos[0] - ox, pos[1] - oy
+        angle = ((pos[2] if len(pos) > 2 else 0.0) + delta) % 180
+        rotated = [
+            ox + dx * cos + dy * sin,
+            oy - dx * sin + dy * cos,
+            int(angle) if angle == int(angle) else angle,
+        ]
+        new_prop = SExp.list(child.name)
+        new_prop._inline = child._inline
+        for sub in child.children:
+            if sub.name == "at":
+                at_new = SExp.list("at")
+                at_new._inline = sub._inline
+                at_new.children = [
+                    _coord_atom(rotated[0]),
+                    _coord_atom(rotated[1]),
+                    SExp.atom(rotated[2]),
+                ]
+                new_prop.children.append(at_new)
+            else:
+                new_prop.children.append(sub)
+        node.children[i] = new_prop
+
+
 def _patch_node(src: SExp, old: SExp, new: SExp, parent: str | None = None) -> SExp:
     """Return *src* with the model's ``old`` -> ``new`` change applied.
 
@@ -226,7 +290,7 @@ def _patch_node(src: SExp, old: SExp, new: SExp, parent: str | None = None) -> S
             elif not atoms_placed:
                 out.append((None, next(atom_iter)))
             continue
-        if parent == "pin" and key[0] == "uuid":
+        if src.name == "pin" and key[0] == "uuid":
             out.append((key, child))  # pin UUIDs are regenerated randomly
         elif key in old_map and key in new_map:
             out.append((key, _patch_node(child, old_map[key], new_map[key], src.name)))
@@ -264,6 +328,8 @@ def _patch_node(src: SExp, old: SExp, new: SExp, parent: str | None = None) -> S
     node = SExp.list(src.name)
     node._inline = src._inline
     node.children = [child for _, child in out]
+    if src.name == "symbol":
+        _rotate_fields_with_symbol(node, old, new)
     return node
 
 
@@ -740,8 +806,11 @@ class SchematicIOMixin:
                 replaced[id(src)] = src
         leftover = [(key, src) for key, src in live if id(src) not in replaced]
         for text, x, y in unmatched:
-            pair = next((p for p in leftover if p[0][0] == text), None) or next(
-                (p for p in leftover if p[0][1:] == (x, y)), None
+            # A position match wins over a text match: a note retyped in place
+            # keeps its own font and UUID even when another deleted note
+            # happens to carry the new text (issue #6085).
+            pair = next((p for p in leftover if p[0][1:] == (x, y)), None) or next(
+                (p for p in leftover if p[0][0] == text), None
             )
             if pair is None:
                 new_body.append(self._build_text_note_node(text, x, y))
