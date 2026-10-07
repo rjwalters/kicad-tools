@@ -236,6 +236,144 @@ def _mst_cost(
     return total
 
 
+# Issue #6019: below this many points per trial MST the scalar Prim is
+# cheaper than the numpy set-up cost.  Both paths return bit-identical
+# results (see ``_batched_trial_mst_costs``), so this is purely a speed knob.
+_BATCHED_MIN_POINTS = 8
+
+
+def _batched_trial_mst_costs(
+    points: list[tuple[float, float]],
+    candidates: list[tuple[float, float]],
+) -> list[float]:
+    """``[_mst_cost(points + [c]) for c in candidates]``, batched in numpy.
+
+    Issue #6019.  Runs one Prim per candidate, vectorised across all
+    candidates, and returns values **bit-identical** to the scalar
+    :func:`_mst_cost` with Manhattan distance.  Exactness rests on three
+    properties, each mirrored from :func:`_build_mst_edges`:
+
+    1. *Same per-edge value.*  ``abs(xi - xj) + abs(yi - yj)`` evaluated
+       elementwise in float64 is the same IEEE operation sequence as the
+       scalar ``_manhattan`` (and ``a - b`` / ``b - a`` differ only in
+       sign, which ``abs`` removes exactly).  The step minimum is a
+       ``min`` over those values, which is order-independent.
+    2. *Same summation order.*  The total is accumulated one Prim step at
+       a time from ``0.0`` -- the same left fold ``_mst_cost`` performs
+       over the edges in the order Prim appended them.
+    3. *Same tie-break.*  The scalar Prim takes the first minimum in
+       ``for i in connected: for j in unconnected`` order, i.e. CPython
+       ``set`` iteration order, which depends on insertion history (it is
+       not ascending once indices collide in the hash table).  A plain
+       ``argmin`` therefore diverges whenever two *different* unconnected
+       vertices tie for the minimum -- the divergence the PR #6022 review
+       measured on 44 of 2000 random point sets.  Rows with such a tie
+       replay the real ``set`` objects with the scalar's exact insertion
+       sequence and pick the first minimum in their actual iteration
+       order.  Ties between different ``i`` for the same ``j`` cannot
+       change the cost or the connected set, so they need no resolution.
+
+    The final tree's *edges* are still produced by the scalar
+    :func:`_build_mst_edges`; this function only scores candidates.
+    """
+    import numpy as np
+
+    n_cand = len(candidates)
+    m = len(points) + 1
+    base = np.asarray(points, dtype=np.float64)
+    cand = np.asarray(candidates, dtype=np.float64)
+    xs = np.empty((n_cand, m), dtype=np.float64)
+    ys = np.empty((n_cand, m), dtype=np.float64)
+    xs[:, :-1] = base[:, 0]
+    ys[:, :-1] = base[:, 1]
+    xs[:, -1] = cand[:, 0]
+    ys[:, -1] = cand[:, 1]
+
+    rows = np.arange(n_cand)
+    in_tree = np.zeros((n_cand, m), dtype=bool)
+    in_tree[:, 0] = True
+    key = np.abs(xs - xs[:, :1]) + np.abs(ys - ys[:, :1])
+    key[:, 0] = np.inf
+    total = np.zeros(n_cand, dtype=np.float64)
+    # Prim insertion sequence per row (column 0 is the seed vertex 0).
+    order = np.zeros((n_cand, m), dtype=np.intp)
+
+    # Lazily replayed scalar sets for rows that hit a tie:
+    # row -> [connected, unconnected, number of order entries replayed].
+    replay: dict[int, list[Any]] = {}
+
+    for step in range(1, m):
+        step_min = key.min(axis=1)
+        tied = key == step_min[:, None]
+        chosen = tied.argmax(axis=1)
+        ambiguous = np.flatnonzero(tied.sum(axis=1) > 1)
+        for r in ambiguous.tolist():
+            state = replay.get(r)
+            if state is None:
+                # Built exactly as ``_build_mst_edges`` builds them.
+                state = [{0}, set(range(1, m)), 1]
+                replay[r] = state
+            connected, unconnected, done = state
+            for j in order[r, done:step].tolist():
+                connected.add(j)
+                unconnected.remove(j)
+            state[2] = step
+
+            trial = points + [candidates[r]]
+            tied_js = set(np.flatnonzero(tied[r]).tolist())
+            unc_order = [j for j in unconnected if j in tied_js]
+            target = float(step_min[r])
+            pick = -1
+            for i in connected:
+                xi, yi = trial[i]
+                for j in unc_order:
+                    xj, yj = trial[j]
+                    if _manhattan(xi, yi, xj, yj) == target:
+                        pick = j
+                        break
+                if pick >= 0:
+                    break
+            if pick < 0:
+                # Unreachable while ``step_min`` is an exact minimum of the
+                # same values; if that invariant ever broke, give up on
+                # batching rather than return a different tree.
+                return [_mst_cost(points + [c]) for c in candidates]
+            chosen[r] = pick
+
+        total += step_min
+        order[:, step] = chosen
+        in_tree[rows, chosen] = True
+        cx = xs[rows, chosen][:, None]
+        cy = ys[rows, chosen][:, None]
+        np.minimum(key, np.abs(xs - cx) + np.abs(ys - cy), out=key)
+        key[in_tree] = np.inf
+
+    costs: list[float] = total.tolist()
+    return costs
+
+
+def _trial_mst_costs(
+    all_points: list[tuple[float, float]],
+    candidates: list[tuple[float, float]],
+    cost_fn: Callable[[float, float, float, float], float] | None,
+) -> list[float]:
+    """MST cost of ``all_points + [c]`` for each candidate ``c``.
+
+    Dispatches to the batched numpy Prim (Issue #6019) for the default
+    Manhattan cost on finite coordinates; custom ``cost_fn`` (the
+    congestion-aware router path) and degenerate inputs keep the scalar
+    path.  Both return bit-identical values.
+    """
+    if (
+        cost_fn is None
+        and len(all_points) + 1 >= _BATCHED_MIN_POINTS
+        and all(math.isfinite(c) for p in all_points for c in p)
+        and all(math.isfinite(c) for p in candidates for c in p)
+    ):
+        return _batched_trial_mst_costs(all_points, candidates)
+    return [_mst_cost(all_points + [c], cost_fn) for c in candidates]
+
+
 def _hanan_grid(
     points: list[tuple[float, float]],
 ) -> list[tuple[float, float]]:
@@ -294,9 +432,8 @@ def _iterative_one_steiner(
         best_gain = 0.0
         best_candidate: tuple[float, float] | None = None
 
-        for candidate in candidates:
-            trial = all_points + [candidate]
-            trial_cost = _mst_cost(trial, cost_fn)
+        trial_costs = _trial_mst_costs(all_points, candidates, cost_fn)
+        for candidate, trial_cost in zip(candidates, trial_costs, strict=True):
             gain = current_cost - trial_cost
             if gain > best_gain:
                 best_gain = gain
