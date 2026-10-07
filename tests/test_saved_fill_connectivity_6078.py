@@ -320,9 +320,10 @@ class TestGerberExportVerifiesTheSavedFill:
 _SHIPPED_ROUTED_BOARDS = sorted(REPO_ROOT.glob("boards/*/output/*_routed.kicad_pcb"))
 
 
-# One kicad-cli DRC per board (~5-15 s): explicitly in the "Test (extended)"
-# job, which has kicad-cli 10, rather than the 3 s bulk pool.
-@pytest.mark.ci_extended
+# One kicad-cli DRC per board (~5-15 s).  Deliberately NOT ci_extended: that
+# marker is deselected from the PR "Test" job and runs only on main pushes, so
+# a fragmented committed board would merge before this gate saw it.  The PR
+# "Test" job runs in the KiCad 10 container, so kicad-cli is available there.
 @pytest.mark.parametrize(
     "board", _SHIPPED_ROUTED_BOARDS, ids=[p.parent.parent.name for p in _SHIPPED_ROUTED_BOARDS]
 )
