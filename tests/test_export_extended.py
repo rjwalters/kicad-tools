@@ -298,8 +298,45 @@ class TestGerberExporterMethods:
             assert "test.gbr" in zf.namelist()
 
 
+@pytest.fixture(autouse=True)
+def _clear_kicad_cli_version_cache():
+    from kicad_tools.export.gerber import clear_kicad_cli_version_cache
+
+    clear_kicad_cli_version_cache()
+    yield
+    clear_kicad_cli_version_cache()
+
+
 class TestGetKicadCliVersion:
     """Tests for get_kicad_cli_version function."""
+
+    def test_memoised_per_path(self):
+        """Second call for the same path must not spawn a subprocess (#5910)."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result) as run:
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
+            assert run.call_count == 1
+            assert get_kicad_cli_version(Path("/b/kicad-cli")) == "10.0.1"
+            assert run.call_count == 2
+
+    def test_failures_not_cached(self):
+        bad = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
+        good = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", side_effect=[bad, good]) as run:
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) is None
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
+            assert run.call_count == 2
+
+    def test_reuses_discovery_probe_version(self):
+        from kicad_tools.cli import runner
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.cli.runner.subprocess.run", return_value=mock_result):
+            assert runner._probe_kicad_cli(Path("/a/kicad-cli")) is True
+        with patch("kicad_tools.export.gerber.subprocess.run") as run:
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
+            run.assert_not_called()
 
     def test_returns_version_string(self):
         """Should return stripped stdout on success."""

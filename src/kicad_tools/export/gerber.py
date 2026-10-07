@@ -258,8 +258,25 @@ MANUFACTURER_PRESETS: dict[str, GerberManufacturerPreset] = {
 }
 
 
+_KICAD_CLI_VERSION_CACHE: dict[str, str] = {}
+
+
+def clear_kicad_cli_version_cache() -> None:
+    """Forget memoised ``kicad-cli version`` results (for tests)."""
+    from kicad_tools.cli import runner
+
+    _KICAD_CLI_VERSION_CACHE.clear()
+    runner.PROBED_KICAD_CLI_VERSIONS.clear()
+
+
 def get_kicad_cli_version(kicad_cli: Path) -> str | None:
     """Get the version string from kicad-cli.
+
+    Successful results are memoised per interpreter and per ``kicad_cli``
+    path (a launch costs seconds and the answer cannot change within a
+    process, #5910).  Failures are not cached, so a transient error is
+    retried.  A version already captured by the discovery probe in
+    ``cli.runner`` is reused without spawning anything.
 
     Args:
         kicad_cli: Path to the kicad-cli executable.
@@ -268,14 +285,23 @@ def get_kicad_cli_version(kicad_cli: Path) -> str | None:
         Version string like ``"10.0.1"`` or ``None`` if the version
         could not be determined.
     """
+    from kicad_tools.cli import runner
+
+    key = str(kicad_cli)
+    cached = _KICAD_CLI_VERSION_CACHE.get(key) or runner.PROBED_KICAD_CLI_VERSIONS.get(key)
+    if cached:
+        return cached
     try:
         result = subprocess.run(
-            [str(kicad_cli), "version"],
+            [key, "version"],
             capture_output=True,
             text=True,
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            version = result.stdout.strip()
+            if version:
+                _KICAD_CLI_VERSION_CACHE[key] = version
+            return version
     except Exception:
         pass
     return None
