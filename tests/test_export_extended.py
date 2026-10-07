@@ -58,7 +58,6 @@ class TestManufacturerPreset:
         assert preset.name == "JLCPCB"
         assert preset.config.use_protel_extensions is True
         assert preset.config.include_solderpaste is False
-        assert "F.Cu" in preset.layer_rename
 
     def test_pcbway_preset(self):
         preset = PCBWAY_PRESET
@@ -188,23 +187,14 @@ class TestGerberConfigDefaults:
 class TestManufacturerPresetDetails:
     """More detailed tests for manufacturer presets."""
 
-    def test_jlcpcb_layer_rename_mapping(self):
-        """Test JLCPCB layer renaming dictionary."""
-        preset = JLCPCB_PRESET
-        assert preset.layer_rename["F.Cu"] == "F_Cu"
-        assert preset.layer_rename["B.Cu"] == "B_Cu"
-        assert preset.layer_rename["Edge.Cuts"] == "Edge_Cuts"
+    def test_presets_carry_no_file_rename_map(self):
+        """Presets ship kicad-cli's own file names (Issue #6163).
 
-    def test_pcbway_no_layer_rename(self):
-        """Test PCBWay has no layer renaming."""
-        preset = PCBWAY_PRESET
-        # PCBWay doesn't need layer renaming
-        assert preset.layer_rename == {}
-
-    def test_oshpark_no_layer_rename(self):
-        """Test OSH Park has no layer renaming."""
-        preset = OSHPARK_PRESET
-        assert preset.layer_rename == {}
+        The former ``layer_rename`` maps were never applied; they were
+        removed so a preset cannot imply a naming it does not produce.
+        """
+        for preset in (JLCPCB_PRESET, PCBWAY_PRESET, OSHPARK_PRESET):
+            assert not hasattr(preset, "layer_rename")
 
 
 class TestGerberExporterMethods:

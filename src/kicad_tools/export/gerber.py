@@ -288,11 +288,23 @@ class GerberConfig:
 
 @dataclass
 class GerberManufacturerPreset:
-    """Preset configuration for a specific manufacturer."""
+    """Preset configuration for a specific manufacturer.
+
+    File naming is deliberately **not** part of a preset (Issue #6163).
+    Every preset ships kicad-cli's own names -- ``<board>-<Layer>.<ext>``
+    with Protel extensions (``board-F_Cu.gtl``, ``board-Edge_Cuts.gm1``,
+    ``board-In1_Cu.g1``) plus ``<board>-job.gbrjob`` -- and keeps the X2
+    ``%TF.FileFunction`` attributes, which is what JLCPCB, PCBWay, Seeed
+    Fusion and OSH Park all document accepting for KiCad uploads.  An
+    earlier ``layer_rename`` map was never applied; it was removed rather
+    than wired up because no supported fab requires a rename and the
+    downstream tools (MCP layer detection, readiness checks) parse the
+    kicad-cli names.  Every field here must be read by the exporter --
+    ``tests/test_gerber_preset_fields.py`` fails on dead config.
+    """
 
     name: str
     config: GerberConfig
-    layer_rename: dict[str, str] = field(default_factory=dict)
 
 
 # Manufacturer presets
@@ -306,21 +318,6 @@ JLCPCB_PRESET = GerberManufacturerPreset(
         merge_pth_npth=False,
         minimal_header=False,
     ),
-    layer_rename={
-        # JLCPCB preferred naming
-        "F.Cu": "F_Cu",
-        "In1.Cu": "In1_Cu",
-        "In2.Cu": "In2_Cu",
-        "B.Cu": "B_Cu",
-        "F.SilkS": "F_Silkscreen",
-        "B.SilkS": "B_Silkscreen",
-        "F.Mask": "F_Mask",
-        "B.Mask": "B_Mask",
-        "Edge.Cuts": "Edge_Cuts",
-        # V-score drawing (Issue #6156): kicad-cli writes Cmts.User as
-        # ``<board>-User_Comments.gbr`` (FileFunction ``Other,Comment``).
-        "Cmts.User": "User_Comments",
-    },
 )
 
 PCBWAY_PRESET = GerberManufacturerPreset(
@@ -355,20 +352,6 @@ SEEED_PRESET = GerberManufacturerPreset(
         merge_pth_npth=False,
         minimal_header=False,
     ),
-    layer_rename={
-        # Seeed Fusion preferred naming (Protel extensions)
-        "F.Cu": "GTL",
-        "B.Cu": "GBL",
-        "In1.Cu": "G1",
-        "In2.Cu": "G2",
-        "F.SilkS": "GTO",
-        "B.SilkS": "GBO",
-        "F.Mask": "GTS",
-        "B.Mask": "GBS",
-        "F.Paste": "GTP",
-        "B.Paste": "GBP",
-        "Edge.Cuts": "GKO",
-    },
 )
 
 MANUFACTURER_PRESETS: dict[str, GerberManufacturerPreset] = {
