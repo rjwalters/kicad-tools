@@ -4788,15 +4788,22 @@ class RoutingGrid:
             min_clearance = self.rules.via_clearance
 
         via_radius = via.diameter / 2
+        # Issue #5398: ``via.layers`` is the barrel's inclusive physical span.
+        # A barrel is copper on every intermediate layer too (a through via
+        # declared F.Cu..B.Cu crosses In1/In2), so judge foreign segments on
+        # the whole span -- not just on its two endpoint layers, which let an
+        # inner-layer trace pass right through a through via's annulus.
+        endpoints: list[int] = []
+        for layer in via.layers:
+            with suppress(KeyError, ValueError):
+                endpoints.append(self.layer_to_index(layer.value))
+        via_layer_indices: set[int] = (
+            set(range(min(endpoints), max(endpoints) + 1)) if endpoints else set()
+        )
         if not self.fixed_fills.via_clear(
             (via.x, via.y),
-            tuple(
-                range(
-                    min(self.layer_to_index(layer.value) for layer in via.layers),
-                    max(self.layer_to_index(layer.value) for layer in via.layers) + 1,
-                )
-            ),
-            via.diameter / 2,
+            tuple(sorted(via_layer_indices)),
+            via_radius,
             max(min_clearance, self.rules.authored_floor(exclude_net)),
         ):
             return False, 0.0, (via.x, via.y)
@@ -4809,12 +4816,6 @@ class RoutingGrid:
         min_actual_clearance = float("inf")
         violation_loc: tuple[float, float] | None = None
         has_violation = False
-
-        # Determine which layer indices the via spans
-        via_layer_indices: set[int] = set()
-        for layer in via.layers:
-            with suppress(KeyError, ValueError):
-                via_layer_indices.add(self.layer_to_index(layer.value))
 
         # Check against segments from existing routes
         for route in self.routes:

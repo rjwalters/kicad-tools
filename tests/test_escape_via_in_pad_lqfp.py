@@ -241,8 +241,14 @@ class TestLqfp48InPadEscape:
             assert abs(esc.via.y - esc.pad.y) < 0.001
             # 4-layer signal-signal-ground-power stack: inner escape lands
             # on In1.Cu (a SIGNAL layer).
-            assert esc.via.layers[0] == esc.pad.layer
-            assert esc.via.layers[1] == Layer.IN1_CU
+            # The landing is In1.Cu; an ordinary drilled barrel declares its
+            # physical span (the full stack) so validators see it on every
+            # layer -- Issue #5398.  A micro-via keeps its true F->In1 span.
+            assert esc.escape_layer == Layer.IN1_CU
+            if esc.via.is_micro:
+                assert esc.via.layers == (esc.pad.layer, Layer.IN1_CU)
+            else:
+                assert esc.via.layers == (Layer.F_CU, Layer.B_CU)
 
     def test_no_in_pad_escape_when_unsupported(self):
         """With manufacturer=jlcpcb (no via-in-pad capability), no in-pad

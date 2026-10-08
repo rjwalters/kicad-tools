@@ -116,6 +116,67 @@ the emitted copper and native saved/refilled connectivity: an electrical
 same-net connectivity result alone does not prove the intended Kelvin tap.
 Dense-board completion remains tracked in [issue #5398](https://github.com/rjwalters/kicad-tools/issues/5398).
 
+#### Inward off-pad access for trapped Kelvin terminals
+
+On a dense fine-pitch package the escape pre-phase can leave a Kelvin sense
+pin's escape inside its own pad: the outward channel is already taken by
+neighbouring escape vias, so no legal outward via exists. The general router
+then has to reach that pin through the same congested channel. During escape
+generation the router now probes a **bounded inward off-pad layer transition**
+(a via under the package body) for exactly those terminals.
+
+*Inputs.* Nothing to configure. A terminal qualifies when its net is a
+recognised Kelvin net (sense-like name **and** an identifiable shunt pad,
+exactly as above), its escape endpoint is still on its own surface pad with no
+via, and the existing bounded lateral via search finds no legal *outward* site.
+
+*What is checked.* The inward search uses the same offset budget, step and via
+geometry as the existing lateral via rescue: the manufacturer's minimum
+ordinary via, never a microvia and never via-in-pad. Every offset is judged
+against physical pads (own-net lands included), committed copper, fixed
+fills, authored netclass minima, sibling escapes from the same pass, drilled
+holes (same-net vias included), the board edge and cut-outs, and the full
+drilled barrel on every copper layer. It must also not merge into another
+branch of its own net (committed copper, a sibling escape, or another
+terminal's pad) before the shunt. A failed search leaves the original escape
+unchanged. Nothing relaxes a clearance, layer, process limit or search budget.
+
+*After commit.* A recovery that actually commits is excluded from sibling
+rip-up in both the `route_all` and negotiated rip-up paths, so a later net
+cannot strip the access. The pad-access gate also keeps protecting the
+net's pending terminals. The run log prints
+`Kelvin inward access: N trapped sense terminal(s) given an off-pad layer transition`
+when it fires. Ordinary nets never enter this path.
+
+*Limits.* This preserves local access to the pin. It does not guarantee that
+the later full route completes, and it does not repair copper that already
+joins sense and force branches. A trapped pin with no legal inward site keeps
+its original escape.
+
+*Reaching it.* It runs inside `Autorouter.generate_escape_routes()`, which
+both the CLI's dense-package escape pre-phase and `route_with_escape()` call:
+
+```bash
+kct route board.kicad_pcb --output routed.kicad_pcb
+```
+
+```python
+from pathlib import Path
+
+from kicad_tools.router import load_pcb_for_routing, merge_routes_into_pcb
+
+board = Path("board.kicad_pcb")
+router, _net_map = load_pcb_for_routing(str(board), skip_nets=["GND"])
+router.route_with_escape()  # escape pre-phase (incl. Kelvin access) + main pass
+print(sorted(router._kelvin_access_protected_nets))  # nets given inward access
+Path("routed.kicad_pcb").write_text(
+    merge_routes_into_pcb(board.read_text(), router.to_sexp())
+)
+```
+
+`tests/router/test_kelvin_escape_access.py` is a self-contained four-terminal
+fixture showing a recovery and each rejection case.
+
 ### Custom Design Rules
 
 ```python

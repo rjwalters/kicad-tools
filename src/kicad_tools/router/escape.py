@@ -35,7 +35,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
@@ -1988,7 +1988,7 @@ class EscapeRouter:
                 escape.via_pos = self._clamp_to_edge_clearance(*escape.via_pos)
                 if escape.via is not None:
                     clamped_x, clamped_y = escape.via_pos
-                    escape.via = Via(
+                    escape.via = self._make_escape_via(
                         x=clamped_x,
                         y=clamped_y,
                         drill=escape.via.drill,
@@ -3597,7 +3597,7 @@ class EscapeRouter:
             )
 
             # Create via
-            via = Via(
+            via = self._make_escape_via(
                 x=via_x,
                 y=via_y,
                 drill=self.rules.via_drill,
@@ -5155,7 +5155,7 @@ class EscapeRouter:
                     continue
 
                 # Create via
-                via = Via(
+                via = self._make_escape_via(
                     x=via_x,
                     y=via_y,
                     drill=self.rules.via_drill,
@@ -6290,7 +6290,7 @@ class EscapeRouter:
             )
 
             # Create via
-            via = Via(
+            via = self._make_escape_via(
                 x=via_x,
                 y=via_y,
                 drill=self.rules.via_drill,
@@ -6662,7 +6662,7 @@ class EscapeRouter:
                         ),
                     ]
 
-                    via = Via(
+                    via = self._make_escape_via(
                         x=via_x,
                         y=via_y,
                         drill=self.rules.via_drill,
@@ -6965,7 +6965,7 @@ class EscapeRouter:
                     foreign_tracks=foreign_tracks,
                     existing_drills=existing_drills,
                 ):
-                    via = Via(
+                    via = self._make_escape_via(
                         x=via_x,
                         y=via_y,
                         drill=self.rules.via_drill,
@@ -8224,7 +8224,7 @@ class EscapeRouter:
         # the via barrel itself.
         offset = via_diameter / 2 + effective_clearance + self.rules.trace_width
 
-        in_pad_via = Via(
+        in_pad_via = self._make_escape_via(
             x=via_x,
             y=via_y,
             drill=via_drill,
@@ -8372,6 +8372,7 @@ class EscapeRouter:
         max_offset_mm: float | None = None,
         step_mm: float = 0.05,
         existing_escapes: list[EscapeRoute] | None = None,
+        candidate_validator: Callable[[EscapeRoute], bool] | None = None,
     ) -> EscapeRoute | None:
         """Probe off-pad via candidates along the pin's escape direction.
 
@@ -8450,6 +8451,11 @@ class EscapeRouter:
                 drop from the refused in-pad via to its lateral replacement.
                 ``None`` (legacy callers / unit fixtures) disables the
                 sibling check, preserving byte-for-byte behaviour.
+            candidate_validator: Optional full physical predicate applied to
+                each otherwise-accepted candidate (Issue #5398, Kelvin inward
+                access).  A rejection continues the SAME bounded offset
+                search -- the budget and step are unchanged.  ``None`` (every
+                existing caller) keeps the original behaviour exactly.
 
         Returns:
             An ``EscapeRoute`` with the laterally-offset via and the
@@ -8651,7 +8657,7 @@ class EscapeRouter:
                 # Via from surface to inner escape layer.  ``in_pad=False``
                 # because the via is geometrically OFF the pad copper
                 # (that's the whole point of the lateral offset).
-                lateral_via = Via(
+                lateral_via = self._make_escape_via(
                     x=cand_x,
                     y=cand_y,
                     drill=via_drill,
@@ -8680,6 +8686,21 @@ class EscapeRouter:
                     net_name=pad.net_name,
                 )
 
+                candidate = EscapeRoute(
+                    pad=pad,
+                    direction=direction,
+                    escape_point=(escape_x, escape_y),
+                    escape_layer=escape_layer,
+                    via_pos=(cand_x, cand_y),
+                    segments=[surface_seg, inner_seg],
+                    via=lateral_via,
+                    ring_index=0,
+                )
+                # Issue #5398: a caller-supplied predicate rejects this offset
+                # and the bounded search continues with the next one.
+                if candidate_validator is not None and not candidate_validator(candidate):
+                    continue
+
                 logger.info(
                     "Lateral via-escape rescue for pad %s (ref=%s pin=%s): "
                     "in-pad deferred; off-pad via at (%.3f, %.3f) "
@@ -8698,16 +8719,7 @@ class EscapeRouter:
                     escape_layer.kicad_name,
                 )
 
-                return EscapeRoute(
-                    pad=pad,
-                    direction=direction,
-                    escape_point=(escape_x, escape_y),
-                    escape_layer=escape_layer,
-                    via_pos=(cand_x, cand_y),
-                    segments=[surface_seg, inner_seg],
-                    via=lateral_via,
-                    ring_index=0,
-                )
+                return candidate
 
         # No candidate in the budget passed.  Caller (dispatcher) will
         # treat this as "defer to main router" -- the same outcome the
@@ -8725,6 +8737,52 @@ class EscapeRouter:
             direction.name,
         )
         return None
+
+    def _make_escape_via(
+        self,
+        *,
+        x: float,
+        y: float,
+        drill: float,
+        diameter: float,
+        layers: tuple[Layer, Layer],
+        net: int = 0,
+        net_name: str = "",
+        in_pad: bool = False,
+        is_micro: bool = False,
+    ) -> Via:
+        """An escape via whose ``layers`` describe its physical drilled barrel.
+
+        Issue #5398 (port of the #5502 reference fix): the escape router only
+        builds ordinary through vias unless it explicitly takes the micro-via
+        fallback, and KiCad sanitises a through via's layer pair to
+        ``F.Cu``/``B.Cu`` on load whatever landing pair is written.  An escape
+        via previously declared its *landing* pair (e.g. ``F.Cu``/``In1.Cu``),
+        so every validator that honours ``via.layers`` -- the native
+        ``validate_route`` span projection, ``validate_via_clearance`` -- was
+        blind to the barrel on the deeper layers, and a later trace could be
+        committed straight through it (a native ``shorting_items`` on board
+        05).  This mirrors what native route conversion already does for its
+        own vias (Issue #5013).  The selected landing layer stays on
+        ``EscapeRoute.escape_layer`` and on its stub segment.  A micro-via
+        keeps its declared (true) span.
+        """
+        if not is_micro:
+            layers = (
+                Layer(self.grid.index_to_layer(0)),
+                Layer(self.grid.index_to_layer(self.grid.num_layers - 1)),
+            )
+        return Via(
+            x=x,
+            y=y,
+            drill=drill,
+            diameter=diameter,
+            layers=layers,
+            net=net,
+            net_name=net_name,
+            in_pad=in_pad,
+            is_micro=is_micro,
+        )
 
     def _select_inner_escape_layer(self, surface_layer: Layer) -> Layer:
         """Select the best inner layer for via escape routing.
