@@ -18,13 +18,14 @@ Three details are load-bearing:
     quote the coordinates from the issue it reproduces verbatim.
 
 Deterministic UUIDs and a pinned date
-    ``add_trace`` / ``add_via`` / ``add_footprint_from_file`` mint
-    ``uuid.uuid4()`` per object and ``PCB.create`` stamps ``date.today()``.
-    Left alone, regenerating a committed fixture produces a byte-different
-    file every single time and "byte-identical across two runs" is unmeetable.
-    :func:`seeded_uuids` patches ``uuid.uuid4`` with a stream drawn from the
-    case's own seed for the duration of the write, and the board date comes
-    from ``CopperCase.board_date``.
+    ``PCB.create`` stamps ``date.today()`` unless given a date, so the board
+    date comes from ``CopperCase.board_date``.  ``add_trace`` / ``add_via`` /
+    ``add_footprint_from_file`` / ``PCB.create`` used to mint
+    ``uuid.uuid4()`` per object; since Issue #6076 they mint content-keyed
+    ``uuid5`` values themselves.  :func:`seeded_uuids` still patches
+    ``uuid.uuid4`` with a stream drawn from the case's own seed for the
+    duration of the write, as a backstop for any writer that still draws
+    from it.
 
 Pads come from committed ``.kicad_mod`` files
     ``PCB.add_footprint`` resolves ``Library:Footprint`` through

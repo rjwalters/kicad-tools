@@ -108,7 +108,7 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "5922b450-4434-4983-8da3-92bd35ae4bf3")
+		(uuid "0de936b6-d866-54f5-9da0-6e614d4b97ba")
 	)
 	(gr_line
 		(start 160 0)
@@ -118,7 +118,7 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "d5cac04a-5e9d-4765-9153-2d7c45d36c4b")
+		(uuid "74779d00-1ce8-5749-ae7c-a3ab6fd28f0e")
 	)
 	(gr_line
 		(start 160 140)
@@ -128,7 +128,7 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "cbe122a3-7086-4f8c-85e5-0ec90cf3327d")
+		(uuid "8365a4a7-aff4-5097-bc3d-edb917c1411c")
 	)
 	(gr_line
 		(start 0 140)
@@ -138,14 +138,14 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "95202048-546c-434a-88fb-9d690c80e8c9")
+		(uuid "8a256981-879c-5705-9e98-eade84fa1063")
 	)
 	(via
 		(at 143.777 123.8)
 		(size 0.6)
 		(drill 0.3)
 		(layers "F.Cu" "B.Cu")
-		(uuid "ac1ed001-79df-45db-a212-9d206c8adb1a")
+		(uuid "4422fb0e-cc01-5b33-978c-c256f2ad4abf")
 		(net 1)
 	)
 	(via
@@ -153,7 +153,7 @@
 		(size 0.6)
 		(drill 0.3)
 		(layers "F.Cu" "B.Cu")
-		(uuid "e4f253bd-d356-48a8-a5c6-7470c29ca3a4")
+		(uuid "08b4415c-39cd-55e0-bd4f-5de4dec38bc4")
 		(net 2)
 	)
 )
