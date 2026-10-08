@@ -17,6 +17,7 @@ Usage:
     python generate_design.py [output_dir]
 """
 
+import math
 import subprocess
 import sys
 import uuid
@@ -396,6 +397,15 @@ def create_led_pcb(output_dir: Path) -> Path:
         cathode side), shifted -1.27 mm because the library puts pad 1 at
         x=0 while this generator centres the pair on the footprint origin,
         with the line width raised to the 0.15 mm jlcpcb-tier1 floor.
+
+        The stock outline's two ``fp_arc`` primitives (centre at the
+        footprint origin, r = 2.99 mm, spanning the 297.8 deg away from the
+        flat) are emitted as an ``fp_line`` polyline instead: kct's silk
+        clearance model covers line segments but reports arcs as
+        ``silk_geometry_unmodeled``, which would leave the outline
+        unchecked and make ``kct check`` end INCOMPLETE (#5764).  With 32
+        chords the worst-case sagitta is ~0.01 mm, well under the stroke.
+        The reference sits at the stock y = -3.96 so it clears the outline.
         """
         x, y = pos
         anode_num = NETS[anode_net]
@@ -403,19 +413,36 @@ def create_led_pcb(output_dir: Path) -> Path:
         # LED pitch: 2.54mm between cathode and anode
         pitch = 2.54 / 2
 
+        # Cathode flat at x = -2.56 (pad-1 side) closed by a 32-chord
+        # polyline approximating the r = 2.99 mm body circle.
+        silk_radius = 2.99
+        flat_x = -2.56
+        flat_y = 1.54483
+        start_angle = math.atan2(-flat_y, flat_x)  # ~ -148.9 deg
+        sweep = 2 * abs(start_angle)  # ~297.8 deg, through 0 deg (anode side)
+        chords = 32
+        outline = [(flat_x, flat_y), (flat_x, -flat_y)]
+        for i in range(1, chords):
+            theta = start_angle + sweep * i / chords
+            outline.append((silk_radius * math.cos(theta), silk_radius * math.sin(theta)))
+        outline.append((flat_x, flat_y))
+        silk = "\n".join(
+            f"    (fp_line (start {x0:.4f} {y0:.4f}) (end {x1:.4f} {y1:.4f}) "
+            f'(stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))'
+            for (x0, y0), (x1, y1) in zip(outline[:-1], outline[1:], strict=True)
+        )
+
         return f"""  (footprint "LED_THT:LED_D5.0mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y} 0)
-    (fp_text reference "{ref}" (at 0 -3.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -3.96) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "LED" (at 0 3.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_line (start {-2.56:.3f} -1.545) (end {-2.56:.3f} 1.545) (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
-    (fp_arc (start {-2.56:.3f} -1.54483) (mid {0.801779:.6f} -2.880495) (end 2.99 0) (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
-    (fp_arc (start 2.99 0) (mid {0.801779:.6f} 2.880495) (end {-2.56:.3f} 1.54483) (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+{silk}
     (pad "1" thru_hole rect (at {-pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
     (pad "2" thru_hole circle (at {pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
   )"""
