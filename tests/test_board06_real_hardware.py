@@ -52,3 +52,18 @@ def test_footprint_placement_precedes_pads_for_native_kicad(tmp_path):
         )
         part = next(p for p in generator.components() if p["ref"] == ref)
         assert {p.get_string(0) for p in fp.find_children("pad")} == set(part["pins"])
+
+
+def test_generator_leaves_routed_project_to_the_router(tmp_path, monkeypatch):
+    """Issue #6258: ``kct route`` derives ``*_routed.kicad_pro`` from the source.
+
+    A generator-authored routed project is not a copy of the source (its own
+    ``meta.filename``), so the router refused it as a DRC sidecar conflict.
+    """
+    generator = _generator()
+    stale = tmp_path / "diffpair_test_routed.kicad_pro"
+    stale.write_text("{}")
+    monkeypatch.setattr("sys.argv", ["generate.py", str(tmp_path)])
+    generator.main()
+    assert (tmp_path / "diffpair_test.kicad_pro").is_file()
+    assert not stale.exists()

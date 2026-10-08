@@ -404,13 +404,16 @@ def main():
     parts = components()
     make_schematic(out, parts)
     make_pcb(out, parts)
-    for stem in ("diffpair_test", "diffpair_test_routed"):
-        project = create_minimal_project(stem + ".kicad_pro")
-        project["board"]["design_settings"]["rules"].update(
-            min_copper_edge_clearance=0.3, min_clearance=0.15, min_track_width=0.15
-        )
-        project["net_settings"]["classes"][0]["clearance"] = 0.15
-        save_project(project, out / (stem + ".kicad_pro"))
+    # Only the source project is authored here.  ``kct route --output
+    # diffpair_test_routed.kicad_pcb`` derives the routed sidecar from it (and
+    # refuses to overwrite an unrelated pre-existing one, issue #6258).
+    project = create_minimal_project("diffpair_test.kicad_pro")
+    project["board"]["design_settings"]["rules"].update(
+        min_copper_edge_clearance=0.3, min_clearance=0.15, min_track_width=0.15
+    )
+    project["net_settings"]["classes"][0]["clearance"] = 0.15
+    save_project(project, out / "diffpair_test.kicad_pro")
+    (out / "diffpair_test_routed.kicad_pro").unlink(missing_ok=True)
     rules = {}
     for prefix in ("IN", "OUT"):
         for i in range(1, 5):

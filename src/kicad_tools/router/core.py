@@ -17202,7 +17202,68 @@ class Autorouter:
         # Issue #6243: authored netclass minima, whichever engine or post-pass
         # produced the copper.  Dormant (one dict check) without floors.
         demoted.extend(self.demote_authored_floor_violation_nets())
+        demoted.extend(self.demote_routing_short_nets())
         return sorted(set(demoted))
+
+    def demote_routing_short_nets(self, *, max_rounds: int = 64) -> list[int]:
+        """Demote every routed net whose copper physically shorts another net (#6258).
+
+        The seg-seg finalize gate above sees only routed segment pairs, so a
+        routed track the optimizer ran through a *via* -- or through copper
+        kept by ``--preserve-existing``, such as a GND plane-stitching via --
+        survived it, and ``kct route`` printed ``Nets routed: 8/8`` beside its
+        own ``SHORT routing short [via] OUT4 vs GND`` finding.  This runs the
+        same audit the post-route short check prints
+        (:func:`~kicad_tools.router.io.validate_routes` +
+        :func:`~kicad_tools.router.io.shorting_violations`) over all committed
+        copper, kept copper included, and demotes the routed net of each
+        routing-caused short (grid unmarked, routes removed), one net per
+        round, so a short is reported as an unrouted net rather than counted
+        as routed.  Shorts between two pieces of kept input copper are input
+        defects (``origin == "input"``) and are left to the post-route gate:
+        no routed net drew them.
+
+        Scope: track/via copper only (``obstacle_type`` ``"segment"`` or
+        ``"via"``) -- the pairs the seg-seg gate cannot see (any via, and kept
+        copper, which is not in :attr:`routes`).  A short against a foreign
+        *pad* keeps its established contract (#5862): the net stays committed
+        and the post-route short gate fails the run with exit 3.
+
+        Returns:
+            Sorted demoted net ids (empty in the common, short-free case).
+        """
+        from .io import shorting_violations, validate_routes
+
+        victims: list[int] = []
+        for _ in range(max_rounds):
+            routed_nets = {r.net for r in self.routes}
+            if not routed_nets:
+                break
+            shorts = [
+                v
+                for v in shorting_violations(validate_routes(self))
+                if not v.is_input_defect
+                and v.obstacle_type in ("segment", "via")
+                and (v.net in routed_nets or v.obstacle_net in routed_nets)
+            ]
+            if not shorts:
+                break
+            hit = shorts[0]
+            # The offending copper's own net when it is routed (the segment or
+            # via the audit walked), else the routed obstacle it hit.
+            net = hit.net if hit.net in routed_nets else hit.obstacle_net
+            flush_print(
+                f"    Net {net} ({self.net_names.get(net, '?')}): "
+                f"{hit.obstacle_type} short against "
+                f"{hit.obstacle_net_name or f'net {hit.obstacle_net}'} "
+                f"(overlap {-hit.distance:.3f}mm); demoted to unrouted"
+            )
+            victims.append(net)
+            for route in [r for r in self.routes if r.net == net]:
+                self.grid.unmark_route_usage(route)
+                self.grid.unmark_route(route)
+                self.routes.remove(route)
+        return sorted(set(victims))
 
     def demote_authored_floor_violation_nets(self) -> list[int]:
         """Demote every routed net whose copper breaks an authored minimum (#6243).

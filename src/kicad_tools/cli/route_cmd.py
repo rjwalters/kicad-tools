@@ -428,14 +428,40 @@ def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
     collinear runs (board 02: 1984 vs 1986 segments into consolidation).
     ``reset_route_occupancy_to_static`` drops that residue so the re-mark
     below is a pure function of ``routes``.
+
+    Issue #6258: ``routes`` is only the *routed* copper.  Fixed copper loaded
+    by ``--preserve-existing`` (``router.existing_routes``: plane-stitching
+    vias, authored diff pairs, ...) is registered on the grid with the same
+    ``mark_route`` call, so it is in ``grid.routes`` and is unmarked above --
+    and ``reset_route_occupancy_to_static`` cannot bring it back either,
+    because the static snapshot is taken *before* the first route mark, i.e.
+    before that copper loaded.  Dropping it left the optimizer's collision
+    checkers (via R-tree, segment R-tree, raster) blind to every preserved
+    via and track, so on the board 06 LVDS demo ``compress_staircase`` ran
+    OUT4 straight through a GND stitching via on B.Cu (a 0.312 mm short).
+    Fixed copper is therefore re-registered first -- the same order and the
+    same calls as ``load_pcb_for_routing`` -- so the re-mark is a pure
+    function of ``existing_routes`` + ``routes``.
     """
     routes = list(routes)
+    routed_ids = {id(route) for route in routes}
+    previous_ids = {id(route) for route in router.grid.routes}
+    fixed = [
+        route
+        for route in getattr(router, "existing_routes", None) or []
+        if id(route) in previous_ids and id(route) not in routed_ids
+    ]
     for existing in list(router.grid.routes):
         router.grid.unmark_route(existing)
     router.grid.reset_route_occupancy_to_static()
     router.grid.reset_route_usage()
     if hasattr(router.router, "clear_routed_segments"):
         router.router.clear_routed_segments()
+    for route in fixed:
+        router.grid.mark_route(route)
+        # Mirror onto the paired C++ grid (no-op on the Python backend):
+        # ``unmark_route`` above cleared it there too.
+        router.grid._mark_route_on_cpp_cells(route)
     router.routes = routes
     for route in routes:
         router._mark_route(route)
