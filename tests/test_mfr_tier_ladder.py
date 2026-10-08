@@ -125,6 +125,45 @@ class TestCanEscalateViaInPad:
         assert can_escalate_via_in_pad("jlcpcb", "not-real") is False
 
 
+class TestCanEscalateViaInPadLayerAware:
+    """Issue #6217: via-in-pad gain depends on the reachable layer count.
+
+    ``jlcpcb-tier1``'s POFV process needs 4+ copper layers, so the bare
+    catalog comparison above over-reports a gain on 2-layer runs.
+    """
+
+    def test_jlcpcb_to_tier1_no_gain_at_two_layers(self):
+        assert can_escalate_via_in_pad("jlcpcb", "jlcpcb-tier1", layer_counts=[2]) is False
+
+    def test_jlcpcb_to_tier1_gains_at_four_layers(self):
+        assert can_escalate_via_in_pad("jlcpcb", "jlcpcb-tier1", layer_counts=[4]) is True
+
+    def test_gain_when_any_reachable_count_qualifies(self):
+        assert can_escalate_via_in_pad("jlcpcb", "jlcpcb-tier1", layer_counts=[2, 4]) is True
+
+    def test_pcbway_gains_at_two_layers(self):
+        assert can_escalate_via_in_pad("jlcpcb", "pcbway", layer_counts=[2]) is True
+
+    def test_tier1_to_pcbway_gains_only_where_tier1_lacks_it(self):
+        assert can_escalate_via_in_pad("jlcpcb-tier1", "pcbway", layer_counts=[2]) is True
+        assert can_escalate_via_in_pad("jlcpcb-tier1", "pcbway", layer_counts=[4]) is False
+
+    def test_unknown_manufacturer_returns_false(self):
+        assert can_escalate_via_in_pad("not-real", "jlcpcb-tier1", layer_counts=[4]) is False
+
+    def test_layer_counts_and_floor_helpers(self):
+        from kicad_tools.router.mfr_limits import (
+            min_via_in_pad_layer_count,
+            via_in_pad_layer_counts,
+        )
+
+        assert via_in_pad_layer_counts("jlcpcb-tier1", [6, 2, 4, 4]) == (4, 6)
+        assert via_in_pad_layer_counts("jlcpcb", [2, 4, 6]) == ()
+        assert min_via_in_pad_layer_count("jlcpcb-tier1") == 4
+        assert min_via_in_pad_layer_count("pcbway") == 2
+        assert min_via_in_pad_layer_count("jlcpcb") is None
+
+
 class TestCanEscalateScalar:
     """Tests for the scalar-relaxation detector (clearance/trace/via)."""
 

@@ -1593,7 +1593,11 @@ class EscapeRouter:
         # Issue #2881: Counter for "would-have-rescued" events -- bumped
         # every time the escape router would have invoked
         # ``_try_in_pad_escape`` for a fine-pitch QFP/SSOP pin but the
-        # current manufacturer's ``via_in_pad_supported`` is False.  When
+        # current manufacturer's ``via_in_pad_supported`` is False.
+        # Issue #6217: counted even when the lateral off-pad via fallback
+        # then salvages the pin's escape -- an in-pad via was still the
+        # first choice, and a lateral via on a 0.5 mm-pitch row takes
+        # routing space the in-pad via would not.  When
         # this counter is non-zero after a routing attempt, the
         # ``--auto-mfr-tier`` escalation loop knows that switching to a
         # via-in-pad-capable manufacturer would unblock those pins, and
@@ -3830,6 +3834,10 @@ class EscapeRouter:
                     pad,
                     package,
                 )
+                # Issue #6217: set once this pin's missed via-in-pad rescue
+                # has been counted, so the legacy detection below does not
+                # count it twice.
+                missed_rescue_recorded = False
                 if try_in_pad_fallback and unclipped_escape.segments:
                     surface_seg = unclipped_escape.segments[0]
                     violation = self._segment_violates_pad_clearance(
@@ -3891,6 +3899,26 @@ class EscapeRouter:
                                     escapes,
                                 ):
                                     pocket_target = raw_target
+
+                    # Issue #6217: record the missed via-in-pad rescue HERE,
+                    # before the lateral off-pad fallback below gets a
+                    # chance to ``continue`` past the legacy detection.
+                    # #5189 stopped gating this block on
+                    # ``via_in_pad_supported`` so that tiers without an
+                    # orderable in-pad process still get the (legal) lateral
+                    # via escape.  A side effect was that every pin the
+                    # lateral fallback rescued skipped the counter, so on
+                    # board 04 at plain jlcpcb the counter read 0 and
+                    # ``--auto-mfr-tier`` never escalated.  The counter
+                    # means "an in-pad via was this pin's first-choice
+                    # escape and this tier cannot place one" -- the same
+                    # set of pins it counted before #5189 -- whether or not
+                    # a lateral via then salvaged the escape.
+                    if wants_in_pad_but_unavailable and violation:
+                        self.missed_via_in_pad_rescues += 1
+                        missed_rescue_recorded = True
+                        if package.ref:
+                            self.missed_via_in_pad_components.add(package.ref)
 
                     if violation or pin_boxed or pocket_target is not None:
                         # Issue #3033 / #3062: forward the EscapeRouter-level
@@ -4059,7 +4087,11 @@ class EscapeRouter:
                 # short-segment skip below, because both the "clipped to
                 # nothing" and "clipped but stub kept" cases are equally
                 # rescue-able by an in-pad via.
-                if wants_in_pad_but_unavailable and unclipped_escape.segments:
+                if (
+                    wants_in_pad_but_unavailable
+                    and not missed_rescue_recorded
+                    and unclipped_escape.segments
+                ):
                     surface_seg = unclipped_escape.segments[0]
                     if self._segment_violates_pad_clearance(
                         surface_seg,

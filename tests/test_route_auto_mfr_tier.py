@@ -964,3 +964,106 @@ class TestTriggerTableWiring:
             ]
         )
         assert _classify_dominant_failure_cause(tied) == FailureCause.PIN_ACCESS
+
+
+class TestLayerAwareViaInPadEscalation:
+    """Issue #6217: the convergence guard must respect the layer count.
+
+    ``jlcpcb-tier1``'s via-in-pad process (JLCPCB POFV) needs 4+ copper
+    layers.  A run that can only reach 2 layers gains nothing from
+    escalating ``jlcpcb -> jlcpcb-tier1`` on the strength of missed
+    via-in-pad rescues, and must say so instead of re-routing.
+    """
+
+    def _make_args(self, **overrides):
+        base = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            manufacturer="jlcpcb",
+            auto_mfr_tier=True,
+            mfr_tier_ladder=None,
+            auto_layers=True,
+            adaptive_rules=False,
+            quiet=False,
+            timeout=None,
+            _wall_clock_deadline=None,
+        )
+        for k, v in overrides.items():
+            setattr(base, k, v)
+        return base
+
+    def _run(self, args):
+        from pathlib import Path
+
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+
+        seen_tiers: list[str] = []
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            seen_tiers.append(args.manufacturer)
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 5
+            mock_router._escape_router.missed_via_in_pad_components = {"U2"}
+            # No routing_failures -> no trigger-table veto; the guard alone
+            # decides.
+            mock_router.routing_failures = []
+            args._last_router = mock_router
+            return 2
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            rc = route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=False,
+            )
+        return rc, seen_tiers
+
+    def test_two_layer_run_does_not_escalate_and_names_layer_floor(self, capsys):
+        args = self._make_args(max_layers=2)
+        rc, seen_tiers = self._run(args)
+        out = capsys.readouterr().out
+
+        assert rc != 0
+        assert seen_tiers == ["jlcpcb"]
+        assert "Escalating to jlcpcb-tier1" not in out
+        # The reason names the tier, its layer floor and this run's reach.
+        assert "No via-in-pad gain from jlcpcb-tier1" in out
+        assert ">= 4 copper layers" in out
+        assert "can reach only 2L" in out
+        assert "raise --max-layers to 4" in out
+        # ...and is repeated in the exhaustion diagnosis.
+        diagnosis = out[out.index("Diagnosis") :]
+        assert ">= 4 copper layers" in diagnosis
+
+    def test_four_layer_run_escalates_on_missed_rescues(self, capsys):
+        args = self._make_args(max_layers=4, starting_layers=4)
+        rc, seen_tiers = self._run(args)
+        out = capsys.readouterr().out
+
+        assert seen_tiers == ["jlcpcb", "jlcpcb-tier1"]
+        assert (
+            "Escalating to jlcpcb-tier1: missed via-in-pad rescues detected on previous tier" in out
+        )
+        assert "No via-in-pad gain" not in out
+
+    def test_two_to_four_layer_ladder_still_escalates(self, capsys):
+        """A run that can reach 4L (even starting at 2L) has a real gain."""
+        args = self._make_args(max_layers=4)
+        _, seen_tiers = self._run(args)
+        assert seen_tiers == ["jlcpcb", "jlcpcb-tier1"]
+
+    def test_reachable_layer_counts_follow_max_and_starting_layers(self):
+        from pathlib import Path
+
+        from kicad_tools.cli.route_cmd import _mfr_tier_reachable_layer_counts
+
+        missing = Path("does-not-exist.kicad_pcb")
+        assert _mfr_tier_reachable_layer_counts(missing, SimpleNamespace(max_layers=2)) == (2,)
+        assert _mfr_tier_reachable_layer_counts(missing, SimpleNamespace(max_layers=4)) == (2, 4)
+        assert _mfr_tier_reachable_layer_counts(
+            missing, SimpleNamespace(max_layers=4, starting_layers=4)
+        ) == (4,)

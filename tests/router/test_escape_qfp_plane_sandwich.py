@@ -822,3 +822,45 @@ def test_ordinary_lateral_rescue_controls_process_error(caplog, blocked):
                 )
                 >= escape.via.diameter / 2 + rules.trace_clearance - 1e-6
             )
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_lateral_rescue_still_records_missed_via_in_pad(blocked):
+    """Issue #6217: a lateral off-pad via that salvages a pin's escape must
+    not hide the missed via-in-pad rescue from ``--auto-mfr-tier``.
+
+    #5189 let tiers without an orderable in-pad process reach the lateral
+    fallback; each pin it rescued then ``continue``d past the missed-rescue
+    detection, so plain jlcpcb reported 0 missed rescues and the escalation
+    ladder never moved to jlcpcb-tier1.  The count must not depend on
+    whether the lateral fallback happened to succeed.
+    """
+    rules = _make_rules(manufacturer="jlcpcb")
+    holes = (
+        [Pad(x=0, y=0, width=30, height=30, net=0, net_name="", through_hole=True, drill=30)]
+        if blocked
+        else []
+    )
+    router = EscapeRouter(_make_grid(rules), rules, component_holes=holes)
+    assert not router.via_in_pad_supported
+    package = router.analyze_package(_make_lqfp48_along_edge_sandwich())
+    router.generate_escapes(package)
+
+    assert (router.forced_lateral_via_fallbacks > 0) is (not blocked)
+    assert router.missed_via_in_pad_rescues > 0
+    assert router.missed_via_in_pad_components == {package.ref}
+
+    # Same count either way: each pin is counted exactly once.
+    other = EscapeRouter(
+        _make_grid(rules),
+        rules,
+        component_holes=(
+            []
+            if blocked
+            else [
+                Pad(x=0, y=0, width=30, height=30, net=0, net_name="", through_hole=True, drill=30)
+            ]
+        ),
+    )
+    other.generate_escapes(other.analyze_package(_make_lqfp48_along_edge_sandwich()))
+    assert other.missed_via_in_pad_rescues == router.missed_via_in_pad_rescues
