@@ -326,3 +326,57 @@ def test_parse_pcbnew_version():
     assert parse_pcbnew_version("10.0.6") == (10, 0, 6)
     assert parse_pcbnew_version("10.1") == (10, 1, 0)
     assert parse_pcbnew_version("garbage") is None
+
+
+_MULTILAYER_ZONE = (
+    '(zone (net 2) (net_name "GOOD") (layers "F.Cu" "B.Cu") '
+    "(polygon (pts (xy 102 101) (xy 118 101) (xy 118 110) (xy 102 110))))"
+)
+
+
+def test_multilayer_fill_on_old_pcbnew_fails_loudly(tmp_path, monkeypatch):
+    """Old pcbnew + multilayer zone raises instead of shipping empty copper (#6213)."""
+    from kicad_tools.zones import placement_fill
+
+    board = tmp_path / "board.kicad_pcb"
+    source = board_text()[:-1] + _MULTILAYER_ZONE + ")"
+    board.write_text(source)
+    monkeypatch.setattr(placement_fill, "kicad_python_version", lambda python: "10.0.1")
+    with pytest.raises(placement_fill.MultilayerFillUnsupportedError) as info:
+        fill_around_fixed_copper(board, frozenset({"BAD"}), python=tmp_path / "py")
+    assert "10.0.2" in str(info.value) and "10.0.1" in str(info.value)
+    assert board.read_text() == source
+
+
+def test_single_layer_fill_not_blocked_by_old_pcbnew(tmp_path, monkeypatch):
+    """The version gate applies only to multilayer zones."""
+    from kicad_tools.zones import placement_fill
+
+    fake = tmp_path / "fake_python.sh"
+    fake.write_text("#!/bin/sh\nexit 1\n")
+    fake.chmod(0o755)
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(board_text()[:-1] + '(zone (net 2) (net_name "GOOD") (layer "F.Cu")))')
+    monkeypatch.setattr(placement_fill, "kicad_python_version", lambda python: "10.0.1")
+    with pytest.raises(placement_fill.NativeFillWorkerError):
+        fill_around_fixed_copper(board, frozenset({"BAD"}), python=fake)
+
+
+def test_find_kicad_python_retries_cold_start_timeout(monkeypatch):
+    """A first probe that times out is retried rather than yielding None."""
+    import subprocess
+    import sys
+
+    from kicad_tools.zones import placement_fill
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(kw["timeout"])
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(placement_fill.subprocess, "run", fake_run)
+    assert placement_fill.find_kicad_python() is not None
+    assert len(calls) == 2 and calls[0] > 5

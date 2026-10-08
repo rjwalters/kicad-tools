@@ -31,8 +31,23 @@ class NativeFillWorkerError(RuntimeError):
         super().__init__(f"native selective zone-fill worker exited {returncode}{detail}")
 
 
+#: Seconds allowed for one interpreter probe. A cold start (first ``import
+#: pcbnew`` + ``wx`` after boot, or under load) can exceed the old 5 s limit and
+#: made discovery flakily return None (Issue #6213).
+_PROBE_TIMEOUT_S = 20
+_PROBE_ATTEMPTS = 2
+
+
+class MultilayerFillUnsupportedError(RuntimeError):
+    """pcbnew is too old to fill multilayer zones; it would yield empty copper."""
+
+
 def find_kicad_python() -> Path | None:
-    """Find an interpreter with the native APIs this selective fill needs."""
+    """Find an interpreter with the native APIs this selective fill needs.
+
+    A probe that times out is retried once (cold-start tolerance) before the
+    candidate is given up on.
+    """
     candidates = [Path(sys.executable)]
     if sys.platform == "darwin":
         candidates.append(
@@ -57,22 +72,27 @@ def find_kicad_python() -> Path | None:
         if not candidate.is_file() or candidate.resolve() in seen:
             continue
         seen.add(candidate.resolve())
-        try:
-            result = subprocess.run(
-                [
-                    str(candidate),
-                    "-c",
-                    "import sys, pcbnew; "
-                    "__import__('wx') if sys.platform != 'linux' else None; "
-                    "assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if result.returncode == 0:
+        result = None
+        for _attempt in range(_PROBE_ATTEMPTS):
+            try:
+                result = subprocess.run(
+                    [
+                        str(candidate),
+                        "-c",
+                        "import sys, pcbnew; "
+                        "__import__('wx') if sys.platform != 'linux' else None; "
+                        "assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=_PROBE_TIMEOUT_S,
+                )
+                break
+            except subprocess.TimeoutExpired:
+                continue
+            except OSError:
+                break
+        if result is not None and result.returncode == 0:
             return candidate
     return None
 
@@ -129,6 +149,7 @@ def fill_around_fixed_copper(
     staged = source
     identities = {}
     expected = set()
+    multilayer_expected = set()
     net_names = parse_net_names(source)
     for start, end, zone in reversed(zones):
         parsed = parse_string(zone)
@@ -152,6 +173,8 @@ def fill_around_fixed_copper(
         name = net_names.get(token, "") if isinstance(token, int) else str(token)
         if name not in protected_nets and parsed.find("keepout") is None:
             expected.add(identity)
+            if parsed.find("layers") is not None:
+                multilayer_expected.add(identity)
         # Normalize legacy timestamp syntax without changing modern identity.
         tagged = re.sub(r"\((?:uuid|tstamp)\s+[^)]+\)", "", zone)
         tagged = tagged.replace("(zone", f'(zone (uuid "{identity}")', 1)
@@ -162,6 +185,16 @@ def fill_around_fixed_copper(
         python = find_kicad_python()
     if python is None:
         raise RuntimeError("KiCad Python with selective zone-fill support is unavailable")
+    if multilayer_expected:
+        found = kicad_python_version(python)
+        if not multilayer_fill_supported(found):
+            required = ".".join(map(str, MULTILAYER_FILL_MIN_VERSION))
+            raise MultilayerFillUnsupportedError(
+                f"{len(multilayer_expected)} multilayer zone(s) need pcbnew >= {required} "
+                f"to fill, but {python} reports pcbnew {found}; older versions silently "
+                "produce empty copper. Upgrade KiCad to >= "
+                f"{required} (Issue #6101/#6213)."
+            )
     with tempfile.TemporaryDirectory(prefix="kct-fixed-fill-") as directory:
         stage = Path(directory) / board.name
         output = Path(directory) / "filled.kicad_pcb"
