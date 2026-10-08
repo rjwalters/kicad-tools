@@ -391,7 +391,10 @@ def _completes_separation(
     broken around a hole, or one ending on the wall of an L-shaped board's
     notch, does cross all of the board's material on that line; it is
     accepted, which is the same risk as the full-span solid line main
-    already accepts.
+    already accepts.  An ambiguous crossing sequence (odd count, or
+    near-coincident crossings from duplicated or overlapping Edge.Cuts
+    segments) is rejected; only the full-span shortcut or ``--vscore-layer``
+    can then enable the layer.
     """
     tol = _VSCORE_SPAN_TOL_MM
     end_tol = _VSCORE_END_TOL_MM
@@ -404,6 +407,16 @@ def _completes_separation(
             runs.append([lo, hi])
     if any(lo <= lo_edge + tol and hi >= hi_edge - tol for lo, hi in runs):
         return True
+
+    # Pairing crossings into material stretches assumes they alternate
+    # off-board / on-board.  An overlapping or duplicated Edge.Cuts segment
+    # adds a spurious crossing that flips the parity (turning a hole's
+    # interior into "material"), so fail closed when the sequence is
+    # ambiguous: an odd count, or two crossings closer than the end tolerance.
+    if len(crossings) % 2 or any(
+        b - a <= end_tol for a, b in zip(crossings, crossings[1:], strict=False)
+    ):
+        return False
 
     # Board material: every other stretch between crossings, starting on
     # board after the first one.  Clip to the outline extent.

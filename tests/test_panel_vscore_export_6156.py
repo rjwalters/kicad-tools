@@ -710,6 +710,43 @@ def test_line_broken_around_a_hole_crosses_all_material(tmp_path: Path) -> None:
     assert pcb_vscore_layers(_probe(tmp_path, [(0, 40, 46, 40)], "Eco1.User", edge=hole)) == []
 
 
+# The judge's third-round probes on PR #6203: an overlapping or duplicated
+# Edge.Cuts segment (DXF imports, a ``gr_rect`` later traced with ``gr_line``)
+# adds a spurious crossing that flips the crossing parity and turns the hole
+# interior into "material".  A hole mark must not become a V-score.
+_MOUNT_HOLE = '(gr_circle (center 20 40) (end 21 40) (layer "Edge.Cuts"))'
+_DUP_LEFT_FULL = '(gr_line (start 0 0) (end 0 80) (layer "Edge.Cuts"))'
+_DUP_LEFT_PART = '(gr_line (start 0 10) (end 0 30) (layer "Edge.Cuts"))'
+_HOLE_CROSSHAIR = [(18.5, 40, 21.5, 40), (20, 38.5, 20, 41.5)]
+_DUPLICATED_EDGE_CASES = {
+    "full-duplicate-with-crosshair": (_DUP_LEFT_FULL, _HOLE_CROSSHAIR),
+    "full-duplicate-with-horizontal-bar": (_DUP_LEFT_FULL, [(17, 40, 23, 40)]),
+    "full-duplicate-with-line-edge-to-past-hole": (_DUP_LEFT_FULL, [(0, 40, 22, 40)]),
+    "partial-overlap-with-crosshair": (_DUP_LEFT_PART, _HOLE_CROSSHAIR),
+}
+
+
+@pytest.mark.parametrize("layer", _PROBE_LAYERS)
+@pytest.mark.parametrize(
+    "dup,lines",
+    list(_DUPLICATED_EDGE_CASES.values()),
+    ids=list(_DUPLICATED_EDGE_CASES),
+)
+def test_duplicated_outline_edge_does_not_turn_a_hole_mark_into_a_score(
+    tmp_path: Path, dup: str, lines, layer: str
+) -> None:
+    clean = _probe(tmp_path, lines, layer, edge=_MOUNT_HOLE)
+    assert pcb_vscore_layers(clean) == []
+    dirty = _probe(tmp_path, lines, layer, edge=_MOUNT_HOLE + dup)
+    assert pcb_vscore_layers(dirty) == []
+
+
+def test_duplicated_outline_edge_keeps_the_full_span_shortcut(tmp_path: Path) -> None:
+    """An ambiguous outline fails closed, but a solid edge-to-edge line still counts."""
+    pcb = _probe(tmp_path, [(-3, 40, 103, 40)], "Eco1.User", edge=_MOUNT_HOLE + _DUP_LEFT_FULL)
+    assert pcb_vscore_layers(pcb) == ["Eco1.User"]
+
+
 def test_l_board_divider_to_the_notch_wall_matches_full_span_acceptance(
     tmp_path: Path,
 ) -> None:
