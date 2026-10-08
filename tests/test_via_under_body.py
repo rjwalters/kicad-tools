@@ -361,6 +361,11 @@ class TestSelection:
             "Package_SON:USON-10_2.5x1.0mm",
             "Package_DFN_QFN:TDFN-8-1EP_3x3mm",
             "Package_DFN_QFN:UDFN-6_1.45x1mm",
+            "OptoDevice:Maxim_OLGA-14_3.3x5.6mm_P0.8mm",
+            "Sensor_Audio:Infineon_PG-LLGA-5-2",
+            "Sensor_Audio:ST_HLGA-6_3.76x4.72mm_P1.65mm",
+            "Sensor_Distance:AMS_OLGA12",
+            "Sensor_Humidity:Texas_S-PWSON-N6-HDC2080",
         ],
     )
     def test_default_pattern_selects(self, name: str):

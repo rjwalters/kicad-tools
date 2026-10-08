@@ -70,7 +70,7 @@ VIA_UNDER_BODY_RULE_ID = "via_under_body"
 # lower-case vendor ids such as ``qfn-16...`` all select).
 #
 # ``SON`` is anchored as a package token -- start of id or a non-letter,
-# up to two prefix letters (W/V/U/X/HU/TD...SON; ``X2SON`` matches via the
+# an optional known prefix (W/V/U/X/HU/TD...SON; ``X2SON`` matches via the
 # non-letter branch), and no trailing letter.  Unanchored, the
 # case-insensitive search would hit ``son`` inside vendor/part names
 # (Degson, Panasonic, SeikoEpson, Resonator, Johanson, Winson, Aosong):
@@ -79,9 +79,14 @@ VIA_UNDER_BODY_RULE_ID = "via_under_body"
 # the same 964 KiCad 10 stock footprints as the old case-sensitive
 # ``QFN|DFN|SON|LGA``.
 #
-# ``LGA`` gets the same anchoring without prefix letters (``Vulgaris``, ``Nolga`` must not select;
-# ``Package_LGA:...``, ``LGA-14``, ``vendor:lga-12`` still do).
-DEFAULT_FOOTPRINT_PATTERN = r"QFN|DFN|(?:^|[^A-Z])(?:[A-Z]{0,2}SON|LGA)(?![A-Z])"
+# ``LGA`` gets the same anchoring, but only with the prefixes KiCad uses
+# (``OLGA``, ``LLGA``, ``HLGA``, ``WLGA``...), so ``Vulgaris`` and ``Nolga``
+# do not select while ``Package_LGA:...``, ``LGA-14``, ``vendor:lga-12`` and
+# ``Maxim_OLGA-14`` do.  ``SON`` likewise admits only real prefixes
+# (``PWSON``, ``HVSON``, ``TDSON``...) rather than any two letters.
+DEFAULT_FOOTPRINT_PATTERN = (
+    r"QFN|DFN|(?:^|[^A-Z])(?:(?:HV|HU|TD|PW|[WVUXTP])?SON|(?:LL|[WUFOLHTP])?LGA)(?![A-Z])"
+)
 
 # An SMD pad at least this many times the footprint's median copper-pad area
 # is treated as an exposed (thermal) pad.
