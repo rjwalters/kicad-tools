@@ -389,6 +389,8 @@ class PadAccessInvariant:
     #: Set when the journal stopped being a reliable change feed (it hit its own
     #: record cap, or the router has none), which disables the cache entirely.
     _cache_disabled: bool = field(default=False, repr=False)
+    #: Net ids recognised as Kelvin sense nets (resolved lazily).
+    _kelvin_net_ids: frozenset[int] | None = field(default=None, repr=False)
 
     # -- arming ----------------------------------------------------------
 
@@ -531,7 +533,7 @@ class PadAccessInvariant:
             # search-derived copper yet.  A net that already landed copper is
             # being served, and protecting its remaining terminals here would
             # veto the ordinary mid-net commits that connect them.
-            if pad_net in committed_nets:
+            if pad_net in committed_nets and not self._kelvin_pad_pending(key, pad_net, grid):
                 continue
             before = self._had_access_before(key, pad, grid, rules)
             if before is None:
@@ -546,6 +548,56 @@ class PadAccessInvariant:
             if not after:
                 return self._describe_veto(key, pad, pad_net, grid, rules, route, candidate_net)
         return None
+
+    def _kelvin_pad_pending(self, key: tuple[str, str], net: int, grid: Any) -> bool:
+        """Is ``key`` a Kelvin-net terminal that its own net has not reached yet?
+
+        Issue #5398.  A Kelvin sense net lands copper for its first branch
+        while the remaining sense pins are still waiting for their turn; those
+        pins have the same scarce front-layer exit as any unrouted pad, and a
+        later foreign route can consume it.  Ordinary nets keep the "already
+        served" exemption unchanged.
+        """
+        if net not in self._kelvin_nets():
+            return False
+        pad = self.pads.get(key)
+        if pad is None:
+            return False
+        hx, hy = pad_half_extents(pad)
+        for other in getattr(grid, "routes", ()) or ():
+            if getattr(other, "is_escape", False) or int(getattr(other, "net", 0) or 0) != net:
+                continue
+            for seg in other.segments:
+                tol = seg.width / 2.0
+                for ex, ey in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+                    if abs(ex - pad.x) <= hx + tol and abs(ey - pad.y) <= hy + tol:
+                        return False
+            for via in other.vias:
+                r = via.diameter / 2.0
+                if abs(via.x - pad.x) <= hx + r and abs(via.y - pad.y) <= hy + r:
+                    return False
+        return True
+
+    def _kelvin_nets(self) -> frozenset[int]:
+        cached = self._kelvin_net_ids
+        if cached is not None:
+            return cached
+        from .kelvin import detect_kelvin_topology
+
+        found: set[int] = set()
+        nets: Mapping[int, Sequence[tuple[str, str]]] = getattr(self.router, "nets", {}) or {}
+        pads: Mapping[tuple[str, str], Pad] = getattr(self.router, "pads", {}) or {}
+        for net, members in nets.items():
+            if not net or len(members) < 3:
+                continue
+            objs = [pads[m] for m in members if m in pads]
+            try:
+                if detect_kelvin_topology(objs) is not None:
+                    found.add(int(net))
+            except Exception:  # pragma: no cover - detection must never break routing
+                continue
+        self._kelvin_net_ids = frozenset(found)
+        return self._kelvin_net_ids
 
     def _describe_veto(
         self,

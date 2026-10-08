@@ -301,6 +301,9 @@ def test_escape_copper_is_the_baseline_not_a_candidate():
 def test_pad_of_an_already_committed_net_is_not_protected():
     """A net that already landed copper is being served, not waiting its turn."""
     router = _kelvin_cluster()
+    # Ordinary (non-Kelvin) net: no shunt-resistor root.  Kelvin nets keep
+    # protecting their unreached terminals (issue #5398, tested below).
+    router.pads[("R10", "1")].ref = "X10"
     # Give the ISENSE net a committed route far from U3 so the net counts as
     # "has copper" without touching U3's access.
     seeded = Route(
@@ -325,6 +328,68 @@ def test_pad_of_an_already_committed_net_is_not_protected():
     assert router._mark_route(_comp_route(), enforce_pad_access=True) is True
     assert router.pad_access_vetoes == []
     assert _u3_access(router).is_empty()
+
+
+def _seeded_kelvin_branch() -> Route:
+    """First Kelvin branch: a track leaving the shunt pad R10.1, far from U3."""
+    return Route(
+        net=ISENSE_NET,
+        net_name="ISENSE_A+",
+        segments=[
+            Segment(
+                x1=5.0,
+                y1=3.0,
+                x2=5.0,
+                y2=5.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=ISENSE_NET,
+                net_name="ISENSE_A+",
+            )
+        ],
+    )
+
+
+def test_pending_kelvin_pad_of_partially_routed_net_stays_protected():
+    """Issue #5398: a Kelvin net with one branch down still has pending pins.
+
+    U3.1 is not reached by the R10 branch, so the competing track that would
+    consume its only exit is refused even though the ISENSE net has copper.
+    """
+    router = _kelvin_cluster()
+    router._mark_route(_seeded_kelvin_branch())
+    assert not _u3_access(router).is_empty()
+
+    assert router._mark_route(_comp_route(), enforce_pad_access=True) is False
+    assert not _u3_access(router).is_empty()
+    assert [v.pad_key for v in router.pad_access_vetoes] == [("U3", "1")]
+
+
+def test_reached_kelvin_pad_is_not_protected():
+    """A Kelvin terminal its own copper already reaches is served, not pending."""
+    router = _kelvin_cluster()
+    router._mark_route(_seeded_kelvin_branch())
+    x, y = KELVIN_POSITIONS["U3"]
+    reach = Route(
+        net=ISENSE_NET,
+        net_name="ISENSE_A+",
+        segments=[
+            Segment(
+                x1=x,
+                y1=y,
+                x2=x,
+                y2=y - 1.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=ISENSE_NET,
+                net_name="ISENSE_A+",
+            )
+        ],
+    )
+    router._mark_route(reach)
+
+    assert router._mark_route(_comp_route(), enforce_pad_access=True) is True
+    assert router.pad_access_vetoes == []
 
 
 def test_empty_route_is_not_a_candidate():
