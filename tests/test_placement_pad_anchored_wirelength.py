@@ -402,7 +402,7 @@ def _load_fixture_board(name: str) -> tuple[list[PlacedComponent], list[Net]]:
     "board_name,centre_mm,pad_mm",
     [
         ("trivial_3_resistors", 12.0, 7.2),
-        ("simple_rc_filter", 127.0, 126.69),
+        ("simple_rc_filter", 127.0, 127.44),
         ("medium_mcu_board", 382.0, 339.23),
     ],
 )

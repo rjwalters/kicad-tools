@@ -238,3 +238,9 @@ uv run python scripts/research/calibrate_fom.py          # official seed-42 cach
 ```
 
 `calibrate_fom.py` now carries every `## Addendum` section of this file forward when it regenerates the report, so a re-run no longer drops these decision records.
+
+## Addendum: the placer now decouples (issue #6020)
+
+The #5984 addendum traced the anti-informative `decoupling_proximity` on `stm32_devboard` to its hand floorplan: U2's VDD pins sit 6-14 mm from the nearest `+3.3V` cap (term 70.24). The cause was upstream of the FOM. Neither the board generators (all fleet boards are hand-placed) nor `kct optimize-placement` had any notion of a decoupling cap. #6020 adds one to the placer (`placement/decoupling.py`; see `docs/placement-scoring.md`). It uses the same rail classifier and `C`/`U` predicates as this term, pairs each cap with a supply pin and snaps it beside that pin.
+
+On board 04's own floorplan, `kct optimize-placement --seed current --max-iterations 0 --no-slide-off` moves only the caps. It takes the term from 70.24 to 13.18, with every supply pin 1.74-1.99 mm from a cap, which is better than any of the 40 jitters (median 62.86). The committed board is unchanged until #6025 regenerates it, so the weight stays 0.0181 here. After that regeneration, re-run `scripts/research/fom_decoupling_ab.py` and the calibration. A committed placement at about 13 against jitters around 60 should make the term informative on this board again, and its fitted weight should rise.

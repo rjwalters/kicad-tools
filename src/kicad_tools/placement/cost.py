@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Sequence
 
+from .decoupling import DecouplingGroup, compute_decoupling_distance
+
 
 class CostMode(Enum):
     """Scoring mode for the composite cost function."""
@@ -60,6 +62,13 @@ class PlacementCostConfig:
             that share a voltage domain into a compact zone but never gates
             feasibility. Kept small relative to the hard-constraint weights so
             it only shapes the layout once a placement is already feasible.
+        decoupling_weight: Weight for the decoupling-capacitor affinity term
+            (issue #6020), the summed distance from each decoupling cap to the
+            IC supply pin it is assigned (see
+            :mod:`kicad_tools.placement.decoupling`). Soft, like cohesion: it
+            pulls caps onto their pins but never gates feasibility. Only fires
+            when decoupling groups are passed to :func:`evaluate_placement`;
+            ``0.0`` disables it.
         mode: Scoring mode (weighted_sum or lexicographic).
     """
 
@@ -72,6 +81,7 @@ class PlacementCostConfig:
     inter_block_spacing: float = 1.0
     creepage_weight: float = 1e5
     cohesion_weight: float = 1.0
+    decoupling_weight: float = 2.0
     mode: CostMode = CostMode.WEIGHTED_SUM
 
 
@@ -113,6 +123,9 @@ class CostBreakdown:
             every voltage domain with two or more members, of each member's
             distance to its domain centroid (a radius-of-gyration-style spread
             penalty). Lower means each domain is packed more tightly.
+        decoupling: Raw decoupling-affinity cost (mm) -- the summed distance
+            from each decoupling cap's supply pad to its assigned IC supply
+            pin (issue #6020). Zero when no decoupling groups were supplied.
     """
 
     wirelength: float = 0.0
@@ -124,6 +137,7 @@ class CostBreakdown:
     inter_block: float = 0.0
     creepage: float = 0.0
     cohesion: float = 0.0
+    decoupling: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -225,6 +239,27 @@ class BoardOutline:
         return self.max_y - self.min_y
 
 
+def _oriented_size(
+    placement: ComponentPlacement,
+    footprint_sizes: dict[str, tuple[float, float]] | None,
+    default_size: tuple[float, float],
+) -> tuple[float, float]:
+    """Footprint ``(width, height)`` as placed: swapped at 90/270 degrees.
+
+    *footprint_sizes* holds the unrotated extent. Every bounding-box term
+    used to read it as-is, so a cap turned 90 degrees was checked for
+    overlap as if it still lay flat -- the opposite of
+    :func:`~kicad_tools.placement.slide_off.slide_off_overlaps`, which swaps
+    the half-sizes. The two then disagreed about which rotated parts collide,
+    and the post-pass slide-off could turn a feasible optimum infeasible
+    (issue #6020).
+    """
+    w, h = (footprint_sizes or {}).get(placement.reference, default_size)
+    if int(round(placement.rotation / 90.0)) % 2:
+        return h, w
+    return w, h
+
+
 def compute_wirelength(
     placements: Sequence[ComponentPlacement],
     nets: Sequence[Net],
@@ -304,7 +339,7 @@ def compute_overlap(
 
     boxes: list[tuple[float, float, float, float]] = []
     for p in placements:
-        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        w, h = _oriented_size(p, footprint_sizes, default_size)
         half_w, half_h = w / 2, h / 2
         boxes.append((p.x - half_w, p.y - half_h, p.x + half_w, p.y + half_h))
 
@@ -342,7 +377,7 @@ def compute_boundary_violation(
     total = 0.0
 
     for p in placements:
-        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        w, h = _oriented_size(p, footprint_sizes, default_size)
         half_w, half_h = w / 2, h / 2
 
         left = p.x - half_w
@@ -384,7 +419,7 @@ def compute_drc_violations(
 
     boxes: list[tuple[float, float, float, float]] = []
     for p in placements:
-        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        w, h = _oriented_size(p, footprint_sizes, default_size)
         half_w, half_h = w / 2, h / 2
         boxes.append((p.x - half_w, p.y - half_h, p.x + half_w, p.y + half_h))
 
@@ -475,7 +510,7 @@ def compute_block_boundary_violation(
         if region is None:
             continue
 
-        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        w, h = _oriented_size(p, footprint_sizes, default_size)
         half_w, half_h = w / 2, h / 2
 
         left = p.x - half_w
@@ -524,7 +559,7 @@ def compute_inter_block_spacing_violation(
         bid = block_membership.get(p.reference)
         if bid is None:
             continue
-        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        w, h = _oriented_size(p, footprint_sizes, default_size)
         half_w, half_h = w / 2, h / 2
         left = p.x - half_w
         right = p.x + half_w
@@ -623,7 +658,7 @@ def compute_creepage_violation(
         domain = ref_domains.get(p.reference)
         if domain is None:
             continue
-        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        w, h = _oriented_size(p, footprint_sizes, default_size)
         half_w, half_h = w / 2, h / 2
         boxes.append(
             (
@@ -745,6 +780,8 @@ def evaluate_placement(
     required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
     exempt_pairs: set[frozenset[str]] | None = None,
     pad_positions: Mapping[tuple[str, str], tuple[float, float]] | None = None,
+    decoupling_groups: Sequence[DecouplingGroup] | None = None,
+    decoupling_pad_positions: Mapping[tuple[str, str], tuple[float, float]] | None = None,
 ) -> PlacementScore:
     """Evaluate a placement configuration and return a composite score.
 
@@ -791,6 +828,15 @@ def evaluate_placement(
             objective byte-identical to the historical centre-anchored
             score. Pins missing from the map fall back to their component
             centre.
+        decoupling_groups: Optional decoupling structure from
+            :func:`kicad_tools.placement.decoupling.identify_decoupling_groups`.
+            Enables the soft decoupling-affinity term (issue #6020), weighted by
+            ``config.decoupling_weight``. ``None`` (the default) keeps the
+            objective unchanged.
+        decoupling_pad_positions: Pad map the decoupling term measures with.
+            Kept separate from *pad_positions* so the decoupling term can be
+            pad-accurate while wirelength stays centre-anchored. Falls back to
+            *pad_positions*, then to component centres.
 
     Returns:
         PlacementScore with total score, per-component breakdown, and
@@ -839,6 +885,16 @@ def evaluate_placement(
     if ref_domains:
         cohesion = compute_domain_cohesion(placements, ref_domains, footprint_sizes)
 
+    # Decoupling-cap affinity (issue #6020). Soft preference like cohesion:
+    # added to the score, never to the is_feasible gate below.
+    decoupling = 0.0
+    if decoupling_groups and config.decoupling_weight:
+        decoupling = compute_decoupling_distance(
+            decoupling_groups,
+            placements,
+            decoupling_pad_positions if decoupling_pad_positions is not None else pad_positions,
+        )
+
     breakdown = CostBreakdown(
         wirelength=wirelength,
         overlap=overlap,
@@ -849,9 +905,10 @@ def evaluate_placement(
         inter_block=inter_block,
         creepage=creepage,
         cohesion=cohesion,
+        decoupling=decoupling,
     )
 
-    # NOTE: cohesion is intentionally NOT part of this conjunction. It is an
+    # NOTE: cohesion (and decoupling) is intentionally NOT part of this conjunction. It is an
     # optimization preference (pack same-domain refs), not a feasibility
     # constraint -- a spread-out domain is suboptimal, never infeasible.
     is_feasible = (
@@ -886,6 +943,7 @@ def _weighted_sum_score(breakdown: CostBreakdown, config: PlacementCostConfig) -
         + config.block_boundary_weight * breakdown.inter_block
         + config.creepage_weight * breakdown.creepage
         + config.cohesion_weight * breakdown.cohesion
+        + config.decoupling_weight * breakdown.decoupling
     )
 
 
@@ -902,10 +960,10 @@ def _lexicographic_score(
     large constant offset.
 
     Feasible placements are scored by the weighted sum of wirelength, area,
-    and the soft same-domain cohesion term. Cohesion shapes the layout only
-    once a placement is already feasible -- it is absent from the infeasible
-    offset branch so it can never make one infeasible placement outrank
-    another on preference alone.
+    and the soft same-domain cohesion and decoupling-affinity terms. Those two
+    shape the layout only once a placement is already feasible -- they are
+    absent from the infeasible offset branch so they can never make one
+    infeasible placement outrank another on preference alone.
     """
     if not is_feasible:
         # Large offset ensures any infeasible score > any feasible score.
@@ -922,4 +980,5 @@ def _lexicographic_score(
             config.wirelength_weight * breakdown.wirelength
             + config.area_weight * breakdown.area
             + config.cohesion_weight * breakdown.cohesion
+            + config.decoupling_weight * breakdown.decoupling
         )

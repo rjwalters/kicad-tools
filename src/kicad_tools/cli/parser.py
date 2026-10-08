@@ -6637,7 +6637,10 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "'current' warm-starts CMA-ES from the board's existing footprint "
             "positions with a tight step size, refining the current layout "
             "instead of re-imagining it -- use it to resolve a few local "
-            "violations without discarding a ratified hand floorplan."
+            "violations without discarding a ratified hand floorplan. It never "
+            "returns a placement scoring worse than the one it started from; with "
+            "--max-iterations 0 it keeps the layout and only runs the slide-off "
+            "and decoupling-cap snap passes."
         ),
     )
     op_parser.add_argument(
@@ -6645,7 +6648,9 @@ def _add_optimize_placement_parser(subparsers) -> None:
         metavar="JSON",
         help=(
             'Custom cost weights as JSON, e.g. \'{"wirelength": 2.0, "overlap": 1e6}\'. '
-            "Keys: overlap, drc, boundary, wirelength, area, creepage, cohesion"
+            "Keys: overlap, drc, boundary, wirelength, area, creepage, cohesion, "
+            "decoupling (default 2.0: pull each decoupling cap onto the IC supply pin "
+            "it serves, then snap it beside that pin; 0 turns both off)"
         ),
     )
     op_parser.add_argument(

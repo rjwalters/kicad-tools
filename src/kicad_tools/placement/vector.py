@@ -284,19 +284,26 @@ def _transform_pad(
     if side == 1:
         lx = -lx
 
-    # Step 2: rotate around local origin
+    # Step 2: rotate around local origin.  KiCad's footprint orientation is
+    # counter-clockwise *as seen on screen*, where +y points down, so in
+    # board coordinates a pad at local (lx, ly) lands at
+    # (lx*cos + ly*sin, -lx*sin + ly*cos) -- the same negated-angle transform
+    # as ``optim.fom_features._pad_absolute_position`` (verified against
+    # pcbnew, issue #3739).  Until issue #6020 this used the y-up form, which
+    # mirrored every 90/270-degree footprint's pads relative to the board the
+    # writer produces.
     rot_idx = int(round(rotation_deg / 90.0)) % 4
     if rot_idx == 0:
         rx, ry = lx, ly
         out_sx, out_sy = sx, sy
-    elif rot_idx == 1:  # 90 degrees CCW
-        rx, ry = -ly, lx
+    elif rot_idx == 1:  # 90 degrees (KiCad orientation)
+        rx, ry = ly, -lx
         out_sx, out_sy = sy, sx
     elif rot_idx == 2:  # 180 degrees
         rx, ry = -lx, -ly
         out_sx, out_sy = sx, sy
-    else:  # 270 degrees CCW (= 90 CW)
-        rx, ry = ly, -lx
+    else:  # 270 degrees
+        rx, ry = -ly, lx
         out_sx, out_sy = sy, sx
 
     # Step 3: translate

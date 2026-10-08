@@ -17,7 +17,14 @@ from typing import TYPE_CHECKING
 logger = logging.getLogger(__name__)
 
 from kicad_tools.optim.board_outline import extract_board_outline as _extract_board_outline_shared
-from kicad_tools.optim.components import Component, FunctionalCluster, Keepout, Pin, Spring
+from kicad_tools.optim.components import (
+    ClusterType,
+    Component,
+    FunctionalCluster,
+    Keepout,
+    Pin,
+    Spring,
+)
 from kicad_tools.optim.config import PlacementConfig
 from kicad_tools.optim.constraints import (
     ConstraintType,
@@ -908,6 +915,16 @@ class PlacementOptimizer:
         if not anchor_comp:
             return
 
+        # Decoupling caps (issue #6020): spring each cap's supply pad to the
+        # IC supply pin it is assigned, one cap per pin before any pin gets
+        # two, instead of every cap to the IC's first pin.
+        if (
+            cluster.cluster_type == ClusterType.POWER
+            and not cluster.anchor_pin
+            and self._create_decoupling_springs(cluster, anchor_comp)
+        ):
+            return
+
         # Find the anchor pin to use (if specified) or use component center
         anchor_pin = None
         if cluster.anchor_pin:
@@ -944,6 +961,67 @@ class PlacementOptimizer:
                 net_name=f"_cluster_{cluster.cluster_type.value}",
             )
             self.springs.append(spring)
+
+    def _create_decoupling_springs(
+        self, cluster: FunctionalCluster, anchor_comp: Component
+    ) -> bool:
+        """Spring each POWER-cluster cap to its assigned IC supply pin.
+
+        Uses :func:`kicad_tools.placement.decoupling.assign_caps_to_pins` on
+        the current pin positions. Returns False (caller falls back to the
+        anchor-centre springs) when no member shares a non-ground net with
+        the anchor.
+        """
+        from kicad_tools.placement.decoupling import (
+            DecouplingCap,
+            DecouplingGroup,
+            SupplyPin,
+            assign_caps_to_pins,
+        )
+        from kicad_tools.router.net_class import is_ground_rail_name
+
+        groups: dict[str, tuple[list[DecouplingCap], list[SupplyPin]]] = {}
+        positions: dict[tuple[str, str], tuple[float, float]] = {}
+        for pin in anchor_comp.pins:
+            if not pin.net_name or is_ground_rail_name(pin.net_name):
+                continue
+            groups.setdefault(pin.net_name, ([], []))[1].append(
+                SupplyPin(anchor_comp.ref, pin.number)
+            )
+            positions[(anchor_comp.ref, pin.number)] = (pin.x, pin.y)
+        for member_ref in cluster.members:
+            member = self._component_map.get(member_ref)
+            if member is None:
+                continue
+            ground = next((p for p in member.pins if is_ground_rail_name(p.net_name)), None)
+            supply = next((p for p in member.pins if p.net_name in groups), None)
+            if supply is None or ground is None:
+                continue
+            groups[supply.net_name][0].append(
+                DecouplingCap(member_ref, supply.number, ground.number)
+            )
+            positions[(member_ref, supply.number)] = (supply.x, supply.y)
+
+        made = False
+        for net_name, (caps, pins) in groups.items():
+            if not caps:
+                continue
+            group = DecouplingGroup(net_name, tuple(caps), tuple(pins))
+            for cap, supply_pin, _ in assign_caps_to_pins(group, positions):
+                self.springs.append(
+                    Spring(
+                        comp1_ref=anchor_comp.ref,
+                        pin1_num=supply_pin.pad,
+                        comp2_ref=cap.reference,
+                        pin2_num=cap.supply_pad,
+                        stiffness=self.config.cluster_stiffness,
+                        rest_length=0.0,
+                        net=-1,
+                        net_name=f"_cluster_{cluster.cluster_type.value}",
+                    )
+                )
+                made = True
+        return made
 
     def get_clusters(self) -> list[FunctionalCluster]:
         """Get all registered functional clusters."""
