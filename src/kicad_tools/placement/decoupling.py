@@ -442,7 +442,7 @@ def snap_decoupling_caps(
     yard_gap_mm: float = 0.15,
     escape_mm: float = 3.0,
     escape_halo_mm: float = 0.35,
-):
+) -> tuple[PlacementVector, list[SnapMove]]:
     """Move each decoupling cap to the nearest free spot beside its pin.
 
     A deterministic local search run after the global optimizer (issue

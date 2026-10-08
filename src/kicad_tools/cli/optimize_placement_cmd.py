@@ -53,8 +53,10 @@ from kicad_tools.placement.cost import (
 )
 from kicad_tools.placement.decoupling import (
     DecouplingGroup,
+    SnapMove,
     decoupling_pairs,
     identify_decoupling_groups,
+    snap_decoupling_caps,
 )
 from kicad_tools.placement.geometry import extract_board_outline as _extract_board_outline
 from kicad_tools.placement.seed import force_directed_placement, random_placement
@@ -351,6 +353,66 @@ def _build_decoupling_context(
     return groups
 
 
+def snap_decoupling(
+    vector: PlacementVector,
+    pcb_path: str,
+    components: Sequence[ComponentDef],
+    nets: Sequence[Net],
+    rules: DesignRuleSet,
+    board: BoardOutline,
+    cost_config: PlacementCostConfig,
+    footprint_sizes: dict[str, tuple[float, float]],
+    decoupling_groups: Sequence[DecouplingGroup] | None,
+    *,
+    fixed_sides: Sequence[int] | None = None,
+    ref_domains: dict[str, str] | None = None,
+    required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
+    exempt_pairs: set[frozenset[str]] | None = None,
+    pad_anchored: bool = False,
+) -> tuple[PlacementVector, list[SnapMove]]:
+    """Run the post-optimize decoupling-cap snap (issue #6020).
+
+    The global search rarely lands a 2 mm part within a millimetre of one
+    pin. Finish the job one cap at a time: each cap moves to the nearest
+    free spot beside its assigned supply pin (clear of other bodies and of
+    IC signal-pin escape lanes), never adding an overlap/DRC/boundary
+    violation. See :func:`~kicad_tools.placement.decoupling.snap_decoupling_caps`.
+
+    Shared by ``kct optimize-placement`` and the MCP ``optimize_placement``
+    tool (issue #6253). A no-op when *decoupling_groups* is empty/``None``.
+    """
+    if not decoupling_groups:
+        return vector, []
+
+    def _score_vector(vec: PlacementVector) -> PlacementScore:
+        return _evaluate(
+            vec,
+            components,
+            nets,
+            rules,
+            board,
+            cost_config,
+            footprint_sizes,
+            ref_domains=ref_domains,
+            required_mm_by_domain_pair=required_mm_by_domain_pair,
+            exempt_pairs=exempt_pairs,
+            pad_anchored=pad_anchored,
+            decoupling_groups=decoupling_groups,
+            fixed_sides=fixed_sides,
+        )
+
+    return snap_decoupling_caps(
+        vector,
+        components,
+        decoupling_groups,
+        board,
+        _score_vector,
+        cost_config,
+        pad_nets={pin: net.name for net in nets for pin in net.pins},
+        extents=_read_local_courtyards(pcb_path),
+    )
+
+
 def _decoupling_report(
     vector: PlacementVector,
     components: Sequence[ComponentDef],
@@ -457,12 +519,40 @@ def _build_hv_context(
 def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
     """Parse a JSON string into PlacementCostConfig.
 
+    Thin wrapper over :func:`weights_to_cost_config` that turns bad input
+    into the CLI's ``SystemExit(1)``.
+    """
+    data = None
+    if weights_json is not None:
+        try:
+            data = json.loads(weights_json)
+        except json.JSONDecodeError as e:
+            print(f"Error: invalid JSON for --weights: {e}", file=sys.stderr)
+            raise SystemExit(1) from e
+    try:
+        return weights_to_cost_config(data)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from e
+
+
+def weights_to_cost_config(data: dict | None) -> PlacementCostConfig:
+    """Build the optimizer's :class:`PlacementCostConfig` from a weights dict.
+
+    Shared by ``kct optimize-placement --weights`` and the MCP
+    ``optimize_placement`` tool (issue #6253) so both score identically.
+
     Defaults to :class:`CostMode.LEXICOGRAPHIC` so that the optimizer's
     convergence check (issue #2821) can use the feasibility-sentinel
     score (>= 1e12) to refuse early convergence in the infeasible region.
+    The decoupling-cap affinity term (issue #6020) is on by default;
+    ``{"decoupling": 0}`` turns it (and the post-optimize snap) off.
 
-    Callers can override the mode via the ``"mode"`` key in the JSON
-    payload (``"lexicographic"`` or ``"weighted_sum"``).
+    Callers can override the mode via the ``"mode"`` key (``"lexicographic"``
+    or ``"weighted_sum"``).
+
+    Raises:
+        ValueError: If ``mode`` is not a valid cost mode.
     """
     defaults = {
         "overlap_weight": 1e6,
@@ -476,13 +566,8 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
         "mode": CostMode.LEXICOGRAPHIC,
     }
 
-    if weights_json is None:
+    if data is None:
         return PlacementCostConfig(**defaults)
-    try:
-        data = json.loads(weights_json)
-    except json.JSONDecodeError as e:
-        print(f"Error: invalid JSON for --weights: {e}", file=sys.stderr)
-        raise SystemExit(1) from e
 
     mode = defaults["mode"]
     raw_mode = data.get("mode")
@@ -491,11 +576,7 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
             mode = CostMode(raw_mode)
         except ValueError as e:
             valid = ", ".join(m.value for m in CostMode)
-            print(
-                f"Error: invalid 'mode' in --weights JSON (got {raw_mode!r}; valid: {valid})",
-                file=sys.stderr,
-            )
-            raise SystemExit(1) from e
+            raise ValueError(f"invalid 'mode' in weights (got {raw_mode!r}; valid: {valid})") from e
 
     return PlacementCostConfig(
         overlap_weight=data.get("overlap", defaults["overlap_weight"]),
@@ -1456,43 +1537,28 @@ def run_optimize_placement(
     # free spot beside its assigned supply pin (clear of other bodies and of
     # IC signal-pin escape lanes), never adding an overlap/DRC/boundary
     # violation. See snap_decoupling_caps.
-    if decoupling_groups:
-        from kicad_tools.placement.decoupling import snap_decoupling_caps
-
-        def _score_vector(vec: PlacementVector) -> PlacementScore:
-            return _evaluate(
-                vec,
-                components,
-                nets,
-                rules,
-                board_outline,
-                cost_config,
-                footprint_sizes,
-                ref_domains=hv_ref_domains,
-                required_mm_by_domain_pair=hv_required,
-                exempt_pairs=hv_exempt,
-                pad_anchored=pad_anchored_wirelength,
-                decoupling_groups=decoupling_groups,
-                fixed_sides=fixed_sides,
+    best_vector, snap_moves = snap_decoupling(
+        best_vector,
+        pcb_path,
+        components,
+        nets,
+        rules,
+        board_outline,
+        cost_config,
+        footprint_sizes,
+        decoupling_groups,
+        fixed_sides=fixed_sides,
+        ref_domains=hv_ref_domains,
+        required_mm_by_domain_pair=hv_required,
+        exempt_pairs=hv_exempt,
+        pad_anchored=pad_anchored_wirelength,
+    )
+    if not quiet and snap_moves:
+        print(f"\n  Decoupling snap: moved {len(snap_moves)} cap(s) onto their supply pins")
+        for move in snap_moves:
+            print(
+                f"    {move.cap} -> {move.pin}: {move.before_mm:.2f} mm -> {move.after_mm:.2f} mm"
             )
-
-        best_vector, snap_moves = snap_decoupling_caps(
-            best_vector,
-            components,
-            decoupling_groups,
-            board_outline,
-            _score_vector,
-            cost_config,
-            pad_nets={pin: net.name for net in nets for pin in net.pins},
-            extents=_read_local_courtyards(pcb_path),
-        )
-        if not quiet and snap_moves:
-            print(f"\n  Decoupling snap: moved {len(snap_moves)} cap(s) onto their supply pins")
-            for move in snap_moves:
-                print(
-                    f"    {move.cap} -> {move.pin}: "
-                    f"{move.before_mm:.2f} mm -> {move.after_mm:.2f} mm"
-                )
 
     # Evaluate final result for full breakdown (after post-pass)
     final_score = _evaluate(
