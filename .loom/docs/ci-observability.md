@@ -679,9 +679,8 @@ from data the poller already fetches — no extra API calls:
   `loom.ci.shard.kind`, parsed from the job's *display name* by
   `ci_telemetry::records::parse_shard` — no artifact or annotation needed.
   `ci.yml`'s two sharded job families already print `(index/total)` in their
-  `name:`: `Rust Unit Tests (1/3)`, `Rust OTLP Feature Tests (2/3)` (both
-  `cargo nextest run --partition count:k/N`, `shard_kind =
-  nextest-partition`), and `Shell Test Suites (hermetic, 1/2)`
+  `name:`: `Rust Unit Tests (1/3)` (`cargo nextest run --partition count:k/N`,
+  `shard_kind = nextest-partition`), and `Shell Test Suites (hermetic, 1/2)`
   (`LOOM_CI_SHARD` round robin, `shard_kind = shell-suite-shard`). A job whose
   name carries no trailing `(k/N)` group is unsharded: `shard_kind = "none"`,
   `shard_index` and `shard_total` both `None`. `shard_kind` is always present
@@ -863,8 +862,8 @@ section 10's "whether it is imbalanced") consume these.
 ### Per-test spans (#9456)
 
 The suite spans above only exist for the `LOOM_CI_SHARD` **shell** legs. The
-`nextest-partition` legs — `Rust Unit Tests (k/3)` and `Rust OTLP Feature Tests
-(k/3)` — had nothing below step granularity, so "~110s of this leg's 250s was
+`nextest-partition` legs — `Rust Unit Tests (k/3)` (the former separate
+`Rust OTLP Feature Tests` family was folded into it, #10823) — had nothing below step granularity, so "~110s of this leg's 250s was
 the test step" was answerable but *which tests* spent it was not, and
 rebalancing `--partition count:k/N` stayed guesswork (the same Unit partition's
 test step has ranged 50s–139s between runs, #9089). Each selected test now
@@ -889,7 +888,7 @@ for the file.
 |---|---|
 | Producer | `.config/nextest.toml`'s `[profile.ci.junit] path = "junit.xml"` → `target/nextest/ci/junit.xml`, written by every `cargo nextest run --profile ci` |
 | Wire format | nextest's JUnit XML: `<testcase name= classname= timestamp= time=>` plus, for a non-pass, one `<failure>` / `<error>` / `<skipped>` / `<flakyFailure>` / `<rerunFailure>` child. `classname` is the **binary id** (`loom-daemon` for the lib tests, `loom-daemon::<target>` for an integration binary), `name` the test path inside it — a test path is only unique within its binary, so both halves are part of the identity |
-| Artifact | `ci-test-timings-<family>-<k>-<N>`, uploaded `if: always()` with `if-no-files-found: ignore`. **The name is the entire pairing key** — JUnit XML carries no run id, no shard and no job name, so unlike a suite-timings record there is nothing inside the file to pair on. `<family>` is the leg's display name with its `(k/N)` suffix stripped and slugified (`Rust Unit Tests (1/3)` → `rust-unit-tests`), which is load-bearing rather than cosmetic: `ci.yml` has **two** nextest-partition families both sharding `1..3`, so `(kind, k, N)` alone matches two jobs. Renaming the artifact — or renaming the job without renaming the artifact — silently stops test spans, which `ci_telemetry::tests::test_spans` asserts against `ci.yml` itself |
+| Artifact | `ci-test-timings-<family>-<k>-<N>`, uploaded `if: always()` with `if-no-files-found: ignore`. **The name is the entire pairing key** — JUnit XML carries no run id, no shard and no job name, so unlike a suite-timings record there is nothing inside the file to pair on. `<family>` is the leg's display name with its `(k/N)` suffix stripped and slugified (`Rust Unit Tests (1/3)` → `rust-unit-tests`), which keeps the key unambiguous: `ci.yml` has one nextest-partition family today (`Rust Unit Tests`, since #10823), but the family slug stays in the name so a second family sharding `1..3` cannot make `(kind, k, N)` match two jobs. Renaming the artifact — or renaming the job without renaming the artifact — silently stops test spans, which `ci_telemetry::tests::test_spans` asserts against `ci.yml` itself |
 | Transport | the same `gh run download` path as a suite-timings artifact, and the same single artifacts listing: one listing serves both families, so a run with both pays one request, not two |
 | Cost gate | **Zero requests** unless the run has at least one *not-yet-emitted* `nextest-partition` job. The gate is **per family**: a run with only nextest legs never downloads a suite-timings artifact, and vice versa |
 | Pairing | the unique `nextest-partition` job of that run with the same family and `(index, total)`. Zero matches or several is `NoUniqueJob` — never guessed, the same rule [suite spans](#suite-spans-9089) and [story stitching](#story-stitching-9088) follow |
@@ -902,7 +901,7 @@ for the file.
 **Volume is the one risk the suite work did not face, and the emission is a
 deliberate tail sample.** A nextest leg runs **4,242 tests** against a shell
 leg's ~118 suites, so one span per test would be ~25,400 spans per CI run
-across the six nextest legs — two orders of magnitude more trace volume than
+across the three nextest legs — two orders of magnitude more trace volume than
 every other CI span combined. Both questions these spans exist for ("what
 should move between partitions", "which test regressed or flakes") live
 entirely in the slow tail: a 3 ms test is not a rebalancing candidate at any

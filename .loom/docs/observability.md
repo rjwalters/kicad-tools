@@ -526,7 +526,8 @@ versus a session limit), which the snapshot-derived `loom.pool.exhaustions`
 cannot do. Each work-finder pool hold emits a `loom.pool.hold` span when it
 clears. At a sweep's terminal transition, the execution's exact token
 breakdown is journalled as one `loom.runtime.usage` span per model and scope
-(execution/attempt) in the sweep's trace,
+(execution/attempt) in the sweep's trace, each stamped with `llm.billing` /
+`llm.credential.kind` / `llm.provider.profile` (#10749),
 and the transcript-ingest pass stamps the sweep's `session.summary` log with
 the same trace when the match is unambiguous — which needs the summary to know
 its issue, so #9445 resolves that from the session's worktree/branch as well as
@@ -573,7 +574,13 @@ picture from the local forge-call sink. Each `invoke github` span carries the
 same facts per call (#10343): `github.http.{status,not_modified,requests,source}`
 (`unknown` when `gh` gave no HTTP evidence — never guessed),
 `github.billing` (`ok`|`not_modified`|`rate_limited`|`error`|`not_sent`) and
-the bucket join keys `github.{resource,account,cred_owner,role}`.
+the bucket join keys `github.{resource,account,cred_owner,role}`. Since
+#10752 a span also carries `github.repo`, a write carries `github.number`, and
+a call made by a daemon pass inside its caller scope carries `github.caller`
+(the `loom:blocked` release pass: `stale_blocked_release`). That pass also
+emits a `pass.summary` log per pass and a `pass.verdict` per artifact; see
+[`telemetry-schema.md`](telemetry-schema.md) and
+`defaults/observability/signoz/pass-queries.sql`.
 
 **Shadow reconciliation (#10343).** *Shadow* spend is what GitHub billed a
 bucket that Loom did not attribute: GitHub's bill per `(account, owner,

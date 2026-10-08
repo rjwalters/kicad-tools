@@ -344,9 +344,23 @@ fixture. A behaviour change is a new id registered beside the old one
      (`--pr-history` / `--forge-pr-cases`) can be in them; compare them with
      `labels_known`, the cases whose labels were reconstructed, not with
      `overall`. A star that reaches the PR only through its linked issue is
-     not seen. The labels select cases only and are not fed to the
-     estimator. The section is absent when no case is held and none knows
-     its labels.
+     not seen by `starred`. The labels select cases only and are not fed to
+     the estimator.
+     Three more subsets split the cases by the `eta-fit/v2` input
+     `starred_any` (PR **or linked-issue** star, read point-in-time by the
+     one priority-input builder, #10508): **`starred_any`** (known on),
+     **`unstarred_any`** (known off) and **`star_any_unknown`** (the case
+     carries priority inputs but the star is unknown; it is never counted
+     as unstarred). Only cases that carry priority inputs
+     (`--pr-history` / `--forge-pr-cases`) can be in them. The section is
+     absent when no case is held, none knows its labels and none carries
+     priority inputs.
+   - **paired by subset** (`paired_by_subset`, `--compare` only, #10508):
+     inside each subset, the two heuristics' deciding loss (`pinball4`)
+     with the `b − a` difference and its 95% issue-bootstrap interval and
+     distinct-issue count, and both late-surprise rates, each over the
+     cases of the subset both sides decided. A report only: `better` does
+     not read it.
 3. **Let it run in shadow** — from the moment it is registered, the tracker
    estimates **every** heuristic of the kind at the same `as_of` for the same
    subject. Each is its own `eta.estimate`; only `current`'s carries
@@ -655,12 +669,57 @@ after quick-tern. The method is `eta::conformal_ipcw::calibrate_drift_aware`.
 
   Nothing here is live-coverage evidence.
 
+**The wrapper over any `land` base** (#10524, slice 5;
+`eta::conformal_wrap::IpcwWrap`). This is quick-tern's and swift-tern's
+calibration with the base as a parameter. It runs the base and re-identifies
+the explanation. It then calibrates the explanation against the base's own
+rows, the `calibration` rows whose `heuristic` is the base's id. Over
+twin-otter-b it reproduces quick-tern (`Calibrator::Ipcw`) and swift-tern
+(`Calibrator::IpcwDrift`) byte for byte, and a test pins that.
+
+The wrapper has four rules:
+- It wraps `land` bases only.
+- It never calibrates twice. A base that already calibrates itself
+  (even-lark, quick-tern, swift-tern, bold-lark) comes back unchanged, only
+  re-identified, and `eta backtest --wrap` refuses it by name
+  (`conformal_wrap::CALIBRATED`).
+- It degrades to the base. With thin evidence, the base's answer comes back
+  without a `calibration` record.
+- Its point-in-time rule is quick-tern's.
+
+A calibrated simulator answer also recomputes. `run_explanation` applies the
+`calibration` shift after a held-heron (`held_heron`) or dependency
+recompute, as it already did after twin-otter's.
+
+**It is not registered.** With the in-flight `land` candidates, the `land`
+shadow budget (13) is full, and a wrapped base needs evidence before it
+earns a slot. So it is evaluated offline, with `eta backtest --heuristic
+BASE --wrap ipcw|ipcw-drift [--compare BASE]`:
+- The wrapped base is scored as `BASE+ipcw` (or `BASE+ipcw-drift`), a
+  `+`-suffixed id that is never registered.
+- The base's own replayed estimates become its evidence, by the same
+  leak-free rule as `calibration_from_replay`.
+- `--compare BASE` pairs the wrapped base against the unwrapped one on the
+  identical replay set. That is the acceptance's "pinball no worse than the
+  unwrapped base".
+
+`--fit-dir DIR` replays every fitted base walk-forward from the
+versioned layout `eta fit` writes: `eta-fit/v1` files directly in `DIR`,
+`eta-fit/v2` files in `DIR/v2/` and `eta-fit/v3` files in `DIR/v3/`
+(`DatedFits::load_dir`). A case gets the newest file of each schema strictly
+before its `as_of`, so keen-wren (v2) and loop-kite (v3) are wrappable beside
+held-heron, land-v4 and the twin-otter pair. A regime-adjusted base
+(brisk-petrel) is calibrated on its raw quantiles with the regime factor
+re-applied last, the order `run_explanation` replays. Registering a wrapped
+base later means a new datestamped id built from `IpcwWrap::new`.
+
 *Deferred* (#10524, #10528):
 - serving the drift inflation, behind a gate that live evidence supports;
 - the drift signal is computed per estimate from the calibration log, not
   consumed from a fleet-level #10528 drift event (none is emitted yet);
 - history-aware (HAPS) conditioning;
-- other bases (#10508, #10523);
+- registering another wrapped base (#10523; keen-wren's is bold-lark), which
+  needs a shadow-budget slot and the backtest evidence above;
 - the loom-experiments walk-forward acceptance backtest.
 
 `land-2026-10-06-held-heron` (#10523) ships the same way: registered, not
@@ -1313,7 +1372,11 @@ it links whose link **and** star were both known before `cutoff`.
 - **Unknown coverage**: a repo whose raw cache has no pulls (link) or
   issue-events rows before `cutoff`, or whose cache was last caught up before
   `cutoff` (the listings' cursor `synced_through` stamp, set when a refresh
-  completes and frozen while SigNoz history covers the repo, #10520), gives an
+  completes; while SigNoz history covers the repo each listing is frozen at its
+  own newest row, #10520, then advanced only by a budgeted ETag'd forge refresh
+  of each star listing, #10746: SigNoz-dated issue star changes are recorded,
+  late exports included, but never move a stamp, since SigNoz has no ingestion
+  watermark proving a window complete), gives an
   unknown state (`null`, counted in `rows_star_unknown`), never "unstarred". `eta fit` also prints
   `rows_starred_any` and `rows_star_issue_only` (starred only through an issue). Serving records nothing for a repo
   with no star observation within the last hour.
@@ -1501,15 +1564,55 @@ for a fit or backtest to report.
   today's `repos.yml`. `eta backtest --pr-history` / `--forge-pr-cases`
   and the nightly folds pass the cached roster history. The plain
   `cases_from_pr_records` is unchanged, and no case's other fields move.
-  Forge-fetched cases do not yet carry `linked_star`, so the star
-  inputs of the real walk-forward are known only through a PR's own labels
-  until a reader supplies it (remaining under #10508).
+  `backtest::fill_linked_stars` fills an unread `linked_star` from the
+  cached raw star events (`star::StarInputs`, the fit's own reader): each
+  record is read at its end (`merged_at`, else `closed_at`, else now), and a
+  record whose repo cache does not cover that instant stays unread, so it
+  is unknown, never unstarred. `eta backtest --pr-history` /
+  `--forge-pr-cases` and the nightly folds call it before conversion; a
+  record that already carries `linked_star` is untouched.
 - **Status.** keen-wren is registered in shadow (tier `candidate`,
   after `held-heron`, before the twin-otter pair). The captain's v2 file is
   published to the other hosts (see **Publishing the v2 file**, below).
   Still open in #10508: the walk-forward backtest against twin-otter-b; and
   live evidence that the ETA authority, the loom-ui chooser and the nightly
   scoring pick the new id up.
+- **Backtest decision rule (predeclared, #10508).** Stated before the run,
+  so the result cannot pick its own bar. The run is
+  `eta backtest --heuristic land-2026-10-04-twin-otter-b --compare
+  land-2026-10-06-keen-wren --forge-pr-cases …` over the experiment repo's
+  walk-forward folds. `--forge-pr-cases` reads through `gh`, so
+  it runs as whatever `GH_TOKEN` holds: set it to a GitHub App installation
+  token (see #10508), never the operator token. Or replay
+  records an App-authenticated run saved with `--pr-history`. `a` is twin-otter-b, `b` is keen-wren; every figure below
+  is in the comparison report.
+  - *Pinball (primary).* keen-wren **beats** twin-otter-b when the 95%
+    issue-bootstrap interval of `paired.delta_pinball4_loss_sec` lies
+    wholly below 0. It **matches** when that interval's upper bound is at
+    most 5% of twin-otter-b's `paired.a_mean_pinball4_loss_sec` (the
+    non-inferiority margin; this 5% is *proposed*, and the operator
+    confirms it on #10508 before the run). Otherwise it fails. Its answer
+    rate must not
+    fall more than `ANSWER_RATE_SLACK` (1 point) below twin-otter-b's.
+  - *Starred items.* From `paired_by_subset.starred_any`: keen-wren's
+    `b_late_rate` must be lower than twin-otter-b's `a_late_rate` (a tie
+    counts as no gain); the target it moves toward is ≤ 15%. If the
+    subset's `delta4_items` is below 100, the result is reported as
+    underpowered, not as a pass (see *Power*).
+  - *Unstarred items (no regression).* From
+    `paired_by_subset.unstarred_any`: keen-wren's late rate at most
+    `LATE_SURPRISE_SLACK` (2 points) above twin-otter-b's, and the upper
+    bound of its `delta_pinball4_loss_sec` interval within the same 5%
+    margin of that subset's `a_mean_pinball4_loss_sec`.
+  - *Power.* A subset whose `delta4_items` is below `MIN_DISTINCT_ITEMS`
+    (100, the live gate's floor) is **underpowered**: its figures and n are
+    reported, and no gain is claimed from them. Stars have history only
+    from about 2026-10-03, so the starred subset is expected to be
+    underpowered at first.
+  - *Coverage.* The report states the `star_any_unknown` count beside the
+    two star subsets, and the fit's `priority_coverage` and
+    `roster_history` coverage, so a result over mostly-unknown inputs is
+    visible as such.
 - **Publishing the v2 file** (`eta::fit::publish_v2`, #10508, item 3 of
   #10586). Beside v1's publication (#10395, which moves only the v1 file),
   the captain publishes its newest `eta-fit/v2` file on the same branch
@@ -2424,7 +2527,9 @@ accepts `--repo-root PATH` (default: the current directory).
   outcomes back in 40–60%), `t_alarm` (drift check trips) against the 6 h / 12 h / 3 h targets,
   plus `false_alarm` on the unshifted stream. It measures the regime layer
   on this heuristic's noise, not the heuristic's own adaptation, so it does
-  not feed the promotion gate's `adaptation` check.
+  not feed the promotion gate's `adaptation` check. `--wrap ipcw|ipcw-drift` scores
+  `--heuristic` (a `land` base) IPCW-calibrated as `ID+ipcw`, and
+  `--compare` stays unwrapped (#10524; see quick-tern above).
 - **`loom-daemon eta view OWNER/NAME#ISSUE [--explain] [--json]`** — the
   current estimate(s) for one issue (#9327). State resolution, in order:
   1. An **open linked PR**: its review labels
@@ -2683,7 +2788,7 @@ of what is on disk and never needs a refetch.
 | `fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `600` (#10329; was `1500`) |
 | `fleetRefresh.reserveCalls` | `LOOM_ETA_FLEET_REFRESH_RESERVE` | `1500` |
 | `fleetRefresh.backfillDays` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_DAYS` | `21` (floor 15: the fit window + 1) |
-| `fleetRefresh.gapFillMaxCallsPerPass` | `LOOM_ETA_FLEET_REFRESH_GAP_FILL_MAX_CALLS` | `100` (floor `2`: one listing page + one timeline page): forge gap-fill reads per repo per cycle while SigNoz is the history source (#10520), snapshot and raw-event reads alike; a covered repo makes neither (its raw cache's star coverage is frozen, so later cutoffs read star-unknown). An interrupted timeline resumes at its next page |
+| `fleetRefresh.gapFillMaxCallsPerPass` | `LOOM_ETA_FLEET_REFRESH_GAP_FILL_MAX_CALLS` | `100` (floor `2`: one listing page + one timeline page): forge gap-fill reads per repo per cycle while SigNoz is the history source (#10520), snapshot and raw-event reads alike; a covered repo makes no snapshot read, and only its backfilled star listings' ETag'd refreshes (issue events and pulls) from what is left of this budget (#10746; an interrupted one leaves star coverage frozen, so later cutoffs read star-unknown). An interrupted timeline resumes at its next page |
 | `fleetRefresh.signoz.enabled` | `LOOM_ETA_FLEET_SIGNOZ_ENABLED` | `false` (#9758; see [SigNoz in-sweep half](#signoz-in-sweep-half-fleetrefreshsignoz-9758)) |
 | `fleetRefresh.signoz.historyPrimary` | `LOOM_ETA_FLEET_SIGNOZ_HISTORY_PRIMARY` | `false` (#10520, opt-in): with `signoz.enabled` and this set, each pass takes PR history from the SigNoz timeline and reads the forge only to gap-fill (every PR SigNoz knows, baseline-only label sets included, is planned); a failed or partial SigNoz walk degrades to the forge walk. Design, coverage rule and parity tolerance: `loom-daemon/src/eta/fleet_signoz_history.rs` |
 

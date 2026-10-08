@@ -56,7 +56,56 @@ a failing dequeue, can still merge. The test
 `known_gap_revocation_after_check_pass_can_still_merge` pins this, and
 `INVARIANT_FULLY_DEMONSTRATED` is `false`. Enabling queue mode requires either
 a forge-side mechanism that closes the window or an explicit operator decision
-to accept it; neither is in scope here.
+to accept it; neither is in scope here. Phase B4 (below) narrows the window
+but does not close it.
+
+## Phase B4 (#10256): whole groups, conclude last, re-fail on revocation
+
+`forge_merge_queue::group_authz` (fake-GitHub tests: `group_authz_tests.rs`)
+fixes three ways the single-PR check above leaves a revoked PR mergeable:
+
+1. **Grouped merges.** The merge group for the entry at position *k* carries
+   every entry ahead of it, and GitHub can merge them all when that group
+   passes. `merge_group_check` evaluates only the group's own PR, so a revoked
+   PR ahead of it could merge inside a later group
+   (`revoked_pr_cannot_ride_a_later_group` shows the old check passing).
+   `group_check` evaluates **every member**; any unauthorized member fails
+   the group.
+2. **Early pass.** `group_check` reports `pending`, which blocks, until every
+   other required check on the group commit has succeeded, and only then
+   reads the live facts. Until then the live facts are not read, so a
+   facts-API or grant-store outage while CI runs also leaves it `pending`;
+   the only early `failure` is a definite grant denial (no grant, or a grant
+   for another head), which needs no live read. An unknown at the final
+   evaluation is a `failure`, never a pass. A hold added while CI runs is
+   seen at the final evaluation with no daemon involvement. If nothing
+   re-runs the check (daemon or runner outage), it stays pending and GitHub
+   times the entry out rather than merging it.
+3. **Green but not yet merged** (GitHub's minimum-group-size wait).
+   `revoke_refail_dequeue` revokes the grant, posts a `failure` commit status
+   for `loom/merge-authorization` on every live group commit that contains
+   the PR (statuses are latest-wins per context), then dequeues. Each step is
+   attempted regardless of the others, and each is idempotent. The re-fail
+   only withdraws authority, so a dormant build does it too.
+
+`GroupRevocation::passed_checks_withdrawn()` reports whether every such
+group was re-failed. When it is `false`, a green group may still merge.
+
+**What remains open (pinned as `known_gap_*`):** (a) a revocation after the
+final pass while the status API is unreachable and the dequeue fails; (b)
+GitHub committing a fully green group before the re-fail arrives. In (b) the
+revocation reports `already_merged`, never success. (b) is the same
+decide-then-merge interval the direct path has: a label read followed by a
+merge call is not atomic either. The fake models GitHub's group semantics as
+an assumption, which the Phase C live pilot must confirm. A group-discovery
+read that wrongly returns no groups counts as "withdrawn", so discovery must
+fail closed (an `Err`), never return an empty list on error.
+
+**Not wired yet:** the GitHub adapters (group discovery from
+`gh-readonly-queue/<base>/pr-<N>-<sha>` refs plus queue order, and the
+commit-status write), the `merge_group` workflow or daemon pass that runs
+`group_check` and posts its status, and switching `revoke_for_transition` and
+`reconcile_pr` from `revoke_then_dequeue` to `revoke_refail_dequeue`.
 
 ## Phase B2 (#10256): lifecycle, delivered dormant
 
@@ -93,10 +142,38 @@ a queue-mode PR merged directly, bypassing the authorization protocol.
 
 ## Still not done
 
-The grant store is comment-backed, not durable; no `merge_group` check
-workflow; `judge.md` is not wired (review claims and revocations reach the
-queue through `forge disable-auto-merge`/claim-reconciliation revoke and the
-live `loom/merge-authorization` check); the post-check-pass revocation window
-above is still open, so `INVARIANT_FULLY_DEMONSTRATED` and
-`QUEUE_EXECUTION_ENABLED` stay `false`. Production enablement also needs Phase C
-qualification (`merge-queue-ci.md`).
+The grant store is PR comments. That survives a daemon restart, but it is
+not tamper-proof: a trusted author who deletes or edits a revoke comment
+brings the grant back. There is no `merge_group` check workflow, and the B4
+group protocol is not wired (see above). `judge.md` is not wired either:
+review claims and revocations reach the queue through `forge
+disable-auto-merge`, the claim-reconciliation revoke, and the live
+`loom/merge-authorization` check. The post-check-pass window above is
+narrowed by B4 but still open, so `INVARIANT_FULLY_DEMONSTRATED` and
+`QUEUE_EXECUTION_ENABLED` stay `false`. Production enablement also needs
+Phase C qualification (`merge-queue-ci.md`).
+
+## Group-aware revocation wiring (Phase B5)
+
+`group_github` adds the GitHub adapters (queue entries via GraphQL `mergeQueue.entries`, group commit = entry `headCommit`, members = entries `1..=k`; commit-status write for `loom/merge-authorization`). `revoke_for_root` and `forge merge-queue revoke` now call `revoke_for_transition_groups`, which revokes, re-fails every live group containing the PR, then dequeues, and reports an unconfirmed re-fail as the residual window in the transition comment. Still not wired: the `merge_group` workflow running `group_check`, a durable GrantStore, `judge.md`. `QUEUE_EXECUTION_ENABLED` and `INVARIANT_FULLY_DEMONSTRATED` stay false.
+
+## Check runner (Phase B6)
+
+`forge merge-queue group-check --commit <merge-group-sha>` (module
+`group_run`) is the runner that turns `group_check` into the posted
+`loom/merge-authorization` commit status: it finds the live group for the
+commit, reads the ruleset's other required contexts (newest run per name,
+`success`/`neutral`/`skipped` only, truncated listings are errors), evaluates
+every member, and posts `success`/`pending`/`failure`. Exit 0 = success posted,
+1 = failure, 6 = pending, 3 = nothing confirmed posted; every non-zero exit
+leaves the context unsatisfied, so the merge stays blocked. A commit that is
+not a live group posts `failure`; a group-discovery outage posts nothing. The
+daemon tick also evaluates every live group (queue mode only) so a group does
+not wait on a workflow; that pass is an accelerator, not the enforcement.
+Run `group-check` from a `merge_group` workflow with `statuses: write`
+(Phase C, `merge-queue-ci.md`; no workflow is installed by this phase).
+
+Still open and why the mode stays disabled: the grant store is PR comments
+(not tamper-proof), the post-pass-to-merge window above, and no live pilot has
+confirmed the fake's model of GitHub's group semantics.
+`QUEUE_EXECUTION_ENABLED` and `INVARIANT_FULLY_DEMONSTRATED` stay `false`.

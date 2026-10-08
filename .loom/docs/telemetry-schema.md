@@ -1763,7 +1763,7 @@ Tokens, providers and pools (Issues #8908, #8931):
 |---|---|---|---|
 | `loom.pool.account_marks` | delta `Sum` | `{account}`; labels `provider`, `reason` | one per account mark the daemon writes, at the seam that writes it: sweep and role-tick Codex terminal feedback (`provider=codex`), API-key pool bad marks (`provider` = the pool namespace, e.g. `zai`), and the Claude insta-crash exhaustion mark (`claude`). `reason` ∈ `rate_limited`, `exhausted`, `session_limit`, `model_credits`, `credential`, `transient`. No point when no mark is written (a native credential failure, a Codex `SUCCESS`/`TIMEOUT`, a failed write) |
 | `loom.pool.hold` span | own root trace (derived from `loom.pool.hold.pool` + hold start) | `loom.pool.hold.pool` (16-hex SHA-256 prefix of the pool directory — the pool's identity, never its path), `loom.pool.hold.post_mortem` (`true` when a real token-selection death armed it), `loom.pool.hold.accounts` | one work-finder pool dispatch hold, from arming to clearing. A hold still armed when the daemon stops emits no span |
-| `loom.runtime.usage` span | one per **model**, child of the unit it measures (see below) | `loom.usage.scope` (`execution` \| `attempt`), `loom.model`, `loom.tokens.input`, `.output`, `.cache_read`, `.cache_write` (= `.cache_write_5m` + `.cache_write_1h`), `.total`; aliases `gen_ai.usage.input_tokens` (**uncached input only, NOT total input** — decision #9315: kept, following Anthropic's vocabulary and so that `input + cache_read + cache_write` never double-counts; a generic OTel GenAI consumer must add `.cache_read_input_tokens` and `.cache_creation_input_tokens` to get total input, as the downstream telemetry consumer must), `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens`; `loom.cost.usd_estimate` = `gen_ai.cost.usd_estimate` with `loom.pricing.verified_on` and `loom.pricing.source` (`asset` \| `compiled`); optional `loom.runtime`, `loom.role`, `loom.attempt`, `loom.sweep_id`, `loom.issue`, `loom.pr_number` | one unit's exact token usage for one model (#8908, #9204, #9303). Absent when usage is unknown or has no model rows; a model row's measured-zero counter is `"0"`. No cost attributes for a model the rate card does not know (never a Sonnet fallback) |
+| `loom.runtime.usage` span | one per **model**, child of the unit it measures (see below) | `loom.usage.scope` (`execution` \| `attempt`), `loom.model`, `loom.tokens.input`, `.output`, `.cache_read`, `.cache_write` (= `.cache_write_5m` + `.cache_write_1h`), `.total`; aliases `gen_ai.usage.input_tokens` (**uncached input only, NOT total input** — decision #9315: kept, following Anthropic's vocabulary and so that `input + cache_read + cache_write` never double-counts; a generic OTel GenAI consumer must add `.cache_read_input_tokens` and `.cache_creation_input_tokens` to get total input, as the downstream telemetry consumer must), `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens`; `llm.billing`, `llm.credential.kind`, `llm.provider.profile` (see [LLM billing class](#llm-billing-class-10749)); `loom.cost.usd_estimate` = `gen_ai.cost.usd_estimate` with `loom.pricing.verified_on` and `loom.pricing.source` (`asset` \| `compiled`); optional `loom.runtime`, `loom.role`, `loom.attempt`, `loom.sweep_id`, `loom.issue`, `loom.pr_number` | one unit's exact token usage for one model (#8908, #9204, #9303). Absent when usage is unknown or has no model rows; a model row's measured-zero counter is `"0"`. No cost attributes for a model the rate card does not know (never a Sonnet fallback) |
 
 GitHub rate limit (Issue #10022):
 
@@ -1772,7 +1772,7 @@ GitHub rate limit (Issue #10022):
 | `loom.ratelimit.trip` span | instant span, own root trace (derived from `loom.ratelimit.source` + trip instant) | `loom.ratelimit.source` (the tripping job), `loom.ratelimit.cooldown_until` (RFC 3339), `github.ratelimit.core.used`, `.core.own`, `.core.external`, and the same three for `graphql` | one per rate-limit breaker trip; a re-trip while cooling emits nothing. `used` is the trip-time probe's pool-wide count, `own` this host's forge-call ledger for the window, `external` = `used − own`. Each is **omitted** (not 0) when unknown: no `used` in the probe, an untrusted probe reading (#8997), or the ledger sink off |
 | `forge.reader.withdrawn` span | instant span, own root trace (derived from the App, owner, resource and the instant) | `forge.reader.app` (the reader App id), `forge.reader.owner` (lowercased; `-` for an App-wide withdrawal), `forge.reader.resource` (`core`, `graphql`, `search`, `all`, or `app` for an App-wide withdrawal), `forge.reader.until` (RFC 3339), `forge.reader.source` (`header`, `probe` or `default`: where the end came from), `forge.reader.secondary` (`true` for a secondary limit) | one per reader withdrawal (W4-A). A rate limit withdraws only the refused `(owner, resource)` bucket; a secondary limit or a refused credential withdraws that owner's `all`; a mint or key failure, or any failure under `LOOM_READ_ROUTING=legacy`, withdraws the App (`app`). A per-repo coverage withdrawal emits nothing |
 | `forge.reader.spill` span | instant span, own root trace (derived from the repo, resource, home reader, mode and instant) | `forge.spill.owner_repo`, `forge.spill.resource` (`core` / `graphql` / `search`), `forge.spill.from` (home reader App id), `forge.spill.to` (target reader App id, or `home` when none has headroom and on release), `forge.spill.mode` (`partial` / `full` / `off`), `forge.spill.until` (RFC 3339 release instant) | one per read-pool spill-latch transition (W4-B, [daemon-reference](daemon-reference.md) `forge.readPool.routing`): engaged when the home bucket is projected at or above `spillProjectedPct` / `spillFullPct` or is withdrawn, released at the home bucket's reset; one more when a held latch re-picks a target that was withdrawn, went stale or reached `spillFullPct` (current mode, new `to`). A few per repo per day is normal; a steady stream means the pool is short of readers |
-| `invoke github` span | one per `gh` facade execution; child of the caller's span (or `LOOM_TRACEPARENT`), else its own root (derived per [`trace-identity.md`](trace-identity.md)) | process truth: `github.operation`, `github.access_intent`, `github.target`, `github.outcome` (`ok`, `exit_nonzero`, `signaled`, `timeout`, `spawn_failed`, `collect_failed`, `routing_refused`, `routing_blocked`, `adapter_unavailable`), `github.exit_code`, `github.invocation`, `github.launcher`, `github.api`, `context_source`. What GitHub billed (#10343): `github.http.status` (`200`, `304`, `403`, … or `unknown`), `github.http.not_modified` (`true`/`false`, `unknown` without a status), `github.http.requests` (pages of a `--paginate --include` call, `1` for one `--include` block, `2` for `run download`, `0` when nothing was sent, else `unknown`), `github.http.source` (`headers`, `stderr`, `none`), `github.billing` (`ok`, `not_modified`, `rate_limited`, `error`, `not_sent`), and the bucket join keys `github.resource`, `github.account`, `github.cred_owner` (`-` when not an App installation), `github.role` (`reader`, `writer`, `writer-fallback`) | one per execution (a reader-routed read retried on the writer is two). The status comes from the `--include` status line, else `gh`'s `(HTTP NNN)` / `HTTP NNN:` stderr marker, else it is `unknown` — never guessed; a passthrough run is always `unknown`. A `304` is `github.billing=not_modified` while `github.outcome=exit_nonzero` (gh exits non-zero on it) |
+| `invoke github` span | one per `gh` facade execution; child of the caller's span (or `LOOM_TRACEPARENT`), else its own root (derived per [`trace-identity.md`](trace-identity.md)) | process truth: `github.operation`, `github.access_intent`, `github.target`, `github.outcome` (`ok`, `exit_nonzero`, `signaled`, `timeout`, `spawn_failed`, `collect_failed`, `routing_refused`, `routing_blocked`, `adapter_unavailable`), `github.exit_code`, `github.invocation`, `github.launcher`, `github.api`, `context_source`. What GitHub billed (#10343): `github.http.status` (`200`, `304`, `403`, … or `unknown`), `github.http.not_modified` (`true`/`false`, `unknown` without a status), `github.http.requests` (pages of a `--paginate --include` call, `1` for one `--include` block, `2` for `run download`, `0` when nothing was sent, else `unknown`), `github.http.source` (`headers`, `stderr`, `none`), `github.billing` (`ok`, `not_modified`, `rate_limited`, `error`, `not_sent`), and the bucket join keys `github.resource`, `github.account`, `github.cred_owner` (`-` when not an App installation), `github.role` (`reader`, `writer`, `writer-fallback`). Since #10752: `github.caller` (the daemon pass whose caller scope the call ran in, e.g. `stale_blocked_release`; absent outside one), `github.repo` (the `owner/repo` the ledger booked the call under) and, on a write, `github.number` (the issue/PR number(s) its argv targets) | one per execution (a reader-routed read retried on the writer is two). The status comes from the `--include` status line, else `gh`'s `(HTTP NNN)` / `HTTP NNN:` stderr marker, else it is `unknown` — never guessed; a passthrough run is always `unknown`. A `304` is `github.billing=not_modified` while `github.outcome=exit_nonzero` (gh exits non-zero on it) |
 | `github.ratelimit.remaining` | `Gauge` | `{request}`; labels `resource`, `account`, `owner`, `role` | requests left in one bucket. On an App host every point is a bucket-book reading (below); the 60 s `gh api rate_limit` probe is booked there as the `(writer account, workspace owner, resource)` bucket (`role=writer`), never exported bare. On an ambient-login host the probe (falling back to the breaker's last trip-time reading while its reset windows are still open) is exported with `owner="-"`, `role="ambient"`; an unresolvable `account` stays `unknown` and is retried at most every 20 min, never while the breaker is suppressing |
 | `github.ratelimit.used` | `Gauge` | `{request}`; labels `resource`, `account`, `owner`, `role` | requests spent this window; absent when the response carried no `used`. Monotone only within one window (`github.ratelimit.reset`): several hosts export one bucket with readings of different ages, and a label set can carry two interleaved windows (#10571), so GitHub's bill is each window's high-water mark (`github-shadow.sql`), never Σ of drops-as-resets |
 | `github.ratelimit.reset` | `Gauge` | `s` (Unix epoch seconds); labels `resource`, `account`, `owner`, `role` | when the bucket's window resets |
@@ -1804,6 +1804,47 @@ span's `github.account`, `account` is `app-<app id>`,
 | `execution` | a role-runner tick's own `loom.role_attempt` root | the tick's transcript/native-store scan |
 | `attempt` | the role's `loom.role_attempt` in the execution journal (daemon child), else a `loom.role_attempt` created in the issue's story trace (operator session) | `loom-daemon usage-record`, run by the sweep prompt after each checkpoint write |
 | `attempt` | the tick's story span, **only when the tick stitched exactly one target** | the role runner; a multi-target tick is never split |
+
+#### LLM billing class (#10749)
+
+`loom.cost.usd_estimate` is the list price whatever the run was billed, so
+`loom.runtime.run` and every `loom.runtime.usage` span (sweep execution and
+attempt scope, and role-tick usage) also carry how it was billed:
+
+| Attribute | Values | Notes |
+|---|---|---|
+| `llm.billing` | `subscription` \| `api` \| `local` \| `unknown` | `api` is metered cash spend. `unknown` is stated, never guessed. |
+| `llm.credential.kind` | `oauth-pool` \| `chatgpt-seat` \| `api-key` | Omitted for `local` and `unknown`. |
+| `llm.provider.profile` | model-profile name (`zai-flash`, `quick-cerebras`, ...) | Present when the launch selected a profile. |
+
+Classification is data-driven: a Claude launch is `subscription`/`oauth-pool`,
+a Codex launch `subscription`/`chatgpt-seat`; a launch the preference walk put
+on a governed metered tap (`backstop=` in its marker) is `api`/`api-key`; a
+native-harness launch uses its model profile's optional `billing` field
+(`subscription` | `api` | `local`, e.g. `zai-flash` is the flat-rate z.ai
+coding plan) and, when absent, treats a profile that reads a provider
+credential as metered (`api`/`api-key`) and a credential-less one as
+`unknown`. An LLM-gateway route is always `api`/`api-key`. Usage spans copy
+the class from the launch's `loom.runtime.run` span (role ticks: from the
+launch record's `llmBilling`/`llmCredentialKind`, else the runtime), and only
+when that launch is established — otherwise they say `unknown`:
+
+- **`execution` scope** totals every launch of the sweep per model and cannot
+  split them, so it carries the class *all* of the execution's runs share; a
+  sweep with differently billed launches (or an unstamped run) is `unknown`,
+  and `llm.credential.kind` / `llm.provider.profile` are kept only when every
+  run shares them. For such a sweep, split cash from subscription with its
+  `attempt` spans.
+- **`attempt` scope** takes the runs in the attempt's own span ancestry (a run
+  under the `loom.role_attempt`, or the run it sits under), else a run that
+  belongs to no attempt and whose interval encloses the attempt's. Those must
+  agree; none, or a disagreement, is `unknown`. A run under another attempt is
+  never borrowed.
+
+Count `unknown` separately — never as `api` nor as `subscription`. Only this
+closed vocabulary and the profile name are emitted: no key value, account
+name or token path. Sum metered spend per day with
+`llm.billing = api` grouped by `llm.provider.profile`.
 
 A daemon sweep's `claude -p` child also runs `usage-record`, so one trace can
 hold both scopes for one `loom.sweep_id`. **Total per `loom.sweep_id` from its
@@ -2321,6 +2362,74 @@ emit, so per-host service cadence is measurable. Full field reference, the
 SigNoz rank-at-instant query and the rows/day volume:
 [`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).
 
+### `pass.summary` and `pass.verdict`
+
+What a pass over forge artifacts did (Issue #10752): one `pass.summary` per
+pass per workspace, and one `pass.verdict` per artifact it decided. Today the
+`loom:blocked` release pass (#10556, `stale_blocked::release_gh`) emits them
+as mechanism `stale_blocked_release`. The shape also fits a role's per-item
+verdicts (Guide's unblock outcomes, Champion's promotion verdicts) with `role`
+set. Envelopes carry `schema_version: 12`. **OTLP-only** (native: `false`).
+The body is the record's JSON. The scalars ride as `loom.pass.*` attributes
+(`PASS_LOG_ATTRIBUTE_KEYS`, allowlisted in the collector's
+`transform/privacy`) plus the shared `loom.repo` and `loom.role`. Both are
+stamped when decided: the summary at the pass's end, a verdict at `at`.
+
+`mechanism` is the pass's `forge_call_stats` caller. Every GitHub call the pass
+makes runs inside its caller scope (`gh_invocation::caller_scope`), so the
+`invoke github` spans carry the same string as `github.caller`. A pass, its
+verdicts and its GitHub cost therefore join on one value.
+
+**Verdict volume.** A verdict that wrote (released, re-parked or failed, mode
+`on`) is always emitted. Any other verdict is emitted when it differs from the
+last one emitted for that artifact (verdict, reason, blocker states, mode), and
+otherwise once per `LOOM_RELEASE_STALE_BLOCKED_VERDICT_HEARTBEAT_SECS`
+(default 3600, `0` = every pass). The summary's counts stay exact per pass,
+and `verdicts_unchanged` says how many verdicts it held back. Severity is
+`WARN` for a refused pass, a pass with a failed write, and a `failed` verdict,
+and `INFO` otherwise.
+
+`pass.summary`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `pass_id` | string | derived: `derived_hex(["loom.pass", mechanism, host, repo, started_at], 32)` |
+| `mechanism` | string | `stale_blocked_release` |
+| `repo` / `host` | string | `owner/repo` (or `repo_unresolved`), the host that ran it |
+| `mode` | string | `on` or `dry_run` |
+| `outcome` | string | `completed`, `archived`, or `refused` (listing failed, rate-limit breaker, forge-write scope) |
+| `refusal` | string? | why it was refused, truncated |
+| `started_at` / `ended_at` / `duration_ms` | RFC3339 / RFC3339 / integer | the pass's bounds |
+| `examined` | integer | artifacts listed |
+| `verdicts` | object | artifacts per verdict, every verdict present |
+| `skipped` | object | skipped artifacts per reason (exported flattened as `loom.pass.skip_reasons`, `name=count,…`) |
+| `write_cap_hit` | bool | `LOOM_RELEASE_STALE_BLOCKED_MAX_WRITES` left work for the next pass |
+| `github` | object | `{calls, writes, not_modified}` inside the pass's caller scope |
+| `verdicts_emitted` / `verdicts_unchanged` | integer | verdict records emitted, and held back as unchanged |
+| `loom` | object | the deciding build's provenance (`loom.pass.version` / `revision`) |
+
+`pass.verdict`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `pass_id` / `mechanism` | string | joins the verdict to its pass |
+| `role` | string? | the deciding role; absent for a daemon pass |
+| `repo` / `number` / `artifact` | string / integer / string | `artifact` is `issue` or `pr` |
+| `verdict` | string | release pass: `released`, `reparked`, `still_blocked`, `skipped`, `unevaluated`, `failed` |
+| `reason` | string? | for `skipped`, the pass's skip reason: `no-park-record`, `unstated`, `cross-repo`, `closed-unmerged-pr`, `other-open-reference`, `open-closing-pr`, `unticked-checklist`, `superseded`, `operator-hold`, `permanent`, `daemon-hold`, `concurrent-edit`, `write-cap` |
+| `detail` | string? | why it was unevaluated, or why a write failed. Sanitized and truncated, and in the body only |
+| `blockers` | array | `{ref, state}` per declared blocker: `ref` is `#12` or `owner/repo#12`; `state` is `open`, `closed`, `merged`, `closed_unmerged`, `unread` (the read failed) or `not_read` |
+| `labels_added` / `labels_removed` | string[] | a release's restored lane label and `loom:blocked` (planned, under dry-run) |
+| `mode` / `applied` | string / bool | `applied`: every write landed (`false` under dry-run) |
+| `at` | RFC3339 | when it was decided |
+
+The `invoke github` span gains three attributes in the same change (see its
+row under "GitHub rate limit" above): `github.caller` inside a caller scope,
+`github.repo`, and `github.number` on a write. Ready-made queries
+(passes per repo with skips by reason and calls by operation, why each
+artifact is still held, and which mechanism removed each `loom:blocked`):
+`defaults/observability/signoz/pass-queries.sql`.
+
 ### `tokens.snapshot`
 
 A point-in-time view of the multi-account token pool (host-level — no `repo` /
@@ -2470,6 +2579,15 @@ cross-repo dispatch tier from the workspace registry (`Workspace.priority`,
 lower dispatches first); it is omitted for a root that is not a registered
 workspace and on older daemons, never defaulted. Additive, no `schema_version`
 bump.
+
+**`managed_repos[].stale_blocked_release` (#10763).** This host's
+`loom:blocked` release-pass tallies for the repo since the daemon started:
+`released` and `reparked` (applied writes only), `last_outcome`, and `ticks`, a
+count per outcome key (`ran`, `not_due`, `skipped_shard`, `denied_scope`,
+`not_served`, `rate_limited`, `skipped_off`, `dry_run`, `archived`,
+`enumerate_error`). Omitted before the pass first ticks the repo on this host,
+never a fabricated zero. A repo whose `ran` stays at zero on every host is
+diagnosable from these keys alone. Additive, no `schema_version` bump.
 
 **Binary identity (`build_commit` / `built_at`, #4956).** `daemon_version` is
 `CARGO_PKG_VERSION`, so it only moves once per release: every build between two

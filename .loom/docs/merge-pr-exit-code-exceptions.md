@@ -22,7 +22,7 @@ does not need loaded to act correctly.
 |---|---|---|
 | `3` | The PR's head branch changed between the fresh head-SHA read taken immediately before merging and the merge call itself (#5579). | someone else |
 | `4` | The #8248/#8919 required-check freshness guard blocked the merge and `--redate-stale-checks` re-dated the checks with a tree-identical no-op push (#8508). | this run |
-| `5` | `--auto`'s bounded settle-wait expired before this head's checks finished, or before the check-runs API became readable (#8896). | nobody |
+| `5` | `--auto`'s bounded settle-wait expired before this head's checks finished, or before the check-runs API became readable (#8896); or the CI-run conclusion gate has no concluded `CI` run for this exact head yet (#10567). | nobody |
 | `6` | Another PR on the same base holds the chain-head merge lock: it was just re-dated and has not landed, so merging now would move the base under it again (#10167). | nobody |
 | `7` | *(Champion Step 3, not `merge-pr.sh`)* `forge merge-queue step` gave no `LOOM-MERGE-QUEUE-DIRECT` verdict, so `merge-pr.sh` never ran (#10256). Queue outcomes are silent; anything else is a surfaced stall (#10628). | nobody |
 | `1` | Everything else, including a #8248 block with no remedy left. | — |
@@ -314,6 +314,22 @@ rule. A daemon too old to know the verb (or missing entirely) produces no
 sentinel, and the script then falls back to #6169's full deadline-bounded wait —
 the state this narrows, so a fault there costs time and never skips a gate. It
 cannot degrade into settling on a single empty read.
+
+**A third site: the CI-run conclusion gate (#10567).** `_check_ci_result`
+(#10444) asks `loom-daemon merge-pr ci-result` whether this exact head's latest
+`CI` workflow run concluded `success`. When that run is still in progress, or
+the repository defines a `CI` workflow but no run exists for this head yet
+(daemon exit 3, or a pre-#10567 binary's exit-0 `LOOM-CI-RESULT-UNVERIFIED`),
+the merge is HELD with exit 5: an unknown is not success, but it is not a
+defect in the PR either, so it re-queues instead of reaching Doctor. Under
+`--auto` the pre-wait call defers this case and `_revalidate_merge_guards`
+decides it after the settle-wait. The gate's other unknowns are NOT exit 5: a
+forge read failure is retried (3 attempts) and then exits 1 quoting the
+provider; a binary missing or too old for the verb, or unexpected output, exits
+1 with the roll hint. Only `LOOM-CI-RESULT-CLEAN` and the explicit no-CI policy
+(`LOOM-CI-RESULT-NO-CI-WORKFLOW`: the repository defines no `CI` workflow at
+all) let the merge through. Before #10567 every one of these unknowns warned
+and merged.
 
 What exit 5 deliberately is **not**:
 

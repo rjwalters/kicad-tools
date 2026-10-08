@@ -1406,15 +1406,27 @@ and whose `.loom-local/local.json` is the host-local tier.
 
 ### File contract
 
+**`fleet.json` first (#10705).** A store that publishes `fleet.json` — the
+compiled fleet document fleet-gitops renders from its one source file
+`fleet.yml` — is read from that one file: the roster is its top-level `root`
+and `repos`, run state is its `state`, and the tiers are `config.defaults`,
+`config.hosts.<host>.defaults` and `config.hosts.<host>.local`, with exactly
+the contracts below. Its `_generated.schema_version` must be `1`. When
+`fleet.json` is **absent**, the legacy files below are read instead (a
+transition fallback, removed once every store publishes it). When it is
+**present but invalid** — not JSON, no `_generated` header, another
+`schema_version`, or a section of the wrong shape — every reader fails closed
+and the legacy files are not consulted.
+
 | Store path | Read by | Contract |
 |---|---|---|
+| `fleet.json` | `roster`, `state`, `render`, version floor | JSON, above. When present, the next five rows are not read for the roster, state or tiers. The version floor reads only its top-level `loom_min_version` (#10711), through the same compiled reader. A present `fleet.json` without that key means no floor (`repos.yml` is not consulted); an invalid one is a fleet-sync error — see below |
 | `fleet/defaults.json` | `render` | JSON object: the machine tier every host shares |
 | `fleet/hosts/<host>/defaults.json` | `render` | JSON object: that host's overlay. Required for a host `render` is asked about |
 | `fleet/hosts/<host>/local.json` | `render` | JSON object: that host's host-local tier. Optional — absent leaves the local tier alone |
 | `repos.yml` | `roster` | YAML, below |
 | `fleet/state.yml` | `state` | YAML, below |
 | `fleet/admins.json` | comment trust | JSON `{"admins": ["login", ...]}`: fleet admins trusted as comment authors in every fleet repo; unreadable means empty (fails closed). See [comment-trust](comment-trust.md) (#10303) |
-| `fleet.json` | version floor | JSON object, the compiled fleet document (#10705). Optional — fetched when present; absent is not an error. Only its top-level `loom_min_version` is read today (#10711) |
 
 Other files in the store (a README, a host inventory) are never fetched.
 
@@ -1437,11 +1449,17 @@ never a silent exclusion — so is a non-boolean `fleet`/`firewall`, a
 non-integer `fleet_priority`, a duplicate `name` or `dir`, or an unsafe `dir`.
 
 **`loom_min_version`** (#10711): an optional top-level `"X.Y.Z"` string, the
-fleet-wide minimum Loom version. Read from `fleet.json` when that file carries
-the key, else from the top level of `repos.yml` (an extra key there, which the
-roster ignores). Every fleet-sync pass reads it into a process-wide value, not
+fleet-wide minimum Loom version. Read from the top level of `fleet.json` when
+the store has that file (a valid one without the key means no floor; an invalid
+one is a fleet-sync error, with no `repos.yml` fallback); only when
+`fleet.json` is absent is it read from the top level of `repos.yml` (an extra
+key there, which the roster ignores). In `fleet.json` it is always a JSON
+string; in `repos.yml` quote it (an unquoted `X.Y.Z` is also read, an unquoted
+`X.Y` is a number and is refused). It must be canonical: no whitespace, no
+leading zeros (`"0.0.0"` and `"0.19.830"` are fine, `"01.2.3"` and
+`" 0.19.830 "` are not). Every fleet-sync pass reads it into a process-wide value, not
 the config tiers, so a change takes effect on the next tick without a restart.
-Absent means no floor; a malformed value (not a string, not `X.Y.Z`) keeps the
+Absent means no floor; a malformed value (not a string, not canonical `X.Y.Z`) keeps the
 last good floor and is reported as a fleet-sync error. It appears as
 `floor` in `fleet-sync-status.json` and on the `Fleet store:` status block.
 Nothing acts on it yet (#10698).
@@ -5473,6 +5491,7 @@ knobs not yet audited here.
 | `autonomous.roleRunner.onIdle` | *(config only)* | `[]` (none) | Subset of all **8** shipped roles — the 7 above **plus `architect`**, which is reachable here and nowhere else by default (#5656) — to fire on the work-finder **idle edge** (#4364) — the non-idle → idle transition (0 in-flight sweeps AND nothing dispatched this tick), in addition to the interval cadence. Absent → none (opposite default from `roles`); unknown names ignored with a warning. Debounced to min 60s per (root, role) and skipped while that role's interval/idle run is in progress. **Requires the work finder enabled** to observe idleness (a startup warning fires if set with the work finder off). **Also gated by that same root's own `enabled`** (#4377) — see below |
 | `autonomous.roleRunner.onIdleMaxWait` | *(config only)* | *(unset — no promotion, today's idle-edge-only firing)* | **Per-role starvation guard for an `onIdle` role (#7511).** A `{"<role>": "<duration>"}` object (e.g. `{"hermit": "24h", "auditor": "72h"}`, duration strings `<n>s`/`<n>m`/`<n>h`/`<n>d`) naming the longest a role may go without a completed tick before it is **promoted** into the next interval-cadence pass — see [`onIdleMaxWait` — promoting a starved `onIdle` role](#onidlemaxwait--promoting-a-starved-onidle-role-7511) below |
 | `autonomous.roleRunner.architectMaxProposals` | `LOOM_ARCHITECT_MAX_PROPOSALS` | `5` | **Per-invocation** cap on how many proposal issues one `architect` dispatch may file (#5656) — the actuator-saturation limit of the idle-edge control loop. Passed to the session as `/loom:architect --max-proposals <n>`, which `architect.md` enforces as a hard ceiling. Per-repo on purpose (the workable cap grows with a repo's maturity — ~5 while work is narrow, 7+ once it fans out), so it is read from each root's own config. Zero/negative/non-integer at either tier drops to the next one (a cap of `0` would spend a whole session forbidden from producing anything). Ignored for every other role |
+| `autonomous.balance.idleGate` | `LOOM_BALANCE_IDLE_GATE` | `false` | **Pipeline-empty gate for hermit/architect idle generation (#10817, slice 4 of #10630).** Off: an `onIdle` edge means a host slot is free, exactly as before (no ledger read, no log line). On: `hermit` and `architect` additionally need this repo's pipeline empty -- no review/changes/merge debt in the demand ledger (`role_runner::demand`) and, where observed, no ready/building issues; any observed work denies the run even with free slots. Unobserved axes never deny nor newly grant (today's host-slot rule applies). Other idle roles are untouched; `architectMaxProposals` still caps a granted architect run. A grant logs `role_runner: idle grant root=<r> role=<role> trigger=idle reason=pipeline-empty`. Precedence env > config > default; truthy `1/true/yes/on`, falsy `0/false/no/off`, an invalid env value warns and falls back to config. Per-repo, live |
 | `autonomous.roleRunner.collisionDetection` | `LOOM_ROLE_RUNNER_DETECT_COLLISIONS` | inherits `autonomous.collisionDetection.enabled`, else `false` | Cross-host role-tick collision baseline (#4623). Detection only — a pre-tick probe of that role's own label queue, logged/counted, never acted on. Absent → falls through to #4085's shared toggle; see [Cross-host role-tick collision detection](#cross-host-role-tick-collision-detection-4623) |
 | `autonomous.roleRunner.collisionWindowSecs` | `LOOM_ROLE_RUNNER_COLLISION_WINDOW_SECS` | that role's tick interval | Lookback window for the #4623 probe, clamped to `[60, 3600]`. Zero/invalid dropped to the next tier |
 | *(host-local tiers only — see below)* | `LOOM_ROLE_RUNNER_SHARD_INDEX` | *(unset)* | **This host's** 0-based role-runner shard index (#6374). Must **differ** per host, so it belongs in the service unit next to `LOOM_ROLE_RUNNER`, never in the tracked `.loom/config.json` — a committed `autonomous.roleRunner.shardIndex` gives every host the same index and leaves every other slice with zero owners fleet-wide, so the daemon **refuses** it (logs `error!`, falls back to unsharded). Requires `shardCount`; out-of-range/malformed → unsharded. See [Role-runner host sharding](#role-runner-host-sharding-6374) |
