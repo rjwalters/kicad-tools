@@ -318,10 +318,10 @@ def test_tagged_line_on_edge_is_still_a_score(tmp_path: Path) -> None:
     assert pcb_vscore_layers(pcb) == ["Dwgs.User"]
 
 
-def test_tagged_partial_line_is_detected_untagged_is_not(tmp_path: Path) -> None:
+def test_tagged_partial_line_is_detected_untagged_short_one_is_not(tmp_path: Path) -> None:
     from kicad_tools.sexp.vscore import make_vscore_uuid
 
-    partial = "(start 0 15) (end 25 15)"
+    partial = "(start 0 15) (end 15 15)"
     assert pcb_vscore_layers(_board(tmp_path, f'(gr_line {partial} (layer "Eco2.User"))')) == []
     tagged = _board(
         tmp_path,
@@ -399,3 +399,72 @@ def test_mixed_panel_gapped_seams_still_detects_scored_seams(tmp_path: Path, fra
         assert y0 == y1 and x0 != x1
     else:
         assert len(lines) == 5
+
+
+# ---------------------------------------------------------------------------
+# Partial and jump scores on third-party panels (Issue #6193)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # partial score from the left edge, 62.5% of the 40 mm width
+        '(gr_line (start 0 15) (end 25 15) (layer "Eco2.User"))',
+        # partial score entering from the far edge, vertical
+        '(gr_line (start 20 33) (end 20 8) (layer "Eco2.User"))',
+        # jump score: two pieces with a gap, spanning the outline
+        '(gr_line (start -3 15) (end 12 15) (layer "Eco2.User"))'
+        '(gr_line (start 16 15) (end 43 15) (layer "Eco2.User"))',
+        # jump score, vertical, three pieces, slightly off-axis coordinates
+        '(gr_line (start 20 0) (end 20 8) (layer "Eco2.User"))'
+        '(gr_line (start 20.005 11) (end 20.005 19) (layer "Eco2.User"))'
+        '(gr_line (start 20 22) (end 20 30) (layer "Eco2.User"))',
+    ],
+)
+def test_partial_and_jump_scores_are_detected(tmp_path: Path, extra: str) -> None:
+    assert pcb_vscore_layers(_board(tmp_path, extra)) == ["Eco2.User"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # short stub from one edge
+        '(gr_line (start 0 15) (end 10 15) (layer "Eco2.User"))',
+        # long collinear pieces floating mid-board, touching no edge
+        '(gr_line (start 5 15) (end 20 15) (layer "Eco2.User"))'
+        '(gr_line (start 22 15) (end 36 15) (layer "Eco2.User"))',
+        # collinear pieces on the outline itself or outside it
+        '(gr_line (start -3 0) (end 12 0) (layer "Eco2.User"))'
+        '(gr_line (start 16 0) (end 43 0) (layer "Eco2.User"))',
+        '(gr_line (start -3 -5) (end 12 -5) (layer "Eco2.User"))'
+        '(gr_line (start 16 -5) (end 43 -5) (layer "Eco2.User"))',
+        # dimension: extension lines and a dimension line above the board
+        '(gr_line (start 0 -6) (end 0 -2) (layer "Dwgs.User"))'
+        '(gr_line (start 40 -6) (end 40 -2) (layer "Dwgs.User"))'
+        '(gr_line (start 0 -5) (end 40 -5) (layer "Dwgs.User"))',
+    ],
+)
+def test_short_or_off_outline_collinear_drawings_are_not_scores(tmp_path: Path, extra: str) -> None:
+    assert pcb_vscore_layers(_board(tmp_path, extra)) == []
+
+
+def test_pieces_on_different_layers_or_lines_are_not_combined(tmp_path: Path) -> None:
+    extra = (
+        '(gr_line (start 0 15) (end 12 15) (layer "Eco2.User"))'
+        '(gr_line (start 14 15) (end 26 15) (layer "Eco1.User"))'
+        '(gr_line (start 0 10) (end 12 10) (layer "Eco2.User"))'
+        '(gr_line (start 0 12) (end 12 12) (layer "Eco2.User"))'
+    )
+    assert pcb_vscore_layers(_board(tmp_path, extra)) == []
+
+
+def test_fleet_boards_detect_no_score_layer() -> None:
+    import subprocess
+
+    files = subprocess.run(
+        ["git", "ls-files", "*.kicad_pcb"], cwd=REPO, capture_output=True, text=True
+    ).stdout.split()
+    assert len(files) >= 50
+    offenders = [f for f in files if pcb_vscore_layers(REPO / f)]
+    assert offenders == []
