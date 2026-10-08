@@ -453,7 +453,7 @@ def main():
         },
         "requirements": {
             "manufacturing": {
-                "target_fab": "jlcpcb-tier1",
+                "target_fab": "jlcpcb",
                 "layers": {"preferred": 4},
                 "assembly": "smt",
             }
