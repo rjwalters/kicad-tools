@@ -33,11 +33,11 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .core.schematic_uuids import root_sheet_uuid, stable_uuid
 from .core.version import (
     KICAD_BOARD_FORMAT_VERSION,
     KICAD_GENERATOR_VERSION,
@@ -325,10 +325,12 @@ class Project:
         schematic_path = directory / f"{name}.kicad_sch"
         pcb_path = directory / f"{name}.kicad_pcb"
 
-        # Generate UUIDs for the files
-        project_uuid = str(uuid.uuid4())
-        schematic_uuid = str(uuid.uuid4())
-        pcb_uuid = str(uuid.uuid4())
+        # Deterministic UUIDs keyed on the project name (Issue #6076), so
+        # creating the same project twice writes identical files.
+        project_uuid = stable_uuid("project", name)
+        schematic_uuid = root_sheet_uuid(name, "")
+        pcb_uuid = stable_uuid("project-pcb", name)
+        outline_uuid = stable_uuid("project-pcb", name, "outline")
 
         # Create minimal .kicad_pro file (JSON format)
         project_data = {
@@ -423,7 +425,7 @@ class Project:
     (stroke (width 0.15) (type default))
     (fill none)
     (layer "Edge.Cuts")
-    (uuid "{str(uuid.uuid4())}")
+    (uuid "{outline_uuid}")
   )
 )
 '''

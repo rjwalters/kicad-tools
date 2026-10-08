@@ -6,10 +6,10 @@ Provides functions to modify, replace, and update symbol instances.
 
 from __future__ import annotations
 
-import uuid as uuid_lib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.core.schematic_uuids import pin_uuid, stable_uuid
 from kicad_tools.sexp import SExp, parse_string, serialize_sexp
 
 
@@ -439,12 +439,20 @@ def update_symbol_pins(
             pin.set_value(0, new_num)
             changes.append(f"Pin {old_num} → {new_num}")
 
-            # Generate new UUID for the pin
+            # New, deterministic UUID for the renumbered pin (Issue #6076)
             uuid_node = pin.find("uuid")
             if uuid_node:
-                uuid_node.set_value(0, str(uuid_lib.uuid4()))
+                uuid_node.set_value(
+                    0, stable_uuid("pin-remap", _symbol_uuid(symbol), old_num, new_num)
+                )
 
     return changes
+
+
+def _symbol_uuid(symbol: SExp) -> str:
+    """The symbol's own ``(uuid ...)`` value (``""`` if it has none)."""
+    node = symbol.find_child("uuid")
+    return (node.get_string(0) or "") if node is not None else ""
 
 
 def clear_symbol_pins(symbol: SExp) -> int:
@@ -474,9 +482,11 @@ def add_symbol_pin(symbol: SExp, pin_number: str) -> None:
         symbol: The symbol S-expression
         pin_number: The pin number to add
     """
+    ordinal = sum(1 for p in symbol.find_all("pin") if p.get_string(0) == pin_number)
     pin = SExp("pin")
     pin.add(pin_number)
-    pin.add(SExp("uuid").add(str(uuid_lib.uuid4())))
+    # Derived from the owning symbol's UUID (Issue #6076).
+    pin.add(SExp("uuid").add(pin_uuid(_symbol_uuid(symbol), pin_number, ordinal)))
     symbol.add(pin)
 
 
@@ -528,7 +538,9 @@ def create_replacement_symbol(
     instance.add(SExp("in_bom").add("yes"))
     instance.add(SExp("on_board").add("yes"))
     instance.add(SExp("dnp").add("no"))
-    instance.add(SExp("uuid").add(str(uuid_lib.uuid4())))
+    instance.add(
+        SExp("uuid").add(stable_uuid("replacement-symbol", lib_id, reference, unit, *position))
+    )
 
     # Add properties
     def add_property(name: str, val: str, x_off: float = 0, y_off: float = 0):

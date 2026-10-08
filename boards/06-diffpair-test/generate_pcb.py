@@ -22,15 +22,19 @@ Usage:
 from __future__ import annotations
 
 import sys
-import uuid
 from pathlib import Path
 
+from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.pcb.center_sheet import centered_origin
+
+# Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
+# the same uuid5 every run, so a fresh build is byte-reproducible.
+_PCB_UUIDS = UuidSequence("boards/06-diffpair-test/diffpair_test.kicad_pcb")
 
 
 def generate_uuid() -> str:
-    """Generate a KiCad-format UUID."""
-    return str(uuid.uuid4())
+    """Next deterministic KiCad-format UUID (Issue #6076)."""
+    return _PCB_UUIDS()
 
 
 # Board dimensions (mm) — generous size keeps source/sink pairs well
@@ -712,6 +716,7 @@ def generate_qfn24_mipi_sink() -> str:
 
 def generate_pcb() -> str:
     """Generate the complete PCB file."""
+    _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
     parts = [
         generate_header(),
         generate_nets(),

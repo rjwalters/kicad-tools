@@ -28,10 +28,10 @@ import os
 import runpy
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
@@ -50,9 +50,14 @@ from kicad_tools.schematic.models.schematic import Schematic
 warn_if_stale()
 
 
+# Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
+# the same uuid5 every run, so a fresh build is byte-reproducible.
+_PCB_UUIDS = UuidSequence("boards/04-stm32-devboard/stm32_devboard.kicad_pcb")
+
+
 def generate_uuid() -> str:
-    """Generate a KiCad-format UUID."""
-    return str(uuid.uuid4())
+    """Next deterministic KiCad-format UUID (Issue #6076)."""
+    return _PCB_UUIDS()
 
 
 def create_stm32_schematic(output_dir: Path) -> Path:
@@ -723,6 +728,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
 
     Returns the path to the generated PCB file.
     """
+    _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
     print("\n" + "=" * 60)
     print("Creating STM32 Development Board PCB...")
     print("=" * 60)
@@ -1756,7 +1762,8 @@ def tie_power_pads(routed_path: Path) -> bool:
         via_sexp.append(SExp.list("drill", 0.15))
         via_sexp.append(SExp.list("layers", "F.Cu", "B.Cu"))
         via_sexp.append(SExp.list("net", gnd_net))
-        via_sexp.append(SExp.list("uuid", generate_uuid()))
+        # Content-keyed, collision-free against the routed board (Issue #6076).
+        via_sexp.append(SExp.list("uuid", pcb.mint_uuid("tie-via", x, y)))
         pcb._sexp.append(via_sexp)
     pcb.save(str(routed_path))
     print(f"   Added {len(_GND_TIE_VIAS)} GND micro-via-in-pads")

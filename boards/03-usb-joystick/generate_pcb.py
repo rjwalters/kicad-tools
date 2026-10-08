@@ -3,11 +3,11 @@
 
 import os
 import sys
-import uuid
 from pathlib import Path
 
 from joystick_hardware import COMPONENTS, NETS
 
+from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.pcb.footprints import FootprintLibrary
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
@@ -16,8 +16,14 @@ BOARD_WIDTH, BOARD_HEIGHT = 80.0, 60.0
 BOARD_ORIGIN_X, BOARD_ORIGIN_Y = centered_origin(BOARD_WIDTH, BOARD_HEIGHT)
 
 
-def generate_uuid():
-    return str(uuid.uuid4())
+# Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
+# the same uuid5 every run, so a fresh build is byte-reproducible.
+_PCB_UUIDS = UuidSequence("boards/03-usb-joystick/usb_joystick.kicad_pcb")
+
+
+def generate_uuid() -> str:
+    """Next deterministic KiCad-format UUID (Issue #6076)."""
+    return _PCB_UUIDS()
 
 
 def stage_local_footprints(output_dir):
@@ -93,6 +99,7 @@ def generate_power_pours():
 
 
 def generate_pcb():
+    _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
     header = """(kicad_pcb (version 20260206) (generator "kicad-tools")
     (general (thickness 1.6)) (paper "A4")
     (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)

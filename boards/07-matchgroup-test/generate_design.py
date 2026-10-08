@@ -465,12 +465,6 @@ def _find_sexp_blocks(text: str, token: str) -> list[str]:
     return blocks
 
 
-def _generate_uuid() -> str:
-    import uuid as _uuid
-
-    return str(_uuid.uuid4())
-
-
 def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     """Geometric per-net copper-connectivity audit (PR #3481 pattern).
 
@@ -822,9 +816,13 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.core.schematic_uuids import UuidMinter, uuids_in_text
     from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
+    # Content-keyed repair-copper UUIDs that avoid every UUID already on the
+    # board, so the same input always gets the same repair (Issue #6076).
+    repair_uuids = UuidMinter(uuids_in_text(text))
     net_id_by_name = {name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)}
     id_to_name = {str(v): k for k, v in net_id_by_name.items()}
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
@@ -1023,7 +1021,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         nid = net_id_by_name[net]
         via_lines.append(
             f"  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) "
-            f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
+            f'(layers "F.Cu" "B.Cu") (net {nid}) '
+            f'(uuid "{repair_uuids.mint("board07-pour-repair-via", net, vx, vy)}"))'
         )
         via_index.append((Point(vx, vy), net, VIA_R, VIA_DRILL_R))
         vias_placed += 1
@@ -1039,7 +1038,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         seg_lines.append(
             f"  (segment (start {p0[0]:.3f} {p0[1]:.3f}) (end {p1[0]:.3f} {p1[1]:.3f}) "
             f'(width {width}) (layer "{layer}") (net {nid}) '
-            f'(uuid "{_generate_uuid()}"))'
+            f'(uuid "{repair_uuids.mint("board07-pour-repair-seg", net, *p0, *p1, layer, width)}"))'
         )
         seg_index.append((LineString([p0, p1]).buffer(width / 2.0), net, layer))
 

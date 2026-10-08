@@ -14,10 +14,17 @@ This module composes functionality from specialized mixins:
 - SchematicNetlistMixin: Netlist extraction and connectivity queries
 """
 
-import uuid
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
+from kicad_tools.core.schematic_uuids import (
+    UuidMinter,
+    is_provisional,
+    root_sheet_uuid,
+    stable_uuid,
+)
 from kicad_tools.sexp import SExp
 
 from ..grid import DEFAULT_GRID
@@ -120,7 +127,10 @@ class Schematic(
             comment2: Second comment line
             paper: Paper size (default: "A4")
             project_name: Project name for sheet instances
-            sheet_uuid: UUID for this sheet (auto-generated if None)
+            sheet_uuid: UUID for this sheet.  When None it is derived
+                deterministically from ``project_name``, ``title``, ``page``
+                and ``parent_uuid`` (Issue #6076), so regenerating the same
+                schematic writes the same UUID.
             parent_uuid: UUID of parent sheet (for hierarchical designs)
             page: Page number string
             grid: Grid spacing in mm (default: 2.54)
@@ -142,7 +152,7 @@ class Schematic(
         self.comment2 = comment2
         self.paper = paper
         self.project_name = project_name
-        self.sheet_uuid = sheet_uuid or str(uuid.uuid4())
+        self.sheet_uuid = sheet_uuid or root_sheet_uuid(project_name, title, page, parent_uuid)
         self.parent_uuid = parent_uuid
         self.page = page
 
@@ -189,6 +199,11 @@ class Schematic(
         # Each entry: (y, x_start, x_end) for horizontal rails
         self._continuous_rails: list[tuple[float, float, float]] = []
 
+        # Deterministic UUID minting (Issue #6076).  Seeded with every UUID of
+        # a loaded file (see ``_from_sexp``) so a minted UUID never repeats
+        # one the file already uses.
+        self._uuid_minter = UuidMinter()
+
         # Track the saved path for operations like run_erc()
         self._saved_path: Path | None = None
 
@@ -220,6 +235,75 @@ class Schematic(
             if lib_path.name == target and lib_path.exists():
                 return lib_path
         return None
+
+    def _mint_uuid(self, kind: str, *key: object) -> str:
+        """Deterministic, collision-free UUID for a new ``kind`` element.
+
+        ``uuid5`` of this sheet's UUID, ``kind`` and ``key`` plus an ordinal
+        that separates repeated keys; see
+        :mod:`kicad_tools.core.schematic_uuids`.
+        """
+        return self._uuid_minter.mint(self.sheet_uuid, kind, *key)
+
+    def _assign_provisional_uuids(self) -> int:
+        """Give every element still holding a provisional UUID its final one.
+
+        Elements constructed without an explicit ``uuid_str`` carry a
+        :class:`~kicad_tools.core.schematic_uuids.ProvisionalUuid`.  This
+        replaces each with a UUID keyed on the element's content (endpoints,
+        position, text, reference) under this sheet, writing it back onto the
+        element so the model and the written file agree.  Loaded and
+        explicitly passed UUIDs are plain strings and are never touched.
+        Runs before every serialization; a no-op once everything is assigned.
+        Returns the number of UUIDs assigned.
+        """
+        groups: list[tuple[str, list, Callable[[Any], tuple]]] = [
+            ("symbol", self.symbols, lambda e: (e.reference, e.unit)),
+            ("power", self.power_symbols, lambda e: (e.reference,)),
+            ("wire", self.wires, lambda e: (e.x1, e.y1, e.x2, e.y2)),
+            ("junction", self.junctions, lambda e: (e.x, e.y)),
+            ("no_connect", self.no_connects, lambda e: (e.x, e.y)),
+            ("label", self.labels, lambda e: (e.text, e.x, e.y)),
+            ("hierarchical_label", self.hier_labels, lambda e: (e.text, e.x, e.y)),
+            ("global_label", self.global_labels, lambda e: (e.text, e.x, e.y)),
+        ]
+        pending = [
+            (kind, elem, key)
+            for kind, elems, key in groups
+            for elem in elems
+            if is_provisional(elem.uuid_str)
+        ]
+        if not pending:
+            return 0
+        # Elements appended with an explicit UUID must not be duplicated.
+        self._uuid_minter.reserve(
+            elem.uuid_str
+            for _kind, elems, _key in groups
+            for elem in elems
+            if not is_provisional(elem.uuid_str)
+        )
+        for kind, elem, key in pending:
+            elem.uuid_str = self._mint_uuid(kind, *key(elem))
+        return len(pending)
+
+    def _text_note_uuid(self, text: str, x: float, y: float, seen: dict) -> str:
+        """UUID for a text note written without a source UUID (Issue #6076).
+
+        Text notes are ``(text, x, y)`` tuples with no UUID of their own, so
+        theirs is recomputed on every write from content plus an ordinal
+        among identical notes in this write (``seen``), skipping any UUID the
+        minter has issued or reserved.  Not recorded in the minter, so
+        writing twice gives the same result.
+        """
+        k = (text, round(x, 4), round(y, 4))
+        ordinal = seen.get(k, 0)
+        while True:
+            candidate = stable_uuid(self.sheet_uuid, "text", text, x, y, ordinal)
+            ordinal += 1
+            if not self._uuid_minter.is_taken(candidate):
+                break
+        seen[k] = ordinal
+        return candidate
 
     @property
     def sheet_path(self) -> str:

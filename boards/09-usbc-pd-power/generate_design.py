@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -863,7 +862,7 @@ def add_ground_connections(pcb: PCB) -> None:
                 "GND",
                 layer,
                 boundary,
-                str(uuid.uuid4()),
+                pcb.mint_uuid("zone", layer, "GND"),  # deterministic (Issue #6076)
                 clearance=0.2,
                 min_thickness=0.2,
                 thermal_gap=0.3,

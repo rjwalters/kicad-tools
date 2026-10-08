@@ -72,6 +72,10 @@ class SchematicElementsMixin:
     # Default tolerance for point matching (in mm)
     POINT_TOLERANCE = 0.1
 
+    if TYPE_CHECKING:
+        # Provided by the concrete ``Schematic`` class (Issue #6076).
+        def _mint_uuid(self, kind: str, *key: object) -> str: ...
+
     def _point_on_wire(
         self, x: float, y: float, wire: Wire, tolerance: float = POINT_TOLERANCE
     ) -> bool:
@@ -415,6 +419,9 @@ class SchematicElementsMixin:
             unit=unit,
             in_bom=in_bom,
             dnp=dnp,
+            # Minted now, not at write time, so a PCB footprint path built
+            # from ``instance.uuid_str`` matches the file (Issue #6076).
+            uuid_str=self._mint_uuid("symbol", ref, unit),
         )
 
         self.symbols.append(instance)
@@ -454,6 +461,7 @@ class SchematicElementsMixin:
             y=y,
             rotation=rotation,
             reference=ref,
+            uuid_str=self._mint_uuid("power", ref),
             _symbol_def=self._symbol_defs[lib_id],
         )
         self.power_symbols.append(pwr)
@@ -561,6 +569,7 @@ class SchematicElementsMixin:
             reference=ref,
             in_bom=in_bom,
             dnp=dnp,
+            uuid_str=self._mint_uuid("power", ref),
         )
         self.power_symbols.append(pwr)
         _log_info(f"Added synthesized power symbol '{net_name}' at ({x}, {y})")
