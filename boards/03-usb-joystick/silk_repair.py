@@ -279,6 +279,11 @@ def trim_silk_to_pad_clearance(
         # nudged line, so joined neighbours can be re-attached afterwards.
         moved_joints: list[tuple[tuple[float, float], tuple[float, float]]] = []
         nudged_nodes: set[int] = set()
+        # (original_local_start, original_local_end, node) for every examined
+        # silk line, captured BEFORE any clip rewrites it -- joints must be
+        # matched on stock geometry, since the clip may trim a joined
+        # neighbour's endpoint well past JOINT_SNAP_MM (J3: 0.06 mm).
+        originals: list[tuple[tuple[float, float], tuple[float, float], Any]] = []
         for node in list(footprint_node.children):
             layer_node = node.find_child("layer")
             if layer_node is None or layer_node.get_string(0) not in SILK_LAYERS:
@@ -302,6 +307,7 @@ def trim_silk_to_pad_clearance(
             if start == end:
                 continue
             result.lines_examined += 1
+            originals.append((_points_of(node, "start"), _points_of(node, "end"), node))
             centerline = LineString([start, end])
             halo = minimum_mm + width / 2.0
             offenders = [
@@ -371,28 +377,6 @@ def trim_silk_to_pad_clearance(
             replacements.append((node, rewritten))
             result.trimmed_references.append(reference)
 
-        # Issue #5762: a nudged line that used to share an endpoint with a
-        # neighbour (J3's pin-1 marker meets the body outline) must stay
-        # joined, or ``silk_overlap`` sees two crossing strokes instead of a
-        # corner.  Re-attach neighbour endpoints that sat on the old joint.
-        # Only ever moves an endpoint onto the nudged line's new endpoint
-        # (<= JOINT_SNAP_MM away); ``residual_violations`` re-verifies.
-        for node in footprint_node.children:
-            if node.name != "fp_line" or id(node) in nudged_nodes:
-                continue
-            layer_node = node.find_child("layer")
-            if layer_node is None or layer_node.get_string(0) not in SILK_LAYERS:
-                continue
-            for tag in ("start", "end"):
-                point = _points_of(node, tag)
-                for old, new in moved_joints:
-                    if math.dist(point, old) <= JOINT_SNAP_MM:
-                        child = node.find_child(tag)
-                        child.set_value(0, round(new[0], 6))
-                        child.set_value(1, round(new[1], 6))
-                        result.joints_reattached += 1
-                        break
-
         if replacements:
             rewritten_children: list[Any] = []
             replaced = {id(original): pieces for original, pieces in replacements}
@@ -402,6 +386,47 @@ def trim_silk_to_pad_clearance(
                 else:
                     rewritten_children.append(child)
             footprint_node.children = rewritten_children
+
+        # Issue #5762: a nudged line that used to share an endpoint with a
+        # neighbour (J3's pin-1 marker meets the body outline) must stay
+        # joined, or ``silk_overlap`` sees two crossing strokes instead of a
+        # corner.  Re-attach neighbour endpoints that sat on the old joint.
+        #
+        # Two things make this subtle, and both bit the first version:
+        # * the neighbour is usually clipped in this same pass (J3's outline
+        #   is), so the edit must land on the OUTPUT pieces -- i.e. run after
+        #   the swap above -- not on the pre-clip node it replaced;
+        # * the joint is matched on the neighbour's ORIGINAL endpoint, and the
+        #   output endpoint snapped is the one nearest to it.  The clipped
+        #   endpoint itself may sit further than JOINT_SNAP_MM from the old
+        #   joint.
+        # Only ever moves an endpoint onto the nudged line's new endpoint;
+        # ``residual_violations`` re-verifies the result on the written bytes.
+        if moved_joints:
+            outputs = {id(original): pieces for original, pieces in replacements}
+            for orig_start, orig_end, node in originals:
+                if id(node) in nudged_nodes:
+                    continue
+                pieces = outputs.get(id(node), [node])
+                for orig_point in (orig_start, orig_end):
+                    for old, new in moved_joints:
+                        if math.dist(orig_point, old) > JOINT_SNAP_MM:
+                            continue
+                        candidates = [
+                            (math.dist(_points_of(piece, tag), orig_point), piece, tag)
+                            for piece in pieces
+                            for tag in ("start", "end")
+                        ]
+                        if not candidates:
+                            break
+                        _, piece, tag = min(candidates, key=lambda c: c[0])
+                        target = (round(new[0], 6), round(new[1], 6))
+                        if _points_of(piece, tag) != target:
+                            child = piece.find_child(tag)
+                            child.set_value(0, target[0])
+                            child.set_value(1, target[1])
+                            result.joints_reattached += 1
+                        break
 
     result.trimmed_references = sorted(set(result.trimmed_references))
     written = Path(output_path) if output_path is not None else Path(pcb_path)
