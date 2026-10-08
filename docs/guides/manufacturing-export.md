@@ -198,6 +198,38 @@ the same kicad-cli names. Fab-specific renames such as `.GKO` for the outline
 are unnecessary, and they would break the kicad-tools consumers that read
 layers from these names.
 
+#### V-score layers (panels)
+
+A V-cut panel's score lines live on a user drawing layer (`Cmts.User`,
+`Dwgs.User`, `Eco1.User`, `Eco2.User` or `User.N`), and the exporter adds
+that layer to the Gerber set when it finds score lines there (Issues #6156,
+#6193). It accepts the following:
+
+- **Lines drawn by `kct panel`.** These are tagged, so they always count.
+- **Untagged straight lines that cross the whole outline**, as KiKit draws
+  them.
+- **Untagged partial scores.** These start at an outline edge and stop on an
+  Edge.Cuts slot or cutout boundary.
+- **Untagged jump scores.** These run edge to edge, and every gap must skip
+  a slot, a cutout or the space between boards.
+
+Section dividers, fold lines, title-block rules and dashed lines on a single
+board match none of these rules, so they never add a Gerber. Only top-level
+Edge.Cuts graphics count as slot or cutout geometry.
+
+If a panel's scores do not fit these rules, name the layer yourself. The
+layer is then plotted whether or not detection finds it:
+
+```bash
+kct export panel.kicad_pcb --vscore-layer User.2      # repeatable
+kicad-export-gerbers panel.kicad_pcb --vscore-layer User.2
+```
+
+The Python equivalent is `GerberConfig(vscore_layers=["User.2"])`, or
+`export_for_manufacturer(..., vscore_layers=[...])` when you use a preset.
+`GerberConfig(include_vscore=False)` turns detection off, but it does not
+drop layers you named explicitly.
+
 ### Step 2: Generate BOM
 
 JLCPCB's BOM format requires LCSC part numbers:

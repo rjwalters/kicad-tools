@@ -500,6 +500,272 @@ def test_layers_are_returned_in_file_order(tmp_path: Path) -> None:
     assert pcb_vscore_layers(_board(tmp_path, untagged + tagged)) == ["Dwgs.User", "Cmts.User"]
 
 
+# Partial scores, more probes and the explicit opt-in (Issue #6193)
+
+# A 100 x 80 mm single board.  ``{edge}`` adds interior Edge.Cuts geometry.
+_PROBE_BOARD = """(kicad_pcb
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user)
+    (19 "Cmts.User" user "User.Comments") (17 "Dwgs.User" user "User.Drawings")
+    (21 "Eco1.User" user "User.Eco1") (22 "Eco2.User" user "User.Eco2")
+    (31 "User.1" user))
+  (gr_rect (start 0 0) (end 100 80) (layer "Edge.Cuts"))
+  {edge}
+  {lines}
+)
+"""
+
+_PROBE_LAYERS = ["Dwgs.User", "Cmts.User", "User.1", "Eco1.User"]
+
+# A 10 x 10 mm cutout centred on (50, 40): y=40 crosses it at x=45 and x=55.
+_CUTOUT = '(gr_rect (start 45 35) (end 55 45) (layer "Edge.Cuts"))'
+
+
+def _probe(tmp_path: Path, lines: list[tuple[float, float, float, float]], layer: str, edge=""):
+    body = "\n  ".join(
+        f'(gr_line (start {x0} {y0}) (end {x1} {y1}) (layer "{layer}"))' for x0, y0, x1, y1 in lines
+    )
+    pcb = tmp_path / "probe.kicad_pcb"
+    pcb.write_text(_PROBE_BOARD.format(edge=edge, lines=body))
+    return pcb
+
+
+def _dashed(on: float, off: float, y: float = 30.0, end: float = 100.0):
+    out, x = [], 0.0
+    while x < end:
+        out.append((x, y, min(x + on, end), y))
+        x += on + off
+    return out
+
+
+# The judge's probe drawings on PR #6203: ordinary single-board documentation
+# that must not add a V-score Gerber to the fab package.
+_DOCUMENTATION_DRAWINGS = {
+    "divider-left-edge-to-55pct": [(0, 40, 55, 40)],
+    "fold-line-top-edge-to-60pct": [(50, 0, 50, 48)],
+    "title-block-rule-right-edge-to-centre": [(100, 70, 50, 70)],
+    "connector-centre-line-edge-to-70pct": [(0, 20, 70, 20)],
+    "dashed-3-on-2-off-edge-to-edge": _dashed(3, 2),
+    "dashed-2-on-2-off-edge-to-edge": _dashed(2, 2),
+    "dashed-dnp-line-edge-to-60pct": _dashed(3, 2, y=60, end=60),
+    "assembly-inner-frame-inset-5mm": [
+        (5, 5, 95, 5),
+        (95, 5, 95, 75),
+        (95, 75, 5, 75),
+        (5, 75, 5, 5),
+    ],
+}
+
+
+@pytest.mark.parametrize("layer", _PROBE_LAYERS)
+@pytest.mark.parametrize(
+    "lines", list(_DOCUMENTATION_DRAWINGS.values()), ids=list(_DOCUMENTATION_DRAWINGS)
+)
+def test_documentation_drawings_are_not_scores(tmp_path: Path, lines, layer: str) -> None:
+    assert pcb_vscore_layers(_probe(tmp_path, lines, layer)) == []
+
+
+@pytest.mark.parametrize("layer", _PROBE_LAYERS)
+def test_solid_edge_to_edge_line_is_still_a_score(tmp_path: Path, layer: str) -> None:
+    assert pcb_vscore_layers(_probe(tmp_path, [(0, 40, 100, 40)], layer)) == [layer]
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # dashed line across a cutout: one gap skips it, the others skip nothing
+        _dashed(3, 2, y=40),
+        # divider stopping 1 mm short of the cutout
+        [(0, 40, 44, 40)],
+        # jump over the cutout, plus a second gap over plain board
+        [(-3, 40, 44, 40), (56, 40, 70, 40), (75, 40, 103, 40)],
+        # pieces reaching neither outline edge, even though the gap is a cutout
+        [(10, 40, 44, 40), (56, 40, 90, 40)],
+        # partial line from the cutout that reaches no outline edge
+        [(55, 40, 80, 40)],
+    ],
+    ids=["dashed-over-cutout", "short-of-cutout", "extra-gap", "no-outline-edge", "floating"],
+)
+def test_lines_the_cutout_does_not_explain_are_not_scores(tmp_path: Path, lines) -> None:
+    assert pcb_vscore_layers(_probe(tmp_path, lines, "Cmts.User", edge=_CUTOUT)) == []
+
+
+@pytest.mark.parametrize("layer", _PROBE_LAYERS)
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # jump score over the cutout, overshooting both edges like KiKit
+        [(-3, 40, 44, 40), (56, 40, 103, 40)],
+        # jump score whose pieces stop exactly at the cutout
+        [(0, 40, 45, 40), (55, 40, 100, 40)],
+        # vertical jump score over the cutout (x=50 crosses it at y=35, 45)
+        [(50, -3, 50, 34), (50, 46, 50, 83)],
+        # partial score from the left edge ending on the cutout
+        [(0, 40, 45, 40)],
+        # partial score from the right edge ending on the cutout, drawn reversed
+        [(100, 40, 55.05, 40)],
+        # partial score from the bottom edge ending on the cutout
+        [(50, 80, 50, 45)],
+    ],
+    ids=["jump", "jump-flush", "jump-vertical", "partial", "partial-reversed", "partial-vertical"],
+)
+def test_scores_explained_by_a_cutout_are_detected(tmp_path: Path, lines, layer: str) -> None:
+    assert pcb_vscore_layers(_probe(tmp_path, lines, layer, edge=_CUTOUT)) == [layer]
+
+
+def test_jump_score_over_a_rounded_slot_is_detected(tmp_path: Path) -> None:
+    """A routed slot drawn as two lines and two arcs (y=40 meets the arcs)."""
+    slot = (
+        '(gr_line (start 45 38) (end 55 38) (layer "Edge.Cuts"))'
+        '(gr_line (start 45 42) (end 55 42) (layer "Edge.Cuts"))'
+        '(gr_arc (start 45 38) (mid 43 40) (end 45 42) (layer "Edge.Cuts"))'
+        '(gr_arc (start 55 42) (mid 57 40) (end 55 38) (layer "Edge.Cuts"))'
+    )
+    jump = [(-3, 40, 42.5, 40), (57.5, 40, 103, 40)]
+    assert pcb_vscore_layers(_probe(tmp_path, jump, "Cmts.User", edge=slot)) == ["Cmts.User"]
+    partial = [(0, 40, 43, 40)]
+    assert pcb_vscore_layers(_probe(tmp_path, partial, "Cmts.User", edge=slot)) == ["Cmts.User"]
+    stub = [(0, 40, 30, 40)]
+    assert pcb_vscore_layers(_probe(tmp_path, stub, "Cmts.User", edge=slot)) == []
+
+
+def test_partial_score_ending_on_a_circular_cutout_is_detected(tmp_path: Path) -> None:
+    hole = '(gr_circle (center 50 40) (end 54 40) (layer "Edge.Cuts"))'
+    assert pcb_vscore_layers(_probe(tmp_path, [(0, 40, 46, 40)], "Eco1.User", edge=hole)) == [
+        "Eco1.User"
+    ]
+    assert pcb_vscore_layers(_probe(tmp_path, [(0, 40, 40, 40)], "Eco1.User", edge=hole)) == []
+
+
+def test_dashed_line_across_a_two_board_panel_is_not_a_score(tmp_path: Path) -> None:
+    """Edge to edge, but most gaps lie on solid board inside a sub-board outline.
+
+    Each gap must contain an Edge.Cuts crossing; overlapping the bounding box
+    of an interior outline is not enough.
+    """
+    dashes = "".join(
+        f'(gr_line (start {x} 15) (end {x + 3} 15) (layer "Cmts.User"))' for x in range(-3, 88, 5)
+    )
+    pcb = tmp_path / "pair.kicad_pcb"
+    pcb.write_text(
+        "(kicad_pcb\n"
+        '  (gr_rect (start 0 0) (end 40 30) (layer "Edge.Cuts"))\n'
+        '  (gr_rect (start 45 0) (end 85 30) (layer "Edge.Cuts"))\n'
+        f"  {dashes}\n"
+        ")\n"
+    )
+    assert pcb_vscore_layers(pcb) == []
+
+
+def test_jump_score_between_separate_board_outlines_is_detected(tmp_path: Path) -> None:
+    """Two boards 5 mm apart: the gap is the space between their outlines."""
+    pcb = tmp_path / "pair.kicad_pcb"
+    pcb.write_text(
+        "(kicad_pcb\n"
+        '  (gr_rect (start 0 0) (end 40 30) (layer "Edge.Cuts"))\n'
+        '  (gr_rect (start 45 0) (end 85 30) (layer "Edge.Cuts"))\n'
+        '  (gr_line (start -3 15) (end 40 15) (layer "Cmts.User"))\n'
+        '  (gr_line (start 45 15) (end 88 15) (layer "Cmts.User"))\n'
+        ")\n"
+    )
+    assert pcb_vscore_layers(pcb) == ["Cmts.User"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # long collinear pieces floating mid-board, touching no edge
+        '(gr_line (start 5 15) (end 20 15) (layer "Eco2.User"))'
+        '(gr_line (start 22 15) (end 36 15) (layer "Eco2.User"))',
+        # collinear pieces on the outline itself or outside it
+        '(gr_line (start -3 0) (end 12 0) (layer "Eco2.User"))'
+        '(gr_line (start 16 0) (end 43 0) (layer "Eco2.User"))',
+        '(gr_line (start -3 -5) (end 12 -5) (layer "Eco2.User"))'
+        '(gr_line (start 16 -5) (end 43 -5) (layer "Eco2.User"))',
+        # dimension: extension lines and a dimension line above the board
+        '(gr_line (start 0 -6) (end 0 -2) (layer "Dwgs.User"))'
+        '(gr_line (start 40 -6) (end 40 -2) (layer "Dwgs.User"))'
+        '(gr_line (start 0 -5) (end 40 -5) (layer "Dwgs.User"))',
+        # pieces split across layers do not combine into one line
+        '(gr_line (start 0 15) (end 20 15) (layer "Eco2.User"))'
+        '(gr_line (start 20 15) (end 40 15) (layer "Eco1.User"))',
+    ],
+)
+def test_collinear_drawings_without_geometry_are_not_scores(tmp_path: Path, extra: str) -> None:
+    assert pcb_vscore_layers(_board(tmp_path, extra)) == []
+
+
+def test_layers_come_back_in_file_order(tmp_path: Path) -> None:
+    from kicad_tools.sexp.vscore import make_vscore_uuid
+
+    extra = (
+        '(gr_line (start 0 15) (end 40 15) (layer "Dwgs.User"))'
+        f'(gr_line (start 0 5) (end 10 5) (layer "Cmts.User") (uuid "{make_vscore_uuid()}"))'
+        '(gr_line (start 20 0) (end 20 30) (layer "Eco1.User"))'
+    )
+    assert pcb_vscore_layers(_board(tmp_path, extra)) == ["Dwgs.User", "Cmts.User", "Eco1.User"]
+
+
+# ---------------------------------------------------------------------------
+# Explicit opt-in: GerberConfig.vscore_layers / --vscore-layer (Issue #6193)
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_vscore_layer_is_plotted_without_detection() -> None:
+    exporter = _make_exporter(FIXTURE)
+    layers = exporter._get_default_layers(GerberConfig(vscore_layers=["User.2"]))
+    assert layers[-1] == "User.2"
+    layers = exporter._get_default_layers(
+        GerberConfig(vscore_layers=["User.2"], include_vscore=False)
+    )
+    assert layers[-1] == "User.2"
+
+
+def test_explicit_vscore_layer_is_not_duplicated(tmp_path: Path) -> None:
+    pcb = _save_panel(tmp_path, cut=CutMethod.VCUT)
+    layers = _make_exporter(pcb)._get_default_layers(
+        GerberConfig(vscore_layers=["Cmts.User", "Edge.Cuts"])
+    )
+    assert layers.count("Cmts.User") == 1
+    assert layers.count("Edge.Cuts") == 1
+
+
+def test_export_for_manufacturer_applies_explicit_vscore_layers() -> None:
+    exporter = _make_exporter(FIXTURE)
+    with patch.object(GerberExporter, "export", autospec=True) as export:
+        exporter.export_for_manufacturer("jlcpcb", "out", vscore_layers=["User.3"])
+    config = export.call_args.args[1]
+    assert config.vscore_layers == ["User.3"]
+    from kicad_tools.export.gerber import MANUFACTURER_PRESETS
+
+    assert MANUFACTURER_PRESETS["jlcpcb"].config.vscore_layers == []
+
+
+def test_kct_export_vscore_layer_reaches_gerber_config(tmp_path: Path, monkeypatch) -> None:
+    from kicad_tools.cli import main as kct_main
+    from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    captured = {}
+    original_init = ManufacturingPackage.__init__
+
+    def spy_init(self, pcb_path, schematic_path=None, manufacturer="jlcpcb", config=None):
+        captured["gerber_config"] = config.gerber_config
+        original_init(self, pcb_path, schematic_path, manufacturer, config)
+
+    def fake_export(self, output_dir=None, *, dry_run=False):
+        return ManufacturingResult(output_dir=Path(output_dir or tmp_path))
+
+    monkeypatch.setattr(ManufacturingPackage, "__init__", spy_init)
+    monkeypatch.setattr(ManufacturingPackage, "export", fake_export)
+    argv = ["export", str(pcb), "--vscore-layer", "User.2", "--vscore-layer", "Eco1.User"]
+    argv += ["--no-report", "--skip-preflight", "-o", str(tmp_path / "out")]
+    assert kct_main(argv) == 0
+    config = captured["gerber_config"]
+    assert config.vscore_layers == ["User.2", "Eco1.User"]
+    assert config.clean_after_zip is True
+
+
 def test_fleet_boards_detect_no_score_layer() -> None:
     import subprocess
 
