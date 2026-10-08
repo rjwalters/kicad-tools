@@ -21,16 +21,14 @@ planes), which is the canonical real-board fixture for the chain.
 
 Acceptance criteria (from issue #2885), adapted to a reproducible signal:
 
-1. The escalation does not regress: the jlcpcb-tier1 attempt routes at
-   least as many nets as the jlcpcb attempt within the same run.  The
-   original AC ("Routing succeeds after escalation, not before") was a
-   strict ``>``, but the python backend's per-net budget is wall-clock, so
-   a strict delta is a timing race on a loaded runner (Issue #6217
-   review).  The AC is therefore rescoped to non-regression; that the
-   escalation fired, and why, is pinned by ACs 2 and 3.  Measured deltas
-   are context only, not a gate.  (board-04 routing also has residual
-   issues tracked under #2695 / #2696 / #2834 that prevent a deterministic
-   absolute completion target.)
+1. The escalation makes measurable progress: the jlcpcb-tier1 attempt
+   routes strictly more nets than the jlcpcb attempt within the same run.
+   This is the "Routing succeeds (>= threshold) after escalation, not
+   before" AC, expressed as a delta rather than an absolute threshold
+   (board-04 routing has residual issues tracked under #2695 / #2696 /
+   #2834 that prevent a deterministic absolute completion target).  The
+   run uses an iteration budget, not wall clock (see "Determinism" below),
+   so the delta is reproducible rather than a timing race.
 
 2. The CLI advances to ``jlcpcb-tier1``: a 'Tier N/M: jlcpcb-tier1'
    banner appears in stdout (the canonical AC#2 from issue #2885 --
@@ -284,29 +282,24 @@ class TestAutoMfrTierIntegration:
         return _split_by_tier(auto_mfr_tier_result.stdout)
 
     # ------------------------------------------------------------------
-    # AC #1 (rescoped to non-regression): Tier-1 does not route fewer nets.
+    # AC #1: Tier-1 escalation produces measurable progress over jlcpcb.
     # ------------------------------------------------------------------
 
-    def test_tier1_does_not_regress_vs_jlcpcb(
+    def test_tier1_routes_more_nets_than_jlcpcb(
         self,
         auto_mfr_tier_result: subprocess.CompletedProcess[str],
         per_tier_stdout: dict[str, str],
     ) -> None:
-        """The jlcpcb-tier1 attempt routes at least as many nets as the
+        """The jlcpcb-tier1 attempt routes strictly more nets than the
         jlcpcb attempt within the same run.
 
-        This test enforces **non-regression only**; it does NOT prove
-        that tier1 routes more nets than jlcpcb.  The python backend's
-        per-net budget is wall-clock, so a strict ``>`` is a timing race
-        on a loaded runner.  For context, deltas measured on a developer
-        machine were +2/+3/+2 at the default 30 s budget, +1 at 15 s and
-        0 at 10 s; those numbers are not asserted.  That the escalation
-        fired, and for the right reason, is pinned deterministically by
-        ``test_escalation_advances_to_tier1`` and
-        ``test_escalation_triggered_by_missed_via_in_pad``.  An absolute
-        completion target on board-04 is gated by residual upstream
-        issues (#2695 OSC_OUT pad-completion, #2696 impedance on 2L,
-        #2834 clearance-pad-segment count).
+        Deterministic: under ``--deterministic-budget --per-net-iterations
+        200000`` with no ``--timeout`` the counts do not depend on runner
+        speed or load (measured: jlcpcb 6/9, jlcpcb-tier1 7/9, identical
+        across four runs under different CPU load).  An absolute completion
+        target on board-04 is gated by residual upstream issues (#2695
+        OSC_OUT pad-completion, #2696 impedance on 2L, #2834
+        clearance-pad-segment count).
         """
         assert "jlcpcb" in per_tier_stdout, (
             "Expected a 'Tier N/M: jlcpcb' banner.  Per-tier banners: "
@@ -339,10 +332,14 @@ class TestAutoMfrTierIntegration:
         jlcpcb_routed, _ = jlcpcb_parsed
         tier1_routed, _ = tier1_parsed
 
-        assert tier1_routed >= jlcpcb_routed, (
+        assert tier1_routed > jlcpcb_routed, (
             "Regression-anchor failed: within the --auto-mfr-tier run the "
             f"jlcpcb-tier1 tier routed {tier1_routed} nets vs jlcpcb's "
-            f"{jlcpcb_routed} nets -- escalation made routing worse.\n"
+            f"{jlcpcb_routed} nets -- no positive delta.\n"
+            "\nThe run is iteration-budgeted, so this is not a timing "
+            "flake.  Either the via-in-pad tier no longer helps (see "
+            "test_tier1_escape_pass_places_via_in_pad) or board-04 routing "
+            "changed and the per-net cap needs re-measuring.\n"
             f"\njlcpcb tier stdout (last 1500 chars):\n{jlcpcb_stdout[-1500:]}\n"
             f"\njlcpcb-tier1 tier stdout (last 1500 chars):\n"
             f"{tier1_stdout[-1500:]}"
@@ -485,9 +482,9 @@ class TestAutoMfrTierIntegration:
     # ------------------------------------------------------------------
     # AC #4: jlcpcb tier attempt falls short -- the regression-anchor.
     # ------------------------------------------------------------------
-    # NOTE: covered by ``test_tier1_does_not_regress_vs_jlcpcb`` above
-    # (non-regression: tier-1 >= jlcpcb; the mechanism is pinned by the
-    # banner and trigger-line tests).  No separate test needed.
+    # NOTE: covered by ``test_tier1_routes_more_nets_than_jlcpcb`` above
+    # (the contrast is bidirectional: tier-1 > jlcpcb is the same
+    # assertion as jlcpcb < tier-1).  No separate test needed.
 
 
 @pytest.mark.slow
