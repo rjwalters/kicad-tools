@@ -2,6 +2,13 @@
 # Source: https://www.flashpcb.com/capabilities
 # Last verified: 2026-01-16
 #
+# V-score copper clearance (Issue #6177): UNSOURCED, min_copper_to_vscore_mm
+# deliberately left unset.  https://www.flashpcb.com/capabilities publishes a
+# routed "Trace/Copper to Edge Distance" (1 mm instant / 0.25 mm email) but
+# no V-score figure (checked 2026-10-07).  kct panel --cut vcut falls back to
+# the conservative unsourced default in kicad_tools.manufacturers.vscore,
+# which is never below this profile's min_copper_to_edge_mm.
+#
 # All measurements in millimeters unless otherwise noted.
 # Note: FlashPCB is a USA-based PCB fabrication and assembly house.
 # This configuration covers the instant quote tier only.

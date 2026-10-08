@@ -75,7 +75,11 @@ class VCutConfig:
             panel warns about board copper closer than this to a scored
             edge and adds a copper-pour keepout this wide on each side of
             every score line, so a zone refill stops short of the score.
-            Fabs typically ask for 0.3--0.5 mm; 0 disables both.
+            Fabs typically ask for 0.3--0.5 mm; 0 disables both.  The
+            0.4 mm library default matches JLCPCB and PCBWay; ``kct panel``
+            replaces it with the resolved fab's
+            ``DesignRules.min_copper_to_vscore_mm`` (see
+            :func:`kicad_tools.manufacturers.vscore.vscore_clearance_for`).
     """
 
     line_width: float = 0.1

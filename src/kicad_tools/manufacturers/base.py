@@ -135,6 +135,15 @@ class DesignRules:
     min_copper_to_edge_mm: float = 0.3
     min_hole_to_edge_mm: float = 0.5
 
+    # Copper clearance to a V-score line (Issue #6177).  Distinct from
+    # ``min_copper_to_edge_mm``, which is for routed (milled) edges: the
+    # scoring blade cuts a V on both faces and fabs ask for more room.
+    # ``None`` means the fab publishes no V-score figure; consumers fall back
+    # to :data:`kicad_tools.manufacturers.vscore.UNSOURCED_VSCORE_CLEARANCE_MM`
+    # and report the value as unsourced.  Every set value must cite the fab's
+    # published capability page in the profile YAML.
+    min_copper_to_vscore_mm: float | None = None
+
     # Hole-to-hole (drill-to-drill) edge-to-edge spacing.  This is distinct
     # from ``min_hole_to_edge_mm`` (hole-to-board-edge) and from
     # ``min_clearance_mm`` (copper trace/space).  Canonical fab value is

@@ -303,7 +303,7 @@ def test_cli_spacing_defaults() -> None:
     args = parser.parse_args(["panel", str(FIXTURE)])
     assert args.panel_spacing is None
     assert args.panel_frame_space is None
-    assert args.panel_vscore_clearance == 0.4
+    assert args.panel_vscore_clearance is None  # resolved from the fab (#6177)
     args = parser.parse_args(["panel", str(FIXTURE), "--spacing-x", "2", "--spacing-y", "0"])
     assert (args.panel_spacing_x, args.panel_spacing_y) == (2.0, 0.0)
 

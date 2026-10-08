@@ -3,6 +3,12 @@
 #         https://support.seeedstudio.com/knowledgebase/articles/447362-fusion-pcb-specification
 # Last verified: 2026-01-16
 #
+# V-score copper clearance (Issue #6177): UNSOURCED, min_copper_to_vscore_mm
+# deliberately left unset.  No copper-to-V-score figure found on Seeed's
+# published Fusion PCB pages (checked 2026-10-07).  kct panel --cut vcut
+# falls back to the conservative unsourced default in
+# kicad_tools.manufacturers.vscore.
+#
 # All measurements in millimeters unless otherwise noted.
 # Note: Seeed offers comparable capabilities to JLCPCB with some differences:
 #       - More conservative trace/clearance for 2-layer (6 mil vs 5 mil)
