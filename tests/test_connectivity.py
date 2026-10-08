@@ -63,6 +63,10 @@ def test_connected_zone_fill_island_stays_clean(tmp_path: Path) -> None:
     assert ConnectivityValidator(pcb_path).validate().zone_islands == []
 
 
+#: Board 05 parity (57) needs kicad-cli >= this; 10.0.1 adds a zone_island.
+BOARD05_PARITY_MIN_KICAD = (10, 0, 2)
+
+
 @pytest.mark.parametrize(
     ("relative_board", "expected"),
     [
@@ -82,6 +86,16 @@ def test_native_fleet_relationship_parity(relative_board: str, expected: int) ->
 
     if find_kicad_cli() is None:
         pytest.skip("kicad-cli is not installed")
+    if "05-bldc" in relative_board:
+        from kicad_tools.cli.runner import get_kicad_version
+        from kicad_tools.zones.placement_fill import parse_pcbnew_version
+
+        version = parse_pcbnew_version(str(get_kicad_version() or ""))
+        if version is not None and version < BOARD05_PARITY_MIN_KICAD:
+            pytest.skip(
+                "KiCad < 10.0.2 reports one extra zone_island relationship "
+                "on board 05 (58 vs 57); CI's 10.0.6 matches (#6101, #5993)"
+            )
     board = Path(__file__).parents[1] / relative_board
     result = ConnectivityValidator(board).validate(reconcile_native=True)
 
