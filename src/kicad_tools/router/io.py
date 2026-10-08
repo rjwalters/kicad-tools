@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
-    from .primitives import Pad, Segment
+    from .primitives import Pad, Route, Segment
     from .stub_terminals import StubTerminal
 
 from .core import Autorouter
@@ -2361,6 +2361,35 @@ def validate_routes(
     def _resolve_net_name(net_id: int) -> str:
         return net_names.get(net_id, f"Net {net_id}")
 
+    def _route_net_name(route: Route) -> str:
+        """Best name for a route's net: its own name, then ``net_names``.
+
+        Issue #6225: copper preserved from the input board on a *skipped*
+        pour net (GND, +3V3, ...) carries its board net id and name on the
+        ``Route`` itself, but the net is absent from ``router.net_names``
+        because ``load_pcb_for_routing`` never registers skipped nets.
+        """
+        return route.net_name or _resolve_net_name(route.net)
+
+    def _pad_on_route_net(pad: Pad, route_net: int, route_name: str | None) -> bool:
+        """True when ``pad`` belongs to the same electrical net as the route.
+
+        Issue #6225: ``load_pcb_for_routing`` rewrites the net id of every
+        pad on a skipped pour net to ``0`` (keeping ``net_name``) so the
+        autorouter does not try to route it, while preserved copper on that
+        same net keeps its real board net id.  Comparing ids alone then
+        treats a preserved +3V3 fanout via touching its own +3V3 pad as
+        cross-net copper overlap -- a phantom "short" that kicad-cli and
+        ``kct check`` (which compare real nets) never report.  A pad is on
+        the route's net when the ids match, or when the pad is a
+        skipped-net pad whose name matches the route's net name.  Name
+        matching only ever applies to ``net == 0`` named pads, so a genuine
+        cross-net overlap between two distinct named nets is still flagged.
+        """
+        if pad.net == route_net:
+            return True
+        return bool(pad.net == 0 and pad.net_name and route_name and pad.net_name == route_name)
+
     # Issue #5240: cheap circle-based lower-bound rejection.  The
     # segment-to-pad / segment-to-segment / segment-to-via loops below are
     # O(segments x pads) / O(segments^2) / O(segments x vias) with no
@@ -2551,6 +2580,7 @@ def validate_routes(
 
     def _pad_obstacles(
         route_net: int,
+        route_name: str | None = None,
     ) -> list[tuple[str, Pad, bool, Layer, float, float, float, float]]:
         """Pads that are clearance obstacles for a route on ``route_net``.
 
@@ -2564,8 +2594,9 @@ def validate_routes(
             return cached
         entries: list[tuple[str, Pad, bool, Layer, float, float, float, float]] = []
         for (ref, _num), pad in router.pads.items():
-            # Skip pads on the same net
-            if pad.net == route_net:
+            # Skip pads on the same net (by id, or by name for skipped
+            # pour-net pads whose id was rewritten to 0 -- Issue #6225)
+            if _pad_on_route_net(pad, route_net, route_name):
                 continue
 
             # Skip truly unconnected pads -- pads with net == 0 AND no
@@ -2702,7 +2733,7 @@ def validate_routes(
 
         # Build set of component refs that this route's net connects to
         route_component_refs = _component_refs(route_net)
-        pad_obstacles = _pad_obstacles(route_net)
+        pad_obstacles = _pad_obstacles(route_net, route.net_name or net_names.get(route_net))
         via_obstacles = _via_obstacles(route_net)
         existing_seg_obstacles = _existing_segment_obstacles(route_net)
 
@@ -3019,11 +3050,15 @@ def validate_routes(
             for r, _p in router.nets[route_net]:
                 route_component_refs.add(r)
 
+        route_name = route.net_name or net_names.get(route_net)
+
         for via in route.vias:
             via_radius = via.diameter / 2
 
             for (ref, num), pad in router.pads.items():
-                if pad.net == route_net:
+                # Issue #6225: a skipped pour-net pad (net id rewritten to
+                # 0) is still the same net as preserved copper of that name.
+                if _pad_on_route_net(pad, route_net, route_name):
                     continue
 
                 # Skip truly unconnected pads.  Pads on skipped pour nets
@@ -3070,7 +3105,7 @@ def validate_routes(
                             obstacle_net=pad.net,
                             distance=effective_dist,
                             required=via_clear,
-                            net_name=_resolve_net_name(route_net),
+                            net_name=_route_net_name(route),
                             obstacle_net_name=(
                                 pad.net_name
                                 if pad.net == 0 and pad.net_name
