@@ -48,7 +48,7 @@ def test_sourced_profiles_carry_the_published_value(mfr: str) -> None:
     # counting the board's layers.
     assert values == {SOURCED[mfr]}
     resolved = vscore_clearance_for(mfr)
-    assert resolved == (SOURCED[mfr], mfr, True)
+    assert resolved == (SOURCED[mfr], mfr, True, None)
 
 
 @pytest.mark.parametrize("mfr", sorted(SOURCED))
@@ -177,4 +177,40 @@ def test_cli_text_reports_clearance_source(tmp_path: Path, capsys) -> None:
     )
     assert run_panel_command(args) == 0
     text = capsys.readouterr().out
-    assert "V-score clearance: 0.5 mm (oshpark publishes none; unsourced default)" in text
+    assert "V-score clearance: 0.5 mm (oshpark does not offer V-scoring; unsourced default)" in text
+
+
+def test_oshpark_does_not_support_vscore_others_unknown() -> None:
+    assert get_profile("oshpark").supports_vscore is False
+    assert vscore_clearance_for("oshpark").supported is False
+    for mfr in ("seeed", "flashpcb", "jlcpcb", "pcbway"):
+        assert get_profile(mfr).supports_vscore is None
+    assert "docs.oshpark.com" in (DATA / "oshpark.yaml").read_text()
+
+
+@needs_shapely
+def test_cli_json_warns_oshpark_has_no_vscore(tmp_path: Path, capsys) -> None:
+    doc = _run(tmp_path, capsys, FIXTURE, "--mfr", "oshpark")
+    assert doc["vscore_supported"] is False
+    assert any("does not offer V-scoring" in w and "mousebite" in w for w in doc["warnings"])
+
+
+@needs_shapely
+def test_cli_text_warns_oshpark_has_no_vscore(tmp_path: Path, capsys) -> None:
+    from kicad_tools.cli.commands.panel import run_panel_command
+    from kicad_tools.cli.parser import create_parser
+
+    out = tmp_path / "panel.kicad_pcb"
+    args = create_parser().parse_args(
+        ["panel", str(FIXTURE), "-o", str(out), "--cut", "vcut", "--mfr", "oshpark"]
+    )
+    assert run_panel_command(args) == 0
+    err = capsys.readouterr().err
+    assert "does not offer V-scoring" in err and "--cut mousebite" in err
+
+
+@needs_shapely
+def test_cli_no_unsupported_warning_for_jlcpcb(tmp_path: Path, capsys) -> None:
+    doc = _run(tmp_path, capsys, FIXTURE)
+    assert doc["vscore_supported"] is None
+    assert not any("does not offer" in w for w in doc["warnings"])
