@@ -13,6 +13,7 @@ import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
@@ -883,7 +884,15 @@ def generate(output: Path) -> dict:
         project_name=NAME,
         local_symbol_libs=[library],
     )
-    pcb = PCB.create(width=100, height=65, layers=4, title="USB-C PD 5V supply — development")
+    # Pinned title-block date: PCB.create stamps today's date otherwise, which
+    # makes regeneration non-reproducible (issue #6076).
+    pcb = PCB.create(
+        width=100,
+        height=65,
+        layers=4,
+        title="USB-C PD 5V supply — development",
+        board_date="2026-10-06",
+    )
     # Explicit rectangle avoids inferred-outline fallback in the router loader.
     edges = pcb._sexp.find_children("gr_line")
     coords = [
@@ -978,6 +987,12 @@ def generate(output: Path) -> dict:
         output / f"{NAME}.kicad_pcb", output / f"{NAME}.kicad_sch"
     )
     assert not annotation.missing_pads, annotation.missing_pads
+    # Give every footprint child the generator left without a UUID a
+    # structure-derived one before KiCad first loads the board; otherwise
+    # check_design.py's ``--save-board`` persists random ones and the
+    # committed board differs run to run (issue #6076).
+    board_file = output / f"{NAME}.kicad_pcb"
+    canonicalize_pcb_file_uuids(board_file, keep=uuids_in_file(board_file))
     pro = create_minimal_project(NAME)
     pro.setdefault("text_variables", {})["KCT_PRESERVE_BOARD_RULES"] = "1"
     pro["board"]["design_settings"]["rules"].update(

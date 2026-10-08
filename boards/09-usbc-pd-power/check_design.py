@@ -12,6 +12,7 @@ from pathlib import Path
 
 from engineering.calculate import calculate
 
+from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
 from kicad_tools.lvs.board_lvs import compare_netlists
 from kicad_tools.lvs.copper_lvs import compare_copper_netlist
 from kicad_tools.schema.pcb import PCB
@@ -160,6 +161,10 @@ def check(output):
     )
     drc_path = output / "placement-drc.json"
     drc_path.unlink(missing_ok=True)
+    # KiCad adds missing mandatory footprint fields on load with random UUIDs
+    # and ``--save-board`` persists them; re-key those afterwards so the
+    # committed board is reproducible (issue #6076, cf. #6052).
+    authored_uuids = uuids_in_file(pcb)
     drc = subprocess.run(
         [
             "kicad-cli",
@@ -175,6 +180,7 @@ def check(output):
         ],
         check=False,
     )
+    canonicalize_pcb_file_uuids(pcb, keep=authored_uuids)
     drc_report = json.loads(drc_path.read_text()) if drc_path.exists() else None
     critical_opens = critical_route_opens(pcb, drc_report) if drc_report else sorted(CRITICAL_NETS)
     labels = compare_netlists(schematic, pcb)

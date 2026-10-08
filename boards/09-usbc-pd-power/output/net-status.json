@@ -1,5 +1,5 @@
 {
-  "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6027/boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+  "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6076-regen-d/boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
   "connectivity_model": "strict",
   "summary": {
     "total_nets": 32,
@@ -10,7 +10,7 @@
   },
   "nets": [
     {
-      "net_number": 5,
+      "net_number": 1,
       "net_name": "+3V3",
       "net_class": "",
       "status": "complete",
@@ -33,31 +33,17 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "C12.1",
+          "name": "R15.1",
           "position": [
-            78.225,
-            34.0
-          ]
-        },
-        {
-          "name": "R17.1",
-          "position": [
-            23.175,
-            35.0
-          ]
-        },
-        {
-          "name": "R12.1",
-          "position": [
-            29.175,
-            44.0
-          ]
-        },
-        {
-          "name": "R13.1",
-          "position": [
-            29.175,
+            35.175,
             48.0
+          ]
+        },
+        {
+          "name": "R18.1",
+          "position": [
+            29.175,
+            35.0
           ]
         },
         {
@@ -75,31 +61,17 @@
           ]
         },
         {
-          "name": "C14.1",
-          "position": [
-            19.225,
-            43.0
-          ]
-        },
-        {
-          "name": "R15.1",
-          "position": [
-            35.175,
-            48.0
-          ]
-        },
-        {
-          "name": "R18.1",
-          "position": [
-            29.175,
-            35.0
-          ]
-        },
-        {
           "name": "U3.6",
           "position": [
             76.1,
             33.0
+          ]
+        },
+        {
+          "name": "R17.1",
+          "position": [
+            23.175,
+            35.0
           ]
         },
         {
@@ -108,12 +80,40 @@
             35.175,
             44.0
           ]
+        },
+        {
+          "name": "C12.1",
+          "position": [
+            78.225,
+            34.0
+          ]
+        },
+        {
+          "name": "R13.1",
+          "position": [
+            29.175,
+            48.0
+          ]
+        },
+        {
+          "name": "C14.1",
+          "position": [
+            19.225,
+            43.0
+          ]
+        },
+        {
+          "name": "R12.1",
+          "position": [
+            29.175,
+            44.0
+          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 19,
+      "net_number": 24,
       "net_name": "+5V_OUT",
       "net_class": "",
       "status": "complete",
@@ -136,17 +136,10 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "C15.1",
+          "name": "U3.8",
           "position": [
-            80.225,
-            20.0
-          ]
-        },
-        {
-          "name": "J2.1",
-          "position": [
-            86.0,
-            16.0
+            76.1,
+            32.0
           ]
         },
         {
@@ -157,24 +150,31 @@
           ]
         },
         {
-          "name": "U3.8",
-          "position": [
-            76.1,
-            32.0
-          ]
-        },
-        {
           "name": "RSH1.4",
           "position": [
             72.985,
             18.635
+          ]
+        },
+        {
+          "name": "J2.1",
+          "position": [
+            86.0,
+            16.0
+          ]
+        },
+        {
+          "name": "C15.1",
+          "position": [
+            80.225,
+            20.0
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 25,
+      "net_number": 12,
       "net_name": "BOOT",
       "net_class": "",
       "status": "complete",
@@ -214,7 +214,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 21,
+      "net_number": 19,
       "net_name": "BOOT_CAP",
       "net_class": "",
       "status": "complete",
@@ -237,24 +237,24 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "C7.1",
-          "position": [
-            61.775,
-            23.0
-          ]
-        },
-        {
           "name": "R9.2",
           "position": [
             62.52499999999999,
             26.5
+          ]
+        },
+        {
+          "name": "C7.1",
+          "position": [
+            61.775,
+            23.0
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 24,
+      "net_number": 11,
       "net_name": "BUCK_EN",
       "net_class": "",
       "status": "complete",
@@ -284,24 +284,24 @@
           ]
         },
         {
-          "name": "R6.1",
-          "position": [
-            63.175,
-            39.0
-          ]
-        },
-        {
           "name": "R5.2",
           "position": [
             64.825,
             35.0
+          ]
+        },
+        {
+          "name": "R6.1",
+          "position": [
+            63.175,
+            39.0
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 3,
+      "net_number": 17,
       "net_name": "CC1",
       "net_class": "",
       "status": "complete",
@@ -348,7 +348,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 4,
+      "net_number": 18,
       "net_name": "CC2",
       "net_class": "",
       "status": "complete",
@@ -395,7 +395,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 15,
+      "net_number": 29,
       "net_name": "DISCHARGE",
       "net_class": "",
       "status": "complete",
@@ -418,24 +418,24 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "R4.2",
-          "position": [
-            27.4625,
-            26.0
-          ]
-        },
-        {
           "name": "U1.9",
           "position": [
             17.75,
             26.9375
+          ]
+        },
+        {
+          "name": "R4.2",
+          "position": [
+            27.4625,
+            26.0
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 9,
+      "net_number": 10,
       "net_name": "FB",
       "net_class": "",
       "status": "complete",
@@ -458,13 +458,6 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "R7.2",
-          "position": [
-            66.825,
-            25.0
-          ]
-        },
-        {
           "name": "U2.4",
           "position": [
             59.1375,
@@ -472,10 +465,10 @@
           ]
         },
         {
-          "name": "C10.2",
+          "name": "R7.2",
           "position": [
-            66.775,
-            22.0
+            66.825,
+            25.0
           ]
         },
         {
@@ -484,12 +477,19 @@
             65.175,
             29.0
           ]
+        },
+        {
+          "name": "C10.2",
+          "position": [
+            66.775,
+            22.0
+          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 1,
+      "net_number": 5,
       "net_name": "GND",
       "net_class": "",
       "status": "complete",
@@ -514,6 +514,48 @@
       "has_vias": true,
       "suggested_fix": "",
       "connected_pads": [
+        {
+          "name": "U4.3",
+          "position": [
+            16.9375,
+            45.0
+          ]
+        },
+        {
+          "name": "C2.2",
+          "position": [
+            20.775,
+            19.0
+          ]
+        },
+        {
+          "name": "U2.1",
+          "position": [
+            56.8625,
+            28.05
+          ]
+        },
+        {
+          "name": "C5.2",
+          "position": [
+            53.0,
+            27.525
+          ]
+        },
+        {
+          "name": "J3.1",
+          "position": [
+            86.0,
+            42.0
+          ]
+        },
+        {
+          "name": "D2.1",
+          "position": [
+            85.2125,
+            30.0
+          ]
+        },
         {
           "name": "J1.A1",
           "position": [
@@ -571,24 +613,24 @@
           ]
         },
         {
-          "name": "C12.2",
+          "name": "U3.1",
           "position": [
-            79.775,
-            34.0
+            71.9,
+            31.0
           ]
         },
         {
-          "name": "C3.2",
+          "name": "U3.2",
           "position": [
-            10.775,
-            23.0
+            71.9,
+            31.5
           ]
         },
         {
-          "name": "C8.2",
+          "name": "U3.7",
           "position": [
-            51.475,
-            16.0
+            76.1,
+            32.5
           ]
         },
         {
@@ -599,52 +641,10 @@
           ]
         },
         {
-          "name": "C15.2",
+          "name": "C8.2",
           "position": [
-            81.775,
-            20.0
-          ]
-        },
-        {
-          "name": "C2.2",
-          "position": [
-            20.775,
-            19.0
-          ]
-        },
-        {
-          "name": "J2.2",
-          "position": [
-            91.08,
+            51.475,
             16.0
-          ]
-        },
-        {
-          "name": "U2.1",
-          "position": [
-            56.8625,
-            28.05
-          ]
-        },
-        {
-          "name": "C5.2",
-          "position": [
-            53.0,
-            27.525
-          ]
-        },
-        {
-          "name": "U4.3",
-          "position": [
-            16.9375,
-            45.0
-          ]
-        },
-        {
-          "name": "C6.2",
-          "position": [
-            55.150000000000006,
-            28.225
           ]
         },
         {
@@ -690,59 +690,10 @@
           ]
         },
         {
-          "name": "R8.2",
+          "name": "C3.2",
           "position": [
-            66.825,
-            29.0
-          ]
-        },
-        {
-          "name": "C1.2",
-          "position": [
-            15.775,
-            18.0
-          ]
-        },
-        {
-          "name": "J3.1",
-          "position": [
-            86.0,
-            42.0
-          ]
-        },
-        {
-          "name": "C14.2",
-          "position": [
-            20.775,
-            43.0
-          ]
-        },
-        {
-          "name": "U3.1",
-          "position": [
-            71.9,
-            31.0
-          ]
-        },
-        {
-          "name": "U3.2",
-          "position": [
-            71.9,
-            31.5
-          ]
-        },
-        {
-          "name": "U3.7",
-          "position": [
-            76.1,
-            32.5
-          ]
-        },
-        {
-          "name": "C13.2",
-          "position": [
-            11.775,
-            43.0
+            10.775,
+            23.0
           ]
         },
         {
@@ -753,17 +704,66 @@
           ]
         },
         {
-          "name": "D2.1",
+          "name": "C1.2",
           "position": [
-            85.2125,
-            30.0
+            15.775,
+            18.0
+          ]
+        },
+        {
+          "name": "C13.2",
+          "position": [
+            11.775,
+            43.0
+          ]
+        },
+        {
+          "name": "C6.2",
+          "position": [
+            55.150000000000006,
+            28.225
+          ]
+        },
+        {
+          "name": "R8.2",
+          "position": [
+            66.825,
+            29.0
+          ]
+        },
+        {
+          "name": "C12.2",
+          "position": [
+            79.775,
+            34.0
+          ]
+        },
+        {
+          "name": "J2.2",
+          "position": [
+            91.08,
+            16.0
+          ]
+        },
+        {
+          "name": "C14.2",
+          "position": [
+            20.775,
+            43.0
+          ]
+        },
+        {
+          "name": "C15.2",
+          "position": [
+            81.775,
+            20.0
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 23,
+      "net_number": 32,
       "net_name": "KELVIN_N",
       "net_class": "",
       "status": "complete",
@@ -803,7 +803,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 32,
+      "net_number": 28,
       "net_name": "KELVIN_P",
       "net_class": "",
       "status": "complete",
@@ -843,7 +843,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 27,
+      "net_number": 16,
       "net_name": "LED_A",
       "net_class": "",
       "status": "complete",
@@ -866,24 +866,24 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "R16.2",
-          "position": [
-            86.825,
-            26.0
-          ]
-        },
-        {
           "name": "D2.2",
           "position": [
             86.7875,
             30.0
+          ]
+        },
+        {
+          "name": "R16.2",
+          "position": [
+            86.825,
+            26.0
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 31,
+      "net_number": 2,
       "net_name": "MON_ALERT",
       "net_class": "",
       "status": "complete",
@@ -906,17 +906,17 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "J3.6",
-          "position": [
-            86.0,
-            54.7
-          ]
-        },
-        {
           "name": "R15.2",
           "position": [
             36.825,
             48.0
+          ]
+        },
+        {
+          "name": "J3.6",
+          "position": [
+            86.0,
+            54.7
           ]
         },
         {
@@ -930,7 +930,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 30,
+      "net_number": 15,
       "net_name": "PD_ALERT",
       "net_class": "",
       "status": "complete",
@@ -953,17 +953,17 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "U1.19",
-          "position": [
-            19.25,
-            23.0625
-          ]
-        },
-        {
           "name": "J3.5",
           "position": [
             86.0,
             52.16
+          ]
+        },
+        {
+          "name": "U1.19",
+          "position": [
+            19.25,
+            23.0625
           ]
         },
         {
@@ -977,7 +977,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 6,
+      "net_number": 30,
       "net_name": "PD_OK2",
       "net_class": "",
       "status": "complete",
@@ -1000,24 +1000,24 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "R17.2",
-          "position": [
-            24.825,
-            35.0
-          ]
-        },
-        {
           "name": "U1.20",
           "position": [
             18.75,
             23.0625
+          ]
+        },
+        {
+          "name": "R17.2",
+          "position": [
+            24.825,
+            35.0
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 28,
+      "net_number": 3,
       "net_name": "PD_OK3",
       "net_class": "",
       "status": "complete",
@@ -1040,24 +1040,24 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "U1.14",
-          "position": [
-            19.9375,
-            25.75
-          ]
-        },
-        {
           "name": "R18.2",
           "position": [
             30.825,
             35.0
+          ]
+        },
+        {
+          "name": "U1.14",
+          "position": [
+            19.9375,
+            25.75
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 11,
+      "net_number": 21,
       "net_name": "PMOS_GATE",
       "net_class": "",
       "status": "complete",
@@ -1094,24 +1094,10 @@
           ]
         },
         {
-          "name": "Q2.4",
-          "position": [
-            46.475,
-            16.095
-          ]
-        },
-        {
           "name": "D1.2",
           "position": [
             40.65,
             27.0
-          ]
-        },
-        {
-          "name": "C4.2",
-          "position": [
-            39.775,
-            31.0
           ]
         },
         {
@@ -1120,12 +1106,26 @@
             28.175,
             30.0
           ]
+        },
+        {
+          "name": "Q2.4",
+          "position": [
+            46.475,
+            16.095
+          ]
+        },
+        {
+          "name": "C4.2",
+          "position": [
+            39.775,
+            31.0
+          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 10,
+      "net_number": 20,
       "net_name": "PMOS_SOURCE",
       "net_class": "",
       "status": "complete",
@@ -1176,6 +1176,13 @@
           ]
         },
         {
+          "name": "D1.1",
+          "position": [
+            37.35,
+            27.0
+          ]
+        },
+        {
           "name": "Q2.1",
           "position": [
             46.475,
@@ -1194,13 +1201,6 @@
           "position": [
             46.475,
             17.365000000000002
-          ]
-        },
-        {
-          "name": "D1.1",
-          "position": [
-            37.35,
-            27.0
           ]
         },
         {
@@ -1237,20 +1237,6 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "R12.2",
-          "position": [
-            30.825,
-            44.0
-          ]
-        },
-        {
-          "name": "U1.7",
-          "position": [
-            16.75,
-            26.9375
-          ]
-        },
-        {
           "name": "J3.2",
           "position": [
             86.0,
@@ -1263,12 +1249,26 @@
             71.9,
             33.0
           ]
+        },
+        {
+          "name": "U1.7",
+          "position": [
+            16.75,
+            26.9375
+          ]
+        },
+        {
+          "name": "R12.2",
+          "position": [
+            30.825,
+            44.0
+          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 16,
+      "net_number": 14,
       "net_name": "SDA",
       "net_class": "",
       "status": "complete",
@@ -1291,20 +1291,6 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "R13.2",
-          "position": [
-            30.825,
-            48.0
-          ]
-        },
-        {
-          "name": "U1.8",
-          "position": [
-            17.25,
-            26.9375
-          ]
-        },
-        {
           "name": "J3.3",
           "position": [
             86.0,
@@ -1317,12 +1303,26 @@
             71.9,
             32.5
           ]
+        },
+        {
+          "name": "U1.8",
+          "position": [
+            17.25,
+            26.9375
+          ]
+        },
+        {
+          "name": "R13.2",
+          "position": [
+            30.825,
+            48.0
+          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 18,
+      "net_number": 25,
       "net_name": "SENSE_N",
       "net_class": "",
       "status": "complete",
@@ -1345,6 +1345,13 @@
       "suggested_fix": "",
       "connected_pads": [
         {
+          "name": "U3.9",
+          "position": [
+            76.1,
+            31.5
+          ]
+        },
+        {
           "name": "C11.2",
           "position": [
             79.775,
@@ -1357,19 +1364,12 @@
             76.825,
             26.0
           ]
-        },
-        {
-          "name": "U3.9",
-          "position": [
-            76.1,
-            31.5
-          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 17,
+      "net_number": 26,
       "net_name": "SENSE_P",
       "net_class": "",
       "status": "complete",
@@ -1392,17 +1392,17 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "C11.1",
-          "position": [
-            78.225,
-            29.0
-          ]
-        },
-        {
           "name": "U3.10",
           "position": [
             76.1,
             31.0
+          ]
+        },
+        {
+          "name": "C11.1",
+          "position": [
+            78.225,
+            29.0
           ]
         },
         {
@@ -1416,7 +1416,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 29,
+      "net_number": 27,
       "net_name": "SINK_GATE",
       "net_class": "",
       "status": "complete",
@@ -1439,24 +1439,24 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "U1.16",
-          "position": [
-            19.9375,
-            24.75
-          ]
-        },
-        {
           "name": "R2.2",
           "position": [
             29.825,
             30.0
+          ]
+        },
+        {
+          "name": "U1.16",
+          "position": [
+            19.9375,
+            24.75
           ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 22,
+      "net_number": 8,
       "net_name": "SW",
       "net_class": "",
       "status": "complete",
@@ -1479,13 +1479,6 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "C7.2",
-          "position": [
-            60.225,
-            23.0
-          ]
-        },
-        {
           "name": "U2.2",
           "position": [
             56.8625,
@@ -1498,12 +1491,19 @@
             48.0,
             29.95
           ]
+        },
+        {
+          "name": "C7.2",
+          "position": [
+            60.225,
+            23.0
+          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 12,
+      "net_number": 22,
       "net_name": "VBUS_FUSED",
       "net_class": "",
       "status": "complete",
@@ -1564,7 +1564,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 2,
+      "net_number": 4,
       "net_name": "VBUS_RAW",
       "net_class": "",
       "status": "complete",
@@ -1586,6 +1586,20 @@
       "has_vias": true,
       "suggested_fix": "",
       "connected_pads": [
+        {
+          "name": "U4.2",
+          "position": [
+            15.0625,
+            45.95
+          ]
+        },
+        {
+          "name": "R3.1",
+          "position": [
+            23.5375,
+            22.0
+          ]
+        },
         {
           "name": "J1.A4",
           "position": [
@@ -1612,20 +1626,6 @@
           "position": [
             12.45,
             11.045
-          ]
-        },
-        {
-          "name": "U4.2",
-          "position": [
-            15.0625,
-            45.95
-          ]
-        },
-        {
-          "name": "R3.1",
-          "position": [
-            23.5375,
-            22.0
           ]
         },
         {
@@ -1660,7 +1660,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 26,
+      "net_number": 7,
       "net_name": "VBUS_SENSE",
       "net_class": "",
       "status": "complete",
@@ -1700,7 +1700,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 14,
+      "net_number": 9,
       "net_name": "VIN",
       "net_class": "",
       "status": "complete",
@@ -1723,6 +1723,27 @@
       "suggested_fix": "",
       "connected_pads": [
         {
+          "name": "U2.3",
+          "position": [
+            56.8625,
+            29.95
+          ]
+        },
+        {
+          "name": "C5.1",
+          "position": [
+            53.0,
+            30.475
+          ]
+        },
+        {
+          "name": "R5.1",
+          "position": [
+            63.175,
+            35.0
+          ]
+        },
+        {
           "name": "R4.1",
           "position": [
             24.5375,
@@ -1730,10 +1751,10 @@
           ]
         },
         {
-          "name": "U2.3",
+          "name": "C6.1",
           "position": [
-            56.8625,
-            29.95
+            55.150000000000006,
+            29.775
           ]
         },
         {
@@ -1763,33 +1784,12 @@
             41.525,
             19.905
           ]
-        },
-        {
-          "name": "C5.1",
-          "position": [
-            53.0,
-            30.475
-          ]
-        },
-        {
-          "name": "C6.1",
-          "position": [
-            55.150000000000006,
-            29.775
-          ]
-        },
-        {
-          "name": "R5.1",
-          "position": [
-            63.175,
-            35.0
-          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 8,
+      "net_number": 23,
       "net_name": "VOUT_PRE",
       "net_class": "",
       "status": "complete",
@@ -1819,10 +1819,10 @@
           ]
         },
         {
-          "name": "C8.1",
+          "name": "L1.2",
           "position": [
-            48.525,
-            16.0
+            48.0,
+            24.05
           ]
         },
         {
@@ -1833,17 +1833,10 @@
           ]
         },
         {
-          "name": "C10.1",
+          "name": "C8.1",
           "position": [
-            65.225,
-            22.0
-          ]
-        },
-        {
-          "name": "L1.2",
-          "position": [
-            48.0,
-            24.05
+            48.525,
+            16.0
           ]
         },
         {
@@ -1852,12 +1845,19 @@
             67.015,
             17.365
           ]
+        },
+        {
+          "name": "C10.1",
+          "position": [
+            65.225,
+            22.0
+          ]
         }
       ],
       "unconnected_pads": []
     },
     {
-      "net_number": 20,
+      "net_number": 6,
       "net_name": "VREG_1V2",
       "net_class": "",
       "status": "complete",
@@ -1897,7 +1897,7 @@
       "unconnected_pads": []
     },
     {
-      "net_number": 7,
+      "net_number": 31,
       "net_name": "VREG_2V7",
       "net_class": "",
       "status": "complete",
@@ -1920,17 +1920,17 @@
       "suggested_fix": "",
       "connected_pads": [
         {
-          "name": "C3.1",
-          "position": [
-            9.225,
-            23.0
-          ]
-        },
-        {
           "name": "U1.23",
           "position": [
             17.25,
             23.0625
+          ]
+        },
+        {
+          "name": "C3.1",
+          "position": [
+            9.225,
+            23.0
           ]
         }
       ],
