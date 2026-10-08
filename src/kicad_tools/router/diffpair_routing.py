@@ -13223,6 +13223,19 @@ class DiffPairRouter:
 
         reach_before = sum(1 for n in candidate_nets if self._net_is_connected(n))
         snapshot_ids = {id(r) for r in autorouter.routes}
+        # Issue #6230: the re-run is a FULL main-strategy pass, not an
+        # add-only one -- the negotiated loop rips up and replaces first-pass
+        # routes of nets the yield never touched, and post-route passes mutate
+        # route geometry in place.  Removing "added" routes on revert therefore
+        # dropped the ripped first-pass copper too (board 06, forced 60 s
+        # deadline: USB_CC1 / USB_CC2 lost all copper after an abandoned
+        # re-run).  Snapshot the exact first-pass route list and geometry so a
+        # revert restores the board the first pass left, whatever the re-run
+        # did to it.
+        pre_rerun_routes = list(autorouter.routes)
+        pre_rerun_geometry = [r.copy_geometry() for r in pre_rerun_routes]
+        failures = getattr(autorouter, "routing_failures", None)
+        pre_rerun_failures = list(failures) if isinstance(failures, list) else None
         yielded_routes = [r for _p, routes in to_yield for r in routes]
         released_nets: set[int] = set()
         # Issue #5895: single-ended legs of budget-exited pairs that the first
@@ -13349,15 +13362,21 @@ class DiffPairRouter:
             return True, released_nets, yielded_routes, added_routes
 
         # The trade did not pay -- put the board back as the first pass left it.
-        for route in added_routes:
-            with contextlib.suppress(Exception):
-                autorouter.grid.unmark_route(route)
-            if route in autorouter.routes:
-                autorouter.routes.remove(route)
-        for route in yielded_routes:
-            autorouter._mark_route(route)
-            if route not in autorouter.routes:
-                autorouter.routes.append(route)
+        # Issue #6230: restore the full first-pass snapshot (route list AND
+        # geometry), not just "remove added, re-add yielded": the re-run may
+        # have ripped or mutated first-pass routes of unrelated nets.  Unmark
+        # everything the re-run left (with its current geometry), restore the
+        # snapshot geometry onto the original Route objects (callers hold
+        # references to them), then re-mark the snapshot on both grids.
+        autorouter.restore_route_snapshot([], replaced_routes=list(autorouter.routes))
+        for route, geometry in zip(pre_rerun_routes, pre_rerun_geometry, strict=True):
+            route.segments = geometry.segments
+            route.vias = geometry.vias
+        autorouter.restore_route_snapshot(pre_rerun_routes, replaced_routes=[])
+        if pre_rerun_failures is not None and isinstance(
+            getattr(autorouter, "routing_failures", None), list
+        ):
+            autorouter.routing_failures[:] = pre_rerun_failures
         if usage_reset and hasattr(grid, "mark_route_usage"):
             # Leave usage consistent with the restored copper.
             grid.reset_route_usage()

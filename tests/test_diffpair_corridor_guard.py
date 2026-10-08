@@ -930,6 +930,63 @@ def test_abandoned_rerun_is_reverted_even_when_it_gained_reach():
         assert route in router.routes
 
 
+def test_reverted_rerun_restores_first_pass_routes_it_ripped_or_mutated():
+    """Issue #6230: a revert restores the exact first-pass board.
+
+    The re-run is a full main-strategy pass: the negotiated loop rips up and
+    replaces first-pass routes of nets the yield never touched, and post-route
+    passes nudge geometry in place.  Board 06 (forced 60 s deadline): after an
+    abandoned re-run the old "remove added, re-add yielded" revert dropped
+    USB_CC1 / USB_CC2 entirely, because their re-routed copper counted as
+    "added" and their first-pass routes were never put back.
+    """
+    from kicad_tools.router import wall_deadline as wd
+
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    ripped = _bystander()[0]
+    nudged = Route(
+        net=5,
+        net_name="OTHER-",
+        segments=[_seg(10.0, 7.5, 14.0, 7.5, Layer.F_CU, net=5)],
+    )
+    _commit(router, [ripped, nudged])
+    before = [(id(r), r.copy_geometry()) for r in router.routes]
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+
+    replacement = Route(
+        net=4,
+        net_name="OTHER+",
+        segments=[_seg(0.5, 0.6, 3.0, 0.6, Layer.F_CU, net=4)],
+    )
+
+    def _strategy() -> list[Route]:
+        # Rip-up-and-reroute of an untouched net, as the negotiated loop does.
+        router.grid.unmark_route(ripped)
+        router.routes.remove(ripped)
+        _commit(router, [replacement])
+        # In-place nudge, as drc_verify_and_nudge does.
+        nudged.segments[0] = _seg(10.0, 7.2, 14.0, 7.2, Layer.F_CU, net=5)
+        assert wd.abandon("test: deadline spent before the safety nets")
+        return []
+
+    kept, _released, _removed, _added = dp._apply_corridor_yields(to_yield, [3], _strategy)
+
+    assert kept is False
+    assert [id(r) for r in router.routes] == [i for i, _g in before], (
+        "the revert must restore exactly the first-pass route objects, in order"
+    )
+    for route, (_i, geometry) in zip(router.routes, before, strict=True):
+        assert route.segments == geometry.segments
+        assert route.vias == geometry.vias
+    assert replacement not in router.routes
+    grid_ids = {id(r) for r in router.grid.routes}
+    assert id(replacement) not in grid_ids, "the re-run's copper must be unmarked"
+    assert id(ripped) in grid_ids, "the ripped first-pass route must be re-marked"
+
+
 def test_negotiated_tail_abandons_instead_of_running_safety_nets_past_the_deadline(
     monkeypatch,
 ):
