@@ -1,7 +1,7 @@
 """Silkscreen repair: line widths and text heights.
 
 Walks the raw SExp tree to find silkscreen graphic elements (fp_line, fp_rect,
-fp_circle, fp_arc, gr_line, gr_rect, gr_circle, gr_arc) whose stroke width is
+fp_circle, fp_arc, fp_poly, gr_line, gr_rect, gr_circle, gr_arc) whose stroke width is
 below the manufacturer minimum, and sets the width to the minimum.
 
 Also walks text elements (fp_text, property, gr_text) on silkscreen layers and
@@ -26,7 +26,7 @@ from kicad_tools.sexp.parser import SExp, parse_file
 SILKSCREEN_LAYERS = frozenset(("F.SilkS", "B.SilkS", "F.Silkscreen", "B.Silkscreen"))
 
 # Graphic element types that live inside footprints.
-FP_GRAPHIC_TYPES = ("fp_line", "fp_rect", "fp_circle", "fp_arc")
+FP_GRAPHIC_TYPES = ("fp_line", "fp_rect", "fp_circle", "fp_arc", "fp_poly")
 
 # Graphic element types at board level.
 GR_GRAPHIC_TYPES = ("gr_line", "gr_rect", "gr_circle", "gr_arc")

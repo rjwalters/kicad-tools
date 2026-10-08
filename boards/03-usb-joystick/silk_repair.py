@@ -37,7 +37,7 @@ class whose absence from the routed artifact surfaced #5744 to begin with.  So
 a fully-consumed line is instead nudged perpendicular, away from the pad, by
 the shortfall (bounded by :data:`MAX_NUDGE_MM`), and only dropped when even
 that will not clear.  On board 03 the outcome is 12 lines clipped, 1 nudged
-(J3's pin-1 marker, 0.045 mm outward), 0 dropped -- all 139 footprint silk
+(J3's pin-1 marker, nudged outward; the nudge grows with the 0.15 mm stroke of #5762), 0 dropped -- all 139 footprint silk
 graphics survive.
 
 Scope is deliberately narrow:
@@ -98,6 +98,10 @@ _BUFFER_QUAD_SEGS = 64
 # board recipe should paper over, so the line is dropped instead.
 MAX_NUDGE_MM = 0.2
 
+# Neighbour endpoints this close to a nudged line's old endpoint are treated
+# as having been joined to it (covers the clip's own few-um..tens-of-um trim).
+JOINT_SNAP_MM = 0.05
+
 # Deterministic UUID namespace for lines this pass has to SPLIT (one input
 # line -> several output lines).  A random uuid4 would make an otherwise
 # reproducible artifact differ between runs for no reason.
@@ -114,6 +118,7 @@ class SilkPadTrimResult:
     lines_nudged: int = 0
     lines_removed: int = 0
     lines_added: int = 0
+    joints_reattached: int = 0
     trimmed_references: list[str] = field(default_factory=list)
     # ``"<reference> <graphic_type>"`` for each violation still present after
     # the pass (a primitive this pass does not rewrite, or copper/silk
@@ -270,6 +275,15 @@ def trim_silk_to_pad_clearance(
             return (dx * cos_rot + dy * sin_rot, -dx * sin_rot + dy * cos_rot)
 
         replacements: list[tuple[Any, list[Any]]] = []
+        # (old_local_endpoint, new_local_endpoint) for each endpoint of a
+        # nudged line, so joined neighbours can be re-attached afterwards.
+        moved_joints: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        nudged_nodes: set[int] = set()
+        # (original_local_start, original_local_end, node) for every examined
+        # silk line, captured BEFORE any clip rewrites it -- joints must be
+        # matched on stock geometry, since the clip may trim a joined
+        # neighbour's endpoint well past JOINT_SNAP_MM (J3: 0.06 mm).
+        originals: list[tuple[tuple[float, float], tuple[float, float], Any]] = []
         for node in list(footprint_node.children):
             layer_node = node.find_child("layer")
             if layer_node is None or layer_node.get_string(0) not in SILK_LAYERS:
@@ -293,6 +307,7 @@ def trim_silk_to_pad_clearance(
             if start == end:
                 continue
             result.lines_examined += 1
+            originals.append((_points_of(node, "start"), _points_of(node, "end"), node))
             centerline = LineString([start, end])
             halo = minimum_mm + width / 2.0
             offenders = [
@@ -330,6 +345,11 @@ def trim_silk_to_pad_clearance(
                     continue
                 pieces = [nudged]
                 result.lines_nudged += 1
+                nudged_nodes.add(id(node))
+                old_ends = (_points_of(node, "start"), _points_of(node, "end"))
+                new_coords = list(nudged.coords)
+                new_ends = (to_local(new_coords[0]), to_local(new_coords[-1]))
+                moved_joints.extend(zip(old_ends, new_ends, strict=True))
             else:
                 result.lines_trimmed += 1
 
@@ -367,6 +387,47 @@ def trim_silk_to_pad_clearance(
                     rewritten_children.append(child)
             footprint_node.children = rewritten_children
 
+        # Issue #5762: a nudged line that used to share an endpoint with a
+        # neighbour (J3's pin-1 marker meets the body outline) must stay
+        # joined, or ``silk_overlap`` sees two crossing strokes instead of a
+        # corner.  Re-attach neighbour endpoints that sat on the old joint.
+        #
+        # Two things make this subtle, and both bit the first version:
+        # * the neighbour is usually clipped in this same pass (J3's outline
+        #   is), so the edit must land on the OUTPUT pieces -- i.e. run after
+        #   the swap above -- not on the pre-clip node it replaced;
+        # * the joint is matched on the neighbour's ORIGINAL endpoint, and the
+        #   output endpoint snapped is the one nearest to it.  The clipped
+        #   endpoint itself may sit further than JOINT_SNAP_MM from the old
+        #   joint.
+        # Only ever moves an endpoint onto the nudged line's new endpoint;
+        # ``residual_violations`` re-verifies the result on the written bytes.
+        if moved_joints:
+            outputs = {id(original): pieces for original, pieces in replacements}
+            for orig_start, orig_end, node in originals:
+                if id(node) in nudged_nodes:
+                    continue
+                pieces = outputs.get(id(node), [node])
+                for orig_point in (orig_start, orig_end):
+                    for old, new in moved_joints:
+                        if math.dist(orig_point, old) > JOINT_SNAP_MM:
+                            continue
+                        candidates = [
+                            (math.dist(_points_of(piece, tag), orig_point), piece, tag)
+                            for piece in pieces
+                            for tag in ("start", "end")
+                        ]
+                        if not candidates:
+                            break
+                        _, piece, tag = min(candidates, key=lambda c: c[0])
+                        target = (round(new[0], 6), round(new[1], 6))
+                        if _points_of(piece, tag) != target:
+                            child = piece.find_child(tag)
+                            child.set_value(0, target[0])
+                            child.set_value(1, target[1])
+                            result.joints_reattached += 1
+                        break
+
     result.trimmed_references = sorted(set(result.trimmed_references))
     written = Path(output_path) if output_path is not None else Path(pcb_path)
     if result.changed or output_path is not None:
@@ -388,6 +449,26 @@ def silk_to_pad_floor(manufacturer: str = "jlcpcb-tier1", *, layers: int = 4) ->
     if rules.min_silk_to_pad_clearance_mm is None:
         raise ValueError(f"{manufacturer} declares no min_silk_to_pad_clearance_mm")
     return rules.min_silk_to_pad_clearance_mm
+
+
+def widen_silk_strokes(pcb_path: Path, *, manufacturer: str = "jlcpcb-tier1") -> int:
+    """Raise footprint silk graphic strokes to the fabricator's width floor.
+
+    Covers ``fp_line``/``fp_rect``/``fp_circle``/``fp_arc``/``fp_poly`` via
+    ``drc.repair_silkscreen`` (graphics only; silk text is untouched).
+    Returns the number of graphics widened (Issue #5762).
+    """
+    from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
+    from kicad_tools.manufacturers import get_profile
+
+    floor = get_profile(manufacturer).get_design_rules(layers=4).min_silkscreen_width_mm
+    if floor is None:
+        raise ValueError(f"{manufacturer} declares no min_silkscreen_width_mm")
+    repairer = SilkscreenRepairer(pcb_path)
+    result = repairer.repair_line_widths(floor)
+    if result.total_fixed:
+        repairer.save()
+    return result.total_fixed
 
 
 def residual_violations(pcb_path: Path, *, minimum_mm: float) -> list[str]:
@@ -444,6 +525,12 @@ def repair_board_silk_pad_clearance(
             fabricator will clip.
     """
     minimum = silk_to_pad_floor(manufacturer)
+    # Issue #5762: widen FIRST, clip SECOND.  The clip buffers each pad
+    # aperture by ``minimum + stroke_width / 2``, so it must see the final
+    # stroke width or the wider ink would re-enter the keepout.
+    widened = widen_silk_strokes(pcb_path, manufacturer=manufacturer)
+    if verbose:
+        print(f"   {manufacturer} silk stroke floor: {widened} graphic(s) widened")
     result = trim_silk_to_pad_clearance(pcb_path, minimum_mm=minimum)
     if verbose:
         print(

@@ -977,3 +977,18 @@ class TestCLI:
         assert data["total_line_width_fixed"] == 1
         assert data["total_text_height_fixed"] == 1
         assert data["total_fixed"] == 2
+
+
+def test_fp_poly_widened_5762(tmp_path: Path):
+    """Undersized fp_poly silk strokes are widened like other fp_ graphics."""
+    pcb = tmp_path / "poly.kicad_pcb"
+    pcb.write_text(
+        '(kicad_pcb (version 20240108) (generator "t")\n'
+        '  (footprint "X:Y" (layer "F.Cu") (at 0 0)\n'
+        '    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))\n'
+        "    (fp_poly (pts (xy 0 0) (xy 1 0) (xy 1 1))\n"
+        '      (stroke (width 0.12) (type solid)) (fill yes) (layer "F.SilkS"))\n'
+        "  ))\n"
+    )
+    result = SilkscreenRepairer(pcb).repair_line_widths(0.15)
+    assert [f.element_type for f in result.fixes] == ["fp_poly"]
