@@ -201,6 +201,7 @@ class RoutingOrchestrator:
         # board, for the short/clearance gate (lazily parsed, cached), and the
         # copper clearance KiCad measures the board against.
         self._board_copper_cache: list[ForeignItem] | None = None
+        self._authored_floors_cache: bool | None = None  # Issue #6254
         self._board_holes_cache: list[ForeignItem] | None = None
         self._required_clearance_cache: float | None = None
         # Issue #6122: the board's per-pair clearance rules (netclasses and
@@ -680,6 +681,108 @@ class RoutingOrchestrator:
             ]
         else:
             result.alternative_strategies = []
+
+    def _board_has_authored_floors(self) -> bool:
+        """Whether the board's project declares a netclass minimum above the base (cached, #6254).
+
+        Cheap gate for :meth:`_enforce_authored_floors`: a ``Default``-only
+        project (the common case) never pays for the board load.  Reads the
+        same project and applies the same "above the router's own base" cut
+        :func:`~kicad_tools.router.io.load_pcb_for_routing` does.
+        """
+        if self._authored_floors_cache is None:
+            self._authored_floors_cache = False
+            path = self._board_path()
+            nets = getattr(self.pcb, "nets", None)
+            if path is not None and isinstance(nets, dict):
+                from .io import _authored_net_clearances
+
+                names = {str(getattr(n, "name", "") or "") for n in nets.values()} - {""}
+                base = min(self.rules.trace_clearance, self.rules.via_clearance)
+                try:
+                    authored = _authored_net_clearances(path, None, dict.fromkeys(names, 0))
+                except Exception as exc:  # unreadable/unsupported project: say so, don't crash
+                    logger.warning("authored netclass minima not checked: %s", exc)
+                    authored = {}
+                self._authored_floors_cache = any(v > base + 1e-9 for v in authored.values())
+        return self._authored_floors_cache
+
+    def _enforce_authored_floors(self, result: RoutingResult, strategy: RoutingStrategy) -> None:
+        """Refuse a result whose copper breaks an authored netclass minimum (#6254).
+
+        The final-pass counterpart of ``kct route``'s
+        ``revalidate_committed_copper_or_demote`` (#6243).  The foreign-copper
+        gate resolves each pair with the #6122 model, which takes the largest
+        class of a multi-class net; the authored census uses KiCad 10 priority
+        and inheritance.  So the result is judged by the SAME helper ``kct
+        route`` uses, :meth:`Autorouter.demote_authored_floor_violation_nets`,
+        on the board loaded with the project's floors: a net it would demote
+        is refused here instead of written.
+        """
+        if not (result.segments or result.vias) or not self._board_has_authored_floors():
+            return
+        path = self._board_path()
+        _, own_names = self._own_net_identity(result)
+        net_name = next(iter(own_names)) if len(own_names) == 1 else ""
+        if not net_name and isinstance(result.net, str):
+            net_name = result.net
+        nets_raw = getattr(self.pcb, "nets", None)
+        if path is None or not net_name or not isinstance(nets_raw, dict):
+            return
+        board_nets = {str(getattr(n, "name", "") or "") for n in nets_raw.values()} - {""}
+        if net_name not in board_nets:
+            return
+        import contextlib
+        from dataclasses import replace as _replace
+
+        from .primitives import Route
+
+        try:
+            router, net_id = self._load_board_router(path, net_name, board_nets, raise_base=False)
+            if net_id <= 0:
+                return
+            ox, oy = getattr(self.pcb, "_board_origin", (0.0, 0.0)) or (0.0, 0.0)
+            route = Route(
+                net=net_id,
+                net_name=net_name,
+                segments=[
+                    _replace(s, x1=s.x1 + ox, y1=s.y1 + oy, x2=s.x2 + ox, y2=s.y2 + oy, net=net_id)
+                    for s in result.segments
+                ],
+                vias=[_replace(v, x=v.x + ox, y=v.y + oy, net=net_id) for v in result.vias],
+            )
+            router.grid.mark_route(route)
+            router.routes.append(route)
+            with contextlib.redirect_stdout(sys.stderr):
+                demoted = router.demote_authored_floor_violation_nets()
+        except Exception as exc:  # defensive: the census must never crash routing
+            logger.warning("authored netclass census skipped for '%s': %s", net_name, exc)
+            return
+        if net_id not in demoted:
+            return
+        name = self._STRATEGY_CLI_NAMES.get(strategy, strategy.name)
+        result.success = False
+        result.partial = False
+        result.segments = []
+        result.vias = []
+        result.metrics = RoutingMetrics()
+        result.error_message = (
+            f"route-auto '{name}' strategy produced copper for '{net_name}' below its "
+            "authored netclass minimum clearance; refusing it rather than writing it "
+            "(issues #6243, #6254)."
+        )
+        result.alternative_strategies = (
+            []
+            if strategy == RoutingStrategy.HIERARCHICAL_DIFF_PAIR
+            else [
+                AlternativeStrategy(
+                    strategy=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+                    reason="Routes on a grid that holds the authored netclass floors",
+                    estimated_cost=1.5,
+                    success_probability=0.6,
+                )
+            ]
+        )
 
     def _warn_corridor_copper(self, strategy: RoutingStrategy) -> str | None:
         """Warn once that a corridor strategy cannot route around other nets' copper.
@@ -1249,6 +1352,8 @@ class RoutingOrchestrator:
             # Issues #6001 / #6107: nor copper that shorts another net's pad,
             # track, arc or via, or violates the board's clearance to it.
             self._enforce_no_foreign_shorts(result, strategy)
+            # Issue #6254: and the final authored-netclass pass kct route runs.
+            self._enforce_authored_floors(result, strategy)
 
             # Ensure failed results always carry alternative suggestions so
             # the retry loop in route_net() has candidates to try.
@@ -1619,7 +1724,7 @@ class RoutingOrchestrator:
     HIERARCHICAL_BOARD_NET_TIMEOUT_S = 120.0
 
     def _load_board_router(
-        self, path: Path, net_name: str, board_nets: set[str]
+        self, path: Path, net_name: str, board_nets: set[str], *, raise_base: bool = True
     ) -> tuple[Any, int]:
         """The board as ``kct route --nets <net>`` loads it, plus its arcs.
 
@@ -1642,7 +1747,9 @@ class RoutingOrchestrator:
         # against -- the largest per-pair requirement between it and any net
         # on the board (#6122: netclasses and .kicad_dru rules) -- so a clean
         # route is one the output gate (and kicad-cli) accepts.
-        required = self._net_required_clearance(net_name)
+        # ``raise_base=False`` keeps the orchestrator's own base, so the
+        # project's authored floors survive as floors (#6254 final pass).
+        required = self._net_required_clearance(net_name) if raise_base else 0.0
         if required > rules.trace_clearance:
             rules = _replace(rules, trace_clearance=required)
         if required > rules.via_clearance:
