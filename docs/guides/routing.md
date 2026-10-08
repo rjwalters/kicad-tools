@@ -1248,9 +1248,46 @@ downstream).
 When post-route DRC writes a renamed PCB, it carries the source board's
 `.kicad_pro` and `.kicad_dru` into the destination before merging manufacturer
 floors. The source files remain unchanged. Authored project settings, netclass
-assignments, custom DRU text, and `KCT_PRESERVE_BOARD_RULES=1` follow the output;
-with that flag, stricter authored minima remain active while manufacturer
-limits can tighten weaker minima.
+assignments, custom DRU text, and the `KCT_PRESERVE_BOARD_RULES` text variable
+follow the output. By default, stricter authored minima remain active while
+manufacturer limits can tighten weaker minima (see below).
+
+#### `KCT_PRESERVE_BOARD_RULES`: how manufacturer floors meet authored minima
+
+Every DRC-constraint export (`kct route` post-route DRC, `kct check
+--emit-dru` / `--emit-drc-constraints`, `kct mfr apply-rules`, the
+manufacturing export) merges the manufacturer profile into the board's
+`.kicad_pro` and `.kicad_dru`. The project text variable
+`KCT_PRESERVE_BOARD_RULES` selects how (Issues #5023, #6191):
+
+| Value | Minima (`design_settings.rules`, `defaults`, `Default` netclass, DRU floors) | Severities | `Reviewed clearance - <class>` DRU rules |
+|-------|------|------|------|
+| unset / empty (default) | `max(authored, profile)` | overwritten by kct | only for classes above the clearance floor |
+| `1` / `true` / `yes` / `on` | `max(authored, profile)` | authored kept | one per netclass |
+| `0` / `false` / `no` / `off` | profile overwrites | overwritten by kct | none |
+
+A stricter authored value always wins unless you opt out, and the profile
+still raises any authored value below the fab floor. The DRU scalar floors
+(track width, clearance, via drill and diameter, annular ring, copper to
+edge) follow the same rule, so native zone fill and `kicad-cli` DRC use the
+stricter authored clearance as well.
+
+In the default mode only, a `Default` netclass whose `(clearance,
+track_width, via_diameter, via_drill)` exactly matches a known template is
+treated as unauthored and relaxed to the profile, as before #6191. The
+templates are kct's own (`(0.15, 0.25, 0.6, 0.3)`), kct's pre-#5654 template
+`(0.2, 0.25, 0.6, 0.3)`, KiCad 5/6 stock `(0.2, 0.25, 0.8, 0.4)` and KiCad 7+
+stock `(0.2, 0.2, 0.6, 0.3)`. Change any one of those four values to make the
+netclass count as authored, or set `KCT_PRESERVE_BOARD_RULES=1`. Other values
+are treated as the default and logged as a warning.
+
+Values kct itself wrote on an earlier pass count as authored too, so a script
+that deliberately applies a *looser* reviewed process on top of them passes
+`preserve_board_rules="0"` to `write_drc_constraints` (board 04's paid
+0.15 mm drilling option does). That overrides the text variable for one call
+without writing it into the project. `kct check --emit-dru` and
+`--emit-drc-constraints` have no CLI flag for the opt-out; set the
+`KCT_PRESERVE_BOARD_RULES` project text variable instead.
 
 An existing destination sidecar must match either the corresponding authored
 source or the result of applying the current manufacturer floors to it. JSON

@@ -190,7 +190,15 @@ def test_merge_preserves_existing_keys_and_relaxes_default_clearance():
         },
         "net_settings": {
             "classes": [
-                {"name": "Default", "clearance": 0.20, "track_width": 0.25},
+                # kct's pre-#5654 template Default netclass: a template
+                # signature, so the default mode still relaxes it (#6191).
+                {
+                    "name": "Default",
+                    "clearance": 0.20,
+                    "track_width": 0.25,
+                    "via_diameter": 0.6,
+                    "via_drill": 0.3,
+                },
                 {"name": "HV", "clearance": 0.5},
             ]
         },
