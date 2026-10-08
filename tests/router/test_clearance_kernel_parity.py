@@ -974,6 +974,14 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # copper-to-score-line gap, so the panel warning and ``kct check`` measure
         # edge clearance with the same kernel.
         "panel/vscore.py",
+        # Issue #6237: ``kct route --preserve-existing``'s kept-copper audit.
+        # ``io._kept_copper_violations`` (shorts in ``validate_routes``,
+        # near-misses in ``kept_copper_clearance_violations``) asks
+        # ``copper_gap`` through ``clearance_shapes.py`` for the gap between
+        # kept input copper and other nets' pads / kept copper, so the audit
+        # and kicad-cli agree on pad shapes.  A new audit of kept copper only:
+        # the routed-copper quadrants of ``validate_routes`` are unchanged.
+        "router/io.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.

@@ -608,7 +608,7 @@ class TestShortHelpersIssue5872:
     def test_audit_failure_is_loud(self, monkeypatch, capsys) -> None:
         from kicad_tools.cli.route_cmd import _audit_shorts_for_escalation
 
-        def boom(_router):
+        def boom(_router, **_kwargs):  # audit_kept_copper=True (#6237)
             raise RuntimeError("kaboom")
 
         monkeypatch.setattr(router_io, "validate_routes", boom)
@@ -620,7 +620,7 @@ class TestShortHelpersIssue5872:
     def test_audit_failure_quiet_is_silent(self, monkeypatch, capsys) -> None:
         from kicad_tools.cli.route_cmd import _audit_shorts_for_escalation
 
-        def boom(_router):
+        def boom(_router, **_kwargs):  # audit_kept_copper=True (#6237)
             raise RuntimeError("kaboom")
 
         monkeypatch.setattr(router_io, "validate_routes", boom)

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
+    from .board_clearance_rules import BoardClearanceRules
     from .primitives import Pad, Route, Segment
     from .stub_terminals import StubTerminal
 
@@ -345,19 +346,80 @@ def describe_short(v: ClearanceViolation) -> str:
     """
     net_label = v.net_name or f"Net {v.net}"
     obs_label = v.obstacle_net_name or f"Net {v.obstacle_net}"
-    obs_kind = v.obstacle_type
-    if v.obstacle_type == "pad" and v.obstacle_pad:
-        obs_kind = f"pad {v.obstacle_pad}"
     loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
     layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
     overlap = f": overlap {-v.distance:.3f}mm"
     if v.is_input_defect:
-        copper = "trace" if v.segment_index >= 0 else "via"
         return (
             "pre-existing short in input board (kept by --preserve-existing): "
-            f"{net_label} {copper} vs {obs_label} {obs_kind}{loc}{layer_str}{overlap}"
+            f"{_input_pair_label(v)}{loc}{layer_str}{overlap}"
         )
     return f"routing short [{v.obstacle_type}] {net_label} vs {obs_label}{loc}{layer_str}{overlap}"
+
+
+def _input_pair_label(v: ClearanceViolation) -> str:
+    """``"+3V3 trace vs GND pad J3.1"`` for a violation in kept copper (#6229/#6237)."""
+    net_label = v.net_name or f"Net {v.net}"
+    obs_label = v.obstacle_net_name or f"Net {v.obstacle_net}"
+    copper = "trace" if v.segment_index >= 0 else "via"
+    if v.obstacle_type == "pad" and v.obstacle_pad:
+        obs_kind = f"pad {v.obstacle_pad}"
+    elif v.obstacle_type == "segment":
+        # Issue #6237: kept-vs-kept -- the obstacle is another kept trace.
+        obs_kind = "trace"
+    else:
+        obs_kind = v.obstacle_type
+    return f"{net_label} {copper} vs {obs_label} {obs_kind}"
+
+
+def describe_input_clearance(v: ClearanceViolation) -> str:
+    """One-line description of a kept-copper clearance near-miss (Issue #6237).
+
+    The clearance counterpart of :func:`describe_short`'s input wording: the
+    copper was kept verbatim from the input board by ``--preserve-existing``
+    and sits closer than the required clearance to another net's copper
+    without touching it (KiCad DRC reports this as ``clearance``).
+    """
+    loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
+    layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
+    return (
+        "pre-existing clearance violation in input board (kept by --preserve-existing): "
+        f"{_input_pair_label(v)}{loc}{layer_str}: "
+        f"gap {v.distance:.3f} < required {v.required:.3f} mm"
+    )
+
+
+#: Severities KiCad accepts in ``board.design_settings.rule_severities``.
+KICAD_SEVERITY_LEVELS = ("error", "warning", "ignore")
+
+
+def kicad_rule_severity(pcb_path: str | Path | None, rule: str, default: str = "error") -> str:
+    """The severity the board's project gives DRC rule ``rule`` (Issue #6237).
+
+    Reads ``board.design_settings.rule_severities[rule]`` from the
+    ``.kicad_pro`` beside ``pcb_path`` -- the setting ``kicad-cli pcb drc``
+    applies to the same board.  Returns ``default`` (KiCad's own default for
+    ``clearance`` and ``shorting_items`` is ``"error"``) when there is no
+    project, it cannot be read, or it does not set the rule to one of
+    :data:`KICAD_SEVERITY_LEVELS`.  Never raises.
+    """
+    if pcb_path is None:
+        return default
+    import json
+
+    try:
+        data = json.loads(Path(pcb_path).with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+    if not isinstance(data, dict):
+        return default
+    board = data.get("board")
+    settings = board.get("design_settings") if isinstance(board, dict) else None
+    severities = settings.get("rule_severities") if isinstance(settings, dict) else None
+    value = severities.get(rule) if isinstance(severities, dict) else None
+    if isinstance(value, str) and value.lower() in KICAD_SEVERITY_LEVELS:
+        return value.lower()
+    return default
 
 
 def short_origin_summary(shorts: list[ClearanceViolation]) -> str:
@@ -390,6 +452,62 @@ def kept_input_routes(router: Autorouter) -> list[Route]:
     routed_net_ids = {r.net for r in getattr(router, "routes", None) or []}
     routed_net_ids -= set(getattr(router, "_stub_terminals", None) or {})
     return [r for r in existing if r.net not in routed_net_ids]
+
+
+def audited_kept_routes(router: Autorouter) -> list[Route]:
+    """:func:`kept_input_routes` under their board net ids, for the audits (#6237).
+
+    On a KiCad-10 name-only board (``(net "NAME")``, no numeric ids) the
+    optimizer parser loads every kept trace and via under net id ``0`` with
+    its name preserved, while pads carry the dialect-normalized ids of
+    ``router.board_net_ids``.  Filtering on ``net != 0`` would therefore drop
+    ALL kept copper and turn the kept-copper audit into a no-op; matching on
+    id 0 alone would merge every kept net into one.  Each id-0 route is
+    re-keyed by its name instead: the loader's map first, then the router's
+    ``net_names`` / pads, and failing those a private negative id per name
+    (a net with copper but no pads is still distinct from every other net;
+    :func:`_pad_on_net` still matches id-0 pads by name).  Only copper with
+    no net name at all -- genuinely anonymous, e.g. the neutral
+    placement-preserved copper -- is skipped.
+
+    Re-keying is local to the audit: ``router.existing_routes`` and the
+    routing grid keep the loader's ids, so routing behaviour is unchanged.
+    """
+    kept = kept_input_routes(router)
+    if all(r.net != 0 for r in kept):
+        return kept
+    name_to_id: dict[str, int] = {}
+    for name, net_id in (getattr(router, "board_net_ids", None) or {}).items():
+        if name and net_id:
+            name_to_id[name] = int(net_id)
+    for net_id, name in (getattr(router, "net_names", None) or {}).items():
+        if name and net_id and name not in name_to_id:
+            name_to_id[name] = int(net_id)
+    for pad in getattr(router, "all_pads", None) or list(
+        (getattr(router, "pads", None) or {}).values()
+    ):
+        if pad.net_name and pad.net and pad.net_name not in name_to_id:
+            name_to_id[pad.net_name] = int(pad.net)
+    synthetic: dict[str, int] = {}
+    out: list[Route] = []
+    for route in kept:
+        if route.net != 0:
+            out.append(route)
+            continue
+        if not route.net_name:
+            continue  # anonymous copper: no net to be shorted to
+        net_id = name_to_id.get(route.net_name)
+        if net_id is None:
+            net_id = synthetic.setdefault(route.net_name, -(len(synthetic) + 1))
+        out.append(
+            replace(
+                route,
+                net=net_id,
+                segments=[replace(seg, net=net_id) for seg in route.segments],
+                vias=[replace(via, net=net_id) for via in route.vias],
+            )
+        )
+    return out
 
 
 def count_shorting_violations(violations: list[ClearanceViolation]) -> int:
@@ -2396,18 +2514,112 @@ def _get_pair_clearance(
     return max(clearance_a, clearance_b)
 
 
+def _pad_on_net(pad: Pad, route_net: int, route_name: str | None) -> bool:
+    """True when ``pad`` belongs to the same electrical net as the copper.
+
+    Issue #6225: ``load_pcb_for_routing`` rewrites the net id of every pad on
+    a skipped pour net to ``0`` (keeping ``net_name``) while preserved copper
+    on that net keeps its real board net id.  A pad is on the copper's net
+    when the ids match, or when it is such a skipped-net pad whose name
+    matches the copper's net name.  Name matching only ever applies to
+    ``net == 0`` named pads, so two distinct named nets are never merged.
+    """
+    if pad.net == route_net:
+        return True
+    return bool(pad.net == 0 and pad.net_name and route_name and pad.net_name == route_name)
+
+
+def _foreign_pad_obstacle_entries(
+    router: Autorouter,
+    route_net: int,
+    route_name: str | None,
+    clearance: float,
+    ncm: dict[str, NetClassRouting] | None,
+    pair_clearance,
+) -> list[tuple[str, Pad, bool, Layer, float, float, float, float]]:
+    """Pads that are clearance obstacles for copper on ``route_net``.
+
+    Each entry is ``(ref, pad, through_hole, layer, x, y, reach,
+    pair_clear)``: ``reach`` is the pad's bounding half-diagonal and
+    ``pair_clear`` the effective required clearance for the net pair.
+    Shared by :func:`validate_routes` (Issue #5240 table) and the kept-copper
+    audit (Issue #6237) so both apply one same-net rule and one requirement.
+    """
+    entries: list[tuple[str, Pad, bool, Layer, float, float, float, float]] = []
+    for (ref, _num), pad in router.pads.items():
+        # Skip pads on the same net (by id, or by name for skipped
+        # pour-net pads whose id was rewritten to 0 -- Issue #6225)
+        if _pad_on_net(pad, route_net, route_name):
+            continue
+
+        # Skip truly unconnected pads -- pads with net == 0 AND no
+        # net name are unconnected mechanical pads / pour leftovers
+        # and do not represent copper that needs clearance from
+        # routed traces.
+        #
+        # Issue #2757: pads with net == 0 but a non-empty net_name
+        # are obstacles from *skipped* pour nets (GND, +3V3, +1V2,
+        # etc.) -- ``load_pcb_for_routing`` rewrites their net to 0
+        # so the autorouter doesn't try to route them, but they
+        # are real pad copper that segments must keep clearance
+        # from.  Surfacing these as violations lets
+        # ``drc_verify_and_nudge`` repair them and lets the
+        # ``format_clearance_violations`` summary report them so
+        # users can see "trace XYZ grazes U2.A1 (GND)" instead of
+        # silently emitting a routed PCB that fails ``kct check``.
+        if pad.net == 0 and not pad.net_name:
+            continue
+
+        # For skipped-pour-net pads, look up the clearance under the
+        # named net (GND, +3V3, ...) rather than net 0, so the
+        # per-class clearance map is honoured.  Falls through to
+        # ``clearance`` when no class match is found.
+        pad_class_clear = clearance
+        if pad.net == 0 and pad.net_name and ncm is not None:
+            pad_class = ncm.get(pad.net_name)
+            if pad_class is not None:
+                pad_class_clear = pad_class.clearance
+        pair_clear = max(pair_clearance(route_net, pad.net), pad_class_clear)
+
+        entries.append(
+            (
+                ref,
+                pad,
+                pad.through_hole,
+                pad.layer,
+                pad.x,
+                pad.y,
+                math.hypot(pad.width / 2.0, pad.height / 2.0),
+                pair_clear,
+            )
+        )
+    return entries
+
+
 def validate_routes(
     router: Autorouter,
     rules: DesignRules | None = None,
+    *,
+    audit_kept_copper: bool = False,
 ) -> list[ClearanceViolation]:
     """Validate routed traces for potential clearance violations.
 
     Checks segment-to-pad, segment-to-segment, and segment-to-via clearances
     for all routed traces. Reports violations with net names and coordinates.
 
+    Copper kept from the input board by ``--preserve-existing`` (see
+    :func:`kept_input_routes`) is always checked against other nets' pads for
+    SHORTS (Issue #6229).  ``audit_kept_copper=True`` -- what ``kct route``
+    passes -- also checks it for shorts against other nets' kept copper
+    (trace/trace, trace/via, via/via; Issue #6237).  Both are tagged
+    ``origin="input"``.  Off by default because the in-router repair loops
+    that also call this function cannot move kept copper.  Kept-copper
+    clearance near-misses are :func:`kept_copper_clearance_violations`.
+
     Args:
         router: Autorouter instance with completed routes
         rules: DesignRules to check against (uses router.rules if None)
+        audit_kept_copper: Also check kept copper against kept copper.
 
     Returns:
         List of potential ClearanceViolation issues.
@@ -2440,24 +2652,8 @@ def validate_routes(
         """
         return route.net_name or _resolve_net_name(route.net)
 
-    def _pad_on_route_net(pad: Pad, route_net: int, route_name: str | None) -> bool:
-        """True when ``pad`` belongs to the same electrical net as the route.
-
-        Issue #6225: ``load_pcb_for_routing`` rewrites the net id of every
-        pad on a skipped pour net to ``0`` (keeping ``net_name``) so the
-        autorouter does not try to route it, while preserved copper on that
-        same net keeps its real board net id.  Comparing ids alone then
-        treats a preserved +3V3 fanout via touching its own +3V3 pad as
-        cross-net copper overlap -- a phantom "short" that kicad-cli and
-        ``kct check`` (which compare real nets) never report.  A pad is on
-        the route's net when the ids match, or when the pad is a
-        skipped-net pad whose name matches the route's net name.  Name
-        matching only ever applies to ``net == 0`` named pads, so a genuine
-        cross-net overlap between two distinct named nets is still flagged.
-        """
-        if pad.net == route_net:
-            return True
-        return bool(pad.net == 0 and pad.net_name and route_name and pad.net_name == route_name)
+    # Issue #6225 same-net rule (id match, or id-0 pad with a matching name).
+    _pad_on_route_net = _pad_on_net
 
     # Issue #5240: cheap circle-based lower-bound rejection.  The
     # segment-to-pad / segment-to-segment / segment-to-via loops below are
@@ -2667,54 +2863,9 @@ def validate_routes(
         cached = _pad_obstacles_by_net.get(cache_key)
         if cached is not None:
             return cached
-        entries: list[tuple[str, Pad, bool, Layer, float, float, float, float]] = []
-        for (ref, _num), pad in router.pads.items():
-            # Skip pads on the same net (by id, or by name for skipped
-            # pour-net pads whose id was rewritten to 0 -- Issue #6225)
-            if _pad_on_route_net(pad, route_net, route_name):
-                continue
-
-            # Skip truly unconnected pads -- pads with net == 0 AND no
-            # net name are unconnected mechanical pads / pour leftovers
-            # and do not represent copper that needs clearance from
-            # routed traces.
-            #
-            # Issue #2757: pads with net == 0 but a non-empty net_name
-            # are obstacles from *skipped* pour nets (GND, +3V3, +1V2,
-            # etc.) -- ``load_pcb_for_routing`` rewrites their net to 0
-            # so the autorouter doesn't try to route them, but they
-            # are real pad copper that segments must keep clearance
-            # from.  Surfacing these as violations lets
-            # ``drc_verify_and_nudge`` repair them and lets the
-            # ``format_clearance_violations`` summary report them so
-            # users can see "trace XYZ grazes U2.A1 (GND)" instead of
-            # silently emitting a routed PCB that fails ``kct check``.
-            if pad.net == 0 and not pad.net_name:
-                continue
-
-            # For skipped-pour-net pads, look up the clearance under the
-            # named net (GND, +3V3, ...) rather than net 0, so the
-            # per-class clearance map is honoured.  Falls through to
-            # ``clearance`` when no class match is found.
-            pad_class_clear = clearance
-            if pad.net == 0 and pad.net_name and ncm is not None:
-                pad_class = ncm.get(pad.net_name)
-                if pad_class is not None:
-                    pad_class_clear = pad_class.clearance
-            pair_clear = max(_pair_clearance(route_net, pad.net), pad_class_clear)
-
-            entries.append(
-                (
-                    ref,
-                    pad,
-                    pad.through_hole,
-                    pad.layer,
-                    pad.x,
-                    pad.y,
-                    _pad_radius(pad),
-                    pair_clear,
-                )
-            )
+        entries = _foreign_pad_obstacle_entries(
+            router, route_net, route_name, clearance, ncm, _pair_clearance
+        )
         _pad_obstacles_by_net[cache_key] = entries
         return entries
 
@@ -3116,19 +3267,11 @@ def validate_routes(
                     )
 
     # --- Via-to-pad checks ---
-    # Include kept input copper so old vias are checked against pads.
-    # Issue #6229: kept vias are tagged ``origin="input"`` so the report
-    # can tell an inherited short from one this run created, and the kept
-    # set is exactly the preserved copper the output carries (see
-    # :func:`kept_input_routes`).  Kept copper without a net (id 0) is
-    # skipped: its ownership is unknown, so it cannot be called a
-    # cross-net short.
-    kept_routes = [r for r in kept_input_routes(router) if r.net != 0]
-    via_pad_sources = itertools.chain(
-        ((r, "routing") for r in router.routes),
-        ((r, "input") for r in kept_routes),
-    )
-    for route, via_origin in via_pad_sources:
+    # Routed vias only.  Kept input vias (Issue #6229) are checked against
+    # pads in the kept-copper audit below, with the shared clearance
+    # kernel's exact pad model, and tagged ``origin="input"`` there.
+    via_origin = "routing"
+    for route in router.routes:
         route_net = route.net
 
         # Build component refs connected to this route's net
@@ -3205,79 +3348,33 @@ def validate_routes(
                         )
                     )
 
-    # --- Kept-trace-to-pad checks (Issue #6229) ---
-    # Trace copper kept from the input board by ``--preserve-existing`` was
-    # checked against routed copper (Issue #5862) but never against other
-    # nets' PADS, so a kept +3V3 trace laid across a GND pad shipped while
-    # ``kct route`` printed SUCCESS.  Only physical overlap (a short) is
-    # reported here: the kept copper was drawn under the input board's own
-    # rules, and a sub-clearance near-miss in it is not this run's to
-    # repair, while a short makes the output unmanufacturable whoever drew
-    # it.  Same-net matching reuses ``_pad_obstacles`` and therefore the
-    # #6225 rule (id match, or id-0 pad with a matching net name).
-    for route in kept_routes:
-        route_net = route.net
-        route_name = _route_net_name(route)
-        kept_pad_obstacles = _pad_obstacles(route_net, route_name)
-        for seg_idx, segment in enumerate(route.segments):
-            seg_layer = segment.layer
-            seg_half_width = segment.width / 2
-            seg_mid_x = (segment.x1 + segment.x2) / 2.0
-            seg_mid_y = (segment.y1 + segment.y2) / 2.0
-            seg_half_len = math.hypot(segment.x2 - segment.x1, segment.y2 - segment.y1) / 2.0
-            for (
-                ref,
-                pad,
-                pad_through_hole,
-                pad_layer,
-                pad_x,
-                pad_y,
-                pad_reach,
-                pair_clear,
-            ) in kept_pad_obstacles:
-                if not pad_through_hole and pad_layer != seg_layer:
-                    continue
-                # Circle lower bound (Issue #5240): positive => no overlap.
-                center_dist = math.hypot(pad_x - seg_mid_x, pad_y - seg_mid_y)
-                if center_dist - seg_half_len - pad_reach - seg_half_width > 0.0:
-                    continue
-                effective_dist = (
-                    _segment_to_aabb_distance(
-                        *pad_local_point(pad, segment.x1, segment.y1),
-                        *pad_local_point(pad, segment.x2, segment.y2),
-                        0.0,
-                        0.0,
-                        pad.width / 2,
-                        pad.height / 2,
-                    )
-                    - seg_half_width
-                )
-                if effective_dist > 0.0:
-                    continue
-                violations.append(
-                    ClearanceViolation(
-                        segment_index=seg_idx,
-                        x1=segment.x1,
-                        y1=segment.y1,
-                        x2=segment.x2,
-                        y2=segment.y2,
-                        net=route_net,
-                        obstacle_type="pad",
-                        obstacle_net=pad.net,
-                        distance=effective_dist,
-                        required=pair_clear,
-                        net_name=route_name,
-                        obstacle_net_name=(
-                            pad.net_name
-                            if pad.net == 0 and pad.net_name
-                            else _resolve_net_name(pad.net)
-                        ),
-                        location=(pad.x, pad.y),
-                        layer=seg_layer,
-                        origin="input",
-                        obstacle_pad=f"{ref}.{pad.pin}",
-                    )
-                )
+    # --- Kept input copper shorts (Issues #6229, #6237) ---
+    # Copper kept verbatim from the input board by ``--preserve-existing``
+    # is checked against routed copper by the quadrants above (Issue
+    # #5862, where the ROUTED item is reported).  Here it is checked for
+    # SHORTS against other nets' pads (#6229, always) and against other
+    # nets' kept copper (#6237, when ``audit_kept_copper``), tagged
+    # ``origin="input"``.  Only physical overlap is decided here: a short is
+    # a short under any rule set, whereas a kept near-miss depends on the
+    # clearance the written board is judged under -- see
+    # :func:`kept_copper_clearance_violations`.
+    kept_routes = audited_kept_routes(router)
+    if kept_routes:
+        violations.extend(
+            _kept_copper_violations(
+                kept_routes,
+                pad_obstacles=_pad_obstacles,
+                route_net_name=_route_net_name,
+                resolve_net_name=_resolve_net_name,
+                pair_clearance=_pair_clearance,
+                via_clear=via_clear,
+                clearance_bound=0.0,
+                shorts=True,
+                near_misses=False,
+                kept_vs_kept=audit_kept_copper,
+                board_rules=None,
+            )
+        )
 
     # --- Via-to-via checks ---
     for i, route_a in enumerate(router.routes):
@@ -3494,6 +3591,339 @@ def validate_routes(
                     )
 
     return violations
+
+
+@dataclass(frozen=True)
+class _KeptItem:
+    """One piece of kept input copper, ready for the kernel (Issue #6237)."""
+
+    net: int
+    name: str
+    seg_index: int  # index into its route's segments; -1 for a via
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    layer: Layer | None  # the trace's layer; ``None`` for a via (all layers)
+    shape: object  # KSegment | KVia
+    cx: float  # bounding-circle centre and radius (Issue #5240 rejection)
+    cy: float
+    radius: float
+
+    @property
+    def is_trace(self) -> bool:
+        return self.seg_index >= 0
+
+
+def _kept_copper_violations(
+    kept_routes: list[Route],
+    *,
+    pad_obstacles,
+    route_net_name,
+    resolve_net_name,
+    pair_clearance,
+    via_clear: float,
+    clearance_bound: float,
+    shorts: bool,
+    near_misses: bool,
+    kept_vs_kept: bool,
+    board_rules: BoardClearanceRules | None,
+) -> list[ClearanceViolation]:
+    """Shorts and/or clearance near-misses in kept input copper (#6229, #6237).
+
+    Kept traces and vias are checked against other nets' pads and, with
+    ``kept_vs_kept``, against other nets' kept traces and vias (each pair
+    reported once).  ``shorts`` reports physical overlap (gap <= 0),
+    ``near_misses`` a positive gap below the required clearance.
+
+    Gaps come from the shared clearance kernel
+    (:mod:`kicad_tools.router.clearance_shapes`), so a pad is measured as
+    its real shape (round, oval, roundrect) -- the model ``kct check`` and
+    kicad-cli use.  The requirement is the one KiCad resolves for the item
+    pair when ``board_rules`` is given, else the requirement
+    :func:`validate_routes` applies to routed copper of the same kind
+    (``pair_clear`` vs a pad or between traces, ``via_clear`` for a via).
+    """
+    from .board_clearance_rules import ItemProps, item_props_for_type
+    from .clearance_shapes import (
+        CLEARANCE_EPSILON_MM,
+        NO_INTERACTION,
+        copper_gap,
+        pad_shape,
+        segment_shape,
+        via_shape,
+    )
+
+    items: list[_KeptItem] = []
+    for route in kept_routes:
+        name = route_net_name(route)
+        for seg_idx, seg in enumerate(route.segments):
+            half_len = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) / 2.0
+            items.append(
+                _KeptItem(
+                    net=route.net,
+                    name=name,
+                    seg_index=seg_idx,
+                    x1=seg.x1,
+                    y1=seg.y1,
+                    x2=seg.x2,
+                    y2=seg.y2,
+                    layer=seg.layer,
+                    shape=segment_shape(seg),
+                    cx=(seg.x1 + seg.x2) / 2.0,
+                    cy=(seg.y1 + seg.y2) / 2.0,
+                    radius=half_len + seg.width / 2.0,
+                )
+            )
+        for via in route.vias:
+            items.append(
+                _KeptItem(
+                    net=route.net,
+                    name=name,
+                    seg_index=-1,
+                    x1=via.x,
+                    y1=via.y,
+                    x2=via.x,
+                    y2=via.y,
+                    layer=None,
+                    shape=via_shape(via),
+                    cx=via.x,
+                    cy=via.y,
+                    radius=via.diameter / 2.0,
+                )
+            )
+
+    def item_props(item: _KeptItem) -> ItemProps:
+        if item.is_trace:
+            layer_name = item.layer.kicad_name if item.layer is not None else None
+            return item_props_for_type("track", item.name, layer=layer_name)
+        return item_props_for_type("via", item.name, plated=True)
+
+    def required(a: ItemProps, b: ItemProps, layer: Layer | None, fallback: float) -> float:
+        """KiCad's clearance for the pair when the board's rules are known."""
+        if board_rules is None:
+            return fallback
+        layer_name = layer.kicad_name if layer is not None else None
+        return max(
+            board_rules.clearance(a, b, layer_name),
+            board_rules.physical_clearance(a, b, layer_name),
+        )
+
+    # Widest requirement any pair can have: the circle / grid rejections
+    # below may only skip a pair that provably clears it.
+    bound = clearance_bound
+    if board_rules is not None:
+        bound = max(bound, board_rules.max_requirement())
+    if not near_misses:
+        bound = 0.0  # shorts only: a positive gap is never reported
+
+    out: list[ClearanceViolation] = []
+
+    # --- kept copper vs other nets' pads ---
+    pad_kshapes: dict[int, object] = {}
+    for item in items:
+        a_props = item_props(item)
+        for ref, pad, pad_th, pad_layer, pad_x, pad_y, pad_reach, pair_clear in pad_obstacles(
+            item.net, item.name
+        ):
+            if item.is_trace and not pad_th and pad_layer != item.layer:
+                continue
+            # Circle lower bound (Issue #5240): skip a pair that provably
+            # clears -- 0 for the short-only check, ``bound`` for the audit.
+            gap_lower_bound = math.hypot(pad_x - item.cx, pad_y - item.cy) - item.radius - pad_reach
+            if gap_lower_bound > bound:
+                continue
+            kpad = pad_kshapes.get(id(pad))
+            if kpad is None:
+                kpad = pad_shape(pad)
+                pad_kshapes[id(pad)] = kpad
+            gap = copper_gap(item.shape, kpad)  # type: ignore[arg-type]
+            if gap == NO_INTERACTION or (gap > 0.0 and not near_misses):
+                continue
+            if gap <= 0.0 and not shorts:
+                continue
+            # The layer the two coppers meet on: the trace's, else an SMD
+            # pad's; a via on a through-hole pad meets it on every layer.
+            meet_layer = item.layer if item.is_trace else (None if pad_th else pad_layer)
+            obstacle_name = pad.net_name or resolve_net_name(pad.net)
+            req = required(
+                a_props,
+                item_props_for_type(
+                    "pad",
+                    obstacle_name,
+                    plated=pad_th,
+                    pad_type="thru_hole" if pad_th else "smd",
+                    layer=pad_layer.kicad_name,
+                ),
+                meet_layer,
+                pair_clear if item.is_trace else via_clear,
+            )
+            if gap > 0.0 and gap >= req - CLEARANCE_EPSILON_MM:
+                continue
+            out.append(
+                ClearanceViolation(
+                    segment_index=item.seg_index,
+                    x1=item.x1,
+                    y1=item.y1,
+                    x2=item.x2,
+                    y2=item.y2,
+                    net=item.net,
+                    obstacle_type="pad",
+                    obstacle_net=pad.net,
+                    distance=gap,
+                    required=req,
+                    net_name=item.name,
+                    obstacle_net_name=obstacle_name,
+                    location=(pad.x, pad.y),
+                    layer=meet_layer,
+                    origin="input",
+                    obstacle_pad=f"{ref}.{pad.pin}",
+                )
+            )
+
+    if not kept_vs_kept or len(items) < 2:
+        return out
+
+    # --- kept copper vs other nets' kept copper (Issue #6237) ---
+    # Uniform-grid broad phase: every item's bounding box, grown by half the
+    # widest requirement, is bucketed; two items whose gap is below that
+    # requirement have overlapping grown boxes and so share a cell.
+    cell = max(2.0, 2.0 * bound)  # >= 2 mm keeps long traces in few cells
+    grow = bound / 2.0
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for idx, item in enumerate(items):
+        x_lo = math.floor((item.cx - item.radius - grow) / cell)
+        x_hi = math.floor((item.cx + item.radius + grow) / cell)
+        y_lo = math.floor((item.cy - item.radius - grow) / cell)
+        y_hi = math.floor((item.cy + item.radius + grow) / cell)
+        for gx in range(x_lo, x_hi + 1):
+            for gy in range(y_lo, y_hi + 1):
+                buckets.setdefault((gx, gy), []).append(idx)
+
+    seen: set[tuple[int, int]] = set()
+    for members in buckets.values():
+        for pos, i in enumerate(members):
+            for j in members[pos + 1 :]:
+                key = (i, j) if i < j else (j, i)
+                if key in seen:
+                    continue
+                seen.add(key)
+                a, b = items[key[0]], items[key[1]]
+                if a.net == b.net or (a.name and a.name == b.name):
+                    continue  # same electrical net: never a defect
+                if not a.is_trace and b.is_trace:
+                    a, b = b, a  # report the trace, so "segment" keeps its contract
+                if a.is_trace and b.is_trace and a.layer != b.layer:
+                    continue
+                center_dist = math.hypot(b.cx - a.cx, b.cy - a.cy)
+                if center_dist - a.radius - b.radius > bound:
+                    continue
+                gap = copper_gap(a.shape, b.shape)  # type: ignore[arg-type]
+                if gap == NO_INTERACTION or (gap > 0.0 and not near_misses):
+                    continue
+                if gap <= 0.0 and not shorts:
+                    continue
+                both_traces = a.is_trace and b.is_trace
+                req = required(
+                    item_props(a),
+                    item_props(b),
+                    a.layer,
+                    pair_clearance(a.net, b.net) if both_traces else via_clear,
+                )
+                if gap > 0.0 and gap >= req - CLEARANCE_EPSILON_MM:
+                    continue
+                if both_traces:
+                    location = ((a.x1 + a.x2 + b.x1 + b.x2) / 4, (a.y1 + a.y2 + b.y1 + b.y2) / 4)
+                elif a.is_trace:
+                    location = (b.cx, b.cy)
+                else:
+                    location = ((a.cx + b.cx) / 2, (a.cy + b.cy) / 2)
+                out.append(
+                    ClearanceViolation(
+                        segment_index=a.seg_index,
+                        x1=a.x1,
+                        y1=a.y1,
+                        x2=a.x2,
+                        y2=a.y2,
+                        net=a.net,
+                        obstacle_type="segment" if b.is_trace else "via",
+                        obstacle_net=b.net,
+                        distance=gap,
+                        required=req,
+                        net_name=a.name,
+                        obstacle_net_name=b.name,
+                        location=location,
+                        layer=a.layer,
+                        origin="input",
+                    )
+                )
+    return out
+
+
+def kept_copper_clearance_violations(
+    router: Autorouter,
+    *,
+    board_rules: BoardClearanceRules | None = None,
+    rules: DesignRules | None = None,
+) -> list[ClearanceViolation]:
+    """Clearance near-misses in copper kept by ``--preserve-existing`` (Issue #6237).
+
+    Every kept trace and via (:func:`audited_kept_routes`: name-only copper
+    under its real net id, only anonymous copper skipped) is
+    measured against other nets' pads and other nets' kept copper; a pair
+    whose gap is positive but below the required clearance (less
+    :data:`~kicad_tools.router.clearance_kernel.CLEARANCE_EPSILON_MM`) is
+    returned as an ``origin="input"`` :class:`ClearanceViolation` -- what
+    kicad-cli reports as ``clearance``.  Overlap is not returned here:
+    :func:`validate_routes` reports it as a short.
+
+    ``board_rules`` should be the rules the written board is judged under
+    (:meth:`BoardClearanceRules.from_board` on the OUTPUT board, whose
+    sibling ``.kicad_pro`` / ``.kicad_dru`` kicad-cli loads); without it the
+    requirement is the one :func:`validate_routes` applies to routed copper.
+    """
+    kept_routes = audited_kept_routes(router)
+    if not kept_routes:
+        return []
+    if rules is None:
+        rules = router.rules
+    clearance = rules.trace_clearance
+    via_clear = rules.via_clearance
+    net_names: dict[int, str] = getattr(router, "net_names", {})
+    ncm: dict[str, NetClassRouting] | None = getattr(router, "net_class_map", None)
+
+    def resolve_net_name(net_id: int) -> str:
+        return net_names.get(net_id, f"Net {net_id}")
+
+    def route_net_name(route: Route) -> str:
+        return route.net_name or resolve_net_name(route.net)
+
+    def pair_clearance(net_a: int, net_b: int) -> float:
+        return _get_pair_clearance(net_a, net_b, clearance, net_names, ncm)
+
+    obstacles_cache: dict[tuple[int, str | None], list] = {}
+
+    def pad_obstacles(route_net: int, route_name: str | None) -> list:
+        key = (route_net, route_name)
+        if key not in obstacles_cache:
+            obstacles_cache[key] = _foreign_pad_obstacle_entries(
+                router, route_net, route_name, clearance, ncm, pair_clearance
+            )
+        return obstacles_cache[key]
+
+    return _kept_copper_violations(
+        kept_routes,
+        pad_obstacles=pad_obstacles,
+        route_net_name=route_net_name,
+        resolve_net_name=resolve_net_name,
+        pair_clearance=pair_clearance,
+        via_clear=via_clear,
+        clearance_bound=max(clearance, via_clear, *(c.clearance for c in (ncm or {}).values())),
+        shorts=False,
+        near_misses=True,
+        kept_vs_kept=True,
+        board_rules=board_rules,
+    )
 
 
 def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
@@ -5345,6 +5775,9 @@ def load_pcb_for_routing(
             carved,
         )
 
+    # Issue #6237: hand the kept-copper audit the name -> id map, so copper
+    # loaded under net 0 from a name-only board resolves to its real id.
+    router.board_net_ids = dict(net_map)
     return router, net_map
 
 
