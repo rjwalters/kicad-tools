@@ -1037,6 +1037,7 @@ def print_routing_diagnostics_json(
     single_pad_count: int = 0,
     routing_plan: dict | None = None,
     diagnose_unrouted_budget: float | None = None,
+    verdict: str | None = None,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -1053,6 +1054,8 @@ def print_routing_diagnostics_json(
         diagnose_unrouted_budget: Seconds for the congested/blocked
             classification pass (Issue #5944) -- see
             :func:`get_routing_diagnostics_json`.
+        verdict: The run's single final verdict (``"success"`` / ``"failed"``,
+            Issue #6239).  Emitted as ``summary.verdict`` when given.
     """
     diagnostics = get_routing_diagnostics_json(
         router,
@@ -1064,6 +1067,8 @@ def print_routing_diagnostics_json(
         routing_plan=routing_plan,
         diagnose_unrouted_budget=diagnose_unrouted_budget,
     )
+    if verdict is not None:
+        diagnostics["summary"]["verdict"] = verdict
     # json_stdout(): the real stdout even while ``kct route --format json``
     # diverts progress prints to stderr (issue #5938).
     from kicad_tools.json_stdout import json_stdout

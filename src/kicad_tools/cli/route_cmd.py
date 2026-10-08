@@ -6854,6 +6854,13 @@ def _print_short_findings(shorts: "Sequence[ClearanceViolation]") -> None:
         print(f"    ... and {len(shorts) - 20} more short(s)")
 
 
+# Issue #6239: the per-attempt ``Status:`` line of the escalation loops is
+# printed before the post-route gates (shorts, stranded pour, HV pairwise,
+# layer intent, zone fill) run, so it must never say ``SUCCESS`` -- only the
+# final banner owns the run's verdict.
+_ATTEMPT_COMPLETE_STATUS = "ATTEMPT COMPLETE (provisional - final verdict follows)"
+
+
 def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_path) -> None:
     """Replace the SUCCESS banner when the written copper shorts nets (#5862).
 
@@ -9291,7 +9298,7 @@ def route_with_layer_escalation(
 
         # Report attempt result
         status = (
-            ("ELIGIBLE ROUTING COMPLETE" if _placement_blocked(args) else "SUCCESS")
+            ("ELIGIBLE ROUTING COMPLETE" if _placement_blocked(args) else _ATTEMPT_COMPLETE_STATUS)
             if result.success
             else "INSUFFICIENT - escalating"
         )
@@ -10228,7 +10235,7 @@ def route_with_rule_relaxation(
 
         # Report attempt result
         status = (
-            ("ELIGIBLE ROUTING COMPLETE" if _placement_blocked(args) else "SUCCESS")
+            ("ELIGIBLE ROUTING COMPLETE" if _placement_blocked(args) else _ATTEMPT_COMPLETE_STATUS)
             if result.success
             else "INSUFFICIENT - relaxing rules"
         )
@@ -17240,11 +17247,19 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 current_strategy=args.strategy,
                 nets_to_route_ids=multi_pad_ids,
                 single_pad_count=getattr(last, "single_pad_count", 0),
+                # Issue #6239: the exit code is the run's single final verdict.
+                verdict="success" if exit_code == 0 else "failed",
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
-    print(json.dumps({"exit_code": exit_code}, indent=2), file=json_stdout())
+    print(
+        json.dumps(
+            {"exit_code": exit_code, "verdict": "success" if exit_code == 0 else "failed"},
+            indent=2,
+        ),
+        file=json_stdout(),
+    )
 
 
 def _run_main_impl(args, parser, argv) -> int:
@@ -20262,6 +20277,24 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         print(_format_layer_intent_violations(layer_intent_violations, limit=5))
 
+    # Issue #6239: the single final verdict, mirroring the banner chain below
+    # (and the exit code), so ``--format json`` reports what the text path does.
+    _final_verdict = (
+        "success"
+        if (
+            layer_intent_new_count == 0
+            and not (pairwise_violation_count > 0 and drc_passed)
+            and short_violation_count == 0
+            and not stranded_pour_blocking
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and drc_passed
+            and (all_nets_routed or meets_threshold)
+        )
+        else "failed"
+    )
+
     if not quiet:
         print("\n" + "=" * 60)
         if layer_intent_new_count > 0:
@@ -20392,6 +20425,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     nets_to_route_ids=multi_pad_net_ids,
                     single_pad_count=len(single_pad_nets),
                     routing_plan=_routing_plan_json,
+                    verdict=_final_verdict,
                 )
             else:
                 # Verbose mode shows detailed path analysis for each failure

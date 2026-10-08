@@ -485,6 +485,48 @@ class TestCliShortGate:
         assert "shorting_items" in stdout, "the message must name the DRC class it maps to"
         assert "NET1 vs NET2" in stdout
 
+    @pytest.mark.parametrize("extra", [[], ["--max-layers", "4"]])
+    def test_short_failure_prints_no_success_anywhere_6239(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        extra: list[str],
+    ) -> None:
+        """Issue #6239: no ``SUCCESS`` line may precede/accompany a failed verdict."""
+        pcb = tmp_path / "trivial.kicad_pcb"
+        pcb.write_text(_TRIVIAL_BOARD)
+        out = tmp_path / "routed.kicad_pcb"
+        monkeypatch.setattr(router_io, "validate_routes", lambda *a, **k: [self._pad_short()])
+
+        rc = route_main([str(pcb), "-o", str(out), "--skip-drc", "--no-optimize", *extra])
+
+        assert rc == 3
+        stdout = capsys.readouterr().out
+        assert "ROUTING FAILED" in stdout
+        assert "SUCCESS" not in stdout
+
+    def test_short_failure_json_reports_single_failed_verdict_6239(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        pcb = tmp_path / "trivial.kicad_pcb"
+        pcb.write_text(_TRIVIAL_BOARD)
+        out = tmp_path / "routed.kicad_pcb"
+        monkeypatch.setattr(router_io, "validate_routes", lambda *a, **k: [self._pad_short()])
+
+        rc = route_main(
+            [str(pcb), "-o", str(out), "--skip-drc", "--no-optimize", "--format", "json"]
+        )
+
+        assert rc == 3
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["verdict"] == "failed"
+
     def test_clean_validation_still_exits_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
