@@ -57,6 +57,17 @@ def load_design_rules_from_yaml(manufacturer_id: str) -> dict[str, DesignRules]:
     return rules
 
 
+def load_capability_flags(manufacturer_id: str) -> dict[str, Any]:
+    """Load the profile-level ``capabilities:`` mapping from a fab's YAML.
+
+    Returns an empty dict when the file or the key is absent.
+    """
+    yaml_path = _DATA_DIR / f"{manufacturer_id}.yaml"
+    if not yaml_path.exists():
+        return {}
+    return dict(_load_yaml(yaml_path).get("capabilities") or {})
+
+
 @dataclass
 class FileNamingConvention:
     """Output file naming rules for a manufacturer."""
@@ -378,6 +389,11 @@ class ManufacturerProfile:
 
     # File naming convention for export outputs
     file_naming: FileNamingConvention = field(default_factory=FileNamingConvention)
+
+    # Whether the fab offers V-scoring at all (Issue #6205).  ``False`` only
+    # when the fab's own docs say so (cited in the YAML); ``None`` means
+    # unknown, which is never treated as "unsupported".
+    supports_vscore: bool | None = None
 
     def get_design_rules(self, layers: int = 4, copper_oz: float = 1.0) -> DesignRules:
         """Get design rules for a specific configuration."""

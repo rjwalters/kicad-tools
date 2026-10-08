@@ -34,12 +34,14 @@ def _fail(as_json: bool, board: str, message: str, *, text: str | None = None) -
     return 1
 
 
-def _fab_vscore_clearance(cli_mfr: str | None, board_path: Path) -> tuple[float, str, str]:
+def _fab_vscore_clearance(
+    cli_mfr: str | None, board_path: Path
+) -> tuple[float, str, str, bool | None]:
     """Resolve the fab's copper-to-V-score clearance (Issue #6177).
 
     The fab comes from the shared ``--mfr`` resolver (explicit flag >
     ``fab_profile.json`` sidecar > ``project.kct`` ``target_fab`` >
-    ``jlcpcb``).  Returns ``(clearance_mm, mfr_id, source)`` where *source*
+    ``jlcpcb``).  Returns ``(clearance_mm, mfr_id, source, supports_vscore)`` where *source*
     is ``"fab"`` for a published figure or ``"unsourced_default"`` when the
     profile carries none.
 
@@ -51,7 +53,12 @@ def _fab_vscore_clearance(cli_mfr: str | None, board_path: Path) -> tuple[float,
 
     mfr = resolve_cli_manufacturer(cli_mfr, board_path)
     resolved = vscore_clearance_for(mfr)
-    return resolved.mm, resolved.mfr, "fab" if resolved.sourced else "unsourced_default"
+    return (
+        resolved.mm,
+        resolved.mfr,
+        "fab" if resolved.sourced else "unsourced_default",
+        resolved.supported,
+    )
 
 
 def run_panel_command(args) -> int:
@@ -107,13 +114,17 @@ def run_panel_command(args) -> int:
     vscore_clearance = getattr(args, "panel_vscore_clearance", None)
     vscore_mfr: str | None = getattr(args, "panel_mfr", None)
     vscore_source: str | None = None
+    vscore_supported: bool | None = None
     if cut_method == CutMethod.VCUT:
         if vscore_clearance is not None:
             vscore_source = "cli"
         else:
-            vscore_clearance, vscore_mfr, vscore_source = _fab_vscore_clearance(
-                vscore_mfr, board_path
-            )
+            (
+                vscore_clearance,
+                vscore_mfr,
+                vscore_source,
+                vscore_supported,
+            ) = _fab_vscore_clearance(vscore_mfr, board_path)
     vcut = VCutConfig(
         layer=getattr(args, "panel_vcut_layer", None) or VCutConfig.layer,
         clearance=VCutConfig.clearance if vscore_clearance is None else vscore_clearance,
@@ -167,6 +178,13 @@ def run_panel_command(args) -> int:
     gap_x, gap_y = panel.spacing
     frame_space = panel.frame_space
     is_vcut = config.cut_method == CutMethod.VCUT
+    warnings = list(panel.warnings)
+    if is_vcut and vscore_supported is False:
+        warnings.append(
+            f"{vscore_mfr} does not offer V-scoring; a --cut vcut panel cannot be "
+            "fabricated there. Use --cut mousebite (routed tabs) instead, or "
+            "send the panel to a fab that V-scores."
+        )
 
     if as_json:
         emit_json(
@@ -196,7 +214,10 @@ def run_panel_command(args) -> int:
                 # profile) or "unsourced_default"; null unless --cut vcut.
                 "vscore_clearance_source": vscore_source,
                 "mfr": vscore_mfr if is_vcut else None,
-                "warnings": panel.warnings,
+                # false when the fab's docs say it offers no V-scoring;
+                # null when unknown or not --cut vcut.
+                "vscore_supported": vscore_supported if is_vcut else None,
+                "warnings": warnings,
                 "tooling_holes": config.tooling_holes is not None,
                 "fiducials": config.fiducials is not None,
                 "success": True,
@@ -214,12 +235,16 @@ def run_panel_command(args) -> int:
     print(f"  Cut method: {config.cut_method.value}")
     if is_vcut:
         print(f"  V-score layer: {config.vcut.layer}")
+        if vscore_supported is False:
+            unsourced_note = f"{vscore_mfr} does not offer V-scoring; unsourced default"
+        else:
+            unsourced_note = f"{vscore_mfr} publishes no figure; unsourced default"
         clearance_note = {
             "cli": "--vscore-clearance",
             "fab": f"{vscore_mfr} published",
-            "unsourced_default": f"{vscore_mfr} publishes none; unsourced default",
+            "unsourced_default": unsourced_note,
         }.get(vscore_source or "", "default")
         print(f"  V-score clearance: {config.vcut.clearance:g} mm ({clearance_note})")
-    for message in panel.warnings:
+    for message in warnings:
         print(f"Warning: {message}", file=sys.stderr)
     return 0

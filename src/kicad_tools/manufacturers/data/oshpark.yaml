@@ -7,10 +7,16 @@
 # panels with 0.1 in between outlines
 # (https://docs.oshpark.com/troubleshooting/panelized-designs/, checked
 # 2026-10-07).  kct panel --cut vcut falls back to the conservative
-# unsourced default in kicad_tools.manufacturers.vscore.
+# unsourced default in kicad_tools.manufacturers.vscore, and warns that the
+# fab does not offer V-scoring (Issue #6205, capabilities.supports_vscore).
 #
 # All measurements in millimeters unless otherwise noted.
 # Note: OSHPark is PCB-only, no assembly services.
+
+capabilities:
+  # Routed panels only; no V-score service.
+  # https://docs.oshpark.com/troubleshooting/panelized-designs/ (checked 2026-10-07)
+  supports_vscore: false
 
 design_rules:
   # Standard 2-layer service (purple boards)

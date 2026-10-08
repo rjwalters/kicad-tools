@@ -42,6 +42,9 @@ class VScoreClearance(NamedTuple):
     mm: float
     mfr: str
     sourced: bool
+    supported: bool | None = None
+    """``False`` when the fab's docs say it offers no V-scoring (Issue
+    #6205); ``None`` when unknown."""
 
 
 def vscore_clearance_for(
@@ -66,9 +69,9 @@ def vscore_clearance_for(
     rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
     published = rules.min_copper_to_vscore_mm
     if published is not None:
-        return VScoreClearance(float(published), profile.id, True)
+        return VScoreClearance(float(published), profile.id, True, profile.supports_vscore)
     fallback = max(UNSOURCED_VSCORE_CLEARANCE_MM, float(rules.min_copper_to_edge_mm))
-    return VScoreClearance(fallback, profile.id, False)
+    return VScoreClearance(fallback, profile.id, False, profile.supports_vscore)
 
 
 __all__ = ["UNSOURCED_VSCORE_CLEARANCE_MM", "VScoreClearance", "vscore_clearance_for"]
