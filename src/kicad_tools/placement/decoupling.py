@@ -50,6 +50,7 @@ __all__ = [
     "SupplyPin",
     "assign_caps_to_pins",
     "compute_decoupling_distance",
+    "compute_pin_coverage",
     "decoupling_pairs",
     "identify_decoupling_groups",
     "snap_decoupling_caps",
@@ -274,6 +275,38 @@ def decoupling_pairs(
     return out
 
 
+def compute_pin_coverage(
+    groups: Sequence[DecouplingGroup] | None,
+    placements: Sequence[ComponentPlacement],
+    pad_positions: Mapping[PadKey, tuple[float, float]] | None = None,
+) -> float:
+    """Sum over supply pins of the distance to the *nearest* cap on the rail (mm).
+
+    The ``decoupling_proximity`` FOM term restricted to the identified
+    caps and supply pins. Unlike :func:`compute_decoupling_distance` it does
+    not care which cap serves which pin, so one cap between two adjacent
+    supply pins covers both. The snap pass uses it as a guard: a move that
+    helps the cap's assigned pin but strands a neighbouring pin is refused.
+    """
+    if not groups:
+        return 0.0
+    centres = {p.reference: (p.x, p.y) for p in placements}
+    total = 0.0
+    for group in groups:
+        caps = [
+            pos
+            for c in group.caps
+            if (pos := _position(c.reference, c.supply_pad, pad_positions, centres)) is not None
+        ]
+        if not caps:
+            continue
+        for pin in group.pins:
+            pos = _position(pin.reference, pin.pad, pad_positions, centres)
+            if pos is not None:
+                total += min(math.hypot(pos[0] - x, pos[1] - y) for x, y in caps)
+    return total
+
+
 def compute_decoupling_distance(
     groups: Sequence[DecouplingGroup] | None,
     placements: Sequence[ComponentPlacement],
@@ -433,7 +466,9 @@ def snap_decoupling_caps(
       blocks the trace that has to leave that pin; pads on the cap's own
       supply net, on ground, or on no net have nothing to escape; and
     * adds no hard-constraint violation under *score_fn* (overlap, DRC,
-      boundary, block, creepage) and lowers the decoupling term.
+      boundary, block, creepage), lowers the decoupling term, and does not
+      worsen :func:`compute_pin_coverage` -- moving a cap onto its assigned
+      pin must not strand a neighbouring pin it was already serving.
 
     Wirelength is deliberately not a gate: a cap that moves onto its pin
     stretches the ground net's bounding box a little, and that trade is the
@@ -488,6 +523,16 @@ def snap_decoupling_caps(
     best_score = score_fn(current)
     best_violation = _violation(best_score, config)
 
+    def coverage(vec_data) -> float:
+        placed_ = decode(PlacementVector(data=vec_data), components)
+        return compute_pin_coverage(
+            groups,
+            [ComponentPlacement(p.reference, p.x, p.y, p.rotation) for p in placed_],
+            build_pad_position_map(placed_),
+        )
+
+    best_coverage = coverage(data)
+
     placed = decode(current, components)
     placements = [ComponentPlacement(p.reference, p.x, p.y, p.rotation) for p in placed]
     pairs = sorted(
@@ -520,7 +565,11 @@ def snap_decoupling_caps(
             yb
             for j, pc in enumerate(placed)
             if j != ci
-            and (yb := _extent_bbox(extents, pc.reference, pc.x, pc.y, pc.rotation, pc.side))
+            and (
+                yb := _extent_bbox(
+                    extents, pc.reference, pc.x, pc.y, pc.rotation, pc.side ^ components[j].side
+                )
+            )
         ]
         lanes = (
             _escape_lanes(placed, ci, pad_nets, net, escape_mm, escape_halo_mm) if pad_nets else []
@@ -564,7 +613,7 @@ def snap_decoupling_caps(
             if d >= before:
                 break
             for rot_idx, rot in enumerate(ROTATION_STEPS):
-                off = _transform_pad(supply, 0.0, 0.0, rot, side)
+                off = _transform_pad(supply, 0.0, 0.0, rot, side ^ cap_def.side)
                 for a in angles if d > 0 else angles[:1]:
                     cx = pin_pad.x + d * math.cos(a) - off.x
                     cy = pin_pad.y + d * math.sin(a) - off.y
@@ -574,8 +623,10 @@ def snap_decoupling_caps(
                     after = math.hypot(cx + off.x - pin_pad.x, cy + off.y - pin_pad.y)
                     if after >= before:
                         continue
-                    bb = _pad_bbox([_transform_pad(p, cx, cy, rot, side) for p in cap_def.pads])
-                    yard = _extent_bbox(extents, cap.reference, cx, cy, rot, side)
+                    bb = _pad_bbox(
+                        [_transform_pad(p, cx, cy, rot, side ^ cap_def.side) for p in cap_def.pads]
+                    )
+                    yard = _extent_bbox(extents, cap.reference, cx, cy, rot, side ^ cap_def.side)
                     if bb is None or not legal(bb, yard):
                         continue
                     trial = data.copy()
@@ -585,8 +636,10 @@ def snap_decoupling_caps(
                     if (
                         violation <= best_violation
                         and score.breakdown.decoupling < best_score.breakdown.decoupling
+                        and (cov := coverage(trial)) <= best_coverage + 1e-9
                     ):
                         data, best_score, best_violation = trial, score, violation
+                        best_coverage = cov
                         accepted = True
                         moves.append(
                             SnapMove(cap.reference, f"{pin.reference}.{pin.pad}", before, after)

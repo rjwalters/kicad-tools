@@ -147,7 +147,10 @@ therefore carries a soft decoupling term (`placement/decoupling.py`):
   from every other footprint and the board edge, whose body (courtyard, else
   silkscreen/fab outline) keeps 0.15 mm from every other body, that stays out
   of the 3 mm escape lane of every IC pad on another net, and that adds no
-  overlap/DRC/boundary violation. Cap centres land on a 0.05 mm grid. CMA-ES alone rarely lands a 2 mm part within a millimetre of one
+  overlap/DRC/boundary violation. A cap only ever moves closer to its pin,
+  and a move may not raise the per-pin nearest-cap sum, so a cap already
+  serving two adjacent supply pins is not pulled onto one of them. Cap
+  centres land on a 0.05 mm grid. CMA-ES alone rarely lands a 2 mm part within a millimetre of one
   pin; the snap finishes the job.
 
 `--seed current --max-iterations 0` keeps a hand floorplan as it is and runs

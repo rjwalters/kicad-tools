@@ -597,3 +597,20 @@ class TestPhysicsClusterSprings:
         # Supply pad (1) of each cap to a distinct U1 supply pin; the nearer
         # cap (C2) keeps pin 1, so C1 goes to pin 2 rather than crowding it.
         assert springs == {"C2": ("1", "1"), "C1": ("2", "1")}
+
+
+class TestBackSideCaptureSide:
+    """``ComponentDef.side``: pads read from a back-side footprint are already flipped."""
+
+    def _pad_x(self, def_side: int, placed_side: int) -> float:
+        comp = ComponentDef("C1", pads=(PadDef("1", -1.0, 0.0),), side=def_side)
+        vec = PlacementVector(data=np.array([10.0, 10.0, 0.0, float(placed_side)]))
+        return decode(vec, [comp])[0].pads[0].x
+
+    def test_no_mirror_on_the_capture_side(self):
+        assert self._pad_x(def_side=1, placed_side=1) == pytest.approx(9.0)
+        assert self._pad_x(def_side=0, placed_side=0) == pytest.approx(9.0)
+
+    def test_mirror_when_flipped_away_from_it(self):
+        assert self._pad_x(def_side=0, placed_side=1) == pytest.approx(11.0)
+        assert self._pad_x(def_side=1, placed_side=0) == pytest.approx(11.0)

@@ -723,6 +723,9 @@ def _read_board_data(
                 pads=tuple(pad_defs),
                 width=width,
                 height=height,
+                # Pads are read as stored, i.e. already flipped for a
+                # back-side footprint; decode must not mirror them again.
+                side=1 if fp.layer == "B.Cu" else 0,
             )
         )
 

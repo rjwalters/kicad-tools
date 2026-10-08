@@ -85,12 +85,18 @@ class ComponentDef:
         pads: Pad definitions in local component coordinates.
         width: Bounding box width in mm (used for bounds calculation).
         height: Bounding box height in mm (used for bounds calculation).
+        side: Board side the *pads* coordinates were captured on (0 front,
+            1 back). A ``.kicad_pcb`` stores a back-side footprint's pads
+            already flipped, so decoding mirrors only when the placed side
+            differs from this one (issue #6020). Default 0 keeps library
+            (front-side) coordinates.
     """
 
     reference: str
     pads: tuple[PadDef, ...] = ()
     width: float = 1.0
     height: float = 1.0
+    side: int = 0
 
 
 @dataclass(frozen=True)
@@ -385,7 +391,7 @@ def decode(
 
         # Transform pads
         transformed_pads = tuple(
-            _transform_pad(pad, x, y, rotation_deg, side) for pad in comp_def.pads
+            _transform_pad(pad, x, y, rotation_deg, side ^ comp_def.side) for pad in comp_def.pads
         )
 
         result.append(
@@ -644,7 +650,7 @@ def decode_with_blocks(
 
         comp_def = components[comp_idx]
         transformed_pads = tuple(
-            _transform_pad(pad, x, y, rotation_deg, side) for pad in comp_def.pads
+            _transform_pad(pad, x, y, rotation_deg, side ^ comp_def.side) for pad in comp_def.pads
         )
         result_map[comp_def.reference] = PlacedComponent(
             reference=comp_def.reference,
@@ -674,7 +680,9 @@ def decode_with_blocks(
             comp_def = comp_map.get(m.reference)
             pads: tuple[TransformedPad, ...] = ()
             if comp_def is not None:
-                pads = tuple(_transform_pad(pad, cx, cy, crot, side) for pad in comp_def.pads)
+                pads = tuple(
+                    _transform_pad(pad, cx, cy, crot, side ^ comp_def.side) for pad in comp_def.pads
+                )
 
             result_map[m.reference] = PlacedComponent(
                 reference=m.reference,
