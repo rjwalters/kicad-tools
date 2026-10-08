@@ -716,13 +716,17 @@ def test_line_broken_around_a_hole_crosses_all_material(tmp_path: Path) -> None:
 # interior into "material".  A hole mark must not become a V-score.
 _MOUNT_HOLE = '(gr_circle (center 20 40) (end 21 40) (layer "Edge.Cuts"))'
 _DUP_LEFT_FULL = '(gr_line (start 0 0) (end 0 80) (layer "Edge.Cuts"))'
-_DUP_LEFT_PART = '(gr_line (start 0 10) (end 0 30) (layer "Edge.Cuts"))'
+_DUP_LEFT_PART = '(gr_line (start 0 30) (end 0 50) (layer "Edge.Cuts"))'
+_DUP_RIGHT_FULL = '(gr_line (start 100 0) (end 100 80) (layer "Edge.Cuts"))'
 _HOLE_CROSSHAIR = [(18.5, 40, 21.5, 40), (20, 38.5, 20, 41.5)]
 _DUPLICATED_EDGE_CASES = {
     "full-duplicate-with-crosshair": (_DUP_LEFT_FULL, _HOLE_CROSSHAIR),
     "full-duplicate-with-horizontal-bar": (_DUP_LEFT_FULL, [(17, 40, 23, 40)]),
     "full-duplicate-with-line-edge-to-past-hole": (_DUP_LEFT_FULL, [(0, 40, 22, 40)]),
     "partial-overlap-with-crosshair": (_DUP_LEFT_PART, _HOLE_CROSSHAIR),
+    # Both edges duplicated: the crossing count stays even (0, 0, 19, 21, 100,
+    # 100), so only the near-crossing check rejects it.
+    "both-edges-duplicated-even-count": (_DUP_LEFT_FULL + _DUP_RIGHT_FULL, _HOLE_CROSSHAIR),
 }
 
 
