@@ -969,6 +969,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--keep-build-artifacts")
     if getattr(args, "export_keep_gerber_files", False):
         sub_argv.append("--keep-gerber-files")
+    for layer in getattr(args, "export_vscore_layer", None) or []:
+        sub_argv.extend(["--vscore-layer", layer])
     if getattr(args, "export_include_tht", False):
         sub_argv.append("--include-tht")
     if hasattr(args, "export_format") and args.export_format != "text":

@@ -208,6 +208,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--vscore-layer",
+        action="append",
+        default=None,
+        metavar="LAYER",
+        help=(
+            "Plot this user layer as a V-score layer (repeatable; Issue #6193). "
+            "For panels whose partial or jump scores the outline geometry "
+            "cannot prove; detected score layers are still added"
+        ),
+    )
+    parser.add_argument(
         "--include-tht",
         action="store_true",
         help="Include through-hole components in CPL (they are excluded by default for JLCPCB)",
@@ -282,10 +293,14 @@ def run_export(args: argparse.Namespace) -> int:
 
     # Build Gerber configuration when --keep-gerber-files is specified
     gerber_config = None
-    if getattr(args, "keep_gerber_files", False):
+    vscore_layers = list(getattr(args, "vscore_layer", None) or [])
+    if getattr(args, "keep_gerber_files", False) or vscore_layers:
         from kicad_tools.export.gerber import GerberConfig
 
-        gerber_config = GerberConfig(clean_after_zip=False)
+        gerber_config = GerberConfig(
+            clean_after_zip=not getattr(args, "keep_gerber_files", False),
+            vscore_layers=vscore_layers,
+        )
 
     # Build configuration
     auto_lcsc = args.auto_lcsc and not args.no_auto_lcsc

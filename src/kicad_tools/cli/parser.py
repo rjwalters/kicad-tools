@@ -10308,6 +10308,18 @@ def _add_export_parser(subparsers) -> None:
         help="Keep individual gerber/drill files alongside the zip archive",
     )
     export_parser.add_argument(
+        "--vscore-layer",
+        dest="export_vscore_layer",
+        action="append",
+        default=None,
+        metavar="LAYER",
+        help=(
+            "Plot this user layer as a V-score layer (repeatable; Issue #6193). "
+            "For panels whose partial or jump scores the outline geometry "
+            "cannot prove; detected score layers are still added"
+        ),
+    )
+    export_parser.add_argument(
         "--include-tht",
         dest="export_include_tht",
         action="store_true",

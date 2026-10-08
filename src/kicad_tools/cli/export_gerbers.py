@@ -9,9 +9,9 @@ Generates:
 - ZIP archive ready for upload
 
 Usage:
-    kicad-export-gerbers path/to/design.kicad_pcb
-    kicad-export-gerbers path/to/design.kicad_pcb --preview
-    kicad-export-gerbers path/to/design.kicad_pcb --output-dir ./gerbers
+    python -m kicad_tools.cli.export_gerbers path/to/design.kicad_pcb
+    python -m kicad_tools.cli.export_gerbers path/to/design.kicad_pcb --preview
+    python -m kicad_tools.cli.export_gerbers path/to/design.kicad_pcb --output-dir ./gerbers
 """
 
 import argparse
@@ -55,7 +55,12 @@ FOUR_LAYER_STACK = [
 ]
 
 
-def export_gerbers(pcb_path: Path, output_dir: Path, kicad_cli: Path) -> bool:
+def export_gerbers(
+    pcb_path: Path,
+    output_dir: Path,
+    kicad_cli: Path,
+    vscore_layers: list[str] | None = None,
+) -> bool:
     """Export Gerber files using kicad-cli."""
     print(f"Exporting Gerbers from: {pcb_path}")
 
@@ -80,11 +85,21 @@ def export_gerbers(pcb_path: Path, output_dir: Path, kicad_cli: Path) -> bool:
 
     # Build layer list for export.  A V-cut panel's score lines live on a
     # user layer (Cmts.User by default) and must reach the fab (Issue #6156).
-    from kicad_tools.export.gerber import pcb_vscore_layers
+    from kicad_tools.export.gerber import missing_vscore_layers, pcb_vscore_layers
 
-    vscore = pcb_vscore_layers(pcb_path)
-    for layer in vscore:
-        print(f"Including V-score layer: {layer}")
+    for layer in missing_vscore_layers(pcb_path, list(vscore_layers or [])):
+        print(
+            f"Warning: --vscore-layer {layer} is not in the board's layer table; "
+            "kicad-cli will plot nothing for it",
+            file=sys.stderr,
+        )
+
+    # ``--vscore-layer`` adds layers detection cannot prove (Issue #6193).
+    vscore: list[str] = []
+    for layer in [*(vscore_layers or []), *pcb_vscore_layers(pcb_path)]:
+        if layer not in vscore and layer not in FOUR_LAYER_STACK:
+            vscore.append(layer)
+            print(f"Including V-score layer: {layer}")
     layers = ",".join(FOUR_LAYER_STACK + vscore)
 
     try:
@@ -302,6 +317,17 @@ def main():
     parser.add_argument(
         "--no-rename", action="store_true", help="Keep KiCad naming (don't rename for Seeed)"
     )
+    parser.add_argument(
+        "--vscore-layer",
+        action="append",
+        default=None,
+        metavar="LAYER",
+        help=(
+            "Plot this user layer as a V-score layer (repeatable; Issue #6193). "
+            "For panels whose partial or jump scores the outline geometry "
+            "cannot prove; detected score layers are still added"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -333,7 +359,7 @@ def main():
     output_dir.mkdir(parents=True)
 
     # Export Gerbers
-    if not export_gerbers(args.pcb, output_dir, kicad_cli):
+    if not export_gerbers(args.pcb, output_dir, kicad_cli, vscore_layers=args.vscore_layer):
         sys.exit(1)
 
     # Export position file

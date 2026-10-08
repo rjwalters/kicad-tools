@@ -583,7 +583,12 @@ class AssemblyPackage:
         exporter = GerberExporter(self.pcb_path)
 
         if self.fab_family in MANUFACTURER_PRESETS:
-            return exporter.export_for_manufacturer(self.fab_family, gerber_dir)
+            # The preset owns the Gerber options; an explicit V-score layer
+            # opt-in (Issue #6193) still applies on top of it.
+            gc = self.config.gerber_config
+            return exporter.export_for_manufacturer(
+                self.fab_family, gerber_dir, vscore_layers=gc.vscore_layers if gc else None
+            )
         else:
             config = self.config.gerber_config or GerberConfig()
             return exporter.export(config, gerber_dir)
