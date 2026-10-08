@@ -397,6 +397,24 @@ class TestSnapDecouplingCaps:
         # Without extents the cap sits closer, inside U1's courtyard.
         assert decode(free, components)[1].x != cx or decode(free, components)[1].y != cy
 
+    def test_never_moves_a_cap_farther_from_its_pin(self):
+        components, _vector, config, score_fn = _snap_fixture()
+        # C1's supply pad sits 1.2 mm from U1.1 with only a 0.2 mm pad gap:
+        # tighter than the 0.5 mm margin a *new* spot needs, and no legal
+        # spot is closer. A tight hand placement is left alone rather than
+        # pushed out to the nearest legal spot.
+        tight = encode(
+            [
+                PlacedComponent("U1", 20.0, 20.0, 0.0, 0),
+                PlacedComponent("C1", 25.2, 20.0, 0.0, 0),
+            ]
+        )
+        new_vector, moves = snap_decoupling_caps(
+            tight, components, _GROUPS, _BOARD, score_fn, config
+        )
+        assert moves == []
+        np.testing.assert_array_equal(new_vector.data, tight.data)
+
     def test_no_move_when_no_free_spot(self):
         components, vector, config, score_fn = _snap_fixture()
         # A margin wider than the board leaves no legal spot anywhere.

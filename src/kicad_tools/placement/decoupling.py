@@ -437,10 +437,9 @@ def snap_decoupling_caps(
 
     Wirelength is deliberately not a gate: a cap that moves onto its pin
     stretches the ground net's bounding box a little, and that trade is the
-    point of the rule. A cap with no such candidate stays where it is, so
-    the pass never adds a violation. A cap the optimizer left *illegally*
-    placed (crowding a neighbour, across an escape lane) is moved to the
-    nearest legal spot even when that is farther from its pin.
+    point of the rule. A cap only ever moves closer to its pin; one with no
+    such candidate stays where it is, so the pass never adds a violation
+    and never undoes a tight hand placement.
 
     Args:
         vector: :class:`~kicad_tools.placement.vector.PlacementVector`.
@@ -558,19 +557,11 @@ def snap_decoupling_caps(
                 bb[0] < o[2] and o[0] < bb[2] and bb[1] < o[3] and o[1] < bb[3] for o in lanes
             )
 
-        # A cap the optimizer left crowding a neighbour or across an escape
-        # lane is moved even if the only legal spot is farther from its pin.
-        current_bb = _pad_bbox(placed[ci].pads)
-        cur = placed[ci]
-        blocked = current_bb is not None and not legal(
-            current_bb, _extent_bbox(extents, cur.reference, cur.x, cur.y, cur.rotation, cur.side)
-        )
-
         base = ci * FIELDS_PER_COMPONENT
         side = int(round(float(data[base + 3])))
         accepted = False
         for d in radii:
-            if d >= before and not blocked:
+            if d >= before:
                 break
             for rot_idx, rot in enumerate(ROTATION_STEPS):
                 off = _transform_pad(supply, 0.0, 0.0, rot, side)
@@ -580,6 +571,9 @@ def snap_decoupling_caps(
                     if grid_mm > 0:
                         cx = round(cx / grid_mm) * grid_mm
                         cy = round(cy / grid_mm) * grid_mm
+                    after = math.hypot(cx + off.x - pin_pad.x, cy + off.y - pin_pad.y)
+                    if after >= before:
+                        continue
                     bb = _pad_bbox([_transform_pad(p, cx, cy, rot, side) for p in cap_def.pads])
                     yard = _extent_bbox(extents, cap.reference, cx, cy, rot, side)
                     if bb is None or not legal(bb, yard):
@@ -588,18 +582,14 @@ def snap_decoupling_caps(
                     trial[base], trial[base + 1], trial[base + 2] = cx, cy, float(rot_idx)
                     score = score_fn(PlacementVector(data=trial))
                     violation = _violation(score, config)
-                    if violation <= best_violation and (
-                        blocked or score.breakdown.decoupling < best_score.breakdown.decoupling
+                    if (
+                        violation <= best_violation
+                        and score.breakdown.decoupling < best_score.breakdown.decoupling
                     ):
                         data, best_score, best_violation = trial, score, violation
                         accepted = True
                         moves.append(
-                            SnapMove(
-                                cap.reference,
-                                f"{pin.reference}.{pin.pad}",
-                                before,
-                                math.hypot(cx + off.x - pin_pad.x, cy + off.y - pin_pad.y),
-                            )
+                            SnapMove(cap.reference, f"{pin.reference}.{pin.pad}", before, after)
                         )
                         break
                 if accepted:
