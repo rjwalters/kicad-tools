@@ -52,6 +52,14 @@ dependencies = [
     # burden on typical installs.  The ``geometry`` extra remains as a
     # back-compat alias.
     "shapely>=2.0",
+    # rtree is a CORE dependency (issue #6198).  The router's collision
+    # checking switches behaviour on whether rtree imports (grid.py
+    # RTREE_AVAILABLE, drc/incremental.py), and the rtree-less fallback was
+    # never exercised end to end in CI, which hid #6184 / #6185.  rtree
+    # 1.x ships pure-Python py3-none wheels with libspatialindex vendored
+    # for manylinux/musllinux/macOS/Windows (x86_64 and arm64, ~0.4-1.5 MB),
+    # so this adds no build burden on any supported platform.
+    "rtree>=1.0",
 ]
 
 [project.urls]
