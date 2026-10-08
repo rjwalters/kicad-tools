@@ -9,9 +9,9 @@ Generates:
 - ZIP archive ready for upload
 
 Usage:
-    kicad-export-gerbers path/to/design.kicad_pcb
-    kicad-export-gerbers path/to/design.kicad_pcb --preview
-    kicad-export-gerbers path/to/design.kicad_pcb --output-dir ./gerbers
+    python -m kicad_tools.cli.export_gerbers path/to/design.kicad_pcb
+    python -m kicad_tools.cli.export_gerbers path/to/design.kicad_pcb --preview
+    python -m kicad_tools.cli.export_gerbers path/to/design.kicad_pcb --output-dir ./gerbers
 """
 
 import argparse
@@ -85,7 +85,14 @@ def export_gerbers(
 
     # Build layer list for export.  A V-cut panel's score lines live on a
     # user layer (Cmts.User by default) and must reach the fab (Issue #6156).
-    from kicad_tools.export.gerber import pcb_vscore_layers
+    from kicad_tools.export.gerber import missing_vscore_layers, pcb_vscore_layers
+
+    for layer in missing_vscore_layers(pcb_path, list(vscore_layers or [])):
+        print(
+            f"Warning: --vscore-layer {layer} is not in the board's layer table; "
+            "kicad-cli will plot nothing for it",
+            file=sys.stderr,
+        )
 
     # ``--vscore-layer`` adds layers detection cannot prove (Issue #6193).
     vscore: list[str] = []

@@ -78,6 +78,45 @@ _COPPER_LAYER_DEF_RE = re.compile(
 )
 
 
+# Any entry of the board-level ``(layers ...)`` table: ordinal, canonical
+# name, type and an optional user name (``(19 "Cmts.User" user "Notes")``).
+_LAYER_DEF_RE = re.compile(
+    r'\(\s*\d+\s+"?([^"\s()]+)"?\s+(?:signal|power|mixed|jumper|user)\b(?:\s+"([^"]*)")?'
+)
+
+
+def pcb_layer_names(pcb_path: Path) -> set[str] | None:
+    """Canonical and user names in the board's layer table, or None if unknown.
+
+    Returns None when the file cannot be read or declares no layer table, so
+    callers only warn about a missing layer when the table was actually seen.
+    """
+    try:
+        text = pcb_path.read_text()
+    except OSError:
+        return None
+    names: set[str] = set()
+    for canonical, user in _LAYER_DEF_RE.findall(text):
+        names.add(canonical)
+        if user:
+            names.add(user)
+    return names or None
+
+
+def missing_vscore_layers(pcb_path: Path, requested: list[str]) -> list[str]:
+    """Explicitly requested V-score layers the board's layer table lacks (#6193).
+
+    kicad-cli plots nothing for a layer the board does not define and exits
+    successfully, so an opt-in typo would otherwise ship no score data.
+    """
+    if not requested:
+        return []
+    names = pcb_layer_names(pcb_path)
+    if names is None:
+        return []
+    return [layer for layer in requested if layer not in names]
+
+
 def _inner_copper_index(name: str) -> int:
     """Return the ``N`` from ``InN.Cu`` (e.g. 1 for ``In1.Cu``)."""
     return int(name[2:].split(".")[0])
@@ -140,13 +179,14 @@ _VSCORE_CANDIDATE_RE = re.compile(r"^(?:(?:Dwgs|Cmts|Eco1|Eco2)\.User|User\.\d+)
 # bounding box to count as spanning it.  V-scores are cut edge to edge.
 _VSCORE_SPAN_TOL_MM = 0.01
 
-# Partial and jump scores (#6193) are only recognised where Edge.Cuts
-# geometry explains them: a partial score's inner end, and every gap of a
-# jump score, must meet the board edge (a slot, cutout or the outline) where
-# it crosses the score line.  This is how close (mm) an end must land on that
-# boundary.  Drawings that geometry cannot justify -- section dividers, fold
-# lines, dashed keepout lines -- are not scores; use the explicit opt-in
-# (``GerberConfig.vscore_layers`` / ``--vscore-layer``) for those layouts.
+# Partial and jump scores (#6193) are only recognised when they complete a
+# full separation: walking the line across the outline extent, every stretch
+# of board material must be covered by score pieces, and every gap must lie
+# off the board (in a slot or cutout, or between board outlines).  A score
+# end may stop this close (mm) to the boundary where the material begins.
+# Layouts the geometry cannot prove -- scores interrupted by tabs, slots
+# drawn inside footprints -- need the explicit opt-in
+# (``GerberConfig.vscore_layers`` / ``--vscore-layer``).
 _VSCORE_END_TOL_MM = 0.1
 
 # Arcs and Bezier curves on Edge.Cuts are flattened into this many chords
@@ -304,12 +344,14 @@ def _edge_crossings(
     axis: str,
     coord: float,
 ) -> list[float]:
-    """Positions along a score line where it meets the Edge.Cuts geometry.
+    """Positions where a score line crosses the Edge.Cuts boundary, sorted.
 
     ``axis`` "h" is the horizontal line ``y = coord`` (positions are x);
-    "v" is the vertical line ``x = coord`` (positions are y).
+    "v" is the vertical line ``x = coord`` (positions are y).  Crossings use
+    the half-open ray-casting rule, so a line through a shared vertex counts
+    it once and a line running along a boundary edge does not count that edge.
+    Between consecutive crossings the line is alternately off and on board.
     """
-    tol = _VSCORE_SPAN_TOL_MM
 
     def swap(p: _Pt) -> _Pt:
         return p if axis == "h" else (p[1], p[0])
@@ -317,61 +359,62 @@ def _edge_crossings(
     out: list[float] = []
     for p, q in segs:
         (px, py), (qx, qy) = swap(p), swap(q)
-        if abs(py - qy) <= tol:  # parallel: its ends count where it lies on the line
-            if abs(py - coord) <= tol:
-                out.extend((px, qx))
-            continue
-        if min(py, qy) - tol <= coord <= max(py, qy) + tol:
+        if (py <= coord < qy) or (qy <= coord < py):
             out.append(px + (coord - py) * (qx - px) / (qy - py))
     for cx, cy, r in circles:
         u, v = swap((cx, cy))
         h = r * r - (coord - v) ** 2
-        if h >= -tol * tol:
-            s = math.sqrt(max(h, 0.0))
+        if h > 0:
+            s = math.sqrt(h)
             out.extend((u - s, u + s))
     return sorted(out)
 
 
-def _justified_score(
+def _completes_separation(
     pieces: list[tuple[float, float]],
     lo_edge: float,
     hi_edge: float,
     crossings: list[float],
 ) -> bool:
-    """Whether collinear untagged pieces form a cut the board geometry explains.
+    """Whether collinear untagged pieces cut all the board material on a line.
 
-    The merged pieces must reach or overshoot at least one outline edge.  Each
-    other end must reach the far outline edge or land on an Edge.Cuts boundary
-    (a partial score stopping at a slot or cutout), and every gap between
-    pieces must contain an Edge.Cuts crossing (a jump score skipping a slot,
-    cutout or the space between boards).  A dashed line or a divider stopping
-    mid-board has nothing to justify its gaps or its loose end.
+    The board material along the line is every stretch between Edge.Cuts
+    crossings that lies inside an odd number of boundaries (inside an
+    outline and not inside a cutout).  Each such stretch must be covered by
+    the merged pieces, to within :data:`_VSCORE_END_TOL_MM` at its ends, so
+    the pieces plus the off-board stretches (slots, cutouts, the space
+    between boards) span the whole outline extent.  A solid piece covering
+    the extent edge to edge is accepted as before (#6156).
+
+    A line ending on a hole rim or slot with solid board beyond it cuts
+    nothing off and is rejected, as are dividers and dashed lines.  A line
+    broken around a hole, or one ending on the wall of an L-shaped board's
+    notch, does cross all of the board's material on that line; it is
+    accepted, which is the same risk as the full-span solid line main
+    already accepts.
     """
     tol = _VSCORE_SPAN_TOL_MM
     end_tol = _VSCORE_END_TOL_MM
 
-    def on_edge(pos: float) -> bool:
-        return any(abs(pos - c) <= end_tol for c in crossings)
-
-    def in_gap(g_lo: float, g_hi: float) -> bool:
-        return any(g_lo - end_tol <= c <= g_hi + end_tol for c in crossings)
-
-    merged: list[list[float]] = []
+    runs: list[list[float]] = []
     for lo, hi in sorted(pieces):
-        if merged and lo <= merged[-1][1] + tol:
-            merged[-1][1] = max(merged[-1][1], hi)
+        if runs and lo <= runs[-1][1] + tol:
+            runs[-1][1] = max(runs[-1][1], hi)
         else:
-            merged.append([lo, hi])
-    first, last = merged[0][0], merged[-1][1]
-    starts_out = first <= lo_edge + tol
-    ends_out = last >= hi_edge - tol
-    if not (starts_out or ends_out):
+            runs.append([lo, hi])
+    if any(lo <= lo_edge + tol and hi >= hi_edge - tol for lo, hi in runs):
+        return True
+
+    # Board material: every other stretch between crossings, starting on
+    # board after the first one.  Clip to the outline extent.
+    material = [
+        (max(a, lo_edge), min(b, hi_edge))
+        for a, b in zip(crossings[0::2], crossings[1::2], strict=False)
+        if min(b, hi_edge) - max(a, lo_edge) > end_tol
+    ]
+    if not material:
         return False
-    if not starts_out and not on_edge(first):
-        return False
-    if not ends_out and not on_edge(last):
-        return False
-    return all(in_gap(a[1], b[0]) for a, b in zip(merged, merged[1:], strict=False))
+    return all(any(lo <= a + end_tol and hi >= b - end_tol for lo, hi in runs) for a, b in material)
 
 
 def pcb_vscore_layers(pcb_path: Path) -> list[str]:
@@ -386,13 +429,17 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
 
     Untagged lines must lie strictly inside the outline on the perpendicular
     axis; borders on or outside the outline and dimension extension lines are
-    not scores.  Partial and jump scores (#6193) are accepted only where the
-    top-level Edge.Cuts geometry explains them: collinear pieces on one layer
-    that reach an outline edge, whose other end reaches the far edge or lands
-    on a slot or cutout boundary, and whose every gap skips over Edge.Cuts
-    geometry crossing the line.  Section dividers, fold lines and dashed
-    documentation lines therefore add no Gerber; a layout the geometry
-    cannot prove needs ``GerberConfig.vscore_layers`` (``--vscore-layer``).
+    not scores.  Partial and jump scores (#6193) are accepted only when they
+    complete a separation along their line: the collinear pieces on one layer
+    must cover every stretch of board material between the top-level
+    Edge.Cuts crossings, so that only slots, cutouts and the space between
+    boards are left uncut (see :func:`_completes_separation`).  Dividers,
+    fold lines, dashed lines and lines ending on a hole or slot with board
+    beyond it therefore add no Gerber.  A line broken around a hole or ending
+    on an L-board's notch wall still crosses all the material on its line and
+    is accepted, the same risk as a full-span solid line.  A layout the
+    geometry cannot prove needs ``GerberConfig.vscore_layers``
+    (``--vscore-layer``).
     Quoted and unquoted layer names (old file formats) are both accepted.
 
     Returns an empty list if the file cannot be read or has no outline.
@@ -466,7 +513,7 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
                     continue
                 crossings = _edge_crossings(edge_segs, edge_circles, axis, coord)
                 pieces = [(g[1], g[2]) for g in group]
-                if _justified_score(pieces, lo_edge, hi_edge, crossings):
+                if _completes_separation(pieces, lo_edge, hi_edge, crossings):
                     index = min(g[3] for g in group)
                     found[layer] = min(found.get(layer, index), index)
     return sorted(found, key=found.__getitem__)
@@ -1168,6 +1215,13 @@ class GerberExporter:
             layers.append("Edge.Cuts")
 
         vscore = list(config.vscore_layers)
+        for layer in missing_vscore_layers(self.pcb_path, vscore):
+            logger.warning(
+                "Gerber export: --vscore-layer %s is not in %s's layer table; "
+                "kicad-cli will plot nothing for it",
+                layer,
+                self.pcb_path.name,
+            )
         if config.include_vscore:
             vscore.extend(pcb_vscore_layers(self.pcb_path))
         for layer in vscore:
