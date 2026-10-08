@@ -574,6 +574,7 @@ def route_stdout(unrouted_pcb_path: Path, tmp_path_factory) -> str:
 
 
 @pytest.mark.slow
+@pytest.mark.xdist_group("board03_routing_baseline")
 @pytest.mark.timeout(960)
 class TestBoard03RoutingBaseline:
     """Pin the June 2026 routing reach baseline for board 03.

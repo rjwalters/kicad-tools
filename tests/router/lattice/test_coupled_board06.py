@@ -37,7 +37,7 @@ from kicad_tools.router.rules import DesignRules
 
 # Runtime-heavy full-board negotiation: excluded from the CI fast lane
 # (`pytest -m "not slow"`); runs in the scheduled/full suites.
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.slow, pytest.mark.xdist_group("board06_coupled_lattice")]
 
 _REPO = Path(__file__).resolve().parents[3]
 # d95b6eff replaced output/ with a four-channel LVDS hardware design. This

@@ -277,6 +277,7 @@ class TestNetClassMapResolver:
 
 @pytest.mark.integration
 @pytest.mark.slow
+@pytest.mark.xdist_group("board07_kct_check_parity")
 class TestBoard07KctCheckParity:
     """End-to-end parity on board 07's committed routed PCB (Issue #3151).
 

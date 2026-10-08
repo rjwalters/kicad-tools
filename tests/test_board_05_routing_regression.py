@@ -158,6 +158,7 @@ def _parse_iter0_route_count(stdout: str) -> int | None:
 
 
 @pytest.mark.slow
+@pytest.mark.xdist_group("board05_routing_throughput")
 class TestBoard05RoutingThroughput:
     """Pin 2-layer routing throughput on board 05 against the #2681 floor.
 

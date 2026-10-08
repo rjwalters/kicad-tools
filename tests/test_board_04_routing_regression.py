@@ -243,6 +243,7 @@ MAX_PAD_CLEARANCE_VIOLATIONS = 0
 
 
 @pytest.mark.slow
+@pytest.mark.xdist_group("board04_osc_out_route")
 class TestBoard04OscOutRouting:
     """Pin >= ``REQUIRED_NETS_ROUTED``/9 routing on board 04 against the
     #2745 BLOCKED_BY_COMPONENT recovery fix (and the #3281 NC-pin

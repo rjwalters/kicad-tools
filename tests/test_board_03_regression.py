@@ -399,6 +399,7 @@ def test_historical_route_interruption_preserves_statistics(monkeypatch, tmp_pat
 
 
 @pytest.mark.slow
+@pytest.mark.xdist_group("board03_regression_routed")
 def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
     """USB_D+ and USB_D- both have non-zero segment count after routing.
 
@@ -483,6 +484,7 @@ def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.xdist_group("board03_regression_routed")
 def test_no_python_fallbacks(routed_board_03) -> None:
     """Issue #3456: board 03 routes entirely on the C++ backend.
 
@@ -707,6 +709,7 @@ def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.xdist_group("board03_regression_routed")
 def test_xtal2_failure_classified_as_trace_blocker(routed_board_03) -> None:
     """Issue #2858: XTAL2's pad-access blocker (if any) must surface as ``"trace"``.
 
