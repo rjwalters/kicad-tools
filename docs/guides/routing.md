@@ -261,6 +261,15 @@ HV attach zones apply only to the fab scalars. By default the routed board's
 DRU carries plain fab floors, which outrank and so hide the class in KiCad's
 DRC; the router still enforces it.
 
+`kct check` enforces the same class on finished copper (#6249), in every
+`KCT_PRESERVE_BOARD_RULES` mode: the `netclass_clearance_copper` category
+requires `max(fab floor, class[a], class[b])` for each foreign pair and reports
+shortfalls separately from the fab-floor `clearance_*` findings. In opt-out mode
+`kicad-cli` stays silent (its DRU carries plain fab floors) but `kct check`
+still errors, with a message saying so; the class is the authored statement in
+`.kicad_pro`, which no mode rewrites. A declaration the resolver cannot model is
+reported as `netclass_clearance_unsupported`, never skipped.
+
 Netclass resolution follows KiCad 10: priorities, inheritance, wildcard
 patterns and schema 3-5 projects (checked against `kicad-cli` in
 `tests/fixtures/project_clearance`). If a project declares a named class this

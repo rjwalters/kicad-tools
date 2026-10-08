@@ -464,7 +464,7 @@ evaluate the board. Examples:
   committed fill, so there was nothing to measure.
 - Diff-pair skew or continuity with `needs_input:net_class_map` on a board
   with diff-pair-named nets.
-- `netclass_floor` with an unreadable `.kicad_pro`.
+- `netclass_floor` or `netclass_clearance_copper` with an unreadable `.kicad_pro`.
 
 `skipped` means the check did not apply, for example because nothing was
 declared to verify or it was deselected. The table output prints every

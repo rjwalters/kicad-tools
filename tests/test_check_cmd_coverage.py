@@ -184,7 +184,9 @@ class TestCategoryListMatchesDispatcher:
     #   file located from the PCB *path*, and the bare call here leaves
     #   ``pcb_path=None``, making the closure a silent no-op.  Same
     #   rationale: not a checker method, not in ``CHECK_ALL_METHODS``.
-    NON_CHECKER_CATEGORIES = frozenset({"sch_fields", "doc_drift", "netclass_floor"})
+    NON_CHECKER_CATEGORIES = frozenset(
+        {"sch_fields", "doc_drift", "netclass_floor", "netclass_clearance_copper"}
+    )
 
     def test_categories_list_equals_dispatcher_keys(self) -> None:
         checker = _build_minimal_checker()
