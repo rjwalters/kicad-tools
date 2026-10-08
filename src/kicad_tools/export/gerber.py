@@ -15,6 +15,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -197,17 +198,60 @@ def _edge_cuts_bbox(root: Any) -> tuple[float, float, float, float] | None:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _gap_crosses_interior_edge(
+    boxes: list[tuple[float, float, float, float]],
+    axis: str,
+    coord: float,
+    gap_lo: float,
+    gap_hi: float,
+    tol: float,
+) -> bool:
+    """True when an interior Edge.Cuts box covers the gap on the score line."""
+    for bx0, by0, bx1, by1 in boxes:
+        if axis == "h":
+            on_line = by0 - tol <= coord <= by1 + tol
+            overlaps = bx0 <= gap_hi and bx1 >= gap_lo
+        else:
+            on_line = bx0 - tol <= coord <= bx1 + tol
+            overlaps = by0 <= gap_hi and by1 >= gap_lo
+        if on_line and overlaps:
+            return True
+    return False
+
+
+def _interior_edge_boxes(
+    root: Any, bbox: tuple[float, float, float, float]
+) -> list[tuple[float, float, float, float]]:
+    """Bounding boxes of Edge.Cuts graphics other than the overall outline."""
+    boxes: list[tuple[float, float, float, float]] = []
+    for child in root.children:
+        if child.is_atom or not child.name.startswith("gr_"):
+            continue
+        layer = child.find_child("layer")
+        if layer is None or layer.get_string(0) != "Edge.Cuts":
+            continue
+        item = _edge_cuts_bbox(SimpleNamespace(children=[child]))
+        if item is None:
+            continue
+        tol = _VSCORE_SPAN_TOL_MM
+        if all(abs(a - b) <= tol for a, b in zip(item, bbox, strict=True)):
+            continue
+        boxes.append(item)
+    return boxes
+
+
 def pcb_vscore_layers(pcb_path: Path) -> list[str]:
-    """Return the user layers that carry V-score lines, in file order (#6156).
+    """Return the user layers that carry V-score lines, in order of first appearance (#6156).
 
     A V-score line is a top-level ``gr_line`` on a user drawing layer
     (``Cmts.User``, ``Dwgs.User``, ``Eco1/2.User``, ``User.N``) that runs
     straight across the board outline: horizontal or vertical, reaching
     or passing the Edge.Cuts bounding box (KiKit overshoots the frame by
-    ~3 mm).  Partial and jump scores are detected too (#6193): collinear
-    segments on the same line that reach at least one outline edge and
-    together cover at least half of the outline extent.  Lines tagged by ``kct panel`` (see
-    :data:`VSCORE_UUID_MARKER`) are always accepted.  Untagged lines must lie strictly
+    ~3 mm).  Jump scores are detected too (#6193): collinear pieces on the
+    same line that together reach both outline edges, with every gap
+    overlapping interior Edge.Cuts geometry.  Partial scores that stop short
+    of an edge are not detected by geometry.  Lines tagged by ``kct panel``
+    (see :data:`VSCORE_UUID_MARKER`) are always accepted.  Untagged lines must lie strictly
     inside the outline on the perpendicular axis; borders on or outside the
     outline and dimension extension lines are not scores.  Ordinary
     notes and dimension lines on ``Cmts.User`` do not span the outline, so a
@@ -237,10 +281,12 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
     tol = _VSCORE_SPAN_TOL_MM
 
     layers: list[str] = []
+    # File position of the first line that made each layer a score layer.
+    order: dict[str, int] = {}
     # Untagged candidate segments, keyed by (layer, axis): (line coordinate,
-    # lo, hi) along the axis.  ``axis`` "h" = horizontal (constant y).
-    segs: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
-    for child in root.children:
+    # lo, hi, file position) along the axis.  ``axis`` "h" = horizontal.
+    segs: dict[tuple[str, str], list[tuple[float, float, float, int]]] = {}
+    for pos, child in enumerate(root.children):
         if child.is_atom or child.name != "gr_line":
             continue
         layer_node = child.find_child("layer")
@@ -249,6 +295,7 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
             continue
         if _is_tagged_vscore(child):
             layers.append(layer)
+            order[layer] = pos
             continue
         if bbox is None:
             continue
@@ -257,57 +304,53 @@ def pcb_vscore_layers(pcb_path: Path) -> list[str]:
             continue
         (x0, y0), (x1, y1) = a, b
         if abs(y0 - y1) <= tol:
-            segs.setdefault((layer, "h"), []).append(((y0 + y1) / 2, min(x0, x1), max(x0, x1)))
+            segs.setdefault((layer, "h"), []).append(((y0 + y1) / 2, min(x0, x1), max(x0, x1), pos))
         elif abs(x0 - x1) <= tol:
-            segs.setdefault((layer, "v"), []).append(((x0 + x1) / 2, min(y0, y1), max(y0, y1)))
+            segs.setdefault((layer, "v"), []).append(((x0 + x1) / 2, min(y0, y1), max(y0, y1), pos))
 
     if bbox is None:
         return layers
     min_x, min_y, max_x, max_y = bbox
+    interior = _interior_edge_boxes(root, bbox)
+    detected = set(layers)
     for (layer, axis), items in segs.items():
-        if layer in layers:
+        if layer in detected:
             continue
         if axis == "h":
             perp_lo, perp_hi, lo_edge, hi_edge = min_y, max_y, min_x, max_x
         else:
             perp_lo, perp_hi, lo_edge, hi_edge = min_x, max_x, min_y, max_y
-        extent = hi_edge - lo_edge
-        if extent <= 0:
-            continue
         items.sort()
         # Cluster segments lying on the same line coordinate.
-        cluster: list[tuple[float, float, float]] = []
-        clusters = []
+        clusters: list[list[tuple[float, float, float, int]]] = []
         for it in items:
-            if cluster and it[0] - cluster[-1][0] > tol:
-                clusters.append(cluster)
-                cluster = []
-            cluster.append(it)
-        if cluster:
-            clusters.append(cluster)
+            if clusters and it[0] - clusters[-1][-1][0] <= tol:
+                clusters[-1].append(it)
+            else:
+                clusters.append([it])
         for cl in clusters:
             coord = sum(c[0] for c in cl) / len(cl)
             if not perp_lo + tol < coord < perp_hi - tol:
                 continue
-            # Union of the collinear pieces, clipped to the outline extent.
-            covered = 0.0
-            cur_lo = cur_hi = None
-            for _, lo, hi in sorted(cl, key=lambda c: c[1]):
-                if cur_hi is not None and lo <= cur_hi + tol:
-                    cur_hi = max(cur_hi, hi)
+            # Merge the collinear pieces into runs; the gaps are what is left.
+            runs: list[list[float]] = []
+            for _, lo, hi, _pos in sorted(cl, key=lambda c: c[1]):
+                if runs and lo <= runs[-1][1] + tol:
+                    runs[-1][1] = max(runs[-1][1], hi)
                 else:
-                    if cur_hi is not None:
-                        covered += max(0.0, min(cur_hi, hi_edge) - max(cur_lo, lo_edge))
-                    cur_lo, cur_hi = lo, hi
-            if cur_hi is not None:
-                covered += max(0.0, min(cur_hi, hi_edge) - max(cur_lo, lo_edge))
-            reaches = (
-                min(c[1] for c in cl) <= lo_edge + tol or max(c[2] for c in cl) >= hi_edge - tol
-            )
-            if reaches and covered >= _VSCORE_MIN_COVERAGE * extent:
-                layers.append(layer)
+                    runs.append([lo, hi])
+            if runs[0][0] > lo_edge + tol or runs[-1][1] < hi_edge - tol:
+                continue
+            if all(
+                _gap_crosses_interior_edge(interior, axis, coord, gap_lo, gap_hi, tol)
+                for gap_lo, gap_hi in zip(
+                    (r[1] for r in runs), (r[0] for r in runs[1:]), strict=False
+                )
+            ):
+                detected.add(layer)
+                order[layer] = min(c[3] for c in cl)
                 break
-    return layers
+    return sorted(detected, key=lambda name: order[name])
 
 
 @dataclass

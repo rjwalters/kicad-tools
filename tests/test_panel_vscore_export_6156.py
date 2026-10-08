@@ -318,10 +318,10 @@ def test_tagged_line_on_edge_is_still_a_score(tmp_path: Path) -> None:
     assert pcb_vscore_layers(pcb) == ["Dwgs.User"]
 
 
-def test_tagged_partial_line_is_detected_untagged_short_one_is_not(tmp_path: Path) -> None:
+def test_tagged_partial_line_is_detected_untagged_is_not(tmp_path: Path) -> None:
     from kicad_tools.sexp.vscore import make_vscore_uuid
 
-    partial = "(start 0 15) (end 15 15)"
+    partial = "(start 0 15) (end 25 15)"
     assert pcb_vscore_layers(_board(tmp_path, f'(gr_line {partial} (layer "Eco2.User"))')) == []
     tagged = _board(
         tmp_path,
@@ -406,43 +406,74 @@ def test_mixed_panel_gapped_seams_still_detects_scored_seams(tmp_path: Path, fra
 # ---------------------------------------------------------------------------
 
 
+_SLOT_H = '(gr_rect (start 14 12) (end 18 18) (layer "Edge.Cuts"))'
+_SLOTS_V = (
+    '(gr_rect (start 18 8) (end 22 11) (layer "Edge.Cuts"))'
+    '(gr_rect (start 18 19) (end 22 22) (layer "Edge.Cuts"))'
+)
+
+
 @pytest.mark.parametrize(
     "extra",
     [
-        # partial score from the left edge, 62.5% of the 40 mm width
-        '(gr_line (start 0 15) (end 25 15) (layer "Eco2.User"))',
-        # partial score entering from the far edge, vertical
-        '(gr_line (start 20 33) (end 20 8) (layer "Eco2.User"))',
-        # jump score: two pieces with a gap, spanning the outline
-        '(gr_line (start -3 15) (end 12 15) (layer "Eco2.User"))'
+        # jump score: two pieces, the gap crosses an interior slot
+        _SLOT_H + '(gr_line (start -3 15) (end 12 15) (layer "Eco2.User"))'
         '(gr_line (start 16 15) (end 43 15) (layer "Eco2.User"))',
         # jump score, vertical, three pieces, slightly off-axis coordinates
-        '(gr_line (start 20 0) (end 20 8) (layer "Eco2.User"))'
+        _SLOTS_V + '(gr_line (start 20 0) (end 20 8) (layer "Eco2.User"))'
         '(gr_line (start 20.005 11) (end 20.005 19) (layer "Eco2.User"))'
         '(gr_line (start 20 22) (end 20 30) (layer "Eco2.User"))',
     ],
 )
-def test_partial_and_jump_scores_are_detected(tmp_path: Path, extra: str) -> None:
+def test_jump_scores_over_interior_cutouts_are_detected(tmp_path: Path, extra: str) -> None:
     assert pcb_vscore_layers(_board(tmp_path, extra)) == ["Eco2.User"]
+
+
+def _line(x0: float, y0: float, x1: float, y1: float, layer: str = "Eco2.User") -> str:
+    return f'(gr_line (start {x0} {y0}) (end {x1} {y1}) (layer "{layer}"))'
+
+
+@pytest.mark.parametrize("layer", ["Dwgs.User", "Cmts.User", "User.1", "Eco1.User"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # section divider, left edge to 55%
+        _line(0, 15, 22, 15),
+        # fold/keepout line, top edge to 60%, vertical
+        _line(20, 0, 20, 18),
+        # title-block rule, right edge to centre
+        _line(40, 15, 20, 15),
+        # connector centre line, edge to 70%
+        _line(0, 15, 28, 15),
+        # dashed line 3-on/2-off, edge to edge over solid board
+        "".join(_line(x, 15, x + 3, 15) for x in range(0, 40, 5)),
+        # dashed line 2-on/2-off (50% duty), edge to edge
+        "".join(_line(x, 15, x + 2, 15) for x in range(0, 40, 4)),
+    ],
+)
+def test_documentation_drawings_on_single_boards_are_not_scores(
+    tmp_path: Path, layer: str, extra: str
+) -> None:
+    extra = extra.replace("Eco2.User", layer)
+    assert pcb_vscore_layers(_board(tmp_path, extra)) == []
 
 
 @pytest.mark.parametrize(
     "extra",
     [
         # short stub from one edge
-        '(gr_line (start 0 15) (end 10 15) (layer "Eco2.User"))',
+        _line(0, 15, 10, 15),
         # long collinear pieces floating mid-board, touching no edge
-        '(gr_line (start 5 15) (end 20 15) (layer "Eco2.User"))'
-        '(gr_line (start 22 15) (end 36 15) (layer "Eco2.User"))',
+        _SLOT_H + _line(5, 15, 12, 15) + _line(16, 15, 36, 15),
+        # gapped pieces that reach only one edge, gap over an interior slot
+        _SLOT_H + _line(0, 15, 12, 15) + _line(16, 15, 30, 15),
         # collinear pieces on the outline itself or outside it
-        '(gr_line (start -3 0) (end 12 0) (layer "Eco2.User"))'
-        '(gr_line (start 16 0) (end 43 0) (layer "Eco2.User"))',
-        '(gr_line (start -3 -5) (end 12 -5) (layer "Eco2.User"))'
-        '(gr_line (start 16 -5) (end 43 -5) (layer "Eco2.User"))',
+        _line(-3, 0, 12, 0) + _line(16, 0, 43, 0),
+        _line(-3, -5, 12, -5) + _line(16, -5, 43, -5),
         # dimension: extension lines and a dimension line above the board
-        '(gr_line (start 0 -6) (end 0 -2) (layer "Dwgs.User"))'
-        '(gr_line (start 40 -6) (end 40 -2) (layer "Dwgs.User"))'
-        '(gr_line (start 0 -5) (end 40 -5) (layer "Dwgs.User"))',
+        _line(0, -6, 0, -2, "Dwgs.User")
+        + _line(40, -6, 40, -2, "Dwgs.User")
+        + _line(0, -5, 40, -5, "Dwgs.User"),
     ],
 )
 def test_short_or_off_outline_collinear_drawings_are_not_scores(tmp_path: Path, extra: str) -> None:
@@ -450,13 +481,23 @@ def test_short_or_off_outline_collinear_drawings_are_not_scores(tmp_path: Path, 
 
 
 def test_pieces_on_different_layers_or_lines_are_not_combined(tmp_path: Path) -> None:
-    extra = (
-        '(gr_line (start 0 15) (end 12 15) (layer "Eco2.User"))'
-        '(gr_line (start 14 15) (end 26 15) (layer "Eco1.User"))'
-        '(gr_line (start 0 10) (end 12 10) (layer "Eco2.User"))'
-        '(gr_line (start 0 12) (end 12 12) (layer "Eco2.User"))'
+    extra = _SLOT_H + (
+        _line(-3, 15, 12, 15, "Eco2.User")
+        + _line(16, 15, 43, 15, "Eco1.User")
+        + _line(-3, 10, 12, 10, "Eco2.User")
+        + _line(16, 12, 43, 12, "Eco2.User")
     )
     assert pcb_vscore_layers(_board(tmp_path, extra)) == []
+
+
+def test_layers_are_returned_in_file_order(tmp_path: Path) -> None:
+    from kicad_tools.sexp.vscore import make_vscore_uuid
+
+    untagged = _line(-3, 15, 43, 15, "Dwgs.User")
+    tagged = (
+        f'(gr_line (start 20 -3) (end 20 33) (layer "Cmts.User") (uuid "{make_vscore_uuid()}"))'
+    )
+    assert pcb_vscore_layers(_board(tmp_path, untagged + tagged)) == ["Dwgs.User", "Cmts.User"]
 
 
 def test_fleet_boards_detect_no_score_layer() -> None:
