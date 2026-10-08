@@ -503,10 +503,11 @@ def test_yield_rerun_starts_without_phantom_negotiated_usage():
 
 
 def _pin_rerun_budget(
-    monkeypatch, *, ceiling=300.0, factor=1.0, floor=60.0, override=False
+    monkeypatch, *, ceiling=300.0, factor=1.0, floor=60.0, override=False, tail=0.2
 ) -> None:
     import kicad_tools.router.diffpair_routing as dpr
 
+    monkeypatch.setattr(dpr, "_CORRIDOR_YIELD_RERUN_TAIL_FRACTION", tail)
     monkeypatch.setattr(dpr, "_CORRIDOR_YIELD_RERUN_S", ceiling)
     monkeypatch.setattr(dpr, "_CORRIDOR_YIELD_RERUN_FACTOR", factor)
     monkeypatch.setattr(dpr, "_CORRIDOR_YIELD_RERUN_FLOOR_S", floor)
@@ -576,7 +577,13 @@ def test_rerun_cap_override_is_read_from_the_environment():
 
 
 def test_rerun_cap_is_applied_to_the_rerun_and_removed_after(monkeypatch):
-    """The derived cap is live on the autorouter only during the re-run."""
+    """The derived cap is live only during the re-run (#5923).
+
+    The cap is the whole re-run's wall deadline; the negotiated loop's stage
+    budget is its ``1 - TAIL_FRACTION`` share (0.8 x 120 = 96 s here).
+    """
+    from kicad_tools.router import wall_deadline
+
     _pin_rerun_budget(monkeypatch, factor=1.0, floor=60.0, ceiling=300.0)
     router = _channel_router()
     dp = router._diffpair
@@ -586,14 +593,18 @@ def test_rerun_cap_is_applied_to_the_rerun_and_removed_after(monkeypatch):
 
     to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
     caps_during: list[float | None] = []
+    left_during: list[float | None] = []
 
     def _strategy() -> list[Route]:
         caps_during.append(router._negotiated_timeout_cap)
+        left_during.append(wall_deadline.remaining())
         return []
 
     dp._apply_corridor_yields(to_yield, [3], _strategy, first_pass_s=120.0)
-    assert caps_during == [120.0]
+    assert caps_during == [pytest.approx(96.0)]
+    assert left_during[0] is not None and 119.0 < left_during[0] <= 120.0
     assert router._negotiated_timeout_cap is None
+    assert not wall_deadline.active()
     assert dp._last_corridor_yield_rerun_cap_s == 120.0
     assert dp._last_corridor_yield_rerun_s is not None
 
@@ -609,9 +620,12 @@ def test_rerun_cap_is_removed_even_when_the_rerun_raises(monkeypatch):
     def _strategy() -> list[Route]:
         raise RuntimeError("boom")
 
+    from kicad_tools.router import wall_deadline
+
     with pytest.raises(RuntimeError):
         dp._apply_corridor_yields(to_yield, [3], _strategy, first_pass_s=90.0)
     assert router._negotiated_timeout_cap is None
+    assert not wall_deadline.active(), "the re-run deadline must not leak"
 
 
 def test_rerun_without_first_pass_time_keeps_the_fixed_cap(monkeypatch):
@@ -628,7 +642,7 @@ def test_rerun_without_first_pass_time_keeps_the_fixed_cap(monkeypatch):
         return []
 
     dp._apply_corridor_yields(to_yield, [3], _strategy)
-    assert caps_during == [300.0]
+    assert caps_during == [pytest.approx(240.0)]  # 0.8 x the fixed 300 s
 
 
 def test_route_all_with_diffpairs_passes_the_measured_first_pass_time():
@@ -665,3 +679,319 @@ def test_route_all_with_diffpairs_passes_the_measured_first_pass_time():
     first_pass_s = seen.get("first_pass_s")
     assert isinstance(first_pass_s, float)
     assert 0.05 <= first_pass_s < 10.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #5923 (Judge round): the cap is a wall deadline on the WHOLE re-run
+# ---------------------------------------------------------------------------
+
+
+def test_wall_deadline_is_identity_without_a_deadline():
+    from kicad_tools.router import wall_deadline as wd
+
+    assert not wd.active()
+    assert wd.remaining() is None
+    assert wd.expired() is False
+    assert wd.clamp_search_timeout(None) is None
+    assert wd.clamp_search_timeout(7.5) == 7.5
+    assert wd.clamp_epoch_deadline(None) is None
+    assert wd.clamp_epoch_deadline(123.0) == 123.0
+
+
+def test_wall_deadline_clamps_searches_and_tail_deadlines():
+    import time as _time
+
+    from kicad_tools.router import wall_deadline as wd
+
+    with wd.deadline(5.0):
+        assert wd.active()
+        assert wd.clamp_search_timeout(1.0) == 1.0
+        # A longer or unbudgeted search is clamped to the time left.
+        assert 4.0 < wd.clamp_search_timeout(60.0) <= 5.0
+        assert 4.0 < wd.clamp_search_timeout(None) <= 5.0
+        assert 4.0 < wd.clamp_search_timeout(0.0) <= 5.0
+        # A tail stage's own (later) allowance is pulled in to the deadline.
+        clamped = wd.clamp_epoch_deadline(_time.time() + 90.0)
+        assert clamped is not None and clamped - _time.time() <= 5.0
+        # A nested block never loosens the outer deadline ...
+        with wd.deadline(100.0):
+            assert wd.remaining() <= 5.0
+        # ... and restores it on exit.
+        assert 4.0 < wd.remaining() <= 5.0
+    assert not wd.active()
+
+
+def test_spent_wall_deadline_gives_searches_a_near_zero_but_bounded_budget():
+    from kicad_tools.router import wall_deadline as wd
+
+    with wd.deadline(0.0):
+        assert wd.expired()
+        # Never 0/None: both backends read those as "no deadline at all".
+        assert wd.clamp_search_timeout(None) == wd.MIN_SEARCH_TIMEOUT_S
+        assert wd.clamp_search_timeout(30.0) == wd.MIN_SEARCH_TIMEOUT_S
+
+
+def test_wall_deadline_is_restored_when_the_block_raises():
+    from kicad_tools.router import wall_deadline as wd
+
+    with pytest.raises(RuntimeError), wd.deadline(5.0):
+        raise RuntimeError("boom")
+    assert not wd.active()
+
+
+def test_pathfinder_route_entry_point_clamps_to_the_deadline(monkeypatch):
+    """The per-search choke point: ``route()`` hands ``_route_impl`` the clamp."""
+    from kicad_tools.router import wall_deadline as wd
+
+    router = _channel_router()
+    pathfinder = router.router
+    seen: list[float | None] = []
+
+    def _impl(*_a: object, per_net_timeout: float | None = None, **_k: object):
+        seen.append(per_net_timeout)
+        return None
+
+    monkeypatch.setattr(pathfinder, "_route_impl", _impl)
+    pads = router.nets[3]
+    pad_a, pad_b = (router.pads[p] for p in pads[:2])
+
+    pathfinder.route(pad_a, pad_b, per_net_timeout=30.0)
+    with wd.deadline(2.0):
+        pathfinder.route(pad_a, pad_b, per_net_timeout=30.0)
+        pathfinder.route(pad_a, pad_b, per_net_timeout=None)
+    with wd.deadline(0.0):
+        pathfinder.route(pad_a, pad_b, per_net_timeout=30.0)
+
+    assert seen[0] == 30.0, "no deadline installed: the caller's budget is untouched"
+    assert 1.0 < seen[1] <= 2.0 and 1.0 < seen[2] <= 2.0
+    assert seen[3] == wd.MIN_SEARCH_TIMEOUT_S
+
+
+def test_python_router_route_entry_point_clamps_to_the_deadline(monkeypatch):
+    from kicad_tools.router import wall_deadline as wd
+    from kicad_tools.router.pathfinder import Router
+
+    router = _channel_router()
+    py_router = Router(router.grid, router.rules)
+    seen: list[float | None] = []
+
+    def _impl(*_a: object, per_net_timeout: float | None = None, **_k: object):
+        seen.append(per_net_timeout)
+        return None
+
+    monkeypatch.setattr(py_router, "_route_impl", _impl)
+    pad_a, pad_b = (router.pads[p] for p in router.nets[3][:2])
+    with wd.deadline(2.0):
+        py_router.route(pad_a, pad_b, per_net_timeout=None)
+    assert seen and 1.0 < seen[0] <= 2.0
+
+
+def _search_runs_to_its_budget(monkeypatch, router: Autorouter, calls: list[float]) -> None:
+    """Every A* search fails only after spending its whole wall budget.
+
+    The pathological case the #5923 judge measured: a search already in
+    flight when the stage budget runs out.  Unbudgeted searches are modelled
+    as 30 s so a missing clamp shows up as a 30 s overrun, not a hang.
+    """
+    import time as _time
+
+    def _impl(*_a: object, per_net_timeout: float | None = None, **_k: object):
+        budget = per_net_timeout if per_net_timeout else 30.0
+        calls.append(budget)
+        _time.sleep(budget)
+        return None
+
+    monkeypatch.setattr(router.router, "_route_impl", _impl)
+
+
+def test_rerun_wall_time_is_bounded_by_the_deadline_including_in_flight_search(
+    monkeypatch,
+):
+    """Observable contract: the re-run returns within cap + small tolerance.
+
+    The strategy is the REAL ``route_all_negotiated`` with a 1000 s stage
+    timeout and a 30 s per-net budget; every search runs to its budget.
+    Before #5923's deadline, a single in-flight search alone would overrun a
+    1.5 s cap by ~28 s and the clearance/sweep tail would add its own
+    allowances.  Tolerance covers pure-Python bookkeeping on this tiny board.
+    """
+    import time as _time
+
+    from kicad_tools.router import wall_deadline as wd
+
+    _pin_rerun_budget(monkeypatch, factor=1.0, floor=1.5, ceiling=1.5)
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+    calls: list[float] = []
+    _search_runs_to_its_budget(monkeypatch, router, calls)
+
+    def _strategy() -> list[Route]:
+        return router.route_all_negotiated(max_iterations=5, timeout=1000.0, per_net_timeout=30.0)
+
+    t0 = _time.monotonic()
+    kept, released, removed, added = dp._apply_corridor_yields(
+        to_yield, [3], _strategy, first_pass_s=1.0
+    )
+    wall_s = _time.monotonic() - t0
+
+    assert calls, "the strategy must have searched"
+    assert max(calls) <= 1.5, "every search is clamped to the re-run deadline"
+    assert wall_s < 1.5 + 2.0, f"re-run took {wall_s:.2f}s against a 1.5s deadline"
+    assert dp._last_corridor_yield_rerun_cap_s == 1.5
+    # Nothing landed, so the spent re-run is reverted and the pair restored.
+    assert (kept, released, removed, added) == (False, set(), [], [])
+    for route in wall:
+        assert route in router.routes
+    assert not wd.active()
+    assert router._negotiated_timeout_cap is None
+
+
+def test_rerun_tail_stage_allowances_are_cut_to_the_deadline(monkeypatch):
+    """A stage with its own fresh allowance (clearance pass, rescue sweep)
+    is pulled in to the re-run deadline rather than added on top of it."""
+    import time as _time
+
+    from kicad_tools.router import wall_deadline as wd
+
+    _pin_rerun_budget(monkeypatch, factor=1.0, floor=1.0, ceiling=1.0)
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+
+    def _strategy() -> list[Route]:
+        # Loop share first (stage timeout checked between "nets") ...
+        stage_t0 = _time.monotonic()
+        while _time.monotonic() - stage_t0 < router._negotiated_timeout_cap:
+            _time.sleep(0.01)
+        # ... then a 60 s tail allowance, as the #4159 sweep would take.
+        tail_deadline = wd.clamp_epoch_deadline(_time.time() + 60.0)
+        assert tail_deadline is not None
+        while _time.time() < tail_deadline:
+            _time.sleep(0.01)
+        return []
+
+    t0 = _time.monotonic()
+    kept, *_rest = dp._apply_corridor_yields(to_yield, [3], _strategy, first_pass_s=1.0)
+    assert _time.monotonic() - t0 < 1.0 + 0.5
+    assert kept is False
+
+
+def test_negotiated_loop_searches_are_clamped_by_an_installed_deadline(monkeypatch):
+    """``route_all_negotiated`` itself honours a spent deadline: every search
+    it (and its tail stages) issues gets the near-zero floor."""
+    from kicad_tools.router import wall_deadline as wd
+
+    router = _channel_router()
+    calls: list[float] = []
+    _search_runs_to_its_budget(monkeypatch, router, calls)
+    with wd.deadline(0.0):
+        router.route_all_negotiated(max_iterations=3, timeout=1000.0, per_net_timeout=30.0)
+    assert calls
+    assert max(calls) == wd.MIN_SEARCH_TIMEOUT_S
+
+
+def test_abandon_is_a_no_op_without_an_installed_deadline():
+    from kicad_tools.router import wall_deadline as wd
+
+    assert wd.abandon("nothing installed") is False
+    with wd.deadline(5.0) as excursion:
+        assert excursion.abandoned is False
+        assert wd.abandon("first") is True
+        assert wd.abandon("second") is True
+    assert excursion.abandoned is True
+    assert excursion.abandon_reason == "first"
+    assert wd.abandon("after the block") is False
+
+
+def test_abandoned_rerun_is_reverted_even_when_it_gained_reach():
+    """Abandoned copper skipped the DRC safety nets: it can never be kept."""
+    from kicad_tools.router import wall_deadline as wd
+
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+
+    def _strategy() -> list[Route]:
+        routes = router.route_net(3)
+        assert wd.abandon("test: deadline spent before the safety nets")
+        return routes
+
+    kept, released, removed, added = dp._apply_corridor_yields(to_yield, [3], _strategy)
+    assert (kept, released, removed, added) == (False, set(), [], [])
+    assert dp._net_is_connected(3) is False, "the abandoned re-run's copper is removed"
+    for route in wall:
+        assert route in router.routes
+
+
+def test_negotiated_tail_abandons_instead_of_running_safety_nets_past_the_deadline(
+    monkeypatch,
+):
+    """A spent deadline at the post-loop safety nets: skip them and abandon.
+
+    Outside an excursion the same call runs every safety net as before.
+    """
+    from kicad_tools.router import wall_deadline as wd
+
+    ran: list[str] = []
+    for name in (
+        "_demote_seg_seg_overlap_nets",
+        "_demote_pad_clearance_violation_nets",
+        "_demote_via_segment_violation_nets",
+    ):
+        monkeypatch.setattr(Autorouter, name, lambda self, *_a, _n=name, **_k: ran.append(_n) or [])
+
+    router = _channel_router()
+    with wd.deadline(0.0) as excursion:
+        router.route_all_negotiated(max_iterations=2, timeout=1000.0, per_net_timeout=5.0)
+    assert ran == []
+    assert excursion.abandoned is True
+
+    # Control: same tail reached without an excursion.  The wall strands SIG
+    # so the loop exits through the post-loop tail rather than the
+    # all-routed early return.
+    router = _channel_router()
+    _commit(router, _wall_routes(router))
+    router.route_all_negotiated(max_iterations=2, timeout=1000.0, per_net_timeout=5.0)
+    assert len(ran) == 3, "no excursion installed: every safety net still runs"
+
+
+def test_negotiated_tail_abandons_when_time_left_cannot_pay_for_the_safety_nets(
+    monkeypatch,
+):
+    """Predictive abandon: the deadline is not spent yet, but less is left
+    than the previous pass spent on the (uninterruptible) safety nets."""
+    from kicad_tools.router import wall_deadline as wd
+
+    ran: list[str] = []
+    monkeypatch.setattr(
+        Autorouter,
+        "_demote_seg_seg_overlap_nets",
+        lambda self, *_a, **_k: ran.append("seg") or [],
+    )
+
+    router = _channel_router()
+    _commit(router, _wall_routes(router))
+    router._last_safety_net_s = 1000.0  # the first pass's measured cost
+    with wd.deadline(60.0) as excursion:
+        router.route_all_negotiated(max_iterations=2, timeout=1000.0, per_net_timeout=5.0)
+    assert excursion.abandoned is True
+    assert ran == []
+    assert router._last_safety_net_s == 1000.0, "an abandoned tail measures nothing"
+
+    # Enough time left for the measured cost: the safety nets run, and their
+    # cost is re-measured for the next excursion.
+    router = _channel_router()
+    _commit(router, _wall_routes(router))
+    router._last_safety_net_s = 0.0
+    with wd.deadline(60.0) as excursion:
+        router.route_all_negotiated(max_iterations=2, timeout=1000.0, per_net_timeout=5.0)
+    assert excursion.abandoned is False
+    assert ran == ["seg"]
+    assert router._last_safety_net_s >= 0.0

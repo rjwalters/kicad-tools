@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 import contextlib
 
 from . import via_conflict as _via_conflict_module
+from . import wall_deadline as _wall_deadline
 from .access_ripup import AccessLossTargeter, AccessLossWitness
 from .access_witness import (
     PASS_ESCAPE,
@@ -1965,6 +1966,11 @@ class Autorouter:
         # ``timeout`` for the ONE strategy re-run the corridor-yield recovery
         # performs.  ``None`` (normal) leaves the caller's timeout alone.
         self._negotiated_timeout_cap: float | None = None
+        # Issue #5923: wall time the latest negotiated pass spent in its
+        # post-loop DRC safety-net demotes.  A bounded excursion (the
+        # corridor-yield re-run) abandons instead of starting them when less
+        # than this (x1.25) is left before its deadline.
+        self._last_safety_net_s: float = 0.0
 
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
@@ -10261,9 +10267,21 @@ class Autorouter:
         # uncapped re-run burned its whole 360s budget and took the job from
         # 770s to 1376s for one recovered net.  The cap is set only for the
         # duration of that re-run; a normal call never sees it.
+        #
+        # Issue #5923: this stage cap is only the negotiated LOOP's share of
+        # the re-run (the caller reserves the rest for the clearance pass and
+        # rescue sweep).  The wall-time bound on the WHOLE re-run is the
+        # ``wall_deadline`` the caller installs: it clamps every A* search
+        # and the tail stages' deadlines, and the loop's stage budget never
+        # outlives it either.
         _yield_cap = getattr(self, "_negotiated_timeout_cap", None)
         if _yield_cap is not None:
             timeout = min(timeout, float(_yield_cap)) if timeout else float(_yield_cap)
+        _excursion_left = _wall_deadline.remaining()
+        if _excursion_left is not None:
+            # Floored above 0: a falsy ``timeout`` means "unbudgeted" below.
+            _excursion_left = max(_wall_deadline.MIN_SEARCH_TIMEOUT_S, _excursion_left)
+            timeout = min(timeout, _excursion_left) if timeout else _excursion_left
 
         # If hierarchical mode is requested, delegate to two-phase routing.
         #
@@ -13652,7 +13670,19 @@ class Autorouter:
         # (each reroute capped by ``per_net_timeout``) is the repair
         # opportunity the demotion safety net was always meant to run
         # after.
-        if successful_nets > 0:
+        # Issue #5923: inside a bounded excursion (the corridor-yield re-run)
+        # the tail stages share the excursion's wall deadline instead of
+        # starting fresh allowances of their own.  A spent deadline skips them
+        # outright -- a pass that would only roll back at its first deadline
+        # check is pure overrun.  No deadline installed -> unchanged.
+        _tail_t0 = time.time()  # Issue #5923: per-stage tail timing
+        _excursion_spent = _wall_deadline.expired()
+        if _excursion_spent:
+            flush_print(
+                "  Post-route clearance correction skipped: corridor-yield "
+                "re-run wall deadline spent (issue #5923)"
+            )
+        if successful_nets > 0 and not _excursion_spent:
             # On the timed-out exit the loop's budget is already spent, so
             # the bounded pass gets a hard wall allowance (90s or 25% of
             # the loop budget, whichever is smaller) and a clamped per-net
@@ -13669,6 +13699,7 @@ class Autorouter:
                 correction_deadline = time.time() + allowance
                 if per_net_timeout is not None:
                     correction_per_net_timeout = min(10.0, per_net_timeout)
+            correction_deadline = _wall_deadline.clamp_epoch_deadline(correction_deadline)
             corrected = self._post_route_clearance_correction(
                 net_routes=net_routes,
                 pads_by_net=pads_by_net,
@@ -13701,7 +13732,39 @@ class Autorouter:
         # fix repairable near-misses; since issue #3413 the correction
         # pass also runs -- single-pass bounded -- on the ``timed_out``
         # exit), so what remains at finalize is unrepaired-and-shipping.
-        demoted = self._demote_seg_seg_overlap_nets(net_routes, neg_router, finalize=True)
+        _tail_t_demote = time.time()
+        # Issue #5923: the safety-net demotes below cannot be cut short (they
+        # are single geometry sweeps; 12.0-12.3 s on board 06's re-run).
+        # Inside a bounded excursion whose time left cannot pay for them --
+        # the deadline is spent, or less remains than this router's previous
+        # pass spent on them (x1.25) -- they and the rescue sweep are skipped
+        # and the excursion is marked ABANDONED.  Its installer (the
+        # corridor-yield re-run) is obliged to discard this copper, so
+        # nothing unvalidated can ship.  Outside an excursion ``abandon``
+        # returns False and everything runs as before.
+        _tail_left = _wall_deadline.remaining()
+        _safety_net_estimate = float(getattr(self, "_last_safety_net_s", 0.0) or 0.0)
+        _abandon_tail = (
+            _tail_left is not None
+            and (_tail_left <= 0.0 or _tail_left < 1.25 * _safety_net_estimate)
+            and _wall_deadline.abandon(
+                f"{max(0.0, _tail_left):.1f}s left before the post-loop DRC "
+                f"safety nets, previous pass spent {_safety_net_estimate:.1f}s on them"
+            )
+        )
+        if _abandon_tail:
+            flush_print(
+                "  Safety-net demotes and rescue sweep skipped: corridor-yield "
+                f"re-run cannot finish them by its wall deadline "
+                f"({_tail_left:.1f}s left, previous pass spent "
+                f"{_safety_net_estimate:.1f}s) -- re-run abandoned, caller "
+                "reverts it (issue #5923)"
+            )
+        demoted = (
+            []
+            if _abandon_tail
+            else self._demote_seg_seg_overlap_nets(net_routes, neg_router, finalize=True)
+        )
         if demoted:
             successful_nets = sum(1 for routes in net_routes.values() if routes)
             flush_print(
@@ -13719,7 +13782,7 @@ class Autorouter:
         # better trade.  Sub-resolution deficits are left for
         # ``drc_verify_and_nudge`` / post-route correction, mirroring
         # the #3433 demote-only-unrepairable philosophy.
-        pad_demoted = self._demote_pad_clearance_violation_nets(net_routes)
+        pad_demoted = [] if _abandon_tail else self._demote_pad_clearance_violation_nets(net_routes)
         if pad_demoted:
             successful_nets = sum(1 for routes in net_routes.values() if routes)
             flush_print(
@@ -13737,7 +13800,9 @@ class Autorouter:
         # on every layer it spans (#3487), so the overlap is a physical
         # cross-net short the same-net connectivity audit cannot see.
         # An unrouted net is the strictly better trade.
-        via_seg_demoted = self._demote_via_segment_violation_nets(net_routes)
+        via_seg_demoted = (
+            [] if _abandon_tail else self._demote_via_segment_violation_nets(net_routes)
+        )
         if via_seg_demoted:
             successful_nets = sum(1 for routes in net_routes.values() if routes)
             flush_print(
@@ -13760,8 +13825,21 @@ class Autorouter:
         # default (it is a strict improvement); ``--no-rescue-pass`` disables
         # it.  Runs AFTER the demotes so it never re-attempts a net that was
         # just demoted for an unrepairable clearance violation.
-        if self._post_negotiation_rescue:
+        _tail_t_sweep = time.time()
+        if not _abandon_tail:
+            # Issue #5923: the cost estimate the next excursion's abandon
+            # decision reads (the corridor-yield re-run reads the first pass's).
+            self._last_safety_net_s = _tail_t_sweep - _tail_t_demote
+        if self._post_negotiation_rescue and not _abandon_tail:
             sweep_stranded = _stranded_nets()
+            if sweep_stranded and _wall_deadline.expired():
+                # Issue #5923: see the clearance-correction note above.
+                flush_print(
+                    f"  Post-negotiation rescue skipped for {len(sweep_stranded)} "
+                    "stranded net(s): corridor-yield re-run wall deadline spent "
+                    "(issue #5923)"
+                )
+                sweep_stranded = []
             if sweep_stranded:
                 # Bound the whole sweep.  Solo long-hauls are sub-second (the
                 # issue's evidence), so a generous ceiling is ample; when the
@@ -13784,7 +13862,7 @@ class Autorouter:
                         timeout, per_net_timeout, sweep_elapsed, timed_out
                     )
                 )
-                sweep_deadline = time.time() + sweep_budget
+                sweep_deadline = _wall_deadline.clamp_epoch_deadline(time.time() + sweep_budget)
                 sweep_rescued = self._post_negotiation_sweep(
                     stranded_nets=sweep_stranded,
                     net_routes=net_routes,
@@ -13833,7 +13911,24 @@ class Autorouter:
 
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).
+        _tail_t_final = time.time()
         self._finalize_routing()
+
+        if _wall_deadline.active():
+            # Issue #5923: inside a bounded excursion, report where the
+            # post-loop tail spent its time so the residual (unbounded)
+            # overrun past the excursion deadline is attributable.
+            _tail_end = time.time()
+            _left = _wall_deadline.remaining()
+            flush_print(
+                f"  Post-loop tail {_tail_end - _tail_t0:.1f}s: clearance "
+                f"{_tail_t_demote - _tail_t0:.1f}s, safety-net demotes "
+                f"{_tail_t_sweep - _tail_t_demote:.1f}s, rescue sweep "
+                f"{_tail_t_final - _tail_t_sweep:.1f}s, finalize "
+                f"{_tail_end - _tail_t_final:.1f}s; excursion deadline "
+                f"{'left ' + format(_left, '.1f') + 's' if _left is not None and _left > 0 else 'spent'} "
+                "(issue #5923)"
+            )
 
         return list(self.routes)
 

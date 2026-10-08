@@ -39,6 +39,7 @@ from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
 
+from . import wall_deadline as _wall_deadline
 from .clearance_shapes import (
     KShape,
     copper_gap,
@@ -208,8 +209,9 @@ _POSE_CORRIDOR_GUARD_BUDGET_S: float = float(
 #   * ``_CORRIDOR_YIELD_RERUN_S`` caps the ONE strategy re-run performed after
 #     the yield.  Without a cap the re-run spends the recipe's full negotiated
 #     backstop a second time (measured: 363s, taking the job from 770s to
-#     1376s).  Applied via ``Autorouter._negotiated_timeout_cap`` and removed
-#     as soon as the re-run returns.
+#     1376s).  Since #5923 it is the ceiling of a whole-re-run wall deadline
+#     (see below) installed via ``wall_deadline.deadline`` and removed as
+#     soon as the re-run returns.
 #   * ``KCT_CORRIDOR_YIELD=0`` is the kill-switch for the whole #4463
 #     behaviour (both the negotiated loop's fixed-point exit and the
 #     plan/yield/re-run recovery); it restores the pre-#4463 shadow-ON
@@ -218,11 +220,11 @@ _POSE_CORRIDOR_GUARD_BUDGET_S: float = float(
 _CORRIDOR_GUARD_PROBE_S: float = float(os.environ.get("KCT_CORRIDOR_GUARD_PROBE_S", "8.0"))
 _CORRIDOR_GUARD_BUDGET_S: float = float(os.environ.get("KCT_CORRIDOR_GUARD_BUDGET_S", "120.0"))
 _CORRIDOR_YIELD_RERUN_S: float = float(os.environ.get("KCT_CORRIDOR_YIELD_RERUN_S", "300.0"))
-# Issue #5923: the re-run's negotiated-loop budget is PROPORTIONAL to the first
-# main-strategy pass.  This is a budget hint, NOT a hard wall-time bound on the
-# whole re-run: ``route_all_negotiated`` checks it between nets, so an in-flight
-# search can overrun it and the post-negotiation sweep / clearance tail runs
-# outside it (a measured CI re-run took 361s against a 223s cap).
+# Issue #5923 / #6230: the re-run's wall-clock DEADLINE is PROPORTIONAL to the
+# first main-strategy pass, and it bounds the WHOLE re-run strategy call (see
+# the ``wall_deadline`` bullet below).  The first version (PR #6227) was only a
+# negotiated-loop budget checked between nets; a measured CI re-run took 361s
+# against its 223s cap.
 # The fixed 300s cap was spent in full by the pathological re-run #5922 fixed
 # (negotiated usage leaking into it: overflow 4424, all nets ripped every
 # iteration, timed out at 300s with overflow 188).  The re-run routes the same
@@ -248,9 +250,34 @@ _CORRIDOR_YIELD_RERUN_S: float = float(os.environ.get("KCT_CORRIDOR_YIELD_RERUN_
 #     10% of what is left), so it must not be tight: the paying board-06
 #     rescue above spent 15.6s over four searches at iteration 2.
 #   * The first-pass time is the WHOLE strategy call (negotiated loop plus
-#     its post-route clearance pass and post-negotiation sweep), while the
-#     cap bounds only the negotiated loop; the re-run's own tail (sweep,
-#     bounded at 60s once the loop timed out, #4159) still follows it.
+#     its post-route clearance pass and post-negotiation sweep), and the cap
+#     is a wall DEADLINE on the WHOLE re-run strategy call, not a stage
+#     hint.  The first version of this PR only lowered the negotiated loop's
+#     stage timeout, which is checked between nets: under load a 223.5s cap
+#     produced a 361.1s re-run (loop 252.0s after an in-flight search, then
+#     a ~56s clearance allowance and a 60s rescue sweep of their own).
+#     ``wall_deadline`` now carries ``t0 + cap`` into every stage: each A*
+#     search is clamped to the time left, the clearance pass / rescue sweep
+#     stop at it (or are skipped once it is spent), and the negotiated loop
+#     gets ``(1 - TAIL_FRACTION) x cap`` as its stage budget so the tail has
+#     a reserve to run in.
+#   * The post-loop DRC safety-net demotes cannot be cut short (12.0-12.3s
+#     on the board-06 re-run).  When the time left cannot pay for them --
+#     deadline spent, or less left than 1.25x what this router's previous
+#     pass (the first pass) spent on them -- ``route_all_negotiated`` skips
+#     them and the sweep and ABANDONS the excursion; the re-run is then
+#     reverted whatever its reach, so unvalidated copper never ships.
+#   * Residual overrun (NOT bounded): pure-Python work that is already
+#     running when the deadline passes -- bookkeeping of the net in hand,
+#     a relief-rescue rollback, best-snapshot restore, the clearance pass's
+#     up-front validation (3.2-3.4s on board 06), a safety-net pass whose
+#     cost exceeded the 1.25x estimate, ``_finalize_routing`` and the
+#     revert -- plus the C++ search's clock sampling (every 1024
+#     expansions, milliseconds).  Issue #6230's PR reports the measured figure;
+#     tests pin the contract with the real negotiated loop.
+#   * ``_CORRIDOR_YIELD_RERUN_TAIL_FRACTION`` (default 0.2) is that tail
+#     reserve.  The paying board-06 re-run's loop alone needed 0.86x the
+#     first pass, so 0.8 x 1.5 = 1.2x still covers it.
 #   * ``_CORRIDOR_YIELD_RERUN_S`` (300s) stays as the ceiling.  Setting
 #     ``KCT_CORRIDOR_YIELD_RERUN_S`` explicitly is an ABSOLUTE override: the
 #     re-run gets exactly that cap, no proportional derivation.
@@ -261,14 +288,18 @@ _CORRIDOR_YIELD_RERUN_FACTOR: float = float(
 _CORRIDOR_YIELD_RERUN_FLOOR_S: float = float(
     os.environ.get("KCT_CORRIDOR_YIELD_RERUN_FLOOR_S", "60.0")
 )
+_CORRIDOR_YIELD_RERUN_TAIL_FRACTION: float = min(
+    0.9, max(0.0, float(os.environ.get("KCT_CORRIDOR_YIELD_RERUN_TAIL_FRACTION", "0.2")))
+)
 _CORRIDOR_YIELD_ENABLED: bool = os.environ.get("KCT_CORRIDOR_YIELD", "1").strip() != "0"
 
 
 def _corridor_yield_rerun_cap(first_pass_s: float | None) -> float:
-    """Negotiated-loop budget (seconds) for the #4463 corridor-yield re-run (#5923).
+    """Wall-clock deadline (seconds) for the #4463 corridor-yield re-run (#5923, #6230).
 
-    Not a hard bound on the re-run's wall time: it is checked between nets and
-    excludes the post-negotiation tail.
+    Applied to the whole re-run strategy call via ``wall_deadline``; see the
+    module comment above ``_CORRIDOR_YIELD_RERUN_OVERRIDE`` for what it bounds
+    and the residual overrun it does not.
 
     ``clamp(FACTOR * first_pass_s, FLOOR, CEILING)``, where ``first_pass_s``
     is the measured wall time of the first main-strategy pass.  An explicit
@@ -13176,8 +13207,12 @@ class DiffPairRouter:
         that buys neither is simply undone.
 
         ``first_pass_s`` is the measured wall time of the first main-strategy
-        pass; the re-run is capped at ``_corridor_yield_rerun_cap`` of it
-        (issue #5923).  ``None`` keeps the fixed ``_CORRIDOR_YIELD_RERUN_S``.
+        pass; the re-run runs under a wall deadline of
+        ``_corridor_yield_rerun_cap`` of it (issue #5923).  ``None`` keeps the
+        fixed ``_CORRIDOR_YIELD_RERUN_S``.  The deadline clamps every search
+        and the tail stages; only pure-Python bookkeeping can run past it.
+        A re-run that spends its deadline is kept only if it still raised
+        reach -- the same keep/revert rule as any other re-run.
 
         Returns:
             ``(kept, released_net_ids, removed_routes, added_routes)``.
@@ -13246,24 +13281,58 @@ class DiffPairRouter:
             f"strategy for the freed nets (cap {rerun_cap:.1f}s, first pass "
             f"{first_pass_txt})"
         )
-        autorouter._negotiated_timeout_cap = rerun_cap
+        # Issue #5923: ``rerun_cap`` is a wall-clock DEADLINE for the whole
+        # re-run, not a stage hint.  ``wall_deadline.deadline`` makes every
+        # stage see it: each A* search is clamped to the time left (so an
+        # in-flight search cannot run past it by more than the backend's
+        # clock-sampling granularity), the clearance pass and rescue sweep
+        # stop at it or are skipped once it is spent, and the negotiated
+        # loop's own stage budget is the cap minus a reserve for that tail.
+        # A tail that cannot afford the uninterruptible safety-net demotes
+        # abandons the re-run (reverted below).  Pure-Python work already in
+        # progress at the deadline is the residual overrun -- see the
+        # ``_CORRIDOR_YIELD_RERUN_TAIL_FRACTION`` comment block.
+        loop_cap = max(
+            _wall_deadline.MIN_SEARCH_TIMEOUT_S,
+            rerun_cap * (1.0 - float(_CORRIDOR_YIELD_RERUN_TAIL_FRACTION)),
+        )
+        autorouter._negotiated_timeout_cap = loop_cap
         rerun_t0 = time.perf_counter()
+        deadline_spent = False
+        excursion: _wall_deadline.Excursion | None = None
         try:
-            non_diffpair_strategy()  # type: ignore[operator]
+            with _wall_deadline.deadline(rerun_cap) as excursion:
+                try:
+                    non_diffpair_strategy()  # type: ignore[operator]
+                finally:
+                    deadline_spent = _wall_deadline.expired()
         finally:
             autorouter._negotiated_timeout_cap = None
             autorouter._budget_exit_diff_nets = set()
         self._last_corridor_yield_rerun_s = time.perf_counter() - rerun_t0
         self._last_corridor_yield_rerun_cap_s = rerun_cap
+        overrun = self._last_corridor_yield_rerun_s - rerun_cap
         print(
             f"  [corridor-yield] re-run wall {self._last_corridor_yield_rerun_s:.1f}s "
-            f"(negotiated-loop budget {rerun_cap:.1f}s)"
+            f"(deadline {rerun_cap:.1f}s, loop share {loop_cap:.1f}s"
+            + (f"; deadline spent, overran by {overrun:.1f}s" if deadline_spent else "")
+            + ")"
         )
 
         added_routes = [r for r in autorouter.routes if id(r) not in snapshot_ids]
         reach_after = sum(1 for n in candidate_nets if self._net_is_connected(n))
+        # Issue #5923: a stage that found the deadline spent before work it
+        # cannot cut short (the post-loop DRC safety nets) skipped it and
+        # abandoned the re-run; its copper is unvalidated, so it is reverted
+        # whatever its reach.
+        abandoned = excursion is not None and excursion.abandoned
+        if abandoned:
+            print(
+                f"  [corridor-yield] re-run abandoned "
+                f"({excursion.abandon_reason if excursion else ''}); reverting"
+            )
 
-        if reach_after > reach_before:
+        if reach_after > reach_before and not abandoned:
             logger.warning(
                 "DIFFPAIR_CORRIDOR_YIELD: %d coupled pair(s) yielded a sealed "
                 "corridor; reach %d -> %d of %d net(s): %s (issue #4463)",
