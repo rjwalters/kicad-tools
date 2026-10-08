@@ -80,13 +80,25 @@ BOARD_04_RECIPE = BOARD_04_DIR / "generate_design.py"
 BOARD_04_PROCESS = BOARD_04_DIR / "manufacturing_process.py"
 BOARD_04_REVIEWED_CHECK = BOARD_04_DIR / "check_manufacturing.py"
 
-# The three stock-profile rules the reviewed paid-drill option overrides, mapped
-# to the ``DesignRules`` field that carries the reviewed floor.  Nothing else is
+# The stock-profile rules the reviewed paid-drill option overrides, mapped to the
+# ``DesignRules`` field that carries the reviewed floor.  Nothing else is
 # excused, and each excused finding is still measured against that floor.
+#
+# Issue #5991: the ``netclass_*`` trio is the SAME three floors, seen through the
+# board's ``.kicad_pro`` instead of its vias.  ``manufacturing_process``'s
+# ``apply_native_floors`` writes the reviewed 0.30 / 0.15 mm via into the
+# ``Default`` netclass on purpose.  ``kct check``'s netclass-floor rule
+# (a13ef00e, 2026-10-01, added after this map was written for #5852) then
+# reports that declaration against stock tier1's 0.60 / 0.30 / 0.15 floors.
+# Mapping the trio to the same three reviewed fields keeps the override set
+# below unchanged, and leg 2 still re-measures each ``actual_value``.
 _PAID_DRILL_RULE_FLOORS = {
     "dimension_via_drill": "min_via_drill_mm",
     "dimension_via_diameter": "min_via_diameter_mm",
     "dimension_annular_ring": "min_annular_ring_mm",
+    "netclass_via_drill": "min_via_drill_mm",
+    "netclass_via_diameter": "min_via_diameter_mm",
+    "netclass_annular_ring": "min_annular_ring_mm",
 }
 
 # The same slack board 04's reviewed validator applies to these three floors

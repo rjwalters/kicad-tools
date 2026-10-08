@@ -29,33 +29,98 @@ permissions:
   contents: read
 
 jobs:
-  slow-tests:
-    name: Slow / Benchmark Tests
+  # Issue #5991: the slow suite runs in the SAME pinned KiCad container as
+  # ci.yml's Test job. It used to run on bare ubuntu-latest with noble's
+  # `kicad-symbols` apt package, which is KiCad 7.0.11 and has no footprints
+  # and no kicad-cli. Two long-standing failures came from that environment,
+  # not from the code:
+  # - board 03's generate_pcb.py needs real KiCad footprints ("Required real
+  #   KiCad footprint unavailable: Package_QFP:TQFP-44_10x10mm_P0.8mm");
+  # - board 04's recipe, generated against KiCad 7 symbols, embeds the wrong
+  #   lib_symbols (Device:C_Small came out as Device:Voltmeter_DC), so its own
+  #   LVS reload died on "Library not found: board04_symbols.kicad_sym".
+  #   The board's reviewed validator also needs a native kicad-cli.
+  # ci.yml's Test job moved into the container for the same KiCad-7-era
+  # library drift (~40 failures there).
+  #
+  # The digest stays single-sourced. ci.yml's workflow-level KICAD_IMAGE is
+  # the one literal (#5682, docs/contributing/kicad-image-pin.md). A workflow
+  # cannot read another workflow's env, so this bridge job reads the value
+  # out of ci.yml at run time and republishes it into `needs`
+  # (`container.image` cannot reference `env`; see ci.yml's kicad_pin).
+  kicad_pin:
+    name: KiCad image pin (read from ci.yml)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
     steps:
       - uses: actions/checkout@v7
-
-      # setup-uv publishes only immutable full-version tags since v8 (no
-      # @v8/@v9 major tags exist), hence the exact pin.
-      - uses: astral-sh/setup-uv@v10.2.0
         with:
-          version: "latest"
-          # setup-uv >=5 auto-enables the Actions cache on hosted runners
-          # (and >=9 no longer prunes it before upload); keep the pre-v5
-          # no-cache behavior these jobs were written against.
-          enable-cache: false
+          sparse-checkout: .github/workflows/ci.yml
+          sparse-checkout-cone-mode: false
 
-      - name: Install KiCad symbol libraries
-        # tests/test_board_03_regression.py regenerates the board 03
-        # schematic from source, which resolves symbols from the system
-        # KiCad libraries (see kicad_tools.schematic.registry). Without
-        # this the regenerated_board fixture errors with "Library not
-        # found: Connector_Generic.kicad_sym" (issue #3458 inventory).
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends kicad-symbols
+      - name: Publish ci.yml's KICAD_IMAGE into the needs context
+        id: pin
+        run: |
+          set -euo pipefail
+          images=$(sed -n 's/^  KICAD_IMAGE: *//p' .github/workflows/ci.yml)
+          if [ "$(printf '%s\n' "$images" | grep -c .)" != "1" ] \
+            || ! printf '%s' "$images" | grep -qE '^kicad/kicad@sha256:[0-9a-f]{64}$'; then
+            echo "::error::expected exactly one 'KICAD_IMAGE: kicad/kicad@sha256:<digest>' in ci.yml, found: ${images:-<none>}"
+            exit 1
+          fi
+          echo "image=${images}" >> "$GITHUB_OUTPUT"
+
+  slow-tests:
+    name: Slow / Benchmark Tests
+    needs: [kicad_pin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Mirrors ci.yml's Test job. Pin -n auto at hosted parity (4 vCPU) and
+      # bound concurrent native KiCad processes, now that kicad-cli exists
+      # here and the native-backed slow tests actually run (#5501/#5616).
+      PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
+      KCT_NATIVE_MAX_CONCURRENCY: "2"
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      # Root, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE. The 12g memory cap matches ci.yml's Test job.
+      options: --user 0:0 --memory 12g
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors ci.yml).
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        # cmake + build-essential for the C++ router backend build below.
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Trust the workspace for git
+        # Root over a runner-owned checkout: git refuses it as "dubious
+        # ownership" without this (mirrors ci.yml's Test job).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        # Official one-liner instead of setup-uv: avoids action-host coupling
+        # inside the container (mirrors ci.yml's Test job).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build native router extension
         # uv sync does NOT build the C++ router extension; without it the

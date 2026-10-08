@@ -199,14 +199,25 @@ def _build_blocked_path_scenario() -> tuple[Autorouter, _StubPCB]:
 
     # U3 -- obstructing cluster in the middle of the corridor.  A dense
     # column of SMD pads at x=15 spanning the FULL y-extent of the
-    # board (1.5 to 28.5) on BOTH copper layers so the corridor is
-    # blocked on F.Cu AND B.Cu and the router cannot escape via the
-    # top/bottom rails either.  Pad pitch is 1.5mm centre-to-centre
-    # with 1.4mm pad width so consecutive clearance envelopes overlap
-    # and the column is one continuous wall.
+    # board on BOTH copper layers so the corridor is blocked on F.Cu AND
+    # B.Cu and the router cannot escape via the top/bottom rails either.
+    # Pad pitch is 1.5mm centre-to-centre with 1.4mm pad width so
+    # consecutive clearance envelopes overlap and the column is one
+    # continuous wall.
+    #
+    # Issue #5991: the column must reach the board edges, not stop short.
+    # It used to run 1.5 -> 28.5 (copper 0.8 -> 29.2), which left a real
+    # 0.8mm rail between the end pads and each edge: a 0.2mm trace on
+    # y=0 clears the pad copper by 0.7mm against a 0.15mm rule.  This bare
+    # ``Autorouter`` has no Edge.Cuts keepout, so that rail is legal
+    # copper.  The router's old conservative per-cell clearance halo hid
+    # it; exact physical clearance (#5425, 7f168061) correctly found it,
+    # SIG1 routed round the wall along y=0, and this gate stopped
+    # blocking anything.  The column now runs 0.75 -> 29.25 (copper
+    # 0.05 -> 29.95), so no trace fits past either end.
     u3_pads: list[dict] = []
     pin = 1
-    y_positions = [1.5 + 1.5 * i for i in range(19)]  # 1.5, 3.0, ..., 28.5
+    y_positions = [0.75 + 1.5 * i for i in range(20)]  # 0.75, 2.25, ..., 29.25
     for y in y_positions:
         for layer in (Layer.F_CU, Layer.B_CU):
             u3_pads.append(

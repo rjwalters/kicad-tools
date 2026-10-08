@@ -677,7 +677,14 @@ def test_negotiated_run_no_longer_strands_u3_with_the_invariant_on():
     def _reached(router: Autorouter) -> set[int]:
         return {route.net for route in router.routes if route.segments or route.vias}
 
-    assert _reached(guarded) == _reached(control)
+    # Issue #5991: "costs no reach" is a subset relation, not equality.  The
+    # control run's ISENSE_A+ is the net this rule exists to stop stranding,
+    # so whether it carries any partial copper at all is decided by the 10 s
+    # per-net wall clock: locally it lands segments ({1, 2, 3}); on a loaded CI
+    # runner the search for it timed out empty ({2, 3}) while the guarded run
+    # reached all three -- a strictly better result that equality called a
+    # failure.  The guarded run must reach everything the control reached.
+    assert _reached(control) <= _reached(guarded)
     assert COMP_NET in _reached(guarded)
     assert ISENSE_NET in _reached(guarded)
     assert not guarded.get_failed_nets()
