@@ -6,29 +6,33 @@ guards the fill *geometry* but needs two full board-03 routes (~22 min).  The
 on track order, so it passes with or without the fix.
 
 This module builds a tiny synthetic board whose kicad-cli fill really does
-depend on the order tracks are loaded in, so one pair of refills proves both
+depend on the order tracks are loaded in, so a handful of refills proves both
 halves:
 
-* **control** -- two shuffles of the same copper (random UUIDs, shuffled file
+* **control** -- shuffles of the same copper (random UUIDs, shuffled file
   order) fill to *different* ``filled_polygon`` rings.  If KiCad ever stops
   being order-sensitive on this fixture the control fails, so the test cannot
   pass vacuously.
-* **fix** -- the same two shuffles after
-  :func:`~kicad_tools.core.canonical_uuids.canonicalize_board_uuids` fill to
-  identical rings.
+* **fix** -- the same shuffles after
+  :func:`~kicad_tools.core.canonical_uuids.canonicalize_board_uuids` all fill
+  to the same rings.
 
-Fixture: a 40x40 mm GND pour on F.Cu with 150 short, thin, randomly-angled
-track segments scattered in a 10x10 mm patch.  About a quarter belong to the
-pour's own net (GND) -- same-net tracks overlapping the pour are what make
-KiCad's island/knock-out result depend on load order; segments on other nets
-alone leave the fill order-insensitive.  Generated from a fixed seed, so the
-board is identical on every run.  Four kicad-cli refills run in parallel
-(a few seconds each).
+Fixture: a 40x40 mm GND pour on F.Cu with 80 axis-aligned segments (0.2/0.3 mm
+wide, on a 0.5 mm grid, nets A/B/C) in a 10x10 mm patch.  Their knock-outs
+share many collinear edges, and the vertex count of the merged outline
+(1468-1471 on KiCad 10.0.x) depends on the order the tracks are loaded in.
+
+Fixture history (why it looks like this): a first version used randomly
+angled segments with about a quarter on the pour's own net.  It *looked* very
+order-sensitive, but KiCad 10.0.6 fills that board non-deterministically even
+for byte-identical input (island/outline vertex counts changed from run to run
+when the same file was refilled serially), so it measured kicad-cli noise and
+made both assertions flaky.  Same-net tracks are what triggered it; this
+fixture has none, and refilling one board repeatedly gives one result.
 """
 
 from __future__ import annotations
 
-import math
 import random
 import uuid
 from collections import defaultdict
@@ -40,9 +44,11 @@ import pytest
 from kicad_tools.core.canonical_uuids import canonicalize_board_uuids
 from kicad_tools.sexp import parse_file, parse_string
 
-_SEGMENTS = 150
-_NETS = (1, 2, 3, 4)  # net 1 is GND, the pour's net
-_SHUFFLE_SEEDS = (0, 1)
+_SEGMENTS = 80
+_NETS = (2, 3, 4)  # none on net 1 (GND, the pour's net) -- see module docstring
+# Seeds 0, 1 and 3 fill to three different outlines on KiCad 10.0.1 and 10.0.6.
+_RAW_SEEDS = (0, 1, 3)
+_CANON_SEEDS = (0, 1, 3)
 
 _HEADER = """(kicad_pcb (version 20240108) (generator "test") (general (thickness 1.6))
 (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
@@ -54,20 +60,14 @@ _HEADER = """(kicad_pcb (version 20240108) (generator "test") (general (thicknes
 
 
 def _segments() -> list[tuple[float, float, float, float, float, int]]:
-    rng = random.Random(3)
+    rng = random.Random(5)
     out = []
     for _ in range(_SEGMENTS):
-        x, y = rng.uniform(105, 115), rng.uniform(105, 115)
-        angle, length = rng.uniform(0, math.pi), rng.uniform(1, 4)
+        x, y = (105 + 0.5 * rng.randrange(0, 20) for _ in range(2))
+        dx, dy = rng.choice(((1, 0), (0, 1)))
+        length = rng.randrange(1, 6) * 0.5
         out.append(
-            (
-                x,
-                y,
-                x + length * math.cos(angle),
-                y + length * math.sin(angle),
-                rng.choice((0.1, 0.13, 0.2)),
-                rng.choice(_NETS),
-            )
+            (x, y, x + dx * length, y + dy * length, rng.choice((0.2, 0.2, 0.3)), rng.choice(_NETS))
         )
     return out
 
@@ -125,17 +125,19 @@ def test_canonicalisation_makes_an_order_sensitive_fill_reproducible(tmp_path):
     if kicad_cli is None:
         pytest.skip("kicad-cli not installed -- zone fill is a no-op, nothing to compare")
 
-    jobs = [(seed, canonical) for canonical in (False, True) for seed in _SHUFFLE_SEEDS]
-    with ThreadPoolExecutor(len(jobs)) as pool:
+    jobs = [(seed, False) for seed in _RAW_SEEDS] + [(seed, True) for seed in _CANON_SEEDS]
+    with ThreadPoolExecutor(3) as pool:
         futures = [pool.submit(_refill, tmp_path, s, c, kicad_cli) for s, c in jobs]
-        raw_a, raw_b, canon_a, canon_b = (f.result() for f in futures)
+        results = [f.result() for f in futures]
+    raw, canon = results[: len(_RAW_SEEDS)], results[len(_RAW_SEEDS) :]
 
-    assert raw_a and canon_a, "kicad-cli poured nothing -- the comparison is vacuous"
-    assert raw_a != raw_b, (
-        "control failed: two track orders without canonicalisation filled identically, so "
-        "this fixture no longer detects order-sensitive fills (Issue #6115)"
+    assert raw[0] and canon[0], "kicad-cli poured nothing -- the comparison is vacuous"
+    distinct_raw = {repr(r) for r in raw}
+    assert len(distinct_raw) > 1, (
+        "control failed: every un-canonicalised track order filled identically, so this "
+        "fixture no longer detects order-sensitive fills (Issue #6115)"
     )
-    assert canon_a == canon_b, (
+    assert all(r == canon[0] for r in canon), (
         "canonicalised boards with identical copper filled differently: the fill is still "
         "sensitive to track order (Issue #6052)"
     )
