@@ -1,68 +1,176 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.22.0",
-  "generated_at": "2026-10-08T06:43:41.747316+00:00",
+  "kicad_tools_version": "0.20.0",
+  "generated_at": "2026-09-10T07:05:00.837414+00:00",
   "manufacturer": "jlcpcb",
   "files": {
+    "README.txt": {
+      "sha256": "a1a0a792139cb2a160da40dc2caad7aa39e3dcac433431911a806c7841a4fee1",
+      "size": 1618
+    },
+    "assembly-back.pdf": {
+      "sha256": "00926dc26909627897ae58555dcf43073418cf1394a7a6b8e628576a26c22b26",
+      "size": 5857
+    },
+    "assembly-front.pdf": {
+      "sha256": "e4c2db0b807369d2793790dd4bccbf1301584bd3ad715953d72cc37a454dcc88",
+      "size": 8681
+    },
     "bom_jlcpcb.csv": {
       "sha256": "bff6f5bac21cb349473f4bd2c2a55f1245bfe32e5a3a804ce99a46b8d502801c",
       "size": 194
+    },
+    "check-report.json": {
+      "sha256": "6c227d5666009e6c4824bd70cad1167af213965f647d626f18b873eef5ca610c",
+      "size": 2106
     },
     "cpl_jlcpcb.csv": {
       "sha256": "3d1ab253728d028da44280bd8d7de99d86907abc59fd23a34ed4f7c6bef5dc30",
       "size": 115
     },
     "gerbers/gerbers.zip": {
-      "sha256": "d6d7411c92dd649f876975868f9f92ec16c2035000167b387a3c018f9607bd52",
-      "size": 9942
-    },
-    "report.pdf": {
-      "sha256": "c0ba7f54cd9aeec01666ca15c648e9d6288d58cab91ed863fea5f46e5e3d7056",
-      "size": 715414
-    },
-    "report.md": {
-      "sha256": "5b11c5e1f0ce1ea882d3a32fcd7fd298b2da8319f0e00137a8e9222bcee2b81a",
-      "size": 2948
+      "sha256": "77f5ac76aa6de4a4effef1c45246c12169eb8fd1c0ab089fa151104ed802434e",
+      "size": 9551
     },
     "images/assembly.png": {
-      "sha256": "9cac79e21d81ae7a86d977cbea40ef7fd310e52c9cacc02f976b277dd45cdd27",
-      "size": 115108
+      "sha256": "d5eef928925ba7527096fc49a7d6da5d81032a7bc85529cdcc5e03aa7a88993d",
+      "size": 90395
     },
     "images/layer_B_Cu.png": {
-      "sha256": "4f31e8dd0b675ea6b87abf3a4f30e4c58462558ad43802b11254280f825ebe42",
-      "size": 69926
+      "sha256": "e71b1d4586b9d677b4e7d16d0c52da9342ce3eafcd63ec0e39ebdaa1898c8640",
+      "size": 70395
     },
     "images/layer_F_Cu.png": {
-      "sha256": "6064dd2c05bbe4b9916a2daafb45fd0b5d09c7082255e7ceeec2603ebe813423",
-      "size": 72768
+      "sha256": "96a92b505f9289509b1b891be0cf492c2d73eb3d0247748e86419f4b881e0dba",
+      "size": 76759
     },
     "images/pcb_back.png": {
-      "sha256": "f8f66be940d1bdc7e36f265f8930f1339866b0773100ccc91cec235165e1588e",
-      "size": 71768
+      "sha256": "af8a5f83033102eb45b25b6494e40839c7856ff3045f4c0819e213479bf6a614",
+      "size": 72277
     },
     "images/pcb_copper.png": {
-      "sha256": "1ddaee2b78506fc3f6e51ecaf0a407bee873988bb3592618e90c91ee37fae963",
-      "size": 75232
+      "sha256": "2846246a8a6ac41ed8d877cf78d0982d9c3aefac8ac3db7764b5db80784786d8",
+      "size": 79381
     },
     "images/pcb_front.png": {
-      "sha256": "c70d6b49dc8036bcf7f79d421edf5d5d817cdd6a50ab417b0f1d7f59aecfa315",
-      "size": 115453
+      "sha256": "2fec5edc3219a242dc83fd65cdcaaca1d47a855e0450d341442a6ee74f93b350",
+      "size": 90837
     },
     "images/schematic_simple_led.png": {
       "sha256": "ee6225e17a3ea7f6f4c076639be1465b2ae3537911bd0eeccf3ff708e42a306f",
       "size": 117856
     },
     "kicad_project.zip": {
-      "sha256": "7fc44fa6a84f4de3a1b3ee65c4f7e42a37dc0462f6f1ef85d25e5809321350c1",
-      "size": 11130
+      "sha256": "dc70611f27c43e4c35d787ec9cdc1fc2379281805c48a2fafa62564ba55ad53b",
+      "size": 12248
     },
-    "README.txt": {
-      "sha256": "6d41542bccbbefc8cfe8872986972a72fbec7f7eb1baaa271df077c576ac895b",
-      "size": 995
+    "native-drc.json": {
+      "sha256": "9c1bd683a5c2f4ef9de9905a595c104ea4909367cc01f5e4902cfe94d6ea0aca",
+      "size": 1209
+    },
+    "procurement-review.md": {
+      "sha256": "5a92a3d3954169dfb8a85c450f48603b1b43fcfbf713a89661fd314b8166d847",
+      "size": 10400
+    },
+    "report.md": {
+      "sha256": "6317d1b14e07521e5e4ac378dc9c393cdd6d29451754358ed11a160d5f377138",
+      "size": 2848
+    },
+    "report.pdf": {
+      "sha256": "c35aa6a5140de172b11e6ef5ed3977d44d2fe0722580d800e67cb47099eba3e1",
+      "size": 681912
+    },
+    "schematic.pdf": {
+      "sha256": "8c7b2cdf3cc991d38eec94216cd55743d434db16f545a8498209f3fe581a2f28",
+      "size": 47227
     }
   },
   "board": {
     "name": "simple_led_routed",
     "pcb_file": "simple_led_routed.kicad_pcb"
+  },
+  "preflight": [
+    {
+      "name": "pcb_file",
+      "status": "OK",
+      "message": "PCB file parsed successfully",
+      "details": "Footprints: 3"
+    },
+    {
+      "name": "schematic_file",
+      "status": "OK",
+      "message": "Schematic auto-detected: simple_led.kicad_sch"
+    },
+    {
+      "name": "schematic_footprints",
+      "status": "OK",
+      "message": "All schematic symbols have a footprint assigned"
+    },
+    {
+      "name": "board_outline",
+      "status": "OK",
+      "message": "Board outline is closed (5 points)"
+    },
+    {
+      "name": "footprints",
+      "status": "OK",
+      "message": "All 3 footprints have library footprint names"
+    },
+    {
+      "name": "board_dimensions",
+      "status": "OK",
+      "message": "Board dimensions within limits (25.00 x 20.00 mm)"
+    },
+    {
+      "name": "drill_holes",
+      "status": "OK",
+      "message": "Drill holes present (0 vias, 4 TH pads)"
+    },
+    {
+      "name": "tht_in_cpl",
+      "status": "OK",
+      "message": "2 through-hole component(s) excluded from CPL",
+      "details": "THT references: D1, J1"
+    },
+    {
+      "name": "bom_fields",
+      "status": "OK",
+      "message": "All 3 BOM items have required fields",
+      "details": "3 active item(s) will receive LCSC from spec overlay"
+    },
+    {
+      "name": "bom_lcsc_values",
+      "status": "OK",
+      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
+    },
+    {
+      "name": "bom_pcb_match",
+      "status": "OK",
+      "message": "BOM and PCB references match (3 components)"
+    },
+    {
+      "name": "bom_cpl_match",
+      "status": "OK",
+      "message": "BOM and CPL references match (1 components, 2 THT excluded)"
+    },
+    {
+      "name": "drc",
+      "status": "WARN",
+      "message": "DRC passed with 2 warning(s)"
+    },
+    {
+      "name": "erc",
+      "status": "OK",
+      "message": "ERC: 0 errors, 0 warnings"
+    }
+  ],
+  "mode": "assembly",
+  "warning_counts": {},
+  "native_warning_counts": {},
+  "acknowledged_warning_rules": [],
+  "documentation_refresh": {
+    "updated_at": "2026-09-10T21:50:06.229926+00:00",
+    "issue": 5048,
+    "scope": "Procurement documentation and package integrity only; original fabrication checks unchanged."
   }
 }

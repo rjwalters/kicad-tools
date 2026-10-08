@@ -1,0 +1,84 @@
+{
+  "file": "/Users/rwalters/GitHub/kicad-tools/boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+  "manufacturer": "jlcpcb",
+  "layers": 2,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 1,
+    "waived": 0,
+    "rules_checked": 43,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1
+    },
+    "passed": true
+  },
+  "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 4.15mm from nearest board edge",
+      "location": [
+        141.0,
+        87.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 4.1499999999999995,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    }
+  ],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "43 rules checked, 0 error(s), 0 warning(s)"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 6,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "PASSED",
+      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
+    },
+    "overall": "PASSED",
+    "schematic_missing": false
+  },
+  "routing_quality": {
+    "total_segments": 2,
+    "nets_with_copper": 1,
+    "segments_per_net": 2.0,
+    "zero_length_count": 0,
+    "median_length_mm": 4.2992135623731,
+    "fragment_count": 0,
+    "fragment_fraction": 0.0,
+    "orthogonal_count": 1,
+    "diagonal_45_count": 1,
+    "off_axis_count": 0,
+    "staircase_step_count": 0,
+    "staircase_fraction": 0.0
+  }
+}
