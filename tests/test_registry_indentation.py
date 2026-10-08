@@ -110,3 +110,20 @@ def test_fast_and_exact_scanners_agree():
         assert scan_toplevel_symbols(lib) == _scan_toplevel_symbols_exact(lib)
     tricky = '(lib (symbol "A" (p "(symbol \\"X\\" (")) (symbol "B" (q ")")))'
     assert scan_toplevel_symbols(tricky) == _scan_toplevel_symbols_exact(tricky)
+
+
+@pytest.mark.parametrize(
+    "lib",
+    [
+        '(kicad_symbol_lib\n (symbol "A" (property "x" "end\\\\" ))\n (symbol "C" (p)))',
+        '(kicad_symbol_lib\n (symbol "A" (property "x" "end\\\\" ) (symbol "Q" (p)))\n'
+        ' (symbol "C" (p)))',
+        '(kicad_symbol_lib\n (symbol "A" (property "x" "a\\"b(" ))\n (symbol "C" (p)))',
+    ],
+)
+def test_escaped_backslash_before_quote(lib):
+    from kicad_tools.schematic.registry import _scan_toplevel_symbols_exact
+
+    got = scan_toplevel_symbols(lib)
+    assert set(got) == {"A", "C"}
+    assert got == _scan_toplevel_symbols_exact(lib)

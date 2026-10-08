@@ -225,14 +225,20 @@ def scan_toplevel_symbols(content: str) -> dict[str, tuple[int, int]]:
     must balance; on any doubt the exact token-by-token scanner is used
     instead.  Raises ``ValueError`` for unbalanced input.
     """
+    # Blank out backslash escapes (length-preserving, so offsets still index
+    # ``content``): ``\\\\`` first, then ``\\"``.  Left-to-right pairing makes a string
+    # ending in an escaped backslash ("end\\\\") close correctly.
+    scan = content
+    if "\\" in scan:
+        scan = scan.replace("\\\\", "__").replace('\\"', "__")
     heads: list[int] = []
     depth = 0
     last = 0
-    for m in _SYMBOL_CANDIDATE.finditer(content):
+    for m in _SYMBOL_CANDIDATE.finditer(scan):
         c = m.start()
-        seg = content[last:c]
+        seg = scan[last:c]
         # A candidate inside a quoted string splits it: skip those.
-        if (seg.count('"') - seg.count('\\"')) % 2:
+        if seg.count('"') % 2:
             continue
         depth += _balance(seg)
         last = c
@@ -241,7 +247,7 @@ def scan_toplevel_symbols(content: str) -> dict[str, tuple[int, int]]:
     if not heads:
         return _scan_toplevel_symbols_exact(content)
 
-    close = content.rstrip().rfind(")")
+    close = scan.rstrip().rfind(")")
     spans: dict[str, tuple[int, int]] = {}
     for i, start in enumerate(heads):
         limit = heads[i + 1] if i + 1 < len(heads) else close
@@ -252,7 +258,7 @@ def scan_toplevel_symbols(content: str) -> dict[str, tuple[int, int]]:
         if not head or end <= start or content[end - 1] != ")":
             return _scan_toplevel_symbols_exact(content)
         spans[head.group(1)] = (start, end)
-    if _balance(content) != 0:
+    if _balance(scan) != 0:
         return _scan_toplevel_symbols_exact(content)
     return spans
 
