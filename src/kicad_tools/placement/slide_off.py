@@ -15,6 +15,14 @@ Key properties:
   modifying disk state.
 - Components on opposite sides (front/back) are not pushed apart.
 - Deterministic fallback direction for coincident components.
+- Optional *violation-only* trigger (``min_clearance_mm``): a pair that is
+  already legal (no overlap, edge gap >= the clearance rule) is never
+  touched, even when it sits closer than ``margin_mm``.  Warm starts from a
+  hand floorplan use this so a feasible layout comes back unchanged
+  (issue #6250).
+- Optional placement grid (``grid_mm``): every non-zero displacement is
+  rounded away from zero to a whole number of grid steps, so a part that
+  started on the grid stays on it.
 
 Usage::
 
@@ -241,6 +249,8 @@ def slide_off_overlaps(
     max_iterations: int = 5,
     max_displacement_mm: float = 20.0,
     use_spatial_index: bool | None = None,
+    min_clearance_mm: float | None = None,
+    grid_mm: float = 0.0,
 ) -> tuple[PlacementVector, SlideOffResult]:
     """Resolve component overlaps by iteratively sliding components apart.
 
@@ -264,6 +274,22 @@ def slide_off_overlaps(
         use_spatial_index: Whether to use a grid-based spatial index.
             ``None`` (default) enables it automatically when the number
             of components exceeds 50.
+        min_clearance_mm: Violation threshold.  ``None`` (default) keeps
+            the historical behaviour: any pair closer than *margin_mm* is
+            pushed.  When set, a pair is only pushed once it is a real
+            violation -- its bounding boxes overlap, or their edge gap
+            (corner-to-corner when separated on both axes, the same metric
+            as :func:`~kicad_tools.placement.cost.compute_drc_violations`)
+            is below this value.  A violating pair is still pushed out to
+            *margin_mm*; a legal pair inside the margin is left alone, so
+            a layout with no violations comes back unchanged.  Remaining
+            and resolved counts then count violations, not margin misses.
+        grid_mm: Placement grid in mm (``0`` disables).  Each moved
+            component's net displacement is rounded, per axis and away
+            from zero, to a multiple of this step (pulled back a step at a
+            time if that would leave the board), so a part placed on the
+            grid stays on it.  Rounding can exceed *max_displacement_mm* by
+            up to one grid step per axis.
 
     Returns:
         Tuple of ``(new_vector, result)`` where *new_vector* is the
@@ -328,6 +354,11 @@ def slide_off_overlaps(
         dtype=np.float64,
     )
 
+    # Exact input positions, before the coincident jitter below: unmoved
+    # components are restored to these and grid rounding is measured
+    # from them.
+    original_positions = positions.copy()
+
     # Pre-jitter: deterministically spread coincident components.
     # When multiple components share the exact same centre, the
     # axis-aligned push loop cannot spread them in 2D because every
@@ -353,6 +384,10 @@ def slide_off_overlaps(
     total_resolved = 0
     iterations_run = 0
     remaining_overlaps = 0
+
+    # Pairs already found violating ``min_clearance_mm``: they keep being
+    # pushed until they clear the full margin.
+    active_pairs: set[tuple[int, int]] = set()
 
     for iteration in range(max_iterations):
         iterations_run = iteration + 1
@@ -396,6 +431,17 @@ def slide_off_overlaps(
             overlap_y = combined_hh - abs(dy)
 
             if overlap_x > 0 and overlap_y > 0:
+                if min_clearance_mm is not None and (i, j) not in active_pairs:
+                    # Inside the margin but possibly legal: only a real
+                    # violation is worth moving a part for (issue #6250).
+                    if not _violates_clearance(
+                        abs(dx) - half_sizes[i, 0] - half_sizes[j, 0],
+                        abs(dy) - half_sizes[i, 1] - half_sizes[j, 1],
+                        min_clearance_mm,
+                    ):
+                        continue
+                    active_pairs.add((i, j))
+
                 any_overlap = True
                 overlap_count += 1
 
@@ -505,27 +551,34 @@ def slide_off_overlaps(
             # We attempted to resolve overlap_count pairs this iteration
             total_resolved += overlap_count
             remaining_overlaps = overlap_count
-    else:
-        # Exhausted max_iterations; count remaining overlaps
-        remaining_overlaps = _count_overlaps(
-            positions,
-            half_sizes,
-            sides,
-            margin_mm,
-            n,
-            spatial_grid,
+
+    # Snap displacements to the placement grid, then restore every
+    # component that did not move to its exact input position.
+    _finalize_positions(
+        positions,
+        original_positions,
+        x_lo,
+        x_hi,
+        y_lo,
+        y_hi,
+        grid_mm,
+    )
+    for i in range(n):
+        cumulative_disp[i] = math.sqrt(
+            (positions[i, 0] - original_positions[i, 0]) ** 2
+            + (positions[i, 1] - original_positions[i, 1]) ** 2
         )
 
-    # If we broke out with no overlaps, recount to be precise
-    if remaining_overlaps == 0 and iterations_run > 0:
-        remaining_overlaps = _count_overlaps(
-            positions,
-            half_sizes,
-            sides,
-            margin_mm,
-            n,
-            spatial_grid,
-        )
+    # Count what is left on the final (snapped) positions.
+    remaining_overlaps = _count_overlaps(
+        positions,
+        half_sizes,
+        sides,
+        margin_mm,
+        n,
+        spatial_grid,
+        min_clearance=min_clearance_mm,
+    )
 
     # Compute final total_resolved as the initial overlaps minus remaining
     initial_overlaps = _count_overlaps(
@@ -535,6 +588,7 @@ def slide_off_overlaps(
         margin_mm,
         n,
         spatial_grid=None,  # Use brute force for accurate initial count
+        min_clearance=min_clearance_mm,
     )
     # Resolved = how many we started with minus how many remain
     actual_resolved = max(0, initial_overlaps - remaining_overlaps)
@@ -559,6 +613,7 @@ def slide_off_overlaps(
             n,
             component_defs,
             spatial_grid,
+            min_clearance=min_clearance_mm,
         )
         overlap_details = tuple(detail_list)
 
@@ -576,6 +631,86 @@ def slide_off_overlaps(
 # ---------------------------------------------------------------------------
 
 
+def _violates_clearance(gap_x: float, gap_y: float, clearance: float) -> bool:
+    """Whether two boxes with per-axis edge gaps *gap_x*/*gap_y* violate.
+
+    Negative gaps mean the boxes overlap on that axis.  Mirrors
+    :func:`~kicad_tools.placement.cost.compute_drc_violations`: overlapping
+    boxes always violate; boxes separated on both axes are measured corner
+    to corner; otherwise the gap on the separating axis is used.
+    """
+    if gap_x < 0 and gap_y < 0:
+        return True
+    if gap_x > 0 and gap_y > 0:
+        gap = math.hypot(gap_x, gap_y)
+    else:
+        gap = max(gap_x, gap_y)
+    return gap < clearance
+
+
+def _pair_counts(
+    gap_x: float,
+    gap_y: float,
+    margin: float,
+    min_clearance: float | None,
+) -> bool:
+    """Whether a pair counts as an (unresolved) overlap for reporting."""
+    if min_clearance is None:
+        return gap_x < margin and gap_y < margin
+    return _violates_clearance(gap_x, gap_y, min_clearance)
+
+
+def _snap_away_from_zero(delta: float, grid: float) -> float:
+    """Round *delta* away from zero to a whole number of *grid* steps."""
+    steps = math.ceil(abs(delta) / grid - 1e-9)
+    return math.copysign(steps * grid, delta)
+
+
+def _finalize_positions(
+    positions: np.ndarray,
+    original_positions: np.ndarray,
+    x_lo: np.ndarray,
+    x_hi: np.ndarray,
+    y_lo: np.ndarray,
+    y_hi: np.ndarray,
+    grid: float,
+) -> None:
+    """Grid-snap each component's displacement; restore unmoved ones.
+
+    Displacements below 1e-9 mm are float noise and are dropped, so a
+    component no pair pushed comes back with its exact input coordinates.
+    With *grid* > 0 each remaining per-axis displacement is rounded away
+    from zero to a multiple of *grid* (never shrinking a separation the
+    push loop produced) and then stepped back toward zero, one grid step
+    at a time, while the result would leave the board.  Components whose
+    clamped range is empty (wider than the board) keep their centred
+    position.  Modifies *positions* in place.
+    """
+    n = positions.shape[0]
+    bounds = ((x_lo, x_hi), (y_lo, y_hi))
+    for i in range(n):
+        for axis in (0, 1):
+            delta = positions[i, axis] - original_positions[i, axis]
+            if abs(delta) < 1e-9:
+                positions[i, axis] = original_positions[i, axis]
+                continue
+            if grid <= 0:
+                continue
+            lo, hi = bounds[axis][0][i], bounds[axis][1][i]
+            if lo > hi:
+                continue
+            snapped = _snap_away_from_zero(delta, grid)
+            candidate = original_positions[i, axis] + snapped
+            while abs(snapped) > 0 and not (lo - 1e-9 <= candidate <= hi + 1e-9):
+                snapped -= math.copysign(grid, snapped)
+                if abs(snapped) < grid / 2:
+                    snapped = 0.0
+                candidate = original_positions[i, axis] + snapped
+            if lo - 1e-9 <= candidate <= hi + 1e-9:
+                positions[i, axis] = candidate
+            # else: even the unmoved position is off-board; keep the clamp.
+
+
 def _count_overlaps(
     positions: np.ndarray,
     half_sizes: np.ndarray,
@@ -583,8 +718,13 @@ def _count_overlaps(
     margin: float,
     n: int,
     spatial_grid: _SpatialGrid | None = None,
+    min_clearance: float | None = None,
 ) -> int:
-    """Count the number of overlapping pairs."""
+    """Count the number of overlapping pairs.
+
+    With *min_clearance* set, counts pairs violating that clearance (see
+    :func:`_violates_clearance`) instead of pairs inside *margin*.
+    """
     count = 0
 
     if spatial_grid is not None:
@@ -597,13 +737,10 @@ def _count_overlaps(
         if sides[i] != sides[j]:
             continue
 
-        dx = abs(positions[j, 0] - positions[i, 0])
-        dy = abs(positions[j, 1] - positions[i, 1])
+        gap_x = abs(positions[j, 0] - positions[i, 0]) - half_sizes[i, 0] - half_sizes[j, 0]
+        gap_y = abs(positions[j, 1] - positions[i, 1]) - half_sizes[i, 1] - half_sizes[j, 1]
 
-        combined_hw = half_sizes[i, 0] + half_sizes[j, 0] + margin
-        combined_hh = half_sizes[i, 1] + half_sizes[j, 1] + margin
-
-        if (combined_hw - dx) > 0 and (combined_hh - dy) > 0:
+        if _pair_counts(gap_x, gap_y, margin, min_clearance):
             count += 1
 
     return count
@@ -617,6 +754,7 @@ def _get_overlap_details(
     n: int,
     component_defs: Sequence[ComponentDef],
     spatial_grid: _SpatialGrid | None = None,
+    min_clearance: float | None = None,
 ) -> list[OverlapDetail]:
     """Return detailed information about each remaining overlap pair.
 
@@ -637,27 +775,20 @@ def _get_overlap_details(
         if sides[i] != sides[j]:
             continue
 
-        dx = abs(positions[j, 0] - positions[i, 0])
-        dy = abs(positions[j, 1] - positions[i, 1])
+        gap_x = abs(positions[j, 0] - positions[i, 0]) - half_sizes[i, 0] - half_sizes[j, 0]
+        gap_y = abs(positions[j, 1] - positions[i, 1]) - half_sizes[i, 1] - half_sizes[j, 1]
 
-        combined_hw = half_sizes[i, 0] + half_sizes[j, 0] + margin
-        combined_hh = half_sizes[i, 1] + half_sizes[j, 1] + margin
-
-        overlap_x = combined_hw - dx
-        overlap_y = combined_hh - dy
-
-        if overlap_x > 0 and overlap_y > 0:
-            # Actual clearance is negative of the worst overlap
-            # (the minimum-overlap axis determines how far apart they need
-            # to move).  Clearance = gap between edges; negative = overlap.
-            worst_overlap = min(overlap_x, overlap_y)
-            actual_clearance = -worst_overlap + margin  # undo the margin inflation
+        if _pair_counts(gap_x, gap_y, margin, min_clearance):
+            # Clearance = gap between edges on the axis that separates
+            # them most (the minimum-overlap axis determines how far apart
+            # they need to move); negative = overlap.
+            actual_clearance = max(gap_x, gap_y)
             details.append(
                 OverlapDetail(
                     ref1=component_defs[i].reference,
                     ref2=component_defs[j].reference,
                     actual_clearance_mm=round(actual_clearance, 3),
-                    required_clearance_mm=margin,
+                    required_clearance_mm=(margin if min_clearance is None else min_clearance),
                 )
             )
 

@@ -73,6 +73,11 @@ from kicad_tools.placement.wirelength import (
 )
 from kicad_tools.placement.writeback import write_footprint_placements
 
+# Placement grid for slide-off displacements on a ``--seed current`` warm
+# start (issue #6250). Matches the decoupling snap's grid and board 04's
+# 0.05 mm routing grid, so a part placed on the grid stays on it.
+WARM_START_PLACEMENT_GRID_MM = 0.05
+
 # ---------------------------------------------------------------------------
 # Interrupt handling (SIGINT / SIGTERM)
 # ---------------------------------------------------------------------------
@@ -1301,6 +1306,20 @@ def run_optimize_placement(
         seed=42,  # Deterministic by default
     )
 
+    # A warm start refines a layout someone already placed, so slide-off
+    # must leave every legal pair alone: it only acts on a real violation
+    # (overlap, or a gap below the objective's own DRC clearance) instead
+    # of on anything inside its 0.5 mm comfort margin, and keeps its
+    # displacements on the 0.05 mm placement grid. Board 04's DRC-clean
+    # floorplan has U2 0.45 mm from C11; the margin test nudged U2 by
+    # 0.0275 mm and broke its 0.5 mm-pitch escapes (issue #6250).
+    # Generated seeds keep the historical margin-driven spreading.
+    slide_min_clearance: float | None = None
+    slide_grid_mm = 0.0
+    if seed_method == "current":
+        slide_min_clearance = rules.min_clearance
+        slide_grid_mm = WARM_START_PLACEMENT_GRID_MM
+
     # Initialize or resume
     if not resumed:
         if not quiet:
@@ -1323,6 +1342,8 @@ def run_optimize_placement(
                 seed_vector,
                 components,
                 board_outline,
+                min_clearance_mm=slide_min_clearance,
+                grid_mm=slide_grid_mm,
             )
             if not quiet:
                 print(
@@ -1524,6 +1545,8 @@ def run_optimize_placement(
             board_outline,
             max_iterations=50,
             max_displacement_mm=50.0,
+            min_clearance_mm=slide_min_clearance,
+            grid_mm=slide_grid_mm,
         )
         if not quiet and post_slide_result.overlaps_resolved > 0:
             print(

@@ -1379,12 +1379,12 @@ kct optimize-placement <pcb_file> [options]
 | `--strategy {cmaes}` | Optimization strategy (default: `cmaes`) |
 | `--max-iterations N` | Maximum optimizer iterations (default: 1000) |
 | `-o`, `--output PATH` | Output PCB (default: overwrite input) |
-| `--seed {force-directed,random}` | Seed placement method |
+| `--seed {force-directed,random,current}` | Seed placement method. `current` warm-starts from the board's own footprint positions; its slide-off passes only move parts that overlap or break the 0.2 mm clearance rule, on a 0.05 mm grid (Issue #6250) |
 | `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area`, `creepage`, `cohesion`, `decoupling` (default 2.0; `{"decoupling": 0}` turns off the decoupling-cap affinity term and its snap pass) |
 | `--dry-run` | Evaluate current placement without optimizing |
 | `--progress N` | Print score every N iterations (0 disables) |
 | `--checkpoint DIR` | Directory for checkpoint save/resume |
-| `--no-slide-off` | Disable slide-off overlap pre-processing on the seed |
+| `--no-slide-off` | Disable slide-off overlap resolution (pre-pass on the seed and post-pass on the result) |
 | `--anchor-weight FLOAT` | Per-net HPWL multiplier boost for nets that touch `(locked)` footprints. Scales each qualifying net's HPWL by `1 + anchor_weight * (anchored_pins / total_pins)`. **Default 0.0**. |
 | `--pad-anchored-wirelength` | Measure the wirelength term between transformed **pad** coordinates instead of footprint centres (issue #4831 M1). **Default off** — the objective is unchanged unless you pass it. |
 | `--time-budget SEC` | Wall-clock budget (bounds the feasibility-gated convergence loop) |
