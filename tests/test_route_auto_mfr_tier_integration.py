@@ -26,7 +26,9 @@ Acceptance criteria (from issue #2885), adapted to a reproducible signal:
    This is the "Routing succeeds (>= threshold) after escalation, not
    before" AC, expressed as a delta rather than an absolute threshold
    (board-04 routing has residual issues tracked under #2695 / #2696 /
-   #2834 that prevent a deterministic absolute completion target).
+   #2834 that prevent a deterministic absolute completion target).  The
+   run uses an iteration budget, not wall clock (see "Determinism" below),
+   so the delta is reproducible rather than a timing race.
 
 2. The CLI advances to ``jlcpcb-tier1``: a 'Tier N/M: jlcpcb-tier1'
    banner appears in stdout (the canonical AC#2 from issue #2885 --
@@ -38,27 +40,51 @@ Acceptance criteria (from issue #2885), adapted to a reproducible signal:
    line in stdout names the trigger.  When the chain actually succeeds
    (tier-1 returns 0) the cost-note 'Recommendation: order from
    jlcpcb-tier1.' line is asserted as well; when tier-1 ends partial
-   (board-04's current state on 2L) the cost-note is not emitted, and
+   (board-04's current state on 4L) the cost-note is not emitted, and
    we assert only the trigger reason.
 
 4. The jlcpcb tier attempt within the same run falls short of the
    jlcpcb-tier1 attempt -- the regression-anchor for the contrast.
 
-Marked ``@pytest.mark.slow`` -- the chain exercises real routing on the
-full LQFP-48 + crystal + LDO + SWD-header board (~5-8 minutes wall-clock
-on a modern laptop).  PR-time CI excludes ``-m slow``; the nightly
-slow-tests workflow at ``.github/workflows/slow-tests.yml`` picks this up.
+Issue #6217 re-baseline (after #5189 / #5201).  Via-in-pad now depends on
+a real, orderable fabrication process, and JLCPCB's POFV process needs 4+
+copper layers: ``jlcpcb-tier1`` has *no* via-in-pad on a 2-layer board.  The
+chain is therefore only physically real at 4L, so the escalation test runs
+``--starting-layers 4 --max-layers 4``.  A second, 2-layer class pins the
+other half of the contract: at 2L the ladder must NOT escalate on the
+missed-rescue signal, and must say why (the tier's 4-layer floor).
 
-We constrain layer escalation to ``--max-layers 2`` so each tier attempt
-runs once at 2L rather than iterating 2L -> 4L -> 6L per tier (which
-exhausts the wall-clock budget before the second tier can start).  The
-2L stack is the minimum surface needed to exercise the mfr-tier
-escalation chain mechanism: 2L jlcpcb makes only a fraction of routes
-(plane-blocked LQFP inner pins fail), 2L jlcpcb-tier1 makes strictly
-more (via-in-pad rescue opens the inner-pin escape on B.Cu).  Absolute
-completion on 2L is gated by #2696 (impedance) and #2834 (clearance);
-that is intentional -- this test pins the *chain mechanism*, not the
-absolute completion target.
+Backend: ``--backend python``, as before.  On the C++ backend board 04
+routes 9/9 at plain ``jlcpcb`` on both 2L and 4L, so the ladder stops at the
+first tier and there is nothing to escalate.  On the python backend U2's
+congested pins (BOOT0, NRST, OSC_IN) are escape-limited under a bounded
+per-net search -- the case in-pad vias straight down to the inner layers
+relieve.
+
+Determinism (PR #6228 review): both runs use ``--deterministic-budget
+--deterministic-rescue --per-net-iterations N`` and NO ``--timeout``, so
+every search is bounded by node expansions rather than wall clock and no
+stage deadline can fire.  The routed counts are then a property of the
+code, not of runner speed or load.  A wall-clock per-net budget made the
+tier1-vs-jlcpcb margin a race: on this branch it measured 2-3 nets at the
+30 s default, 1 at 15 s and 0 at 10 s, so a busy 4-vCPU runner could flip
+it.  Measured with the iteration budget (4L, each tier alone): at 200k
+expansions per net jlcpcb's best attempt is 6/9 and jlcpcb-tier1's is 7/9;
+at 500k and 1M it is 7/9 vs 8/9, but each tier then takes ~27 min under
+load; at 100k both stall at 3/9.  Two concurrent full ``--auto-mfr-tier``
+runs at 200k gave identical per-attempt counts (jlcpcb 6, 3; tier1 7, 6, 3),
+matching the single-tier runs made under different load, in ~25 min each
+under ~5x CPU contention.  This needed #6217's fix that makes ``--per-net-iterations`` reach the
+pure-python backend at all.
+
+The progress assertion is backed by a mechanism check that does not depend
+on the A* budget: tier1's escape pass reports ``(N via-in-pad)`` for U2 and
+jlcpcb's reports none.
+
+Marked ``@pytest.mark.slow``; PR-time CI excludes ``-m slow`` and the
+nightly ``.github/workflows/slow-tests.yml`` runs it.  Without ``--timeout``
+the subprocess wall-clock limit below is the only safety net, so it is set
+well above the measured runtime.
 """
 
 from __future__ import annotations
@@ -89,22 +115,23 @@ def unrouted_pcb_path() -> Path:
 
 
 def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
-    """Extract the final ``Nets routed: N/M`` count from a stdout block.
+    """Extract the best routed-net count from one tier's stdout block.
 
-    Returns ``(routed, total)`` from the LAST occurrence in ``stdout``.
-    The block may contain multiple summary lines (e.g. one per layer
-    escalation attempt); we take the final one which represents the
-    best result for that block.
+    Each layer attempt prints ``Routed: N/M nets`` and the tier's layer
+    escalation summary prints ``Nets routed: N/M``.  Returns the
+    ``(routed, total)`` pair with the highest ``routed`` over both forms --
+    the tier's best attempt.  Issue #6217: the per-attempt lines matter
+    because the hard ``--timeout`` (#5141) can end the final tier
+    mid-attempt, before its summary is printed.
 
-    Returns ``None`` if no summary line is present (e.g. the router
-    crashed before producing one).
+    Returns ``None`` if no count is present (e.g. the router crashed
+    before finishing any attempt).
     """
-    pattern = re.compile(r"Nets routed:\s+(\d+)/(\d+)")
-    matches = pattern.findall(stdout)
+    pattern = re.compile(r"(?:Nets routed|Routed):\s+(\d+)/(\d+)")
+    matches = [(int(r), int(t)) for r, t in pattern.findall(stdout)]
     if not matches:
         return None
-    routed, total = matches[-1]
-    return int(routed), int(total)
+    return max(matches)
 
 
 def _split_by_tier(stdout: str) -> dict[str, str]:
@@ -132,19 +159,35 @@ def _split_by_tier(stdout: str) -> dict[str, str]:
     return result
 
 
+# Per-net A* node-expansion caps for the deterministic runs.  4L: the
+# smallest measured cap with a jlcpcb-tier1 > jlcpcb margin (6/9 vs 7/9).
+# 2L: the run only needs the base tier to fail, so a small cap keeps it short.
+_ESCALATION_4L_PER_NET_ITERATIONS = 200_000
+_NO_ESCALATION_2L_PER_NET_ITERATIONS = 50_000
+# Subprocess wall-clock safety nets (seconds).  No ``--timeout`` is passed --
+# a firing wall-clock deadline would make the result machine-dependent again.
+_ESCALATION_4L_WALL_CLOCK_S = 4200
+_NO_ESCALATION_2L_WALL_CLOCK_S = 1500
+
+
 def _run_route_auto_mfr_tier(
     unrouted_pcb_path: Path,
     *,
-    timeout_seconds: int = 480,
+    max_layers: int,
+    starting_layers: int,
+    per_net_iterations: int,
+    wall_clock_seconds: int,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``kct route --auto-mfr-tier`` on a copy of the board-04 PCB.
 
     Args:
         unrouted_pcb_path: Source unrouted PCB (board-04 committed artifact).
-        timeout_seconds: Total wall-clock budget passed via ``--timeout``.
-            The two-tier ladder (jlcpcb + jlcpcb-tier1) at ``--max-layers 2``
-            typically completes in ~150-300s; 480s gives generous slack
-            for slow runners.
+        max_layers: ``--max-layers``.  The reachable layer counts decide
+            whether ``jlcpcb-tier1`` offers via-in-pad (Issue #6217).
+        starting_layers: ``--starting-layers``.
+        per_net_iterations: ``--per-net-iterations`` under
+            ``--deterministic-budget`` (machine-independent search bound).
+        wall_clock_seconds: Subprocess safety-net limit.
 
     Returns the completed subprocess so callers can inspect both the
     return code and the captured stdout/stderr.
@@ -160,42 +203,57 @@ def _run_route_auto_mfr_tier(
             str(pcb_copy),
             "--seed",
             "42",
+            "--starting-layers",
+            str(starting_layers),
             "--max-layers",
-            "2",
+            str(max_layers),
             "--manufacturer",
             "jlcpcb",
-            "--timeout",
-            str(timeout_seconds),
+            "--deterministic-budget",
+            "--deterministic-rescue",
+            "--per-net-iterations",
+            str(per_net_iterations),
             "--backend",
             "python",
             "--auto-mfr-tier",
         ]
-        # subprocess timeout = wall-clock budget + setup overhead slack.
-        wall_clock = timeout_seconds + 120
         return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=wall_clock,
+            timeout=wall_clock_seconds,
             check=False,
         )
 
 
+def _assert_deterministic(proc: subprocess.CompletedProcess[str]) -> None:
+    """No wall-clock stage deadline fired, so the counts are reproducible."""
+    assert "stage deadline fired" not in proc.stdout, (
+        "A wall-clock stage deadline fired during a --deterministic-budget run, "
+        "so its routed counts are no longer machine-independent.\n"
+        f"Last 3000 chars of stdout:\n{proc.stdout[-3000:]}"
+    )
+
+
+def _fail_on_fatal_exit(proc: subprocess.CompletedProcess[str]) -> None:
+    """Config errors / internal crashes (exit 1 or 5) are never a result."""
+    if proc.returncode in (1, 5):
+        pytest.fail(
+            f"kct route --auto-mfr-tier returned fatal exit code "
+            f"{proc.returncode}\n"
+            f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
+            f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
+        )
+
+
 @pytest.mark.slow
-@pytest.mark.timeout(900)
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Issue #6217 (split from #5991): #5189/#5201 made via-in-pad depend on "
-        "a real fabrication process. JLCPCB POFV needs 4+ layers, so "
-        "jlcpcb-tier1 offers no via-in-pad on this 2-layer run. The jlcpcb "
-        "tier also stopped recording missed via-in-pad rescues (bisected to "
-        "3bbbf1aa), so escalation never leaves jlcpcb. Strict: remove this "
-        "marker when #6217 re-baselines the chain at 4L."
-    ),
-)
+@pytest.mark.timeout(4500)
+# The class-scoped route runs once per xdist worker that receives one of its
+# tests; pin the class to one worker so the ~25 CPU-min route runs once
+# (Slow Tests uses ``--dist loadgroup``; PR #6228 review).
+@pytest.mark.xdist_group("mfr_tier_4l")
 class TestAutoMfrTierIntegration:
-    """End-to-end chain test: jlcpcb -> escalate to jlcpcb-tier1.
+    """End-to-end chain test at 4L: jlcpcb -> escalate to jlcpcb-tier1.
 
     A single ``--auto-mfr-tier`` subprocess invocation produces both:
       - the jlcpcb tier attempt (AC #4 regression-anchor evidence)
@@ -208,16 +266,16 @@ class TestAutoMfrTierIntegration:
 
     @pytest.fixture(scope="class")
     def auto_mfr_tier_result(self, unrouted_pcb_path: Path) -> subprocess.CompletedProcess[str]:
-        """Run with ``--auto-mfr-tier --max-layers 2`` and capture output."""
-        proc = _run_route_auto_mfr_tier(unrouted_pcb_path, timeout_seconds=480)
-        # Fatal exit codes (config error, internal crash) -- bail with detail.
-        if proc.returncode in (1, 5):
-            pytest.fail(
-                f"kct route --auto-mfr-tier returned fatal exit code "
-                f"{proc.returncode}\n"
-                f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
-                f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
-            )
+        """Run with ``--auto-mfr-tier`` at 4L only and capture output."""
+        proc = _run_route_auto_mfr_tier(
+            unrouted_pcb_path,
+            max_layers=4,
+            starting_layers=4,
+            per_net_iterations=_ESCALATION_4L_PER_NET_ITERATIONS,
+            wall_clock_seconds=_ESCALATION_4L_WALL_CLOCK_S,
+        )
+        _fail_on_fatal_exit(proc)
+        _assert_deterministic(proc)
         return proc
 
     @pytest.fixture(scope="class")
@@ -239,12 +297,13 @@ class TestAutoMfrTierIntegration:
         """The jlcpcb-tier1 attempt routes strictly more nets than the
         jlcpcb attempt within the same run.
 
-        This is the AC#1 evidence ("Routing succeeds [more] after
-        escalation [than] before") expressed as a delta.  An absolute
-        completion target on board-04 is gated by residual upstream
-        issues (#2695 OSC_OUT pad-completion, #2696 impedance on 2L,
-        #2834 clearance-pad-segment count); the chain mechanism is
-        nevertheless visible as a positive delta in routed-net counts.
+        Deterministic: under ``--deterministic-budget --per-net-iterations
+        200000`` with no ``--timeout`` the counts do not depend on runner
+        speed or load (measured: jlcpcb 6/9, jlcpcb-tier1 7/9, identical
+        across four runs under different CPU load).  An absolute completion
+        target on board-04 is gated by residual upstream issues (#2695
+        OSC_OUT pad-completion, #2696 impedance on 2L, #2834
+        clearance-pad-segment count).
         """
         assert "jlcpcb" in per_tier_stdout, (
             "Expected a 'Tier N/M: jlcpcb' banner.  Per-tier banners: "
@@ -266,11 +325,11 @@ class TestAutoMfrTierIntegration:
         jlcpcb_parsed = _parse_routed_net_count(jlcpcb_stdout)
         tier1_parsed = _parse_routed_net_count(tier1_stdout)
         assert jlcpcb_parsed is not None, (
-            "Expected 'Nets routed: N/M' summary in jlcpcb tier stdout.\n"
+            "Expected a 'Routed: N/M' count in jlcpcb tier stdout.\n"
             f"Last 2000 chars:\n{jlcpcb_stdout[-2000:]}"
         )
         assert tier1_parsed is not None, (
-            "Expected 'Nets routed: N/M' summary in jlcpcb-tier1 tier stdout.\n"
+            "Expected a 'Routed: N/M' count in jlcpcb-tier1 tier stdout.\n"
             f"Last 2000 chars:\n{tier1_stdout[-2000:]}"
         )
 
@@ -281,16 +340,42 @@ class TestAutoMfrTierIntegration:
             "Regression-anchor failed: within the --auto-mfr-tier run the "
             f"jlcpcb-tier1 tier routed {tier1_routed} nets vs jlcpcb's "
             f"{jlcpcb_routed} nets -- no positive delta.\n"
-            "\nThis means either:\n"
-            "  (a) The escalation path is not exercising any new capability "
-            "      vs the base tier (the feature is effectively dead).\n"
-            "  (b) The fine-pitch LQFP-48 + jlcpcb chain has become trivially "
-            "      routable on the base tier (capability has shifted; this "
-            "      test fixture is no longer the right anchor and should be "
-            "      replaced with a tighter case).\n"
+            "\nThe run is iteration-budgeted, so this is not a timing "
+            "flake.  Either the via-in-pad tier no longer helps (see "
+            "test_tier1_escape_pass_places_via_in_pad) or board-04 routing "
+            "changed and the per-net cap needs re-measuring.\n"
             f"\njlcpcb tier stdout (last 1500 chars):\n{jlcpcb_stdout[-1500:]}\n"
             f"\njlcpcb-tier1 tier stdout (last 1500 chars):\n"
             f"{tier1_stdout[-1500:]}"
+        )
+
+    def test_tier1_escape_pass_places_via_in_pad(self, per_tier_stdout: dict[str, str]) -> None:
+        """Mechanism check, independent of the A* budget (PR #6228 review).
+
+        The escape pass runs before any A* search, so whether it places
+        in-pad vias does not depend on how far the search gets.  jlcpcb has
+        no via-in-pad process and must place none on U2; jlcpcb-tier1 at 4L
+        has POFV and must place at least one -- the capability the
+        escalation exists to buy.  Checked on ANY tier1 attempt: the
+        interleaved micro-via fallback rung (#3371) places none, because its
+        0.3/0.15 mm micro-via is outside POFV's drill envelope (#5378).
+        """
+        in_pad_re = re.compile(r"Escape routes: U2 \(\w+\) - \d+ pins escaped \((\d+) via-in-pad\)")
+        assert "jlcpcb-tier1" in per_tier_stdout, (
+            f"No jlcpcb-tier1 tier ran.  Banners: {list(per_tier_stdout)}"
+        )
+        jlcpcb_in_pad = in_pad_re.findall(per_tier_stdout.get("jlcpcb", ""))
+        tier1_in_pad = [int(n) for n in in_pad_re.findall(per_tier_stdout["jlcpcb-tier1"])]
+        assert not jlcpcb_in_pad, (
+            "jlcpcb has no via-in-pad process, yet its escape pass reported "
+            f"in-pad vias on U2: {jlcpcb_in_pad}"
+        )
+        assert any(n > 0 for n in tier1_in_pad), (
+            "Expected a jlcpcb-tier1 attempt's escape pass to place at least "
+            "one via-in-pad on U2 ('Escape routes: U2 (...) - N pins escaped "
+            "(M via-in-pad)').\n"
+            f"\njlcpcb-tier1 stdout (last 3000 chars):\n"
+            f"{per_tier_stdout['jlcpcb-tier1'][-3000:]}"
         )
 
     # ------------------------------------------------------------------
@@ -404,3 +489,61 @@ class TestAutoMfrTierIntegration:
     # NOTE: covered by ``test_tier1_routes_more_nets_than_jlcpcb`` above
     # (the contrast is bidirectional: tier-1 > jlcpcb is the same
     # assertion as jlcpcb < tier-1).  No separate test needed.
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(1800)
+@pytest.mark.xdist_group("mfr_tier_2l")
+class TestAutoMfrTierNoEscalationAt2L:
+    """Issue #6217: at 2L the ladder must not escalate on missed rescues.
+
+    ``jlcpcb-tier1``'s via-in-pad process (POFV) needs 4+ copper layers, so a
+    ``--max-layers 2`` run gains nothing from escalating on the
+    missed-rescue signal.  Before #6217 the layer-blind guard
+    ``can_escalate_via_in_pad`` credited that gain anyway.  The run must
+    stay on ``jlcpcb`` and name the layer floor.
+    """
+
+    @pytest.fixture(scope="class")
+    def two_layer_result(self, unrouted_pcb_path: Path) -> subprocess.CompletedProcess[str]:
+        proc = _run_route_auto_mfr_tier(
+            unrouted_pcb_path,
+            max_layers=2,
+            starting_layers=2,
+            per_net_iterations=_NO_ESCALATION_2L_PER_NET_ITERATIONS,
+            wall_clock_seconds=_NO_ESCALATION_2L_WALL_CLOCK_S,
+        )
+        _fail_on_fatal_exit(proc)
+        _assert_deterministic(proc)
+        return proc
+
+    def test_does_not_escalate_to_tier1(
+        self, two_layer_result: subprocess.CompletedProcess[str]
+    ) -> None:
+        stdout = two_layer_result.stdout
+        banners = list(_split_by_tier(stdout))
+        assert banners == ["jlcpcb"], (
+            "At --max-layers 2 the ladder must stay on jlcpcb (jlcpcb-tier1 "
+            f"has no via-in-pad below 4 layers).  Per-tier banners: {banners}\n"
+            f"\nLast 3000 chars of stdout:\n{stdout[-3000:]}"
+        )
+        assert "Escalating to jlcpcb-tier1" not in stdout
+
+    def test_reports_the_layer_floor(
+        self, two_layer_result: subprocess.CompletedProcess[str]
+    ) -> None:
+        """The missed rescues are still detected, and the reason no tier
+        can use them is printed, naming tier1's 4-layer floor."""
+        stdout = two_layer_result.stdout
+        line = re.search(
+            r"No via-in-pad gain from jlcpcb-tier1: (\d+) missed via-in-pad "
+            r"rescue\(s\) on jlcpcb, but jlcpcb-tier1 offers via-in-pad only at "
+            r">= 4 copper layers and this run can reach only 2L",
+            stdout,
+        )
+        assert line is not None, (
+            "Expected the layer-gated no-escalation reason in stdout.\n"
+            f"\nLast 4000 chars of stdout:\n{stdout[-4000:]}"
+        )
+        assert int(line.group(1)) > 0
+        assert "raise --max-layers to 4" in stdout

@@ -175,6 +175,29 @@ class TestInterleaveFallback:
         assert out[2] == (4, "stack-4L", False)
         assert out[3] == (4, "stack-4L", True)
 
+    def test_manufacturer_skips_layer_counts_without_process(self):
+        """Issue #6217: jlcpcb-tier1 has no via-in-pad process at 2L (POFV
+        needs 4+ layers), so no 2L fallback rung is interleaved."""
+        out = _interleave_fine_pitch_fallback_attempts(
+            [(2, "stack-2L"), (4, "stack-4L")],
+            enabled=True,
+            manufacturer="jlcpcb-tier1",
+        )
+        assert out == [
+            (2, "stack-2L", False),
+            (4, "stack-4L", False),
+            (4, "stack-4L", True),
+        ]
+
+    def test_manufacturer_with_two_layer_process_keeps_every_rung(self):
+        """pcbway declares a via-in-pad process at 2L too."""
+        out = _interleave_fine_pitch_fallback_attempts(
+            [(2, "stack-2L"), (4, "stack-4L")],
+            enabled=True,
+            manufacturer="pcbway",
+        )
+        assert len(out) == 4
+
     def test_empty_input_preserved(self):
         """Empty input -> empty output, regardless of ``enabled``."""
         assert _interleave_fine_pitch_fallback_attempts([], enabled=False) == []

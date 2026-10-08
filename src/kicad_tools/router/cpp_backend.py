@@ -4774,7 +4774,18 @@ def create_hybrid_router(
 
     from .pathfinder import Router
 
-    return Router(grid, rules, net_class_map=net_class_map, diagonal_routing=diagonal_routing)
+    py_router = Router(grid, rules, net_class_map=net_class_map, diagonal_routing=diagonal_routing)
+    # Issue #6217: honour the tuned per-net iteration cap (#3881) on the pure
+    # Python backend too.  Before this, ``--per-net-iterations`` /
+    # ``--deterministic-budget`` only reached the Python A* when it ran as the
+    # C++ wrapper's fallback (``_max_iterations_override`` set per call there),
+    # so ``--backend python`` silently kept a wall-clock-only per-net budget
+    # (and none at all under --deterministic-budget, which zeroes
+    # --per-net-timeout).  The override only ever tightens the historical
+    # ``cols * rows * 4`` bound.
+    if per_net_iterations and int(per_net_iterations) > 0:
+        py_router._max_iterations_override = int(per_net_iterations)
+    return py_router
 
 
 # ---------------------------------------------------------------------------

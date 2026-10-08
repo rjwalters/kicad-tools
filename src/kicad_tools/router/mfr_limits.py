@@ -15,6 +15,7 @@ Supported Manufacturers:
 - PCBWay: Chinese manufacturer with good middle-ground specs
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from difflib import get_close_matches
 
@@ -417,27 +418,89 @@ def get_mfr_tier_ladder(manufacturer: str) -> list[str]:
     return list(ladder)
 
 
-def can_escalate_via_in_pad(current_mfr: str, next_mfr: str) -> bool:
+#: Copper-layer counts probed by :func:`min_via_in_pad_layer_count` when
+#: naming the floor a tier's via-in-pad process needs (Issue #6217).
+_VIA_IN_PAD_PROBE_LAYER_COUNTS: tuple[int, ...] = (2, 4, 6, 8, 10, 12)
+
+
+def via_in_pad_layer_counts(manufacturer: str, layer_counts: Iterable[int]) -> tuple[int, ...]:
+    """Return the members of ``layer_counts`` at which ``manufacturer`` can
+    actually fabricate via-in-pad (Issue #6217).
+
+    A tier's bare :attr:`MfrLimits.via_in_pad_supported` flag only says the
+    process exists *somewhere* in its catalog.  JLCPCB Capability Plus
+    (``jlcpcb-tier1``) is the canonical example: the flag is ``True`` on
+    every layer configuration, but its POFV process needs 4+ copper layers.
+    This helper defers to
+    :func:`kicad_tools.router.via_in_pad_eligibility.resolve_process` -- the
+    same predicate the escape router and the DRC rule use -- so the
+    escalation loop can never disagree with them about which layer counts
+    get an in-pad via.
+
+    Returns:
+        The eligible layer counts, sorted ascending and de-duplicated.
+        Empty for an unknown manufacturer (fail closed).
+    """
+    from kicad_tools.router.via_in_pad_eligibility import resolve_process
+
+    return tuple(
+        sorted({int(n) for n in layer_counts if resolve_process(manufacturer, int(n)) is not None})
+    )
+
+
+def min_via_in_pad_layer_count(manufacturer: str) -> int | None:
+    """Smallest copper-layer count at which ``manufacturer`` offers an
+    orderable via-in-pad process, or ``None`` when it never does.
+
+    Used to name the constraint in the ``--auto-mfr-tier`` diagnostics
+    (e.g. "jlcpcb-tier1 offers via-in-pad only at >= 4 copper layers").
+    """
+    eligible = via_in_pad_layer_counts(manufacturer, _VIA_IN_PAD_PROBE_LAYER_COUNTS)
+    return eligible[0] if eligible else None
+
+
+def can_escalate_via_in_pad(
+    current_mfr: str,
+    next_mfr: str,
+    layer_counts: Iterable[int] | None = None,
+) -> bool:
     """True iff escalating from current_mfr to next_mfr gains via-in-pad.
 
     Used by the auto-mfr-tier escalation loop as the canonical convergence
     guard: when the next tier in the ladder offers no via-in-pad gain AND
     no scalar relaxation, escalating is a no-op and should be skipped.
 
+    Issue #6217: the gain is layer-dependent.  ``jlcpcb-tier1``'s via-in-pad
+    process needs 4+ copper layers, so escalating ``jlcpcb -> jlcpcb-tier1``
+    on a run that can only reach 2 layers gains nothing.  Pass
+    ``layer_counts`` -- the copper-layer counts the next tier's routing
+    attempt can actually reach -- and the gain is real only when, at one of
+    those counts, ``next_mfr`` has an orderable via-in-pad process
+    (:func:`via_in_pad_layer_counts`) and ``current_mfr`` does not.
+
     Args:
         current_mfr: Current manufacturer tier name.
         next_mfr: Candidate next-tier manufacturer name.
+        layer_counts: Copper-layer counts the escalated attempt may route
+            at.  ``None`` keeps the legacy catalog-level comparison of the
+            bare capability flags, which ignores layer count; production
+            callers (``route_with_mfr_tier_escalation``) always pass it.
 
     Returns:
-        True when ``next_mfr`` supports via-in-pad and ``current_mfr``
-        does not.  Both manufacturers must be in :data:`MFR_LIMITS`.
+        True when ``next_mfr`` gains via-in-pad over ``current_mfr``.  Both
+        manufacturers must be in :data:`MFR_LIMITS`.
     """
     try:
         cur = get_mfr_limits(current_mfr)
         nxt = get_mfr_limits(next_mfr)
     except ValueError:
         return False
-    return nxt.via_in_pad_supported and not cur.via_in_pad_supported
+    if layer_counts is None:
+        return nxt.via_in_pad_supported and not cur.via_in_pad_supported
+    counts = tuple(layer_counts)
+    nxt_counts = set(via_in_pad_layer_counts(next_mfr, counts))
+    cur_counts = set(via_in_pad_layer_counts(current_mfr, counts))
+    return bool(nxt_counts - cur_counts)
 
 
 def can_escalate_scalar(current_mfr: str, next_mfr: str) -> bool:

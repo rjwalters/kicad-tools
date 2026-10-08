@@ -8337,6 +8337,7 @@ def _mfr_supports_via_in_pad(manufacturer: str | None) -> bool:
 def _interleave_fine_pitch_fallback_attempts(
     layer_configs: list,
     enabled: bool,
+    manufacturer: str | None = None,
 ):
     """Interleave a via-in-pad fallback retry between consecutive layer attempts.
 
@@ -8363,19 +8364,78 @@ def _interleave_fine_pitch_fallback_attempts(
         layer_configs: Pre-P_FP5 list of ``(layer_count, layer_stack)``
             tuples (the output of ``_filter_layer_configs_for_pcb``).
         enabled: When ``True``, insert a fallback retry after each entry.
+        manufacturer: Issue #6217 -- when given, the fallback retry is only
+            inserted after entries whose layer count has an orderable
+            via-in-pad process for this manufacturer
+            (:func:`kicad_tools.router.mfr_limits.via_in_pad_layer_counts`).
+            ``None`` keeps the layer-blind behaviour (every entry).
 
     Returns:
         A new list of ``(layer_count, layer_stack, via_in_pad_fallback)``
         triples.  Length is ``len(layer_configs)`` when ``enabled=False``
-        and ``2 * len(layer_configs)`` otherwise.
+        and up to ``2 * len(layer_configs)`` otherwise.
     """
     if not enabled:
         return [(lc, ls, False) for lc, ls in layer_configs]
+    eligible: set[int] | None = None
+    if manufacturer:
+        from kicad_tools.router.mfr_limits import via_in_pad_layer_counts
+
+        eligible = set(via_in_pad_layer_counts(manufacturer, [lc for lc, _ in layer_configs]))
     interleaved: list = []
     for lc, ls in layer_configs:
         interleaved.append((lc, ls, False))
-        interleaved.append((lc, ls, True))
+        if eligible is None or lc in eligible:
+            interleaved.append((lc, ls, True))
     return interleaved
+
+
+def _layer_escalation_base_configs() -> list:
+    """The unfiltered ``(layer_count, LayerStack)`` ladder that
+    :func:`route_with_layer_escalation` walks, in escalation order.
+
+    Shared with :func:`_mfr_tier_reachable_layer_counts` (Issue #6217) so
+    the manufacturer-tier guard reasons about exactly the layer counts the
+    inner escalation will try.
+    """
+    from kicad_tools.router import LayerStack
+
+    return [
+        (2, LayerStack.two_layer()),
+        (4, LayerStack.four_layer_sig_gnd_pwr_sig()),
+        (4, LayerStack.four_layer_all_signal()),
+        (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
+    ]
+
+
+def _mfr_tier_reachable_layer_counts(pcb_path: Path, args) -> tuple[int, ...]:
+    """Copper-layer counts a tier's inner layer-escalation attempt can reach.
+
+    Issue #6217: via-in-pad availability depends on layer count
+    (``jlcpcb-tier1``'s POFV process needs 4+ layers), so the
+    ``--auto-mfr-tier`` convergence guard must know which layer counts the
+    next tier's ``route_with_layer_escalation`` call will actually try.
+    This applies the same ladder and the same
+    :func:`_filter_layer_configs_for_pcb` filter (``--max-layers``,
+    ``--starting-layers``, declared stackup) that the inner call applies.
+
+    Returns:
+        Sorted, de-duplicated layer counts.  Never empty: on any failure it
+        falls back to ``(2,)`` -- the conservative choice, since no tier
+        gains via-in-pad from a smaller board.
+    """
+    try:
+        configs = _filter_layer_configs_for_pcb(
+            _layer_escalation_base_configs(),
+            pcb_path,
+            int(getattr(args, "max_layers", 4) or 4),
+            quiet=True,
+            starting_layers=int(getattr(args, "starting_layers", None) or 2),
+        )
+    except Exception:  # pragma: no cover - defensive: never break escalation
+        configs = []
+    counts = tuple(sorted({int(n) for n, _ in configs}))
+    return counts or (2,)
 
 
 def _rung_dedup_fingerprint(
@@ -8441,7 +8501,6 @@ def route_with_layer_escalation(
     from kicad_tools.cli.progress import flush_print, spinner
     from kicad_tools.router import (
         DesignRules,
-        LayerStack,
         ensure_cpp_backend_available,
         load_pcb_for_routing,
         show_routing_summary,
@@ -8554,12 +8613,7 @@ def route_with_layer_escalation(
     _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Layer stacks to try (in escalation order)
-    layer_configs = [
-        (2, LayerStack.two_layer()),
-        (4, LayerStack.four_layer_sig_gnd_pwr_sig()),
-        (4, LayerStack.four_layer_all_signal()),
-        (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
-    ]
+    layer_configs = _layer_escalation_base_configs()
 
     # Issue #2916: filter and reorder by the PCB's declared stackup.
     # Drops entries below the detected copper count (so a 4L board never
@@ -8598,8 +8652,14 @@ def route_with_layer_escalation(
     _fp5_compose_fallback = not _user_explicit_fallback and _mfr_supports_via_in_pad(
         getattr(args, "manufacturer", None)
     )
+    # Issue #6217: only interleave the fallback rung at layer counts where
+    # the tier can actually fabricate via-in-pad.  ``jlcpcb-tier1`` at 2L has
+    # no orderable process, so the escape router refuses every in-pad via
+    # there and a 2L fallback rung would just re-run the baseline.
     layer_configs = _interleave_fine_pitch_fallback_attempts(
-        layer_configs, enabled=_fp5_compose_fallback
+        layer_configs,
+        enabled=_fp5_compose_fallback,
+        manufacturer=getattr(args, "manufacturer", None),
     )
 
     if not quiet:
@@ -10852,6 +10912,7 @@ def route_with_mfr_tier_escalation(
         can_escalate_via_in_pad,
         get_mfr_limits,
         get_mfr_tier_ladder,
+        min_via_in_pad_layer_count,
     )
 
     # Resolve the ladder.  Explicit --mfr-tier-ladder wins; otherwise look
@@ -10896,6 +10957,17 @@ def route_with_mfr_tier_escalation(
     final_exit_code: int = 1
     saw_terminating_success: bool = False
 
+    # Issue #6217: via-in-pad availability is layer-dependent
+    # (``jlcpcb-tier1``'s POFV process needs 4+ copper layers).  Resolve
+    # once which layer counts each tier's inner layer-escalation call can
+    # reach, so the convergence guard below only credits a via-in-pad gain
+    # the next tier can actually fabricate on this run.
+    reachable_layer_counts = _mfr_tier_reachable_layer_counts(pcb_path, args)
+    reachable_label = "/".join(f"{n}L" for n in reachable_layer_counts)
+    # Diagnostic recorded when missed via-in-pad rescues were seen but the
+    # next tier offers via-in-pad only at layer counts this run cannot reach.
+    layer_gated_note: str | None = None
+
     # Issue #2891: suppress the per-attempt "does not support via-in-pad"
     # ERROR log (#2880) while escalation is in flight.  The flag is read
     # by ``EscapeRouter`` via ``rules.auto_mfr_tier_in_progress`` (set by
@@ -10925,7 +10997,14 @@ def route_with_mfr_tier_escalation(
         # if some tier got registered twice).
         if tier_idx > 0:
             prev_tier = tiers_to_try[tier_idx - 1]
-            gains_capability = can_escalate_via_in_pad(prev_tier, tier_name)
+            gains_capability = can_escalate_via_in_pad(
+                prev_tier, tier_name, layer_counts=reachable_layer_counts
+            )
+            # Issue #6217: the catalog says ``tier_name`` adds via-in-pad,
+            # but not at any layer count this run can reach.
+            via_in_pad_layer_gated = not gains_capability and can_escalate_via_in_pad(
+                prev_tier, tier_name
+            )
             gains_scalar = can_escalate_scalar(prev_tier, tier_name)
             # Issue #2881: trigger-aware escalation -- only walk forward
             # when the failure mode is one that escalation could fix.
@@ -10935,6 +11014,7 @@ def route_with_mfr_tier_escalation(
             # (defensive: the user opted in to escalation, and a tighter
             # tier is registered in the ladder).
             triggered_by_missed_in_pad = False
+            missed_count: int = 0
             if last_router is not None:
                 # Read the canonical private attribute set by
                 # Autorouter._escape (see core.py:8856).
@@ -10942,9 +11022,10 @@ def route_with_mfr_tier_escalation(
                 if escape_router is not None:
                     missed = getattr(escape_router, "missed_via_in_pad_rescues", 0)
                     try:
-                        triggered_by_missed_in_pad = bool(missed and int(missed) > 0)
+                        missed_count = int(missed or 0)
                     except (TypeError, ValueError):
-                        triggered_by_missed_in_pad = False
+                        missed_count = 0
+                    triggered_by_missed_in_pad = missed_count > 0
 
             # Issue #2883: consult MFR_TIER_ESCALATION_TRIGGERS on the
             # dominant failure cause from the previous tier.  When the
@@ -10968,6 +11049,36 @@ def route_with_mfr_tier_escalation(
                     dominant_cause
                 ):
                     trigger_table_vetoes = True
+
+            if triggered_by_missed_in_pad and via_in_pad_layer_gated:
+                floor = min_via_in_pad_layer_count(tier_name)
+                floor_text = (
+                    f"only at >= {floor} copper layers"
+                    if floor is not None
+                    else "at no layer count"
+                )
+                max_layers_arg = getattr(args, "max_layers", None)
+                # Only blame --max-layers when it is what keeps the floor out
+                # of reach; otherwise name the run's layer ladder (stackup /
+                # --starting-layers filtering).
+                max_layers_limits = (
+                    floor is not None and isinstance(max_layers_arg, int) and max_layers_arg < floor
+                )
+                limit_text = (
+                    f" (--max-layers {max_layers_arg})"
+                    if max_layers_limits
+                    else " (this run's layer ladder)"
+                )
+                layer_gated_note = (
+                    f"{missed_count} missed via-in-pad rescue(s) on {prev_tier}, but "
+                    f"{tier_name} offers via-in-pad {floor_text} and this run "
+                    f"can reach only {reachable_label}{limit_text}, so escalating "
+                    "to it cannot place those in-pad vias"
+                )
+                if max_layers_limits:
+                    layer_gated_note += f" -- raise --max-layers to {floor}"
+                if not quiet:
+                    flush_print(f"  No via-in-pad gain from {tier_name}: {layer_gated_note}.")
 
             should_escalate = False
             reason = ""
@@ -11136,9 +11247,14 @@ def route_with_mfr_tier_escalation(
             last_router=last_router,
             manufacturer=args.manufacturer,
         )
-        if named_line:
+        if named_line or layer_gated_note:
             flush_print("\nDiagnosis:")
-            flush_print(f"  {named_line}")
+            if named_line:
+                flush_print(f"  {named_line}")
+            if layer_gated_note:
+                # Issue #6217: name the layer-count constraint that kept the
+                # via-in-pad tier out of reach.
+                flush_print(f"  {layer_gated_note}.")
 
         # Concrete remediation options.  Always print at least three so
         # users have actionable alternatives:

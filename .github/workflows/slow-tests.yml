@@ -149,4 +149,11 @@ jobs:
         # is why it hit the 1200s cap. Nothing consumed this report: no
         # fail_under threshold, no upload, only a terminal table. The cause
         # was removed instead of raising the timeout.
-        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=1200 -m slow
+        #
+        # --dist loadgroup (PR #6228): a class-scoped fixture runs once per
+        # xdist worker that receives a test from its class, so under the
+        # default --dist load the ~25 CPU-min board-04 --auto-mfr-tier route
+        # could run on up to 4 workers.  Tests marked
+        # @pytest.mark.xdist_group(...) stay on one worker; ungrouped tests
+        # load-balance exactly as under --dist load.
+        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 -m slow
