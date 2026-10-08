@@ -248,6 +248,10 @@ def _fail_on_fatal_exit(proc: subprocess.CompletedProcess[str]) -> None:
 
 @pytest.mark.slow
 @pytest.mark.timeout(4500)
+# The class-scoped route runs once per xdist worker that receives one of its
+# tests; pin the class to one worker so the ~25 CPU-min route runs once
+# (Slow Tests uses ``--dist loadgroup``; PR #6228 review).
+@pytest.mark.xdist_group("mfr_tier_4l")
 class TestAutoMfrTierIntegration:
     """End-to-end chain test at 4L: jlcpcb -> escalate to jlcpcb-tier1.
 
@@ -489,6 +493,7 @@ class TestAutoMfrTierIntegration:
 
 @pytest.mark.slow
 @pytest.mark.timeout(1800)
+@pytest.mark.xdist_group("mfr_tier_2l")
 class TestAutoMfrTierNoEscalationAt2L:
     """Issue #6217: at 2L the ladder must not escalate on missed rescues.
 
