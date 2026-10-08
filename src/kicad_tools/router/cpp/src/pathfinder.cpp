@@ -847,6 +847,13 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
     if (!grid_.component_holes_clear(hole_x, hole_y,
                                     search_emit_via_drill_ > 0 ? search_emit_via_drill_ : rules_.via_drill,
                                     rules_.min_hole_to_hole)) return true;
+    // Issue #6243: authored per-net minimum for the barrel, before any
+    // sharing / raster relief.
+    if (grid_.authored_active() &&
+        !grid_.authored_via_clear(hole_x, hole_y,
+                                  search_via_half_diam_mm_ > 0 ? 2.0 * search_via_half_diam_mm_
+                                                               : rules_.via_diameter,
+                                  net)) return true;
 
     const bool geometry_complete = grid_.route_geometry_complete();
     int physical_clear = -1;
@@ -1450,6 +1457,10 @@ RouteResult Pathfinder::route(
                 if (!grid_.trace_stored_vias_clear(edge,
                         search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
                         physical_partner_net_, physical_partner_clearance_)) continue;
+                // Issue #6243: authored per-net minimum on the swept step,
+                // before any pad-exit / sharing / partner relief below.
+                if (grid_.authored_active() &&
+                    !grid_.authored_segment_clear(ax, ay, bx, by, edge.width, nlayer, edge.net)) continue;
             }
 
             if (grid_.has_fixed_fills()) {
@@ -2114,6 +2125,10 @@ RouteResult Pathfinder::run_astar_loop() {
                 if (!grid_.trace_stored_vias_clear(edge,
                         search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
                         physical_partner_net_, physical_partner_clearance_)) continue;
+                // Issue #6243: authored per-net minimum on the swept step,
+                // before any pad-exit / sharing / partner relief below.
+                if (grid_.authored_active() &&
+                    !grid_.authored_segment_clear(ax, ay, bx, by, edge.width, nlayer, edge.net)) continue;
             }
 
             if (grid_.has_fixed_fills()) {

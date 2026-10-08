@@ -2763,6 +2763,8 @@ class Autorouter:
                 drill=pad_info.get("drill", 0.0),
                 rotation=pad_info.get("rotation", 0.0),
                 shape=pad_info.get("shape", "rect"),
+                # Issue #6243: a neutralised pad keeps its authored minimum.
+                authored_clearance=float(pad_info.get("authored_clearance", 0.0) or 0.0),
             )
             prepared.append(pad)
         # A pin name identifies an electrical terminal, not necessarily one
@@ -17196,7 +17198,55 @@ class Autorouter:
             self.net_class_map,
             congestion_estimator=self._ensure_congestion_estimator(),
         )
-        return self._demote_seg_seg_overlap_nets(net_routes, neg_router, finalize=True)
+        demoted = self._demote_seg_seg_overlap_nets(net_routes, neg_router, finalize=True)
+        # Issue #6243: authored netclass minima, whichever engine or post-pass
+        # produced the copper.  Dormant (one dict check) without floors.
+        demoted.extend(self.demote_authored_floor_violation_nets())
+        return sorted(set(demoted))
+
+    def demote_authored_floor_violation_nets(self) -> list[int]:
+        """Demote every routed net whose copper breaks an authored minimum (#6243).
+
+        The final-validation half of the authored-netclass contract: the same
+        kernel-backed census the search gates and the commit validators ask
+        (:func:`~kicad_tools.router.authored_clearance.authored_violations`),
+        run over the finished copper -- routed nets, escape stubs, preserved
+        and existing copper, every pad.  A net that still violates a stricter
+        netclass after search, optimize and nudge is demoted to unrouted
+        (grid unmarked, routes removed) and reported, never shipped as a
+        clearance failure.  Demotion is greedy and one net at a time, so of a
+        violating pair only one side is stripped.
+
+        Returns:
+            Sorted demoted net ids (empty in the common case, and always
+            when no authored minimum exists).
+        """
+        floors = self.rules.net_clearance_floors
+        if not floors and getattr(self.grid, "_authored_item_floors", False) is not True:
+            return []
+        from .authored_clearance import authored_violations
+
+        pads = self.grid.pads
+        routed_ids = {id(r) for r in self.routes}
+        fixed = [r for r in self.existing_routes if id(r) not in routed_ids]
+        victims: list[int] = []
+        while True:
+            found = authored_violations(floors, pads, [*self.routes, *fixed], first_per_net=True)
+            routed = [v for v in found if any(r.net == v.net for r in self.routes)]
+            if not routed:
+                break
+            hit = routed[0]
+            flush_print(
+                f"    Net {hit.net} ({self.net_names.get(hit.net, '?')}): {hit.actual:.3f}mm "
+                f"from net {hit.other_net} {hit.kind} at ({hit.x:.3f}, {hit.y:.3f}) is below "
+                f"the authored netclass minimum {hit.required:.3f}mm; demoted to unrouted"
+            )
+            victims.append(hit.net)
+            for route in [r for r in self.routes if r.net == hit.net]:
+                self.grid.unmark_route_usage(route)
+                self.grid.unmark_route(route)
+                self.routes.remove(route)
+        return sorted(victims)
 
     def route_all_advanced(
         self,

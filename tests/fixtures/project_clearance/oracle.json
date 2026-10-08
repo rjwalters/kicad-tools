@@ -1,0 +1,495 @@
+{
+  "native_version": "10.0.6",
+  "cases": [
+    {
+      "id": "v3-reverse0-inherit0",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 3
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "Low",
+              "priority": 0,
+              "clearance": 0.1
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": "Low"
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.1,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v3-reverse0-inherit1",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 3
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "Low",
+              "priority": 0
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": "Low"
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v3-reverse1-inherit0",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 3
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 0
+            },
+            {
+              "name": "Low",
+              "priority": 1,
+              "clearance": 0.1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": "Low"
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v3-reverse1-inherit1",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 3
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 0
+            },
+            {
+              "name": "Low",
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": "Low"
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v4-reverse0-inherit0",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 4
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "Low",
+              "priority": 0,
+              "clearance": 0.1
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": [
+              "Low"
+            ]
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.1,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v4-reverse0-inherit1",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 4
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "Low",
+              "priority": 0
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": [
+              "Low"
+            ]
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v4-reverse1-inherit0",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 4
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 0
+            },
+            {
+              "name": "Low",
+              "priority": 1,
+              "clearance": 0.1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": [
+              "Low"
+            ]
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v4-reverse1-inherit1",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 4
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 0
+            },
+            {
+              "name": "Low",
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": [
+              "Low"
+            ]
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v5-reverse0-inherit0",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 5
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "Low",
+              "priority": 0,
+              "clearance": 0.1
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": [
+              "Low"
+            ]
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.1,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v5-reverse0-inherit1",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 5
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "Low",
+              "priority": 0
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": [
+              "Low"
+            ]
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v5-reverse1-inherit0",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 5
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 0
+            },
+            {
+              "name": "Low",
+              "priority": 1,
+              "clearance": 0.1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": [
+              "Low"
+            ]
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    },
+    {
+      "id": "v5-reverse1-inherit1",
+      "project": {
+        "net_settings": {
+          "meta": {
+            "version": 5
+          },
+          "classes": [
+            {
+              "name": "Default",
+              "clearance": 0.2
+            },
+            {
+              "name": "High",
+              "clearance": 0.4,
+              "priority": 0
+            },
+            {
+              "name": "Low",
+              "priority": 1
+            }
+          ],
+          "netclass_patterns": [
+            {
+              "pattern": "USB*",
+              "netclass": "High"
+            }
+          ],
+          "netclass_assignments": {
+            "USB1": [
+              "Low"
+            ]
+          }
+        }
+      },
+      "expected_clearances": {
+        "USB1": 0.4,
+        "USB2": 0.4,
+        "Other": 0.2
+      }
+    }
+  ]
+}

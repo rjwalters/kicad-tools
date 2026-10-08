@@ -129,7 +129,7 @@ def plan_tapered_escapes(
         return deadline is not None and time.monotonic() >= deadline
 
     def options(pad: Pad, net_class: object | None) -> list[EscapeChoice]:
-        half, clr = pf._conn_geometry(net_class)
+        half, clr = pf._conn_geometry(net_class, pad.net)  # Issue #6243
         hard = pf._hard_avoided_layers(net_class)
         stubs, width = pf._escape_stubs(
             pad,

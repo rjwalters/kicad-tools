@@ -290,6 +290,15 @@ bool CoupledPathfinder::rail_clear_world(double wx, double wy,
         }
     }
 
+    // Issue #6243: the authored per-net minimum against pads and stored
+    // route copper (partner copper included -- a stricter netclass binds the
+    // pair's own nets too), through the grid's kernel-backed gate.
+    if (grid_.authored_active()) {
+        if (is_via ? !grid_.authored_via_clear(wx, wy, 2.0 * half, net)
+                   : !grid_.authored_segment_clear(wx, wy, vx, vy, 2.0 * half, layer, net))
+            return false;
+    }
+
     return stored_route_clear(wx, wy, vx, vy, layer, net, partner_net, half, gap, is_via);
 }
 

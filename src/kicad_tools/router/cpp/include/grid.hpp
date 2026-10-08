@@ -18,6 +18,9 @@
 #include <tuple>
 #include <optional>
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
 
 namespace router {
 
@@ -354,14 +357,45 @@ public:
     void set_pad_via_policy(size_t index, float clearance, bool carveout_eligible);
 
     // Register a completed route's segments for clearance validation.
+    // ``authored_floor`` (Issue #6243) is the copper's own authored minimum
+    // when its net id was neutralised; 0.0 defers to the per-net floors.
     void add_stored_segment(float x1, float y1, float x2, float y2,
                             float width, int layer_idx, int net,
-                            std::optional<std::tuple<int, int, int, int>> grid_endpoints = std::nullopt);
+                            std::optional<std::tuple<int, int, int, int>> grid_endpoints = std::nullopt,
+                            float authored_floor = 0.0f);
 
     // Register a completed route's via for clearance validation.
     void add_stored_via(float x, float y, float drill, float diameter, int net,
                         std::optional<std::pair<int, int>> grid_center = std::nullopt,
-                        int layer_from = 0, int layer_to = -1);
+                        int layer_from = 0, int layer_to = -1,
+                        float authored_floor = 0.0f);
+
+    // ---- Issue #6243: authored per-net clearance minima -------------------
+    // Project netclasses stricter than ``Default`` are designer-authored
+    // electrical minima.  Two foreign coppers must keep
+    // ``max(floor[a], floor[b])`` apart, judged by the shared clearance
+    // kernel -- the native mirror of ``router/authored_clearance.py``, held
+    // to identical verdicts by the kernel parity suite (``test_authored_floor_*``).
+    // The gate is dormant (``authored_active() == false``, every query a
+    // single null check) unless a floor or an item-level floor exists.
+    void set_net_clearance_floors(const std::vector<int>& nets,
+                                  const std::vector<double>& floors);
+    double net_clearance_floor(int net) const;
+    // ``max(floor[a], floor[b])``; 0.0 for same-net copper.
+    double authored_pair_floor(int net_a, int net_b) const;
+    // Exact pad copper for the authored gate (``clearance_shapes.pad_shape``'s
+    // inputs, in double precision) plus the pad's own item-level floor.  Call
+    // ``rebuild_authored_index`` after a batch of these.
+    void set_pad_authored(size_t index, const std::string& shape, double width,
+                          double height, double rotation, double x, double y,
+                          double drill, double item_floor);
+    void rebuild_authored_index();
+    bool authored_active() const { return authored_index_ != nullptr; }
+    // True when the candidate trace / through-via owned by ``net`` keeps every
+    // authored minimum against registered pads and stored route copper.
+    bool authored_segment_clear(double x1, double y1, double x2, double y2,
+                                double width, int layer, int net) const;
+    bool authored_via_clear(double x, double y, double diameter, int net) const;
 
     // Global completeness is diagnostic. A cell is refinable only when all
     // active marks covering it have registered physical geometry. Unknown
@@ -642,6 +676,24 @@ private:
     GeometryBins route_via_bins_;
     static void index_route_geometry(GeometryBins& bins, size_t index,
                                      float minx, float miny, float maxx, float maxy);
+
+    // Issue #6243: authored per-net minima.  ``authored_index_`` is null
+    // while the gate is dormant; otherwise it buckets every pad and stored
+    // segment/via as kernel copper (defined in grid.cpp, which owns the
+    // kernel include).  Appends keep it current; clears rebuild it.
+    struct AuthoredPadSpec {
+        bool set = false;
+        std::string shape;
+        double width = 0, height = 0, rotation = 0, x = 0, y = 0, drill = 0, floor = 0;
+    };
+    struct AuthoredIndex;
+    std::unordered_map<int, double> net_floors_;
+    std::vector<AuthoredPadSpec> authored_pad_specs_;
+    bool authored_items_ = false;
+    std::shared_ptr<AuthoredIndex> authored_index_;
+    void authored_index_pad(size_t index);
+    void authored_index_segment(size_t index);
+    void authored_index_via(size_t index);
 
     // Geometric validation storage (Issue #2439)
     std::vector<PadInfo> pads_;

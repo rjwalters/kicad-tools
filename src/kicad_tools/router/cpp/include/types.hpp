@@ -280,7 +280,16 @@ namespace router {
 // ``clear_rule_area_keepouts`` / ``rule_area_*_blocked`` -- keepout rule areas
 // the grid engine now enforces.  A v46 .so would route straight through
 // via-blocking and net-filtered areas, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 47;
+// v48 (Issue #6243): authored per-net clearance minima -- project netclasses
+// stricter than ``Default`` -- enforced through the shared clearance kernel:
+// ``Grid3D.set_net_clearance_floors`` / ``set_pad_authored`` /
+// ``rebuild_authored_index`` / ``authored_segment_clear`` /
+// ``authored_via_clear``, the ``authored_floor`` argument of
+// ``add_stored_segment`` / ``add_stored_via``, the A* step / via gates in
+// ``Pathfinder`` and ``CoupledPathfinder::rail_clear``, and
+// ``validate_route``'s violation type 9.  A v47 .so would search straight
+// through a stricter netclass's clearance, so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 48;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -678,6 +687,9 @@ struct StoredSegment {
     float width;
     int layer_idx;
     int net;
+    // Issue #6243: the copper's own authored minimum when its net id was
+    // neutralised (0.0 = defer to the grid's per-net floors).
+    float authored_floor = 0.0f;
 };
 
 // Stored via for validation (Issue #2439)
@@ -689,6 +701,7 @@ struct StoredVia {
     int net;
     int layer_from = 0;
     int layer_to = std::numeric_limits<int>::max();
+    float authored_floor = 0.0f;  // Issue #6243, see StoredSegment
 };
 
 // Rated-footprint attach zone for pairwise clearance (Issue #4510 / #4506).
@@ -729,7 +742,7 @@ struct ValidationResult {
     float min_clearance = std::numeric_limits<float>::infinity();
     float violation_x = 0.0f;
     float violation_y = 0.0f;
-    int violation_type = 0;  // 0=none, 1=seg-pad, 2=seg-seg, 3=seg-via, 4=via-seg, 5=via-via, 6=drill, 7=reserved, 8=via-pad
+    int violation_type = 0;  // 0=none, 1=seg-pad, 2=seg-seg, 3=seg-via, 4=via-seg, 5=via-via, 6=drill, 7=reserved, 8=via-pad, 9=authored-floor (#6243)
 };
 
 }  // namespace router

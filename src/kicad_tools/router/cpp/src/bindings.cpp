@@ -329,9 +329,25 @@ NB_MODULE(router_cpp, m) {
              "index"_a, "clearance"_a, "carveout_eligible"_a)
         .def("add_stored_segment", &Grid3D::add_stored_segment,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a,
-             "width"_a, "layer_idx"_a, "net"_a, "grid_endpoints"_a = nb::none())
+             "width"_a, "layer_idx"_a, "net"_a, "grid_endpoints"_a = nb::none(),
+             "authored_floor"_a = 0.0f)
         .def("add_stored_via", &Grid3D::add_stored_via,
-             "x"_a, "y"_a, "drill"_a, "diameter"_a, "net"_a, "grid_center"_a = nb::none(), "layer_from"_a = 0, "layer_to"_a = -1)
+             "x"_a, "y"_a, "drill"_a, "diameter"_a, "net"_a, "grid_center"_a = nb::none(), "layer_from"_a = 0, "layer_to"_a = -1,
+             "authored_floor"_a = 0.0f)
+        // Issue #6243: authored per-net clearance minima.
+        .def("set_net_clearance_floors", &Grid3D::set_net_clearance_floors,
+             "nets"_a, "floors"_a)
+        .def("net_clearance_floor", &Grid3D::net_clearance_floor, "net"_a)
+        .def("authored_pair_floor", &Grid3D::authored_pair_floor, "net_a"_a, "net_b"_a)
+        .def("set_pad_authored", &Grid3D::set_pad_authored,
+             "index"_a, "shape"_a, "width"_a, "height"_a, "rotation"_a,
+             "x"_a, "y"_a, "drill"_a, "item_floor"_a)
+        .def("rebuild_authored_index", &Grid3D::rebuild_authored_index)
+        .def("authored_active", &Grid3D::authored_active)
+        .def("authored_segment_clear", &Grid3D::authored_segment_clear,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "width"_a, "layer"_a, "net"_a)
+        .def("authored_via_clear", &Grid3D::authored_via_clear,
+             "x"_a, "y"_a, "diameter"_a, "net"_a)
         .def("trace_stored_vias_clear", &Grid3D::trace_stored_vias_clear,
              "segment"_a, "clearance"_a, "partner_net"_a = -1, "partner_clearance"_a = -1.0f)
         .def("clear_validation_data", &Grid3D::clear_validation_data)

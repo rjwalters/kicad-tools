@@ -8929,6 +8929,7 @@ class EscapeRouter:
 
         # Issue #2998: counters for diagnostics on dropped escapes.
         skipped_seg_vs_via = 0
+        skipped_authored = 0  # Issue #6243
         # Issue #6061: escapes whose stub or via lands in a keepout rule area.
         skipped_rule_area = 0
         check_rule_areas = bool(getattr(self.grid, "_rule_area_keepouts", None))
@@ -9043,6 +9044,37 @@ class EscapeRouter:
                     )
                     continue
 
+            # Issue #6243: an escape stub or via below an authored netclass
+            # minimum (against pads, committed copper and the escapes
+            # committed earlier in this call) is deferred to the main
+            # router, whose search honours the same kernel-backed gate.
+            # Dormant -- one dict check per item -- without floors.
+            escape_copper: list[Segment | Via] = [*escape.segments]
+            if escape.via is not None:
+                escape_copper.append(escape.via)
+            authored = next(
+                (
+                    hit
+                    for item in escape_copper
+                    if (hit := self.grid.authored_violation(item, current_net)) is not None
+                ),
+                None,
+            )
+            if authored is not None:
+                skipped_authored += 1
+                logger.info(
+                    "Escape commit: deferred %s pin %s (ref=%s) to main router -- "
+                    "%.3fmm from net %d is below its authored netclass minimum "
+                    "%.3fmm (Issue #6243).",
+                    escape.pad.net_name,
+                    escape.pad.pin,
+                    escape.pad.ref,
+                    authored.actual,
+                    authored.other_net,
+                    authored.required,
+                )
+                continue
+
             route = Route(
                 net=escape.pad.net,
                 net_name=escape.pad.net_name,
@@ -9061,7 +9093,7 @@ class EscapeRouter:
         # essential -- a stale override would redirect the main router to
         # a non-existent escape endpoint and leave the original pad
         # unconnected, regressing completion.
-        if skipped_seg_vs_via:
+        if skipped_seg_vs_via or skipped_authored:
             escapes[:] = committed_escapes
             logger.info(
                 "Escape commit: %d escape(s) deferred to main router due to "

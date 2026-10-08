@@ -240,6 +240,35 @@ router.set_net_class_rules("Power", trace_width=0.5)
 router.set_net_class_rules("HighSpeed", clearance=0.2)
 ```
 
+### Project Netclass Clearances (`.kicad_pro`)
+
+`kct route` honours the clearances of the board project's own netclasses
+(`net_settings` in the `.kicad_pro` beside the board). A net whose class is
+stricter than the router's base clearance is routed so that every foreign
+copper item -- pads, traces, vias, preserved fills -- stays at least
+`max(clearance[a], clearance[b])` away, which is how KiCad's DRC resolves a
+pair of netclasses. The `Default` class is not treated this way: it stays the
+board-wide base, owned by the fab tier and `--clearance` as before.
+
+The minimum is mandatory. It is checked in search on both backends (`python`
+and `cpp`), on the grid, lattice and mesh engines and the coupled diff-pair
+search. It is also checked at commit, by the post-route optimizer and escape
+stubs, and in a final pass that demotes to unrouted any net still below it, so
+no relief can loosen it: diff-pair partner gaps, same-component carve-outs and
+HV attach zones apply only to the fab scalars. By default the routed board's
+`.kicad_dru` restates each class stricter than the clearance floor (#6191), so
+`kicad-cli pcb drc` checks the class too. With `KCT_PRESERVE_BOARD_RULES=0` the
+DRU carries plain fab floors, which outrank and so hide the class in KiCad's
+DRC; the router still enforces it.
+
+Netclass resolution follows KiCad 10: priorities, inheritance, wildcard
+patterns and schema 3-5 projects (checked against `kicad-cli` in
+`tests/fixtures/project_clearance`). If a project declares a named class this
+resolver cannot model, such as an unsupported pattern or schema, or an
+assignment to an unknown class, the route stops with an explicit
+`ProjectClearanceError`; it never routes silently below the class. Custom
+`.kicad_dru` expressions are not evaluated as netclass rules.
+
 ---
 
 ## Strategy Escalation
