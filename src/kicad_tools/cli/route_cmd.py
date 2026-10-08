@@ -6793,7 +6793,9 @@ def _short_escalation_exit(rc: int, shorts: "Sequence[ClearanceViolation]") -> i
     return rc
 
 
-def _audit_shorts_for_escalation(final_result, quiet: bool) -> "list[ClearanceViolation]":
+def _audit_shorts_for_escalation(
+    final_result, quiet: bool, args=None, output_path=None
+) -> "list[ClearanceViolation]":
     """Find cross-net copper overlap in the committed copper (Issue #5862).
 
     A SHORT is a ``ClearanceViolation`` whose edge-to-edge ``distance`` is
@@ -6802,6 +6804,13 @@ def _audit_shorts_for_escalation(final_result, quiet: bool) -> "list[ClearanceVi
     from the positive-but-sub-clearance near-misses that share the
     violation type, and it must never leave ``kct route`` claiming a clean
     board.
+
+    Issue #6237: kept copper is also checked against other kept copper, and
+    -- given ``output_path`` -- the returned list also carries clearance
+    near-misses in copper kept by ``--preserve-existing`` when the written
+    board's project gives KiCad's ``clearance`` rule ``error`` severity
+    (see :func:`_audit_kept_copper_clearance`).  They fail the run through
+    the same gate.
 
     Like the #4588 pairwise gate next to it, this exists as a separate
     helper because the escalation wrappers are *terminal* paths that
@@ -6825,7 +6834,7 @@ def _audit_shorts_for_escalation(final_result, quiet: bool) -> "list[ClearanceVi
     ):
         return []
     try:
-        violations = validate_routes(router)
+        violations = validate_routes(router, audit_kept_copper=True)
     except Exception as exc:  # never let the audit break a save, but say so
         if not quiet:
             print(f"WARNING: post-route short audit failed to run ({exc}); shorts were NOT checked")
@@ -6833,7 +6842,81 @@ def _audit_shorts_for_escalation(final_result, quiet: bool) -> "list[ClearanceVi
     shorts = shorting_violations(violations)
     if shorts and not quiet:
         _print_short_findings(shorts)
-    return shorts
+    if output_path is None or (args is not None and getattr(args, "dry_run", False)):
+        return shorts
+    source = Path(args.pcb) if args is not None and getattr(args, "pcb", None) else None
+    return shorts + _audit_kept_copper_clearance(router, Path(output_path), quiet, source)
+
+
+def _audit_kept_copper_clearance(
+    router, output_path: Path, quiet: bool, source_pcb: "Path | None" = None
+) -> "list[ClearanceViolation]":
+    """Clearance near-misses in kept input copper, as kicad-cli judges them (#6237).
+
+    ``kicad-cli pcb drc`` on the routed board loads the ``.kicad_pro`` /
+    ``.kicad_dru`` beside it, so the per-pair clearance
+    (:class:`BoardClearanceRules`) and the ``clearance`` rule severity come
+    from the project the written board ships with: the output's own
+    sidecars when ``kct route`` has written them by now (the post-route DRC
+    and zone fill write them from the source project and the fab profile),
+    else the input board's (``source_pcb``) -- what every other publication
+    path copies beside the output -- else KiCad's defaults.  At ``error``
+    severity (KiCad's default) the near-misses are printed as errors and
+    returned so they fail the run; at ``warning`` they are printed and not
+    returned; at ``ignore`` nothing is reported.  Never raises.
+    """
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+    from kicad_tools.router.io import kept_copper_clearance_violations, kicad_rule_severity
+
+    if not (
+        getattr(router, "existing_routes", None)
+        or getattr(router, "_emitted_preserved_routes", None)
+    ):
+        return []
+    judged = output_path
+    if (
+        not output_path.with_suffix(".kicad_pro").is_file()
+        and source_pcb is not None
+        and source_pcb.with_suffix(".kicad_pro").is_file()
+    ):
+        judged = source_pcb
+    try:
+        severity = kicad_rule_severity(judged, "clearance")
+        if severity == "ignore":
+            return []
+        near = kept_copper_clearance_violations(
+            router, board_rules=BoardClearanceRules.from_board(judged)
+        )
+    except Exception as exc:  # never let the audit break a save, but say so
+        if not quiet:
+            print(
+                f"WARNING: kept-copper clearance audit failed to run ({exc}); "
+                "input clearance was NOT checked"
+            )
+        return []
+    if near and not quiet:
+        _print_input_clearance_findings(near, severity)
+    return near if severity == "error" else []
+
+
+def _print_input_clearance_findings(
+    violations: "Sequence[ClearanceViolation]", severity: str
+) -> None:
+    """Report clearance near-misses in kept input copper (Issue #6237)."""
+    from kicad_tools.router.io import describe_input_clearance
+
+    level = "ERROR" if severity == "error" else "WARNING"
+    print("\n--- Kept Input Copper Clearance Check ---")
+    print(
+        f"  {level}: {len(violations)} clearance violation(s) in copper kept by "
+        f"--preserve-existing -- pre-existing in the input board (input defect), "
+        f"not caused by routing (KiCad DRC reports this class as `clearance`, "
+        f"severity {severity!r})"
+    )
+    for v in violations[:20]:
+        print(f"    {level} {describe_input_clearance(v)}")
+    if len(violations) > 20:
+        print(f"    ... and {len(violations) - 20} more")
 
 
 def _print_short_findings(shorts: "Sequence[ClearanceViolation]") -> None:
@@ -6868,26 +6951,57 @@ def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_p
     copper of two different nets into the same space has not succeeded,
     whatever its completion percentage, so the success banner must be
     unreachable rather than merely accompanied by a warning.
-    """
-    from kicad_tools.router.io import describe_short, short_origin_summary
 
-    print("ROUTING FAILED: cross-net copper shorts in the routed output")
+    Issue #6237: ``shorts`` may also carry error-severity clearance
+    near-misses in kept input copper (positive ``distance``); they are
+    listed in their own section.
+    """
+    from kicad_tools.router.io import (
+        describe_input_clearance,
+        describe_short,
+        short_origin_summary,
+    )
+
+    real_shorts = [v for v in shorts if v.is_short]
+    near_misses = [v for v in shorts if not v.is_short]
+    if real_shorts:
+        print("ROUTING FAILED: cross-net copper shorts in the routed output")
+    else:
+        print("ROUTING FAILED: clearance violations in input copper kept by --preserve-existing")
     print("=" * 60)
     print()
-    print(f"Shorts ({len(shorts)} item(s)): {short_origin_summary(list(shorts))}")
-    for v in shorts[:10]:
-        print(f"  {describe_short(v)}")
-    if len(shorts) > 10:
-        print(f"  ... and {len(shorts) - 10} more")
-    print()
-    print("Copper of different nets physically overlaps. KiCad DRC reports this")
-    print("class as `shorting_items`; this board is NOT manufacturable as written.")
-    if any(v.is_input_defect for v in shorts):
-        # Issue #6229: an inherited short fails the run like a routing short
-        # (the output is unmanufacturable either way), but the fix is in the
-        # input board, not in the router's settings.
-        print("Shorts marked 'pre-existing' were already in the input board and were")
-        print("kept by --preserve-existing; fix or remove that copper in the input.")
+    if real_shorts:
+        print(f"Shorts ({len(real_shorts)} item(s)): {short_origin_summary(real_shorts)}")
+        for v in real_shorts[:10]:
+            print(f"  {describe_short(v)}")
+        if len(real_shorts) > 10:
+            print(f"  ... and {len(real_shorts) - 10} more")
+        print()
+        print("Copper of different nets physically overlaps. KiCad DRC reports this")
+        print("class as `shorting_items`; this board is NOT manufacturable as written.")
+        if any(v.is_input_defect for v in real_shorts):
+            # Issue #6229: an inherited short fails the run like a routing short
+            # (the output is unmanufacturable either way), but the fix is in the
+            # input board, not in the router's settings.
+            print("Shorts marked 'pre-existing' were already in the input board and were")
+            print("kept by --preserve-existing; fix or remove that copper in the input.")
+    if near_misses:
+        if real_shorts:
+            print()
+        print(
+            f"Input clearance violations ({len(near_misses)} item(s)): "
+            f"{len(near_misses)} pre-existing in the input board (input defect), "
+            f"0 caused by routing (routing failure)"
+        )
+        for v in near_misses[:10]:
+            print(f"  {describe_input_clearance(v)}")
+        if len(near_misses) > 10:
+            print(f"  ... and {len(near_misses) - 10} more")
+        print()
+        print("Copper kept by --preserve-existing is closer to another net than the")
+        print("board's clearance rule allows (KiCad DRC `clearance`, severity error).")
+        print("Fix that copper in the input board, or set the rule's severity to")
+        print('"warning" in the .kicad_pro (board.design_settings.rule_severities.clearance).')
     print(f"Board written to {output_path} for inspection.")
 
 
@@ -9700,7 +9814,9 @@ def route_with_layer_escalation(
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
     # Issue #5862: cross-net copper overlap gate.  Terminal escalation
     # path -- main()'s inline pre-save validation never runs here.
-    _shorts = _audit_shorts_for_escalation(final_result, quiet=quiet)
+    _shorts = _audit_shorts_for_escalation(
+        final_result, quiet=quiet, args=args, output_path=output_path
+    )
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
@@ -10641,7 +10757,9 @@ def route_with_rule_relaxation(
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
     # Issue #5862: cross-net copper overlap gate.  Terminal escalation
     # path -- main()'s inline pre-save validation never runs here.
-    _shorts = _audit_shorts_for_escalation(final_result, quiet=quiet)
+    _shorts = _audit_shorts_for_escalation(
+        final_result, quiet=quiet, args=args, output_path=output_path
+    )
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
@@ -13141,7 +13259,9 @@ def route_with_combined_escalation(
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
     # Issue #5862: cross-net copper overlap gate.  Terminal escalation
     # path -- main()'s inline pre-save validation never runs here.
-    _shorts = _audit_shorts_for_escalation(final_result, quiet=quiet)
+    _shorts = _audit_shorts_for_escalation(
+        final_result, quiet=quiet, args=args, output_path=output_path
+    )
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
@@ -20088,6 +20208,9 @@ def _run_main_impl(args, parser, argv) -> int:
     seg_seg_violation_count = 0
     short_violation_count = 0
     short_violations: list[ClearanceViolation] = []
+    # Issue #6237: clearance near-misses in copper kept by --preserve-existing
+    # at error severity -- audited after the save, see below.
+    input_clearance_errors: list[ClearanceViolation] = []
     # Issue #6229: kept input copper (--preserve-existing) is audited even
     # when this run routed nothing new -- it can short a foreign pad alone.
     if (stats["nets_routed"] > 0 or getattr(router, "existing_routes", None)) and not args.dry_run:
@@ -20097,12 +20220,17 @@ def _run_main_impl(args, parser, argv) -> int:
             validate_routes,
         )
 
-        clearance_violations = validate_routes(router)
+        # Issue #6237: also checks kept copper against kept copper for shorts.
+        clearance_violations = validate_routes(router, audit_kept_copper=True)
         if clearance_violations:
             seg_seg_violation_count = sum(
                 1
                 for v in clearance_violations
-                if v.obstacle_type == "segment" and not v.component_inherent
+                # Issue #6237: a kept-vs-kept short is an input defect gated
+                # as a short, not a segment-to-segment failure of routing.
+                if v.obstacle_type == "segment"
+                and not v.component_inherent
+                and not v.is_input_defect
             )
             short_violations = shorting_violations(clearance_violations)
             short_violation_count = len(short_violations)
@@ -20368,6 +20496,14 @@ def _run_main_impl(args, parser, argv) -> int:
         bool(getattr(args, "_allow_stranded_pour_pads", False)),
     )
     all_nets_routed = stats["nets_routed"] == nets_to_route
+    # Issue #6237: clearance near-misses in kept input copper, judged under
+    # the rules and severity the WRITTEN board ships with (its sidecars are
+    # on disk by now), the way ``kicad-cli pcb drc`` on the output judges it.
+    if not args.dry_run and output_content:
+        input_clearance_errors = _audit_kept_copper_clearance(
+            router, output_path, quiet, Path(args.pcb)
+        )
+
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
     completion_ratio = stats["nets_routed"] / nets_to_route if nets_to_route > 0 else 1.0
     meets_threshold = completion_ratio >= args.min_completion
@@ -20401,6 +20537,7 @@ def _run_main_impl(args, parser, argv) -> int:
             layer_intent_new_count == 0
             and not (pairwise_violation_count > 0 and drc_passed)
             and short_violation_count == 0
+            and not input_clearance_errors
             and not stranded_pour_blocking
             and not getattr(args, "_placement_fill_error", None)
             and not getattr(args, "_placement_repair_error", None)
@@ -20428,10 +20565,12 @@ def _run_main_impl(args, parser, argv) -> int:
             # pass, so the pairwise failure banner replaces it outright --
             # SUCCESS must be unreachable while non-exempt violations exist.
             _print_pairwise_failure_banner(pairwise_violations, args, output_path)
-        elif short_violation_count > 0:
+        elif short_violation_count > 0 or input_clearance_errors:
             # Issue #5862: this run would otherwise have printed a SUCCESS
             # banner while its own copper shorts two nets together.
-            _print_short_failure_banner(short_violations, output_path)
+            # Issue #6237: likewise for error-severity clearance violations
+            # in copper kept by --preserve-existing.
+            _print_short_failure_banner(short_violations + input_clearance_errors, output_path)
         elif stranded_pour_blocking and (all_nets_routed or meets_threshold):
             # Issue #5785: kicad-cli reports pads stranded on a pour.
             _print_stranded_pour_failure_banner(args, output_path)
@@ -20720,6 +20859,7 @@ def _run_main_impl(args, parser, argv) -> int:
         and drc_passed
         and seg_seg_violation_count == 0
         and short_violation_count == 0
+        and not input_clearance_errors
         and pairwise_violation_count == 0
         and not stranded_pour_blocking
     ):
@@ -20728,6 +20868,7 @@ def _run_main_impl(args, parser, argv) -> int:
         not drc_passed
         or seg_seg_violation_count > 0
         or short_violation_count > 0
+        or input_clearance_errors
         or pairwise_violation_count > 0
         or stranded_pour_blocking
     ):
@@ -20738,6 +20879,7 @@ def _run_main_impl(args, parser, argv) -> int:
     elif not meets_threshold and (
         seg_seg_violation_count > 0
         or short_violation_count > 0
+        or input_clearance_errors
         or pairwise_violation_count > 0
         or stranded_pour_blocking
     ):
