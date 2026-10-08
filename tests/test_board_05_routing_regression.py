@@ -174,9 +174,9 @@ class TestBoard05RoutingThroughput:
         Captures stdout for the per-test assertions below.  The run uses
         the pure-Python backend so the regression test is reproducible on
         CI runners where the C++ extension is not built.  ``--no-auto-layers
-        --layers 2`` keeps the test wall-clock around 4 minutes (one 240s
-        budget) instead of the 4x cost a full ``--auto-layers`` escalation
-        would incur.
+        --layers 2`` keeps the test to one 240s search stage (about 6-7
+        minutes wall clock including post-processing) instead of the 4x cost
+        a full ``--auto-layers`` escalation would incur.
         """
         with tempfile.TemporaryDirectory() as td:
             pcb_copy = Path(td) / "bldc_controller.kicad_pcb"
@@ -195,6 +195,22 @@ class TestBoard05RoutingThroughput:
             # cached route rather than current router throughput.  Both
             # tests in this class pin THROUGHPUT, so the route must
             # actually run.
+            # ``--search-timeout 240 --timeout 600`` (issue #5991): since
+            # #5141 (6ef9873d) ``--timeout`` is a HARD, supervised end-to-end
+            # budget that also covers optimisation, zone fill and DRC.  A
+            # 240s value let the 240s search consume all of it, so the
+            # supervisor killed the run (exit 124, "PARTIAL: routing deadline
+            # exceeded") before the ``Nets routed`` summary was ever printed.
+            # #5268 split out ``--search-timeout`` for exactly this: the
+            # router still gets the #2681 240s search budget, and the hard cap
+            # adds a post-processing reserve (~150s measured locally, under
+            # load).
+            # ``--no-placement-delta-feedback`` (issue #5991): #5890 turned
+            # on classifier-driven placement-delta probes by default whenever
+            # the routing plan reports an infeasible board, which board 05
+            # does.  Each probe is another full search stage.  This class
+            # pins first-pass 2L throughput, not placement repair, so the
+            # probes are opted out explicitly.
             # ``--allow-unsafe-grid`` (issue #4024): board 05's dense
             # geometry (210 pads, 0.15mm clearance) forces ``--grid auto``
             # coarser than clearance/2 under the memory budget cap, tripping
@@ -222,8 +238,11 @@ class TestBoard05RoutingThroughput:
                 "2",
                 "--manufacturer",
                 "jlcpcb",
-                "--timeout",
+                "--search-timeout",
                 "240",
+                "--timeout",
+                "600",
+                "--no-placement-delta-feedback",
                 "--backend",
                 "python",
                 "--no-cache",
@@ -233,7 +252,7 @@ class TestBoard05RoutingThroughput:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=360,  # 240s route + slack for setup/teardown
+                timeout=720,  # 600s hard route budget + setup/teardown slack
                 check=False,
             )
             # ``kct route`` returns:
