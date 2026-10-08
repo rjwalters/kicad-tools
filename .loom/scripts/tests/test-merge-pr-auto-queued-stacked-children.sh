@@ -62,6 +62,7 @@ MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -97,6 +98,16 @@ assert_contains() {
     else
         fail "$msg" "Expected substring: '$needle'"
     fi
+}
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md section 6.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
 }
 
 assert_src_absent() {
@@ -248,8 +259,14 @@ _wait_body="$(awk '
     f { print }
     f && $0 == "}" { exit }
 ' "$MERGE_PR_SRC")"
-assert_contains "$_wait_body" "Timed out after" \
-    "the delegated wait still stops short of the merge on the LOOM_AUTO_MERGE_TIMEOUT ceiling"
+retired "the grep for the in-shell 'Timed out after' timeout text in the wait body" \
+    "the delegated wait still stops short of the merge on the LOOM_AUTO_MERGE_TIMEOUT ceiling" \
+    "the two timeout texts moved to Rust in the #8191 poll-wait slice, so no grep of this file can find them" \
+    "both_timeouts_say_exit_5_and_name_the_knob in src/merge_pr/poll_wait/tests.rs, tests/merge_pr_poll_wait_differential.rs, and the exit-5 scenarios in test-merge-pr-auto-blocked-settle.sh"
+assert_contains "$_wait_body" "_mp_poll_wait pending" \
+    "the pending arm delegates its deadline-or-wait decision to 'merge-pr poll-wait'"
+assert_contains "$_wait_body" "_mp_poll_wait unfetchable" \
+    "the unfetchable arm delegates its deadline-or-wait decision to 'merge-pr poll-wait'"
 # #8896: that stop is exit 5 (re-queue), not error()'s exit 1 — still terminal
 # for this run, so #8048's "no child stranded behind a merged parent" half holds.
 assert_contains "$_wait_body" "exit 5" \

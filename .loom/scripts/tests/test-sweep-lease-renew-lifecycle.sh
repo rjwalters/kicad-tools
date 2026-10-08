@@ -23,6 +23,9 @@
 #   (z5) sliding window cursor + own-yield guard retained
 #   (z6)/(z7) a loop with no lease stops after two consecutive misses; a hit
 #        in between resets the count
+#   (y8) #10348: verb absent => probed once, 0 state reads, renewal unchanged
+#   (y9) #10348: dispatched marker + verb => 0 state reads, check gets "open",
+#        renewal continues, loop still ends when the watched pid dies
 #
 # With LEASE_RENEWER_DAEMON=<built loom-daemon> the stub hands `lease renewer`
 # to the real binary and (r1)-(r4) run end to end: closed issue, concurrent
@@ -406,6 +409,32 @@ wait_patches 2
 assert_eq "true" "$([[ "$(patch_n)" -ge 2 ]] && yb alive "$LOOP" || echo false)" "(z7) one miss then hits: the loop survives and renews"
 kill "$LOOP" "$WATCH" 2> /dev/null
 wait "$WATCH" 2> /dev/null
+
+# (y8) #10348: verb absent -> one probe, no state read, no check/claim, renews.
+reset_state
+touch "$STUB_DIR/renewer-absent"
+sleep 30 &
+WATCH=$!
+LOOP="$(start_loop 10229 "$WATCH")"
+wait_patches 3
+kill "$LOOP" "$WATCH" 2> /dev/null
+assert_eq "0" "$(cat "$STUB_DIR/state-calls.log" 2> /dev/null | wc -l | tr -d ' ')" "(y8) no state read when the daemon lacks the verb"
+assert_eq "true" "$([[ "$(patch_n)" -ge 3 ]] && echo true || echo false)" "(y8) renewal unchanged without the verb"
+# #10203's per-start `sanitize-exec --check` probe is a separate verb; exclude it.
+assert_eq "1" "$(grep -v 'sanitize-exec' "$STUB_DIR/renewer-args.log" 2> /dev/null | grep -c 'lease renewer')" "(y8) the verb is probed once per start, not per cycle"
+
+# (y9) #10348: dispatched start -> no state read, still gated, ends with the watch pid.
+reset_state
+sleep 30 &
+WATCH=$!
+LOOP="$(LOOM_SWEEP_LEASE_RENEW_SOURCE=dispatch start_loop 10229 "$WATCH")"
+wait_patches 3
+assert_eq "0" "$(cat "$STUB_DIR/state-calls.log" 2> /dev/null | wc -l | tr -d ' ')" "(y9) dispatched start spends no state read"
+assert_eq "true" "$([[ "$(grep -c -- '--issue-state open$' "$STUB_DIR/renewer-args.log")" -ge 2 ]] && echo true || echo false)" "(y9) check still runs each cycle with a non-empty state"
+assert_eq "true" "$([[ "$(patch_n)" -ge 3 ]] && echo true || echo false)" "(y9) renewal continues"
+kill "$WATCH" 2> /dev/null
+sleep 2.5
+assert_eq "false" "$(yb alive "$LOOP")" "(y9) loop ends when the watched pid dies"
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

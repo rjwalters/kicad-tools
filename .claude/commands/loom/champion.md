@@ -37,7 +37,8 @@ Safety Criteria still apply (see its "Batch Processing").
 
 ### Priority 2: Quality Issues Ready to Promote
 
-If no PRs need merging, check for curated issues. Exclude `loom:evaluating` (a
+Runs every pass, whether or not PRs remain ("Autonomous Operation" below,
+#10753). Check for curated issues. Exclude `loom:evaluating` (a
 fresh claim from a concurrent Champion evaluation, #4954), as well as
 `loom:operator-only` and `loom:blocked` — both put an issue permanently outside
 Champion's promotion authority per `champion-issue-promo.md`'s "When NOT to
@@ -46,7 +47,8 @@ Promote", so there is no reason to hand them into the evaluation pass at all
 `loom:issue` but deliberately leaves `loom:curated` in place as a permanent
 milestone marker (see note below), so without this exclusion every
 already-promoted or already-claimed issue keeps matching this query forever
-(#5285). Excluding them here, not just in the evaluation step, so a batch
+(#5285). Exclude `loom:needs-revision` too: Curator holds the issue until it
+revises the body (#10753). Excluding them here, not just in the evaluation step, so a batch
 doesn't re-discover work another pass already claimed or that is already
 terminal — `title`/`body` feed `champion-issue-promo.md`'s body-hash
 idempotency check (the issue's aggregate `updatedAt` is deliberately NOT used
@@ -90,11 +92,7 @@ gh issue list \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments \
-  --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
-  select([.labels[].name] | contains(["loom:blocked"]) | not) |
-  select([.labels[].name] | contains(["loom:issue"]) | not) |
-  select([.labels[].name] | contains(["loom:building"]) | not) |
+  --jq '.[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision")) | not) |
   "#\(.number) \(.title)"'
 ```
 
@@ -107,50 +105,21 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 ### Priority 3: Architect/Hermit/Auditor Proposals Ready to Promote
 
-If no curated issues need promotion, check for well-formed proposals. Same
-`loom:evaluating`/`loom:operator-only`/`loom:blocked`/`loom:issue`/
-`loom:building` exclusion (see Priority 2's note on why the latter two are
-required) and `title`/`body` fetch as Priority 2 above:
+If no curated issues need promotion, check for well-formed proposals, with
+Priority 2's exclusions (see its note on why `loom:issue`/`loom:building` are
+required) and `title`/`body` fetch:
 
 ```bash
-# Check for Architect proposals
+# Architect proposals, Hermit proposals, Auditor bug reports
+for P in architect hermit auditor; do
 gh issue list \
-  --label="loom:architect" \
+  --label="loom:$P" \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments \
-  --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
-  select([.labels[].name] | contains(["loom:blocked"]) | not) |
-  select([.labels[].name] | contains(["loom:issue"]) | not) |
-  select([.labels[].name] | contains(["loom:building"]) | not) |
-  "#\(.number) \(.title) [architect]"'
-
-# Check for Hermit proposals
-gh issue list \
-  --label="loom:hermit" \
-  --state=open \
-  --limit=500 \
-  --json number,title,body,labels,comments \
-  --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
-  select([.labels[].name] | contains(["loom:blocked"]) | not) |
-  select([.labels[].name] | contains(["loom:issue"]) | not) |
-  select([.labels[].name] | contains(["loom:building"]) | not) |
-  "#\(.number) \(.title) [hermit]"'
-
-# Check for Auditor bug reports
-gh issue list \
-  --label="loom:auditor" \
-  --state=open \
-  --limit=500 \
-  --json number,title,body,labels,comments \
-  --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
-  select([.labels[].name] | contains(["loom:blocked"]) | not) |
-  select([.labels[].name] | contains(["loom:issue"]) | not) |
-  select([.labels[].name] | contains(["loom:building"]) | not) |
-  "#\(.number) \(.title) [auditor]"'
+  --jq '.[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision")) | not) |
+  "#\(.number) \(.title) ['"$P"']"'
+done
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-issue-promo.md`**. Architect/Hermit/Auditor proposals use the curated issues' 8 criteria plus that file's "Concurrency Guard and Idempotency (`loom:evaluating`)" section.
@@ -190,6 +159,10 @@ gh pr list \
 ```
 
 Ignore any that also carry `loom:operator-only` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges or closes (Champion's only close authority is the proposal "premise-false close gate", `champion-issue-promo.md` Step 4, #7657 — never a PR).
+
+### Rollout Check Pass (every pass, max 3 items)
+
+Search issue comments for `"rollout-check-pending"`. Items without a `loom:rollout-check-done` marker are pending, and are due 24h after their PR's `mergedAt`. Run each due signal and comment the done marker with the observed value. On a mismatch or an unqueryable signal, add `loom:operator`. Query and markers: `.loom/docs/rollout-check.md`.
 
 ### No Work Available
 
@@ -282,12 +255,13 @@ This role is designed for **autonomous operation** with a recommended interval o
 **Default prompt**: "Check for safe PRs to auto-merge and quality issues to promote"
 
 When running autonomously:
-1. Check for `loom:pr` PRs (Priority 1)
-2. Process **all available PRs** (shared PR queue order), merging safe ones — drain the full queue
-3. If no PRs remain, check for `loom:curated` issues (Priority 2)
-4. Process **all available curated issues** (oldest first), promoting qualifying ones
-5. If no promotion work remains, run the capped-PR recovery pass over `loom:blocked` + `loom:changes-requested` PRs (Priority 5), deciding each one with a rationale comment
-6. Report results and stop
+1. Work `loom:pr` PRs (Priority 1) in shared PR queue order, merging safe ones
+2. **Merges never starve promotion (#10753).** After `${LOOM_CHAMPION_PR_SLICE:-10}` PR rows, pause and run Priorities 2-3, whether or not PRs remain (held, sequenced, waiting, unvisited). While unvisited rows remain, stop promotion after `${LOOM_CHAMPION_PROMOTION_SLICE:-3}` fresh verdicts (silent skips are free)
+3. Resume Priority 1 until every row is visited (drain the full queue), then finish promotion (oldest first)
+4. If no promotion work remains, run the capped-PR recovery pass over `loom:blocked` + `loom:changes-requested` PRs (Priority 5), deciding each one with a rationale comment
+5. Report results and stop
+
+Knobs, defaults and evidence: `.loom/docs/promotion-throughput.md`.
 
 **Quality Over Quantity**: Conservative bias is intentional. It's better to defer borderline decisions than to flood the Builder queue with ambiguous work or merge risky PRs. Batch processing doesn't lower the bar — it eliminates unnecessary waiting when multiple items have already qualified.
 

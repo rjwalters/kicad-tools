@@ -376,6 +376,31 @@ assert_eq "5" "$LAST_RC" \
 assert_contains "$LAST_OUT" "fetchable" \
   "#8896: that refusal names the unreadable check-runs API, not a failed check"
 
+# #8191 poll-wait slice (PR #10908 review): exit 5 is ONLY the timeout. Each
+# poll arm sleeps AFTER `_mp_poll_wait ... || exit 5`, never inside it — errexit
+# is off in an `||` operand, so a failing sleep there would leak out as exit 5
+# ("re-queue, not a failure"). A bogus LOOM_AUTO_MERGE_POLL_INTERVAL must keep
+# the pre-port exit 1. run_fn's own `|| LAST_RC=$?` would switch errexit off
+# too, so this runs the function under a plain `set -e`, like merge-pr.sh's
+# bare call site.
+_bogus_interval_case() { # <arm>
+    set +e
+    LAST_OUT="$(set -e; LOOM_AUTO_MERGE_POLL_INTERVAL=bogus; _wait_for_checks_then_sync_merge 2>&1)"
+    LAST_RC=$?
+    set -e
+    assert_eq "1" "$LAST_RC" \
+      "#8191: an invalid poll interval on the $1 arm fails as exit 1 (the pre-port shape), NOT exit 5 (rc=$LAST_RC)"
+}
+_reset
+LOOM_AUTO_MERGE_TIMEOUT=30
+CHECK_RUNS_SCRIPT=("$(_runs 5 "$GATES_DONE,$SUITES_RUNNING")")
+_bogus_interval_case pending
+_reset
+LOOM_AUTO_MERGE_TIMEOUT=30
+forge_get_check_runs() { return 1; }
+_bogus_interval_case unfetchable
+eval "$_SAVED_GET_CHECK_RUNS"
+
 # The contrast that gives exit 5 its meaning: a genuinely failed REQUIRED check
 # is NOT a timeout and must stay exit 1 — evidence about this head, not timing.
 _reset

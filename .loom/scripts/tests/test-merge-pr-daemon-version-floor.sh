@@ -311,8 +311,10 @@ worktree-contains open -
 worktree-preserve open -
 discovered-worktree open -
 retries-used open -
+poll-wait open -
 revalidate-head open -
-cleanup-paths open -"
+cleanup-paths open -
+workflow-scope open -"
 
 # Shared comparison, so the controls below exercise the SAME logic the real
 # assertion does rather than a paraphrase of it. `sort -V` over a here-string

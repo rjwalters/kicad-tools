@@ -254,6 +254,46 @@ cannot be added there without first porting the resolution behind the daemon.
 Tracked separately in
 [#8654](https://github.com/rjwalters/loom/issues/8654).
 
+## Compatibility contract (#10716)
+
+Each release declares what its two halves need from each other (tracker
+[#10698](https://github.com/rjwalters/loom/issues/10698), D3/D4). Both values
+are constants in `loom-daemon/src/install_compat.rs`:
+
+| Constant | Meaning | Recorded where |
+|---|---|---|
+| `SUPPORTS_INSTALLED` | the oldest installed Loom (`loom_version`) this daemon works with | in the daemon only |
+| `REQUIRES_DAEMON` | the oldest daemon the installed files this release ships work with | `.loom/install-metadata.json` `requires_daemon`, written by `loom-daemon init` and `scripts/install-loom.sh` |
+
+**They move only when a change breaks compatibility**, in the PR that breaks
+it, never at release time:
+
+- Raise `REQUIRES_DAEMON` when shipped shell starts needing something an older
+  daemon lacks: a new `loom-daemon` subcommand, or a hard
+  `# requires-daemon: <sub> >= <version>` floor above the current value. Name
+  a published release, or the version this change ships as (`VERSION` + 1
+  patch) when the dependency lands in the same PR. The value is a floor, not
+  a tag: releases skip versions (above), so `v<REQUIRES_DAEMON>` may never be
+  published, and CI proves the claim against the oldest published release at
+  or above it.
+- Raise `SUPPORTS_INSTALLED` when the daemon stops working with older
+  installed files: it starts executing an installed file that older releases
+  do not ship, or relies on a changed argument contract. Add any newly
+  executed file to `DAEMON_INVOKED_INSTALLED_FILES` in the same PR.
+
+The `Compatibility contract across adjacent releases` step of CI's
+`Install Surface Checks` job (`loom-daemon install-compat check`) proves both
+claims. It runs the previous release's installed files against the new daemon,
+and the new installed files against the oldest published release at or above
+`REQUIRES_DAEMON` (`--fetch-old-daemon`; a release whose assets are still
+uploading is skipped). While no such release is published, which is the PR
+that raises the value and `main` until the next release, the new daemon stands
+in for it. It fails when a claim is violated. To try a proposed value before
+changing the constant, run it locally with `--requires-daemon <v>` /
+`--supports-installed <v>` and `--fetch-old-daemon` (or `--old-daemon <that
+release's binary>`). `loom-daemon install-compat show --repo <clone>` prints
+both sides for one repo and how they classify.
+
 ## See also
 
 - `CLAUDE.md` § "Forge Authentication & Releasing" — how `/repo:release` works

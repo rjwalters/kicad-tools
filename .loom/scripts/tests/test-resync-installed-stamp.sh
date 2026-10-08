@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-resync-installed-stamp.sh - install-metadata.json re-stamping in
-# resync-installed.sh's restamp_metadata() (#9174, #9613)
+# resync-installed.sh's restamp_metadata() (#9174, #9613, #10717)
 #
 # Split out of test-resync-installed.sh (frozen by the file-size ratchet,
 # .loom/docs/file-size-policy.md) rather than grown in place.
@@ -216,6 +216,34 @@ if [[ "$GOOD_COMMIT" == "$(git -C "$WORKDIR/consumer-good-src" rev-parse HEAD)" 
     pass "(#9174/#9613) loom_commit is the source checkout's full HEAD SHA"
 else
     fail "(#9174/#9613) loom_commit is wrong (got '$GOOD_COMMIT')"
+fi
+
+echo ""
+echo "Test group 6: requires_daemon is re-stamped from the source tree (#10717)"
+C6="$(make_consumer_fixture consumer-contract yes yes)"
+mkdir -p "$WORKDIR/consumer-contract-src/loom-daemon/src"
+printf 'pub const REQUIRES_DAEMON: &str = "0.19.772";\n' \
+    > "$WORKDIR/consumer-contract-src/loom-daemon/src/install_compat.rs"
+git -C "$WORKDIR/consumer-contract-src" add -A >/dev/null 2>&1
+git -C "$WORKDIR/consumer-contract-src" commit -qm "contract" >/dev/null 2>&1
+(cd "$C6" && bash "$SCRIPT" >/dev/null 2>&1)
+if [[ "$(read_field "$C6/.loom/install-metadata.json" requires_daemon)" == "0.19.772" ]]; then
+    pass "(#10717) requires_daemon is the source tree's REQUIRES_DAEMON"
+else
+    fail "(#10717) requires_daemon not stamped: $(cat "$C6/.loom/install-metadata.json")"
+fi
+# A source that predates the contract makes no claim about the files it just
+# installed, so a recorded value is dropped rather than left stale.
+rm "$WORKDIR/consumer-contract-src/loom-daemon/src/install_compat.rs"
+printf 'B\n' > "$WORKDIR/consumer-contract-src/defaults/hooks/guard.sh"
+git -C "$WORKDIR/consumer-contract-src" add -A >/dev/null 2>&1
+git -C "$WORKDIR/consumer-contract-src" commit -qm "pre-contract" >/dev/null 2>&1
+(cd "$C6" && bash "$SCRIPT" >/dev/null 2>&1)
+if ! grep -q requires_daemon "$C6/.loom/install-metadata.json" \
+    && [[ "$(read_field "$C6/.loom/install-metadata.json" loom_version)" == "1.2.3" ]]; then
+    pass "(#10717) a source without the contract drops requires_daemon"
+else
+    fail "(#10717) stale requires_daemon survived: $(cat "$C6/.loom/install-metadata.json")"
 fi
 
 # --- summary -----------------------------------------------------------------

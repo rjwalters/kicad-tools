@@ -7,7 +7,6 @@ episode. It owns one label (`loom:operator`) and three comment markers on one PR
 it never merges and never removes `loom:pr`.
 
 Rationale: `.loom/docs/critical-file-hold.md`.
-
 ## The rules
 
 - A critical-file FAIL is a **one-way terminal state**, so it gets a durable
@@ -89,7 +88,6 @@ T=$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape) && CF_JS
 HEAD_SHA=$(jq -r '.headRefOid' <<<"$CF_JSON")
 OPERATOR_LABEL_NOW=$(jq -r '[.labels[].name] | any(. == "loom:operator")' <<<"$CF_JSON")
 
-# Latest of the three episode markers decides the state.
 LAST_STATE=$(jq -r --arg h "$HOLD_MARKER" --arg c "$CLEARED_MARKER" --arg r "$RELEASED_MARKER" \
   '[.comments[] | select((.body | startswith($h)) or (.body | startswith($c)) or (.body | startswith($r)))] | last | .body // ""' <<<"$CF_JSON")
 case "$LAST_STATE" in
@@ -98,8 +96,7 @@ case "$LAST_STATE" in
   *)                   CF_STATE=none ;;   # cleared, or never held
 esac
 
-# The head that state was recorded against. Empty for a legacy hold posted
-# before the hold-state line existed — treated as "unknown", i.e. re-arm.
+# Head the state was recorded against; empty (legacy hold) => re-arm.
 STATE_HEAD=$(printf '%s' "$LAST_STATE" \
   | sed -n 's/.*champion:hold-state head=\([0-9a-f]*\).*/\1/p' | head -1)
 
@@ -114,8 +111,7 @@ cf_change_unmoved() {
 }
 
 if [ "$CRITERION3_RESULT" = "FAIL" ]; then
-  # Decide once (table above), then act once. Same-head arms come first: they
-  # need no binary or network.
+  # Decide once (table above), then act once; same-head arms need no network.
   CF_EQUIV_KIND=""
   if [ "$CF_STATE" = released ] && [ "$STATE_HEAD" = "$HEAD_SHA" ]; then
     CF_ACTION=none          # released at this head, already acknowledged
@@ -141,8 +137,7 @@ if [ "$CRITERION3_RESULT" = "FAIL" ]; then
       echo "Critical-file hold for #$PR_NUMBER was released at $HEAD_SHA — not re-holding (#9016)"
       ;;
     stands)
-      # `--add-label` on a label already there is a no-op; this branch and
-      # hold|rearm are the ONLY ones that may assert it.
+      # `--add-label` is a no-op if present; this and hold|rearm alone assert it.
       echo "Critical-file hold already posted for #$PR_NUMBER — hold stands, no comment"
       gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
       ;;
@@ -153,6 +148,11 @@ if [ "$CRITERION3_RESULT" = "FAIL" ]; then
       else
         CF_REARM_NOTE=""
       fi
+      CF_WF_NOTE=""   # #10539
+      gh pr diff "$PR_NUMBER" --name-only 2>/dev/null | grep -q '^\.github/workflows/' &&
+        CF_WF_NOTE="
+Merging workflow files needs the \`workflow\` token scope: \`gh auth refresh -h github.com -s workflow\`
+"
       ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$HOLD_MARKER
 <!-- champion:hold-state head=$HEAD_SHA -->
 **Champion: Holding for Human Merge — Critical File**
@@ -174,14 +174,13 @@ so \`merge-pr.sh\` sees no contradictory state (#8112): no need to beat a Champi
 merge of \`main\` does not re-arm the hold (#9416); a push that changes the diff
 does. A later push that narrows the diff off every critical-file pattern clears
 the hold on the next tick. \`loom:pr\` stays: Judge's approval stands.
-
+${CF_WF_NOTE}
 ---
 *Automated by Champion role*"
       gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
       ;;
     respect)
-      # Do NOT re-add `loom:operator`; the original notice stays. This comment
-      # records the release and re-anchors it at the current head.
+      # Do NOT re-add `loom:operator`; this records the release at the current head.
       if [ -n "$CF_EQUIV_KIND" ]; then
         CF_EQUIV_LINE="<!-- champion:hold-equivalence kind=$CF_EQUIV_KIND from=$STATE_HEAD to=$HEAD_SHA -->"
         CF_EQUIV_NOTE=" — carried from \`$STATE_HEAD\` by equivalence \`$CF_EQUIV_KIND\`, re-derived from the repository (#9416)"
@@ -205,9 +204,8 @@ The merge is yours: \`./.loom/scripts/merge-pr.sh $PR_NUMBER\`. A push that chan
       ;;
   esac
 elif [ "$CF_STATE" = held ] || [ "$CF_STATE" = released ]; then
-  # PASS with an episode still open — a later push narrowed the diff. Close it:
-  # clear the label (a no-op on the `released` path), post a one-time reversal
-  # notice, then fall through to the rest of the criteria as an ordinary PASS.
+  # PASS with an episode open — a push narrowed the diff. Clear the label, post
+  # a one-time reversal notice, then continue as an ordinary PASS.
   gh pr edit "$PR_NUMBER" --remove-label "loom:operator" 2>/dev/null || true
   ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$CLEARED_MARKER
 **Champion: Critical-File Hold Cleared**

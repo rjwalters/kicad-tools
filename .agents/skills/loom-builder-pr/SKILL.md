@@ -23,6 +23,7 @@ This document covers PR creation, test output handling, and quality requirements
 - [Pre-Implementation Review: Check Recent Main Changes](#pre-implementation-review-check-recent-main-changes)
 - [Test Output: Truncate for Token Efficiency](#test-output-truncate-for-token-efficiency)
 - [Acceptance Criteria Verification: REQUIRED Before PR Creation](#acceptance-criteria-verification-required-before-pr-creation)
+- [Rollout check (host-move PRs)](#rollout-check-host-move-prs)
 - [Test-First Discipline (TDD line, required in PR body)](#test-first-discipline-tdd-line-required-in-pr-body)
 - [PR Titles: Conventional Commit Style Required](#pr-titles-conventional-commit-style-required)
 - [Commit Messages: Same Rules as PR Titles](#commit-messages-same-rules-as-pr-titles)
@@ -407,43 +408,32 @@ Local verification:
 If you modified any `.rs` files, run these checks **before committing**:
 
 ```bash
-# Compile check - catches type errors, borrow issues, async Send violations
+# Compile check
 cargo check
 
-# Lint - catches common mistakes, anti-patterns, correctness issues
+# Lint
 cargo clippy
 
-# Format all Rust files (applies formatting)
+# Format (applies)
 cargo fmt
 
-# Verify formatting (check only, no changes - returns non-zero if unformatted)
+# Verify formatting (check only)
 cargo fmt --all -- --check
 ```
 
-**Why check before commit?** Pre-commit hooks can fail silently in worktrees; a Doctor cycle costs far more than a local check; async errors (e.g. `MutexGuard` across `.await`) only the compiler catches.
+**Why check before commit?** Pre-commit hooks can fail silently in worktrees, and a Doctor cycle costs far more than a local check.
 
-**Add to your pre-PR checklist when modifying Rust:**
-
-```markdown
-Local verification:
-- [ ] The project's check command passes (`buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`)
-- [ ] `cargo check` returns 0 (Rust files only)
-- [ ] `cargo clippy` returns 0 (Rust files only)
-- [ ] `cargo fmt --all -- --check` returns 0 (Rust files only)
-```
+**When modifying Rust**, tick off before the PR: the project check command (`buildGate.command` in `.loom/config.json`), `cargo check`, `cargo clippy`, and `cargo fmt --all -- --check` all return 0.
 
 ### Red Flags: Don't Create PR Yet
 
-**STOP and verify if:**
-- You haven't explicitly checked each criterion from the issue
-- You're unsure if a criterion is met ("it should work")
-- The issue mentions files you haven't touched
-- CI might fail on something you didn't test locally
+**STOP and verify if** you have not checked each issue criterion, are unsure one is met ("it should work"), the issue mentions files you have not touched, or CI might fail on something untested locally. Then re-extract criteria (Step 1), verify each explicitly, and only then create the PR.
 
-**Instead:**
-1. Go back to Step 1 and re-extract criteria
-2. Verify each one explicitly
-3. Only then create the PR
+---
+
+## Rollout check (host-move PRs)
+
+A PR that moves work between hosts or changes who emits a fleet signal (authority, captain, singleton jobs, gating, capability routing) needs a `## Rollout check` section: the production signal (e.g. a SigNoz query) and its expected value after the fleet rolls. Others omit it. See `.loom/docs/rollout-check.md`.
 
 ---
 
@@ -827,7 +817,8 @@ When creating a PR, verify:
 8. Tests added/updated as needed
 9. Commits carry a `Signed-off-by:` trailer if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` check — see "DCO sign-off")
 10. `## Test Plan` includes a `TDD:` line for any diff touching executing code (see "Test-First Discipline" above) — omit only for docs/config/ADR-only changes
-11. **Rebased onto latest `origin/main` immediately before push** — see "Pre-Push Rebase: Sync with `origin/main`" below
+11. `## Rollout check` section present if the PR is a host-move PR (see "Rollout check" above)
+12. **Rebased onto latest `origin/main` immediately before push** — see "Pre-Push Rebase: Sync with `origin/main`" below
 
 ### Pre-Push Rebase: Sync with `origin/main` (#7668)
 

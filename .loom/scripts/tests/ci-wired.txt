@@ -46,8 +46,10 @@ test-champion-epic-verdict-marker-scope.sh
 test-champion-held-pr-health-pass.sh
 test-champion-issue-promo-escalation-respects-human-hold.sh
 test-champion-merge-queue-step-no-fallthrough.sh
+test-champion-needs-revision-routing.sh
 test-champion-pr-merge-negation-guard.sh
 test-champion-premise-false-close.sh
+test-champion-promotion-throughput.sh
 test-champion-standing-authorization.sh
 test-check-ci-status.sh
 test-check-config-no-host-paths.sh

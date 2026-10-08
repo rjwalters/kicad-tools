@@ -6,9 +6,9 @@
 #
 # champion-issue-promo.md's tier-based rate limiting ("Rate Limiting by Tier")
 # can decide that a proposal passes all 8 promotion criteria but is held back
-# THIS PASS anyway -- Tier 3 promotes only one issue per iteration and only if
-# fewer than 5 Tier 3 issues are already in the backlog; Tier 2 promotes at
-# most 2 per iteration. Every later Champion pass (cron tick, role-runner
+# THIS PASS anyway -- per-pass Tier 2/3 caps and a Tier 3 backlog cap (env
+# vars, defaults 2/1/5 since #10753; the backlog counts promoted issues only).
+# Every later Champion pass (cron tick, role-runner
 # tick, or a fresh dispatch) re-derives the same "criteria pass, capacity
 # gate blocks it" conclusion for an issue that has not been revised at all --
 # and, without a guard, posts an equivalent "Tier N backlog cap reached"

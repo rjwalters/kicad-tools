@@ -59,7 +59,7 @@ mk_daemon() { # <name> <body>
 }
 mk_daemon daemon-old 'echo "error: unrecognized subcommand '\''may-write'\''" >&2; exit 2'
 mk_daemon daemon-deny 'echo "the credential in use cannot write to me/solo (repository role \`pull\`)" >&2; exit 1'
-mk_daemon daemon-allow 'echo "me/widgets"; exit 0'
+mk_daemon daemon-allow '[[ "${2:-}" == verdict-reconcile ]] && { echo "LOOM-VERDICT-RECONCILE STABLE"; exit 0; }; echo "me/widgets"; exit 0'
 mk_daemon daemon-silent 'exit 0'
 NO_DAEMON="$WORK/no-such-loom-daemon"
 

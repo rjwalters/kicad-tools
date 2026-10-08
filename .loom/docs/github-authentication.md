@@ -14,6 +14,7 @@ separate question. See [`forge-egress.md`](forge-egress.md)
 - [Required Token Permissions](#required-token-permissions)
 - [Creating a Fine-Grained PAT](#creating-a-fine-grained-pat)
 - [Using the Token](#using-the-token)
+- [Merging workflow-file PRs needs the `workflow` scope (#10539)](#merging-workflow-file-prs-needs-the-workflow-scope-10539)
 - [Verifying Authentication](#verifying-authentication)
 - [Headless and SSH-only daemon operation (#4005)](#headless-and-ssh-only-daemon-operation-4005)
 - [Rate-limit pools: what actually splits the bucket (#9872)](#rate-limit-pools-what-actually-splits-the-bucket-9872)
@@ -125,6 +126,26 @@ all of them share your one personal rate-limit pool (see
 [Rate-limit pools](#rate-limit-pools-what-actually-splits-the-bucket-9872)).
 
 When using Daemon Mode, set the variable before launching the daemon so all spawned terminals inherit it.
+
+## Merging workflow-file PRs needs the `workflow` scope (#10539)
+
+GitHub refuses (403, "refusing to allow an OAuth App to create or update
+workflow ... without `workflow` scope") to merge a PR that changes
+`.github/workflows/*` when the OAuth token in use lacks the classic `workflow`
+scope. Champion's critical-file hold sends exactly these PRs to a human merge,
+so the operator's `gh` login needs it:
+
+```bash
+gh auth refresh -h github.com -s workflow
+```
+
+`merge-pr.sh` checks this up front (`loom-daemon merge-pr workflow-scope`) and
+refuses with that command instead of surfacing the raw 403. It blocks only when
+the PR touches `.github/workflows/` AND the token's `X-OAuth-Scopes` header is
+present and lacks `workflow`. App installation and fine-grained tokens send no
+such header, so they are never blocked here; any lookup error also proceeds.
+Bypass: `LOOM_SKIP_WORKFLOW_SCOPE_CHECK=1`. Refreshing the credential is an
+operator action; automation never runs `gh auth refresh`.
 
 ## Verifying Authentication
 

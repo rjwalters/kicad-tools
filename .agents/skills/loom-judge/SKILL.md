@@ -328,22 +328,19 @@ section for the full carve-out list).
 
 **Post every verdict comment through `./.loom/scripts/post-verdict.sh`, never a bare `gh pr comment` (#6382).** It takes `$VERDICT_SHA` as an argument and appends the `<!-- loom:verdict-sha ... -->` marker itself, so the marker cannot be typed-and-forgotten the way it can in a hand-written heredoc — the same reasoning behind `create-pr.sh` / `merge-pr.sh` existing instead of raw `gh` calls in this prompt. See "Verdict SHA Marker" under Evaluation Process for why the marker matters; it applies to **every** verdict-label write in this document, not just the two below.
 
-**After approval (green → blue) — BOTH commands are REQUIRED:**
+**After approval (green → blue):**
 ```bash
 ./.loom/scripts/post-verdict.sh <number> approved "$VERDICT_SHA" \
-    --body "LGTM! Code quality is excellent, tests pass, implementation is solid." && \
-  gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
+    --body "LGTM! Code quality is excellent, tests pass, implementation is solid."
 ```
 
-**If changes needed (green → amber) — BOTH commands are REQUIRED:**
+**If changes needed (green → amber):**
 ```bash
 ./.loom/scripts/post-verdict.sh <number> changes-requested "$VERDICT_SHA" \
-    --body "Issues found that need addressing before approval..." && \
-  gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"
-# Doctor will address feedback and change back to loom:review-requested
+    --body "Issues found that need addressing before approval..."
 ```
 
-**CRITICAL: The `gh pr edit` label command is the PRIMARY deliverable of evaluation.** The comment alone is NOT sufficient — the sweep orchestrator validates outcomes by checking labels, not comments. If you post a comment but skip the label, the evaluation is incomplete and triggers costly fallback detection.
+**`post-verdict.sh` applies the verdict label itself (#10581)** and verifies it: approve leaves `loom:pr` and strips `loom:changes-requested`, `loom:ci-failure`, `loom:reviewing`, `loom:review-requested`; changes-requested leaves `loom:changes-requested` and strips `loom:pr`, `loom:reviewing`, `loom:review-requested`. A trailing `&& gh pr edit` in older examples below is redundant but harmless; add only companions (`loom:ci-failure`, `loom:merge-conflict`) yourself. The label is the PRIMARY deliverable — the sweep validates labels, not comments — so **exit 8** (comment posted, labels did not hold) means run the printed repair command now. **Exit 7**, no approval stands: `loom:ci-failure` is on the PR, another verdict at this same head is changes-requested (do not approve over it without a new push; `--overrules-prior "<why each point no longer blocks>"` only when you verified every point), the PR state was unreadable, or a concurrent changes-requested from another host won (labels flipped). A same-head repeat within 10 minutes is deduped: stand down.
 
 **Label transitions:**
 - `loom:review-requested` (green) → `loom:pr` (blue) [approved, ready for Champion auto-merge]
@@ -509,8 +506,7 @@ after your own mutation so your next cached read cannot return your own
 pre-write state:
 
 ```bash
-./.loom/scripts/post-verdict.sh "$N" approved "$VERDICT_SHA" --body "…" \
-  && gh pr edit "$N" --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
+./.loom/scripts/post-verdict.sh "$N" approved "$VERDICT_SHA" --body "…"
 "$GH_READ" --clear-cache   # local /tmp sweep — zero API cost
 ```
 
@@ -561,9 +557,9 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
 8b. **Reconcile formal reviews and inline threads**: `./.loom/scripts/check-review-feedback.sh --number <number> --head-sha "$REVIEW_HEAD_SHA"` — CI green plus friendly issue comments is NOT the whole review record (#7647). Exit 0 = clear; 10/11/12 mean something is outstanding, older-head, or unread, and an approval must dispose of it explicitly. See "Formal Review & Inline Thread Reconciliation" below. **Applies to every approval path, including the fast paths** — `post-verdict.sh` re-runs this gate itself and refuses an ungrounded approval.
 9. **Evaluate changes**: Examine diff, look for issues, suggest improvements
 10. **Provide feedback**: Use `./.loom/scripts/post-verdict.sh` to provide evaluation feedback
-11. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file). **Run the Verdict-Time CAS Recheck (see below) immediately before this step** — abort instead of writing if it finds your claim lost, another Judge's verdict already landed, or the head SHA moved off `REVIEW_HEAD_SHA`. It yields `$VERDICT_SHA`, which `post-verdict.sh` MUST be given (see "Verdict SHA Marker") — the script stamps the `<!-- loom:verdict-sha ... -->` marker itself. **The label update is the PRIMARY deliverable — always run it immediately after the comment using `&&`:**
-   - If approved: `post-verdict.sh <number> approved "$VERDICT_SHA" --body ... && gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"` (blue badge - ready for Champion auto-merge)
-   - If changes needed: `post-verdict.sh <number> changes-requested "$VERDICT_SHA" --body ... && gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"` (amber badge - Doctor will address)
+11. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file). **Run the Verdict-Time CAS Recheck (see below) immediately before this step** — abort instead of writing if it finds your claim lost, another Judge's verdict already landed, or the head SHA moved off `REVIEW_HEAD_SHA`. It yields `$VERDICT_SHA`, which `post-verdict.sh` MUST be given (see "Verdict SHA Marker") — the script stamps the `<!-- loom:verdict-sha ... -->` marker itself. The script applies the label (the PRIMARY deliverable) itself; see Label Workflow for exits 7/8:
+   - If approved: `post-verdict.sh <number> approved "$VERDICT_SHA" --body ...` (blue `loom:pr` - ready for Champion auto-merge)
+   - If changes needed: `post-verdict.sh <number> changes-requested "$VERDICT_SHA" --body ...` (amber - Doctor will address)
 
 ### Stale `loom:reviewing` Claim Check (Step 2)
 
@@ -814,12 +810,11 @@ completion write — see `doctor.md`'s "Verdict-Time CAS Recheck".
 **Pre-approval checklist** (verify before executing approval commands):
 - [ ] I am posting my verdict through `./.loom/scripts/post-verdict.sh`, NOT a
       bare `gh pr comment` and NOT `gh pr review`
-- [ ] I am using `gh pr edit` for label changes
 - [ ] I understand `gh pr review --approve` WILL fail with "cannot approve your own PR"
 - [ ] All CI checks pass (verified via `forge wait-checks`)
 - [ ] Merge state is CLEAN (verified via `gh pr view --json mergeStateStatus`)
 - [ ] I will NEVER call `gh pr review` in any form
-- [ ] I will run `post-verdict.sh` AND `gh pr edit` atomically (chained with `&&`)
+- [ ] `post-verdict.sh` exited 0 (it applied the verdict label; exit 8 = run its repair command)
 - [ ] If my review body came from a scratch file, the filename is namespaced by
       the PR/issue number (`review-<N>.md`, never a fixed name like
       `review.md` — wave subagents share one scratchpad, #6381), I passed it
@@ -1935,6 +1930,10 @@ EOF
   full flow.
 
 ## Evaluation Focus Areas
+
+### Rollout check (host-move PRs)
+
+If the PR moves work between hosts or changes who emits a fleet signal (authority, captain, singleton jobs, gating, capability routing), request changes when `## Rollout check` is missing or names no concrete queryable signal and expected value. Other PRs: never flag. Detail: `judge-reference.md` § "Rollout check".
 
 ### PR Description and Issue Linking (CRITICAL)
 

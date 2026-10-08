@@ -114,3 +114,11 @@ comment carrying two further markers:
 
 No marker comment is ever rewritten or deleted. A cleared notice ends an episode;
 a later FAIL is a fresh episode, never a permanent exemption.
+
+## Workflow files need the `workflow` token scope (#10539)
+
+A hold whose PR touches `.github/workflows/` ends in a human `merge-pr.sh`, and
+GitHub 403s that merge unless the operator's `gh` token has the `workflow` scope
+(see `github-authentication.md`). The hold comment therefore appends the fix
+(`gh auth refresh -h github.com -s workflow`) for such PRs, and only for them;
+`merge-pr.sh` also refuses up front with the same command.

@@ -774,61 +774,6 @@ forge_get_workflow_runs() {
 
 # --- PR Listing Helpers ---
 
-# List merged PRs.
-# Usage: forge_list_merged_prs NWO LIMIT [DATE_FILTER]
-# GitHub: gh pr list --state merged
-# Gitea: GET /repos/{owner}/{repo}/pulls?state=closed + client-side merge filter
-forge_list_merged_prs() {
-  local nwo="$1"
-  local limit="$2"
-  local date_filter="${3:-}"
-
-  if [[ "$FORGE_TYPE" == "gitea" ]]; then
-    forge_split_nwo "$nwo"
-    local page=1
-    local per_page=50
-    local collected=0
-    local results="[]"
-
-    while [[ $collected -lt $limit ]]; do
-      local batch
-      batch=$(gitea_api GET "repos/$FORGE_OWNER/$FORGE_REPO/pulls?state=closed&sort=updated&limit=$per_page&page=$page" 2>/dev/null) || break
-
-      local batch_len
-      batch_len=$(echo "$batch" | jq 'length')
-      [[ "$batch_len" -eq 0 ]] && break
-
-      # Filter to merged PRs and optionally by date
-      local filtered
-      if [[ -n "$date_filter" ]]; then
-        filtered=$(echo "$batch" | jq --arg df "$date_filter" '[.[] | select(.merged == true and .merged_at != null and .merged_at >= $df) | {number: .number, mergedAt: .merged_at}]')
-      else
-        filtered=$(echo "$batch" | jq '[.[] | select(.merged == true) | {number: .number, mergedAt: .merged_at}]')
-      fi
-
-      results=$(echo "$results" "$filtered" | jq -s '.[0] + .[1]')
-      collected=$(echo "$results" | jq 'length')
-
-      # If we got a full page, there may be more
-      [[ "$batch_len" -lt "$per_page" ]] && break
-      page=$((page + 1))
-
-      # Rate limiting protection for Gitea
-      sleep 0.2
-    done
-
-    # Trim to limit and output just the numbers
-    echo "$results" | jq -r ".[:$limit] | .[].number"
-  else
-    if [[ -n "$date_filter" ]]; then
-      gh pr list --state merged --limit "$limit" --json number,mergedAt \
-        --jq '[.[] | select(.mergedAt >= "'"$date_filter"'")] | .[].number' 2>/dev/null || echo ""
-    else
-      gh pr list --state merged --limit "$limit" --json number --jq '.[].number' 2>/dev/null || echo ""
-    fi
-  fi
-}
-
 # Get PR body.
 # Usage: forge_get_pr_body NWO PR_NUMBER
 forge_get_pr_body() {

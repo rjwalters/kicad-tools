@@ -3186,15 +3186,14 @@ fi
 
 **Process all qualifying PRs in one iteration — drain the full queue.**
 
-Use `loom-daemon pr-queue --role champion` and evaluate rows in its order; see `.loom/docs/pr-planning.md`. Continue past holds and CI/dependency waits.
+Evaluate `loom-daemon pr-queue --role champion` rows in order (`.loom/docs/pr-planning.md`). Continue past holds and CI/dependency waits.
 
-After each completed/skipped PR, refresh the queue and take the next unvisited row; keep a per-pass visited set. Continue past individual merge failures.
+After each completed/skipped PR, refresh the queue and take the next unvisited row; keep a per-pass visited set. It pauses once after `${LOOM_CHAMPION_PR_SLICE:-10}` rows for promotion, then resumes (`champion.md`, #10753). Continue past individual merge failures.
 
 **Congestion signal, report-only.** At the start of the pass, run
 `loom-daemon forge pr-congestion` from the repo root and copy its verdict
 line into the pass summary — measurement only, never a merge-order input.
-Full policy: `.loom/docs/pr-congestion-signal.md` (source:
-`defaults/docs/pr-congestion-signal.md`).
+Full policy: `.loom/docs/pr-congestion-signal.md`.
 
 **Starred PRs first (`loom:operator-priority`, #9244; level 2 before the star, #10307).** The shared queue puts stars
 ahead of interactive work, then ordinary work (oldest first within each class). The star changes order only: all 6

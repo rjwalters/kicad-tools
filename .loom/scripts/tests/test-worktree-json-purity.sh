@@ -403,9 +403,12 @@ cleanup_repo "$REPO"
 # fd 3 is the caller's saved stdout. `lease ensure` starts a renewer that
 # outlives worktree.sh by up to 4h; if it inherits fd 3, a `worktree.sh N | tail`
 # pipe stays open that long. The stub stands in for a daemon whose `lease`
-# subcommand leaves a long-lived background child with every inherited fd intact
-# (stdout/stderr already sent to /dev/null, as worktree.sh does) and answers
-# every other subcommand like an old binary. Bounded: a regression fails in ~30s.
+# subcommand leaves a long-lived background child with every OTHER inherited fd
+# intact, and answers every other subcommand like an old binary. Its child's
+# stderr is /dev/null because the real renewer's is: `lease ensure` starts it
+# with `Stdio::null()` (cli/lease_ensure.rs `start_renewal`). worktree.sh leaves
+# its own stderr attached so the one outcome line stays visible (#10570), so
+# this models fd 3 alone. Bounded: a regression fails in ~30s.
 echo ""
 echo "Test 10: worktree.sh N | cat returns while a lease renewer keeps running (#10203)"
 REPO=$(setup_repo leasefd)
@@ -414,7 +417,7 @@ RENEWER_PIDFILE=$(mktemp /tmp/loom-wtjson-leasepid.XXXXXX)
 cat > "$RENEWER_DAEMON" <<STUB
 #!/usr/bin/env bash
 if [[ "\$1" == "lease" ]]; then
-    sleep 30 &
+    sleep 30 2>/dev/null &
     echo \$! > "$RENEWER_PIDFILE"
     exit 0
 fi

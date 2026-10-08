@@ -2565,11 +2565,19 @@ restamp_metadata() {
     # freezing whatever was recorded at install time. Best-effort: empty when
     # SOURCE_ROOT isn't a git checkout or has no `origin` configured.
     remote="$(git -C "$SOURCE_ROOT" remote get-url origin 2>/dev/null || true)"
+    # #10717: requires_daemon (the compatibility contract, #10716) travels with
+    # the files, so it is read from the tree they came from, the same way
+    # scripts/install/loom-source-path.sh reads it at install time. A source
+    # that predates the contract makes no claim: the field is dropped rather
+    # than left describing files this run just replaced.
+    local req
+    req="$(sed -n 's/^pub const REQUIRES_DAEMON: &str = "\([0-9][0-9.]*\)";$/\1/p' \
+        "$SOURCE_ROOT/loom-daemon/src/install_compat.rs" 2>/dev/null || true)"
     tmp="${meta}.tmp.$$"
 
     if command -v jq >/dev/null 2>&1; then
-        if jq --arg v "$version" --arg c "$commit" --arg r "$today" --arg src "$remote" \
-              '.loom_version=$v | .loom_commit=$c | .last_resync=$r | .loom_source_remote=$src | del(.loom_source)' \
+        if jq --arg v "$version" --arg c "$commit" --arg r "$today" --arg src "$remote" --arg q "$req" \
+              '.loom_version=$v | .loom_commit=$c | .last_resync=$r | .loom_source_remote=$src | del(.loom_source) | if $q == "" then del(.requires_daemon) else .requires_daemon=$q end' \
               "$meta" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
             mv "$tmp" "$meta"
             note "  ${GREEN}re-stamped${NC} install-metadata.json (loom_version=$version, loom_commit=$commit, last_resync=$today)"
@@ -2579,7 +2587,7 @@ restamp_metadata() {
     fi
 
     if command -v python3 >/dev/null 2>&1; then
-        if META="$meta" VERSION="$version" COMMIT="$commit" TODAY="$today" REMOTE="$remote" \
+        if META="$meta" VERSION="$version" COMMIT="$commit" TODAY="$today" REMOTE="$remote" REQ="$req" \
            python3 - "$tmp" <<'PY' 2>/dev/null && [[ -s "$tmp" ]]; then
 import json, os, sys
 with open(os.environ["META"]) as f:
@@ -2589,6 +2597,9 @@ data["loom_commit"] = os.environ["COMMIT"]
 data["last_resync"] = os.environ["TODAY"]
 data["loom_source_remote"] = os.environ["REMOTE"]
 data.pop("loom_source", None)
+data.pop("requires_daemon", None)
+if os.environ["REQ"]:
+    data["requires_daemon"] = os.environ["REQ"]
 with open(sys.argv[1], "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")

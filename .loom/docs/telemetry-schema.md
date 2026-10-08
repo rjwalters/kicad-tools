@@ -60,6 +60,25 @@ decision. Every log record also carries `loom.record_id`, a content-derived
 dedupe id (`derived_hex(["loom.record", kind, host_id, emitted_at, record JSON],
 16)`). Full contract: [`telemetry-replay.md`](telemetry-replay.md).
 
+### `loom.kind` on every log record (Issues #9881, #10899)
+
+Every OTLP **log** record carries its record kind as the ordinary string
+attribute `loom.kind`, equal to the envelope's `kind` tag (`sweep.outcome`,
+`eta.estimate`, `ci.job`, `pr.resolved`, …). That holds for every kind whose
+registry row says `otlp: Logs`. Filter logs by kind on this key, never on the
+log `name` column (SigNoz lowers `name` to a JSON function this ClickHouse build
+rejects, loom-ui#747) and never on `body`: the JSON-body kinds (`eta.*`,
+`pr.resolved`, `pass.*`, `pick.decision`, `auto_update.tick`,
+`token_ranking.refresh`, `ci.job.log`, `session.output`) have a body that is
+not the event name. The mapping stamps it once, after the per-kind mapping, at
+index 1 right after `loom.record_id`, so the 64-attribute bound never drops
+it. The collector's log `keep_keys` admits it. Records exported before #10899
+lack it for every kind except the `sweep.*` lifecycle kinds (other than
+`sweep.phase`), `role_tick.outcome`, `session.summary`, `session.analysis`,
+`pick.decision` and `pass.*`. The `loom.eta.*` attribute filters the ETA
+queries use are unchanged and still valid. Contract:
+`observability/otlp/mapping/tests/loom_kind.rs`, which walks the kind registry.
+
 ### `schema_version` semantics
 
 `schema_version` is a **plain integer**, not a semver string, deliberately: a
@@ -1646,7 +1665,7 @@ Never an issue number, sha or path.
 | `loom.eta.health.fit_age_seconds` | `s` | none | now minus the loaded file's cutoff. Omitted when none is loaded |
 | `loom.eta.health.fit_check_age_seconds` | `s` | `reason` (the last fit check's outcome or skip reason) | time since the last fit check. Omitted until one has run in this process |
 | `loom.eta.health.snapshot_age_seconds` | `s` | `repo` | now minus each cached fleet snapshot's `as_of` |
-| `loom.eta.health.refresh_gate` | `1` | `state` ∈ `captain`, `no_captain`, `stand_down`, `disabled` | `1` for the current gate state, `0` for the other three. Before the first tick it is the state the read-only captain resolver reports (`disabled` when the loop does not run) |
+| `loom.eta.health.refresh_gate` | `1` | `state` ∈ `captain`, `authority`, `no_captain`, `stand_down`, `disabled` | `1` for the current gate state, `0` for the other four. `authority` (#10918): this host refreshes as the explicit `fleet.etaAuthority`; `captain`: it refreshes as `fleet.captain` (no explicit authority); `disabled`: its own `fleetRefresh.enabled` is off and it is not the explicit authority. Before the first tick it is the state the read-only gate resolver reports (`disabled` when the loop does not run) |
 | `loom.eta.health.refresh_last_cycle_age_seconds` | `s` | none | time since the last refresh tick (stand-down ticks count). Omitted before the first tick; keeps growing if the loop stalls |
 | `loom.eta.health.refresh_repos` | `{repository}` | `reason` (a fleet-refresh stop reason) | repos per stop reason in the last tick that refreshed; a reason that drops out is exported once as `0` |
 | `loom.eta.health.snapshot_rows` | `{row}` | none | rows in the last `eta.snapshot` this process built. Omitted until one was built |

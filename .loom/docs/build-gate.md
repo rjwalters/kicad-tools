@@ -453,6 +453,29 @@ Two concrete failure classes motivated the split (#3985):
   [`troubleshooting.md`](troubleshooting.md) → "Several unrelated things hang at
   once (macOS Gatekeeper / `syspolicyd`)".
 
+A third class was added by #9360, and it is the one to reach for first when the
+gate reds on a **dispatch worker** while the same commit is green in CI:
+
+- **An inherited runtime pin.** The gate runs *inside* an agent session, and
+  every Loom agent session is deliberately spawned with the admitted runtime
+  pinned into its environment (`LOOM_RUNTIME`, plus `LOOM_RUNTIME_<ROLE>` —
+  `launch_env::apply_launch_env`, so `spawn-worker.sh` cannot re-resolve a
+  different runtime after the pre-spawn decision). Those variables outrank every
+  config file a unit-test fixture can write, and the shared
+  `runtime_admission::resolve_binding` reads them first — so on a native worker
+  (`LOOM_RUNTIME=opencode`) a test that installs a Claude surface gets
+  `RuntimeRejected`, and a test asserting the `--model` pin gets no `--model` at
+  all, because the native default-model branch has no shipped default. Three
+  tests failed exactly that way; see #9360's gate log. **The fix belongs in the
+  test, not in the gate**: take
+  `runtime_selection_test_support::ClearedRuntimeSelectionEnv` (an RAII guard
+  that clears every variable `resolve_binding` reads and restores them on drop)
+  in any test that asserts on a runtime binding, an admission outcome, or a
+  resolved dispatch model, and hold a `serial_test` key while it is alive. The
+  gate deliberately does **not** sanitize the environment wholesale: it needs
+  the real `PATH`/`HOME`/credential environment to run at all, and an `env -i`
+  wrapper would hide exactly the host-shaped reds this section is about.
+
 **The gate runs at a mild throttle relative to sweeps (#4020, revises #3985).**
 `build-gate.sh` now defaults to `nice 5` — a mild positive niceness, a real but
 small step down from the sweep children's `nice 0`. It previously re-exec'd

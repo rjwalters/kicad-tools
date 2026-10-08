@@ -1568,36 +1568,48 @@ on a live host is the daemon's own sync, below
 
 Every other sub-verb above only reads the store. `propose` is the one place
 `fleet-config` writes to it — and it never writes directly: each sub-verb
-edits a fresh fetch of the relevant store file in memory, then opens a
-**branch + PR** (never a direct push) carrying that one change and the hidden
-`<!-- loom:provenance v1 … -->` marker every Loom-authored PR body carries
-(`loom-daemon/src/provenance`), with `base=` the store commit it branched
-from. Merges stay the operator's, per the store's own branch policy — this command
-has no auto-merge path, and it never touches `repos.yml`'s `fleet`/`firewall`
-flags. `--dry-run` prints the diff and stops before opening anything.
+edits `fleet.yml`, the store's one hand-edited source, in memory (#10905),
+then opens a **branch + PR** (never a direct push) carrying that change and
+the hidden `<!-- loom:provenance v1 … -->` marker every Loom-authored PR body
+carries (`loom-daemon/src/provenance`), with `base=` the store commit it
+branched from. Merges stay the operator's, per the store's own branch
+policy — this command has no auto-merge path, and it never touches a repo's
+`fleet`/`firewall` flags. `--dry-run` prints the diff and stops before
+opening anything. A store without `fleet.yml` takes no proposal.
 
 Every edit is **format-preserving**: it patches only the lines the change
 requires (a small line-oriented editor, not a YAML re-serialize), so a
-reviewer's diff is exactly that change — comments, ordering and unrelated
-records in `repos.yml` / `fleet/state.yml` are untouched.
+reviewer's diff is exactly that change — comments (including an inline
+comment on a replaced value), ordering and unrelated records are untouched.
+
+**Renders.** The store's `validate` check rejects a render that differs from
+`fleet.yml` (`fleet-stale`), so the edited `fleet.yml` is rendered with the
+store's own `scripts/render.py`, run from a scratch copy of the base commit's
+`scripts/` and `schema/`, and the PR carries `fleet.yml` plus every render it
+changes (`fleet.json`, `repos.yml`, `fleet/state.yml`, the host tiers). A
+render that refuses the edit is an error and opens nothing. Without `python3`
+and PyYAML on the host (or without `scripts/render.py` in the store) the PR
+carries `fleet.yml` alone, and both a warning and the PR body say to run
+`python3 scripts/render.py` on the branch.
 
 - **`propose state <running|paused|stopped> [--host H] --reason … [--by WHO]
-  [--dry-run]`** — sets `fleet/state.yml`'s `hosts.<H>.state` (or, with no
-  `--host`, the top-level `fleet.state` default), always (re)writing
-  `since`/`by`; `reason` is required. Creates `hosts:` and/or the host's own
-  entry when either is missing; editing the fleet default requires that
-  block to already exist. `--by` defaults to this host's identity.
+  [--dry-run]`** — sets `state.hosts.<H>.state` (or, with no `--host`, the
+  `state.fleet` default), always (re)writing `since`/`by`; `reason` is
+  required. Creates `hosts:` and/or the host's own entry when either is
+  missing; editing the fleet default requires that block to already exist.
+  `--by` defaults to this host's identity.
 - **`propose priority <repo> <priority> [--dry-run]`** — sets the named
-  `repos[]` record's `fleet_priority` in `repos.yml`, inserting the key if
-  the record does not have one yet. Every other key on that record, and
-  every other record, is untouched.
+  `repos[]` record's `fleet_priority`, inserting the key if the record does
+  not have one yet. Every other key on that record, and every other record,
+  is untouched.
 - **`propose adopt [--host H] [--dry-run]`** — turns this host's `render
-  --check` drift into the store-side edit that would make it the new
-  rendered value: the host-local tier (`fleet/hosts/<H>/local.json`) is
-  adopted verbatim (including creating it when the store has never had one
-  for this host); the machine tier (`fleet/hosts/<H>/defaults.json`) is
-  patched leaf-by-leaf, so the host's other overrides survive untouched.
-  Exits with nothing to propose (and no PR) when the host has no drift.
+  --check` drift into the `fleet.yml` edit that would make it the new
+  rendered value, leaf by leaf: the host-local tier
+  (`config.hosts.<H>.local`) is made equal to the on-disk file (added when
+  the store has none for this host); the machine tier
+  (`config.hosts.<H>.defaults`) gets only the differing leaves, so the
+  host's other overrides survive untouched. Exits with nothing to propose
+  (and no PR) when the host has no drift.
 
 Any sub-verb whose edit came out a no-op — the store already says what it
 was asked to say — prints `nothing to propose` and exits 0 without opening
@@ -2610,7 +2622,7 @@ blocker reads count), and a child of
 several starred issues takes the earliest starred-at.
 
 **Materialized star (#10012 §2–§3).** With `materializeLabels` on (default
-**off**, an opt-in) together with `propagate` and `escalate`, the pass also writes the inherited star as the `loom:operator-priority` label on
+**on**; `false` opts out) together with `propagate` and `escalate`, the pass also writes the inherited star as the `loom:operator-priority` label on
 every open child reached by a link the issue text records (park record, task
 list, the dependency phrase of a `loom:blocked` parent), so Curator, Builder's
 starred-first query, the dashboard and `forge starred` see it too. A
@@ -2649,9 +2661,10 @@ without an inherited marker, so that star reads as the operator's and is not
 auto-removed on unstar (it fails safe). Closing it needs a `loom-daemon`
 subcommand posting the marker, tracked in #10592.
 
-**What travels to children (#10012 §6).** One table in code
-(`star_liveness::propagation_rules`) says which labels go from a parent to
-its children, always downward. The star goes to child issues and their PRs and
+**What travels to children (#10012 §6).** Each label's `propagate` field in
+`defaults/labels.json` (#10013) says whether it goes from a parent to its
+children, always downward; `star_liveness::propagation_rules` derives its
+table from it. The star goes to child issues and their PRs and
 is removed with the parent's star. `external` goes to child issues and is
 removed when no ancestor carries it any more, so a child of an unapproved
 outside submission cannot get past the maintainer gate. A `tier:*` label is
@@ -2664,9 +2677,9 @@ human put on the child, and never after an incomplete walk. The
 (`loom:blocked`, `loom:operator`, `loom:operator-only` and its sub-kinds,
 `loom:needs-capability`), claim, lifecycle and PR-lane labels, proposal kinds,
 `loom:epic-phase`, `loom:heavy`, `points:*`, the retired `loom:urgent`, and the
-#10307 level labels, which reach blockers by their own pass. A unit test fails
-when a `defaults/labels.json` label is in neither the table nor the
-never-propagate list. The pass writes only the star so far (above); it
+#10307 level labels, which reach blockers by their own pass: all carry
+`propagate: null`, and a unit test fails if a hold, claim, lifecycle, PR-lane,
+proposal, structural, size or resource label gets a rule. The pass writes only the star so far (above); it
 writes no `external` or `tier:*` label yet.
 
 **loom-ui stars.** The `/ingest` ack may carry `operator_priority_intents`
@@ -2685,7 +2698,7 @@ default**):
 | `intervalSecs` | `LOOM_OPERATOR_PRIORITY_INTERVAL_SECS` | `120` | pass interval |
 | `poolsExhaustedGraceMinutes` | `LOOM_OPERATOR_PRIORITY_POOLS_GRACE_MINUTES` | `10` | wait before a `pools-exhausted` ask; `0` asks at once |
 | `propagate` | `LOOM_OPERATOR_PRIORITY_PROPAGATE` | `true` | a star also reaches its children by park record, task list and dependency phrase; `false` keeps only the blocker / incident / red-main inheritance |
-| `materializeLabels` | `LOOM_OPERATOR_PRIORITY_MATERIALIZE_LABELS` | `false` | write the inherited star as the `loom:operator-priority` label (and on the linked PR) and take it back when the root loses its star ("Materialized star" above); needs `propagate` and `escalate`. Off, the inherited star is an in-memory ordering only, no star owner is read and no star label is written |
+| `materializeLabels` | `LOOM_OPERATOR_PRIORITY_MATERIALIZE_LABELS` | `true` | write the inherited star as the `loom:operator-priority` label (and on the linked PR) and take it back when the root loses its star ("Materialized star" above); needs `propagate` and `escalate`. Opt out with `false` (env `0`): the inherited star is an in-memory ordering only, no star owner is read and no star label is written |
 | `levelCaps` | — | `{"2": 5}` (the level table) | per-level cap on open issues carrying the level's operator label; over the cap is flagged in the digest, never refused |
 
 **Priority levels (#10307).** Every pass also walks each level ≥ 2 issue's
@@ -3111,8 +3124,8 @@ rules with `git check-ignore`.
 | `autonomous.eta.fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily coefficient refit (#10245). It checks hourly, fits at most once per UTC day into `.loom/state/eta/fit/`, makes no forge call, and runs only with `autonomous.eta.enabled`. A no-op until a snapshot is cached. With `fleetRefresh.enabled` (below, #10263) the check runs at the end of every fleet refresh cycle instead of on its own task, so it always sees fresh snapshots. Read at start |
 | `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
 | `autonomous.eta.shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `14` registered heuristics per kind (floor 1, #10525): `current` plus the 13 `eta.snapshot` alternates (#10521; 13 since #10549, was 10). A build over it does not start the ETA tracker; the error names the excess heuristics. Read at start. See [eta → shadow fleet management](eta.md#shadow-fleet-management) |
-| `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. **Restart required**. **On a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
-| `fleet.etaAuthority` | `LOOM_ETA_AUTHORITY` | unset (#10498). The one host that computes and emits `eta.*` records and fits locally. Unset: the declared `fleet.captain`, else the host whose own `fleetRefresh.enabled` is on; several candidates fall back to the lowest host id with a warning. Re-read every pass. See [eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498) |
+| `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. Since #10918 the key is re-read every tick (no restart): `false` makes this host's tick `disabled` (no forge call), **except on the host `fleet.etaAuthority` names explicitly, which refreshes regardless**, so a worker-level `false` override does not starve the authority's fit. The env `LOOM_ETA_FLEET_REFRESH_ENABLED=0` is the hard stop on any host, the authority included (read at start: the loop is not spawned). **With `fleet.etaAuthority` set, the authority, not the captain, is the one refresher** and runs the nightly folds too ([eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498)). Otherwise, **on a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
+| `fleet.etaAuthority` | `LOOM_ETA_AUTHORITY` | unset (#10498). The one host that computes and emits `eta.*` records and fits locally. When set, it also runs the `eta-fleet-refresh` and `eta-nightly-folds` singleton jobs in place of `fleet.captain` (#10918). Unset: the declared `fleet.captain`, else the host whose own `fleetRefresh.enabled` is on; several candidates fall back to the lowest host id with a warning. Re-read every pass. See [eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498) |
 | `autonomous.eta.fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor `900`); first cycle 120 s after start |
 | `autonomous.eta.fleetRefresh.maxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_MAX_CALLS` | `300` forge calls per cycle for refresh passes, host-wide (`304`s and errors count) |
 | `autonomous.eta.fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `600` per cycle for backfill passes, host-wide (was `1500`, most of a 5,000/h installation, #10329); a larger backfill resumes next cycle. Spend per hour is `budget × 3600 / intervalSecs`, so a lowered `intervalSecs` multiplies it |
@@ -5637,6 +5650,9 @@ knobs not yet audited here.
 | `autonomous.autoUpdate.deferDeadlineSecs` | `LOOM_AUTO_UPDATE_DEFER_DEADLINE_SECS` | `21600` (6h) | Bound on the build-stampede gate (#4929): after this much **continuous** deferral for in-flight sweeps, the rebuild runs anyway at reduced CPU priority (`nice 19`) instead of deferring forever. Any check that sees zero in-flight sweeps — or a new source commit, or a completed rebuild — re-arms the clock, so short busy bursts never reach it. **Bounds the rebuild/source path only (#8252)** — a resolved release artifact is fetched immediately regardless of in-flight sweeps (niced, not deferred), so this deadline never delays an artifact roll. Zero/invalid → default; there is deliberately no "defer forever" value (set a very large one instead) |
 | `autonomous.autoUpdate.rollStallDeadlines` | `LOOM_AUTO_UPDATE_ROLL_STALL_DEADLINES` | `3` | Unsatisfiable-drain detector (#8998): how many drain deadlines may expire — summed **across roll lifetimes**, not per drain — with the in-flight sweep count never improving before the roll is declared unsatisfiable, abandoned, and *not re-armed* until an auto-update tick samples in-flight at zero (a sample on this cadence, not a continuous watch — see the mechanism entry below, and #9010 for the bounded-retry follow-up). Bounds the arm → refuse → retain → abandon → re-arm *sequence*, which #6007's per-drain paused-dispatch budget does not: each new release (or a #8514 supersede) restarted that budget, so two fleet dispatchers sat paused for 21h behind a legitimate 9h32m analog-simulation sweep and never rolled. Zero/invalid → default; there is deliberately no "never give up" value, since that is the bug. Set it high to make the detector effectively unreachable |
 | `autonomous.autoUpdate.rollStallCooldownSecs` | `LOOM_AUTO_UPDATE_ROLL_STALL_COOLDOWN_SECS` | `21600` (6h) | Bounds the `rollStallDeadlines` suppression above in TIME as well as by the `in_flight == 0` sample (#9010): once a standing unsatisfiability declaration has stood for this long, it is dropped and the next tick arms a roll for **one** more bounded attempt — if the host still cannot drain, the detector re-declares after `rollStallDeadlines` more deadlines rather than cycling, so the cost is one paused-dispatch budget per cooldown period instead of unbounded staleness on a host whose `in_flight == 0` sample never lands. Zero/invalid → default, exactly like `rollStallDeadlines`: a `0` would clear a declaration on the tick it was made, re-entering #8998's livelock through the knob. Set it very large to make the retry effectively unreachable |
+| `autonomous.autoUpdate.rollWindowSecs` | `LOOM_AUTO_UPDATE_ROLL_WINDOW_SECS` | *(off)* | Period of the scheduled roll window (#9132). **Unset/zero/invalid → no window**: rolls arm on every new build exactly as before (opt-in; this default preserves existing behaviour). When set, a new build arms **nothing** outside an open window, the settle gate is bypassed (the window is the batching mechanism, so a busy `main` cannot starve the host), and at most one roll arms per window — see [Scheduled roll windows](#scheduled-roll-windows-9132). **Restart required** |
+| `autonomous.autoUpdate.rollWindowOffsetSecs` | `LOOM_AUTO_UPDATE_ROLL_WINDOW_OFFSET_SECS` | derived from host id | Where window 0 opens within the period. Zero/invalid → the **derived** offset: `fnv1a(host_id) mod period`, stable across restarts and spread across hosts. An explicit value is reduced modulo the period, so the offset is always `< rollWindowSecs`. Only meaningful with `rollWindowSecs`. **Restart required** |
+| `autonomous.autoUpdate.launchdLiveReload` | `LOOM_AUTO_UPDATE_LAUNCHD_LIVE_RELOAD` | `false` | Opt-in for the launchd skip-the-drain path (`restart --reload-supervisor`, #6682). Selected **only** on launchd **and** only when `true`; systemd always uses the bounded drain. Depends on #9452 (the stale-sweep watchdog killing journal-adopted survivors) — do not enable on a real host before that is resolved. **Not yet wired to execute**: the selection is reported in `status` and logged, and rolls still use the bounded drain until live-host verification lands |
 | `autonomous.ciTelemetry.enabled` | `LOOM_CI_TELEMETRY_ENABLED` | `false` | Periodic GitHub Actions run/job capture (#8824, phase 2 #8825). Read-only observer: it can never change a dispatch, claim, or merge decision. **Restart required** — `spawn_task` resolves the whole block once, before the poller task is spawned; it is never re-read inside the poll loop. See [`ci-observability.md`](ci-observability.md) |
 | `autonomous.ciTelemetry.owners` | `LOOM_CI_TELEMETRY_OWNERS` (comma-separated) | `["2amlogic"]` | Orgs **and user accounts** whose repos are auto-discovered and polled (#9188). Each kind comes from `GET /users/{owner}`, probed once per daemon lifetime. Wins over `org` at the same tier. Empty → unset. **Restart required** — same one-time `spawn_task` resolution as `enabled` |
 | `autonomous.ciTelemetry.org` | `LOOM_CI_TELEMETRY_ORG` | — | Deprecated single-owner alias of `owners`: one declared organization, not probed. Empty → unset. **Restart required** |
@@ -5646,6 +5662,42 @@ knobs not yet audited here.
 | `autonomous.ciTelemetry.logCaptureMaxBytes` | `LOOM_CI_TELEMETRY_LOG_CAPTURE_MAX_BYTES` | `5242880` (5 MiB) | Per-job cap on captured log text. Zero/invalid → default. **Restart required** |
 | `autonomous.ciTelemetry.logCaptureExcludedRepos` | *(config only)* | `[]` | Repos excluded from **log capture only** — their `ci.run`/`ci.job` records and duration metrics are still captured unconditionally, same admission rule (`repo` + non-empty `reason`) as `excludedRepos`. Distinct key from `excludedRepos` deliberately: excluding a repo there would also drop its metrics, which the ci-observability policy forbids. **Restart required** |
 | `autonomous.sweepOutcomeWriteback.enabled` | `LOOM_SWEEP_OUTCOME_WRITEBACK` | `false` | Post-`Success` issue write-back comment (#9056). Opt-in, unlike the safety backstops above — it posts a forge-visible comment, not a dispatch decision. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. Resolved fresh at each terminal `Success` transition (not cached at startup), so a config edit takes effect on the very next sweep to finish with no daemon restart. See "Sweep-outcome issue write-back (#9056)" below |
+
+### Scheduled roll windows (#9132)
+
+With `autonomous.autoUpdate.rollWindowSecs` set, the auto-update loop rolls on a
+**schedule**, not on build arrival. Windows start at `offset + k * period` (UTC epoch
+seconds) and stay open for `max(2 x intervalSecs, 600s)` (capped at the period), so a
+tick always lands inside one.
+
+- **Outside an open window nothing arms.** `status` reports `scheduled wait: ...`.
+  The roll targets whatever artifact is on disk when the window is open, so nothing
+  chases a moving target.
+- **One arm per window.** A drain that times out (the roll goes *pending*, #6007) is
+  abandoned so dispatch resumes, and nothing re-arms until the next window, however
+  many ticks or releases pass (`drain timed out, waiting for next window`). This
+  composes with #8998/#9010 (their abandonment and cooldown still apply inside a
+  window) and #8514 (a still-draining roll overtaken by a newer release is retargeted
+  once, inside the same open window; after the window closes the stale target is
+  dropped and the newest waits). Operator drains (`restart --drain`, `--then-exit`
+  teardowns) are never abandoned or counted as an update pause.
+- **Stable per-host offset.** Derived from the host id unless configured, identical on
+  every restart.
+- **`status`** (`Auto-update loop:` lines and `auto_update.roll_window` in `--json`)
+  shows the period/offset, whether a window is open, when the next one opens, the roll
+  target, whether an update drain holds dispatch paused, the last deferral reason and
+  the selected restart path.
+
+**Fleet-overlap guarantee, stated precisely.** Distinct per-host offsets *reduce
+synchronized drain starts*; they do **not** guarantee that two hosts' drains never
+overlap. A drain can last up to its own timeout, which can exceed the gap between two
+hosts' offsets, and there is no fleet coordination or budget rule (a host does not look
+at what its peers are doing). Treat offsets as spreading, not mutual exclusion. A
+fleet-level "do not arm while a peer is draining" rule is not implemented.
+
+**Restart path.** systemd always uses the bounded drain. On launchd the drain is skipped
+only with `launchdLiveReload: true`, which is off by default and is not yet wired to
+execute (see the knob above); freshness deadlines never become an implicit force-kill.
 
 ### Sweep-outcome issue write-back (#9056)
 
@@ -7305,6 +7357,13 @@ the shared reader budgets. Each tick re-reads the gate for the singleton job
 | `Armed` (this host is the captain) | Arms `eta-fleet-refresh` (`host.health.armed_singleton_jobs`) and runs the cycle |
 | `Refused` (another host is) | **No forge call** (snapshots, backfill, raw events) and no `eta.fleet_refresh` record. The daily fit check still runs, on the snapshots this host has |
 | `NoCaptainDeclared` | Runs the cycle **unarmed**, and logs once that a multi-host fleet should declare a captain. Not listed in `captainless_singleton_jobs` |
+
+**An explicit `fleet.etaAuthority` takes the job over (#10918).** When the key,
+or `LOOM_ETA_AUTHORITY`, names a host, that host arms `eta-fleet-refresh` and
+runs the cycle (gauge state `authority`). It does so even with its own
+`fleetRefresh.enabled` off in config. Every other host, the captain included,
+stands down as `Refused` above. `eta-nightly-folds` follows the same owner. See
+[eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498).
 
 **Why it fails open, unlike `ci-telemetry-poll`**: the gate's fail-closed
 contract protects dedup-sensitive alerts, where a duplicate is a bug. A
@@ -12147,6 +12206,7 @@ seams):
 | `LOOM_DAEMON_UPDATE_COSIGN_OIDC_ISSUER` | Expected keyless certificate issuer (default `https://token.actions.githubusercontent.com`) |
 | `LOOM_DAEMON_UPDATE_REQUIRE_SIGNATURE` | `1`/`true`/`yes`/`on` selects **required** signature mode (#10470): an unsigned release (`SIGNATURE=skipped`) or one whose signature cannot be checked here (`SIGNATURE=unavailable`) is refused before provisioning, with distinct messages, and a sanitized `LOOM_SIGNATURE_EVIDENCE {...}` line is emitted on success (the full schema-versioned record, see [Signature evidence record](#signature-evidence-record-loom_signature_evidence-10474)): tag, asset sha256, signature state, and what the verifier that actually succeeded checked (`verification_method` = `codesign` / `cosign-key` / `cosign-keyless-identity` / `cosign-keyless-identity-regexp`; `identity`, `identity_regexp` and `oidc_issuer` are populated only by the keyless verifier that checked them and are `null` for codesign and key mode, which establish no GitHub workflow identity). Default off = the **present-only** compatibility mode (#5054), unchanged |
 | `LOOM_DAEMON_UPDATE_APPROVED_WORKFLOW` | Optional, with required mode: pin the derived keyless identity to this workflow file (regex-escaped) instead of `[^@]+`; a workflow rename then needs an explicit policy update. Recorded in the evidence line as `configured_workflow`, with `configured_workflow_applied` true only when a keyless regexp actually enforced it (false for codesign, key mode and an exact-identity override) |
+| `LOOM_DAEMON_UPDATE_APPROVED_SOURCE_ANCHOR` | Optional, with required mode (#10473): a full 40-hex commit SHA; the release tag must resolve (via `gh api .../git/ref/tags/<tag>`, annotated tags peeled through `git/tags/<sha>`) to that commit or a descendant (`compare/<anchor>...<commit>` status `identical`/`ahead`). Refusal classes, all before the candidate is executed: **configuration error** (short/non-hex anchor — never a skip), **source assurance unavailable** (`gh`/API failure or unparsable answer — not worded as tampering), **not a descendant of approved source** (`behind`/`diverged`, including a rollback below the anchor), **tag movement** (same tag, different commit than this host adopted) and **asset replacement** (same tag, different asset sha256). Every required-mode success records `{tag -> commit, asset sha256}` in `~/.loom/daemon-update/release-adoption.json` (public facts only; each write holds an exclusive lock on `release-adoption.json.lock` and re-checks the tag's pin, so a conflicting pin a concurrent update persisted first is refused as tag movement / asset replacement, never overwritten) and adds `source_revision` (the resolved commit) / `source_anchor` / `source_check` (`identical` / `ahead` / `not_configured`) / `adoption_record` (`first_seen` / `matched`; an unwritable record refuses the artifact before it is executed) to the evidence line; unrun checks stay `null`. **Limits**: the commit half of the record is only populated when an anchor is set (the asset-digest half always is); the record lives on the recipient host, so it detects drift and ordinary replacement, not an attacker with write access to that host; provenance attestation and an approval boundary outside the recipient are not provided. Lower/replace the anchor (or remove a record entry) explicitly to accept an older release or a re-cut tag |
 | `LOOM_SIGNATURE_EVIDENCE_JOURNAL_PATH` | Override where the durable signature-evidence journal is written (default `<repo>/.loom/logs/signature-evidence.jsonl`, only when the checkout already has a `.loom/`). See [Signature evidence record](#signature-evidence-record-loom_signature_evidence-10474) |
 
 #### Signature evidence record (`LOOM_SIGNATURE_EVIDENCE`, #10474)
@@ -12171,7 +12231,7 @@ belongs to the fleet-inventory repo, not here.
   and additive-only in *what* it carries: it is now the same record, a strict
   superset of the original nine keys with identical meanings.
 
-`LOOM_SIGNATURE_EVIDENCE` not-available fields (explicit `null` + `*_status: "not_available"`, never fabricated): `source_revision` (#10473), `policy_revision` / `approval_provenance` / `root_domain_scope` (#10472).
+`LOOM_SIGNATURE_EVIDENCE` not-available fields (explicit `null` + `*_status: "not_available"`, never fabricated): `policy_revision` / `approval_provenance` / `root_domain_scope` (#10472).
 
 Schema (`schema_version: 1`; adding a field is not a breaking change, so
 consumers must ignore unknown keys):
@@ -12183,7 +12243,7 @@ consumers must ignore unknown keys):
 | `host_id` | The host's telemetry identity (`LOOM_HOST_ID` precedence, same as OTLP records) |
 | `loom` | Deciding build's provenance: `version`, `revision`, `tree_state`, `complete` |
 | `policy_mode` | `required` or `present-only` |
-| `outcome` | `verified` / `refused_unsigned` / `refused_unavailable` / `signature_invalid` / `checksum_mismatch` / `signature_material_unavailable` / `glibc_incompatible` / `download_failed` |
+| `outcome` | `verified` / `refused_unsigned` / `refused_unavailable` / `signature_invalid` / `checksum_mismatch` / `signature_material_unavailable` / `glibc_incompatible` / `source_assurance_refused` / `download_failed` |
 | `tamper_evidence` | `true` only for `signature_invalid` and `checksum_mismatch`; a tooling gap (`refused_unavailable`) is never tampering |
 | `tag` | Release tag fetched |
 | `asset_sha256` | Digest of the checksum-verified binary; `null` when the checksum did not match or no binary was downloaded |
@@ -12192,7 +12252,8 @@ consumers must ignore unknown keys):
 | `identity`, `identity_regexp`, `oidc_issuer` | Populated only by the keyless verifier that checked them; `null` for codesign and key mode |
 | `configured_workflow` | `LOOM_DAEMON_UPDATE_APPROVED_WORKFLOW` as configured (the current policy-revision proxy) |
 | `configured_workflow_applied` | Whether that pin was enforced by this verification |
-| `source_revision` + `source_revision_status` | Always `null` + `"not_available"` — filled by #10473 (adopted source revision / tag ancestry) |
+| `source_revision` + `source_revision_status` | The release commit the tag resolved to (`"available"`) when the required-mode source gate ran with a configured anchor (#10473); otherwise `null` + `"not_available"` |
+| `source_anchor`, `source_check`, `adoption_record` | Source-gate detail (#10473): the configured anchor, `not_configured`/`identical`/`ahead` (refusals: `behind`/`diverged`/`unavailable`), and `not_recorded`/`first_seen`/`matched` (refusals: `unavailable`/`tag_moved`/`asset_replaced`/`write_failed`); `null` when that check did not run |
 | `policy_revision` + `policy_revision_status` | Always `null` + `"not_available"` — filled by #10472 (recorded, monotonic assurance policy) |
 | `approval_provenance` + `approval_provenance_status` | Always `null` + `"not_available"` — filled by #10472 (provider authority map) |
 | `root_domain_scope` + `root_domain_scope_status` | Always `null` + `"not_available"` — filled by #10472 (provider authority map) |

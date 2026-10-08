@@ -42,13 +42,7 @@ fi
 
 Classify the changed files to determine which scoped test strategies to apply:
 
-| Extension/Path | Language | Scoped Strategy |
-|----------------|----------|-----------------|
-| `.py`, `.pyi` | Python | `pytest --testmon` or full pytest |
-| `.ts`, `.tsx` | TypeScript | `jest --changedSince` or `vitest --changed` |
-| `.js`, `.jsx`, `.mjs`, `.cjs` | JavaScript | `jest --changedSince` or `vitest --changed` |
-| `.rs` | Rust | `cargo test -p <crate>` |
-| Other | Unknown | Full test suite |
+`.py`/`.pyi` Python; `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs` JS/TS; `.rs` Rust; anything else unknown (full suite).
 
 ### Step 4: Run Scoped Tests by Language
 
@@ -82,9 +76,6 @@ else
     SCOPED_STRATEGY="full-pytest (testmon missing/stale/not installed)"
 fi
 ```
-
-**Recommendation if testmon is unavailable:**
-Note in evaluation comment: "Consider installing `pytest-testmon` (`pip install pytest-testmon`) for faster scoped test execution in future reviews."
 
 #### JavaScript/TypeScript Repositories
 
@@ -131,31 +122,15 @@ Run the full test suite when:
 - Scoped tools are not available
 - First run in a repository with no scoping data
 
-```bash
-# Generic fallback — use whatever the project's standard check command is
-pnpm check:ci 2>/dev/null || \
-    npm test 2>/dev/null || \
-    ./.loom/scripts/run-tests.sh 2>/dev/null || \
-    cargo test 2>/dev/null || \
-    make test 2>/dev/null
-SCOPED_STRATEGY="full-suite (fallback)"
-```
+Use the project's standard check command (`pnpm check:ci`, `npm test`, `./.loom/scripts/run-tests.sh`, `cargo test`, or `make test`) and set `SCOPED_STRATEGY="full-suite (fallback)"`.
 
 ### Step 6: Document Strategy in Evaluation Comment
 
 **Always log which scoping strategy was used.** Include a "Test Scoping" section in your evaluation comment:
 
-```markdown
-## Test Scoping
+Fields: **Strategy**, **Changed files**, **Scoped result** (selected/passed vs. full-suite size), and a **Recommendation** only when a scoping tool is missing.
 
-**Strategy**: `pytest-testmon`   <!-- or: `full-suite` (config files changed) -->
-**Changed files**: 3 Python files in `src/utils/`
-**Scoped result**: 12 tests selected, all passed
-**Note**: Full suite has 847 tests; scoped execution covered tests affected by changes.
-**Recommendation**: (only when a scoping tool is missing) install `pytest-testmon`.
-```
-
-When falling back, give the reason on the Strategy line (`full-suite` (config files changed), `full-pytest` (testmon not installed), …) and report the full-suite result instead of a scoped one.
+When falling back, state the reason on the Strategy line and report the full-suite result.
 
 ### Merge-Base Run for a `TDD: yes` Claim
 
@@ -199,11 +174,20 @@ The run command is the Step 4 scoped one narrowed to that path (`run-tests.sh <p
 |----------|----------|
 | PR touches only docs/markdown | Skip test execution entirely (no code changes) |
 | PR touches files in multiple languages | Run scoped tests for each language independently |
-| Scoped tests pass but you suspect missed coverage | Note in evaluation; do not block approval |
 | No test framework detected | Note absence in evaluation; check if project has tests at all |
-| PR touches shared utilities | Scoped tools may miss downstream tests — note this risk in evaluation |
+| PR touches shared utilities | Scoped tools may miss downstream tests — note the risk; suspected missed coverage alone does not block approval |
 
 **Key principle**: Scoped execution is an optimization, not a replacement for CI — the full suite still runs there (step 8 verifies CI status); this just gives the Judge faster local feedback. Duration/confidence comparison: `.loom/docs/judge-reference-rationale.md`.
+
+---
+
+## Rollout check
+
+**Applies only to host-move PRs** (#10917): the diff moves work between hosts or changes who emits a fleet signal (authority, captain, singleton jobs, gating, capability routing; #10498 is the model case). Docs-only, single-host refactor, and ordinary PRs are NOT flagged.
+
+**Request changes** when `## Rollout check` is missing, or vague ("verify in prod"). A passing section names a runnable production signal (SigNoz query, metric, daemon command) and its expected value after the fleet rolls.
+
+On approval, comment it on the linked issue under `<!-- loom:rollout-check-pending pr=<PR> -->`; Champion runs it after the roll. Format and escalation: `.loom/docs/rollout-check.md`.
 
 ---
 

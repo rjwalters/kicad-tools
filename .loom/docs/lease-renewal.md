@@ -140,6 +140,18 @@ In every case the lease comment is **left in place** to age out. A
 terminating loop never deletes it — the epic requires positive evidence on
 the reclaim side, and the renew side simply stops broadcasting.
 
+**Before a loop exists: the deferred publisher (#10570).** When an attended
+`loom-daemon lease ensure` is declined (publish exit 4, a peer lease still in
+its TTL, or exit 2, a failed `gh` write), there is no lease to renew yet. A
+detached `lease ensure --deferred` retries the publish instead (see
+`lease-record.md`). It watches the same `(pid, start-time identity)` pair, so a
+short-lived tool shell or a recycled pid ends it. It is always capped (the
+`--max-age` it was given, 4 h by default, even when that is `0`). It hands this
+loop only the remainder of that cap, so publication plus renewal never
+outlives the original bound. Its attempts and its exit reason (`SessionEnded`,
+`CapReached`, or the settled outcome) go to
+`.loom/logs/lease-ensure/issue-<N>.log`.
+
 #### Identity, not just a PID number
 
 A bare PID is not a durable handle on a process. The kernel recycles PID

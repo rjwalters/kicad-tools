@@ -1106,11 +1106,31 @@ _loom_account_provider_for_runtime() {
 
 # --- Token selection ---
 if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+    # --- Ambient Anthropic credential scrub (#10413) ---
+    # Reached only when Loom itself is about to choose the child's credential
+    # (no LOOM_SPAWN_NO_EXPORT, no caller-set CLAUDE_CODE_OAUTH_TOKEN): the
+    # pool token SELECTED AND EXPORTED by this block is authoritative for the
+    # spawned session. Claude Code's credential precedence is API-key env var
+    # > OAuth-token env var > keychain, so an ANTHROPIC_API_KEY or
+    # ANTHROPIC_AUTH_TOKEN inherited from the spawning shell (e.g. a
+    # machine-level rc file pinning a console key) would silently shadow the
+    # selected account and the session would run — and die on quota errors —
+    # on a key nobody chose (the 2026-10-04 incident, #10413: a zero-credit
+    # console key leaked into every spawned session, and no subscription
+    # switch ever reached any of them). Unset both names before selection —
+    # unset of an absent name is a no-op — loud and secret-free: the warning
+    # names the variables, never their values. Explicit-credential callers
+    # (the skipped branch) keep their environment byte-identical; the
+    # containerized path is unaffected (ANTHROPIC_* never crosses the docker
+    # boundary by name). This cannot be a loom-daemon subcommand: a child
+    # process cannot unset its parent's environment, so the scrub must run
+    # here — which is also why it is kept to the portable-shell floor.
+    [[ -n "${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}" ]] && log_warn "spawn-claude: unsetting ambient ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN — they would shadow the pool token 'tokens select' is about to export (Claude Code precedence: API-key env > OAuth-token env > keychain; #10413)"
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+
     _daemon_bin="$(loom_locate_daemon_bin "$WORKSPACE")"
     if [[ -z "$_daemon_bin" ]] || ! "$_daemon_bin" tokens select --help >/dev/null 2>&1; then
-        log_error "No loom-daemon binary supporting 'tokens select' was found."
-        log_error "(\$LOOM_DAEMON_BIN -> 'loom-daemon' on PATH -> build-output-relative"
-        log_error "candidates under the repo all came up empty or stale.)"
+        log_error "No loom-daemon binary supporting 'tokens select' was found (\$LOOM_DAEMON_BIN -> 'loom-daemon' on PATH -> build-output candidates all empty or stale)."
         log_error "Build or start one, then retry:"
         log_error "  ./.loom/scripts/cli/loom-daemon-start.sh"
         log_error "  cargo build --release -p loom-daemon"

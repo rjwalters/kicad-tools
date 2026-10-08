@@ -12,8 +12,10 @@
 # path even resolved.
 #
 # Build scripts are awkward to unit-test, so this shell test compiles a tiny
-# scratch crate whose build.rs is a VERBATIM COPY of the real
-# loom-daemon/build.rs (it uses only std, so it is copy-portable) inside a
+# scratch crate whose build.rs is a two-line shim around a VERBATIM COPY of the
+# real loom-daemon/build_stamp.rs (the git-stamp / watch-set half of build.rs;
+# it uses only std, so it is copy-portable — build.rs itself needs `tar`/`zstd`
+# for the install payload, which a hermetic scratch crate cannot fetch) inside a
 # scratch git repo, then advances the branch with a REF-ONLY move
 # (`git commit-tree` + `git update-ref`, touching neither HEAD nor the index)
 # and asserts the embedded commit changed. It exercises:
@@ -35,7 +37,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # defaults/scripts/tests -> repo root is three levels up.
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-REAL_BUILD_RS="$REPO_ROOT/loom-daemon/build.rs"
+REAL_BUILD_RS="$REPO_ROOT/loom-daemon/build_stamp.rs"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -105,7 +107,15 @@ fn main() {
     println!("{}", env!("LOOM_DAEMON_GIT_COMMIT"));
 }
 EOF
-    cp "$REAL_BUILD_RS" "$dir/build.rs"
+    cp "$REAL_BUILD_RS" "$dir/build_stamp.rs"
+    cat > "$dir/build.rs" <<'EOF'
+mod build_stamp;
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    build_stamp::emit();
+}
+EOF
 }
 
 # Build the crate at $1 and echo the commit its binary reports.
