@@ -14,6 +14,7 @@ This module composes functionality from specialized mixins:
 - SchematicNetlistMixin: Netlist extraction and connectivity queries
 """
 
+import weakref
 from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
@@ -55,6 +56,14 @@ class SnapMode(Enum):
     WARN = "warn"  # Don't snap but warn on off-grid coordinates
     AUTO = "auto"  # Automatically snap to grid (default)
     STRICT = "strict"  # Snap and warn if original was off-grid
+
+
+#: Live child sheets by UUID (Issue #6076).  Two sibling child sheets built
+#: without ``sheet_uuid`` / ``sheet_file`` and with the same title and page
+#: would otherwise derive the same UUID; a sibling whose derived UUID is held
+#: by a still-alive sheet gets an ordinal instead.  Weak, so a schematic that
+#: has been dropped (e.g. a previous build in the same process) frees its UUID.
+_LIVE_CHILD_SHEETS: weakref.WeakValueDictionary[str, Any] = weakref.WeakValueDictionary()
 
 
 class Schematic(
@@ -115,6 +124,7 @@ class Schematic(
         grid: float = DEFAULT_GRID,
         snap_mode: SnapMode = SnapMode.AUTO,
         local_symbol_libs: list[Path] | None = None,
+        sheet_file: str | None = None,
     ):
         """Initialize a new schematic.
 
@@ -131,6 +141,8 @@ class Schematic(
                 deterministically from ``project_name``, ``title``, ``page``
                 and ``parent_uuid`` (Issue #6076), so regenerating the same
                 schematic writes the same UUID.
+                Pass ``sheet_file`` for child sheets so siblings that share
+                a title and page stay distinct.
             parent_uuid: UUID of parent sheet (for hierarchical designs)
             page: Page number string
             grid: Grid spacing in mm (default: 2.54)
@@ -143,6 +155,12 @@ class Schematic(
                 ids whose ``LIBNAME`` matches the file stem of any entry.
                 Default ``None`` preserves prior behavior (stock libs only).
                 See :meth:`resolve_lib_path` for the search semantics.
+            sheet_file: The sheet's file name (e.g. ``"power.kicad_sch"``) as
+                referenced by its parent.  Only used to derive ``sheet_uuid``
+                when that is not given: it separates sibling child sheets
+                that share a title and page.  If two live child sheets of the
+                same parent still derive the same UUID, the later one gets an
+                ordinal-suffixed UUID.
         """
         self.title = title
         self.date = date
@@ -152,7 +170,11 @@ class Schematic(
         self.comment2 = comment2
         self.paper = paper
         self.project_name = project_name
-        self.sheet_uuid = sheet_uuid or root_sheet_uuid(project_name, title, page, parent_uuid)
+        self.sheet_uuid = sheet_uuid or self._derive_sheet_uuid(
+            project_name, title, page, parent_uuid, sheet_file
+        )
+        if parent_uuid:
+            _LIVE_CHILD_SHEETS.setdefault(self.sheet_uuid, self)
         self.parent_uuid = parent_uuid
         self.page = page
 
@@ -303,6 +325,25 @@ class Schematic(
             if not self._uuid_minter.is_taken(candidate):
                 break
         seen[k] = ordinal
+        return candidate
+
+    @staticmethod
+    def _derive_sheet_uuid(
+        project_name: str,
+        title: str,
+        page: str,
+        parent_uuid: str | None,
+        sheet_file: str | None,
+    ) -> str:
+        """Deterministic UUID for a sheet built without ``sheet_uuid`` (Issue #6076)."""
+        base = root_sheet_uuid(project_name, title, page, parent_uuid, sheet_file)
+        if not parent_uuid:
+            return base
+        candidate = base
+        ordinal = 1
+        while candidate in _LIVE_CHILD_SHEETS:
+            candidate = stable_uuid(base, "sibling", ordinal)
+            ordinal += 1
         return candidate
 
     @property

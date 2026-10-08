@@ -35,6 +35,7 @@ from .symbol_ops import (
     get_symbol_lib_id,
     get_symbol_pins,
     replace_symbol_lib_id,
+    sexp_uuids,
     update_symbol_pins,
 )
 
@@ -71,5 +72,6 @@ __all__ = [
     "get_symbol_lib_id",
     "get_symbol_pins",
     "replace_symbol_lib_id",
+    "sexp_uuids",
     "update_symbol_pins",
 ]

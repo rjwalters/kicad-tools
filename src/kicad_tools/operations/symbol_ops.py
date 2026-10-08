@@ -6,10 +6,11 @@ Provides functions to modify, replace, and update symbol instances.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.core.schematic_uuids import pin_uuid, stable_uuid
+from kicad_tools.core.schematic_uuids import UuidMinter
 from kicad_tools.sexp import SExp, parse_string, serialize_sexp
 
 
@@ -268,10 +269,12 @@ def replace_symbol_lib_id(
                 symbol.remove(pin)
                 changes.append(f"Removed instance pin {pin_num} (not in new symbol)")
 
-        # Add instance pins that exist in new symbol but not in instance
+        # Add instance pins that exist in new symbol but not in instance;
+        # their UUIDs avoid every UUID already in the file (Issue #6076).
+        document_uuids = sexp_uuids(sexp)
         for pin in effective_pins:
             if pin.number not in old_instance_pins:
-                add_symbol_pin(symbol, pin.number)
+                add_symbol_pin(symbol, pin.number, reserved=document_uuids)
                 changes.append(f"Added instance pin {pin.number} (new in replacement symbol)")
 
         new_pin_count = len(get_symbol_pins(symbol))
@@ -419,6 +422,7 @@ def _find_lib_symbol_sexp(sexp: SExp, lib_id: str) -> SExp | None:
 def update_symbol_pins(
     symbol: SExp,
     pin_mapping: dict[str, str],
+    reserved: Iterable[str] = (),
 ) -> list[str]:
     """
     Update symbol pin numbers based on a mapping.
@@ -426,12 +430,18 @@ def update_symbol_pins(
     Args:
         symbol: The symbol S-expression
         pin_mapping: Dict mapping old pin number -> new pin number
+        reserved: UUIDs the new pin UUIDs must not reuse (pass every UUID
+            in the enclosing document).  The symbol's own UUIDs are always
+            reserved.
 
     Returns:
         List of changes made
     """
     changes = []
-    # Stacked pins share a number; the ordinal keeps their remapped UUIDs distinct.
+    minter = _minter_for(symbol, reserved)
+    symbol_uuid = _symbol_uuid(symbol)
+    # Stacked pins share a number, so an ordinal among same-numbered pins
+    # keeps their new UUIDs apart (as ``pin_uuid`` does for placed pins).
     seen: dict[str, int] = {}
 
     for pin in symbol.find_all("pin"):
@@ -447,8 +457,7 @@ def update_symbol_pins(
             uuid_node = pin.find("uuid")
             if uuid_node:
                 uuid_node.set_value(
-                    0,
-                    stable_uuid("pin-remap", _symbol_uuid(symbol), old_num, new_num, ordinal),
+                    0, minter.claim("pin-remap", symbol_uuid, old_num, new_num, ordinal)
                 )
 
     return changes
@@ -458,6 +467,24 @@ def _symbol_uuid(symbol: SExp) -> str:
     """The symbol's own ``(uuid ...)`` value (``""`` if it has none)."""
     node = symbol.find_child("uuid")
     return (node.get_string(0) or "") if node is not None else ""
+
+
+def sexp_uuids(node: SExp) -> set[str]:
+    """Every ``(uuid ...)`` / ``(tstamp ...)`` value in ``node``'s subtree (lower-cased)."""
+    out: set[str] = set()
+    for child in node.iter_all():
+        if child.name in ("uuid", "tstamp"):
+            value = child.get_first_atom()
+            if value is not None:
+                out.add(str(value).lower())
+    return out
+
+
+def _minter_for(symbol: SExp, reserved: Iterable[str]) -> UuidMinter:
+    """A minter that never returns a UUID in ``reserved`` or already in ``symbol``."""
+    minter = UuidMinter(reserved)
+    minter.reserve(sexp_uuids(symbol))
+    return minter
 
 
 def clear_symbol_pins(symbol: SExp) -> int:
@@ -479,19 +506,24 @@ def clear_symbol_pins(symbol: SExp) -> int:
     return count
 
 
-def add_symbol_pin(symbol: SExp, pin_number: str) -> None:
+def add_symbol_pin(symbol: SExp, pin_number: str, reserved: Iterable[str] = ()) -> None:
     """
     Add a pin to a symbol.
 
     Args:
         symbol: The symbol S-expression
         pin_number: The pin number to add
+        reserved: UUIDs the new pin UUID must not reuse (pass every UUID in
+            the enclosing document).  The symbol's own UUIDs are always
+            reserved.
     """
     ordinal = sum(1 for p in symbol.find_all("pin") if p.get_string(0) == pin_number)
     pin = SExp("pin")
     pin.add(pin_number)
-    # Derived from the owning symbol's UUID (Issue #6076).
-    pin.add(SExp("uuid").add(pin_uuid(_symbol_uuid(symbol), pin_number, ordinal)))
+    # Derived from the owning symbol's UUID (Issue #6076): equals
+    # ``pin_uuid(symbol_uuid, pin_number, ordinal)`` unless that is taken.
+    minter = _minter_for(symbol, reserved)
+    pin.add(SExp("uuid").add(minter.claim("pin", _symbol_uuid(symbol), pin_number, ordinal)))
     symbol.add(pin)
 
 
@@ -503,6 +535,7 @@ def create_replacement_symbol(
     value: str = "",
     footprint: str = "",
     unit: int = 1,
+    reserved: Iterable[str] = (),
 ) -> SExp:
     """
     Create a new symbol instance from a template library symbol.
@@ -515,6 +548,9 @@ def create_replacement_symbol(
         value: Value for the symbol
         footprint: Footprint assignment
         unit: Symbol unit (for multi-unit symbols)
+        reserved: UUIDs already in the target schematic (e.g.
+            ``sexp_uuids(document)``); the new symbol and its pins never
+            reuse one of them.
 
     Returns:
         A new symbol SExp ready to be added to a schematic
@@ -543,9 +579,11 @@ def create_replacement_symbol(
     instance.add(SExp("in_bom").add("yes"))
     instance.add(SExp("on_board").add("yes"))
     instance.add(SExp("dnp").add("no"))
-    instance.add(
-        SExp("uuid").add(stable_uuid("replacement-symbol", lib_id, reference, unit, *position))
-    )
+    reserved = set(reserved)
+    minter = UuidMinter(reserved)
+    instance_uuid = minter.claim("replacement-symbol", lib_id, reference, unit, *position)
+    reserved.add(instance_uuid)
+    instance.add(SExp("uuid").add(instance_uuid))
 
     # Add properties
     def add_property(name: str, val: str, x_off: float = 0, y_off: float = 0):
@@ -567,6 +605,6 @@ def create_replacement_symbol(
             if number_node := pin.find("number"):
                 pin_num = number_node.get_string(0)
                 if pin_num:
-                    add_symbol_pin(instance, pin_num)
+                    add_symbol_pin(instance, pin_num, reserved=reserved)
 
     return instance

@@ -377,3 +377,139 @@ def test_update_symbol_pins_stacked_pins_get_distinct_deterministic_uuids():
     assert first[0] != first[1]
     assert first[2] == "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
     assert remap() == first
+
+
+# --- review fixes: stacked-pin remap, sibling sheets, reserved UUIDs ----------
+
+
+def test_minter_claim_keeps_plain_value_and_skips_taken():
+    minter = UuidMinter()
+    first = minter.claim("k", 1)
+    assert first == stable_uuid("k", 1)
+    second = minter.claim("k", 1)
+    assert second != first
+    assert UuidMinter([first]).claim("k", 1) == second
+
+
+_STACKED = """(symbol (lib_id "x:Y") (at 0 0 0) (unit 1)
+  (uuid "{sym}")
+  (pin "1" (uuid "{a}"))
+  (pin "1" (uuid "{b}"))
+  (pin "2" (uuid "{c}")))"""
+
+
+def _stacked_symbol(seed: str):
+    from kicad_tools.sexp import parse_string
+
+    ids = {k: stable_uuid(seed, k) for k in ("sym", "a", "b", "c")}
+    return parse_string(_STACKED.format(**ids)), ids
+
+
+def _pin_ids(symbol) -> list[str]:
+    return [p.find("uuid").get_string(0) for p in symbol.find_all("pin")]
+
+
+def test_update_symbol_pins_gives_stacked_pins_distinct_uuids():
+    from kicad_tools.operations.symbol_ops import sexp_uuids, update_symbol_pins
+
+    symbol, ids = _stacked_symbol("s")
+    before = sexp_uuids(symbol)
+    update_symbol_pins(symbol, {"1": "3"})
+    after = _pin_ids(symbol)
+    assert [p.get_string(0) for p in symbol.find_all("pin")] == ["3", "3", "2"]
+    assert len(set(after)) == 3
+    # Remapped pins get new UUIDs that reuse nothing already in the symbol.
+    assert not ({after[0], after[1]} & before)
+    assert after[2] == ids["c"]
+
+    # Deterministic: the same input remaps to the same UUIDs.
+    again, _ = _stacked_symbol("s")
+    update_symbol_pins(again, {"1": "3"})
+    assert _pin_ids(again) == after
+
+
+def test_update_symbol_pins_avoids_reserved_document_uuids():
+    from kicad_tools.operations.symbol_ops import update_symbol_pins
+
+    symbol, _ = _stacked_symbol("s")
+    plain, _ = _stacked_symbol("s")
+    update_symbol_pins(plain, {"1": "3"})
+    taken = set(_pin_ids(plain)[:2])
+    update_symbol_pins(symbol, {"1": "3"}, reserved=taken)
+    assert not (set(_pin_ids(symbol)[:2]) & taken)
+    assert len(set(_pin_ids(symbol))) == 3
+
+
+def test_add_symbol_pin_avoids_existing_uuids():
+    from kicad_tools.operations.symbol_ops import add_symbol_pin, sexp_uuids
+
+    symbol, ids = _stacked_symbol("s")
+    # A loaded symbol may already hold the UUID the next pin would derive.
+    clash = pin_uuid(ids["sym"], "2", 1)
+    add_symbol_pin(symbol, "2", reserved={clash})
+    new = _pin_ids(symbol)[-1]
+    assert new != clash and new not in {ids["a"], ids["b"], ids["c"]}
+    assert len(sexp_uuids(symbol)) == 5
+
+
+def test_create_replacement_symbol_avoids_document_uuids(tmp_path):
+    from kicad_tools.operations.symbol_ops import create_replacement_symbol, sexp_uuids
+
+    lib = _lib(tmp_path)
+    plain = create_replacement_symbol(str(lib), (10, 20), reference="U1")
+    assert plain.find("uuid").get_string(0) == stable_uuid(
+        "replacement-symbol", "WIDGET", "U1", 1, 10, 20
+    )
+    assert create_replacement_symbol(str(lib), (10, 20), reference="U1").to_string() == (
+        plain.to_string()
+    )
+
+    taken = sexp_uuids(plain)
+    again = create_replacement_symbol(str(lib), (10, 20), reference="U1", reserved=taken)
+    assert not (sexp_uuids(again) & taken)
+    assert len(sexp_uuids(again)) == len(taken)
+
+
+def test_sibling_child_sheets_get_distinct_uuids():
+    parent = Schematic(title="Top", project_name="p")
+    kw = {"title": "Channel", "page": "2", "project_name": "p", "parent_uuid": parent.sheet_uuid}
+
+    a = Schematic(**kw, sheet_file="ch_a.kicad_sch")
+    b = Schematic(**kw, sheet_file="ch_b.kicad_sch")
+    assert a.sheet_uuid != b.sheet_uuid
+    # Deterministic per file name, and the file name changes the key.
+    assert a.sheet_uuid == root_sheet_uuid("p", "Channel", "2", parent.sheet_uuid, "ch_a.kicad_sch")
+    assert a.sheet_uuid != root_sheet_uuid("p", "Channel", "2", parent.sheet_uuid)
+
+    # Without sheet_file, two live siblings still differ (ordinal) ...
+    c = Schematic(**kw)
+    d = Schematic(**kw)
+    assert len({a.sheet_uuid, b.sheet_uuid, c.sheet_uuid, d.sheet_uuid}) == 4
+    assert c.sheet_uuid == root_sheet_uuid("p", "Channel", "2", parent.sheet_uuid)
+
+    # ... and the sequence is reproducible once the earlier build is dropped.
+    first = (c.sheet_uuid, d.sheet_uuid)
+    del c, d
+    e = Schematic(**kw)
+    f = Schematic(**kw)
+    assert (e.sheet_uuid, f.sheet_uuid) == first
+
+
+def test_degenerate_pcb_outline_has_unique_uuids():
+    from kicad_tools.schema.pcb import PCB
+
+    found = _UUID_RE.findall(
+        PCB.create(width=0, height=0, board_date="2026-01-01")._sexp.to_string()
+    )
+    assert len(found) == len(set(found))
+
+
+def test_replace_outline_avoids_existing_board_uuids():
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=40, height=30, board_date="2026-01-01")
+    pcb.add_via(5, 1, net="A")
+    pcb.replace_outline(0, 0, 50, 40)
+    pcb.add_via(6, 1, net="A")
+    found = _UUID_RE.findall(pcb._sexp.to_string())
+    assert len(found) == len(set(found))

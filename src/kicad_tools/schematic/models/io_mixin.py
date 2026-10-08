@@ -398,6 +398,7 @@ class SchematicIOMixin:
             grid: float = ...,
             snap_mode: object = ...,
             local_symbol_libs: list[Path] | None = None,
+            sheet_file: str | None = None,
         ) -> None: ...
 
     @classmethod

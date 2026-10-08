@@ -17,7 +17,7 @@ pure function of *what* is being identified, under one pinned namespace
 
 Keys
 ----
-* **Root sheet** -- :func:`root_sheet_uuid`: project name, title, page and
+* **Root sheet** -- :func:`root_sheet_uuid`: project name, title, page,
   parent sheet UUID (the sheet's "path").
 * **Placed symbol** -- ``(sheet UUID, "symbol", reference, unit)``, minted
   when :meth:`Schematic.add_symbol` places it, so the UUID is final before
@@ -125,9 +125,21 @@ def stable_uuid(*parts: object) -> str:
 
 
 def root_sheet_uuid(
-    project_name: str, title: str, page: str = "1", parent_uuid: str | None = None
+    project_name: str,
+    title: str,
+    page: str = "1",
+    parent_uuid: str | None = None,
+    sheet_file: str | None = None,
 ) -> str:
-    """The UUID a schematic built without an explicit ``sheet_uuid`` gets."""
+    """The UUID a schematic built without an explicit ``sheet_uuid`` gets.
+
+    ``sheet_file`` (the sheet's file name / path within the hierarchy) is
+    part of the key when given, so two sibling child sheets that share a
+    title and page number still get distinct UUIDs.  Omitting it keeps the
+    original ``(parent, project, title, page)`` key.
+    """
+    if sheet_file:
+        return stable_uuid("sheet", parent_uuid or "", project_name, title, page, sheet_file)
     return stable_uuid("sheet", parent_uuid or "", project_name, title, page)
 
 
@@ -195,6 +207,23 @@ class UuidMinter:
 
     def is_taken(self, value: str) -> bool:
         return value.lower() in self._taken
+
+    def claim(self, *key: object) -> str:
+        """``stable_uuid(*key)`` if unused, else the first unused ``stable_uuid(*key, n)``.
+
+        Unlike :meth:`mint`, the common (no clash) case returns exactly
+        ``stable_uuid(*key)``, so a site that used to call :func:`stable_uuid`
+        directly keeps its values while gaining the reserve/issued check.
+        The result is recorded, so claiming the same key again returns a
+        different UUID.
+        """
+        candidate = stable_uuid(*key)
+        n = 1
+        while candidate.lower() in self._taken:
+            candidate = stable_uuid(*key, f"#{n}")
+            n += 1
+        self._taken.add(candidate)
+        return candidate
 
     def mint(self, *key: object) -> str:
         """The next unused deterministic UUID for ``key``."""
