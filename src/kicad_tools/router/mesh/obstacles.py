@@ -33,6 +33,7 @@ them would be a second model rather than a port.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from .geometry import Pt
@@ -99,6 +100,7 @@ class ObstacleModel:
         clearance: float = 0.0,
         pads: Sequence[Pad] = (),
         edge_clearance: float = 0.0,
+        pad_floors: Mapping[int, float] | None = None,
     ) -> None:
         """Build an obstacle model.
 
@@ -117,6 +119,10 @@ class ObstacleModel:
                 (the default) means the caller resolved no board-edge rule and
                 the outline branch stays the pure containment test it was
                 before Epic #5509 Phase 3e.
+            pad_floors: Issue #6243 -- per-net authored netclass minima
+                (``DesignRules.net_clearance_floors``).  A pad whose net (or
+                the pad itself) carries one is cleared at
+                ``max(clearance, floor)``.  ``None``/empty is byte-identical.
         """
         self.outline = outline
         self.keepouts = keepouts
@@ -127,6 +133,7 @@ class ObstacleModel:
         self.clearance = clearance
         self.pads = list(pads)
         self.edge_clearance = edge_clearance
+        self.pad_floors = dict(pad_floors or {})
         self._kernel: _KernelShapes | None = None
 
     def _shapes(self) -> _KernelShapes:
@@ -144,6 +151,12 @@ class ObstacleModel:
             # Broad-phase reach: a leg whose centreline bounding box misses a
             # pad's box grown by this much provably clears that pad.
             reach = self.half + self.clearance
+            # Issue #6243: each pad's requirement is max(own, pad's floor).
+            from ..authored_clearance import pad_authored_floor
+
+            pad_required = [
+                max(self.clearance, pad_authored_floor(pad, self.pad_floors)) for pad in self.pads
+            ]
             cached = _KernelShapes(
                 outline=outline_of(self.outline),
                 keepouts=tuple(
@@ -156,8 +169,11 @@ class ObstacleModel:
                     if region is not None
                 ),
                 pads=tuple(
-                    (shape, pad_reach_box(shape, reach))
-                    for shape in (pad_of(pad) for pad in self.pads)
+                    (shape, pad_reach_box(shape, reach + required - self.clearance), required)
+                    for shape, required in (
+                        (pad_of(pad), required)
+                        for pad, required in zip(self.pads, pad_required, strict=True)
+                    )
                     if shape is not None
                 ),
             )
@@ -212,10 +228,10 @@ class ObstacleModel:
 
         if shapes.pads:
             copper = copper_leg(a, b, self.half)
-            for pad, (px0, py0, px1, py1) in shapes.pads:
+            for pad, (px0, py0, px1, py1), required in shapes.pads:
                 if hi_x < px0 or lo_x > px1 or hi_y < py0 or lo_y > py1:
                     continue
-                if not leg_clears(copper, pad, self.clearance):
+                if not leg_clears(copper, pad, required):
                     return False
 
         if shapes.keepouts or shapes.pours:
@@ -250,7 +266,7 @@ class _KernelShapes:
         outline: MeshOutline | None,
         keepouts: tuple[tuple[MeshRegion, Box], ...],
         pours: tuple[tuple[MeshRegion, Box], ...],
-        pads: tuple[tuple[MeshPad, Box], ...] = (),
+        pads: tuple[tuple[MeshPad, Box, float], ...] = (),
     ) -> None:
         self.outline = outline
         self.keepouts = keepouts

@@ -176,6 +176,10 @@ class CacheKey:
         min_trace_floor = getattr(rules, "min_trace_width_floor", None)
         if min_trace_floor:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
+        # Issue #6243: authored per-net minima change which routes are legal.
+        # Only keyed when present, so every floor-free key is unchanged.
+        if getattr(rules, "net_clearance_floors", None):
+            rules_data["net_clearance_floors"] = sorted(rules.net_clearance_floors.items())
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
         # Issue #5004: flips whether the same-component carve-out grants an
@@ -378,6 +382,10 @@ class SubProblemSignature:
         min_trace_floor = getattr(rules, "min_trace_width_floor", None)
         if min_trace_floor:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
+        # Issue #6243: authored per-net minima change which routes are legal.
+        # Only keyed when present, so every floor-free key is unchanged.
+        if getattr(rules, "net_clearance_floors", None):
+            rules_data["net_clearance_floors"] = sorted(rules.net_clearance_floors.items())
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
         # Issue #5004: see ``CacheKey.compute`` above -- same reasoning

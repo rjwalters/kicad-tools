@@ -615,6 +615,192 @@ void Grid3D::add_pad(float x, float y, float width, float height,
                      bool is_circular) {
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
                      clearance_override, is_plane_net, rotation, clearance_override, false, is_circular});
+    if (authored_index_) authored_index_pad(pads_.size() - 1);  // Issue #6243
+}
+
+// -----------------------------------------------------------------------
+// Issue #6243: authored per-net clearance minima
+// -----------------------------------------------------------------------
+//
+// The native mirror of ``router/authored_clearance.py``.  Rule resolution is
+// the pair floor ``max(floor[a], floor[b])`` (same-net copper exempt); every
+// verdict is the shared clearance kernel's ``clear`` under its own epsilon.
+// Buckets only select candidates (1 mm, as in the Python index); checking a
+// candidate twice cannot change a verdict, so no de-duplication is needed and
+// queries allocate nothing.
+
+namespace {
+constexpr double AUTHORED_BUCKET_MM = 1.0;
+
+inline int64_t authored_bucket_key(int bx, int by) {
+    return (static_cast<int64_t>(bx) << 32) ^ static_cast<int64_t>(static_cast<uint32_t>(by));
+}
+}  // namespace
+
+struct Grid3D::AuthoredIndex {
+    struct Item {
+        ::router::clearance::KShape shape;
+        int net = 0;
+        double floor = 0.0;
+    };
+    std::vector<Item> items;
+    std::unordered_map<int64_t, std::vector<uint32_t>> all;
+    std::unordered_map<int64_t, std::vector<uint32_t>> floored;
+    double max_item_floor = 0.0;
+
+    void add(Item item, double minx, double miny, double maxx, double maxy) {
+        const uint32_t id = static_cast<uint32_t>(items.size());
+        if (item.floor > max_item_floor) max_item_floor = item.floor;
+        const bool has_floor = item.floor > 0.0;
+        items.push_back(std::move(item));
+        const int x0 = static_cast<int>(std::floor(minx / AUTHORED_BUCKET_MM));
+        const int x1 = static_cast<int>(std::floor(maxx / AUTHORED_BUCKET_MM));
+        const int y0 = static_cast<int>(std::floor(miny / AUTHORED_BUCKET_MM));
+        const int y1 = static_cast<int>(std::floor(maxy / AUTHORED_BUCKET_MM));
+        for (int bx = x0; bx <= x1; ++bx) {
+            for (int by = y0; by <= y1; ++by) {
+                all[authored_bucket_key(bx, by)].push_back(id);
+                if (has_floor) floored[authored_bucket_key(bx, by)].push_back(id);
+            }
+        }
+    }
+};
+
+void Grid3D::set_net_clearance_floors(const std::vector<int>& nets,
+                                      const std::vector<double>& floors) {
+    net_floors_.clear();
+    const size_t n = std::min(nets.size(), floors.size());
+    for (size_t i = 0; i < n; ++i) {
+        if (floors[i] > 0.0) net_floors_[nets[i]] = floors[i];
+    }
+    rebuild_authored_index();
+}
+
+double Grid3D::net_clearance_floor(int net) const {
+    const auto it = net_floors_.find(net);
+    return it == net_floors_.end() ? 0.0 : it->second;
+}
+
+double Grid3D::authored_pair_floor(int net_a, int net_b) const {
+    if (net_a == net_b) return 0.0;
+    return std::max(net_clearance_floor(net_a), net_clearance_floor(net_b));
+}
+
+void Grid3D::set_pad_authored(size_t index, const std::string& shape, double width,
+                              double height, double rotation, double x, double y,
+                              double drill, double item_floor) {
+    if (index >= pads_.size()) return;
+    if (authored_pad_specs_.size() < pads_.size()) authored_pad_specs_.resize(pads_.size());
+    authored_pad_specs_[index] = {true, shape, width, height, rotation, x, y, drill,
+                                  std::max(0.0, item_floor)};
+    if (item_floor > 0.0) authored_items_ = true;
+}
+
+void Grid3D::authored_index_pad(size_t i) {
+    namespace ck = ::router::clearance;
+    const auto& pad = pads_[i];
+    const int layer = pad.layer_idx < 0 ? ck::ALL_LAYERS : pad.layer_idx;
+    AuthoredIndex::Item item;
+    item.net = pad.net;
+    double cx = pad.x, cy = pad.y, w = pad.width, h = pad.height;
+    if (i < authored_pad_specs_.size() && authored_pad_specs_[i].set) {
+        const auto& spec = authored_pad_specs_[i];
+        item.shape = ck::make_pad(spec.shape, spec.width, spec.height, 0.25, spec.rotation,
+                                  spec.x, spec.y, layer, spec.drill);
+        item.floor = std::max(net_clearance_floor(pad.net), spec.floor);
+        cx = spec.x; cy = spec.y; w = spec.width; h = spec.height;
+    } else {
+        // No exact spec synced: the conservative rectangle/circle ``pads_``
+        // already models (``clearance_shapes`` falls back the same way).
+        item.shape = ck::make_pad(pad.is_circular ? "circle" : "rect", pad.width, pad.height,
+                                  0.25, pad.rotation, pad.x, pad.y, layer, 0.0);
+        item.floor = net_clearance_floor(pad.net);
+    }
+    const double r = std::hypot(w, h) / 2.0;
+    authored_index_->add(std::move(item), cx - r, cy - r, cx + r, cy + r);
+}
+
+void Grid3D::authored_index_segment(size_t i) {
+    namespace ck = ::router::clearance;
+    const auto& s = stored_segments_[i];
+    AuthoredIndex::Item item;
+    item.shape = ck::KSegment{s.x1, s.y1, s.x2, s.y2, s.width, s.layer_idx};
+    item.net = s.net;
+    item.floor = std::max<double>(net_clearance_floor(s.net), s.authored_floor);
+    const double h = s.width / 2.0;
+    authored_index_->add(std::move(item), std::min(s.x1, s.x2) - h, std::min(s.y1, s.y2) - h,
+                         std::max(s.x1, s.x2) + h, std::max(s.y1, s.y2) + h);
+}
+
+void Grid3D::authored_index_via(size_t i) {
+    namespace ck = ::router::clearance;
+    const auto& v = stored_vias_[i];
+    AuthoredIndex::Item item;
+    item.shape = ck::KVia{v.x, v.y, v.diameter, v.drill};
+    item.net = v.net;
+    item.floor = std::max<double>(net_clearance_floor(v.net), v.authored_floor);
+    const double r = v.diameter / 2.0;
+    authored_index_->add(std::move(item), v.x - r, v.y - r, v.x + r, v.y + r);
+}
+
+void Grid3D::rebuild_authored_index() {
+    if (net_floors_.empty() && !authored_items_) {
+        authored_index_.reset();
+        return;
+    }
+    authored_index_ = std::make_shared<AuthoredIndex>();
+    for (size_t i = 0; i < pads_.size(); ++i) authored_index_pad(i);
+    for (size_t i = 0; i < stored_segments_.size(); ++i) authored_index_segment(i);
+    for (size_t i = 0; i < stored_vias_.size(); ++i) authored_index_via(i);
+}
+
+namespace {
+template <typename Index>
+bool authored_shape_clear(const Index& idx, const ::router::clearance::KShape& shape,
+                          double minx, double miny, double maxx, double maxy,
+                          int net, double own) {
+    namespace ck = ::router::clearance;
+    const auto& buckets = own > 0.0 ? idx.all : idx.floored;
+    const double reach = own > 0.0 ? std::max(own, idx.max_item_floor) : idx.max_item_floor;
+    if (reach <= 0.0 || buckets.empty()) return true;
+    const int x0 = static_cast<int>(std::floor((minx - reach) / AUTHORED_BUCKET_MM));
+    const int x1 = static_cast<int>(std::floor((maxx + reach) / AUTHORED_BUCKET_MM));
+    const int y0 = static_cast<int>(std::floor((miny - reach) / AUTHORED_BUCKET_MM));
+    const int y1 = static_cast<int>(std::floor((maxy + reach) / AUTHORED_BUCKET_MM));
+    for (int bx = x0; bx <= x1; ++bx) {
+        for (int by = y0; by <= y1; ++by) {
+            const auto it = buckets.find(authored_bucket_key(bx, by));
+            if (it == buckets.end()) continue;
+            for (uint32_t id : it->second) {
+                const auto& item = idx.items[id];
+                if (item.net == net) continue;
+                const double required = std::max(own, item.floor);
+                if (required <= 0.0) continue;
+                if (!ck::clear(shape, item.shape, required)) return false;
+            }
+        }
+    }
+    return true;
+}
+}  // namespace
+
+bool Grid3D::authored_segment_clear(double x1, double y1, double x2, double y2,
+                                    double width, int layer, int net) const {
+    if (!authored_index_) return true;
+    namespace ck = ::router::clearance;
+    const double h = width / 2.0;
+    return authored_shape_clear(*authored_index_, ck::KSegment{x1, y1, x2, y2, width, layer},
+                                std::min(x1, x2) - h, std::min(y1, y2) - h,
+                                std::max(x1, x2) + h, std::max(y1, y2) + h,
+                                net, net_clearance_floor(net));
+}
+
+bool Grid3D::authored_via_clear(double x, double y, double diameter, int net) const {
+    if (!authored_index_) return true;
+    namespace ck = ::router::clearance;
+    const double r = diameter / 2.0;
+    return authored_shape_clear(*authored_index_, ck::KVia{x, y, diameter, 0.0},
+                                x - r, y - r, x + r, y + r, net, net_clearance_floor(net));
 }
 
 void Grid3D::set_pad_via_policy(size_t index, float clearance, bool carveout_eligible) {
@@ -778,11 +964,19 @@ std::pair<std::vector<size_t>, std::vector<size_t>> Grid3D::route_geometry_candi
 
 void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
                                 float width, int layer_idx, int net,
-                                std::optional<std::tuple<int, int, int, int>> grid_endpoints) {
+                                std::optional<std::tuple<int, int, int, int>> grid_endpoints,
+                                float authored_floor) {
     index_route_geometry(route_segment_bins_, stored_segments_.size(),
                          std::min(x1, x2) - width / 2, std::min(y1, y2) - width / 2,
                          std::max(x1, x2) + width / 2, std::max(y1, y2) + width / 2);
-    stored_segments_.push_back({x1, y1, x2, y2, width, layer_idx, net});
+    stored_segments_.push_back({x1, y1, x2, y2, width, layer_idx, net, authored_floor});
+    // Issue #6243: keep the authored index current (or activate it).
+    if (authored_floor > 0.0f && !authored_items_) {
+        authored_items_ = true;
+        rebuild_authored_index();
+    } else if (authored_index_) {
+        authored_index_segment(stored_segments_.size() - 1);
+    }
     auto [gx1, gy1] = world_to_grid(x1, y1);
     auto [gx2, gy2] = world_to_grid(x2, y2);
     // Python marking uses double precision and ties-to-even rounding. Keep
@@ -793,13 +987,21 @@ void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
 }
 
 void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int net,
-                           std::optional<std::pair<int, int>> grid_center, int layer_from, int layer_to) {
+                           std::optional<std::pair<int, int>> grid_center, int layer_from, int layer_to,
+                           float authored_floor) {
     const float radius = std::max(drill, diameter) / 2;
     index_route_geometry(route_via_bins_, stored_vias_.size(),
                          x - radius, y - radius, x + radius, y + radius);
     stored_vias_.push_back({x, y, drill, diameter, net,
         std::min(layer_from, layer_to < 0 ? layers_ - 1 : layer_to),
-        std::max(layer_from, layer_to < 0 ? layers_ - 1 : layer_to)});
+        std::max(layer_from, layer_to < 0 ? layers_ - 1 : layer_to), authored_floor});
+    // Issue #6243: keep the authored index current (or activate it).
+    if (authored_floor > 0.0f && !authored_items_) {
+        authored_items_ = true;
+        rebuild_authored_index();
+    } else if (authored_index_) {
+        authored_index_via(stored_vias_.size() - 1);
+    }
     const auto [gx, gy] = grid_center.value_or(world_to_grid(x, y));
     registered_route_geometry_.insert(via_mark_key(gx, gy, net));
     route_coverage_dirty_ = true;
@@ -807,6 +1009,7 @@ void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int n
 
 void Grid3D::clear_validation_data() {
     pads_.clear();
+    authored_pad_specs_.clear();
     clear_component_holes();
     stored_segments_.clear();
     stored_vias_.clear();
@@ -814,6 +1017,7 @@ void Grid3D::clear_validation_data() {
     route_segment_bins_.clear();
     route_via_bins_.clear();
     route_coverage_dirty_ = true;
+    if (authored_index_) rebuild_authored_index();  // Issue #6243
 }
 
 void Grid3D::clear_stored_routes() {
@@ -826,6 +1030,7 @@ void Grid3D::clear_stored_routes() {
     route_segment_bins_.clear();
     route_via_bins_.clear();
     route_coverage_dirty_ = true;
+    if (authored_index_) rebuild_authored_index();  // Issue #6243: pads only
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,6 +1444,30 @@ ValidationResult Grid3D::validate_route(
     ValidationResult result;
     result.valid = true;
     result.min_clearance = std::numeric_limits<float>::infinity();
+
+    // Issue #6243: authored per-net minima first -- no partner gap,
+    // component relief, plane-pad waiver or attach zone below may lower them.
+    if (authored_index_) {
+        for (const auto& seg : segments) {
+            if (!authored_segment_clear(seg.x1, seg.y1, seg.x2, seg.y2, seg.width,
+                                        seg.layer, exclude_net)) {
+                result.valid = false;
+                result.violation_x = seg.x1;
+                result.violation_y = seg.y1;
+                result.violation_type = 9;  // authored-floor
+                return result;
+            }
+        }
+        for (const auto& via : vias) {
+            if (!authored_via_clear(via.x, via.y, via.diameter, exclude_net)) {
+                result.valid = false;
+                result.violation_x = via.x;
+                result.violation_y = via.y;
+                result.violation_type = 9;  // authored-floor
+                return result;
+            }
+        }
+    }
 
     for (const auto& seg : segments) {
         if (!fixed_fill_clear(seg.x1, seg.y1, seg.x2, seg.y2, seg.layer,

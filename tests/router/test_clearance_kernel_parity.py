@@ -968,6 +968,15 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # ``kct check`` clearance family uses, so the gate and the checker
         # cannot disagree about a gap.
         "router/foreign_copper.py",
+        # Issue #6243: authored per-net (netclass) clearance minima.
+        # ``authored_clearance.py`` is the one predicate search, commit and
+        # final validation ask for a project netclass stricter than
+        # ``Default``: the pair floor ``max(floor[a], floor[b])`` is its rule,
+        # the kernel's ``clear`` (through ``clearance_shapes``) its geometry.
+        # Its native twin is ``Grid3D::authored_*_clear`` in ``src/grid.cpp``
+        # (already listed below); ``test_authored_floor_parity_*`` holds the
+        # two to identical verdicts.
+        "router/authored_clearance.py",
         # Issue #6164 (PR #6176): ``kct panel --cut vcut``'s copper-near-score
         # warning.  ``panel/vscore.py`` builds a ``KSegment`` for each arc chord
         # and asks the ``validate/clearance_shapes`` adapter for the exact
@@ -1151,3 +1160,220 @@ def test_ripgrep_acceptance_criterion() -> None:
     except FileNotFoundError:  # pragma: no cover - environment dependent
         pytest.skip("rg not installed")
     assert proc.stdout.strip() == "", f"unexpected consumer references:\n{proc.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #6243: authored per-net (netclass) clearance minima
+# ---------------------------------------------------------------------------
+#
+# The kernel itself stays rule-free; the per-net minimum is a *rule* layered on
+# it -- ``max(floor[a], floor[b])`` for foreign copper -- by
+# ``router/authored_clearance.py`` (Python) and ``Grid3D::authored_*``
+# (native).  These cases drive both through their production entry points on
+# the same random scenes:
+#
+# * search: ``Grid3D::authored_segment_clear`` / ``authored_via_clear`` (what
+#   the native A* step / via gates call) vs ``Router``'s step / via gates;
+# * commit: ``Grid3D::validate_route`` (violation type 9) vs
+#   ``RoutingGrid.validate_segment_clearance`` / ``validate_via_clearance``;
+# * final validation: :func:`authored_clearance.authored_violations`.
+#
+# A query whose binding gap lies inside the verdict boundary band is counted
+# and skipped, exactly like the shape-parity cases above (the native side
+# stores route copper in float32).
+
+_AUTHORED_SHAPES = ("rect", "circle", "oval", "roundrect")
+
+
+def _authored_scene(seed: int):
+    """A random board: pads, committed routes, floors, and probe copper."""
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad, Route, Segment, Via
+    from kicad_tools.router.rules import DesignRules
+
+    rng = random.Random(seed)
+    layers = (Layer.F_CU, Layer.B_CU)
+    floors = {net: round(rng.uniform(0.15, 0.6), 4) for net in rng.sample(range(1, 7), 2)}
+    grid = RoutingGrid(
+        20, 20, DesignRules(trace_clearance=0.1, via_clearance=0.1, net_clearance_floors=floors)
+    )
+    for i in range(14):
+        through = rng.random() < 0.3
+        net = rng.choice([0, 0, *range(1, 7)])
+        grid.add_pad(
+            Pad(
+                round(rng.uniform(2, 18), 4),
+                round(rng.uniform(2, 18), 4),
+                round(rng.uniform(0.3, 1.8), 4),
+                round(rng.uniform(0.3, 1.8), 4),
+                net,
+                f"N{net}",
+                layer=rng.choice(layers),
+                ref=f"U{i}",
+                pin="1",
+                through_hole=through,
+                drill=0.3 if through else 0.0,
+                rotation=rng.choice([0.0, 0.0, 30.0, 45.0, 17.5]),
+                shape=rng.choice(_AUTHORED_SHAPES),
+                # A neutral pad sometimes keeps its own authored minimum.
+                authored_clearance=round(rng.uniform(0.2, 0.5), 4)
+                if net == 0 and rng.random() < 0.5
+                else 0.0,
+            )
+        )
+    for _ in range(10):
+        net = rng.randint(1, 6)
+        x, y = rng.uniform(2, 18), rng.uniform(2, 18)
+        seg = Segment(
+            x, y, x + rng.uniform(-4, 4), y + rng.uniform(-4, 4), 0.2, rng.choice(layers), net
+        )
+        vias = []
+        if rng.random() < 0.4:
+            vias.append(Via(seg.x2, seg.y2, 0.3, 0.6, layers, net))
+        grid.mark_route(Route(net, f"N{net}", segments=[seg], vias=vias))
+    probes = []
+    for _ in range(40):
+        net = rng.randint(1, 6)
+        x, y = rng.uniform(1, 19), rng.uniform(1, 19)
+        if rng.random() < 0.3:
+            probes.append(Via(x, y, 0.3, 0.6, layers, net))
+        else:
+            probes.append(
+                Segment(
+                    x,
+                    y,
+                    x + rng.uniform(-3, 3),
+                    y + rng.uniform(-3, 3),
+                    rng.choice([0.15, 0.2, 0.3]),
+                    rng.choice(layers),
+                    net,
+                )
+            )
+    return grid, probes
+
+
+def _authored_on_boundary(grid, probe) -> bool:
+    """True when the probe's tightest authored pair sits in the verdict band."""
+    from kicad_tools.router.authored_clearance import AuthoredCopperIndex
+    from kicad_tools.router.primitives import Via
+
+    index = AuthoredCopperIndex(grid.rules.net_clearance_floors, grid.pads, grid.routes)
+    from kicad_tools.router.clearance_shapes import segment_shape, via_shape
+
+    shape = via_shape(probe) if isinstance(probe, Via) else segment_shape(probe)
+    own = grid.rules.authored_floor(probe.net)
+    for bucket in index._all.values():
+        for item in bucket:
+            if item.net == probe.net:
+                continue
+            required = max(own, item.floor)
+            if required <= 0:
+                continue
+            gap = ck.copper_gap(shape, item.shape)
+            if not math.isinf(gap) and abs(gap - required) <= VERDICT_BOUNDARY_BAND_MM:
+                return True
+    return False
+
+
+@requires_cpp
+@pytest.mark.parametrize("seed_base", (0, 20, 40, 60))
+def test_authored_floor_parity_search_commit_validation(seed_base: int, record_property) -> None:
+    """Python and native authored gates agree in search, commit and validation."""
+    from kicad_tools.router import router_cpp
+    from kicad_tools.router.authored_clearance import authored_violations
+    from kicad_tools.router.cpp_backend import CppGrid, sync_stored_routes
+    from kicad_tools.router.primitives import Route, Via
+
+    compared = boundary = rejected = 0
+    for seed in range(seed_base, seed_base + 20):
+        grid, probes = _authored_scene(seed)
+        native = CppGrid.from_routing_grid(grid)
+        sync_stored_routes(native, grid)
+        impl = native._impl
+        assert impl.authored_active()
+        for probe in probes:
+            if _authored_on_boundary(grid, probe):
+                boundary += 1
+                continue
+            if isinstance(probe, Via):
+                search_py = grid.authored_violation(probe, probe.net) is None
+                search_cpp = impl.authored_via_clear(probe.x, probe.y, probe.diameter, probe.net)
+                commit_py = grid.validate_via_clearance(probe, probe.net)[0]
+                cv = router_cpp.Via()
+                cv.x, cv.y, cv.drill, cv.diameter, cv.net = (
+                    probe.x,
+                    probe.y,
+                    probe.drill,
+                    probe.diameter,
+                    probe.net,
+                )
+                cv.layer_from, cv.layer_to = 0, grid.num_layers - 1
+                result = impl.validate_route([], [cv], probe.net, [], 0.0, 0.0, 0.0)
+            else:
+                layer = grid.layer_to_index(probe.layer.value)
+                search_py = grid.authored_violation(probe, probe.net) is None
+                search_cpp = impl.authored_segment_clear(
+                    probe.x1, probe.y1, probe.x2, probe.y2, probe.width, layer, probe.net
+                )
+                commit_py = grid.validate_segment_clearance(probe, probe.net)[0]
+                cs = router_cpp.Segment()
+                cs.x1, cs.y1, cs.x2, cs.y2 = probe.x1, probe.y1, probe.x2, probe.y2
+                cs.width, cs.layer, cs.net = probe.width, layer, probe.net
+                result = impl.validate_route([cs], [], probe.net, [], 0.0, 0.0, 0.0)
+            census = not authored_violations(
+                grid.rules.net_clearance_floors,
+                grid.pads,
+                [*grid.routes, Route(probe.net, "probe", **_as_route_items(probe))],
+            ) or not _probe_flagged(grid, probe)
+            assert search_py == search_cpp, f"seed {seed}: search verdicts differ for {probe}"
+            native_commit = result.valid or result.violation_type != 9
+            assert native_commit == search_cpp, f"seed {seed}: native commit != search"
+            # The Python commit validators also apply the scalar base, so they
+            # may reject for other reasons -- but never accept an authored miss.
+            assert search_py or not commit_py, f"seed {seed}: commit accepted an authored miss"
+            assert census == search_py, f"seed {seed}: final census != search"
+            compared += 1
+            rejected += not search_py
+    assert compared > 0 and rejected > 0 and rejected < compared
+    record_property("authored_parity_compared", compared)
+    record_property("authored_parity_boundary_excluded", boundary)
+    print(f"[authored seeds {seed_base}..] compared={compared} rejected={rejected} band={boundary}")
+
+
+def _as_route_items(probe):
+    from kicad_tools.router.primitives import Via
+
+    return {"vias": [probe]} if isinstance(probe, Via) else {"segments": [probe]}
+
+
+def _probe_flagged(grid, probe) -> bool:
+    """Whether the census flags the PROBE itself (not pre-existing scene copper)."""
+    from kicad_tools.router.authored_clearance import AuthoredCopperIndex
+    from kicad_tools.router.primitives import Via
+
+    index = AuthoredCopperIndex(grid.rules.net_clearance_floors, grid.pads, grid.routes)
+    if isinstance(probe, Via):
+        return index.via_violation(probe, probe.net) is not None
+    return index.segment_violation(probe, probe.net) is not None
+
+
+@requires_cpp
+def test_authored_pair_floor_rule_parity() -> None:
+    """The rule half: both ports resolve ``max(floor[a], floor[b])`` identically."""
+    from kicad_tools.router.authored_clearance import pair_floor
+    from kicad_tools.router.cpp_backend import CppGrid
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.rules import DesignRules
+
+    rng = random.Random(6243)
+    for _ in range(25):
+        floors = {net: round(rng.uniform(0.1, 1.0), 4) for net in rng.sample(range(0, 9), 3)}
+        rules = DesignRules(net_clearance_floors=floors)
+        impl = CppGrid.from_routing_grid(RoutingGrid(5, 5, rules))._impl
+        for a in range(9):
+            for b in range(9):
+                assert impl.authored_pair_floor(a, b) == pytest.approx(pair_floor(floors, a, b))
+                assert rules.clearance_for_nets(a, b, 0.0) == pytest.approx(
+                    pair_floor(floors, a, b)
+                )

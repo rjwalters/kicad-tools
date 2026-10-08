@@ -183,6 +183,7 @@ class LatticeObstacleModel:
         pad_layer_indices: list[tuple[int, ...]],
         num_layers: int,
         agent_radius: float,
+        pad_extra: list[float] | None = None,
     ) -> None:
         self.lattice = lattice
         self.pads = pads
@@ -191,11 +192,16 @@ class LatticeObstacleModel:
         self.agent_radius = agent_radius
 
         # Inflated keep-out rectangle per pad (pad half-extent + agent radius).
+        # Issue #6243: ``pad_extra[i]`` grows pad ``i``'s keep-out by the
+        # amount its authored netclass minimum exceeds the board-global
+        # clearance baked into ``agent_radius`` -- the pad's own side of the
+        # pair, honoured by every predicate that reads ``pad_rects``.
         self.pad_rects: list[Rect] = []
-        for pad in pads:
+        for i, pad in enumerate(pads):
             half_w, half_h = pad_half_extents(pad)
-            hx = half_w + agent_radius
-            hy = half_h + agent_radius
+            grow = pad_extra[i] if pad_extra is not None else 0.0
+            hx = half_w + agent_radius + grow
+            hy = half_h + agent_radius + grow
             self.pad_rects.append((pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy))
 
         # Pad-lookup buckets.

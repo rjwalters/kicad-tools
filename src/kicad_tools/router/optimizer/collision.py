@@ -691,6 +691,30 @@ def _routed_copper_clear(
     return True
 
 
+def _authored_path_clear(
+    grid: Any, x1: float, y1: float, x2: float, y2: float, layer: Layer, width: float, net: int
+) -> bool:
+    """Issue #6243: the optimizer may not move copper below an authored minimum.
+
+    Asks the grid's kernel-backed authored-netclass gate (the predicate the
+    router's search and validators share).  ``True`` immediately for a grid
+    without authored floors -- or a test double without the gate.
+    """
+    floors = getattr(getattr(grid, "rules", None), "net_clearance_floors", None)
+    # Strict type checks: a duck-typed test double's auto-attributes must
+    # never read as "authored floors present".
+    if not (isinstance(floors, dict) and floors) and (
+        getattr(grid, "_authored_item_floors", False) is not True
+    ):
+        return True
+    check = getattr(grid, "authored_violation", None)
+    if check is None:
+        return True
+    from ..primitives import Segment
+
+    return check(Segment(x1, y1, x2, y2, width, layer, net), net) is None
+
+
 class CollisionChecker(Protocol):
     """Protocol for checking if a path is clear of obstacles.
 
@@ -801,6 +825,8 @@ class GridCollisionChecker:
         Returns:
             True if the path is clear, False if it would cross obstacles.
         """
+        if not _authored_path_clear(self.grid, x1, y1, x2, y2, layer, width, exclude_net):
+            return False
         # Convert to grid coordinates
         gx1, gy1 = self.grid.world_to_grid(x1, y1)
         gx2, gy2 = self.grid.world_to_grid(x2, y2)
@@ -1046,6 +1072,9 @@ class VectorCollisionChecker:
         Returns:
             True if the path is clear, False if it would cross obstacles.
         """
+        if not _authored_path_clear(self.grid, x1, y1, x2, y2, layer, width, exclude_net):
+            return False  # Issue #6243
+
         # Resolve layer index
         try:
             layer_idx = self.grid.layer_to_index(layer.value)

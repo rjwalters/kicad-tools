@@ -401,6 +401,7 @@ class LatticePathfinder:
             [self._pad_layer_indices(p) for p in self.pads],
             self.num_layers,
             self._agent_radius,
+            pad_extra=self._authored_pad_extra(),
         )
         return self._lattice
 
@@ -496,17 +497,39 @@ class LatticePathfinder:
         for point, net, clr, radius, layers in self._fixed_vias:
             committed.add_via(point, net, clr, radius=radius, layers=layers)
 
-    def _fixed_clearance_for(self, net: int, clearances: dict[int, float] | None) -> float:
+    def _authored_pad_extra(self) -> list[float] | None:
+        """Per-pad keep-out growth for authored netclass minima (Issue #6243).
+
+        A pad whose net (or the pad itself, when neutralised) carries an
+        authored minimum above the board-global clearance grows its static
+        keep-out by the difference, so every lattice pad predicate -- node /
+        edge masks, free-segment and via checks, the coupled fat agent --
+        keeps that pad's own side of the pair.  ``None`` (no floors) leaves
+        the model byte-identical.
+        """
+        floors = self.rules.net_clearance_floors
+        if not floors and not any(p.authored_clearance > 0.0 for p in self.pads):
+            return None
+        from ..authored_clearance import pad_authored_floor
+
+        base = self.rules.trace_clearance
+        return [max(0.0, pad_authored_floor(p, floors) - base) for p in self.pads]
+
+    def _fixed_clearance_for(
+        self, net: int, clearances: dict[int, float] | None, item_floor: float = 0.0
+    ) -> float:
         """Seed clearance for preserved net ``net`` (issue #4597).
 
         Same floor semantics as :meth:`_conn_geometry`: a class may only GROW
         the gap, never shrink it below ``rules.trace_clearance``.  An unmapped
         net (or ``clearances is None``) resolves to the board-global floor --
-        the pre-#4597 behavior, byte-for-byte.
+        the pre-#4597 behavior, byte-for-byte.  Issue #6243: the net's
+        authored minimum (or the copper's own, ``item_floor``) also raises it.
         """
+        authored = max(self.rules.authored_floor(net), item_floor)
         if not clearances:
-            return self.rules.trace_clearance
-        return max(clearances.get(net) or 0.0, self.rules.trace_clearance)
+            return max(self.rules.trace_clearance, authored)
+        return max(clearances.get(net) or 0.0, self.rules.trace_clearance, authored)
 
     def _set_fixed_copper(
         self,
@@ -527,6 +550,7 @@ class LatticePathfinder:
         runs: list[tuple[int, Pt, Pt, int, float, float]] = []
         vias: list[tuple[Pt, int, float, float, tuple[int, ...]]] = []
         for route in routes or []:
+            item_floor = float(getattr(route, "authored_clearance", 0.0) or 0.0)
             for seg in getattr(route, "segments", []):
                 try:
                     layer_idx = self.layer_stack.layer_enum_to_index(seg.layer)
@@ -542,7 +566,14 @@ class LatticePathfinder:
                     continue
                 half = (getattr(seg, "width", None) or self.rules.trace_width) / 2.0
                 runs.append(
-                    (layer_idx, a, b, seg.net, half, self._fixed_clearance_for(seg.net, clearances))
+                    (
+                        layer_idx,
+                        a,
+                        b,
+                        seg.net,
+                        half,
+                        self._fixed_clearance_for(seg.net, clearances, item_floor),
+                    )
                 )
             for via in getattr(route, "vias", []):
                 # A routing stack may select only part of the physical board
@@ -558,7 +589,7 @@ class LatticePathfinder:
                     (
                         (via.x, via.y),
                         via.net,
-                        self._fixed_clearance_for(via.net, clearances),
+                        self._fixed_clearance_for(via.net, clearances, item_floor),
                         via.diameter / 2,
                         occupied_layers,
                     )
@@ -566,7 +597,9 @@ class LatticePathfinder:
         self._fixed_runs = runs
         self._fixed_vias = vias
 
-    def _conn_geometry(self, net_class: object | None) -> tuple[float, float]:
+    def _conn_geometry(
+        self, net_class: object | None, net: int | None = None
+    ) -> tuple[float, float]:
         """Per-connection ``(trace half-width, clearance)`` (issue #4271).
 
         Width follows the class exactly as :meth:`_emit` does (the copper is
@@ -574,10 +607,15 @@ class LatticePathfinder:
         clearance takes ``max(class, rules)`` so a class can only GROW the
         gap, never shrink below the design rules.  ``None`` -> global
         geometry, preserving the single-width pre-#4271 behavior exactly.
+
+        Issue #6243: ``net``'s authored netclass minimum is the connection's
+        own side of every pair, so it raises the clearance too -- and, carried
+        into committed copper, it is the stored side for every later net.
         """
         tw = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clr = getattr(net_class, "clearance", None) or 0.0
-        return tw / 2.0, max(clr, self.rules.trace_clearance)
+        authored = self.rules.authored_floor(net) if net is not None else 0.0
+        return tw / 2.0, max(clr, self.rules.trace_clearance, authored)
 
     def _hard_avoided_layers(self, net_class: object | None) -> frozenset[int]:
         """Grid-layer indices to HARD-block for this connection (issue #4979).
@@ -650,7 +688,7 @@ class LatticePathfinder:
         by the surcharge over the global agent radius (single-ended path;
         the fat-agent path carries its own grown envelope).
         """
-        half, clr = self._conn_geometry(net_class)
+        half, clr = self._conn_geometry(net_class, net)
         return self._scan_stubs(
             pad,
             net,
@@ -842,7 +880,7 @@ class LatticePathfinder:
         full-width legs are checked at the full width (#3906).
         """
         body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
-        full_half, clr = self._conn_geometry(net_class)
+        full_half, clr = self._conn_geometry(net_class, net)
         fat = extra_clearance > 0.0 or partner_net is not None
 
         stubs = self.pad_stubs(
@@ -1342,7 +1380,7 @@ class LatticePathfinder:
         # and clearance size EVERY legality check below, and ``extra`` is the
         # keep-out surcharge over the global agent radius for the static pad
         # masks (0.0 for default-width nets -> pre-#4271 behavior exactly).
-        half, clr = self._conn_geometry(net_class)
+        half, clr = self._conn_geometry(net_class, net)
         extra = max(0.0, half + clr - self._agent_radius)
 
         # Issue #4979: hard-block layers the net's class declares off-limits
@@ -2452,8 +2490,9 @@ class LatticePathfinder:
                     # Legs are EMITTED at the pair class width (#4270), so
                     # commit them at the same width + clearance (#4271) --
                     # emission and spacing must agree.
-                    half, clr = self._conn_geometry(item.net_class)
                     for leg_net, layer_idx, points in pres.runs:
+                        # Issue #6243: each leg stores its own authored side.
+                        half, clr = self._conn_geometry(item.net_class, leg_net)
                         committed.add_run(layer_idx, points, leg_net, half, clr)
                     continue
                 key, start, end, net_class = item
@@ -2487,7 +2526,7 @@ class LatticePathfinder:
                 # copper as 2.6 mm copper, and a tapered escape neck is spaced
                 # honestly as neck copper -- never the taper cheating the
                 # spacing model.  Clearance stays the class clearance (#4271).
-                _half, clr = self._conn_geometry(net_class)
+                _half, clr = self._conn_geometry(net_class, start.net)
                 for layer_idx, points, widths in result.runs:
                     committed.add_run_widths(
                         layer_idx, points, start.net, [w / 2.0 for w in widths], clr

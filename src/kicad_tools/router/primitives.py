@@ -366,6 +366,10 @@ class Route:
     # TMDS nets permanently at 1/2 pads connected when the pre-pass was
     # re-enabled under the C++ backend).
     is_escape: bool = False
+    # Issue #6243: the copper's own authored electrical minimum (mm) when its
+    # routing net id has been neutralised to 0 (placement-preserved copper of
+    # a strict netclass).  ``0.0`` defers to ``DesignRules.net_clearance_floors``.
+    authored_clearance: float = 0.0
 
     def to_sexp(self, name_only: bool = False) -> str:
         """Generate all S-expressions for this route.
@@ -525,6 +529,17 @@ class Pad:
     escape_terminal: bool = False  # Metal bounds must stay within committed escape copper
     terminal_id: str = ""
     """Internal physical land identity; ``pin`` keeps its authored display name."""
+
+    authored_clearance: float = 0.0
+    """The pad's own authored electrical minimum (Issue #6243), in mm.
+
+    Set by the routing loader for a pad whose **authored** net's netclass is
+    stricter than the project ``Default`` when that net's routing id has been
+    neutralised (skipped plane nets, placement-excluded or unsupported-geometry
+    nets all become net ``0``).  The authored minimum belongs to the copper, not
+    to the routing target, so it survives the neutralisation.  ``0.0`` -- the
+    default -- defers entirely to ``DesignRules.net_clearance_floors``.
+    """
 
     @property
     def component_key(self) -> str:

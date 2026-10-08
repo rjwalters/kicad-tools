@@ -306,6 +306,8 @@ class MeshPathfinder:
 
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
+        # Issue #6243: the net's authored netclass minimum is its own side.
+        clearance = max(clearance, self.rules.authored_floor(start.net))
 
         net = start.net
         start_pt: Pt = (start.x, start.y)
@@ -328,6 +330,7 @@ class MeshPathfinder:
             clearance=clearance,
             pads=self._foreign_pads(net),
             edge_clearance=self.edge_clearance,
+            pad_floors=self.rules.net_clearance_floors,
         )
 
         cost_congestion = self.rules.cost_congestion if negotiated_mode else 0.0
@@ -505,6 +508,13 @@ class MeshPathfinder:
                         committed_by_layer,
                         present_cost_factor=present,
                     )
+                if result is not None and not self._authored_route_clear(
+                    result[0], [*(fixed_copper or ()), *routes.values()]
+                ):
+                    # Issue #6243: the mesh's committed-copper capsules are
+                    # net-agnostic, so a strict net's own side against them is
+                    # verified on the emitted copper and declined honestly.
+                    result = None
                 if result is None:
                     failed.append((key, start, end, net_class))
                     continue
@@ -554,6 +564,23 @@ class MeshPathfinder:
         return best_routes, stats
 
     # -- helpers ----------------------------------------------------------
+
+    def _authored_route_clear(self, route: Route, committed: list[Route]) -> bool:
+        """Does ``route`` keep every authored netclass minimum (Issue #6243)?
+
+        The kernel-backed census against every pad and the copper already
+        committed this pass.  ``True`` immediately when nothing carries a
+        floor, so floor-free boards are untouched.
+        """
+        floors = self.rules.net_clearance_floors
+        if not floors and not any(p.authored_clearance > 0.0 for p in self.pads):
+            return True
+        from ..authored_clearance import AuthoredCopperIndex
+
+        index = AuthoredCopperIndex(floors, self.pads, committed)
+        return all(index.segment_clear(seg, route.net) for seg in route.segments) and all(
+            index.via_clear(via, route.net) for via in route.vias
+        )
 
     def _foreign_pads(self, net: int) -> list[Pad]:
         """Every OTHER-net pad, verbatim -- the exact copper the fit clears.
@@ -721,6 +748,7 @@ class MeshPathfinder:
 
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
+        clearance = max(clearance, self.rules.authored_floor(start.net))  # Issue #6243
         via_radius = self.rules.via_diameter / 2.0 + clearance
         net = start.net
         start_pt: Pt = (start.x, start.y)
@@ -740,6 +768,7 @@ class MeshPathfinder:
                 clearance=clearance,
                 pads=self._foreign_pads_layer(net, lidx),
                 edge_clearance=self.edge_clearance,
+                pad_floors=self.rules.net_clearance_floors,
             )
 
         # Per-layer portal blocking (issue #4276 section 3): a portal is blocked
@@ -948,7 +977,12 @@ class MeshPathfinder:
         must be tracked per layer so later nets see it only where it actually
         sits (an F.Cu net is not blocked by another net's B.Cu cross-under).
         """
-        half = self.rules.trace_width + self.rules.trace_clearance
+        half = self.rules.trace_width + max(
+            self.rules.trace_clearance,
+            # Issue #6243: committed strict copper keeps its own side.
+            self.rules.authored_floor(route.net),
+            float(getattr(route, "authored_clearance", 0.0) or 0.0),
+        )
         out: dict[int, list[list[Pt]]] = {}
         for seg in route.segments:
             lidx = self._layer_index(seg.layer)

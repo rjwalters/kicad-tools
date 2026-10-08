@@ -3218,6 +3218,44 @@ class CoupledPathfinder:
         self._build_route_from_path(n_route, n_path, n_start, n_end)
         return p_route, n_route
 
+    def _coupled_step_authored_clear(self, state, new_state, is_via: bool, p_pad, n_pad) -> bool:
+        """Do both rails of a coupled step keep every authored minimum (#6243)?
+
+        Each rail's swept step (or, for a layer change, its via barrel) is
+        asked of the grid's kernel-backed authored gate -- the same predicate
+        the single-ended search, the commit validators and the finalize census
+        use.  The partner rail is not yet committed, so its own floor is
+        enforced at commit and by the census.
+        """
+        from .layers import Layer
+
+        first = Layer(self.grid.index_to_layer(0))
+        last = Layer(self.grid.index_to_layer(self.grid.num_layers - 1))
+        for old, new, pad in (
+            (state.p_pos, new_state.p_pos, p_pad),
+            (state.n_pos, new_state.n_pos, n_pad),
+        ):
+            bx, by = self.grid.grid_to_world(new.x, new.y)
+            item: Segment | Via
+            if is_via:
+                item = Via(
+                    bx, by, self.rules.via_drill, self.rules.via_diameter, (first, last), pad.net
+                )
+            else:
+                ax, ay = self.grid.grid_to_world(old.x, old.y)
+                item = Segment(
+                    ax,
+                    ay,
+                    bx,
+                    by,
+                    self._get_trace_width_for_net(pad.net_name),
+                    Layer(self.grid.index_to_layer(new.layer)),
+                    pad.net,
+                )
+            if self.grid.authored_violation(item, pad.net) is not None:
+                return False
+        return True
+
     def route_coupled(
         self,
         p_start: Pad,
@@ -3499,6 +3537,11 @@ class CoupledPathfinder:
             else None
         )
 
+        # Issue #6243: hoisted -- the per-step authored gate costs nothing
+        # unless some copper carries an authored netclass minimum.
+        authored_active = bool(self.rules.net_clearance_floors) or bool(
+            getattr(self.grid, "_authored_item_floors", False) is True
+        )
         while open_set and iterations < max_iterations:
             iterations += 1
             # Issue #3473: keep the public counter current on every
@@ -3665,6 +3708,12 @@ class CoupledPathfinder:
                 p_trail_buckets=p_trail_buckets,
                 n_trail_buckets=n_trail_buckets,
             ):
+                # Issue #6243: authored netclass minima on both rails, through
+                # the grid's kernel-backed gate.  Dormant without floors.
+                if authored_active and not self._coupled_step_authored_clear(
+                    current.state, new_state, is_via, p_start, n_start
+                ):
+                    continue
                 if self.grid.fixed_fills:
                     valid = True
                     for old, new, pad in (
@@ -3678,7 +3727,7 @@ class CoupledPathfinder:
                                 b,
                                 tuple(range(self.grid.num_layers)),
                                 self.rules.via_diameter / 2,
-                                self.rules.via_clearance,
+                                max(self.rules.via_clearance, self.rules.authored_floor(pad.net)),
                             )
                         else:
                             valid = valid and self.grid.fixed_fills.segment_clear(
@@ -3686,9 +3735,12 @@ class CoupledPathfinder:
                                 b,
                                 new.layer,
                                 self._get_trace_width_for_net(pad.net_name) / 2,
-                                self.net_class_map[pad.net_name].clearance
-                                if pad.net_name in self.net_class_map
-                                else self.rules.trace_clearance,
+                                max(
+                                    self.net_class_map[pad.net_name].clearance
+                                    if pad.net_name in self.net_class_map
+                                    else self.rules.trace_clearance,
+                                    self.rules.authored_floor(pad.net),
+                                ),
                             )
                     if not valid:
                         continue

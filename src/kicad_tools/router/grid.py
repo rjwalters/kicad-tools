@@ -1144,6 +1144,10 @@ class RoutingGrid:
         # Issue #750: Grid-based checking is approximate; we need precise geometry
         # for post-route validation to catch diagonal segment violations
         self._pads: list[Pad] = []
+        # Issue #6243: True once a registered pad or marked route carries its
+        # own authored clearance minimum (``Pad/Route.authored_clearance``);
+        # see ``authored_clearance.grid_authored_index``.
+        self._authored_item_floors = False
 
         # Issue #2452: Track pads by component reference for same-component
         # clearance relaxation. When pads share the same component (e.g.,
@@ -2317,6 +2321,10 @@ class RoutingGrid:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
         self._pads.append(pad)
+        if pad.authored_clearance > 0.0:
+            # Issue #6243: an item-level authored minimum on a neutralised pad
+            # activates the authored gate even when no routed net has a floor.
+            self._authored_item_floors = True
         self.add_component_hole(pad, physical=False)
 
         # Issue #2908: Sync the pad to the paired C++ grid (if present) so the
@@ -4275,6 +4283,28 @@ class RoutingGrid:
 
         return worst_deficit, worst_loc
 
+    def authored_violation(self, item: Segment | Via, net: int | None = None) -> Any:
+        """The first authored-minimum shortfall of ``item`` (Issue #6243), or ``None``.
+
+        ``item`` is a :class:`Segment` or :class:`Via` owned by ``net``
+        (defaults to ``item.net``).  Delegates to the grid's cached
+        :class:`~kicad_tools.router.authored_clearance.AuthoredCopperIndex`, so
+        every caller -- search steps, via placement, commit validation, the
+        finalize census -- asks the one kernel-backed predicate.  Returns
+        ``None`` immediately when no copper carries an authored minimum.
+        """
+        if not self.rules.net_clearance_floors and not self._authored_item_floors:
+            return None
+        from .authored_clearance import grid_authored_index
+
+        index = grid_authored_index(self)
+        if index is None:
+            return None
+        owner = item.net if net is None else net
+        if isinstance(item, Via):
+            return index.via_violation(item, owner)
+        return index.segment_violation(item, owner)
+
     def validate_segment_clearance(
         self,
         seg: Segment,
@@ -4331,9 +4361,16 @@ class RoutingGrid:
             (seg.x2, seg.y2),
             self.layer_to_index(seg.layer.value),
             seg.width / 2,
-            min_clearance,
+            max(min_clearance, self.rules.authored_floor(exclude_net)),
         ):
             return False, 0.0, (seg.x1, seg.y1)
+
+        # Issue #6243: the authored per-net minimum, judged by the shared
+        # clearance kernel and immune to every relief below (partner gap,
+        # same-component carve-outs, plane-pad waivers).  No-op without floors.
+        authored = self.authored_violation(seg, exclude_net)
+        if authored is not None:
+            return False, authored.actual, (authored.x, authored.y)
 
         # Issue #2559: Tighter clearance is only applied when both arguments
         # are present and the partner clearance is tighter than the default.
@@ -4760,9 +4797,14 @@ class RoutingGrid:
                 )
             ),
             via.diameter / 2,
-            min_clearance,
+            max(min_clearance, self.rules.authored_floor(exclude_net)),
         ):
             return False, 0.0, (via.x, via.y)
+
+        # Issue #6243: authored per-net minimum against pads, traces and vias.
+        authored = self.authored_violation(via, exclude_net)
+        if authored is not None:
+            return False, authored.actual, (authored.x, authored.y)
 
         min_actual_clearance = float("inf")
         violation_loc: tuple[float, float] | None = None
@@ -5406,6 +5448,8 @@ class RoutingGrid:
             # first route copper lands so rip-up can restore pad halos /
             # keepouts instead of erasing them.
             self._ensure_static_blockage_snapshot()
+            if route.authored_clearance > 0.0:
+                self._authored_item_floors = True  # Issue #6243
             for seg in route.segments:
                 # Issue #1674: Use seg.width instead of rules.trace_width
                 # so wider net-class traces block the correct number of cells.

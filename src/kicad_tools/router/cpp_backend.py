@@ -68,7 +68,11 @@ logger = logging.getLogger(__name__)
 # ``dubins_path_length`` bindings.  A v45 .so lacks them.
 # v47 (Issue #6008): ``Grid3D.add_rule_area_keepout`` and friends -- board-file
 # keepout rule areas enforced by the grid engine.  A v46 .so lacks them.
-_REQUIRED_CPP_BUILD_VERSION = 47
+# v48 (Issue #6243): authored per-net clearance minima -- the
+# ``Grid3D.authored_*`` gate, ``set_net_clearance_floors`` /
+# ``set_pad_authored``, and the search / coupled / validate_route consults.
+# A v47 .so would route straight through a stricter netclass's clearance.
+_REQUIRED_CPP_BUILD_VERSION = 48
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -87,6 +91,7 @@ _CPP_VIOLATION_KINDS: dict[int, str] = {
     6: "drill",
     7: "reserved",
     8: "via-pad",
+    9: "authored-floor",  # Issue #6243
 }
 
 
@@ -921,6 +926,8 @@ class CppGrid:
         # Track synced route count for incremental stored segment/via updates
         # (Issue #2439: C++ geometric validation)
         self._synced_route_count: int = 0
+        # Issue #6243: what ``sync_authored_floors`` last installed.
+        self._authored_key: tuple | None = None
 
     def install_fixed_fills(self, fills) -> None:
         if not hasattr(self._impl, "add_fixed_fill"):
@@ -1168,6 +1175,8 @@ class CppGrid:
             from .rule_area_grid import mirror_rule_areas_to_cpp
 
             mirror_rule_areas_to_cpp(grid, cpp_grid)
+        # Issue #6243: authored per-net minima (dormant without floors).
+        sync_authored_floors(cpp_grid, grid)
         return cpp_grid
 
     def index_to_layer(self, index: int) -> int:
@@ -2433,12 +2442,17 @@ class CppPathfinder:
             if hasattr(self._impl, "set_search_pair_widths"):
                 self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
             if hasattr(self._impl, "set_search_fill_clearances"):
+                # Issue #6243: the routing net's own authored minimum is its
+                # side of every fill pair (the fill carries its own side).
+                own_floor = self._rules.authored_floor(start.net)
                 self._impl.set_search_fill_clearances(
-                    net_trace_clearance, self._rules.via_clearance
+                    max(net_trace_clearance, own_floor),
+                    max(self._rules.via_clearance, own_floor),
                 )
 
             if self._grid._py_grid is not None:
                 self._sync_stored_routes(self._grid._py_grid)
+                sync_authored_floors(self._grid, self._grid._py_grid)
             self._impl.set_search_partner_clearance(
                 partner_net_id,
                 search_intra_pair_clearance if partner_net_id >= 0 else -1.0,
@@ -3520,6 +3534,8 @@ class CppPathfinder:
 
         # Sync stored segments/vias from completed routes to C++
         self._sync_stored_routes(py_grid)
+        # Issue #6243: the native validator enforces the authored minima too.
+        sync_authored_floors(self._grid, py_grid)
 
         # Build exclude_ref_hashes for start/end pad components (Issue #1764)
         #
@@ -3614,6 +3630,7 @@ class CppPathfinder:
         if py_grid is not None and py_grid.fixed_fills:
             fill_class = self._net_class_map.get(start.net_name)
             fill_clearance = fill_class.clearance if fill_class else self._rules.trace_clearance
+            fill_clearance = max(fill_clearance, self._rules.authored_floor(start.net))
             for segment in route.segments:
                 layer = py_grid.layer_to_index(segment.layer.value)
                 if not py_grid.fixed_fills.segment_clear(
@@ -3652,6 +3669,16 @@ class CppPathfinder:
                 type_code,
                 min_clearance,
             )
+
+        # Issue #6243: the Python twin of the native authored gate over the
+        # Python grid's complete copper (including any off-grid segment the
+        # native index has no planar slot for).  Dormant without floors.
+        for item in (*route.segments, *route.vias):
+            authored = py_grid.authored_violation(item, start.net)
+            if authored is not None:
+                return RouteClearanceViolation(
+                    authored.x, authored.y, "authored-floor", 9, authored.actual
+                )
 
         # A selected-layer grid has no native planar slot for omitted copper.
         # A physical via can still cross that copper between its endpoints.
@@ -4889,6 +4916,47 @@ def project_via_spans(cpp_grid: CppGrid, layers) -> list[tuple[int, int]]:
     return spans
 
 
+def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
+    """Mirror the Python grid's authored per-net minima onto *cpp_grid* (#6243).
+
+    Installs ``rules.net_clearance_floors`` and every pad's exact kernel
+    copper plus its item-level floor (``Pad.authored_clearance``), so
+    ``Grid3D``'s authored gate judges the same copper with the same kernel as
+    :mod:`kicad_tools.router.authored_clearance`.  Keyed on the floors and the
+    pad count, so the common no-floor board pays one tuple compare per call
+    and never touches the native side.
+    """
+    impl = cpp_grid._impl
+    floors = dict(getattr(py_grid.rules, "net_clearance_floors", None) or {})
+    active = bool(floors) or getattr(py_grid, "_authored_item_floors", False) is True
+    key = (tuple(sorted(floors.items())), len(py_grid._pads), active)
+    previous = getattr(cpp_grid, "_authored_key", None)
+    if previous == key or (previous is None and not active):
+        cpp_grid._authored_key = key
+        return
+    if not hasattr(impl, "set_net_clearance_floors"):
+        raise RuntimeError(
+            "Rebuild the native router (`kct build-native`): authored netclass "
+            "clearance support (Issue #6243) is required"
+        )
+    for index, pad in enumerate(py_grid._pads):
+        impl.set_pad_authored(
+            index,
+            pad.shape,
+            pad.width,
+            pad.height,
+            pad.rotation,
+            pad.x,
+            pad.y,
+            pad.drill if pad.through_hole else 0.0,
+            float(pad.authored_clearance),
+        )
+    # Installs the floors and rebuilds the native index (or drops it when
+    # nothing is active any more).
+    impl.set_net_clearance_floors(list(floors), [float(v) for v in floors.values()])
+    cpp_grid._authored_key = key
+
+
 def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) -> None:
     """Copy committed route copper into *cpp_grid*'s stored-geometry index.
 
@@ -4905,6 +4973,10 @@ def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) ->
         return
 
     for route in py_grid.routes[cpp_grid._synced_route_count :]:
+        # Issue #6243: neutralised copper keeps its authored minimum.  Only
+        # passed when set, so a pre-#6243 call shape is unchanged.
+        item_floor = float(getattr(route, "authored_clearance", 0.0) or 0.0)
+        extra = {"authored_floor": item_floor} if item_floor > 0.0 else {}
         for seg in route.segments:
             layer_idx = cpp_grid._layer_to_index.get(seg.layer.value)
             if layer_idx is None:
@@ -4924,6 +4996,7 @@ def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) ->
                     *py_grid.world_to_grid(seg.x1, seg.y1),
                     *py_grid.world_to_grid(seg.x2, seg.y2),
                 ),
+                **extra,
             )
         for via in route.vias:
             for span in project(via.layers):
@@ -4935,6 +5008,7 @@ def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) ->
                     via.net,
                     py_grid.world_to_grid(via.x, via.y),
                     *span,
+                    **extra,
                 )
 
     cpp_grid._synced_route_count = current_count

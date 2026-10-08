@@ -1287,3 +1287,85 @@ def test_renamed_identical_authored_destination_is_accepted(authored_route_sourc
         ]
         == "1"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #6243 x #6191: one clearance rule per stricter netclass, per mode
+# ---------------------------------------------------------------------------
+
+_MODES = {None: "default", "1": "full", "0": "off"}
+
+
+def _hv_project(flag: str | None) -> dict:
+    from tests.router.test_authored_netclass_board import project
+
+    data = project("hv")
+    if flag is not None:
+        data["text_variables"] = {"KCT_PRESERVE_BOARD_RULES": flag}
+    return data
+
+
+@pytest.mark.parametrize("flag", list(_MODES))
+def test_each_preserve_mode_restates_each_class_at_most_once(flag):
+    """#6191's modes own the netclass restatement; #6243 adds none of its own.
+
+    default: only classes stricter than the clearance floor, once each (here
+    HV, and Default too -- #6191 keeps its authored 0.15 mm over jlcpcb's 0.127);
+    full: every class, once each; off: plain fab floors, none.
+    """
+    import re
+
+    from kicad_tools.manufacturers.project_generator import generate_project_dru
+
+    rules = get_profile("jlcpcb").get_design_rules(layers=2)
+    dru = generate_project_dru(rules, _hv_project(flag), manufacturer_id="jlcpcb")
+    names = re.findall(r'\(rule "([^"]*clearance - [^"]*)"', dru)
+    assert len(names) == len(set(names)), names
+    hv_rules = [n for n in names if n.endswith("- HV")]
+    expected = {"default": 1, "full": 1, "off": 0}[_MODES[flag]]
+    assert len(hv_rules) == expected, names
+
+
+@pytest.mark.parametrize("flag", list(_MODES))
+def test_kicad_cli_flags_a_045mm_hv_run_unless_the_project_opts_out(tmp_path, flag):
+    """The #6243 control board with HV routed straight through its 0.45 mm
+    corridor -- what the pre-#6243 router produced.  With the DRU kct writes,
+    KiCad's DRC must flag it in the default and full modes.  The opt-out mode
+    deliberately carries plain fab floors, and a custom rule outranks the
+    netclass, so KiCad does NOT flag it there; the router still refuses it."""
+    import subprocess
+
+    from tests.router.test_authored_netclass_board import (
+        HV_Y,
+        _kicad_cli,
+        board_text,
+    )
+
+    cli = _kicad_cli()
+    if cli is None:
+        pytest.skip("kicad-cli not available")
+    board = tmp_path / "hv.kicad_pcb"
+    text = board_text().rstrip().rstrip(")")
+    board.write_text(
+        text + f'  (segment (start 103 {HV_Y}) (end 127 {HV_Y}) (width 0.2) (layer "F.Cu") '
+        "(net 1))\n)\n"
+    )
+    board.with_suffix(".kicad_pro").write_text(json.dumps(_hv_project(flag)))
+    write_drc_constraints(
+        board, get_profile("jlcpcb").get_design_rules(layers=2), manufacturer_id="jlcpcb", layers=2
+    )
+    report = tmp_path / "drc.json"
+    subprocess.run(
+        [cli, "pcb", "drc", "--format", "json", "--output", str(report), str(board)],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    clearance = [
+        v for v in json.loads(report.read_text())["violations"] if v["type"] == "clearance"
+    ]
+    if _MODES[flag] == "off":
+        assert clearance == []
+    else:
+        assert clearance, "KiCad must see HV's 0.5 mm class on the routed board"
+        assert all("0.5000 mm" in v["description"] for v in clearance), clearance

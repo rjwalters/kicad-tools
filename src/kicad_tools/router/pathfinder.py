@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .pairwise_clearance import PairwiseClearanceTable
@@ -483,6 +483,11 @@ class Router:
         # last remaining via-clearance bug pattern for non-square pads).
         self._foreign_pad_tuples: list[tuple[float, float, float, float, int]] = []
         self._foreign_track_adapters: list[_SegmentAdapter] = []
+        # Issue #6243: ``(index, {(gx, gy, net): verdict})`` for the authored
+        # via gate; reset whenever the grid's authored index is rebuilt.
+        self._authored_via_memo: tuple[Any, dict[tuple[int, int, int], bool]] = (None, {})
+        # Issue #6243: ``(index, {(net, radius, all_layers): candidate mask})``.
+        self._authored_mask_cache: tuple[Any, dict[tuple[int, float, bool], Any]] = (None, {})
 
         # Issue #3002: Symmetric to ``_foreign_pad_tuples`` /
         # ``_foreign_track_adapters`` (Issue #2947), but for the OPPOSITE
@@ -1620,12 +1625,26 @@ class Router:
 
         return (gx1, gy1, gx2, gy2)
 
-    def _fixed_step_clear(self, current, nx, ny, layer, net_name):
+    def _fixed_step_clear(self, current, nx, ny, layer, net_name, net=None):
+        # Issue #6243: the authored per-net minimum is checked on the swept
+        # step itself, before any raster relief (pad-exit, sharing, partner)
+        # can waive it.  A no-op unless some copper carries an authored floor.
+        if (
+            net is not None
+            and (
+                self.rules.net_clearance_floors
+                or getattr(self.grid, "_authored_item_floors", False) is True
+            )
+            and not self._authored_step_clear(current, nx, ny, layer, net)
+        ):
+            return False
         if not self.grid.fixed_fills:
             return True
         net_class = self._get_net_class(net_name)
         half = (net_class.trace_width if net_class else self.rules.trace_width) / 2
         clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        if net is not None:
+            clearance = max(clearance, self.rules.authored_floor(net))
         return self.grid.fixed_fills.segment_clear(
             self.grid.grid_to_world(current.x, current.y),
             self.grid.grid_to_world(nx, ny),
@@ -1633,6 +1652,112 @@ class Router:
             half,
             clearance,
         )
+
+    def _authored_step_clear(self, current, nx: int, ny: int, layer: int, net: int) -> bool:
+        """Does the swept trace step ``current -> (nx, ny)`` keep every authored minimum?
+
+        Issue #6243.  Builds the step's actual copper (the net's emitted trace
+        width on ``layer``) and asks the grid's kernel-backed authored gate.
+        """
+        from .authored_clearance import grid_authored_index
+
+        index = grid_authored_index(self.grid)
+        if index is None:
+            return True
+        nc = self._halo_net_class(net)
+        width = nc.trace_width if nc else self.rules.trace_width
+        mask = self._authored_candidate_mask(index, net, width / 2.0, all_layers=False)
+        rows, cols = mask.shape[1], mask.shape[2]
+        if (
+            0 <= current.y < rows
+            and 0 <= current.x < cols
+            and 0 <= ny < rows
+            and 0 <= nx < cols
+            and not mask[layer, current.y, current.x]
+            and not mask[layer, ny, nx]
+        ):
+            return True  # provably clear of every authored minimum
+        copper_layer = self._grid_layer_object(layer)
+        if copper_layer is None:
+            return False
+        x1, y1 = self.grid.grid_to_world(current.x, current.y)
+        x2, y2 = self.grid.grid_to_world(nx, ny)
+        return index.segment_clear(Segment(x1, y1, x2, y2, width, copper_layer, net), net)
+
+    def _authored_candidate_mask(self, index, net: int, radius: float, *, all_layers: bool):
+        """Cached :meth:`AuthoredCopperIndex.candidate_mask` for this grid (#6243)."""
+        cache = self._authored_mask_cache
+        if cache[0] is not index:
+            cache = (index, {})
+            self._authored_mask_cache = cache
+        key = (net, round(radius, 6), all_layers)
+        mask = cache[1].get(key)
+        if mask is None:
+            layer_values = []
+            for idx in range(self.grid.num_layers):
+                obj = self._grid_layer_object(idx)
+                layer_values.append(obj.value if obj is not None else None)
+            mask = index.candidate_mask(
+                net,
+                radius,
+                origin=(self.grid.origin_x, self.grid.origin_y),
+                resolution=self.grid.resolution,
+                shape=(self.grid.num_layers, self.grid.rows, self.grid.cols),
+                layer_values=layer_values,
+                all_layers=all_layers,
+            )
+            if all_layers:
+                mask = mask.any(axis=0)
+            cache[1][key] = mask
+        return mask
+
+    def _authored_via_clear(self, gx: int, gy: int, net: int) -> bool:
+        """Does a via for ``net`` at grid ``(gx, gy)`` keep every authored minimum?
+
+        Issue #6243.  Memoised per ``(gx, gy, net)`` against the index the
+        verdict was computed from, so a rebuilt index (new copper) re-asks.
+        """
+        if (
+            not self.rules.net_clearance_floors
+            and getattr(self.grid, "_authored_item_floors", False) is not True
+        ):
+            return True
+        from .authored_clearance import grid_authored_index
+
+        index = grid_authored_index(self.grid)
+        if index is None:
+            return True
+        memo = self._authored_via_memo
+        if memo[0] is not index:
+            memo = (index, {})
+            self._authored_via_memo = memo
+        key = (gx, gy, net)
+        hit = memo[1].get(key)
+        if hit is not None:
+            return hit
+        nc = self._halo_net_class(net)
+        diameter = nc.via_size if nc else self.rules.via_diameter
+        via_mask = self._authored_candidate_mask(index, net, diameter / 2.0, all_layers=True)
+        if 0 <= gy < via_mask.shape[0] and 0 <= gx < via_mask.shape[1] and not via_mask[gy, gx]:
+            memo[1][key] = True
+            return True
+        first = self._grid_layer_object(0)
+        last = self._grid_layer_object(self.grid.num_layers - 1)
+        if first is None or last is None:
+            return False
+        nc = self._halo_net_class(net)
+        x, y = self.grid.grid_to_world(gx, gy)
+        via = Via(
+            x,
+            y,
+            self.rules.via_drill,
+            nc.via_size if nc else self.rules.via_diameter,
+            (first, last),
+            net,
+        )
+        verdict = index.via_clear(via, net)
+        memo[1][key] = verdict
+        return verdict
 
     def _halo_net_class(self, net: int) -> NetClassRouting | None:
         if self._route_halo_class is not None and self._route_halo_class[0] == net:
@@ -2240,6 +2365,9 @@ class Router:
         # evaluated once instead of once per non-plane layer.
         if not self._component_hole_clear_cached(gx, gy):
             return True
+        # Issue #6243: authored per-net minimum, before any raster relief.
+        if not self._authored_via_clear(gx, gy, net):
+            return True
         halo = getattr(self.grid, "_route_halo", None)
         geometry_complete = halo is not None and halo.complete
         # Partial raster coverage cannot waive clearance to known copper.
@@ -2255,7 +2383,7 @@ class Router:
                 self.grid.grid_to_world(gx, gy),
                 tuple(range(self.grid.num_layers)),
                 half,
-                self.rules.via_clearance,
+                max(self.rules.via_clearance, self.rules.authored_floor(net)),
             ):
                 return True
 
@@ -3314,6 +3442,10 @@ class Router:
         # Issue #5617: memoised per cell (see ``_component_hole_clear_cached``).
         if not self._component_hole_clear_cached(gx, gy):
             return False
+        # Issue #6243: authored per-net minimum, never cached as "clear" by
+        # the sharing-insensitive via cache below.
+        if not self._authored_via_clear(gx, gy, net):
+            return False
 
         # Try cache first (only in non-sharing mode since sharing state can change)
         # Issue #1692: Include radius in cache key so different net classes
@@ -4347,7 +4479,7 @@ class Router:
             for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
                 nlayer = current.layer
-                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name):
+                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name, start.net):
                     continue
 
                 # Check bounds and obstacles - account for trace width
@@ -6058,7 +6190,9 @@ class Router:
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
             nx, ny = current.x + dx, current.y + dy
             nlayer = current.layer
-            if not self._fixed_step_clear(current, nx, ny, nlayer, source_pad.net_name):
+            if not self._fixed_step_clear(
+                current, nx, ny, nlayer, source_pad.net_name, source_pad.net
+            ):
                 continue
 
             # Check bounds
@@ -6405,11 +6539,19 @@ class Router:
         # Collect backward path (end -> meeting point), then reverse
         backward_path: list[tuple[float, float, int, bool]] = []
         backward_node = backward_nodes.get(meeting_point)
+        # A backward-tree node's ``via_from_parent`` describes the edge to its
+        # parent (the end side).  Walking meeting -> end reverses each edge, so
+        # the flag belongs on the NEXT node emitted.  Keeping it on the node
+        # that owns it shifted every backward-half via one grid step away from
+        # the position the search actually checked (surfaced by #6243, whose
+        # authored via gate then rejected the emitted barrel).
+        incoming_via = backward_node.via_from_parent if backward_node else False
         if backward_node:
             backward_node = backward_node.parent  # Skip meeting point (already in forward)
         while backward_node:
             wx, wy = self.grid.grid_to_world(backward_node.x, backward_node.y)
-            backward_path.append((wx, wy, backward_node.layer, backward_node.via_from_parent))
+            backward_path.append((wx, wy, backward_node.layer, incoming_via))
+            incoming_via = backward_node.via_from_parent
             backward_node = backward_node.parent
         # backward_path is now from meeting -> end, which is what we want
 

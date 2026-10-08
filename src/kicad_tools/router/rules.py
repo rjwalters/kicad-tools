@@ -8,6 +8,7 @@ This module provides:
 """
 
 import logging
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -155,6 +156,22 @@ class DesignRules:
     # Maps component reference (e.g., "U1") to clearance in mm
     # Use for fine-pitch ICs where tighter clearance is needed between pins
     component_clearances: dict[str, float] = field(default_factory=dict)
+
+    # Authored electrical clearance minima, keyed by the loader's integer net
+    # id (Issue #6243).  Resolved from the project's ``.kicad_pro``
+    # ``net_settings`` netclasses by :mod:`kicad_tools.core.project_clearance`
+    # and kept ONLY for nets whose class is stricter than the project's
+    # ``Default`` class -- ``Default`` itself is the board-wide base, which the
+    # fab tier / ``--clearance`` resolution already owns.  These are
+    # designer-authored requirements, deliberately separate from every fab
+    # scalar above: no manufacturer tier, rule relaxation, component relief,
+    # diff-pair partner gap or HV attach-zone waiver lowers them.  Two foreign
+    # nets need ``max(base, floor[a], floor[b])`` -- KiCad's netclass
+    # semantics, which the 36-case kicad-cli oracle in
+    # ``tests/fixtures/project_clearance`` pins.  Empty (the default, and
+    # every board whose project declares only ``Default``) leaves every
+    # consumer byte-identical.
+    net_clearance_floors: dict[int, float] = field(default_factory=dict)
 
     # Pairwise (net-pair) HV-isolation clearance table (Issue #4431, Phase 1).
     # Scalar clearance cannot express "far from LV copper, near from own
@@ -418,7 +435,23 @@ class DesignRules:
         explicitly-passed non-default ``min_hole_to_hole`` is left untouched,
         and an unknown manufacturer falls back to the 0.5 default (no raise --
         manufacturer validation belongs to the CLI layer, not the dataclass).
+
+        Issue #6243: :attr:`net_clearance_floors` is validated here so a
+        malformed authored minimum fails at construction rather than being
+        silently ignored by whichever consumer reads it first.
         """
+        floors = dict(self.net_clearance_floors)
+        for net, value in floors.items():
+            if (
+                type(net) is not int
+                or net < 0
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"Invalid authored net clearance floor {net!r}: {value!r}")
+        self.net_clearance_floors = floors
         if self.manufacturer and self.min_hole_to_hole == 0.5:
             try:
                 from .mfr_limits import get_mfr_limits
@@ -427,6 +460,33 @@ class DesignRules:
             except ValueError:
                 # Unknown manufacturer: keep the conservative 0.5 default.
                 pass
+
+    def authored_floor(self, net: int) -> float:
+        """The authored electrical minimum of ``net`` (0.0 when it has none)."""
+        return self.net_clearance_floors.get(net, 0.0)
+
+    def clearance_for_nets(self, net_a: int, net_b: int, base: float) -> float:
+        """Raise a foreign-net requirement ``base`` to both nets' authored minima.
+
+        Issue #6243.  KiCad resolves a copper-to-copper clearance between two
+        nets as the larger of their two netclass clearances, so the pair needs
+        ``max(base, floor[a], floor[b])``.  Same-net copper is never a
+        clearance obstacle, so it keeps ``base`` untouched.  A net with no
+        authored floor contributes nothing, so an unrelated strict net never
+        widens this pair.
+        """
+        if net_a == net_b or not self.net_clearance_floors:
+            return base
+        return max(
+            base,
+            self.net_clearance_floors.get(net_a, 0.0),
+            self.net_clearance_floors.get(net_b, 0.0),
+        )
+
+    @property
+    def max_net_clearance_floor(self) -> float:
+        """The widest authored minimum (0.0 when none) -- a spatial bound only."""
+        return max(self.net_clearance_floors.values(), default=0.0)
 
     @property
     def max_clearance(self) -> float:
@@ -447,6 +507,9 @@ class DesignRules:
             Maximum clearance value in mm.
         """
         clearances = [self.trace_clearance, self.via_clearance]
+        # Issue #6243: authored per-net minima widen the spatial envelope the
+        # same way the #4431 pairwise matrix does below.  Empty -> no-op.
+        clearances.extend(self.net_clearance_floors.values())
         if self.component_clearances:
             clearances.extend(self.component_clearances.values())
         if self.fine_pitch_clearance is not None:

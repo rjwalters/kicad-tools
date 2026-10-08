@@ -4761,6 +4761,41 @@ def _install_fine_pitch_regions_from_components(
     return len(regions)
 
 
+def _authored_net_clearances(
+    pcb_path: str | Path, project_path: str | Path | None, net_map: dict[str, int]
+) -> dict[str, float]:
+    """``{net_name: authored minimum}`` for nets in a non-``Default`` netclass (#6243).
+
+    Reads ``project_path`` (default: ``pcb_path``'s ``.kicad_pro`` sibling).
+    A missing project returns ``{}``; an unreadable one, or one declaring a
+    stricter class this resolver cannot model, raises
+    :class:`~kicad_tools.core.project_clearance.ProjectClearanceError` --
+    routing silently below a designer's electrical minimum is the failure this
+    exists to prevent.
+    """
+    import json
+
+    from kicad_tools.core.project_clearance import (
+        ProjectClearanceError,
+        authored_netclass_clearances,
+    )
+
+    sidecar = (
+        Path(project_path) if project_path is not None else Path(pcb_path).with_suffix(".kicad_pro")
+    )
+    if not sidecar.is_file():
+        return {}
+    try:
+        project = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ProjectClearanceError(f"Cannot read project {sidecar}: {exc}") from exc
+    try:
+        resolved = authored_netclass_clearances(project, list(net_map))
+    except ProjectClearanceError as exc:
+        raise ProjectClearanceError(f"{sidecar}: {exc}") from exc
+    return {name: value.clearance for name, value in resolved.items()}
+
+
 def load_pcb_for_routing(
     pcb_path: str,
     skip_nets: list[str] | None = None,
@@ -4784,12 +4819,19 @@ def load_pcb_for_routing(
     lattice_deadline: float | None = None,
     min_trace_width_floor: float | None = None,
     placement_disposition: RoutingPlacementDisposition | None = None,
+    project_path: str | Path | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
 
     Args:
         pcb_path: Path to .kicad_pcb file
+        project_path: The ``.kicad_pro`` whose netclasses the route must honour
+            (Issue #6243).  Defaults to ``pcb_path``'s sibling; pass the
+            ORIGINAL board's project when ``pcb_path`` is a staged copy.  A
+            missing project keeps the legacy (floor-free) rules; a project
+            whose stricter netclasses cannot be resolved raises
+            :class:`~kicad_tools.core.project_clearance.ProjectClearanceError`.
         placement_disposition: Optional precomputed placement exclusion. Only
             its invalid nets are removed from targets (selection remains the
             caller's responsibility). Excluded pads and authored copper remain
@@ -5259,6 +5301,35 @@ def load_pcb_for_routing(
             # Fall back to conservative defaults
             rules = DesignRules(grid_resolution=0.1)
 
+    # Issue #6243: the project's named (non-``Default``) netclasses become
+    # mandatory per-net minima.  Read from the ORIGINAL project (a staged
+    # copy's sidecar may already have been rewritten), keyed by net id, and
+    # copied onto a fresh ``DesignRules`` so the caller's object is untouched.
+    # Neutralised pads (skipped / placement-excluded / unsupported nets become
+    # net 0) keep their authored minimum on the pad itself.
+    # A class at or below the router's own base adds nothing to any pair
+    # (the pair needs max(base, floors)), so only the ones above it are kept --
+    # which keeps the per-step authored gate dormant on the common project
+    # whose named classes only change widths.
+    base_floor = min(rules.trace_clearance, rules.via_clearance)
+    authored_by_name = {
+        name: value
+        for name, value in _authored_net_clearances(pcb_path, project_path, net_map).items()
+        if value > base_floor + 1e-9
+    }
+    if authored_by_name:
+        floors = dict(rules.net_clearance_floors)
+        for name, value in authored_by_name.items():
+            net_id = net_map.get(name, 0)
+            if net_id:
+                floors[net_id] = max(floors.get(net_id, 0.0), value)
+        for comp in components:
+            for pad in comp["pads"]:
+                pad_floor = authored_by_name.get(pad.get("net_name", ""))
+                if pad_floor is not None and pad["net"] == 0:
+                    pad["authored_clearance"] = pad_floor
+        rules = replace(rules, net_clearance_floors=floors)
+
     # Auto-adjust grid resolution if enabled
     if auto_adjust_grid:
         adjustment = adjust_grid_for_compliance(
@@ -5543,12 +5614,20 @@ def load_pcb_for_routing(
         )
         # Excluded custom-pad copper joins the same immutable collection every
         # engine already consults; no parallel collision representation.
-        router.grid.install_fixed_fills(
-            FixedFillObstacles(
-                zone_fills.fills
-                + pad_fixed_fills(placement_fixed_pads, router.grid, router.net_class_map)
-            )
+        fills = zone_fills.fills + pad_fixed_fills(
+            placement_fixed_pads, router.grid, router.net_class_map
         )
+        if authored_by_name:
+            # Issue #6243: a fill's own clearance is its side of the pair; the
+            # fill predicate already takes max(caller, fill), so raising it to
+            # the source net's authored minimum makes the pair symmetric.
+            fills = tuple(
+                replace(fill, clearance=max(fill.clearance, authored_by_name[fill.source_net]))
+                if fill.source_net in authored_by_name
+                else fill
+                for fill in fills
+            )
+        router.grid.install_fixed_fills(FixedFillObstacles(fills))
         for kind in ("segment", "via", "arc") if preserve_placement else ():
             for start, _end, block in _extract_balanced_blocks(pcb_text, kind):
                 identity = resolve_block_net(block, id_to_name, net_map)
@@ -5625,6 +5704,9 @@ def load_pcb_for_routing(
                     net_name="",
                     segments=[replace(seg, net=0, net_name="") for seg in route.segments],
                     vias=[replace(via, net=0, net_name="") for via in route.vias],
+                    # Issue #6243: neutral ownership, but the authored minimum
+                    # of the copper's real netclass stays with the copper.
+                    authored_clearance=authored_by_name.get(net_name, 0.0),
                 )
             if net_name in preserve_placement:
                 router.placement_neutral_routes += (route,)
