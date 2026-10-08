@@ -431,11 +431,15 @@ def update_symbol_pins(
         List of changes made
     """
     changes = []
+    # Stacked pins share a number; the ordinal keeps their remapped UUIDs distinct.
+    seen: dict[str, int] = {}
 
     for pin in symbol.find_all("pin"):
         old_num = pin.get_string(0)
         if old_num in pin_mapping:
             new_num = pin_mapping[old_num]
+            ordinal = seen.get(old_num, 0)
+            seen[old_num] = ordinal + 1
             pin.set_value(0, new_num)
             changes.append(f"Pin {old_num} → {new_num}")
 
@@ -443,7 +447,8 @@ def update_symbol_pins(
             uuid_node = pin.find("uuid")
             if uuid_node:
                 uuid_node.set_value(
-                    0, stable_uuid("pin-remap", _symbol_uuid(symbol), old_num, new_num)
+                    0,
+                    stable_uuid("pin-remap", _symbol_uuid(symbol), old_num, new_num, ordinal),
                 )
 
     return changes

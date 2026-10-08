@@ -355,3 +355,25 @@ def test_from_sexp_without_uuid_gets_deterministic_uuid_on_load(tmp_path, kind):
     elem = (one.wires or one.junctions)[0]
     assert not is_provisional(elem.uuid_str)
     assert elem.uuid_str == (two.wires or two.junctions)[0].uuid_str
+
+
+def test_update_symbol_pins_stacked_pins_get_distinct_deterministic_uuids():
+    from kicad_tools.operations.symbol_ops import update_symbol_pins
+    from kicad_tools.sexp import parse_string
+
+    text = (
+        '(symbol (lib_id "x:Y") (uuid "11111111-1111-4111-8111-111111111111")'
+        ' (pin "1" (uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))'
+        ' (pin "1" (uuid "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"))'
+        ' (pin "3" (uuid "cccccccc-cccc-4ccc-8ccc-cccccccccccc")))'
+    )
+
+    def remap():
+        sym = parse_string(text)
+        update_symbol_pins(sym, {"1": "2"})
+        return [p.find("uuid").get_string(0) for p in sym.find_all("pin")]
+
+    first = remap()
+    assert first[0] != first[1]
+    assert first[2] == "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    assert remap() == first
