@@ -525,20 +525,120 @@ def _pad_copper_clear(
     return True
 
 
+class _RoutedCopperIndex:
+    """Pure-Python broad phase over ``grid.routes`` for the rtree-less checker.
+
+    Issue #6184.  ``GridCollisionChecker`` is selected precisely when there is
+    no R-tree, so before this index its exact narrow phase
+    (:func:`_routed_copper_clear`) had to walk every committed segment on the
+    board, and to keep that affordable it only ran when the raster walk
+    flagged a foreign-owned soft cell.  The raster cannot be trusted to flag
+    it: a cell carries ONE owner net (first marker wins), so where two nets'
+    clearance halos overlap -- any two traces closer than about twice
+    ``width / 2 + clearance``, which includes every legally spaced neighbour --
+    the shared cells can belong to the candidate's own net, or to a pad
+    obstacle, and the foreign copper underneath is invisible.  On board 03 the
+    coupled USB_D+/USB_D- pair's halos overlap along their whole run, so
+    ``compress_staircase`` moved USB_D+ to 0.105 mm from USB_D- without
+    the walk ever seeing a USB_D- cell.
+
+    This index makes the exact measurement cheap enough to run on every
+    candidate, the way ``VectorCollisionChecker`` always has.  Objects are
+    binned into a uniform world-space hash (segments per layer, vias on every
+    layer since a via's span is decided later by :func:`_via_spans_layer`).
+    The bins are a superset filter only: every object they return still goes
+    through the same kernel query, so no clearance arithmetic lives here.
+    """
+
+    #: Bin edge in mm.  Coarse enough that a typical optimizer candidate
+    #: touches a handful of bins, fine enough that a bin holds few objects.
+    BIN_MM = 1.0
+
+    def __init__(self, routes: list[Any]) -> None:
+        self._segs: dict[tuple[int, int, int], list[Segment]] = {}
+        self._vias: dict[tuple[int, int], list[Any]] = {}
+        for route in routes:
+            for seg in route.segments:
+                half = seg.width / 2
+                layer_value = seg.layer.value
+                for bx, by in self._bins(
+                    min(seg.x1, seg.x2) - half,
+                    min(seg.y1, seg.y2) - half,
+                    max(seg.x1, seg.x2) + half,
+                    max(seg.y1, seg.y2) + half,
+                ):
+                    self._segs.setdefault((layer_value, bx, by), []).append(seg)
+            for via in route.vias:
+                radius = via.diameter / 2
+                for key in self._bins(
+                    via.x - radius, via.y - radius, via.x + radius, via.y + radius
+                ):
+                    self._vias.setdefault(key, []).append(via)
+
+    @classmethod
+    def _bins(cls, x1: float, y1: float, x2: float, y2: float) -> Iterator[tuple[int, int]]:
+        size = cls.BIN_MM
+        bx1, bx2 = int(x1 // size), int(x2 // size)
+        by1, by2 = int(y1 // size), int(y2 // size)
+        for by in range(by1, by2 + 1):
+            for bx in range(bx1, bx2 + 1):
+                yield bx, by
+
+    def segments_near(
+        self, layer_value: int, bounds: tuple[float, float, float, float]
+    ) -> Iterator[Segment]:
+        """Each segment on ``layer_value`` whose bin overlaps ``bounds``, once."""
+        seen: set[int] = set()
+        for bx, by in self._bins(*bounds):
+            for seg in self._segs.get((layer_value, bx, by), ()):
+                if id(seg) not in seen:
+                    seen.add(id(seg))
+                    yield seg
+
+    def vias_near(self, bounds: tuple[float, float, float, float]) -> Iterator[Any]:
+        """Each via whose bin overlaps ``bounds``, once."""
+        seen: set[int] = set()
+        for key in self._bins(*bounds):
+            for via in self._vias.get(key, ()):
+                if id(via) not in seen:
+                    seen.add(id(via))
+                    yield via
+
+
+def _routed_copper_index_key(grid: RoutingGrid) -> tuple:
+    """Staleness token for a :class:`_RoutedCopperIndex` built over ``grid``.
+
+    ``occupancy_generation`` is bumped by every ``_blocked`` / ``_net`` write
+    (#4794), which every mark / unmark performs.  The route identities and
+    object counts are folded in as well, so a route list that is replaced or
+    edited without a raster write still rebuilds the index rather than being
+    served stale -- a missed rebuild here would be a missed short.
+    """
+    routes = grid.routes
+    return (
+        getattr(grid, "occupancy_generation", None),
+        id(routes),
+        tuple((id(r), len(r.segments), len(r.vias)) for r in routes),
+    )
+
+
 def _routed_copper_clear(
     grid: RoutingGrid,
     candidate: KSegment,
     layer: Layer,
     layer_idx: int,
     exclude_net: int,
+    index: _RoutedCopperIndex | None = None,
 ) -> bool:
     """Exact clearance of a candidate path against every committed route.
 
     Issue #5625: the grid checker's narrow phase.  Same question, same
     arithmetic and same rule values as ``VectorCollisionChecker``'s R-tree
     narrow phase -- only the broad phase differs, because this class is
-    selected precisely when no R-tree is available, so candidates come from a
-    linear walk of ``grid.routes`` instead.
+    selected precisely when no R-tree is available.  With ``index`` (issue
+    #6184) candidates come from :class:`_RoutedCopperIndex`'s bins; without
+    it, from a linear walk of ``grid.routes``.  Both feed every surviving
+    object to the same kernel query, so the verdict is identical.
     """
     min_clearance = grid.rules.trace_clearance
     via_clearance = max(min_clearance, grid.rules.via_clearance)
@@ -548,6 +648,33 @@ def _routed_copper_clear(
     # the vector checker's R-tree narrow phase (``other_seg.net`` /
     # ``via.net``): a route whose own ``net`` disagrees with an object it
     # carries must not hide that object from this scan.
+    if index is not None:
+        half = candidate.width / 2
+        cx1, cx2 = min(candidate.x1, candidate.x2), max(candidate.x1, candidate.x2)
+        cy1, cy2 = min(candidate.y1, candidate.y2), max(candidate.y1, candidate.y2)
+        # Bins hold each object's own copper extent, so growing the query by
+        # the candidate's half width plus the required gap reaches every
+        # object that could be within clearance.
+        seg_reach = half + min_clearance
+        for seg in index.segments_near(
+            layer_value, (cx1 - seg_reach, cy1 - seg_reach, cx2 + seg_reach, cy2 + seg_reach)
+        ):
+            if seg.net == exclude_net:
+                continue
+            if not _path_clear_of_segment(candidate, seg, min_clearance):
+                return False
+        via_reach = half + via_clearance
+        for via in index.vias_near(
+            (cx1 - via_reach, cy1 - via_reach, cx2 + via_reach, cy2 + via_reach)
+        ):
+            if via.net == exclude_net:
+                continue
+            if not _via_spans_layer(grid, via, layer_idx):
+                continue
+            if not _path_clear_of_via(candidate, via, via_clearance):
+                return False
+        return True
+
     for route in grid.routes:
         for seg in route.segments:
             if seg.net == exclude_net or seg.layer.value != layer_value:
@@ -608,12 +735,14 @@ class GridCollisionChecker:
     Uses the RoutingGrid's obstacle data to check if paths are clear.
     This reuses the same collision detection logic as the autorouter.
 
-    When ``ignore_overflow=True``, cells that are blocked by route
-    occupation (another net passing through) but are *not* hard obstacles
-    (pads, keepouts) are treated as clear.  This prevents the trace
-    optimizer from fragmenting routes that pass through cells with minor
-    overflow from negotiated routing.  Hard obstacles are always respected
-    regardless of this flag.
+    When ``ignore_overflow=True``, the *raster* verdict on a genuinely
+    overused cell (``usage_count > 1``) blocked by another net's route is
+    waived, but the cell still sends the candidate to the exact kernel
+    measurement against registered route copper (issue #6184) -- the same
+    query ``VectorCollisionChecker`` always runs.  The flag therefore cannot
+    let a candidate cross or crowd foreign copper; it only stops the raster's
+    doubled clearance envelope from refusing paths through a congested
+    corridor.  Hard obstacles are always respected regardless of this flag.
     """
 
     def __init__(self, grid: RoutingGrid, ignore_overflow: bool = False):
@@ -621,14 +750,31 @@ class GridCollisionChecker:
 
         Args:
             grid: The routing grid with obstacle and net data.
-            ignore_overflow: When True, treat cells blocked by route
-                occupation (not hard obstacles) as clear.  This is used
-                after negotiated routing with residual overflow so that
-                the optimizer preserves connectivity instead of
-                destroying segments that pass through overused cells.
+            ignore_overflow: When True, overused cells (``usage_count >
+                1``) blocked by route occupation defer to the exact kernel
+                measurement instead of refusing off the raster.  Used after
+                negotiated routing with residual overflow.  Never waives the
+                exact check (issue #6184).
         """
         self.grid = grid
         self.ignore_overflow = ignore_overflow
+        self._index: _RoutedCopperIndex | None = None
+        self._index_key: tuple | None = None
+
+    def _copper_index(self) -> _RoutedCopperIndex | None:
+        """The routed-copper broad phase, rebuilt whenever the copper moved.
+
+        Returns ``None`` (the linear-walk fallback) for a grid that does not
+        expose a real ``routes`` list -- a test double -- rather than guessing.
+        """
+        routes = getattr(self.grid, "routes", None)
+        if not isinstance(routes, list):
+            return None
+        key = _routed_copper_index_key(self.grid)
+        if self._index is None or key != self._index_key:
+            self._index = _RoutedCopperIndex(routes)
+            self._index_key = key
+        return self._index
 
     def path_is_clear(
         self,
@@ -672,13 +818,12 @@ class GridCollisionChecker:
         # Check all cells along the path using Bresenham's algorithm
         cells_to_check = self._get_path_cells(gx1, gy1, gx2, gy2, clearance_cells)
 
-        # Issue #5625: set when the walk meets a foreign-net cell whose
-        # occupancy is fully accounted for by registered route copper.  Such a
-        # cell is a broad-phase hit, not a verdict (the raster already carries
-        # the committed object's own clearance dilation, so the two envelopes
-        # meeting is about twice the real requirement) -- the exact narrow
-        # phase below decides it, exactly as ``VectorCollisionChecker`` does.
-        needs_exact_route_check = False
+        # Issue #5625: a foreign-net cell whose occupancy is fully accounted
+        # for by registered route copper is a broad-phase hit, not a verdict
+        # (the raster already carries the committed object's own clearance
+        # dilation, so the two envelopes meeting is about twice the real
+        # requirement) -- the exact narrow phase below decides it, exactly as
+        # ``VectorCollisionChecker`` does.
         # Epic #5509 Phase 4a (#5854): the same deferral for a cell whose
         # HARD blockage is accountable to a registered pad.  A pad's raster
         # footprint is its metal plus its own clearance halo, so the branches
@@ -738,8 +883,9 @@ class GridCollisionChecker:
                     return False
 
                 # Cell is occupied by another net's route (soft block).
-                # When ignore_overflow is set, skip this check so the
-                # optimizer does not fragment routes through overused cells.
+                # When ignore_overflow is set, an overused cell does not
+                # refuse off the raster (#2303) -- but it is still measured
+                # exactly (#6184, below).
                 #
                 # Issue #3433: the tolerance is scoped to cells that are
                 # GENUINELY overused (``usage_count > 1`` -- the same
@@ -758,7 +904,11 @@ class GridCollisionChecker:
                 # segments -- only this grid fallback was blind.
                 if cell.net != 0 and cell.net != exclude_net:
                     if self.ignore_overflow and cell.usage_count > 1:
-                        continue  # Genuinely overused cell -- tolerated.
+                        # Genuinely overused cell -- the RASTER verdict is
+                        # tolerated, but the exact routed-copper measurement
+                        # after the walk still runs (issue #6184), as it
+                        # does for every candidate.
+                        continue
 
                     # Issue #5625: ``VectorCollisionChecker`` answers this
                     # same question by measuring the foreign copper exactly,
@@ -771,12 +921,22 @@ class GridCollisionChecker:
                     # board-edge band -- none of which register geometry to
                     # re-measure) keeps the conservative reject below.
                     if _soft_cell_is_accountable_route_copper(self.grid, gx, gy, layer_idx):
-                        needs_exact_route_check = True
                         continue
                     return False  # Blocked by another net
 
-        if needs_exact_route_check and not _routed_copper_clear(
-            self.grid, candidate, layer, layer_idx, exclude_net
+        # Issue #6184: the exact routed-copper narrow phase runs for EVERY
+        # candidate the raster walk did not already refuse, exactly as
+        # ``VectorCollisionChecker``'s R-tree narrow phase does.  It used to
+        # run only when the walk met a foreign-owned soft cell, but a cell has
+        # one owner and the first marker wins: where the candidate's own halo
+        # (or a pad's) overlaps a neighbour's, the neighbour's copper owns no
+        # cell the walk visits.  Board 03's coupled USB_D+/USB_D- pair is
+        # exactly that, so ``compress_staircase`` put USB_D+ 0.105 mm from
+        # USB_D- on every rtree-less install (``rtree`` is an optional extra)
+        # and the post-optimize backstop demoted USB_D+ (13/13 -> 12/13).
+        # :class:`_RoutedCopperIndex` keeps the unconditional check cheap.
+        if not _routed_copper_clear(
+            self.grid, candidate, layer, layer_idx, exclude_net, index=self._copper_index()
         ):
             return False
 
@@ -1190,8 +1350,10 @@ def make_collision_checker(
 
     Args:
         grid: The routing grid with obstacle and net data.
-        ignore_overflow: When True, treat cells blocked by route
-            occupation (not hard obstacles) as clear.
+        ignore_overflow: When True, the grid fallback defers overused
+            route-occupied cells to the exact kernel measurement instead of
+            refusing them off the raster (issue #6184).  The vector checker
+            ignores it: it always measures foreign copper exactly.
 
     Returns:
         The most efficient collision checker for the given grid state.

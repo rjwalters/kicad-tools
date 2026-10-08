@@ -11,10 +11,11 @@ Definitions
 
 The *access set* of a routing terminal is
 
-* every **exit stub** -- a short own-layer trace leaving the terminal's metal in
-  one of the eight A* directions, long enough to clear the terminal's own
-  clearance halo (``trace_width + 2 * trace_clearance``, rounded up to whole
-  grid cells); plus
+* every **exit stub** -- a short trace leaving the terminal's metal in one of
+  the eight A* directions on a layer the terminal has copper on (its own layer;
+  every copper layer for a through-hole terminal, issue #6185), long enough to
+  clear the terminal's own clearance halo (``trace_width + 2 *
+  trace_clearance``, rounded up to whole grid cells); plus
 * every **via site** reachable from the terminal -- the terminal centre itself
   when the fab tier supports via-in-pad, and the far end of each *legal* exit
   stub.
@@ -139,7 +140,10 @@ def direction_name(direction: tuple[int, int]) -> str:
 
 @dataclass(frozen=True)
 class ExitStub:
-    """A legal own-layer trace leaving the terminal's metal in one direction.
+    """A legal trace leaving the terminal's metal in one direction.
+
+    ``layer`` is the terminal's own layer for an SMD terminal, and any copper
+    layer for a through-hole one (issue #6185).
 
     ``(x0, y0)`` is on the terminal's metal boundary along ``direction``;
     ``(x1, y1)`` is the far end, which is also the via site candidate for this
@@ -917,8 +921,12 @@ def _stub_candidates(
     width: float,
     stub_length: float,
     bounds: tuple[float, float, float, float],
+    layer: Layer | None = None,
 ) -> tuple[list[tuple[tuple[int, int], Segment]], bool]:
-    """The eight candidate exit stubs of ``pad``, before any legality test.
+    """The eight candidate exit stubs of ``pad`` on ``layer``, before any legality test.
+
+    ``layer`` defaults to ``pad.layer``; :func:`_terminal_layers` supplies the
+    others for a through-hole terminal.
 
     Shared by :func:`compute_access_set` and :func:`has_access` so the cheap
     existence question and the full enumeration can never disagree about *which
@@ -951,13 +959,36 @@ def _stub_candidates(
                     x2=x1,
                     y2=y1,
                     width=width,
-                    layer=pad.layer,
+                    layer=pad.layer if layer is None else layer,
                     net=pad.net,
                     net_name=pad.net_name,
                 ),
             )
         )
     return candidates, out_of_bounds
+
+
+def _terminal_layers(grid: object, pad: Pad) -> tuple[Layer, ...]:
+    """Every copper layer a first move out of ``pad`` may start on.
+
+    Issue #6185.  An SMD terminal exists on ``pad.layer`` only.  A
+    through-hole terminal is copper on every layer of the stack, and the
+    pathfinder starts (and ends) a search on a through-hole pad on **every**
+    routable layer (``start_layers = routable_layers if start.through_hole``
+    in ``pathfinder.py``), so its exit stubs are candidates on every one of
+    them.  Enumerating ``pad.layer`` alone made a THT terminal look stranded as
+    soon as its last ``pad.layer`` exit closed, however open the other layers
+    were.  On board 03 the commit-time invariant then refused USB_CC1's relief
+    probe for "stranding" J1.A6 (USB_D+) -- a THT pin whose B.Cu exits were
+    untouched -- and the board finished 23/24.
+
+    ``pad.layer`` comes first and the rest follow in stack order, so the
+    enumeration (and every witness built from it) stays deterministic and an
+    SMD terminal's candidates are exactly what they were.
+    """
+    if not getattr(pad, "through_hole", False):
+        return (pad.layer,)
+    return (pad.layer, *_other_copper_layers(grid, pad.layer))
 
 
 def _in_pad_via_allowed(pad: Pad, mfr: MfrLimits | None) -> bool:
@@ -1010,13 +1041,14 @@ def has_access(
     bounds = _grid_world_bounds(grid)
     net = pad.net
 
-    candidates, _out_of_bounds = _stub_candidates(
-        pad, width=width, stub_length=stub_length, bounds=bounds
-    )
-    for _direction, seg in candidates:
-        is_legal, _loc = adapter.stub_legal(seg, net)
-        if is_legal:
-            return True
+    for layer in _terminal_layers(grid, pad):
+        candidates, _out_of_bounds = _stub_candidates(
+            pad, width=width, stub_length=stub_length, bounds=bounds, layer=layer
+        )
+        for _direction, seg in candidates:
+            is_legal, _loc = adapter.stub_legal(seg, net)
+            if is_legal:
+                return True
 
     # Every stub was rejected, so the only candidate left is a via inside the
     # pad itself -- the one access candidate that does not depend on a stub.
@@ -1092,45 +1124,53 @@ def compute_access_set(
 
     # -- exit stubs -------------------------------------------------------
     stubs: list[ExitStub] = []
-    candidates, out_of_bounds = _stub_candidates(
-        pad, width=width, stub_length=stub_length, bounds=bounds
-    )
-    for direction, seg in candidates:
-        is_legal, _loc = adapter.stub_legal(seg, net)
-        if is_legal:
-            stubs.append(
-                ExitStub(
-                    layer=origin_layer,
-                    x0=seg.x1,
-                    y0=seg.y1,
-                    x1=seg.x2,
-                    y1=seg.y2,
-                    width=width,
-                    direction=direction,
+    out_of_bounds = False
+    # Issue #6185: a through-hole terminal's stubs are candidates on every
+    # copper layer, not just ``origin_layer`` (see :func:`_terminal_layers`).
+    for layer in _terminal_layers(grid, pad):
+        candidates, layer_out_of_bounds = _stub_candidates(
+            pad, width=width, stub_length=stub_length, bounds=bounds, layer=layer
+        )
+        out_of_bounds = out_of_bounds or layer_out_of_bounds
+        for direction, seg in candidates:
+            is_legal, _loc = adapter.stub_legal(seg, net)
+            if is_legal:
+                stubs.append(
+                    ExitStub(
+                        layer=layer,
+                        x0=seg.x1,
+                        y0=seg.y1,
+                        x1=seg.x2,
+                        y1=seg.y2,
+                        width=width,
+                        direction=direction,
+                    )
                 )
-            )
-        else:
-            rejected_stub_segments.append(seg)
+            else:
+                rejected_stub_segments.append(seg)
 
     # -- via sites --------------------------------------------------------
     mfr, drill, diameter = via_candidate_geometry(rules)
-    other_layers = _other_copper_layers(grid, origin_layer)
 
-    via_candidates: list[tuple[float, float, bool, int | None]] = []
+    # Each candidate transitions from the layer its first move is on: the
+    # pad's own layer for an in-pad via, the stub's layer for a stub-end site
+    # (issue #6185: a through-hole terminal's stubs are not all on
+    # ``origin_layer``).
+    via_candidates: list[tuple[float, float, bool, int | None, Layer]] = []
     if _in_pad_via_allowed(pad, mfr):
-        via_candidates.append((pad.x, pad.y, True, None))
+        via_candidates.append((pad.x, pad.y, True, None, origin_layer))
     for index, stub in enumerate(stubs):
-        via_candidates.append((stub.x1, stub.y1, False, index))
+        via_candidates.append((stub.x1, stub.y1, False, index, stub.layer))
 
     via_sites: list[ViaSite] = []
-    for x, y, in_pad, from_stub in via_candidates:
-        for other_layer in other_layers:
+    for x, y, in_pad, from_stub, from_layer in via_candidates:
+        for other_layer in _other_copper_layers(grid, from_layer):
             candidate = Via(
                 x=x,
                 y=y,
                 drill=drill,
                 diameter=diameter,
-                layers=(origin_layer, other_layer),
+                layers=(from_layer, other_layer),
                 net=net,
                 net_name=pad.net_name,
                 in_pad=in_pad,
@@ -1143,7 +1183,7 @@ def compute_access_set(
                         y=y,
                         drill=drill,
                         diameter=diameter,
-                        layers=(origin_layer, other_layer),
+                        layers=(from_layer, other_layer),
                         in_pad=in_pad,
                         from_stub=from_stub,
                     )
@@ -1186,7 +1226,7 @@ def compute_access_set(
         min_y = min(min_y, seg.y1, seg.y2)
         max_x = max(max_x, seg.x1, seg.x2)
         max_y = max(max_y, seg.y1, seg.y2)
-    for x, y, _in_pad, _from_stub in via_candidates:
+    for x, y, _in_pad, _from_stub, _from_layer in via_candidates:
         min_x, min_y = min(min_x, x - diameter / 2), min(min_y, y - diameter / 2)
         max_x, max_y = max(max_x, x + diameter / 2), max(max_y, y + diameter / 2)
     dilation = max(width / 2 + rules.trace_clearance, diameter / 2 + rules.via_clearance)

@@ -37,6 +37,7 @@ def _make_mock_grid(
     resolution: float = 0.1,
     cols: int = 100,
     rows: int = 100,
+    num_layers: int = 1,
 ):
     """Create a mock RoutingGrid with optional R-tree index data."""
     grid = MagicMock()
@@ -107,10 +108,10 @@ def _make_mock_grid(
     # attribute is truthy, so without this the "no obstacles" default above
     # would silently NOT apply to that call path.  Match ``mock_cell``'s
     # all-clear defaults at the array level too.
-    grid._blocked = np.zeros((1, rows, cols), dtype=bool)
-    grid._is_obstacle = np.zeros((1, rows, cols), dtype=bool)
-    grid._pad_blocked = np.zeros((1, rows, cols), dtype=bool)
-    grid._net = np.zeros((1, rows, cols), dtype=np.int32)
+    grid._blocked = np.zeros((num_layers, rows, cols), dtype=bool)
+    grid._is_obstacle = np.zeros((num_layers, rows, cols), dtype=bool)
+    grid._pad_blocked = np.zeros((num_layers, rows, cols), dtype=bool)
+    grid._net = np.zeros((num_layers, rows, cols), dtype=np.int32)
 
     return grid
 
@@ -564,11 +565,15 @@ class TestVectorCollisionCheckerForeignVia:
             net=2,
         )
         route = _make_route_with_via(net=2, via=via)
-        grid = _make_mock_grid(routes=[route])
+        grid = _make_mock_grid(routes=[route], num_layers=2)
 
-        # Override layer_to_index so F.Cu=0, B.Cu=1
-        def _layer_to_index(name: str) -> int:
-            return {"F.Cu": 0, "B.Cu": 1}.get(name, 0)
+        # Override layer_to_index so F.Cu=0, B.Cu=1.  Issue #6184: keyed on
+        # ``Layer.value`` (an int), which is what production passes.  Keying
+        # it on layer NAMES mapped every layer to 0, so this test silently ran
+        # the grid fallback with the via on the trace's layer, and passed only
+        # because that fallback never measured routed copper.
+        def _layer_to_index(value: int) -> int:
+            return {Layer.F_CU.value: 0, Layer.B_CU.value: 1}.get(value, 0)
 
         grid.layer_to_index = MagicMock(side_effect=_layer_to_index)
         mock_rtree = MagicMock()
@@ -595,10 +600,10 @@ class TestVectorCollisionCheckerForeignVia:
         """A TH via (F.Cu <-> B.Cu) must block on F.Cu AND B.Cu."""
         via = _make_via(2.5, 0.0, net=2)
         route = _make_route_with_via(net=2, via=via)
-        grid = _make_mock_grid(routes=[route])
+        grid = _make_mock_grid(routes=[route], num_layers=2)
 
-        def _layer_to_index(name: str) -> int:
-            return {"F.Cu": 0, "B.Cu": 1}.get(name, 0)
+        def _layer_to_index(value: int) -> int:
+            return {Layer.F_CU.value: 0, Layer.B_CU.value: 1}.get(value, 0)
 
         grid.layer_to_index = MagicMock(side_effect=_layer_to_index)
         mock_rtree = MagicMock()
