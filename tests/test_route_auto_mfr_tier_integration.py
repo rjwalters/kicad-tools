@@ -21,12 +21,16 @@ planes), which is the canonical real-board fixture for the chain.
 
 Acceptance criteria (from issue #2885), adapted to a reproducible signal:
 
-1. The escalation makes measurable progress: the jlcpcb-tier1 attempt
-   routes strictly more nets than the jlcpcb attempt within the same run.
-   This is the "Routing succeeds (>= threshold) after escalation, not
-   before" AC, expressed as a delta rather than an absolute threshold
-   (board-04 routing has residual issues tracked under #2695 / #2696 /
-   #2834 that prevent a deterministic absolute completion target).
+1. The escalation does not regress: the jlcpcb-tier1 attempt routes at
+   least as many nets as the jlcpcb attempt within the same run.  The
+   original AC ("Routing succeeds after escalation, not before") was a
+   strict ``>``, but the python backend's per-net budget is wall-clock, so
+   a strict delta is a timing race on a loaded runner (Issue #6217
+   review).  The AC is therefore rescoped to non-regression; that the
+   escalation fired, and why, is pinned by ACs 2 and 3.  Measured deltas
+   are context only, not a gate.  (board-04 routing also has residual
+   issues tracked under #2695 / #2696 / #2834 that prevent a deterministic
+   absolute completion target.)
 
 2. The CLI advances to ``jlcpcb-tier1``: a 'Tier N/M: jlcpcb-tier1'
    banner appears in stdout (the canonical AC#2 from issue #2885 --
@@ -262,7 +266,7 @@ class TestAutoMfrTierIntegration:
         return _split_by_tier(auto_mfr_tier_result.stdout)
 
     # ------------------------------------------------------------------
-    # AC #1: Tier-1 escalation produces measurable progress over jlcpcb.
+    # AC #1 (rescoped to non-regression): Tier-1 does not route fewer nets.
     # ------------------------------------------------------------------
 
     def test_tier1_does_not_regress_vs_jlcpcb(
@@ -273,18 +277,18 @@ class TestAutoMfrTierIntegration:
         """The jlcpcb-tier1 attempt routes at least as many nets as the
         jlcpcb attempt within the same run.
 
-        This is the AC#1 evidence ("Routing succeeds [more] after
-        escalation [than] before") expressed as non-regression.  The
-        python backend's per-net budget is wall-clock, so a strict ``>``
-        is a timing race on a loaded runner: measured deltas were +2/+3/+2
-        at the default 30 s budget, +1 at 15 s and 0 at 10 s.  That the
-        escalation actually fired for the right reason is pinned
-        deterministically by ``test_escalation_advances_to_tier1`` and
+        This test enforces **non-regression only**; it does NOT prove
+        that tier1 routes more nets than jlcpcb.  The python backend's
+        per-net budget is wall-clock, so a strict ``>`` is a timing race
+        on a loaded runner.  For context, deltas measured on a developer
+        machine were +2/+3/+2 at the default 30 s budget, +1 at 15 s and
+        0 at 10 s; those numbers are not asserted.  That the escalation
+        fired, and for the right reason, is pinned deterministically by
+        ``test_escalation_advances_to_tier1`` and
         ``test_escalation_triggered_by_missed_via_in_pad``.  An absolute
         completion target on board-04 is gated by residual upstream
         issues (#2695 OSC_OUT pad-completion, #2696 impedance on 2L,
-        #2834 clearance-pad-segment count); the chain mechanism is
-        nevertheless visible as a positive delta in routed-net counts.
+        #2834 clearance-pad-segment count).
         """
         assert "jlcpcb" in per_tier_stdout, (
             "Expected a 'Tier N/M: jlcpcb' banner.  Per-tier banners: "
