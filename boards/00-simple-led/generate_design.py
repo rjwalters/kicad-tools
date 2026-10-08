@@ -391,6 +391,11 @@ def create_led_pcb(output_dir: Path) -> Path:
         Pin assignments per KiCad LED_THT:LED_D5.0mm convention:
         - Pin 1 (rectangular pad) = Cathode (K)
         - Pin 2 (circular pad) = Anode (A)
+
+        Silkscreen is the stock library outline (flat edge on the pad-1 /
+        cathode side), shifted -1.27 mm because the library puts pad 1 at
+        x=0 while this generator centres the pair on the footprint origin,
+        with the line width raised to the 0.15 mm jlcpcb-tier1 floor.
         """
         x, y = pos
         anode_num = NETS[anode_net]
@@ -408,6 +413,9 @@ def create_led_pcb(output_dir: Path) -> Path:
     (fp_text value "LED" (at 0 3.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (fp_line (start {-2.56:.3f} -1.545) (end {-2.56:.3f} 1.545) (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_arc (start {-2.56:.3f} -1.54483) (mid {0.801779:.6f} -2.880495) (end 2.99 0) (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_arc (start 2.99 0) (mid {0.801779:.6f} 2.880495) (end {-2.56:.3f} 1.54483) (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
     (pad "1" thru_hole rect (at {-pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
     (pad "2" thru_hole circle (at {pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
   )"""
