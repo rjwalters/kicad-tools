@@ -67,15 +67,41 @@ whole tick per full `max_admissions_per_tick` batch ahead when no turnover is
 needed. The draws are never age-conditioned. `start` ends there; `land` for
 an unstarted issue continues from `sweep.curator` in the same path, so its
 queue wait and post-dispatch stages are combined by one resampling pass
-(stages independent, as everywhere). A ready row the plan gives no position
-(`blocked`, or no plan on this host — the single-workspace loop publishes
-none) is refused `no_dispatch_plan`. Too few turnover samples is
+(stages independent, as everywhere). Too few turnover samples is
 `insufficient_samples`, whatever the position: the tick interval alone never
 makes a number. v1 limits: turnover history is upper-biased when the pool ran
 below its cap; a repo-cap or out-of-slice deferral is recorded (as the row's
-`gate` in `path.dispatch`), not modelled; and a `held_until` hold (#9311)
-rides only `blocked` rows, which have no position, so it is refused
-`no_dispatch_plan` rather than turned into a start time.
+`gate` in `path.dispatch`), not modelled; and the slots and turnovers are the
+estimating host's own, not the fleet's (#10944).
+
+**Rows this host's planner does not position (#10903).** The single ETA
+authority estimates for the whole fleet, so a ready row its own planner
+cannot dispatch is still estimated when another host can
+(`eta::ready_order`):
+
+- **Not here**: `host_constraint`, `host_class_refused`, `peer_claim`,
+  `workspace_commands_missing`, `dispatch_error`, and `workspace_halted` for
+  a host-local cause (`gate_pending`, `token_pool`, `preflight_advisory`,
+  `drain`, `breaker`, `write_scope`; a red `main` halts every host and stays
+  refused).
+- **Time-held**: `recheck_interval`, `dispatch_backoff`, `noop_cooldown` and
+  `prless_retry` rows with a `held_until` (#9311). What is left of the hold at
+  the tick is added to `admission_delay_sec`. The hold is added to the queue
+  wait, not overlapped with it, so this is an upper bound when both are long.
+
+Such a row is slotted into the planner's order by the work finder's own
+comparator rank: `ahead` counts the waiting rows ranked before it, and
+`position` is one past their highest planner position. Only waiting rows
+count, because only they share this host's slots. That keeps every waiting
+row's input byte-identical. `path.dispatch.not_here` (and the
+`loom.eta.not_here` attribute) names the reason, for example
+`peer_claim` or `workspace_halted:token_pool`; `path.dispatch.held_until`
+carries a hold's expiry.
+
+A row parked by a hold label (`parked`, `hard_exclusion`, `labelled_blocked`)
+is refused `blocked`. Every other row with no position is refused
+`no_dispatch_plan`: `quarantined`, `open_pr`, `declined`, a hold with no
+clock, or no plan on this host (the single-workspace loop publishes none).
 
 Human-gated stages (intake, approval) are outside the model: an issue there
 has no estimate, with a reason (below). An approved PR under an operator hold
@@ -2320,7 +2346,7 @@ ORDER BY share;
 | `human_gated` | intake or approval (`loom:triage`, `loom:curating`, `loom:curated`) |
 | `insufficient_samples` | a needed stage or the verdict history is under the sample floor |
 | `beyond_history` | the item has been in its stage longer than all but 5 samples (never `land-v4`, which answers with a flagged tail estimate) |
-| `no_dispatch_plan` | not started, and the dispatch plan gives it no position (blocked, or no plan on this host) |
+| `no_dispatch_plan` | not started, the dispatch plan gives it no position, and no other host could dispatch it either (`quarantined`, `open_pr`, a red `main`, a hold with no clock), or there is no plan on this host. A row only this host cannot dispatch is estimated with `path.dispatch.not_here` instead (#10903) |
 | `unknown_stage` | no stage label, or contradictory ones |
 | `stale_inputs` | a ready item whose dispatch plan is older than 15 minutes (or three ticks) |
 | `no_model` | a fitted heuristic (`land-2026-10-04-twin-otter-b` on a PR stage) has no usable coefficient file: none loaded (always, in the CLI), no direct model, a cutoff at or after `as_of`, or malformed coefficients |

@@ -851,6 +851,9 @@ exempt_files=(
     # only inside its expected-string literals, exactly like its parent.
     "$SCRIPTS_DIR/tests/test-spawn-codex-session-exec.sh"
     "$SCRIPT_DIR/test-run-job.sh"
+    # Host-side, opt-in live test (#10830): drives a session container directly
+    # and never runs inside a worker container.
+    "$SCRIPTS_DIR/tests/test-roll-pause-resume-live.sh"
 )
 _is_exempt() {
     local candidate="$1" ex

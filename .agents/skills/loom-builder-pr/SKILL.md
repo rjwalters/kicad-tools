@@ -399,7 +399,7 @@ Local verification:
 - [ ] Linter run on changed files (0 errors)
 ```
 
-**Pre-PR gate (pre-flight, #10476).** With `buildGate` set, run `loom-daemon preflight --issue N` before `create-pr.sh`. Exit 1 = failed: fix the printed tail, commit, re-run (max `preflightMaxAttempts`, default 3). Exit 4 (`preflight_unresolved`) = stop, NO PR (claim released). Exit 5 = timeout (claim kept): re-run; at cap, NO PR. `create-pr.sh` refuses (exit 7) an ungated HEAD. No `buildGate` = no-op exit 0.
+**Pre-PR gate (pre-flight, #10476).** With `buildGate` set, run `loom-daemon preflight --issue N` before `create-pr.sh`. Exit 1 = failed: fix the tail, commit, re-run (max `preflightMaxAttempts`). Exit 4 (`preflight_unresolved`) = stop, NO PR (claim released). Exit 5 = timeout, exit 6 = deferred for host load (both keep the claim): re-run later; at the timeout cap, NO PR. Name any `PASS (flaky…)` test in the PR. `create-pr.sh` refuses (exit 7) an ungated HEAD.
 
 ### Language-Specific Verification
 

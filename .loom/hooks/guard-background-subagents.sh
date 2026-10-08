@@ -288,6 +288,14 @@ if ! background_subagent_guard_enabled; then
     exit 0
 fi
 
+# A daemon roll is pausing this session (#10830, design §2 step 5): its
+# background children are about to be stopped with the whole tree, so blocking
+# the stop would only hold the session past its safe point. roll-pause.sh asks
+# `loom-daemon roll-pause active`; inert without LOOM_DAEMON_ITEM_ID.
+if [[ -n "${LOOM_DAEMON_ITEM_ID:-}" ]] && bash "$SCRIPT_DIR/roll-pause.sh" active </dev/null >/dev/null 2>&1; then
+    exit 0
+fi
+
 # =============================================================================
 # Session-mode detection (issue #6645) — see the header for the full rationale.
 #

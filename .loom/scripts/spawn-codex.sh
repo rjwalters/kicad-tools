@@ -480,6 +480,18 @@ done
 # Codex's hook-trust waiver comes only from Loom's sealed-registration vetting (#10102), never from a caller.
 [[ " ${PASSTHROUGH_ARGS[*]-} " != *" --dangerously-bypass-hook-trust"* ]] || { log_error "A caller may not pass Codex's hook-trust waiver; spawn-codex.sh adds it only for a vetted sealed registration (issue #10102)."; exit 78; }
 
+# --- Roll resume (issue #10830) ---
+# A daemon roll resumes a paused session with `codex exec resume <id> <prompt>`
+# (docs/design/daemon-roll-pause-resume.md). The caller passes
+# LOOM_RESUME_SESSION_ID + LOOM_RESUME_PROMPT and pins the session's account
+# with LOOM_CODEX_HOME, because the rollout lives in that account's CODEX_HOME
+# (and, session-managed, in that account's container). `loom-daemon
+# agent-resume codex-prompt` checks all three and prints the prompt.
+if [[ -n "${LOOM_RESUME_SESSION_ID:-}" ]]; then
+    PROMPT="$("$(loom_resolve_self_daemon_bin)" agent-resume codex-prompt)" || { log_error "spawn-codex: cannot build the resume launch (loom-daemon agent-resume codex-prompt, #10830)"; exit 78; }
+    HAS_PROMPT=true
+fi
+
 # --- Model selection (mirrors spawn-claude.sh's #3477 precedence) ---
 # Precedence: explicit -m/--model > LOOM_MODEL > LOOM_CODEX_MODEL (the adapter's
 # static default, unset by default) > nothing (Codex CLI/profile default).
@@ -851,6 +863,8 @@ if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
     fi
     [[ "$_posture_gh" != "gh=forward" || -z "${GH_CONFIG_DIR:-}" ]] || SESSION_EXTRA_ENV=(--env GH_CONFIG_DIR)
 fi
+# `codex exec resume` takes no -s/--sandbox: the same mode rides on -c (#10830).
+[[ -z "${LOOM_RESUME_SESSION_ID:-}" || "${SANDBOX_ARGS[0]:-}" == --dangerously-bypass-approvals-and-sandbox ]] || SANDBOX_ARGS=(-c "sandbox_mode=\"$SANDBOX_MODE\"")
 PASSTHROUGH_ARGS+=(${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"})
 
 # --- ChatGPT-plan auth-mode guard for a pinned model (issue #5499) ---
@@ -1063,9 +1077,8 @@ fi
 # Non-interactive (prompt present): `codex exec [flags] "<prompt>"`.
 # Interactive (no prompt):          `codex [flags]`.
 CODEX_ARGS=()
-if [[ "$HAS_PROMPT" == "true" ]]; then
-    CODEX_ARGS+=(exec)
-fi
+# Resume (#10830): `codex exec resume [flags] <session-id> <prompt>`.
+[[ "$HAS_PROMPT" != "true" ]] || CODEX_ARGS+=(exec ${LOOM_RESUME_SESSION_ID:+resume})
 # Only for a sealed registration whose every hook source was vetted above (#10102).
 [[ "$_hook_trust_bypass" != "sealed" ]] || CODEX_ARGS+=(--dangerously-bypass-hook-trust -c features.plugins=false)
 if [[ "$CODEX_DROP_PINNED_MODEL" == "true" ]]; then
@@ -1097,9 +1110,9 @@ if [[ "$CODEX_DROP_PINNED_MODEL" == "true" ]]; then
 else
     CODEX_ARGS+=(${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"})
 fi
-if [[ "$HAS_PROMPT" == "true" ]]; then
-    CODEX_ARGS+=("$PROMPT")
-fi
+[[ "$HAS_PROMPT" != "true" ]] || CODEX_ARGS+=(${LOOM_RESUME_SESSION_ID:+"$LOOM_RESUME_SESSION_ID"} "$PROMPT")
+# The resume identity is consumed (argv above); a nested spawn must not inherit it (#10830).
+unset LOOM_RESUME_SESSION_ID LOOM_RESUME_PROMPT
 
 # --- Session-exec invocation assembly (issue #6926) ---
 # Bare-metal: `codex <CODEX_ARGS...>`. Session-exec: `docker exec <container>
@@ -1127,7 +1140,7 @@ if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
     # provider credentials are deliberately NOT forwarded — the container
     # owns its own CODEX_HOME (ADR-0017 Decision 1).
     CODEX_INVOKE=("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" session-exec host --container "$CODEX_SESSION_CONTAINER" --workdir "$PWD" --env "LOOM_WORKSPACE=$WORKSPACE" --env CARGO_INCREMENTAL=0 ${SESSION_EXTRA_ENV[@]+"${SESSION_EXTRA_ENV[@]}"} --owner-pid "$PPID")
-    for _v in LOOM_ROLE LOOM_RUNTIME LOOM_TERMINAL_ID LOOM_SWEEP_ID LOOM_WORKTREE_PATH LOOM_WORKTREE_ROOT LOOM_PROJECT_ROOT LOOM_SWEEP_CLAIM_OWNED LOOM_ACCOUNT_NAME LOOM_ACCOUNT_PROVIDER; do [[ -n "${!_v:-}" ]] && CODEX_INVOKE+=(--env "$_v=${!_v}"); done
+    for _v in LOOM_ROLE LOOM_RUNTIME LOOM_TERMINAL_ID LOOM_SWEEP_ID LOOM_WORKTREE_PATH LOOM_WORKTREE_ROOT LOOM_PROJECT_ROOT LOOM_SWEEP_CLAIM_OWNED LOOM_ACCOUNT_NAME LOOM_ACCOUNT_PROVIDER LOOM_DAEMON_ITEM_ID LOOM_ROLL_PAUSE_DIR LOOM_ROLL_PAUSE_BIN; do [[ -n "${!_v:-}" ]] && CODEX_INVOKE+=(--env "$_v=${!_v}"); done
     CODEX_INVOKE+=(--)
 fi
 CODEX_INVOKE+=(codex ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})
@@ -1176,6 +1189,21 @@ _stderr_file="$(mktemp -t loom-spawn-codex.XXXXXX 2>/dev/null || mktemp)"
 # shellcheck disable=SC2064  # expand $_stderr_file now, at trap-install time.
 trap "rm -f '$_stderr_file' '$_stderr_file.cancel'" EXIT
 
+# Live session-id capture (#10830): a roll needs the id while the session is
+# still running, not after it exits. `loom-daemon agent-resume capture-codex`
+# watches the capture below and writes LOOM_RESUME_HANDLE_FILE as soon as the
+# `session id:` line lands; it ends with this script ($$). It can outlive this
+# script by one poll, so nothing it leaves running may hold a private account's
+# lease (LOOM_PRIVATE_LEASE_FD), or the next dispatch on that account is refused:
+#   * `exec`, so the backgrounded subshell BECOMES the watcher. Without it bash
+#     keeps that subshell waiting on the watcher, and the subshell holds the
+#     lease whatever the watcher's own redirections say.
+#   * The watcher closes the descriptor LOOM_PRIVATE_LEASE_FD names as its first
+#     act. Do not add `N>&-` here instead: on an `exec`, bash 3.2 keeps a saved
+#     copy of the descriptor open in the new process.
+# The handle path is consumed once the watcher is forked, so it is unset on the
+# same line: a nested spawn's watcher would overwrite this session's handle.
+[[ -z "${LOOM_RESUME_HANDLE_FILE:-}" ]] || LOOM_CODEX_SANDBOX_MODE="${SANDBOX_MODE:-}" exec "$(loom_resolve_self_daemon_bin)" agent-resume capture-codex --stderr-file "$_stderr_file" --handle-file "$LOOM_RESUME_HANDLE_FILE" --watch-pid $$ --codex-home "${CODEX_HOME:-}" --account "${CODEX_PROFILE_NAME:-}" --container "${CODEX_SESSION_CONTAINER:-}" </dev/null >/dev/null 2>&1 & unset LOOM_RESUME_HANDLE_FILE
 set +e
 echo "# LOOM_CLI_START runtime=codex" >&2
 if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then

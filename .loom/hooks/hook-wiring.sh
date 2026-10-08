@@ -89,6 +89,10 @@
 # silent-allow hole for everyone, which is the exact failure mode this file
 # exists to close. An env var must be set by the operator on the session's own
 # process, which is an operator act, not a repository change.
+# One committed exception (#10830): the `PreToolUse` entry for `roll-pause.sh`
+# exports it inside its own `bash -c`, so only that hook's process sees it.
+# `roll-pause.sh` is not a guard (it parks a tool call for a roll), so a missing
+# copy must allow. No guard entry may set it this way.
 #
 # ── Contract ─────────────────────────────────────────────────────────────────
 # Same contract as every guard in this repo: NEVER exits non-zero. A deny is

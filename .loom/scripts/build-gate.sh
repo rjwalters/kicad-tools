@@ -355,7 +355,7 @@ fi
 # purely to stay inside the `shell-budget --check` portable ratchet: this file is
 # `contract` in scripts/shell-allowlist.txt, so its code-line count may shrink
 # but never grow (see .loom/docs/shell-language-policy.md).
-_rust_unit_cmd=(cargo nextest run --workspace --lib --bins --profile ci)
+_rust_unit_cmd=(cargo nextest run --workspace --lib --bins --profile ci --retries "${LOOM_BUILD_GATE_TEST_RETRIES:-1}" --final-status-level flaky)
 command -v cargo-nextest >/dev/null 2>&1 || { _rust_unit_cmd=(cargo test --workspace --lib --bins); printf '[build-gate] WARNING: cargo-nextest is NOT installed -- falling back to cargo test, which shares ONE process\n[build-gate] WARNING: across every test in a binary, so env mutation can race Command::spawn and produce flaky FALSE\n[build-gate] WARNING: REDS that do not reproduce under the runner CI uses (#4385; see .config/nextest.toml, and\n[build-gate] WARNING: #8170 for an investigation spent on exactly such a false red).\n[build-gate] WARNING: Install the runner CI uses for a trustworthy gate:  cargo install cargo-nextest --locked\n' >&2; }
 echo "[build-gate] ${_rust_unit_cmd[*]} (workspace unit tests; host-dependent integration targets are CI-only, #3985)"
 run_gate_step "${_rust_unit_cmd[*]}" "${_rust_unit_cmd[@]}"

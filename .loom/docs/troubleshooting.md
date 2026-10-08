@@ -8,6 +8,7 @@
 - [Stuck Agent Detection](#stuck-agent-detection)
 - [Sweep Dispatch Troubleshooting](#sweep-dispatch-troubleshooting)
 - [Overnight / long-running orchestration](#overnight--long-running-orchestration)
+- [Worker disk full: dispatch halted `disk_full` (#10973)](#worker-disk-full-dispatch-halted-disk_full-10973)
 <!-- toc:end -->
 
 ## Common Issues
@@ -3298,3 +3299,40 @@ from `land-resync-commit.sh`; track down what did. If a commit's SHA
 legitimately changed for some other reason, `git diff <old-sha> <new-sha>`
 being empty confirms the content is identical (the #6646 incident's actual
 outcome) even though the identity changed.
+
+## Worker disk full: dispatch halted `disk_full` (#10973)
+
+**Symptom.** `host.health` shows `dispatch_halted: true` with a `halt_reason`
+starting `disk_full: <n> GB free`, `loom-daemon status` reports the host
+breaker `open` with the same reason, and `dispatch_sweep` is refused. On the
+2026-10-08 incident a worker's worktree volume reached 0 GB and, because that
+host was the ETA authority, fleet ETAs went `stale_inputs` for hours.
+
+**What the daemon does by itself.** Each work-finder tick samples free GB on
+the worktree-root volume. Two consecutive readings below the floor
+(`LOOM_DISK_FULL_HALT_GB`, default 3; `0` disables) halt new dispatch. The
+eager reclaim pass (#7512) gets the first low tick to free space, so a pass
+that frees space never halts. The halt clears only at `LOOM_DISK_FULL_RESUME_GB`
+(default twice the floor). An unmeasurable probe (`df` failure) never halts and
+clears an existing halt. Running sweeps drain; nothing is killed. Grep the
+daemon log for `disk_full_halt:` (edges) and `eager_reclaim:` (what each
+reclaim step freed).
+
+**Free disk on the worker.**
+
+1. `df -h` the worktree volume; find the consumer (`du -xh --max-depth=2`).
+2. `loom-clean --force` removes stale loom-managed worktrees and branches.
+3. `loom-daemon clean --deep --safe` strips build artifacts (`target/`,
+   `node_modules/`) from the primary checkout; it has its own cooldown, so a
+   manual run is the way past it.
+4. Reclaim only touches Loom-managed paths. Space held by anything else (logs,
+   caches, another tenant) must be freed by hand.
+5. The halt lifts within a tick or two of free space reaching the resume level.
+
+**Move the ETA authority off a sick host.** Set `fleet.etaAuthority` in the
+committed config to a healthy host id (or `LOOM_ETA_AUTHORITY=<host id>` on
+that host), per "One ETA authority per fleet" above, and confirm with
+`loom-daemon eta doctor`. Caveat (#10933): estimates issued before the move
+may never receive an `eta.outcome` (no outcome-coverage accounting or backfill
+yet), so headline ETA scores can look optimistic until that lands; do not
+read the gap as a regression.

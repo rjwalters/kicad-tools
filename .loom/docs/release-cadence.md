@@ -294,6 +294,56 @@ changing the constant, run it locally with `--requires-daemon <v>` /
 release's binary>`). `loom-daemon install-compat show --repo <clone>` prints
 both sides for one repo and how they classify.
 
+Three things about that step's verdict (#10868):
+
+- **A release still uploading is skipped, and the output says so.** The note
+  names each tag passed over (`release v<x> is tagged but its assets are not
+  uploaded yet`). A listed asset that then fails to download is retried, three
+  attempts five seconds apart, before the step fails naming the tag and the
+  asset. An asset listing the forge could not answer still fails the step.
+- **A daemon that crashes is a violation, not a pass.** A subcommand is
+  missing only when clap refuses it. A probe binary that cannot be executed,
+  is killed by a signal or panics is reported as broken, with the binary, the
+  subcommand and the exit status. It is never counted as having the
+  subcommand.
+- **The floor check also runs as a unit test.**
+  `no_shipped_hard_floor_is_above_requires_daemon`
+  (`loom-daemon/src/install_compat/tests.rs`) walks `defaults/` with the
+  harness's own code and fails when a hard `# requires-daemon:` floor is above
+  `REQUIRES_DAEMON`. It catches a floor that is too high, never one that is
+  too low.
+
+### The daily proof of `SUPPORTS_INSTALLED`
+
+The CI step tests one release in direction A: the newest tag at or below
+`VERSION`. So nothing in the merge gate runs the release `SUPPORTS_INSTALLED`
+itself names. The `Compatibility Floor (SUPPORTS_INSTALLED)` job of
+`.github/workflows/ci-daily.yml` does, once a day:
+
+```bash
+loom-daemon install-compat check --prev-ref "v<SUPPORTS_INSTALLED>" --fetch-old-daemon
+```
+
+It reads the value from the built daemon (`install-compat show --json`), so
+moving the constant needs no workflow edit. A failure opens the
+`[ci-daily] Compatibility Floor (SUPPORTS_INSTALLED)` tracking issue.
+
+When it fails the claim is false, and there are two ways to make it true:
+
+- **Raise `SUPPORTS_INSTALLED`** to the oldest release for which the command
+  above passes (try one with `--supports-installed <v> --prev-ref v<v>`), and
+  update the constant's comment. This is the default. What it means: once the
+  dispatch hold ([#10719](https://github.com/rjwalters/loom/issues/10719))
+  acts on the value, a repo installed below it is held until it is resynced.
+  Fleet repos are resynced by the daemon; a repo outside the fleet that old
+  needs a manual resync.
+- **Keep the value** and restore in the daemon whatever the old installed
+  shell needs. Choose this when the gap is a regression, not an intended
+  break.
+
+`SUPPORTS_INSTALLED` must name a release tag: the job fails when `v<value>`
+does not exist, because then nothing can be run against it.
+
 ## See also
 
 - `CLAUDE.md` § "Forge Authentication & Releasing" — how `/repo:release` works

@@ -323,6 +323,26 @@ fi
 EVENT_CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)" || EVENT_CWD=""
 
 # ---------------------------------------------------------------------------
+# Daemon roll pause (issue #10830): park the call at a safe point
+# ---------------------------------------------------------------------------
+#
+# Inert unless the daemon dispatched this session (LOOM_DAEMON_ITEM_ID) and an
+# install carries roll-pause.sh (which runs `loom-daemon roll-pause hook`). A
+# missing pause hook, or a container daemon too old to know the subcommand,
+# never denies: it only means this install predates pause-and-roll. Codex's managed entry is
+# PreToolUse only, so there is no ledger (LOOM_ROLL_PAUSE_LEDGER=0), and the park
+# budget stays well under the entry's 30 s timeout: a timed-out hook is a hook
+# failure, not a block. It runs before tool classification so read-only calls
+# park too: after the safe point no call of any kind may run.
+if [[ -n "${LOOM_DAEMON_ITEM_ID:-}" && -r "$GUARD_DIR/roll-pause.sh" ]]; then
+    PAUSE_OUT="$(printf '%s' "$INPUT" | LOOM_ROLL_PAUSE_LEDGER=0 LOOM_ROLL_PAUSE_RUNTIME=codex \
+        LOOM_ROLL_PAUSE_PARK_SECS="${LOOM_ROLL_PAUSE_CODEX_PARK_SECS:-20}" \
+        bash "$GUARD_DIR/roll-pause.sh" 2>/dev/null)" || PAUSE_OUT=""
+    PAUSE_REASON="$(printf '%s' "$PAUSE_OUT" | jq -r 'select(.hookSpecificOutput.permissionDecision? == "deny") | .hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)" || PAUSE_REASON=""
+    [[ -z "$PAUSE_REASON" ]] || emit_deny "$PAUSE_REASON"
+fi
+
+# ---------------------------------------------------------------------------
 # Tool classification
 # ---------------------------------------------------------------------------
 #

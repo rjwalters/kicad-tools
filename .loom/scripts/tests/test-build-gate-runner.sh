@@ -244,8 +244,8 @@ chmod +x "$STUB_DIR/cargo-nextest"
 : > "$CARGO_LOG"
 present_output="$(cd "$SCRATCH_REPO" && run_gate_full_tier "$STUB_DIR:$MIN_PATH")"
 
-if grep -Fxq "nextest run --workspace --lib --bins --profile ci" "$CARGO_LOG"; then
-    pass "with cargo-nextest installed, the gate runs 'cargo nextest run --workspace --lib --bins --profile ci'"
+if grep -Fxq "nextest run --workspace --lib --bins --profile ci --retries 1 --final-status-level flaky" "$CARGO_LOG"; then
+    pass "with cargo-nextest installed, the gate runs 'cargo nextest run --workspace --lib --bins --profile ci' (one retry, #10955)"
 else
     fail "expected a nextest invocation, cargo calls were: $(cat "$CARGO_LOG")"
 fi
