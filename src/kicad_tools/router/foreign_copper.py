@@ -126,6 +126,10 @@ class ForeignItem:
         parent: For a hole, the label of the pad or via it is drilled in.
         pad_type: For a pad (or a pad's hole), the schema pad ``type``
             (``smd``, ``thru_hole``, ``np_thru_hole``, ...).
+        footprint_layer: For a pad (or a pad's hole), its footprint's
+            ``(layer ...)`` -- ``"F.Cu"`` or ``"B.Cu"``; ``""`` when unknown.
+            ``kicad-cli`` 10.0.2+ reports *this* as the pad's ``Layer`` in a
+            ``.kicad_dru`` condition, not the pad's own copper layer (#6201).
     """
 
     kind: str
@@ -140,6 +144,7 @@ class ForeignItem:
     slot_edge: bool = False
     parent: str = ""
     pad_type: str = ""
+    footprint_layer: str = ""
 
     def props(self) -> ItemProps:
         """This item as a ``.kicad_dru`` condition sees it."""
@@ -153,9 +158,16 @@ class ForeignItem:
             plated = True
         if plated is None and kind == "pad":
             plated = {"thru_hole": True, "np_thru_hole": False, "smd": False}.get(self.pad_type)
-        layer = (
-            next(iter(self.layers)) if self.layers is not None and len(self.layers) == 1 else None
-        )
+        if kind == "pad":
+            # A pad's ``Layer`` is its footprint's (kicad-cli 10.0.2+, #6201),
+            # whatever copper the pad itself is on.
+            layer = self.footprint_layer if self.footprint_layer in _FOOTPRINT_SIDES else None
+        else:
+            layer = (
+                next(iter(self.layers))
+                if self.layers is not None and len(self.layers) == 1
+                else None
+            )
         return item_props_for_type(kind, name, plated, self.pad_type or None, layer)
 
     @property
@@ -425,9 +437,21 @@ def board_copper(pcb: Any) -> list[ForeignItem]:
                         layers=layers,
                         bbox=_shape_bbox(pad_copper),
                         pad_type=str(getattr(pad, "type", "") or ""),
+                        footprint_layer=_footprint_layer(fp),
                     )
                 )
     return items
+
+
+#: The layers a footprint can sit on -- all a pad's ``Layer`` can be on
+#: ``kicad-cli`` 10.0.2+ (#6201).
+_FOOTPRINT_SIDES = ("F.Cu", "B.Cu")
+
+
+def _footprint_layer(fp: Any) -> str:
+    """``fp``'s ``(layer ...)`` when it is a copper side, else ``""`` (unknown)."""
+    layer = str(getattr(fp, "layer", "") or "")
+    return layer if layer in _FOOTPRINT_SIDES else ""
 
 
 def _pad_hole(pad: Any, fp: Any) -> tuple[KPad, bool] | None:
@@ -508,6 +532,7 @@ def board_holes(pcb: Any) -> list[ForeignItem]:
                         plated=plated,
                         slot_edge=is_slot and not plated,
                         pad_type=pad_type,
+                        footprint_layer=_footprint_layer(fp),
                         parent=f"pad {ref}.{pad.number} at {where}",  # matches board_copper
                     )
                 )
