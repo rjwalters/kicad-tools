@@ -476,7 +476,8 @@ The decoupling term is a placement-quality preference (the
 `decoupling_proximity` FOM term measures the same thing), not a routability
 predictor. #6020 validated it with a real route instead: board 04's floorplan
 with the caps snapped beside their pins routes 9/9 signal nets under the
-board's own route flags, the same as the hand floorplan.
+board's own route flags, the same as the hand floorplan, and its own post-route
+steps take it to 0 `kicad-cli` DRC errors.
 
 ## Reproduce
 

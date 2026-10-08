@@ -144,13 +144,16 @@ therefore carries a soft decoupling term (`placement/decoupling.py`):
   feasibility.
 - **Snap pass.** After the optimizer (and the post-pass slide-off), each cap
   moves to the nearest spot beside its pin whose real pad extent keeps 0.5 mm
-  from every other footprint and the board edge, stays out of the 2 mm escape
-  lane of every IC pad on another net, and adds no overlap/DRC/boundary
-  violation. CMA-ES alone rarely lands a 2 mm part within a millimetre of one
+  from every other footprint and the board edge, whose body (courtyard, else
+  silkscreen/fab outline) keeps 0.15 mm from every other body, that stays out
+  of the 3 mm escape lane of every IC pad on another net, and that adds no
+  overlap/DRC/boundary violation. Cap centres land on a 0.05 mm grid. CMA-ES alone rarely lands a 2 mm part within a millimetre of one
   pin; the snap finishes the job.
 
 `--seed current --max-iterations 0` keeps a hand floorplan as it is and runs
-only slide-off and the snap: on board 04 that moves the caps and nothing else.
+only slide-off and the snap. Add `--no-slide-off` to move the caps and nothing
+else: on board 04 the slide-off pre-pass nudges U2 by 0.03 mm, which is enough
+to break the fine-pitch escape routing (#6250).
 `--weights '{"decoupling": 0}'` turns the term and the snap off. The JSON
 document lists each cap's pin and distance under `"decoupling"`.
 
