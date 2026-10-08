@@ -6818,7 +6818,11 @@ def _audit_shorts_for_escalation(final_result, quiet: bool) -> "list[ClearanceVi
     from kicad_tools.router.io import shorting_violations, validate_routes
 
     router = getattr(final_result, "router", None)
-    if router is None or not getattr(router, "routes", None):
+    # Issue #6229: kept input copper alone can short a foreign pad, so a run
+    # that routed nothing new is still audited when it carries kept copper.
+    if router is None or not (
+        getattr(router, "routes", None) or getattr(router, "existing_routes", None)
+    ):
         return []
     try:
         violations = validate_routes(router)
@@ -6834,21 +6838,18 @@ def _audit_shorts_for_escalation(final_result, quiet: bool) -> "list[ClearanceVi
 
 def _print_short_findings(shorts: "Sequence[ClearanceViolation]") -> None:
     """Report cross-net copper overlap explicitly (Issue #5862)."""
+    from kicad_tools.router.io import describe_short, short_origin_summary
+
     print("\n--- Post-route Short Check ---")
     print(
         f"  ERROR: {len(shorts)} short(s) -- copper of different nets physically "
         f"overlaps in the routed output (KiCad DRC reports this class as "
         f"`shorting_items`)"
     )
+    # Issue #6229: input defects (kept by --preserve-existing) vs routing failures.
+    print(f"  {short_origin_summary(list(shorts))}")
     for v in shorts[:20]:
-        loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
-        layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
-        print(
-            f"    SHORT [{v.obstacle_type}] "
-            f"{v.net_name or f'Net {v.net}'} vs "
-            f"{v.obstacle_net_name or f'Net {v.obstacle_net}'}"
-            f"{loc}{layer_str}: overlap {-v.distance:.3f}mm"
-        )
+        print(f"    SHORT {describe_short(v)}")
     if len(shorts) > 20:
         print(f"    ... and {len(shorts) - 20} more short(s)")
 
@@ -6861,23 +6862,25 @@ def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_p
     whatever its completion percentage, so the success banner must be
     unreachable rather than merely accompanied by a warning.
     """
+    from kicad_tools.router.io import describe_short, short_origin_summary
+
     print("ROUTING FAILED: cross-net copper shorts in the routed output")
     print("=" * 60)
     print()
-    print(f"Shorts ({len(shorts)} item(s)):")
+    print(f"Shorts ({len(shorts)} item(s)): {short_origin_summary(list(shorts))}")
     for v in shorts[:10]:
-        loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
-        layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
-        print(
-            f"  [{v.obstacle_type}] {v.net_name or f'Net {v.net}'} vs "
-            f"{v.obstacle_net_name or f'Net {v.obstacle_net}'}"
-            f"{loc}{layer_str}: overlap {-v.distance:.3f}mm"
-        )
+        print(f"  {describe_short(v)}")
     if len(shorts) > 10:
         print(f"  ... and {len(shorts) - 10} more")
     print()
     print("Copper of different nets physically overlaps. KiCad DRC reports this")
     print("class as `shorting_items`; this board is NOT manufacturable as written.")
+    if any(v.is_input_defect for v in shorts):
+        # Issue #6229: an inherited short fails the run like a routing short
+        # (the output is unmanufacturable either way), but the fix is in the
+        # input board, not in the router's settings.
+        print("Shorts marked 'pre-existing' were already in the input board and were")
+        print("kept by --preserve-existing; fix or remove that copper in the input.")
     print(f"Board written to {output_path} for inspection.")
 
 
@@ -19954,7 +19957,9 @@ def _run_main_impl(args, parser, argv) -> int:
     seg_seg_violation_count = 0
     short_violation_count = 0
     short_violations: list[ClearanceViolation] = []
-    if stats["nets_routed"] > 0 and not args.dry_run:
+    # Issue #6229: kept input copper (--preserve-existing) is audited even
+    # when this run routed nothing new -- it can short a foreign pad alone.
+    if (stats["nets_routed"] > 0 or getattr(router, "existing_routes", None)) and not args.dry_run:
         from kicad_tools.router.io import (
             format_clearance_violations,
             shorting_violations,
