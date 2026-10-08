@@ -740,6 +740,9 @@ class BoardClearanceRules:
     #: Why the ``.kicad_dru`` was discarded (see :func:`parse_dru`), else ``None``.
     dru_error: str | None = None
     _cache: dict[tuple[Any, ...], float] = field(default_factory=dict, repr=False)
+    #: The raw ``.kicad_pro`` object, for the shared netclass resolver (#6254).
+    _project: dict[str, Any] | None = field(default=None, repr=False)
+    _resolved_class: dict[str, float | None] = field(default_factory=dict, repr=False)
 
     # -- loading ------------------------------------------------------------
 
@@ -759,6 +762,7 @@ class BoardClearanceRules:
             data = None
         if isinstance(data, dict):
             rules._read_project(data)
+            rules._project = data
         return rules
 
     def _read_project(self, data: dict) -> None:
@@ -821,8 +825,41 @@ class BoardClearanceRules:
         )
         return matched or ("Default",)
 
+    def _authored_class_clearance(self, net_name: str | None) -> float | None:
+        """The shared resolver's clearance for a known net; ``None`` to fall back."""
+        if not net_name or self._project is None:
+            return None
+        if net_name not in self._resolved_class:
+            value: float | None = None
+            settings = self._project.get("net_settings")
+            classes = settings.get("classes") if isinstance(settings, dict) else None
+            if isinstance(classes, list) and any(
+                isinstance(c, dict) and c.get("name") != "Default" and "clearance" in c
+                for c in classes
+            ):
+                try:
+                    from kicad_tools.core.project_clearance import resolve_project_clearances
+
+                    value = resolve_project_clearances(self._project, [net_name])[
+                        net_name
+                    ].clearance
+                except Exception:  # unsupported declarations: keep the #6122 model
+                    value = None
+            self._resolved_class[net_name] = value
+        return self._resolved_class[net_name]
+
     def class_clearance_of(self, net_name: str | None) -> float:
-        """The netclass clearance of a net (the largest, when it is ambiguous)."""
+        """The netclass clearance of a net.
+
+        With a project that authors a non-``Default`` clearance this is the
+        shared KiCad 10 priority/inheritance resolver's answer (#6254), the
+        one ``kct route``'s authored floors use, so both commands judge a
+        multi-class net identically.  Otherwise (or if the resolver rejects
+        the project) the largest class of an ambiguous net.
+        """
+        resolved = self._authored_class_clearance(net_name)
+        if resolved is not None:
+            return resolved
         classes = self.netclasses_of(net_name)
         if classes is None:
             values = [self.default_class_clearance(), *self.class_clearance.values()]
