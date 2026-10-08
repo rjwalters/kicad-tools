@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from difflib import get_close_matches
 from pathlib import Path
 
+from .exceptions import LibraryNotFoundError, SymbolNotFoundError
 from .grid import get_symbol_search_paths
 
 
@@ -165,6 +166,97 @@ class SymbolDef:
         return "\n".join(indented_lines)
 
 
+_SEXP_TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"|[()]')
+_SYMBOL_HEAD = re.compile(r'\(symbol\s+"((?:[^"\\]|\\.)*)"')
+
+
+def _scan_toplevel_symbols_exact(content: str) -> dict[str, tuple[int, int]]:
+    """Locate every top-level ``(symbol "name" ...)`` in a ``.kicad_sym`` file.
+
+    Paren-depth-aware and string-aware, so it is independent of the file's
+    indentation (tabs in KiCad 8+, two spaces in KiCad 7) and of parens that
+    appear inside quoted strings.  Returns ``{name: (start, end)}`` where the
+    span covers the balanced ``(symbol ...)`` form.  Unit sub-symbols such as
+    ``C_Small_0_1`` live at depth 2 and are therefore never returned.
+
+    Raises:
+        ValueError: if the parentheses are unbalanced (truncated/corrupt file).
+    """
+    spans: dict[str, tuple[int, int]] = {}
+    depth = 0
+    start = -1
+    for m in _SEXP_TOKEN.finditer(content):
+        tok = m.group()
+        if tok == "(":
+            if depth == 1:
+                start = m.start()
+            depth += 1
+        elif tok == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("Unbalanced parentheses in symbol library")
+            if depth == 1 and start >= 0:
+                head = _SYMBOL_HEAD.match(content, start)
+                if head:
+                    spans[head.group(1)] = (start, m.end())
+                start = -1
+    if depth != 0:
+        raise ValueError("Unbalanced parentheses in symbol library (truncated file?)")
+    return spans
+
+
+_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+_SYMBOL_CANDIDATE = re.compile(r'\(symbol\s+"')
+
+
+def _balance(text: str) -> int:
+    """Net paren depth of ``text`` ignoring parens inside quoted strings."""
+    t = _STRING.sub("", text) if '"' in text else text
+    return t.count("(") - t.count(")")
+
+
+def scan_toplevel_symbols(content: str) -> dict[str, tuple[int, int]]:
+    """Locate top-level ``(symbol ...)`` forms; indentation-agnostic.
+
+    Fast path: candidate ``(symbol "`` heads are found with a C-speed regex
+    and their nesting depth is derived from balanced-paren counts of the
+    text between them (quoted strings stripped), so no per-token Python loop
+    is needed on multi-MB libraries.  Spans are sanity-checked and the whole file
+    must balance; on any doubt the exact token-by-token scanner is used
+    instead.  Raises ``ValueError`` for unbalanced input.
+    """
+    heads: list[int] = []
+    depth = 0
+    last = 0
+    for m in _SYMBOL_CANDIDATE.finditer(content):
+        c = m.start()
+        seg = content[last:c]
+        # A candidate inside a quoted string splits it: skip those.
+        if (seg.count('"') - seg.count('\\"')) % 2:
+            continue
+        depth += _balance(seg)
+        last = c
+        if depth == 1:
+            heads.append(c)
+    if not heads:
+        return _scan_toplevel_symbols_exact(content)
+
+    close = content.rstrip().rfind(")")
+    spans: dict[str, tuple[int, int]] = {}
+    for i, start in enumerate(heads):
+        limit = heads[i + 1] if i + 1 < len(heads) else close
+        end = limit
+        while end > start and content[end - 1].isspace():
+            end -= 1
+        head = _SYMBOL_HEAD.match(content, start)
+        if not head or end <= start or content[end - 1] != ")":
+            return _scan_toplevel_symbols_exact(content)
+        spans[head.group(1)] = (start, end)
+    if _balance(content) != 0:
+        return _scan_toplevel_symbols_exact(content)
+    return spans
+
+
 @dataclass
 class LibraryIndex:
     """Index of symbols in a library file."""
@@ -172,24 +264,29 @@ class LibraryIndex:
     path: Path
     name: str
     symbols: dict[str, int] = field(default_factory=dict)  # name -> byte offset
+    spans: dict[str, tuple[int, int]] = field(default_factory=dict, repr=False)
     _content: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_file(cls, path: Path) -> "LibraryIndex":
-        """Build index from library file."""
+        """Build index from library file (indentation-agnostic)."""
         name = path.stem
         content = path.read_text()
+        try:
+            spans = scan_toplevel_symbols(content)
+        except ValueError as e:
+            raise ValueError(f"Cannot parse symbol library {path}: {e}") from e
+        # Unit-style names (``Name_<unit>_<style>``) are never real parents.
+        spans = {n: sp for n, sp in spans.items() if not re.match(r".+_\d+_\d+$", n)}
+        symbols = {n: sp[0] for n, sp in spans.items()}
+        return cls(path=path, name=name, symbols=symbols, spans=spans, _content=content)
 
-        # Find all top-level symbol definitions
-        symbols = {}
-        # Match (symbol "name" at the start of a line with one tab
-        for match in re.finditer(r'^\t\(symbol "([^"]+)"', content, re.MULTILINE):
-            sym_name = match.group(1)
-            # Skip unit symbols (have _N_N suffix)
-            if not re.match(r".+_\d+_\d+$", sym_name):
-                symbols[sym_name] = match.start()
-
-        return cls(path=path, name=name, symbols=symbols, _content=content)
+    def get_symbol_text(self, sym_name: str) -> str | None:
+        """Exact S-expression text of a top-level symbol, or None."""
+        span = self.spans.get(sym_name)
+        if span is None:
+            return None
+        return self.get_content()[span[0] : span[1]]
 
     def get_content(self) -> str:
         """Get library file content (cached)."""
@@ -275,10 +372,10 @@ class SymbolRegistry:
             if lib_path is None:
                 available = self.list_libraries()
                 close = get_close_matches(lib_name, available, n=5, cutoff=0.4)
-                error_msg = f"Library not found: {lib_file}"
+                err = LibraryNotFoundError(lib_file, list(self.lib_paths))
                 if close:
-                    error_msg += f". Similar: {close}"
-                raise FileNotFoundError(error_msg)
+                    err.args = (f"{err.args[0]}\n\nSimilar libraries: {close}",)
+                raise err
 
             self._library_index[lib_name] = LibraryIndex.from_file(lib_path)
 
@@ -287,30 +384,32 @@ class SymbolRegistry:
     def _parse_symbol(self, lib_name: str, sym_name: str) -> SymbolDef:
         """Parse a symbol from library content."""
         index = self._get_library_index(lib_name)
-        content = index.get_content()
 
-        # Extract symbol definition
-        pattern = rf'\(symbol "{re.escape(sym_name)}"[\s\S]*?(?=\n\t\(symbol "|\n\)$)'
-        match = re.search(pattern, content)
+        # Exact top-level lookup via paren-depth scan -- never a fuzzy/regex
+        # match, so a miss can never return some other symbol (issue #6218).
+        raw_sexp = index.get_symbol_text(sym_name)
 
-        if not match:
+        if raw_sexp is None:
             available = list(index.symbols.keys())
             close = get_close_matches(sym_name, available, n=5, cutoff=0.4)
-            error_msg = f"Symbol not found: {sym_name} in {lib_name}"
-            if close:
-                error_msg += f". Similar: {close}"
-            raise ValueError(error_msg)
+            raise SymbolNotFoundError(
+                sym_name, f"{lib_name}.kicad_sym", available_symbols=available, suggestions=close
+            )
 
-        raw_sexp = match.group(0)
-
-        # Handle symbol inheritance (extends)
-        extends_match = re.search(r'\(extends\s+"([^"]+)"\)', raw_sexp)
+        # Handle symbol inheritance (extends): the parent is a direct child
+        # form of this symbol, not any "(extends" later in the file.
+        extends_match = re.match(r'\(symbol\s+"[^"]*"\s*\(extends\s+"([^"]+)"\)', raw_sexp)
         if extends_match:
             parent_name = extends_match.group(1)
-            parent_pattern = rf'\(symbol "{re.escape(parent_name)}"[\s\S]*?(?=\n\t\(symbol "|\n\)$)'
-            parent_match = re.search(parent_pattern, content)
-            if parent_match:
-                raw_sexp = parent_match.group(0) + "\n" + raw_sexp
+            parent_text = index.get_symbol_text(parent_name)
+            if parent_text is None:
+                raise SymbolNotFoundError(
+                    parent_name,
+                    f"{lib_name}.kicad_sym",
+                    available_symbols=list(index.symbols.keys()),
+                    suggestions=get_close_matches(parent_name, list(index.symbols), n=5),
+                )
+            raw_sexp = parent_text + "\n" + raw_sexp
 
         # Parse metadata
         description = ""
