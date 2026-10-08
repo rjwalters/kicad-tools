@@ -365,7 +365,6 @@ def test_single_layer_fill_not_blocked_by_old_pcbnew(tmp_path, monkeypatch):
 def test_find_kicad_python_retries_cold_start_timeout(monkeypatch):
     """A first probe that times out is retried rather than yielding None."""
     import subprocess
-    import sys
 
     from kicad_tools.zones import placement_fill
 
