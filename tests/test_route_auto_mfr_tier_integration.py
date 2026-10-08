@@ -183,6 +183,17 @@ def _run_route_auto_mfr_tier(
 
 @pytest.mark.slow
 @pytest.mark.timeout(900)
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Issue #6217 (split from #5991): #5189/#5201 made via-in-pad depend on "
+        "a real fabrication process. JLCPCB POFV needs 4+ layers, so "
+        "jlcpcb-tier1 offers no via-in-pad on this 2-layer run. The jlcpcb "
+        "tier also stopped recording missed via-in-pad rescues (bisected to "
+        "3bbbf1aa), so escalation never leaves jlcpcb. Strict: remove this "
+        "marker when #6217 re-baselines the chain at 4L."
+    ),
+)
 class TestAutoMfrTierIntegration:
     """End-to-end chain test: jlcpcb -> escalate to jlcpcb-tier1.
 

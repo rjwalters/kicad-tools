@@ -39,7 +39,8 @@ jobs:
   # - board 04's recipe, generated against KiCad 7 symbols, embeds the wrong
   #   lib_symbols (Device:C_Small came out as Device:Voltmeter_DC), so its own
   #   LVS reload died on "Library not found: board04_symbols.kicad_sym".
-  #   The board's reviewed validator also needs a native kicad-cli.
+  #   The board's reviewed validator also needs a native kicad-cli. (The
+  #   registry's KiCad-7 mis-parse is its own bug, #6218.)
   # ci.yml's Test job moved into the container for the same KiCad-7-era
   # library drift (~40 failures there).
   #
@@ -140,4 +141,12 @@ jobs:
         # legitimately run 5-20 minutes each (routing subprocesses with
         # internal 600-900s budgets); the old --timeout=120 could never
         # pass them deterministically.
-        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=1200 -m slow --cov=kicad_tools --cov-report=term-missing
+        #
+        # No --cov (issue #5991). Line+branch tracing of the whole package
+        # made the CPU-bound, in-process slow tests 5x+ slower. The
+        # board-06 coupled lattice fixture needs ~205 CPU-s without
+        # coverage and was still running after 18 CPU-min with it, which
+        # is why it hit the 1200s cap. Nothing consumed this report: no
+        # fail_under threshold, no upload, only a terminal table. The cause
+        # was removed instead of raising the timeout.
+        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=1200 -m slow
