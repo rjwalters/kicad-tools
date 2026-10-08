@@ -218,7 +218,71 @@ _POSE_CORRIDOR_GUARD_BUDGET_S: float = float(
 _CORRIDOR_GUARD_PROBE_S: float = float(os.environ.get("KCT_CORRIDOR_GUARD_PROBE_S", "8.0"))
 _CORRIDOR_GUARD_BUDGET_S: float = float(os.environ.get("KCT_CORRIDOR_GUARD_BUDGET_S", "120.0"))
 _CORRIDOR_YIELD_RERUN_S: float = float(os.environ.get("KCT_CORRIDOR_YIELD_RERUN_S", "300.0"))
+# Issue #5923: the re-run's negotiated-loop budget is PROPORTIONAL to the first
+# main-strategy pass.  This is a budget hint, NOT a hard wall-time bound on the
+# whole re-run: ``route_all_negotiated`` checks it between nets, so an in-flight
+# search can overrun it and the post-negotiation sweep / clearance tail runs
+# outside it (a measured CI re-run took 361s against a 223s cap).
+# The fixed 300s cap was spent in full by the pathological re-run #5922 fixed
+# (negotiated usage leaking into it: overflow 4424, all nets ripped every
+# iteration, timed out at 300s with overflow 188).  The re-run routes the same
+# board with the same strategy and only a few freed nets left to connect, so
+# its honest cost is of the order of the first pass.  Measured on board 06
+# (seed 42, C++ backend, KCT_POSE_CORRIDOR_GUARD=0 so the MIPI_D0 pose trunk
+# commits and yields; local M-series host):
+#
+#   first main pass (negotiated, 19 nets)   65.2s
+#   yield re-run (reach 20 -> 21 of 21)     55.9s   (0.86x the first pass)
+#
+# CI's first pass on the same board costs ~120s, so the fixed 300s let a
+# re-run cost ~2.5x the work it was repairing -- for a trade that is reverted
+# when reach does not improve.
+#
+#   * ``_CORRIDOR_YIELD_RERUN_FACTOR`` (default 1.5) scales the measured first
+#     pass wall time: 1.75x headroom over the 0.86x a paying re-run needed,
+#     for host noise and a slower convergence on another board.
+#   * ``_CORRIDOR_YIELD_RERUN_FLOOR_S`` (default 60s) keeps a trivially fast
+#     first pass from starving the re-run: iteration 0 of the board-06
+#     re-run alone took 29.7s, and the paying pass needed four iterations.
+#     The cap also scales the loop's remaining-budget per-net cap (#3989:
+#     10% of what is left), so it must not be tight: the paying board-06
+#     rescue above spent 15.6s over four searches at iteration 2.
+#   * The first-pass time is the WHOLE strategy call (negotiated loop plus
+#     its post-route clearance pass and post-negotiation sweep), while the
+#     cap bounds only the negotiated loop; the re-run's own tail (sweep,
+#     bounded at 60s once the loop timed out, #4159) still follows it.
+#   * ``_CORRIDOR_YIELD_RERUN_S`` (300s) stays as the ceiling.  Setting
+#     ``KCT_CORRIDOR_YIELD_RERUN_S`` explicitly is an ABSOLUTE override: the
+#     re-run gets exactly that cap, no proportional derivation.
+_CORRIDOR_YIELD_RERUN_OVERRIDE: bool = "KCT_CORRIDOR_YIELD_RERUN_S" in os.environ
+_CORRIDOR_YIELD_RERUN_FACTOR: float = float(
+    os.environ.get("KCT_CORRIDOR_YIELD_RERUN_FACTOR", "1.5")
+)
+_CORRIDOR_YIELD_RERUN_FLOOR_S: float = float(
+    os.environ.get("KCT_CORRIDOR_YIELD_RERUN_FLOOR_S", "60.0")
+)
 _CORRIDOR_YIELD_ENABLED: bool = os.environ.get("KCT_CORRIDOR_YIELD", "1").strip() != "0"
+
+
+def _corridor_yield_rerun_cap(first_pass_s: float | None) -> float:
+    """Negotiated-loop budget (seconds) for the #4463 corridor-yield re-run (#5923).
+
+    Not a hard bound on the re-run's wall time: it is checked between nets and
+    excludes the post-negotiation tail.
+
+    ``clamp(FACTOR * first_pass_s, FLOOR, CEILING)``, where ``first_pass_s``
+    is the measured wall time of the first main-strategy pass.  An explicit
+    ``KCT_CORRIDOR_YIELD_RERUN_S`` is returned as-is (absolute override), and
+    an unknown first-pass time falls back to the ceiling -- the pre-#5923
+    fixed cap.  Reads the module globals at call time so tests can patch them.
+    """
+    ceiling = float(_CORRIDOR_YIELD_RERUN_S)
+    if _CORRIDOR_YIELD_RERUN_OVERRIDE or first_pass_s is None:
+        return ceiling
+    floor = min(float(_CORRIDOR_YIELD_RERUN_FLOOR_S), ceiling)
+    proportional = float(_CORRIDOR_YIELD_RERUN_FACTOR) * max(0.0, float(first_pass_s))
+    return max(floor, min(proportional, ceiling))
+
 
 # Issue #3990 (unit 2b of #3921): variable-gap parallel offset.  The
 # geometric shadow constructor historically offset the WHOLE guide by a
@@ -4236,6 +4300,10 @@ class DiffPairRouter:
         # of every ``route_all_with_diffpairs`` call so it reflects only
         # the latest invocation.
         self._last_budget_exit_pair_names: list[str] = []
+        # Issue #5923: wall time and cap of the latest corridor-yield re-run
+        # (None when no re-run happened in the latest invocation).
+        self._last_corridor_yield_rerun_s: float | None = None
+        self._last_corridor_yield_rerun_cap_s: float | None = None
         # Issue #4095 instrumentation: monotonic counters for a future
         # checkpoint-and-compare follow-up to key on.  ``coupled_attempted``
         # counts pairs that reached the coupled A* (engaged, within
@@ -13087,6 +13155,7 @@ class DiffPairRouter:
         non_diffpair_strategy: object,
         also_release_nets: set[int] | None = None,
         promote_nets: set[int] | None = None,
+        first_pass_s: float | None = None,
     ) -> tuple[bool, set[int], list[Route], list[Route]]:
         """Rip the planned pairs, re-run the main strategy, keep only if it paid.
 
@@ -13105,6 +13174,10 @@ class DiffPairRouter:
         is put back exactly as it was.  A pair that claims-but-strands
         costs reach, a pair that yields costs only quality, and a yield
         that buys neither is simply undone.
+
+        ``first_pass_s`` is the measured wall time of the first main-strategy
+        pass; the re-run is capped at ``_corridor_yield_rerun_cap`` of it
+        (issue #5923).  ``None`` keeps the fixed ``_CORRIDOR_YIELD_RERUN_S``.
 
         Returns:
             ``(kept, released_net_ids, removed_routes, added_routes)``.
@@ -13165,17 +13238,27 @@ class DiffPairRouter:
         released_pose_claims = pose_claims & released_nets
         pose_claims.difference_update(released_pose_claims)
 
+        rerun_cap = _corridor_yield_rerun_cap(first_pass_s)
+        first_pass_txt = f"{first_pass_s:.1f}s" if first_pass_s is not None else "n/a"
         print(
             f"  [corridor-yield] {len(to_yield)} pair(s) yielded their corridor: "
             f"{', '.join(p.name for p, _r in to_yield)}; re-running the main "
-            f"strategy for the freed nets"
+            f"strategy for the freed nets (cap {rerun_cap:.1f}s, first pass "
+            f"{first_pass_txt})"
         )
-        autorouter._negotiated_timeout_cap = _CORRIDOR_YIELD_RERUN_S
+        autorouter._negotiated_timeout_cap = rerun_cap
+        rerun_t0 = time.perf_counter()
         try:
             non_diffpair_strategy()  # type: ignore[operator]
         finally:
             autorouter._negotiated_timeout_cap = None
             autorouter._budget_exit_diff_nets = set()
+        self._last_corridor_yield_rerun_s = time.perf_counter() - rerun_t0
+        self._last_corridor_yield_rerun_cap_s = rerun_cap
+        print(
+            f"  [corridor-yield] re-run wall {self._last_corridor_yield_rerun_s:.1f}s "
+            f"(negotiated-loop budget {rerun_cap:.1f}s)"
+        )
 
         added_routes = [r for r in autorouter.routes if id(r) not in snapshot_ids]
         reach_after = sum(1 for n in candidate_nets if self._net_is_connected(n))
@@ -13314,6 +13397,8 @@ class DiffPairRouter:
         # Issue #4463: pairs that yielded their corridor to unblock a
         # single-ended net (empty unless the corridor guard fired).
         self._last_corridor_yield_pair_names: list[str] = []
+        self._last_corridor_yield_rerun_s = None  # Issue #5923
+        self._last_corridor_yield_rerun_cap_s = None
         # Issue #4799: same "latest invocation only" contract for the
         # per-instance census capture.  The process-wide collector behind the
         # JSON report is deliberately NOT reset here -- a run that routes in
@@ -13628,6 +13713,7 @@ class DiffPairRouter:
         )
 
         non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
+        main_pass_s: float | None = None
         if non_diff_nets:
             print(f"\n--- Routing {len(non_diff_nets)} non-differential nets ---")
             if non_diffpair_strategy is not None:
@@ -13636,9 +13722,13 @@ class DiffPairRouter:
                 # responsible for routing every net in self.autorouter.nets;
                 # diff-pair nets are filtered by the caller's net selection
                 # since their pads are already marked as routed on the grid.
+                # Issue #5923: time the first main pass -- the corridor-yield
+                # re-run below is capped proportionally to it.
+                main_pass_t0 = time.perf_counter()
                 try:
                     strategy_routes = non_diffpair_strategy()
                 finally:
+                    main_pass_s = time.perf_counter() - main_pass_t0
                     # Issue #3270: Clear the budget-exit promotion set so
                     # subsequent ``route_all`` / ``route_all_negotiated``
                     # invocations on the same autorouter inherit the
@@ -13714,6 +13804,7 @@ class DiffPairRouter:
                 non_diffpair_strategy,
                 also_release_nets=rerun_release,
                 promote_nets=rerun_promote,
+                first_pass_s=main_pass_s,
             )
             if kept:
                 diff_net_ids = diff_net_ids - released_nets
