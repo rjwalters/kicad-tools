@@ -218,7 +218,11 @@ _POSE_CORRIDOR_GUARD_BUDGET_S: float = float(
 _CORRIDOR_GUARD_PROBE_S: float = float(os.environ.get("KCT_CORRIDOR_GUARD_PROBE_S", "8.0"))
 _CORRIDOR_GUARD_BUDGET_S: float = float(os.environ.get("KCT_CORRIDOR_GUARD_BUDGET_S", "120.0"))
 _CORRIDOR_YIELD_RERUN_S: float = float(os.environ.get("KCT_CORRIDOR_YIELD_RERUN_S", "300.0"))
-# Issue #5923: the re-run cap is PROPORTIONAL to the first main-strategy pass.
+# Issue #5923: the re-run's negotiated-loop budget is PROPORTIONAL to the first
+# main-strategy pass.  This is a budget hint, NOT a hard wall-time bound on the
+# whole re-run: ``route_all_negotiated`` checks it between nets, so an in-flight
+# search can overrun it and the post-negotiation sweep / clearance tail runs
+# outside it (a measured CI re-run took 361s against a 223s cap).
 # The fixed 300s cap was spent in full by the pathological re-run #5922 fixed
 # (negotiated usage leaking into it: overflow 4424, all nets ripped every
 # iteration, timed out at 300s with overflow 188).  The re-run routes the same
@@ -261,7 +265,10 @@ _CORRIDOR_YIELD_ENABLED: bool = os.environ.get("KCT_CORRIDOR_YIELD", "1").strip(
 
 
 def _corridor_yield_rerun_cap(first_pass_s: float | None) -> float:
-    """Wall-clock cap (seconds) for the #4463 corridor-yield re-run (#5923).
+    """Negotiated-loop budget (seconds) for the #4463 corridor-yield re-run (#5923).
+
+    Not a hard bound on the re-run's wall time: it is checked between nets and
+    excludes the post-negotiation tail.
 
     ``clamp(FACTOR * first_pass_s, FLOOR, CEILING)``, where ``first_pass_s``
     is the measured wall time of the first main-strategy pass.  An explicit
@@ -13250,7 +13257,7 @@ class DiffPairRouter:
         self._last_corridor_yield_rerun_cap_s = rerun_cap
         print(
             f"  [corridor-yield] re-run wall {self._last_corridor_yield_rerun_s:.1f}s "
-            f"(cap {rerun_cap:.1f}s)"
+            f"(negotiated-loop budget {rerun_cap:.1f}s)"
         )
 
         added_routes = [r for r in autorouter.routes if id(r) not in snapshot_ids]
