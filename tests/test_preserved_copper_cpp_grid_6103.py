@@ -81,8 +81,14 @@ def test_proof_memo_fingerprint_covers_preserved_copper() -> None:
     """#6098's fallback memo keys on the Python grid, which carries the copper."""
     with_copper, _ = _load(load_existing_routes=True)
     without, _ = _load(load_existing_routes=False)
-    stamp = CppPathfinder._py_grid_state_stamp
-    assert stamp(with_copper.grid)[1] != stamp(without.grid)[1]
+    # #6152 made the stamp an instance method (it now also folds in the
+    # pathfinder's own net-name map / attach zones), so call it bound.
+    assert isinstance(with_copper.router, CppPathfinder)
+    assert isinstance(without.router, CppPathfinder)
+    with_stamp = with_copper.router._py_grid_state_stamp(with_copper.grid)
+    without_stamp = without.router._py_grid_state_stamp(without.grid)
+    # Index 1 is the per-array CRC tuple: the preserved copper must change it.
+    assert with_stamp[1] != without_stamp[1]
 
 
 @needs_cpp

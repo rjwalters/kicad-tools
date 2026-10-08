@@ -64,11 +64,17 @@ these item properties:
 * ``A.hasNetclass('X')``, ``A.isPlated()``;
 * ``A.Layer`` of a track: its layer, compared **case-sensitively** with
   ``*`` / ``?`` wildcards (``'F.*'`` and ``'*.Cu'`` match ``F.Cu``,
-  ``'f.cu'`` does not).  A via's or pad's ``Layer`` is KiCad's null.
+  ``'f.cu'`` does not).  A via's ``Layer`` is KiCad's null.  A pad's
+  ``Layer`` changed between KiCad releases (#6196): ``kicad-cli`` 10.0.1
+  gives KiCad's null, 10.0.2 onward (CI pins 10.0.6) the pad's own layer --
+  ``F.Cu`` for an ``F.Cu`` SMD pad *and* for a ``*.Cu`` through-hole pad,
+  whatever layer the other item is on.  The gate honours both: a pad-layer
+  comparison is false only when it is false under both readings (it never
+  names one of the pad's copper layers), and unknown otherwise.
 
 Everything else -- ``A.insideArea(...)`` / ``intersectsArea`` /
 ``enclosedByArea``, numeric properties -- evaluates to **unknown**.  A track's
-or via's ``Pad_Type``, and a via's or pad's ``Layer``, is KiCad's null, which
+or via's ``Pad_Type``, and a via's ``Layer``, is KiCad's null, which
 compares false under both ``==`` and ``!=``.  The evaluator is
 three-valued, and an unknown rule is handled **conservatively**: it is
 treated as possibly applying, so the requirement is the *largest* of the
@@ -202,8 +208,10 @@ class ItemProps:
             ``False`` for an NPTH pad.
         pad_type: KiCad's ``Pad_Type`` of a pad (``"SMD"``,
             ``"Through-hole"``, ``"NPTH, mechanical"``).
-        layer: A track's copper layer (``"F.Cu"``), its ``Layer`` property.
-            Ignored for a via or pad, whose ``Layer`` is KiCad's null.
+        layer: A track's copper layer (``"F.Cu"``), its ``Layer`` property;
+            for a pad, its copper layer when it has exactly one (``None``:
+            some copper layer, unknown which).  Ignored for a via, whose
+            ``Layer`` is KiCad's null.
     """
 
     type: str | None
@@ -384,6 +392,38 @@ class _LayerName(str):
     """
 
 
+#: Copper layer names a pad of unknown layer could report as its ``Layer``.
+_COPPER_LAYER_NAMES = ("F.Cu", "B.Cu", *(f"In{i}.Cu" for i in range(1, 31)))
+
+
+def _layer_name_eq(layer: str, other: str) -> bool:
+    return layer == other or fnmatch.fnmatchcase(layer, other) or fnmatch.fnmatchcase(other, layer)
+
+
+@dataclass(frozen=True)
+class _PadLayer:
+    """A pad's ``Layer``: KiCad's null on 10.0.1, the pad's layer on 10.0.2+.
+
+    Measured with ``kicad-cli`` 10.0.1 / 10.0.2 / 10.0.4 / 10.0.5 / 10.0.6
+    (#6196): 10.0.1 compares a pad's ``Layer`` false under ``==`` and ``!=``
+    alike; from 10.0.2 it is the pad's own layer (``F.Cu`` for an ``F.Cu``
+    SMD pad and for a ``*.Cu`` pad, even against a ``B.Cu`` track), compared
+    like a track's.  ``candidates`` are the layers that could be (one copper
+    layer, or every copper layer when the pad has several).
+    """
+
+    candidates: tuple[str, ...]
+
+    def compare(self, other: str, op: str) -> bool | None:
+        """``self <op> other``: false only if false under both KiCad readings."""
+        matches = {_layer_name_eq(c, other) for c in self.candidates}
+        eq: bool | None = matches.pop() if len(matches) == 1 else None
+        result = eq if op == "==" else _not3(eq)
+        # Null (10.0.1) gives False; anything not also False under the
+        # pad-layer reading (10.0.2+) depends on the KiCad release.
+        return False if result is False else None
+
+
 _TOKEN_RE = re.compile(
     r"""
     \s*(?:
@@ -522,6 +562,9 @@ class _Evaluator:
         if left is _NULL or right is _NULL:
             return False
         if op in ("==", "!="):
+            if isinstance(left, _PadLayer) or isinstance(right, _PadLayer):
+                pad, other = (left, right) if isinstance(left, _PadLayer) else (right, left)
+                return pad.compare(other, op) if isinstance(other, str) else None
             if isinstance(left, _LayerName) or isinstance(right, _LayerName):
                 if not (isinstance(left, str) and isinstance(right, str)):
                     return None
@@ -608,8 +651,12 @@ class _PairContext:
                 return _NULL
             return _UNKNOWN if item.pad_type is None else item.pad_type
         if name == "layer":
-            if item.type in ("Via", "Pad"):
-                return _NULL  # verified with kicad-cli 10.0.1 (issue #6150)
+            if item.type == "Via":
+                return _NULL  # verified with kicad-cli 10.0.1 - 10.0.6 (#6150, #6196)
+            if item.type == "Pad":
+                # KiCad-release dependent (#6196); see :class:`_PadLayer`.
+                layers = (item.layer,) if item.layer is not None else _COPPER_LAYER_NAMES
+                return _PadLayer(layers)
             if item.type == "Track" and item.layer is not None:
                 return _LayerName(item.layer)
             return _UNKNOWN
@@ -928,7 +975,8 @@ def item_props_for_type(
     """:class:`ItemProps` for a gate item kind (``track``/``arc``/``via``/``pad``).
 
     KiCad reports an arc's ``Type`` as ``'Track'`` (verified with ``kicad-cli``
-    10.0.1).  ``layer`` is kept for a track or arc only.
+    10.0.1).  ``layer`` is kept for a track, arc or pad (a pad's single copper
+    layer -- its ``Layer`` from ``kicad-cli`` 10.0.2, #6196), never a via.
     """
     dru_type = {"track": "Track", "arc": "Track", "via": "Via", "pad": "Pad"}.get(kind)
     return ItemProps(
@@ -936,7 +984,7 @@ def item_props_for_type(
         net_name,
         plated,
         PAD_TYPE_NAMES.get(pad_type or "") if kind == "pad" else None,
-        layer if dru_type == "Track" else None,
+        layer if dru_type in ("Track", "Pad") else None,
     )
 
 

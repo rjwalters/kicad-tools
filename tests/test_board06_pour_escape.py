@@ -203,6 +203,92 @@ def test_kct_managed_dru_sidecar_with_unknown_rule_family_rejected(tmp_path):
         escape.EscapeRules.from_project(p)
 
 
+BOARD06 = Path(__file__).resolve().parents[1] / "boards/06-diffpair-test"
+
+
+@pytest.mark.parametrize("fab", ["jlcpcb", "jlcpcb-tier1"])
+@pytest.mark.parametrize("layers", [2, 4])
+def test_generator_output_is_fully_modeled(fab, layers):
+    """Every family today's generator emits is folded or provably irrelevant (#6196).
+
+    #6160 refreshed board 06's regression fixture to the current generator
+    output (PTH hole floors, the SMD pad floor, silk-to-pad, the
+    Edge.Cuts-scoped hole floor); the parser rejected it, the escape search
+    raised, and the whole pour-connectivity repair round aborted.
+    """
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
+
+    profile = get_profile(fab)
+    rules = profile.get_design_rules(layers=layers, copper_oz=1.0)
+    text = merge_dru_floors(None, generate_dru(rules, manufacturer_name=fab))
+    minima = escape._kct_managed_floor_minima(text)
+    assert minima is not None, text
+    hole_floors = [
+        v for v in (rules.min_pth_hole_to_track_mm, rules.min_inner_pth_hole_to_copper_mm) if v
+    ]
+    if hole_floors:
+        assert minima["hole_copper"] == pytest.approx(max(hole_floors))
+
+
+@pytest.mark.parametrize("subdir", ["regression-fixture", "output"])
+def test_board06_committed_dru_folds_pth_hole_floors(subdir):
+    """The exact sidecars the recipe and the CI regression read (#6196)."""
+    project = BOARD06 / subdir / "diffpair_test_routed.kicad_pro"
+    rules = escape.EscapeRules.from_project(project)
+    # "Inner PTH Hole to Copper" (0.3 mm, inner layers) is applied board-wide.
+    assert rules.hole_copper == pytest.approx(0.3)
+
+
+def test_pth_hole_floors_strengthen_hole_copper(tmp_path):
+    p = tmp_path / "board.kicad_pro"
+    p.write_text(json.dumps({}))
+    p.with_suffix(".kicad_dru").write_text(
+        _kct_managed_dru(
+            '(rule "PTH Hole to Track - jlcpcb"\n'
+            "  (condition \"(A.Pad_Type == 'Through-hole' && B.Type == 'Track') || "
+            "(B.Pad_Type == 'Through-hole' && A.Type == 'Track')\")\n"
+            "  (constraint hole_clearance (min 0.35mm)))",
+            '(rule "Inner PTH Hole to Copper - jlcpcb"\n'
+            "  (layer inner)\n"
+            "  (condition \"A.Pad_Type == 'Through-hole' || B.Pad_Type == 'Through-hole'\")\n"
+            "  (constraint hole_clearance (min 0.4mm)))",
+        )
+    )
+    assert escape.EscapeRules.from_project(p).hole_copper == pytest.approx(0.4)
+
+
+@pytest.mark.parametrize(
+    "stanza",
+    [
+        # A folded family carrying a different constraint is not our rule.
+        '(rule "PTH Hole to Track - jlcpcb"\n  (constraint physical_clearance (min 0.3mm)))',
+        # The SMD floor is ignorable only because it is pad-to-pad.
+        '(rule "SMD Pad Clearance - jlcpcb"\n  (constraint clearance (min 0.15mm)))',
+        # The hole floor is ignorable only while scoped to the board edge
+        # (the pre-#6160 shape was an unconditional hole-to-copper floor).
+        '(rule "Hole to Edge - jlcpcb"\n'
+        "  (condition \"A.Type == 'via' || A.Type == 'pad'\")\n"
+        "  (constraint hole_clearance (min 0.4mm)))",
+        # An ignored family must not grow a layer scope.
+        '(rule "Copper to Edge - jlcpcb"\n  (layer inner)\n'
+        "  (constraint edge_clearance (min 0.3mm)))",
+        # Net-class ampacity widths are not modelled by this search.
+        '(rule "Ampacity Min Width (Power, external) - jlcpcb"\n'
+        "  (condition \"A.NetClass == 'Power' && A.Type == 'track' && "
+        "(A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
+        "  (constraint track_width (min 0.8000mm)))",
+    ],
+    ids=["wrong-constraint", "smd-unscoped", "legacy-hole-to-edge", "layer-on-ignored", "ampacity"],
+)
+def test_unmodeled_floor_shapes_still_fail_closed(tmp_path, stanza):
+    p = tmp_path / "board.kicad_pro"
+    p.write_text(json.dumps({}))
+    p.with_suffix(".kicad_dru").write_text(_kct_managed_dru(stanza))
+    with pytest.raises(ValueError, match="custom DRC"):
+        escape.EscapeRules.from_project(p)
+
+
 @pytest.mark.parametrize("value", [-1, True, "0.2", float("nan")])
 def test_invalid_project_dimensions_fail_closed(tmp_path, value):
     p = tmp_path / "board.kicad_pro"
