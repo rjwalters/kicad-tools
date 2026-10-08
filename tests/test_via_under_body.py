@@ -319,6 +319,18 @@ class TestSplitExposedPad:
             pad.net_number, pad.net_name = 3, "VDD"
         assert [p.number for p in exposed_pads(fp)] == ["9"]
 
+    def test_intact_ep_does_not_absorb_larger_than_median_pins(self):
+        """Pins 1/2 on the EP's net, slightly > median, are not thermal pads."""
+        fp = _qfn()
+        for pad in fp.pads[:2]:
+            pad.net_number, pad.net_name = 1, "GND"
+            pad.size = (0.8, 0.4)
+        assert [p.number for p in exposed_pads(fp)] == ["9"]
+        # A GND via inside pin 1's copper is still reported.
+        pin1 = fp.pads[0]
+        pcb = _pcb([fp], [_via(50.0 + pin1.position[0], 50.0 + pin1.position[1], net=(1, "GND"))])
+        assert len(_run(pcb)) == 1
+
     def test_unconnected_split_pads_not_clustered(self):
         """Net 0 pads are never grouped together."""
         assert exposed_pads(_split_ep_qfn(ep_net=(0, ""))) == []
@@ -344,6 +356,11 @@ class TestSelection:
             "Package_SON:X2SON-8_1.4x1mm_P0.35mm",
             "vendor:Dfn-6",
             "vendor:Qfn-20",
+            "Package_SON:WSON-8-1EP_2x2mm",
+            "Package_SON:VSON-8_3x3mm",
+            "Package_SON:USON-10_2.5x1.0mm",
+            "Package_DFN_QFN:TDFN-8-1EP_3x3mm",
+            "Package_DFN_QFN:UDFN-6_1.45x1mm",
         ],
     )
     def test_default_pattern_selects(self, name: str):
@@ -362,6 +379,10 @@ class TestSelection:
             "Crystal:Resonator_SMD_Murata_CSTxExxV-3Pin_3.0x1.1mm",
             "Inductor_SMD:L_Panasonic_PCC-M0530M",
             "Oscillator:Oscillator_SMD_SeikoEpson_SG210-4Pin_2.5x2.0mm",
+            "Crystal:Resonator_SMD_muRata_CSTCC2_Series",
+            "Sensor:Person_Detector",
+            "Inductor_SMD:L_Vulgaris",
+            "Transformer_SMD:Transformer_Nolga",
             "TerminalBlock:TerminalBlock_Degson_DG246-3.81-2P",
         ],
     )

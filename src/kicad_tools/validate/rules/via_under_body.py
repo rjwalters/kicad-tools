@@ -78,7 +78,10 @@ VIA_UNDER_BODY_RULE_ID = "via_under_body"
 # resonators and power inductors.  Anchored, the pattern selects exactly
 # the same 964 KiCad 10 stock footprints as the old case-sensitive
 # ``QFN|DFN|SON|LGA``.
-DEFAULT_FOOTPRINT_PATTERN = r"QFN|DFN|LGA|(?:^|[^A-Z])[A-Z]{0,2}SON(?![A-Z])"
+#
+# ``LGA`` gets the same anchoring without prefix letters (``Vulgaris``, ``Nolga`` must not select;
+# ``Package_LGA:...``, ``LGA-14``, ``vendor:lga-12`` still do).
+DEFAULT_FOOTPRINT_PATTERN = r"QFN|DFN|(?:^|[^A-Z])(?:[A-Z]{0,2}SON|LGA)(?![A-Z])"
 
 # An SMD pad at least this many times the footprint's median copper-pad area
 # is treated as an exposed (thermal) pad.
@@ -120,7 +123,10 @@ def exposed_pads(footprint: Footprint) -> list[Pad]:
     if threshold is not None and typical is not None:
         clusters: dict[int, list[int]] = {}
         for i, (pad, area) in enumerate(zip(copper, areas, strict=True)):
-            if pad.net_number and area > typical:
+            # Already-oversized pads are intact EPs; letting them into the
+            # cluster would satisfy the combined-area test on their own and
+            # whitelist ordinary same-net pins that are merely > median.
+            if pad.net_number and typical < area < threshold:
                 clusters.setdefault(pad.net_number, []).append(i)
         for members in clusters.values():
             if len(members) >= 2 and sum(areas[i] for i in members) >= threshold:
