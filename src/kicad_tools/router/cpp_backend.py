@@ -28,6 +28,7 @@ import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
+from . import wall_deadline as _wall_deadline
 from .resource_guard import reraise_if_resource_exhaustion
 
 if TYPE_CHECKING:
@@ -2115,6 +2116,10 @@ class CppPathfinder:
         Returns:
             Route object if successful, None if no path found
         """
+        # Issue #5923: inside a bounded excursion (the corridor-yield re-run)
+        # no single search may run past the excursion's wall deadline.
+        # Identity when no deadline is installed.
+        per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
         if not self._per_call_timing_enabled:
             try:
                 return self._route_impl(

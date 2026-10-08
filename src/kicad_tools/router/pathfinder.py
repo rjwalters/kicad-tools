@@ -34,6 +34,7 @@ import numpy as np
 
 from kicad_tools.core.types import copper_span
 
+from . import wall_deadline as _wall_deadline
 from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
@@ -3793,6 +3794,9 @@ class Router:
         wall-clock time and whether the deadline was respected.  The actual
         search logic lives in :meth:`_route_impl`.
         """
+        # Issue #5923: clamp to the bounded-excursion wall deadline, if any
+        # (identity otherwise) -- same choke point as ``CppPathfinder.route``.
+        per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
         if not self._per_call_timing_enabled:
             return self._route_impl(
                 start,
