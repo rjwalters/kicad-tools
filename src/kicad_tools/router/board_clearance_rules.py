@@ -66,11 +66,13 @@ these item properties:
   ``*`` / ``?`` wildcards (``'F.*'`` and ``'*.Cu'`` match ``F.Cu``,
   ``'f.cu'`` does not).  A via's ``Layer`` is KiCad's null.  A pad's
   ``Layer`` changed between KiCad releases (#6196): ``kicad-cli`` 10.0.1
-  gives KiCad's null, 10.0.2 onward (CI pins 10.0.6) the pad's own layer --
-  ``F.Cu`` for an ``F.Cu`` SMD pad *and* for a ``*.Cu`` through-hole pad,
-  whatever layer the other item is on.  The gate honours both: a pad-layer
-  comparison is false only when it is false under both readings (it never
-  names one of the pad's copper layers), and unknown otherwise.
+  gives KiCad's null, 10.0.2 onward (CI pins 10.0.6) its **footprint's**
+  layer, not the pad's own copper (#6201) -- ``F.Cu`` for every pad of an
+  ``F.Cu`` footprint, an SMD pad on ``B.Cu`` (card-edge fingers) and a
+  ``*.Cu`` through-hole pad included, whatever layer the other item is on.
+  The gate honours both: a pad-layer comparison is false only when it is
+  false under both readings (it never names the footprint's layer), and
+  unknown otherwise.
 
 Everything else -- ``A.insideArea(...)`` / ``intersectsArea`` /
 ``enclosedByArea``, numeric properties -- evaluates to **unknown**.  A track's
@@ -209,9 +211,10 @@ class ItemProps:
         pad_type: KiCad's ``Pad_Type`` of a pad (``"SMD"``,
             ``"Through-hole"``, ``"NPTH, mechanical"``).
         layer: A track's copper layer (``"F.Cu"``), its ``Layer`` property;
-            for a pad, its copper layer when it has exactly one (``None``:
-            some copper layer, unknown which).  Ignored for a via, whose
-            ``Layer`` is KiCad's null.
+            for a pad, its **footprint's** layer (``F.Cu`` / ``B.Cu``), which
+            ``kicad-cli`` 10.0.2+ reports as the pad's ``Layer`` whatever
+            copper the pad is on (#6201) -- ``None``: unknown, any copper
+            layer.  Ignored for a via, whose ``Layer`` is KiCad's null.
     """
 
     type: str | None
@@ -402,14 +405,15 @@ def _layer_name_eq(layer: str, other: str) -> bool:
 
 @dataclass(frozen=True)
 class _PadLayer:
-    """A pad's ``Layer``: KiCad's null on 10.0.1, the pad's layer on 10.0.2+.
+    """A pad's ``Layer``: KiCad's null on 10.0.1, its footprint's layer on 10.0.2+.
 
     Measured with ``kicad-cli`` 10.0.1 / 10.0.2 / 10.0.4 / 10.0.5 / 10.0.6
-    (#6196): 10.0.1 compares a pad's ``Layer`` false under ``==`` and ``!=``
-    alike; from 10.0.2 it is the pad's own layer (``F.Cu`` for an ``F.Cu``
-    SMD pad and for a ``*.Cu`` pad, even against a ``B.Cu`` track), compared
-    like a track's.  ``candidates`` are the layers that could be (one copper
-    layer, or every copper layer when the pad has several).
+    (#6196, #6201): 10.0.1 compares a pad's ``Layer`` false under ``==`` and
+    ``!=`` alike; from 10.0.2 it is the layer of the pad's **footprint**,
+    compared like a track's -- not the pad's own copper.  A ``B.Cu`` SMD pad
+    in an ``F.Cu`` footprint reads ``F.Cu``, and so does a ``*.Cu`` pad, even
+    against a ``B.Cu`` item.  ``candidates`` are the layers it could be: the
+    footprint's layer, or every copper layer when that is unknown.
     """
 
     candidates: tuple[str, ...]
@@ -975,8 +979,9 @@ def item_props_for_type(
     """:class:`ItemProps` for a gate item kind (``track``/``arc``/``via``/``pad``).
 
     KiCad reports an arc's ``Type`` as ``'Track'`` (verified with ``kicad-cli``
-    10.0.1).  ``layer`` is kept for a track, arc or pad (a pad's single copper
-    layer -- its ``Layer`` from ``kicad-cli`` 10.0.2, #6196), never a via.
+    10.0.1).  ``layer`` is kept for a track, arc or pad (for a pad, its
+    footprint's layer -- the pad's ``Layer`` from ``kicad-cli`` 10.0.2,
+    #6196 / #6201), never a via.
     """
     dru_type = {"track": "Track", "arc": "Track", "via": "Via", "pad": "Pad"}.get(kind)
     return ItemProps(

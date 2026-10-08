@@ -698,6 +698,138 @@ def test_gate_agrees_with_kicad_cli(
     assert bool(flags) is kicad_flags, flags
 
 
+# ---------------------------------------------------------------------------
+# #6201: a pad's Layer is its footprint's, not the pad's own copper
+# ---------------------------------------------------------------------------
+
+# kicad-cli 10.0.2+ reads a pad's Layer as its *footprint's* layer (#6201),
+# so a B.Cu pad in an F.Cu footprint (card-edge fingers) reads F.Cu.  R5's
+# pad and footprint are put on either side; a /B via (0.6 mm, 0.3 mm drill)
+# at x = 17.0 sits 0.2 mm from the pad, under a 0.3 mm rule when it applies.
+R5_FOOTPRINT = '(footprint "Test:BigPad"\n    (layer "F.Cu")'
+SIDE_PADS = {
+    "F.Cu": '(pad "1" smd rect (at 0 0) (size 3.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "/A"))',
+    "B.Cu": '(pad "1" smd rect (at 0 0) (size 3.0 1.0) (layers "B.Cu" "B.Mask") (net 1 "/A"))',
+    "*.Cu": (
+        '(pad "1" thru_hole rect (at 0 0) (size 3.0 1.0) (drill 0.4) '
+        '(layers "*.Cu" "*.Mask") (net 1 "/A"))'
+    ),
+}
+_SINCE = PAD_LAYER_SINCE  # flagged by 10.0.2+, not by 10.0.1
+
+FOOTPRINT_SIDE_SCENARIOS = [
+    # id, footprint layer, pad copper, condition, gate refuses, kicad flags
+    # --- the issue's table: an SMD pad on the other side of its footprint ---
+    ("fp-F-pad-B-eq-F", "F.Cu", "B.Cu", "A.Type == 'pad' && A.Layer == 'F.Cu'", True, _SINCE),
+    ("fp-F-pad-B-eq-B", "F.Cu", "B.Cu", "A.Type == 'pad' && A.Layer == 'B.Cu'", False, False),
+    ("fp-B-pad-F-eq-B", "B.Cu", "F.Cu", "A.Type == 'pad' && A.Layer == 'B.Cu'", True, _SINCE),
+    ("fp-B-pad-F-eq-F", "B.Cu", "F.Cu", "A.Type == 'pad' && A.Layer == 'F.Cu'", False, False),
+    ("fp-B-pad-B-eq-B", "B.Cu", "B.Cu", "A.Type == 'pad' && A.Layer == 'B.Cu'", True, _SINCE),
+    ("fp-B-pad-B-eq-F", "B.Cu", "B.Cu", "A.Type == 'pad' && A.Layer == 'F.Cu'", False, False),
+    # --- != and B.Layer read the footprint's side too ---
+    ("fp-F-pad-B-ne-B", "F.Cu", "B.Cu", "A.Type == 'pad' && A.Layer != 'B.Cu'", True, _SINCE),
+    ("fp-F-pad-B-ne-F", "F.Cu", "B.Cu", "A.Type == 'pad' && A.Layer != 'F.Cu'", False, False),
+    ("fp-F-pad-B-B-eq-F", "F.Cu", "B.Cu", "B.Type == 'pad' && B.Layer == 'F.Cu'", True, _SINCE),
+    ("fp-F-pad-B-B-eq-B", "F.Cu", "B.Cu", "B.Type == 'pad' && B.Layer == 'B.Cu'", False, False),
+    ("fp-B-pad-F-B-ne-B", "B.Cu", "F.Cu", "B.Type == 'pad' && B.Layer != 'B.Cu'", False, False),
+    # --- layer sets (wildcards) ---
+    ("fp-F-pad-B-eq-F*", "F.Cu", "B.Cu", "A.Type == 'pad' && A.Layer == 'F.*'", True, _SINCE),
+    ("fp-F-pad-B-eq-B*", "F.Cu", "B.Cu", "A.Type == 'pad' && A.Layer == 'B.*'", False, False),
+    ("fp-B-pad-F-eq-*Cu", "B.Cu", "F.Cu", "A.Type == 'pad' && A.Layer == '*.Cu'", True, _SINCE),
+    ("fp-F-pad-B-eq-In1", "F.Cu", "B.Cu", "A.Type == 'pad' && A.Layer == 'In1.Cu'", False, False),
+    # --- a through-hole pad reads its footprint's side ---
+    ("fp-B-pth-eq-B", "B.Cu", "*.Cu", "A.Type == 'pad' && A.Layer == 'B.Cu'", True, _SINCE),
+    ("fp-B-pth-eq-F", "B.Cu", "*.Cu", "A.Type == 'pad' && A.Layer == 'F.Cu'", False, False),
+    ("fp-F-pth-ne-B", "F.Cu", "*.Cu", "A.Type == 'pad' && A.Layer != 'B.Cu'", True, _SINCE),
+    # --- a via's Layer is KiCad's null on every release ---
+    ("fp-F-pad-B-via-eq-F", "F.Cu", "B.Cu", "A.Type == 'via' && A.Layer == 'F.Cu'", False, False),
+    ("fp-F-pad-B-via-ne-F", "F.Cu", "B.Cu", "A.Type == 'via' && A.Layer != 'F.Cu'", False, False),
+]
+
+
+@pytest.mark.parametrize(
+    "fp_layer,pad_layer,condition,gate_refuses,kicad_flags",
+    [pytest.param(*s[1:], id=s[0]) for s in FOOTPRINT_SIDE_SCENARIOS],
+)
+def test_gate_reads_a_pads_layer_as_its_footprints(
+    tmp_path, fp_layer, pad_layer, condition, gate_refuses, kicad_flags
+) -> None:
+    """#6201: the gate never passes copper kicad-cli 10.0.2+ flags, whichever
+    side of its footprint the pad is on."""
+    path = _board(
+        tmp_path,
+        PAD,
+        pad=SIDE_PADS[pad_layer],
+        pro=_default_pro(0.1),
+        dru=_dru(f'(rule "p" (condition "{condition}") (constraint clearance (min 0.3mm)))'),
+    )
+    text = path.read_text()
+    assert R5_FOOTPRINT in text, "fixture footprint changed; update the replacement"
+    path.write_text(text.replace(R5_FOOTPRINT, R5_FOOTPRINT.replace("F.Cu", fp_layer)))
+    vias = [Via(17.0, 8.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "/B")]
+
+    refused, message = _gate_refuses(path, vias=vias)
+    assert refused is gate_refuses, message
+
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("kicad-cli not installed; gate verdict checked, KiCad's not")
+    if isinstance(kicad_flags, tuple):
+        version = _kicad_cli_version(Path(cli))
+        assert version is not None, "kicad-cli version unreadable"
+        kicad_flags = version >= kicad_flags
+    flags = _kicad_flags(Path(cli), path, vias=vias)
+    assert bool(flags) is kicad_flags, flags
+
+
+def test_gate_pad_props_carry_the_footprints_layer() -> None:
+    """#6201: a pad item's ``Layer`` is its footprint's side, unknown without one."""
+    from kicad_tools.router.foreign_copper import ForeignItem
+
+    def pad(layers, footprint_layer):
+        return ForeignItem(
+            "pad",
+            1,
+            "/A",
+            "pad R5.1",
+            (),
+            layers,
+            (0, 0, 1, 1),
+            pad_type="smd",
+            footprint_layer=footprint_layer,
+        )
+
+    assert pad(frozenset({"B.Cu"}), "F.Cu").props().layer == "F.Cu"
+    assert pad(frozenset({"F.Cu"}), "B.Cu").props().layer == "B.Cu"
+    assert pad(None, "B.Cu").props().layer == "B.Cu"
+    # Unknown footprint side: any copper layer, so only Edge.Cuts-style
+    # comparisons stay decided.
+    unknown = pad(frozenset({"B.Cu"}), "").props()
+    assert unknown.layer is None
+    track = ItemProps("Track", "/B", layer="B.Cu")
+    assert evaluate_condition("A.Layer == 'F.Cu'", unknown, track) is None
+    assert evaluate_condition("A.Layer == 'Edge.Cuts'", unknown, track) is False
+
+
+def test_board_copper_and_holes_record_the_footprints_layer(tmp_path) -> None:
+    from kicad_tools.router.foreign_copper import board_copper
+
+    text = PAD.read_text().replace(
+        R5_PAD,
+        '(pad "1" thru_hole rect (at 0 0) (size 3.0 1.0) (drill 0.4) '
+        '(layers "*.Cu" "*.Mask") (net 1 "/A"))',
+    )
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(text.replace(R5_FOOTPRINT, R5_FOOTPRINT.replace("F.Cu", "B.Cu")))
+    pcb = PCB.load(str(path))
+    r5 = [i for i in board_copper(pcb) if i.label.startswith("pad R5.")]
+    assert [i.props().layer for i in r5] == ["B.Cu"]
+    holes = [i for i in board_holes(pcb) if "R5." in i.label]
+    assert [i.props().layer for i in holes] == ["B.Cu"]
+    r1 = [i for i in board_copper(pcb) if i.label.startswith("pad R1.")]
+    assert [i.props().layer for i in r1] == ["F.Cu"]
+
+
 def test_hole_refusal_names_the_rule(tmp_path) -> None:
     path = _board(tmp_path, PAD, pad=OVAL_NPTH)
     refused, message = _gate_refuses(path, [_b_track(16.9)])
