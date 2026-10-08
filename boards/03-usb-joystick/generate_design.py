@@ -396,8 +396,8 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
     USB-C F.Cu-only GND pad is already stitched).
     """
     import re as _re
-    import uuid as _uuid
 
+    from kicad_tools.core.schematic_uuids import UuidMinter, uuids_in_text
     from kicad_tools.lvs.board_lvs import _schematic_pin_to_net
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
@@ -532,6 +532,9 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
         print("\n   All single-layer USB-C GND pads already stitched -- no vias added.")
         return 0
 
+    # Content-keyed via UUIDs that avoid every UUID already on the board, so
+    # the same routed input always gets the same stitch vias (Issue #6076).
+    via_uuids = UuidMinter(uuids_in_text(text))
     via_blocks = []
     for anchor, x, y in vias:
         via_blocks.append(
@@ -540,7 +543,7 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
             "\t\t(size 0.6)\n"
             "\t\t(drill 0.3)\n"
             '\t\t(layers "F.Cu" "B.Cu")\n'
-            f'\t\t(uuid "{_uuid.uuid4()}")\n'
+            f'\t\t(uuid "{via_uuids.mint("board03-gnd-stitch", x, y)}")\n'
             f"\t\t(net {gnd_net_id})\n"
             "\t)\n"
         )

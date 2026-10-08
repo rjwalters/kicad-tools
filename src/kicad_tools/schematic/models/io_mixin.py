@@ -7,7 +7,6 @@ Provides file loading and saving capabilities for Schematic class.
 from __future__ import annotations
 
 import copy
-import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +29,7 @@ from .elements import GlobalLabel, HierarchicalLabel, Junction, Label, NoConnect
 from .symbol import SymbolInstance
 
 if TYPE_CHECKING:
+    from kicad_tools.core.schematic_uuids import UuidMinter
     from kicad_tools.erc import ERCReport
 
     from .schematic import Schematic
@@ -372,6 +372,10 @@ class SchematicIOMixin:
         _source_consumed: list[SExp]
         _source_slots: dict[str, tuple[SExp | None, str, SExp]]
         _text_note_sources: dict[tuple[str, float, float], list[SExp]]
+        _uuid_minter: UuidMinter
+
+        def _assign_provisional_uuids(self) -> int: ...
+        def _text_note_uuid(self, text: str, x: float, y: float, seen: dict) -> str: ...
 
         # ``_from_sexp`` constructs the concrete ``Schematic`` via ``cls(...)``.
         # Declaring the constructor signature here lets mypy validate those
@@ -394,6 +398,7 @@ class SchematicIOMixin:
             grid: float = ...,
             snap_mode: object = ...,
             local_symbol_libs: list[Path] | None = None,
+            sheet_file: str | None = None,
         ) -> None: ...
 
     @classmethod
@@ -502,7 +507,8 @@ class SchematicIOMixin:
 
         # Get UUID
         uuid_node_elem = doc.get("uuid")
-        sheet_uuid = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else str(uuid.uuid4())
+        # A file without a root UUID gets the deterministic default (#6076).
+        sheet_uuid = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else None
 
         # Parse lib_symbols to get embedded symbol definitions
         embedded_lib_symbols: dict[str, SExp] = {}
@@ -601,6 +607,17 @@ class SchematicIOMixin:
                     sch.text_notes.append((text, x, y))
                     sch._text_note_sources.setdefault((text, x, y), []).append(child)
 
+        # Keep rule (Issue #6076): every UUID in the file is reserved, so an
+        # element added later can never be minted a UUID the file already
+        # uses, and an element the file gave no UUID gets a deterministic one
+        # now -- before the snapshot, so its fingerprint already carries it.
+        sch._uuid_minter.reserve(
+            str(node.get_first_atom())
+            for node in doc.iter_all()
+            if node.name in ("uuid", "tstamp") and node.get_first_atom() is not None
+        )
+        sch._assign_provisional_uuids()
+
         # Update power counter based on existing power symbols
         max_pwr = 0
         for pwr in sch.power_symbols:
@@ -653,9 +670,9 @@ class SchematicIOMixin:
 
         return lib_symbols
 
-    def _build_text_note_node(self, text: str, x: float, y: float) -> SExp:
-        """Build a text note as SExp node."""
-        return text_node(text, x, y, str(uuid.uuid4()))
+    def _build_text_note_node(self, text: str, x: float, y: float, seen: dict) -> SExp:
+        """Build a text note as SExp node (deterministic UUID, Issue #6076)."""
+        return text_node(text, x, y, self._text_note_uuid(text, x, y, seen))
 
     def _header_slot_nodes(self) -> dict[str, SExp]:
         """Model-generated header/trailer nodes, keyed by node name."""
@@ -724,6 +741,8 @@ class SchematicIOMixin:
         A loaded one (KiCad format ``version`` >= ``KICAD_SCH_FORMAT_VERSION``)
         is written source-preserving: see :meth:`_to_sexp_node_preserving`.
         """
+        # Issue #6076: settle every provisional UUID (write-back) first.
+        self._assign_provisional_uuids()
         if self._source_doc is not None:
             return self._to_sexp_node_preserving(self._source_doc)
 
@@ -748,8 +767,9 @@ class SchematicIOMixin:
             root.append(node)
 
         # Text notes
+        seen_notes: dict = {}
         for text, x, y in self.text_notes:
-            root.append(self._build_text_note_node(text, x, y))
+            root.append(self._build_text_note_node(text, x, y, seen_notes))
 
         root.append(slots["sheet_instances"])
 
@@ -830,6 +850,7 @@ class SchematicIOMixin:
             else:
                 replaced[id(src)] = src
         leftover = [(key, src) for key, src in live if id(src) not in replaced]
+        seen_notes: dict = {}
         for text, x, y in unmatched:
             # A position match wins over a text match: a note retyped in place
             # keeps its own font and UUID even when another deleted note
@@ -838,12 +859,16 @@ class SchematicIOMixin:
                 (p for p in leftover if p[0][0] == text), None
             )
             if pair is None:
-                new_body.append(self._build_text_note_node(text, x, y))
+                new_body.append(self._build_text_note_node(text, x, y, seen_notes))
                 continue
             leftover.remove(pair)
             (old_text, old_x, old_y), src = pair
             uuid_child = src.get("uuid")
-            note_uuid = str(uuid_child.get_first_atom()) if uuid_child else str(uuid.uuid4())
+            note_uuid = (
+                str(uuid_child.get_first_atom())
+                if uuid_child
+                else self._text_note_uuid(text, x, y, seen_notes)
+            )
             replaced[id(src)] = _patch_node(
                 src,
                 text_node(old_text, old_x, old_y, note_uuid),

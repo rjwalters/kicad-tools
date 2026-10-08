@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 from kicad_tools.sexp import SExp
 
 from ..core.board_outline import board_outline_bounds, legacy_arc_points
+from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
 from ..footprints.fp_lib_table import find_project_fp_lib_table, parse_fp_lib_table
@@ -2650,6 +2651,9 @@ class PCB:
         # (strip_traces, dedupe_copper, segments/vias reload) so they rebuild.
         self._segment_keys: set[_SegmentKey] | None = None
         self._via_keys: set[_ViaKey] | None = None
+        # Deterministic UUIDs for items this API adds (Issue #6076); built
+        # lazily so it reserves every UUID the board holds at first use.
+        self._uuid_minter: UuidMinter | None = None
         self._zones: list[Zone] = []
         # Issue #6087: zones embedded in footprints (antenna keepouts and
         # the like).  Kept apart from ``_zones`` so pour/zone-count/save
@@ -2983,7 +2987,11 @@ class PCB:
 
     @staticmethod
     def _build_board_outline_sexp(
-        width: float, height: float, origin_x: float, origin_y: float
+        width: float,
+        height: float,
+        origin_x: float,
+        origin_y: float,
+        minter: UuidMinter | None = None,
     ) -> list[SExp]:
         """Build a rectangular board outline on Edge.Cuts layer.
 
@@ -2997,9 +3005,15 @@ class PCB:
         Corners are walked clockwise:
         ``(ox,oy) -> (ox+w,oy) -> (ox+w,oy+h) -> (ox,oy+h) -> (ox,oy)``.
 
+        ``minter`` (default: a fresh one) supplies the ``gr_line`` UUIDs; pass
+        one seeded with the board's existing UUIDs when adding the outline to
+        an existing board so no UUID is reused.
+
         Returns:
             A list of four ``gr_line`` S-expressions.
         """
+        if minter is None:
+            minter = UuidMinter()
         ox, oy = origin_x, origin_y
         corners = [
             (ox, oy),
@@ -3019,7 +3033,9 @@ class PCB:
                     SExp.list("end", end[0], end[1]),
                     SExp.list("stroke", SExp.list("width", 0.1), SExp.list("type", "default")),
                     SExp.list("layer", "Edge.Cuts"),
-                    SExp.list("uuid", str(uuid.uuid4())),
+                    # Content-keyed (Issue #6076); the minter separates
+                    # degenerate (zero-size) sides that share a key.
+                    SExp.list("uuid", minter.claim("edge", *start, *end)),
                 )
             )
         return lines
@@ -5211,9 +5227,17 @@ class PCB:
                     self._sexp.remove(node)
                 removed += 1
 
-        # Insert new outline (four gr_line Edge.Cuts segments)
-        for line in PCB._build_board_outline_sexp(width, height, origin_x, origin_y):
+        # Insert new outline (four gr_line Edge.Cuts segments) whose UUIDs
+        # avoid every UUID still on the board (Issue #6076).
+        outline_minter = UuidMinter(self._board_uuids())
+        for line in PCB._build_board_outline_sexp(
+            width, height, origin_x, origin_y, minter=outline_minter
+        ):
             self._sexp.append(line)
+            if self._uuid_minter is not None:
+                self._uuid_minter.reserve(
+                    str(n.get_first_atom()) for n in line.iter_all() if n.name == "uuid"
+                )
 
         # Rebuild in-memory lists
         self._graphic_lines = []
@@ -6050,6 +6074,26 @@ class PCB:
 
         return issues
 
+    def mint_uuid(self, *key: object) -> str:
+        """Deterministic, collision-free UUID for an item this API adds (Issue #6076).
+
+        ``uuid5`` of ``key`` (plus an ordinal for repeats) under
+        :data:`~kicad_tools.core.schematic_uuids.SCHEMATIC_UUID_NAMESPACE`,
+        never equal to a UUID already on the board, so building the same board
+        twice writes the same UUIDs.  Existing UUIDs are never changed.
+        """
+        if self._uuid_minter is None:
+            self._uuid_minter = UuidMinter(self._board_uuids())
+        return self._uuid_minter.mint("pcb", *key)
+
+    def _board_uuids(self) -> set[str]:
+        """Every ``(uuid ...)`` / ``(tstamp ...)`` value on the board (lower-cased)."""
+        return {
+            str(node.get_first_atom()).lower()
+            for node in self._sexp.iter_all()
+            if node.name in ("uuid", "tstamp") and node.get_first_atom() is not None
+        }
+
     def add_footprint_from_file(
         self,
         kicad_mod_path: str | Path,
@@ -6102,8 +6146,8 @@ class PCB:
         # Load the footprint from file
         fp_sexp = load_footprint(kicad_mod_path)
 
-        # Generate a new UUID for this footprint instance
-        new_uuid = str(uuid.uuid4())
+        # Deterministic UUID for this footprint instance (Issue #6076)
+        new_uuid = self.mint_uuid("footprint", reference)
 
         # Update the UUID in the footprint
         uuid_node = fp_sexp.find_child("uuid")
@@ -6116,12 +6160,13 @@ class PCB:
         # Library pad identities are not placed-instance identities. Persist
         # fresh IDs even when the library omits them, so native DRC findings
         # can be correlated with the saved board instead of transient IDs.
-        for pad_node in fp_sexp.find_all("pad"):
+        for pad_index, pad_node in enumerate(fp_sexp.find_all("pad")):
+            pad_id = self.mint_uuid("pad", new_uuid, pad_index)
             pad_uuid = pad_node.find_child("uuid")
             if pad_uuid is not None:
-                pad_uuid.set_value(0, str(uuid.uuid4()))
+                pad_uuid.set_value(0, pad_id)
             else:
-                pad_node.append(SExp.list("uuid", str(uuid.uuid4())))
+                pad_node.append(SExp.list("uuid", pad_id))
             legacy_stamp = pad_node.find_child("tstamp")
             if legacy_stamp is not None:
                 pad_node.remove(legacy_stamp)
@@ -6226,7 +6271,7 @@ class PCB:
             ref_prop = SExp.list("property", "Reference", SExp.quoted_atom(reference))
             ref_prop.append(SExp.list("at", 0.0, -1.5))
             ref_prop.append(SExp.list("layer", layer.replace(".Cu", ".SilkS")))
-            ref_prop.append(SExp.list("uuid", str(uuid.uuid4())))
+            ref_prop.append(SExp.list("uuid", self.mint_uuid("property", new_uuid, "Reference")))
             effects = SExp.list("effects")
             font = SExp.list("font")
             font.append(SExp.list("size", 1.0, 1.0))
@@ -6240,7 +6285,7 @@ class PCB:
             val_prop = SExp.list("property", "Value", SExp.quoted_atom(value))
             val_prop.append(SExp.list("at", 0.0, 1.5))
             val_prop.append(SExp.list("layer", layer.replace(".Cu", ".Fab")))
-            val_prop.append(SExp.list("uuid", str(uuid.uuid4())))
+            val_prop.append(SExp.list("uuid", self.mint_uuid("property", new_uuid, "Value")))
             effects = SExp.list("effects")
             font = SExp.list("font")
             font.append(SExp.list("size", 1.0, 1.0))
@@ -6656,7 +6701,9 @@ class PCB:
                 # Issue #4416: match the board's net-reference dialect so
                 # copper added to a name-based board stays name-based on save.
                 net_name_only=self._net_name_only_dialect and bool(net),
-                uuid=str(uuid.uuid4()),
+                uuid=self.mint_uuid(
+                    "segment", net_number, layer, *points[i], *points[i + 1], width
+                ),
             )
             segments.append(seg)
             self._segments.append(seg)
@@ -6726,7 +6773,7 @@ class PCB:
             net_name=net or "",
             # Issue #4416: match the board's net-reference dialect (see add_trace).
             net_name_only=self._net_name_only_dialect and bool(net),
-            uuid=str(uuid.uuid4()),
+            uuid=self.mint_uuid("via", net_number, x, y, size, drill, *layers),
         )
         self._vias.append(via)
 

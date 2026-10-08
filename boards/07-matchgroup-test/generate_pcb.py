@@ -33,13 +33,18 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-import uuid
 from pathlib import Path
+
+from kicad_tools.core.schematic_uuids import UuidSequence
+
+# Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
+# the same uuid5 every run, so a fresh build is byte-reproducible.
+_PCB_UUIDS = UuidSequence("boards/07-matchgroup-test/matchgroup_test.kicad_pcb")
 
 
 def generate_uuid() -> str:
-    """Generate a KiCad-format UUID."""
-    return str(uuid.uuid4())
+    """Next deterministic KiCad-format UUID (Issue #6076)."""
+    return _PCB_UUIDS()
 
 
 # Board dimensions (mm) -- generous size keeps source/sink pairs well
@@ -832,6 +837,7 @@ def generate_pcb(
     replays a committed placement delta's pad re-binding.  ``None`` / empty --
     the default -- emits exactly the authored netlist.
     """
+    _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
     parts = [
         generate_header(),
         generate_nets(),

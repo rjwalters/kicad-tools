@@ -45,7 +45,7 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "2267a78a-4ff4-455f-bc46-ebe02c1061e6")
+		(uuid "ce4bff6e-d91c-54e4-93f6-6128d4b6ad4c")
 	)
 	(gr_line
 		(start 40 0)
@@ -55,7 +55,7 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "11a15107-05c2-4369-a640-af5be0586b1c")
+		(uuid "e4983ca1-1dbe-559e-ba4f-1aef57e46daa")
 	)
 	(gr_line
 		(start 40 30)
@@ -65,7 +65,7 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "c62c60c1-d0d1-4906-9d18-994b71d1ef52")
+		(uuid "60c18b02-5b9b-56ea-a468-c3badfe4dfe4")
 	)
 	(gr_line
 		(start 0 30)
@@ -75,7 +75,7 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "4624db72-e59c-4c54-88f6-0238343df766")
+		(uuid "17b59bb2-bc35-53b9-a5ee-c02b196d0d0f")
 	)
 	(footprint "Pad_RoundRect"
 		(version 20240108)
@@ -89,14 +89,14 @@
 			(size 1.0 1.0)
 			(layers "F.Cu" "F.Paste" "F.Mask")
 			(roundrect_rratio 0.25)
-			(uuid "e35d0572-859f-4586-b9a6-29f523bd1fdd")
+			(uuid "eef5417f-d36d-5c8e-9379-505db4ca126e")
 			(net 2 "PAD_ROUNDRECT")
 		)
-		(uuid "fc4754ed-4a87-4bf6-90e6-57778e254e03")
+		(uuid "c31e32b5-f7d0-5008-95b2-018272521d4b")
 		(property "Reference" "P1"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "f1ab3da7-0077-48d3-b330-c047cd8dcaf8")
+			(uuid "555b1266-ff2b-5e16-b06b-f9acf90a2522")
 			(effects
 				(font
 					(size 1 1)
@@ -107,7 +107,7 @@
 		(property "Value" ""
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "f34a4abf-1fb9-430a-af9f-16f72fde5e5a")
+			(uuid "e8146422-8a49-5e0d-bb3e-f644c36b6e35")
 			(effects
 				(font
 					(size 1 1)
@@ -121,7 +121,7 @@
 		(end 20.8986 17)
 		(width 0.15)
 		(layer "F.Cu")
-		(uuid "a14f906e-bbab-4683-a6cd-5079e6c5e390")
+		(uuid "b22a48b9-a383-584b-a67e-398a703da2db")
 		(net 1)
 	)
 )

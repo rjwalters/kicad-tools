@@ -5,11 +5,11 @@ Symbol definitions and instances for schematic generation.
 """
 
 import re
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.schematic_uuids import pin_uuid, provisional_uuid
 from kicad_tools.core.symbol_transform import normalize_mirror, symbol_to_sheet_offset
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import (
@@ -584,7 +584,7 @@ class SymbolInstance:
     reference: str
     value: str
     unit: int = 1
-    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    uuid_str: str = field(default_factory=provisional_uuid)
     footprint: str = ""
     properties: dict[str, str] = field(default_factory=dict)
     # BOM / DNP flags emitted into the placed symbol.  Defaults preserve
@@ -797,6 +797,22 @@ class SymbolInstance:
 
         return True
 
+    def _pin_uuids(self) -> list[tuple[str, str]]:
+        """``(pin number, pin UUID)`` for every pin, in definition order.
+
+        Each UUID is :func:`~kicad_tools.core.schematic_uuids.pin_uuid` of this
+        symbol's UUID, the pin number and an ordinal among pins sharing that
+        number, so every write of the symbol emits the same pin UUIDs
+        (Issue #6076; they used to be a fresh ``uuid4`` per write).
+        """
+        seen: dict[str, int] = {}
+        out: list[tuple[str, str]] = []
+        for pin in self.symbol_def.pins:
+            ordinal = seen.get(pin.number, 0)
+            seen[pin.number] = ordinal + 1
+            out.append((pin.number, pin_uuid(self.uuid_str, pin.number, ordinal)))
+        return out
+
     def to_sexp_node(self, project_name: str, sheet_path: str) -> SExp:
         """Build S-expression tree for this symbol instance."""
         # Note: x, y formatting reserved for future position string output
@@ -831,9 +847,9 @@ class SymbolInstance:
         for prop_name, prop_value in self.properties.items():
             sym.append(symbol_property_node(prop_name, prop_value, self.x, self.y, hide=True))
 
-        # Add pin UUIDs
-        for pin in self.symbol_def.pins:
-            sym.append(pin_uuid_node(pin.number, str(uuid.uuid4())))
+        # Add pin UUIDs -- derived from this symbol's UUID (Issue #6076)
+        for number, pin_id in self._pin_uuids():
+            sym.append(pin_uuid_node(number, pin_id))
 
         # Add instances
         sym.append(symbol_instances_node(project_name, sheet_path, self.reference, self.unit))
@@ -844,7 +860,7 @@ class SymbolInstance:
         """Generate S-expression for this symbol instance."""
         # Generate pin UUID mappings
         pin_uuids = "\n".join(
-            f'\t\t(pin "{p.number}" (uuid "{uuid.uuid4()}"))' for p in self.symbol_def.pins
+            f'\t\t(pin "{number}" (uuid "{pin_id}"))' for number, pin_id in self._pin_uuids()
         )
 
         # Use _fmt_coord to avoid floating-point precision issues
@@ -974,7 +990,7 @@ class SymbolInstance:
 
         # Get UUID
         uuid_node_elem = node.get("uuid")
-        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else str(uuid.uuid4())
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
 
         # Get BOM / DNP flags (issue #4303).  KiCad omits or uses "yes"/"no"
         # tokens; default to the historical in_bom=True / dnp=False when the

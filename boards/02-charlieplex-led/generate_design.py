@@ -22,7 +22,6 @@ If no output directory is specified, files are written to ./output/
 import os
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 from design_spec import (
@@ -37,11 +36,6 @@ from kicad_tools.recipes.precondition import require_spec
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
-
-
-def generate_uuid() -> str:
-    """Generate a KiCad-format UUID."""
-    return str(uuid.uuid4())
 
 
 # =============================================================================

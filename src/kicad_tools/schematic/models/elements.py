@@ -4,10 +4,10 @@ KiCad Schematic Element Models
 Wire, Junction, Label, HierarchicalLabel, GlobalLabel, PowerSymbol, and WireCollision classes.
 """
 
-import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
+from kicad_tools.core.schematic_uuids import pin_uuid, provisional_uuid
 from kicad_tools.core.symbol_transform import normalize_mirror
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import (
@@ -36,7 +36,7 @@ class Wire:
     y1: float
     x2: float
     y2: float
-    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    uuid_str: str = field(default_factory=provisional_uuid)
 
     @classmethod
     def between(cls, p1: tuple[float, float], p2: tuple[float, float]) -> "Wire":
@@ -68,14 +68,14 @@ class Wire:
         p2_atoms = xy_nodes[1].get_atoms()
 
         uuid_node_elem = node.get("uuid")
-        uuid_str = uuid_node_elem.get_first_atom() if uuid_node_elem else str(uuid.uuid4())
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
 
         return cls(
             x1=round(float(p1_atoms[0]), 2),
             y1=round(float(p1_atoms[1]), 2),
             x2=round(float(p2_atoms[0]), 2),
             y2=round(float(p2_atoms[1]), 2),
-            uuid_str=str(uuid_str),
+            uuid_str=uuid_str,
         )
 
 
@@ -114,7 +114,7 @@ class Junction:
 
     x: float
     y: float
-    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    uuid_str: str = field(default_factory=provisional_uuid)
 
     def __post_init__(self):
         # Round coordinates for consistent matching
@@ -140,9 +140,9 @@ class Junction:
         atoms = at_node.get_atoms()
 
         uuid_node_elem = node.get("uuid")
-        uuid_str = uuid_node_elem.get_first_atom() if uuid_node_elem else str(uuid.uuid4())
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
 
-        return cls(x=round(float(atoms[0]), 2), y=round(float(atoms[1]), 2), uuid_str=str(uuid_str))
+        return cls(x=round(float(atoms[0]), 2), y=round(float(atoms[1]), 2), uuid_str=uuid_str)
 
 
 @dataclass
@@ -155,7 +155,7 @@ class NoConnect:
 
     x: float
     y: float
-    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    uuid_str: str = field(default_factory=provisional_uuid)
 
     def __post_init__(self):
         # Round coordinates for consistent matching
@@ -181,9 +181,9 @@ class NoConnect:
         atoms = at_node.get_atoms()
 
         uuid_node_elem = node.get("uuid")
-        uuid_str = uuid_node_elem.get_first_atom() if uuid_node_elem else str(uuid.uuid4())
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
 
-        return cls(x=round(float(atoms[0]), 2), y=round(float(atoms[1]), 2), uuid_str=str(uuid_str))
+        return cls(x=round(float(atoms[0]), 2), y=round(float(atoms[1]), 2), uuid_str=uuid_str)
 
 
 @dataclass
@@ -194,7 +194,7 @@ class Label:
     x: float
     y: float
     rotation: float = 0
-    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    uuid_str: str = field(default_factory=provisional_uuid)
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression tree for this label."""
@@ -223,9 +223,9 @@ class Label:
         rotation = float(atoms[2]) if len(atoms) > 2 else 0
 
         uuid_node_elem = node.get("uuid")
-        uuid_str = uuid_node_elem.get_first_atom() if uuid_node_elem else str(uuid.uuid4())
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
 
-        return cls(text=str(text), x=x, y=y, rotation=rotation, uuid_str=str(uuid_str))
+        return cls(text=str(text), x=x, y=y, rotation=rotation, uuid_str=uuid_str)
 
 
 @dataclass
@@ -237,7 +237,7 @@ class HierarchicalLabel:
     y: float
     shape: str = "input"  # input, output, bidirectional, passive
     rotation: float = 0
-    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    uuid_str: str = field(default_factory=provisional_uuid)
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression tree for this hierarchical label."""
@@ -270,11 +270,9 @@ class HierarchicalLabel:
         rotation = float(atoms[2]) if len(atoms) > 2 else 0
 
         uuid_node_elem = node.get("uuid")
-        uuid_str = uuid_node_elem.get_first_atom() if uuid_node_elem else str(uuid.uuid4())
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
 
-        return cls(
-            text=str(text), x=x, y=y, shape=str(shape), rotation=rotation, uuid_str=str(uuid_str)
-        )
+        return cls(text=str(text), x=x, y=y, shape=str(shape), rotation=rotation, uuid_str=uuid_str)
 
 
 @dataclass
@@ -297,7 +295,7 @@ class GlobalLabel:
     y: float
     shape: str = "bidirectional"  # input, output, bidirectional, tri_state, passive
     rotation: float = 0
-    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    uuid_str: str = field(default_factory=provisional_uuid)
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression tree for this global label."""
@@ -332,11 +330,9 @@ class GlobalLabel:
         rotation = float(atoms[2]) if len(atoms) > 2 else 0
 
         uuid_node_elem = node.get("uuid")
-        uuid_str = uuid_node_elem.get_first_atom() if uuid_node_elem else str(uuid.uuid4())
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
 
-        return cls(
-            text=str(text), x=x, y=y, shape=str(shape), rotation=rotation, uuid_str=str(uuid_str)
-        )
+        return cls(text=str(text), x=x, y=y, shape=str(shape), rotation=rotation, uuid_str=uuid_str)
 
 
 @dataclass
@@ -348,7 +344,7 @@ class PowerSymbol:
     y: float
     rotation: float = 0
     reference: str = "#PWR?"
-    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    uuid_str: str = field(default_factory=provisional_uuid)
     # BOM / DNP flags.  Defaults preserve historical byte output exactly
     # (in_bom=True -> "yes", dnp=False -> "no") while letting callers emit
     # exclude-from-BOM / do-not-populate power symbols (issue #4303).
@@ -414,7 +410,7 @@ class PowerSymbol:
         sym.append(symbol_property_node("Datasheet", "", self.x, self.y, hide=True))
 
         # Power symbols always have pin "1"
-        sym.append(pin_uuid_node("1", str(uuid.uuid4())))
+        sym.append(pin_uuid_node("1", pin_uuid(self.uuid_str, "1")))
 
         # Add instances section
         sym.append(symbol_instances_node(project_name, sheet_path, self.reference, 1))
@@ -456,7 +452,7 @@ class PowerSymbol:
 
         # Get UUID
         uuid_node_elem = node.get("uuid")
-        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else str(uuid.uuid4())
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
 
         # Get reference from properties
         reference = "#PWR?"

@@ -19,10 +19,10 @@ Usage:
 
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.core.schematic_uuids import UuidSequence, uuids_in_file
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.pcb.center_sheet import centered_origin
@@ -34,9 +34,15 @@ from kicad_tools.schematic.models.schematic import Schematic
 warn_if_stale()
 
 
+# Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
+# the same uuid5 every run, so a fresh build is byte-reproducible.
+# ``create_led_pcb`` restarts the sequence.
+_PCB_UUIDS = UuidSequence("boards/00-simple-led/simple_led.kicad_pcb")
+
+
 def generate_uuid() -> str:
-    """Generate a KiCad-format UUID."""
-    return str(uuid.uuid4())
+    """Next deterministic KiCad-format UUID for the generated PCB."""
+    return _PCB_UUIDS()
 
 
 def create_led_schematic(output_dir: Path) -> Path:
@@ -237,6 +243,7 @@ def create_led_pcb(output_dir: Path) -> Path:
     print("\n" + "=" * 60)
     print("Creating Simple LED PCB...")
     print("=" * 60)
+    _PCB_UUIDS.reset()
 
     # Board dimensions (mm)
     BOARD_WIDTH = 25.0
@@ -471,6 +478,11 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
     from kicad_tools.sexp import SExp, parse_file
 
     doc = parse_file(pcb_path)
+    # Deterministic segment UUIDs that avoid every UUID already on the board
+    # (Issue #6076).
+    segment_uuids = UuidSequence(
+        "boards/00-simple-led/led-anode-route", reserved=uuids_in_file(pcb_path)
+    )
 
     # Resolve the LED_ANODE net number from the header net table.
     net_num: int | None = None
@@ -574,7 +586,7 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
                 SExp.list("end", round(ex, 3), round(ey, 3)),
                 SExp.list("width", 0.2),
                 SExp.list("layer", "F.Cu"),
-                SExp.list("uuid", generate_uuid()),
+                SExp.list("uuid", segment_uuids()),
                 SExp.list("net", net_num),
             )
         )

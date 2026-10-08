@@ -12,12 +12,12 @@ import argparse
 import json
 import math
 import os
-import uuid
 from pathlib import Path
 
 import yaml
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.core.schematic_uuids import UuidMinter
 from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
 from kicad_tools.schematic import PinDef, PinSide, PinType, SymbolDef, generate_symbol_sexp
 from kicad_tools.schematic.models.schematic import Schematic
@@ -188,6 +188,8 @@ def footprint_root():
 
 
 def make_pcb(out, parts):
+    # Deterministic, content-keyed item UUIDs (Issue #6076).
+    mint = UuidMinter()
     # 100 x 75 mm. Native KiCad library geometry is copied unchanged.
     pcb = parse_string("""(kicad_pcb (version 20260206) (generator "kicad-tools")
       (general (thickness 1.6)) (paper "A4")
@@ -220,7 +222,7 @@ def make_pcb(out, parts):
         x, y = part["xy"]
         angle = part["angle"]
         fp.insert_after("layer", parse_string(f"(at {x} {y} {angle})"))
-        fp.append(parse_string(f'(uuid "{uuid.uuid4()}")'))
+        fp.append(parse_string(f'(uuid "{mint.mint("footprint", part["ref"])}")'))
         for prop in fp.find_children("property"):
             key = prop.get_string(0)
             if key in ("Reference", "Value"):
@@ -271,7 +273,7 @@ def make_pcb(out, parts):
                 continue
             pcb.append(
                 parse_string(
-                    f'(segment (start {start[0]} {start[1]}) (end {end[0]} {end[1]}) (width {width}) (layer "{layer}") (net {nets[net]}) (uuid "{uuid.uuid4()}"))'
+                    f'(segment (start {start[0]} {start[1]}) (end {end[0]} {end[1]}) (width {width}) (layer "{layer}") (net {nets[net]}) (uuid "{mint.mint("segment", net, *start, *end, width, layer)}"))'
                 )
             )
 
@@ -301,7 +303,7 @@ def make_pcb(out, parts):
             )
     for net, layer in [("GND", "In1.Cu"), ("+3V3", "In2.Cu")]:
         pcb.append(
-            parse_string(f'''(zone (net {nets[net]}) (net_name "{net}") (layer "{layer}") (uuid "{uuid.uuid4()}")
+            parse_string(f'''(zone (net {nets[net]}) (net_name "{net}") (layer "{layer}") (uuid "{mint.mint("zone", net, layer)}")
           (hatch edge 0.5) (connect_pads yes (clearance 0.2)) (min_thickness 0.2)
           (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
           (polygon (pts (xy 5.5 5.5) (xy 94.5 5.5) (xy 94.5 74.5) (xy 5.5 74.5))))''')
@@ -319,7 +321,7 @@ def make_pcb(out, parts):
             trace(net, [(x, y), via], 0.3)
             pcb.append(
                 parse_string(
-                    f'(via (at {via[0]} {via[1]}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net {nets[net]}) (uuid "{uuid.uuid4()}"))'
+                    f'(via (at {via[0]} {via[1]}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net {nets[net]}) (uuid "{mint.mint("via", net, *via)}"))'
                 )
             )
     path = out / "diffpair_test.kicad_pcb"

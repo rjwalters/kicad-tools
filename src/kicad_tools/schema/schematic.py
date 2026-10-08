@@ -7,7 +7,6 @@ Provides a high-level interface to KiCad schematic files.
 from __future__ import annotations
 
 import re
-import uuid as uuid_mod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.sexp import SExp
 
+from ..core.schematic_uuids import UuidMinter, pin_uuid
 from ..core.sexp_file import load_schematic, save_schematic
 from .label import GlobalLabel, HierarchicalLabel, Label
 from .library import LibrarySymbol, resolve_extends
@@ -24,6 +24,17 @@ from .wire import Junction, NoConnect, Wire
 if TYPE_CHECKING:
     from ..erc import ERCReport
     from ..query.symbols import SymbolList
+
+
+def _deterministic_pins(symbol_uuid: str, pin_numbers: list[str]) -> list[SymbolPin]:
+    """Pins whose UUIDs derive from the owning symbol's (Issue #6076)."""
+    seen: dict[str, int] = {}
+    pins: list[SymbolPin] = []
+    for num in pin_numbers:
+        ordinal = seen.get(num, 0)
+        seen[num] = ordinal + 1
+        pins.append(SymbolPin(number=num, uuid=pin_uuid(symbol_uuid, num, ordinal)))
+    return pins
 
 
 @dataclass
@@ -126,6 +137,9 @@ class Schematic:
         self._labels: list[Label] | None = None
         self._hierarchical_labels: list[HierarchicalLabel] | None = None
         self._sheets: list[SheetInstance] | None = None
+        # Deterministic UUIDs for added elements (Issue #6076); built lazily
+        # so it reserves every UUID in the document at first use.
+        self._uuid_minter: UuidMinter | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> Schematic:
@@ -331,6 +345,22 @@ class Schematic:
 
     # Editing API
 
+    def _mint_uuid(self, kind: str, *key: object) -> str:
+        """Deterministic, collision-free UUID for an element this API adds.
+
+        ``uuid5`` of the sheet UUID, ``kind`` and ``key`` (plus an ordinal
+        for repeats) -- see :mod:`kicad_tools.core.schematic_uuids` -- never
+        equal to any UUID already in the document, whose own UUIDs are
+        never changed (Issue #6076).
+        """
+        if self._uuid_minter is None:
+            self._uuid_minter = UuidMinter(
+                str(node.get_first_atom())
+                for node in self._sexp.iter_all()
+                if node.name in ("uuid", "tstamp") and node.get_first_atom() is not None
+            )
+        return self._uuid_minter.mint(self.uuid or "", kind, *key)
+
     def _find_insertion_index(self) -> int:
         """Find the S-expression index where new elements should be inserted.
 
@@ -389,7 +419,7 @@ class Schematic:
             ValueError: If ``lib_id`` is not found in ``lib_symbols`` and
                 *pin_numbers* was not supplied.
         """
-        sym_uuid = str(uuid_mod.uuid4())
+        sym_uuid = self._mint_uuid("symbol", reference, unit)
 
         # Build properties
         props: dict[str, SymbolProperty] = {
@@ -434,7 +464,7 @@ class Schematic:
                     "Use embed_lib_symbol() first, or supply pin_numbers explicitly."
                 )
 
-        pins = [SymbolPin(number=num, uuid=str(uuid_mod.uuid4())) for num in pin_numbers]
+        pins = _deterministic_pins(sym_uuid, pin_numbers)
 
         instance = SymbolInstance(
             lib_id=lib_id,
@@ -483,7 +513,6 @@ class Schematic:
             The created :class:`SymbolInstance`.
         """
         lib_id = f"power:{name}"
-        sym_uuid = str(uuid_mod.uuid4())
 
         # Detect pins from lib_symbols
         pin_numbers: list[str] = []
@@ -505,6 +534,7 @@ class Schematic:
             if m:
                 max_num = max(max_num, int(m.group(1)))
         ref_value = f"{ref_prefix}{max_num + 1:02d}"
+        sym_uuid = self._mint_uuid("power", ref_value)
 
         props: dict[str, SymbolProperty] = {
             "Reference": SymbolProperty(
@@ -537,7 +567,7 @@ class Schematic:
             ),
         }
 
-        pins = [SymbolPin(number=num, uuid=str(uuid_mod.uuid4())) for num in pin_numbers]
+        pins = _deterministic_pins(sym_uuid, pin_numbers)
 
         instance = SymbolInstance(
             lib_id=lib_id,
@@ -577,7 +607,7 @@ class Schematic:
         wire = Wire(
             start=start,
             end=end,
-            uuid=str(uuid_mod.uuid4()),
+            uuid=self._mint_uuid("wire", *start, *end),
             stroke_width=0,
             stroke_type="default",
         )
@@ -606,7 +636,7 @@ class Schematic:
             text=text,
             position=position,
             rotation=rotation,
-            uuid=str(uuid_mod.uuid4()),
+            uuid=self._mint_uuid("label", text, *position),
         )
         idx = self._find_insertion_index()
         self._sexp.insert(idx, label.to_sexp())
@@ -636,7 +666,7 @@ class Schematic:
             position=position,
             rotation=rotation,
             shape=shape,
-            uuid=str(uuid_mod.uuid4()),
+            uuid=self._mint_uuid("global_label", text, *position),
         )
         idx = self._find_insertion_index()
         self._sexp.insert(idx, label.to_sexp())
@@ -666,7 +696,7 @@ class Schematic:
             position=position,
             rotation=rotation,
             shape=shape,
-            uuid=str(uuid_mod.uuid4()),
+            uuid=self._mint_uuid("hierarchical_label", text, *position),
         )
         idx = self._find_insertion_index()
         self._sexp.insert(idx, label.to_sexp())
@@ -687,7 +717,7 @@ class Schematic:
         """
         junc = Junction(
             position=position,
-            uuid=str(uuid_mod.uuid4()),
+            uuid=self._mint_uuid("junction", *position),
         )
         idx = self._find_insertion_index()
         self._sexp.insert(idx, junc.to_sexp())

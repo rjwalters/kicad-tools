@@ -8,9 +8,10 @@ disagreement".
 Two sources of non-determinism had to be removed to make this possible, and
 both are re-checked here rather than merely trusted:
 
-* ``PCB.add_trace`` / ``add_via`` / ``add_footprint_from_file`` mint a fresh
-  ``uuid.uuid4()`` per object -> ``board.seeded_uuids`` patches ``uuid.uuid4``
-  with a stream drawn from the case.
+* ``PCB.add_trace`` / ``add_via`` / ``add_footprint_from_file`` minted a fresh
+  ``uuid.uuid4()`` per object -> they mint deterministic ``uuid5`` values
+  since Issue #6076, and ``board.seeded_uuids`` still patches ``uuid.uuid4``
+  with a stream drawn from the case as a backstop.
 * ``PCB.create`` stamps ``date.today()`` into the title block ->
   ``CopperCase.board_date`` pins it.
 

@@ -11,11 +11,11 @@ legacy_drv8301; its electrical defects are documented in issue #4993.
 
 import subprocess
 import sys
-import uuid
 from dataclasses import replace
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
@@ -47,9 +47,14 @@ from kicad_tools.schematic.models.schematic import Schematic
 warn_if_stale()
 
 
+# Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
+# the same uuid5 every run, so a fresh build is byte-reproducible.
+_PCB_UUIDS = UuidSequence("boards/05-bldc-motor-controller/bldc_controller.kicad_pcb")
+
+
 def generate_uuid() -> str:
-    """Generate a KiCad-format UUID."""
-    return str(uuid.uuid4())
+    """Next deterministic KiCad-format UUID (Issue #6076)."""
+    return _PCB_UUIDS()
 
 
 def create_bldc_controller(output_dir: Path) -> Path:
@@ -1413,6 +1418,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
 
     Returns the path to the generated PCB file.
     """
+    _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
     print("\n" + "=" * 60)
     print("Creating BLDC Motor Controller PCB...")
     print("=" * 60)
