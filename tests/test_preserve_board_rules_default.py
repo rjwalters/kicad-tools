@@ -357,3 +357,37 @@ def test_minimal_project_minima_identical_under_default_and_opt_out(profile_id):
         == opted_out["board"]["design_settings"]["rule_severities"]
     )
     assert generate_project_dru(rules, default) == generate_project_dru(rules, opted_out)
+
+
+# ---------------------------------------------------------------------------
+# Caller override (board 04's reviewed looser process floors)
+# ---------------------------------------------------------------------------
+
+
+def test_caller_override_relaxes_floors_an_earlier_kct_pass_wrote(tmp_path: Path):
+    """A reviewed looser process must not be blocked by kct's own stricter write."""
+    from dataclasses import replace
+
+    stock = get_profile("jlcpcb-tier1").get_design_rules(layers=2)
+    looser = replace(stock, min_via_drill_mm=0.15, min_via_diameter_mm=0.30)
+    board = tmp_path / "process.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    write_drc_constraints(board, stock, layers=2)
+
+    write_drc_constraints(board, looser, layers=2)
+    sticky = json.loads(board.with_suffix(".kicad_pro").read_text())
+    assert sticky["board"]["design_settings"]["rules"]["min_via_hole"] == stock.min_via_drill_mm
+
+    write_drc_constraints(board, looser, layers=2, preserve_board_rules="0")
+    data = json.loads(board.with_suffix(".kicad_pro").read_text())
+    assert data["board"]["design_settings"]["rules"]["min_via_hole"] == 0.15
+    assert data["board"]["design_settings"]["rules"]["min_via_diameter"] == 0.30
+    # The override is not persisted into the project.
+    assert "KCT_PRESERVE_BOARD_RULES" not in data.get("text_variables", {})
+    assert "(constraint hole_size (min 0.15mm))" in board.with_suffix(".kicad_dru").read_text()
+
+
+def test_caller_override_beats_project_text_variable(rules):
+    data = merge_project_rules(_project("1"), rules, preserve_board_rules="off")
+    assert data["board"]["design_settings"]["rules"]["min_clearance"] == rules.min_clearance_mm
+    assert preserve_board_rules_mode(_project("0"), "true") == PRESERVE_MODE_FULL

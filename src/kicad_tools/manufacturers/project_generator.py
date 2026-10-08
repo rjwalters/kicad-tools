@@ -299,11 +299,13 @@ _PRESERVE_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _PRESERVE_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 
-def preserve_board_rules_mode(project_data: dict) -> str:
+def preserve_board_rules_mode(project_data: dict, override: str | None = None) -> str:
     """Return the board-rule preservation mode a project selects.
 
     Reads the ``KCT_PRESERVE_BOARD_RULES`` native project text variable
-    (case-insensitive, surrounding whitespace ignored):
+    (case-insensitive, surrounding whitespace ignored), or ``override`` when
+    the caller passes one -- see the ``preserve_board_rules`` argument of
+    :func:`merge_project_rules`:
 
     * unset or empty -> :data:`PRESERVE_MODE_STRICTER` (default, #6191)
     * ``1`` / ``true`` / ``yes`` / ``on`` -> :data:`PRESERVE_MODE_FULL` (#5023)
@@ -315,16 +317,21 @@ def preserve_board_rules_mode(project_data: dict) -> str:
 
     Args:
         project_data: Parsed ``.kicad_pro`` data.
+        override: Value to use instead of the project's text variable, with
+            the same spellings.  ``None`` reads the project.
 
     Returns:
         One of the ``PRESERVE_MODE_*`` constants.
     """
-    text_variables = project_data.get("text_variables")
-    raw = (
-        text_variables.get(PRESERVE_BOARD_RULES_VARIABLE)
-        if isinstance(text_variables, dict)
-        else None
-    )
+    if override is not None:
+        raw: object = override
+    else:
+        text_variables = project_data.get("text_variables")
+        raw = (
+            text_variables.get(PRESERVE_BOARD_RULES_VARIABLE)
+            if isinstance(text_variables, dict)
+            else None
+        )
     value = "" if raw is None else str(raw).strip().lower()
     if value == "":
         return PRESERVE_MODE_STRICTER
@@ -409,6 +416,8 @@ def is_template_default_netclass(netclass: dict) -> bool:
 def merge_project_rules(
     project_data: dict,
     rules: DesignRules,
+    *,
+    preserve_board_rules: str | None = None,
 ) -> dict:
     """Apply DRC constraints + severities onto an existing project dict.
 
@@ -435,6 +444,12 @@ def merge_project_rules(
     Args:
         project_data: Parsed ``.kicad_pro`` data (mutated in place).
         rules: Manufacturer design rules to apply.
+        preserve_board_rules: Caller override for the project's
+            ``KCT_PRESERVE_BOARD_RULES`` (same spellings); ``None`` reads the
+            project.  A script that deliberately applies a reviewed process
+            *looser* than rules an earlier kct pass wrote (board 04's paid
+            0.15 mm drilling option) passes ``"0"``, because under the default
+            mode that earlier, stricter value would otherwise stick.
 
     Returns:
         The same ``project_data`` dict, mutated.
@@ -442,7 +457,7 @@ def merge_project_rules(
     board = project_data.setdefault("board", {})
     settings = board.setdefault("design_settings", {})
 
-    mode = preserve_board_rules_mode(project_data)
+    mode = preserve_board_rules_mode(project_data, preserve_board_rules)
     keep_minima = mode != PRESERVE_MODE_OFF
 
     def apply_minima(target: dict, values: dict, keep: bool = keep_minima) -> None:
@@ -508,6 +523,7 @@ def generate_project_dru(
     *,
     manufacturer_id: str = "",
     net_classes: Sequence[NetClassRouting] | None = None,
+    preserve_board_rules: str | None = None,
 ) -> str:
     """Render the factory-floor ``.kicad_dru`` text, honouring project minima.
 
@@ -536,13 +552,15 @@ def generate_project_dru(
         manufacturer_id: Manufacturer label for the DRU header.
         net_classes: Optional net-class routing configs forwarded to
             :func:`~kicad_tools.manufacturers.dru_generator.generate_dru`.
+        preserve_board_rules: Caller override for the project's
+            ``KCT_PRESERVE_BOARD_RULES``; see :func:`merge_project_rules`.
 
     Returns:
         The ``.kicad_dru`` text.
     """
     from .dru_generator import generate_dru
 
-    mode = preserve_board_rules_mode(project_data)
+    mode = preserve_board_rules_mode(project_data, preserve_board_rules)
     dru_rules = rules
     preserved_clearances = ""
     if mode != PRESERVE_MODE_OFF:
@@ -656,6 +674,7 @@ def write_drc_constraints(
     write_dru: bool = True,
     net_classes: Sequence[NetClassRouting] | None = None,
     source_pcb_path: str | Path | None = None,
+    preserve_board_rules: str | None = None,
     _board_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
@@ -694,6 +713,11 @@ def write_drc_constraints(
 
     Args:
         pcb_path: Path to the routed board.
+        preserve_board_rules: Caller override for the project's
+            ``KCT_PRESERVE_BOARD_RULES`` text variable (same spellings),
+            applied to both sidecars without being written into the project;
+            ``None`` (default) reads the project.  See
+            :func:`merge_project_rules`.
         _board_path: Internal -- board to read keepout rule areas from when
             ``pcb_path`` is a staged sibling with no ``.kicad_pcb`` beside it.
         source_pcb_path: Original board when routing to a renamed destination.
@@ -747,6 +771,7 @@ def write_drc_constraints(
                 copper_oz=copper_oz,
                 write_dru=write_dru,
                 net_classes=net_classes,
+                preserve_board_rules=preserve_board_rules,
                 _board_path=pcb_path,
             )
             for result in rendered:
@@ -772,7 +797,7 @@ def write_drc_constraints(
     if pro_path.exists():
         try:
             project_data = json.loads(pro_path.read_text(encoding="utf-8"))
-            merge_project_rules(project_data, rules)
+            merge_project_rules(project_data, rules, preserve_board_rules=preserve_board_rules)
             if manufacturer_id:
                 project_data.setdefault("meta", {})["manufacturer"] = manufacturer_id
         except (json.JSONDecodeError, OSError):
@@ -813,7 +838,11 @@ def write_drc_constraints(
         merged_dru = merge_dru_floors(
             existing_dru,
             generate_project_dru(
-                rules, project_data, manufacturer_id=manufacturer_id, net_classes=net_classes
+                rules,
+                project_data,
+                manufacturer_id=manufacturer_id,
+                net_classes=net_classes,
+                preserve_board_rules=preserve_board_rules,
             ),
             path=dru_path,
         )

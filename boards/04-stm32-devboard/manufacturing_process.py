@@ -489,7 +489,12 @@ def process_rules():
 
 
 def apply_native_floors(pcb_path):
-    """Emit the exact same reviewed DesignRules used by the Python checker."""
+    """Emit the exact same reviewed DesignRules used by the Python checker.
+
+    The reviewed paid-drill floors are deliberately looser than the stock
+    tier1 floors ``kct route`` already wrote, so this pass overwrites instead
+    of keeping the stricter earlier values (the #6191 default).
+    """
     from kicad_tools.manufacturers import write_drc_constraints
 
     write_drc_constraints(
@@ -499,6 +504,7 @@ def apply_native_floors(pcb_path):
         layers=2,
         copper_oz=1.0,
         write_dru=True,
+        preserve_board_rules="0",
     )
 
     project = Path(pcb_path).with_suffix(".kicad_pro")
