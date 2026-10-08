@@ -176,6 +176,12 @@ Doctor completions, and subsequent Judge approvals even between daemon polls.
 The terminal checkpoint helper journals after its atomic write succeeds. It does
 not infer an earlier start or a missing verdict. A caller that bypasses that
 helper can provide only the phases that the daemon actually observes.
+Every checkpoint-observed phase and role span, and an owned attempt its
+checkpoint completes, also carries its execution root's `loom.repo` and
+`loom.sweep_id` (#10637), so it names the repository and sweep, not only the
+issue. `loom.repo` is GitHub's own `owner/name` spelling on every Loom span,
+the value `loom.dispatch.*` carries; where a repo keys a trace ID, the key is
+its ASCII lowercase ([trace identity](trace-identity.md)).
 
 `loom.attempt.worked` (#9420) is the companion a **duration** query needs:
 `"true"` when the span's interval measures an attempt that ran its stage's
@@ -269,9 +275,10 @@ Linux exposes no compression figure) is absent, never zero — the "unknown !=
 zero" contract the telemetry schema states for every measured field.
 
 Role-attempt completion attributes close the same gap on the *why*: a fixed
-`loom.admission.reason` literal — `failure`, `session-down` (#10455), `session-mount-stale` (#10364), `runtime-rejected`,
-`no-token-pool`, `pool-exhausted`, `model-runtime-mismatch`, `load-ceiling`,
-plus `preflight-rejected` (stamped on the runtime-preflight span itself, not a
+`loom.admission.reason` literal — `session-down` (#10455),
+`session-mount-stale` (#10364), `runtime-rejected`, `no-token-pool`,
+`pool-exhausted`, `model-runtime-mismatch`, `load-ceiling`, plus
+`preflight-rejected` (stamped on the runtime-preflight span itself, not a
 role-attempt finish) — plus the measured context that distinguishes them: the
 actual load against the ceiling on a load deferral, which pool gated and its
 total size, and the runtime's missing capabilities. The free-form text these
@@ -280,6 +287,43 @@ attributes stay allowlisted, 256-byte bounded, and free of untrusted content.
 Together the two boundaries' host state and the admission reason let an
 operator separate an attempt deferred for memory pressure from one the kernel
 killed from one that simply timed out, directly in the trace.
+
+A role-runner attempt that launched and then failed (`loom.result=failure`)
+was admitted, so since #10640 it carries **no** `loom.admission.reason` (the
+earlier `failure` literal only repeated `loom.result`). It says why it failed
+instead, from what the launch site observed:
+
+- `loom.failure_class` — a closed, kebab-case vocabulary that is the sweep
+  `failure_class`'s wherever the two describe the same shape, because the
+  same classifiers read the tick's own region of `role-<role>.log`;
+- `loom.exit_code` — present only when the child exited with a code;
+- the span's **status message** — one line built from a fixed template plus
+  a code, signal number, timeout, `io::ErrorKind` or adapter category. It is
+  journalled as `loom.status_message` and exported as the OTLP status
+  description of the `Error` span, not as an attribute. It never carries log
+  text, argv, environment or a path.
+
+| `loom.failure_class` | Meaning |
+|---|---|
+| `launch-failed` | the launcher could not be spawned; no child ran |
+| `wait-failed` | polling the child for its exit failed |
+| `timeout-ceiling` | the role timeout fired and the child was terminated (a load-saturated ceiling is `skipped_load` instead) |
+| `killed-by-signal` | the child was ended by a signal; the message names it |
+| `toolless-launch`, `sandbox-unavailable` | exit 0, but the launch offered no `loom_*` tools (#8448) or the sandbox refused every tool call (#10003) |
+| `session-down`, `session-mount-stale` | a `session-exec` refusal (#10455, #10364) named in the adapter's terminal record; it outranks `preflight-no-cli-start` and matches `loom.admission.reason` |
+| `preflight-auth-failed`, `preflight-mcp-failed`, `preflight-token-selection-failed`, `preflight-no-cli-start` | the adapter died before its CLI started (`# LOOM_CLI_START` never written) |
+| `account-pool-exhausted` | the wrapper's account rotation ran out mid-run |
+| `credential-expired`, `account-exhausted:<category>`, `session-limit`, `runtime-timeout`, `runtime-fatal`, `cwd-deleted`, `model-refusal` | the runtime adapter's own `# LOOM_TERMINAL_RESULT` category |
+| `no-usable-account`, `account-exhausted:<signature>`, `execution-error`, `self-kill:background-wait`, `exit-<code>` | the sweep crash classifier; `exit-<code>` is its last resort |
+| `unclassified:after-launch` | explicit fallback: the tick failed after launch and no site recorded why |
+
+The adapter's `RECOVERABLE` category is its catch-all for an exit it did not
+recognize, so it yields no class of its own; the status message still quotes
+it (`role child exited with code 1; runtime adapter reported RECOVERABLE`).
+The tick's story copies (`loom.timing_source=tick`) carry the same class,
+code and message. A recovered `process_lost` close carries
+`loom.failure_class=supervisor-lost` — the child and its supervisor both
+exited before either recorded a close — and keeps an unset status.
 
 ## Journals and recovery
 

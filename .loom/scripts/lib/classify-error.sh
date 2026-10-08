@@ -238,7 +238,7 @@ _classify_error_claude() {
     #   * `"type":"authentication_error"` — the JSON field itself, whitespace-
     #     tolerant. Unambiguous, and matches the nested envelope too, which no
     #     "401-then-gap" pattern can.
-    #   * `token (has been|was) revoked` — requires the word "token" directly
+    #   * `token (has been |was )?revoked` — requires the word "token" directly
     #     before the revocation verb, so an unrelated "revoked" (a revoked
     #     approval, a revoked branch ruleset) cannot fire it. Covers "OAuth
     #     access token has been revoked" as a substring, so no separate
@@ -247,7 +247,7 @@ _classify_error_claude() {
     # remedy is identical in kind — mark this account bad, rotate, never
     # blind-retry — and `claude-wrapper.sh::is_account_auth_dead` already
     # dispatches on exactly this classification.
-    if echo "$output" | grep -qiE "401[^a-z]*authentication_error|\"type\"[[:space:]]*:[[:space:]]*\"?authentication_error|token (has been|was) revoked|invalid bearer token|OAuth token has expired|token has expired|organization has disabled|failed to authenticate.*socket connection was closed unexpectedly"; then
+    if echo "$output" | grep -qiE "401[^a-z]*authentication_error|\"type\"[[:space:]]*:[[:space:]]*\"?authentication_error|token (has been |was )?revoked|invalid bearer token|OAuth token has expired|token has expired|organization has disabled|failed to authenticate.*socket connection was closed unexpectedly"; then
         echo "TOKEN_EXPIRED"
         return
     fi

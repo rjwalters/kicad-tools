@@ -379,7 +379,7 @@ workflow) that require maintainer approval before being worked on.
 - **Check dependencies**: all task-list items checked before claiming
 - **Guard, then claim**: `loom-daemon forge check-claim <number>` must not exit 0 (exit 0 = blocked — open PR, claim label, fresh lease, or remote branch; take another issue), then `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"`, then lease it: `loom-daemon lease ensure <number> --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"`. `worktree.sh` (below) runs this itself; a lane NOT using it MUST call `lease ensure` directly — a leaseless claim is invisible to other lanes and reclaimable (#9453)
 - **Do the work**: Implement, test, commit, create PR
-- **Mark PR for review**: `./.loom/scripts/create-pr.sh --label "loom:review-requested"` — never a bare `gh pr create` (#6074); the structured body template is canonical in builder-pr.md § "Creating the PR"
+- **Mark PR for review**: `./.loom/scripts/create-pr.sh --label "loom:review-requested"` (copies the star, #10518) — never a bare `gh pr create` (#6074); body template: builder-pr.md § "Creating the PR"
 - **Complete**: Issue auto-closes when PR merges, or mark `loom:blocked` if stuck
 
 ## Exception: Explicit User Instructions

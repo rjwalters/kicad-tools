@@ -713,6 +713,14 @@ held-heron, land-v4 and the twin-otter pair. A regime-adjusted base
 re-applied last, the order `run_explanation` replays. Registering a wrapped
 base later means a new datestamped id built from `IpcwWrap::new`.
 
+*First measurement* (2026-10-07, this repo's own journals, 427 scored
+cases, 2 fit files, so a day-scale replay and not the loom-experiments
+folds): `twin-otter-b+ipcw` vs unwrapped. P25-p75 coverage 46.1% (45.2%);
+late surprise 9.6% (11.0%); common-case pinball4 +752 worse, 95% CI
+[-1755, +2920] (includes 0). By subset (coverage, late): held 42.4%/0.0%,
+sequenced 53.8%/7.7%, starred 38.2%/11.8%. Starred is below the band and
+its pinball4 is worse (CI excludes 0); held is below it on 33 cases.
+
 *Deferred* (#10524, #10528):
 - serving the drift inflation, behind a gate that live evidence supports;
 - the drift signal is computed per estimate from the calibration log, not

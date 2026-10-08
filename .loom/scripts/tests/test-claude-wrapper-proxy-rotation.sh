@@ -19,6 +19,10 @@
 #   5. proxied + host refuses  -> ACCOUNT_POOL_EXHAUSTED, still no tokens calls
 #   6. UNproxied + exhausted   -> tokens mark-bad + tokens select, no
 #                                 proxy-rotate (AC4: unchanged)
+#   7-8. proxied + 'OAuth token revoked' (#10294) -> auth-dead; refusal -> 78
+#   9-10. DIRECT + 'OAuth token revoked' (#10294) against a stateful pool:
+#         one auth-reason mark before re-selection, no backoff, exclusion
+#         until unblock; no eligible alternate -> exit 78
 #
 # Style matches test-token-cache-affinity.sh — plain bash, hand-rolled
 # assertions, stub `loom-daemon` and `claude`.
@@ -68,6 +72,20 @@ assert_not_contains() {
     fi
 }
 
+assert_eq() {
+    local expected="$1" actual="$2" msg="$3"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$expected" == "$actual" ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: $msg"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: $msg"
+        echo "    Expected: '$expected'"
+        echo "    Actual:   '$actual'"
+    fi
+}
+
 echo "============================================"
 echo "test-claude-wrapper-proxy-rotation.sh (#8818)"
 echo "============================================"
@@ -92,7 +110,7 @@ cat > "$STUB/loom-daemon" <<STUB
 #!/usr/bin/env bash
 case "\$1 \${2:-}" in
     "retry-classify account-exhaustion") grep -qiE "hit your (session )?limit" && exit 0 || exit 1 ;;
-    "retry-classify auth-dead") grep -q "401 Invalid bearer token" && exit 0 || exit 1 ;;
+    "retry-classify auth-dead") grep -qE "401 Invalid bearer token|OAuth token revoked" && exit 0 || exit 1 ;;
     "retry-classify session-limit") grep -q "concurrent sessions" && exit 0 || exit 1 ;;
     "retry-classify "*) exit 1 ;;
     "worker proxy-rotate")
@@ -120,10 +138,14 @@ case " $* " in
   *" -p "*) ;;
   *) exit 0 ;;
 esac
+[[ -n "${STUB_CALLS:-}" ]] && printf 'CLAUDE %s\n' "${LOOM_TOKEN_NAME:-}" >> "${STUB_CALLS}"
 if [[ "${LOOM_TOKEN_NAME:-}" == "alpha" ]]; then
     echo "${FAILURE_TEXT}"
     exit 1
 fi
+# The direct cases (STUB_CALLS set) assert no credential reaches the output, so
+# the stub itself must not print one there.
+if [[ -n "${STUB_CALLS:-}" ]]; then echo "stub-claude success as ${LOOM_TOKEN_NAME}"; exit 0; fi
 echo "stub-claude success as ${LOOM_TOKEN_NAME} token=${CLAUDE_CODE_OAUTH_TOKEN}"
 exit 0
 STUB
@@ -149,6 +171,7 @@ run_wrapper() {
         LOOM_STARTUP_MONITOR_WINDOW=1 \
         PATH="$STUB:$PATH" \
         bash "$WRAPPER" -p "ping" 2>&1
+    echo "$?" > "$WS/.last_rc"
     set -e
 }
 
@@ -198,6 +221,236 @@ assert_contains "TOKENS mark-bad alpha" "$calls" "an unproxied launch still bad-
 assert_contains "TOKENS_SELECT" "$calls" "an unproxied launch still re-selects in-process"
 assert_not_contains "PROXY_ROTATE" "$calls" "an unproxied launch never calls proxy-rotate"
 assert_contains "stub-claude success as beta token=tok-beta" "$out" "the unproxied retry runs on the re-selected token"
+
+echo ""
+echo "7. #10294: 'OAuth token revoked' (no auxiliary verb) rotates, no backoff"
+REVOKED="Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator."
+out="$(run_wrapper "$PLACEHOLDER" "$REVOKED")"
+calls="$(cat "$CALLS")"
+assert_contains "PROXY_ROTATE --reason auth-dead" "$calls" "the revoked token asks the proxy for an auth-dead rotation"
+assert_not_contains "TOKENS" "$calls" "no in-container token mutation"
+assert_not_contains "Transient error" "$out" "no transient backoff for a revoked token"
+assert_contains "stub-claude success as beta" "$out" "the alternate account is attempted immediately"
+
+echo ""
+echo "8. #10294: revoked token and no alternate account -> exit 78"
+out="$(run_wrapper "$PLACEHOLDER" "$REVOKED" PROXY_REFUSE=1)"
+assert_contains "ACCOUNT_POOL_EXHAUSTED" "$out" "sentinel still emitted"
+assert_eq "78" "$(cat "$WS/.last_rc")" "exit 78 when no alternate account"
+
+# ---------------------------------------------------------------------------
+# 9-10. #10294 DIRECT (unproxied) launch against a STATEFUL pool fixture.
+#
+# Cases 7-8 prove proxy routing only: the stub above classifies by its own
+# regex and its `tokens select` always answers beta. Here, instead:
+#   * classification comes from the REAL lib/classify-error.sh the wrapper
+#     sources (it hands `--classification <category>` to retry-classify), and
+#     retry-classify itself is a freshly built worktree daemon when one exists
+#     ($LOOM_TEST_SELF_DAEMON, else <checkout>/target/{release,debug}); with no
+#     build it falls back to a mirror of the Rust library arm
+#     (`is_account_auth_dead`: classification == TOKEN_EXPIRED);
+#   * the pool daemon keeps real state under a temp workspace OUTSIDE the
+#     repository: <ws>/.loom/tokens/<name>.token (fake values) and .bad_tokens.
+#     `select` returns the first account (name order) with no bad entry and
+#     fails when none is eligible; `mark-bad` appends; `unblock` removes. An
+#     auth-class reason never expires, as in bad_tokens.rs.
+# ---------------------------------------------------------------------------
+REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
+REAL_SELF=""
+for cand in "${LOOM_TEST_SELF_DAEMON:-}" \
+    "${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/loom-daemon" \
+    "${CARGO_TARGET_DIR:-$REPO_ROOT/target}/debug/loom-daemon"; do
+    if [[ -n "$cand" && -x "$cand" ]] && "$cand" retry-classify auth-dead --help >/dev/null 2>&1; then
+        REAL_SELF="$cand"
+        break
+    fi
+done
+FIX="$(mktemp -d)"
+DWS="$(mktemp -d)"
+trap 'rm -rf "$WS" "$STUB" "$FIX" "$DWS"; rm -f "$CALLS"' EXIT
+
+# Classification delegate: logs what it was asked, then answers via the real
+# build or the library-arm mirror.
+cat > "$FIX/classify-daemon" <<FIXTURE
+#!/usr/bin/env bash
+sub="\${2:-}" cls="" transient=0 args=("\$@")
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --classification) cls="\$2"; shift ;;
+        --classification-transient) transient=1 ;;
+    esac
+    shift
+done
+printf 'CLASSIFY %s classification=%s\n' "\$sub" "\${cls:-<degraded>}" >> "$CALLS"
+if [[ -n "$REAL_SELF" ]]; then exec "$REAL_SELF" "\${args[@]}"; fi
+cat >/dev/null
+case "\$sub" in
+    auth-dead) [[ "\$cls" == "TOKEN_EXPIRED" ]] ;;
+    account-exhaustion) [[ "\$cls" == "TOKEN_EXHAUSTED" ]] ;;
+    session-limit) [[ "\$cls" == "SESSION_LIMIT" ]] ;;
+    transient) echo "\${cls:-UNCLASSIFIED}"; [[ "\$transient" -eq 1 ]] ;;
+    *) exit 1 ;;
+esac
+FIXTURE
+chmod +x "$FIX/classify-daemon"
+
+# Stateful pool daemon (the INSTALLED-daemon role: mark-bad / select / unblock).
+cat > "$FIX/pool-daemon" <<FIXTURE
+#!/usr/bin/env bash
+cmd="\${1:-} \${2:-}"; shift 2 || true
+ws="" name="" reason="" export=0
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --workspace) ws="\$2"; shift ;;
+        --reason) reason="\$2"; shift ;;
+        --export) export=1 ;;
+        --help) exit 0 ;;
+        -*) ;;
+        *) name="\$1" ;;
+    esac
+    shift
+done
+tokdir="\${ws:-$DWS}/.loom/tokens"
+bad="\$tokdir/.bad_tokens"
+touch "\$bad"
+case "\$cmd" in
+    "tokens mark-bad")
+        printf 'MARK_BAD %s reason=%s\n' "\$name" "\$reason" >> "$CALLS"
+        printf '%s\t%s\n' "\$name" "\$reason" >> "\$bad" ;;
+    "tokens unblock")
+        printf 'UNBLOCK %s\n' "\$name" >> "$CALLS"
+        grep -v "^\${name}	" "\$bad" > "\$bad.tmp" || true; mv "\$bad.tmp" "\$bad" ;;
+    "tokens select")
+        for f in "\$tokdir"/*.token; do
+            [[ -e "\$f" ]] || continue
+            n="\$(basename "\$f" .token)"
+            grep -q "^\${n}	" "\$bad" && continue
+            printf 'SELECT %s\n' "\$n" >> "$CALLS"
+            [[ "\$export" -eq 1 ]] && printf "export CLAUDE_CODE_OAUTH_TOKEN='%s'\nexport LOOM_TOKEN_NAME='%s'\n" "\$(cat "\$f")" "\$n" || echo "\$n"
+            exit 0
+        done
+        printf 'SELECT <none>\n' >> "$CALLS"
+        exit 1 ;;
+    "worker proxy-rotate") printf 'PROXY_ROTATE\n' >> "$CALLS"; exit 1 ;;
+esac
+exit 0
+FIXTURE
+chmod +x "$FIX/pool-daemon"
+
+# Stubbed sleep: records calls and returns at once, so a backoff regression
+# cannot stall the suite.
+cat > "$FIX/sleep" <<FIXTURE
+#!/usr/bin/env bash
+printf 'SLEEP %s\n' "\$*" >> "$CALLS"
+FIXTURE
+chmod +x "$FIX/sleep"
+
+# Fake credentials, workspace in a temp dir outside every repository/worktree.
+FAKE_A="fake-alpha-$(printf '%s' "$DWS" | cksum | cut -d' ' -f1)-not-a-real-credential"
+FAKE_B="fake-beta-$(printf '%s' "$DWS" | cksum | cut -d' ' -f1)-not-a-real-credential"
+
+reset_pool() {
+    rm -rf "$DWS/.loom"; mkdir -p "$DWS/.loom/tokens"
+    printf '%s' "$FAKE_A" > "$DWS/.loom/tokens/alpha.token"
+    [[ "$1" == "with-beta" ]] && printf '%s' "$FAKE_B" > "$DWS/.loom/tokens/beta.token"
+    : > "$DWS/.loom/tokens/.bad_tokens"
+}
+
+run_direct() {
+    local start="$SECONDS"
+    : > "$CALLS"
+    set +e
+    env LOOM_WORKSPACE="$DWS" \
+        LOOM_TOKEN_NAME="alpha" \
+        CLAUDE_CODE_OAUTH_TOKEN="$FAKE_A" \
+        FAILURE_TEXT="$REVOKED" \
+        STUB_CALLS="$CALLS" \
+        LOOM_DAEMON_BIN="$FIX/pool-daemon" \
+        LOOM_DAEMON_SELF_BIN="$FIX/classify-daemon" \
+        LOOM_MAX_RETRIES=3 \
+        LOOM_INITIAL_WAIT=60 \
+        LOOM_SESSION_LIMIT_BACKOFF=0 \
+        LOOM_SHEPHERD_TASK_ID="test-direct-revoked" \
+        LOOM_STARTUP_MONITOR_WINDOW=1 \
+        PATH="$FIX:$STUB:$PATH" \
+        bash "$WRAPPER" -p "ping" 2>&1
+    echo "$?" > "$DWS/.last_rc"
+    echo "$((SECONDS - start))" > "$DWS/.elapsed"
+    set -e
+}
+
+# The transient backoff sleeps in 5s slices, indistinguishable from the
+# background monitors' own 5s polls, so detect it at its entry instead:
+# `calculate_wait_time` (-> `retry-classify wait-time`) runs only on the
+# backoff path. The stubbed `sleep` keeps a regression from stalling the suite;
+# the wall-clock assertion next to each use bounds the run independently.
+backoff_sleeps() { grep -E '^CLASSIFY wait-time' "$CALLS" || true; }
+
+# line_of <prefix> — 1-based line of the first call-log entry starting with it.
+line_of() { { grep -n "^$1" "$CALLS" || true; } | head -1 | cut -d: -f1; }
+
+echo ""
+echo "9. #10294 DIRECT: exact incident message on alpha, beta healthy"
+if [[ -n "$REAL_SELF" ]]; then
+    echo "  (retry-classify: real daemon $REAL_SELF)"
+else
+    echo "  (retry-classify: no worktree build found; library-arm mirror over the real classify-error.sh)"
+fi
+reset_pool with-beta
+out="$(run_direct)"
+calls="$(cat "$CALLS")"
+assert_eq "0" "$(cat "$DWS/.last_rc")" "the launch succeeds on the alternate account"
+assert_contains "CLASSIFY auth-dead classification=TOKEN_EXPIRED" "$calls" \
+    "the real shell classifier reports TOKEN_EXPIRED for the exact message"
+assert_eq "1" "$(grep -c '^MARK_BAD ' "$CALLS")" "exactly one bad mark"
+assert_contains "MARK_BAD alpha reason=auth-dead: OAuth token revoked" "$calls" \
+    "the bad mark names alpha with an auth-dead reason"
+reason="$(cut -f2 "$DWS/.loom/tokens/.bad_tokens")"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -qiE '\b(401|oauth|auth(entication)?|unauthorized|token[_[:space:]]?expired|expired|blocked)\b' <<<"$reason"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: the recorded reason is auth-class (bad_tokens.rs auth_reason_regex)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: reason '$reason' is not auth-class"
+fi
+mark_line="$(line_of 'MARK_BAD alpha')"; sel_line="$(line_of 'SELECT beta')"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -n "$mark_line" && -n "$sel_line" && "$mark_line" -lt "$sel_line" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: alpha is bad-marked before beta is selected"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: mark/select order wrong (mark=$mark_line select=$sel_line)"; echo "$calls"
+fi
+assert_eq "1" "$(grep -c '^CLAUDE alpha$' "$CALLS")" "alpha is attempted exactly once (no retry on it)"
+assert_eq "CLAUDE alpha|CLAUDE beta" "$(grep '^CLAUDE ' "$CALLS" | paste -sd'|' -)" \
+    "beta is the very next attempt"
+assert_eq "" "$(backoff_sleeps)" "no transient backoff (wait-time never computed) between the two attempts"
+assert_eq "1" "$(( $(cat "$DWS/.elapsed") < 60 ))" "the failover completes well under a minute"
+assert_not_contains "CLASSIFY transient" "$calls" "the transient predicate is never consulted"
+assert_not_contains "Transient error" "$out" "no transient-backoff log line"
+assert_not_contains "PROXY_ROTATE" "$calls" "a direct launch never asks the proxy"
+assert_contains "Marked account 'alpha' auth-dead in .bad_tokens (OAuth token revoked)" "$out" \
+    "rejection/quarantine evidence names the account and failure class"
+assert_not_contains "$FAKE_A" "$out" "no credential value of alpha in the wrapper output"
+assert_not_contains "$FAKE_B" "$out" "no credential value of beta in the wrapper output"
+assert_not_contains "$FAKE_A" "$(cat "$DWS/.loom/tokens/.bad_tokens")" "no credential value in the quarantine record"
+# Subsequent selection excludes alpha until an explicit unblock.
+assert_eq "beta" "$("$FIX/pool-daemon" tokens select --workspace "$DWS")" "a later selection still excludes alpha"
+assert_eq "beta" "$("$FIX/pool-daemon" tokens select --workspace "$DWS")" "...and again (the auth mark does not expire)"
+"$FIX/pool-daemon" tokens unblock alpha --workspace "$DWS"
+assert_eq "alpha" "$("$FIX/pool-daemon" tokens select --workspace "$DWS")" "after tokens unblock, alpha is eligible again"
+
+echo ""
+echo "10. #10294 DIRECT: exact incident message, no eligible alternate -> exit 78"
+reset_pool alpha-only
+out="$(run_direct)"
+calls="$(cat "$CALLS")"
+assert_eq "78" "$(cat "$DWS/.last_rc")" "exit 78 (EX_CONFIG) when no eligible account remains"
+assert_eq "1" "$(grep -c '^MARK_BAD alpha reason=auth-dead' "$CALLS")" "alpha is still bad-marked once (auth reason)"
+assert_contains "SELECT <none>" "$calls" "selection found no eligible account"
+assert_eq "1" "$(grep -c '^CLAUDE ' "$CALLS")" "no further launch attempt"
+assert_eq "" "$(backoff_sleeps)" "no transient backoff (wait-time never computed) before giving up"
+assert_eq "1" "$(( $(cat "$DWS/.elapsed") < 60 ))" "exit 78 arrives well under a minute"
+assert_contains "ACCOUNT_POOL_EXHAUSTED" "$out" "the pool-exhausted sentinel is emitted"
+assert_not_contains "$FAKE_A" "$out" "no credential value in the failure output"
 
 echo ""
 echo "==================================="

@@ -373,7 +373,7 @@ run_gate_step "cargo test --workspace --doc" cargo test --workspace --doc
 # behavioural difference is cosmetic: the announced label is now the script path
 # ("bash scripts/test-installer.sh"), which names the thing a reader would go
 # run, rather than a prose description ("bash installer suite").
-for _bash_suite in test-installer test-changelog test-daemon-liveness test-install-local-mode test-migrate-consumer; do
+for _bash_suite in ${LOOM_BUILD_GATE_INSTALLER_SUITE-test-installer} test-changelog test-daemon-liveness test-install-local-mode test-migrate-consumer; do
   echo "[build-gate] bash scripts/${_bash_suite}.sh"
   run_gate_step "bash scripts/${_bash_suite}.sh" bash "scripts/${_bash_suite}.sh"
 done

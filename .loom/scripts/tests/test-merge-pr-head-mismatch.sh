@@ -398,10 +398,14 @@ retired "the awk source-order scan asserting _is_head_mismatch_response appeared
 # the merge call — a window the armed queue could not see at all. Assert that
 # re-validation exists and routes to the same exit-3 re-queue signal.
 _reval_body="$(awk '/^_revalidate_merge_guards\(\) \{/{f=1} f; f && /^}/{exit}' "$MERGE_PR_SRC")"
+retired "the grep for the in-shell 'fresh_sha\" != \"\$MERGE_PRECONDITION_SHA' comparison" \
+    "--auto compares the post-wait head against \$MERGE_PRECONDITION_SHA" \
+    "the comparison left merge-pr.sh in the #8191 revalidate-head slice; it is Rust in loom-daemon/src/merge_pr/revalidate_head.rs, so no grep of this file can pass" \
+    "loom-daemon/tests/merge_pr_revalidate_head_differential.rs (frozen retired comparison vs the verb), a_moved_head_reports_the_fresh_sha in src/merge_pr/revalidate_head/tests.rs, and test-merge-pr-auto-blocked-settle.sh AC3 (behavioural: exit 3 naming both SHAs)"
 TESTS_RUN=$((TESTS_RUN + 1))
 # Here-strings, never pipes: `grep -q` exits on first match and would SIGPIPE
 # the producer under `set -o pipefail` (#7771 class).
-if grep -qF -- 'fresh_sha" != "$MERGE_PRECONDITION_SHA' <<<"$_reval_body" && \
+if grep -qF -- 'merge-pr revalidate-head --precondition-sha "${MERGE_PRECONDITION_SHA:-}"' <<<"$_reval_body" && \
    grep -qF -- 'error_head_moved' <<<"$_reval_body"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: --auto re-reads the head after its wait and routes a move to error_head_moved (exit 3, #8410)"

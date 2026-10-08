@@ -173,8 +173,11 @@ FORGE_TYPE="github"
 AUTO_MERGE="true"
 DEFAULT_BRANCH_NAME="main"
 REPO_ROOT="."
-# Only `merge-pr chain-lock` is intercepted; every other subcommand goes to the
-# real daemon the helper resolved above, which the other scenarios rely on.
+# Only `merge-pr chain-lock` is intercepted (plus `merge-pr revalidate-head`,
+# but ONLY when REVALIDATE_HEAD_STUB_RC is set: it then plays a daemon that
+# predates the verb, clap's unknown-subcommand rc 2 or a missing binary's 127);
+# every other subcommand goes to the real daemon the helper resolved above,
+# which the other scenarios rely on.
 CHAIN_LOCK_STUB="$(mktemp)"
 export CHAIN_LOCK_REAL_DAEMON="${LOOM_DAEMON_BIN:-loom-daemon}"
 cat > "$CHAIN_LOCK_STUB" <<'STUB'
@@ -183,11 +186,15 @@ if [[ "$1" == "merge-pr" && "$2" == "chain-lock" ]]; then
     echo "${CHAIN_LOCK_MSG:-LOOM-CHAIN-LOCK-CLEAR}"
     exit "${CHAIN_LOCK_RC:-0}"
 fi
+if [[ "$1" == "merge-pr" && "$2" == "revalidate-head" && -n "${REVALIDATE_HEAD_STUB_RC:-}" ]]; then
+    echo "error: unrecognized subcommand 'revalidate-head'" >&2
+    exit "$REVALIDATE_HEAD_STUB_RC"
+fi
 exec "$CHAIN_LOCK_REAL_DAEMON" "$@"
 STUB
 chmod +x "$CHAIN_LOCK_STUB"
 export LOOM_DAEMON_BIN="$CHAIN_LOCK_STUB"
-unset CHAIN_LOCK_RC CHAIN_LOCK_MSG
+unset CHAIN_LOCK_RC CHAIN_LOCK_MSG REVALIDATE_HEAD_STUB_RC
 
 # Speed: no real sleeping, and a deadline the tests set explicitly.
 LOOM_AUTO_MERGE_POLL_INTERVAL=0
@@ -258,7 +265,7 @@ _reset() {
     MERGE_PRECONDITION_SHA="490b79f1d"
     ALLOW_UNAPPROVED=false
     LOOM_AUTO_MERGE_TIMEOUT=1
-    unset CHAIN_LOCK_RC CHAIN_LOCK_MSG
+    unset CHAIN_LOCK_RC CHAIN_LOCK_MSG REVALIDATE_HEAD_STUB_RC
 }
 
 # Run one of the extracted functions in a subshell, capturing output + rc.
@@ -528,6 +535,55 @@ else
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: #8896: an unreadable re-read does NOT reuse the genuine-absence \`loom:pr\` wording"
 fi
+
+# ===========================================================================
+# Old daemon — a loom-daemon predating `merge-pr revalidate-head` (#8191 slice).
+# The floor test classifies the verb `open` (degrades, never raises the
+# requires-daemon floor), so such a host must reach the SAME verdicts through
+# the retired jq predicate — not refuse every --auto merge as a "forge read
+# failure" (the #8967 class: a floor the host satisfies, then every merge
+# refused).
+# ===========================================================================
+echo ""
+echo "Old daemon: no revalidate-head verb -> the retired jq predicate decides, same verdicts..."
+
+_old_daemon_case() { # <stub-rc> <payload> <expected-rc> <msg>
+    _reset
+    FRESH_PR_JSON="$2"
+    REVALIDATE_HEAD_STUB_RC="$1" run_fn _revalidate_merge_guards
+    assert_eq "$3" "$LAST_RC" "old daemon (verb exits $1): $4"
+}
+
+for _rc in 2 127; do
+    _old_daemon_case "$_rc" '{"number":8220,"head":{"sha":"490b79f1d"},"merged":false,"labels":[{"name":"loom:pr"}]}' 0 \
+      "an unchanged, still-approved head re-validates cleanly (the merge is NOT refused)"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -qF 'could not re-read' <<<"$LAST_OUT"; then
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: old daemon (verb exits $_rc): a readable payload must not be reported as a forge read failure"
+        echo "    In: '$LAST_OUT'"
+    else
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: old daemon (verb exits $_rc): a readable payload is not reported as a forge read failure"
+    fi
+done
+
+_old_daemon_case 2 '{"number":8220,"head":{"sha":"490b79f1d"},"merged":false,"labels":[{"name":"loom:review-requested"}]}' 1 \
+  "a loom:pr revoked during the wait still blocks (labels re-read by jq)"
+assert_contains "$LAST_OUT" "does not carry the \`loom:pr\` label" \
+  "old daemon: the block is the genuine-absence wording, from the label set jq read"
+_old_daemon_case 2 '{"number":8220,"head":{"sha":"490b79f1d"},"merged":false,"labels":[{"name":"loom:pr"},{"name":"loom:changes-requested"}]}' 1 \
+  "a contradicting verdict label still blocks (#8112)"
+_old_daemon_case 2 '{"number":8220,"head":{"sha":"ab58dd87d"},"merged":false,"labels":[{"name":"loom:pr"}]}' 3 \
+  "a moved head is still the exit-3 re-queue (#8410 AC3)"
+assert_contains "$LAST_OUT" "ab58dd87d" \
+  "old daemon: the moved-head diagnostic names the new head"
+_old_daemon_case 2 '{"number":8220,"head":{"sha":"490b79f1d"},"merged":true,"labels":[]}' 0 \
+  "a concurrently-merged PR still short-circuits"
+_old_daemon_case 2 '{}' 1 \
+  "an unreadable re-read still refuses (fails closed, #8896)"
+assert_contains "$LAST_OUT" "could not re-read PR #8220" \
+  "old daemon: and still names the failed re-read as the reason"
 
 # ===========================================================================
 # #10167 — a chain head may take its merge lock DURING the settle wait.

@@ -130,6 +130,7 @@ run_gate_full_tier() {
         -u LOOM_BUILD_SLOT_HELD \
         -u LOOM_BUILD_GATE_NICED \
         -u LOOM_BUILD_GATE_TIER \
+        -u LOOM_BUILD_GATE_INSTALLER_SUITE \
         PATH="$path_value" \
         LOOM_FORCE_PORTABLE_TIMEOUT=1 \
         LOOM_BUILD_GATE_NICE=0 \
@@ -320,6 +321,41 @@ else
     else
         fail "expected a 'cargo test --workspace --doc' step on the fallback branch, cargo calls were: $(cat "$CARGO_LOG")"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# Section 3: the installer suite is droppable by pre-flight path scoping (#10860)
+# ---------------------------------------------------------------------------
+#
+# `loom-daemon preflight` exports LOOM_BUILD_GATE_INSTALLER_SUITE empty when the
+# diff touches no installer input (`buildGate.preflightPathScopes`). Exported
+# empty, the gate skips scripts/test-installer.sh and still runs the other four
+# suites; unset (every other caller), all five run, in order, exactly as before.
+SUITES_REPO="$STUB_DIR/suites-repo"
+mkdir -p "$SUITES_REPO/scripts" && git -C "$SUITES_REPO" init -q
+all_suites="test-installer test-changelog test-daemon-liveness test-install-local-mode test-migrate-consumer"
+for s in $all_suites; do
+    printf '#!/usr/bin/env bash\nprintf "SUITE %%s\\n" %s >> "%s"\n' "$s" "$CARGO_LOG" > "$SUITES_REPO/scripts/$s.sh"
+done
+
+suite_calls() { grep '^SUITE ' "$CARGO_LOG" | sed 's/^SUITE //' | tr '\n' ' ' | sed 's/ $//'; }
+
+: > "$CARGO_LOG"
+unset_rc=0
+unset_output="$(cd "$SUITES_REPO" && run_gate_full_tier "$STUB_DIR:$MIN_PATH" LOOM_TEST_CARGO_FAIL_ON=)" || unset_rc=$?
+if [[ "$unset_rc" -eq 0 && "$(suite_calls)" == "$all_suites" ]]; then
+    pass "with LOOM_BUILD_GATE_INSTALLER_SUITE unset, all five bash suites run in order"
+else
+    fail "expected all five suites ($all_suites), rc=$unset_rc, got: $(suite_calls); gate output: $unset_output"
+fi
+
+: > "$CARGO_LOG"
+skip_rc=0
+skip_output="$(cd "$SUITES_REPO" && run_gate_full_tier "$STUB_DIR:$MIN_PATH" LOOM_TEST_CARGO_FAIL_ON= LOOM_BUILD_GATE_INSTALLER_SUITE=)" || skip_rc=$?
+if [[ "$skip_rc" -eq 0 && "$(suite_calls)" == "${all_suites#test-installer }" ]]; then
+    pass "with LOOM_BUILD_GATE_INSTALLER_SUITE exported empty, test-installer.sh is skipped and the other four run"
+else
+    fail "expected only '${all_suites#test-installer }', rc=$skip_rc, got: $(suite_calls); gate output: $skip_output"
 fi
 
 # ---------------------------------------------------------------------------

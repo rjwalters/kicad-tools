@@ -203,8 +203,8 @@ done
 Curate each at once (no workflow label = treat as `loom:triage`), then add
 `loom:curated` and `loom:issue` in ONE label POST. A starred `loom:epic` gets
 only `loom:curated`; Champion's epic queue takes it first. Guards still apply: skip the labels in the query above and hard exclusions. Never add or remove a priority label (the star and level 2 are human-only; `*-inherited` is daemon-only). Next come red-main
-fixes (`<!-- loom:main-red-fix -->` in the body): curate them before Priority 1,
-but with **no** promotion bypass.
+fixes (`<!-- loom:main-red-fix -->` in the body): curate, never
+promote: the daemon admits them on a red `main`.
 
 ### Priority 1: Approved Issues Needing Curation
 

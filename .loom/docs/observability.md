@@ -558,15 +558,16 @@ reading of every `(account, owner, resource)` pool it spends, from the free
 `gh api rate_limit` probe per published credential directory after every
 reader-refresh pass, plus the 60 s probe above. Each believed reading is
 exported once per tick as `github.ratelimit.{remaining,used,reset}` labelled
-`resource`, `account`, `owner` and `role` (`writer`|`reader`) — since #10343
-no point leaves without `owner`. A label set is still **not** guaranteed to
-be one GitHub bucket: live data shows some `(account, owner, resource)` keys
-carrying two interleaved hourly reset windows (#10571), and several hosts
-export one bucket with readings of different ages. Read `used` together with
-its `reset` (the window), never as a monotone series.
+`resource`, `account`, `owner`, `installation` and `role` (`writer`|`reader`)
+— since #10343 no point leaves without `owner`, and since #10571 `account`/
+`owner` are keyed by the identity minted into each credential directory (its
+`identity.json` sidecar), so a label set is one GitHub bucket. Several hosts
+still export one bucket with readings of different ages, and older daemons'
+data can interleave two windows: read `used` together with its `reset` (the
+window), never as a monotone series.
 `loom.forge.calls` is a delta counter of the requests the `gh` facade sent,
 labelled by caller, inventoried operation, identity role, credential bucket
-(`account`, `cred_owner`, `resource`), `target_owner` and `outcome`; the free
+(`account`, `cred_owner`, `installation`, `resource`), `target_owner` and `outcome`; the free
 `rate_limit` probe appears under `resource="other"` and is never charged to a
 bucket. On a host
 without an exporter, `loom-daemon forge calls --by bucket` shows the same
@@ -595,8 +596,8 @@ recipe is `defaults/observability/signoz/github-shadow.sql`
 (queries 1–3, with query 4 cross-checking against the spans); a large
 shadow on a bucket means spend from outside this fleet's daemons (agent `gh`
 calls, another host, an operator) or an uninstrumented caller. A negative
-shadow means the bucket's readings undercount it (sparse readings, or the
-readings describe another bucket — #10571), not that Loom over-spent.
+shadow means the bucket's readings undercount it (sparse readings, or a
+pre-#10571 daemon's readings of another bucket), not that Loom over-spent.
 
 **Codex session-container state (#10455).** An always-on daemon task (started
 with the other observers, whether or not any telemetry exporter is configured)
@@ -705,6 +706,23 @@ loop also emits one `auto_update.tick` log per tick. It records the decision
 the drain state and the deciding build's version and revision. A host that
 stops converging now says why on every tick. See
 [`telemetry-schema.md` → `auto_update.tick`](telemetry-schema.md#auto_updatetick).
+The token-ranking refresh loop (default-on, every 600 s) emits one
+`token_ranking.refresh` log per workspace per round (#10744). It records the
+accounts probed against `api.anthropic.com`, each account's outcome and
+credential kind, and `api_key_probe_count`, the probes that were metered spend.
+Before #10744 this recurring provider call from every host was invisible. See
+[`telemetry-schema.md` → `token_ranking.refresh`](telemetry-schema.md#token_rankingrefresh).
+
+**IPC latency (#10765).** `loom.daemon.ipc.latency_max{kind}`,
+`loom.daemon.ipc.latency{kind}` and `loom.daemon.ipc.requests{kind}` time
+every IPC request from read to response written, so a live but slow daemon is
+visible without the watchdog. A request slower than 5 s is also logged at WARN
+(`ipc: <kind> request took ...`), except `DaemonStatus` and
+`DaemonStatusSections` (`status --json --section`, #10787; it has its own
+`kind` so cheap sectioned calls do not dilute the full build's series), which
+log their own phase breakdown, and `CancelSweep` / `DispatchSweep` (slow by
+design: the SIGTERM grace and the token-capture poll). See
+[`telemetry-schema.md`](telemetry-schema.md) for the labels.
 
 To add a signal, add a `MetricName` or `SpanName` variant. If it needs a new
 label or attribute key, extend `OPS_METRIC_LABEL_KEYS` or

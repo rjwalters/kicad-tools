@@ -127,9 +127,11 @@ done <<'EOF'
 the verbatim incident wording (#6614)|Failed to authenticate. API Error: 401 {"type":"authentication_error","message":"OAuth access token has been revoked."}|TOKEN_EXPIRED
 nested error envelope the API also serves|API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}|TOKEN_EXPIRED
 prose form, no JSON at all|Failed to authenticate. API Error: 401 OAuth access token has been revoked|TOKEN_EXPIRED
+exact #10294 message, no auxiliary verb|Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator.|TOKEN_EXPIRED
 past-tense variant|Your access token was revoked|TOKEN_EXPIRED
 JSON authentication_error with some OTHER message|{"type":"authentication_error","message":"Invalid API key"}|TOKEN_EXPIRED
 pre-#6614 plain form still classifies|API Error: 401 authentication_error|TOKEN_EXPIRED
+negative: unrelated revoked word without token|Your session was revoked by the admin|RECOVERABLE
 negative: a revoked thing that is not a token|The reviewer revoked their approval and the ruleset was revoked|RECOVERABLE
 EOF
 
@@ -138,6 +140,10 @@ EOF
 assert_eq "SUCCESS" \
     "$(classify_error 'API Error: 401 {"type":"authentication_error","message":"OAuth access token has been revoked."}' 0)" \
     "a CLEAN exit whose output quotes the revoked-token 401 stays SUCCESS (#3233)"
+
+assert_eq "SUCCESS" \
+    "$(classify_error 'Failed to authenticate: OAuth token revoked.' 0)" \
+    "zero exit quoting the no-verb revoked text stays SUCCESS (#10294)"
 
 # TOKEN_EXPIRED must be FATAL, not transient: that is what makes
 # claude-wrapper.sh mark the account bad and rotate instead of retrying the

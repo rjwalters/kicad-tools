@@ -23,14 +23,21 @@
 #     property the prompts depend on);
 #   - an unknown option is a usage error, not a silently-empty list — an
 #     empty list would silently DISABLE every exclusion, which is the failure
-#     mode this whole mechanism exists to prevent.
+#     mode this whole mechanism exists to prevent;
+#   - both list sources (#10013): the registry QUERY path (a stub
+#     `loom-daemon labels list --property hard_exclusion` answer wins) and the
+#     offline FALLBACK array (no daemon on PATH, a daemon without the `labels`
+#     subcommand, or one that answers empty all yield `external`).
 #
 # The Rust half of the lockstep (const vs. this script) is asserted by
 # `loom-daemon/src/hard_exclusion.rs`'s
 # `rust_const_matches_shipped_shell_script` unit test, not here.
 #
-# Hermetic: no forge, no network, no daemon. Requires `jq` only for the
-# fragment-validity checks, which are skipped (with a note) when jq is absent.
+# Sections 1-4 run against whatever `loom-daemon` is on PATH (the registry
+# answer and the fallback array agree on `external`, so they pass either way).
+# Section 5 pins each source explicitly with stub daemons and a scrubbed PATH.
+# No forge, no network. Requires `jq` only for the fragment-validity checks,
+# which are skipped (with a note) when jq is absent.
 #
 # Usage:
 #   bash defaults/scripts/tests/test-hard-exclusion-labels.sh
@@ -162,6 +169,38 @@ if [[ "$help_rc" -eq 0 ]]; then
 else
     fail "expected --help to exit 0, got $help_rc: $help_out"
 fi
+
+# --- 5. Registry query path vs. offline fallback (#10013) ----------------
+BASH_BIN="$(command -v bash)"
+stub_dir="$(mktemp -d)"
+trap 'rm -rf "$stub_dir"' EXIT
+mkdir -p "$stub_dir/empty"
+# Answers the registry query with a distinctive second label.
+printf '#!/bin/sh\n[ "$*" = "labels list --property hard_exclusion" ] || exit 2\nprintf "external\\nstub-only\\n"\n' >"$stub_dir/query"
+# An older binary: no `labels` subcommand (clap usage error).
+printf '#!/bin/sh\nexit 2\n' >"$stub_dir/old"
+# Exits 0 with no output.
+printf '#!/bin/sh\nexit 0\n' >"$stub_dir/empty-answer"
+chmod +x "$stub_dir/query" "$stub_dir/old" "$stub_dir/empty-answer"
+
+run_with() { env -i PATH="$stub_dir/empty" LOOM_DAEMON_BIN="$1" "$BASH_BIN" "$SUBJECT" --lines 2>&1; }
+
+q_out="$(run_with "$stub_dir/query")"
+if [[ "$q_out" == $'external\nstub-only' ]]; then
+    pass "query path: the daemon's registry answer replaces the fallback array"
+else
+    fail "query path: expected the stub's two labels, got: $q_out"
+fi
+
+for case in /nonexistent old empty-answer; do
+    bin="$case"; [[ "$case" == /* ]] || bin="$stub_dir/$case"
+    f_out="$(run_with "$bin")"
+    if [[ "$f_out" == "external" ]]; then
+        pass "fallback path ($case daemon): the offline array (external) is used"
+    else
+        fail "fallback path ($case daemon): expected 'external', got: $f_out"
+    fi
+done
 
 echo ""
 echo "=== Results: $passed passed, $failed failed ==="

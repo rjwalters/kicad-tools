@@ -98,7 +98,11 @@ says so, and no role applies it).
 - **Operator-derived only (#10012).** No role stars on its own judgment. The
   daemon relays a loom-ui star intent; Builder copies it onto the PR it opens;
   `create-issue.sh --parent N` stars a new child of a starred N (audit comment
-  `inherited_from=#N`). Never propagated: holds, claim/lifecycle labels, `loom:heavy`, `points:*`.
+  `inherited_from=#N`), and, when `autonomous.operatorPriority.materializeLabels`
+  is on (default off), the star-liveness pass writes it on every open
+  child a starred issue's text links, removing it once that root loses its
+  star (never an operator's own star, never because the root closed).
+  Never propagated: holds, claim/lifecycle labels, `loom:heavy`, `points:*`.
   Only the star, `external` and (as a default) `tier:*` travel to children;
   the table and full never-list: `daemon-reference.md` → "What travels to children".
 - **Starred first, every stage.** Curator curates starred issues first (a
@@ -122,7 +126,9 @@ says so, and no role applies it).
 - **Red-main fixes** are a body marker, not a label: an issue that fixes a red
   `main` carries `<!-- loom:main-red-fix -->` (Doctor adds it when filing a
   pre-existing failure confirmed on `origin/main`). Curator takes these next,
-  after starred work, with no promotion bypass.
+  after starred work, and never promotes them: while that repo's `main` is
+  verified red the work finder admits them from `loom:triage`/`loom:curated`
+  itself (only when a trusted identity filed them, #9548), and alerts the operator if one stays unclaimed (#10118).
 
 ## Entry points
 
@@ -982,7 +988,7 @@ above. Nothing about the guard changes for any other blocking label.
 label's name, description, color, `kind`, `applied_by`/`removed_by`, and the
 boolean properties the daemon's label tables encode (`park`, `skip`,
 `hold`, `operator_gate`, `blocked_colabel`, `hard_exclusion`, `champion_path`,
-`human_gated`, `contradicts_approval`). It is embedded in `loom-daemon`; query
+`human_gated`, `merge_hold`, `operator_hold`, `contradicts_approval`). It is embedded in `loom-daemon`; query
 it with `loom-daemon labels list --property park` / `labels get <name>`
 (non-zero exit on an unknown label or property).
 

@@ -1783,7 +1783,7 @@ _auth_dead_phrase() {
     # reason string instead of falling through to the generic default — grep
     # returns the LEFTMOST match, so the quoted `"type":"` wrapper is never
     # captured with it.
-    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|(OAuth )?(access )?token (has been|was) revoked|authentication_error|invalid bearer token|OAuth token has expired|token has expired" | head -1)"
+    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|(OAuth )?(access )?token (has been |was )?revoked|authentication_error|invalid bearer token|OAuth token has expired|token has expired" | head -1)"
     echo "${m:-401/invalid credential}"
 }
 
@@ -2792,7 +2792,7 @@ run_with_retry() {
             log_error "Re-authenticate the affected account(s), then run 'loom-daemon tokens unblock <name>'."
             echo "# ACCOUNT_POOL_EXHAUSTED" >&2
             clear_retry_state
-            return 1
+            return 78  # EX_CONFIG: no alternate account (#10294)
         fi
 
         # Check if this is a transient error worth retrying
