@@ -48,7 +48,7 @@ def test_sourced_profiles_carry_the_published_value(mfr: str) -> None:
     # counting the board's layers.
     assert values == {SOURCED[mfr]}
     resolved = vscore_clearance_for(mfr)
-    assert resolved == (SOURCED[mfr], mfr, True)
+    assert resolved == (SOURCED[mfr], mfr, True, None)
 
 
 @pytest.mark.parametrize("mfr", sorted(SOURCED))
