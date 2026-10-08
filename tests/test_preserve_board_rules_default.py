@@ -391,3 +391,44 @@ def test_caller_override_beats_project_text_variable(rules):
     data = merge_project_rules(_project("1"), rules, preserve_board_rules="off")
     assert data["board"]["design_settings"]["rules"]["min_clearance"] == rules.min_clearance_mm
     assert preserve_board_rules_mode(_project("0"), "true") == PRESERVE_MODE_FULL
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_clearance"),
+    [(None, 0.15), ("0", None)],  # None -> the profile floor
+)
+def test_caller_override_reaches_renamed_route_staging(
+    tmp_path: Path, rules, override, expected_clearance
+):
+    """``preserve_board_rules=`` survives the ``source_pcb_path`` staging branch.
+
+    A renamed route renders sidecars from the authored source in a temporary
+    staging directory; the override must be forwarded into that recursive
+    call, apply to both sidecars, and never be written into either project.
+    """
+    source = tmp_path / "authored.kicad_pcb"
+    source.write_text("(kicad_pcb)")
+    source.with_suffix(".kicad_pro").write_text(json.dumps(_project()))
+    source_before = source.with_suffix(".kicad_pro").read_bytes()
+    output = tmp_path / "routed" / "renamed.kicad_pcb"
+    output.parent.mkdir()
+
+    write_drc_constraints(
+        output,
+        rules,
+        manufacturer_id="jlcpcb-tier1",
+        layers=4,
+        source_pcb_path=source,
+        preserve_board_rules=override,
+    )
+
+    expected = rules.min_clearance_mm if expected_clearance is None else expected_clearance
+    data = json.loads(output.with_suffix(".kicad_pro").read_text())
+    assert data["board"]["design_settings"]["rules"]["min_clearance"] == expected
+    default = next(c for c in data["net_settings"]["classes"] if c["name"] == "Default")
+    assert default["clearance"] == expected
+    assert "KCT_PRESERVE_BOARD_RULES" not in data.get("text_variables", {})
+    dru = output.with_suffix(".kicad_dru").read_text()
+    assert f'(rule "Clearance - jlcpcb-tier1"\n  (constraint clearance (min {expected}mm)))' in dru
+    # The authored source is read-only.
+    assert source.with_suffix(".kicad_pro").read_bytes() == source_before

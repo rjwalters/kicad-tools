@@ -1285,7 +1285,9 @@ Values kct itself wrote on an earlier pass count as authored too, so a script
 that deliberately applies a *looser* reviewed process on top of them passes
 `preserve_board_rules="0"` to `write_drc_constraints` (board 04's paid
 0.15 mm drilling option does). That overrides the text variable for one call
-without writing it into the project.
+without writing it into the project. `kct check --emit-dru` and
+`--emit-drc-constraints` have no CLI flag for the opt-out; set the
+`KCT_PRESERVE_BOARD_RULES` project text variable instead.
 
 An existing destination sidecar must match either the corresponding authored
 source or the result of applying the current manufacturer floors to it. JSON

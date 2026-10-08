@@ -517,13 +517,20 @@ def generate(output):
     (output / "fp-lib-table").write_text(
         '(fp_lib_table (version 7) (lib (name "board05_revB") (type "KiCad") (uri "${KIPRJMOD}/board05_revB.pretty") (options "") (descr "TI DRV8313 land pattern")))'
     )
+    # These minima are honoured by default (#6191: stricter authored values
+    # survive `kct check --emit-dru`), so they must describe the copper this
+    # board actually ships, not an aspiration.  routing.json is routed and
+    # native-DRC-reviewed against the JLCPCB 4-layer 0.1016 mm (4 mil)
+    # clearance floor -- its tightest gaps are ~0.112 mm -- so clearance is
+    # authored at that floor.  Every routed track is >= 0.15 mm and every via
+    # is >= 0.45/0.2 mm, so the remaining minima are genuine.
     (output / "bldc_controller.kicad_pro").write_text(
         json.dumps(
             {
                 "board": {
                     "design_settings": {
                         "rules": {
-                            "min_clearance": 0.127,
+                            "min_clearance": 0.1016,
                             "min_through_hole_diameter": 0.2,
                             "min_track_width": 0.15,
                             "min_via_diameter": 0.45,
@@ -534,15 +541,11 @@ def generate(output):
                         }
                     }
                 },
-                # Board 05 routes to the JLCPCB 0.1 mm floor; its authored
-                # 0.127 mm minima are stricter than the router targets, so opt
-                # out of the #6191 keep-stricter default (as board 04 does).
-                "text_variables": {"KCT_PRESERVE_BOARD_RULES": "0"},
                 "net_settings": {
                     "classes": [
                         {
                             "name": "Default",
-                            "clearance": 0.127,
+                            "clearance": 0.1016,
                             "track_width": 0.2,
                             "via_diameter": 0.6,
                             "via_drill": 0.3,
