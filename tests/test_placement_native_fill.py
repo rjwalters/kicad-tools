@@ -9,10 +9,18 @@ from shapely.ops import unary_union
 from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import parse_string
-from kicad_tools.zones.placement_fill import fill_around_fixed_copper, find_kicad_python
+from kicad_tools.zones.placement_fill import (
+    MULTILAYER_FILL_MIN_VERSION,
+    fill_around_fixed_copper,
+    find_kicad_python,
+    kicad_python_version,
+    multilayer_fill_supported,
+    parse_pcbnew_version,
+)
 from tests.test_routing_placement_disposition import board_text
 
 NATIVE_PYTHON = find_kicad_python()
+NATIVE_VERSION = kicad_python_version(NATIVE_PYTHON) if NATIVE_PYTHON else None
 
 
 def _zone_content(zone_text: str) -> str:
@@ -47,6 +55,12 @@ def _count_zone(board_text: str, zone_text: str) -> int:
 def test_native_eligible_fill_clears_and_preserves_fixed_zone(
     tmp_path, project_clearance, multilayer, name_only
 ):
+    if multilayer and not multilayer_fill_supported(NATIVE_VERSION):
+        pytest.skip(
+            f"multilayer native fill needs KiCad >= "
+            f"{'.'.join(map(str, MULTILAYER_FILL_MIN_VERSION))} (found {NATIVE_VERSION}); "
+            "fills come out empty on older pcbnew (Issue #6101)"
+        )
     zone = """(zone (net 1) (net_name "BAD") (layer "F.Cu")
       (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
       (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
@@ -288,3 +302,27 @@ def test_worker_failure_surfaces_its_stderr(tmp_path):
         fill_around_fixed_copper(board, frozenset({"BAD"}), python=fake)
     assert info.value.returncode == 1
     assert board.read_text() == source
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("10.0.1", False),
+        ("10.0.2", True),
+        ("10.0.6", True),
+        ("10.1.0", True),
+        ("9.0.7", False),
+        ("10.0.1-rc1", False),
+        ("(10.0.1)", True),  # unparseable: do not skip
+        (None, True),
+    ],
+)
+def test_multilayer_fill_version_gate(version, expected):
+    """Version gate for multilayer fills works on mocked version strings (Issue #6101)."""
+    assert multilayer_fill_supported(version) is expected
+
+
+def test_parse_pcbnew_version():
+    assert parse_pcbnew_version("10.0.6") == (10, 0, 6)
+    assert parse_pcbnew_version("10.1") == (10, 1, 0)
+    assert parse_pcbnew_version("garbage") is None

@@ -77,6 +77,41 @@ def find_kicad_python() -> Path | None:
     return None
 
 
+#: Multilayer (``layers`` list) zones fill empty on pcbnew < 10.0.2 (Issue #6101).
+MULTILAYER_FILL_MIN_VERSION = (10, 0, 2)
+
+
+def parse_pcbnew_version(version: str) -> tuple[int, ...] | None:
+    """Parse a ``pcbnew.Version()`` string such as ``"10.0.1"`` or ``"10.0.2-rc1"``."""
+    match = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", version or "")
+    if not match:
+        return None
+    return tuple(int(g) if g else 0 for g in match.groups())
+
+
+def multilayer_fill_supported(version: str | None) -> bool:
+    """Whether a pcbnew version fills multilayer zones (unknown versions assumed fine)."""
+    parsed = parse_pcbnew_version(version) if version else None
+    return parsed is None or parsed >= MULTILAYER_FILL_MIN_VERSION
+
+
+def kicad_python_version(python: Path) -> str | None:
+    """Return ``pcbnew.Version()`` as reported by ``python``, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            [str(python), "-c", "import pcbnew; print(pcbnew.Version())"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    return lines[-1].strip() if lines else None
+
+
 def fill_around_fixed_copper(
     board: Path, protected_nets: frozenset[str], *, python: Path | None = None
 ) -> None:
