@@ -903,3 +903,170 @@ class TestEdgeCases:
 
         # Should not crash, components should be within board
         assert np.all(np.isfinite(new_vector.data))
+
+
+# ---------------------------------------------------------------------------
+# Violation-only trigger and placement grid (issue #6250)
+# ---------------------------------------------------------------------------
+
+
+def _vector_from(positions: list[tuple[float, float]], side: int = 0) -> PlacementVector:
+    data = np.zeros(len(positions) * FIELDS_PER_COMPONENT, dtype=np.float64)
+    for i, (x, y) in enumerate(positions):
+        base = i * FIELDS_PER_COMPONENT
+        data[base] = x
+        data[base + 1] = y
+        data[base + 3] = float(side)
+    return PlacementVector(data=data)
+
+
+def _board04_u2_c11() -> tuple[list[ComponentDef], PlacementVector, BoardOutline]:
+    """Board 04's hand floorplan: U2 (LQFP-48 pad box) 0.45 mm below C11."""
+    comps = [
+        ComponentDef(reference="U2", width=9.8, height=9.8),
+        ComponentDef(reference="C11", width=3.0, height=1.3),
+    ]
+    vec = _vector_from([(31.0, 22.0), (25.0, 16.0)])
+    return comps, vec, BoardOutline(min_x=0.0, min_y=0.0, max_x=60.0, max_y=40.0)
+
+
+def _edge_gaps(vec: PlacementVector, comps: list[ComponentDef], i: int, j: int):
+    d = vec.data
+    bi, bj = i * FIELDS_PER_COMPONENT, j * FIELDS_PER_COMPONENT
+    gx = abs(d[bj] - d[bi]) - (comps[i].width + comps[j].width) / 2
+    gy = abs(d[bj + 1] - d[bi + 1]) - (comps[i].height + comps[j].height) / 2
+    return gx, gy
+
+
+class TestViolationOnlyTrigger:
+    """``min_clearance_mm`` leaves legal pairs alone (issue #6250)."""
+
+    def test_margin_mode_nudges_board04_u2(self):
+        """Documents the bug: a 0.45 mm gap is inside the 0.5 mm margin."""
+        comps, vec, board = _board04_u2_c11()
+        new_vec, result = slide_off_overlaps(vec, comps, board)
+        assert result.overlaps_resolved == 1
+        assert new_vec.data[1] == pytest.approx(22.0275)
+
+    def test_legal_pair_inside_margin_is_untouched(self):
+        comps, vec, board = _board04_u2_c11()
+        new_vec, result = slide_off_overlaps(vec, comps, board, min_clearance_mm=0.2, grid_mm=0.05)
+        assert np.array_equal(new_vec.data, vec.data)
+        assert result.overlaps_resolved == 0
+        assert result.overlaps_remaining == 0
+        assert result.max_displacement_applied == 0.0
+        assert result.overlap_details == ()
+
+    def test_diagonal_pair_uses_corner_distance_like_drc_cost(self):
+        """0.15 mm per-axis corner gaps are 0.21 mm apart: legal at 0.2 mm."""
+        from kicad_tools.placement.cost import (
+            ComponentPlacement,
+            DesignRuleSet,
+            compute_drc_violations,
+        )
+
+        comps = _make_components(2, size=2.0)
+        vec = _vector_from([(0.0, 0.0), (2.15, 2.15)])
+        placements = [
+            ComponentPlacement(reference=c.reference, x=vec.data[4 * i], y=vec.data[4 * i + 1])
+            for i, c in enumerate(comps)
+        ]
+        sizes = {c.reference: (c.width, c.height) for c in comps}
+        assert compute_drc_violations(placements, DesignRuleSet(min_clearance=0.2), sizes) == 0
+
+        new_vec, result = slide_off_overlaps(vec, comps, _make_board(), min_clearance_mm=0.2)
+        assert np.array_equal(new_vec.data, vec.data)
+        assert result.overlaps_remaining == 0
+
+    def test_genuine_overlap_is_separated_to_the_margin(self):
+        comps = _make_components(2, size=2.0)
+        vec = _vector_from([(0.0, 0.0), (1.0, 0.0)])
+        new_vec, result = slide_off_overlaps(
+            vec, comps, _make_board(), min_clearance_mm=0.2, max_iterations=20
+        )
+        gx, _gy = _edge_gaps(new_vec, comps, 0, 1)
+        assert gx >= 0.5 - 1e-9
+        assert result.overlaps_resolved == 1
+        assert result.overlaps_remaining == 0
+
+    def test_clearance_violation_without_overlap_is_separated(self):
+        """A 0.1 mm gap is below the 0.2 mm rule, so it is pushed to 0.5 mm."""
+        comps = _make_components(2, size=2.0)
+        vec = _vector_from([(0.0, 0.0), (2.1, 0.0)])
+        new_vec, result = slide_off_overlaps(
+            vec, comps, _make_board(), min_clearance_mm=0.2, max_iterations=20
+        )
+        gx, _gy = _edge_gaps(new_vec, comps, 0, 1)
+        assert gx >= 0.5 - 1e-9
+        assert result.overlaps_resolved == 1
+
+    def test_only_the_violating_pair_moves(self):
+        """A legal neighbour inside the margin stays exactly where it was."""
+        comps = _make_components(3, size=2.0)
+        # U1/U2 overlap along x; U3 sits 0.3 mm above U1 (legal, but inside
+        # the 0.5 mm margin). U1's x-push keeps that 0.3 mm y-gap.
+        vec = _vector_from([(0.0, 0.0), (1.5, 0.0), (0.0, 2.3)])
+        margin_vec, _ = slide_off_overlaps(vec, comps, _make_board(), max_iterations=20)
+        assert margin_vec.data[9] != vec.data[9]  # margin mode pushes U3 too
+
+        new_vec, _result = slide_off_overlaps(
+            vec, comps, _make_board(), min_clearance_mm=0.2, max_iterations=20
+        )
+        assert new_vec.data[8] == vec.data[8]
+        assert new_vec.data[9] == vec.data[9]
+        assert not np.array_equal(new_vec.data[:2], vec.data[:2])
+
+    def test_default_keeps_historical_margin_behaviour(self):
+        comps = _make_components(2, size=2.0)
+        vec = _vector_from([(0.0, 0.0), (2.3, 0.0)])  # 0.3 mm gap, legal
+        new_vec, result = slide_off_overlaps(vec, comps, _make_board())
+        assert result.overlaps_resolved == 1
+        gx, _gy = _edge_gaps(new_vec, comps, 0, 1)
+        assert gx >= 0.5 - 1e-9
+
+
+class TestPlacementGrid:
+    """``grid_mm`` keeps every displacement a whole number of grid steps."""
+
+    @staticmethod
+    def _on_grid(value: float, grid: float) -> bool:
+        return abs(value / grid - round(value / grid)) < 1e-6
+
+    def test_displacements_land_on_grid(self):
+        comps = _make_components(3, size=2.0)
+        vec = _vector_from([(0.0, 0.0), (1.3, 0.2), (0.4, 1.45)])
+        new_vec, result = slide_off_overlaps(
+            vec, comps, _make_board(), min_clearance_mm=0.2, grid_mm=0.05, max_iterations=50
+        )
+        assert result.max_displacement_applied > 0
+        for i in range(3):
+            for axis in (0, 1):
+                k = i * FIELDS_PER_COMPONENT + axis
+                assert self._on_grid(new_vec.data[k] - vec.data[k], 0.05)
+                # Positions started on the grid, so they stay on it.
+                assert self._on_grid(new_vec.data[k], 0.05)
+        assert result.overlaps_remaining == 0
+
+    def test_rounding_never_shrinks_the_separation(self):
+        comps = _make_components(2, size=2.0)
+        vec = _vector_from([(0.0, 0.0), (1.0, 0.0)])
+        unsnapped, _ = slide_off_overlaps(
+            vec, comps, _make_board(), min_clearance_mm=0.2, max_iterations=20
+        )
+        snapped, _ = slide_off_overlaps(
+            vec, comps, _make_board(), min_clearance_mm=0.2, grid_mm=0.05, max_iterations=20
+        )
+        assert _edge_gaps(snapped, comps, 0, 1)[0] >= _edge_gaps(unsnapped, comps, 0, 1)[0]
+
+    def test_snap_stays_inside_the_board(self):
+        board = BoardOutline(min_x=0.0, min_y=0.0, max_x=10.0, max_y=10.0)
+        comps = _make_components(2, size=2.0)
+        # U1 hugs the left edge, so it can only take the clamped push.
+        vec = _vector_from([(1.0, 5.0), (2.0, 5.0)])
+        new_vec, _ = slide_off_overlaps(
+            vec, comps, board, min_clearance_mm=0.2, grid_mm=0.05, max_iterations=20
+        )
+        for i in range(2):
+            x = new_vec.data[i * FIELDS_PER_COMPONENT]
+            assert 1.0 - 1e-9 <= x <= 9.0 + 1e-9
+            assert self._on_grid(x - vec.data[i * FIELDS_PER_COMPONENT], 0.05)

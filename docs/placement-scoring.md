@@ -154,9 +154,14 @@ therefore carries a soft decoupling term (`placement/decoupling.py`):
   pin; the snap finishes the job.
 
 `--seed current --max-iterations 0` keeps a hand floorplan as it is and runs
-only slide-off and the snap. Add `--no-slide-off` to move the caps and nothing
-else: on board 04 the slide-off pre-pass nudges U2 by 0.03 mm, which is enough
-to break the fine-pitch escape routing (#6250).
+only slide-off and the snap. On a warm start slide-off only moves a part that
+overlaps another or sits closer than the objective's 0.2 mm DRC clearance
+(measured the same way as the `drc` term), and rounds each move to the 0.05 mm
+placement grid. A legal pair that is merely inside slide-off's 0.5 mm margin
+stays where it is, so a feasible floorplan comes back with only the caps moved.
+Before #6250 the pre-pass nudged board 04's U2 0.0275 mm off-grid (0.45 mm from
+C11), which broke its fine-pitch escape routing. Generated seeds
+(`force-directed`, `random`) still spread every pair out to the 0.5 mm margin.
 `--weights '{"decoupling": 0}'` turns the term and the snap off. The JSON
 document lists each cap's pin and distance under `"decoupling"`.
 

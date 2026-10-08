@@ -345,6 +345,95 @@ class TestSeedCurrentWiring:
         assert captured["mean"] is None
 
 
+def _two_resistor_pcb(path: Path, r2_at: tuple[float, float]) -> Path:
+    """R1 at (10, 10) and R2 at *r2_at*; both pad boxes are 2.8 x 1.0 mm."""
+    footprints = ""
+    for ref, (x, y) in (("R1", (10.0, 10.0)), ("R2", r2_at)):
+        footprints += f"""\
+  (footprint "R_0805" (layer "F.Cu")
+    (at {x} {y} 0)
+    (property "Reference" "{ref}")
+    (pad "1" smd rect (at -1.0 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+    (pad "2" smd rect (at 1.0 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "N2"))
+  )
+"""
+    path.write_text(
+        f"""\
+(kicad_pcb (version 20230101) (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+  )
+  (net 0 "")
+  (net 1 "N1")
+  (net 2 "N2")
+{footprints}  (gr_line (start 0 0) (end 30 0) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 30 0) (end 30 20) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 30 20) (end 0 20) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 0 20) (end 0 0) (layer "Edge.Cuts") (width 0.05))
+)
+"""
+    )
+    return path
+
+
+class TestSeedCurrentSlideOff:
+    """`--seed current` slide-off never moves a legal hand floorplan (#6250)."""
+
+    def _run(self, pcb: Path, out: Path, **kwargs) -> int:
+        return run_optimize_placement(
+            str(pcb),
+            seed_method="current",
+            max_iterations=0,
+            output_path=str(out),
+            quiet=True,
+            **kwargs,
+        )
+
+    def test_legal_layout_inside_the_margin_is_kept_exactly(self, tmp_path):
+        # R2 sits 0.3 mm below R1: legal at the 0.2 mm clearance rule, but
+        # inside slide-off's 0.5 mm margin -- the board 04 U2/C11 shape.
+        pcb = _two_resistor_pcb(tmp_path / "in.kicad_pcb", r2_at=(10.0, 11.3))
+        components, *_ = _read_board_data(str(pcb))
+        before = _read_current_vector(str(pcb), components).data
+
+        out = tmp_path / "out.kicad_pcb"
+        assert self._run(pcb, out) == 0
+        after = _read_current_vector(str(out), components).data
+        assert np.array_equal(after, before)
+
+        # Byte-identical to the same run with slide-off disabled.
+        out_no_slide = tmp_path / "out_no_slide.kicad_pcb"
+        assert self._run(pcb, out_no_slide, no_slide_off=True) == 0
+        assert out.read_bytes() == out_no_slide.read_bytes()
+
+    def test_overlapping_parts_are_still_separated_on_grid(self, tmp_path):
+        pcb = _two_resistor_pcb(tmp_path / "in.kicad_pcb", r2_at=(10.5, 10.2))
+        components, *_ = _read_board_data(str(pcb))
+        before = _read_current_vector(str(pcb), components).data
+
+        out = tmp_path / "out.kicad_pcb"
+        assert self._run(pcb, out) == 0  # feasible after slide-off
+        after = _read_current_vector(str(out), components).data
+        assert not np.array_equal(after, before)
+
+        widths = {c.reference: (c.width, c.height) for c in components}
+        (w1, h1), (w2, h2) = widths["R1"], widths["R2"]
+        gap_x = abs(after[4] - after[0]) - (w1 + w2) / 2
+        gap_y = abs(after[5] - after[1]) - (h1 + h2) / 2
+        assert max(gap_x, gap_y) >= 0.5 - 1e-6
+
+        # Every displacement is a whole number of 0.05 mm grid steps.
+        for k in (0, 1, 4, 5):
+            steps = (after[k] - before[k]) / 0.05
+            assert abs(steps - round(steps)) < 1e-6
+
+
 class TestInitializeMeanOverride:
     """CMAESStrategy.initialize honours config.extra['mean']."""
 

@@ -6640,7 +6640,9 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "violations without discarding a ratified hand floorplan. It never "
             "returns a placement scoring worse than the one it started from; with "
             "--max-iterations 0 it keeps the layout and only runs the slide-off "
-            "and decoupling-cap snap passes."
+            "and decoupling-cap snap passes. On a warm start slide-off only moves "
+            "parts that overlap or break the 0.2 mm clearance rule, and keeps its "
+            "moves on a 0.05 mm grid, so a legal floorplan is not touched."
         ),
     )
     op_parser.add_argument(
@@ -6731,7 +6733,10 @@ def _add_optimize_placement_parser(subparsers) -> None:
         "--no-slide-off",
         action="store_true",
         default=False,
-        help="Disable slide-off overlap pre-processing on the seed placement",
+        help=(
+            "Disable slide-off overlap resolution (the pre-pass on the seed and "
+            "the post-pass on the result)"
+        ),
     )
     op_parser.add_argument(
         "--anchor-weight",
