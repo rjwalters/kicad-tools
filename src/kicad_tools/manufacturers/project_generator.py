@@ -276,18 +276,161 @@ def build_project_data(
     }
 
 
+#: Name of the native project text variable that selects the board-rule
+#: preservation mode.  See :func:`preserve_board_rules_mode`.
+PRESERVE_BOARD_RULES_VARIABLE = "KCT_PRESERVE_BOARD_RULES"
+
+#: ``KCT_PRESERVE_BOARD_RULES`` modes (Issues #5023, #6191).
+#:
+#: ``"stricter"``  -- unset / empty (the default since #6191): numeric minima
+#:     become ``max(authored, profile)``; severities are overwritten; an
+#:     untouched template ``Default`` netclass is still relaxed.
+#: ``"full"``      -- ``1`` / ``true`` / ``yes`` / ``on``: the #5023 opt-in.
+#:     Stricter minima AND authored severities are kept, every netclass
+#:     (template-signature ``Default`` included) is preserved, and the DRU
+#:     carries one ``Reviewed clearance`` rule per netclass.
+#: ``"off"``       -- ``0`` / ``false`` / ``no`` / ``off``: the legacy
+#:     overwrite.  Profile values replace every minimum.
+PRESERVE_MODE_STRICTER = "stricter"
+PRESERVE_MODE_FULL = "full"
+PRESERVE_MODE_OFF = "off"
+
+_PRESERVE_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_PRESERVE_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def preserve_board_rules_mode(project_data: dict) -> str:
+    """Return the board-rule preservation mode a project selects.
+
+    Reads the ``KCT_PRESERVE_BOARD_RULES`` native project text variable
+    (case-insensitive, surrounding whitespace ignored):
+
+    * unset or empty -> :data:`PRESERVE_MODE_STRICTER` (default, #6191)
+    * ``1`` / ``true`` / ``yes`` / ``on`` -> :data:`PRESERVE_MODE_FULL` (#5023)
+    * ``0`` / ``false`` / ``no`` / ``off`` -> :data:`PRESERVE_MODE_OFF`
+
+    Any other value logs a warning and falls back to the default
+    :data:`PRESERVE_MODE_STRICTER` -- the mode that can never loosen an
+    authored minimum.
+
+    Args:
+        project_data: Parsed ``.kicad_pro`` data.
+
+    Returns:
+        One of the ``PRESERVE_MODE_*`` constants.
+    """
+    text_variables = project_data.get("text_variables")
+    raw = (
+        text_variables.get(PRESERVE_BOARD_RULES_VARIABLE)
+        if isinstance(text_variables, dict)
+        else None
+    )
+    value = "" if raw is None else str(raw).strip().lower()
+    if value == "":
+        return PRESERVE_MODE_STRICTER
+    if value in _PRESERVE_TRUE_VALUES:
+        return PRESERVE_MODE_FULL
+    if value in _PRESERVE_FALSE_VALUES:
+        return PRESERVE_MODE_OFF
+    logger.warning(
+        "Unrecognised %s=%r; using the default (keep stricter authored minima). "
+        "Use 1/true to also keep authored severities, or 0/false for the legacy "
+        "profile overwrite.",
+        PRESERVE_BOARD_RULES_VARIABLE,
+        raw,
+    )
+    return PRESERVE_MODE_STRICTER
+
+
+def _template_netclass_signature() -> tuple[float, float, float, float]:
+    from kicad_tools.core.project_file import DEFAULT_NETCLASS_DEFINITION
+
+    return tuple(  # type: ignore[return-value]
+        float(DEFAULT_NETCLASS_DEFINITION[key]) for key in _NETCLASS_SIGNATURE_KEYS
+    )
+
+
+#: Keys compared, in order, against :data:`TEMPLATE_DEFAULT_NETCLASS_SIGNATURES`.
+_NETCLASS_SIGNATURE_KEYS: tuple[str, str, str, str] = (
+    "clearance",
+    "track_width",
+    "via_diameter",
+    "via_drill",
+)
+
+#: ``(clearance, track_width, via_diameter, via_drill)`` tuples, in mm, of
+#: ``Default`` netclasses that come from a template rather than a designer
+#: (Issue #6191).  Under the default ``stricter`` mode a ``Default`` netclass
+#: that matches one of these exactly (within :data:`_SIGNATURE_TOLERANCE_MM`)
+#: is treated as unauthored and relaxed to the profile, exactly as before
+#: #6191.  Without this exemption every board whose project was stamped from a
+#: template would have its stock 0.20 mm clearance "preserved" on
+#: regeneration -- the external softstart board went from 10 to 23 kicad-cli
+#: DRC errors that way.  ``KCT_PRESERVE_BOARD_RULES=1`` still preserves these.
+#:
+#: * kct's own template, derived from
+#:   :data:`kicad_tools.core.project_file.DEFAULT_NETCLASS_DEFINITION`
+#:   (currently ``(0.15, 0.25, 0.6, 0.3)``).
+#: * kct's pre-#5654 template ``(0.2, 0.25, 0.6, 0.3)``.
+#: * KiCad 5/6 stock ``(0.2, 0.25, 0.8, 0.4)``.
+#: * KiCad 7+ stock ``(0.2, 0.2, 0.6, 0.3)``.
+#:
+#: Deliberately no equivalent heuristic exists for ``design_settings.rules``:
+#: values there are authored (#6191 ruling).
+TEMPLATE_DEFAULT_NETCLASS_SIGNATURES: tuple[tuple[float, float, float, float], ...] = (
+    _template_netclass_signature(),
+    (0.2, 0.25, 0.6, 0.3),
+    (0.2, 0.25, 0.8, 0.4),
+    (0.2, 0.2, 0.6, 0.3),
+)
+
+_SIGNATURE_TOLERANCE_MM = 1e-6
+
+
+def is_template_default_netclass(netclass: dict) -> bool:
+    """Return True when ``netclass`` matches a known template ``Default``.
+
+    See :data:`TEMPLATE_DEFAULT_NETCLASS_SIGNATURES`.  A netclass missing any
+    of the four signature keys, or carrying a non-numeric value, never
+    matches.
+    """
+    values: list[float] = []
+    for key in _NETCLASS_SIGNATURE_KEYS:
+        value = netclass.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        values.append(float(value))
+    return any(
+        all(abs(v - s) <= _SIGNATURE_TOLERANCE_MM for v, s in zip(values, signature, strict=True))
+        for signature in TEMPLATE_DEFAULT_NETCLASS_SIGNATURES
+    )
+
+
 def merge_project_rules(
     project_data: dict,
     rules: DesignRules,
 ) -> dict:
     """Apply DRC constraints + severities onto an existing project dict.
 
-    Preserves unrelated keys. By default, applies the profile's owned entries
-    (including legacy stock-default relaxation). A native project text variable
-    ``KCT_PRESERVE_BOARD_RULES=1`` retains stricter authored minima, Default
-    netclass dimensions, and explicit severities. Factory minima may still
-    tighten a lower authored value. The text variable survives native project
-    editing and makes this policy part of the reviewed source (#5023).
+    Preserves unrelated keys.  How profile minima combine with the project's
+    authored minima is selected by the native project text variable
+    ``KCT_PRESERVE_BOARD_RULES`` (see :func:`preserve_board_rules_mode`):
+
+    * **unset / empty (default, #6191)** -- every numeric minimum in
+      ``design_settings.rules``, ``design_settings.defaults`` and the
+      ``Default`` netclass becomes ``max(authored, profile)``: a stricter
+      authored value wins, and the profile still tightens an authored value
+      below the fab floor.  Severities in ``_NON_BLOCKING_SEVERITIES`` are
+      overwritten.  A ``Default`` netclass that exactly matches a template
+      signature (:data:`TEMPLATE_DEFAULT_NETCLASS_SIGNATURES`) counts as
+      unauthored and is relaxed to the profile.
+    * **``1`` / ``true``** (#5023) -- as the default, but authored severities
+      are kept too and a template-signature ``Default`` netclass is preserved.
+    * **``0`` / ``false``** -- the pre-#6191 legacy overwrite: profile values
+      replace every minimum, including stricter authored ones.
+
+    The text variable survives native project editing, which makes the
+    policy part of the reviewed source.
 
     Args:
         project_data: Parsed ``.kicad_pro`` data (mutated in place).
@@ -299,22 +442,23 @@ def merge_project_rules(
     board = project_data.setdefault("board", {})
     settings = board.setdefault("design_settings", {})
 
-    preserve = str(
-        project_data.get("text_variables", {}).get("KCT_PRESERVE_BOARD_RULES", "0")
-    ).lower() in {"1", "true"}
+    mode = preserve_board_rules_mode(project_data)
+    keep_minima = mode != PRESERVE_MODE_OFF
 
-    def apply_minima(target: dict, values: dict) -> None:
+    def apply_minima(target: dict, values: dict, keep: bool = keep_minima) -> None:
         for key, value in values.items():
             previous = target.get(key)
             target[key] = (
-                max(previous, value) if preserve and isinstance(previous, (int, float)) else value
+                max(previous, value)
+                if keep and isinstance(previous, (int, float)) and not isinstance(previous, bool)
+                else value
             )
 
     apply_minima(settings.setdefault("rules", {}), build_project_rules(rules))
 
     severities = settings.setdefault("rule_severities", {})
     for key, value in _NON_BLOCKING_SEVERITIES.items():
-        if preserve:
+        if mode == PRESERVE_MODE_FULL:
             severities.setdefault(key, value)
         else:
             severities[key] = value
@@ -333,12 +477,17 @@ def merge_project_rules(
     # Relax the applied Default-netclass clearance/track/via to the profile
     # so the kicad-cli ``clearance`` test (which reads the applied netclass
     # clearance, not min_clearance) does not flag the stock 0.20mm default.
+    # Under the default mode an authored (non-template) Default netclass
+    # keeps its stricter values (#6191).
     net_settings = project_data.setdefault("net_settings", {})
     classes = net_settings.setdefault("classes", [])
     default_cls = next((c for c in classes if c.get("name") == "Default"), None)
     if default_cls is None:
         classes.insert(0, build_default_netclass(rules))
     else:
+        keep_default_cls = keep_minima and not (
+            mode == PRESERVE_MODE_STRICTER and is_template_default_netclass(default_cls)
+        )
         apply_minima(
             default_cls,
             {
@@ -347,6 +496,7 @@ def merge_project_rules(
                 "via_diameter": rules.min_via_diameter_mm,
                 "via_drill": rules.min_via_drill_mm,
             },
+            keep_default_cls,
         )
 
     return project_data
@@ -359,18 +509,51 @@ def generate_project_dru(
     manufacturer_id: str = "",
     net_classes: Sequence[NetClassRouting] | None = None,
 ) -> str:
-    """Render factory rules while honoring opt-in reviewed project floors."""
+    """Render the factory-floor ``.kicad_dru`` text, honouring project minima.
+
+    Custom DRU constraints override project minima during native zone fill
+    and DRC, so the stricter authored project minima must be carried into
+    BOTH representations (#5023, #6191).  The mode comes from the
+    ``KCT_PRESERVE_BOARD_RULES`` text variable (see
+    :func:`preserve_board_rules_mode`):
+
+    * **unset / empty (default)** -- each DRU scalar floor (track width,
+      clearance, via drill/diameter, annular ring, copper-to-edge) becomes
+      ``max(profile, native project minimum)``.  A ``Reviewed clearance -
+      <class>`` rule is emitted only for netclasses whose clearance is
+      strictly greater than that clearance floor; a rule at or below the
+      floor is redundant and, because later matching KiCad rules win, could
+      only shadow more specific rules.
+    * **``1`` / ``true``** -- the same floors, plus one ``Reviewed clearance``
+      rule for every netclass (ascending clearance, so the stricter class
+      wins where two classes meet), exactly as #5023 shipped.
+    * **``0`` / ``false``** -- plain profile floors, no reviewed rules.
+
+    Args:
+        rules: Manufacturer design rules.
+        project_data: Parsed ``.kicad_pro`` data (normally already merged by
+            :func:`merge_project_rules`); not mutated.
+        manufacturer_id: Manufacturer label for the DRU header.
+        net_classes: Optional net-class routing configs forwarded to
+            :func:`~kicad_tools.manufacturers.dru_generator.generate_dru`.
+
+    Returns:
+        The ``.kicad_dru`` text.
+    """
     from .dru_generator import generate_dru
 
+    mode = preserve_board_rules_mode(project_data)
     dru_rules = rules
     preserved_clearances = ""
-    if str(project_data.get("text_variables", {}).get("KCT_PRESERVE_BOARD_RULES", "0")).lower() in {
-        "1",
-        "true",
-    }:
-        # Custom DRU constraints override project minima during native zone
-        # fill. Preserve those minima in BOTH representations (#5023).
+    if mode != PRESERVE_MODE_OFF:
         native = project_data.get("board", {}).get("design_settings", {}).get("rules", {})
+
+        def native_floor(key: str) -> float:
+            value = native.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return 0
+            return value
+
         mapping = {
             "min_trace_width_mm": "min_track_width",
             "min_clearance_mm": "min_clearance",
@@ -382,7 +565,7 @@ def generate_project_dru(
         dru_rules = replace(
             rules,
             **{
-                field: max(getattr(rules, field), native.get(key, 0))
+                field: max(getattr(rules, field), native_floor(key))
                 for field, key in mapping.items()
             },
         )
@@ -391,6 +574,8 @@ def generate_project_dru(
         classes = project_data.get("net_settings", {}).get("classes", [])
         for cls in sorted(classes, key=lambda c: c.get("clearance", 0)):
             clearance = max(dru_rules.min_clearance_mm, cls.get("clearance", 0))
+            if mode == PRESERVE_MODE_STRICTER and clearance <= dru_rules.min_clearance_mm:
+                continue
             name = cls["name"].replace("\\", "\\\\").replace("'", "\\'")
             condition = f"A.NetClass == '{name}' || B.NetClass == '{name}'"
             preserved_clearances += (
@@ -479,7 +664,9 @@ def write_drc_constraints(
     auto-loads the relaxed built-in minimums, and -- by default -- a
     companion ``<board>.kicad_dru`` for the rule families the project
     schema can't express.  An existing ``.kicad_pro`` is preserved and
-    only the constraint/severity entries are overwritten.
+    only the constraint/severity entries are merged; stricter authored
+    minima win unless the project opts out with
+    ``KCT_PRESERVE_BOARD_RULES=0`` (see :func:`merge_project_rules`, #6191).
 
     The ``.kicad_dru`` half has matching preserve-and-merge semantics
     (Issue #4600): the tier-floor rules land inside a sentinel-delimited

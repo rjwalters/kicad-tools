@@ -308,6 +308,8 @@ otherwise the exported planes change on refill even when DRC passes. The
 persistent `KCT_PRESERVE_BOARD_RULES=1` opt-in now retains stricter minima,
 netclass clearances and explicit severities. Factory requirements can still
 raise a lower authored floor. Legacy stock-default relaxation is unchanged.
+(Since [#6191](https://github.com/rjwalters/kicad-tools/issues/6191), stricter
+minima are kept by default; `=1` additionally keeps severities and `=0` opts out.)
 All 31 export/native-rule tests pass. The final board07 copper is byte-identical
 through a second independent native refill under the emitted rules.
 
