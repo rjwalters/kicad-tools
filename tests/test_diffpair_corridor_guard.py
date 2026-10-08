@@ -34,6 +34,8 @@ These tests cover the four units that make that safe:
 
 from __future__ import annotations
 
+import pytest
+
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import (
     DifferentialPair,
@@ -493,3 +495,173 @@ def test_yield_rerun_starts_without_phantom_negotiated_usage():
             | {c for v in route.vias for c in router.grid._get_via_cells(v)}
         )
     assert int(router.grid._usage_count.sum()) == expected
+
+
+# ---------------------------------------------------------------------------
+# Issue #5923: the re-run cap is proportional to the first main pass
+# ---------------------------------------------------------------------------
+
+
+def _pin_rerun_budget(
+    monkeypatch, *, ceiling=300.0, factor=1.0, floor=60.0, override=False
+) -> None:
+    import kicad_tools.router.diffpair_routing as dpr
+
+    monkeypatch.setattr(dpr, "_CORRIDOR_YIELD_RERUN_S", ceiling)
+    monkeypatch.setattr(dpr, "_CORRIDOR_YIELD_RERUN_FACTOR", factor)
+    monkeypatch.setattr(dpr, "_CORRIDOR_YIELD_RERUN_FLOOR_S", floor)
+    monkeypatch.setattr(dpr, "_CORRIDOR_YIELD_RERUN_OVERRIDE", override)
+
+
+def test_rerun_cap_is_proportional_to_the_first_pass(monkeypatch):
+    from kicad_tools.router.diffpair_routing import _corridor_yield_rerun_cap
+
+    _pin_rerun_budget(monkeypatch, factor=1.0)
+    assert _corridor_yield_rerun_cap(120.0) == 120.0
+    _pin_rerun_budget(monkeypatch, factor=1.5)
+    assert _corridor_yield_rerun_cap(100.0) == 150.0
+
+
+def test_rerun_cap_has_a_floor(monkeypatch):
+    from kicad_tools.router.diffpair_routing import _corridor_yield_rerun_cap
+
+    _pin_rerun_budget(monkeypatch, floor=60.0)
+    assert _corridor_yield_rerun_cap(5.0) == 60.0
+    assert _corridor_yield_rerun_cap(0.0) == 60.0
+    # A floor above the ceiling never lifts the cap past the ceiling.
+    _pin_rerun_budget(monkeypatch, ceiling=30.0, floor=60.0)
+    assert _corridor_yield_rerun_cap(5.0) == 30.0
+
+
+def test_rerun_cap_is_bounded_by_the_ceiling(monkeypatch):
+    from kicad_tools.router.diffpair_routing import _corridor_yield_rerun_cap
+
+    _pin_rerun_budget(monkeypatch, ceiling=300.0)
+    assert _corridor_yield_rerun_cap(1000.0) == 300.0
+    # Unknown first-pass time: the pre-#5923 fixed cap.
+    assert _corridor_yield_rerun_cap(None) == 300.0
+
+
+def test_rerun_cap_env_setting_is_an_absolute_override(monkeypatch):
+    from kicad_tools.router.diffpair_routing import _corridor_yield_rerun_cap
+
+    _pin_rerun_budget(monkeypatch, ceiling=450.0, override=True)
+    assert _corridor_yield_rerun_cap(10.0) == 450.0
+    assert _corridor_yield_rerun_cap(1000.0) == 450.0
+
+
+def test_rerun_cap_override_is_read_from_the_environment():
+    """``KCT_CORRIDOR_YIELD_RERUN_S`` set at import time => override."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import kicad_tools.router.diffpair_routing as d;"
+        "print(d._CORRIDOR_YIELD_RERUN_OVERRIDE, d._corridor_yield_rerun_cap(5.0))"
+    )
+    env = dict(os.environ)
+    env.pop("KCT_CORRIDOR_YIELD_RERUN_FACTOR", None)
+    env.pop("KCT_CORRIDOR_YIELD_RERUN_FLOOR_S", None)
+    env["KCT_CORRIDOR_YIELD_RERUN_S"] = "42"
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    ).stdout.split()
+    assert out == ["True", "42.0"]
+    env.pop("KCT_CORRIDOR_YIELD_RERUN_S")
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    ).stdout.split()
+    assert out == ["False", "60.0"]
+
+
+def test_rerun_cap_is_applied_to_the_rerun_and_removed_after(monkeypatch):
+    """The derived cap is live on the autorouter only during the re-run."""
+    _pin_rerun_budget(monkeypatch, factor=1.0, floor=60.0, ceiling=300.0)
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    assert router._negotiated_timeout_cap is None
+
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+    caps_during: list[float | None] = []
+
+    def _strategy() -> list[Route]:
+        caps_during.append(router._negotiated_timeout_cap)
+        return []
+
+    dp._apply_corridor_yields(to_yield, [3], _strategy, first_pass_s=120.0)
+    assert caps_during == [120.0]
+    assert router._negotiated_timeout_cap is None
+    assert dp._last_corridor_yield_rerun_cap_s == 120.0
+    assert dp._last_corridor_yield_rerun_s is not None
+
+
+def test_rerun_cap_is_removed_even_when_the_rerun_raises(monkeypatch):
+    _pin_rerun_budget(monkeypatch)
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+
+    def _strategy() -> list[Route]:
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        dp._apply_corridor_yields(to_yield, [3], _strategy, first_pass_s=90.0)
+    assert router._negotiated_timeout_cap is None
+
+
+def test_rerun_without_first_pass_time_keeps_the_fixed_cap(monkeypatch):
+    _pin_rerun_budget(monkeypatch, ceiling=300.0)
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+    caps_during: list[float | None] = []
+
+    def _strategy() -> list[Route]:
+        caps_during.append(router._negotiated_timeout_cap)
+        return []
+
+    dp._apply_corridor_yields(to_yield, [3], _strategy)
+    assert caps_during == [300.0]
+
+
+def test_route_all_with_diffpairs_passes_the_measured_first_pass_time():
+    """The orchestrator times the first main pass and hands it to the yield."""
+    import time as _time
+
+    router = _channel_router()
+    dp = router._diffpair
+    seen: dict[str, object] = {}
+    sentinel_pair = (_pair(), [])
+
+    # Force the diff-pair path (the fixture has no pair pads); the pair's
+    # nets have no pads, so its coupled attempt routes nothing.
+    dp.detect_differential_pairs_with_source = lambda: [(_pair(), "test")]  # type: ignore[method-assign]
+    dp._corridor_yield_candidates = lambda *_a, **_k: [sentinel_pair]  # type: ignore[method-assign]
+    dp._plan_corridor_yields = lambda *_a, **_k: ([], [])  # type: ignore[method-assign]
+
+    def _apply(*_args: object, **kwargs: object):
+        seen.update(kwargs)
+        return False, set(), [], []
+
+    dp._apply_corridor_yields = _apply  # type: ignore[method-assign]
+    calls: list[float | None] = []
+
+    def _strategy() -> list[Route]:
+        calls.append(router._negotiated_timeout_cap)
+        _time.sleep(0.05)
+        return []
+
+    config = DifferentialPairConfig(enabled=True, enable_shadow_construction=True)
+    router.route_all_with_diffpairs(config, non_diffpair_strategy=_strategy)
+
+    assert calls == [None], "the first main pass must run uncapped"
+    first_pass_s = seen.get("first_pass_s")
+    assert isinstance(first_pass_s, float)
+    assert 0.05 <= first_pass_s < 10.0
