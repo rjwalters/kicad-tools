@@ -3,10 +3,12 @@
 A V-scored panel butts its copies edge to edge.  The score line sits on
 the shared edge, and the scoring blade removes material on both faces in
 a V around it.  Fabs therefore ask for more copper clearance from a score
-line than from a routed edge, typically 0.3--0.5 mm.  None of the
-manufacturer profiles in :mod:`kicad_tools.manufacturers` publishes a
-V-score figure yet, so :attr:`VCutConfig.clearance
-<kicad_tools.panel.config.VCutConfig.clearance>` defaults to 0.4 mm.
+line than from a routed edge, typically 0.3--0.5 mm.  Each manufacturer
+profile carries that figure as ``DesignRules.min_copper_to_vscore_mm``
+(Issue #6177; JLCPCB and PCBWay publish 0.4 mm), and ``kct panel`` resolves
+the fab with the shared ``--mfr`` resolver and passes its value in as
+:attr:`VCutConfig.clearance <kicad_tools.panel.config.VCutConfig.clearance>`
+(library default 0.4 mm).  See :mod:`kicad_tools.manufacturers.vscore`.
 
 The check runs once on the *source* board: for each of its four edges it
 finds the closest copper (track, arc, via, pad, zone fill).  The panel then

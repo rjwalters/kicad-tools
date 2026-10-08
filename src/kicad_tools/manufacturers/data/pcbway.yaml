@@ -2,6 +2,13 @@
 # Source: https://www.pcbway.com/capabilities.html
 # Last verified: 2026-05-10
 #
+# V-score copper clearance (Issue #6177): min_copper_to_vscore_mm = 0.4 from
+# https://www.pcbway.com/pcb_prototype/PCB_Panel_Creation.html: "the minimum
+# spacing between copper pattern (trace/pad/copper ground) and V-cut line is
+# 0.4mm"; restated by
+# https://www.pcbway.com/helpcenter/panel_issues/V_cut_standard_Limited_to_Quick_turn_PCB.html
+# (verified 2026-10-07).
+#
 # All measurements in millimeters unless otherwise noted.
 #
 # PCBWay offers via-in-pad (epoxy-filled, plated-over) as a standard
@@ -26,6 +33,7 @@ design_rules:
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.25
+    min_copper_to_vscore_mm: 0.4  # PCBWay PCB_Panel_Creation, verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
@@ -48,6 +56,7 @@ design_rules:
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.25
+    min_copper_to_vscore_mm: 0.4  # PCBWay PCB_Panel_Creation, verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
@@ -70,6 +79,7 @@ design_rules:
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.25
+    min_copper_to_vscore_mm: 0.4  # PCBWay PCB_Panel_Creation, verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
@@ -92,6 +102,7 @@ design_rules:
     min_hole_diameter_mm: 0.15
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.25
+    min_copper_to_vscore_mm: 0.4  # PCBWay PCB_Panel_Creation, verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15

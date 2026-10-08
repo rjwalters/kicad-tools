@@ -2,6 +2,13 @@
 # Source: https://docs.oshpark.com/services/
 # Last verified: 2026-01-16
 #
+# V-score copper clearance (Issue #6177): UNSOURCED, min_copper_to_vscore_mm
+# deliberately left unset.  OSHPark does not V-score; it accepts only routed
+# panels with 0.1 in between outlines
+# (https://docs.oshpark.com/troubleshooting/panelized-designs/, checked
+# 2026-10-07).  kct panel --cut vcut falls back to the conservative
+# unsourced default in kicad_tools.manufacturers.vscore.
+#
 # All measurements in millimeters unless otherwise noted.
 # Note: OSHPark is PCB-only, no assembly services.
 

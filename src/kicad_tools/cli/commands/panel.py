@@ -34,6 +34,26 @@ def _fail(as_json: bool, board: str, message: str, *, text: str | None = None) -
     return 1
 
 
+def _fab_vscore_clearance(cli_mfr: str | None, board_path: Path) -> tuple[float, str, str]:
+    """Resolve the fab's copper-to-V-score clearance (Issue #6177).
+
+    The fab comes from the shared ``--mfr`` resolver (explicit flag >
+    ``fab_profile.json`` sidecar > ``project.kct`` ``target_fab`` >
+    ``jlcpcb``).  Returns ``(clearance_mm, mfr_id, source)`` where *source*
+    is ``"fab"`` for a published figure or ``"unsourced_default"`` when the
+    profile carries none.
+
+    Every profile's figure is stackup-independent (a test pins that), so the
+    2-layer rules are consulted without loading the board to count layers.
+    """
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+    from kicad_tools.manufacturers.vscore import vscore_clearance_for
+
+    mfr = resolve_cli_manufacturer(cli_mfr, board_path)
+    resolved = vscore_clearance_for(mfr)
+    return resolved.mm, resolved.mfr, "fab" if resolved.sourced else "unsourced_default"
+
+
 def run_panel_command(args) -> int:
     """Handle the ``kct panel`` command.
 
@@ -85,6 +105,15 @@ def run_panel_command(args) -> int:
     )
 
     vscore_clearance = getattr(args, "panel_vscore_clearance", None)
+    vscore_mfr: str | None = getattr(args, "panel_mfr", None)
+    vscore_source: str | None = None
+    if cut_method == CutMethod.VCUT:
+        if vscore_clearance is not None:
+            vscore_source = "cli"
+        else:
+            vscore_clearance, vscore_mfr, vscore_source = _fab_vscore_clearance(
+                vscore_mfr, board_path
+            )
     vcut = VCutConfig(
         layer=getattr(args, "panel_vcut_layer", None) or VCutConfig.layer,
         clearance=VCutConfig.clearance if vscore_clearance is None else vscore_clearance,
@@ -163,6 +192,10 @@ def run_panel_command(args) -> int:
                 "frame": config.frame is not None,
                 "frame_space_mm": frame_space,
                 "vscore_clearance_mm": config.vcut.clearance if is_vcut else None,
+                # "cli" (--vscore-clearance), "fab" (published by the
+                # profile) or "unsourced_default"; null unless --cut vcut.
+                "vscore_clearance_source": vscore_source,
+                "mfr": vscore_mfr if is_vcut else None,
                 "warnings": panel.warnings,
                 "tooling_holes": config.tooling_holes is not None,
                 "fiducials": config.fiducials is not None,
@@ -181,6 +214,12 @@ def run_panel_command(args) -> int:
     print(f"  Cut method: {config.cut_method.value}")
     if is_vcut:
         print(f"  V-score layer: {config.vcut.layer}")
+        clearance_note = {
+            "cli": "--vscore-clearance",
+            "fab": f"{vscore_mfr} published",
+            "unsourced_default": f"{vscore_mfr} publishes none; unsourced default",
+        }.get(vscore_source or "", "default")
+        print(f"  V-score clearance: {config.vcut.clearance:g} mm ({clearance_note})")
     for message in panel.warnings:
         print(f"Warning: {message}", file=sys.stderr)
     return 0

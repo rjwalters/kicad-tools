@@ -8586,12 +8586,26 @@ def _add_panel_parser(subparsers) -> None:
         "--vscore-clearance",
         dest="panel_vscore_clearance",
         type=float,
-        default=0.4,
+        default=None,
         help=(
             "Minimum copper distance from a V-score line in mm, with --cut vcut "
-            "(default: 0.4; fabs typically ask 0.3-0.5). Closer copper is "
-            "warned about, and a copper-pour keepout this wide flanks each "
-            "score. 0 disables both"
+            "(default: the --mfr profile's published V-score clearance, e.g. "
+            "0.4 for jlcpcb/pcbway; a conservative unsourced default for fabs "
+            "that publish none). Closer copper is warned about, and a "
+            "copper-pour keepout this wide flanks each score. 0 disables both"
+        ),
+    )
+    panel_parser.add_argument(
+        "--mfr",
+        "--manufacturer",
+        dest="panel_mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Fab profile whose V-score clearance --cut vcut checks against "
+            "(Issue #6177). When omitted, auto-resolves from the "
+            "fab_profile.json sidecar, then project.kct target_fab, then "
+            "falls back to jlcpcb. --vscore-clearance overrides the value"
         ),
     )
     panel_parser.add_argument(

@@ -3,6 +3,10 @@
 #         https://github.com/ayberkozgur/jlcpcb-design-rules-stackups
 # Last verified: 2026-01-16
 #
+# V-score copper clearance (Issue #6177): min_copper_to_vscore_mm = 0.4 from
+# https://jlcpcb.com/capabilities/pcb-capabilities, Panelization > V-Cut:
+# "Copper clearance from V-cut board edges: >=0.4 mm" (verified 2026-10-07).
+#
 # All measurements in millimeters unless otherwise noted.
 
 design_rules:
@@ -16,6 +20,7 @@ design_rules:
     min_hole_diameter_mm: 0.3
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
+    min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.5
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
@@ -42,6 +47,7 @@ design_rules:
     min_hole_diameter_mm: 0.3
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
+    min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.5
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
@@ -68,6 +74,7 @@ design_rules:
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
+    min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
@@ -94,6 +101,7 @@ design_rules:
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
+    min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
@@ -120,6 +128,7 @@ design_rules:
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
+    min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
