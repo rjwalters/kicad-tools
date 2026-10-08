@@ -25,6 +25,15 @@ comparable within a pass, not across passes**.
 | Referee | `kicad-cli` 10.0.6 | same |
 | Host | Apple M3 Ultra, 28 cores, macOS (Darwin 27) | Intel Xeon Platinum 8488C, 8 vCPU, Ubuntu 24.04 (AWS) |
 
+**Pass 3 (#5795): the 06a and 06b rows only.** Re-run on 2026-10-08 with
+`krt_compare.py --boards 06a,06b` after the Issue #5788 fix, on kicad-tools
+`28d7f76a` (`kct` 0.22.0, C++ backend built), the same KRT commit as above
+(prebuilt `grid_router` v0.22.0, macOS arm64, shapely 2.2.0 rather than 2.1.2),
+`kicad-cli` 10.0.6, on an Apple M3 (8 cores). That host is neither pass 1's
+nor pass 2's, so the 06 runtimes are comparable within the 06 rows only. Pass 3
+also puts back the 06a/06b rows that the pass-2 rewrite had dropped from the
+table.
+
 Two consequences of the split, both load-bearing when reading the table:
 
 - **Runtime.** Pass 2's host is a shared 8-vCPU cloud worker, not a 28-core
@@ -32,8 +41,8 @@ Two consequences of the split, both load-bearing when reading the table:
   pass-1 runtime against a pass-2 one.
 - **`--preserve-existing`.** Pass 2's `95af4f6a` contains the Issue #5788 fix
   (already-connected nets are held out of the route set); pass 1's `ae264953`
-  does not. That changes what 06a would measure today, and it is why the 07a
-  row below behaves differently from the 06a row above.
+  does not. That changed what 06a measures, which pass 3 (below) re-ran, and it
+  is why the 07a row behaves differently from pass 1's 06a numbers.
 
 Citations below use `path:function` at these commits. KRT paths are relative
 to the KRT repo root; ours are relative to this repo.
@@ -447,8 +456,8 @@ Every cell is a single run. **Three runs hit the 20-minute cap**, all of them
 are still scored, because how far a tool had got when the cap fired is itself
 the measurement. The results JSON holds all DRC classes.
 
-Rows 00–06 are pass 1 (Apple M3 Ultra); rows 04–07 are pass 2 (8-vCPU AWS
-worker). See "Pinned versions" — runtimes are comparable within a pass only.
+Rows 00–03 are pass 1 (Apple M3 Ultra); rows 04–07 are pass 2 (8-vCPU AWS
+worker); the 06a/06b rows are pass 3 (Apple M3, see above). See "Pinned versions" — runtimes are comparable within a pass only.
 
 | Board | Tool | Nets complete | Connections | kicad-cli unconnected | DRC errors (shared) | DRC errors (fab) | DRC errors (as emitted) | kct check errors | Vias | Wirelength mm | Signal on plane layers mm | Pair coupling % (min) | Group length spread mm (max) | Runtime s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -472,6 +481,12 @@ worker). See "Pinned versions" — runtimes are comparable within a pass only.
 | 05 | krt | 32/37 | 111/142 | 0 | 6 (annular_width 3, via_diameter 3) | 6‡ | 0 | 33 (connectivity 5, dimension_annular_ring 3, dimension_via_diameter 3, pth_hole_clearance 1, via_in_pad 21) | 63 | 1168.69 | 0.0 | -- | -- | 13.35 |
 | 05 | ref | 37/37 | 142/142 | 0 | 5 (clearance 5) | 5‡ | n/a | 0 | 136 | 1446.63 | 442.3 | -- | -- | n/a |
 | 05f | krt | 33/37 | 112/142 | 0 | 94 (annular_width 3, clearance 60, track_width 28, via_diameter 3) | 94‡ | 0 | 141 (clearance_segment_via 43, clearance_segment_segment 29, dimension_trace_width 28, via_in_pad 26, +15 others) | 78 | 1149.35 | 0.0 | -- | -- | 10.53 |
+| 06a | kct | 18/18 | 90/90 | 0 | 0 | 0 | 0 | 0 | 55 | 490.0 | 0.0 | 87.1 | -- | 18.41 |
+| 06a | krt | 18/18 | 90/90 | 0 | 0 | 0 | 0 | 0 | 54 | 484.55 | 0.0 | 88.9 | -- | 17.09 |
+| 06a | ref | 18/18 | 90/90 | 0 | 0 | 0 | n/a | 0 | 63 | 503.11 | 0.0 | 87.1 | -- | n/a |
+| 06b | kct | 18/18 | 90/90 | 0 | 0 | 0 | 0 | 0 | 55 | 509.76 | 0.0 | 87.0 | -- | 19.94 |
+| 06b | krt | 18/18 | 90/90 | 0 | 0 | 0 | 0 | 0 | 54 | 477.42 | 0.0 | 88.9 | -- | 5.92 |
+| 06b | ref | 18/18 | 90/90 | 0 | 0 | 0 | n/a | 0 | 63 | 503.11 | 0.0 | 87.1 | -- | n/a |
 | 07a | kct | 21/55 | 127/161 | 34 | 20 (clearance 19, starved_thermal 1) | 20‡ | 20 | 47 (clearance_segment_via 12, connectivity 34, hole_to_hole_clearance 1) | 202 | 1073.2 | 294.1 | -- | 54.16 | 1200.18 (TIMEOUT) |
 | 07a | krt | 33/55 | 139/161 | 2 | 175 (annular_width 10, clearance 34, drill_out_of_range 10, **shorting_items 61**, **tracks_crossing 43**, via_diameter 17) | 175‡ | 137 (clearance 32, shorting_items 61, tracks_crossing 44) | 295 (clearance_segment_segment 186, clearance_segment_via 17, connectivity 22, via_in_pad 20, +50 others) | 195 | 2645.75 | 18.1 | -- | 42.61 | 67.76 |
 | 07a | ref | 55/55 | 161/161 | 0 | 0 | 0‡ | n/a | 0 | 192 | 3332.76 | 0.0 | -- | **2.92** | n/a |
@@ -584,18 +599,47 @@ now fixed: end legs that grazed the partner's pad, and a stub-failed net that
 the main pass never got back. The search is single-layer, so a pair whose ends
 need a via between them still falls back to independent legs.
 
-In 06a, kct also discarded the generator's pre-routed, coupled LVDS copper,
-even with `--preserve-existing`. That flag only preserves nets outside the
-route set, which is why board 06's own README passes `--nets IN1,…,OUT4`. The
-06a and 06b outputs are therefore identical. KRT kept the pre-routed pairs
-(its cleanup passes simplified them from 8 to 4 segments per leg).
+Historical (pass 1, before #5788): in 06a, kct also discarded the generator's
+pre-routed, coupled LVDS copper, even with `--preserve-existing`. That flag
+only preserved nets outside the route set, which is why board 06's own README
+passes `--nets IN1,…,OUT4`. The 06a and 06b outputs were therefore identical
+(55 vias, 487.01 mm, 22.8 mm of signal on the plane layers, 0% coupling). KRT
+kept the pre-routed pairs (its cleanup passes simplified them from 8 to 4
+segments per leg).
 
 **Fixed after this benchmark ran (Issue #5788).** `--preserve-existing` now
 excludes a net that is already fully connected on the input from the route set,
-so the 06a recipe above keeps 64/64 LVDS segments (it kept 0/64 when measured
-here). The 06a rows in the table above are the pre-fix measurement and were not
-regenerated. Pass 2's kct **does** contain the fix, which is why 07a starts
-from the input's 119 routed connections instead of discarding them.
+so the 06a recipe above keeps 64/64 LVDS segments (it kept 0/64 when first
+measured). Pass 2's kct contains the fix, which is why 07a starts from the
+input's 119 routed connections instead of discarding them. **Pass 3 (#5795)
+regenerated the 06a rows**: kct now logs `8 net(s) already fully connected --
+left untouched` and routes only the 8 LVTTL nets; all 64 LVDS segments in the
+output are the input's. Against the pass-1 06a kct row:
+
+| 06a kct | Vias | Wirelength mm | Signal on plane layers mm | Pair coupling % (min) | Runtime s |
+|---|---|---|---|---|---|
+| pass 1 (pre-fix, `ae264953`) | 55 | 487.01 | 22.8 | 0.0 | 20.86 |
+| pass 3 (`28d7f76a`) | 55 | 490.0 | 0.0 | 87.1 | 18.41 |
+
+Nets, connections and every DRC column are unchanged at 18/18, 90/90 and 0. The
+gains are coupling (0% to the reference's 87.1%) and 22.8 mm of signal copper
+no longer on the plane layers. Wirelength is 3 mm higher because the preserved
+pairs are the generator's, not kct's. The 06a KRT and ref rows are unchanged
+from pass 1 apart from runtime (KRT 17.09 s vs 4.47 s on a different host), as
+expected. 06b kct is also 18/18 and 0 errors, with 87.0% coupling, which is the
+default pose-centerline search (#5895) and not the #5788 fix. Two things to
+read with it:
+
+- **kct exits 3 on both 06a and 06b** although the shared referee, the fab
+  referee, the as-emitted project and `kct check --mfr jlcpcb` all report 0.
+  The route itself says `Status: SUCCESS`, but kct's own post-route short
+  check lists 0.075 mm pad overlaps of net 1 against +3V3 and net 2 against
+  GND at the board's header pads and declares the board "NOT manufacturable as
+  written". kicad-cli does not report them. Filed as a follow-up rather than
+  fixed here.
+- KRT's 06a runtime is 17.09 s here against 4.47 s in pass 1. That is host
+  variance and the shapely version, not a regression in either tool; it is
+  not comparable across passes.
 
 **QFP/QFN fanout (04f, 05f — newly measured).** KRT's escape pre-pass is a
 real, and genuinely two-sided, effect:
@@ -884,10 +928,11 @@ Not proposed:
 Incidental kct findings from this benchmark. These did not come from KRT, and
 triage should decide whether to file them:
 
-- **`--preserve-existing` help text.** The help says "only unconnected nets
-  are routed". In practice, already-complete nets inside the route set are
-  re-routed and their copper is dropped (06a lost its coupled LVDS geometry).
-  Filed and fixed as Issue #5788: already-complete nets are now held out of the
+- **`--preserve-existing` help text (resolved).** The help said "only
+  unconnected nets are routed". In practice, already-complete nets inside the
+  route set were re-routed and their copper dropped (06a lost its coupled LVDS
+  geometry). Filed and fixed as Issue #5788, and the 06a rows were re-measured
+  in #5795: already-complete nets are now held out of the
   route set, and the help text states the contract (including that `--nets` /
   `--region` / `--complete` still re-route what they name).
 - **Plane layers on board 06.** kct's default routes signals on board 06's
