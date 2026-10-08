@@ -1801,7 +1801,10 @@ register_tool(
         "a seed placement, and runs iterative optimization to minimize wirelength, "
         "overlap, DRC violations, and boundary violations. Returns the optimized score "
         "with convergence data. Use evaluate_placement first to assess whether "
-        "optimization is needed."
+        "optimization is needed. Decoupling capacitors are pulled onto the IC supply "
+        "pin they serve (affinity term, default weight 2.0, plus a post-optimize snap "
+        'pass), same as `kct optimize-placement`; pass weights={"decoupling": 0} to '
+        "turn it off. Reports the per-cap result under 'decoupling'."
     ),
     parameters=_make_params(
         properties={
@@ -1830,7 +1833,10 @@ register_tool(
                 "type": "object",
                 "description": (
                     "Cost function weight overrides. Keys: overlap, drc, boundary, "
-                    "wirelength, area. Higher weights penalize that metric more."
+                    "wirelength, area, creepage, cohesion, decoupling. Higher weights "
+                    "penalize that metric more. 'decoupling' (default 2.0) is the "
+                    "decoupling-cap affinity term and its post-optimize snap pass; "
+                    "set it to 0 to disable both."
                 ),
                 "properties": {
                     "overlap": {"type": "number", "description": "Overlap weight (default: 1e6)"},
@@ -1844,6 +1850,13 @@ register_tool(
                         "description": "Wirelength weight (default: 1.0)",
                     },
                     "area": {"type": "number", "description": "Area weight (default: 0.1)"},
+                    "decoupling": {
+                        "type": "number",
+                        "description": (
+                            "Decoupling-cap affinity weight (default: 2.0). 0 disables "
+                            "the term and the post-optimize snap pass."
+                        ),
+                    },
                 },
             },
             "seed_method": {

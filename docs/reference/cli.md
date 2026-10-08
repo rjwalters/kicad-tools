@@ -1380,7 +1380,7 @@ kct optimize-placement <pcb_file> [options]
 | `--max-iterations N` | Maximum optimizer iterations (default: 1000) |
 | `-o`, `--output PATH` | Output PCB (default: overwrite input) |
 | `--seed {force-directed,random}` | Seed placement method |
-| `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area` |
+| `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area`, `creepage`, `cohesion`, `decoupling` (default 2.0; `{"decoupling": 0}` turns off the decoupling-cap affinity term and its snap pass) |
 | `--dry-run` | Evaluate current placement without optimizing |
 | `--progress N` | Print score every N iterations (0 disables) |
 | `--checkpoint DIR` | Directory for checkpoint save/resume |
@@ -1411,6 +1411,14 @@ net. On this repo's own placement fixtures the two estimators differ by 0.2 %
 to 40 % on the *same* layout, so expect different — not merely rescaled —
 optimizer trajectories. See
 [`docs/placement-pad-anchoring-audit.md`](../placement-pad-anchoring-audit.md).
+
+**Decoupling caps (issue #6020, #6253).** Each decoupling capacitor (one pad
+on a supply rail, the other on ground) is pulled onto the IC supply pin it
+serves by a `decoupling` affinity term (weight 2.0, on by default), and a snap
+pass after the optimizer moves each cap to the nearest free spot beside its
+pin. The MCP `optimize_placement` tool runs the same code (same weights keys,
+same defaults, same snap), so the two produce the same placement for the same
+board and seed; its result carries a `decoupling` list and the snap moves.
 
 **Feasibility gate.** By default the optimizer exits **1** with
 `FATAL: optimizer exited with infeasible placement (...)` on stderr if the

@@ -15,6 +15,23 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
+# Board reading, net anchor weighting, footprint sizing, the placement writer and
+# the whole decoupling pipeline are the CLI's own (``kct optimize-placement``):
+# one implementation, so the MCP tool and the CLI see the same board, score it
+# the same way and write the same file (issue #6253).
+from kicad_tools.cli.optimize_placement_cmd import (
+    _build_decoupling_context,
+    _compute_net_anchor_weight,  # noqa: F401  (re-exported)
+    _decoupling_report,
+    _evaluate,
+    _footprint_size_from_pads,  # noqa: F401  (re-exported)
+    _read_board_data,
+    _read_current_vector,
+    _with_sides,
+    _write_placements_to_pcb,
+    snap_decoupling,
+    weights_to_cost_config,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
 from kicad_tools.placement.cost import (
@@ -29,12 +46,10 @@ from kicad_tools.placement.cost import (
 from kicad_tools.placement.cost import (
     evaluate_placement as cost_evaluate_placement,
 )
-from kicad_tools.placement.geometry import extract_board_outline as _extract_board_outline
 from kicad_tools.placement.strategy import StrategyConfig
 from kicad_tools.placement.vector import (
     FIELDS_PER_COMPONENT,
     ComponentDef,
-    PadDef,
     PlacementVector,
     bounds,
     decode,
@@ -43,7 +58,6 @@ from kicad_tools.placement.wirelength import (
     compare_wirelength_estimators,
     compute_per_footprint_ratsnest,
 )
-from kicad_tools.placement.writeback import write_footprint_placements
 
 if TYPE_CHECKING:
     from kicad_tools.placement.bo_strategy import BayesianOptStrategy
@@ -76,154 +90,6 @@ def _validate_pcb_path(pcb_path: str) -> Path:
     if path.suffix != ".kicad_pcb":
         raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
     return path
-
-
-def _read_board_data(
-    pcb_path: str,
-    *,
-    anchor_weight: float = 0.0,
-) -> tuple[list[ComponentDef], list[Net], BoardOutline, DesignRuleSet, tuple[float, float]]:
-    """Read component, net, and board data from a .kicad_pcb file.
-
-    Uses kicad_tools.schema.pcb.PCB to parse the file and extract
-    components, nets, board outline, design rules, and board origin.
-
-    Args:
-        pcb_path: Path to .kicad_pcb file.
-        anchor_weight: When > 0, every net touching at least one ``(locked)``
-            footprint receives ``Net.weight = 1 + anchor_weight * f``, where
-            ``f`` is the fraction of the net's pins that land on locked
-            footprints (range 0..1). Default 0.0 preserves uniform weighting.
-
-    Returns:
-        Tuple of (components, nets, board_outline, rules, board_origin).
-    """
-    from kicad_tools.schema.pcb import PCB as SchemaPCB
-
-    pcb = SchemaPCB.load(pcb_path)
-
-    # Board outline -- try Shapely geometry first, fall back to legacy AABB
-    board_outline: BoardOutline | None = None
-    try:
-        from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
-
-        if has_shapely():
-            try:
-                board_geom = BoardGeometry.from_pcb(pcb)
-                board_outline = board_geom.to_board_outline()
-            except (ValueError, Exception):
-                pass
-    except ImportError:
-        pass
-    if board_outline is None:
-        board_outline = _extract_board_outline(pcb)
-
-    # Components from footprints
-    locked_refs: set[str] = set()
-    components: list[ComponentDef] = []
-    for fp in pcb.footprints:
-        ref = fp.reference
-        if not ref:
-            continue
-
-        if getattr(fp, "locked", False):
-            locked_refs.add(ref)
-
-        width, height = _footprint_size_from_pads(fp)
-
-        pad_defs: list[PadDef] = []
-        for pad in fp.pads:
-            pad_defs.append(
-                PadDef(
-                    name=pad.number,
-                    local_x=pad.position[0],
-                    local_y=pad.position[1],
-                    size_x=pad.size[0],
-                    size_y=pad.size[1],
-                )
-            )
-
-        components.append(
-            ComponentDef(
-                reference=ref,
-                pads=tuple(pad_defs),
-                width=width,
-                height=height,
-            )
-        )
-
-    # Nets from footprint pad net assignments
-    component_refs = {c.reference for c in components}
-    net_map: dict[str, list[tuple[str, str]]] = {}
-    for fp in pcb.footprints:
-        ref = fp.reference
-        if not ref or ref not in component_refs:
-            continue
-        for pad in fp.pads:
-            net_name = pad.net_name
-            if net_name and net_name not in ("", "unconnected"):
-                net_map.setdefault(net_name, []).append((ref, pad.number))
-
-    nets: list[Net] = []
-    for net_name, pins in net_map.items():
-        if len(pins) < 2:
-            continue
-        weight = _compute_net_anchor_weight(pins, locked_refs, anchor_weight)
-        nets.append(Net(name=net_name, pins=pins, weight=weight))
-
-    rules = DesignRuleSet()
-    return components, nets, board_outline, rules, pcb.board_origin
-
-
-def _compute_net_anchor_weight(
-    pins: Sequence[tuple[str, str]],
-    locked_refs: set[str],
-    anchor_weight: float,
-) -> float:
-    """Compute the per-net wirelength weight from anchor pad fraction.
-
-    Mirror of the helper in ``kicad_tools.cli.optimize_placement_cmd``.
-    A pin contributes to the "anchored" count when its component reference
-    appears in ``locked_refs`` (set of footprints carrying the ``(locked)``
-    attribute). The returned weight is::
-
-        1.0 + anchor_weight * (anchored_pins / total_pins)
-
-    For ``anchor_weight <= 0`` the weight collapses to 1.0 (regression-safe
-    default). Nets with no anchored pins also collapse to 1.0.
-    """
-    if anchor_weight <= 0.0 or not pins or not locked_refs:
-        return 1.0
-    anchored = sum(1 for ref, _ in pins if ref in locked_refs)
-    if anchored == 0:
-        return 1.0
-    fraction = anchored / len(pins)
-    return 1.0 + anchor_weight * fraction
-
-
-# _extract_board_outline is imported from kicad_tools.placement.geometry
-# (consolidated in #2349).
-
-
-def _footprint_size_from_pads(fp: Any) -> tuple[float, float]:
-    """Estimate footprint bounding box from pad positions and sizes."""
-    if not fp.pads:
-        return (2.0, 2.0)
-
-    xs: list[float] = []
-    ys: list[float] = []
-    for pad in fp.pads:
-        px, py = pad.position
-        sx, sy = pad.size
-        xs.extend([px - sx / 2, px + sx / 2])
-        ys.extend([py - sy / 2, py + sy / 2])
-
-    if xs and ys:
-        w = max(xs) - min(xs)
-        h = max(ys) - min(ys)
-        return (max(w, 1.0), max(h, 1.0))
-
-    return (2.0, 2.0)
 
 
 def _vector_to_placements(
@@ -309,6 +175,7 @@ def _breakdown_to_dict(breakdown: CostBreakdown) -> dict[str, float]:
         "boundary": round(breakdown.boundary, 4),
         "drc": round(breakdown.drc, 4),
         "area": round(breakdown.area, 4),
+        "decoupling": round(breakdown.decoupling, 4),
     }
 
 
@@ -352,7 +219,13 @@ def optimize_placement(
             ``bayesian`` extra).
         max_iterations: Maximum number of optimization iterations.
         weights: Optional cost function weight overrides. Keys:
-            overlap, drc, boundary, wirelength, area.
+            overlap, drc, boundary, wirelength, area, creepage, cohesion,
+            decoupling, plus ``mode`` ("lexicographic" or "weighted_sum").
+            Same keys and defaults as ``kct optimize-placement --weights``.
+            The decoupling-capacitor affinity term (default weight 2.0)
+            pulls each decoupling cap onto the IC supply pin it serves, and
+            a post-optimize snap pass finishes the job; pass
+            ``{"decoupling": 0}`` to turn both off.
         seed_method: Seed placement method ("force-directed" or "random").
         output_path: Path for output file. If None, does not write to disk.
         pre_slide_off: If True, run slide-off overlap resolution on the seed
@@ -377,6 +250,11 @@ def optimize_placement(
         - component_count: Number of components optimized.
         - net_count: Number of nets considered.
         - output_path: Path to the output file (if written).
+        - decoupling: Per-cap assignment of the final placement (net, cap,
+          supply pin, distance in mm). Empty when the term is off or the
+          board has no cap/supply-pin structure.
+        - decoupling_snap_moves: Caps the snap pass moved (cap, pin, before_mm,
+          after_mm).
         - convergence_data: List of (iteration, best_score) snapshots.
         - error_message: Error description if success is False.
 
@@ -407,9 +285,36 @@ def optimize_placement(
             "net_count": 0,
         }
 
-    cost_config = _parse_weights(weights)
+    try:
+        cost_config = weights_to_cost_config(weights)
+    except ValueError as e:
+        return {
+            "success": False,
+            "error_message": str(e),
+            "component_count": len(components),
+            "net_count": len(nets),
+        }
     footprint_sizes = _build_footprint_sizes(components)
     placement_bounds = bounds(board_outline, components)
+
+    # Same scoring context as ``kct optimize-placement``: side flags pinned to
+    # the board's own (the writer cannot flip footprints) and the decoupling-cap
+    # affinity term, on by default, off with ``weights={"decoupling": 0}``.
+    fixed_sides = [int(v) for v in _read_current_vector(pcb_path, components).data[3::4]]
+    decoupling_groups = _build_decoupling_context(pcb_path, nets, cost_config, quiet=True)
+
+    def _score(vec: PlacementVector) -> PlacementScore:
+        return _evaluate(
+            vec,
+            components,
+            nets,
+            rules,
+            board_outline,
+            cost_config,
+            footprint_sizes,
+            decoupling_groups=decoupling_groups,
+            fixed_sides=fixed_sides,
+        )
 
     # Create strategy.  Annotated with the concrete union (not the abstract
     # PlacementStrategy) because the loop below reads ``_population_size``,
@@ -476,9 +381,7 @@ def optimize_placement(
         )
 
     # Evaluate seed
-    seed_score = _evaluate_vector(
-        seed_vector, components, nets, rules, board_outline, cost_config, footprint_sizes
-    )
+    seed_score = _score(seed_vector)
 
     # Initialize optimizer
     config = StrategyConfig(
@@ -490,9 +393,7 @@ def optimize_placement(
     # Evaluate initial population
     initial_scores = []
     for candidate in initial_population:
-        score = _evaluate_vector(
-            candidate, components, nets, rules, board_outline, cost_config, footprint_sizes
-        )
+        score = _score(candidate)
         initial_scores.append(score.total)
     optimizer.observe(initial_population, initial_scores)
 
@@ -511,15 +412,7 @@ def optimize_placement(
 
             scores = []
             for candidate in candidates:
-                score = _evaluate_vector(
-                    candidate,
-                    components,
-                    nets,
-                    rules,
-                    board_outline,
-                    cost_config,
-                    footprint_sizes,
-                )
+                score = _score(candidate)
                 scores.append(score.total)
 
             optimizer.observe(candidates, scores)
@@ -541,6 +434,7 @@ def optimize_placement(
 
     # Get final result
     best_vector, best_score_value = optimizer.best()
+    best_vector = _with_sides(best_vector, fixed_sides)
 
     # Post-convergence slide-off pass to resolve residual overlaps
     post_slide_result = None
@@ -555,9 +449,21 @@ def optimize_placement(
             max_displacement_mm=50.0,
         )
 
-    final_score = _evaluate_vector(
-        best_vector, components, nets, rules, board_outline, cost_config, footprint_sizes
+    # Decoupling-cap snap: the CLI's own post-optimize pass (issue #6020).
+    best_vector, snap_moves = snap_decoupling(
+        best_vector,
+        pcb_path,
+        components,
+        nets,
+        rules,
+        board_outline,
+        cost_config,
+        footprint_sizes,
+        decoupling_groups,
+        fixed_sides=fixed_sides,
     )
+
+    final_score = _score(best_vector)
 
     # Calculate improvement
     if seed_score.total > 0:
@@ -589,6 +495,16 @@ def optimize_placement(
         "component_count": len(components),
         "net_count": len(nets),
         "convergence_data": convergence_data,
+        "decoupling": _decoupling_report(best_vector, components, decoupling_groups),
+        "decoupling_snap_moves": [
+            {
+                "cap": m.cap,
+                "pin": m.pin,
+                "before_mm": round(m.before_mm, 3),
+                "after_mm": round(m.after_mm, 3),
+            }
+            for m in snap_moves
+        ],
         "per_component_ratsnest": [
             {"reference": fr.reference, "ratsnest_mm": fr.ratsnest_mm} for fr in ratsnest_list
         ],
@@ -733,33 +649,6 @@ def evaluate_placement(
 # ---------------------------------------------------------------------------
 # PCB output writer
 # ---------------------------------------------------------------------------
-
-
-def _write_placements_to_pcb(
-    pcb_path: str,
-    output_path: str,
-    vector: PlacementVector,
-    components: Sequence[ComponentDef],
-    board_origin: tuple[float, float] = (0.0, 0.0),
-) -> None:
-    """Write optimized placements back to a .kicad_pcb file.
-
-    Reads the original file, updates footprint positions, and writes
-    the result.  Positions from the optimizer are in board-relative
-    coordinates; the board origin offset is added back to produce the
-    sheet-absolute values expected in the ``.kicad_pcb`` file.
-    """
-    placed = decode(vector, components)
-    ox, oy = board_origin
-    # Through the PCB model, not text patching: it also moves the footprint's
-    # board-absolute geometry -- embedded keepout zones and pad angles --
-    # and edits the footprint's own ``(at ...)`` rather than the first
-    # ``(at ...)`` line after the reference (Issue #6119).
-    write_footprint_placements(
-        pcb_path,
-        output_path,
-        ((p.reference, p.x + ox, p.y + oy, p.rotation) for p in placed),
-    )
 
 
 # ---------------------------------------------------------------------------
