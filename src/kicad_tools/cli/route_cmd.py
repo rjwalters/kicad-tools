@@ -6833,15 +6833,21 @@ def _audit_shorts_for_escalation(
         getattr(router, "routes", None) or getattr(router, "existing_routes", None)
     ):
         return []
+    # The short audit and the kept-copper clearance audit (#6237) are
+    # independent: a failure in one must not silently skip the other.
+    shorts: list[ClearanceViolation] = []
     try:
         violations = validate_routes(router, audit_kept_copper=True)
     except Exception as exc:  # never let the audit break a save, but say so
         if not quiet:
-            print(f"WARNING: post-route short audit failed to run ({exc}); shorts were NOT checked")
-        return []
-    shorts = shorting_violations(violations)
-    if shorts and not quiet:
-        _print_short_findings(shorts)
+            print(
+                f"WARNING: post-route short audit failed to run ({exc}); shorts were NOT "
+                "checked (the kept-copper clearance audit still runs)"
+            )
+    else:
+        shorts = shorting_violations(violations)
+        if shorts and not quiet:
+            _print_short_findings(shorts)
     if output_path is None or (args is not None and getattr(args, "dry_run", False)):
         return shorts
     source = Path(args.pcb) if args is not None and getattr(args, "pcb", None) else None

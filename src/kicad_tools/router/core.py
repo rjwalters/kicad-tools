@@ -1446,6 +1446,12 @@ class Autorouter:
         # alongside ``self.routes`` so preserved trace copper is not
         # structurally invisible to the safety gate.
         self._emitted_preserved_routes: list[Any] | None = None
+        # Issue #6237: the board's net name -> id map, as the board loader
+        # resolved it (``load_pcb_for_routing``'s ``net_map``, KiCad-10
+        # name-only nets included).  Kept copper on a name-only board is
+        # loaded under net id 0 with its name intact; the kept-copper audit
+        # resolves its real id here.  Empty for routers built another way.
+        self.board_net_ids: dict[str, int] = {}
         # Issue #5945: which negotiated pass produced the emitted result
         # (``None`` until ``route_all_negotiated`` finishes its rip-up loop).
         self.emitted_iteration: int | None = None

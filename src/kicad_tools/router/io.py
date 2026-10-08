@@ -454,6 +454,62 @@ def kept_input_routes(router: Autorouter) -> list[Route]:
     return [r for r in existing if r.net not in routed_net_ids]
 
 
+def audited_kept_routes(router: Autorouter) -> list[Route]:
+    """:func:`kept_input_routes` under their board net ids, for the audits (#6237).
+
+    On a KiCad-10 name-only board (``(net "NAME")``, no numeric ids) the
+    optimizer parser loads every kept trace and via under net id ``0`` with
+    its name preserved, while pads carry the dialect-normalized ids of
+    ``router.board_net_ids``.  Filtering on ``net != 0`` would therefore drop
+    ALL kept copper and turn the kept-copper audit into a no-op; matching on
+    id 0 alone would merge every kept net into one.  Each id-0 route is
+    re-keyed by its name instead: the loader's map first, then the router's
+    ``net_names`` / pads, and failing those a private negative id per name
+    (a net with copper but no pads is still distinct from every other net;
+    :func:`_pad_on_net` still matches id-0 pads by name).  Only copper with
+    no net name at all -- genuinely anonymous, e.g. the neutral
+    placement-preserved copper -- is skipped.
+
+    Re-keying is local to the audit: ``router.existing_routes`` and the
+    routing grid keep the loader's ids, so routing behaviour is unchanged.
+    """
+    kept = kept_input_routes(router)
+    if all(r.net != 0 for r in kept):
+        return kept
+    name_to_id: dict[str, int] = {}
+    for name, net_id in (getattr(router, "board_net_ids", None) or {}).items():
+        if name and net_id:
+            name_to_id[name] = int(net_id)
+    for net_id, name in (getattr(router, "net_names", None) or {}).items():
+        if name and net_id and name not in name_to_id:
+            name_to_id[name] = int(net_id)
+    for pad in getattr(router, "all_pads", None) or list(
+        (getattr(router, "pads", None) or {}).values()
+    ):
+        if pad.net_name and pad.net and pad.net_name not in name_to_id:
+            name_to_id[pad.net_name] = int(pad.net)
+    synthetic: dict[str, int] = {}
+    out: list[Route] = []
+    for route in kept:
+        if route.net != 0:
+            out.append(route)
+            continue
+        if not route.net_name:
+            continue  # anonymous copper: no net to be shorted to
+        net_id = name_to_id.get(route.net_name)
+        if net_id is None:
+            net_id = synthetic.setdefault(route.net_name, -(len(synthetic) + 1))
+        out.append(
+            replace(
+                route,
+                net=net_id,
+                segments=[replace(seg, net=net_id) for seg in route.segments],
+                vias=[replace(via, net=net_id) for via in route.vias],
+            )
+        )
+    return out
+
+
 def count_shorting_violations(violations: list[ClearanceViolation]) -> int:
     """Count violations whose copper physically overlaps (Issue #5862).
 
@@ -3302,7 +3358,7 @@ def validate_routes(
     # a short under any rule set, whereas a kept near-miss depends on the
     # clearance the written board is judged under -- see
     # :func:`kept_copper_clearance_violations`.
-    kept_routes = [r for r in kept_input_routes(router) if r.net != 0]
+    kept_routes = audited_kept_routes(router)
     if kept_routes:
         violations.extend(
             _kept_copper_violations(
@@ -3812,7 +3868,8 @@ def kept_copper_clearance_violations(
 ) -> list[ClearanceViolation]:
     """Clearance near-misses in copper kept by ``--preserve-existing`` (Issue #6237).
 
-    Every kept trace and via (:func:`kept_input_routes`, net 0 skipped) is
+    Every kept trace and via (:func:`audited_kept_routes`: name-only copper
+    under its real net id, only anonymous copper skipped) is
     measured against other nets' pads and other nets' kept copper; a pair
     whose gap is positive but below the required clearance (less
     :data:`~kicad_tools.router.clearance_kernel.CLEARANCE_EPSILON_MM`) is
@@ -3825,7 +3882,7 @@ def kept_copper_clearance_violations(
     sibling ``.kicad_pro`` / ``.kicad_dru`` kicad-cli loads); without it the
     requirement is the one :func:`validate_routes` applies to routed copper.
     """
-    kept_routes = [r for r in kept_input_routes(router) if r.net != 0]
+    kept_routes = audited_kept_routes(router)
     if not kept_routes:
         return []
     if rules is None:
@@ -5718,6 +5775,9 @@ def load_pcb_for_routing(
             carved,
         )
 
+    # Issue #6237: hand the kept-copper audit the name -> id map, so copper
+    # loaded under net 0 from a name-only board resolves to its real id.
+    router.board_net_ids = dict(net_map)
     return router, net_map
 
 

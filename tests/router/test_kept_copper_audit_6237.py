@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.io import (
     ClearanceViolation,
+    audited_kept_routes,
     describe_input_clearance,
     describe_short,
     kept_copper_clearance_violations,
@@ -189,6 +191,68 @@ class TestKeptVsKeptShorts:
         router.existing_routes += [_v3v3(), _trace(0, "", 12.0, 5.0, 12.0, 15.0)]
 
         assert _kept_shorts(router) == []
+
+    def test_name_only_kept_copper_is_audited(self) -> None:
+        """KiCad-10 name-only copper loads under net 0 with its name (#6237 review).
+
+        The audit must re-key it by name, not drop it as net-less.
+        """
+        router = _router()
+        router.board_net_ids = {"+3V3": 1, "GND": 2}
+        router.existing_routes += [
+            _trace(0, "+3V3", 5.0, 10.0, 19.0, 10.0),
+            _trace(0, "GND", 12.0, 5.0, 12.0, 15.0),
+        ]
+
+        shorts = _kept_shorts(router)
+
+        assert len(shorts) == 1
+        assert {
+            (shorts[0].net, shorts[0].net_name),
+            (shorts[0].obstacle_net, shorts[0].obstacle_net_name),
+        } == {(1, "+3V3"), (2, "GND")}
+
+    def test_name_only_kept_copper_vs_pad_uses_the_pad_ids(self) -> None:
+        """Re-keyed copper never shorts its own pads, and does short foreign ones."""
+        router = _router()
+        router.board_net_ids = {"+3V3": 1, "GND": 2}
+        router.pads[("J1", "1")] = _pad(1, "+3V3", 5.0, 10.0, ref="J1")
+        router.pads[("J3", "1")] = _pad(2, "GND", 12.0, 10.0)
+        router.existing_routes += [_trace(0, "+3V3", 5.0, 10.0, 19.0, 10.0)]
+
+        shorts = _kept_shorts(router)
+
+        assert [s.obstacle_pad for s in shorts] == ["J3.1"]
+
+    def test_name_only_resolution_without_loader_map(self) -> None:
+        """No ``board_net_ids``: pads' ids, then a private id per pad-less name."""
+        router = _router()
+        router.pads[("J1", "1")] = _pad(1, "+3V3", 5.0, 10.0, ref="J1")
+        router.existing_routes += [
+            _trace(0, "+3V3", 5.0, 10.0, 19.0, 10.0),
+            _trace(0, "FLOAT_A", 12.0, 5.0, 12.0, 15.0),
+            _trace(0, "FLOAT_B", 14.0, 5.0, 14.0, 15.0),
+            _trace(0, "", 16.0, 5.0, 16.0, 15.0),
+        ]
+
+        kept = {r.net_name: r.net for r in audited_kept_routes(router)}
+
+        assert kept["+3V3"] == 1
+        assert kept["FLOAT_A"] < 0 and kept["FLOAT_B"] < 0
+        assert kept["FLOAT_A"] != kept["FLOAT_B"]
+        assert "" not in kept, "anonymous copper is skipped"
+        assert len(_kept_shorts(router)) == 2  # +3V3 crosses each FLOAT trace
+
+    def test_name_only_same_net_is_never_flagged(self) -> None:
+        router = _router()
+        router.board_net_ids = {"+3V3": 1}
+        router.existing_routes += [
+            _trace(0, "+3V3", 5.0, 10.0, 19.0, 10.0),
+            _trace(0, "+3V3", 12.0, 5.0, 12.0, 15.0),
+        ]
+
+        assert _kept_shorts(router) == []
+        assert kept_copper_clearance_violations(router, board_rules=BoardClearanceRules()) == []
 
     def test_kept_vs_kept_needs_the_audit_flag(self) -> None:
         """In-router repair loops (default call) never see kept-vs-kept pairs."""
@@ -482,10 +546,29 @@ def _board(extra: list[str]) -> str:
     return "\n".join([*nodes, ")"])
 
 
-def _route(tmp_path: Path, case: str, project: dict | None = None) -> tuple[int, Path]:
+def _name_only(text: str) -> str:
+    """The same board in KiCad 10's name-only net dialect (``(net "NAME")``).
+
+    No header net table and no numeric id anywhere: the router loads kept
+    copper under net id 0 with its name, which the audit must still check
+    (#6237 review).
+    """
+    text = text.replace("(version 20240108)", "(version 20260206)")
+    text = re.sub(r'^\(net \d+ "[^"]*"\)$', "", text, flags=re.M)  # header table
+    text = re.sub(r'\(net \d+ "([^"]*)"\)', r'(net "\1")', text)  # pads
+    return re.sub(r"\(net (\d+)\)", lambda m: f'(net "{_NETS[int(m.group(1))]}")', text)
+
+
+def _route(
+    tmp_path: Path, case: str, project: dict | None = None, *, name_only: bool = False
+) -> tuple[int, Path]:
     src = tmp_path / "in.kicad_pcb"
     out = tmp_path / "out.kicad_pcb"
-    src.write_text(_board(_CASES[case]))
+    text = _board(_CASES[case])
+    if name_only:
+        text = _name_only(text)
+        assert re.search(r"\(net \d", text) is None
+    src.write_text(text)
     if project is not None:
         src.with_suffix(".kicad_pro").write_text(json.dumps(project))
     rc = route_main(
@@ -494,11 +577,15 @@ def _route(tmp_path: Path, case: str, project: dict | None = None) -> tuple[int,
     return rc, out
 
 
+_DIALECTS = pytest.mark.parametrize("name_only", [False, True], ids=["numeric", "name_only"])
+
+
+@_DIALECTS
 class TestCliPreserveExisting:
     def test_kept_near_miss_fails_the_run(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], name_only: bool
     ) -> None:
-        rc, _out = _route(tmp_path, "near_pad")
+        rc, _out = _route(tmp_path, "near_pad", name_only=name_only)
         stdout = capsys.readouterr().out
 
         assert rc == 3
@@ -509,26 +596,28 @@ class TestCliPreserveExisting:
         )
 
     def test_warning_severity_passes_with_a_warning(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], name_only: bool
     ) -> None:
-        rc, _out = _route(tmp_path, "near_pad", TestRuleSeverity._sev("warning"))
+        rc, _out = _route(
+            tmp_path, "near_pad", TestRuleSeverity._sev("warning"), name_only=name_only
+        )
         stdout = capsys.readouterr().out
 
         assert rc == 0
         assert "WARNING pre-existing clearance violation in input board" in stdout
 
     def test_kept_trace_crossing_kept_trace_fails_the_run(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], name_only: bool
     ) -> None:
-        rc, _out = _route(tmp_path, "trace_trace")
+        rc, _out = _route(tmp_path, "trace_trace", name_only=name_only)
         stdout = capsys.readouterr().out
 
         assert rc == 3
         assert "pre-existing short in input board (kept by --preserve-existing): " in stdout
         assert "+3V3 trace vs GND trace" in stdout
 
-    def test_same_net_kept_copper_exits_zero(self, tmp_path: Path) -> None:
-        rc, _out = _route(tmp_path, "same_net")
+    def test_same_net_kept_copper_exits_zero(self, tmp_path: Path, name_only: bool) -> None:
+        rc, _out = _route(tmp_path, "same_net", name_only=name_only)
         assert rc == 0
 
 
@@ -543,11 +632,13 @@ class TestCliPreserveExisting:
         ("same_net", set()),
     ],
 )
+@_DIALECTS
 def test_kicad_cli_agrees(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     case: str,
     expected: set[str],
+    name_only: bool,
 ) -> None:
     """kct and kicad-cli find the same classes of defect on the written board."""
     from kicad_tools.cli.runner import find_kicad_cli
@@ -556,7 +647,7 @@ def test_kicad_cli_agrees(
     if kicad_cli is None:
         pytest.skip("kicad-cli not installed")
 
-    rc, out = _route(tmp_path, case)
+    rc, out = _route(tmp_path, case, name_only=name_only)
     stdout = capsys.readouterr().out
     kct_found = set()
     if "pre-existing short in input board" in stdout:
