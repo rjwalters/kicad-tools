@@ -298,6 +298,18 @@ class ClearanceViolation:
     location: tuple[float, float] | None = None  # Approximate violation location (x, y)
     component_inherent: bool = False  # True if both pads are on the same component
     layer: Layer | None = None  # Copper layer where the violation occurs
+    # Issue #6229: who drew the offending copper.  ``"routing"`` (the
+    # default, so every pre-existing record is unchanged) means this run
+    # produced it; ``"input"`` means it is copper kept verbatim from the
+    # input board by ``--preserve-existing`` -- an input defect the router
+    # inherited, not one it created.
+    origin: str = "routing"
+    obstacle_pad: str = ""  # "REF.PIN" when ``obstacle_type == "pad"`` (Issue #6229)
+
+    @property
+    def is_input_defect(self) -> bool:
+        """True when the offending copper was kept from the input board (#6229)."""
+        return self.origin == "input"
 
     @property
     def is_short(self) -> bool:
@@ -321,6 +333,63 @@ def shorting_violations(violations: list[ClearanceViolation]) -> list[ClearanceV
     exit-code gates and :func:`count_shorting_violations`.
     """
     return [v for v in violations if v.is_short and not v.component_inherent]
+
+
+def describe_short(v: ClearanceViolation) -> str:
+    """One-line, origin-aware description of a short (Issue #6229).
+
+    Shorts in copper kept from the input board are labelled as input
+    defects so a user can tell "the router drew this" from "the board you
+    gave me already shorted these nets"; routing-caused shorts keep the
+    #5862 wording, prefixed with an explicit routing label.
+    """
+    net_label = v.net_name or f"Net {v.net}"
+    obs_label = v.obstacle_net_name or f"Net {v.obstacle_net}"
+    obs_kind = v.obstacle_type
+    if v.obstacle_type == "pad" and v.obstacle_pad:
+        obs_kind = f"pad {v.obstacle_pad}"
+    loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
+    layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
+    overlap = f": overlap {-v.distance:.3f}mm"
+    if v.is_input_defect:
+        copper = "trace" if v.segment_index >= 0 else "via"
+        return (
+            "pre-existing short in input board (kept by --preserve-existing): "
+            f"{net_label} {copper} vs {obs_label} {obs_kind}{loc}{layer_str}{overlap}"
+        )
+    return f"routing short [{v.obstacle_type}] {net_label} vs {obs_label}{loc}{layer_str}{overlap}"
+
+
+def short_origin_summary(shorts: list[ClearanceViolation]) -> str:
+    """``"N input defect(s), M routing failure(s)"`` for a short list (#6229)."""
+    input_count = sum(1 for v in shorts if v.is_input_defect)
+    routing_count = len(shorts) - input_count
+    return (
+        f"{input_count} pre-existing in the input board (input defect), "
+        f"{routing_count} caused by routing (routing failure)"
+    )
+
+
+def kept_input_routes(router: Autorouter) -> list[Route]:
+    """Copper kept verbatim from the input board that the output carries (#6229).
+
+    Prefers ``router._emitted_preserved_routes`` -- recorded by the CLI's
+    ``_finalize_routes`` and therefore exactly the preserved copper written
+    to the output (with placement-preserved copper under its real net ids).
+    Before finalize (repair loops, unit tests) it falls back to
+    ``router.existing_routes`` minus the nets this run re-routed, the same
+    "a re-routed net replaces its own stale copper" dedupe finalize applies
+    (stub-terminal nets keep their outside copper, Issue #4170).
+    """
+    emitted = getattr(router, "_emitted_preserved_routes", None)
+    if emitted is not None:
+        return list(emitted)
+    existing = list(getattr(router, "existing_routes", None) or [])
+    if not existing:
+        return []
+    routed_net_ids = {r.net for r in getattr(router, "routes", None) or []}
+    routed_net_ids -= set(getattr(router, "_stub_terminals", None) or {})
+    return [r for r in existing if r.net not in routed_net_ids]
 
 
 def count_shorting_violations(violations: list[ClearanceViolation]) -> int:
@@ -2575,7 +2644,9 @@ def validate_routes(
     # mutated during validation and the two skips are order-preserving,
     # so the surviving pads are visited in exactly the original
     # ``router.pads.items()`` order.
-    _pad_obstacles_by_net: dict[int, list[tuple[str, Pad, bool, Layer, float, float, float, float]]]
+    _pad_obstacles_by_net: dict[
+        tuple[int, str | None], list[tuple[str, Pad, bool, Layer, float, float, float, float]]
+    ]
     _pad_obstacles_by_net = {}
 
     def _pad_obstacles(
@@ -2589,7 +2660,11 @@ def validate_routes(
         and ``pair_clear`` the effective required clearance for this net
         pair.
         """
-        cached = _pad_obstacles_by_net.get(route_net)
+        # Keyed by (id, name): the same-net test below also matches by name
+        # (Issue #6225), so two callers sharing an id but not a name must
+        # not share an obstacle list (Issue #6229 kept copper).
+        cache_key = (route_net, route_name)
+        cached = _pad_obstacles_by_net.get(cache_key)
         if cached is not None:
             return cached
         entries: list[tuple[str, Pad, bool, Layer, float, float, float, float]] = []
@@ -2640,7 +2715,7 @@ def validate_routes(
                     pair_clear,
                 )
             )
-        _pad_obstacles_by_net[route_net] = entries
+        _pad_obstacles_by_net[cache_key] = entries
         return entries
 
     # Component refs connected to a net, memoized: the segment loop below
@@ -2849,6 +2924,7 @@ def validate_routes(
                             location=(pad.x, pad.y),
                             component_inherent=is_component_inherent,
                             layer=segment.layer,
+                            obstacle_pad=f"{ref}.{pad.pin}",
                         )
                     )
 
@@ -3040,8 +3116,19 @@ def validate_routes(
                     )
 
     # --- Via-to-pad checks ---
-    # Include pre-existing routes so old vias are checked against pads.
-    for route in itertools.chain(router.routes, getattr(router, "existing_routes", [])):
+    # Include kept input copper so old vias are checked against pads.
+    # Issue #6229: kept vias are tagged ``origin="input"`` so the report
+    # can tell an inherited short from one this run created, and the kept
+    # set is exactly the preserved copper the output carries (see
+    # :func:`kept_input_routes`).  Kept copper without a net (id 0) is
+    # skipped: its ownership is unknown, so it cannot be called a
+    # cross-net short.
+    kept_routes = [r for r in kept_input_routes(router) if r.net != 0]
+    via_pad_sources = itertools.chain(
+        ((r, "routing") for r in router.routes),
+        ((r, "input") for r in kept_routes),
+    )
+    for route, via_origin in via_pad_sources:
         route_net = route.net
 
         # Build component refs connected to this route's net
@@ -3113,8 +3200,84 @@ def validate_routes(
                             ),
                             location=(pad.x, pad.y),
                             component_inherent=is_component_inherent,
+                            origin=via_origin,
+                            obstacle_pad=f"{ref}.{num}",
                         )
                     )
+
+    # --- Kept-trace-to-pad checks (Issue #6229) ---
+    # Trace copper kept from the input board by ``--preserve-existing`` was
+    # checked against routed copper (Issue #5862) but never against other
+    # nets' PADS, so a kept +3V3 trace laid across a GND pad shipped while
+    # ``kct route`` printed SUCCESS.  Only physical overlap (a short) is
+    # reported here: the kept copper was drawn under the input board's own
+    # rules, and a sub-clearance near-miss in it is not this run's to
+    # repair, while a short makes the output unmanufacturable whoever drew
+    # it.  Same-net matching reuses ``_pad_obstacles`` and therefore the
+    # #6225 rule (id match, or id-0 pad with a matching net name).
+    for route in kept_routes:
+        route_net = route.net
+        route_name = _route_net_name(route)
+        kept_pad_obstacles = _pad_obstacles(route_net, route_name)
+        for seg_idx, segment in enumerate(route.segments):
+            seg_layer = segment.layer
+            seg_half_width = segment.width / 2
+            seg_mid_x = (segment.x1 + segment.x2) / 2.0
+            seg_mid_y = (segment.y1 + segment.y2) / 2.0
+            seg_half_len = math.hypot(segment.x2 - segment.x1, segment.y2 - segment.y1) / 2.0
+            for (
+                ref,
+                pad,
+                pad_through_hole,
+                pad_layer,
+                pad_x,
+                pad_y,
+                pad_reach,
+                pair_clear,
+            ) in kept_pad_obstacles:
+                if not pad_through_hole and pad_layer != seg_layer:
+                    continue
+                # Circle lower bound (Issue #5240): positive => no overlap.
+                center_dist = math.hypot(pad_x - seg_mid_x, pad_y - seg_mid_y)
+                if center_dist - seg_half_len - pad_reach - seg_half_width > 0.0:
+                    continue
+                effective_dist = (
+                    _segment_to_aabb_distance(
+                        *pad_local_point(pad, segment.x1, segment.y1),
+                        *pad_local_point(pad, segment.x2, segment.y2),
+                        0.0,
+                        0.0,
+                        pad.width / 2,
+                        pad.height / 2,
+                    )
+                    - seg_half_width
+                )
+                if effective_dist > 0.0:
+                    continue
+                violations.append(
+                    ClearanceViolation(
+                        segment_index=seg_idx,
+                        x1=segment.x1,
+                        y1=segment.y1,
+                        x2=segment.x2,
+                        y2=segment.y2,
+                        net=route_net,
+                        obstacle_type="pad",
+                        obstacle_net=pad.net,
+                        distance=effective_dist,
+                        required=pair_clear,
+                        net_name=route_name,
+                        obstacle_net_name=(
+                            pad.net_name
+                            if pad.net == 0 and pad.net_name
+                            else _resolve_net_name(pad.net)
+                        ),
+                        location=(pad.x, pad.y),
+                        layer=seg_layer,
+                        origin="input",
+                        obstacle_pad=f"{ref}.{pad.pin}",
+                    )
+                )
 
     # --- Via-to-via checks ---
     for i, route_a in enumerate(router.routes):
@@ -3370,12 +3533,14 @@ def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
         # violations" here, but only one of them makes the board
         # electrically wrong, and that distinction was invisible in a
         # list sorted by obstacle type.
-        short_count = sum(1 for v in routing_violations if v.is_short)
-        if short_count:
+        shorts = [v for v in routing_violations if v.is_short]
+        if shorts:
             lines.append(
-                f"  SHORTS (copper of different nets overlapping): {short_count} "
+                f"  SHORTS (copper of different nets overlapping): {len(shorts)} "
                 f"-- these are KiCad `shorting_items`, not near-misses"
             )
+            # Issue #6229: say who drew the shorting copper.
+            lines.append(f"    of which {short_origin_summary(shorts)}")
 
         # Show individual violations (limit to first 20 to avoid flooding output)
         max_detail = 20
@@ -3387,6 +3552,11 @@ def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
                 loc_str = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})"
             layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
             short_str = " SHORT" if v.is_short else ""
+            if v.is_input_defect:
+                if v.is_short:
+                    lines.append(f"  {describe_short(v)}")
+                    continue
+                short_str += " (input copper)"
             lines.append(
                 f"  [{v.obstacle_type}]{short_str} {net_label} vs {obs_label}"
                 f"{loc_str}{layer_str}: "
