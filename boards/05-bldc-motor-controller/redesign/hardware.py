@@ -534,6 +534,10 @@ def generate(output):
                         }
                     }
                 },
+                # Board 05 routes to the JLCPCB 0.1 mm floor; its authored
+                # 0.127 mm minima are stricter than the router targets, so opt
+                # out of the #6191 keep-stricter default (as board 04 does).
+                "text_variables": {"KCT_PRESERVE_BOARD_RULES": "0"},
                 "net_settings": {
                     "classes": [
                         {
