@@ -58,21 +58,35 @@ missed-rescue signal, and must say why (the tier's 4-layer floor).
 
 Backend: ``--backend python``, as before.  On the C++ backend board 04
 routes 9/9 at plain ``jlcpcb`` on both 2L and 4L, so the ladder stops at the
-first tier and there is nothing to escalate.  The python A* runs under a
-bounded per-net search budget (``--per-net-timeout``, default 30 s), and
-under that budget U2's congested pins (BOOT0, NRST, OSC_IN) are
-escape-limited -- the case in-pad vias straight down to the inner layers
-relieve.  Measured on the #6217 branch (three 4L runs, default per-net
-budget): jlcpcb ended at 6/9, 4/9 and 4/9; jlcpcb-tier1 at 8/9, 7/9 and 6/9.
-With ``--per-net-timeout 10`` both tiers stalled at 3/9, so the 4L test keeps
-the default per-net budget.
+first tier and there is nothing to escalate.  On the python backend U2's
+congested pins (BOOT0, NRST, OSC_IN) are escape-limited under a bounded
+per-net search -- the case in-pad vias straight down to the inner layers
+relieve.
+
+Determinism (PR #6228 review): both runs use ``--deterministic-budget
+--deterministic-rescue --per-net-iterations N`` and NO ``--timeout``, so
+every search is bounded by node expansions rather than wall clock and no
+stage deadline can fire.  The routed counts are then a property of the
+code, not of runner speed or load.  A wall-clock per-net budget made the
+tier1-vs-jlcpcb margin a race: on this branch it measured 2-3 nets at the
+30 s default, 1 at 15 s and 0 at 10 s, so a busy 4-vCPU runner could flip
+it.  Measured with the iteration budget (4L, each tier alone): at 200k
+expansions per net jlcpcb's best attempt is 6/9 and jlcpcb-tier1's is 7/9;
+at 500k and 1M it is 7/9 vs 8/9, but each tier then takes ~27 min under
+load; at 100k both stall at 3/9.  Two concurrent full ``--auto-mfr-tier``
+runs at 200k gave identical per-attempt counts (jlcpcb 6, 3; tier1 7, 6, 3),
+matching the single-tier runs made under different load, in ~25 min each
+under ~5x CPU contention.  This needed #6217's fix that makes ``--per-net-iterations`` reach the
+pure-python backend at all.
+
+The progress assertion is backed by a mechanism check that does not depend
+on the A* budget: tier1's escape pass reports ``(N via-in-pad)`` for U2 and
+jlcpcb's reports none.
 
 Marked ``@pytest.mark.slow``; PR-time CI excludes ``-m slow`` and the
-nightly ``.github/workflows/slow-tests.yml`` runs it.  ``--timeout`` is the
-hard end-to-end budget since #5141; the 4L run caps each search stage with
-``--search-timeout`` (the #5266 split, as the board 05 throughput test
-does) so both tiers fit inside it (~18 min locally).  The 2L run only needs
-the base tier to fail, so it uses a short ``--per-net-timeout``.
+nightly ``.github/workflows/slow-tests.yml`` runs it.  Without ``--timeout``
+the subprocess wall-clock limit below is the only safety net, so it is set
+well above the measured runtime.
 """
 
 from __future__ import annotations
@@ -147,15 +161,15 @@ def _split_by_tier(stdout: str) -> dict[str, str]:
     return result
 
 
-# 4L escalation run: hard end-to-end ``--timeout`` and per-stage
-# ``--search-timeout`` (seconds).  Two tiers x up to three 4L rungs each;
-# measured 1087 s locally.
-_ESCALATION_4L_TIMEOUT_S = 1200
-_ESCALATION_4L_SEARCH_TIMEOUT_S = 240
-# 2L no-escalation run: one tier (the guard stops the ladder); a short
-# per-net budget keeps it to ~3 min.
-_NO_ESCALATION_2L_TIMEOUT_S = 600
-_NO_ESCALATION_2L_PER_NET_TIMEOUT_S = 10
+# Per-net A* node-expansion caps for the deterministic runs.  4L: the
+# smallest measured cap with a jlcpcb-tier1 > jlcpcb margin (6/9 vs 7/9).
+# 2L: the run only needs the base tier to fail, so a small cap keeps it short.
+_ESCALATION_4L_PER_NET_ITERATIONS = 200_000
+_NO_ESCALATION_2L_PER_NET_ITERATIONS = 50_000
+# Subprocess wall-clock safety nets (seconds).  No ``--timeout`` is passed --
+# a firing wall-clock deadline would make the result machine-dependent again.
+_ESCALATION_4L_WALL_CLOCK_S = 4200
+_NO_ESCALATION_2L_WALL_CLOCK_S = 1500
 
 
 def _run_route_auto_mfr_tier(
@@ -163,9 +177,8 @@ def _run_route_auto_mfr_tier(
     *,
     max_layers: int,
     starting_layers: int,
-    timeout_seconds: int,
-    search_timeout_seconds: int | None = None,
-    per_net_timeout_seconds: int | None = None,
+    per_net_iterations: int,
+    wall_clock_seconds: int,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``kct route --auto-mfr-tier`` on a copy of the board-04 PCB.
 
@@ -174,10 +187,9 @@ def _run_route_auto_mfr_tier(
         max_layers: ``--max-layers``.  The reachable layer counts decide
             whether ``jlcpcb-tier1`` offers via-in-pad (Issue #6217).
         starting_layers: ``--starting-layers``.
-        timeout_seconds: Hard end-to-end ``--timeout`` budget.
-        search_timeout_seconds: Optional per-stage ``--search-timeout``.
-        per_net_timeout_seconds: Optional ``--per-net-timeout`` (python A*
-            wall clock per net; the CLI default is 30 s).
+        per_net_iterations: ``--per-net-iterations`` under
+            ``--deterministic-budget`` (machine-independent search bound).
+        wall_clock_seconds: Subprocess safety-net limit.
 
     Returns the completed subprocess so callers can inspect both the
     return code and the captured stdout/stderr.
@@ -199,25 +211,30 @@ def _run_route_auto_mfr_tier(
             str(max_layers),
             "--manufacturer",
             "jlcpcb",
-            "--timeout",
-            str(timeout_seconds),
+            "--deterministic-budget",
+            "--deterministic-rescue",
+            "--per-net-iterations",
+            str(per_net_iterations),
             "--backend",
             "python",
             "--auto-mfr-tier",
         ]
-        if search_timeout_seconds is not None:
-            cmd += ["--search-timeout", str(search_timeout_seconds)]
-        if per_net_timeout_seconds is not None:
-            cmd += ["--per-net-timeout", str(per_net_timeout_seconds)]
-        # subprocess timeout = hard budget + interpreter/setup slack.
-        wall_clock = timeout_seconds + 120
         return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=wall_clock,
+            timeout=wall_clock_seconds,
             check=False,
         )
+
+
+def _assert_deterministic(proc: subprocess.CompletedProcess[str]) -> None:
+    """No wall-clock stage deadline fired, so the counts are reproducible."""
+    assert "stage deadline fired" not in proc.stdout, (
+        "A wall-clock stage deadline fired during a --deterministic-budget run, "
+        "so its routed counts are no longer machine-independent.\n"
+        f"Last 3000 chars of stdout:\n{proc.stdout[-3000:]}"
+    )
 
 
 def _fail_on_fatal_exit(proc: subprocess.CompletedProcess[str]) -> None:
@@ -232,7 +249,7 @@ def _fail_on_fatal_exit(proc: subprocess.CompletedProcess[str]) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(1500)
+@pytest.mark.timeout(4500)
 class TestAutoMfrTierIntegration:
     """End-to-end chain test at 4L: jlcpcb -> escalate to jlcpcb-tier1.
 
@@ -252,10 +269,11 @@ class TestAutoMfrTierIntegration:
             unrouted_pcb_path,
             max_layers=4,
             starting_layers=4,
-            timeout_seconds=_ESCALATION_4L_TIMEOUT_S,
-            search_timeout_seconds=_ESCALATION_4L_SEARCH_TIMEOUT_S,
+            per_net_iterations=_ESCALATION_4L_PER_NET_ITERATIONS,
+            wall_clock_seconds=_ESCALATION_4L_WALL_CLOCK_S,
         )
         _fail_on_fatal_exit(proc)
+        _assert_deterministic(proc)
         return proc
 
     @pytest.fixture(scope="class")
@@ -328,6 +346,35 @@ class TestAutoMfrTierIntegration:
             f"\njlcpcb tier stdout (last 1500 chars):\n{jlcpcb_stdout[-1500:]}\n"
             f"\njlcpcb-tier1 tier stdout (last 1500 chars):\n"
             f"{tier1_stdout[-1500:]}"
+        )
+
+    def test_tier1_escape_pass_places_via_in_pad(self, per_tier_stdout: dict[str, str]) -> None:
+        """Mechanism check, independent of the A* budget (PR #6228 review).
+
+        The escape pass runs before any A* search, so whether it places
+        in-pad vias does not depend on how far the search gets.  jlcpcb has
+        no via-in-pad process and must place none on U2; jlcpcb-tier1 at 4L
+        has POFV and must place at least one -- the capability the
+        escalation exists to buy.  Checked on ANY tier1 attempt: the
+        interleaved micro-via fallback rung (#3371) places none, because its
+        0.3/0.15 mm micro-via is outside POFV's drill envelope (#5378).
+        """
+        in_pad_re = re.compile(r"Escape routes: U2 \(\w+\) - \d+ pins escaped \((\d+) via-in-pad\)")
+        assert "jlcpcb-tier1" in per_tier_stdout, (
+            f"No jlcpcb-tier1 tier ran.  Banners: {list(per_tier_stdout)}"
+        )
+        jlcpcb_in_pad = in_pad_re.findall(per_tier_stdout.get("jlcpcb", ""))
+        tier1_in_pad = [int(n) for n in in_pad_re.findall(per_tier_stdout["jlcpcb-tier1"])]
+        assert not jlcpcb_in_pad, (
+            "jlcpcb has no via-in-pad process, yet its escape pass reported "
+            f"in-pad vias on U2: {jlcpcb_in_pad}"
+        )
+        assert any(n > 0 for n in tier1_in_pad), (
+            "Expected a jlcpcb-tier1 attempt's escape pass to place at least "
+            "one via-in-pad on U2 ('Escape routes: U2 (...) - N pins escaped "
+            "(M via-in-pad)').\n"
+            f"\njlcpcb-tier1 stdout (last 3000 chars):\n"
+            f"{per_tier_stdout['jlcpcb-tier1'][-3000:]}"
         )
 
     # ------------------------------------------------------------------
@@ -444,7 +491,7 @@ class TestAutoMfrTierIntegration:
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1800)
 class TestAutoMfrTierNoEscalationAt2L:
     """Issue #6217: at 2L the ladder must not escalate on missed rescues.
 
@@ -461,10 +508,11 @@ class TestAutoMfrTierNoEscalationAt2L:
             unrouted_pcb_path,
             max_layers=2,
             starting_layers=2,
-            timeout_seconds=_NO_ESCALATION_2L_TIMEOUT_S,
-            per_net_timeout_seconds=_NO_ESCALATION_2L_PER_NET_TIMEOUT_S,
+            per_net_iterations=_NO_ESCALATION_2L_PER_NET_ITERATIONS,
+            wall_clock_seconds=_NO_ESCALATION_2L_WALL_CLOCK_S,
         )
         _fail_on_fatal_exit(proc)
+        _assert_deterministic(proc)
         return proc
 
     def test_does_not_escalate_to_tier1(

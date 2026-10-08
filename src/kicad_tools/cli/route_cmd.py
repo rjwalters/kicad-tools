@@ -11047,14 +11047,25 @@ def route_with_mfr_tier_escalation(
                     if floor is not None
                     else "at no layer count"
                 )
+                max_layers_arg = getattr(args, "max_layers", None)
+                # Only blame --max-layers when it is what keeps the floor out
+                # of reach; otherwise name the run's layer ladder (stackup /
+                # --starting-layers filtering).
+                max_layers_limits = (
+                    floor is not None and isinstance(max_layers_arg, int) and max_layers_arg < floor
+                )
+                limit_text = (
+                    f" (--max-layers {max_layers_arg})"
+                    if max_layers_limits
+                    else " (this run's layer ladder)"
+                )
                 layer_gated_note = (
                     f"{missed_count} missed via-in-pad rescue(s) on {prev_tier}, but "
                     f"{tier_name} offers via-in-pad {floor_text} and this run "
-                    f"can reach only {reachable_label} (--max-layers "
-                    f"{getattr(args, 'max_layers', '?')}), so escalating to it "
-                    "cannot place those in-pad vias"
+                    f"can reach only {reachable_label}{limit_text}, so escalating "
+                    "to it cannot place those in-pad vias"
                 )
-                if floor is not None:
+                if max_layers_limits:
                     layer_gated_note += f" -- raise --max-layers to {floor}"
                 if not quiet:
                     flush_print(f"  No via-in-pad gain from {tier_name}: {layer_gated_note}.")

@@ -19276,9 +19276,20 @@ class Autorouter:
                             pad, escape
                         )
 
+                # Issue #6217: name how many escapes used an in-pad via, so a
+                # run can show (deterministically -- the escape pass does not
+                # depend on the A* budget) that a via-in-pad tier actually
+                # used the capability.  Omitted when zero to keep every
+                # non-in-pad board's output unchanged.
+                in_pad_vias = sum(
+                    1
+                    for e in escapes
+                    if getattr(e, "via", None) is not None and getattr(e.via, "in_pad", False)
+                )
+                in_pad_note = f" ({in_pad_vias} via-in-pad)" if in_pad_vias else ""
                 print(
                     f"  Escape routes: {package.ref} ({package.package_type.name})"
-                    f" - {len(escapes)} pins escaped"
+                    f" - {len(escapes)} pins escaped{in_pad_note}"
                 )
 
         if self._escape_pad_overrides:

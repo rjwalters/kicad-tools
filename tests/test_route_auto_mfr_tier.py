@@ -1039,6 +1039,23 @@ class TestLayerAwareViaInPadEscalation:
         diagnosis = out[out.index("Diagnosis") :]
         assert ">= 4 copper layers" in diagnosis
 
+    def test_ladder_limit_does_not_blame_max_layers(self, capsys):
+        """When --max-layers already allows tier1's floor but the run's
+        layer ladder (stackup / --starting-layers) still excludes it, the
+        reason names the ladder instead of telling the user to raise
+        --max-layers."""
+        args = self._make_args(max_layers=6)
+        with patch(
+            "kicad_tools.cli.route_cmd._mfr_tier_reachable_layer_counts",
+            return_value=(2,),
+        ):
+            _, seen_tiers = self._run(args)
+        out = capsys.readouterr().out
+
+        assert seen_tiers == ["jlcpcb"]
+        assert "can reach only 2L (this run's layer ladder)" in out
+        assert "--max-layers" not in out.split("No via-in-pad gain", 1)[1].split("\n", 1)[0]
+
     def test_four_layer_run_escalates_on_missed_rescues(self, capsys):
         args = self._make_args(max_layers=4, starting_layers=4)
         rc, seen_tiers = self._run(args)
