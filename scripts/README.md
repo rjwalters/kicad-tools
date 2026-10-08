@@ -141,5 +141,7 @@ plus standalone router benchmark / profiling scripts (`bench_*.py`,
 `bench_stitch_fill_predicates.py`, `bench_stitch_track_index.py`,
 `calibrate_fom.py`, `check_negatives.py`, `demo_integration.py`,
 `generate_negative_controls.py`, `generate_perturbations.py`,
+`placement_score_calibration.py` (#5948, write-up in
+[`docs/research/placement_score_calibration.md`](../docs/research/placement_score_calibration.md)),
 `profile_board06_rtree_deletes.py`, `run_phase0_corpus.sh`,
 `run_phase0_fast_corpus.sh`, `train_phase0_classifier.py`.

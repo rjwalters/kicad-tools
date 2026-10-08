@@ -647,7 +647,10 @@ language = "Python"
 stars = 9
 last_push = "2026-10-06"
 last_verified = "2026-10-07"
-research_docs = ["docs/research/circuit-skills-evaluation.md"]
+research_docs = [
+  "docs/research/circuit-skills-evaluation.md",
+  "docs/research/placement_score_calibration.md",
+]
 # The commit read for issue #5941 (22 commits past the previous pin
 # bc1322f9). HEAD has since moved two commits, both placement-only.
 pinned_commit = "f6ed02104137f7b8a1cb9d0bd447dd3a11deccac"

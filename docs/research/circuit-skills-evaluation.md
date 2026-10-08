@@ -84,7 +84,7 @@ verify.
 
 | # | Candidate | Verdict | Evidence pointer |
 |---|---|---|---|
-| U1 | Placement score fitted on routing outcomes (reported 0.89 pairwise on 319 placements, 64 boards; unverified) | **duplicate-of-#5948** | Placement scoring today: `docs/placement-scoring.md`. |
+| U1 | Placement score fitted on routing outcomes (reported 0.89 pairwise on 319 placements, 64 boards; unverified) | **duplicate-of-#5948** | Placement scoring today: `docs/placement-scoring.md`. Measured in [`placement_score_calibration.md`](placement_score_calibration.md): on two corpora our best pre-route signal ranks at most 0.75 of same-board pairs, a fitted combination does not beat the best single signal, and the score was not adopted as an acceptance gate (`--route-check` instead, #6234). |
 | U2 | Finish-or-re-place diagnosis (closest candidate, are the leftovers in congested cells) | **duplicate-of-#5944** (also #5945 for the best-so-far part) | #5944 classifies congested vs blocked per unrouted connection. |
 | U3 | Rip up what DRC flags, then re-route with widening radius | **adopt** | `kct fix-drc` (`cli/fix_drc_cmd.py`) and `repair-clearance` only nudge: `drc/repair_clearance.py`, `drc/repair_drill_clearance.py`. `route_fixed_repair.py` is the natural re-route building block. Filed #6045. |
 | U4a | Floating-SMD-pad gate (opposite-layer copper, no via) | **already have** | Checked: a B.Cu trace ending under an F.Cu SMD pad with no via makes `kct check` report `connectivity` ("1 of 2 pads stranded") and `track_dangling`. `validate/connectivity.py` deliberately does not fuse via-less crossings (#3783). |

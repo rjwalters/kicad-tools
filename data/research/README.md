@@ -13,12 +13,13 @@ one:
 | **`data/research/`** (this directory) | The committed artifacts: datasets, caches, fitted models, plots, weight files. |
 | `docs/research/` | The write-ups: method, results, caveats, and the decision each study drove. |
 
-Two independent datasets live here. They share nothing but a parent directory.
+Three independent datasets live here. They share nothing but a parent directory.
 
 | Dataset | Issue | Question | Write-up |
 |---|---|---|---|
 | [`fom_phase0/`](fom_phase0/) | #3187 | Does any learnable signal exist between cheap placement features and binary manufacturability? | [`docs/research/learned_fom_phase0.md`](../../docs/research/learned_fom_phase0.md) |
 | [`fom_weights/`](fom_weights/) | #3188 | What soft-term weights make the FOM rank a committed placement above its perturbations? | [`docs/research/fom_calibration.md`](../../docs/research/fom_calibration.md) |
+| [`placement_score/`](placement_score/) | #5948, #6233 | Do pre-route placement signals (RUDY, HPWL, the `optimize-placement` cost) pick the more routable of two same-board placements? | [`docs/research/placement_score_calibration.md`](../../docs/research/placement_score_calibration.md) |
 
 Interactive companions for both live in [`notebooks/`](../../notebooks/).
 
@@ -178,3 +179,28 @@ so a re-run rewrites that tracked file as well as everything in this directory.
 perturbations and weight-search candidates draw from the same seeded RNG
 sequence across runs. Pass `--reuse-cache` to keep an existing `term_cache.npz`
 instead of re-scoring the perturbations.
+
+---
+
+## `placement_score/` — pre-route placement score vs. routing outcomes
+
+Two corpora used to decide whether a calibrated pre-route score should gate
+`optimize-placement` (decision: no; use a bounded real route, #6234). Corpus A
+re-scores the recorded Phase 0 labels in `fom_phase0/` without routing; corpus
+B is a fresh perturb-measure-route-check run on fleet boards 00-07. Every file
+is written by `scripts/research/placement_score_calibration.py`:
+
+| File | Written by |
+|---|---|
+| `results.json` | Corpus A: `phase0` (reads `../fom_phase0/labels.jsonl` and the seed boards at git rev `83b0bc82`). |
+| `labels_budget45.jsonl` | Corpus B: `generate --route-timeout 45` (boards 00, 01). From the aborted first run, filtered to those two boards; `route_timeout` back-filled to 45 because the field was added after that run (see the write-up). |
+| `labels_budget120.jsonl` | Corpus B: `generate --route-timeout 120` (boards 02-07). |
+| `analysis.json`, `analysis.md` | `analyze labels_budget45.jsonl labels_budget120.jsonl --json analysis.json` (stdout to `analysis.md`). |
+| `analysis_timeouts_as_worst.json`, `analysis_timeouts_as_worst.md` | Same, plus `--timeouts-as-worst`. |
+
+One corpus B labels row = one placement (the original with router seeds 0-2, or one Gaussian
+perturbation). It carries the pre-route `signals`, the `route` outcome
+(`label_source` = final board or best-so-far checkpoint), `net_status`
+(signal-net completion) and `check` (error counts by rule). The `label_pcb`
+paths point at a deleted scratch tree (`--cleanup`) and are kept only as
+provenance.
