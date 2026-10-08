@@ -244,13 +244,16 @@ This is the existing analogue of pcbplace's five-verb vocabulary (relevant to
 Both estimators were run over the **same** committed placements in
 `tests/fixtures/placement/benchmark_boards.json` (decoded through `encode` /
 `decode` in `src/kicad_tools/placement/vector.py`, so pad transforms are the
-production ones). Re-run at `8a98a69f`; all three rows reproduce exactly as
-first measured.
+production ones). Re-run at `8a98a69f`; all three rows reproduced exactly as
+first measured. Issue #6020 then corrected the 90/270-degree pad transform in
+`vector.py` (it had used the y-up rotation, mirroring rotated footprints'
+pads relative to KiCad), which moves the `simple_rc_filter` row from
+126.690 mm (−0.24%) to 127.440 mm; the other two rows have no rotated parts.
 
 | Fixture board | Components | Nets | `compute_wirelength` (centres) | `compute_hpwl` (pads) | Δ |
 |---|---|---|---|---|---|
 | `trivial_3_resistors` (known-optimal) | 3 | 4 | 12.000 mm | 7.200 mm | −40.0% |
-| `simple_rc_filter` (reference) | 10 | 8 | 127.000 mm | 126.690 mm | −0.24% |
+| `simple_rc_filter` (reference) | 10 | 8 | 127.000 mm | 127.440 mm | +0.35% |
 | `medium_mcu_board` (reference) | 20 | 17 | 382.000 mm | 339.230 mm | −11.2% |
 | `stress_50_components` | 50 | — | *not measured* | *not measured* | no committed placement — the fixture carries only a `component_generation` block and the board is built programmatically in `tests/test_placement_benchmark.py` |
 

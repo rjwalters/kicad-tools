@@ -38,6 +38,8 @@ import time
 from pathlib import Path
 from typing import Callable, ParamSpec, Sequence, TypeVar
 
+import numpy as np
+
 from kicad_tools.cli.format_options import emit_json
 from kicad_tools.placement.cost import (
     BoardOutline,
@@ -48,6 +50,11 @@ from kicad_tools.placement.cost import (
     PlacementCostConfig,
     PlacementScore,
     evaluate_placement,
+)
+from kicad_tools.placement.decoupling import (
+    DecouplingGroup,
+    decoupling_pairs,
+    identify_decoupling_groups,
 )
 from kicad_tools.placement.geometry import extract_board_outline as _extract_board_outline
 from kicad_tools.placement.seed import force_directed_placement, random_placement
@@ -193,6 +200,8 @@ def _evaluate(
     required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
     exempt_pairs: set[frozenset[str]] | None = None,
     pad_anchored: bool = False,
+    decoupling_groups: Sequence[DecouplingGroup] | None = None,
+    fixed_sides: Sequence[int] | None = None,
 ) -> PlacementScore:
     """Evaluate a single placement vector and return its score.
 
@@ -204,12 +213,21 @@ def _evaluate(
     transformed pad coordinates ``decode`` already produces, instead of
     between footprint centres (issue #4831 M1). ``False`` (the default)
     discards those pads exactly as before, keeping the score unchanged.
+
+    *decoupling_groups* (issue #6020) enables the decoupling-cap affinity
+    term. It always measures at pads, whatever *pad_anchored* says.
+
+    *fixed_sides* overrides the vector's side flags before decoding (see
+    :func:`_with_sides`), so pads are scored where the writer will put them.
     """
+    if fixed_sides is not None:
+        vector = _with_sides(vector, fixed_sides)
     placed = decode(vector, components)
     placements = [
         ComponentPlacement(reference=p.reference, x=p.x, y=p.y, rotation=p.rotation) for p in placed
     ]
-    pad_positions = build_pad_position_map(placed) if pad_anchored else None
+    pad_map = build_pad_position_map(placed) if (pad_anchored or decoupling_groups) else None
+    pad_positions = pad_map if pad_anchored else None
     return evaluate_placement(
         placements,
         nets,
@@ -221,7 +239,141 @@ def _evaluate(
         required_mm_by_domain_pair=required_mm_by_domain_pair,
         exempt_pairs=exempt_pairs,
         pad_positions=pad_positions,
+        decoupling_groups=decoupling_groups,
+        decoupling_pad_positions=pad_map,
     )
+
+
+def _with_sides(vector: PlacementVector, sides: Sequence[int]) -> PlacementVector:
+    """Return a copy of *vector* with every side flag set from *sides*.
+
+    The writer (:func:`_write_placements_to_pcb`) moves and rotates
+    footprints but never flips them, so a side the optimizer picks is
+    discarded on write. Scoring a flipped candidate anyway mirrors its pads
+    (pad-anchored wirelength, decoupling affinity) and lets the slide-off
+    pass skip overlaps between parts that will in fact share a side. Pinning
+    the sides to the board's own keeps the model and the written board in
+    step (issue #6020).
+    """
+    data = vector.data.copy()
+    data[3::4] = np.asarray(sides, dtype=np.float64)
+    return PlacementVector(data=data)
+
+
+def _read_pad_pin_types(pcb_path: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """Read the schematic pin annotations on the PCB's pads (issue #5985).
+
+    Returns ``(reference, pad) -> (pintype, pinfunction)`` for every pad that
+    carries a ``(pintype ...)``. Empty for boards never annotated.
+    """
+    from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+    pcb = SchemaPCB.load(pcb_path)
+    out: dict[tuple[str, str], tuple[str, str]] = {}
+    for fp in pcb.footprints:
+        if not fp.reference:
+            continue
+        for pad in fp.pads:
+            pintype = getattr(pad, "pintype", "") or ""
+            if pintype:
+                out[(fp.reference, pad.number)] = (pintype, getattr(pad, "pinfunction", "") or "")
+    return out
+
+
+def _read_local_courtyards(pcb_path: str) -> dict[str, tuple[float, float, float, float]]:
+    """Each footprint's body box in its own frame, for the decoupling snap.
+
+    The courtyard (``F.CrtYd``/``B.CrtYd`` on the footprint's side) when the
+    footprint has one; otherwise the silkscreen and fab outlines on that side
+    together with the pads, so a cap is not snapped onto another part's silk
+    (``silk_pad_clearance``). Coordinates are the unrotated footprint frame
+    the optimizer's pads use.
+    """
+    from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+    out: dict[str, tuple[float, float, float, float]] = {}
+    for fp in SchemaPCB.load(pcb_path).footprints:
+        if not fp.reference:
+            continue
+        side = "B" if str(fp.layer).startswith("B") else "F"
+
+        def points(layers: tuple[str, ...]) -> list[tuple[float, float]]:
+            # Each vertex is widened by half the stroke: DRC measures the
+            # drawn line, not its centreline.
+            pts: list[tuple[float, float]] = []
+            for g in fp.graphics:
+                if g.layer not in layers:
+                    continue
+                hw = (g.stroke_width or 0.0) / 2
+                for x, y in list(g.points) if g.graphic_type == "poly" else [g.start, g.end]:
+                    pts.extend([(x - hw, y - hw), (x + hw, y + hw)])
+            return pts
+
+        pts = points((f"{side}.CrtYd",))
+        if not pts:
+            pts = points((f"{side}.SilkS", f"{side}.Fab"))
+            for pad in fp.pads:
+                (px, py), (sx, sy) = pad.position, pad.size
+                pts.extend([(px - sx / 2, py - sy / 2), (px + sx / 2, py + sy / 2)])
+        if pts:
+            xs = [x for x, _ in pts]
+            ys = [y for _, y in pts]
+            out[fp.reference] = (min(xs), min(ys), max(xs), max(ys))
+    return out
+
+
+def _build_decoupling_context(
+    pcb_path: str,
+    nets: Sequence[Net],
+    cost_config: PlacementCostConfig,
+    *,
+    quiet: bool,
+) -> list[DecouplingGroup] | None:
+    """Find the decoupling caps and IC supply pins (issue #6020).
+
+    Returns ``None`` when the term is disabled (``decoupling`` weight 0) or
+    the board has no cap/supply-pin structure.
+    """
+    if not cost_config.decoupling_weight:
+        return None
+    groups = identify_decoupling_groups(nets, _read_pad_pin_types(pcb_path))
+    if not groups:
+        return None
+    if not quiet:
+        n_caps = sum(len(g.caps) for g in groups)
+        n_pins = sum(len(g.pins) for g in groups)
+        nets_str = ", ".join(g.net for g in groups)
+        print(
+            f"  Decoupling affinity: {n_caps} cap(s) -> {n_pins} IC supply pin(s) "
+            f"on {len(groups)} rail(s) ({nets_str}); "
+            f"weight={cost_config.decoupling_weight:g}"
+        )
+    return groups
+
+
+def _decoupling_report(
+    vector: PlacementVector,
+    components: Sequence[ComponentDef],
+    groups: Sequence[DecouplingGroup] | None,
+) -> list[dict]:
+    """Per-cap assignment for *vector*: net, cap, pin and distance (mm)."""
+    if not groups:
+        return []
+    placed = decode(vector, components)
+    placements = [
+        ComponentPlacement(reference=p.reference, x=p.x, y=p.y, rotation=p.rotation) for p in placed
+    ]
+    return [
+        {
+            "net": net,
+            "cap": cap.reference,
+            "pin": f"{pin.reference}.{pin.pad}",
+            "distance_mm": round(dist, 3),
+        }
+        for net, cap, pin, dist in decoupling_pairs(
+            groups, placements, build_pad_position_map(placed)
+        )
+    ]
 
 
 def _build_footprint_sizes(
@@ -320,6 +472,7 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
         "area_weight": 0.1,
         "creepage_weight": 1e5,
         "cohesion_weight": 1.0,
+        "decoupling_weight": 2.0,
         "mode": CostMode.LEXICOGRAPHIC,
     }
 
@@ -352,6 +505,7 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
         area_weight=data.get("area", defaults["area_weight"]),
         creepage_weight=data.get("creepage", defaults["creepage_weight"]),
         cohesion_weight=data.get("cohesion", defaults["cohesion_weight"]),
+        decoupling_weight=data.get("decoupling", defaults["decoupling_weight"]),
         mode=mode,
     )
 
@@ -479,10 +633,11 @@ def _print_score(label: str, score: PlacementScore) -> None:
     b = score.breakdown
     feasible = "feasible" if score.is_feasible else "INFEASIBLE"
     creepage_str = f" crp={b.creepage:.2f}" if b.creepage else ""
+    decoupling_str = f" dcp={b.decoupling:.2f}" if b.decoupling else ""
     print(
         f"  {label}: {score.total:.4f} ({feasible}) "
         f"[wl={b.wirelength:.2f} ovl={b.overlap:.2f} bnd={b.boundary:.2f} "
-        f"drc={b.drc:.0f} area={b.area:.2f}{creepage_str}]"
+        f"drc={b.drc:.0f} area={b.area:.2f}{creepage_str}{decoupling_str}]"
     )
 
 
@@ -568,6 +723,9 @@ def _read_board_data(
                 pads=tuple(pad_defs),
                 width=width,
                 height=height,
+                # Pads are read as stored, i.e. already flipped for a
+                # back-side footprint; decode must not mirror them again.
+                side=1 if fp.layer == "B.Cu" else 0,
             )
         )
 
@@ -909,6 +1067,16 @@ def run_optimize_placement(
 
     footprint_sizes = _build_footprint_sizes(components)
 
+    # Side flags as on the board: the writer cannot flip footprints, so every
+    # score and the final vector use these (see _with_sides).
+    fixed_sides = [int(s) for s in _read_current_vector(pcb_path, components).data[3::4]]
+
+    # Decoupling-cap affinity (issue #6020): pull each decoupling cap onto the
+    # IC supply pin it serves. On by default; ``{"decoupling": 0}`` in
+    # --weights turns it off. Boards without cap/supply-pin structure get None
+    # and an unchanged objective.
+    decoupling_groups = _build_decoupling_context(pcb_path, nets, cost_config, quiet=quiet)
+
     # Pad-anchored wirelength (issue #4831 M1). The pads are transformed on
     # every decode regardless; this only decides whether the objective reads
     # them or throws them away. Warn -- rather than silently no-op -- when the
@@ -966,6 +1134,8 @@ def run_optimize_placement(
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
+            decoupling_groups=decoupling_groups,
+            fixed_sides=fixed_sides,
         )
         # Report BOTH wirelength estimators for this layout (issue #4831 M5).
         # Report-only: `score` above is untouched, so --dry-run still reports
@@ -1009,6 +1179,7 @@ def run_optimize_placement(
                     "mode": "evaluate",
                     "scores": {"current": _score_document(score)},
                     "wirelength_estimators": estimators.as_dict(),
+                    "decoupling": _decoupling_report(current_vector, components, decoupling_groups),
                     "feasible": bool(score.is_feasible),
                     "saved": False,
                     "written_to": None,
@@ -1102,6 +1273,8 @@ def run_optimize_placement(
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
+            decoupling_groups=decoupling_groups,
+            fixed_sides=fixed_sides,
         )
         if not quiet:
             _print_score("Seed", seed_score)
@@ -1127,6 +1300,8 @@ def run_optimize_placement(
                 required_mm_by_domain_pair=hv_required,
                 exempt_pairs=hv_exempt,
                 pad_anchored=pad_anchored_wirelength,
+                decoupling_groups=decoupling_groups,
+                fixed_sides=fixed_sides,
             )
             initial_scores.append(score.total)
 
@@ -1147,6 +1322,8 @@ def run_optimize_placement(
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
+            decoupling_groups=decoupling_groups,
+            fixed_sides=fixed_sides,
         )
 
     # Keep interrupt state up-to-date with best vector for graceful save
@@ -1201,6 +1378,8 @@ def run_optimize_placement(
                     required_mm_by_domain_pair=hv_required,
                     exempt_pairs=hv_exempt,
                     pad_anchored=pad_anchored_wirelength,
+                    decoupling_groups=decoupling_groups,
+                    fixed_sides=fixed_sides,
                 )
                 scores.append(score.total)
 
@@ -1236,6 +1415,22 @@ def run_optimize_placement(
 
     # Get final result
     best_vector, best_score = strategy.best()
+    best_vector = _with_sides(best_vector, fixed_sides)
+
+    # A warm start never hands back a worse placement than it started from.
+    # CMA-ES only reports the best *sampled* candidate, so with a tight step
+    # size it can return a jittered copy of the seed that scores worse than
+    # the seed itself (issue #6020). ``--max-iterations 0`` with
+    # ``--seed current`` keeps the seed outright, which makes the run a pure
+    # refinement pass: slide-off plus the decoupling snap below.
+    if (
+        seed_method == "current"
+        and not resumed
+        and (max_iterations == 0 or seed_score.total <= best_score)
+    ):
+        best_vector = _with_sides(seed_vector, fixed_sides)
+        if not quiet:
+            print("  Keeping the warm-start placement: no candidate scored better")
 
     # --- Post-convergence overlap resolution pass ---
     post_slide_result = None
@@ -1255,6 +1450,50 @@ def run_optimize_placement(
                 f"overlaps ({post_slide_result.overlaps_remaining} remaining)"
             )
 
+    # --- Decoupling-cap snap (issue #6020) ---
+    # The global search rarely lands a 2 mm part within a millimetre of one
+    # pin. Finish the job one cap at a time: each cap moves to the nearest
+    # free spot beside its assigned supply pin (clear of other bodies and of
+    # IC signal-pin escape lanes), never adding an overlap/DRC/boundary
+    # violation. See snap_decoupling_caps.
+    if decoupling_groups:
+        from kicad_tools.placement.decoupling import snap_decoupling_caps
+
+        def _score_vector(vec: PlacementVector) -> PlacementScore:
+            return _evaluate(
+                vec,
+                components,
+                nets,
+                rules,
+                board_outline,
+                cost_config,
+                footprint_sizes,
+                ref_domains=hv_ref_domains,
+                required_mm_by_domain_pair=hv_required,
+                exempt_pairs=hv_exempt,
+                pad_anchored=pad_anchored_wirelength,
+                decoupling_groups=decoupling_groups,
+                fixed_sides=fixed_sides,
+            )
+
+        best_vector, snap_moves = snap_decoupling_caps(
+            best_vector,
+            components,
+            decoupling_groups,
+            board_outline,
+            _score_vector,
+            cost_config,
+            pad_nets={pin: net.name for net in nets for pin in net.pins},
+            extents=_read_local_courtyards(pcb_path),
+        )
+        if not quiet and snap_moves:
+            print(f"\n  Decoupling snap: moved {len(snap_moves)} cap(s) onto their supply pins")
+            for move in snap_moves:
+                print(
+                    f"    {move.cap} -> {move.pin}: "
+                    f"{move.before_mm:.2f} mm -> {move.after_mm:.2f} mm"
+                )
+
     # Evaluate final result for full breakdown (after post-pass)
     final_score = _evaluate(
         best_vector,
@@ -1268,6 +1507,8 @@ def run_optimize_placement(
         required_mm_by_domain_pair=hv_required,
         exempt_pairs=hv_exempt,
         pad_anchored=pad_anchored_wirelength,
+        decoupling_groups=decoupling_groups,
+        fixed_sides=fixed_sides,
     )
 
     # Save final checkpoint
@@ -1306,6 +1547,8 @@ def run_optimize_placement(
         print(f"    Area:          {_delta(si.area, sf.area)}")
         if si.creepage or sf.creepage:
             print(f"    Creepage:      {_delta(si.creepage, sf.creepage)}")
+        if si.decoupling or sf.decoupling:
+            print(f"    Decoupling:    {_delta(si.decoupling, sf.decoupling)}")
 
         # Feasibility transition (categorical, not percent)
         seed_feas = "feasible" if seed_score.is_feasible else "INFEASIBLE"
@@ -1375,6 +1618,7 @@ def run_optimize_placement(
                         "initial": _score_document(seed_score),
                         "final": _score_document(final_score),
                     },
+                    "decoupling": _decoupling_report(best_vector, components, decoupling_groups),
                     "feasible": bool(final_score.is_feasible),
                     "infeasible_detail": infeasible_detail,
                     "iterations": iteration,

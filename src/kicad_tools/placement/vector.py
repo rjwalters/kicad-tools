@@ -85,12 +85,18 @@ class ComponentDef:
         pads: Pad definitions in local component coordinates.
         width: Bounding box width in mm (used for bounds calculation).
         height: Bounding box height in mm (used for bounds calculation).
+        side: Board side the *pads* coordinates were captured on (0 front,
+            1 back). A ``.kicad_pcb`` stores a back-side footprint's pads
+            already flipped, so decoding mirrors only when the placed side
+            differs from this one (issue #6020). Default 0 keeps library
+            (front-side) coordinates.
     """
 
     reference: str
     pads: tuple[PadDef, ...] = ()
     width: float = 1.0
     height: float = 1.0
+    side: int = 0
 
 
 @dataclass(frozen=True)
@@ -284,19 +290,26 @@ def _transform_pad(
     if side == 1:
         lx = -lx
 
-    # Step 2: rotate around local origin
+    # Step 2: rotate around local origin.  KiCad's footprint orientation is
+    # counter-clockwise *as seen on screen*, where +y points down, so in
+    # board coordinates a pad at local (lx, ly) lands at
+    # (lx*cos + ly*sin, -lx*sin + ly*cos) -- the same negated-angle transform
+    # as ``optim.fom_features._pad_absolute_position`` (verified against
+    # pcbnew, issue #3739).  Until issue #6020 this used the y-up form, which
+    # mirrored every 90/270-degree footprint's pads relative to the board the
+    # writer produces.
     rot_idx = int(round(rotation_deg / 90.0)) % 4
     if rot_idx == 0:
         rx, ry = lx, ly
         out_sx, out_sy = sx, sy
-    elif rot_idx == 1:  # 90 degrees CCW
-        rx, ry = -ly, lx
+    elif rot_idx == 1:  # 90 degrees (KiCad orientation)
+        rx, ry = ly, -lx
         out_sx, out_sy = sy, sx
     elif rot_idx == 2:  # 180 degrees
         rx, ry = -lx, -ly
         out_sx, out_sy = sx, sy
-    else:  # 270 degrees CCW (= 90 CW)
-        rx, ry = ly, -lx
+    else:  # 270 degrees
+        rx, ry = -ly, lx
         out_sx, out_sy = sy, sx
 
     # Step 3: translate
@@ -378,7 +391,7 @@ def decode(
 
         # Transform pads
         transformed_pads = tuple(
-            _transform_pad(pad, x, y, rotation_deg, side) for pad in comp_def.pads
+            _transform_pad(pad, x, y, rotation_deg, side ^ comp_def.side) for pad in comp_def.pads
         )
 
         result.append(
@@ -637,7 +650,7 @@ def decode_with_blocks(
 
         comp_def = components[comp_idx]
         transformed_pads = tuple(
-            _transform_pad(pad, x, y, rotation_deg, side) for pad in comp_def.pads
+            _transform_pad(pad, x, y, rotation_deg, side ^ comp_def.side) for pad in comp_def.pads
         )
         result_map[comp_def.reference] = PlacedComponent(
             reference=comp_def.reference,
@@ -667,7 +680,9 @@ def decode_with_blocks(
             comp_def = comp_map.get(m.reference)
             pads: tuple[TransformedPad, ...] = ()
             if comp_def is not None:
-                pads = tuple(_transform_pad(pad, cx, cy, crot, side) for pad in comp_def.pads)
+                pads = tuple(
+                    _transform_pad(pad, cx, cy, crot, side ^ comp_def.side) for pad in comp_def.pads
+                )
 
             result_map[m.reference] = PlacedComponent(
                 reference=m.reference,

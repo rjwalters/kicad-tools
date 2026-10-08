@@ -366,8 +366,8 @@ class TestHPWLWithEncodeDecode:
             ),
         ]
 
-        # U1 at (10, 10) rotated 90 degrees: pad at local (2,0) becomes (-0, 2)
-        # => absolute (10, 12)
+        # U1 at (10, 10) rotated 90 degrees: pad at local (2,0) becomes (0, -2)
+        # (KiCad orientation, y down) => absolute (10, 8)
         # U2 at (10, 0): pad at (0,0) => absolute (10, 0)
         original = [
             PlacedComponent(reference="U1", x=10.0, y=10.0, rotation=90.0, side=0, pads=()),
@@ -378,10 +378,10 @@ class TestHPWLWithEncodeDecode:
         decoded = decode(vector, comp_defs)
 
         nets = [Net(name="N1", pins=[("U1", "1"), ("U2", "1")])]
-        # U1 pad: (10 + 0, 10 + 2) = (10, 12) [90 CCW: (2,0) -> (0,2)]
+        # U1 pad: (10 + 0, 10 - 2) = (10, 8) [KiCad 90: (2,0) -> (0,-2)]
         # U2 pad: (10, 0)
-        # HPWL = (10-10) + (12-0) = 12
-        assert compute_hpwl(decoded, nets) == 12.0
+        # HPWL = (10-10) + (8-0) = 8
+        assert compute_hpwl(decoded, nets) == 8.0
 
 
 # ---------------------------------------------------------------------------

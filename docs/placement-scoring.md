@@ -120,6 +120,46 @@ they can rank two candidate layouts differently. Background, the full
 term-by-term inventory, and the remaining migration candidates are in
 [`placement-pad-anchoring-audit.md`](placement-pad-anchoring-audit.md).
 
+## Decoupling-cap affinity (issue #6020)
+
+Wirelength cannot see decoupling: one cap anywhere inside the supply net's
+bounding box adds nothing to its half-perimeter. Board 04's hand floorplan
+left the STM32's VDD pins 6-14 mm from the nearest cap. `optimize-placement`
+therefore carries a soft decoupling term (`placement/decoupling.py`):
+
+- **Identification.** A decoupling cap is a `C<n>` with one pad on a supply
+  rail and the other on ground; a supply pin is a `U<n>` pad on the same rail.
+  Rails and grounds are classified by the shared
+  `router.net_class.is_power_rail_name` / `is_ground_rail_name`, the same
+  classifiers the `decoupling_proximity` FOM term uses. When the board carries
+  schematic pin types (`(pintype "power_in")`, #5985), a net with a
+  `power_in`/`power_out` IC pin counts as a rail even if its name does not,
+  and an IC pin on a rail that is typed otherwise (an `EN` tied high) is not a
+  target.
+- **Assignment.** Caps are paired with pins greedily by distance, one cap per
+  pin before any pin gets two, recomputed for every candidate so the pairing
+  follows the IC when it moves or rotates.
+- **Cost.** The summed distance from each cap's supply pad to its pin (mm),
+  weighted by `decoupling` (default `2.0`). Like cohesion it is never part of
+  feasibility.
+- **Snap pass.** After the optimizer (and the post-pass slide-off), each cap
+  moves to the nearest spot beside its pin whose real pad extent keeps 0.5 mm
+  from every other footprint and the board edge, whose body (courtyard, else
+  silkscreen/fab outline) keeps 0.15 mm from every other body, that stays out
+  of the 3 mm escape lane of every IC pad on another net, and that adds no
+  overlap/DRC/boundary violation. A cap only ever moves closer to its pin,
+  and a move may not raise the per-pin nearest-cap sum, so a cap already
+  serving two adjacent supply pins is not pulled onto one of them. Cap
+  centres land on a 0.05 mm grid. CMA-ES alone rarely lands a 2 mm part within a millimetre of one
+  pin; the snap finishes the job.
+
+`--seed current --max-iterations 0` keeps a hand floorplan as it is and runs
+only slide-off and the snap. Add `--no-slide-off` to move the caps and nothing
+else: on board 04 the slide-off pre-pass nudges U2 by 0.03 mm, which is enough
+to break the fine-pitch escape routing (#6250).
+`--weights '{"decoupling": 0}'` turns the term and the snap off. The JSON
+document lists each cap's pin and distance under `"decoupling"`.
+
 ## HV-aware placement: the creepage-keepout term (issue #4373)
 
 By default the optimizer objective is **voltage-blind**: the wirelength term

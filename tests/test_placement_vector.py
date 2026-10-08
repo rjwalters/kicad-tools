@@ -262,9 +262,9 @@ class TestPadTransforms:
 
     def test_rot90_front(self, comp):
         pad = self._decode_pad(comp, 1, 0)
-        # 90 CCW: (lx, ly) -> (-ly, lx) => (-2, 1)
-        assert _close(pad.x, 8.0)  # 10 + (-2)
-        assert _close(pad.y, 21.0)  # 20 + 1
+        # KiCad 90 (y-down): (lx, ly) -> (ly, -lx) => (2, -1)
+        assert _close(pad.x, 12.0)  # 10 + 2
+        assert _close(pad.y, 19.0)  # 20 + (-1)
         assert _close(pad.size_x, 0.8)  # swapped
         assert _close(pad.size_y, 0.6)
 
@@ -278,9 +278,9 @@ class TestPadTransforms:
 
     def test_rot270_front(self, comp):
         pad = self._decode_pad(comp, 3, 0)
-        # 270 CCW: (lx, ly) -> (ly, -lx) => (2, -1)
-        assert _close(pad.x, 12.0)  # 10 + 2
-        assert _close(pad.y, 19.0)  # 20 + (-1)
+        # KiCad 270 (y-down): (lx, ly) -> (-ly, lx) => (-2, 1)
+        assert _close(pad.x, 8.0)  # 10 + (-2)
+        assert _close(pad.y, 21.0)  # 20 + 1
         assert _close(pad.size_x, 0.8)  # swapped
         assert _close(pad.size_y, 0.6)
 
@@ -296,9 +296,9 @@ class TestPadTransforms:
 
     def test_rot90_back(self, comp):
         pad = self._decode_pad(comp, 1, 1)
-        # Mirror: (-1, 2), then 90 CCW: (-ly, lx) => (-2, -1)
-        assert _close(pad.x, 8.0)  # 10 + (-2)
-        assert _close(pad.y, 19.0)  # 20 + (-1)
+        # Mirror: (-1, 2), then KiCad 90: (ly, -lx) => (2, 1)
+        assert _close(pad.x, 12.0)  # 10 + 2
+        assert _close(pad.y, 21.0)  # 20 + 1
         assert _close(pad.size_x, 0.8)
         assert _close(pad.size_y, 0.6)
 
@@ -312,9 +312,9 @@ class TestPadTransforms:
 
     def test_rot270_back(self, comp):
         pad = self._decode_pad(comp, 3, 1)
-        # Mirror: (-1, 2), then 270 CCW: (ly, -lx) => (2, 1)
-        assert _close(pad.x, 12.0)  # 10 + 2
-        assert _close(pad.y, 21.0)  # 20 + 1
+        # Mirror: (-1, 2), then KiCad 270: (-ly, lx) => (-2, -1)
+        assert _close(pad.x, 8.0)  # 10 + (-2)
+        assert _close(pad.y, 19.0)  # 20 + (-1)
         assert _close(pad.size_x, 0.8)
         assert _close(pad.size_y, 0.6)
 
@@ -509,10 +509,10 @@ class TestThreeComponentBoard:
         assert _close(p2.x, 22.0) and _close(p2.y, 15.0)
 
     def test_r1_pads_at_90deg(self, components):
-        """R1 at (35,10) rot=90 side=0: pads rotated 90 CCW.
+        """R1 at (35,10) rot=90 side=0: pads rotated by KiCad's 90 (y-down).
 
-        Pad 1 local (-1, 0) -> 90 CCW -> (0, -1) -> abs (35, 9)
-        Pad 2 local (1, 0)  -> 90 CCW -> (0, 1)  -> abs (35, 11)
+        Pad 1 local (-1, 0) -> (0, 1)  -> abs (35, 11)
+        Pad 2 local (1, 0)  -> (0, -1) -> abs (35, 9)
         """
         vec = PlacementVector(
             data=np.array(
@@ -534,8 +534,8 @@ class TestThreeComponentBoard:
         )
         r1 = decode(vec, components)[1]
         p1, p2 = r1.pads
-        assert _close(p1.x, 35.0) and _close(p1.y, 9.0)
-        assert _close(p2.x, 35.0) and _close(p2.y, 11.0)
+        assert _close(p1.x, 35.0) and _close(p1.y, 11.0)
+        assert _close(p2.x, 35.0) and _close(p2.y, 9.0)
 
     def test_c1_pads_at_180_back(self, components):
         """C1 at (10,30) rot=180 side=1 (back).

@@ -463,6 +463,22 @@ justifies one. No code in `optimize-placement` was changed.
   Phase 0 classifier on the same pairs, or a 0.89-style comparison on an
   equal corpus.
 
+### Note: the optimizer objective gained a decoupling term (issue #6020)
+
+Corpus B's `placement_cost_total` came from `kct optimize-placement --dry-run`
+before #6020. Since #6020 that objective adds `2.0 x` the summed
+cap-to-assigned-supply-pin distance (`breakdown.decoupling`) on any board with
+decoupling caps, and it scores rotated parts at their true orientation. A
+re-run would therefore shift `placement_cost_total` on boards 02-07 and 09,
+and corpus A's `placement_cost` would also shift wherever `evaluate_placement`
+is given decoupling groups. The decision above does not depend on that term.
+The decoupling term is a placement-quality preference (the
+`decoupling_proximity` FOM term measures the same thing), not a routability
+predictor. #6020 validated it with a real route instead: board 04's floorplan
+with the caps snapped beside their pins routes 9/9 signal nets under the
+board's own route flags, the same as the hand floorplan, and its own post-route
+steps take it to 0 `kicad-cli` DRC errors.
+
 ## Reproduce
 
 Corpus A (no routing, seconds):
