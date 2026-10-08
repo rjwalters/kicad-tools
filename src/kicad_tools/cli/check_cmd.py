@@ -1145,6 +1145,7 @@ CHECK_CATEGORIES = [
     "impedance",
     "isolated_copper",
     "match_group_length_skew",
+    "netclass_clearance_copper",
     "netclass_floor",
     "netlist",
     "pad_grid",
@@ -2891,6 +2892,18 @@ def run_selected_checks(
             copper_layers=effective_layers,
         )
 
+    # Issue #6249: authored ``.kicad_pro`` netclass clearances on routed copper
+    # (parity with ``kicad-cli pcb drc`` after #6243).  CLI-level closure for
+    # the same reason as ``netclass_floor``: it needs the PCB *path*.
+    def _netclass_clearance_copper_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.netclass_clearance_copper import (
+            check_netclass_clearance_copper,
+        )
+
+        return check_netclass_clearance_copper(pcb_path, checker.pcb, checker.design_rules)
+
     # Map of category to check method.  This dict MUST stay a superset
     # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
     # name in ``DRCChecker.CHECK_ALL_METHODS`` must be referenced as a
@@ -2918,6 +2931,7 @@ def run_selected_checks(
         "impedance": checker.check_impedance,
         "isolated_copper": checker.check_isolated_copper,
         "match_group_length_skew": checker.check_match_group_length_skew,
+        "netclass_clearance_copper": _netclass_clearance_copper_check,
         "netclass_floor": _netclass_floor_check,
         "netlist": checker.check_netlist,
         "pad_grid": _pad_grid_check,

@@ -529,6 +529,10 @@ class DRCChecker:
         "netclass_via_diameter": CATEGORY_MANUFACTURING,
         "netclass_via_drill": CATEGORY_MANUFACTURING,
         "netclass_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #6249: authored netclass clearance on routed copper -- the
+        # same defect class kicad-cli reports as a netclass clearance error.
+        "netclass_clearance_copper": CATEGORY_MANUFACTURING,
+        "netclass_clearance_unsupported": CATEGORY_MANUFACTURING,
         "footprint_outside_board": CATEGORY_MANUFACTURING,
         "single_pad_net": CATEGORY_MANUFACTURING,
         "net_undeclared": CATEGORY_MANUFACTURING,

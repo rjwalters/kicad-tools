@@ -63,6 +63,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "edge",
         "impedance",
         "match_group_length_skew",
+        "netclass_clearance_copper",
         "netclass_floor",
         "netlist",
         "solder_mask",
@@ -185,6 +186,16 @@ def precheck(
             return unknown(category, "needs_input:schematic")
     if category == "doc_drift" and pcb_path is None:
         return unknown(category, "needs_input:pcb_path")
+    if category == "netclass_clearance_copper":
+        if pcb_path is None:
+            return unknown(category, "needs_input:pcb_path")
+        pro = pcb_path.with_suffix(".kicad_pro")
+        if not pro.is_file():
+            return skipped(category, "no_kicad_pro")
+        try:
+            json.loads(pro.read_text())
+        except (OSError, ValueError):
+            return unknown(category, "unreadable_kicad_pro")
     if category == "netclass_floor":
         if pcb_path is None:
             return unknown(category, "needs_input:pcb_path")
