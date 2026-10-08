@@ -42,6 +42,14 @@ first loads the routed board:
 
 Identical copper then always reaches KiCad with identical UUIDs in an
 identical order, so the fill it produces is reproducible.
+
+Limit (Issue #6215): this holds for **short-free** copper.  On load KiCad
+gives every connected copper cluster one net, and when a cluster shorts
+different nets it picks the winner arbitrarily per process (KiCad 10.0.6;
+``MaximumThreads=1`` does not change it).  If the winner is the pour's own
+net the cluster is not knocked out, so a shorted board's fill varies between
+refills of byte-identical input.  Such a board already fails DRC with
+``shorting_items``; same-net copper in a pour is not a trigger.
 """
 
 from __future__ import annotations

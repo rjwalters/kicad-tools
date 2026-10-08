@@ -825,7 +825,9 @@ def run_fill_zones(
     # redo.  Nothing mutates ``pcb_path`` between the fill above and this
     # call, and #5578 (see ``tests/test_pour_fill_determinism_5578.py``)
     # already established the fill engine is deterministic given identical
-    # input, so re-running it here would reproduce byte-identical zone
+    # input (short-free input -- a shorted board refills differently each
+    # time, Issue #6215, and skipping a refill cannot make that worse), so
+    # re-running it here would reproduce byte-identical zone
     # geometry at the cost of one more full kicad-cli launch (measured
     # locally at ~1/3 of a "zone fill" call's wall time -- one of three
     # kicad-cli round trips a clean first pass makes).  Skip that redundant

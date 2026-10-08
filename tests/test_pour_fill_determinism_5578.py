@@ -123,6 +123,18 @@ canonicalizes the routed board's UUIDs before KiCad first loads it
 invented pad UUIDs.  :func:`test_board03_pour_fill_is_reproducible` therefore
 also requires the two fills to be *exactly* equal -- ring for ring, vertex
 for vertex -- so a roughly 60/40 split can no longer pass by chance.
+
+Issue #6215: that guarantee needs short-free copper
+---------------------------------------------------
+
+KiCad relabels every copper cluster to one net on load, and picks the net of a
+cluster that shorts different nets arbitrarily from process to process, so a
+shorted board fills differently on every refill even when its bytes are
+identical.  Same-net copper in a pour is *not* a trigger (see
+``tests/test_fill_short_nondeterminism_6215.py``).  The slow test checks that
+route ``a`` has no such short before comparing fills; board 03 has none
+(0 DRC shorts; 12/12 serial and 16/16 8-way-concurrent refills of a fresh
+deterministic route were identical, 2026-10-07, KiCad 10.0.6).
 """
 
 from __future__ import annotations
@@ -643,6 +655,21 @@ def test_board03_pour_fill_is_reproducible(tmp_path):
         f"{len(set(copper_a) ^ set(copper_b))} differ).  The pour fill is "
         "downstream of this, so any fill difference below would be a "
         "consequence, not a fill-engine nondeterminism (Issue #5870)."
+    )
+
+    # Issue #6215: KiCad's fill is only reproducible around short-free copper.
+    # A cluster that shorts different nets gets an arbitrary net on every
+    # kicad-cli load, so the pour around it differs between two refills of
+    # the *same* board.  Rule that out first, so a short is reported as one
+    # and not as a #6052 regression below.
+    from tests.test_fill_short_nondeterminism_6215 import kicad_net_reassignments
+
+    relabelled = kicad_net_reassignments(a, find_kicad_cli())
+    assert not relabelled, (
+        f"the routed board shorts different nets: KiCad relabelled {len(relabelled)} "
+        f"copper item(s) on load (uuid, routed net, KiCad's net): {relabelled[:10]}.  "
+        "KiCad picks a shorted cluster's net arbitrarily per process, so the pour fill "
+        "around it is not reproducible -- fix the short, not the fill (Issue #6215)."
     )
 
     sig_a = _fill_union_signature(a)

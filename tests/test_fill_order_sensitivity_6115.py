@@ -27,8 +27,14 @@ angled segments with about a quarter on the pour's own net.  It *looked* very
 order-sensitive, but KiCad 10.0.6 fills that board non-deterministically even
 for byte-identical input (island/outline vertex counts changed from run to run
 when the same file was refilled serially), so it measured kicad-cli noise and
-made both assertions flaky.  Same-net tracks are what triggered it; this
-fixture has none, and refilling one board repeatedly gives one result.
+made both assertions flaky.  The trigger was not same-net copper as such but
+*shorts*: the random segments overlapped across different nets, and KiCad
+relabels a shorted cluster with an arbitrary one of its nets on each load, so
+a cluster that came out as GND was not knocked out of the pour (Issue #6215,
+``tests/test_fill_short_nondeterminism_6215.py``).  This fixture's segments
+still touch each other, but only across nets A/B/C: whichever of those KiCad
+picks, the GND pour knocks the cluster out the same way, so refilling one
+board repeatedly gives one result.
 """
 
 from __future__ import annotations
