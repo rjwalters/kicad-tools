@@ -99,22 +99,23 @@ def unrouted_pcb_path() -> Path:
 
 
 def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
-    """Extract the final ``Nets routed: N/M`` count from a stdout block.
+    """Extract the best routed-net count from one tier's stdout block.
 
-    Returns ``(routed, total)`` from the LAST occurrence in ``stdout``.
-    The block may contain multiple summary lines (e.g. one per layer
-    escalation attempt); we take the final one which represents the
-    best result for that block.
+    Each layer attempt prints ``Routed: N/M nets`` and the tier's layer
+    escalation summary prints ``Nets routed: N/M``.  Returns the
+    ``(routed, total)`` pair with the highest ``routed`` over both forms --
+    the tier's best attempt.  Issue #6217: the per-attempt lines matter
+    because the hard ``--timeout`` (#5141) can end the final tier
+    mid-attempt, before its summary is printed.
 
-    Returns ``None`` if no summary line is present (e.g. the router
-    crashed before producing one).
+    Returns ``None`` if no count is present (e.g. the router crashed
+    before finishing any attempt).
     """
-    pattern = re.compile(r"Nets routed:\s+(\d+)/(\d+)")
-    matches = pattern.findall(stdout)
+    pattern = re.compile(r"(?:Nets routed|Routed):\s+(\d+)/(\d+)")
+    matches = [(int(r), int(t)) for r, t in pattern.findall(stdout)]
     if not matches:
         return None
-    routed, total = matches[-1]
-    return int(routed), int(total)
+    return max(matches)
 
 
 def _split_by_tier(stdout: str) -> dict[str, str]:
@@ -299,11 +300,11 @@ class TestAutoMfrTierIntegration:
         jlcpcb_parsed = _parse_routed_net_count(jlcpcb_stdout)
         tier1_parsed = _parse_routed_net_count(tier1_stdout)
         assert jlcpcb_parsed is not None, (
-            "Expected 'Nets routed: N/M' summary in jlcpcb tier stdout.\n"
+            "Expected a 'Routed: N/M' count in jlcpcb tier stdout.\n"
             f"Last 2000 chars:\n{jlcpcb_stdout[-2000:]}"
         )
         assert tier1_parsed is not None, (
-            "Expected 'Nets routed: N/M' summary in jlcpcb-tier1 tier stdout.\n"
+            "Expected a 'Routed: N/M' count in jlcpcb-tier1 tier stdout.\n"
             f"Last 2000 chars:\n{tier1_stdout[-2000:]}"
         )
 
