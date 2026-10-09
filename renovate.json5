@@ -1,0 +1,122 @@
+// Renovate configuration for rjwalters/kicad-tools
+// Docs: https://docs.renovatebot.com/configuration-options/
+//
+// Adapted from turian's PR #5648 (itself adopted from noc0dev-template),
+// extended to carry over the coverage, grouping exclusions and labels of the
+// retired .github/dependabot.yml. Self-contained: rjwalters/.github publishes
+// no org preset (no repo-policy.json), so there is nothing to extend there.
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+
+  "extends": [
+    "config:recommended",
+    "security:openssf-scorecard",
+    ":dependencyDashboard"
+  ],
+
+  // Override the Mend-hosted "silent" default (applied when the app is
+  // installed on "All repositories"). "full" lets Renovate create branches,
+  // PRs, and the Dependency Dashboard issue.
+  "mode": "full",
+
+  // Ecosystems this repo actually has (same three Dependabot covered):
+  //   github-actions : .github/workflows/*.yml
+  //   pep621         : pyproject.toml + uv.lock at / (Renovate's uv support
+  //                    lives in the pep621 manager)
+  //   npm            : site/package.json + site/package-lock.json
+  // The root package.json is dependency-free, so npm finds nothing there.
+  "enabledManagers": ["github-actions", "pep621", "npm"],
+
+  // --- Supply chain security ---
+
+  // 14-day quarantine: do not propose routine updates until 14 days after
+  // release, so registries can catch and yank malicious packages first.
+  // Vulnerability-fix PRs bypass this (and the schedule) -- see
+  // vulnerabilityAlerts below.
+  "minimumReleaseAge": "14 days",
+
+  // Flag known vulnerabilities from the OSV database.
+  "osvVulnerabilityAlerts": true,
+
+  "vulnerabilityAlerts": {
+    "enabled": true
+  },
+
+  // --- Merge policy ---
+
+  // Never auto-merge. Bot PRs go through the normal review + merge flow.
+  "automerge": false,
+
+  // draftPR deliberately NOT set (#5648 had `true`): Loom's Judge skips draft
+  // PRs outright, and GitHub refuses to merge a draft, so every bot PR would
+  // need a manual "Ready for review" before our flow could touch it.
+  // automerge:false already keeps a human/agent gate on every merge.
+
+  // Same labels Dependabot applied (neither is reserved via "Applied by:").
+  "labels": ["dependencies", "tier:maintenance"],
+
+  // --- Schedule ---
+
+  // Weekly, Monday morning UTC (Dependabot was weekly too).
+  "schedule": ["before 10am on monday"],
+  "timezone": "UTC",
+
+  // --- Lockfiles ---
+
+  // Update lockfiles without widening manifest ranges where the new version
+  // already satisfies them (uv.lock, site/package-lock.json).
+  "rangeStrategy": "update-lockfile",
+
+  // Periodically refresh uv.lock / package-lock.json so transitive deps stay
+  // current, on the same Monday schedule.
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 10am on monday"]
+  },
+
+  // --- PR behavior ---
+
+  "prConcurrentLimit": 5,
+  "fetchChangeLogs": "pr",
+
+  // --- Grouping (mirrors the retired dependabot.yml) ---
+  // Majors are never grouped: config:recommended gives each its own PR.
+
+  "packageRules": [
+    {
+      "groupName": "github-actions minor/patch",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"]
+    },
+    {
+      // Native toolchain / ABI coupling (C++ router extension): nanobind,
+      // cmake and numpy stay out of the group and get their own PRs.
+      "groupName": "python minor/patch",
+      "matchManagers": ["pep621"],
+      "matchPackageNames": ["!nanobind", "!cmake", "!numpy"],
+      "matchUpdateTypes": ["minor", "patch"]
+    },
+    {
+      // Site framework: astro and @astrojs/* get their own PRs.
+      "groupName": "site minor/patch",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["site/**"],
+      "matchPackageNames": ["!astro", "!@astrojs/**"],
+      "matchUpdateTypes": ["minor", "patch"]
+    }
+  ],
+
+  // --- Ignored paths ---
+
+  // Installer-owned tool roots (each carries install-metadata.json; the next
+  // tool install/upgrade overwrites them, so bot PRs against them are churn --
+  // use /repo:update-tools instead). Setting ignorePaths replaces the
+  // config:recommended default, so node_modules is re-listed explicitly.
+  "ignorePaths": [
+    "**/node_modules/**",
+    ".loom/**",
+    ".claude/skills/**",
+    ".agents/**",
+    ".kct/**"
+  ]
+}
