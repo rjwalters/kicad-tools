@@ -1843,6 +1843,18 @@ One more `ClaimKind` on the same envelope closes it:
   forever. A missing/zero `consecutive` (a pre-#9292 peer) contributes `0`; a
   missing/zero `remaining_secs` reads as an already-elapsed window whose release
   still counts for the streak hour.
+- **Unresolved senders add a window, never a count (#9518).** Every other lane
+  keeps the #5063 carve-out: an `UNKNOWN_HOST` ad is treated as a peer, never as
+  self, because its worst case is a harmless extra backoff. That argument is
+  *window-specific*. This lane sums counts, and an unresolved sender cannot prove
+  its count is disjoint from ours; when the receiver is also `UNKNOWN_HOST` it is
+  very likely our own echoed ad, which would double the tally and trip the hold
+  at about half the threshold. So `observe_prless_release_at` keeps the
+  conservative backoff window for an `UNKNOWN_HOST` ad but stores `0` as its
+  contribution to the peer tally, whatever the receiver's identity. Unidentified
+  senders therefore degrade counting to the exact local count plus any
+  identifiable peers (two unresolved hosts do not count each other). Known self
+  ads are still excluded and known peers still sum.
 - **Degrades to the pre-#9292 tally, loudly.** No publisher/view attached, a
   dropped ad, a pre-#9292 peer, or a poisoned view all reduce the peer term to
   what could be read, leaving this host's own exact count behind. Precondition 1

@@ -1,9 +1,9 @@
 # Telemetry Replay Contract
 
-Status: contract, emit-side facts and committed replay SQL (Issue #10196,
-slices 1 and R3/R4) and the `fleet.state` record (slice R1).
-`loom-daemon telemetry replay --as-of <t>` and `--check` are later slices
-and do not exist yet.
+Status: contract, emit-side facts, committed replay SQL (Issue #10196,
+slices 1 and R3/R4), the `fleet.state` record (slice R1) and
+`loom-daemon telemetry-replay --as-of <t>` (slice R6). `--check` is a later
+slice and does not exist yet.
 
 The question this contract answers: **what did the fleet look like at instant
 `t`, as a daemon running at `t` could have known it?** ETA backtesting
@@ -158,10 +158,11 @@ What the rows cover is exactly what the host's reads saw:
   sees the listing shift is a failed listing, so the repo's `census` is absent
   and its earlier PR rows are kept, never sent as `removed`.
 - **Ready queue**: every row the planner saw on the host's last work-finder
-  tick. The work finder lists one forge page (100 items) per label and cannot
-  yet prove a listing whole, so `ready_complete` is `false` for every repo
-  until #11139: its `ready_wait` rows are not the repo's whole queue. Such a
-  repo is sent with `ready_replace: true`, carrying its **entire** observed
+  tick. A repo whose ready listing the work finder walked to its last page is
+  `ready_complete: true` and its `ready_wait` rows are diffed (#11139). A repo
+  whose listing came back partial (a later page failed, the page cap, a
+  mid-walk change) is `ready_complete: false`: its `ready_wait` rows are not
+  the repo's whole queue. Such a repo is sent with `ready_replace: true`, carrying its **entire** observed
   `ready_wait` set whenever it is named, and the reader replaces rather than
   diffs (step 3 below). A repo whose tick listing failed keeps its earlier
   `ready_wait` rows. Only a `ready_complete: true` repo's `ready_wait` rows
@@ -231,9 +232,47 @@ listings, and ranks the ready queue by its own planner. Per `(repo, issue)` at
 A host restart begins a new chain with a fresh anchor. Records from before the
 restart never chain into it, because their `anchor_as_of` differs.
 
+## How to run a replay
+
+```bash
+loom-daemon telemetry-replay --as-of 2026-10-04T13:00:00Z \
+  --endpoint https://clickhouse.example:8443 --user reader \
+  --credential-file ~/.config/loom/signoz-read.key   # owner-only (chmod 600)
+```
+
+It runs queries 1 (state) and 3 (coverage) of `replay-queries.sql` exactly as
+committed (`include_str!`, nothing re-typed), binding `t`, `window`
+(`--window-sec`, default 3900) and `repo` (`--repo`, default all). It prints
+every emitting host as `covered`, or `unknown` with the SQL's reason
+(`broken_chain`, `incomplete_anchor`, `incomplete_delta`, `missing_anchor`,
+`no_anchor`), then every reconstructed item; `--json` prints the same as JSON.
+An uncovered host is never shown as empty. No row is capped and no host is
+elected; it computes no estimate or statistic.
+
+- **Endpoint config**: flags, then `telemetry.signoz.{endpoint,user,credentialFile}`.
+  The old `autonomous.eta.fleetRefresh.signoz.*` key is read as a fallback for
+  one release, with a deprecation warning (it goes with #11098).
+- **Offline**: `--print-sql` prints both queries for `clickhouse-client
+  --param_t=… --param_window=… --param_repo= --format JSONEachRow`; feed the
+  combined output back with `--from-file`.
+- **`t` is UTC**, bound as a `DateTime64(3)` parameter; the store's server
+  timezone must be UTC (as SigNoz deploys it).
+- **The SQL decides.** Where the committed SQL and the prose above differ
+  (a broken chain is `unknown` in the SQL, "partial" in step 4; the SQL does
+  not yet apply `ready_replace`), replay reports what the SQL returns. Fix the
+  SQL, not the reader.
+- **Tests**: `tests/telemetry_replay_fixture_store.rs` runs the command's own
+  queries and reader over R3's fixture store in a pinned ClickHouse.
+
+The reader is the neutral client in `loom-daemon/src/signoz_read.rs` (#11127):
+`ClickhouseHttp` (bound `param_*` parameters, credential read from an
+owner-only file at call time and never logged) and `FileRows`. Nothing in it
+or in the replay command depends on `eta/`, so both survive the ETA
+subsystem's removal (#11098).
+
 ## Not yet implemented
 
-- `loom-daemon telemetry replay --as-of <t>` and `--check`.
+- `loom-daemon telemetry-replay --check` (#11128).
 - `fleet.state` hold and capacity facts (slice R8) and the committed
   volume/coverage ClickHouse query (bytes/day, rows per anchor, anchors
   missing chunks, hosts with no anchor in 2 h).

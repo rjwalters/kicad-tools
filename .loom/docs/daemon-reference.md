@@ -3301,7 +3301,9 @@ never under 5 minutes), `no_tick` (no tick yet in this daemon process, so the
 queue is unknown rather than empty) or `disabled`. A repo whose forge listing
 failed on the tick is named in `last_work_finder_tick.listing_failed`, and the
 view says the queue is INCOMPLETE rather than empty (`--json`: `complete:
-false`). The `serve`
+false`). A repo whose listing came back partial (#11139: a later page failed,
+the page cap, a mid-walk change) is named in `listing_incomplete`: its rows
+are shown, but the view still says INCOMPLETE and `complete` is `false`. The `serve`
 dashboard has a matching "Ready queue" panel. The single-workspace tick path does
 not record rows. Each row also carries daemon-derived `state` and `reason`
 strings, so clients do not keep their own copy of the mapping. With
@@ -4096,7 +4098,7 @@ order:
 | Kind | Carried when | Computed by |
 |------|--------------|-------------|
 | `tree` (#9124, #9576) | the two heads' trees are byte-identical | `forge_tree_unchanged::tree_unchanged` — `compare/{marker}...{head}` reporting `files: []` **together with** `status` `identical`/`ahead` |
-| `clean-merge` (#9416) | the head is a two-parent merge whose **first** parent is the reviewed head, whose second parent is a commit on the PR's base branch, and whose tree equals `git merge-tree --write-tree <reviewed> <base-parent>` — so no hand edits and no conflict resolution | `verdict_equivalence::clean_merge`, local git (never fetches; an absent object is no answer) |
+| `clean-merge` (#9416) | the head is the reviewed head plus only clean merges of the base and tree-identical commits (#10875): each merge is two-parent, its **first** parent reduces to the reviewed head, its second parent is a commit on the PR's base branch, and its tree equals `git merge-tree --write-tree <first> <base-parent>` — so no hand edits and no conflict resolution | `verdict_equivalence::clean_merge`, local git (never fetches; an absent object is no answer) |
 | `rebase-patch-identical` (#9416) | the PR's own merge-base-relative patch is byte-identical before and after the move — same file set, statuses, resulting blob ids and patch text | `verdict_equivalence::patch_identity`, comparing `compare/{base}...{reviewed}` with `compare/{base}...{head}` |
 
 `files: []` alone proves nothing for the `tree` kind: the three-dot compare diffs
@@ -6589,9 +6591,15 @@ internal Judge or Doctor `Task` running **49–66 minutes (multi-hour in the wor
 cases) emitting zero output until the very end**, silently blocking the sweep's
 back half with no self-heal. The third backstop, running in the same watchdog
 tick, closes that gap: for each still-running daemon-dispatched sweep that has
-already made startup progress, it measures **log silence** (how long the
-per-sweep log file's mtime has gone un-advanced — a live sweep flushes tool
-output continuously, a hung one does not) and, past `reviewStallTimeoutSecs`
+already made startup progress, it measures **activity silence** — the
+minimum idle time over the per-sweep log file's mtime **and** the sweep's
+session transcripts (`~/.claude/projects/<slug>/*.jsonl` plus
+`subagents/*.jsonl`; #9533 — a headless `claude -p` sweep writes nothing to its
+log while it works, so log mtime alone is not liveness; unreadable signals
+are skipped and, with none readable, the sweep is left alone). The same
+predicate backs the stale-sweep backstop below. While a roll/drain is armed the
+watchdog neither cancels nor re-dispatches (a respawn would keep the drain from
+converging), and its log lines name the sweep's checkpoint phase. Past `reviewStallTimeoutSecs`
 (default 45 min), auto-cancels the wedged child and re-dispatches the issue
 **exactly once, bounded, never a loop**. The re-dispatch resumes from the sweep
 checkpoint, so the hung review phase is re-run — not the whole build. A second
@@ -9128,10 +9136,29 @@ a six-builder wave, each loss costing a full Rust rebuild.
 The reaper now also asks the filesystem, which the process table cannot
 contradict: **a worktree with any write in the last `N` minutes is live**,
 whatever the registry thinks. The probe reads the worktree's gitdir refs
-(`HEAD`/`index`/`logs/HEAD` — the only place a *commit* is observable, since
-committing touches no working-tree file), the build-artifact directories at
-depth 1 (a running `cargo` rewrites `target/debug/` constantly), and a bounded
-walk of the source tree, stopping at the first recent entry.
+(`HEAD`/`index` by mtime, `logs/HEAD` by its newest entry's own timestamp — the
+only place a *commit* is observable, since committing touches no working-tree
+file), the build-artifact directories at depth 1 (a running `cargo` rewrites
+`target/debug/` constantly), and a bounded walk of the source tree, stopping at
+the first recent entry.
+
+`logs/HEAD` is read by content, not mtime, since #11071: `git gc`'s `reflog
+expire --all` rewrites the `logs/HEAD` of **every** linked worktree without
+adding an entry, so on a busy host every kept worktree read as live and none was
+ever trimmed (31 hours on loom-worker-1, 40 GB held by idle `target/` dirs).
+
+**Order and logging (#11071).** Eligible directories are removed largest first.
+Each removal logs `category=worktree_target_idle` with the worktree, the
+directory, its bytes and `dry_run`; each artifact directory left in place logs
+why and its bytes (`info` when it holds anything). Below the floor, the eager
+tier runs the same reclaim across **every registered root** (its own probe root
+is usually the daemon's checkout, which has no worktrees), without the forge,
+and judges the floor **per volume** (filesystem device): it stops on each
+volume as soon as that volume's free space is back above `diskWarnFreeGb`, so a
+volume already above the floor keeps its caches and never ends the pass before
+a pressured volume is reached.
+`loom-daemon clean --dry-run` lists the same candidates; `clean` never removes
+them.
 
 Set `LOOM_WORKTREE_ACTIVITY_WINDOW_MINUTES=0` to disable the gate and restore
 the pre-#8116 behavior. A worktree the daemon cannot read is never reclaimed

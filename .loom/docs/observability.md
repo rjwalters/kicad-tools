@@ -880,7 +880,8 @@ cardinality:
 
 - **SigNoz (OTLP):** every work-finder tick emits `loom.queue.issues{state,reason}`
   gauges, one per queue disposition with zeros included, plus
-  `loom.queue.listing_failed_repos`. These use the labels already on the
+  `loom.queue.listing_failed_repos` and `loom.queue.listing_incomplete_repos`
+  (#11139, a partial listing). These use the labels already on the
   allowlist, so no gateway change is needed. They never carry an issue number
   or a repo.
 - **Fleet dashboard (native HTTPS):** the per-issue rows travel as the

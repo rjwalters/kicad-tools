@@ -160,7 +160,7 @@ unavailable:
 | `classify-ac-verification.sh` | `loom:ac-verified` (comments; the PR body only when its author is trusted) | no evidence: the issue stays held |
 | Champion merge precheck | hold markers, release phrases, new Judge reviews | skip the PR this pass |
 | Champion criterion #5 | "real activity" comments | the raw read (it can only read as more active) |
-| Critical-file hold | `champion:critical-file-*`, `hold-state` | the raw read (bookkeeping only; a FAIL never merges) |
+| Critical-file hold | `champion:critical-file-*`, `hold-state` | the raw read, which may hold but never release — a `none`/`respect` decision defers with no write (#10875) |
 | Champion epic | epic verdict / escalation markers | skip the epic this pass |
 | Judge fast-track | `loom:conflict-only` | full evaluation |
 | Curator AC-hold check | `champion:ac-hold` | treated as no hold |

@@ -83,6 +83,7 @@ test-create-pr-rate-limit-fallback.sh
 test-create-pr-review-gate.sh
 test-create-pr-superseded-issue.sh
 test-create-pr-version-check.sh
+test-critical-file-hold-tick.sh
 test-curator-rightsizing.sh
 test-default-branch.sh
 test-dependency-parse.sh

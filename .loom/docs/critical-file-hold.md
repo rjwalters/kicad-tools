@@ -87,7 +87,8 @@ Three properties are not negotiable, and the prompt restates each one:
    An absent binary, a daemon predating the verb, a `gh` outage, a shallow clone,
    a missing object, a `merge-tree` conflict, or either kill switch re-arms the
    hold — the pre-#9416 behavior, which costs one extra operator removal and
-   never an unreviewed merge.
+   never an unreviewed merge. The re-arm notice quotes the verb's one-line
+   reason (#10875), so "could not compare" is never mistaken for a real change.
 3. **The hold is what is exempted, never a check.** CI re-runs against the new
    head regardless of which equivalence carried the release; the base really did
    move, which is the whole point of the re-date remedy.
@@ -96,6 +97,27 @@ The conservative arm is still needed for what evidence cannot settle: a push tha
 really did change the diff between the operator's removal and the next tick.
 Re-arming costs one more removal; reading it as a release for an unseen diff
 would cost a critical-file change merged with nobody having looked at it.
+
+## Re-dates around a merge, and untrusted reads (#10875)
+
+On #10857 (2026-10-08) a released hold re-armed twice. The trace from the
+trusted comments, the label timeline and the recorded vs live heads showed both
+re-arms were fail-closed on real evidence: one span carried a Doctor commit that
+edited `ci.yml`, the other a merge of `main` with a hand-resolved conflict. Each
+re-arm landed minutes after a re-date push, so it looked like the re-date
+re-armed it. The trace also showed a real gap. That history (no-op, no-op,
+merge, no-op, no-op) could never be proven even when the merge was clean,
+because `clean-merge` accepted only `head = merge(recorded, base)`. That kind
+now peels tree-identical single-parent commits on either side of each merge,
+and through earlier clean merges, using git objects only. A real commit, a
+hand edit or a conflict anywhere in the chain still refutes.
+
+When `forge trusted-comments` cannot run, the tick reads the raw comments. Those
+may hold but never release: a `none`/`respect` decision on an unfiltered read
+becomes `defer` (no write), so a forged release marker can neither suppress a
+hold durably nor be re-recorded as one. Coverage:
+`defaults/scripts/tests/test-critical-file-hold-tick.sh` executes the shipped
+tick, and `verdict_equivalence/noop_chain_tests.rs` covers the proof.
 
 ## The audit trail
 
