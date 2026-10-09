@@ -1,11 +1,9 @@
 {
-  "all_by_type": {
-    "lib_footprint_issues": 3
-  },
+  "all_by_type": {},
   "by_type": {},
   "error_count": 0,
   "note": null,
-  "pcb_sha256": "9d67ba3042aa035030416617ea4fc10d36c3825011ab3a06913f27f973b8b846",
+  "pcb_sha256": "ce5e3e8c7467dfa1af204b387e75b057825b368d9780c776b15f439db5b95edc",
   "ran": true,
   "reason": "ok",
   "refill_during_check": false,
