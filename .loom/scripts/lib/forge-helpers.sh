@@ -1572,10 +1572,8 @@ forge_gh_create_issue_rl_safe() {
   shift 3
   local labels=("$@")
 
-  local -a create_args=(--title "$title" --body "$body")
-  if [[ -n "$nwo" ]]; then
-    create_args+=(--repo "$nwo")
-  fi
+  # loom_write_repo always yields a repo (#9548), so it is named unconditionally.
+  local -a create_args=(--title "$title" --body "$body" --repo "$nwo")
   local label
   for label in "${labels[@]+"${labels[@]}"}"; do
     create_args+=(--label "$label")
@@ -1584,7 +1582,8 @@ forge_gh_create_issue_rl_safe() {
   # Capture stdout (the issue URL) separately from stderr (the error text the
   # rate-limit signature table is matched against), so a successful create
   # never returns gh's progress chatter as the URL.
-  local err_file out err rc=0
+  # t0 bounds the #9714 duplicate probe: taken BEFORE the attempt, minus skew.
+  local err_file out err rc=0 t0; t0=$(jq -nr 'now - 60 | todate')
   err_file=$(mktemp)
   out=$(forge_gh_perm_safe issue create "${create_args[@]}" 2>"$err_file") || rc=$?
   err=$(cat "$err_file" 2>/dev/null || true)
@@ -1599,28 +1598,40 @@ forge_gh_create_issue_rl_safe() {
     return 0
   fi
 
-  if is_rate_limit_error "$err"; then
+  # #9714: a server error ("Something went wrong while executing your query",
+  # HTTP 502/503/504) also falls back -- but unlike a rate-limit rejection,
+  # which is refused BEFORE execution, the mutation may have committed. So
+  # first reconcile against the non-search, DB-consistent issue listing (the
+  # search index lags creation by exactly the window that matters): an
+  # exact-title non-PR issue since t0 is adopted; an unreadable listing, or a
+  # FULL first page with no match (the original may be on page two), means NO
+  # POST. An empty t0 (jq failure) yields `since=`, which the forge rejects ->
+  # also no POST. Empty stderr / invalid JSON / signals never get here; they
+  # keep the #8289 "MAY exist" message below. is_rate_limit_error is shared
+  # by every #4856 fallback, so the server-error table stays local.
+  local server_err=0; grep -qiE 'something went wrong while executing your query|HTTP 50[234]' <<<"$err" && server_err=1
+  if is_rate_limit_error "$err" || [[ $server_err -eq 1 ]]; then
+    local rest_path="repos/$nwo/issues" listing hit payload labels_json
+    if ! is_rate_limit_error "$err"; then
+      if ! listing=$(gh api "$rest_path?state=all&sort=created&direction=desc&per_page=20&since=$t0" 2>/dev/null) \
+          || ! hit=$(jq -r --arg t "$title" 'def tr: gsub("^\\s+|\\s+$"; ""); map(select(.pull_request == null and (.title | tr) == ($t | tr)))[0].html_url // (if length >= 20 then error("full page") else empty end)' <<<"$listing" 2>/dev/null); then
+        echo "gh issue create hit a server error, and the duplicate probe failed or could not prove absence, so no REST retry was made. The issue MAY exist; check the forge before re-filing rather than blind-retrying. ($err)" >&2
+        return 1
+      fi
+      [[ -n "$hit" ]] && { printf '%s\n' "$hit"; return 0; }
+    fi
     # One POST carries title + body + labels together. `--input -` takes the
     # JSON body on stdin, which also sidesteps the guard false positive where
     # a heredoc body containing `>=` is classified as a Bash redirect.
-    local payload labels_json
     labels_json=$(jq -nc '$ARGS.positional' --args "${labels[@]+"${labels[@]}"}")
     payload=$(jq -n --arg t "$title" --arg b "$body" --argjson l "$labels_json" \
       '{title: $t, body: $b, labels: $l}')
-    local rest_path
-    if [[ -n "$nwo" ]]; then
-      rest_path="repos/$nwo/issues"
-    else
-      # Unreachable since #9548 (loom_write_repo always yields a repo); kept
-      # only because this frozen file cannot restructure the branch for free.
-      rest_path='repos/{owner}/{repo}/issues'
-    fi
     if out=$(printf '%s' "$payload" \
         | gh api --method POST "$rest_path" --input - --jq '.html_url' 2>/dev/null); then
       printf '%s\n' "$out"
       return 0
     fi
-    echo "gh issue create rate-limited, and the REST fallback also failed: $err" >&2
+    echo "gh issue create failed ($err), and the REST fallback also failed." >&2
     return 1
   fi
 

@@ -181,6 +181,17 @@ if [[ "$1" == "api" ]]; then
   if [[ "$*" == *"--input -"* ]]; then
     cat > "$API_STDIN_LOG"
   fi
+  # #9714 server-error modes: the duplicate probe (GET listing) and the POST.
+  case "$mode:$*" in
+    servererr-nomatch:"api --method POST"*) echo "https://github.test/o/r/issues/1234"; exit 0 ;;
+    servererr-nomatch:*) echo '[{"title":"A title","html_url":"https://github.test/o/r/pull/7","pull_request":{}},{"title":"Other","html_url":"https://github.test/o/r/issues/8"}]'; exit 0 ;;
+    servererr-match:"api repos/owner/repo/issues?"*) echo '[{"title":"A title","html_url":"https://github.test/o/r/issues/555"}]'; exit 0 ;;
+    servererr-probefail:"api repos/owner/repo/issues?"*) echo "HTTP 502: Bad Gateway" >&2; exit 1 ;;
+    # A FULL page (== per_page=20) of newer, other-title issues: the original
+    # may sit on page two, so absence is unproven (#11145 review).
+    servererr-fullpage:"api --method POST"*) echo "https://github.test/o/r/issues/duplicate"; exit 0 ;;
+    servererr-fullpage:"api repos/owner/repo/issues?"*) jq -nc '[range(20) | {title: "Other \(.)", html_url: "https://github.test/o/r/issues/\(.)"}]'; exit 0 ;;
+  esac
   if [[ "$mode" == "ratelimited" ]]; then
     # POST .../issues --jq .html_url returns the new issue's URL (#5047).
     [[ "$*" == *"--method POST"*/issues* ]] && echo "https://github.test/o/r/issues/1234"
@@ -205,6 +216,14 @@ case "$mode" in
     echo "HTTP 404: Not Found" >&2
     exit 1
     ;;
+  servererr-*)
+    echo "GraphQL: Something went wrong while executing your query. Please include \`ABCD:1234\` when reporting this issue." >&2
+    exit 1
+    ;;
+  http422) echo "HTTP 422: Validation Failed" >&2; exit 1 ;;
+  emptyerr) exit 1 ;;
+  emptyok) exit 0 ;;
+  badjson) echo "unexpected end of JSON input" >&2; exit 1 ;;
 esac
 STUB
 chmod +x "$STUB_DIR/gh"
@@ -377,6 +396,90 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: forge_gh_create_issue_rl_safe incorrectly retried over REST on a non-rate-limit failure"
 fi
+
+# --- #9714: server-error fallback, reconciled so it files exactly once ---
+echo ""
+echo "Testing forge_gh_create_issue_rl_safe server-error fallback (#9714)..."
+
+_post_count() { grep -c "^api --method POST" "$ARGV_LOG" || true; }
+
+# No matching issue in the listing (a same-title PR and an other-title issue
+# must NOT count) -> exactly one REST POST with title/body/labels.
+rc=0
+out=$(_run_stubbed servererr-nomatch forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" "loom:triage" 2>/dev/null) || rc=$?
+assert_eq "0:https://github.test/o/r/issues/1234" "$rc:$out" \
+    "server error + no match: files via REST and prints the URL"
+assert_eq "1" "$(_post_count)" "server error + no match: exactly ONE REST POST"
+assert_eq "A title|A body|loom:triage" "$(jq -r '[.title, .body, (.labels | join(","))] | join("|")' "$API_STDIN_LOG")" \
+    "server error + no match: the POST carries title, body and labels together"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -qE "^api repos/owner/repo/issues\?state=all&sort=created&direction=desc&per_page=20&since=[0-9]{4}-[0-9]{2}-[0-9]{2}T" "$ARGV_LOG" \
+    && ! grep -q "search" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: probe uses the non-search issue listing bounded by since=t0"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: probe must use repos/{nwo}/issues?...&since=<t0>, never search"
+fi
+
+# The GraphQL create actually committed -> adopt it, zero POSTs.
+rc=0
+out=$(_run_stubbed servererr-match forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" 2>/dev/null) || rc=$?
+assert_eq "0:https://github.test/o/r/issues/555" "$rc:$out" \
+    "server error + matching issue: adopts the existing issue's URL"
+assert_eq "0" "$(_post_count)" "server error + matching issue: ZERO REST POSTs (no double-filing)"
+
+# The probe itself fails -> zero POSTs, return 1, "MAY exist".
+rc=0
+err=$(_run_stubbed servererr-probefail forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" 2>&1 >/dev/null) || rc=$?
+assert_eq "1" "$rc" "server error + probe failure: returns 1"
+assert_eq "0" "$(_post_count)" "server error + probe failure: ZERO REST POSTs"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$err" == *"MAY exist"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: server error + probe failure: stderr says the issue MAY exist"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: server error + probe failure must say MAY exist (got: $err)"
+fi
+
+# Full first page, no exact-title match -> absence unproven: zero POSTs,
+# return 1, "MAY exist" (the original may be on page two).
+rc=0
+err=$(_run_stubbed servererr-fullpage forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" 2>&1 >/dev/null) || rc=$?
+assert_eq "1" "$rc" "server error + full page, no match: returns 1"
+assert_eq "0" "$(_post_count)" "server error + full page, no match: ZERO REST POSTs (no double-filing)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$err" == *"MAY exist"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: server error + full page, no match: stderr says the issue MAY exist"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: server error + full page, no match must say MAY exist (got: $err)"
+fi
+
+# Exact-title comparison trims surrounding whitespace on both sides.
+rc=0
+out=$(_run_stubbed servererr-match forge_gh_create_issue_rl_safe "owner/repo" "  A title " "A body" 2>/dev/null) || rc=$?
+assert_eq "0:https://github.test/o/r/issues/555:0" "$rc:$out:$(_post_count)" \
+    "server error + whitespace-padded title: adopts the trimmed exact match, ZERO POSTs"
+
+# Unknown-outcome shapes keep #8289; HTTP 422 stays non-retryable. No REST at all.
+for m in emptyerr emptyok badjson http422; do
+    rc=0
+    err=$(_run_stubbed "$m" forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" 2>&1 >/dev/null) || rc=$?
+    assert_eq "1:0" "$rc:$(grep -c "^api " "$ARGV_LOG" || true)" "$m: returns 1 with ZERO REST calls"
+    if [[ "$m" == empty* ]]; then
+        TESTS_RUN=$((TESTS_RUN + 1))
+        if [[ "$err" == *"MAY exist"* ]]; then
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+            echo -e "  ${GREEN}PASS${NC}: $m: keeps the #8289 MAY-exist message"
+        else
+            TESTS_FAILED=$((TESTS_FAILED + 1))
+            echo -e "  ${RED}FAIL${NC}: $m: lost the #8289 MAY-exist message (got: $err)"
+        fi
+    fi
+done
 
 # --- create-issue.sh CLI wrapper (#5047), the surface role prompts invoke ---
 echo ""

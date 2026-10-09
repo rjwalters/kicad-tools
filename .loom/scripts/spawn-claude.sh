@@ -1284,6 +1284,8 @@ unset _loom_print_mode
 # runs unpinned and a roll requeues it); a resume it cannot build is refused.
 # The session id is pinned once here: claude-wrapper.sh turns it into --resume
 # on a retry, because Claude refuses a second launch with the same id.
+# For a daemon item it also prints `--settings <json>` wiring the roll-pause
+# hook, which a consumer repo's own .claude/settings.json does not (#11049).
 if [[ -n "${LOOM_CLAUDE_SESSION_ID:-}${LOOM_RESUME_SESSION_ID:-}" ]]; then
     _resume_args_file="$(mktemp -t loom-resume-args.XXXXXX 2>/dev/null || mktemp)"
     if ! "$(loom_resolve_self_daemon_bin)" agent-resume claude-args >"$_resume_args_file"; then
