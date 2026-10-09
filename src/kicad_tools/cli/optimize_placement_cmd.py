@@ -251,6 +251,67 @@ def _evaluate(
     )
 
 
+class _BoardPins(list):
+    """The board's side flags, plus the full pose of every locked footprint.
+
+    A ``list`` of per-component sides (so it still satisfies every
+    ``fixed_sides: Sequence[int]`` parameter it is threaded through) that
+    also carries ``poses``: ``{component index: (x, y, rotation_index)}`` for
+    footprints carrying KiCad's ``locked`` flag. :func:`_with_sides` applies
+    both, so every score, the snap pass and the final vector see a locked
+    footprint exactly where the board has it (issue #6262).
+    """
+
+    def __init__(
+        self,
+        sides: Sequence[int],
+        poses: dict[int, tuple[float, float, float]] | None = None,
+    ) -> None:
+        super().__init__(sides)
+        self.poses: dict[int, tuple[float, float, float]] = dict(poses or {})
+
+
+def _board_pins(
+    board_vector: PlacementVector,
+    components: Sequence[ComponentDef],
+    locked_refs: set[str],
+) -> _BoardPins:
+    """Sides of every component and the pose of each locked one, from the board."""
+    data = board_vector.data
+    poses = {
+        i: (float(data[4 * i]), float(data[4 * i + 1]), float(data[4 * i + 2]))
+        for i, comp in enumerate(components)
+        if comp.reference in locked_refs
+    }
+    return _BoardPins([int(s) for s in data[3::4]], poses)
+
+
+def _without_caps(
+    groups: Sequence[DecouplingGroup] | None, refs: set[str]
+) -> Sequence[DecouplingGroup] | None:
+    """*groups* minus the caps in *refs* -- locked caps are never snapped (#6262)."""
+    if not groups or not refs:
+        return groups
+    import dataclasses
+
+    trimmed = [
+        dataclasses.replace(g, caps=tuple(c for c in g.caps if c.reference not in refs))
+        for g in groups
+    ]
+    return [g for g in trimmed if g.caps]
+
+
+def _locked_refs(pcb_path: str) -> set[str]:
+    """References of the footprints carrying KiCad's ``locked`` flag."""
+    from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+    return {
+        fp.reference
+        for fp in SchemaPCB.load(pcb_path).footprints
+        if fp.reference and getattr(fp, "locked", False)
+    }
+
+
 def _with_sides(vector: PlacementVector, sides: Sequence[int]) -> PlacementVector:
     """Return a copy of *vector* with every side flag set from *sides*.
 
@@ -261,9 +322,15 @@ def _with_sides(vector: PlacementVector, sides: Sequence[int]) -> PlacementVecto
     pass skip overlaps between parts that will in fact share a side. Pinning
     the sides to the board's own keeps the model and the written board in
     step (issue #6020).
+
+    When *sides* is a :class:`_BoardPins`, locked footprints are also pinned
+    to their board position and rotation: the writer never moves them
+    (issue #6262), so no candidate may be scored with them anywhere else.
     """
     data = vector.data.copy()
     data[3::4] = np.asarray(sides, dtype=np.float64)
+    for index, (x, y, rotation) in getattr(sides, "poses", {}).items():
+        data[4 * index : 4 * index + 3] = (x, y, rotation)
     return PlacementVector(data=data)
 
 
@@ -906,6 +973,10 @@ def _write_placements_to_pcb(
     """
     placed = decode(vector, components)
     ox, oy = board_origin
+    # A locked footprint is the designer's fixed point (the anchor that
+    # --anchor-weight biases toward): never move or re-rotate it, whatever
+    # the vector says (issue #6262).
+    locked = _locked_refs(pcb_path)
     # Through the PCB model, not text patching: it also moves the footprint's
     # board-absolute geometry -- embedded keepout zones and pad angles --
     # and edits the footprint's own ``(at ...)`` rather than the first
@@ -913,7 +984,11 @@ def _write_placements_to_pcb(
     write_footprint_placements(
         pcb_path,
         output_path,
-        ((p.reference, p.x + ox, p.y + oy, p.rotation) for p in placed),
+        (
+            (p.reference, p.x + ox, p.y + oy, p.rotation)
+            for p in placed
+            if p.reference not in locked
+        ),
     )
 
 
@@ -978,6 +1053,7 @@ def run_optimize_placement(
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
     as_json: bool = False,
+    random_seed: int = 42,
 ) -> int:
     """Run placement optimization.
 
@@ -1035,6 +1111,8 @@ def run_optimize_placement(
             prose report (issue #4674). Progress/summary chatter is suppressed;
             exit codes and the ``FATAL:``/``ERROR:`` stderr diagnostics are
             unchanged.
+        random_seed: The strategy's RNG seed (default 42, deterministic).
+            Python-API only; tests use it to sample several trajectories.
 
     Returns:
         Exit code:
@@ -1155,7 +1233,11 @@ def run_optimize_placement(
 
     # Side flags as on the board: the writer cannot flip footprints, so every
     # score and the final vector use these (see _with_sides).
-    fixed_sides = [int(s) for s in _read_current_vector(pcb_path, components).data[3::4]]
+    # Locked footprints keep their board pose too (issue #6262): the writer
+    # never moves them, so neither may any score or the slide-off pass.
+    locked_refs = _locked_refs(pcb_path)
+    fixed_sides = _board_pins(_read_current_vector(pcb_path, components), components, locked_refs)
+    locked_indices = sorted(fixed_sides.poses)
 
     # Decoupling-cap affinity (issue #6020): pull each decoupling cap onto the
     # IC supply pin it serves. On by default; ``{"decoupling": 0}`` in
@@ -1303,7 +1385,7 @@ def run_optimize_placement(
     # Configure strategy
     config = StrategyConfig(
         max_iterations=max_iterations,
-        seed=42,  # Deterministic by default
+        seed=random_seed,  # Deterministic by default (42)
     )
 
     # A warm start refines a layout someone already placed, so slide-off
@@ -1333,6 +1415,7 @@ def run_optimize_placement(
             seed_vector = _read_current_vector(pcb_path, components)
         else:
             seed_vector = _generate_seed(seed_method, components, nets, board_outline)
+        seed_vector = _with_sides(seed_vector, fixed_sides)
 
         # Apply slide-off pre-processing
         if not no_slide_off:
@@ -1344,6 +1427,7 @@ def run_optimize_placement(
                 board_outline,
                 min_clearance_mm=slide_min_clearance,
                 grid_mm=slide_grid_mm,
+                fixed=locked_indices,
             )
             if not quiet:
                 print(
@@ -1547,6 +1631,7 @@ def run_optimize_placement(
             max_displacement_mm=50.0,
             min_clearance_mm=slide_min_clearance,
             grid_mm=slide_grid_mm,
+            fixed=locked_indices,
         )
         if not quiet and post_slide_result.overlaps_resolved > 0:
             print(
@@ -1569,7 +1654,7 @@ def run_optimize_placement(
         board_outline,
         cost_config,
         footprint_sizes,
-        decoupling_groups,
+        _without_caps(decoupling_groups, locked_refs),
         fixed_sides=fixed_sides,
         ref_domains=hv_ref_domains,
         required_mm_by_domain_pair=hv_required,

@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Collection, Sequence
 
 import numpy as np
 
@@ -251,6 +251,7 @@ def slide_off_overlaps(
     use_spatial_index: bool | None = None,
     min_clearance_mm: float | None = None,
     grid_mm: float = 0.0,
+    fixed: Collection[int] = (),
 ) -> tuple[PlacementVector, SlideOffResult]:
     """Resolve component overlaps by iteratively sliding components apart.
 
@@ -290,6 +291,10 @@ def slide_off_overlaps(
             time if that would leave the board), so a part placed on the
             grid stays on it.  Rounding can exceed *max_displacement_mm* by
             up to one grid step per axis.
+        fixed: Indices of components that must not move (locked
+            footprints, issue #6262).  A pair with one fixed member pushes
+            only the other, by the whole separation; a pair of two fixed
+            components is left as it is.
 
     Returns:
         Tuple of ``(new_vector, result)`` where *new_vector* is the
@@ -366,6 +371,9 @@ def slide_off_overlaps(
     # offset (proportional to component index) so that subsequent
     # pairwise pushes have distinct axes to work with.
     _apply_coincident_jitter(positions, sides, n)
+    fixed_set = {i for i in fixed if 0 <= i < n}
+    for i in fixed_set:
+        positions[i] = original_positions[i]
 
     # Save initial positions to track cumulative displacement
     initial_positions = positions.copy()
@@ -411,6 +419,9 @@ def slide_off_overlaps(
         for i, j in pairs_to_check:
             # Skip components on different sides
             if sides[i] != sides[j]:
+                continue
+            # Two fixed components cannot be separated here.
+            if i in fixed_set and j in fixed_set:
                 continue
 
             # Check if both components have exhausted their displacement budget
@@ -491,6 +502,16 @@ def slide_off_overlaps(
                     push_i_x = 0.0
                     push_j_x = 0.0
 
+                # A fixed member stays put; the other takes the whole push.
+                if i in fixed_set:
+                    push_j_x -= push_i_x
+                    push_j_y -= push_i_y
+                    push_i_x = push_i_y = 0.0
+                elif j in fixed_set:
+                    push_i_x -= push_j_x
+                    push_i_y -= push_j_y
+                    push_j_x = push_j_y = 0.0
+
                 # Apply displacement cap to component i
                 remaining_i = max(0.0, max_displacement_mm - cumulative_disp[i])
                 push_i_mag = math.sqrt(push_i_x * push_i_x + push_i_y * push_i_y)
@@ -525,6 +546,8 @@ def slide_off_overlaps(
 
         # Clamp all positions to board bounds
         for i in range(n):
+            if i in fixed_set:
+                continue
             if x_lo[i] <= x_hi[i]:
                 positions[i, 0] = max(x_lo[i], min(x_hi[i], positions[i, 0]))
             else:

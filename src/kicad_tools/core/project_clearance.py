@@ -27,6 +27,36 @@ class NetclassClearance:
     source_class: str
 
 
+#: The schema an unversioned ``net_settings`` block is read as: the newest one
+#: modelled here (the KiCad 10.0.6 oracle captures it). Only schema 3 is
+#: treated differently (string assignments, implicit priorities), so 4 vs 5
+#: makes no difference to the result.
+CURRENT_NET_SETTINGS_SCHEMA = 5
+
+
+def _schema_version(settings: dict[str, Any]) -> object:
+    """The ``net_settings`` schema version, reading an unversioned block as current.
+
+    Issue #6262: KiCad's ``NESTED_SETTINGS::LoadFromFile`` treats a missing or
+    unreadable ``meta.version`` as "no migration needed" and loads the block
+    as its current schema -- kicad-cli 10 enforces the classes and patterns of
+    a ``net_settings`` with no ``meta`` (pinned by the ``hv-class-*``
+    scenarios of ``tests/test_route_auto_pair_and_hole_clearance_6122_6139``).
+    Hand-written projects and ``merge_project_rules``'s own
+    ``setdefault("net_settings", {})`` produce exactly that shape, so a
+    missing ``meta``, a missing ``version`` or a JSON ``null`` one is read the
+    way KiCad reads it.  A version that IS stated but is not one this module
+    models (an older schema needing migration, or a newer one) still raises.
+    """
+    meta = settings.get("meta")
+    if meta is None:
+        return CURRENT_NET_SETTINGS_SCHEMA
+    if not isinstance(meta, dict):
+        raise ProjectClearanceError(f"net_settings.meta must be an object, not {meta!r}")
+    version = meta.get("version")
+    return CURRENT_NET_SETTINGS_SCHEMA if version is None else version
+
+
 def resolve_project_clearances(
     project: dict[str, Any], net_names: Iterable[str]
 ) -> dict[str, NetclassClearance]:
@@ -38,8 +68,10 @@ def resolve_project_clearances(
     Schema 3 class order and string assignments are migrated in a private copy.
     No manufacturer choice or route relaxation changes these authored values.
 
-    Missing net_settings returns an empty mapping. Malformed declarations,
-    unsupported patterns/schemas, and unresolved references fail explicitly.
+    Missing or ``null`` net_settings returns an empty mapping (no authored
+    netclasses); an unversioned block is read as the current schema, as KiCad
+    reads it (#6262). Malformed declarations, unsupported patterns, a stated
+    but unsupported schema, and unresolved references fail explicitly.
     Custom DRC rules, board minima and fabrication limits remain separate
     constraints for the routing caller to combine.
     """
@@ -50,14 +82,15 @@ def resolve_project_clearances(
     names = list(net_names)
     if not all(isinstance(name, str) for name in names):
         raise ProjectClearanceError("Net names must be strings")
-    if "net_settings" not in project:
+    if project.get("net_settings") is None:
+        # Absent or JSON ``null``: the project declares no netclasses, so
+        # there is nothing authored to resolve (#6262).
         return {}
     data = deepcopy(project)
     settings = data["net_settings"]
     if not isinstance(settings, dict):
         raise ProjectClearanceError("net_settings must be an object")
-    meta = settings.get("meta", {})
-    version = meta.get("version") if isinstance(meta, dict) else None
+    version = _schema_version(settings)
     if type(version) is not int or version not in (3, 4, 5):
         raise ProjectClearanceError(f"Unsupported net_settings schema: {version!r}")
     classes = settings.get("classes", [])
@@ -151,7 +184,7 @@ def authored_netclass_clearances(
     :func:`resolve_project_clearances` and inherits its explicit failures for
     unsupported declarations.
     """
-    if not isinstance(project, dict) or "net_settings" not in project:
+    if not isinstance(project, dict) or project.get("net_settings") is None:
         return {}
     settings = project["net_settings"]
     classes = settings.get("classes") if isinstance(settings, dict) else None

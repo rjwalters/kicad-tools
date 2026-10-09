@@ -1070,3 +1070,33 @@ class TestPlacementGrid:
             x = new_vec.data[i * FIELDS_PER_COMPONENT]
             assert 1.0 - 1e-9 <= x <= 9.0 + 1e-9
             assert self._on_grid(x - vec.data[i * FIELDS_PER_COMPONENT], 0.05)
+
+
+class TestFixedComponents:
+    """Issue #6262: a fixed (locked) component never moves."""
+
+    def test_fixed_member_stays_and_the_other_takes_the_push(self):
+        comps = _make_components(2)
+        data = np.zeros(2 * FIELDS_PER_COMPONENT, dtype=np.float64)
+        data[0], data[FIELDS_PER_COMPONENT] = 0.0, 1.0  # 1 mm apart, 2 mm parts
+        vec, result = slide_off_overlaps(
+            PlacementVector(data=data), comps, _make_board(), fixed=[0]
+        )
+        assert (vec.data[0], vec.data[1]) == (0.0, 0.0)
+        assert vec.data[FIELDS_PER_COMPONENT] >= 2.0 + 0.5 - 1e-9  # clear by the margin
+        assert result.overlaps_remaining == 0
+
+    def test_coincident_with_fixed_member_still_separates(self):
+        comps = _make_components(3)
+        vec, result = slide_off_overlaps(
+            _make_vector_at_same_position(3, x=5.0, y=-3.0), comps, _make_board(), fixed=[1]
+        )
+        base = FIELDS_PER_COMPONENT
+        assert (vec.data[base], vec.data[base + 1]) == (5.0, -3.0)
+        assert result.overlaps_remaining == 0
+
+    def test_two_fixed_components_are_left_as_they_are(self):
+        comps = _make_components(2)
+        original = _make_vector_at_same_position(2, x=1.0, y=1.0)
+        vec, _ = slide_off_overlaps(original, comps, _make_board(), fixed=[0, 1])
+        assert np.array_equal(vec.data, original.data)

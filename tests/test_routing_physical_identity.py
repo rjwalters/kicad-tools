@@ -12,7 +12,24 @@ import pytest
 from kicad_tools.placement.routing import analyze_routing_placement
 from kicad_tools.router.io import load_pcb_for_routing
 from kicad_tools.schema.pcb import PCB
+from tests.test_route_partial_placement_cli import (
+    CLI_SUBPROCESS_SECONDS,
+    PYTEST_TIMEOUT_SECONDS,
+    ROUTE_DEADLINE_SECONDS,
+    _reject_deadline_expiry,
+)
 from tests.test_routing_placement_disposition import board_text
+
+# Issue #6262: the CLI tests below route the #5413 fixture under a finite
+# ``--timeout`` so the supervisor path is exercised.  A flat 30 s budget was
+# charged the native-permit queue wait of ``post-route-drc``'s kicad-cli
+# launch (KCT_NATIVE_MAX_CONCURRENCY=2 in the Test job), which nothing gives
+# back to a grandchild route worker -- the #5579 failure mode exactly
+# ("routing deadline exceeded during post-route-drc", exit 124, with routing
+# itself at 0.0 s).  Use the same composed budget as #5579's tests: the
+# invocation's own 30 s plus the gate's fail-open queue bound when (and only
+# when) the gate is configured; unchanged locally.
+_cli_budget = pytest.mark.timeout(PYTEST_TIMEOUT_SECONDS)
 
 
 def repeated_reference_board(*, invalid, style):
@@ -54,6 +71,7 @@ def test_every_topology_entry_resolves_to_its_own_physical_net(tmp_path, style):
     assert board.read_bytes() == original
 
 
+@_cli_budget
 @pytest.mark.parametrize("style", ["missing", "empty", "duplicate", "escaped"])
 def test_default_mixed_cli_routes_only_valid_physical_nets(
     tmp_path, style, options=(), expected_exit=2
@@ -72,17 +90,18 @@ def test_default_mixed_cli_routes_only_valid_physical_nets(
             "-o",
             str(output),
             "--timeout",
-            "30",
+            str(ROUTE_DEADLINE_SECONDS),
             "--complete-report",
             str(report),
             *options,
         ],
         capture_output=True,
         text=True,
-        timeout=90,
+        timeout=CLI_SUBPROCESS_SECONDS,
         cwd=tmp_path,
         env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
     )
+    _reject_deadline_expiry(output, result.stdout + result.stderr)
     assert result.returncode == expected_exit, result.stdout + result.stderr
     assert board.read_bytes() == original
     before, after = PCB.load(board), PCB.load(output)
@@ -223,6 +242,7 @@ def test_loader_and_reset_keep_same_pin_arrays_as_physical_obstacles(tmp_path, p
         ["--complete"],
     ],
 )
+@_cli_budget
 def test_duplicate_reference_mixed_cli_modes(tmp_path, options):
     # Single-pass modes also report the fixture's inherited BAD/PLANE DRC errors.
     expected_exit = 2 if "--adaptive-rules" in options or "--region" in options else 3

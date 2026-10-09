@@ -114,7 +114,9 @@ def test_native_oracle():
         (Path(__file__).parent / "fixtures/netclass_diagnostics/oracle.json").read_text()
     )
     assert corpus["kicad_version"] == "10.0.5"
-    unsupported = {"USB.1", r"USB\*", "USB[0-9]", "^USB$", "/USB/", "a**"}
+    # "/USB/" left this set in #6262: slash is literal, so its row is now
+    # evaluated and must agree with every native result below.
+    unsupported = {"USB.1", r"USB\*", "USB[0-9]", "^USB$", "a**"}
     for case in corpus["cases"]:
         p = {"pattern": case["pattern"], "netclass": "Power"}
         r = diagnose_netclasses(project([p]), [case["net"]])

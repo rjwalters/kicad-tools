@@ -168,3 +168,52 @@ def test_agrees_with_kicad_cli(tmp_path: Path, capsys) -> None:
         assert bool(errors) is expect_error, (name, errors)
         code, rep = _check(pcb, d, capsys)
         assert bool(_hits(rep)) is expect_error
+
+
+def _unversioned_hv() -> dict:
+    project = copy.deepcopy(wall.project("hv"))
+    del project["net_settings"]["meta"]
+    return project
+
+
+def test_unversioned_net_settings_is_checked_not_rejected(tmp_path: Path, capsys) -> None:
+    """Issue #6262: no ``net_settings.meta`` is KiCad's current schema, not an error."""
+    code, report = _check(_board(tmp_path, STRAIGHT, _unversioned_hv()), tmp_path, capsys)
+    assert _hits(report, "netclass_clearance_unsupported") == []
+    hits = _hits(report)
+    assert hits and min(h["actual_value"] for h in hits) == pytest.approx(0.45, abs=1e-3)
+    assert code != 0
+
+
+@pytest.mark.parametrize(
+    "project",
+    [
+        {"meta": {"filename": "hv.kicad_pro", "version": 1}},  # minimal/legacy: no net_settings
+        {"meta": {"filename": "hv.kicad_pro", "version": 1}, "net_settings": None},
+        {"meta": {"filename": "hv.kicad_pro", "version": 1}, "net_settings": {}},
+    ],
+    ids=["absent", "null", "empty"],
+)
+def test_project_without_net_settings_is_silent(tmp_path: Path, capsys, project) -> None:
+    """Issue #6262: no authored netclasses -> nothing to check, and no error."""
+    code, report = _check(_board(tmp_path, STRAIGHT, project), tmp_path, capsys)
+    assert code == 0 and report["violations"] == []
+
+
+@pytest.mark.skipif(wall._kicad_cli() is None, reason="kicad-cli not available")
+def test_kicad_cli_enforces_an_unversioned_net_settings_block(tmp_path: Path, capsys) -> None:
+    """The #6262 reading is KiCad's: kicad-cli applies HV with no ``meta.version``."""
+    pcb = _board(tmp_path, STRAIGHT, _unversioned_hv())
+    report = tmp_path / "drc.json"
+    subprocess.run(
+        [wall._kicad_cli(), "pcb", "drc", "--format", "json", "--output", str(report), str(pcb)],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    errors = [
+        v
+        for v in json.loads(report.read_text())["violations"]
+        if v.get("severity") == "error" and "clearance" in v.get("type", "")
+    ]
+    assert errors

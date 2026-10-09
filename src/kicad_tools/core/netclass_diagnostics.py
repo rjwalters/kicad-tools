@@ -9,7 +9,9 @@ from copy import deepcopy
 from string import ascii_letters, digits
 from typing import Any
 
-_LITERAL = frozenset(ascii_letters + digits + "_ -:")
+# ``/`` (hierarchical sheet paths, issue #6262) is literal under both KiCad
+# interpretations: the native oracle's ``/USB/`` row matches only ``/USB/``.
+_LITERAL = frozenset(ascii_letters + digits + "_ -:/")
 
 
 def _supported(pattern: str) -> bool:
