@@ -3,7 +3,7 @@
   "context_sha256": {
     "charlieplex_3x3.kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
     "charlieplex_3x3_routed.kicad_dru": "0714e8b4cb73fde358fa3c1d35adfab2755f47561476f85015a9f03c02e745d8",
-    "charlieplex_3x3_routed.kicad_pcb": "49a44cf319bb9e144c50a36b4546ea54a9c79c2e17de738ea497b2353ca03f7d",
+    "charlieplex_3x3_routed.kicad_pcb": "17501d9b09c8fec26ba3ce7f625a18f7ea83ada48b2f6a99b7930b9dd9b0caa0",
     "charlieplex_3x3_routed.kicad_pro": "92e3e14743916b4f2460d7dc80fd0e9c86c4112bc3d7a03c45ad18f7d3621ecb"
   },
   "deltas_mm2": {},
@@ -14,6 +14,6 @@
   "refilled_sha256": "17501d9b09c8fec26ba3ce7f625a18f7ea83ada48b2f6a99b7930b9dd9b0caa0",
   "saved_areas_mm2": {},
   "saved_pcb": "output/readiness/fill-saved/charlieplex_3x3_routed.kicad_pcb",
-  "saved_sha256": "49a44cf319bb9e144c50a36b4546ea54a9c79c2e17de738ea497b2353ca03f7d",
+  "saved_sha256": "17501d9b09c8fec26ba3ce7f625a18f7ea83ada48b2f6a99b7930b9dd9b0caa0",
   "tolerance_mm2": 0.01
 }
