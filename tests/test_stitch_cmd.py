@@ -6865,8 +6865,10 @@ class TestStitchOwnPadDrillNotBlocking:
 
         real = stitch_mod.find_all_drills
 
-        def buggy(sexp, exclude_nets=None, pad_exclude_nets=None):  # type: ignore[no-untyped-def]
-            return real(sexp, exclude_nets=exclude_nets)
+        def buggy(  # type: ignore[no-untyped-def]
+            sexp, exclude_nets=None, pad_exclude_nets=None, **kwargs
+        ):
+            return real(sexp, exclude_nets=exclude_nets, **kwargs)
 
         monkeypatch.setattr(stitch_mod, "find_all_drills", buggy)
 
