@@ -62,8 +62,12 @@ the same "raise, never replace" footing as ``rules.min_clearance``
 a board that declares *less* than the router's target from being loosened.
 
 What is still deliberately **not** read: ``.kicad_dru`` rules carrying a
-``(condition …)`` (see :attr:`DeclaredClearanceRules.dru_mm`), and KiCad's
-``physical_clearance`` constraint, which is a different rule family.
+``(condition …)`` (see :attr:`DeclaredClearanceRules.dru_mm`), with one
+narrow exception -- a condition that is purely a copper-*type* test naming a
+via (``A.Type == 'Via' || B.Type == 'Via'``) is recognised as a via-scoped
+rule and feeds ``via_clearance`` (:attr:`DeclaredClearanceRules.dru_via_mm`,
+#6280) -- and KiCad's ``physical_clearance`` constraint, which is a
+different rule family.
 
 Precedence
 ----------
@@ -121,14 +125,25 @@ two arguments by construction:
    whose keys are already order-independent (sorted, ``/``-stripped).
 9. **Trace/via symmetry** -- when *either* side of the pair is a via, the
    requirement rises to ``via_clearance``.  This is the asymmetry #5398
-   recorded: ``kct route`` builds its ``DesignRules`` with
-   ``trace_clearance`` set from ``route_cmd.DEFAULT_ROUTE_CLEARANCE_MM``
-   (0.15mm) while ``via_clearance`` keeps the dataclass default of 0.20mm
-   (:mod:`kicad_tools.router.rules` ships *both* fields at 0.2 -- the 0.15
-   never comes from the dataclass), and consumers disagreed about which
-   applied to a trace-vs-via pair depending on which object they were called
-   *about*.  Here it is a property of the unordered pair, so it cannot depend
-   on argument order.
+   recorded: consumers disagreed about whether ``trace_clearance`` or
+   ``via_clearance`` applied to a trace-vs-via pair depending on which object
+   they were called *about*.  Here it is a property of the unordered pair, so
+   it cannot depend on argument order; #6272 made every search / commit gate
+   resolve it the same way (:func:`trace_via_clearance_mm`).
+
+   ``via_clearance`` itself is resolved from the board's own rules by
+   :func:`resolve_via_clearance` (#6280), not left at the 0.20mm
+   ``DesignRules`` dataclass default.  Before #6280 ``kct route`` set only
+   ``trace_clearance`` from the board, so once #6272 made the via term
+   symmetric, the router held every trace 0.20mm off every foreign via even on
+   a board whose declared rule -- the value ``kicad-cli`` measures -- was
+   0.15mm (board 02: 27 -> 52 vias for no DRC benefit).  The via value is
+   the strictest declared rule that applies to a via pair (the ``.kicad_pro``
+   board minimum, a via-scoped or unconditional ``.kicad_dru`` clearance, the
+   applied netclass, a legacy board netclass), raised to the fab floor and
+   never looser than it; 0.20mm remains the fallback only when the board
+   declares nothing.  ``kct route --via-clearance`` is the explicit waiver,
+   on the same footing as ``--clearance``.
 
 Order symmetry
 --------------
@@ -151,6 +166,7 @@ they keep their own arithmetic for now and are moved onto
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -165,14 +181,21 @@ __all__ = [
     "ClearanceResolver",
     "ClearanceRuleSet",
     "CopperKind",
+    "DEFAULT_VIA_CLEARANCE_MM",
     "DeclaredClearanceRules",
     "ResolvedClearance",
     "RuleSource",
     "read_declared_clearance_rules",
     "resolve_base_clearance",
+    "resolve_via_clearance",
     "strictest_net_class_clearance",
     "trace_via_clearance_mm",
 ]
+
+#: ``via_clearance`` when the board declares no rule that applies to a via
+#: pair -- the :class:`~kicad_tools.router.rules.DesignRules` dataclass
+#: default, which ``kct route`` used unconditionally before #6280.
+DEFAULT_VIA_CLEARANCE_MM = 0.2
 
 
 def trace_via_clearance_mm(trace_clearance: float, via_clearance: float | None) -> float:
@@ -238,6 +261,7 @@ class RuleSource(Enum):
 
     EXPLICIT_TARGET = "explicit-target"
     PROJECT_DRU = "project-dru"
+    PROJECT_DRU_VIA = "project-dru-via"
     BOARD_NET_CLASS = "board-net-class"
     PROJECT_MIN_CLEARANCE = "project-min-clearance"
     PROJECT_NET_CLASS = "project-net-class"
@@ -247,6 +271,7 @@ class RuleSource(Enum):
     NET_CLASS_OVERRIDE = "net-class-override"
     PAIR_MATRIX = "pair-matrix"
     VIA_CLEARANCE = "via-clearance"
+    TRACE_BASE = "trace-base"
 
 
 #: Ordering used to break exact ties between equal-valued terms.
@@ -294,6 +319,13 @@ class DeclaredClearanceRules:
         board_net_class_mm: Strictest positive clearance across the legacy
             top-level ``(net_class …)`` blocks of the ``.kicad_pcb`` (#4875).
         board_net_class_name: The class :attr:`board_net_class_mm` came from.
+        dru_via_mm: Strictest **via-scoped** ``(constraint clearance (min …))``
+            in the ``.kicad_dru`` -- a rule whose condition is purely a
+            copper-type test naming a via (``A.Type == 'Via'``,
+            ``A.Type == 'Via' || B.Type == 'Via'``, ``A.Type == 'Via' &&
+            B.Type == 'Track'``, …).  It governs only pairs with a via on one
+            side, so it feeds :meth:`via_requirement` and never the board-wide
+            trace base (#6280).
     """
 
     dru_mm: float | None = None
@@ -302,6 +334,42 @@ class DeclaredClearanceRules:
     net_class_name: str | None = None
     board_net_class_mm: float | None = None
     board_net_class_name: str | None = None
+    dru_via_mm: float | None = None
+
+    def via_requirement(self) -> tuple[float, RuleSource, str | None] | None:
+        """The strictest declared rule that applies to a **via** pair (#6280).
+
+        KiCad's ``clearance`` constraint is one rule for every copper kind, so
+        every board-wide layer applies to a via exactly as it does to a trace:
+        the ``.kicad_pro`` board minimum, an unconditional ``.kicad_dru``
+        clearance, the applied netclass and a legacy ``(net_class …)``.  On
+        top of those, a via-scoped ``.kicad_dru`` rule
+        (:attr:`dru_via_mm`) applies to via pairs only.  KiCad enforces every
+        one of them, so the largest wins; ties break by :class:`RuleSource`
+        declaration order, which keeps provenance stable.
+
+        Unlike :meth:`project_requirement`, the result is meant to *replace*
+        the router's 0.20mm ``via_clearance`` default, not floor it -- see
+        :func:`resolve_via_clearance`.
+
+        Returns:
+            ``(value_mm, source, class_name)`` or ``None`` when nothing
+            applicable is declared.
+        """
+        candidates: tuple[tuple[float | None, RuleSource, str | None], ...] = (
+            (self.dru_mm, RuleSource.PROJECT_DRU, None),
+            (self.dru_via_mm, RuleSource.PROJECT_DRU_VIA, None),
+            (self.board_net_class_mm, RuleSource.BOARD_NET_CLASS, self.board_net_class_name),
+            (self.project_min_clearance_mm, RuleSource.PROJECT_MIN_CLEARANCE, None),
+            (self.net_class_clearance_mm, RuleSource.PROJECT_NET_CLASS, self.net_class_name),
+        )
+        winner: tuple[float, RuleSource, str | None] | None = None
+        for value, source, label in candidates:
+            if value is None or value <= 0:
+                continue
+            if winner is None or value > winner[0] + RESOLVER_TIE_EPSILON_MM:
+                winner = (value, source, label)
+        return winner
 
     def project_requirement(self) -> tuple[float, RuleSource, str | None] | None:
         """The winning **project-derived** minimum, or ``None`` when there is none.
@@ -365,7 +433,7 @@ class DeclaredClearanceRules:
 
     def is_empty(self) -> bool:
         """True when no file declared any copper clearance requirement."""
-        return self.strictest_requirement() is None
+        return self.strictest_requirement() is None and self.via_requirement() is None
 
 
 @dataclass(frozen=True)
@@ -767,24 +835,77 @@ def _read_dru_clearance(dru_path: Path) -> float | None:
 
     Never raises -- a malformed sidecar yields ``None``.
     """
+    return _read_dru_clearances(dru_path)[0]
+
+
+#: One atom of a via-scoped DRU condition: ``A.Type == 'Via'`` and friends.
+_TYPE_ATOM_RE = re.compile(r"""^\(*\s*[AB]\.Type\s*==\s*['"]([A-Za-z_ ]+)['"]\s*\)*$""")
+
+#: Copper types a via-scoped clause may name besides the via itself.  A
+#: clause pairing a via with a *pad* or a *zone* does not govern the
+#: trace/via or via/via pairs ``via_clearance`` is consulted for, so it is
+#: not read (#6280).
+_VIA_PEER_TYPES = frozenset({"via", "track"})
+
+
+def _is_via_scoped_condition(expression: str) -> bool:
+    """True when a DRU condition provably selects (some) via-involving pairs.
+
+    Deliberately narrow (#6280): the condition must be a ``||`` of clauses,
+    at least one of which is a ``&&`` of nothing but ``A.Type`` / ``B.Type``
+    equality tests, naming ``via`` at least once and otherwise only
+    ``track`` / ``via``.  Such a clause matches *every* trace/via (or
+    via/via) pair it names, so the rule's minimum is a requirement on those
+    pairs whatever the other clauses say.  Anything else -- a net-class or
+    layer test, a negation, a function call -- needs a DRC-expression
+    evaluator this module does not have, and is ignored rather than guessed.
+    """
+    for clause in expression.split("||"):
+        atoms = [atom.strip() for atom in clause.split("&&")]
+        types: list[str] = []
+        for atom in atoms:
+            match = _TYPE_ATOM_RE.match(atom)
+            if match is None:
+                types = []
+                break
+            types.append(match.group(1).strip().lower())
+        if types and "via" in types and all(kind in _VIA_PEER_TYPES for kind in types):
+            return True
+    return False
+
+
+def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None]:
+    """Both ``.kicad_dru`` clearance layers, from one parse of the file.
+
+    Returns ``(unconditional_mm, via_scoped_mm)``: the strictest
+    unconditional ``(constraint clearance (min …))`` (see
+    :func:`_read_dru_clearance`) and the strictest one whose condition is
+    via-scoped (:func:`_is_via_scoped_condition`, #6280).  Never raises.
+    """
     try:
         text = dru_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None
+        return (None, None)
     if "clearance" not in text:
-        return None
+        return (None, None)
 
     try:
         from kicad_tools.sexp import parse_string
 
         tree = parse_string("(rules " + text + ")")
     except Exception:
-        return None
+        return (None, None)
 
     best: float | None = None
+    best_via: float | None = None
     for rule in tree.find_all("rule"):
-        if rule.find_child("condition") is not None:
-            continue
+        condition = rule.find_child("condition")
+        via_scoped = False
+        if condition is not None:
+            expression = condition.get_first_atom()
+            if expression is None or not _is_via_scoped_condition(str(expression)):
+                continue
+            via_scoped = True
         for constraint in rule.find_all("constraint"):
             atoms = constraint.get_atoms()
             if not atoms or str(atoms[0]) != "clearance":
@@ -795,9 +916,12 @@ def _read_dru_clearance(dru_path: Path) -> float | None:
             value = _parse_length_mm(minimum.get_first_atom())
             if value is None or value <= 0:
                 continue
-            if best is None or value > best:
+            if via_scoped:
+                if best_via is None or value > best_via:
+                    best_via = value
+            elif best is None or value > best:
                 best = value
-    return best
+    return (best, best_via)
 
 
 def _parse_length_mm(raw: object) -> float | None:
@@ -847,7 +971,7 @@ def read_declared_clearance_rules(
     path = Path(pcb_path)
 
     project_minimum, project_net_class = _read_project_clearances(path.with_suffix(".kicad_pro"))
-    dru_mm = _read_dru_clearance(path.with_suffix(".kicad_dru"))
+    dru_mm, dru_via_mm = _read_dru_clearances(path.with_suffix(".kicad_dru"))
 
     board_net_class = (
         strictest_net_class_clearance(board_net_classes) if board_net_classes else None
@@ -860,6 +984,7 @@ def read_declared_clearance_rules(
         net_class_name=project_net_class[0] if project_net_class else None,
         board_net_class_mm=board_net_class[1] if board_net_class else None,
         board_net_class_name=board_net_class[0] if board_net_class else None,
+        dru_via_mm=dru_via_mm,
     )
 
 
@@ -973,6 +1098,148 @@ def resolve_base_clearance(
 
     if fab_floor_mm is not None and fab_floor_mm > 0:
         resolved = resolved.with_term(floor_source, fab_floor_mm)
+
+    if warning is not None:
+        resolved = ResolvedClearance(
+            resolved.required_mm,
+            resolved.source,
+            resolved.terms,
+            warning,
+            resolved.source_label,
+        )
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# The via clearance (#6280)
+# ---------------------------------------------------------------------------
+
+
+def resolve_via_clearance(
+    *,
+    declared: DeclaredClearanceRules | None = None,
+    fab_floor_mm: float | None = None,
+    explicit_via_mm: float | None = None,
+    explicit_manufacturer: bool = False,
+    manufacturer: str | None = None,
+    default_mm: float = DEFAULT_VIA_CLEARANCE_MM,
+    trace_clearance_mm: float | None = None,
+) -> ResolvedClearance:
+    """Resolve ``DesignRules.via_clearance`` from the board's own rules (#6280).
+
+    ``via_clearance`` is the step-9 trace/via symmetry term: every trace and
+    foreign via are held ``max(trace_clearance, via_clearance)`` apart
+    (:func:`trace_via_clearance_mm`, #6272), and via/via pairs at least
+    ``via_clearance``.  Leaving it at the 0.20mm dataclass default holds that
+    copper further apart than a board declaring 0.15mm -- the value
+    ``kicad-cli pcb drc`` measures -- ever asks for.
+
+    Precedence, the via analogue of :func:`resolve_base_clearance`:
+
+    1. **Explicit** ``--via-clearance`` wins outright and is never moved; a
+       warning names any declared via rule it undercuts.
+    2. The board's strictest **declared** rule that applies to a via pair
+       (:meth:`DeclaredClearanceRules.via_requirement`: the ``.kicad_pro``
+       board minimum, a via-scoped or unconditional ``.kicad_dru`` clearance,
+       the applied netclass, a legacy board netclass) **replaces** the
+       ``default_mm`` fallback -- in both directions.  Unlike the trace base
+       there is no separate router target to floor: the 0.20mm default is a
+       placeholder for "nothing declared", not a margin anyone chose.
+    3. The **fab floor** is the last ``max``, exactly the
+       ``max(designer value, fab floor)`` policy ``merge_project_rules``
+       applies to the project minima (#6191): a declared value below it is
+       raised and warned about, never honoured silently.
+    4. With nothing declared, ``default_mm`` (0.20mm) stands, still floored
+       by the fab.
+    5. The resolved **trace base** (``trace_clearance_mm``) is a final
+       ``max``.  Step 9 is a *widening* term on top of the base --
+       :meth:`ClearanceResolver.resolve` answers a via pair with
+       ``max(base, via_mm)`` -- so a ``via_clearance`` below the trace base
+       would let any consumer that reads ``DesignRules.via_clearance`` alone
+       (via-to-pad and via-to-via halos) hold a via closer than the resolver
+       itself would.  It only binds when the board declares less than the
+       router's trace target (board 05: 0.127mm declared, 0.15mm target).
+
+    Args:
+        declared: What the board's files declare
+            (:func:`read_declared_clearance_rules`).
+        fab_floor_mm: The fab tier's minimum copper clearance
+            (:func:`~kicad_tools.router.mfr_limits.resolve_clearance`).
+        explicit_via_mm: ``--via-clearance`` when the operator passed it.
+        explicit_manufacturer: Names the floor term
+            :attr:`RuleSource.MANUFACTURER_OVERRIDE`; never waives a rule.
+        manufacturer: Manufacturer name, for the warning text only.
+        default_mm: The nothing-declared fallback.
+        trace_clearance_mm: The resolved trace base
+            (:func:`resolve_base_clearance`), applied as a floor; ``None``
+            skips the term.  Not applied to an explicit value.
+
+    Returns:
+        The resolved via clearance with provenance and any warning.
+    """
+    declared = declared or DeclaredClearanceRules()
+    requirement = declared.via_requirement()
+
+    if explicit_via_mm is not None:
+        value = float(explicit_via_mm)
+        resolved = ResolvedClearance(
+            value, RuleSource.EXPLICIT_TARGET, ((RuleSource.EXPLICIT_TARGET, value),)
+        )
+        if requirement is not None and requirement[0] > value + RESOLVER_TIE_EPSILON_MM:
+            where = requirement[2] or requirement[1].value
+            return ResolvedClearance(
+                resolved.required_mm,
+                resolved.source,
+                resolved.terms,
+                (
+                    f"WARNING: explicit --via-clearance {value:.4g}mm is below the "
+                    f"{requirement[0]:.4g}mm this board declares for vias ({where}); "
+                    f"copper routed at {value:.4g}mm can fail the board's own DRC."
+                ),
+            )
+        return resolved
+
+    default = float(default_mm)
+    resolved = ResolvedClearance(
+        default, RuleSource.TARGET_DEFAULT, ((RuleSource.TARGET_DEFAULT, default),)
+    )
+    if requirement is not None:
+        value, source, label = requirement
+        resolved = ResolvedClearance(value, source, (*resolved.terms, (source, value)), None, label)
+
+    warning: str | None = None
+    if (
+        requirement is not None
+        and fab_floor_mm is not None
+        and resolved.required_mm < fab_floor_mm - RESOLVER_TIE_EPSILON_MM
+    ):
+        value, source, label = requirement
+        where = label or source.value
+        warning = (
+            f'WARNING: the board declares via clearance {value:.4g}mm ("{where}"), '
+            f"which is below the {manufacturer} minimum clearance "
+            f"{fab_floor_mm:.4g}mm. Resolving via clearance at the "
+            f"{fab_floor_mm:.4g}mm floor instead; pass --via-clearance {value:.4g} "
+            f"to route at the board's declared value anyway."
+        )
+
+    if fab_floor_mm is not None and fab_floor_mm > 0:
+        floor_source = (
+            RuleSource.MANUFACTURER_OVERRIDE if explicit_manufacturer else RuleSource.FAB_FLOOR
+        )
+        resolved = resolved.with_term(floor_source, fab_floor_mm)
+
+    if trace_clearance_mm is not None and trace_clearance_mm > 0:
+        resolved = resolved.with_term(RuleSource.TRACE_BASE, float(trace_clearance_mm))
+        if (
+            warning is not None
+            and fab_floor_mm is not None
+            and resolved.required_mm > fab_floor_mm + RESOLVER_TIE_EPSILON_MM
+        ):
+            # The trace base, not the fab floor, decided the value: the
+            # sub-floor declaration changed nothing, exactly as on the trace
+            # path, which floors such a declaration silently.
+            warning = None
 
     if warning is not None:
         resolved = ResolvedClearance(

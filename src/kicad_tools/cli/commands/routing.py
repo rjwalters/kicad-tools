@@ -952,6 +952,10 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--trace-width", str(args.trace_width)])
     if args.clearance != 0.15 or _explicit_clearance:
         sub_argv.extend(["--clearance", str(args.clearance)])
+    # Issue #6280: ``None`` sentinel = resolve from the board's own rules;
+    # forward only an explicit value so flag-off argv stays byte-identical.
+    if getattr(args, "via_clearance", None) is not None:
+        sub_argv.extend(["--via-clearance", str(args.via_clearance)])
     if args.via_drill != 0.3:
         sub_argv.extend(["--via-drill", str(args.via_drill)])
     if args.via_diameter != 0.6:
