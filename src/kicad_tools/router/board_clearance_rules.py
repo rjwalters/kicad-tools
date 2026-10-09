@@ -837,13 +837,22 @@ class BoardClearanceRules:
                 isinstance(c, dict) and c.get("name") != "Default" and "clearance" in c
                 for c in classes
             ):
-                try:
-                    from kicad_tools.core.project_clearance import resolve_project_clearances
+                from kicad_tools.core.project_clearance import (
+                    ProjectClearanceError,
+                    resolve_project_clearances,
+                )
 
+                try:
                     value = resolve_project_clearances(self._project, [net_name])[
                         net_name
                     ].clearance
-                except Exception:  # unsupported declarations: keep the #6122 model
+                except ProjectClearanceError:
+                    # Only declarations that are present but unmodellable reach
+                    # here (#6262: an absent/null/unversioned net_settings no
+                    # longer raises).  The #6122 largest-class answer is the
+                    # conservative bound for this gate; the loud failure for
+                    # such a project is owned by the router's load path
+                    # (``io._authored_net_clearances``) and ``kct check``.
                     value = None
             self._resolved_class[net_name] = value
         return self._resolved_class[net_name]

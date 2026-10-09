@@ -1474,60 +1474,119 @@ class TestAnchorWeight:
         anchored_pcb: Path,
         tmp_path: Path,
     ) -> None:
-        """A non-zero anchor weight should not stretch NET_ANCHOR more than
-        the unweighted run does.
+        """A non-zero anchor weight keeps U1 nearer the locked J1.
 
-        The optimizer is deterministic with seed=42, so this is a stable
-        comparison rather than a probabilistic one. The expectation is that
-        with anchor_weight>0 the optimizer pays a heavier price for moving
-        U1 away from the (locked) J1, so the final Manhattan distance from
-        U1 to J1 should be no greater than the unweighted run.
+        Issue #6262: until then ``optimize-placement`` never pinned locked
+        footprints -- J1 wandered to the board centre with everything else,
+        so "U1 to J1" was just NET_ANCHOR's length between two FREE parts,
+        a near-floor quantity that differed by platform-dependent
+        float noise in the CMA-ES trajectory (CI saw 1.988 vs 2.605 mm
+        where a dev box saw 3.153 vs 2.792). With J1 genuinely fixed, the
+        weighted run pulls U1 toward it; the comparison is made over
+        several seeds so it measures the effect, not one trajectory.
         """
         from kicad_tools.schema.pcb import PCB as SchemaPCB
 
-        out_unweighted = tmp_path / "out_unweighted.kicad_pcb"
-        out_weighted = tmp_path / "out_weighted.kicad_pcb"
-
-        rc_u = run_optimize_placement(
-            str(anchored_pcb),
-            max_iterations=20,
-            output_path=str(out_unweighted),
-            anchor_weight=0.0,
-            quiet=True,
-        )
-        rc_w = run_optimize_placement(
-            str(anchored_pcb),
-            max_iterations=20,
-            output_path=str(out_weighted),
-            anchor_weight=10.0,
-            quiet=True,
-        )
-        assert rc_u == 0
-        assert rc_w == 0
+        def _positions(pcb_path: Path) -> dict[str, tuple[float, float]]:
+            pcb = SchemaPCB.load(str(pcb_path))
+            return {fp.reference: fp.position for fp in pcb.footprints}
 
         def _u1_distance_to_j1(pcb_path: Path) -> float:
-            """Compute Manhattan distance from U1 to J1 in the saved PCB."""
-            pcb = SchemaPCB.load(str(pcb_path))
-            positions = {fp.reference: fp.position for fp in pcb.footprints}
-            u1 = positions["U1"]
-            j1 = positions["J1"]
+            positions = _positions(pcb_path)
+            u1, j1 = positions["U1"], positions["J1"]
             return abs(u1[0] - j1[0]) + abs(u1[1] - j1[1])
 
-        d_unweighted = _u1_distance_to_j1(out_unweighted)
-        d_weighted = _u1_distance_to_j1(out_weighted)
+        j1_before = _positions(anchored_pcb)["J1"]
+        distances: dict[float, list[float]] = {0.0: [], 10.0: []}
+        for seed in (42, 1, 2, 3, 4):
+            for weight, runs in distances.items():
+                out = tmp_path / f"out_{seed}_{weight}.kicad_pcb"
+                rc = run_optimize_placement(
+                    str(anchored_pcb),
+                    max_iterations=20,
+                    output_path=str(out),
+                    anchor_weight=weight,
+                    quiet=True,
+                    random_seed=seed,
+                )
+                assert rc == 0
+                # The anchor really is one: a locked footprint never moves.
+                assert _positions(out)["J1"] == pytest.approx(j1_before)
+                runs.append(_u1_distance_to_j1(out))
 
-        # The weighted run should not stretch NET_ANCHOR farther than the
-        # unweighted one. This test was vacuous before issue #6119: the old
-        # text writer never persisted the optimizer's moves, so both runs
-        # compared the untouched input (24.0 vs 24.0). It now measures real
-        # CMA-ES output, which differs slightly across numpy/cma builds
-        # (CI saw 2.614 vs 2.623 mm where a dev box saw 2.729 vs 2.197), so
-        # allow a 0.25 mm tolerance -- well under the ~0.5 mm effect size
-        # but above cross-environment jitter.
-        assert d_weighted <= d_unweighted + 0.25, (
-            f"anchor weight should keep U1 near J1: "
-            f"unweighted={d_unweighted:.3f} mm, weighted={d_weighted:.3f} mm"
+        mean_unweighted = sum(distances[0.0]) / len(distances[0.0])
+        mean_weighted = sum(distances[10.0]) / len(distances[10.0])
+        assert mean_weighted < mean_unweighted, (
+            f"anchor weight should keep U1 near J1: unweighted={distances[0.0]}, "
+            f"weighted={distances[10.0]}"
         )
+
+    def test_locked_footprint_is_never_moved_or_rotated(
+        self,
+        anchored_pcb: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #6262: every seed method leaves a locked footprint untouched."""
+        from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+        before = {fp.reference: fp for fp in SchemaPCB.load(str(anchored_pcb)).footprints}
+        for seed_method in ("current", "force-directed", "random"):
+            out = tmp_path / f"out_{seed_method}.kicad_pcb"
+            rc = run_optimize_placement(
+                str(anchored_pcb),
+                max_iterations=5,
+                output_path=str(out),
+                seed_method=seed_method,
+                anchor_weight=1.0,
+                quiet=True,
+            )
+            assert rc == 0
+            after = {fp.reference: fp for fp in SchemaPCB.load(str(out)).footprints}
+            assert after["J1"].position == before["J1"].position, seed_method
+            assert after["J1"].rotation == before["J1"].rotation, seed_method
+            assert after["J1"].locked, seed_method
+            moved = [r for r in ("U1", "R1", "R2") if after[r].position != before[r].position]
+            assert moved, f"{seed_method}: the free parts should still be optimized"
+
+    def test_mcp_resolve_overlaps_never_pushes_a_locked_footprint(
+        self,
+        anchored_pcb: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #6262: the MCP overlap tool must hold locked parts in place.
+
+        The writer skips locked footprints, so a slide-off that pushes one
+        half of a locked/free pair apart drops that half on write and the
+        overlap survives on disk while the tool reports it resolved. Re-read
+        the written file and check it against the reported counts.
+        """
+        from kicad_tools.mcp.tools.optimize_placement import resolve_placement_overlaps
+        from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+        # Drop R1 onto the locked J1.
+        text = anchored_pcb.read_text().replace("(at 18.0 15.0 0)", "(at 1.5 25.0 0)", 1)
+        anchored_pcb.write_text(text)
+        before = {fp.reference: fp for fp in SchemaPCB.load(str(anchored_pcb)).footprints}
+
+        out = tmp_path / "resolved.kicad_pcb"
+        res = resolve_placement_overlaps(str(anchored_pcb), output_path=str(out))
+        assert res["success"], res
+        assert res.get("output_path") == str(out), res
+        assert res["overlaps_resolved"] >= 1
+        assert res["overlaps_remaining"] == 0
+
+        after = {fp.reference: fp for fp in SchemaPCB.load(str(out)).footprints}
+        assert after["J1"].position == before["J1"].position
+        assert after["J1"].rotation == before["J1"].rotation
+        assert after["J1"].locked
+        assert after["R1"].position != before["R1"].position
+
+        # A fresh scan of the written file (no sliding) must agree with the
+        # reported counts: nothing left to resolve, nothing remaining.
+        rescan = resolve_placement_overlaps(str(out), max_iterations=0)
+        assert rescan["success"], rescan
+        assert rescan["overlaps_remaining"] == res["overlaps_remaining"] == 0
+        assert rescan["overlaps_resolved"] == 0
 
     def test_negative_anchor_weight_is_rejected(self, anchored_pcb: Path) -> None:
         """Negative anchor_weight is invalid; the runner should exit non-zero."""

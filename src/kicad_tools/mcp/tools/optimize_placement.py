@@ -20,14 +20,17 @@ from typing import TYPE_CHECKING, Any, Sequence
 # one implementation, so the MCP tool and the CLI see the same board, score it
 # the same way and write the same file (issue #6253).
 from kicad_tools.cli.optimize_placement_cmd import (
+    _board_pins,
     _build_decoupling_context,
     _compute_net_anchor_weight,  # noqa: F401  (re-exported)
     _decoupling_report,
     _evaluate,
     _footprint_size_from_pads,  # noqa: F401  (re-exported)
+    _locked_refs,
     _read_board_data,
     _read_current_vector,
     _with_sides,
+    _without_caps,
     _write_placements_to_pcb,
     snap_decoupling,
     weights_to_cost_config,
@@ -300,7 +303,10 @@ def optimize_placement(
     # Same scoring context as ``kct optimize-placement``: side flags pinned to
     # the board's own (the writer cannot flip footprints) and the decoupling-cap
     # affinity term, on by default, off with ``weights={"decoupling": 0}``.
-    fixed_sides = [int(v) for v in _read_current_vector(pcb_path, components).data[3::4]]
+    # Locked footprints keep their board pose as well (issue #6262).
+    locked_refs = _locked_refs(pcb_path)
+    fixed_sides = _board_pins(_read_current_vector(pcb_path, components), components, locked_refs)
+    locked_indices = sorted(fixed_sides.poses)
     decoupling_groups = _build_decoupling_context(pcb_path, nets, cost_config, quiet=True)
 
     def _score(vec: PlacementVector) -> PlacementScore:
@@ -370,6 +376,8 @@ def optimize_placement(
             "net_count": len(nets),
         }
 
+    seed_vector = _with_sides(seed_vector, fixed_sides)
+
     # Apply slide-off pre-processing to resolve seed overlaps
     if pre_slide_off:
         from kicad_tools.placement.slide_off import slide_off_overlaps
@@ -378,6 +386,7 @@ def optimize_placement(
             seed_vector,
             components,
             board_outline,
+            fixed=locked_indices,
         )
 
     # Evaluate seed
@@ -447,6 +456,7 @@ def optimize_placement(
             board_outline,
             max_iterations=50,
             max_displacement_mm=50.0,
+            fixed=locked_indices,
         )
 
     # Decoupling-cap snap: the CLI's own post-optimize pass (issue #6020).
@@ -459,7 +469,7 @@ def optimize_placement(
         board_outline,
         cost_config,
         footprint_sizes,
-        decoupling_groups,
+        _without_caps(decoupling_groups, locked_refs),
         fixed_sides=fixed_sides,
     )
 
@@ -735,6 +745,12 @@ def resolve_placement_overlaps(
 
     vector = PV(data=data)
 
+    # Locked footprints are never moved by the writer (issue #6262), so the
+    # slide-off must treat them as immovable: otherwise it reports an overlap
+    # resolved by pushing a locked part whose move is then dropped on write.
+    locked_refs = _locked_refs(pcb_path)
+    locked_indices = sorted(i for i, c in enumerate(components) if c.reference in locked_refs)
+
     # Run slide-off
     from kicad_tools.placement.slide_off import slide_off_overlaps
 
@@ -745,6 +761,7 @@ def resolve_placement_overlaps(
         margin_mm=margin_mm,
         max_iterations=max_iterations,
         max_displacement_mm=max_displacement_mm,
+        fixed=locked_indices,
     )
 
     result: dict[str, Any] = {

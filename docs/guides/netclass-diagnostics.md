@@ -58,9 +58,12 @@ into ordinary prefix matching. In particular `USB_*` matches both `USB_D`
 and `USB1` (wildcard). Python `fnmatch` alone cannot implement this contract.
 
 The implemented subset is ASCII letters, digits, underscore, space, hyphen,
-colon, `*` and `?`, with no adjacent quantifiers. Other syntax is explicitly
-`unsupported_pattern`, including backslashes/escaping, brackets, parentheses,
-periods, slashes, regex anchors, and Unicode **in patterns**. It is not silently
+colon, slash, `*` and `?`, with no adjacent quantifiers. Slash is literal under
+both interpretations -- the oracle's `/USB/` pattern matches only `/USB/` --
+so hierarchical sheet-path patterns such as `/Power/*` are supported (issue
+#6262). Other syntax is explicitly `unsupported_pattern`, including
+backslashes/escaping, brackets, parentheses, periods, regex anchors, and
+Unicode **in patterns**. It is not silently
 interpreted as a glob. The supported subset evaluates both interpretations;
 invalid leading regex quantifiers still allow the wildcard interpretation.
 The independent implementation uses position sets, avoiding regex backtracking.
