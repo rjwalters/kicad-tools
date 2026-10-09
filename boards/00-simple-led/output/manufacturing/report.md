@@ -1,8 +1,8 @@
 ---
 title: "simple_led_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb"
+author: "kicad-tools 0.22.0"
+date: "Rev 1 | 2026-10-08 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -36,7 +36,7 @@ Minimal LED circuit
 
 ### Power Architecture
 
-**Power Rails**: GND, PWR_FLAG, VCC
+**Power Rails**: GND, VCC
 
 ## Assembly Notes
 

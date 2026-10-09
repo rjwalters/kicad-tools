@@ -554,6 +554,28 @@ class TestCommittedBoard04:
         assert _ids(_run(_board_04())) == []
 
 
+BOARD_00_ROUTED = Path("boards/00-simple-led/output/simple_led_routed.kicad_pcb")
+
+
+def _board_00() -> PCB:
+    if not BOARD_00_ROUTED.is_file():
+        pytest.skip(f"board fixture not present: {BOARD_00_ROUTED}")
+    return PCB.load(str(BOARD_00_ROUTED))
+
+
+class TestCommittedBoard00:
+    """Board 00's LED D1 carries a cathode silkscreen mark (issue #5764)."""
+
+    def test_rule_still_selects_led(self):
+        """Guards against the zero-findings assertion passing vacuously."""
+        rule = Pin1MarkerRule()
+        selected = sorted(fp.reference for fp in _board_00().footprints if rule.selects(fp))
+        assert selected == ["D1"]
+
+    def test_no_pin1_marker_findings(self):
+        assert _ids(_run(_board_00())) == []
+
+
 class TestCheckerWiring:
     def test_check_all_methods_includes_rule(self):
         assert "check_pin1_markers" in DRCChecker.CHECK_ALL_METHODS

@@ -100,12 +100,18 @@ mixed THT/SMD board — see the `decisions:` block in `project.kct`.
 | `output/lvs.json` | Copper + label LVS report; `clean: true` on the committed board |
 | `output/drc_report.json` | DRC snapshot from the run that produced these artifacts |
 | `output/erc_report.json` | `kicad-cli sch erc` JSON report |
+| `package_release.py` | Rebuilds the shipped package below through `kct readiness --generate`; run it after `generate_design.py` changes the PCB. |
 | `output/manufacturing/` | Full fab bundle — see below |
+| `output/readiness.json`, `output/readiness/` | Hash-bound readiness verdict and its gate evidence |
 
 The `output/manufacturing/` bundle contains `gerbers/gerbers.zip`,
 `bom_jlcpcb.csv`, `cpl_jlcpcb.csv`, `kicad_project.zip`, `manifest.json`,
-`README.txt`, `report.md`, `report.pdf`, and `images/` (front/back/copper/
-assembly renders plus per-layer PNGs and the schematic render).
+`README.txt`, `report.md`, `report.pdf`, `schematic.pdf`,
+`assembly-front.pdf`/`assembly-back.pdf`, the sign-off evidence
+`check-report.json` and `native-drc.json`, the supplier review
+`procurement-review.md`, and `images/` (front/back/copper/assembly renders
+plus per-layer PNGs and the schematic render). `output/manufacturing.zip`
+archives the whole bundle.
 
 `output/board.json` is **not** committed — it is the public data contract
 emitted on demand by `kct board-metrics`, which CI runs against a temporary
