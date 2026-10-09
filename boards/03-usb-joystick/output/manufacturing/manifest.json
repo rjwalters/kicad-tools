@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.22.0",
-  "generated_at": "2026-10-09T02:13:28.130104+00:00",
+  "generated_at": "2026-10-09T02:59:04.353166+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -173,7 +173,7 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "4e8158ab4ced1ac9aabc501c7ad236850fbd71c46604ec97ad7834b4fe9f6557",
+      "sha256": "019e72f4ce48d09c4f3d06fe7d4289d00c3e53af07bfad67c9c4eb291fea4c98",
       "size": 189740
     },
     "images/assembly.png": {
@@ -213,7 +213,7 @@
       "size": 486470
     },
     "kicad_project.zip": {
-      "sha256": "ccc70d3c6ca313f0e605a79e0119589b8d972d2b6cb436cfa53520811a68756d",
+      "sha256": "0029677239ff3f65dd1f21296f5780b9f6f371e774ad9a5394b88ce52847af9f",
       "size": 282157
     },
     "manual-assembly-bom.csv": {

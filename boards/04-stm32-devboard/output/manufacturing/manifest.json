@@ -105,15 +105,15 @@
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "72cdb0acc9e1cfa9a91fc604b0cccdb519fff0bdba2fcc6a5572ca94e04a5e21",
+      "sha256": "9a7231f1beb82413d2309d8573d9554b873c0954ed1872fcdf01f732243ed1a3",
       "size": 4638
     },
     "native-erc-linux.json": {
-      "sha256": "5b8d02374a128882072a7387b05514d7722a9709fa38aeb8260969497945ff2c",
+      "sha256": "7824c1dc8d19565c38fb89b59b15e11aa34fcd1f14874836df0551e2b792c12a",
       "size": 987
     },
     "native-erc.json": {
-      "sha256": "586b6d6e6b0d1a3217a31179d58a952e29f5e2c21a95649d699417f11833857c",
+      "sha256": "9440dfb7ec5787f4102b55ad2f409cb0dd3ebdf6b61020f917141e9a3213f768",
       "size": 987
     },
     "procurement-review.md": {
