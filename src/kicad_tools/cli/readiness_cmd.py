@@ -137,6 +137,8 @@ DEFAULT_FILL_TOLERANCE_MM2 = 0.01
 _ARCHIVE_NAME = "manufacturing.zip"
 _EVIDENCE_DIRNAME = "readiness"
 _REPORT_NAME = "readiness.json"
+#: Fixed member timestamp for archives this producer writes (ZIP's epoch).
+_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +444,21 @@ class Engines:
     through_hole_refs: Callable[[Path], set[str]] = _through_hole_refs
     net_metrics: Callable[[Path], dict[str, Any]] = _net_metrics
     kicad_cli_version: Callable[[], str | None] = staticmethod(_kicad_cli_version)
+    # Board-recipe hooks (Issue #6076).  A board's own release script uses these
+    # to ship and check what the generic producer cannot express, without
+    # bypassing any generic gate:
+    #
+    # * ``package_extras(options)`` runs after the export and drawings but
+    #   BEFORE the README and the full-bundle manifest, so every file it adds to
+    #   ``options.output_dir`` is listed and checksummed like any other.  It
+    #   returns extra README lines (appended after the generic README).
+    # * ``extra_checks(options)`` returns additional ``checks[]`` entries; a
+    #   failed or not-run extra check blocks ``ready`` like a generic one.
+    # * ``extra_inputs(options)`` returns further files whose bytes the verdict
+    #   depends on (e.g. design sources); they are hashed into ``inputs``.
+    package_extras: Callable[[ReadinessOptions], list[str]] | None = None
+    extra_checks: Callable[[ReadinessOptions], list[CheckOutcome]] | None = None
+    extra_inputs: Callable[[ReadinessOptions], list[Path]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1007,7 +1024,7 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
                 "context_sha256": {
                     path.relative_to(saved.parent).as_posix(): _sha256_file(path)
                     for path in sorted(saved.parent.rglob("*"))
-                    if path.is_file()
+                    if path.is_file() and not _is_transient_local(path.relative_to(saved.parent))
                 },
             }
         )
@@ -1069,6 +1086,17 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
             blockers=[f"Saved/refilled copper could not be measured: {exc}"],
         )
     finally:
+        # kicad-cli leaves per-user files (e.g. ``<board>.kicad_prl``) beside the
+        # boards it saved; they are not evidence and VCS ignores them (#6076).
+        for name in ("fill-saved", "fill-refilled"):
+            directory = options.evidence_dir / name
+            if directory.is_dir():
+                for path in sorted(directory.rglob("*"), reverse=True):
+                    if _is_transient_local(path.relative_to(directory)):
+                        if path.is_dir():
+                            shutil.rmtree(path, ignore_errors=True)
+                        elif path.exists():
+                            path.unlink()
         evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
 
 
@@ -1119,6 +1147,17 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
             {},
         )
     report = _read_json(report_path)
+    # Record the checked board board-relative: an absolute path would leak the
+    # throw-away candidate directory into hash-bound evidence, so identical
+    # inputs would never reproduce identical bytes (Issue #6076).
+    checked = report.get("file")
+    if isinstance(checked, str) and Path(checked).is_absolute():
+        try:
+            report["file"] = _rel(options, Path(checked))
+        except ValueError:
+            pass
+        else:
+            report_path.write_text(json.dumps(report, indent=2) + "\n")
     summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     errors = int(summary.get("errors", 0) or 0)
     meta = report.get("meta_checks", {}) if isinstance(report.get("meta_checks"), dict) else {}
@@ -1525,12 +1564,30 @@ def _gate_hv_isolation(options: ReadinessOptions) -> CheckOutcome | None:
 # ---------------------------------------------------------------------------
 
 
+#: KiCad per-user / transient files (Issue #6076).  kicad-cli writes them as a
+#: side effect (a ``.kicad_prl`` beside every board it saves), and VCS ignores
+#: them, so they can never be hash-bound evidence or shipped package content:
+#: a fresh clone would read every report pinning one as "checked files are
+#: missing".
+_TRANSIENT_SUFFIXES = frozenset({".kicad_prl", ".lck"})
+_TRANSIENT_NAMES = frozenset({"fp-info-cache", ".DS_Store"})
+
+
+def _is_transient_local(path: Path) -> bool:
+    """True for KiCad/OS per-user or transient files that must not be evidence."""
+    if path.suffix in _TRANSIENT_SUFFIXES or path.name in _TRANSIENT_NAMES:
+        return True
+    return any(part == "__pycache__" or part.endswith("-backups") for part in path.parts)
+
+
 def _bundle_files(output_dir: Path, exclude: Sequence[str] = ()) -> list[Path]:
     excluded = set(exclude)
     return sorted(
         p
         for p in output_dir.rglob("*")
-        if p.is_file() and p.relative_to(output_dir).as_posix() not in excluded
+        if p.is_file()
+        and p.relative_to(output_dir).as_posix() not in excluded
+        and not _is_transient_local(p.relative_to(output_dir))
     )
 
 
@@ -1954,8 +2011,17 @@ def _gate_artifacts(
         if not pdf_run.ok:
             problems.append(f"{name} not produced ({pdf_run.detail})")
 
+    readme_extra: list[str] = []
+    if engines.package_extras is not None:
+        try:
+            readme_extra = list(engines.package_extras(options))
+        except Exception as exc:
+            problems.append(f"board package extras failed: {exc}")
+
     # Gate 7 — README, written before the manifest so it is checksummed.
-    _write_readme(options, warning_counts, tht_refs)
+    readme = _write_readme(options, warning_counts, tht_refs)
+    if readme_extra:
+        readme.write_text(readme.read_text() + "\n".join(["", *readme_extra, ""]))
 
     # Gate 8 — the manifest must cover the finished directory, and be newest.
     manifest_path = _write_full_manifest(options, warning_counts)
@@ -2175,9 +2241,15 @@ def _build_archive(options: ReadinessOptions) -> Path | None:
     archive = options.output_dir.parent / _ARCHIVE_NAME
     if archive.exists():
         archive.unlink()
+    # Deterministic bytes (Issue #6076): sorted members, fixed timestamp and
+    # permissions, so identical bundle contents always yield an identical archive.
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in _bundle_files(options.output_dir):
-            zf.write(path, Path(options.output_dir.name) / path.relative_to(options.output_dir))
+            name = (Path(options.output_dir.name) / path.relative_to(options.output_dir)).as_posix()
+            info = zipfile.ZipInfo(name, date_time=_ZIP_EPOCH)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, path.read_bytes())
     return archive
 
 
@@ -2239,7 +2311,13 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     if spec.is_file():
         paths.add(spec.resolve())
 
-    return sorted(p for p in paths if p.is_relative_to(root) and p.name != _REPORT_NAME)
+    return sorted(
+        p
+        for p in paths
+        if p.is_relative_to(root)
+        and p.name != _REPORT_NAME
+        and not _is_transient_local(p.relative_to(root))
+    )
 
 
 def build_report(
@@ -2247,6 +2325,7 @@ def build_report(
     checks: Sequence[CheckOutcome],
     metrics: dict[str, Any],
     fingerprint: EngineFingerprint,
+    extra_inputs: Sequence[Path] = (),
 ) -> dict[str, Any]:
     """Compose the readiness-v1 document from the gate outcomes."""
     blockers: list[str] = []
@@ -2285,9 +2364,14 @@ def build_report(
     if metrics and status != STATUS_UNVERIFIED:
         report["metrics"] = metrics
 
-    report["inputs"] = {
-        _rel(options, path): _sha256_file(path) for path in _hashable_inputs(options)
-    }
+    root = options.board_dir.resolve()
+    hashed = set(_hashable_inputs(options))
+    for path in extra_inputs:
+        resolved = Path(path).resolve()
+        if not resolved.is_file() or not resolved.is_relative_to(root):
+            raise ValueError(f"extra readiness input is not a board file: {path}")
+        hashed.add(resolved)
+    report["inputs"] = {_rel(options, path): _sha256_file(path) for path in sorted(hashed)}
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).
@@ -2633,6 +2717,18 @@ def _run_readiness_candidate(
 
     checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs))
     checks.append(_gate_bom(options, engines, tht_refs))
+    if engines.extra_checks is not None:
+        try:
+            checks.extend(engines.extra_checks(options))
+        except Exception as exc:
+            checks.append(
+                CheckOutcome(
+                    "board_checks",
+                    NOT_RUN,
+                    f"board-specific checks could not run: {exc}",
+                    blockers=[f"Board-specific checks could not run ({exc})."],
+                )
+            )
     if any(
         not path.is_file() or _sha256_file(path) != digest
         for path, digest in checked_sources.items()
@@ -2671,7 +2767,8 @@ def _run_readiness_candidate(
         recipe=options.recipe,
     )
 
-    report = build_report(options, checks, metrics, fingerprint)
+    extra_inputs = list(engines.extra_inputs(options)) if engines.extra_inputs else []
+    report = build_report(options, checks, metrics, fingerprint, extra_inputs=extra_inputs)
     report_path = options.board_dir / "output" / _REPORT_NAME
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2) + "\n")

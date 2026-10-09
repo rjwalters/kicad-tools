@@ -1,8 +1,8 @@
 ---
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb"
+author: "kicad-tools 0.22.0"
+date: "Rev 1 | 2026-10-09 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -29,10 +29,6 @@ header-includes:
 ### Theory of Operation
 
 ATtiny85 Charlieplex LED Grid
-
-### Power Architecture
-
-**Power Rails**: PWR_FLAG
 
 ## Assembly Notes
 
@@ -126,6 +122,11 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 | Blocking | 0 |
 
 **Status**: PASS
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| silk_geometry_unmodeled | 1 |
 
 
 \newpage
