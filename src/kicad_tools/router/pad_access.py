@@ -85,6 +85,7 @@ __all__ = [
     "direction_name",
     "has_access",
     "route_envelope",
+    "stub_candidate_segments",
     "via_candidate_geometry",
 ]
 
@@ -1013,6 +1014,45 @@ def _stub_candidates(
     return candidates, out_of_bounds
 
 
+def _stub_dimensions(
+    grid: object, rules: DesignRules, trace_width: float | None
+) -> tuple[float, float]:
+    """``(width, stub_length)`` of every exit-stub candidate.
+
+    Shared by :func:`compute_access_set`, :func:`has_access` and
+    :func:`stub_candidate_segments` so the three can never size a candidate
+    differently.
+    """
+    width = rules.trace_width if trace_width is None else trace_width
+    resolution = float(getattr(grid, "resolution", rules.grid_resolution))
+    return width, _round_up_to_cells(width + 2 * rules.trace_clearance, resolution)
+
+
+def stub_candidate_segments(
+    pad: Pad,
+    grid: object,
+    rules: DesignRules,
+    *,
+    trace_width: float | None = None,
+) -> list[Segment]:
+    """Every in-bounds exit-stub candidate of ``pad``, legal or not.
+
+    Exactly the candidates :func:`compute_access_set` tests, on every
+    terminal layer, in the same order.  Pure geometry: the result does not
+    depend on any committed copper, which is what lets the witness replay
+    (issue #6292) keep a per-candidate legality table across journal records.
+    """
+    width, stub_length = _stub_dimensions(grid, rules, trace_width)
+    bounds = _grid_world_bounds(grid)
+    segments: list[Segment] = []
+    for layer in _terminal_layers(grid, pad):
+        candidates, _out_of_bounds = _stub_candidates(
+            pad, width=width, stub_length=stub_length, bounds=bounds, layer=layer
+        )
+        segments.extend(seg for _direction, seg in candidates)
+    return segments
+
+
 def _terminal_layers(grid: object, pad: Pad) -> tuple[Layer, ...]:
     """Every copper layer a first move out of ``pad`` may start on.
 
@@ -1075,9 +1115,7 @@ def has_access(
     otherwise identical to :func:`compute_access_set`; both share
     :func:`_stub_candidates` so the candidates they test cannot drift apart.
     """
-    width = rules.trace_width if trace_width is None else trace_width
-    resolution = float(getattr(grid, "resolution", rules.grid_resolution))
-    stub_length = _round_up_to_cells(width + 2 * rules.trace_clearance, resolution)
+    width, stub_length = _stub_dimensions(grid, rules, trace_width)
     adapter: AccessLegality = (
         DefaultAccessLegality(grid, rules, hard_same_net=hard_same_net, memoize_inventories=True)
         if legality is None
@@ -1165,9 +1203,7 @@ def compute_access_set(
         The :class:`AccessSet`.  ``closing_copper`` is populated only when the
         set is empty.
     """
-    width = rules.trace_width if trace_width is None else trace_width
-    resolution = float(getattr(grid, "resolution", rules.grid_resolution))
-    stub_length = _round_up_to_cells(width + 2 * rules.trace_clearance, resolution)
+    width, stub_length = _stub_dimensions(grid, rules, trace_width)
     adapter: AccessLegality = (
         DefaultAccessLegality(grid, rules, hard_same_net=hard_same_net, memoize_inventories=True)
         if legality is None

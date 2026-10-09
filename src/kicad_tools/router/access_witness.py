@@ -979,32 +979,185 @@ class _ReplayCopper:
         self._by_id: dict[int, list[Route]] = {}
         self._keys: dict[int, tuple[Any, ...]] = {}
 
-    def apply(self, record: CommitRecord) -> None:
+    def apply(self, record: CommitRecord) -> Route | None:
+        """Apply ``record``; return the route object it added or removed.
+
+        ``None`` when a removal matched nothing the replay holds.
+        """
         if record.added:
             route = record.route
             self.routes.append(route)
             self._by_id.setdefault(record.route_id, []).append(route)
             self._keys[id(route)] = record.geometry_key()
-            return
+            return route
         bucket = self._by_id.get(record.route_id)
         if bucket:
             route = bucket.pop()
-            self._drop(route)
-            return
+            return route if self._drop(route) else None
         # Fallback: a wholesale resync removes geometry the replay appended
         # under a different route_id.  Match the most recent identical shape.
         key = record.geometry_key()
         for route in reversed(self.routes):
             if self._keys.get(id(route)) == key:
-                self._drop(route)
-                return
+                return route if self._drop(route) else None
+        return None
 
-    def _drop(self, route: Route) -> None:
+    def _drop(self, route: Route) -> bool:
         self._keys.pop(id(route), None)
         for index in range(len(self.routes) - 1, -1, -1):
             if self.routes[index] is route:
                 del self.routes[index]
-                return
+                return True
+        return False
+
+
+def _stub_key(seg: Segment) -> tuple[int, float, float, float, float]:
+    return (seg.layer.value, seg.x1, seg.y1, seg.x2, seg.y2)
+
+
+class _KnownStubLegality:
+    """An :class:`~kicad_tools.router.pad_access.AccessLegality` that answers
+    stub legality from an already-decided table (issue #6292).
+
+    Lets :func:`~kicad_tools.router.pad_access.compute_access_set` assemble the
+    access set -- stub order, ``bbox``, fingerprint -- exactly as it always
+    does, from verdicts :class:`_IncrementalAccess` decided incrementally.
+    Only ever used with ``presence_only=True`` and at least one legal stub,
+    where no via test runs; ``via_legal`` delegates to the real predicates
+    anyway, so a misuse is slow rather than wrong.
+    """
+
+    def __init__(self, legal: Mapping[tuple[int, float, float, float, float], bool], fallback: Any):
+        self._legal = legal
+        self._fallback = fallback
+
+    def stub_legal(self, seg: Segment, net: int) -> tuple[bool, tuple[float, float] | None]:
+        return self._legal.get(_stub_key(seg), False), None
+
+    def via_legal(self, via: Via, net: int) -> tuple[bool, tuple[float, float] | None]:
+        result: tuple[bool, tuple[float, float] | None] = self._fallback.via_legal(via, net)
+        return result
+
+
+class _IncrementalAccess:
+    """One terminal's access set, re-evaluated from the copper *delta* (issue #6292).
+
+    Every stub legality predicate is a conjunction over the copper present --
+    a stub is legal iff it clears every obstacle, one obstacle at a time --
+    and the rest of what it reads (pads, fixed fills, board bounds, the grid's
+    segment index) does not change during a replay.  So between two
+    evaluations of this terminal:
+
+    * a stub that was **rejected** stays rejected while copper is only added;
+    * a stub that was **legal** stays legal against the copper that was
+      already there (minus anything removed), so it only has to be re-tested
+      against the copper **added since** -- :attr:`pending`;
+    * only a removal can make a rejected stub legal again, so after one the
+      rejected stubs are re-tested against everything present.
+
+    This tracks *all* records since the terminal's last evaluation, not just
+    the ones :func:`~kicad_tools.router.pad_access.affected_pads` flagged, so
+    the result does not lean on that filter's bbox argument: it is the stub
+    table a from-scratch evaluation would produce.  The access set itself is
+    then assembled by :func:`~kicad_tools.router.pad_access.compute_access_set`
+    from that table, and an evaluation that leaves no legal stub falls back to
+    the full computation (the in-pad via, and the closing-copper attribution).
+    """
+
+    def __init__(self, pad: Any, grid: Any, rules: DesignRules) -> None:
+        self.pad = pad
+        self.grid = grid
+        self.rules = rules
+        self.legal: dict[tuple[int, float, float, float, float], bool] | None = None
+        self.segments: dict[tuple[int, float, float, float, float], Segment] = {}
+        self.pending: list[Route] = []
+        self.removed = False
+
+    def note_added(self, route: Route) -> None:
+        self.pending.append(route)
+
+    def note_removed(self, route: Route | None) -> None:
+        self.removed = True
+        if route is not None:
+            for index in range(len(self.pending) - 1, -1, -1):
+                if self.pending[index] is route:
+                    del self.pending[index]
+                    break
+
+    def full(self) -> AccessSet:
+        """From-scratch evaluation; also (re)builds the stub table."""
+        from .pad_access import compute_access_set
+
+        access = compute_access_set(self.pad, self.grid, self.rules, presence_only=True)
+        self._reset_table(access)
+        return access
+
+    def evaluate(self) -> AccessSet:
+        from .pad_access import DefaultAccessLegality, compute_access_set
+
+        if self.legal is None or not any(self.legal.values()):
+            return self.full()
+        adapter = DefaultAccessLegality(self.grid, self.rules, memoize_inventories=True)
+        net = self.pad.net
+        everything = self.grid.routes
+        legal = dict(self.legal)
+        try:
+            if self.removed:
+                for key, ok in legal.items():
+                    if not ok:
+                        legal[key] = adapter.stub_legal(self.segments[key], net)[0]
+            if self.pending:
+                self.grid.routes = self.pending
+                delta = DefaultAccessLegality(self.grid, self.rules)
+                for key, ok in self.legal.items():
+                    if ok:
+                        legal[key] = delta.stub_legal(self.segments[key], net)[0]
+        finally:
+            self.grid.routes = everything
+        if not any(legal.values()):
+            # Closed: the full computation owns the in-pad via and the
+            # closing-copper attribution the witness reports.
+            return self.full()
+        access = compute_access_set(
+            self.pad,
+            self.grid,
+            self.rules,
+            legality=_KnownStubLegality(legal, adapter),
+            presence_only=True,
+        )
+        self._reset_table(access, legal)
+        return access
+
+    def _reset_table(
+        self,
+        access: AccessSet,
+        legal: dict[tuple[int, float, float, float, float], bool] | None = None,
+    ) -> None:
+        from .pad_access import stub_candidate_segments
+
+        if not self.segments:
+            for seg in stub_candidate_segments(self.pad, self.grid, self.rules):
+                self.segments[_stub_key(seg)] = seg
+        if legal is None:
+            open_keys = {_stub_key(stub.to_segment(self.pad.net)) for stub in access.stubs}
+            legal = {key: key in open_keys for key in self.segments}
+        self.legal = legal
+        self.pending = []
+        self.removed = False
+
+
+def _authored_floors_active(grid: Any) -> bool:
+    """True when the grid's authored-clearance index could be consulted.
+
+    That index is cached on ``grid.routes``' identity and length
+    (:func:`~kicad_tools.router.authored_clearance.grid_authored_index`), so
+    the incremental replay -- which briefly points ``grid.routes`` at a delta
+    list -- does not use it.  ``None`` / empty floors is the common case.
+    """
+    rules = getattr(grid, "rules", None)
+    return bool(getattr(rules, "net_clearance_floors", None)) or (
+        getattr(grid, "_authored_item_floors", False) is True
+    )
 
 
 def _closing_summary(access: AccessSet) -> dict[str, tuple[str, ...]]:
@@ -1086,8 +1239,16 @@ def replay(
         exit path.  The grid's blocked/usage **raster** is not replayed, so the
         ``closing_markings`` labels describe the finished board; they are
         descriptive only and never take part in a legality decision.
+
+        Issue #6292: an evaluation re-tests only the copper delta since the
+        terminal's last one (:class:`_IncrementalAccess`), skips the via-site
+        tests once a stub is legal, and is skipped outright for a terminal
+        that is already empty when a record only adds copper.  Each step is
+        exact, so the witness is the one a from-scratch evaluation at every
+        affected record would produce -- only :attr:`AccessWitness.evaluations`
+        drops.  Board 05's two-terminal replay went from 215 s to 7 s.
     """
-    from .pad_access import affected_pads, compute_access_set, route_envelope
+    from .pad_access import affected_pads, route_envelope
 
     grid = getattr(router, "grid", None)
     resolved_rules = rules if rules is not None else getattr(router, "rules", None)
@@ -1117,25 +1278,30 @@ def replay(
     copper = _ReplayCopper()
     budget = max_evaluations
     evaluations = 0
+    # Issue #6292: each terminal is re-evaluated from the copper delta since
+    # its last evaluation (see :class:`_IncrementalAccess`); the evaluations
+    # themselves ask only for presence -- the replay reads ``is_empty()``,
+    # ``bbox`` and (for an empty set) ``closing_copper``, none of which needs
+    # the via-site tests once a stub is legal.
+    incremental = not _authored_floors_active(grid)
+    trackers = {key: _IncrementalAccess(pads[key], grid, resolved_rules) for key in keys}
 
     saved_routes = getattr(grid, "routes", [])
     try:
         grid.routes = copper.routes
 
-        def evaluate(key: tuple[str, str]) -> AccessSet:
+        def evaluate(key: tuple[str, str], *, initial: bool = False) -> AccessSet:
             nonlocal evaluations
             evaluations += 1
-            # Issue #6292: the replay reads only ``is_empty()``, ``bbox`` and
-            # (for an empty set) ``closing_copper`` -- none of which needs the
-            # via-site tests once a stub is legal.  See ``presence_only``.
-            return compute_access_set(pads[key], grid, resolved_rules, presence_only=True)
+            tracker = trackers[key]
+            return tracker.full() if initial or not incremental else tracker.evaluate()
 
         state: dict[tuple[str, str], AccessSet] = {}
         for key in keys:
             if evaluations >= budget:
                 truncated = True
                 break
-            state[key] = evaluate(key)
+            state[key] = evaluate(key, initial=True)
 
         first_closed: dict[tuple[str, str], tuple[CommitRecord, dict[str, tuple[str, ...]]]] = {}
         baseline: dict[tuple[str, str], str] = {}
@@ -1147,7 +1313,13 @@ def replay(
                 # is the escape-pre-phase baseline.
                 baseline = {k: _state_label(a) for k, a in state.items()}
                 seen_search_pass = True
-            copper.apply(record)
+            changed = copper.apply(record)
+            for tracker in trackers.values():
+                if record.added:
+                    if changed is not None:
+                        tracker.note_added(changed)
+                else:
+                    tracker.note_removed(changed)
             if evaluations >= budget or (deadline is not None and time.monotonic() >= deadline):
                 truncated = True
                 break

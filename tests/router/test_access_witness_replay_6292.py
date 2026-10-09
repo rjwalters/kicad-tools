@@ -1,15 +1,18 @@
 """Issue #6292: a cheaper access-witness replay with identical verdicts.
 
 Board 05's replay took 143-267 s of its 900 s ``kct route --timeout`` budget.
-Two changes make it cheaper, and neither may change a verdict:
+Three changes make it cheaper, and none may change a verdict:
 
 * the replay asks :func:`compute_access_set` for *presence* only
   (``presence_only=True``): once an exit stub is legal the access set is
   non-empty and its ``bbox`` is already fixed, so the via-site tests -- each a
   walk of every committed segment -- are skipped;
+* each terminal keeps a per-stub legality table and re-tests only the delta:
+  legal stubs against the copper added since its last evaluation, rejected
+  stubs only after a removal (``_IncrementalAccess``);
 * a record that **adds** copper to a terminal whose access set is already
-  empty is not re-evaluated: adding copper can only reject more candidates,
-  so the set stays empty, and an empty set's bbox is fixed.
+  empty is not re-evaluated at all: adding copper can only reject more
+  candidates, so the set stays empty, and an empty set's bbox is fixed.
 
 Plus :class:`DefaultAccessLegality` memoizes its foreign-copper inventories for
 the one read-only call it lives for.
@@ -356,3 +359,259 @@ class TestPresenceOnly:
         first = adapter.drill_registry()
         first.append((0.0, 0.0, 99.0))
         assert (0.0, 0.0, 99.0) not in adapter.drill_registry()
+
+
+# ---------------------------------------------------------------------------
+# Randomized journals: commits, vias, rips and resyncs in arbitrary order.
+# ---------------------------------------------------------------------------
+
+
+def _random_board(manufacturer: str | None):
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(
+        grid_resolution=0.1,
+        trace_width=0.2,
+        trace_clearance=0.2,
+        **({"manufacturer": manufacturer} if manufacturer else {}),
+    )
+    router = Autorouter(10, 10, rules=rules, force_python=True, physics_enabled=False)
+    router.enable_pad_access_invariant = False
+    tracked = {
+        ("P1", "1"): (3.0, 3.0, 1, {}),
+        ("P2", "1"): (6.0, 6.0, 2, {"through_hole": True, "drill": 0.4}),
+        ("P3", "1"): (7.0, 3.0, 3, {}),
+        ("P4", "1"): (3.0, 7.0, 4, {}),
+    }
+    for (ref, pin), (x, y, net, extra) in tracked.items():
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": pin,
+                    "x": x,
+                    "y": y,
+                    "width": 0.8,
+                    "height": 0.8,
+                    "net": net,
+                    "net_name": f"N{net}",
+                    "layer": Layer.F_CU,
+                    **extra,
+                }
+            ],
+        )
+    return router, sorted(tracked)
+
+
+def _random_route(rng, centres) -> Route:
+    net = rng.choice([1, 2, 5, 6, 7, 8])  # tracked nets' own copper is invisible to them
+    name = f"N{net}"
+    cx, cy = rng.choice(centres)
+    layer = rng.choice([Layer.F_CU, Layer.F_CU, Layer.B_CU])
+    segments = []
+    x, y = cx + rng.uniform(-1.1, 1.1), cy + rng.uniform(-1.1, 1.1)
+    for _ in range(rng.randint(1, 4)):
+        nx, ny = x + rng.uniform(-1.0, 1.0), y + rng.uniform(-1.0, 1.0)
+        nx, ny = min(max(nx, 0.3), 9.7), min(max(ny, 0.3), 9.7)
+        segments.append(
+            _seg(round(x, 3), round(y, 3), round(nx, 3), round(ny, 3), net, name, layer)
+        )
+        x, y = nx, ny
+    vias = []
+    if rng.random() < 0.35:
+        vias.append(
+            Via(
+                x=round(x, 3),
+                y=round(y, 3),
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=net,
+                net_name=name,
+            )
+        )
+    return Route(net=net, net_name=name, segments=segments, vias=vias)
+
+
+def _random_journal(router, rng, *, records: int) -> None:
+    from kicad_tools.router.access_witness import PASS_ESCAPE, PASS_INITIAL, PASS_ITERATION
+
+    centres = [(3.0, 3.0), (6.0, 6.0), (7.0, 3.0), (3.0, 7.0)]
+    journal = router.commit_journal
+    live: list[Route] = []
+    with journal.context(PASS_ESCAPE, 0):
+        route = _random_route(rng, centres)
+        router.grid.mark_route(route)
+        live.append(route)
+    for step in range(records):
+        context = (PASS_INITIAL, 0) if step < records // 3 else (PASS_ITERATION, 1 + step % 3)
+        with journal.context(*context):
+            if live and rng.random() < 0.35:
+                victim = live.pop(rng.randrange(len(live)))
+                router.grid.unmark_route(victim)
+                if rng.random() < 0.3:  # a restore of the very route just ripped
+                    router.grid.mark_route(victim)
+                    live.append(victim)
+            else:
+                route = _random_route(rng, centres)
+                router.grid.mark_route(route)
+                live.append(route)
+
+
+RANDOM_RECORDS = 60
+
+
+@pytest.mark.parametrize("manufacturer", [None, "jlcpcb-tier1"])
+@pytest.mark.parametrize("seed", range(12))
+def test_random_journals_match_the_pre_6292_replay(seed, manufacturer):
+    import random
+
+    rng = random.Random(6292 * 100 + seed)
+    router, keys = _random_board(manufacturer)
+    _random_journal(router, rng, records=RANDOM_RECORDS)
+    _assert_identical(router, keys)
+
+
+def test_random_journals_exercise_closures_and_reopenings():
+    """Guard against a vacuous generator: the seeds above must hit both."""
+    import random
+
+    closed = reopened = 0
+    for seed in range(12):
+        rng = random.Random(6292 * 100 + seed)
+        router, keys = _random_board(None)
+        _random_journal(router, rng, records=RANDOM_RECORDS)
+        for pad in replay(router.commit_journal, router, pad_keys=keys):
+            closed += pad.first_closed_at is not None
+            reopened += pad.reopened
+    assert closed >= 3
+    assert reopened >= 1
+
+
+def _stub_blockers(router, key, directions_to_block, net=9, name="BLK") -> Route:
+    """One route with a short foreign segment across the far end of each listed stub."""
+    from kicad_tools.router.pad_access import DIRECTIONS, stub_candidate_segments
+
+    pad = router.pads[key]
+    segments = []
+    for direction, stub in zip(
+        DIRECTIONS, stub_candidate_segments(pad, router.grid, router.rules), strict=True
+    ):
+        if direction in directions_to_block:
+            x, y = stub.x2, stub.y2
+            segments.append(_seg(x - 0.05, y, x + 0.05, y, net, name))
+    return Route(net=net, net_name=name, segments=segments)
+
+
+def test_a_rip_reopens_rejected_stubs_before_the_next_closure_is_judged():
+    """A removal must re-test the REJECTED stubs, not just the legal ones.
+
+    Seven of the pad's eight stubs are walled, then the wall is ripped (all
+    eight open again), then the one stub that was open throughout is walled.
+    A replay that kept the rejected stubs rejected across the rip would see
+    that last commit close the pad; it does not -- seven ways out remain.
+    """
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.pad_access import DIRECTIONS
+    from kicad_tools.router.rules import DesignRules
+
+    router = Autorouter(
+        10,
+        10,
+        rules=DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.2),
+        force_python=True,
+        physics_enabled=False,
+    )
+    router.add_component(
+        "P",
+        [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 5.0,
+                "width": 0.8,
+                "height": 0.8,
+                "net": 1,
+                "net_name": "N1",
+                "layer": Layer.F_CU,
+            }
+        ],
+    )
+    key = ("P", "1")
+    north = (0, -1)
+    wall = _stub_blockers(router, key, [d for d in DIRECTIONS if d != north])
+    lid = _stub_blockers(router, key, [north], net=8, name="LID")
+    journal = router.commit_journal
+    with journal.context("initial", 0):
+        router.grid.mark_route(wall)
+    with journal.context("iteration", 1):
+        router.grid.unmark_route(wall)
+        router.grid.mark_route(lid)
+
+    # Preconditions, from scratch: the wall left exactly one way out, the lid
+    # alone closes exactly that one.
+    assert [s.direction for s in _state_after(router, key, upto=1).stubs] == [north]
+    final = _state_after(router, key, upto=3)
+    assert len(final.stubs) == 7 and final.stub_for(north) is None
+
+    _assert_identical(router, [key])
+    pad = replay(journal, router, pad_keys=[key]).for_pad(*key)
+    assert pad is not None
+    assert pad.first_closed_at is None
+    assert pad.final_access == ACCESS_NON_EMPTY
+
+
+def _assert_tracker_matches_scratch(router, keys, *, every: int = 1) -> int:
+    """Feed every record to an ``_IncrementalAccess`` per pad; after every
+    ``every``-th record, its access set must equal a from-scratch presence
+    evaluation in every field (stubs, bbox, emptiness, closing copper).
+
+    Returns how many incremental (non-full) evaluations were compared.
+    """
+    from kicad_tools.router.access_witness import _IncrementalAccess
+
+    grid, rules = router.grid, router.rules
+    copper = _ReplayCopper()
+    trackers = {key: _IncrementalAccess(router.pads[key], grid, rules) for key in keys}
+    saved = grid.routes
+    compared = 0
+    try:
+        grid.routes = copper.routes
+        for tracker in trackers.values():
+            tracker.full()
+        for index, record in enumerate(router.commit_journal.records):
+            changed = copper.apply(record)
+            for tracker in trackers.values():
+                if record.added:
+                    tracker.note_added(changed)
+                else:
+                    tracker.note_removed(changed)
+            if index % every:
+                continue
+            for key, tracker in trackers.items():
+                incremental = bool(tracker.legal and any(tracker.legal.values()))
+                got = tracker.evaluate()
+                want = compute_access_set(router.pads[key], grid, rules, presence_only=True)
+                assert got == want, f"{key} diverged after record {index}"
+                compared += incremental
+    finally:
+        grid.routes = saved
+    return compared
+
+
+def test_incremental_table_equals_a_scratch_evaluation_after_a_rip():
+    router = _multi_record_router()
+    assert _assert_tracker_matches_scratch(router, TestMultiRecordJournal.KEYS) > 0
+
+
+@pytest.mark.parametrize("every", [1, 3])
+@pytest.mark.parametrize("seed", range(6))
+def test_incremental_table_equals_a_scratch_evaluation_on_random_journals(seed, every):
+    """``every=3`` lets additions AND removals pile up between evaluations."""
+    import random
+
+    rng = random.Random(6292 * 100 + seed)
+    router, keys = _random_board(None)
+    _random_journal(router, rng, records=RANDOM_RECORDS)
+    assert _assert_tracker_matches_scratch(router, keys, every=every) > 0
