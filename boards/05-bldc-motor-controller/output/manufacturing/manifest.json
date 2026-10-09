@@ -33,8 +33,8 @@
       "size": 2559
     },
     "design-source.zip": {
-      "sha256": "4ed8dbfbb8120439ae6f624c015c1e48a7f0b0915d98c3317ff6d0e934ae0d71",
-      "size": 364824
+      "sha256": "4c2c3aafe4ae7af3bb89edc214536f995e79a58b110b094db33fd372feaba0a9",
+      "size": 359126
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -97,8 +97,8 @@
       "size": 4103
     },
     "kicad_project.zip": {
-      "sha256": "48877f98b4bfed3b9f783b18635d5415e90a2213c686847f26ef73a4e43ae63d",
-      "size": 555799
+      "sha256": "52e07960800096e7c74cae3c8585b23bf1a5defafe6373bd6bc287432fcb22cd",
+      "size": 546633
     },
     "lvs.json": {
       "sha256": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
@@ -109,7 +109,7 @@
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "413700ae1e92136ad5d319314d28bdc3624dfb25a55cbf8fffc6edbd43569891",
+      "sha256": "31dbdaf2bf4bbed40e102749fe337c2abab78b14bad18bbc6a6cdf0d6f6b0d8a",
       "size": 988
     },
     "project.kct": {
