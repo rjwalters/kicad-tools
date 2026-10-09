@@ -1377,3 +1377,173 @@ def test_authored_pair_floor_rule_parity() -> None:
                 assert rules.clearance_for_nets(a, b, 0.0) == pytest.approx(
                     pair_floor(floors, a, b)
                 )
+
+
+# ---------------------------------------------------------------------------
+# Issue #6272: the trace/via floor is independent of insertion order
+# ---------------------------------------------------------------------------
+#
+# A trace and a foreign via are one unordered copper pair.  Before #6272 the
+# floor between them depended on which was committed first: a via placed
+# against an existing trace met ``via_clearance``, a trace placed against an
+# existing via met ``trace_clearance``.  Every gate now resolves
+# ``clearance_resolver.trace_via_clearance_mm`` (native twin
+# ``router::trace_via_clearance``) = ``max(trace, via)``.  The matrix below
+# drives both rule orderings (via > trace and trace > via), both insertion
+# orders, both backends (Python commit validators + Python pathfinder commit
+# gate; native ``validate_route`` + the native search predicates), and gaps a
+# hair either side of the floor -- plus the diff-pair-partner case, where the
+# barrel must keep the via floor.
+
+# (trace_clearance, via_clearance)
+_TRACE_VIA_RULES = ((0.15, 0.20), (0.20, 0.15), (0.25, 0.20), (0.10, 0.30))
+# Offsets from the floor; well outside float32 noise, inside one grid cell.
+_TRACE_VIA_OFFSETS = (-0.02, -0.005, 0.005, 0.02)
+
+
+def _trace_via_scene(trace: float, via_floor: float, gap: float):
+    """A 0.2 mm F.Cu trace (net 2) ``gap`` mm from a 0.6/0.3 through via (net 1)."""
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(
+        trace_width=0.2,
+        trace_clearance=trace,
+        via_clearance=via_floor,
+        via_diameter=0.6,
+        via_drill=0.3,
+        grid_resolution=0.05,
+    )
+    grid = RoutingGrid(10, 10, rules)
+    via = Via(5.0, 5.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 1, "VIA")
+    y = 5.0 + 0.3 + 0.1 + gap
+    segment = Segment(4.0, y, 6.0, y, 0.2, Layer.F_CU, 2, "TRACE")
+    return (
+        rules,
+        grid,
+        via,
+        segment,
+        Route(1, "VIA", vias=[via]),
+        Route(2, "TRACE", segments=[segment]),
+    )
+
+
+def _python_verdicts(trace: float, via_floor: float, gap: float) -> dict[str, bool]:
+    """``{gate: legal}`` from every Python trace/via gate, in both orders."""
+    from kicad_tools.router.pathfinder import Router
+
+    _, grid, via, segment, via_route, trace_route = _trace_via_scene(trace, via_floor, gap)
+    router = Router(grid, grid.rules)
+    verdicts: dict[str, bool] = {}
+    # via committed first, trace is the candidate
+    grid.routes = [via_route]
+    verdicts["py_seg_validate"] = grid.validate_segment_clearance(segment, 2)[0]
+    verdicts["py_seg_validate_partner"] = grid.validate_segment_clearance(
+        segment, 2, partner_net=1, partner_clearance=0.05
+    )[0]
+    verdicts["py_router_trace_after_via"] = router._validate_route_clearance(trace_route, 2)
+    # trace committed first, via is the candidate
+    grid.routes = [trace_route]
+    verdicts["py_via_validate"] = grid.validate_via_clearance(via, 1)[0]
+    verdicts["py_via_deficit"] = grid.worst_via_segment_deficit(via, 1)[0] <= 0
+    verdicts["py_router_via_after_trace"] = router._validate_route_clearance(via_route, 1)
+    return verdicts
+
+
+def _native_verdicts(trace: float, via_floor: float, gap: float) -> dict[str, bool]:
+    """``{gate: legal}`` from every native trace/via gate, in both orders."""
+    from kicad_tools.router import router_cpp
+    from kicad_tools.router.cpp_backend import CppGrid
+
+    _, grid, via, segment, _, _ = _trace_via_scene(trace, via_floor, gap)
+    impl = CppGrid.from_routing_grid(grid)._impl
+    cs = router_cpp.Segment()
+    cs.x1, cs.y1, cs.x2, cs.y2 = segment.x1, segment.y1, segment.x2, segment.y2
+    cs.width, cs.layer, cs.net = segment.width, 0, segment.net
+    cv = router_cpp.Via()
+    cv.x, cv.y, cv.drill, cv.diameter, cv.net = via.x, via.y, via.drill, via.diameter, 1
+    cv.layer_from, cv.layer_to = 0, grid.num_layers - 1
+    floor = router_cpp.trace_via_clearance(trace, via_floor)
+    verdicts: dict[str, bool] = {}
+
+    # via committed first, trace is the candidate
+    impl.add_stored_via(via.x, via.y, via.drill, via.diameter, 1)
+    verdicts["cpp_commit_trace_after_via"] = impl.validate_route(
+        [cs], [], 2, [], trace, via_floor, 0.1
+    ).valid
+    verdicts["cpp_commit_trace_after_via_partner"] = impl.validate_route(
+        [cs], [], 2, [], trace, via_floor, 0.1, partner_net=1, intra_pair_clearance=0.05
+    ).valid
+    verdicts["cpp_search_trace_geometry"] = impl.route_trace_geometry_clear(
+        cs, trace, -1, -1.0, via_floor
+    )
+    verdicts["cpp_search_trace_geometry_partner"] = impl.route_trace_geometry_clear(
+        cs, trace, 1, 0.05, via_floor
+    )
+    verdicts["cpp_search_swept_edge"] = impl.trace_stored_vias_clear(cs, floor)
+    verdicts["cpp_search_swept_edge_partner"] = impl.trace_stored_vias_clear(cs, floor, 1, 0.05)
+
+    # trace committed first, via is the candidate
+    impl.clear_stored_routes()
+    impl.add_stored_segment(cs.x1, cs.y1, cs.x2, cs.y2, cs.width, 0, 2)
+    verdicts["cpp_commit_via_after_trace"] = impl.validate_route(
+        [], [cv], 1, [], trace, via_floor, 0.1
+    ).valid
+    verdicts["cpp_search_via_geometry"] = impl.route_via_geometry_clear(
+        cv, via_floor, 0.0, 0.0, trace
+    )
+    return verdicts
+
+
+@requires_cpp
+@pytest.mark.parametrize("trace,via_floor", _TRACE_VIA_RULES)
+@pytest.mark.parametrize("offset", _TRACE_VIA_OFFSETS)
+def test_trace_via_floor_is_insertion_order_and_backend_invariant(
+    trace: float, via_floor: float, offset: float
+) -> None:
+    """Issue #6272: one verdict per trace/via pair -- any order, any backend."""
+    from kicad_tools.router.clearance_resolver import trace_via_clearance_mm
+
+    floor = trace_via_clearance_mm(trace, via_floor)
+    gap = floor + offset
+    legal = offset > 0
+    verdicts = {
+        **_python_verdicts(trace, via_floor, gap),
+        **_native_verdicts(trace, via_floor, gap),
+    }
+    wrong = {gate: ok for gate, ok in verdicts.items() if ok is not legal}
+    assert not wrong, (
+        f"trace={trace} via={via_floor} gap={gap:.3f} (floor {floor}): expected "
+        f"{'legal' if legal else 'violation'} from every gate; disagreeing: {wrong}"
+    )
+
+
+@requires_cpp
+def test_trace_via_floor_rule_parity() -> None:
+    """The rule half: resolver, scalar helper and native helper agree."""
+    from kicad_tools.router import router_cpp
+    from kicad_tools.router.clearance_resolver import (
+        ClearanceResolver,
+        ClearanceRuleSet,
+        CopperKind,
+        trace_via_clearance_mm,
+    )
+    from kicad_tools.router.rules import DesignRules
+
+    rng = random.Random(6272)
+    for _ in range(200):
+        trace = round(rng.uniform(0.05, 0.5), 4)
+        via = round(rng.uniform(0.05, 0.5), 4)
+        expected = max(trace, via)
+        assert trace_via_clearance_mm(trace, via) == pytest.approx(expected)
+        assert router_cpp.trace_via_clearance(trace, via) == pytest.approx(expected, abs=1e-6)
+        resolver = ClearanceResolver(
+            ClearanceRuleSet.from_design_rules(
+                DesignRules(trace_clearance=trace, via_clearance=via)
+            )
+        )
+        for kinds in ((CopperKind.TRACE, CopperKind.VIA), (CopperKind.VIA, CopperKind.TRACE)):
+            assert resolver.required_mm("A", "B", *kinds) == pytest.approx(expected)
+    assert trace_via_clearance_mm(0.15, None) == pytest.approx(0.15)

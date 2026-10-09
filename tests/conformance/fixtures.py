@@ -111,6 +111,12 @@ def build_issue5398_seg_via_order() -> CopperCase:
     kicad-cli has no such notion of order: the project's ``Default`` class is
     0.20 mm, so it reports one clearance violation either way.  The board is
     therefore order-free; the adapters replay both orders against it.
+
+    **Resolved by Issue #6272.**  Both insertion orders now resolve the
+    trace/via floor ``max(trace_clearance, via_clearance)`` = 0.20 through
+    :func:`kicad_tools.router.clearance_resolver.trace_via_clearance_mm`
+    (native twin ``router::trace_via_clearance``), so the commit gates and
+    the search-time refinement all REJECT the pair -- agreeing with kicad-cli.
     """
     gap = 0.18
     seg_y = 15.0
@@ -152,8 +158,10 @@ def build_issue5398_seg_via_order() -> CopperCase:
         notes=(
             "#5398: 0.18 mm gap between a 0.15 mm track and a 0.6/0.3 via. "
             "kicad-cli flags it against the project Default class (0.20 mm). "
-            "Expected today: Python/C++ grid commit gates ACCEPT when the via "
-            "is inserted first and REJECT when the segment is inserted first."
+            "Before #6272 the Python/C++ grid commit gates ACCEPTED when the "
+            "via was inserted first and REJECTED when the segment was. "
+            "Expected today: every trace/via gate resolves max(trace, via) = "
+            "0.20 in both orders and REJECTS, agreeing with kicad-cli."
         ),
     )
 
@@ -243,12 +251,19 @@ def build_search_vs_commit_seg_via_max() -> CopperCase:
     Same run, same backend, same two objects, opposite answers -- which is why
     a net could look unroutable and still pass validation once routed.
 
-    **Resolved by Epic #5509 Phase 3b (#5661).**  Both search-time predicates
-    now ask :func:`kicad_tools.router.clearance_kernel.clear` with the
-    requirement the pair actually resolves, so the widening is gone and the
-    search accepts what commit accepts.  The fixture stays as the regression
-    guard: ``test_named_fixtures._PREDICTIONS`` pins groups 4/5 to ACCEPT, so
-    a consumer that re-derives its own ``max(...)`` reddens the build.
+    **Resolved by Epic #5509 Phase 3b (#5661)**, then re-resolved the other
+    way by **Issue #6272**.  #5661 made search agree with commit by dropping
+    the widening; #6272 found the commit gates themselves order-dependent
+    (via-first held the trace to ``trace_clearance``, trace-first held the via
+    to ``via_clearance``) and made every trace/via gate -- commit and search,
+    both backends, both orders -- resolve the one floor
+    ``max(trace_clearance, via_clearance)``.  So search and commit still give
+    one answer, and that answer is now REJECT at the router's own rule values
+    (``via_clearance`` 0.20).  Against this fixture's 0.15 mm project class
+    that is an over-rejection of the router's own stricter ``via_clearance``,
+    not a kicad-cli disagreement about the pair's geometry: driven at the
+    project's own values (``verdicts_at_project_rules``) every migrated row
+    accepts and agrees with kicad-cli.
     """
     rules = CaseRules(
         project_clearance=TRACE_CLEARANCE_MM,  # 0.15 -- deliberately below the gap
@@ -299,10 +314,12 @@ def build_search_vs_commit_seg_via_max() -> CopperCase:
             "class at 0.15 mm, so kicad-cli is clean. Before Epic #5509 Phase "
             "3b (#5661) the route-halo geometry consumers REJECTED "
             "(max(required, via_clearance) = 0.20) while the Python and C++ "
-            "commit gates ACCEPTED (trace_clearance = 0.15). Expected today: "
-            "both ACCEPT -- the search-time predicates ask the shared "
-            "clearance kernel for the requirement the pair resolves, so the "
-            "widening is gone and search agrees with commit."
+            "commit gates ACCEPTED (trace_clearance = 0.15). #5661 made both "
+            "ACCEPT; #6272 then made every trace/via gate resolve "
+            "max(trace, via) = 0.20 in either insertion order. Expected "
+            "today: search and commit both REJECT at the router's own rules "
+            "(and both ACCEPT at the project's 0.15 mm, agreeing with "
+            "kicad-cli)."
         ),
     )
 

@@ -102,9 +102,10 @@ def test_python_coverage_rejects_changed_owner():
 
 @pytest.mark.parametrize("gap,blocked", [(0.1, False), (0.6, True)])
 def test_python_refinement_preserves_authored_partner_gap(gap, blocked):
+    from kicad_tools.router.primitives import Segment
     from kicad_tools.router.rules import NetClassRouting
 
-    _, router = _context()
+    grid, router = _context()
     router.net_class_map["N1"] = NetClassRouting(
         name="PAIR",
         trace_width=0.15,
@@ -112,6 +113,14 @@ def test_python_refinement_preserves_authored_partner_gap(gap, blocked):
         diffpair_partner="N2",
         intra_pair_clearance=gap,
     )
+    # Issue #6272: the partner's VIA keeps the trace/via floor whatever the
+    # authored gap -- (55, 56) clears it either way.
+    assert not router._is_trace_blocked(55, 56, 2, 1, False, radius=2)
+    # Partner TRACE copper 0.4 mm (edge-to-edge) away: the authored gap decides.
+    x, y = grid.grid_to_world(55, 56)
+    rail_x = x - 0.075 - 0.4 - 0.1
+    rail = Segment(rail_x, y - 1.0, rail_x, y + 1.0, 0.2, Layer.IN2_CU, 2, "N2")
+    grid.mark_route(Route(net=2, net_name="N2", segments=[rail]))
     assert router._is_trace_blocked(55, 56, 2, 1, False, radius=2) == blocked
 
 
@@ -153,23 +162,21 @@ def test_python_overlap_checks_hidden_owner_and_ripup_removes_only_its_geometry(
 
 
 @pytest.mark.parametrize("sharing", [False, True])
-def test_python_trace_halo_ignores_via_clearance_for_seg_via_pairs(sharing):
-    """Issue #5661: a trace-vs-via requirement tracks ``trace_clearance`` only.
+def test_python_trace_halo_uses_trace_via_floor_for_seg_via_pairs(sharing):
+    """Issue #6272: a trace-vs-via requirement is ``max(trace, via)``.
 
-    Before this phase ``RouteHaloGeometry.clear`` separately widened a trace
-    candidate's requirement against a stored via to
-    ``max(required, rules.via_clearance)`` -- stricter than the commit-time
-    validator for the identical pair, which applies ``trace_clearance``. The
-    real gap here (~0.168 mm) sits in exactly that band: legal by
-    ``trace_clearance`` (0.15 mm, this fixture's default) and illegal only by
-    the retired ``via_clearance`` override. Switching onto the shared kernel
-    means ``via_clearance`` alone can no longer move this verdict.
+    The real gap here (~0.168 mm) is legal by ``trace_clearance`` (0.15 mm)
+    and illegal by ``via_clearance`` (0.20 mm).  Issue #5661 had dropped
+    ``via_clearance`` from this verdict to match the commit validators, which
+    then held a trace beside an earlier via to ``trace_clearance`` alone;
+    #6272 made every trace/via gate resolve the shared floor in either
+    insertion order, so the search-time refinement tracks it again.
     """
     _, router = _context()
     router.rules.via_clearance = 0.15
     assert not router._is_trace_blocked(58, 56, 2, 1, sharing, radius=2)
     router.rules.via_clearance = 0.2
-    assert not router._is_trace_blocked(58, 56, 2, 1, sharing, radius=2)
+    assert router._is_trace_blocked(58, 56, 2, 1, sharing, radius=2)
 
 
 def test_python_trace_clearance_expands_geometry_lookup_across_bins():

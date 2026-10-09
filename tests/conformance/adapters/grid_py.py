@@ -21,7 +21,10 @@ a via candidate against ``rules.via_clearance``.  On a board where those differ
 (0.15 vs 0.20 by default -- see ``fixtures.py``) the same pair of objects gets
 two different answers depending on insertion order.  That is #5398, and it is
 why :func:`tests.conformance.adapters._support.pair_contexts` pins one order
-(via-first) and says so.
+(via-first) and says so.  (Issue #6272 removed the asymmetry for trace/via
+pairs: both validators now resolve ``max(trace_clearance, via_clearance)``
+through ``clearance_resolver.trace_via_clearance_mm``, so the pinned order no
+longer changes this row's verdict.)
 
 **It has no via-vs-pad predicate at all.**  ``validate_via_clearance`` walks
 ``self.routes``' *segments*; ``validate_via_to_via_clearance`` walks their

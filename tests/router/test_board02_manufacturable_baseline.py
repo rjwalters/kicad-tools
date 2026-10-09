@@ -11,9 +11,17 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 24 vias / 321.75mm total
+- **Deterministic output**: 22 routes / 26 vias / 323.06mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (24 vias / 321.46mm before the 2026-10-01
+  has fully converged.  (24 vias / 321.75mm before the Issue #6272
+  re-baseline, which made every trace-vs-via gate resolve
+  ``max(trace_clearance, via_clearance)`` in both insertion orders: a
+  trace routed past an earlier foreign via is now held to the 0.20 mm
+  via floor the reverse order already met, so copper that squeezed past
+  a barrel now changes layer instead (+2 vias, +1.31 mm).  Routes (22) and reach
+  (8/8) are UNCHANGED and DRC stays clean -- see the #6272 note in
+  ``test_routing_output_deterministic_across_seeds``.)
+  (24 vias / 321.46mm before the 2026-10-01
   #5854 re-baseline, which switched the POST-ROUTE trace optimizer's
   two collision checkers to the clearance kernel: their pad gate stops
   comparing two already-grown raster halos and measures the exact
@@ -824,7 +832,8 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # ``DRC: PASS`` / ``LVS: PASS`` / ``Overall: PASS`` with zero
     # ``hole_to_hole_clearance`` violations (it reported one before).
     # Prior pin (22, 227-segment-era, 23, 322.77).
-    EXPECTED_VIAS = 24
+    # Issue #6272: 24 -> 26 -- see the #6272 note under EXPECTED_LENGTH.
+    EXPECTED_VIAS = 26
     # Re-measured at ff96e855 after local halo-coverage refinement:
     # seeds 42/43/44 yield (22, 226, 24, 326.73), identical copper
     # geometry, 34 preserved/bound pads, and zero native refill/all-track
@@ -884,7 +893,25 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # containerized kicad-cli run is authoritative for the live board), and
     # CI's "Board 02 End-to-End" / "Routed PCB DRC Check" jobs pass on this
     # output.  Prior pin (22, 224-segment-era, 24, 321.46).
-    EXPECTED_LENGTH = 321.75
+    #
+    # Re-baselined for Issue #6272 (trace/via clearance independent of
+    # insertion order).  Every trace-vs-via gate -- Python and native,
+    # search and commit, plus negotiated revalidation -- now resolves
+    # ``max(trace_clearance, via_clearance)``.  At ``jlcpcb-tier1`` this
+    # board routes with a trace floor below the 0.20 mm ``via_clearance``,
+    # so a trace laid past an EARLIER foreign via used to be held to the
+    # trace floor alone, while a via dropped beside an earlier trace met
+    # the 0.20 mm via floor.  The trace-after-via order now meets the same
+    # 0.20 mm.  Seeds 42/43/44 all yield (22, 213, 26, 323.06),
+    # bit-identical across seeds.  Routes (22) and reach (8/8) are
+    # UNCHANGED; vias move 24 -> 26 and length 321.75 -> 323.06 (+1.31 mm)
+    # because copper that previously squeezed past a barrel inside the via
+    # floor now changes layer or detours instead.  This is the stricter
+    # direction by construction (no requirement was lowered), and
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors at the
+    # tier1 profile on this output.  Prior pin (22, 219-segment-era, 24,
+    # 321.75).
+    EXPECTED_LENGTH = 323.06
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability

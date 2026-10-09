@@ -202,9 +202,14 @@ def test_escaped_terminal_does_not_waive_foreign_via_clearance(force_python):
     if not force_python and not get_backend_info()["available"]:
         pytest.skip("C++ extension unavailable")
 
+    # Issue #6272: a trace/via pair is held to max(trace_clearance,
+    # via_clearance), so pin via_clearance to the 0.15 mm rule this scenario
+    # is written against (the 0.20 mm dataclass default would silently move
+    # the floor this test measures).
     rules = DesignRules(
         trace_width=0.2,
         trace_clearance=0.15,
+        via_clearance=0.15,
         via_drill=0.3,
         via_diameter=0.6,
     )

@@ -1275,14 +1275,13 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
         const auto& via = stored_vias_[i];
         if (via.net == s.net || s.layer < via.layer_from || s.layer > via.layer_to) continue;
         const auto cp = closest_point_on_segment(via.x, via.y, s.x1, s.y1, s.x2, s.y2);
+        // Issue #6272: ``clearance`` is the trace/via floor.  A diff-pair
+        // partner's intra-pair gap covers trace/trace only, never a drilled
+        // barrel, so only the pairwise HV matrix may widen it here.
         float required = clearance;
-        if (via.net == partner_net && partner_clearance >= 0) {
-            required = partner_clearance;
-        } else {
-            const float pair = pairwise_required_clearance(s.net, via.net);
-            if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
-                    (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;
-        }
+        const float pair = pairwise_required_clearance(s.net, via.net);
+        if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
+                (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;
         const ck::KVia other{via.x, via.y, via.diameter, via.drill};
         if (!ck::clear(candidate, other, required)) return false;
     }
@@ -1305,17 +1304,25 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
     // validator for the identical pair, which applies ``clearance``/the
     // pairwise table and never ``via_clearance`` here -- the asymmetry
     // #5410's own fixture named.
+    //
+    // Issue #6272 resolved that asymmetry from the commit side instead: the
+    // validators now hold every trace/via pair to ``trace_via_clearance``
+    // (``max(trace, via)``) in both insertion orders, so the seg-via branch
+    // asks that same floor again -- and, like the validators, without the
+    // diff-pair partner relief, which is a trace-to-trace allowance only.
     namespace ck = ::router::clearance;
     const float margin = s.width / 2 + std::max({clearance, via_clearance, partner_clearance, max_pairwise_clearance_});
     const auto candidates = route_geometry_candidates(
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
         std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
-    auto required = [&](int other_net, std::pair<float, float> point) {
-        if (other_net == partner_net && partner_clearance >= 0) return partner_clearance;
+    const float via_floor = trace_via_clearance(clearance, via_clearance);
+    auto required = [&](int other_net, std::pair<float, float> point, bool trace_pair) {
+        if (trace_pair && other_net == partner_net && partner_clearance >= 0) return partner_clearance;
+        const float base = trace_pair ? clearance : via_floor;
         const float pair = pairwise_required_clearance(s.net, other_net);
-        if (pair > clearance && !attach_zone_exempts(point.first, point.second, s.net, other_net, s.layer))
+        if (pair > base && !attach_zone_exempts(point.first, point.second, s.net, other_net, s.layer))
             return pair;
-        return clearance;
+        return base;
     };
     const ck::KSegment candidate{s.x1, s.y1, s.x2, s.y2, s.width, s.layer};
     for (size_t i : candidates.first) {
@@ -1324,7 +1331,7 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
         const auto point = closest_gap_midpoint(s.x1, s.y1, s.x2, s.y2,
             other.x1, other.y1, other.x2, other.y2);
         const ck::KSegment other_shape{other.x1, other.y1, other.x2, other.y2, other.width, other.layer_idx};
-        if (!ck::clear(candidate, other_shape, required(other.net, point))) return false;
+        if (!ck::clear(candidate, other_shape, required(other.net, point, true))) return false;
     }
     for (size_t i : candidates.second) {
         const auto& other = stored_vias_[i];
@@ -1332,7 +1339,7 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
         const auto cp = closest_point_on_segment(other.x, other.y, s.x1, s.y1, s.x2, s.y2);
         const ck::KVia other_shape{other.x, other.y, other.diameter, other.drill};
         if (!ck::clear(candidate, other_shape,
-                       required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2})))
+                       required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}, false)))
             return false;
     }
     return true;
@@ -1372,7 +1379,8 @@ bool Grid3D::component_holes_clear(float x, float y, float drill, float clearanc
 }
 
 bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
-                                     float hole_clearance, float same_net_drill_clearance) const {
+                                     float hole_clearance, float same_net_drill_clearance,
+                                     float trace_clearance) const {
     // Issue #5661 (Epic #5509 Phase 3b): the two COPPER checks below (via-vs-
     // segment, via-vs-via) ask the shared kernel instead of composing their
     // own ``centre_distance - half_a - half_b``.  ``ck`` rather than
@@ -1382,14 +1390,18 @@ bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
     // it is a different rule value than copper clearance, and the kernel's
     // own ``clear()`` does not fold it in either.
     namespace ck = ::router::clearance;
+    // Issue #6272: a via candidate against a stored trace is held to the
+    // trace/via floor; via-vs-via keeps the via clearance.
+    const float segment_floor = trace_clearance >= 0
+        ? trace_via_clearance(trace_clearance, clearance) : clearance;
     const float margin = std::max(v.diameter, v.drill) / 2
-        + std::max({clearance, hole_clearance, same_net_drill_clearance, max_pairwise_clearance_});
+        + std::max({segment_floor, hole_clearance, same_net_drill_clearance, max_pairwise_clearance_});
     const auto candidates = route_geometry_candidates(v.x - margin, v.y - margin, v.x + margin, v.y + margin);
-    auto required = [&](int other_net, int layer, std::pair<float, float> point) {
+    auto required = [&](int other_net, int layer, std::pair<float, float> point, float base) {
         const float pair = pairwise_required_clearance(v.net, other_net);
-        if (pair > clearance && !attach_zone_exempts(point.first, point.second, v.net, other_net, layer))
+        if (pair > base && !attach_zone_exempts(point.first, point.second, v.net, other_net, layer))
             return pair;
-        return clearance;
+        return base;
     };
     const ck::KVia candidate{v.x, v.y, v.diameter, v.drill};
     for (size_t i : candidates.first) {
@@ -1399,7 +1411,7 @@ bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
         const auto cp = closest_point_on_segment(v.x, v.y, s.x1, s.y1, s.x2, s.y2);
         const ck::KSegment other_shape{s.x1, s.y1, s.x2, s.y2, s.width, s.layer_idx};
         if (!ck::clear(candidate, other_shape,
-                       required(s.net, s.layer_idx, {(v.x + cp.first) / 2, (v.y + cp.second) / 2})))
+                       required(s.net, s.layer_idx, {(v.x + cp.first) / 2, (v.y + cp.second) / 2}, segment_floor)))
             return false;
     }
     for (size_t i : candidates.second) {
@@ -1422,7 +1434,7 @@ bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
         if (other.net == v.net) continue;
         const ck::KVia other_shape{other.x, other.y, other.diameter, other.drill};
         if (!ck::clear(candidate, other_shape,
-                       required(other.net, -1, {(v.x + other.x) / 2, (v.y + other.y) / 2})))
+                       required(other.net, -1, {(v.x + other.x) / 2, (v.y + other.y) / 2}, clearance)))
             return false;
     }
     return true;
@@ -1813,20 +1825,18 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            // Issue #2559 / Phase 1C: tighter clearance for the partner.
-            const bool is_partner = partner_active && sv.net == partner_net;
-            float effective_clearance = is_partner ? intra_pair_clearance : trace_clearance;
-
-            // Issue #4510: cross-domain widening (partner branch wins).
-            if (!is_partner) {
-                // #4507: the barrel crosses the candidate segment's layer.
-                effective_clearance = widen(effective_clearance, sv.net, seg.layer, [&]() {
+            // Issue #6272: via copper uses the same floor in either insertion
+            // order (``trace_via_clearance``), and the diff-pair intra-pair
+            // gap (#2559) covers trace/trace only -- it cannot relax a drilled
+            // barrel, even the partner's.  Issue #4510 cross-domain widening
+            // still applies; #4507: the barrel crosses the segment's layer.
+            const float effective_clearance = widen(
+                trace_via_clearance(trace_clearance, via_clearance), sv.net, seg.layer, [&]() {
                     const auto cp = closest_point_on_segment(
                         sv.x, sv.y, seg.x1, seg.y1, seg.x2, seg.y2);
                     return std::pair<float, float>((sv.x + cp.first) / 2.0f,
                                                    (sv.y + cp.second) / 2.0f);
                 });
-            }
 
             if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
@@ -1902,7 +1912,9 @@ ValidationResult Grid3D::validate_route(
             // stored foreign segment (no diff-pair partner branch here).
             // #4507: the shared layer is the stored segment's (the candidate
             // via's barrel spans it -- the loop above already checked that).
-            const float effective_clearance = widen(via_clearance, seg.net, seg.layer_idx, [&]() {
+            // Issue #6272: the trace/via floor, as in the seg-via branch above.
+            const float effective_clearance = widen(
+                trace_via_clearance(trace_clearance, via_clearance), seg.net, seg.layer_idx, [&]() {
                 const auto cp = closest_point_on_segment(
                     via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2);
                 return std::pair<float, float>((via.x + cp.first) / 2.0f,

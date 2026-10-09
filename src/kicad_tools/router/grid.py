@@ -107,6 +107,7 @@ from .clearance_kernel import (
 from .clearance_kernel import (
     copper_gap as _kernel_copper_gap,
 )
+from .clearance_resolver import trace_via_clearance_mm
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
 )
@@ -4251,7 +4252,8 @@ class RoutingGrid:
             checked foreign segments (<= 0 means no violation) and
             ``worst_location`` is the via center (or ``None``).
         """
-        min_clearance = self.rules.via_clearance
+        # Issue #6272: the trace/via floor, identical in either insertion order.
+        min_clearance = trace_via_clearance_mm(self.rules.trace_clearance, self.rules.via_clearance)
         via_radius = via.diameter / 2
         worst_deficit = 0.0
         worst_loc: tuple[float, float] | None = None
@@ -4341,10 +4343,12 @@ class RoutingGrid:
                              Used for automatic fine-pitch clearance detection.
             partner_net: Issue #2559 / Phase 1C -- when set, the named net id
                          is the diff-pair partner of ``exclude_net`` and the
-                         seg-vs-seg / seg-vs-via comparisons use
-                         ``partner_clearance`` instead of ``min_clearance``.
-            partner_clearance: Tighter clearance applied only to elements
-                               whose net matches ``partner_net``.
+                         seg-vs-seg comparisons use ``partner_clearance``
+                         instead of ``min_clearance``.  Seg-vs-via is never
+                         relaxed (Issue #6272): a partner's barrel keeps the
+                         trace/via floor.
+            partner_clearance: Tighter trace-to-trace clearance applied only
+                               to segments whose net matches ``partner_net``.
 
         Returns:
             Tuple of (is_valid, actual_clearance, violation_location)
@@ -4734,6 +4738,12 @@ class RoutingGrid:
                         )
 
         # Check against vias from existing routes (not in R-tree; typically few)
+        # Issue #6272: a trace and a foreign via share one floor --
+        # ``max(trace, via)`` -- whichever was committed first, and neither a
+        # diff-pair partner's gap nor a closer (legal) trace obstacle relaxes
+        # it.  The verdict is therefore taken per via, not gated on the via
+        # being the new nearest obstacle.
+        via_floor = trace_via_clearance_mm(min_clearance, self.rules.via_clearance)
         for route in self.routes:
             if route.net == exclude_net:
                 continue
@@ -4748,9 +4758,9 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                    if clearance < min_clearance:
-                        has_violation = True
-                        violation_loc = (via.x, via.y)
+                if clearance < via_floor:
+                    has_violation = True
+                    violation_loc = (via.x, via.y)
 
         # Issue #1016: is_valid is True only if no violations were found
         is_valid = not has_violation
@@ -4776,7 +4786,11 @@ class RoutingGrid:
         Args:
             via: The via to validate
             exclude_net: Net ID to exclude (same-net elements don't violate clearance)
-            min_clearance: Minimum required clearance (default: rules.via_clearance)
+            min_clearance: Via-side clearance (default: rules.via_clearance).
+                Issue #6272: the via-vs-segment floor is
+                ``max(min_clearance, rules.trace_clearance)`` -- the floor
+                :meth:`validate_segment_clearance` applies to the reverse
+                insertion order.  Fixed fills keep ``min_clearance``.
 
         Returns:
             Tuple of (is_valid, actual_clearance, violation_location)
@@ -4786,6 +4800,7 @@ class RoutingGrid:
         """
         if min_clearance is None:
             min_clearance = self.rules.via_clearance
+        segment_floor = trace_via_clearance_mm(self.rules.trace_clearance, min_clearance)
 
         via_radius = via.diameter / 2
         # Issue #5398: ``via.layers`` is the barrel's inclusive physical span.
@@ -4838,7 +4853,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < min_clearance:
+                if clearance < segment_floor:
                     has_violation = True
                     violation_loc = (via.x, via.y)
 

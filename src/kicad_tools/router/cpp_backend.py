@@ -72,7 +72,12 @@ logger = logging.getLogger(__name__)
 # ``Grid3D.authored_*`` gate, ``set_net_clearance_floors`` /
 # ``set_pad_authored``, and the search / coupled / validate_route consults.
 # A v47 .so would route straight through a stricter netclass's clearance.
-_REQUIRED_CPP_BUILD_VERSION = 48
+# v49 (Issue #6272): every native trace-vs-via gate resolves
+# ``trace_via_clearance`` (max of the two floors) in both insertion orders, a
+# diff-pair partner no longer relaxes a barrel, ``route_via_geometry_clear``
+# gained ``trace_clearance`` and ``router_cpp.trace_via_clearance`` is bound.
+# A v48 .so would let a trace land inside an earlier via's floor.
+_REQUIRED_CPP_BUILD_VERSION = 49
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -3686,15 +3691,18 @@ class CppPathfinder:
         # full-stack grids keep the native path alone. Pairwise widening below
         # continues to cover the same complete Python route collection.
         if route.vias and self._grid._off_grid_stored_segments:
+            from .clearance_resolver import trace_via_clearance_mm
             from .via_clearance import via_clears_foreign_segment
 
+            # Issue #6272: one trace/via floor in either insertion order.
+            via_floor = trace_via_clearance_mm(
+                self._rules.trace_clearance, self._rules.via_clearance
+            )
             for segment in self._grid._off_grid_stored_segments:
                 if segment.net == start.net:
                     continue
                 for via in route.vias:
-                    if not via_clears_foreign_segment(
-                        via, segment, trace_clearance=self._rules.via_clearance
-                    ):
+                    if not via_clears_foreign_segment(via, segment, trace_clearance=via_floor):
                         return RouteClearanceViolation(via.x, via.y, "via_vs_offgrid_segment", None)
 
         # Issue #3002 (PR #3006 follow-up): Python-side segment-vs-foreign-via
@@ -3707,8 +3715,13 @@ class CppPathfinder:
         # mirroring the predicate consumed by the Python pathfinder at
         # ``pathfinder.py:_validate_route_clearance``.
         if self._foreign_vias:
+            from .clearance_resolver import trace_via_clearance_mm
             from .via_clearance import segment_clears_foreign_via
 
+            # Issue #6272: the trace/via floor, not the bare trace floor.
+            foreign_via_floor = trace_via_clearance_mm(
+                self._rules.trace_clearance, self._rules.via_clearance
+            )
             for seg in route.segments:
                 for via in self._foreign_vias:
                     if via.net == start.net:
@@ -3716,7 +3729,7 @@ class CppPathfinder:
                     if not segment_clears_foreign_via(
                         seg,
                         via,
-                        trace_clearance=self._rules.trace_clearance,
+                        trace_clearance=foreign_via_floor,
                         hard_intersection_only=False,
                     ):
                         return RouteClearanceViolation(via.x, via.y, "seg_vs_foreign_via", None)

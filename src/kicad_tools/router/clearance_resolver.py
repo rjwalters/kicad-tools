@@ -171,7 +171,43 @@ __all__ = [
     "read_declared_clearance_rules",
     "resolve_base_clearance",
     "strictest_net_class_clearance",
+    "trace_via_clearance_mm",
 ]
+
+
+def trace_via_clearance_mm(trace_clearance: float, via_clearance: float | None) -> float:
+    """The trace-vs-via copper floor: step 9 in scalar form (Issue #6272).
+
+    A trace and a foreign via are one unordered copper pair, so the floor
+    between them must not depend on which of the two was committed first or
+    on which object a consumer happens to be validating.  This is
+    :meth:`ClearanceResolver.resolve`'s trace/via symmetry term reduced to
+    the two scalars the hot search / commit paths already hold:
+    ``max(trace_clearance, via_clearance)``.
+
+    Every trace-vs-via gate routes through here -- the Python grid's
+    segment-vs-via and via-vs-segment validators, the Python pathfinder's
+    foreign-via context, the negotiated revalidation hooks and the
+    ``cpp_backend`` foreign checks -- and the native backend mirrors it as
+    ``router::trace_via_clearance`` (``cpp/include/types.hpp``), which its
+    search predicates and ``validate_route`` call.
+
+    A differential-pair partner's intra-pair gap is a trace-to-trace
+    allowance; it never relaxes this floor (a drilled barrel beside the
+    partner keeps the via floor).
+
+    Args:
+        trace_clearance: The trace side's resolved clearance (scalar rule or
+            net-class override).
+        via_clearance: ``DesignRules.via_clearance``.  ``None`` disables the
+            term, exactly as :attr:`ClearanceRuleSet.via_mm` ``None`` does.
+
+    Returns:
+        The floor in mm.
+    """
+    if via_clearance is None:
+        return float(trace_clearance)
+    return max(float(trace_clearance), float(via_clearance))
 
 
 class CopperKind(Enum):

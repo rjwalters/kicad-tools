@@ -33,6 +33,12 @@ void register_mesh(nb::module_& m);
 void register_clearance_kernel(nb::module_& m);
 
 NB_MODULE(router_cpp, m) {
+    // Issue #6272: the shared trace/via floor, exposed for parity tests
+    // against ``clearance_resolver.trace_via_clearance_mm``.
+    m.def("trace_via_clearance", &trace_via_clearance,
+          "trace_clearance"_a, "via_clearance"_a,
+          "Issue #6272: max(trace_clearance, via_clearance) -- the native "
+          "trace/via copper floor.");
     m.doc() = "C++ router core for high-performance PCB routing";
 
     // GridCell struct
@@ -259,7 +265,11 @@ NB_MODULE(router_cpp, m) {
              "xs"_a, "ys"_a, "layers"_a, "value"_a,
              "Issue #5410: bulk form of set_cell_static_blocked.")
         .def("route_trace_geometry_clear", &Grid3D::route_trace_geometry_clear)
-        .def("route_via_geometry_clear", &Grid3D::route_via_geometry_clear)
+        .def("route_via_geometry_clear", &Grid3D::route_via_geometry_clear,
+             "via"_a, "clearance"_a, "hole_clearance"_a, "same_net_drill_clearance"_a,
+             "trace_clearance"_a = -1.0f,
+             "Issue #6272: a non-negative trace_clearance raises the "
+             "via-vs-stored-segment floor to max(trace_clearance, clearance).")
         .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
@@ -349,7 +359,9 @@ NB_MODULE(router_cpp, m) {
         .def("authored_via_clear", &Grid3D::authored_via_clear,
              "x"_a, "y"_a, "diameter"_a, "net"_a)
         .def("trace_stored_vias_clear", &Grid3D::trace_stored_vias_clear,
-             "segment"_a, "clearance"_a, "partner_net"_a = -1, "partner_clearance"_a = -1.0f)
+             "segment"_a, "clearance"_a, "partner_net"_a = -1, "partner_clearance"_a = -1.0f,
+             "Issue #6272: clearance is the trace/via floor; the partner arguments "
+             "only widen the lookup and never relax a barrel (even the partner's).")
         .def("clear_validation_data", &Grid3D::clear_validation_data)
         .def("clear_stored_routes", &Grid3D::clear_stored_routes,
              "Issue #2481: Drop only stored route data (segments + vias), "
@@ -365,7 +377,7 @@ NB_MODULE(router_cpp, m) {
              "min_hole_clearance"_a = -1.0f,
              "Validate a candidate route against stored geometry.  Issue #2559 "
              "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
-             "comparisons against partner_net use intra_pair_clearance instead "
+             "segment-to-segment comparisons against partner_net use intra_pair_clearance instead "
              "of trace_clearance (defaults preserve pre-#2559 behavior).  "
              "Issue #5166: refs in exclude_ref_hashes keep the full-skip "
              "same-component carve-out (#2452 corridor relief, whose floor is "
