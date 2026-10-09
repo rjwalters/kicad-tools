@@ -3735,6 +3735,16 @@ def _add_route_parser(subparsers) -> None:
     )
     route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
     route_parser.add_argument(
+        "--via-clearance",
+        type=float,
+        default=None,
+        help=(
+            "Via clearance in mm (default: resolved from the board's own "
+            ".kicad_pro / .kicad_dru / netclass rules, raised to the "
+            "manufacturer floor; 0.2 when nothing is declared). Issue #6280."
+        ),
+    )
+    route_parser.add_argument(
         "--strict-pad-clearance",
         action="store_true",
         help="Enforce authored clearance against all foreign pads, including fine-pitch and NC pads.",

@@ -8159,6 +8159,138 @@ def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) 
         print(warning, file=sys.stderr)
     if banner is not None and not quiet:
         print(banner)
+
+    # Issue #6280: resolve ``via_clearance`` from the same declared rules,
+    # instead of leaving it at the 0.20mm ``DesignRules`` default.
+    _resolve_route_via_clearance(
+        args,
+        declared,
+        explicit_manufacturer=explicit_manufacturer,
+        trace_warned=warning is not None,
+        quiet=quiet,
+    )
+    return value
+
+
+def _effective_via_clearance(args) -> float:
+    """``DesignRules.via_clearance`` for this run (Issue #6280).
+
+    :func:`_resolve_route_via_clearance` stores the resolved value on
+    ``args.via_clearance``; a caller that builds ``args`` without running the
+    resolver (unit tests driving an inner stage directly) keeps the historical
+    0.20mm default rather than crashing on the ``None`` sentinel.
+    """
+    from kicad_tools.router.clearance_resolver import DEFAULT_VIA_CLEARANCE_MM
+
+    value = getattr(args, "via_clearance", None)
+    return float(value) if value is not None else DEFAULT_VIA_CLEARANCE_MM
+
+
+def _resolve_route_via_clearance(
+    args,
+    declared,
+    *,
+    explicit_manufacturer: bool,
+    trace_warned: bool = False,
+    quiet: bool = False,
+) -> float:
+    """Resolve ``args.via_clearance`` from the board's own rules (Issue #6280).
+
+    ``kct route`` used to resolve only ``trace_clearance`` from the board and
+    leave ``via_clearance`` at the 0.20mm ``DesignRules`` default.  Once
+    #6272 made every trace/via gate resolve ``max(trace, via)`` in both
+    insertion orders, that default held every trace 0.20mm off every foreign
+    via even on boards whose declared rule -- the one ``kicad-cli`` measures
+    -- is 0.15mm (board 02: 27 -> 52 vias).
+
+    Delegates to
+    :func:`kicad_tools.router.clearance_resolver.resolve_via_clearance`:
+    explicit ``--via-clearance`` > the strictest declared rule that applies to
+    a via pair (``.kicad_pro`` board minimum, ``.kicad_dru`` via-scoped or
+    unconditional clearance, netclass) > 0.20mm, then ``max`` with the fab
+    floor -- the #6191 ``max(designer value, fab floor)`` policy -- and with
+    the resolved trace clearance (``args.clearance``), so a via is never held
+    closer to foreign copper than a trace is.
+
+    ``--clearance`` does not move the via value: it is the trace waiver, and
+    the trace/via floor is ``max`` of the two anyway, so an explicit
+    ``--clearance`` above the via rule still governs trace/via spacing.
+
+    Prints a banner (stdout, suppressed by ``--quiet``) when a declared rule
+    or explicit flag moved the value off the default -- worded without the
+    ``(rules: …)`` marker the trace banner owns -- and any warning (stderr).
+    A fab-floor warning that only restates the trace one is not repeated.
+    Stores the value on ``args.via_clearance`` and its provenance on
+    ``args._via_clearance_rule_source``.
+    """
+    from kicad_tools.router.clearance_resolver import RuleSource, resolve_via_clearance
+    from kicad_tools.router.mfr_limits import resolve_clearance
+
+    manufacturer = getattr(args, "manufacturer", None)
+    # ``args.via_clearance`` is overwritten with the resolved value below, so
+    # remember what the operator passed: a second resolution on the same
+    # ``args`` must not mistake a resolved value for an explicit flag.
+    if not hasattr(args, "_via_clearance_explicit"):
+        args._via_clearance_explicit = getattr(args, "via_clearance", None)
+    explicit = args._via_clearance_explicit
+    resolved = resolve_via_clearance(
+        declared=declared,
+        fab_floor_mm=resolve_clearance(manufacturer),
+        explicit_via_mm=float(explicit) if explicit is not None else None,
+        explicit_manufacturer=explicit_manufacturer,
+        manufacturer=manufacturer,
+        trace_clearance_mm=getattr(args, "clearance", None),
+    )
+
+    value = resolved.required_mm
+    args.via_clearance = value
+    args._via_clearance_rule_source = resolved.source.value
+
+    requirement = declared.via_requirement() if declared is not None else None
+    if resolved.warning is not None:
+        # The generic layers (netclass, board minimum, unconditional DRU)
+        # already produced the trace path's fab-floor warning; only a
+        # via-specific rule, or an explicit --via-clearance, says something new.
+        restates_trace = (
+            trace_warned
+            and explicit is None
+            and requirement is not None
+            and requirement[1] is not RuleSource.PROJECT_DRU_VIA
+        )
+        if not restates_trace:
+            print(resolved.warning, file=sys.stderr)
+
+    if quiet or resolved.source is RuleSource.TARGET_DEFAULT:
+        return value
+
+    def _label(rule_source, class_name: str | None) -> str:
+        if rule_source is RuleSource.EXPLICIT_TARGET:
+            return "explicit --via-clearance flag"
+        if rule_source is RuleSource.PROJECT_DRU:
+            return "board .kicad_dru clearance rule"
+        if rule_source is RuleSource.PROJECT_DRU_VIA:
+            return "board .kicad_dru via clearance rule"
+        if rule_source is RuleSource.PROJECT_MIN_CLEARANCE:
+            return "project board minimum clearance"
+        if rule_source is RuleSource.PROJECT_NET_CLASS:
+            return f'project netclass "{class_name}"' if class_name else "project netclass"
+        if rule_source is RuleSource.BOARD_NET_CLASS:
+            return f'board net_class "{class_name}"'
+        if rule_source is RuleSource.TRACE_BASE:
+            return "the trace clearance; a via is never held closer than a trace"
+        return str(rule_source.value)
+
+    if resolved.source in (RuleSource.FAB_FLOOR, RuleSource.MANUFACTURER_OVERRIDE):
+        if requirement is not None:
+            detail = (
+                f"from {_label(requirement[1], requirement[2])} {requirement[0]:.4g}mm, "
+                f"raised to the {manufacturer} floor"
+            )
+        else:
+            detail = f"from the {manufacturer} minimum clearance"
+    else:
+        detail = f"from {_label(resolved.source, resolved.source_label)}"
+    print(f"Via clearance: {value:.4g}mm ({detail})")
     return value
 
 
@@ -8973,6 +9105,8 @@ def route_with_layer_escalation(
         trace_width=_effective_trace_width(args),
         trace_clearance=args.clearance,
         via_drill=args.via_drill,
+        # Issue #6280: the board's own via rule, not the 0.20mm default.
+        via_clearance=_effective_via_clearance(args),
         via_diameter=args.via_diameter,
         fine_pitch_clearance=fine_pitch_cl,
         strict_pad_clearance=getattr(args, "strict_pad_clearance", False),
@@ -10492,6 +10626,8 @@ def route_with_rule_relaxation(
             trace_width=tier.trace_width,
             trace_clearance=tier.clearance,
             via_drill=tier.via_drill,
+            # Issue #6280: the board's own via rule, not the 0.20mm default.
+            via_clearance=_effective_via_clearance(args),
             via_diameter=tier.via_diameter,
             fine_pitch_clearance=fine_pitch_cl,
             strict_pad_clearance=getattr(args, "strict_pad_clearance", False),
@@ -12980,6 +13116,8 @@ def route_with_combined_escalation(
                 trace_width=tier.trace_width,
                 trace_clearance=tier.clearance,
                 via_drill=tier.via_drill,
+                # Issue #6280: the board's own via rule, not the 0.20mm default.
+                via_clearance=_effective_via_clearance(args),
                 via_diameter=tier.via_diameter,
                 fine_pitch_clearance=fine_pitch_cl,
                 strict_pad_clearance=getattr(args, "strict_pad_clearance", False),
@@ -15919,6 +16057,21 @@ def _route_parser() -> argparse.ArgumentParser:
             "keeps the 0.15 default exactly as before. A declared value below "
             "the active manufacturer's minimum clearance is raised to that "
             "floor with a stderr WARNING."
+        ),
+    )
+    parser.add_argument(
+        "--via-clearance",
+        type=float,
+        default=None,
+        help=(
+            "Via clearance in mm: the minimum gap between a via and foreign "
+            "copper (trace/via pairs use max(--clearance, --via-clearance)). "
+            "Default (issue #6280): resolved from the board's own rules -- the "
+            ".kicad_pro board minimum, a .kicad_dru via-scoped or unconditional "
+            "clearance rule, or the netclass clearance, whichever is strictest "
+            "-- raised to the manufacturer's minimum clearance; 0.2 when the "
+            "board declares nothing. An explicit value is used as given (with "
+            "a stderr WARNING if it undercuts a declared rule)."
         ),
     )
     parser.add_argument(
@@ -18869,6 +19022,8 @@ def _run_main_impl(args, parser, argv) -> int:
         trace_width=_effective_trace_width(args),
         trace_clearance=args.clearance,
         via_drill=args.via_drill,
+        # Issue #6280: the board's own via rule, not the 0.20mm default.
+        via_clearance=_effective_via_clearance(args),
         via_diameter=args.via_diameter,
         fine_pitch_clearance=fine_pitch_cl,
         strict_pad_clearance=getattr(args, "strict_pad_clearance", False),
