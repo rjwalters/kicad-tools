@@ -1548,6 +1548,46 @@ class TestAnchorWeight:
             moved = [r for r in ("U1", "R1", "R2") if after[r].position != before[r].position]
             assert moved, f"{seed_method}: the free parts should still be optimized"
 
+    def test_mcp_resolve_overlaps_never_pushes_a_locked_footprint(
+        self,
+        anchored_pcb: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #6262: the MCP overlap tool must hold locked parts in place.
+
+        The writer skips locked footprints, so a slide-off that pushes one
+        half of a locked/free pair apart drops that half on write and the
+        overlap survives on disk while the tool reports it resolved. Re-read
+        the written file and check it against the reported counts.
+        """
+        from kicad_tools.mcp.tools.optimize_placement import resolve_placement_overlaps
+        from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+        # Drop R1 onto the locked J1.
+        text = anchored_pcb.read_text().replace("(at 18.0 15.0 0)", "(at 1.5 25.0 0)", 1)
+        anchored_pcb.write_text(text)
+        before = {fp.reference: fp for fp in SchemaPCB.load(str(anchored_pcb)).footprints}
+
+        out = tmp_path / "resolved.kicad_pcb"
+        res = resolve_placement_overlaps(str(anchored_pcb), output_path=str(out))
+        assert res["success"], res
+        assert res.get("output_path") == str(out), res
+        assert res["overlaps_resolved"] >= 1
+        assert res["overlaps_remaining"] == 0
+
+        after = {fp.reference: fp for fp in SchemaPCB.load(str(out)).footprints}
+        assert after["J1"].position == before["J1"].position
+        assert after["J1"].rotation == before["J1"].rotation
+        assert after["J1"].locked
+        assert after["R1"].position != before["R1"].position
+
+        # A fresh scan of the written file (no sliding) must agree with the
+        # reported counts: nothing left to resolve, nothing remaining.
+        rescan = resolve_placement_overlaps(str(out), max_iterations=0)
+        assert rescan["success"], rescan
+        assert rescan["overlaps_remaining"] == res["overlaps_remaining"] == 0
+        assert rescan["overlaps_resolved"] == 0
+
     def test_negative_anchor_weight_is_rejected(self, anchored_pcb: Path) -> None:
         """Negative anchor_weight is invalid; the runner should exit non-zero."""
         rc = run_optimize_placement(

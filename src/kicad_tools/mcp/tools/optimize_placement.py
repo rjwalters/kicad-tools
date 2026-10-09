@@ -745,6 +745,12 @@ def resolve_placement_overlaps(
 
     vector = PV(data=data)
 
+    # Locked footprints are never moved by the writer (issue #6262), so the
+    # slide-off must treat them as immovable: otherwise it reports an overlap
+    # resolved by pushing a locked part whose move is then dropped on write.
+    locked_refs = _locked_refs(pcb_path)
+    locked_indices = sorted(i for i, c in enumerate(components) if c.reference in locked_refs)
+
     # Run slide-off
     from kicad_tools.placement.slide_off import slide_off_overlaps
 
@@ -755,6 +761,7 @@ def resolve_placement_overlaps(
         margin_mm=margin_mm,
         max_iterations=max_iterations,
         max_displacement_mm=max_displacement_mm,
+        fixed=locked_indices,
     )
 
     result: dict[str, Any] = {
