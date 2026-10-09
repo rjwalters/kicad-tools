@@ -233,7 +233,10 @@ def test_loader_and_reset_keep_same_pin_arrays_as_physical_obstacles(tmp_path, p
     "options",
     [
         ["--no-auto-layers", "--strategy", "monte-carlo"],
-        ["--no-auto-layers", "--strategy", "evolutionary"],
+        # Tiny GA (#6267): this test asserts identity preservation, not route
+        # quality.  The default 20 x 10 GA is 200 route_all() evaluations and
+        # blew the route deadline on a cold cache.
+        ["--no-auto-layers", "--strategy", "evolutionary", "--pop-size", "4", "--generations", "2"],
         ["--no-auto-layers", "--strategy", "basic", "--route-engine", "mesh"],
         ["--no-auto-layers", "--strategy", "basic", "--route-engine", "lattice"],
         ["--no-auto-layers", "--adaptive-rules"],

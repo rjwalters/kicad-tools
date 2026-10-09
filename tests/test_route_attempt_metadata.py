@@ -4,9 +4,11 @@ import pytest
 
 from kicad_tools.cli import route_cmd
 from kicad_tools.router.reporting import RouteAttemptResult
+from tests.test_route_partial_placement_cli import PYTEST_TIMEOUT_SECONDS, ROUTE_DEADLINE_SECONDS
 from tests.test_routing_placement_disposition import board_text
 
 
+@pytest.mark.timeout(PYTEST_TIMEOUT_SECONDS)
 @pytest.mark.parametrize("finite", [False, True])
 def test_all_invalid_attempt_returns_typed_metadata_without_output(tmp_path, finite):
     source = tmp_path / "mixed.kicad_pcb"
@@ -16,7 +18,7 @@ def test_all_invalid_attempt_returns_typed_metadata_without_output(tmp_path, fin
     output.write_text("stale unrelated output")
     args = [str(source), "-o", str(output), "--nets", "BAD"]
     if finite:
-        args += ["--timeout", "10"]
+        args += ["--timeout", str(ROUTE_DEADLINE_SECONDS)]
     result = route_cmd.main_with_result(args)
     assert isinstance(result, RouteAttemptResult)
     assert result.exit_code == 2

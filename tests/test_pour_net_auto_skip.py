@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.test_route_partial_placement_cli import PYTEST_TIMEOUT_SECONDS, ROUTE_DEADLINE_SECONDS
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -1438,6 +1440,7 @@ def pcb_vcc_gnd_pour(tmp_path: Path) -> Path:
     return p
 
 
+@pytest.mark.timeout(PYTEST_TIMEOUT_SECONDS)
 class TestNetsFlagConflictsWithPourAutoSkip:
     """``--nets VCC,GND`` where both nets are auto-skipped pour nets must
     report the conflict explicitly and must NOT claim a loader bug."""
@@ -1457,7 +1460,7 @@ class TestNetsFlagConflictsWithPourAutoSkip:
             "--no-placement-feedback",
             "--no-cache",
             "--timeout",
-            "30",
+            str(ROUTE_DEADLINE_SECONDS),  # Issue #6267: queue-aware, not a flat 30
             "--no-optimize",
             "-o",
             str(out_path),
