@@ -291,6 +291,8 @@ assert_eq "posted:1" "$(field "$out" STANDDOWN_ACTION)" "T7: first stand-down po
 assert_contains "$log" "POST repos/owner/repo/issues/6513/comments" "T7: it POSTs a new comment"
 assert_contains "$log" "loom:standdown claim=" "T7: the comment carries the stand-down marker"
 assert_contains "$log" "seq=1" "T7: the marker records seq=1"
+assert_contains "$log" "1 of 3 (streak cap NOT met)" "T7: the message reports the streak against the cap (#9927)"
+assert_contains "$log" "of 30m (age floor NOT met)" "T7: the message also reports the claim-age floor (#9927)"
 
 # --- T8: THE STREAK-STARVATION REGRESSION ---------------------------------
 # A stand-down comment already exists for this claim. The old logic skipped
@@ -344,6 +346,22 @@ jq -n --arg t "$(ago 1)" --arg m "<!-- loom:standdown claim=$CLAIM_TS seq=5 -->"
 out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
 assert_eq "fresh" "$(field "$out" CLAIM_STATE)" \
     "T11: a high peer-arrival streak on a 10-minute-old claim does NOT force-reclaim (#4790)"
+
+# --- T11b: #9927 — a capped streak under the age floor says which gate binds -
+# 2am#1138 read "4 of 3" as an overdue force-reclaim; the message must name the
+# age floor as the outstanding condition, and the marker must stay unchanged.
+reset
+CLAIM_TS="$(ago 23)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 1)" --arg m "<!-- loom:standdown claim=$CLAIM_TS seq=3 -->" \
+    '[{id:551,created_at:$t,body:("Judge pass: standing down.\n" + $m)}]' | set_comments
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
+log="$(read_log)"
+assert_eq "bumped:551:4" "$(field "$out" STANDDOWN_ACTION)" "T11b: the under-floor claim stays fresh and is bumped to seq=4"
+assert_contains "$log" "4 of 3 (streak cap met)" "T11b: the streak cap is reported as met"
+assert_contains "$log" "claim age 23m of 30m (age floor NOT met)" "T11b: the age floor is named as the binding gate"
+assert_contains "$log" "only once BOTH are met" "T11b: the message states the fallback needs both gates"
+assert_contains "$log" "<!-- loom:standdown claim=$CLAIM_TS seq=4 -->" "T11b: the marker format is unchanged"
 
 # --- T12: the fallback beats an activity-marker-spamming zombie ------------
 reset

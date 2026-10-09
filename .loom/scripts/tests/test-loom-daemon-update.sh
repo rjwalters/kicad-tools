@@ -1788,9 +1788,9 @@ write_fixture_plist_pre4077 "$PLIST21" "$LOOM_LAUNCHD_LABEL" "$INSTALLED21" "$HO
     bash "$UPDATE_SCRIPT" --relaunch >/dev/null 2>&1 )
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -q 'LOOM_DAEMON_SUPERVISOR' "$PLIST21" 2>/dev/null \
-    && grep -q 'SuccessfulExit' "$PLIST21" 2>/dev/null; then
+    && grep -q 'SuccessfulExit' "$PLIST21" 2>/dev/null && grep -q '<key>Crashed</key>' "$PLIST21" 2>/dev/null; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --relaunch re-renders the plist with KeepAlive:SuccessfulExit + LOOM_DAEMON_SUPERVISOR (AC1)"
+    echo -e "${GREEN}✓${NC} --relaunch re-renders the plist with KeepAlive:SuccessfulExit + Crashed (#11058) + LOOM_DAEMON_SUPERVISOR (AC1)"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}✗${NC} --relaunch re-renders the plist with KeepAlive:SuccessfulExit + LOOM_DAEMON_SUPERVISOR (AC1)"
@@ -2257,7 +2257,7 @@ fi
 # ============================================================
 # 31. --relaunch re-renders the unit with the SUPERVISED keys (mirrors test
 #     21): after a refused restart, `--relaunch` re-renders via
-#     loom-daemon-start.sh, installing Restart=on-success +
+#     loom-daemon-start.sh, installing Restart=always + OOMPolicy=continue +
 #     LOOM_DAEMON_SUPERVISOR=systemd into the unit — the two keys the stale
 #     pre-#4267 fixture unit LACKS, so a passing assertion proves the
 #     re-render actually happened (not a leftover). HOME is sandboxed so
@@ -2286,13 +2286,13 @@ write_fixture_unit_pre4267 "$UNIT_PATH31" "$INSTALLED31"
     bash "$UPDATE_SCRIPT" --relaunch >/dev/null 2>&1 )
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -q 'LOOM_DAEMON_SUPERVISOR=systemd' "$UNIT_PATH31" 2>/dev/null \
-    && grep -qx 'Restart=on-success' "$UNIT_PATH31" 2>/dev/null \
+    && grep -qx 'Restart=always' "$UNIT_PATH31" 2>/dev/null && grep -qx 'OOMPolicy=continue' "$UNIT_PATH31" 2>/dev/null \
     && grep -qx 'KillMode=mixed' "$UNIT_PATH31" 2>/dev/null; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --relaunch re-renders the unit with Restart=on-success + KillMode=mixed (#4862) + LOOM_DAEMON_SUPERVISOR=systemd"
+    echo -e "${GREEN}✓${NC} --relaunch re-renders the unit with Restart=always + OOMPolicy=continue (#11058) + KillMode=mixed (#4862) + LOOM_DAEMON_SUPERVISOR=systemd"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} --relaunch re-renders the unit with Restart=on-success + KillMode=mixed + LOOM_DAEMON_SUPERVISOR=systemd"
+    echo -e "${RED}✗${NC} --relaunch re-renders the unit with Restart=always + OOMPolicy=continue + KillMode=mixed + LOOM_DAEMON_SUPERVISOR=systemd"
     echo "  unit: $(cat "$UNIT_PATH31" 2>/dev/null)"
 fi
 

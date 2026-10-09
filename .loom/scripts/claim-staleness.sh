@@ -414,7 +414,7 @@ fi
 NEXT_SEQ=$((STANDDOWN_COUNT + 1))
 BODY="$ROLE pass: still carries a fresh \`$LABEL\` claim (claimed $CLAIMED_AT, idle ${IDLE_MINUTES}m) — standing down without reclaiming. Not stomping.
 
-Stand-down passes against this claim: $NEXT_SEQ of $MAX_STREAK before the bounded fallback force-reclaims it. This comment is edited in place on each pass rather than reposted (#5123, #6514).
+Stand-down passes against this claim: $NEXT_SEQ of $MAX_STREAK (streak cap $( ((NEXT_SEQ >= MAX_STREAK)) && echo met || echo "NOT met")); claim age ${CLAIM_AGE_MINUTES}m of ${STALE_MINUTES}m (age floor $( ((CLAIM_AGE_MINUTES >= STALE_MINUTES)) && echo met || echo "NOT met")). The bounded fallback force-reclaims only once BOTH are met (#9927). This comment is edited in place on each pass rather than reposted (#5123, #6514).
 ${STANDDOWN_PREFIX}${CLAIMED_AT} seq=${NEXT_SEQ} -->"
 
 if [[ "$DRY_RUN" == true ]]; then

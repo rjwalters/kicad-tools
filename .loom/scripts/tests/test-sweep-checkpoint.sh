@@ -365,6 +365,17 @@ fi
 out=$("$CHECKPOINT" phase 82)
 assert_eq "fallback-default checkpoint still reads phase" "curator-done" "$out"
 
+# --- Telemetry-only phase begin (#9935) ---
+# 38. `begin` never creates or alters the checkpoint (resume keys on `phase`).
+assert "begin on a missing checkpoint is a no-op" "$CHECKPOINT" begin 90 builder
+assert_exit "begin does not create a checkpoint" 1 "$CHECKPOINT" exists 90
+"$CHECKPOINT" write 90 curator-done --task-id sweep-test >/dev/null
+before=$("$CHECKPOINT" read 90)
+assert "begin with attempt/model succeeds" "$CHECKPOINT" begin 90 builder --attempt 1 --model opus
+assert_eq "begin leaves the checkpoint byte-identical" "$before" "$("$CHECKPOINT" read 90)"
+assert_exit "begin rejects a non-role" 2 "$CHECKPOINT" begin 90 builder-done
+assert_exit "begin rejects an unknown option" 1 "$CHECKPOINT" begin 90 builder --pr-number 1
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] || exit 1

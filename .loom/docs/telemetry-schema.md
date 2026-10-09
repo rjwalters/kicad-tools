@@ -21,6 +21,7 @@ writing) will additionally push these records to a cloud backend.
 - [Envelope](#envelope)
 - [`/ingest` response (the bound-`host_id` echo)](#ingest-response-the-bound-host_id-echo)
 - [`RepoVisibility` contract — private by default](#repovisibility-contract--private-by-default)
+- [Exported-facts contract (external ETA consumers, #11098)](#exported-facts-contract-external-eta-consumers-11098)
 - [Record kinds](#record-kinds)
 - [Persistence & read surface (`sweep.outcome`, Issue #4704)](#persistence--read-surface-sweepoutcome-issue-4704)
 - [Refreshing the model rate card](#refreshing-the-model-rate-card)
@@ -211,6 +212,86 @@ keys off this tag, never off client-side filtering.
 Visibility is derived at emit time from the forge (`gh api repos/{owner}/{repo}
 --jq .private`) and cached per `owner/repo` with a TTL, so it costs no per-record
 API call. A probe failure resolves to `private` — the same fail-safe default.
+
+## Exported-facts contract (external ETA consumers, #11098)
+
+ETA is moving out of Loom (decision #11078). loom-ui rebuilds it from label
+webhooks, `github-read`, SigNoz and the records below (tracked on #11098).
+Loom keeps no ETA logic. Its one obligation is to keep exporting the facts in
+the first table. This section only points at each kind's own section, which
+remains the field reference.
+
+**Stability promise.** For every record in the first table, changes are
+additive only. A field, attribute or metric name is never renamed or removed,
+and its meaning never changes. Removing one needs an issue that loom-ui has
+agreed to. **Growth rule:** a new fact (up to the whole ready queue per daemon
+cycle) is added only when loom-ui's error tracking shows it is needed.
+
+**Stable records: owned by non-ETA code.**
+
+| Record | Signal | Owner (emit site, under `loom-daemon/src/`) |
+|---|---|---|
+| [`sweep.outcome`](#sweepoutcome) | log, native + OTLP | `sweep_registry/outcome_journal.rs`, `observability/collector.rs`, `sweep_registry/prless_retry/durable.rs`, `observability/backfill.rs` |
+| [`sweep.started`](#sweepstarted) / [`sweep.phase`](#sweepphase) / [`sweep.completed`](#sweepcompleted) / [`sweep.identity`](#sweepidentity) | log, native + OTLP | `observability/collector.rs` (+ `collector/identity.rs`), `observability/queue.rs`, `observability/shutdown.rs`, `observability/backfill.rs` |
+| Phase spans (`trace.span`: `loom.phase`, `loom.role_attempt`) | span, OTLP only | `observability/lifecycle.rs` → `observability/otlp/traces.rs`; see [`tracing.md`](tracing.md#owned-lifecycle-instrumentation) |
+| [`pick.decision`](#pickdecision) | log, OTLP only | `observability/pick_decision.rs` (from `role_tick_telemetry.rs` and `work_finder/tick_summary.rs`) |
+| [`queue.snapshot`](#queuesnapshot) (whole ready queue per tick) | native only | `observability/queue_snapshot.rs` |
+| `loom.queue.issues`, `loom.queue.listing_failed_repos` ([`metric.points`](#metricpoints)) | metric | `observability/ops/queue.rs` |
+| `loom.queue.oldest_wait`, `loom.queue.starved[.by_reason]`, `loom.queue.dispatch_wait[.samples]` ([`metric.points`](#metricpoints)) | metric | `observability/ops/dwell.rs` |
+| [`loom.dispatch.disposition`](#loomdispatchdisposition-issue-9222-per-issue-why-is-it-waiting) rows (`loom.queue.*` attributes) and `loom.queue.disposition_rows_dropped` | span + metric, OTLP only | `observability/ops/disposition.rs` |
+| [`host.health`](#hosthealth) | gauges, native + OTLP | `observability/collector.rs` (+ `exporter.rs`, `sender.rs`) |
+| Captain gauges: `loom.captain.gauge_age_seconds`, `loom.captain.gauge_fallback`, `loom.forge.stage_dwell`, `loom.forge.stage_items` ([`metric.points`](#metricpoints)) | metric | `observability/captain_gauges.rs`, `observability/ops/stage_dwell.rs` |
+
+The captain gauges are emitted by non-ETA code. Since Stage 2 of #11098,
+`fleet.captainGauges.ref` has its own default (`eta-fit`, the branch the
+heartbeat already used; a legacy `fleet.etaFitRef` is still read as the
+fallback), and `captain_gauges/store.rs` uses the neutral
+`fleet_store/publication.rs` helpers instead of `crate::eta::fit`. What is
+emitted did not change.
+
+**ETA-only records.** Only ETA code emits these. Each one either gets a non-ETA
+owner or is dropped with loom-ui's agreement. No disposition is final until
+loom-ui confirms it; track each disposition on #11098.
+
+| Record | Signal | Sole emit site (under `loom-daemon/src/`) | ETA-only | Disposition |
+|---|---|---|---|---|
+| [`eta.stage_outcome`](#etastage_outcome) (stage-journal rows) | log, OTLP only | `observability/eta/stage_outcome.rs` | yes | **open: needs loom-ui input.** Either keep it under a non-ETA owner or drop it. It is the one stage-boundary fact loom-ui cannot easily rebuild from webhooks. |
+| [`pr.resolved`](#prresolved) | log, OTLP only | `observability/eta/pr_resolved.rs` | yes | **open: needs loom-ui input.** Either keep it under a non-ETA owner or drop it. loom-ui's webhooks already cover merge and close. |
+| [`eta.estimate` / `eta.outcome`](#etaestimate--etaoutcome) | log, OTLP only | `observability/eta.rs` | yes | drop, pending loom-ui agreement (predictions, not facts) |
+| [`eta.snapshot`](#etasnapshot) | native only | `observability/eta_snapshot.rs` | yes | drop, pending loom-ui agreement. loom-ui consumes it natively today. |
+| [`eta.fit`](#etafit) | log, OTLP only | `observability/eta_fit.rs` | yes | drop, pending loom-ui agreement |
+| [`eta.fleet_refresh`](#etafleet_refresh) | log, OTLP only | `observability/eta_fleet_refresh.rs` | yes | drop, pending loom-ui agreement |
+| [`eta.backtest.fold` / `eta.backtest.summary`](#etabacktestfold-and-etabacktestsummary) | log, OTLP only | `observability/eta_nightly_folds.rs` | yes | drop, pending loom-ui agreement |
+| `loom.eta.health.*` (14 gauges, [`metric.points`](#metricpoints)) | metric | `observability/ops/eta_health.rs` | yes | drop, pending loom-ui agreement |
+
+ETA-only records leave the daemon by two kinds of path, not one:
+
+- **Collector tick.** The `eta::record`, `eta_snapshot::record` and
+  `ops::eta_health::record` calls in `observability/collector.rs` emit
+  `eta.estimate` / `eta.outcome`, `eta.snapshot` and the `loom.eta.health.*`
+  gauges.
+- **Separate task paths.** Each of these has its own `spawn_task`
+  registration in `observability/mod.rs` and offers to the sink directly:
+  `eta.fit` from `observability/eta_fit.rs`, `eta.fleet_refresh` from
+  `observability/eta_fleet_refresh.rs`, and `eta.backtest.fold` /
+  `eta.backtest.summary` from `observability/eta_nightly_folds.rs`.
+
+Removal stages must cover both paths. The `eta.stage_outcome` and
+`pr.resolved` rows are owned by the files named in the table above.
+
+**Non-ETA records that borrow an ETA type.**
+[`pass.summary` / `pass.verdict`](#passsummary-and-passverdict),
+[`auto_update.tick`](#auto_updatetick),
+[`token_ranking.refresh`](#token_rankingrefresh), and the `release_fetch` and
+`stale_blocked` release telemetry use `Provenance` as their `loom` object.
+They stay. Stage 2 of #11098 moved `Provenance` to the neutral
+`telemetry/provenance.rs` (`crate::eta::Provenance` is a re-export until
+Stage 3); the wire shape is unchanged, pinned by that module's serialization
+test.
+
+**Naming note.** The issue text said `eta.stage_sample`, but no record kind
+has that name. The stage-journal rows are exported as `eta.stage_outcome`.
+`StageSample` is only an in-memory type in `eta/fleet.rs`.
 
 ## Record kinds
 
@@ -2347,6 +2428,12 @@ its existing review listing and the PR read the tracker already makes. Only
 the fleet's ETA authority runs the pass, so only it emits these. At most one
 record per `(repo, pr_number, state)` per pass.
 
+**Natural key: `(repo, pr_number, state)`.** The record carries
+`loom.fact_id = derived_hex(["loom.fact", "pr.resolved", repo, pr_number,
+state], 16)`, the same on every host (no `host_id`, no `emitted_at`), so a
+reader dedupes the fact across hosts with `LIMIT 1 BY loom.fact_id`; see
+[`telemetry-replay.md`](telemetry-replay.md).
+
 The log record's **time is `resolved_at`** and its **observed timestamp is
 `observed_at`** (the knowable-at time, see "Event time vs knowable-at"
 above). The body is the record's JSON. The scalars ride as `loom.repo`,
@@ -2377,6 +2464,11 @@ review-label transitions, verdicts, `merge_hold` overlays and the
 `pr.resolved` read. A slot-turnover sample has no issue and gives no
 record. The record joins the issue's story trace when an open estimate
 knew the repo id.
+
+**Natural key: `(repo, issue, stage, left_at)`.** The record carries
+`loom.fact_id = derived_hex(["loom.fact", "eta.stage_outcome", repo, issue,
+stage, left_at], 16)` (`left_at` as RFC 3339 UTC, nanoseconds), the same on
+every host; see [`telemetry-replay.md`](telemetry-replay.md).
 
 The log record's **time is `left_at`** and its **observed timestamp is
 `observed_at`**. The body is the record's JSON. The scalars ride as

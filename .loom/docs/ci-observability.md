@@ -585,6 +585,10 @@ offers every line past a byte cursor (`export-cursor.json`) to the configured
 exporter queue(s), so records reach SigNoz whenever `observability` is
 enabled. Only complete lines are read.
 
+> **Memory attribution (#11114).** A dated Linux investigation of daemon memory
+> with CI telemetry off/on and a streamed export is in
+> [`docs/notes/ci-telemetry-memory-attribution-11114.md`](https://github.com/rjwalters/loom/blob/main/docs/notes/ci-telemetry-memory-attribution-11114.md).
+
 ### Journal rotation (#11045)
 
 The journal is never read whole. The torn-tail repair reads only the last

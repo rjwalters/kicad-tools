@@ -427,7 +427,12 @@ if [[ "${LOOM_SWEEP_CPU_QUOTA:-1}" != "0" ]]; then
     fi
 
     if command -v is_linux_systemd >/dev/null 2>&1 && is_linux_systemd; then
-        _cpu_quota_props=(-p "CPUQuota=${_cpu_quota_pct}%")
+        # OOMPolicy=continue (issue #11076): the systemd default (stop) tears
+        # down the WHOLE scope when the kernel OOM-kills any one child (a
+        # `git`/`rustc`), SIGTERMing the claude CLI; the resilient wrapper then
+        # retries while the daemon has already released the sweep as dead. With
+        # `continue` only the offending command fails and the agent can react.
+        _cpu_quota_props=(-p "CPUQuota=${_cpu_quota_pct}%" -p "OOMPolicy=continue")
         if [[ "$_cpu_wallclock" != "0" ]]; then
             _cpu_quota_props+=(-p "RuntimeMaxSec=${_cpu_wallclock}")
         fi

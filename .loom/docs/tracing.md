@@ -173,11 +173,29 @@ secrets scrubbed by the daemon, no separate collector — see the agent telemetr
 relay in [`observability.md` §3d](observability.md#3d-agent-telemetry-relay-issue-10964)
 (#10964); when both are on, the relay's endpoint wins.
 
-Phase timing has two explicit forms. An explicitly launched role has an observed
-start; its checkpoint completes that attempt. A role performed inside one
-third-party CLI session has only an observed checkpoint completion, represented
-as a zero-duration phase/role span. `loom.timing_source` distinguishes these from
-legacy polling observations. Checkpoint writes preserve repeated Judge rejections,
+Phase timing has three explicit forms, distinguished by `loom.timing_source`
+(and from legacy polling observations):
+
+- **Explicitly launched role** (`owned_boundary`): a standalone worker process
+  has an observed start; its checkpoint completes that attempt.
+- **Begun sweep phase** (`checkpoint_begin_observed`, #9935): a role performed
+  as a subagent inside one orchestrator CLI session — every `/loom:sweep`
+  curator, builder, judge, doctor and merge phase — is opened at its dispatch
+  instant by `sweep-checkpoint begin ISSUE ROLE [--attempt N] [--model M]`.
+  That call is telemetry only: it never reads or writes the checkpoint file, so
+  resume (which keys on the file's `phase`) is unaffected. The phase's later
+  `*-done`/`judge-rejected` write completes the same attempt, which closes as
+  `owned_start_checkpoint_completion` with `loom.attempt.worked="true"` and a
+  duration equal to dispatch → checkpoint. Begun attempts carry `loom.issue`,
+  so parallel builders in one wave each complete their own. A re-dispatch of
+  the same phase closes the earlier still-open begin as `loom.result=superseded`
+  (`worked` absent); a begin never followed by its checkpoint is closed at
+  execution end as `exit_unobserved` / `terminal_observed` (`worked` absent).
+- **Completion only** (`checkpoint_write_observed` / `checkpoint_poll_observed`):
+  a checkpoint with no observed start — an older orchestrator prompt or binary
+  without `begin`, a phase skipped without a dispatch (e.g. an already-curated
+  issue), or a legacy poll — is represented as a zero-duration phase/role span
+  with `worked="false"`. That is the only legitimate zero-duration attempt. Checkpoint writes preserve repeated Judge rejections,
 Doctor completions, and subsequent Judge approvals even between daemon polls.
 The terminal checkpoint helper journals after its atomic write succeeds. It does
 not infer an earlier start or a missing verdict. A caller that bypasses that

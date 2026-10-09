@@ -967,10 +967,12 @@ the plan/ordering/checklist; the per-phase shell is rendered in
 6. **workspace-clone** — `gh repo clone` each `--repo` + `loom-daemon init`
    (installs the `/loom:sweep` command, #4027).
 7. **workspace-register** — `loom-daemon workspace add` each repo at `--priority`.
-8. **daemon-unit** — a systemd `--user` unit (`Restart=on-success`,
+8. **daemon-unit** — a systemd `--user` unit (`Restart=always` minus the
+   stay-down exit codes, `OOMPolicy=continue`,
    `Environment=LOOM_DAEMON_SUPERVISOR=systemd`, `loginctl enable-linger`) —
-   mirroring the canonical `render_systemd_unit()` policy in
-   `loom-daemon-start.sh` (#4268) so `restart --drain` (#4090) works on fleet
+   rendered from the SAME supervision block as the canonical unit
+   (`systemd_supervision_block()`, #11058; see "Supervisor exit-code contract"
+   below) so `restart --drain` (#4090) works on fleet
    workers (#4640). `WorkingDirectory=` is pinned to a workspace clone as the
    **#4292** token-pool-cwd workaround — the rendered unit carries a `#4292`
    marker so it is removed when that lands.
@@ -981,7 +983,7 @@ the plan/ordering/checklist; the per-phase shell is rendered in
 
    **The guard vetoes on the daemon's own reported eligibility, not on bare
    process presence (#5565).** Under the fleet's own `daemon-unit` systemd
-   `Restart=on-success` supervision (step 8 above), a stage-1 `autonomous.idleExit`
+   `Restart=always` supervision (step 8 above), a stage-1 `autonomous.idleExit`
    self-exit is respawned immediately — so a veto on `pgrep -f loom-daemon`
    (the pre-#5565 behavior) could never observe an absent daemon, making
    `--idle-shutdown-minutes` a silent no-op on every `fleet add-worker`-provisioned
@@ -1766,7 +1768,7 @@ workspace's default branch (never the working tree) and classifies it:
 |---|---|---|
 | `W0` | the installed files equal this daemon's payload | nothing |
 | `W1` | compatible, but the files differ | tries the claim |
-| `W3` | too old for this daemon or the floor, and the files differ | as `W1`, first |
+| `W3` | too old for this daemon or the floor, and the files differ | as `W1`, first. Dispatch is held only if nothing vouches for the files (see "Dispatch holds") |
 | `W4` | the installed files need a newer daemon, or record a version that cannot be ordered | reports only |
 | `repo-ahead` | installed by a newer daemon, and still compatible with this one | reports only |
 | `skipped` | the Loom source repo, a non-GitHub origin, or no Loom on the default branch | nothing |
@@ -1809,8 +1811,10 @@ cannot work with this daemon. The checkout copy is
 | a contract field that cannot be ordered, such as `0.20.0-rc1`, and `requires_daemon` above the running daemon | held | `daemon-too-old` | yes, for `requires_daemon` |
 | a contract field that cannot be ordered, and `requires_daemon` at or below the running daemon | held | `daemon-too-old` | no |
 | a contract field that cannot be ordered, and no `requires_daemon` that parses | held | `daemon-too-old` | yes, for any release after this one; WARN once per workspace |
-| too old for this daemon or the floor, **and** the files differ from the payload (`W3`) | held | `install-incompatible` | no |
+| too old for this daemon or the floor, **and** the files differ from the payload (`W3`), **and** no `requires_daemon` that parses | held | `install-incompatible` | no |
+| below this daemon's `supports_installed`, and the files differ (`W3`) | held | `install-incompatible` | no |
 | a resync to a release above this daemon was interrupted there (`resync_pending`) | held | `install-incompatible` | no |
+| behind only the floor, `requires_daemon` at or below the running daemon (`W3`) | not held; still resynced first | | no |
 | too old by its stamp, files equal to the payload (`W0`) | not held | | no |
 | installed by a newer daemon, `requires_daemon` at or below this one (`repo-ahead`) | not held | | no |
 | compatible, or a resync owed (no `requires_daemon`) | not held | | no |
@@ -1823,6 +1827,16 @@ cannot work with this daemon. The checkout copy is
   forward one release at a time. While the newer files' `requires_daemon` is
   at or below this daemon, this host keeps working the repo, never resyncs it
   downward, and reports `repo-ahead`.
+- **Behind, but compatible, is not held (#11052).** A floor roll leaves
+  every repo one release behind the new floor at once, and the fleet resyncs
+  a few repos a minute. Holding each until its resync landed left hosts idle
+  for 15-20 minutes. A `W3` copy whose `requires_daemon` is at or below the
+  running daemon, and whose `loom_version` is at or above the daemon's
+  `supports_installed`, is behind only the floor: its own files say they work
+  here. It is not held. It is still `W3`, so the pass still resyncs it, and
+  first. A `W3` copy with no `requires_daemon` that parses is held, because
+  nothing on record says its files work with this daemon. So is one below
+  `supports_installed`, which is a break the daemon declared.
 - **A version that cannot be ordered rolls only for a need.** Such a copy
   is held, because it may be newer than this daemon. Whether it also asks
   for a roll is decided by its `requires_daemon` alone when that parses:
@@ -1863,10 +1877,19 @@ cannot work with this daemon. The checkout copy is
   it is what clears a `W3` hold. A terminal a person opens over IPC is not
   dispatch. Until the first workspace pass after a restart has finished there
   are no holds at all (see "After a restart" below).
-- **How it clears.** The holds are rebuilt on every pass. `W3` clears on the
-  first pass after a resync has landed on the default branch and this host's
-  checkout is current. `W4` clears once this host runs a daemon at or above
-  `requires_daemon`. A workspace that leaves the registry is dropped.
+- **How it clears.** The holds are rebuilt on every pass. A `W3` hold on the
+  default branch clears on the first pass after a resync has landed there. A
+  `W3` hold on the checkout copy is judged again right after the checkout
+  step fast-forwards that checkout, so it clears in the same pass the
+  checkout caught up, not one interval later. `W4` clears once this host runs
+  a daemon at or above `requires_daemon`. A workspace that leaves the
+  registry is dropped.
+- **How long a roll held dispatch.** When the last `install-incompatible`
+  hold since the daemon started clears, the daemon logs one INFO line: how
+  many workspaces were held and how long after the first workspace pass the
+  last one cleared. It waits until a pass has judged every workspace's
+  default branch, so one the pass budget has not reached yet cannot end it
+  early. Once per process; a roll that held nothing logs nothing.
 - **A hold that stands for 30 minutes alerts** at ERROR, and again every 30
   minutes for as long as it stands. Every set, clear and standing alert is
   published on the event-bus topic `fleet_sync.workspace_hold`. The
@@ -6326,6 +6349,11 @@ says** (#10954): the loop is spawned on every host with a fleet store, and
   --drain --then-exit` or `fleet drain`) does hold a roll: that tick is
   skipped. `restart --abort-drain` clears that record and releases the hold.
   A `stopped` host exits at boot, before the loop starts.
+- **A manual `loom-daemon-update.sh` asks first** (#11044). Run by hand on a
+  fleet host, it warns before installing a version that moves the host off
+  the floor, asks `[y/N]` on a terminal and refuses without one unless given
+  `--yes`. `--to-floor` installs exactly the floor's release. See [Fleet floor
+  check](#self-update-rebuild--provision--restart-3968).
 
 ### Sweep-outcome issue write-back (#9056)
 
@@ -8044,7 +8072,7 @@ are unchanged on every host. Code: `observability/captain_gauges.rs`.
 | `fleet.captainGauges.standDown` | `false` | On a dispatcher: skip a job for the repos a fresh heartbeat covers. Env `LOOM_CAPTAIN_GAUGES_STAND_DOWN` (`0`/`1`) overrides it per host |
 | `fleet.captainGauges.maxAgeSecs` | `1800` | A job's published `as_of` older than this is stale and the dispatcher produces locally again. Two publish intervals plus two collector passes, the fleet refresh's own liveness rule |
 | `fleet.captainGauges.publishIntervalSecs` | `600` | How often the captain writes the heartbeat |
-| `fleet.captainGauges.ref` | `fleet.etaFitRef` (`eta-fit`) | The fleet-store branch the heartbeat lives on. Never the store's reviewed branch or `main` |
+| `fleet.captainGauges.ref` | `eta-fit` (legacy fallback: `fleet.etaFitRef`) | The fleet-store branch the heartbeat lives on. Never the store's reviewed branch or `main` |
 | `fleet.captainGauges.starFacts` | `false` | Part 2 job **`star-facts`**. Captain (with `enabled`): list every operator label per repo and publish how many open starred issues each has. Dispatcher (with `standDown`): skip the starred-issue liveness evaluator for a repo the captain freshly reports as having none |
 | `fleet.captainGauges.queueBlocked` | `false` | Part 2 job **`queue-blocked`**. Captain: list `loom:blocked` per repo and publish number, creation time and label names. Dispatcher: build its `queue.snapshot` blocked rows from that instead of listing |
 | `fleet.captainGauges.starFactsMaxAgeSecs` | `900` | The staleness bound for `star-facts` alone, in place of `maxAgeSecs`: two collector passes plus slack. A believed "no star here" is a skipped liveness pass, so this bounds how long a new star can go unevaluated when the captain stops reporting. While it produces `star-facts`, the captain republishes at least every `starFactsMaxAgeSecs − 600` s (300 s at the default) so its facts stay inside the bound |
@@ -11299,11 +11327,14 @@ non-zero, and `Type=simple`'s default "clean exit" criterion is exit `0` or
 termination BY one of SIGHUP/SIGINT/SIGTERM/SIGPIPE, neither of which matches
 a `std::process::exit(143)` *exit code*. `render_systemd_unit()` now sets
 `SuccessExitStatus=143 130` (reclassifies both as a clean exit) paired with
-`RestartPreventExitStatus=143 130` (belt-and-braces: vetoes `Restart=on-success`
-firing on those codes regardless of *how* the process died, since
+`RestartPreventExitStatus=143 130` (belt-and-braces: vetoes a relaunch on
+those codes regardless of *how* the process died, since
 `SuccessExitStatus=` widens what a bare `kill -TERM` outside `systemctl`
 would count as "clean" — see the rationale comment at the `printf` site in
 `loom-daemon-start.sh` for the full systemd.service(5)-sourced argument).
+Since #11058 the unit runs `Restart=always`, and `RestartPreventExitStatus=` is
+no longer belt-and-braces: it is the whole stay-down list (`1 79 130 143
+SIGTERM SIGINT`, see "Supervisor exit-code contract" below).
 
 **Known caveat, deliberately left unresolved here.** `restart_scheduled_message`'s (in the loom source repo's `loom-daemon/src/ipc.rs`)
 systemd wording — "in-flight sweeps and role runs do NOT survive on systemd,
@@ -11917,7 +11948,10 @@ without an Aqua session, not regressions introduced here.
   SIGTERM operator stop (143), and on a SIGINT/Ctrl-C (130), this **preserves** the
   old no-crash-loop semantics of `KeepAlive=false` — none of those respawn — while
   making the one deliberate clean-exit path (the `RestartDaemon` request, `loom-daemon
-  restart`) the *only* thing that trips a relaunch. `loom-daemon-stop.sh` still
+  restart`) the *only* thing that trips a relaunch. Since #11058 the dict also
+  carries `Crashed=true`, so a death by a crash signal (`SIGSEGV`, `SIGABRT`, …)
+  is relaunched too; the non-zero `exit()` codes above still stay down (see
+  "Supervisor exit-code contract" below). `loom-daemon-stop.sh` still
   `bootout`s the loaded definition after confirming the process is dead (so an
   explicit stop is honored at the next login too), but the bootout is now
   belt-and-braces: the non-zero SIGTERM exit already prevents launchd from relaunching
@@ -12039,8 +12073,10 @@ disable-on-stop. The contract mirrors launchd point-for-point:
 | launchd (Darwin) | systemd `--user` (Linux) |
 |---|---|
 | `RunAtLoad=true` + `launchctl enable` (#3972) | `[Install] WantedBy=default.target` + `systemctl --user enable` |
-| `KeepAlive:{SuccessfulExit:true}` — relaunch only on a clean exit `0` (#4054) | `Restart=on-success` — relaunch only on a clean exit `0` (exact analog; a crash / operator SIGTERM/SIGINT exits non-zero and stays down) |
-| (no cgroup-timeout reclassification of a clean exit — not applicable) | `KillMode=mixed` (#4862) — without it, a clean exit(0) with lingering cgroup children (in-flight `claude`/`tee`/`sleep` sweep workers) gets reclassified `Result=timeout` by the default `control-group` mode once `TimeoutStopSec` elapses, and `Restart=on-success` does not match `timeout` — so the relaunch silently never fires. `mixed` escalates the leftover-process SIGKILL sweep on the *main process's own exit*, not after `TimeoutStopSec`, so the unit's `Result` tracks the main process's exit status |
+| `KeepAlive:{SuccessfulExit:true, Crashed:true}` — relaunch on a clean exit `0` (#4054) or a crash-signal death (#11058) | `Restart=always` + `RestartPreventExitStatus=1 79 130 143 SIGTERM SIGINT` — relaunch on everything but the stay-down exits (#11058; was `Restart=on-success`). See "Supervisor exit-code contract" below |
+| (no cgroup analog — a killed child never takes its parent's job down) | `OOMPolicy=continue` (#11058) — under the systemd default `OOMPolicy=stop`, the kernel OOM-killing ONE child in the unit's cgroup (a `git`, a sweep) stopped the whole unit |
+| (no start-rate limit; launchd throttles relaunches to one per 10s) | `RestartSec=5` + `[Unit] StartLimitIntervalSec=600` / `StartLimitBurst=5` (#11058) — bounds a crash loop; past the limit the unit is `failed` and the watchdog takes over |
+| (no cgroup-timeout reclassification of a clean exit — not applicable) | `KillMode=mixed` (#4862) — without it, a clean exit(0) with lingering cgroup children (in-flight `claude`/`tee`/`sleep` sweep workers) gets reclassified `Result=timeout` by the default `control-group` mode once `TimeoutStopSec` elapses, and the then-current `Restart=on-success` did not match `timeout` — so the relaunch silently never fired. `mixed` escalates the leftover-process SIGKILL sweep on the *main process's own exit*, not after `TimeoutStopSec`, so the unit's `Result` tracks the main process's exit status |
 | (no `TimeoutStopSec` analog — launchd's `KeepAlive` has no stop-timeout escalation) | `TimeoutStopSec=20` (#4950) — the daemon's own stop paths (`RestartDaemon`'s `exit(0)`, the SIGTERM handler's `exit(143)`) are near-instant with no blocking drain, so 20s is a generous multiple, not a tight fit; it exists purely as a fast-failure backstop against a regression or a stale, not-yet-re-rendered unit, well below systemd's 90s default |
 | `launchctl bootout` on operator stop | `systemctl --user disable --now <unit>` |
 | plist `EnvironmentVariables` (`LOOM_DAEMON_SUPERVISOR=launchd`, forwarded `LOOM_*`/tokens, deterministic PATH #4172) | `Environment=` lines (`LOOM_DAEMON_SUPERVISOR=systemd`, same forwarded env + PATH) |
@@ -12079,16 +12115,15 @@ disable-on-stop. The contract mirrors launchd point-for-point:
   bootout-did-not-stick check). `LOOM_DAEMON_SYSTEMD=0` disables all systemd
   interaction symmetrically, so a `--no-systemd` (nohup) start gets a stop that
   never touches the user manager.
-- **Crash relaunch is out of scope.** `Restart=on-success` deliberately does
-  **not** relaunch a crashed daemon (a non-zero exit) — that is watchdog territory.
-  On a systemd host it is delivered by the `<unit>-watchdog.timer` +
+- **Crash relaunch (#11058).** The unit relaunches an involuntary death itself
+  (`Restart=always`, bounded by the start-rate limit), and launchd relaunches a
+  crash-signal death (`Crashed=true`). The `<unit>-watchdog.timer` +
   `Type=oneshot` `.service` pair (#4260 sub-issue D, "Autonomy-loss watchdog +
   heartbeat" above), mirroring the macOS `StartInterval` autonomy-loss watchdog
-  (#4011) — the watchdog mostly *reports* divergence, except for the narrow
-  #4232/#4862 auto-remediation gates (unit LOADED + not running + a clean
-  `ExecMainStatus=0`, mirroring `launchctl kickstart`), which run `systemctl
-  --user reset-failed <unit> && systemctl --user start <unit>` — never for a
-  crash or an operator stop.
+  (#4011), is the second layer: it revives what the supervisor leaves down
+  while the autonomy marker says a daemon is expected (#6388) — a launchd
+  `SIGKILL`/panic, a stray `kill -TERM`, a unit past its start limit.
+
 - **The `restart` primitive itself also verifies, synchronously (#4950).** The
   watchdog gate above is a periodic (timer-driven) safety net; it can be
   minutes away from the moment a roll actually breaks the relaunch. So
@@ -12100,11 +12135,51 @@ disable-on-stop. The contract mirrors launchd point-for-point:
   (Result: timeout)` because `TimeoutStopSec` (now bounded to 20s, see
   "systemd unit rendering" below) had not yet been applied to the live,
   already-installed unit. When the poll times out AND the unit's `ActiveState`
-  is confirmed `failed` — `Restart=on-success` never auto-relaunches a `failed`
-  unit — it self-heals with the identical `systemctl --user reset-failed
+  is confirmed `failed` — systemd never auto-relaunches a `failed` unit, under
+  any `Restart=` policy — it self-heals with the identical `systemctl --user reset-failed
   <unit> && systemctl --user start <unit>` recovery, re-polls
   (`LOOM_DAEMON_RESTART_KICKSTART_POLL_SECS`, default 15s), and only then gives
   up (exit 7) with a `systemctl --user status` diagnostic snapshot.
+
+#### Supervisor exit-code contract (#4054, #6129, #11058)
+
+The daemon encodes WHY it exits in its exit code (`ipc.rs`,
+`fleet_state.rs`), and both supervisors relaunch or stay down on that code:
+
+| Exit | Constant | Cause | systemd (`Restart=always`) | launchd (`KeepAlive`) |
+|---|---|---|---|---|
+| `0` | `EXIT_RESTART` | supervised restart (`restart`, `--drain`, auto-update roll), `autonomous.idleExit` | relaunch | relaunch (`SuccessfulExit`) |
+| `1` | `EXIT_STARTUP_FAILURE` | startup refusal (singleton guard, any `Err` out of `run_daemon`) | stay down | stay down |
+| `79` | `EXIT_FLEET_STOPPED` | the fleet run state is `stopped` | stay down | stay down |
+| `130` | `EXIT_SIGINT` | Ctrl-C | stay down | stay down |
+| `143` | `EXIT_SIGTERM` / `EXIT_SHUTDOWN` | SIGTERM, IPC `Shutdown`, `restart --drain --then-exit` | stay down | stay down |
+| signal | — | `SIGTERM` / `SIGINT` before the handler is installed | stay down | stay down |
+| signal | — | `SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGILL`, … (crash) | relaunch | relaunch (`Crashed`) |
+| signal | — | `SIGKILL` (kernel OOM kill, jetsam, `kill -9`) | relaunch | **stay down** — watchdog revives |
+| `101` | — | unwinding panic | relaunch | **stay down** — watchdog revives |
+| — | — | `systemctl --user stop`/`disable --now`, `launchctl bootout` | stay down | stay down |
+
+- **systemd**: the stay-down rows are `RestartPreventExitStatus=1 79 130 143
+  SIGTERM SIGINT`, built from the constants by
+  `systemd_restart_prevent_exit_status()` so the unit cannot drift from the code.
+  `RestartSec=5` and `StartLimitIntervalSec=600`/`StartLimitBurst=5` bound a
+  crash loop. `OOMPolicy=continue` keeps one OOM-killed child from stopping the
+  unit at all.
+- **launchd** cannot say "relaunch on everything but these codes". It does not
+  count `SIGKILL` as a crash and a panic is a plain `exit(101)`, so those two
+  rows still stay down under launchd; an unconditional `KeepAlive=true` would
+  close them but would also relaunch every stay-down exit, including
+  `--then-exit` (#4521). The autonomy-loss watchdog covers them instead.
+- **A `kill -9` of a systemd-supervised daemon is relaunched**, because it is
+  indistinguishable from an OOM kill. Stop with `loom-daemon-stop.sh` or
+  `systemctl --user disable --now`.
+- **Existing installs pick the new unit up on re-render**: `loom-daemon-update.sh
+  --relaunch` (re-renders via `loom-daemon-start.sh`; on a fleet worker it
+  rewrites the same `loom-daemon.service`), or any fresh `loom-daemon-start.sh`
+  against a stopped daemon. A plain supervised restart (exit 0) does NOT
+  re-render: the relaunched process runs under the unit systemd already has
+  loaded. `fleet add-worker` skips its `daemon-unit` step on a worker whose unit
+  is already enabled, so use `--relaunch` there too.
 
 ### macOS TCC hygiene under launchd (#3980)
 
@@ -12267,10 +12342,11 @@ loom-daemon restart --reload-supervisor   # launchd only: bootout+bootstrap the 
                                            # see "Changing daemon environment variables" below)
 ```
 
-- **Mechanism (macOS):** the plist uses `KeepAlive:{SuccessfulExit:true}` and the
-  daemon exits `0` **only** for a `RestartDaemon` request, so launchd relaunches
-  the job on that one clean exit and leaves it down on every other (SIGTERM 143,
-  SIGINT 130, crash non-zero). The relaunched process comes back with **exactly**
+- **Mechanism (macOS):** the plist uses `KeepAlive:{SuccessfulExit:true,
+  Crashed:true}` and the daemon exits `0` **only** for a `RestartDaemon` request,
+  so launchd relaunches the job on that one clean exit (and on a crash-signal
+  death, #11058) and leaves it down on every deliberate non-zero exit (SIGTERM
+  143, SIGINT 130, startup refusal 1, fleet-stopped 79). The relaunched process comes back with **exactly**
   its start flags/env as launchd already has them bootstrapped in memory — **never
   a fresh read of the on-disk plist file** (see "Changing daemon environment
   variables" immediately below — this is not the widening-safe guarantee it
@@ -12838,7 +12914,64 @@ manually rebuilt the Rust binary, reprovisioned it, and restarted the process.
 ./.loom/scripts/cli/loom-daemon-update.sh --fetch        # REQUIRE a verified release artifact (never silently fall back to a source build); exit 1 if none resolves
 ./.loom/scripts/cli/loom-daemon-update.sh --no-fetch     # never consider release artifacts; always build from local source (pre-#5020 behavior)
 ./.loom/scripts/cli/loom-daemon-update.sh --resolve-json # READ-ONLY (#7609): print ONE JSON object describing the latest release artifact + the installed binary, then exit -- no fetch, no git fetch, no build, no provision, no restart
+./.loom/scripts/cli/loom-daemon-update.sh --yes          # fleet host (#11044): install even if it moves this host off the fleet floor, without asking (= LOOM_DAEMON_UPDATE_YES=1)
+./.loom/scripts/cli/loom-daemon-update.sh --to-floor     # fleet host (#11044): install exactly the floor's release (--fetch --tag v<floor>); nothing to do at or above the floor
 ```
+
+**Fleet floor check (#11044).** On a fleet host the version is set by the
+fleet floor and the host moves only when the floor moves ([The fleet floor
+drives rolls](#the-fleet-floor-drives-rolls-no-roll-windows-10885)). A manual
+run of this script would otherwise install the newest release (or a source
+build) and silently leave one host ahead of the fleet. So, before it fetches,
+builds or provisions anything, it compares the version it is about to install
+with the floor and the installed version:
+
+| Floor | About to install | Result |
+|---|---|---|
+| no fleet store (not a fleet host) | anything | unchanged, nothing printed |
+| set | the floor's version, or the installed version again | unchanged, nothing printed |
+| set | above the floor, installed version below it (catching up) | unchanged, nothing printed: a floor roll goes there too |
+| set | above the floor, installed version at or above it | warning: moves the host **ahead of the fleet** |
+| set | below the floor | warning: moves the host **below the floor** |
+| unknown (a store, but no floor known) | anything | warning: the floor is not known |
+
+On a warning a run with a terminal on stdin asks `Continue? [y/N]`, and only a
+typed `y` continues. A run without one **refuses** with exit 1 and names the
+override, and never reads stdin. `--yes` or `LOOM_DAEMON_UPDATE_YES=1`
+continues without asking. `--dry-run` prints the warning and never asks.
+`--check` and `--resolve-json` are unchanged.
+
+```text
+This host is in fleet 2AMLogic/fleet-gitops with loom_min_version 0.19.950 (fleet-sync snapshot of 2026-10-09T03:30:25Z). Installing 0.19.953 (release v0.19.953) moves it ahead of the fleet; the fleet changes version by raising the floor.
+Continue? [y/N]
+```
+
+- **How a fleet host is detected.** Without contacting the daemon, so a busy,
+  wedged or stopped daemon cannot hang the script: a store resolved the way
+  the daemon resolves it (`LOOM_FLEET_REPO` over `fleet.repo` in the
+  effective config), **or** a fleet-sync snapshot
+  (`~/.loom/fleet-sync-status.json`, under `LOOM_SOCKET_PATH`'s directory when
+  that is set). The snapshot counts on its own because a host often names its
+  store only in the daemon's launchd plist or systemd unit, which an
+  operator's shell does not carry; the daemon deletes the snapshot at startup
+  when it reads no store, so a snapshot present means it reads one.
+- **Where the floor comes from, and how stale it can be.** The snapshot's
+  `floor`. While the daemon runs it is at most one `fleet.syncIntervalSecs`
+  old; with the daemon stopped it is as old as the daemon's last pass. The
+  warning names the snapshot's time. A store with no snapshot, a snapshot with
+  no floor, or a snapshot for a different store is "unknown".
+- **Runs Loom starts itself never prompt.** The daemon's self-update loop,
+  `fleet roll` and `fleet add-worker` set `LOOM_DAEMON_UPDATE_INVOKER`
+  (`daemon`, `fleet-roll`, `add-worker`). Such a run prints the warning and
+  continues: it has no terminal, and the daemon's own floor rolls target a
+  release at or above the floor anyway. `fleet roll` is an explicit operator
+  command, so it is treated as confirmed; on a fleet host prefer raising the
+  floor.
+- **`--to-floor`** installs exactly the floor's release (`v<floor>`, as
+  `--fetch --tag`) to bring a lagging host up to the fleet, for example a
+  fleet-paused host held by an operator stop. A host already at or above the
+  floor installs nothing (exit 0); it never moves a host down. A host with no
+  fleet store, or whose floor is unknown, is refused (exit 1).
 
 **One-shot drain roll (Issue #5138).** Before this, a drained roll needed the
 documented two-step dance — `loom-daemon-update.sh --no-restart` followed by a

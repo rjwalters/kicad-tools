@@ -59,6 +59,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-stub.sh"
 write_scope_allow_all "$WS_STUB_DIR"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCRIPT="$HELPERS_DIR/check-main-clean.sh"
+# #11075: --quarantine asks `loom-daemon stashes build-trees` which cargo build
+# trees to exclude, so the 11075 cases need THIS checkout's build. FATAL, not a
+# skip, without one (wired in the "Native Port Suites" job for that reason).
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$HELPERS_DIR" "stashes"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -1117,6 +1123,193 @@ else
     fail "expected 3 naming only leaked_module.py, got rc=$RC; out=$out"
 fi
 rm -rf "$REPO"
+
+# -------- Test: --quarantine never stashes a cargo target tree (#11075) --------
+echo "Test 11075: --quarantine excludes CACHEDIR.TAG trees from refs/stash"
+REPO=$(make_repo_with_source)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-11075.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+for d in target-x .cargo-target; do
+    mkdir -p "$REPO/$d/debug"
+    printf 'Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n' > "$REPO/$d/CACHEDIR.TAG"
+    printf 'bin\n' > "$REPO/$d/debug/artifact.o"
+done
+mkdir -p "$REPO/target-staged"
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > "$REPO/target-staged/CACHEDIR.TAG"
+printf 'bin\n' > "$REPO/target-staged/a.o"
+git -C "$REPO" add target-staged
+# An untagged target/ is hand-authored content and MUST still be rescued.
+mkdir -p "$REPO/target"; printf 'keep\n' > "$REPO/target/hand.txt"
+printf 'def leaked(): pass\n' > "$REPO/leaked_module.py"
+out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine --label "run=R issue=11075" 2>&1 ); RC=$?
+if [[ "$RC" -eq 4 ]]; then pass "quarantine with target trees present exits 4"; else fail "expected 4, got $RC; out=$out"; fi
+STASH_FILES=$( { git -C "$REPO" ls-tree -r --name-only 'stash@{0}^3' 2>/dev/null; git -C "$REPO" ls-tree -r --name-only 'stash@{0}' 2>/dev/null; git -C "$REPO" ls-tree -r --name-only 'stash@{0}^2' 2>/dev/null; } )
+if grep -q 'leaked_module.py' <<<"$STASH_FILES" && grep -q '^target/hand.txt' <<<"$STASH_FILES"; then
+    pass "real untracked files (and untagged target/) are still stashed"
+else
+    fail "rescue weakened; stash holds: $STASH_FILES"
+fi
+if grep -qE '^(target-x|target-staged|\.cargo-target)/' <<<"$STASH_FILES"; then
+    fail "cargo target tree leaked into refs/stash: $STASH_FILES"
+else
+    pass "no CACHEDIR.TAG tree blob in refs/stash"
+fi
+rm -rf "${REPO:?}"
+
+# stash_files <repo> -> every path in stash@{0}'s worktree, index and untracked trees.
+stash_files() {
+    local r
+    for r in 'stash@{0}' 'stash@{0}^2' 'stash@{0}^3'; do
+        git -C "$1" ls-tree -r --name-only "$r" 2>/dev/null || true
+    done
+}
+
+# -------- Test: IGNORED markers, .rustc_info.json-only trees, staged artifacts (#11075) --------
+echo "Test 11075b: --quarantine finds ignored / untagged cargo markers on disk"
+REPO=$(make_repo_with_source)
+printf 'CACHEDIR.TAG\n.rustc_info.json\n' >> "$REPO/.gitignore"
+git -C "$REPO" commit -q -am "ignore cargo markers"
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-11075b.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+SIG='Signature: 8a477f597d28d172789f06886806bc55'
+mkdir -p "$REPO/target-x/debug" "$REPO/cargo-out/debug" "$REPO/target-staged" "$REPO/nested/target-y/debug"
+printf '%s\n' "$SIG" > "$REPO/target-x/CACHEDIR.TAG"
+printf 'bin\n' > "$REPO/target-x/debug/artifact.o"
+# No CACHEDIR.TAG at all: only cargo's .rustc_info.json (the #9748 / #9989 shape).
+printf '{"rustc_fingerprint":1234,"outputs":{}}\n' > "$REPO/cargo-out/.rustc_info.json"
+printf 'bin\n' > "$REPO/cargo-out/debug/b.o"
+# Staged artifacts beside an ignored marker (`git add` skips the marker itself).
+printf '%s\n' "$SIG" > "$REPO/target-staged/CACHEDIR.TAG"
+printf 'bin\n' > "$REPO/target-staged/a.o"
+git -C "$REPO" add target-staged
+# A tree nested in a collapsed untracked parent next to real work.
+printf '%s\n' "$SIG" > "$REPO/nested/target-y/CACHEDIR.TAG"
+printf 'bin\n' > "$REPO/nested/target-y/debug/c.o"
+printf 'notes\n' > "$REPO/nested/notes.txt"
+printf 'def leaked(): pass\n' > "$REPO/leaked_module.py"
+out=$( cd "$REPO" && LOOM_QUARANTINE_COMMENT=0 "$SCRIPT" --baseline "$SNAP" --quarantine --label "run=R issue=11075" 2>&1 ); RC=$?
+if [[ "$RC" -eq 4 ]]; then pass "ignored-marker quarantine exits 4 (no residual-dirt failure)"; else fail "expected 4, got $RC; out=$out"; fi
+STASH_FILES=$(stash_files "$REPO")
+if grep -q '^leaked_module.py$' <<<"$STASH_FILES" && grep -q '^nested/notes.txt$' <<<"$STASH_FILES"; then
+    pass "real work beside ignored-marker trees is still stashed"
+else
+    fail "rescue weakened; stash holds: $STASH_FILES"
+fi
+if grep -qE '^(target-x|cargo-out|target-staged|nested/target-y)/' <<<"$STASH_FILES"; then
+    fail "build tree with ignored/untagged marker leaked into refs/stash: $STASH_FILES"
+else
+    pass "no ignored-marker / .rustc_info.json tree blob in refs/stash"
+fi
+if [[ -f "$REPO/target-staged/a.o" && -f "$REPO/cargo-out/debug/b.o" ]]; then
+    pass "build-tree content left on disk"
+else
+    fail "build-tree content was removed from disk"
+fi
+rm -rf "${REPO:?}"
+
+# -------- Test: a repo-root CACHEDIR.TAG does not make every path a build tree (#11075) --------
+echo "Test 11075c: a root-level CACHEDIR.TAG never suppresses the rescue"
+REPO=$(make_repo_with_source)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-11075c.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > "$REPO/CACHEDIR.TAG"
+printf '{"rustc_fingerprint":1}\n' > "$REPO/.rustc_info.json"
+mkdir -p "$REPO/src"; printf 'work\n' > "$REPO/src/real.rs"
+printf 'modified tracked content\n' > "$REPO/tracked_source.py"
+out=$( cd "$REPO" && LOOM_QUARANTINE_COMMENT=0 "$SCRIPT" --baseline "$SNAP" --quarantine --label "run=R issue=11075" 2>&1 ); RC=$?
+if [[ "$RC" -eq 4 ]]; then pass "root-tag quarantine exits 4"; else fail "expected 4, got $RC; out=$out"; fi
+STASH_FILES=$(stash_files "$REPO")
+if grep -q '^src/real.rs$' <<<"$STASH_FILES" && [[ "$(cat "$REPO/tracked_source.py")" == "original tracked content" ]]; then
+    pass "root-level marker ignored: real work still rescued"
+else
+    fail "root-level CACHEDIR.TAG suppressed the rescue; stash holds: $STASH_FILES"
+fi
+rm -rf "${REPO:?}"
+
+# -------- Test: bogus .rustc_info.json, .loom/-nested tree, ignored tag beside staged file (#11075) --------
+echo "Test 11075d: bogus .rustc_info.json is not a marker; ignored/untagged trees excluded"
+REPO=$(make_repo_with_source)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-11075d.txt"
+printf 'CACHEDIR.TAG\n' > "$REPO/.gitignore"
+git -C "$REPO" add .gitignore && git -C "$REPO" commit -qm "ignore tags"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+# (a) valid tag that is gitignored, plus a staged copy of its artifact
+mkdir -p "$REPO/target-ign/debug"
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > "$REPO/target-ign/CACHEDIR.TAG"
+printf 'bin\n' > "$REPO/target-ign/debug/artifact.o"
+printf 'bin\n' > "$REPO/target-ign/debug/staged.o"
+git -C "$REPO" add target-ign/debug/staged.o
+# (b) target tree whose CACHEDIR.TAG is missing; only .rustc_info.json remains
+mkdir -p "$REPO/.loom/target-issue-1/debug"
+printf '{"rustc_fingerprint":123,"outputs":{}}\n' > "$REPO/.loom/target-issue-1/.rustc_info.json"
+printf 'bin\n' > "$REPO/.loom/target-issue-1/debug/b.o"
+# (c) a bogus .rustc_info.json is NOT a marker: its siblings are rescued
+mkdir -p "$REPO/notcargo"
+printf '{"other":1}\n' > "$REPO/notcargo/.rustc_info.json"
+printf 'keep\n' > "$REPO/notcargo/keep.txt"
+# (d) root-level tag must not turn every path into "build output"
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > "$REPO/CACHEDIR.TAG"
+printf 'def real(): pass\n' > "$REPO/real_work.py"
+out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine --label "run=R issue=11075" 2>&1 ); RC=$?
+STASH_FILES=$( { git -C "$REPO" ls-tree -r --name-only 'stash@{0}^3' 2>/dev/null; git -C "$REPO" ls-tree -r --name-only 'stash@{0}' 2>/dev/null; git -C "$REPO" ls-tree -r --name-only 'stash@{0}^2' 2>/dev/null; } )
+if grep -q 'real_work.py' <<<"$STASH_FILES" && grep -q '^notcargo/keep.txt' <<<"$STASH_FILES"; then
+    pass "root-level tag ignored; real dirt and bogus-marker siblings still rescued"
+else
+    fail "rescue weakened (rc=$RC); stash holds: $STASH_FILES; out=$out"
+fi
+if grep -qE '^(target-ign|\.loom/target-issue-1)/' <<<"$STASH_FILES"; then
+    fail "ignored-tag / rustc_info tree leaked into refs/stash: $STASH_FILES"
+else
+    pass "ignored CACHEDIR.TAG and .rustc_info.json-only trees excluded (incl. staged)"
+fi
+rm -rf "${REPO:?}"
+
+# -------- Test: no usable loom-daemon falls back LOUDLY to include-everything (#11075) --------
+# A missing binary, or one too old to have `stashes build-trees`, must never
+# make the quarantine skip real work. The chosen fail-safe is the pre-#11075
+# rescue (build trees included) with a warning naming the cause.
+echo "Test 11075e: missing / too-old loom-daemon -> loud include-everything fallback"
+STUB_DIR=$(mktemp -d)
+printf '#!/usr/bin/env bash\necho "error: unrecognized subcommand build-trees" >&2\nexit 2\n' > "$STUB_DIR/loom-daemon"
+chmod +x "$STUB_DIR/loom-daemon"
+# PATH minus every directory that carries a loom-daemon, so "missing" is real.
+NO_DAEMON_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | while IFS= read -r d; do [[ -x "$d/loom-daemon" ]] || printf '%s:' "$d"; done)
+for mode in old missing; do
+    REPO=$(make_repo_with_source)
+    SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-11075e.txt"
+    ( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+    mkdir -p "$REPO/target-x/debug"
+    printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > "$REPO/target-x/CACHEDIR.TAG"
+    printf 'bin\n' > "$REPO/target-x/debug/artifact.o"
+    printf 'def leaked(): pass\n' > "$REPO/leaked_module.py"
+    if [[ "$mode" == old ]]; then
+        out=$( cd "$REPO" && LOOM_QUARANTINE_COMMENT=0 LOOM_DAEMON_SELF_BIN="$STUB_DIR/loom-daemon" \
+            "$SCRIPT" --baseline "$SNAP" --quarantine --label "run=R issue=11075" 2>&1 ); RC=$?
+    else
+        out=$( cd "$REPO" && env -u LOOM_DAEMON_SELF_BIN -u LOOM_DAEMON_BIN -u CARGO_TARGET_DIR \
+            LOOM_QUARANTINE_COMMENT=0 LOOM_DAEMON_BIN_DIR="$STUB_DIR/none" PATH="${NO_DAEMON_PATH%:}" \
+            "$SCRIPT" --baseline "$SNAP" --quarantine --label "run=R issue=11075" 2>&1 ); RC=$?
+    fi
+    STASH_FILES=$(stash_files "$REPO")
+    if [[ "$RC" -eq 4 ]] && grep -q '^leaked_module.py$' <<<"$STASH_FILES"; then
+        pass "$mode daemon: real work is still quarantined (exit 4)"
+    else
+        fail "$mode daemon: rescue skipped real work (rc=$RC); stash holds: $STASH_FILES; out=$out"
+    fi
+    if grep -q 'WARNING: .*stashes build-trees' <<<"$out" && grep -q 'NOT be excluded' <<<"$out" \
+        && { [[ "$mode" == old ]] || grep -q 'not found' <<<"$out"; }; then
+        pass "$mode daemon: the fallback warns that build trees are not excluded"
+    else
+        fail "$mode daemon: fallback was silent; out=$out"
+    fi
+    if grep -q '^target-x/' <<<"$STASH_FILES"; then
+        pass "$mode daemon: fallback is the pre-#11075 include-everything rescue"
+    else
+        fail "$mode daemon: expected the include-everything fallback; stash holds: $STASH_FILES"
+    fi
+    rm -rf "${REPO:?}"
+done
+rm -rf "${STUB_DIR:?}"
 
 # -------- Summary --------
 echo ""

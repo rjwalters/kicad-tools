@@ -62,7 +62,6 @@ test-check-merge-config.sh
 test-check-host-sleep.sh
 test-check-defaults-version-bump.sh
 test-check-ingest-key-file.sh
-test-check-main-clean.sh
 test-check-main-freshness.sh
 test-check-pipefail-early-exit.sh
 test-check-promotion-landed.sh
@@ -307,3 +306,7 @@ scripts/test-changelog.sh
 # #9987: spawn-claude.sh managed-gh container admission. Hermetic: a fake daemon
 # and docker stub under mktemp -d; no network, forge or real daemon binary.
 test-spawn-claude-managed-gh.sh
+
+# #11076: spawn-claude.sh's systemd scope carries OOMPolicy=continue. Hermetic:
+# systemd-run/systemctl/claude stubs under mktemp -d, no daemon, forge or network.
+test-spawn-claude-oom-policy.sh

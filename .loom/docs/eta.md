@@ -373,10 +373,7 @@ matches the in-memory inputs.
 | `land-v1` | `land` | in-sweep phases and the stage-sample journal (turnovers too, for an unstarted issue) | after `merge_wait` |
 | `land-v2` | `land` | the same, with **right-censored** stage samples folded in (Kaplan–Meier grids) | after `merge_wait` |
 | `land-2026-10-06-even-lark` | `land` | `land-v2`'s path, then **each** of p25/p50/p75/p90 conformally calibrated against its own hit rate from `land-v2`'s landed **and** still-open (right-censored lower-bound) track record in a trailing 14-day window, per (stage, age bucket) → stage → pooled. The score is in **seconds** (`actual − q_τ`), so each quantile moves by `+ c_τ` seconds; the shift changes by at most 2 h a day. Fitted at the estimate's own `as_of` (recorded as `calibration`, `method` `split_conformal_km_seconds`; replaced the retired log-scale `land-2026-10-06-calm-plover`; #10489) | after `merge_wait` |
-| `land-2026-10-06-quick-tern` | `land` | `land-2026-10-04-twin-otter-b`'s estimate, then each of p25/p50/p75/p90 calibrated by **IPCW** split-conformal over twin-otter-b's landed and still-open track record in a **short recent window** (6 h half-life, doubling when there are too few landings), per stage → pooled. There is no rate limit; a shift within 1.5 standard errors of zero is not applied. Fitted at the estimate's own `as_of`, recorded as `calibration` with `ipcw{…}` (#10524) | at the merge |
 | `land-2026-10-06-brisk-petrel` | `land` | `land-2026-10-04-twin-otter-b`'s estimate, with p25/p50/p75/p90 scaled by the **latent-regime residual factor** (`eta/regime.rs`): the 3 h half-life weighted mean of `ln(actual / p50)` over twin-otter-b's scored outcomes from the last 24 h, clamped to 0.25-4. It is applied **only while the drift check (6 h CUSUM against the 7-day baseline) has tripped** for the item's stage, so a calm stream is served twin-otter-b's estimate byte for byte. It is identity below the sample floor or when the mean is within 3 standard errors of zero. Recorded as `regime_adjustment{stage, factor, n_recent, half_life}` (#10528). Shadow, tier `candidate` | at the merge |
-| `land-2026-10-06-swift-tern` | `land` | quick-tern made **drift-aware** (#10524 slice 3, #10528): when the stage's CUSUM drift check trips (residuals centred on the shift quick-tern would serve), the half-life ladder starts at 1.5 h instead of 6 h. The interval inflation the check asks for is recorded but not applied. Otherwise quick-tern's answer. Recorded as `calibration` with `ipcw.drift{…}` | at the merge |
-| `land-2026-10-06-bold-lark` | `land` | keen-wren's priority-aware estimate (#10508) wrapped by the same IPCW split-conformal calibrator as quick-tern (#10524 slice 4). Only keen-wren's logged rows are evidence. Recorded as `calibration` with `base = land-2026-10-06-keen-wren` | at the merge |
 | `land-2026-10-06-held-heron` | `land` | `land-2026-10-04-twin-otter-b`'s estimate, except a PR that is **held** (`merge_hold`) or **sequenced** (`merge_wait` with `loom:sequenced`) at `as_of`. That PR is answered by a competing-risks hold and sequencing chain whose hazards are events ÷ exposure over the 14 days before `as_of`, read from the stage episodes and the PR flag timeline; there are no draws. Too little evidence answers as twin-otter-b. Recorded as `held_heron` (#10523) | at the merge |
 | `land-v4` | `land` | the retired `land-v3`'s grid calibration (widened about its median, Builder scaled by `points:N`, review/merge shifted by `queue_running`, review floored; recorded per stage as `distribution.adjustment`; #9970), plus the binding stall's term added to every path, operator-held PRs estimated from the stage under the hold, and no `beyond_history` refusal (a flagged residual-life tail instead; #10210) | after `merge_wait` |
 | `little-v0` | `land` | **floor baseline, never promoted** (#10208): Little's law. For a PR in `review_wait` / `doctor` / `merge_wait`, `items_ahead / drain_rate` for the current stage plus the recency-weighted mean duration of each later stage; interval from a Gamma posterior on the rate (shape = observed exits, 400 seeded draws). Refuses with a zero drain rate and items ahead, or with no queue context; a held PR (`merge_hold`) is refused `blocked`, as by every heuristic that does not model the hold | after `merge_wait` |
@@ -407,6 +404,75 @@ registry would be a second mechanism for dominated heuristics).
 | `land-2026-10-04-fresh-tide` | 2026-10-06 | Failed the backtest gate: on the 52-fold backtest over verified forge history (the evidence is on #10549) it was +0.49 h [+0.30, +0.69] pinball4 against `land-v2`, winning 17 of 52 days (Wilson lower bound 0.22). Its recency idea is covered by the recent-window calibration of #10541 and the planned regime adjustment of #10528. Its module and the `eta backtest --half-life-days` replay flag (#10325) were removed with it; the engine's recency weighting stays (`recalibrate` uses it). | #10209, #10549 |
 | `land-2026-10-04-twin-otter` | 2026-10-07 | Superseded by its fixed successor `land-2026-10-04-twin-otter-b` (the #10500 train/serve skew fix), the only heuristic that passed the backtest gate (−2.39 h pinball4 against `land-v2`). It answered PR stages only, which `-b` answers identically, so the chooser loses nothing. Retired to keep `land` within the 13-heuristic budget when `land-2026-10-06-brisk-petrel` landed: a 14th alternate would exceed the 3 KB `eta.snapshot` row guard. Only the registration went: `-b`, keen-wren, held-heron and the fit still use its module (`recompute`, `adapt_input`, `visit_*`, `DRAW_ORDER`), and `-b`'s PR-stage explanations still record and replay `twin_otter`. | #10243, #10528 |
 | `land-2026-10-06-calm-plover` | 2026-10-06 | Hit its rates but failed the backtest's deciding loss: on the walk-forward replay of 600 merged-PR timelines (1,144 common `land` cases) it was +4,810 s [+580, +9,230] `pinball4` against `land-v2`, at p25–p75 coverage 49.4% and late surprise 9.8%. Its one multiplicative shift per cell widened every item's range by the same factor. Replaced in the registry by `land-2026-10-06-even-lark`, the same calibration on the seconds scale; the log-scale code stays in `eta::conformal` so persisted calm-plover explanations still recompute. | #10489 |
+| `land-2026-10-06-quick-tern` | 2026-10-08 | Failed the 2026-10-08 walk-forward ([below](#the-2026-10-08-walk-forward-and-the-twin-otter-b-promotion-gate-10949)): pinball4 30.12 h, +12.70 h against `land-v1`, winning 6 of 52 days. The IPCW wrapper failed over every base: 82–95% of wrapped estimates hit the unresolved-tail rule, and their intervals ballooned to 156–566 h. It was `land-2026-10-04-twin-otter-b` wrapped by `eta::conformal_ipcw::calibrate`; the calibrator and the offline wrapper (`eta::conformal_wrap`, `eta backtest --wrap ipcw`) stay, so the arm is still reproducible offline, and persisted explanations still recompute (`run_explanation` applies their recorded `calibration`). Only the registration and the thin heuristic module went. | #10524, #10949 |
+| `land-2026-10-06-swift-tern` | 2026-10-08 | Same walk-forward: pinball4 24.71 h, +7.29 h against `land-v1`, 7 of 52 days. quick-tern made drift-aware (`calibrate_drift_aware`, still offline as `--wrap ipcw-drift`). | #10524, #10949 |
+| `land-2026-10-06-bold-lark` | 2026-10-08 | Same walk-forward: pinball4 30.63 h, +13.21 h against `land-v1`, 5 of 52 days. keen-wren wrapped by the same IPCW calibrator as quick-tern. | #10524, #10949 |
+
+### The 2026-10-08 walk-forward and the twin-otter-b promotion gate (#10949)
+
+The 2026-10-08 walk-forward (loom-experiments#21) ran 52
+point-in-time daily folds, 2026-08-15 to 2026-10-05, covering 7,875 PR-days.
+Confidence intervals are clustered by fold day. Full results: #10524,
+comment 6062722711.
+
+| arm | pinball4 h | p25–p75 cov | late > p90 | Δ vs `land-v1` | day wins |
+|---|---|---|---|---|---|
+| `land-v1` (primary) | 17.42 | .370 | .154 | — | — |
+| **`land-2026-10-04-twin-otter-b`** | **14.87** | .363 | .142 | **−2.55 [−3.73, −1.47]** | 40/52 |
+| `land-2026-10-06-keen-wren` | 14.78 | .363 | .142 | −2.63 (ties twin-otter-b) | 40/52 |
+| `land-2026-10-06-brisk-petrel` | 15.16 | .333 | .144 | −2.26 | 41/52 |
+| `land-2026-10-06-even-lark` | 18.57 | .432 | .108 | +1.15 | 18/52 |
+| `land-2026-10-06-quick-tern` (twin-otter-b + IPCW, retired) | 30.12 | .332 | .118 | +12.70 | 6/52 |
+| `land-2026-10-06-swift-tern` (+ IPCW drift, retired) | 24.71 | .303 | .117 | +7.29 | 7/52 |
+| `land-2026-10-06-bold-lark` (keen-wren + IPCW, retired) | 30.63 | .338 | .120 | +13.21 | 5/52 |
+
+- twin-otter-b is also the only heuristic that passed the earlier backtest
+  gate. Its pinball4 never degraded after the 2026-10-03 shift, while
+  `land-v1` / `land-v2` took 28 h to recover.
+- The three IPCW arms are [retired](#retired-heuristics) (above). That frees
+  three `land` slots of the shadow budget (`DEFAULT_MAX_ACTIVE` 14 /
+  `MAX_ALTERNATES` 13, unchanged) for the #10921 and #10929 candidates.
+- keen-wren stays in shadow: it ties twin-otter-b, and its starred subset is
+  underpowered because star history starts around 2026-10-03. Re-check about
+  two weeks on (around 2026-10-22).
+
+**Recommended primary: `land-2026-10-04-twin-otter-b`, not yet switched.**
+`land-v1` stays `current` (and stays registered as the `baseline` it already
+is) until twin-otter-b answers live on the ETA authority
+(`fleet.etaAuthority`, #10498). Without a fit there, the fitted family
+refuses PR stages `no_model`; #10923 makes the authority publish its fits.
+The switch is an operator action on the authority host, made only when both
+hold:
+
+1. **Non-refusal (shipped, #10949).** Of the tracker passes in the
+   trailing 24 h where `land-v1` answered, twin-otter-b answered at least
+   95%, over at least 50 such passes. The shadow ledger keeps these counts
+   per UTC hour (`answer_hours` in `shadow.json`, the newest 72 hours;
+   `eta::shadow_non_refusal`), and `loom-daemon eta promote --candidate
+   land-2026-10-04-twin-otter-b` reports the figure as `non-refusal:` (and
+   `non_refusal` in `--json`; nothing is written without `--apply`). For
+   which stages refuse, see `eta-queries.sql` section 0 and Q7.
+2. **Per-stage parity.** twin-otter-b's live per-stage figures agree with
+   its replay (`eta backtest --heuristic land-2026-10-04-twin-otter-b
+   --fit-dir DIR`): no PR stage refuses live where the replay answers. This
+   one is an operator check; no command decides it.
+
+The non-refusal check is part of `eta promote` for **every** candidate, not
+only this one: a failed check refuses the flip like a failed gate, and a
+ledger with fewer than 50 answered passes in the window fails closed.
+
+The switch sets `autonomous.eta.current.land` to
+`land-2026-10-04-twin-otter-b` and must leave an `eta.*` record naming the
+heuristic, the time and this evidence (#10949). Run `loom-daemon eta promote
+--candidate land-2026-10-04-twin-otter-b --evidence
+https://github.com/rjwalters/loom/issues/10524#issuecomment-6062722711` on the
+authority host first: it appends an `eta-promotion-decision/v1` record to
+`.loom/logs/eta-promotions.jsonl` with `at`, `candidate`, `non_refusal` and
+`evidence`, whether or not it flips. Note that the live gate's coverage band
+(p25–p75 inside 40–60%) refuses twin-otter-b as measured here (.363), so
+`--apply` will not flip it. In that case the switch is a config change made
+by the operator after that record shows `non_refusal` `passed`, with the
+change linked on #10949.
 
 A shipped id is **immutable**: a golden test pins each id's output on a fixed
 fixture. A behaviour change is a new id registered beside the old one
@@ -546,9 +612,10 @@ The calibration log (`.loom/state/eta/calibration.jsonl`) and the
 recalibration machinery stay in the daemon. The log holds every landed
 outcome the tracker scored for a **calibration base**
 (`heuristics::CALIBRATION_BASES`): `land-v2` and, since #10524,
-`land-2026-10-04-twin-otter-b`. `land-2026-10-06-even-lark` and
-`land-2026-10-06-quick-tern` (below) read it, each filtering on its own base,
-so `eta view` loads it. `eta backtest` / `eta promote` derive the same
+`land-2026-10-04-twin-otter-b` (and keen-wren). `land-2026-10-06-even-lark`
+reads it, and so does the offline IPCW wrapper (below; the registered
+quick-tern, swift-tern and bold-lark are retired, #10949), each filtering on
+its own base, so `eta view` loads it. `eta backtest` / `eta promote` derive the same
 evidence by replaying every base over the cases. That is leak-free because
 the calibration is refitted at each case's own `as_of`.
 `land-2026-10-06-calm-plover` (#10489) shipped the same way and was retired
@@ -655,7 +722,12 @@ The scale and the 2 h step were chosen on this replay, though every step from
 And it replays merged PRs only, so its most recent fold holds only the fast
 ones. Live shadow pairs through the #10233 gate are the real test.
 
-`land-2026-10-06-quick-tern` (#10524) ships the same way: registered, not
+*Retired 2026-10-08 (#10949):* quick-tern, swift-tern and bold-lark are no
+longer registered (see [Retired heuristics](#retired-heuristics)). What
+follows records the calibrator they used, which `eta backtest --wrap` still
+runs offline.
+
+`land-2026-10-06-quick-tern` (#10524) shipped the same way: registered, not
 current, tier `candidate`, shadowed into `alternates`, and promoted only
 through the #10233 gate. It is the ninth `land` registration, within the
 default shadow budget of 10. With it, `land`'s eight non-current
@@ -732,7 +804,8 @@ then applies `shift`.
 **drift-aware** with #10528's drift check (`eta::regime`). Quick-tern itself
 is unchanged (ids are immutable). Swift-tern ships the same way: registered,
 not current, tier `candidate`, it models the hold, and it is registered just
-after quick-tern. The method is `eta::conformal_ipcw::calibrate_drift_aware`.
+after quick-tern (retired with it, #10949). The method is
+`eta::conformal_ipcw::calibrate_drift_aware`.
 
 - **The check.** For a stage cell, the residuals `ln(actual / p50)` of
   twin-otter-b's landings known before `as_of` go through the regime CUSUM
@@ -780,13 +853,14 @@ after quick-tern. The method is `eta::conformal_ipcw::calibrate_drift_aware`.
 calibration with the base as a parameter. It runs the base and re-identifies
 the explanation. It then calibrates the explanation against the base's own
 rows, the `calibration` rows whose `heuristic` is the base's id. Over
-twin-otter-b it reproduces quick-tern (`Calibrator::Ipcw`) and swift-tern
-(`Calibrator::IpcwDrift`) byte for byte, and a test pins that.
+twin-otter-b it reproduced quick-tern (`Calibrator::Ipcw`) and swift-tern
+(`Calibrator::IpcwDrift`) byte for byte; since their retirement (#10949) it
+is how they are rebuilt offline, under their own ids.
 
 The wrapper has four rules:
 - It wraps `land` bases only.
 - It never calibrates twice. A base that already calibrates itself
-  (even-lark, quick-tern, swift-tern, bold-lark) comes back unchanged, only
+  (even-lark; formerly also quick-tern, swift-tern, bold-lark) comes back unchanged, only
   re-identified, and `eta backtest --wrap` refuses it by name
   (`conformal_wrap::CALIBRATED`).
 - It degrades to the base. With thin evidence, the base's answer comes back
@@ -832,14 +906,15 @@ its pinball4 is worse (CI excludes 0); held is below it on 33 cases.
 - the drift signal is computed per estimate from the calibration log, not
   consumed from a fleet-level #10528 drift event (none is emitted yet);
 - history-aware (HAPS) conditioning;
-- registering another wrapped base (#10523; keen-wren's is bold-lark), which
-  needs a shadow-budget slot and the backtest evidence above;
-- the loom-experiments walk-forward acceptance backtest.
+- registering another wrapped base, which needs a shadow-budget slot and
+  backtest evidence. The loom-experiments walk-forward (2026-10-08, #10949)
+  found the IPCW wrapper worse than its base over every base, and its three
+  registered arms were retired.
 
 `land-2026-10-06-held-heron` (#10523) ships the same way: registered, not
 current, tier `candidate`, it models the hold, and it is promoted only
-through the #10233 gate. Registration puts it after quick-tern and before
-`-b`. It depends on #10549, which retires
+through the #10233 gate. Registration puts it after brisk-petrel (and the
+retired quick-tern and swift-tern) and before `-b`. It depends on #10549, which retires
 `land-2026-10-04-fresh-tide` and raises the live list's alternate cap to 12
 (and the default budget to 13). With that change in place, it is the ninth
 `land` registration and its eight alternates fit the cap.
@@ -972,7 +1047,7 @@ in wiring. Two rules keep it safe as their number grows (#10525).
 |---|---|---|---|---|
 | `baseline` | `start-v1`, `finish-v1`, `land-v1`, `little-v0` | yes | no | no |
 | `candidate` | every other registered id | yes | yes | yes, through the gates |
-| `retired` | `land-v3`, `land-2026-10-04-amber-heron`, `land-2026-10-04-fresh-tide`, `land-2026-10-04-twin-otter` ([above](#retired-heuristics)) | no (not registered) | no | no |
+| `retired` | `land-v3`, `land-2026-10-04-amber-heron`, `land-2026-10-04-fresh-tide`, `land-2026-10-04-twin-otter`, `land-2026-10-06-calm-plover`, `land-2026-10-06-quick-tern`, `land-2026-10-06-swift-tern`, `land-2026-10-06-bold-lark` ([above](#retired-heuristics)) | no (not registered) | no | no |
 
 A baseline is the reference every candidate is scored beside. `land-v1` is
 also the default `current` for `land`; being a baseline only stops the gate
@@ -989,23 +1064,23 @@ autonomous.eta.shadow.maxActive is M; over the budget: …`, naming the
 heuristics past the budget in registration order. `eta promote` refuses the
 same way. A unit test holds the built-in registry within the default budget,
 so a fifteenth registration fails CI first. Retire a heuristic (a code
-change, as in #10484, #10549 and #10528) or raise the budget. The default is the
+change, as in #10484, #10549, #10528 and #10949) or raise the budget. The default is the
 kind's `current` plus the 13 alternates one `eta.snapshot` row carries
 (#10521, which registered `land-2026-10-06-loop-kite` as the fourteenth land
 heuristic; 12 since #10549, was 10 and 8), and a unit test holds the two
 together, so no heuristic within the default budget is silently dropped from
 the chooser. Raising the budget also needs the alternates cap raised on both
-sides (loom-ui's `MAX_ALTERNATES`). A loom-ui still slicing at 12 reads the
-first 12 by id; with the shipped registry and the default `current`
-(`land-v1`) the 13th by id is `little-v0`, a baseline the chooser never
-offers.
+sides (loom-ui's `MAX_ALTERNATES`). Since the IPCW arms were retired
+(#10949), `land` registers 11 heuristics, so a `land` snapshot carries 10
+alternates: three slots are free for new candidates (#10921, #10929), and
+even a loom-ui still slicing at 12 sees every alternate.
 
 **Wrappers are explicit compositions.** A calibration, conformal or
 dependency wrapper over a base is registered as its own id
 (`land-2026-10-06-even-lark` is calibration over `land-v2`;
-`land-2026-10-06-quick-tern` is IPCW calibration over, and
-`land-2026-10-06-tandem-wren` the dependency wrapper over,
-`land-2026-10-04-twin-otter-b`; `land-2026-10-06-held-heron` is
+`land-2026-10-06-tandem-wren` is the dependency wrapper over
+`land-2026-10-04-twin-otter-b`, as the retired IPCW arm
+`land-2026-10-06-quick-tern` was its calibration; `land-2026-10-06-held-heron` is
 twin-otter-b with held and sequenced PRs routed to the hold simulator). It
 is never
 an automatic cross product of wrappers × bases, so each one spends budget
@@ -1862,6 +1937,42 @@ extension keeps `fleet::load_all`'s `*.json` listing to snapshots alone).
   (`Tracker::set_file_snapshots`); both pass `files: Some(..)` to
   `loop_features`. Snapshots older than 120 days are dropped when the log
   grows past 20 000 entries.
+- **Diff stat (#10960 slice 1).** Each snapshot also carries `additions`,
+  `deletions` (summed over the page's entries; no extra call) and `listed`
+  (the entry count, kept even when the page is incomplete, so a PR of 100+
+  files reads as huge). Older lines parse them as unknown.
+
+#### Size and scope predictors (#10960)
+
+`eta::scope_features` derives a PR's size and scope from the same log,
+through one builder the fit (`fit::rows::Assembled::scope`, at `t - lag`)
+and serving (`Tracker::scope_features_of`, at `now - lag`, recorded on
+`eta.estimate` as `features.scope`) both call. **No heuristic reads them
+yet**: they are the size/scope block of the next fit schema (`eta-fit/v4`,
+shared with #10959's capacity block), behind one new shadow once the log
+covers a full 14-day window (about 2026-10-21; churn about 2026-10-28).
+
+| column | meaning |
+|---|---|
+| `log_lines`, `lines_known` | `ln(1 + additions + deletions)` of the PR's latest whole list before `as_of` |
+| `log_files` | `ln(1 + files)`; for a huge PR `ln(1 + listed)`, a lower bound |
+| `huge` | the latest read listed 100+ entries (paths unknown, size known to be large) |
+| `scope_known` | the latest observation is a whole list, so the flags below are known |
+| `docs_only` | every path ends `.md` / `.txt` or is under top-level `docs/` |
+| `tests_only` | every path is under a `tests/` directory or named `*_tests.rs`, `*.test.ts`, `test-*.sh` |
+| `touches_rust`, `touches_ts`, `touches_shell` | some path ends `.rs`; `.ts` / `.tsx`; `.sh` |
+| `touches_critical` | some path contains a Champion critical-file pattern (`scope_features::CRITICAL_PATTERNS`; a test pins it to `champion-pr-merge.md`'s array), so it predicts entering the critical-file hold |
+| `log_churn_7d`, `churn_known` | distinct paths of this PR touched by a repo PR that **merged** in `[as_of - 7 d, as_of)`, from those PRs' lists known before `as_of` |
+
+Unknown is never small: no read yet, no log loaded, or a later incomplete
+read gives `scope_known = 0` (an older whole list is not served as current),
+and a merged PR in the window whose list is unknown leaves the churn
+unknown rather than lower. Story points (#10896) and the pre-PR issue-size
+proxies are out of this block: the fit is PR-level. No shadow is registered
+yet, so the land-heuristic budget (14 of `DEFAULT_MAX_ACTIVE = 14`) is
+unchanged; the `eta-fit/v4` shadow that reads this block retires
+`land-2026-10-06-loop-kite` (or names the shadow it displaces) once its
+walk-forward against `land-2026-10-04-twin-otter-b` shows no regression.
 
 ### Dependency-aware ETAs (#10510)
 
@@ -2685,7 +2796,8 @@ accepts `--repo-root PATH` (default: the current directory).
   on this heuristic's noise, not the heuristic's own adaptation, so it does
   not feed the promotion gate's `adaptation` check. `--wrap ipcw|ipcw-drift` scores
   `--heuristic` (a `land` base) IPCW-calibrated as `ID+ipcw`, and
-  `--compare` stays unwrapped (#10524; see quick-tern above).
+  `--compare` stays unwrapped (#10524; see quick-tern above; how the retired
+  IPCW arms are reproduced offline, #10949).
 - **`loom-daemon eta view OWNER/NAME#ISSUE [--explain] [--json]`** — the
   current estimate(s) for one issue (#9327). State resolution, in order:
   1. An **open linked PR**: its review labels
@@ -2721,13 +2833,15 @@ accepts `--repo-root PATH` (default: the current directory).
   last (stably by issue number) and their reason shown. One bounded `gh issue
   list` plus, per issue, the same open-PR/checkpoint reads `view` makes — no
   extra reads beyond that.
-- **`loom-daemon eta promote --candidate ID [--repo OWNER/NAME] [--since RFC3339] [--apply] [--json]`**
+- **`loom-daemon eta promote --candidate ID [--repo OWNER/NAME] [--since RFC3339] [--evidence URL] [--apply] [--json]`**
   — evaluates the two-gate promotion rule
   ([above](#adding-a-v2-and-comparing-it)) for a registered shadow candidate
-  and, with `--apply` and only when both gates pass, flips
-  `autonomous.eta.current.<kind>` in the host-local config tier (#9328).
+  and, with `--apply` and only when both gates **and** the live non-refusal
+  check pass ([#10949](#the-2026-10-08-walk-forward-and-the-twin-otter-b-promotion-gate-10949)),
+  flips `autonomous.eta.current.<kind>` in the host-local config tier (#9328).
   Without `--apply` it changes nothing. Either way it appends the decision
-  record that explains the outcome. Only a short-listed candidate reaches the
+  record that explains the outcome, with `--evidence` recorded as
+  `evidence`. Only a short-listed candidate reaches the
   gates ([Shadow fleet management](#shadow-fleet-management), #10525).
 - **`loom-daemon eta retire [--file] [--json]`** (#10525) — the retirement
   proposals the saved nightly folds support, with their evidence

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # check-main-clean.sh - Backstop guard: fail if the MAIN worktree is dirty.
+# requires-daemon: stashes optional        --quarantine probes `stashes build-trees`; missing/too old -> loud include-everything rescue (#11075)
 #
 # Detects the #2802 / #3513 failure mode where a Builder agent's cwd resets
 # between tool calls and a repo-relative Write/Edit/Bash file operation lands
@@ -770,7 +771,48 @@ if [[ -n "$effective_status" && "$QUARANTINE" -eq 1 ]]; then
             <(printf '%s\n' "$recheck_status" | sort) \
             | sed '/^$/d')
     fi
-    effective_status="$recheck_status"
+    # Cargo build trees are never rescued (#11075): a directory holding a
+    # content-verified cargo marker (any name, ignored or not) is excluded from
+    # the stash and its porcelain lines are neither offending nor residual
+    # dirt. Discovery lives in `loom-daemon stashes build-trees` (Rust, shared
+    # with the worktree quarantine) — one implementation, not two that drift.
+    #
+    # No usable daemon (missing, or too old to have the subcommand) falls back
+    # to the pre-#11075 include-everything rescue, LOUDLY. Refusing instead
+    # would leave the dirt on main, which is worse than one oversized stash.
+    TAG_DIRS=(); bt_excludes=(); bt_ok=0
+    # shellcheck source=lib/locate-daemon-bin.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/locate-daemon-bin.sh"
+    bt_bin=$(loom_daemon_self_bin_override || LOOM_LOCATE_DAEMON_BIN_QUIET=1 loom_locate_daemon_bin "$main_root" || true)
+    if [[ -n "$bt_bin" ]]; then
+        # A trailing empty record is the success sentinel: it only arrives when
+        # the subcommand exited 0, so a failed or absent subcommand stays bt_ok=0.
+        while IFS= read -r -d '' d; do
+            if [[ -z "$d" ]]; then bt_ok=1; else TAG_DIRS+=("$d"); fi
+        done < <("$bt_bin" stashes build-trees --workspace "$main_root" -z 2>/dev/null && printf '\0')
+    fi
+    if [[ "$bt_ok" -eq 0 ]]; then
+        echo "WARNING: check-main-clean.sh: no loom-daemon with \`stashes build-trees\` (${bt_bin:-not found});" >&2
+        echo "         cargo build trees will NOT be excluded and may be stashed into refs/stash (#11075)." >&2
+        echo "         Update loom-daemon (\`loom update\`) to restore the exclusion." >&2
+    fi
+    for d in ${TAG_DIRS[@]+"${TAG_DIRS[@]}"}; do
+        # Exclude pathspecs only limit the worktree diff; unstage staged copies
+        # so the stash's index commit cannot carry them either.
+        git -C "$main_root" reset -q -- ":(literal,top)$d" >/dev/null 2>&1 || true
+        bt_excludes+=(":(exclude,literal,top)$d")
+    done
+    # bt_filter <porcelain> -> the text minus build-tree lines; unchanged when
+    # the daemon is unusable or the call fails (never drop real dirt).
+    bt_filter() {
+        local out
+        if [[ "$bt_ok" -eq 1 ]] && out=$(printf '%s\n' "$1" | "$bt_bin" stashes build-trees --workspace "$main_root" --filter-status 2>/dev/null); then
+            printf '%s' "$out"
+        else
+            printf '%s' "$1"
+        fi
+    }
+    effective_status=$(bt_filter "$recheck_status")
 
     OFFENDING_PATHS=()
     if [[ -n "$effective_status" ]]; then
@@ -811,7 +853,7 @@ if [[ -n "$effective_status" && "$QUARANTINE" -eq 1 ]]; then
     # offending pathspecs so baselined (pre-existing) dirt is left untouched;
     # `:(literal,top)` anchors each at the repo root and disables glob magic so
     # a path containing `*`/`[` cannot over-match.
-    stash_pathspecs=()
+    stash_pathspecs=(${bt_excludes[@]+"${bt_excludes[@]}"})
     for p in "${OFFENDING_PATHS[@]}"; do
         stash_pathspecs+=(":(literal,top)$p")
     done
@@ -837,11 +879,11 @@ if [[ -n "$effective_status" && "$QUARANTINE" -eq 1 ]]; then
     # no new dirt remains. A partial quarantine is exactly the failure mode this
     # mode exists to prevent, so it is reported as a hard failure, not a success.
     post_status=$(filter_loom_owned "$(git -C "$main_root" status --porcelain 2>/dev/null || true)")
-    post_effective="$post_status"
+    post_effective=$(bt_filter "$post_status")
     if [[ "$MODE" == "baseline" && -r "$MODE_FILE" ]]; then
         post_effective=$(comm -13 \
             <(sort "$MODE_FILE") \
-            <(printf '%s\n' "$post_status" | sort) \
+            <(printf '%s\n' "$post_effective" | sort) \
             | sed '/^$/d')
     fi
     if [[ -n "$post_effective" ]]; then
