@@ -6597,6 +6597,11 @@ def _add_config_parser(subparsers) -> None:
 
 def _add_optimize_placement_parser(subparsers) -> None:
     """Add optimize-placement subcommand parser."""
+    # kicad_tools.placement.route_check.DEFAULT_ROUTE_CHECK_BUDGET, as a
+    # literal: importing the placement package here would cost every kct
+    # invocation ~0.5 s. tests/test_optimize_placement_route_check.py pins it.
+    route_check_budget_default = 100_000
+
     op_parser = subparsers.add_parser(
         "optimize-placement",
         help="Run CMA-ES placement optimization on a KiCad PCB",
@@ -6793,6 +6798,34 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "Default behaviour (issue #2821) is to exit 1 with a "
             "FATAL: message on stderr so pipelines do not silently "
             "hand illegal placements to the router."
+        ),
+    )
+    op_parser.add_argument(
+        "--route-check",
+        action="store_true",
+        default=False,
+        help=(
+            "Confirm the result with bounded real routes before writing it "
+            "(issue #6234). The board as read is the incumbent. The "
+            "optimizer result, and then the decoupling snap, each replace "
+            "it only if a check route reaches at least the incumbent's "
+            "completion with no more DRC errors; otherwise the incumbent is "
+            "kept. Checks run once, after optimization: at most 3 routes "
+            "per run (incumbent, optimizer result, snap), each bounded by "
+            "--route-check-budget and seeded, so the verdict is "
+            "reproducible. Default off."
+        ),
+    )
+    op_parser.add_argument(
+        "--route-check-budget",
+        type=int,
+        default=route_check_budget_default,
+        metavar="N",
+        help=(
+            "Per-net A* node-expansion cap of each --route-check route "
+            "(kct route --per-net-iterations under --deterministic-budget). "
+            f"Default {route_check_budget_default:,}, one tenth of the "
+            "production cap: enough to rank two placements of the same board."
         ),
     )
     op_parser.add_argument("-v", "--verbose", action="store_true")

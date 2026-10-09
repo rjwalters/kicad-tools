@@ -1389,6 +1389,8 @@ kct optimize-placement <pcb_file> [options]
 | `--pad-anchored-wirelength` | Measure the wirelength term between transformed **pad** coordinates instead of footprint centres (issue #4831 M1). **Default off** — the objective is unchanged unless you pass it. |
 | `--time-budget SEC` | Wall-clock budget (bounds the feasibility-gated convergence loop) |
 | `--allow-infeasible` | Exit 0 even when overlap/DRC/boundary violations remain |
+| `--route-check` | Confirm the result with bounded real routes before writing it; keep the board as read if it routes worse (issue #6234). **Default off.** |
+| `--route-check-budget N` | Per-net A* node-expansion cap of each `--route-check` route (default 100,000) |
 | `-v` / `-q` | Verbose / quiet |
 
 **Anchor-weight discrepancy to know about.** The `--help` text recommends
@@ -1419,6 +1421,27 @@ pass after the optimizer moves each cap to the nearest free spot beside its
 pin. The MCP `optimize_placement` tool runs the same code (same weights keys,
 same defaults, same snap), so the two produce the same placement for the same
 board and seed; its result carries a `decoupling` list and the snap moves.
+
+**Route check (`--route-check`, issue #6234).** No pre-route score reliably
+predicts which of two placements routes better (#5948: HPWL agrees with the
+routed outcome on 0.749 of pairs, RUDY is at chance). `--route-check` measures
+instead. The board as read is the incumbent. The optimizer result (after
+slide-off) and then the decoupling snap each replace it only if a bounded
+`kct route` reaches at least the incumbent's completion (routed / requested
+nets) with no more post-route DRC errors. Otherwise the incumbent is kept, and
+a kept board is written unchanged. The checks run once, after optimization,
+never inside the loop: **at most 3 routes per run** (incumbent, optimizer
+result, snap). A stage that changes nothing is skipped. Each route is bounded
+by `--route-check-budget` node expansions per net
+(`--deterministic-budget --per-net-iterations N --deterministic-rescue
+--seed`), so the verdict is the same on any machine. The router does not move
+parts (`--no-placement-feedback`), and each candidate is routed from a private
+temporary copy with its old traces stripped. The text report prints each
+stage's incumbent and candidate numbers and its verdict; `--format json` adds
+a `route_check` object. The MCP `optimize_placement` tool takes the same
+`route_check` / `route_check_budget` options. Cost: a check route takes a few
+seconds on board 01 (four parts) and several minutes on board 02, where
+negotiated rip-up rounds, not the per-net cap, dominate.
 
 **Feasibility gate.** By default the optimizer exits **1** with
 `FATAL: optimizer exited with infeasible placement (...)` on stderr if the

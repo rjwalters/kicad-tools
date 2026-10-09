@@ -1790,6 +1790,12 @@ def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
         seed_method=params.get("seed_method", "force-directed"),
         output_path=params.get("output_path"),
         pre_slide_off=params.get("pre_slide_off", True),
+        route_check=params.get("route_check", False),
+        **(
+            {"route_check_budget": params["route_check_budget"]}
+            if "route_check_budget" in params
+            else {}
+        ),
     )
 
 
@@ -1880,6 +1886,27 @@ register_tool(
                     "penalty for faster convergence. Default: true."
                 ),
                 "default": True,
+            },
+            "route_check": {
+                "type": "boolean",
+                "description": (
+                    "Confirm the result with bounded real routes before "
+                    "accepting it, like `kct optimize-placement --route-check`. "
+                    "The board as read is the incumbent; the optimizer result "
+                    "and then the decoupling snap each replace it only if a "
+                    "check route reaches at least its completion with no more "
+                    "DRC errors. At most 3 routes per call. Default: false."
+                ),
+                "default": False,
+            },
+            "route_check_budget": {
+                "type": "integer",
+                "description": (
+                    "Per-net A* node-expansion cap of each route_check route "
+                    "(default 100000). Iteration-bounded, so the verdict is "
+                    "reproducible."
+                ),
+                "default": 100000,
             },
         },
         required=["pcb_path"],
