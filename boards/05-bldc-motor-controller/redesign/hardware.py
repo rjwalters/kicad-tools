@@ -448,7 +448,16 @@ def build_schematic():
 
 
 def build_pcb():
-    pcb = PCB.create(width=70, height=90, layers=4, title="Sensored BLDC Controller", revision="B")
+    # Pinned title-block date: PCB.create otherwise stamps today's date, which
+    # makes every rebuild differ byte-for-byte (Issue #6076).
+    pcb = PCB.create(
+        width=70,
+        height=90,
+        layers=4,
+        title="Sensored BLDC Controller",
+        revision="B",
+        board_date="2026-09-10",
+    )
     # Equivalent rectangular outline, for legacy routing loader #4978 which
     # ignores gr_line outlines and silently substitutes Raspberry Pi HAT bounds.
     for edge in list(pcb._sexp.find_all("gr_line")):
