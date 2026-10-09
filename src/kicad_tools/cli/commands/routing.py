@@ -958,6 +958,14 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--via-diameter", str(args.via_diameter)])
     if args.mc_trials != 10:
         sub_argv.extend(["--mc-trials", str(args.mc_trials)])
+    # Issue #6267: forward the evolutionary GA size.  The outer parser accepted
+    # --pop-size/--generations but never handed them to the inner route
+    # command, so every ``kct route --strategy evolutionary`` ran the default
+    # 20 x 10 GA regardless of the flags.
+    if getattr(args, "pop_size", 20) != 20:
+        sub_argv.extend(["--pop-size", str(args.pop_size)])
+    if getattr(args, "generations", 10) != 10:
+        sub_argv.extend(["--generations", str(args.generations)])
     if args.iterations != 15:
         sub_argv.extend(["--iterations", str(args.iterations)])
     # Issue #3101: forward --early-stop-patience.  Both outer and inner

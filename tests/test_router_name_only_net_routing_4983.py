@@ -36,6 +36,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli.route_cmd import _reject_lost_route_only_bindings
 from kicad_tools.cli.route_cmd import main as route_main
 from kicad_tools.router.io import (
@@ -45,6 +47,7 @@ from kicad_tools.router.io import (
     verify_output_connectivity,
 )
 from kicad_tools.router.primitives import Pad as PadObj
+from tests.test_route_partial_placement_cli import PYTEST_TIMEOUT_SECONDS, ROUTE_DEADLINE_SECONDS
 
 # ---------------------------------------------------------------------------
 # Fixtures: the exact minimal repro from issue #4983 (name-only, no header
@@ -258,7 +261,7 @@ def _route_argv(pcb_path: Path, out_path: Path, nets: str = "SIGNAL") -> list[st
         # This is a copper/diagnostic regression, not a speed benchmark.
         # Leave room for supervised startup and post-routing checks under CI.
         "--timeout",
-        "30",
+        str(ROUTE_DEADLINE_SECONDS),
         "--no-optimize",
         "-o",
         str(out_path),
@@ -269,6 +272,9 @@ def _segment_count(pcb_text: str) -> int:
     return len(re.findall(r"\(segment\b", pcb_text))
 
 
+# Issue #6267: a flat ``--timeout 30`` was charged the kicad-cli DRC queue wait
+# (KCT_NATIVE_MAX_CONCURRENCY=2 in the Test job).  Use #5579's composed budget.
+@pytest.mark.timeout(PYTEST_TIMEOUT_SECONDS)
 class TestRouteCliNameOnlyDialect:
     def test_name_only_board_routes_and_writes_copper(self, tmp_path: Path):
         """Issue #4983's exact repro: must route real copper, not 0/0."""
