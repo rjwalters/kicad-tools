@@ -53,7 +53,9 @@ def test_negotiated_search_routes_around_actual_via_diameter(method):
         (2, 1, 5.0, -1, -1, True),
         (2, 0, 5.6, -1, -1, True),
         (2, 0, 5.59, -1, -1, False),
-        (2, 0, 5.5, 2, 0.1, True),
+        # Issue #6272: a partner's barrel keeps the via floor -- the
+        # intra-pair gap relaxes trace/trace spacing only.
+        (2, 0, 5.5, 2, 0.1, False),
         (2, 0, 5.49, 2, 0.1, False),
     ],
 )
@@ -95,7 +97,8 @@ def test_pairwise_widening_and_attach_zone_preserve_scalar_floor():
     segment.x1, segment.y1, segment.x2, segment.y2 = 4, 5.7, 6, 5.7
     segment.width, segment.layer, segment.net = 0.2, 0, 1
     assert not native._impl.trace_stored_vias_clear(segment, 0.2)
-    assert native._impl.trace_stored_vias_clear(segment, 0.2, 2, 0.1)
+    # Issue #6272: naming net 2 the partner no longer relaxes its barrel.
+    assert not native._impl.trace_stored_vias_clear(segment, 0.2, 2, 0.1)
     zone = router_cpp.AttachZone()
     zone.min_x, zone.min_y, zone.max_x, zone.max_y = 4, 4, 6, 6
     zone.net_ids = [1, 2]

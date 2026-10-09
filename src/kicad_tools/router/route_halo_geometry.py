@@ -15,6 +15,7 @@ from kicad_tools.acceleration import to_numpy
 from .clearance_kernel import KSegment as _KSegment
 from .clearance_kernel import KVia as _KVia
 from .clearance_kernel import clear as _kernel_clear
+from .clearance_resolver import trace_via_clearance_mm
 
 if TYPE_CHECKING:
     from .grid import RoutingGrid
@@ -296,6 +297,15 @@ class RouteHaloGeometry:
         unaffected -- they are a different rule value than copper clearance
         and the kernel's :func:`~kicad_tools.router.clearance_kernel.clear`
         does not fold them in either.
+
+        Issue #6272 settled the remaining half of that disagreement the other
+        way round: the commit validators now hold every trace-vs-via pair to
+        :func:`~kicad_tools.router.clearance_resolver.trace_via_clearance_mm`
+        (``max(trace, via)``) in *both* insertion orders, so this search-time
+        predicate asks the same floor again -- for a trace candidate against a
+        stored via and for a via candidate against a stored trace alike.  A
+        diff-pair partner's ``partner_clearance`` relaxes trace-vs-trace only;
+        a partner's barrel keeps the via floor.
         """
         from .pairwise_clearance import _attach_zone_exempts
         from .primitives import Segment
@@ -427,7 +437,18 @@ class RouteHaloGeometry:
                 if same_net:
                     continue
             required = scalar
-            if is_trace and other.net == partner_net and partner_clearance is not None:
+            if is_trace != other_trace:
+                # Issue #6272: one trace/via floor in either insertion order.
+                required = trace_via_clearance_mm(
+                    scalar if is_trace else router.rules.trace_clearance,
+                    router.rules.via_clearance,
+                )
+            if (
+                is_trace
+                and other_trace
+                and other.net == partner_net
+                and partner_clearance is not None
+            ):
                 required = partner_clearance
             elif table is not None:
                 pair = table.required_clearance(own_name, names.get(other.net, ""))
@@ -650,9 +671,9 @@ class RouteHaloRefiner:
         * ``_route_halo_names`` (the candidate's and every neighbour's net
           name), ``net_class_map`` (``nc.via_size``) and ``_attach_zones``
           (the HV widening's exemption test).
-        * ``rules.trace_clearance`` is not read on the via branch; it is
-          included so the token stays correct if the memo is ever extended to
-          :meth:`trace_clear`.  An over-wide token can only cost recomputation.
+        * ``rules.trace_clearance`` -- since Issue #6272 the via branch holds a
+          via candidate against a stored trace to
+          ``max(trace_clearance, via_clearance)``, so it is a real input.
 
         Container members are compared by value, but Python's tuple comparison
         short-circuits on identity, so the common case (nothing replaced) costs

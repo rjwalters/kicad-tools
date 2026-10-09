@@ -40,6 +40,7 @@ from kicad_tools.core.geometry import (
 )
 
 from . import wall_deadline as _wall_deadline
+from .clearance_resolver import trace_via_clearance_mm
 from .clearance_shapes import (
     KShape,
     copper_gap,
@@ -5982,7 +5983,9 @@ class DiffPairRouter:
         universe = self._shadow_foreign_universe
         if universe is None:
             return 0.0, None
-        clearance = self.autorouter.rules.trace_clearance
+        # Issue #6272: the trace/via floor, the same in either insertion order.
+        rules = self.autorouter.rules
+        clearance = trace_via_clearance_mm(rules.trace_clearance, rules.via_clearance)
         shape = segment_shape(seg)
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
@@ -6046,10 +6049,11 @@ class DiffPairRouter:
         """Worst deficit of a via vs FOREIGN segments and vias (#4575).
 
         The mirror direction of :meth:`_segment_via_deficit`: a constructed
-        barrel is copper on every layer it spans, so it must keep
-        ``rules.via_clearance`` from foreign trace centrelines (the exact
-        threshold ``RoutingGrid.worst_via_segment_deficit`` and
-        ``via_clears_foreign_segment`` use) and from foreign barrels.
+        barrel is copper on every layer it spans, so it must keep the
+        trace/via floor ``max(trace_clearance, via_clearance)`` from foreign
+        traces (Issue #6272; the exact threshold
+        ``RoutingGrid.worst_via_segment_deficit`` uses) and ``via_clearance``
+        from foreign barrels.
 
         Epic #5509 Phase 3c: both directions are measured with the shared
         clearance kernel.  The layer-span gates stay here -- ``KVia`` models
@@ -6060,7 +6064,12 @@ class DiffPairRouter:
         universe = self._shadow_foreign_universe
         if universe is None:
             return 0.0, None
-        clearance = self.autorouter.rules.via_clearance
+        # Issue #6272: via-vs-trace takes the shared trace/via floor (as
+        # ``RoutingGrid.worst_via_segment_deficit`` does); via-vs-via keeps
+        # ``via_clearance``.
+        rules = self.autorouter.rules
+        clearance = rules.via_clearance
+        trace_floor = trace_via_clearance_mm(rules.trace_clearance, rules.via_clearance)
         shape = via_shape(via)
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
@@ -6071,7 +6080,7 @@ class DiffPairRouter:
                 continue
             if not _via_spans_layer(via, seg.layer):
                 continue
-            deficit = gap_deficit(shape, segment_shape(seg), clearance)
+            deficit = gap_deficit(shape, segment_shape(seg), trace_floor)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)

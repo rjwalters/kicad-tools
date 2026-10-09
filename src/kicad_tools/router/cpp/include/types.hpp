@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -289,7 +290,15 @@ namespace router {
 // ``Pathfinder`` and ``CoupledPathfinder::rail_clear``, and
 // ``validate_route``'s violation type 9.  A v47 .so would search straight
 // through a stricter netclass's clearance, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 48;
+// v49 (Issue #6272): every trace-vs-via gate -- ``validate_route`` in both
+// insertion orders, ``trace_stored_vias_clear``, the via branches of
+// ``route_trace_geometry_clear`` / ``route_via_geometry_clear`` and the A*
+// swept-edge guard -- resolves ``trace_via_clearance(trace, via)``, and a
+// diff-pair partner no longer relaxes a barrel's floor.
+// ``route_via_geometry_clear`` gained a trailing ``trace_clearance`` argument.
+// A v48 .so would let a trace land inside the via floor of an earlier via,
+// so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 49;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -654,6 +663,17 @@ struct DesignRules {
     // admissibility preserved).  ``0.0`` disables the attractor.
     float cost_corridor_attractor = 3.0f;
 };
+
+// Issue #6272: the trace-vs-via copper floor, ``max(trace, via)``.  Native
+// mirror of ``clearance_resolver.trace_via_clearance_mm`` (the resolver's
+// trace/via symmetry term in scalar form): a trace and a foreign via are one
+// unordered pair, so neither insertion order nor a diff-pair partner's
+// intra-pair gap may change the floor between them.  Every native trace/via
+// gate calls this instead of picking ``trace_clearance`` or ``via_clearance``
+// by which object it happens to be validating.
+inline float trace_via_clearance(float trace_clearance, float via_clearance) {
+    return std::max(trace_clearance, via_clearance);
+}
 
 // Pad info for geometric validation (Issue #2439)
 // Stores pad geometry needed for clearance checking without Python callbacks.

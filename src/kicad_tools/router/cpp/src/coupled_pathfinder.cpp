@@ -117,9 +117,12 @@ bool CoupledPathfinder::via_route_geometry_clear(int x, int y, int net) const {
     via.drill = rules_.via_drill;
     via.diameter = static_cast<float>(dims ? dims->via_diameter : rules_.via_diameter);
     via.layer_from = 0; via.layer_to = grid_.layers() - 1;
+    // Issue #6272: a via candidate against stored traces takes the
+    // trace/via floor, as ``Pathfinder::via_route_geometry_clear`` does.
     return grid_.route_via_geometry_clear(via, rules_.via_clearance,
                                           rules_.min_hole_to_hole,
-                                          rules_.min_drill_clearance);
+                                          rules_.min_drill_clearance,
+                                          rules_.trace_clearance);
 }
 
 bool CoupledPathfinder::is_trace_blocked(int gx, int gy, int layer, int net,

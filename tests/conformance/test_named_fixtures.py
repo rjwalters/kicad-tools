@@ -302,20 +302,26 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # values -- the #5398/#5654 rule-resolution gap no Phase 3 PR may close --
     # and ``test_named_fixture_adapter_agrees_with_kicad_cli`` drives these two
     # migrated rows at the project's own 0.20 mm, where they reject and agree.
+    #
+    # Issue #6272 closed that under-rejection at the router's own values: every
+    # trace/via gate (commit and search, Python and C++, either insertion
+    # order) now resolves ``max(trace_clearance, via_clearance)`` = 0.20, so
+    # ``grid_py`` / ``grid_cpp`` / ``route_halo`` / ``route_geometry_cpp`` all
+    # REJECT and agree with kicad-cli outright.
     "issue5398-seg-via-0p18-order": (
         ("clearance_kernel", True),
         ("diffpair", True),
         ("lattice", False),
-        ("grid_py", False),
-        ("grid_cpp", False),
+        ("grid_py", True),
+        ("grid_cpp", True),
         ("via_clearance", False),
         ("pairwise", False),
         ("drc_nudge", False),
         ("occupancy", True),
         ("grid_cpp_marking", True),
         ("cpp_blocked_kernel", True),
-        ("route_halo", False),
-        ("route_geometry_cpp", False),
+        ("route_halo", True),
+        ("route_geometry_cpp", True),
         ("optimizer_collision", True),
         ("match_group", True),
         ("kct_check", True),
@@ -360,14 +366,25 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # prediction is kept (rather than the fixture deleted) because it is the
     # regression guard: a future consumer that re-derives its own ``max(...)``
     # would turn these two rows back to REJECT and redden here.
+    #
+    # Issue #6272 deliberately turned them back to REJECT -- together with the
+    # commit gates, which is what keeps search and commit in step.  The commit
+    # gates were the order-dependent half: via-first held the trace to
+    # ``trace_clearance`` (0.15), trace-first held the via to ``via_clearance``
+    # (0.20).  Every trace/via gate now resolves ``max(trace, via)`` = 0.20 in
+    # both orders, so all four rows below REJECT at the router's own rules.
+    # That is stricter than this fixture's 0.15 mm project class (the router's
+    # own ``via_clearance`` default is the stricter rule), and
+    # ``test_named_fixture_adapter_agrees_with_kicad_cli`` still drives the
+    # migrated rows at the project's values, where they accept and agree.
     "search-vs-commit-seg-via-max": (
         ("clearance_kernel", False),
         ("diffpair", True),
         ("lattice", False),
-        ("route_halo", False),
-        ("route_geometry_cpp", False),
-        ("grid_py", False),
-        ("grid_cpp", False),
+        ("route_halo", True),
+        ("route_geometry_cpp", True),
+        ("grid_py", True),
+        ("grid_cpp", True),
         ("via_clearance", False),
         ("pairwise", False),
         ("drc_nudge", False),

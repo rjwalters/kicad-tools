@@ -251,6 +251,18 @@ def test_dynamic_refinement_preserves_pairwise_widening(sharing):
     assert pathfinder._impl.is_via_blocked(55, 56, 1, sharing, 4)
 
 
+def _add_partner_segment(grid, native):
+    """A net-2 (partner) trace 0.4 mm left of the (54, 57) candidate's edge.
+
+    Issue #6272: the diff-pair partner gap is a trace-to-trace allowance, so
+    the partner-gap plumbing tests below need partner *trace* copper -- the
+    context's net-2 via keeps the trace/via floor whatever the partner gap.
+    """
+    x54, y57 = grid.grid_to_world(54, 57)
+    sx = x54 - 0.075 - 0.1 - 0.4
+    native._impl.add_stored_segment(sx, y57 - 1.0, sx, y57 + 1.0, 0.2, 2, 2)
+
+
 def test_dynamic_refinement_uses_authored_partner_gap():
     from kicad_tools.router import router_cpp
 
@@ -259,6 +271,12 @@ def test_dynamic_refinement_uses_authored_partner_gap():
     segment.x1, segment.y1 = grid.grid_to_world(55, 56)
     segment.x2, segment.y2 = grid.grid_to_world(54, 57)
     segment.width, segment.layer, segment.net = 0.15, 2, 1
+    # Issue #6272: against the partner's VIA alone the partner gap is inert --
+    # the ~0.44 mm gap clears the 0.2 mm trace/via floor either way.
+    assert native._impl.route_trace_geometry_clear(segment, 0.15, 2, 0.1, 0.2)
+    assert native._impl.route_trace_geometry_clear(segment, 0.15, 2, 0.6, 0.2)
+    # Against partner TRACE copper 0.4 mm away, the authored gap decides.
+    _add_partner_segment(grid, native)
     assert native._impl.route_trace_geometry_clear(segment, 0.15, 2, 0.1, 0.2)
     assert not native._impl.route_trace_geometry_clear(segment, 0.15, 2, 0.6, 0.2)
     pathfinder._impl.set_search_partner_clearance(2, 0.6)
@@ -289,7 +307,8 @@ def test_trace_refinement_checks_swept_step_not_only_endpoints():
 
 @pytest.mark.parametrize("method", ["route", "route_resumable"])
 def test_partner_clearance_does_not_leak_into_next_route(method):
-    grid, _, pathfinder = _context()
+    grid, native, pathfinder = _context()
+    _add_partner_segment(grid, native)  # Issue #6272: partner gap is trace/trace
     pathfinder._impl.set_search_partner_clearance(2, 0.6)
     assert pathfinder._impl.is_trace_blocked(55, 56, 2, 1, False, 2)
     start, end = grid.grid_to_world(20, 20), grid.grid_to_world(22, 20)
@@ -446,24 +465,24 @@ def test_stored_geometry_uses_the_python_mark_coordinates_at_half_cells(kind):
 
 
 @pytest.mark.parametrize("sharing", [False, True])
-def test_trace_halo_ignores_via_clearance_for_seg_via_pairs(sharing):
-    """Issue #5661: a trace-vs-via requirement tracks ``trace_clearance`` only.
+def test_trace_halo_uses_trace_via_floor_for_seg_via_pairs(sharing):
+    """Issue #6272: a trace-vs-via requirement is ``max(trace, via)``.
 
-    0.168 mm copper gap clears the trace rule (0.15) but not the (retired)
-    via-clearance override (0.20) that board02's class of segment-to-via
-    violation used to be measured against. Before this phase
-    ``route_trace_geometry_clear`` separately widened a trace candidate's
-    seg-via requirement to ``max(required, via_clearance)`` -- stricter than
-    the commit-time validator for the identical pair, which applies the
-    resolved ``clearance`` and never ``via_clearance`` here. Switching onto
-    the shared kernel means ``via_clearance`` alone can no longer move this
-    verdict.
+    0.168 mm copper gap clears the trace rule (0.15) but not the via
+    clearance (0.20).  Issue #5661 had dropped ``via_clearance`` from this
+    search-time verdict so it matched the commit validators, which then held
+    a trace placed beside an earlier via to ``trace_clearance`` alone.  #6272
+    resolves that asymmetry from the commit side -- both insertion orders now
+    use the shared trace/via floor -- so search asks the same floor again and
+    stays in step with commit.  The floor is symmetric in its two rules.
     """
     _, _, pathfinder = _context()
     pathfinder._impl.set_search_fill_clearances(0.15, 0.15)
     assert not pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
     pathfinder._impl.set_search_fill_clearances(0.15, 0.2)
-    assert not pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
+    assert pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
+    pathfinder._impl.set_search_fill_clearances(0.2, 0.15)
+    assert pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
 
 
 def test_trace_clearance_expands_geometry_lookup_across_bins():

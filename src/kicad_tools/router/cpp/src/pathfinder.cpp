@@ -211,7 +211,10 @@ bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
     via.diameter = search_via_half_diam_mm_ > 0 ? 2 * search_via_half_diam_mm_ : rules_.via_diameter;
     via.layer_from = 0; via.layer_to = grid_.layers() - 1;
     const float clearance = search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance;
-    return grid_.route_via_geometry_clear(via, clearance, rules_.min_hole_to_hole, rules_.min_drill_clearance);
+    // Issue #6272: via-vs-stored-trace takes the trace/via floor.
+    const float trace_clearance = search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance;
+    return grid_.route_via_geometry_clear(via, clearance, rules_.min_hole_to_hole, rules_.min_drill_clearance,
+                                          trace_clearance);
 }
 
 bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
@@ -1454,8 +1457,12 @@ RouteResult Pathfinder::route(
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = emit_trace_width > 0 ? emit_trace_width : rules_.trace_width;
                 edge.layer = nlayer; edge.net = net;
+                // Issue #6272: the trace/via floor, not the bare trace floor,
+                // so search and commit agree in either insertion order.
                 if (!grid_.trace_stored_vias_clear(edge,
-                        search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                        trace_via_clearance(
+                            search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
                         physical_partner_net_, physical_partner_clearance_)) continue;
                 // Issue #6243: authored per-net minimum on the swept step,
                 // before any pad-exit / sharing / partner relief below.
@@ -2122,8 +2129,12 @@ RouteResult Pathfinder::run_astar_loop() {
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = search_emit_trace_width_ > 0 ? search_emit_trace_width_ : rules_.trace_width;
                 edge.layer = nlayer; edge.net = search_net_;
+                // Issue #6272: the trace/via floor, not the bare trace floor,
+                // so search and commit agree in either insertion order.
                 if (!grid_.trace_stored_vias_clear(edge,
-                        search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                        trace_via_clearance(
+                            search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
                         physical_partner_net_, physical_partner_clearance_)) continue;
                 // Issue #6243: authored per-net minimum on the swept step,
                 // before any pad-exit / sharing / partner relief below.

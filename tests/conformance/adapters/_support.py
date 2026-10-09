@@ -380,9 +380,10 @@ def pair_contexts(case: CopperCase) -> list[PairContext]:
        routing starts; no consumer here is ever asked "may I add this pad?".
     2. **A segment/via pair commits the via first.**  This is the *named*
        insertion order this harness measures (see the module docstring); it is
-       the order under which #5398's 0.18 mm pair is accepted, because the
-       candidate segment is then compared against ``trace_clearance`` rather
-       than the wider ``via_clearance``.
+       the order under which #5398's 0.18 mm pair used to be accepted, because
+       the candidate segment was then compared against ``trace_clearance``
+       rather than the wider ``via_clearance`` (Issue #6272 made both orders
+       resolve ``max(trace, via)``, so the order no longer moves a verdict).
     3. **Otherwise the pair's first-declared object is existing copper** and
        the second is the candidate.
 

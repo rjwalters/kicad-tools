@@ -269,21 +269,22 @@ def test_overlapping_route_ownership_and_ripup():
     assert not pathfinder._is_via_blocked(*LEGAL, 1)
 
 
-def test_trace_refinement_ignores_via_clearance_for_seg_via_pairs():
-    """Issue #5661: a trace-vs-via requirement tracks ``trace_clearance`` only.
+def test_trace_refinement_uses_trace_via_floor_for_seg_via_pairs():
+    """Issue #6272: a trace-vs-via requirement is ``max(trace, via)``.
 
-    Before this phase the refinement separately widened a trace candidate's
-    requirement against a stored via to ``max(required, rules.via_clearance)``
-    -- stricter than the commit-time validator for the identical pair, which
-    applies ``trace_clearance``. The real gap here (~0.168 mm) sits in exactly
-    that band: legal by ``trace_clearance`` (0.15 mm, this fixture's default)
-    and illegal only by the retired ``via_clearance`` override.
+    The real gap here (~0.168 mm) is legal by ``trace_clearance`` (0.15 mm,
+    this fixture's default) and illegal by ``via_clearance`` (0.20 mm).
+    Issue #5661 had dropped ``via_clearance`` from this refinement to match
+    the commit gates, which then held a trace beside an earlier via to the
+    trace floor alone; #6272 made every trace/via gate -- commit and search,
+    either insertion order -- resolve the shared floor, so the refinement
+    tracks ``via_clearance`` again.
     """
     _, pathfinder = _context()
     pathfinder.rules.via_clearance = 0.15
     assert not pathfinder._is_trace_blocked(58, 56, LAYER, 1)
     pathfinder.rules.via_clearance = 0.2
-    assert not pathfinder._is_trace_blocked(58, 56, LAYER, 1)
+    assert pathfinder._is_trace_blocked(58, 56, LAYER, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -434,17 +435,45 @@ def _partner_sweep(pathfinder, cpp) -> tuple[int, int, int]:
     return sampled, under, over
 
 
+def _partner_rail_context(intra_pair_clearance: float | None):
+    """``_context`` with net 2's via swapped for a net-2 *trace*.
+
+    Issue #6272: the intra-pair waiver is a trace-to-trace allowance -- a
+    partner's barrel keeps the trace/via floor -- so the waiver tests need
+    partner trace copper to act on.  The rail runs on ``LAYER`` 0.15 mm
+    (edge-to-edge) from a 0.2 mm net-1 centreline at ``PARTNER_WAIVED``:
+    illegal at the 0.30 mm class clearance, legal at the 0.05 mm gap.
+    """
+    from kicad_tools.router.primitives import Segment
+
+    grid, pathfinder = _context(net_class_map=_partnered_net_class_map(intra_pair_clearance))
+    grid.unmark_route(grid.routes[0], max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
+    x, y = grid.grid_to_world(*PARTNER_WAIVED)
+    rail_x = x + 0.1 + 0.15 + 0.1
+    rail = Segment(rail_x, y - 1.0, rail_x, y + 1.0, 0.2, Layer.IN2_CU, 2, "N2")
+    grid.mark_route(Route(net=2, net_name="N2", segments=[rail]))
+    return grid, pathfinder
+
+
 def test_partner_waiver_is_load_bearing_on_the_python_arm():
     """Without the waiver the same cell is rejected; with it, admitted.
 
     This is the precondition for the parity tests below: if the waiver never
     changed a verdict, a C++ arm that ignored it would agree by accident.
     """
-    _, no_waiver = _context(net_class_map=_partnered_net_class_map(None))
+    _, no_waiver = _partner_rail_context(None)
     assert no_waiver._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
 
-    _, waived = _context(net_class_map=_partnered_net_class_map(0.05))
+    _, waived = _partner_rail_context(0.05)
     assert not waived._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+
+
+def test_partner_waiver_never_relaxes_a_partner_barrel():
+    """Issue #6272: beside the partner's VIA the waiver changes nothing."""
+    _, no_waiver = _context(net_class_map=_partnered_net_class_map(None))
+    _, waived = _context(net_class_map=_partnered_net_class_map(0.05))
+    assert no_waiver._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+    assert waived._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
 
 
 @requires_cpp
@@ -456,12 +485,12 @@ def test_cpp_applies_the_partner_waiver_the_python_arm_applies():
     only cost the production-default backend reach beside a partner rail's
     committed copper that the Python fallback had.
     """
-    _, no_waiver = _context(net_class_map=_partnered_net_class_map(None))
+    _, no_waiver = _partner_rail_context(None)
     cpp_no_waiver = no_waiver._get_cpp_coupled_impl()
     assert cpp_no_waiver is not None
     assert cpp_no_waiver.trace_blocked(*PARTNER_WAIVED, LAYER, 1)
 
-    _, waived = _context(net_class_map=_partnered_net_class_map(0.05))
+    _, waived = _partner_rail_context(0.05)
     cpp_waived = waived._get_cpp_coupled_impl()
     assert cpp_waived is not None
     assert not cpp_waived.trace_blocked(*PARTNER_WAIVED, LAYER, 1)

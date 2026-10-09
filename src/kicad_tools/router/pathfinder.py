@@ -35,6 +35,7 @@ import numpy as np
 from kicad_tools.core.types import copper_span
 
 from . import wall_deadline as _wall_deadline
+from .clearance_resolver import trace_via_clearance_mm
 from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
@@ -5480,10 +5481,14 @@ class Router:
                 for via in self._foreign_vias:
                     if via.net == exclude_net:
                         continue  # Same-net via -- skipped by convention.
+                    # Issue #6272: the trace/via floor, not the bare
+                    # trace floor -- same answer in either insertion order.
                     if not segment_clears_foreign_via(
                         seg,
                         via,
-                        trace_clearance=self.rules.trace_clearance,
+                        trace_clearance=trace_via_clearance_mm(
+                            self.rules.trace_clearance, self.rules.via_clearance
+                        ),
                         hard_intersection_only=False,
                     ):
                         return False

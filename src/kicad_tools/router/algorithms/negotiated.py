@@ -1845,7 +1845,12 @@ class NegotiatedRouter:
 
         # Import here to avoid a top-level circular dependency between
         # algorithms.negotiated -> via_clearance -> primitives.
+        from ..clearance_resolver import trace_via_clearance_mm
         from ..via_clearance import segment_clears_foreign_via
+
+        # Issue #6272: a segment-vs-foreign-via pair is held to the shared
+        # trace/via floor, the same one the via-vs-segment sibling uses.
+        trace_clearance = trace_via_clearance_mm(trace_clearance, self.rules.via_clearance)
 
         # Issue #3002 (PR #3006 perf): bucket vias by their layer span
         # so the segment-vs-via inner loop only consults vias whose
@@ -2068,7 +2073,12 @@ class NegotiatedRouter:
 
         # Import here to avoid a top-level circular dependency between
         # algorithms.negotiated -> via_clearance -> primitives.
+        from ..clearance_resolver import trace_via_clearance_mm
         from ..via_clearance import via_clears_foreign_segment
+
+        # Issue #6272: the shared trace/via floor (see the segment-vs-via
+        # sibling above) -- independent of which copper was placed first.
+        trace_clearance = trace_via_clearance_mm(trace_clearance, self.rules.via_clearance)
 
         # Issue #3020: bucket segments by layer so the via-vs-segment
         # inner loop only consults segments on a layer the via's span

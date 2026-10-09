@@ -430,10 +430,17 @@ public:
     bool route_trace_geometry_clear(const Segment& segment, float clearance,
                                     int partner_net, float partner_clearance, float via_clearance) const;
     // Hard constraint for negotiated traces; foreign trace copper remains soft.
+    // Issue #6272: ``clearance`` is the trace/via floor
+    // (``trace_via_clearance``); ``partner_net`` / ``partner_clearance`` only
+    // widen the candidate lookup -- a partner's barrel is never relaxed.
     bool trace_stored_vias_clear(const Segment& segment, float clearance,
                                  int partner_net, float partner_clearance) const;
+    // Issue #6272: ``trace_clearance`` >= 0 raises the via-vs-stored-segment
+    // floor to ``trace_via_clearance(trace_clearance, clearance)``; via-vs-via
+    // keeps ``clearance``.  The default (-1) keeps the pre-#6272 via floor.
     bool route_via_geometry_clear(const Via& via, float clearance,
-                                  float hole_clearance, float same_net_drill_clearance) const;
+                                  float hole_clearance, float same_net_drill_clearance,
+                                  float trace_clearance = -1.0f) const;
     // Broad-phase candidates whose copper bounding boxes share two-mm bins
     // with the supplied world-coordinate box. Exact geometry remains required.
     std::pair<std::vector<size_t>, std::vector<size_t>> route_geometry_candidates(
