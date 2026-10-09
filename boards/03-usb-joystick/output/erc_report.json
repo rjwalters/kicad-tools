@@ -1,7 +1,7 @@
 {
     "$schema": "https://schemas.kicad.org/erc.v1.json",
     "coordinate_units": "mm",
-    "date": "2026-09-15T04:23:22",
+    "date": "2026-10-08T17:36:46",
     "ignored_checks": [
         {
             "description": "Global label only appears once in the schematic",
@@ -25,28 +25,12 @@
         "warning",
         "exclusion"
     ],
-    "kicad_version": "10.0.5",
+    "kicad_version": "10.0.6",
     "sheets": [
         {
             "path": "/",
-            "uuid_path": "/6b37c496-c822-4122-91ad-ca0d66bbde58",
-            "violations": [
-                {
-                    "description": "The current configuration does not include the footprint library 'Joystick'",
-                    "items": [
-                        {
-                            "description": "Symbol J3 [Conn_02x03_Odd_Even]",
-                            "pos": {
-                                "x": 1.6256,
-                                "y": 0.3302
-                            },
-                            "uuid": "c3b5781c-ad4c-4099-bdd6-3e5d72162842"
-                        }
-                    ],
-                    "severity": "warning",
-                    "type": "footprint_link_issues"
-                }
-            ]
+            "uuid_path": "/5e99d4e6-1717-5ef3-9d21-4aa660fd2263",
+            "violations": []
         }
     ],
     "source": "usb_joystick.kicad_sch"

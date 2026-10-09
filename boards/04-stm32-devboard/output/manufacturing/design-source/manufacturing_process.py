@@ -7,6 +7,7 @@ be described as laser microvias or use an unselected via-in-pad process.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -43,6 +44,14 @@ MOVES = [
     ("U2.6", "OSC_OUT", (26.8375, 21.75), (27.95, 21.75)),
     ("U2.39", "SWO", (32.75, 17.8375), (32.75, 19.0)),
     ("U2.7", "NRST", (27.3375, 22.25), (28.65, 22.25)),
+]
+INSET_ROUTE_MOVES = [
+    # The inset pad seeds (#5004) route OSC_OUT beside C11.1: move its
+    # ordinary 0.30 mm drill another 0.10 mm east to clear the SMT land.
+    ("C11.1", "OSC_OUT", (24.7, 15.75), (24.8, 15.75)),
+    # The ordinary through-via OSC_IN escape needs 0.10 mm drill-to-land
+    # clearance at C10.1; the original 0.075 mm gap is insufficient.
+    ("C10.1", "OSC_IN", (17.95, 15.20), (17.95, 15.15)),
 ]
 
 
@@ -91,30 +100,230 @@ def physical_fingerprint(path):
     return hashlib.sha256(json.dumps(rounded(data), sort_keys=True).encode()).hexdigest()
 
 
+def select_offpad_position(pcb, via, ref, preferred, layers):
+    """Screen the complete bond; reuse the generic off-pad candidate ladder."""
+    from shapely.geometry import LineString, Point, Polygon
+
+    from kicad_tools.cli import relocate_in_pad_vias as relocation
+
+    rules = process_rules()
+    pads = relocation._collect_smd_pads_by_net(pcb)
+    holes = relocation._collect_tht_pads(pcb)
+    region = relocation._alternative_board_region(pcb)
+
+    def safe(target):
+        if not relocation._alternative_contained(region, via, target, 0.15):
+            return False
+        path, center = LineString([via.position, target]), Point(target)
+        if region is None:
+            return False  # This board's pinned design always has a closed outline.
+        if path.distance(region.boundary) < 0.075 + rules.min_copper_to_edge_mm or center.distance(
+            region.boundary
+        ) < max(
+            via.size / 2 + rules.min_copper_to_edge_mm, via.drill / 2 + rules.min_hole_to_edge_mm
+        ):
+            return False
+        for zone in pcb.zones:
+            if zone.keepout is None:
+                continue
+            area = Polygon(zone.polygon)
+            if not area.is_valid or area.is_empty:
+                return False
+            zone_layers = set(zone.layers or [zone.layer])
+            through_layers = {layer.name for layer in pcb.copper_layers}
+            if zone_layers & {"*.Cu", "F&B.Cu"}:
+                zone_layers |= through_layers
+            if (
+                not zone.keepout.vias_allowed
+                and zone_layers & through_layers
+                and center.distance(area) <= via.size / 2
+            ):
+                return False
+            if (
+                not zone.keepout.tracks_allowed
+                and zone_layers & set(layers)
+                and path.distance(area) <= 0.075
+            ):
+                return False
+        if any(
+            relocation._dist_point_to_aabb(*target, pad_absolute_bbox(pad, fp))
+            < via.drill / 2 + 0.10 - 1e-6
+            for fp in pcb.footprints
+            for pad in fp.pads
+            if is_smd_pad(pad)
+        ):
+            return False
+        return (
+            relocation._check_clearance(
+                pcb,
+                via,
+                *target,
+                pads,
+                holes,
+                rules.min_clearance_mm,
+                rules.min_hole_to_hole_mm,
+                0.10,
+            )
+            is None
+            and relocation._check_stub_clearance(
+                pcb,
+                via,
+                target,
+                layers,
+                0.15,
+                rules.min_clearance_mm,
+                0.10,
+            )
+            is None
+        )
+
+    if safe(preferred):
+        return preferred
+    reference, number = ref.rsplit(".", 1)
+    footprint = next(fp for fp in pcb.footprints if fp.reference == reference)
+    pad = next(pad for pad in footprint.pads if pad.number == number)
+    target = relocation._first_offpad_signal_candidate(
+        pcb,
+        via,
+        pad_absolute_bbox(pad, footprint),
+        pads,
+        holes,
+        rules.min_clearance_mm,
+        rules.min_hole_to_hole_mm,
+        layers,
+        0.15,
+        0.10,
+        search_alternatives=True,
+        candidate_predicate=safe,
+    )
+    if target is None or not safe(target):
+        raise ValueError(f"No clearance-safe off-pad bond for {ref}")
+    return target
+
+
+def has_verified_offpad_bond(pcb, ref, net, old):
+    """Recognize this repair's complete, still-clear bond before zone refill."""
+    for via in pcb.vias:
+        if pcb.nets[via.net_number].name != net:
+            continue
+        target = tuple(round(value, 6) for value in via.position)
+        required_layers = {"F.Cu"}
+        bonded_layers = set()
+        for segment in pcb.segments:
+            if segment.net_number != via.net_number:
+                continue
+            if any(math.dist(endpoint, old) < 0.001 for endpoint in (segment.start, segment.end)):
+                required_layers.add(segment.layer)
+            expected_id = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"board04-offpad:{ref}:{target}:{segment.layer}")
+            )
+            if (
+                segment.uuid == expected_id
+                and math.dist(segment.start, old) < 0.001
+                and math.dist(segment.end, target) < 0.001
+                and segment.width == 0.15
+            ):
+                bonded_layers.add(segment.layer)
+        if not required_layers <= bonded_layers:
+            continue
+        position = via.position
+        try:
+            via.position = old
+            checked = select_offpad_position(pcb, via, ref, target, sorted(required_layers))
+            if math.dist(checked, target) < 1e-6:
+                return True
+        except ValueError:
+            continue
+        finally:
+            via.position = position
+    return False
+
+
 def repair(pcb_path):
-    """Move exactly the reviewed eight escapes and add a tail on every used layer."""
+    """Validate all staged repairs before publishing the board and options."""
+    import os
+    import shutil
+    import tempfile
+
+    pcb_path = Path(pcb_path)
+    with tempfile.TemporaryDirectory(prefix=".board04-repair-", dir=pcb_path.parent) as tmp:
+        staged = Path(tmp) / pcb_path.name
+        shutil.copy2(pcb_path, staged)
+        changed = _repair_staged(staged)
+        # Both artifacts have passed process validation before either write.
+        os.replace(staged, pcb_path)
+        os.replace(
+            Path(tmp) / "manufacturing-requirements.json",
+            pcb_path.parent / "manufacturing-requirements.json",
+        )
+    return changed
+
+
+def _repair_staged(pcb_path):
+    """Move reviewed escapes/route vias and add a tail on every used layer."""
     pcb_path = Path(pcb_path)
     if physical_fingerprint(pcb_path) != PHYSICAL_SHA256:
         raise ValueError("Board04 physical design changed: review new via escapes")
     pcb, doc = PCB.load(pcb_path), parse_file(pcb_path)
     ox, oy = pcb.board_origin
     changed = 0
-    for ref, net, old, new in MOVES:
+    for move in MOVES + INSET_ROUTE_MOVES:
+        # The recipe refills after repair. Screen fixed copper against the
+        # current staged moves, without treating obsolete fill as an obstacle.
+        # Keep zone boundaries and keepouts in the geometry model.
+        pcb = PCB(copy.deepcopy(doc))
+        for zone in pcb.zones:
+            zone.filled_polygons.clear()
+        ref, net, old, new = move
         choices = [
             (i, v)
             for i, v in enumerate(pcb.vias)
             if pcb.nets[v.net_number].name == net and math.dist(v.position, old) < 0.001
         ]
         if not choices:
+            if has_verified_offpad_bond(pcb, ref, net, old):
+                continue
             if any(
                 pcb.nets[v.net_number].name == net and math.dist(v.position, new) < 0.001
                 for v in pcb.vias
+            ):
+                continue
+            # The pinned historical route has no C11 transition at this
+            # location. Its absence is allowed; validate_process below still
+            # checks every drill against every SMT land on either variant.
+            if move in INSET_ROUTE_MOVES:
+                continue
+            # A fresh route may connect this circuit through a different
+            # outside-pad via (or entirely on the surface). The fingerprint
+            # above pins every pad/net identity. Accept that alternative only
+            # when physical copper joins exactly the complete expected net;
+            # missing pads, opens, and foreign-terminal shorts still fail.
+            # validate_process below checks every resulting drill/SMT gap.
+            from kicad_tools.validate.connectivity import ConnectivityValidator
+
+            expected = frozenset(
+                f"{fp.reference}.{pad.number}"
+                for fp in pcb.footprints
+                for pad in fp.pads
+                if pad.net_name == net
+            )
+            if (
+                ref in expected
+                and len(expected) >= 2
+                and ConnectivityValidator(pcb_path).extract_pad_partition().count(expected) == 1
             ):
                 continue
             raise ValueError(f"Missing reviewed escape {ref}: cannot apply fixed repair")
         if len(choices) != 1:
             raise ValueError(f"Ambiguous escape {ref}")
         i, v = choices[0]
+        layers = {"F.Cu"}
+        for segment in pcb.segments:
+            if segment.net_number == v.net_number and any(
+                math.dist(p, v.position) < 0.001 for p in [segment.start, segment.end]
+            ):
+                layers.add(segment.layer)
+        new = select_offpad_position(pcb, v, ref, new, sorted(layers))
         node = doc.find_children("via")[i]
         at = node.find_child("at")
         at.set_atom(0, new[0] + ox)
@@ -122,12 +331,6 @@ def repair(pcb_path):
         node.children = [c for c in node.children if not (c.is_atom and c.value == "micro")]
         node.remove_child("tenting")
         node.add(parse_string("(tenting (front yes) (back yes))"))
-        layers = {"F.Cu"}
-        for segment in pcb.segments:
-            if segment.net_number == v.net_number and any(
-                math.dist(p, v.position) < 0.001 for p in [segment.start, segment.end]
-            ):
-                layers.add(segment.layer)
         for layer in sorted(layers):
             net_expr = serialize_sexp(node.find_child("net"))
             uid = uuid.uuid5(uuid.NAMESPACE_URL, f"board04-offpad:{ref}:{new}:{layer}")
@@ -144,11 +347,83 @@ def repair(pcb_path):
         via.add(parse_string("(tenting (front yes) (back yes))"))
     pcb_path.write_text(serialize_sexp(doc))
     trim_obsolete_nrst_tail(pcb_path)
+    trim_redundant_gnd_stitch(pcb_path)
     (pcb_path.parent / "manufacturing-requirements.json").write_text(
         json.dumps(OPTIONS, indent=2) + "\n"
     )
     validate_process(pcb_path, check_native=False)
     return changed
+
+
+def trim_redundant_gnd_stitch(pcb_path):
+    """Remove the reviewed redundant stitch crossing U2's unused bottom pads.
+
+    U2.23 has its own off-pad ground bond after repair. The additional
+    0.60/0.30 mm stitch at (32.01, 26.16) cuts U2.20/U2.21 solder lands;
+    its surface tail also joins unused pins. Remove only this exact pair,
+    and only when all net-assigned pad connectivity survives unchanged.
+    """
+    import tempfile
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    pcb_path = Path(pcb_path)
+    pcb = PCB.load(pcb_path)
+    origin, end = (33.25, 26.16), (32.01, 26.16)
+    vias = [
+        v
+        for v in pcb.vias
+        if v.net_name == "GND"
+        and math.dist(v.position, end) < 0.001
+        and abs(v.size - 0.6) < 1e-6
+        and abs(v.drill - 0.3) < 1e-6
+    ]
+    if not vias:
+        return 0
+    tails = [
+        s
+        for s in pcb.segments
+        if s.net_name == "GND"
+        and s.layer == "F.Cu"
+        and abs(s.width - 0.2) < 1e-6
+        and any(
+            math.dist(a, origin) < 0.001 and math.dist(b, end) < 0.001
+            for a, b in ((s.start, s.end), (s.end, s.start))
+        )
+    ]
+    if len(vias) != 1 or len(tails) != 1:
+        raise ValueError("Ambiguous redundant Board04 ground stitch")
+    bound = {
+        f"{fp.reference}.{pad.number}" for fp in pcb.footprints for pad in fp.pads if pad.net_name
+    }
+
+    def partition(path):
+        return {
+            frozenset(component & bound)
+            for component in ConnectivityValidator(path).extract_pad_partition()
+            if component & bound
+        }
+
+    before = partition(pcb_path)
+    remove = {vias[0].uuid, tails[0].uuid}
+    doc = parse_file(pcb_path)
+    doc.children = [
+        node
+        for node in doc.children
+        if not (
+            node.name in ("via", "segment")
+            and node.find_child("uuid")
+            and node.find_child("uuid").get_string(0) in remove
+        )
+    ]
+    candidate_text = serialize_sexp(doc)
+    with tempfile.TemporaryDirectory(prefix="board04-stitch-check-") as directory:
+        candidate = Path(directory) / pcb_path.name
+        candidate.write_text(candidate_text)
+        if partition(candidate) != before:
+            raise ValueError("Board04 ground stitch is required for pad connectivity")
+    pcb_path.write_text(candidate_text)
+    return 1
 
 
 def trim_obsolete_nrst_tail(pcb_path):
@@ -214,7 +489,12 @@ def process_rules():
 
 
 def apply_native_floors(pcb_path):
-    """Emit the exact same reviewed DesignRules used by the Python checker."""
+    """Emit the exact same reviewed DesignRules used by the Python checker.
+
+    The reviewed paid-drill floors are deliberately looser than the stock
+    tier1 floors ``kct route`` already wrote, so this pass overwrites instead
+    of keeping the stricter earlier values (the #6191 default).
+    """
     from kicad_tools.manufacturers import write_drc_constraints
 
     write_drc_constraints(
@@ -224,6 +504,7 @@ def apply_native_floors(pcb_path):
         layers=2,
         copper_oz=1.0,
         write_dru=True,
+        preserve_board_rules="0",
     )
 
     project = Path(pcb_path).with_suffix(".kicad_pro")

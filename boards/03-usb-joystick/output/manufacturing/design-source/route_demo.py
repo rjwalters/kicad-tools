@@ -149,6 +149,10 @@ def main():
     # a final DRC summary even when ``route_pcb()`` short-circuits.
     print("\n--- DRC Validation ---")
     drc_passed, drc_errors, drc_warnings = run_drc(output_path, refill=True)
+    # Issue #5981: a machine-readable record of the kct-check leg alone, so
+    # the regression test can tell a kct-check failure/crash (``errors=-1``)
+    # apart from a native-only failure.  Keep this format stable.
+    print(f"  kct check: passed={drc_passed} errors={drc_errors}")
     # A second, independent check uses the now-emitted native project rules.
     import json
 

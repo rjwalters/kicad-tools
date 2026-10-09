@@ -1,7 +1,7 @@
 {
     "$schema": "https://schemas.kicad.org/drc.v1.json",
     "coordinate_units": "mm",
-    "date": "2026-09-15T04:34:43",
+    "date": "2026-10-08T17:38:40",
     "ignored_checks": [
         {
             "description": "Footprint has no courtyard defined",
@@ -33,9 +33,56 @@
         "warning",
         "exclusion"
     ],
-    "kicad_version": "10.0.5",
+    "kicad_version": "10.0.6",
     "schematic_parity": [],
     "source": "usb_joystick_routed.kicad_pcb",
     "unconnected_items": [],
-    "violations": []
+    "violations": [
+        {
+            "description": "Silkscreen clearance (board setup constraints silk clearance 0.0500 mm; actual 0.0369 mm)",
+            "items": [
+                {
+                    "description": "Reference field of SW5",
+                    "pos": {
+                        "x": 171.5,
+                        "y": 84.5
+                    },
+                    "uuid": "643f1563-2d04-4ac8-bd25-13c231f6d626"
+                },
+                {
+                    "description": "Segment of SW5 on F.Silkscreen",
+                    "pos": {
+                        "x": 169.8,
+                        "y": 84.2
+                    },
+                    "uuid": "9a3f4e08-6f90-595e-b5cf-f6f43201d166"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        },
+        {
+            "description": "Silkscreen clearance (board setup constraints silk clearance 0.0500 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Reference field of SW5",
+                    "pos": {
+                        "x": 171.5,
+                        "y": 84.5
+                    },
+                    "uuid": "643f1563-2d04-4ac8-bd25-13c231f6d626"
+                },
+                {
+                    "description": "Segment of SW5 on F.Silkscreen",
+                    "pos": {
+                        "x": 173.2,
+                        "y": 84.2
+                    },
+                    "uuid": "abc51dc8-2d37-5474-9846-027ed4c8f4b2"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        }
+    ]
 }

@@ -3,11 +3,11 @@
 
 import os
 import sys
-import uuid
 from pathlib import Path
 
 from joystick_hardware import COMPONENTS, NETS
 
+from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.pcb.footprints import FootprintLibrary
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
@@ -16,8 +16,14 @@ BOARD_WIDTH, BOARD_HEIGHT = 80.0, 60.0
 BOARD_ORIGIN_X, BOARD_ORIGIN_Y = centered_origin(BOARD_WIDTH, BOARD_HEIGHT)
 
 
-def generate_uuid():
-    return str(uuid.uuid4())
+# Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
+# the same uuid5 every run, so a fresh build is byte-reproducible.
+_PCB_UUIDS = UuidSequence("boards/03-usb-joystick/usb_joystick.kicad_pcb")
+
+
+def generate_uuid() -> str:
+    """Next deterministic KiCad-format UUID (Issue #6076)."""
+    return _PCB_UUIDS()
 
 
 def stage_local_footprints(output_dir):
@@ -93,6 +99,7 @@ def generate_power_pours():
 
 
 def generate_pcb():
+    _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
     header = """(kicad_pcb (version 20260206) (generator "kicad-tools")
     (general (thickness 1.6)) (paper "A4")
     (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)
@@ -125,16 +132,46 @@ def generate_pcb():
     )
 
 
-if __name__ == "__main__":
-    target = (
-        Path(sys.argv[1])
-        if len(sys.argv) > 1
-        else Path(__file__).parent / "output/usb_joystick.kicad_pcb"
-    )
+def write_pcb(target, *, verbose=True):
+    """Write the generated board to *target* and repair its footprint silk.
+
+    Issue #5744: three of this board's library land patterns (``J3``'s
+    pin-header socket, the ``R3``/``R4`` 0402 pads) draw silkscreen closer to
+    their own pads than the reviewed ``jlcpcb-tier1`` floor
+    (``min_silk_to_pad_clearance_mm`` = 0.15mm) allows.  Those 21
+    ``silk_pad_clearance`` errors were latent only because
+    ``routing_plan.apply_plan()`` used to delete every footprint silk graphic
+    on replay -- the routed artifact carried no silk to measure.  The replay
+    is fixed, so the silk really is there and has to really be manufacturable.
+
+    The repair belongs HERE, not in ``generate_design.py:main()``: every
+    consumer of this generator (the full recipe, a bare
+    ``python generate_pcb.py <dir>``, ``route_demo.py``,
+    ``tests/test_board_03_regression.py``'s regeneration fixture) must get the
+    same repaired placement, because each of them then feeds it to
+    ``apply_plan()``.  Raises if any violation survives.
+    """
+    target = Path(target)
     if target.suffix != ".kicad_pcb":
         target = target / "usb_joystick.kicad_pcb"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(generate_pcb())
+
+    # Board-local sibling module: import by path-insert so this works whatever
+    # the caller's cwd is and whether or not the caller already did so.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from silk_repair import repair_board_silk_pad_clearance
+
+    repair_board_silk_pad_clearance(target, verbose=verbose)
+    return target
+
+
+if __name__ == "__main__":
+    target = write_pcb(
+        Path(sys.argv[1])
+        if len(sys.argv) > 1
+        else Path(__file__).parent / "output/usb_joystick.kicad_pcb"
+    )
     stage_local_footprints(target.parent)
     # KiCad loads project-local libraries only when the matching project exists.
     from kicad_tools.core.project_file import create_minimal_project, save_project

@@ -1,7 +1,7 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.20.0",
-  "generated_at": "2026-09-15T04:24:34.244259+00:00",
+  "kicad_tools_version": "0.22.0",
+  "generated_at": "2026-10-09T00:38:07.107170+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,8 +29,8 @@
       "size": 982
     },
     "check-report.json": {
-      "sha256": "c7ac869c6875f980eb5de981e0c3aa6319d63da9879a5be92d2fdb14d84dde4e",
-      "size": 4972
+      "sha256": "3011c4ae717a0185d674268af8fe958d9657f27c741aa0e5346632735dcf498f",
+      "size": 7077
     },
     "cpl_jlcpcb.csv": {
       "sha256": "8b435e9347774c7f26e3536b35136d1cf2fc0c9ba3c1de5803fcfd2ab6086b5d",
@@ -49,12 +49,12 @@
       "size": 6324
     },
     "design-source/generate_design.py": {
-      "sha256": "9b0296979b3d9d54c9573ee9681188f984f299d5b31c8228a16b72606fba8a2f",
-      "size": 50475
+      "sha256": "27b12d6b1f9f350c86761a074b469278158c708654adfdbdbd3cc598f4020bbf",
+      "size": 51887
     },
     "design-source/generate_pcb.py": {
-      "sha256": "3724dbddf1e655d999db3bae8cc64150f0a450fd055a089db921bfbf4cc82e0b",
-      "size": 5824
+      "sha256": "a2d4d8bf7034d20092888e2d42c513c68a715b511dba5d6281e4b6ede3d1e125",
+      "size": 7685
     },
     "design-source/generate_schematic.py": {
       "sha256": "f509834c144b688688971cfc0ea7614977457f4f56e402dcc569551fa909c464",
@@ -77,16 +77,16 @@
       "size": 7474
     },
     "design-source/route_demo.py": {
-      "sha256": "6ce7891b359bdc5f511ca7dc795fcb445d08759b419877e847026853cfa1d0c2",
-      "size": 9828
+      "sha256": "a7a5f7f5c227384d08a3f3c49a4e5f6a6c86925b984286840195a99e28082afc",
+      "size": 10114
     },
     "design-source/routing-plan.json": {
       "sha256": "d71934a443c58d28deefce99cf2c29f502414ba55f8bdd1eff9568460736e4c6",
       "size": 387836
     },
     "design-source/routing_plan.py": {
-      "sha256": "6853cf14404d5a54807fd78ea5d4b74cafc172a8bfe2104da6357ac695be195b",
-      "size": 13223
+      "sha256": "2cf9c44b14df7e990b67c5e2bfa0d23819e83f9095cb9a5b74fbaeaea34f513a",
+      "size": 16167
     },
     "firmware/.gitignore": {
       "sha256": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
@@ -173,12 +173,12 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "c9eabe9dcb1979c4e8777c747bb1260b3078df31899bd92fdef32e52b301f2fb",
-      "size": 183197
+      "sha256": "d6eeeabf874ce6b2eb7d2827925e6aaddf5990bf6f242db6bb8a12f2cc7db0c2",
+      "size": 189744
     },
     "images/assembly.png": {
-      "sha256": "92504aaf9f4e8b596f1697832a8a482e566eba735dd5fb9431361ede30d4775f",
-      "size": 489499
+      "sha256": "5116f2d20c6863b59b216a57f7e1e58d88e719b839c7076caa7faf6b5b3e78d6",
+      "size": 508198
     },
     "images/layer_B_Cu.png": {
       "sha256": "dc094755d5343698529929d8ab74cb4cb74fb270822bbe1eebda93a4d2050438",
@@ -205,16 +205,16 @@
       "size": 400050
     },
     "images/pcb_front.png": {
-      "sha256": "e4fd07faa436f88b206ed090ffe334f000887f3bd23b6db5cd1fbdd6d279b8d7",
-      "size": 478425
+      "sha256": "0aa5638253a9f24e78e10469406dd4bfc1bc7425aaca197eab02511295ba3f91",
+      "size": 497328
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "280cd14f3e38b8ee0d7494113bdd72bae08e75561aa78723bf7c44f65c26f9d3",
-      "size": 486452
+      "sha256": "4c37ff6a64358801a9cce138450e326a2316180fb885a74de18787530635fceb",
+      "size": 486470
     },
     "kicad_project.zip": {
-      "sha256": "82890137bdd1203fdf0c935991a8a2efb7efbfcf90892a794aaf2b4610af29ad",
-      "size": 271031
+      "sha256": "d4503f5662d08b30a93b084792ca8812a14ecb487762cbf44b469898199919a8",
+      "size": 282157
     },
     "manual-assembly-bom.csv": {
       "sha256": "f51fef1b581623d69c00b1b3604f0a1b193c29e29134a3931e0853ab13030ef7",
@@ -317,12 +317,12 @@
       "size": 2354
     },
     "report.md": {
-      "sha256": "33365daf2e2d493e0628fd26b5b87546ce29fb76b4ccac39aa056fdf6476fceb",
-      "size": 7306
+      "sha256": "1583d29a8ace857894482a46a19a0c8d3a00d626e608351dfffb8b8587d84dc7",
+      "size": 4976
     },
     "report.pdf": {
-      "sha256": "e67b7f1c4dec15a368e57e8e75a4d068bc90d4ddc6e313106dd610e3e6182661",
-      "size": 3722247
+      "sha256": "e18c5a58b7676132dcf7972546daba527cdb6133df2c7a92afc64a42ddf69539",
+      "size": 3717712
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -399,14 +399,24 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 6 warning(s)"
+      "message": "DRC passed with 8 warning(s)"
     },
     {
       "name": "erc",
-      "status": "WARN",
-      "message": "ERC passed with 1 warning(s)"
+      "status": "OK",
+      "message": "ERC: 0 errors, 0 warnings"
     }
   ],
-  "qualification_provenance": "native-clearance-qualification/provenance.json",
-  "warning_counts_by_rule": {}
+  "fabrication_process": {
+    "process_id": "jlcpcb-tier1-pofv-4l",
+    "name": "JLCPCB Capability Plus -- Plated-Over Filled Via (POFV), 4+ layer",
+    "min_layer_count": 4,
+    "min_via_drill_mm": 0.2,
+    "max_via_drill_mm": 0.5,
+    "min_annular_ring_mm": 0.1,
+    "requires_filled_and_capped": true,
+    "min_component_hole_distance_mm": 0.5,
+    "source": "https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv",
+    "ordering_instructions": "Order the JLCPCB Capability Plus -- Plated-Over Filled Via (POFV), 4+ layer process (jlcpcb-tier1-pofv-4l): a >= 4-layer stackup with epoxy-filled and copper-capped (plated-over) vias, via drills between 0.2 and 0.5 mm, annular ring >= 0.1 mm, and in-pad vias kept >= 0.5 mm from any other component's drilled hole. Do not substitute ordinary open or merely tented vias. Source: https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv"
+  }
 }

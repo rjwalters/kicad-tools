@@ -1,9 +1,11 @@
 {
-  "all_by_type": {},
+  "all_by_type": {
+    "silk_overlap": 2
+  },
   "by_type": {},
   "error_count": 0,
   "note": null,
-  "pcb_sha256": "17d3fc83cb535fcd0ccac2e7b1a6036e272ec5d15a7936400217900b84e20a53",
+  "pcb_sha256": "1113687838f880f0f3e2d53f2f4c9666b54b1787ed875af6d7d4ef4d005fb25a",
   "ran": true,
   "reason": "ok",
   "refill_during_check": false,
