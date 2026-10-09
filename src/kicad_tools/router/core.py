@@ -2011,6 +2011,13 @@ class Autorouter:
         # can no longer reach the original pad through the inter-pad
         # channel.  Populated by ``_apply_in_pad_escape_rescues``.
         self._in_pad_escape_protected_nets: set[int] = set()
+        # Issue #5398: Kelvin sense nets whose trapped terminal received a
+        # committed inward off-pad access in ``generate_escape_routes``.  Never
+        # displaced by a sibling rip-up in EITHER rip-up variant (route_all and
+        # negotiated), so a later higher-priority net cannot strip the
+        # recovered access.  Kept separate from the #3183 set so ordinary
+        # (non-Kelvin) negotiated rip-up behaviour is unchanged.
+        self._kelvin_access_protected_nets: set[int] = set()
         # Fine-grid routing count (updated by route_all_multi_resolution)
         self.fine_grid_nets_count: int = 0
 
@@ -2193,6 +2200,18 @@ class Autorouter:
         )
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager
+
+    @property
+    def kelvin_access_nets(self) -> frozenset[int]:
+        """Net ids given a committed Kelvin inward off-pad access (Issue #5398).
+
+        Populated by :meth:`generate_escape_routes` (and therefore
+        :meth:`route_with_escape`) when a trapped Kelvin sense terminal of a
+        dense package received a validated inward via escape that actually
+        committed.  These nets are excluded from sibling rip-up.  Empty when
+        the recovery never fired.  Read-only snapshot.
+        """
+        return frozenset(self._kelvin_access_protected_nets)
 
     @property
     def use_waypoint_injection(self) -> bool:
@@ -9042,6 +9061,7 @@ class Autorouter:
         # purpose of the rescue and triggering the very clearance
         # violation it exists to prevent.
         routed_net_ids -= self._in_pad_escape_protected_nets
+        routed_net_ids -= self._kelvin_access_protected_nets  # Issue #5398
         siblings = self._find_lower_priority_siblings_on_components(
             failed_net=failed_net,
             blocking_components=blocking_components,
@@ -9229,6 +9249,8 @@ class Autorouter:
         # components.  Restrict candidates to nets that currently have
         # routes in ``net_routes``.
         routed_net_ids = {n for n, routes in net_routes.items() if routes and n != failed_net}
+        # Issue #5398: a committed Kelvin inward access is never displaced.
+        routed_net_ids -= self._kelvin_access_protected_nets
         siblings = self._find_lower_priority_siblings_on_components(
             failed_net=failed_net,
             blocking_components=blocking_components,
@@ -19467,10 +19489,45 @@ class Autorouter:
         # measures against.  ``EscapeRouter.apply_escape_routes`` marks the
         # stubs straight onto ``self.grid`` (bypassing ``_mark_route``), so the
         # grid-level observer is what catches them; this only supplies the tag.
+        # Issue #5398: Kelvin recognition needs the board's physical terminals
+        # (the shunt root lives off the dense package), computed once.
+        from .kelvin_escape import kelvin_net_ids, recover_kelvin_escapes
+
+        physical_pads = self.all_pads or list(self.pads.values())
+        kelvin_nets = kelvin_net_ids(physical_pads)
+        recovered_labels: list[str] = []
+
         with self._journal_stage(PASS_ESCAPE):
             for package in packages:
                 escapes = self._escape.generate_escapes(package)
+                if kelvin_nets:
+                    # Issue #5398: a Kelvin sense terminal whose escape never
+                    # left its land gets a bounded, fully validated inward
+                    # off-pad layer transition before general routing.
+                    original_ids = {id(escape) for escape in escapes}
+                    escapes = recover_kelvin_escapes(
+                        self._escape,
+                        package,
+                        escapes,
+                        physical_pads,
+                        edge_segments=self._edge_segments or (),
+                        edge_clearance=self._edge_clearance or 0.0,
+                        kelvin_nets=kelvin_nets,
+                    )
+                    recovered_ids = {id(escape) for escape in escapes} - original_ids
+                else:
+                    recovered_ids = set()
                 routes = self._escape.apply_escape_routes(escapes)
+                if recovered_ids:
+                    # ``apply_escape_routes`` narrows ``escapes`` in place to
+                    # the committed subset: only a recovery that actually
+                    # landed gains protection from sibling rip-up.
+                    for escape in escapes:
+                        if id(escape) in recovered_ids and escape.pad.net:
+                            self._kelvin_access_protected_nets.add(escape.pad.net)
+                            recovered_labels.append(
+                                f"{escape.pad.ref}.{escape.pad.pin} ({escape.pad.net_name})"
+                            )
                 all_routes.extend(routes)
 
                 # Track these routes
@@ -19503,6 +19560,12 @@ class Autorouter:
                     f"  Escape routes: {package.ref} ({package.package_type.name})"
                     f" - {len(escapes)} pins escaped{in_pad_note}"
                 )
+
+        if recovered_labels:
+            print(
+                f"  Kelvin inward access: {len(recovered_labels)} trapped sense terminal(s) "
+                "given an off-pad layer transition (Issue #5398): " + ", ".join(recovered_labels)
+            )
 
         if self._escape_pad_overrides:
             print(
