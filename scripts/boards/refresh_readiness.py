@@ -395,7 +395,7 @@ def refresh(
     cfg = BOARDS[board.name]
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-") as tmp:
         staged = Path(tmp) / board.name
-        shutil.copytree(board, staged)
+        shutil.copytree(board, staged, ignore=shutil.ignore_patterns("__pycache__"))
         out = staged / "output"
         mfg = out / "manufacturing"
 
@@ -454,6 +454,7 @@ def refresh(
             p.relative_to(staged).as_posix()
             for p in staged.rglob("*")
             if p.is_file()
+            and "__pycache__" not in p.relative_to(staged).parts
             and (board / p.relative_to(staged)).is_file()
             and p.read_bytes() != (board / p.relative_to(staged)).read_bytes()
         )

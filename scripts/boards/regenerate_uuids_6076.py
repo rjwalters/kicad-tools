@@ -236,7 +236,7 @@ def board05() -> None:
             out / "bldc_controller.kicad_sch", gen / "bldc_controller.kicad_sch"
         )
         log(
-            f"  schematic masked delta: {len(sch_delta)} lines (lib_symbols property order, f33f4ddd)"
+            f"  schematic masked delta: {len(sch_delta)} lines (lib_symbols property order of ATmega328P-A, f33f4ddd)"
         )
         record("05-sch-masked-delta.txt", sch_delta)
         m = structural_map(
@@ -318,7 +318,7 @@ def board07() -> None:
         log(f"  build_source outputs other than the schematic are byte-identical: {sorted(same)}")
         sch_delta = masked_delta(out / "matchgroup_test.kicad_sch", gen / "sdram_demo.kicad_sch")
         log(
-            f"  schematic masked delta: {len(sch_delta)} lines (lib_symbols property order, f33f4ddd)"
+            f"  schematic masked delta: {len(sch_delta)} lines (lib_symbols property order of IS42S16400J-xT and AP2112K-3.3, f33f4ddd)"
         )
         record("07-sch-masked-delta.txt", sch_delta)
         assert (out / "readiness/checked.kicad_sch").read_bytes() == (
