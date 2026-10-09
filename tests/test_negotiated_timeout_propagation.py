@@ -72,6 +72,12 @@ class FakeGrid:
     def unmark_route(self, route: Route) -> None:
         pass
 
+    def resync_route_occupancy(self, replacements) -> None:
+        # Issue #6273: a rip-up iteration the deadline cuts off mid-reroute
+        # now restores the complete pre-iteration snapshot, which resyncs
+        # route occupancy; the fake grid tracks nothing to resync.
+        pass
+
     def update_history_costs(self, increment: float) -> None:
         pass
 
@@ -294,6 +300,46 @@ class TestTwoPhaseTimeoutPropagation:
         # "Iteration N complete" comes from the overflow recompute
         # following the inner loop.
         assert "Iteration 1 complete" not in captured.out
+
+    def test_timeout_mid_reroute_restores_the_complete_snapshot(self, capsys):
+        """Issue #6273: an iteration cut off mid-reroute must not be emitted.
+
+        Iteration 1 rips all three nets and the deadline fires after two have
+        re-landed, so the live state holds 2/3 nets.  Its overflow is no
+        worse than the complete initial pass, and before #6273 the
+        ``(clearance, overflow)`` comparator therefore kept the gutted state
+        -- the board-05 escalation trigger.  The routed-net key restores
+        the complete snapshot instead.
+        """
+        two_phase, grid, burn_log = self._build(net_count=3, per_net_step=2.0)
+        clock = two_phase._test_clock  # type: ignore[attr-defined]
+
+        with (
+            patch("kicad_tools.router.algorithms.two_phase.time.time", clock),
+            patch(
+                "kicad_tools.router.algorithms.NegotiatedRouter",
+                FakeNegotiatedRouter,
+            ),
+        ):
+            net_order = list(two_phase.nets.keys())
+            routes = two_phase._detailed_negotiated(
+                net_order=net_order,
+                corridor_penalty=5.0,
+                timeout=10.0,
+                start_time=1000.0,
+                max_iterations=5,
+                patience=99,
+            )
+
+        captured = capsys.readouterr()
+        assert "Timeout during reroute at net" in captured.out
+        assert "Restoring iteration 0 state" in captured.out
+        assert "(clearance_viol=0, routed=3, overflow=5) instead of final" in captured.out
+        assert "(clearance_viol=0, routed=2, overflow=5)" in captured.out
+        # Every net of the initial pass is back -- the emitted copper is the
+        # complete snapshot, not the partial iteration.
+        assert {route.net for route in routes} == set(net_order)
+        assert {route.net for route in two_phase.routes} == set(net_order)
 
     def test_no_timeout_runs_all_iterations(self, capsys):
         """When ``timeout=None``, the loop runs to ``max_iterations`` (or

@@ -267,6 +267,18 @@ class TestReplayOnTheKelvinFixture:
         assert witness.truncated is True
         assert witness.evaluations <= 2
 
+    def test_expired_deadline_truncates_instead_of_running_on(self):
+        """Issue #6273: a ``kct route --timeout`` run bounds the replay in time."""
+        import time
+
+        router = _routed_kelvin()
+        witness = replay(
+            router.commit_journal, router, pad_keys=[U3], deadline=time.monotonic() - 1.0
+        )
+        assert witness.truncated is True
+        unbounded = replay(router.commit_journal, router, pad_keys=[U3])
+        assert witness.evaluations < unbounded.evaluations
+
     def test_pad_cap_truncates_deterministically(self):
         router = _routed_kelvin()
         keys = [U3, ("R10", "1"), ("Q1", "1")]

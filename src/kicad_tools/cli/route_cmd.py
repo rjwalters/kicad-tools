@@ -147,6 +147,23 @@ logger = logging.getLogger(__name__)
 _AUTO_FIX_RESERVE_FRACTION = 0.20
 _AUTO_FIX_RESERVE_FLOOR_SEC = 60.0
 
+# Issue #6273: post-route finishing reserve.  See :func:`_post_route_reserve`.
+_POST_ROUTE_RESERVE_FRACTION = 0.15
+_POST_ROUTE_RESERVE_FLOOR_SEC = 60.0
+_POST_ROUTE_RESERVE_CAP_FRACTION = 0.25
+# Every carved-out reserve together never takes more than this share of
+# ``--timeout`` from routing (the #3238 auto-fix cap, now shared).
+_TOTAL_RESERVE_CAP_FRACTION = 0.5
+# The finishing stages stop starting kicad-cli work this long before the
+# hard deadline: the summary, audits and interpreter exit still follow.
+_FINISHING_EXIT_MARGIN_SEC = 10.0
+# The pre-save trace optimizer runs only while this share of the post-route
+# reserve is still left (see :func:`_optimization_fits_budget`).
+_OPTIMIZE_MIN_RESERVE_SHARE = 0.75
+# A kicad-cli DRC is only started when the time left covers its estimated
+# cost (the run's measured zone-fill time) times this factor.
+_DRC_DEADLINE_SAFETY = 1.5
+
 # =============================================================================
 # Issue #3538: Deterministic (iteration-budgeted) routing
 # =============================================================================
@@ -409,6 +426,91 @@ def _auto_fix_budget(args) -> float:
     return min(reserve, 0.5 * float(timeout))
 
 
+def _post_route_reserve(args, timeout: float | None = None) -> float:
+    """Return the post-route finishing reserve in seconds (issue #6273).
+
+    ``--timeout`` is a HARD total: :mod:`kicad_tools.cli.route_deadline`
+    terminates the worker when it fires and quarantines whatever was on disk
+    as ``*_timeout_unverified_*``.  But every routing loop budgets against the
+    routing deadline, and before #6273 that deadline was the *whole* budget
+    (minus only an ``--auto-fix`` reserve).  The last layer-escalation
+    attempt's fair slice was therefore "everything that is left", so a board
+    whose routing ran to its slice left the finishing stages -- optimize, DRC
+    nudge, save, zone fill, pour completion, post-route DRC -- no time at all,
+    and the supervisor killed the run before anything was saved.  Board 05's
+    legacy recipe (``--timeout 900``) never produced an accepted board for
+    exactly this reason: its 900 s always ran out in escalation or
+    optimization.
+
+    This reserve is carved out of the routing deadline so the routing loops
+    stop early enough for those stages to finish inside ``--timeout``.  It is
+    ``max(60 s, 15% of --timeout)`` capped at 25% of ``--timeout``.  A run
+    whose routing finishes earlier than ``--timeout`` minus the reserve is
+    unaffected: the reserve is a ceiling on routing, never a target.
+
+    ``timeout`` overrides ``args.timeout`` with the budget this invocation
+    actually has -- :func:`_set_wall_clock_deadline` passes the value clamped
+    to an enclosing supervisor's deadline, so a nested call with three seconds
+    left reserves a share of three seconds, not of its nominal ``--timeout``.
+
+    Returns ``0.0`` when ``--timeout`` is unset (legacy unbounded runs).
+    """
+    if timeout is None:
+        timeout = getattr(args, "timeout", None)
+    if not timeout or timeout <= 0:
+        return 0.0
+    reserve = max(_POST_ROUTE_RESERVE_FLOOR_SEC, _POST_ROUTE_RESERVE_FRACTION * float(timeout))
+    return min(reserve, _POST_ROUTE_RESERVE_CAP_FRACTION * float(timeout))
+
+
+def _finishing_time_left(args) -> float | None:
+    """Seconds a finishing stage may still start work in (issue #6273).
+
+    The hard total (``_wall_clock_deadline``) minus
+    :data:`_FINISHING_EXIT_MARGIN_SEC`, which covers the summary, audits and
+    interpreter exit that follow the last stage.  ``None`` when the run has
+    no ``--timeout``; never negative.
+    """
+    remaining = _total_remaining_budget(args)
+    if remaining is None:
+        return None
+    return max(0.0, remaining - _FINISHING_EXIT_MARGIN_SEC)
+
+
+def _optimization_fits_budget(args, quiet: bool = False, stage: str = "Optimizing traces") -> bool:
+    """Whether a pre-save geometric pass may still run (issue #6273).
+
+    The trace optimizer and the DRC nudge run BEFORE the routed board is
+    saved, so time they spend is time the save, zone fill and DRC no longer
+    have.  Each is skipped -- with a note naming ``stage`` -- when less than
+    :data:`_OPTIMIZE_MIN_RESERVE_SHARE` of the post-route reserve is left of
+    ``--timeout``, i.e. when routing overran into the finishing reserve.  The
+    copper is still finalized, consolidated and saved; only the optional
+    clean-up passes are dropped.  Always ``True`` without ``--timeout``.
+    """
+    remaining = _total_remaining_budget(args)
+    reserve = float(getattr(args, "_post_route_reserve", 0.0) or 0.0)
+    if remaining is None or reserve <= 0.0:
+        return True
+    need = _OPTIMIZE_MIN_RESERVE_SHARE * reserve
+    if remaining >= need:
+        return True
+    if not quiet:
+        print(
+            f"\n--- {stage}: skipped ({remaining:.0f}s of --timeout left, "
+            f"under the {need:.0f}s kept for save / zone fill / DRC; issue #6273) ---"
+        )
+    return False
+
+
+def _post_route_drc_budget(args) -> dict:
+    """Keyword arguments that bound :func:`run_post_route_drc` (issue #6273)."""
+    return {
+        "time_left": _finishing_time_left(args),
+        "drc_cost_estimate": float(getattr(args, "_zone_fill_seconds", 0.0) or 0.0),
+    }
+
+
 def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
     """Rebuild route-derived state from the selected copper before post-passes.
 
@@ -481,6 +583,12 @@ def _set_wall_clock_deadline(args) -> None:
     so outer routing loops bail early enough to leave a guaranteed budget
     for auto-fix.  The original ``_wall_clock_deadline`` continues to
     bound the *total* wall-clock budget.
+
+    Issue #6273: the routing deadline ALSO holds back the post-route
+    finishing reserve (:func:`_post_route_reserve`), so routing can never
+    consume the time the optimize / save / zone-fill / DRC stages need to
+    produce an accepted board.  The two reserves together are capped at half
+    of ``--timeout``.
     """
     timeout = getattr(args, "timeout", None)
     now = time.monotonic()
@@ -493,14 +601,20 @@ def _set_wall_clock_deadline(args) -> None:
         args._wall_clock_deadline = now + float(timeout)
         reserve = _auto_fix_budget(args)
         args._auto_fix_reserve = reserve
+        # Issue #6273: the finishing stages' reserve, trimmed so the two
+        # reserves together never exceed half of the requested budget.
+        post_route = min(
+            _post_route_reserve(args, float(timeout)),
+            max(0.0, _TOTAL_RESERVE_CAP_FRACTION * float(timeout) - reserve),
+        )
+        args._post_route_reserve = post_route
         # Routing deadline is the wall-clock deadline minus the auto-fix
-        # reserve.  When no reserve is held (no --auto-fix, or no
-        # --timeout) routing deadline collapses to the wall-clock
-        # deadline -- existing behaviour is preserved bit-for-bit.
-        args._routing_deadline = now + float(timeout) - reserve
+        # reserve (#3238) and the post-route finishing reserve (#6273).
+        args._routing_deadline = now + float(timeout) - reserve - post_route
     else:
         args._wall_clock_deadline = None
         args._auto_fix_reserve = 0.0
+        args._post_route_reserve = 0.0
         args._routing_deadline = None
 
 
@@ -701,6 +815,20 @@ def _per_attempt_budgeted_timeout(args, attempt_index: int, max_attempts: int) -
         return per_attempt_slice
 
     return min(float(cap), remaining, per_attempt_slice)
+
+
+def _charge_attempt_setup(attempt_timeout: float | None, slice_started: float) -> float | None:
+    """Deduct an attempt's setup time from its routing slice (issue #6273).
+
+    ``attempt_timeout`` is computed before the attempt loads its board (issue
+    #4798 needs it there for the lattice deadline), but the router measures
+    the timeout it is handed from its own start.  Returns the slice minus the
+    seconds elapsed since ``slice_started`` (never below zero), or ``None``
+    for an unbounded run.
+    """
+    if attempt_timeout is None:
+        return None
+    return max(0.0, attempt_timeout - (time.monotonic() - slice_started))
 
 
 def _routable_multi_pad_nets(router: "Autorouter") -> list[int]:
@@ -3043,6 +3171,8 @@ def _write_access_witness_sidecar(
     router: object | None,
     quiet: bool = False,
     journal_first: bool = False,
+    replay: bool = True,
+    replay_deadline: float | None = None,
 ) -> Path | None:
     """Persist the router's ordered commit journal next to the routed PCB (#5517).
 
@@ -3081,6 +3211,15 @@ def _write_access_witness_sidecar(
             geometric sweeps, and a journal that survived beats a witness that
             did not.  The normal save path leaves this off -- it is not racing
             a signal, and one write beats two.
+        replay: Issue #6273.  ``False`` writes the journal alone and skips
+            the witness replay (up to
+            :data:`~kicad_tools.router.access_witness.MAX_WITNESS_EVALUATIONS`
+            geometric sweeps -- 143 s for board 05's two stranded terminals
+            on a loaded host).  The post-route DRC passes ``False`` when the
+            hard ``--timeout`` leaves no time for it before its own check.
+        replay_deadline: Issue #6273.  Absolute ``time.monotonic()`` time the
+            replay must stop by (it is then marked truncated).  ``None`` (the
+            default) replays to the evaluation cap as before.
 
     Returns:
         The sidecar path when one was written, else ``None`` (no journal,
@@ -3125,13 +3264,27 @@ def _write_access_witness_sidecar(
     # SIGKILL during the replay below still leaves the commit order on disk.
     if journal_first and not dump():
         return None
+    if not replay:
+        # Issue #6273: out of --timeout budget for the replay; the journal
+        # still carries the commit order across to ``net-status --why``.
+        if not journal_first and not dump():
+            return None
+        if not quiet:
+            print(
+                f"  Access-witness sidecar: {sidecar_path} (journal only -- replay "
+                "skipped for the --timeout budget; issue #6273)"
+            )
+        return sidecar_path
     # Issue #5517 (PR 2): the replay runs HERE, while the grid that decided the
     # clearances is still alive.  ``net-status --why`` reads a saved board and
     # could not reproduce it; the sidecar carries the verdict instead.  The key
     # is omitted entirely when nothing ended unrouted -- the common case -- so a
     # fully-routed board's sidecar is unchanged from PR 1's shape.
     try:
-        witness = witness_for_router(router)
+        if replay_deadline is None:
+            witness = witness_for_router(router)
+        else:
+            witness = witness_for_router(router, deadline=replay_deadline)
     except Exception as e:  # pragma: no cover - a diagnostic never fails a route
         witness = None
         if not quiet:
@@ -3520,6 +3673,8 @@ def run_post_route_drc(
     preserve_filled_copper: bool = False,
     routing_plan: "RoutingPlan | None" = None,
     router: object | None = None,
+    time_left: float | None = None,
+    drc_cost_estimate: float = 0.0,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -3589,13 +3744,32 @@ def run_post_route_drc(
             ``<output_stem>.access_witness.json`` next to the routed PCB so
             ``kct net-status --why`` can explain a stranded pad from a saved
             board.  ``None`` is a silent no-op.
+        time_left: Issue #6273.  Seconds this stage may still use before the
+            hard ``--timeout`` (``None`` = unbounded).  The sidecars are
+            always written; the DRC verification itself (internal checker +
+            ``kicad-cli pcb drc``) is skipped, with a note, when the time left
+            cannot cover ``drc_cost_estimate`` times
+            :data:`_DRC_DEADLINE_SAFETY`, because a DRC the supervisor kills
+            costs the run its saved board.
+        drc_cost_estimate: Expected seconds of the native DRC run (callers
+            pass the run's measured zone-fill time: the same KiCad load and
+            refill).
 
     Returns:
-        Tuple of (error_count, warning_count)
+        Tuple of (error_count, warning_count); ``(0, 0)`` when the
+        verification was skipped for time.
     """
     record_stage("post-route-drc")
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
+
+    # Issue #6273: ``time_left`` is a snapshot; turn it into a deadline so the
+    # checks below see the time the sidecar writes themselves used.
+    _finish_by = None if time_left is None else time.monotonic() + max(0.0, time_left)
+    _verify_need = drc_cost_estimate * _DRC_DEADLINE_SAFETY
+
+    def _left() -> float | None:
+        return None if _finish_by is None else _finish_by - time.monotonic()
 
     # Issue #3917 Defect 1: persist the net-class map as a sidecar next to
     # the routed PCB so ``kct check`` (and re-runs of this DRC) can
@@ -3636,10 +3810,18 @@ def run_post_route_drc(
     # next to the routed PCB.  ``net-status --why`` classifies a SAVED board
     # and has no live router, so without this sidecar the commit order that
     # explains a stranded pad is gone by the time anyone asks.
+    # Issue #6273: the witness replay is a diagnostic bounded by evaluations,
+    # not time (143 s for board 05 on a loaded host).  On a --timeout run it
+    # must stop in time for the DRC below, the journal lands first in case it
+    # does not, and with no time to spare it is skipped outright.
+    _replay_by = None if _finish_by is None else _finish_by - _verify_need
     _write_access_witness_sidecar(
         output_path,
         router,
         quiet=quiet,
+        journal_first=_replay_by is not None,
+        replay=_replay_by is None or _replay_by > time.monotonic(),
+        replay_deadline=_replay_by,
     )
 
     # Issue #3920: persist the resolved fab profile as a ``fab_profile.json``
@@ -3664,6 +3846,19 @@ def run_post_route_drc(
         quiet=quiet,
         source_pcb_path=source_pcb_path,
     )
+
+    # Issue #6273: the sidecars above are cheap and always written; the
+    # verification below loads KiCad and refills every zone.  Do not start it
+    # when the hard --timeout cannot cover it -- the supervisor would kill the
+    # run and quarantine the board this DRC was only meant to report on.
+    _left_now = _left()
+    if _left_now is not None and (_left_now <= 0.0 or _left_now < _verify_need):
+        print(
+            f"\n--- DRC Validation ---\n  SKIPPED: {max(0.0, _left_now):.0f}s of --timeout "
+            f"left, under the ~{_verify_need:.0f}s a KiCad DRC of this board needs "
+            "(issue #6273).  The saved board is UNVERIFIED -- run `kct check` on it."
+        )
+        return 0, 0
 
     try:
         # Load the routed PCB
@@ -4905,7 +5100,19 @@ def _fill_zones_after_route(
             source_pcb_path=Path(args.pcb),
         )
 
-    result = run_fill_zones(output_path, kicad_cli=kicad_cli)
+    _fill_started = time.monotonic()
+    # Issue #6273: on a --timeout run the fill (and its starved-thermal
+    # remediation passes) never starts kicad-cli work the hard deadline
+    # cannot finish -- a killed run would lose the board saved above.
+    _fill_kwargs: dict = {}
+    if args is not None and _finishing_time_left(args) is not None:
+        _fill_kwargs["time_left"] = lambda: _finishing_time_left(args)
+    result = run_fill_zones(output_path, kicad_cli=kicad_cli, **_fill_kwargs)
+    if args is not None:
+        # Issue #6273: the measured KiCad load + fill time of THIS board is
+        # the cost estimate the later kicad-cli stages (oracle DRC rounds,
+        # post-route DRC) budget against the hard --timeout.
+        args._zone_fill_seconds = time.monotonic() - _fill_started
 
     if not result.success:
         # Non-fatal: log warning and continue.  The board may still be
@@ -6777,6 +6984,10 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
             nets=pour_nets,
             max_rounds=rounds,
             log=None if quiet else print,
+            # Issue #6273: stop before a kicad-cli call the hard --timeout
+            # cannot finish (a killed run loses its saved board).
+            time_left=lambda: _finishing_time_left(args),
+            call_cost_estimate=float(getattr(args, "_zone_fill_seconds", 0.0) or 0.0),
         )
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
@@ -9018,6 +9229,7 @@ def route_with_layer_escalation(
             attempt_index=attempt_num - 1,
             max_attempts=len(layer_configs),
         )
+        _attempt_slice_started = time.monotonic()
 
         # Load PCB with this layer stack
         try:
@@ -9147,6 +9359,13 @@ def route_with_layer_escalation(
 
         # ``_attempt_timeout`` (this attempt's #2823 fair slice) was computed
         # ahead of ``load_pcb_for_routing`` above -- see issue #4798.
+        # Issue #6273: the routing call measures its ``timeout`` from its OWN
+        # start, so the board load + grid build + setup above (tens of seconds
+        # on a dense board) used to come on top of the slice.  On board 05
+        # that overran the last attempt into the post-route reserve.  Charge
+        # the elapsed setup time to the slice so the attempt ends where its
+        # slice does.
+        _attempt_timeout = _charge_attempt_setup(_attempt_timeout, _attempt_slice_started)
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
@@ -9631,7 +9850,12 @@ def route_with_layer_escalation(
 
     record_stage("optimization")
     # Optimize traces
-    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -9680,8 +9904,14 @@ def route_with_layer_escalation(
 
     record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
-    if _post_passes_enabled and final_result.router.routes:
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity again before nudge.  The
@@ -9800,6 +10030,8 @@ def route_with_layer_escalation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            # Issue #6273: never start a DRC the --timeout cannot finish.
+            **_post_route_drc_budget(args),
             preserve_filled_copper=bool(
                 getattr(args, "_placement_disposition", None)
                 and args._placement_disposition.preserve_copper_nets
@@ -10583,7 +10815,12 @@ def route_with_rule_relaxation(
 
     record_stage("optimization")
     # Optimize traces
-    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -10629,8 +10866,14 @@ def route_with_rule_relaxation(
 
     record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
-    if _post_passes_enabled and final_result.router.routes:
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -10745,6 +10988,8 @@ def route_with_rule_relaxation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            # Issue #6273: never start a DRC the --timeout cannot finish.
+            **_post_route_drc_budget(args),
             preserve_filled_copper=bool(
                 getattr(args, "_placement_disposition", None)
                 and args._placement_disposition.preserve_copper_nets
@@ -13088,7 +13333,12 @@ def route_with_combined_escalation(
 
     record_stage("optimization")
     # Optimize traces
-    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -13134,8 +13384,14 @@ def route_with_combined_escalation(
 
     record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
-    if _post_passes_enabled and final_result.router.routes:
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -13249,6 +13505,8 @@ def route_with_combined_escalation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            # Issue #6273: never start a DRC the --timeout cannot finish.
+            **_post_route_drc_budget(args),
             preserve_filled_copper=bool(
                 getattr(args, "_placement_disposition", None)
                 and args._placement_disposition.preserve_copper_nets
@@ -19864,7 +20122,12 @@ def _run_main_impl(args, parser, argv) -> int:
             _restore_route_grid(router, router.routes)
 
     # Optimize traces (unless --no-optimize/--raw flag is set)
-    if _post_passes_enabled and not args.no_optimize and router.routes:
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -19910,8 +20173,14 @@ def _run_main_impl(args, parser, argv) -> int:
 
     record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
-    if _post_passes_enabled and router.routes:
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -20448,6 +20717,8 @@ def _run_main_impl(args, parser, argv) -> int:
         drc_ran = True
         drc_errors, drc_warnings = run_post_route_drc(
             output_path=output_path,
+            # Issue #6273: never start a DRC the --timeout cannot finish.
+            **_post_route_drc_budget(args),
             preserve_filled_copper=bool(
                 getattr(args, "_placement_disposition", None)
                 and args._placement_disposition.preserve_copper_nets
