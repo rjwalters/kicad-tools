@@ -31,6 +31,7 @@ import dataclasses
 import functools
 import json
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -59,6 +60,12 @@ from kicad_tools.placement.decoupling import (
     snap_decoupling_caps,
 )
 from kicad_tools.placement.geometry import extract_board_outline as _extract_board_outline
+from kicad_tools.placement.route_check import (
+    DEFAULT_ROUTE_CHECK_BUDGET,
+    STAGE_DECOUPLING_SNAP,
+    RouteCheckOutcome,
+    RouteCheckReport,
+)
 from kicad_tools.placement.seed import force_directed_placement, random_placement
 from kicad_tools.placement.strategy import PlacementStrategy, StrategyConfig
 from kicad_tools.placement.vector import (
@@ -483,6 +490,121 @@ def snap_decoupling(
         pad_nets={pin: net.name for net in nets for pin in net.pins},
         extents=_read_local_courtyards(pcb_path),
     )
+
+
+def _strip_routing(pcb_path: Path) -> None:
+    """Drop traces and vias from a route-check copy (zones are kept).
+
+    Copper laid for the *old* placement would favour the incumbent and
+    dangle off every moved part, so each candidate is routed from bare pads.
+    """
+    text = pcb_path.read_text()
+    if "(segment" not in text and "(via" not in text and "(arc" not in text:
+        return
+    from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+    pcb = SchemaPCB.load(str(pcb_path))
+    pcb.strip_traces()
+    pcb.save(str(pcb_path))
+
+
+def route_check_placement(
+    pcb_path: str,
+    components: Sequence[ComponentDef],
+    board_origin: tuple[float, float],
+    stage_a: PlacementVector,
+    snap: Callable[[PlacementVector], PlacementVector],
+    *,
+    fixed_sides: Sequence[int],
+    locked_indices: Sequence[int],
+    budget: int,
+    seed: int,
+    timeout_s: float | None = None,
+) -> tuple[PlacementVector, RouteCheckReport]:
+    """Confirm the optimizer's result with bounded real routes (issue #6234).
+
+    The incumbent is the board as read. *stage_a* is the optimizer result
+    after keep-seed and slide-off, and *snap* is the decoupling snap. The
+    staged chain (:func:`~kicad_tools.placement.route_check.run_route_check_chain`)
+    routes at most three placements: incumbent, stage A and stage B. Each
+    one is written to a private temporary PCB copy, never to the user's
+    output, stripped of old copper, and routed under ``--per-net-iterations
+    <budget>``. Returns the accepted vector and the report.
+
+    Shared by ``kct optimize-placement --route-check`` and the MCP
+    ``optimize_placement`` tool's ``route_check`` option.
+    """
+    from kicad_tools.placement.route_check import (
+        DEFAULT_ROUTE_CHECK_TIMEOUT_S,
+        bounded_route,
+        run_route_check_chain,
+    )
+    from kicad_tools.sync.discover import resolve_target_fab_for_pcb
+
+    source = Path(pcb_path)
+    incumbent = _with_sides(_read_current_vector(pcb_path, components), fixed_sides)
+    try:
+        manufacturer = resolve_target_fab_for_pcb(source)
+    except Exception:  # noqa: BLE001 -- fall back to the router's default
+        manufacturer = None
+    backstop = DEFAULT_ROUTE_CHECK_TIMEOUT_S if timeout_s is None else timeout_s
+
+    with tempfile.TemporaryDirectory(prefix="kct-route-check-") as tmp:
+        work = Path(tmp)
+        counter = iter(range(1_000_000))
+
+        def route(vec: PlacementVector) -> RouteCheckOutcome:
+            stage_dir = work / f"candidate-{next(counter)}"
+            stage_dir.mkdir()
+            candidate = stage_dir / source.name
+            if np.array_equal(vec.data, incumbent.data):
+                # The board as read, byte for byte (the vector encoding snaps
+                # rotations to 90 degrees; the incumbent must not be altered).
+                shutil.copyfile(source, candidate)
+            else:
+                _write_placements_to_pcb_atomic(
+                    pcb_path, str(candidate), vec, components, board_origin
+                )
+            _strip_routing(candidate)
+            # The authored project rules and DRU belong to the board; carry
+            # them so the check route and its DRC judge by the same rules.
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                sidecar = source.with_suffix(suffix)
+                if sidecar.exists():
+                    shutil.copyfile(sidecar, candidate.with_suffix(suffix))
+            return bounded_route(
+                candidate,
+                budget=budget,
+                seed=seed,
+                timeout_s=backstop,
+                manufacturer=manufacturer,
+                workdir=stage_dir,
+            )
+
+        return run_route_check_chain(
+            incumbent,
+            stage_a,
+            snap,
+            route,
+            budget=budget,
+            locked_indices=locked_indices,
+        )
+
+
+def _write_board_as_read_atomic(pcb_path: str, output_path: str) -> None:
+    """Write the input board unchanged to *output_path* (route-check kept it)."""
+    if Path(pcb_path).resolve() == Path(output_path).resolve():
+        return
+    out = Path(output_path)
+    fd, tmp_path = tempfile.mkstemp(dir=str(out.parent), prefix=".placement_", suffix=".tmp")
+    os.close(fd)
+    try:
+        shutil.copyfile(pcb_path, tmp_path)
+        Path(tmp_path).replace(out)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            Path(tmp_path).unlink(missing_ok=True)
+        raise
 
 
 def _decoupling_report(
@@ -1054,6 +1176,9 @@ def run_optimize_placement(
     hv_threshold: float = 30.0,
     as_json: bool = False,
     random_seed: int = 42,
+    route_check: bool = False,
+    route_check_budget: int = DEFAULT_ROUTE_CHECK_BUDGET,
+    route_check_timeout: float | None = None,
 ) -> int:
     """Run placement optimization.
 
@@ -1113,6 +1238,19 @@ def run_optimize_placement(
             unchanged.
         random_seed: The strategy's RNG seed (default 42, deterministic).
             Python-API only; tests use it to sample several trajectories.
+            Also the ``--seed`` of every ``route_check`` route.
+        route_check: Confirm the result with bounded real routes before
+            writing it (issue #6234). The input board is the incumbent; the
+            optimizer result (stage A) and then the decoupling snap (stage
+            B) each replace it only if their check route reaches at least
+            the incumbent's completion with no more DRC errors. At most
+            three routes per run; see
+            :mod:`kicad_tools.placement.route_check`. Off (the default)
+            leaves the run unchanged.
+        route_check_budget: Per-net A* node-expansion cap of each check
+            route (``--per-net-iterations``), so the verdict is reproducible.
+        route_check_timeout: Wall-clock safety backstop per check route in
+            seconds (Python-API only; ``None`` = the module default).
 
     Returns:
         Exit code:
@@ -1132,6 +1270,12 @@ def run_optimize_placement(
     if anchor_weight < 0.0:
         return _placement_error(
             pcb_path, f"--anchor-weight must be >= 0 (got {anchor_weight})", as_json=as_json
+        )
+    if route_check and route_check_budget <= 0:
+        return _placement_error(
+            pcb_path,
+            f"--route-check-budget must be > 0 (got {route_check_budget})",
+            as_json=as_json,
         )
 
     # JSON mode owns stdout: every prose site below is already gated on
@@ -1645,22 +1789,94 @@ def run_optimize_placement(
     # free spot beside its assigned supply pin (clear of other bodies and of
     # IC signal-pin escape lanes), never adding an overlap/DRC/boundary
     # violation. See snap_decoupling_caps.
-    best_vector, snap_moves = snap_decoupling(
-        best_vector,
-        pcb_path,
-        components,
-        nets,
-        rules,
-        board_outline,
-        cost_config,
-        footprint_sizes,
-        _without_caps(decoupling_groups, locked_refs),
-        fixed_sides=fixed_sides,
-        ref_domains=hv_ref_domains,
-        required_mm_by_domain_pair=hv_required,
-        exempt_pairs=hv_exempt,
-        pad_anchored=pad_anchored_wirelength,
-    )
+    route_check_report: RouteCheckReport | None = None
+    if not route_check:
+        best_vector, snap_moves = snap_decoupling(
+            best_vector,
+            pcb_path,
+            components,
+            nets,
+            rules,
+            board_outline,
+            cost_config,
+            footprint_sizes,
+            _without_caps(decoupling_groups, locked_refs),
+            fixed_sides=fixed_sides,
+            ref_domains=hv_ref_domains,
+            required_mm_by_domain_pair=hv_required,
+            exempt_pairs=hv_exempt,
+            pad_anchored=pad_anchored_wirelength,
+        )
+    else:
+        # --- Route-check acceptance (issue #6234) ---
+        # No pre-route score reliably predicts routability (#5948), so the
+        # result is confirmed with bounded real routes: the input board is
+        # the incumbent, and the optimizer result (stage A, just above) and
+        # then the snap (stage B, applied to whichever of the two survived)
+        # each replace it only if they route at least as completely with no
+        # more DRC errors. At most 3 iteration-bounded routes.
+        snaps: dict[bytes, list[SnapMove]] = {}
+
+        def _snap(vec: PlacementVector) -> PlacementVector:
+            snapped, moves = snap_decoupling(
+                vec,
+                pcb_path,
+                components,
+                nets,
+                rules,
+                board_outline,
+                cost_config,
+                footprint_sizes,
+                _without_caps(decoupling_groups, locked_refs),
+                fixed_sides=fixed_sides,
+                ref_domains=hv_ref_domains,
+                required_mm_by_domain_pair=hv_required,
+                exempt_pairs=hv_exempt,
+                pad_anchored=pad_anchored_wirelength,
+            )
+            snaps[snapped.data.tobytes()] = moves
+            return snapped
+
+        if not quiet:
+            print(
+                f"\nRoute check: confirming the result with bounded routes "
+                f"(per-net budget {route_check_budget:,} node expansions, at most 3 routes)..."
+            )
+        # An interrupt mid-check saves the board as read, never an
+        # unconfirmed candidate.
+        _interrupt_state["best_vector"] = _with_sides(
+            _read_current_vector(pcb_path, components), fixed_sides
+        )
+        best_vector, route_check_report = route_check_placement(
+            pcb_path,
+            components,
+            board_origin,
+            best_vector,
+            _snap,
+            fixed_sides=fixed_sides,
+            locked_indices=locked_indices,
+            budget=route_check_budget,
+            seed=random_seed,
+            timeout_s=route_check_timeout,
+        )
+        _interrupt_state["best_vector"] = best_vector
+        stage_a = route_check_report.stages[0]
+        if not (stage_a.accepted or stage_a.skipped):
+            # The slide-off report describes the rejected optimizer result,
+            # not the placement that will be written.
+            post_slide_result = None
+        snap_moves = (
+            snaps.get(best_vector.data.tobytes(), [])
+            if route_check_report.accepted_stage == STAGE_DECOUPLING_SNAP
+            else []
+        )
+        if not quiet:
+            print()
+            for line in route_check_report.lines():
+                print(f"  {line}")
+        elif route_check_report.warnings and not as_json:
+            for warning in route_check_report.warnings:
+                print(f"WARNING: route check: {warning}", file=sys.stderr)
     if not quiet and snap_moves:
         print(f"\n  Decoupling snap: moved {len(snap_moves)} cap(s) onto their supply pins")
         for move in snap_moves:
@@ -1762,9 +1978,14 @@ def run_optimize_placement(
         print(f"\nWriting result to: {output_path}")
 
     try:
-        _write_placements_to_pcb_atomic(
-            pcb_path, output_path, best_vector, components, board_origin
-        )
+        if route_check_report is not None and route_check_report.accepted_stage == "incumbent":
+            # Route check kept the board as read: write it untouched (the
+            # vector encoding would snap any off-90-degree rotation).
+            _write_board_as_read_atomic(pcb_path, output_path)
+        else:
+            _write_placements_to_pcb_atomic(
+                pcb_path, output_path, best_vector, components, board_origin
+            )
     except Exception as e:
         rc = _placement_error(
             pcb_path,
@@ -1784,9 +2005,15 @@ def run_optimize_placement(
     def _finish(rc: int, *, infeasible_detail: str | None = None) -> int:
         """Emit the single JSON document (if asked) and return *rc* unchanged."""
         if as_json:
+            route_check_doc = (
+                {"route_check": route_check_report.as_dict()}
+                if route_check_report is not None
+                else {}
+            )
             emit_json(
                 {
                     **base_document,
+                    **route_check_doc,
                     "mode": "optimize",
                     "scores": {
                         "initial": _score_document(seed_score),

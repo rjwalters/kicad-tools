@@ -337,6 +337,20 @@ component grouping, but **may not always improve routability**. A placement that
 minimizes total wire length might actually make routing harder by creating congested
 areas or blocking routing channels.
 
+### Confirm with a real route: `--route-check`
+
+```bash
+kct optimize-placement board.kicad_pcb -o placed.kicad_pcb --route-check
+```
+
+`--route-check` (issue #6234) keeps the board as read unless the optimizer
+result routes at least as completely, with no more DRC errors, under a short
+iteration-bounded `kct route`. The decoupling snap is checked the same way.
+That is at most three routes per run: the board as read, the optimizer result
+and the snap. `--route-check-budget N` sets each route's per-net A*
+node-expansion cap (default 100,000). See
+[CLI Reference → optimize-placement](../reference/cli.md#optimize-placement).
+
 ### Check Routability Impact
 
 Use `--check-routability` to see how optimization affects routability:

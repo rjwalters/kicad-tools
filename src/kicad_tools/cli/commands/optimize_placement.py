@@ -13,6 +13,8 @@ __all__ = ["run_optimize_placement_command"]
 
 def run_optimize_placement_command(args) -> int:
     """Handle optimize-placement command."""
+    from kicad_tools.placement.route_check import DEFAULT_ROUTE_CHECK_BUDGET
+
     from ..optimize_placement_cmd import run_optimize_placement
 
     return run_optimize_placement(
@@ -39,4 +41,6 @@ def run_optimize_placement_command(args) -> int:
         material_group=getattr(args, "material_group", "IIIa"),
         hv_threshold=getattr(args, "hv_threshold", 30.0),
         as_json=getattr(args, "format", "text") == FORMAT_JSON,
+        route_check=getattr(args, "route_check", False),
+        route_check_budget=getattr(args, "route_check_budget", DEFAULT_ROUTE_CHECK_BUDGET),
     )

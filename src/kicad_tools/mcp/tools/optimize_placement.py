@@ -31,7 +31,9 @@ from kicad_tools.cli.optimize_placement_cmd import (
     _read_current_vector,
     _with_sides,
     _without_caps,
+    _write_board_as_read_atomic,
     _write_placements_to_pcb,
+    route_check_placement,
     snap_decoupling,
     weights_to_cost_config,
 )
@@ -48,6 +50,11 @@ from kicad_tools.placement.cost import (
 )
 from kicad_tools.placement.cost import (
     evaluate_placement as cost_evaluate_placement,
+)
+from kicad_tools.placement.route_check import (
+    DEFAULT_ROUTE_CHECK_BUDGET,
+    STAGE_DECOUPLING_SNAP,
+    RouteCheckReport,
 )
 from kicad_tools.placement.strategy import StrategyConfig
 from kicad_tools.placement.vector import (
@@ -209,6 +216,8 @@ def optimize_placement(
     output_path: str | None = None,
     pre_slide_off: bool = True,
     anchor_weight: float = 0.0,
+    route_check: bool = False,
+    route_check_budget: int = DEFAULT_ROUTE_CHECK_BUDGET,
 ) -> dict[str, Any]:
     """Optimize component placement on a PCB board using CMA-ES.
 
@@ -239,6 +248,13 @@ def optimize_placement(
             preserves uniform per-net weighting (regression-safe).
             Recommended starting range: 2.0..5.0 for boards with
             perimeter-anchored signals (connectors, edge sense FETs).
+        route_check: Confirm the result with bounded real routes, exactly as
+            ``kct optimize-placement --route-check`` does (issue #6234). The
+            board as read is the incumbent; the optimizer result and then the
+            decoupling snap each replace it only if a check route reaches at
+            least its completion with no more DRC errors. At most 3 routes.
+        route_check_budget: Per-net A* node-expansion cap of each check
+            route (``kct route --per-net-iterations``).
 
     Returns:
         Dictionary with optimization results:
@@ -259,6 +275,8 @@ def optimize_placement(
         - decoupling_snap_moves: Caps the snap pass moved (cap, pin, before_mm,
           after_mm).
         - convergence_data: List of (iteration, best_score) snapshots.
+        - route_check: Stage-by-stage route-check verdicts (only when
+          ``route_check`` is True), same shape as the CLI's ``--format json``.
         - error_message: Error description if success is False.
 
     Raises:
@@ -270,6 +288,8 @@ def optimize_placement(
 
     if anchor_weight < 0.0:
         raise ValueError(f"anchor_weight must be >= 0 (got {anchor_weight})")
+    if route_check and route_check_budget <= 0:
+        raise ValueError(f"route_check_budget must be > 0 (got {route_check_budget})")
 
     # Parse board data
     try:
@@ -460,18 +480,53 @@ def optimize_placement(
         )
 
     # Decoupling-cap snap: the CLI's own post-optimize pass (issue #6020).
-    best_vector, snap_moves = snap_decoupling(
-        best_vector,
-        pcb_path,
-        components,
-        nets,
-        rules,
-        board_outline,
-        cost_config,
-        footprint_sizes,
-        _without_caps(decoupling_groups, locked_refs),
-        fixed_sides=fixed_sides,
-    )
+    def _snap(vec: PlacementVector) -> tuple[PlacementVector, list]:
+        return snap_decoupling(
+            vec,
+            pcb_path,
+            components,
+            nets,
+            rules,
+            board_outline,
+            cost_config,
+            footprint_sizes,
+            _without_caps(decoupling_groups, locked_refs),
+            fixed_sides=fixed_sides,
+        )
+
+    route_check_report: RouteCheckReport | None = None
+    if not route_check:
+        best_vector, snap_moves = _snap(best_vector)
+    else:
+        # The CLI's own route-check chain (issue #6234): incumbent = board as
+        # read, then the optimizer result, then the snap, each gated by a
+        # bounded real route.
+        snaps: dict[bytes, list] = {}
+
+        def _snap_only(vec: PlacementVector) -> PlacementVector:
+            snapped, moves = _snap(vec)
+            snaps[snapped.data.tobytes()] = moves
+            return snapped
+
+        best_vector, route_check_report = route_check_placement(
+            pcb_path,
+            components,
+            board_origin,
+            best_vector,
+            _snap_only,
+            fixed_sides=fixed_sides,
+            locked_indices=locked_indices,
+            budget=route_check_budget,
+            seed=42,
+        )
+        stage_a = route_check_report.stages[0]
+        if not (stage_a.accepted or stage_a.skipped):
+            post_slide_result = None
+        snap_moves = (
+            snaps.get(best_vector.data.tobytes(), [])
+            if route_check_report.accepted_stage == STAGE_DECOUPLING_SNAP
+            else []
+        )
 
     final_score = _score(best_vector)
 
@@ -520,6 +575,9 @@ def optimize_placement(
         ],
     }
 
+    if route_check_report is not None:
+        result["route_check"] = route_check_report.as_dict()
+
     # Include overlap details when post-pass found unresolvable overlaps
     if post_slide_result is not None and post_slide_result.overlaps_remaining > 0:
         result["unresolved_overlaps"] = [
@@ -535,7 +593,13 @@ def optimize_placement(
     # Write output if requested
     if output_path:
         try:
-            _write_placements_to_pcb(pcb_path, output_path, best_vector, components, board_origin)
+            if route_check_report is not None and route_check_report.accepted_stage == "incumbent":
+                # Route check kept the board as read: write it untouched.
+                _write_board_as_read_atomic(pcb_path, output_path)
+            else:
+                _write_placements_to_pcb(
+                    pcb_path, output_path, best_vector, components, board_origin
+                )
             result["output_path"] = output_path
         except Exception as e:
             result["warnings"] = [f"Optimization succeeded but save failed: {e}"]
