@@ -141,7 +141,10 @@ def test_inner_routing_budget_cannot_exceed_parent_deadline(monkeypatch):
     args = SimpleNamespace(timeout=90, auto_fix=False)
     route_cmd._set_wall_clock_deadline(args)
     assert args._wall_clock_deadline == 100
-    assert args._routing_deadline == 100
+    # Issue #6273: the post-route reserve is sized from the 3 s this nested
+    # call actually has left (25% cap = 0.75 s), not from its nominal 90 s.
+    assert args._post_route_reserve == pytest.approx(0.75)
+    assert args._routing_deadline == pytest.approx(99.25)
 
 
 def test_timed_in_place_output_is_rejected_without_writes(tmp_path, monkeypatch):

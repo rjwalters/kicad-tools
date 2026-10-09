@@ -147,6 +147,23 @@ logger = logging.getLogger(__name__)
 _AUTO_FIX_RESERVE_FRACTION = 0.20
 _AUTO_FIX_RESERVE_FLOOR_SEC = 60.0
 
+# Issue #6273: post-route finishing reserve.  See :func:`_post_route_reserve`.
+_POST_ROUTE_RESERVE_FRACTION = 0.15
+_POST_ROUTE_RESERVE_FLOOR_SEC = 60.0
+_POST_ROUTE_RESERVE_CAP_FRACTION = 0.25
+# Every carved-out reserve together never takes more than this share of
+# ``--timeout`` from routing (the #3238 auto-fix cap, now shared).
+_TOTAL_RESERVE_CAP_FRACTION = 0.5
+# The finishing stages stop starting kicad-cli work this long before the
+# hard deadline: the summary, audits and interpreter exit still follow.
+_FINISHING_EXIT_MARGIN_SEC = 10.0
+# The pre-save trace optimizer runs only while this share of the post-route
+# reserve is still left (see :func:`_optimization_fits_budget`).
+_OPTIMIZE_MIN_RESERVE_SHARE = 0.75
+# A kicad-cli DRC is only started when the time left covers its estimated
+# cost (the run's measured zone-fill time) times this factor.
+_DRC_DEADLINE_SAFETY = 1.5
+
 # =============================================================================
 # Issue #3538: Deterministic (iteration-budgeted) routing
 # =============================================================================
@@ -409,6 +426,160 @@ def _auto_fix_budget(args) -> float:
     return min(reserve, 0.5 * float(timeout))
 
 
+def _post_route_reserve(args, timeout: float | None = None) -> float:
+    """Return the post-route finishing reserve in seconds (issue #6273).
+
+    ``--timeout`` is a HARD total: :mod:`kicad_tools.cli.route_deadline`
+    terminates the worker when it fires and quarantines whatever was on disk
+    as ``*_timeout_unverified_*``.  But every routing loop budgets against the
+    routing deadline, and before #6273 that deadline was the *whole* budget
+    (minus only an ``--auto-fix`` reserve).  The last layer-escalation
+    attempt's fair slice was therefore "everything that is left", so a board
+    whose routing ran to its slice left the finishing stages -- optimize, DRC
+    nudge, save, zone fill, pour completion, post-route DRC -- no time at all,
+    and the supervisor killed the run before anything was saved.  Board 05's
+    legacy recipe (``--timeout 900``) never produced an accepted board for
+    exactly this reason: its 900 s always ran out in escalation or
+    optimization.
+
+    This reserve is carved out of the routing deadline so the routing loops
+    stop early enough for those stages to finish inside ``--timeout``.  It is
+    ``max(60 s, 15% of --timeout)`` capped at 25% of ``--timeout``.  A run
+    whose routing finishes earlier than ``--timeout`` minus the reserve is
+    unaffected: the reserve is a ceiling on routing, never a target.
+
+    ``timeout`` overrides ``args.timeout`` with the budget this invocation
+    actually has -- :func:`_set_wall_clock_deadline` passes the value clamped
+    to an enclosing supervisor's deadline, so a nested call with three seconds
+    left reserves a share of three seconds, not of its nominal ``--timeout``.
+
+    Returns ``0.0`` when ``--timeout`` is unset (legacy unbounded runs).
+    """
+    if timeout is None:
+        timeout = getattr(args, "timeout", None)
+    if not timeout or timeout <= 0:
+        return 0.0
+    reserve = max(_POST_ROUTE_RESERVE_FLOOR_SEC, _POST_ROUTE_RESERVE_FRACTION * float(timeout))
+    return min(reserve, _POST_ROUTE_RESERVE_CAP_FRACTION * float(timeout))
+
+
+def _finishing_time_left(args) -> float | None:
+    """Seconds a finishing stage may still start work in (issue #6273).
+
+    The hard total (``_wall_clock_deadline``) minus
+    :data:`_FINISHING_EXIT_MARGIN_SEC`, which covers the summary, audits and
+    interpreter exit that follow the last stage.  ``None`` when the run has
+    no ``--timeout``; never negative.
+    """
+    remaining = _total_remaining_budget(args)
+    if remaining is None:
+        return None
+    return max(0.0, remaining - _FINISHING_EXIT_MARGIN_SEC)
+
+
+def _optimization_fits_budget(args, quiet: bool = False, stage: str = "Optimizing traces") -> bool:
+    """Whether a pre-save geometric pass may still run (issue #6273).
+
+    The trace optimizer and the DRC nudge run BEFORE the routed board is
+    saved, so time they spend is time the save, zone fill and DRC no longer
+    have.  Each is skipped -- with a note naming ``stage`` -- when less than
+    :data:`_OPTIMIZE_MIN_RESERVE_SHARE` of the post-route reserve is left of
+    ``--timeout``, i.e. when routing overran into the finishing reserve.  The
+    copper is still finalized, consolidated and saved; only the optional
+    clean-up passes are dropped.  Always ``True`` without ``--timeout``.
+    """
+    remaining = _total_remaining_budget(args)
+    reserve = float(getattr(args, "_post_route_reserve", 0.0) or 0.0)
+    if remaining is None or reserve <= 0.0:
+        return True
+    need = _OPTIMIZE_MIN_RESERVE_SHARE * reserve
+    if remaining >= need:
+        return True
+    if not quiet:
+        print(
+            f"\n--- {stage}: skipped ({remaining:.0f}s of --timeout left, "
+            f"under the {need:.0f}s kept for save / zone fill / DRC; issue #6273) ---"
+        )
+    return False
+
+
+def _post_route_drc_budget(args) -> dict:
+    """Keyword arguments that bound :func:`run_post_route_drc` (issue #6273)."""
+    return {
+        "time_left": _finishing_time_left(args),
+        "drc_cost_estimate": float(getattr(args, "_zone_fill_seconds", 0.0) or 0.0),
+    }
+
+
+#: Issue #6273: what :func:`run_post_route_drc` returns when it skipped the
+#: verification because the hard ``--timeout`` could not cover it.  Distinct
+#: from ``(-1, -1)`` ("DRC tried to run and failed") and, above all, from
+#: ``(0, 0)`` ("DRC ran and passed"): a board nobody checked is never clean.
+DRC_SKIPPED_FOR_TIME: tuple[int, int] = (-2, -2)
+
+#: Issue #6273: exit code of a run that met its completion threshold with no
+#: failure found, but whose post-route verification (the DRC and/or the
+#: #5785 stranded-pour check) was skipped because ``--timeout`` ran out.  The
+#: board is saved but unverified; ``kct check`` it before manufacturing.  It
+#: only ever replaces exit 0 -- a run with a known failure keeps that code.
+EXIT_UNVERIFIED = 10
+
+
+def _record_post_route_drc(args, drc_errors: int) -> None:
+    """Remember whether the last post-route DRC was skipped for time (#6273).
+
+    Assigned (not latched) on every DRC call, so an escalation wrapper that
+    routes again judges the attempt it actually ships.
+    """
+    with contextlib.suppress(AttributeError, TypeError):
+        args._drc_skipped_for_time = drc_errors == DRC_SKIPPED_FOR_TIME[0]
+
+
+def _unverified_checks(args) -> list[str]:
+    """Post-route checks this run skipped for ``--timeout`` (issue #6273).
+
+    Empty when every verification that should have run did run.  The
+    stranded-pour check only counts when its verdict would gate the run
+    (i.e. without ``--allow-stranded-pour-pads``).
+    """
+    checks: list[str] = []
+    if getattr(args, "_drc_skipped_for_time", False) is True:
+        checks.append("post-route DRC")
+    if getattr(args, "_stranded_pour_unknown", False) is True and not getattr(
+        args, "_allow_stranded_pour_pads", False
+    ):
+        checks.append("stranded-pour check")
+    return checks
+
+
+def _unverified_exit(rc: int, args) -> int:
+    """Map a would-be exit 0 to :data:`EXIT_UNVERIFIED` when a check was skipped."""
+    if rc == 0 and _unverified_checks(args):
+        return EXIT_UNVERIFIED
+    return rc
+
+
+def _verdict_for_exit(exit_code: int) -> str:
+    """The JSON ``summary.verdict`` for a final exit code (#6239, #6273)."""
+    if exit_code == 0:
+        return "success"
+    if exit_code == EXIT_UNVERIFIED:
+        return "unverified"
+    return "failed"
+
+
+def _print_unverified_banner(args, output_path, headline: str) -> None:
+    """Replace a SUCCESS banner whose verification was skipped (issue #6273)."""
+    checks = _unverified_checks(args)
+    print(f"UNVERIFIED: {headline}")
+    print(f"  Skipped for --timeout: {', '.join(checks)} -- the board was NOT verified.")
+    print(
+        f"  Run 'kct check {output_path} --mfr {getattr(args, 'manufacturer', 'jlcpcb')}' "
+        "before manufacturing (exit code "
+        f"{EXIT_UNVERIFIED})."
+    )
+
+
 def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
     """Rebuild route-derived state from the selected copper before post-passes.
 
@@ -481,6 +652,12 @@ def _set_wall_clock_deadline(args) -> None:
     so outer routing loops bail early enough to leave a guaranteed budget
     for auto-fix.  The original ``_wall_clock_deadline`` continues to
     bound the *total* wall-clock budget.
+
+    Issue #6273: the routing deadline ALSO holds back the post-route
+    finishing reserve (:func:`_post_route_reserve`), so routing can never
+    consume the time the optimize / save / zone-fill / DRC stages need to
+    produce an accepted board.  The two reserves together are capped at half
+    of ``--timeout``.
     """
     timeout = getattr(args, "timeout", None)
     now = time.monotonic()
@@ -493,14 +670,20 @@ def _set_wall_clock_deadline(args) -> None:
         args._wall_clock_deadline = now + float(timeout)
         reserve = _auto_fix_budget(args)
         args._auto_fix_reserve = reserve
+        # Issue #6273: the finishing stages' reserve, trimmed so the two
+        # reserves together never exceed half of the requested budget.
+        post_route = min(
+            _post_route_reserve(args, float(timeout)),
+            max(0.0, _TOTAL_RESERVE_CAP_FRACTION * float(timeout) - reserve),
+        )
+        args._post_route_reserve = post_route
         # Routing deadline is the wall-clock deadline minus the auto-fix
-        # reserve.  When no reserve is held (no --auto-fix, or no
-        # --timeout) routing deadline collapses to the wall-clock
-        # deadline -- existing behaviour is preserved bit-for-bit.
-        args._routing_deadline = now + float(timeout) - reserve
+        # reserve (#3238) and the post-route finishing reserve (#6273).
+        args._routing_deadline = now + float(timeout) - reserve - post_route
     else:
         args._wall_clock_deadline = None
         args._auto_fix_reserve = 0.0
+        args._post_route_reserve = 0.0
         args._routing_deadline = None
 
 
@@ -701,6 +884,20 @@ def _per_attempt_budgeted_timeout(args, attempt_index: int, max_attempts: int) -
         return per_attempt_slice
 
     return min(float(cap), remaining, per_attempt_slice)
+
+
+def _charge_attempt_setup(attempt_timeout: float | None, slice_started: float) -> float | None:
+    """Deduct an attempt's setup time from its routing slice (issue #6273).
+
+    ``attempt_timeout`` is computed before the attempt loads its board (issue
+    #4798 needs it there for the lattice deadline), but the router measures
+    the timeout it is handed from its own start.  Returns the slice minus the
+    seconds elapsed since ``slice_started`` (never below zero), or ``None``
+    for an unbounded run.
+    """
+    if attempt_timeout is None:
+        return None
+    return max(0.0, attempt_timeout - (time.monotonic() - slice_started))
 
 
 def _routable_multi_pad_nets(router: "Autorouter") -> list[int]:
@@ -3043,6 +3240,8 @@ def _write_access_witness_sidecar(
     router: object | None,
     quiet: bool = False,
     journal_first: bool = False,
+    replay: bool = True,
+    replay_deadline: float | None = None,
 ) -> Path | None:
     """Persist the router's ordered commit journal next to the routed PCB (#5517).
 
@@ -3081,6 +3280,15 @@ def _write_access_witness_sidecar(
             geometric sweeps, and a journal that survived beats a witness that
             did not.  The normal save path leaves this off -- it is not racing
             a signal, and one write beats two.
+        replay: Issue #6273.  ``False`` writes the journal alone and skips
+            the witness replay (up to
+            :data:`~kicad_tools.router.access_witness.MAX_WITNESS_EVALUATIONS`
+            geometric sweeps -- 143 s for board 05's two stranded terminals
+            on a loaded host).  The post-route DRC passes ``False`` when the
+            hard ``--timeout`` leaves no time for it before its own check.
+        replay_deadline: Issue #6273.  Absolute ``time.monotonic()`` time the
+            replay must stop by (it is then marked truncated).  ``None`` (the
+            default) replays to the evaluation cap as before.
 
     Returns:
         The sidecar path when one was written, else ``None`` (no journal,
@@ -3125,13 +3333,27 @@ def _write_access_witness_sidecar(
     # SIGKILL during the replay below still leaves the commit order on disk.
     if journal_first and not dump():
         return None
+    if not replay:
+        # Issue #6273: out of --timeout budget for the replay; the journal
+        # still carries the commit order across to ``net-status --why``.
+        if not journal_first and not dump():
+            return None
+        if not quiet:
+            print(
+                f"  Access-witness sidecar: {sidecar_path} (journal only -- replay "
+                "skipped for the --timeout budget; issue #6273)"
+            )
+        return sidecar_path
     # Issue #5517 (PR 2): the replay runs HERE, while the grid that decided the
     # clearances is still alive.  ``net-status --why`` reads a saved board and
     # could not reproduce it; the sidecar carries the verdict instead.  The key
     # is omitted entirely when nothing ended unrouted -- the common case -- so a
     # fully-routed board's sidecar is unchanged from PR 1's shape.
     try:
-        witness = witness_for_router(router)
+        if replay_deadline is None:
+            witness = witness_for_router(router)
+        else:
+            witness = witness_for_router(router, deadline=replay_deadline)
     except Exception as e:  # pragma: no cover - a diagnostic never fails a route
         witness = None
         if not quiet:
@@ -3520,6 +3742,8 @@ def run_post_route_drc(
     preserve_filled_copper: bool = False,
     routing_plan: "RoutingPlan | None" = None,
     router: object | None = None,
+    time_left: float | None = None,
+    drc_cost_estimate: float = 0.0,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -3589,13 +3813,34 @@ def run_post_route_drc(
             ``<output_stem>.access_witness.json`` next to the routed PCB so
             ``kct net-status --why`` can explain a stranded pad from a saved
             board.  ``None`` is a silent no-op.
+        time_left: Issue #6273.  Seconds this stage may still use before the
+            hard ``--timeout`` (``None`` = unbounded).  The sidecars are
+            always written; the DRC verification itself (internal checker +
+            ``kicad-cli pcb drc``) is skipped, with a note, when the time left
+            cannot cover ``drc_cost_estimate`` times
+            :data:`_DRC_DEADLINE_SAFETY`, because a DRC the supervisor kills
+            costs the run its saved board.
+        drc_cost_estimate: Expected seconds of the native DRC run (callers
+            pass the run's measured zone-fill time: the same KiCad load and
+            refill).
 
     Returns:
-        Tuple of (error_count, warning_count)
+        Tuple of (error_count, warning_count); :data:`DRC_SKIPPED_FOR_TIME`
+        (``(-2, -2)``) when the verification was skipped for time, and
+        ``(-1, -1)`` when it failed to run.  Neither is a pass: callers
+        record the skip with :func:`_record_post_route_drc`.
     """
     record_stage("post-route-drc")
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
+
+    # Issue #6273: ``time_left`` is a snapshot; turn it into a deadline so the
+    # checks below see the time the sidecar writes themselves used.
+    _finish_by = None if time_left is None else time.monotonic() + max(0.0, time_left)
+    _verify_need = drc_cost_estimate * _DRC_DEADLINE_SAFETY
+
+    def _left() -> float | None:
+        return None if _finish_by is None else _finish_by - time.monotonic()
 
     # Issue #3917 Defect 1: persist the net-class map as a sidecar next to
     # the routed PCB so ``kct check`` (and re-runs of this DRC) can
@@ -3636,10 +3881,18 @@ def run_post_route_drc(
     # next to the routed PCB.  ``net-status --why`` classifies a SAVED board
     # and has no live router, so without this sidecar the commit order that
     # explains a stranded pad is gone by the time anyone asks.
+    # Issue #6273: the witness replay is a diagnostic bounded by evaluations,
+    # not time (143 s for board 05 on a loaded host).  On a --timeout run it
+    # must stop in time for the DRC below, the journal lands first in case it
+    # does not, and with no time to spare it is skipped outright.
+    _replay_by = None if _finish_by is None else _finish_by - _verify_need
     _write_access_witness_sidecar(
         output_path,
         router,
         quiet=quiet,
+        journal_first=_replay_by is not None,
+        replay=_replay_by is None or _replay_by > time.monotonic(),
+        replay_deadline=_replay_by,
     )
 
     # Issue #3920: persist the resolved fab profile as a ``fab_profile.json``
@@ -3664,6 +3917,21 @@ def run_post_route_drc(
         quiet=quiet,
         source_pcb_path=source_pcb_path,
     )
+
+    # Issue #6273: the sidecars above are cheap and always written; the
+    # verification below loads KiCad and refills every zone.  Do not start it
+    # when the hard --timeout cannot cover it -- the supervisor would kill the
+    # run and quarantine the board this DRC was only meant to report on.
+    _left_now = _left()
+    if _left_now is not None and (_left_now <= 0.0 or _left_now < _verify_need):
+        print(
+            f"\n--- DRC Validation ---\n  SKIPPED: {max(0.0, _left_now):.0f}s of --timeout "
+            f"left, under the ~{_verify_need:.0f}s a KiCad DRC of this board needs "
+            "(issue #6273).  The saved board is UNVERIFIED -- run `kct check` on it."
+        )
+        # Never (0, 0): that reads as "DRC passed".  Callers record this
+        # sentinel via _record_post_route_drc and exit EXIT_UNVERIFIED.
+        return DRC_SKIPPED_FOR_TIME
 
     try:
         # Load the routed PCB
@@ -4905,7 +5173,19 @@ def _fill_zones_after_route(
             source_pcb_path=Path(args.pcb),
         )
 
-    result = run_fill_zones(output_path, kicad_cli=kicad_cli)
+    _fill_started = time.monotonic()
+    # Issue #6273: on a --timeout run the fill (and its starved-thermal
+    # remediation passes) never starts kicad-cli work the hard deadline
+    # cannot finish -- a killed run would lose the board saved above.
+    _fill_kwargs: dict = {}
+    if args is not None and _finishing_time_left(args) is not None:
+        _fill_kwargs["time_left"] = lambda: _finishing_time_left(args)
+    result = run_fill_zones(output_path, kicad_cli=kicad_cli, **_fill_kwargs)
+    if args is not None:
+        # Issue #6273: the measured KiCad load + fill time of THIS board is
+        # the cost estimate the later kicad-cli stages (oracle DRC rounds,
+        # post-route DRC) budget against the hard --timeout.
+        args._zone_fill_seconds = time.monotonic() - _fill_started
 
     if not result.success:
         # Non-fatal: log warning and continue.  The board may still be
@@ -6724,12 +7004,17 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
     the exit-code gate) and returns it.  Never raises: a missing kicad-cli, a
     placement-preserving run or any internal failure leaves the board
     untouched and the count at 0 (the strict-DRC machinery already reports a
-    kicad-cli that did not run).
+    kicad-cli that did not run).  Issue #6273: a check the ``--timeout``
+    stopped before its first DRC sets ``args._stranded_pour_unknown`` instead,
+    so the run exits :data:`EXIT_UNVERIFIED` rather than passing the gate.
     """
     from kicad_tools.router.completion_verdict import allow_stranded_pour_pads, oracle_rounds
-    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS
+    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS, STOP_DEADLINE
 
     args._stranded_pour_links = 0
+    # Issue #6273: True when the check was cut by --timeout before KiCad
+    # reported anything -- the count above is then unknown, not 0.
+    args._stranded_pour_unknown = False
     args._allow_stranded_pour_pads = allow_stranded_pour_pads(
         bool(getattr(args, "allow_stranded_pour_pads", False))
     )
@@ -6777,6 +7062,10 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
             nets=pour_nets,
             max_rounds=rounds,
             log=None if quiet else print,
+            # Issue #6273: stop before a kicad-cli call the hard --timeout
+            # cannot finish (a killed run loses its saved board).
+            time_left=lambda: _finishing_time_left(args),
+            call_cost_estimate=float(getattr(args, "_zone_fill_seconds", 0.0) or 0.0),
         )
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
@@ -6784,6 +7073,13 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
     if not result.ran:
         if not quiet:
             print(f"  skipped: {result.note or 'kicad-cli DRC did not run'}")
+        if result.stop_reason == STOP_DEADLINE:
+            # Issue #6273: the deadline, not KiCad, ended the check, so the
+            # stranded-pad count was never measured.  0 would pass the #5785
+            # gate vacuously; the run is reported unverified instead.
+            args._stranded_pour_unknown = True
+            if not quiet:
+                print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         return 0
     args._stranded_pour_links = result.final_links
     args._oracle_completion = result
@@ -9018,6 +9314,7 @@ def route_with_layer_escalation(
             attempt_index=attempt_num - 1,
             max_attempts=len(layer_configs),
         )
+        _attempt_slice_started = time.monotonic()
 
         # Load PCB with this layer stack
         try:
@@ -9147,6 +9444,13 @@ def route_with_layer_escalation(
 
         # ``_attempt_timeout`` (this attempt's #2823 fair slice) was computed
         # ahead of ``load_pcb_for_routing`` above -- see issue #4798.
+        # Issue #6273: the routing call measures its ``timeout`` from its OWN
+        # start, so the board load + grid build + setup above (tens of seconds
+        # on a dense board) used to come on top of the slice.  On board 05
+        # that overran the last attempt into the post-route reserve.  Charge
+        # the elapsed setup time to the slice so the attempt ends where its
+        # slice does.
+        _attempt_timeout = _charge_attempt_setup(_attempt_timeout, _attempt_slice_started)
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
@@ -9631,7 +9935,12 @@ def route_with_layer_escalation(
 
     record_stage("optimization")
     # Optimize traces
-    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -9680,8 +9989,14 @@ def route_with_layer_escalation(
 
     record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
-    if _post_passes_enabled and final_result.router.routes:
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity again before nudge.  The
@@ -9800,6 +10115,8 @@ def route_with_layer_escalation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            # Issue #6273: never start a DRC the --timeout cannot finish.
+            **_post_route_drc_budget(args),
             preserve_filled_copper=bool(
                 getattr(args, "_placement_disposition", None)
                 and args._placement_disposition.preserve_copper_nets
@@ -9841,6 +10158,9 @@ def route_with_layer_escalation(
             # <output_stem>.access_witness.json next to the routed PCB.
             router=final_result.router,
         )
+
+        # Issue #6273: a DRC skipped for --timeout is "unverified", not a pass.
+        _record_post_route_drc(args, drc_errors)
 
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
@@ -9895,6 +10215,13 @@ def route_with_layer_escalation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif final_result.success and _unverified_checks(args):
+            # Issue #6273: never "SUCCESS" for a board nobody verified.
+            _print_unverified_banner(
+                args,
+                output_path,
+                f"Design requires minimum {final_result.layer_count} layers",
+            )
         elif final_result.success:
             print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
         else:
@@ -9949,12 +10276,17 @@ def route_with_layer_escalation(
         # detected") already covers this case semantically.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(
-            _stranded_pour_escalation_exit(
-                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
-                args,
+        # Issue #6273: a clean result whose DRC / stranded-pour check was
+        # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
+        return _unverified_exit(
+            _layer_intent_escalation_exit(
+                _stranded_pour_escalation_exit(
+                    _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                    args,
+                ),
+                _layer_intent,
             ),
-            _layer_intent,
+            args,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -10583,7 +10915,12 @@ def route_with_rule_relaxation(
 
     record_stage("optimization")
     # Optimize traces
-    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -10629,8 +10966,14 @@ def route_with_rule_relaxation(
 
     record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
-    if _post_passes_enabled and final_result.router.routes:
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -10745,6 +11088,8 @@ def route_with_rule_relaxation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            # Issue #6273: never start a DRC the --timeout cannot finish.
+            **_post_route_drc_budget(args),
             preserve_filled_copper=bool(
                 getattr(args, "_placement_disposition", None)
                 and args._placement_disposition.preserve_copper_nets
@@ -10786,6 +11131,9 @@ def route_with_rule_relaxation(
             # <output_stem>.access_witness.json next to the routed PCB.
             router=final_result.router,
         )
+
+        # Issue #6273: a DRC skipped for --timeout is "unverified", not a pass.
+        _record_post_route_drc(args, drc_errors)
 
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
@@ -10838,6 +11186,9 @@ def route_with_rule_relaxation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif final_result.success and _unverified_checks(args):
+            # Issue #6273: never "SUCCESS" for a board nobody verified.
+            _print_unverified_banner(args, output_path, "Routing complete with adaptive rules")
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
             if final_result.tier > 0:
@@ -10878,12 +11229,17 @@ def route_with_rule_relaxation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(
-            _stranded_pour_escalation_exit(
-                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
-                args,
+        # Issue #6273: a clean result whose DRC / stranded-pour check was
+        # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
+        return _unverified_exit(
+            _layer_intent_escalation_exit(
+                _stranded_pour_escalation_exit(
+                    _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                    args,
+                ),
+                _layer_intent,
             ),
-            _layer_intent,
+            args,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -11365,8 +11721,10 @@ def route_with_mfr_tier_escalation(
             # forward (if the next tier offers via-in-pad capability).
             last_router = getattr(args, "_last_router", None)
 
-            # Successful routing -- stop escalation.
-            if inner_rc == 0:
+            # Successful routing -- stop escalation.  Issue #6273: a routing
+            # success whose verification was skipped for --timeout is still a
+            # routing success; another tier would only run out of time too.
+            if inner_rc in (0, EXIT_UNVERIFIED):
                 saw_terminating_success = True
                 if not quiet:
                     flush_print(
@@ -11387,7 +11745,7 @@ def route_with_mfr_tier_escalation(
             # on success the mutation is intentional (and surfaced via the
             # cost-note recommendation).  On failure, restore so subsequent
             # CLI calls aren't surprised.
-            if last_exit_code != 0:
+            if last_exit_code not in (0, EXIT_UNVERIFIED):
                 args.manufacturer = original_mfr
             # Issue #2891: always clear the escalation-in-progress flag
             # on exit so callers that re-use ``args`` aren't surprised by
@@ -13088,7 +13446,12 @@ def route_with_combined_escalation(
 
     record_stage("optimization")
     # Optimize traces
-    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -13134,8 +13497,14 @@ def route_with_combined_escalation(
 
     record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
-    if _post_passes_enabled and final_result.router.routes:
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and final_result.router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -13249,6 +13618,8 @@ def route_with_combined_escalation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            # Issue #6273: never start a DRC the --timeout cannot finish.
+            **_post_route_drc_budget(args),
             preserve_filled_copper=bool(
                 getattr(args, "_placement_disposition", None)
                 and args._placement_disposition.preserve_copper_nets
@@ -13290,6 +13661,9 @@ def route_with_combined_escalation(
             # <output_stem>.access_witness.json next to the routed PCB.
             router=final_result.router,
         )
+
+        # Issue #6273: a DRC skipped for --timeout is "unverified", not a pass.
+        _record_post_route_drc(args, drc_errors)
 
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
@@ -13342,6 +13716,14 @@ def route_with_combined_escalation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif final_result.success and _unverified_checks(args):
+            # Issue #6273: never "SUCCESS" for a board nobody verified.
+            _print_unverified_banner(
+                args,
+                output_path,
+                f"Minimum viable config = {final_result.layer_count} layers + "
+                f"tier {final_result.tier} rules",
+            )
         elif final_result.success:
             print(
                 f"SUCCESS: Minimum viable config = {final_result.layer_count} layers + "
@@ -13384,12 +13766,17 @@ def route_with_combined_escalation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(
-            _stranded_pour_escalation_exit(
-                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
-                args,
+        # Issue #6273: a clean result whose DRC / stranded-pour check was
+        # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
+        return _unverified_exit(
+            _layer_intent_escalation_exit(
+                _stranded_pour_escalation_exit(
+                    _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                    args,
+                ),
+                _layer_intent,
             ),
-            _layer_intent,
+            args,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -17531,14 +17918,14 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 nets_to_route_ids=multi_pad_ids,
                 single_pad_count=getattr(last, "single_pad_count", 0),
                 # Issue #6239: the exit code is the run's single final verdict.
-                verdict="success" if exit_code == 0 else "failed",
+                verdict=_verdict_for_exit(exit_code),
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
     print(
         json.dumps(
-            {"exit_code": exit_code, "verdict": "success" if exit_code == 0 else "failed"},
+            {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)},
             indent=2,
         ),
         file=json_stdout(),
@@ -19864,7 +20251,12 @@ def _run_main_impl(args, parser, argv) -> int:
             _restore_route_grid(router, router.routes)
 
     # Optimize traces (unless --no-optimize/--raw flag is set)
-    if _post_passes_enabled and not args.no_optimize and router.routes:
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -19910,8 +20302,14 @@ def _run_main_impl(args, parser, argv) -> int:
 
     record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
-    if _post_passes_enabled and router.routes:
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -20448,6 +20846,8 @@ def _run_main_impl(args, parser, argv) -> int:
         drc_ran = True
         drc_errors, drc_warnings = run_post_route_drc(
             output_path=output_path,
+            # Issue #6273: never start a DRC the --timeout cannot finish.
+            **_post_route_drc_budget(args),
             preserve_filled_copper=bool(
                 getattr(args, "_placement_disposition", None)
                 and args._placement_disposition.preserve_copper_nets
@@ -20485,6 +20885,9 @@ def _run_main_impl(args, parser, argv) -> int:
             # <output_stem>.access_witness.json next to the routed PCB.
             router=router,
         )
+
+        # Issue #6273: a DRC skipped for --timeout is "unverified", not a pass.
+        _record_post_route_drc(args, drc_errors)
 
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
@@ -20597,6 +21000,12 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         else "failed"
     )
+    # Issue #6273: a would-be success whose DRC / stranded-pour check was
+    # skipped for --timeout is "unverified" (exit EXIT_UNVERIFIED), never
+    # "success".
+    _unverified = _unverified_checks(args)
+    if _final_verdict == "success" and _unverified:
+        _final_verdict = "unverified"
 
     if not quiet:
         print("\n" + "=" * 60)
@@ -20630,6 +21039,18 @@ def _run_main_impl(args, parser, argv) -> int:
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif _unverified and drc_passed and (all_nets_routed or meets_threshold):
+            # Issue #6273: verification was skipped for --timeout, so neither
+            # "SUCCESS" nor "DRC passed" may be printed for this board.
+            if all_nets_routed:
+                _headline = f"All signal nets routed{summary_suffix}"
+            else:
+                _headline = (
+                    f"Routed {stats['nets_routed']}/{nets_to_route} signal nets "
+                    f"({completion_ratio * 100:.0f}%, meets "
+                    f"{args.min_completion * 100:.0f}% threshold){summary_suffix}"
+                )
+            _print_unverified_banner(args, output_path, _headline)
         elif all_nets_routed and drc_passed:
             if drc_ran and drc_errors == 0:
                 print(f"SUCCESS: All signal nets routed, DRC passed!{summary_suffix}")
@@ -20791,6 +21212,8 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Exit codes:
     # 0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)
+    #     (``--skip-drc`` / a DRC that failed to run; NOT one skipped for
+    #     --timeout, which is exit 10 below)
     # 1 = Fatal failure — no nets routed, no useful output
     # 2 = Partial routing — some nets routed but below --min-completion threshold
     # 3 = Meets threshold but DRC violations detected (includes seg-seg violations).
@@ -20853,6 +21276,12 @@ def _run_main_impl(args, parser, argv) -> int:
     #       Overridden by the existing --force.
     #     For both, the fix layer is placement / escape planning / stackup,
     #     not the router.
+    # 10 = UNVERIFIED (EXIT_UNVERIFIED, issue #6273): everything that would
+    #     have returned 0, except that the post-route DRC and/or the #5785
+    #     stranded-pour check was skipped because the hard --timeout could
+    #     not cover it.  The board is saved; run ``kct check`` on it.  Only
+    #     ever replaces 0 -- a known failure keeps its own code.  JSON
+    #     ``summary.verdict`` is ``"unverified"``.
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.
@@ -20915,7 +21344,9 @@ def _run_main_impl(args, parser, argv) -> int:
         and pairwise_violation_count == 0
         and not stranded_pour_blocking
     ):
-        return 0
+        # Issue #6273: EXIT_UNVERIFIED when the DRC / stranded-pour check
+        # was skipped for --timeout -- a board nobody verified is not exit 0.
+        return EXIT_UNVERIFIED if _unverified else 0
     elif meets_threshold and (
         not drc_passed
         or seg_seg_violation_count > 0

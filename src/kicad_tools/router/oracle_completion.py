@@ -49,6 +49,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,6 +94,12 @@ STOP_NO_PROGRESS = "no_progress"  # a round did not lower the count (restored)
 STOP_DRC_REGRESSED = "drc_regressed"  # a round raised DRC errors (restored)
 STOP_ORACLE_FAILED = "oracle_failed"  # kicad-cli failed mid-loop (restored)
 STOP_MAX_ROUNDS = "max_rounds"  # round budget spent while still falling
+STOP_DEADLINE = "deadline"  # the next kicad-cli call would overrun --timeout (#6273)
+
+#: Issue #6273: a kicad-cli call is only started when the time left covers
+#: its estimated cost times this factor (KiCad load + DRC time varies run to
+#: run, and an overrun is fatal: the route supervisor kills the whole run).
+ORACLE_DEADLINE_SAFETY = 1.25
 
 # ---------------------------------------------------------------------------
 # Parsing kicad-cli ``unconnected_items`` into links
@@ -401,6 +408,8 @@ def run_oracle_completion(
     max_rounds: int = DEFAULT_ORACLE_ROUNDS,
     max_retries: int = 2,
     log: Callable[[str], None] | None = None,
+    time_left: Callable[[], float | None] | None = None,
+    call_cost_estimate: float = 0.0,
 ) -> OracleCompletionResult:
     """Close the KiCad-reported unconnected links on ``nets``, round by round.
 
@@ -428,9 +437,36 @@ def run_oracle_completion(
         max_rounds: Round budget (``0`` disables the loop).
         max_retries: Attribution retries per round after a DRC regression.
         log: Optional progress sink.
+        time_left: Issue #6273.  Seconds the caller can still spend (``None``
+            = unbounded).  ``kct route --timeout`` is a hard total enforced by
+            killing the run, so the loop never starts a kicad-cli call it
+            cannot finish: before every call it checks the time left against
+            the call's estimated cost and stops with ``deadline`` instead
+            (the board is left exactly as the last kept round wrote it).
+        call_cost_estimate: Seconds one kicad-cli DRC on this board is
+            expected to take before any has been measured (the caller passes
+            its zone-fill time, the same KiCad load + fill).  Measured calls
+            replace it.
     """
     scope = set(nets)
     say = log or (lambda _msg: None)
+    #: Issue #6273: measured seconds of each bare DRC call and of each
+    #: attempt (closer, which refills the zones, plus its DRC).
+    drc_costs: list[float] = []
+    attempt_costs: list[float] = []
+
+    def affordable(*, attempt: bool) -> bool:
+        if time_left is None:
+            return True
+        left = time_left()
+        if left is None:
+            return True
+        drc = max([call_cost_estimate, *drc_costs])
+        # An unmeasured attempt is a refill plus a DRC: about two DRC calls.
+        estimate = (
+            max(attempt_costs) if (attempt and attempt_costs) else drc * (2 if attempt else 1)
+        )
+        return left >= estimate * ORACLE_DEADLINE_SAFETY
 
     def in_scope(geo: GeometricDRCResult) -> list[OracleLink]:
         # Canonical order: KiCad's report order is not reproducible (#5934).
@@ -438,7 +474,15 @@ def run_oracle_completion(
             lk for lk in links_from_violations(geo.unconnected_items) if lk.net in scope
         )
 
+    if not affordable(attempt=False):
+        return OracleCompletionResult(
+            ran=False,
+            stop_reason=STOP_DEADLINE,
+            note="the --timeout budget left cannot cover a kicad-cli DRC run (issue #6273)",
+        )
+    started = time.monotonic()
     geo = oracle(pcb_path)
+    drc_costs.append(time.monotonic() - started)
     if not geo.ran:
         return OracleCompletionResult(ran=False, stop_reason=STOP_NOT_RUN, note=geo.note)
 
@@ -471,13 +515,20 @@ def run_oracle_completion(
         attempts = 0
         geo_after = geo
         for _ in range(1 + max_retries):
+            if not affordable(attempt=True):
+                # The board holds the last kept round's bytes here: the first
+                # attempt has not touched it and a refused one was restored.
+                stop = STOP_DEADLINE
+                break
             attempts += 1
+            started = time.monotonic()
             attempt = closer(pcb_path, links, frozenset(banned))
             if attempt.applied == 0:
                 pcb_path.write_bytes(backup)
                 stop = STOP_NO_CLOSER
                 break
             geo_after = oracle(pcb_path)
+            attempt_costs.append(time.monotonic() - started)
             if not geo_after.ran:
                 pcb_path.write_bytes(backup)
                 stop = STOP_ORACLE_FAILED

@@ -75,6 +75,7 @@ from __future__ import annotations
 import contextlib
 import json
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1038,6 +1039,7 @@ def replay(
     rules: DesignRules | None = None,
     max_pads: int = MAX_WITNESS_PADS,
     max_evaluations: int = MAX_WITNESS_EVALUATIONS,
+    deadline: float | None = None,
 ) -> AccessWitness:
     """Name the commit that closed each tracked terminal's access set.
 
@@ -1062,6 +1064,11 @@ def replay(
         max_pads: Cap on tracked terminals (:data:`MAX_WITNESS_PADS`).
         max_evaluations: Cap on access-set evaluations
             (:data:`MAX_WITNESS_EVALUATIONS`).
+        deadline: Issue #6273.  Optional absolute ``time.monotonic()`` time
+            after which the replay stops (``truncated=True``), exactly as when
+            the evaluation cap is hit.  The evaluation cap bounds the work,
+            not the wall clock: on a loaded host board 05's two-terminal
+            replay took 143 s, which ``kct route --timeout`` cannot afford.
 
     Returns:
         The :class:`AccessWitness`.  Empty (falsy) when nothing ended unrouted,
@@ -1134,12 +1141,12 @@ def replay(
                 baseline = {k: _state_label(a) for k, a in state.items()}
                 seen_search_pass = True
             copper.apply(record)
-            if evaluations >= budget:
+            if evaluations >= budget or (deadline is not None and time.monotonic() >= deadline):
                 truncated = True
                 break
             envelope = route_envelope(record.route, resolved_rules)
             for key in affected_pads(state, envelope):
-                if evaluations >= budget:
+                if evaluations >= budget or (deadline is not None and time.monotonic() >= deadline):
                     truncated = True
                     break
                 access = evaluate(key)
@@ -1207,7 +1214,7 @@ def _state_label(access: AccessSet | None) -> str:
     return ACCESS_EMPTY if access.is_empty() else ACCESS_NON_EMPTY
 
 
-def witness_for_router(router: Any) -> AccessWitness | None:
+def witness_for_router(router: Any, *, deadline: float | None = None) -> AccessWitness | None:
     """Replay ``router``'s own journal, memoizing the result on the router.
 
     Two post-route consumers want the same witness -- the
@@ -1219,6 +1226,10 @@ def witness_for_router(router: Any) -> AccessWitness | None:
     engine); returns an empty-but-present witness when the journal exists and
     nothing ended unrouted, so a caller can tell "not applicable" from
     "nothing stranded".
+
+    ``deadline`` (Issue #6273) is forwarded to :func:`replay`.  A replay the
+    deadline truncated is not memoized, so a later unbounded consumer replays
+    in full.
     """
     journal = getattr(router, "commit_journal", None)
     if journal is None:
@@ -1226,7 +1237,12 @@ def witness_for_router(router: Any) -> AccessWitness | None:
     cached = getattr(router, "_access_witness_cache", None)
     if isinstance(cached, AccessWitness) and cached.record_count == len(journal):
         return cached
-    witness = replay(journal, router)
+    if deadline is None:
+        witness = replay(journal, router)
+    else:
+        witness = replay(journal, router, deadline=deadline)
+    if deadline is not None and witness.truncated:
+        return witness
     with contextlib.suppress(Exception):  # a frozen / slotted stub router
         router._access_witness_cache = witness
     return witness

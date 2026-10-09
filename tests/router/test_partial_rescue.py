@@ -658,6 +658,24 @@ def test_completion_no_unfinished_nets_is_noop(tmp_path: Path, monkeypatch) -> N
     history = complete_unfinished_nets(pcb, RescueConfig(), quiet=True)
     assert history == []
     assert calls == []  # no route subprocess launched
+    # Issue #6273: "nothing to complete" is a confirmed fully-connected board.
+    assert history.all_connected is True
+
+
+def test_completion_without_output_is_not_all_connected(tmp_path: Path, monkeypatch) -> None:
+    """Issue #6273: an empty history alone does not mean every net connected."""
+    pcb = _write_pcb(tmp_path)
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets",
+        lambda *a, **k: ["SDA"],
+    )
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.subprocess.run",
+        lambda cmd, **k: None,  # writes no output board
+    )
+    result = complete_unfinished_nets(pcb, RescueConfig(), quiet=True)
+    assert result == []
+    assert result.all_connected is False
 
 
 def test_completion_progress_promotes_and_iterates(tmp_path: Path, monkeypatch) -> None:
@@ -692,6 +710,7 @@ def test_completion_progress_promotes_and_iterates(tmp_path: Path, monkeypatch) 
 
     history = complete_unfinished_nets(pcb, RescueConfig(), max_passes=3, quiet=True)
     assert history == [(2, 1), (1, 0)]
+    assert history.all_connected is True
     text = pcb.read_text()
     # Both passes' output survived.
     assert "(start 7 7)" in text and "(start 8 8)" in text
@@ -728,6 +747,7 @@ def test_completion_no_progress_restores_backup(tmp_path: Path, monkeypatch) -> 
 
     history = complete_unfinished_nets(pcb, RescueConfig(), max_passes=3, quiet=True)
     assert history == [(2, 2)]
+    assert history.all_connected is False
     # Pre-pass board restored byte-for-byte (junk stub gone, stripped
     # copper back).
     assert pcb.read_text() == original

@@ -78,7 +78,8 @@ class TestSearchStageCap:
         """Without the flag the cap is ``--timeout`` verbatim (bit-for-bit)."""
         args = _staged_args(search_timeout=None)
         assert route_cmd._search_stage_cap(args) == 2400.0
-        assert route_cmd._budgeted_timeout(args) == pytest.approx(2400.0, abs=1.0)
+        # The total holds back the #6273 post-route reserve (15% = 360 s).
+        assert route_cmd._budgeted_timeout(args) == pytest.approx(2040.0, abs=1.0)
 
     def test_cap_applies_without_any_total_deadline(self):
         """``--search-timeout`` alone still bounds each stage."""
@@ -148,7 +149,8 @@ class TestInitialStageExhaustion:
 
         assert not route_cmd._deadline_expired(args)
         remaining = route_cmd._remaining_budget(args)
-        assert remaining is not None and remaining > 1700.0
+        # 2400 - 600 spent - 360 post-route reserve (#6273): both probes fit.
+        assert remaining is not None and remaining > 1400.0
 
         _run_delta_feedback(args, tmp_path)
         out = capsys.readouterr().out
@@ -183,7 +185,9 @@ class TestInitialStageExhaustion:
     def test_shortfall_between_total_and_probe_contract_is_announced(self, capsys):
         """2 x 600 s of probes with 900 s left gets an advisory note."""
         args = _staged_args()
-        _advance(args, 1500.0)  # ~900 s left; 2 x 600 does not fit
+        # ~840 s of routing budget left (2400 - 1200 - the #6273 360 s
+        # post-route reserve); one 600 s probe fits, 2 x 600 does not.
+        _advance(args, 1200.0)
         assert route_cmd._delta_probe_timeout(args, quiet=False) == 600.0
         assert "exceeds the" in capsys.readouterr().out
 

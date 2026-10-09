@@ -114,6 +114,12 @@ class CompletionResult:
     #: pass's ``--complete-report``.  Empty when every link closed (or when no
     #: report was produced -- a pass that closed everything writes none).
     unroutable_links: list[UnroutableLink] = field(default_factory=list)
+    #: Issue #6273: the completion detector itself observed ZERO unfinished
+    #: signal nets -- either before the first pass (nothing to do, so
+    #: :attr:`history` stays empty) or after a pass that closed the last one.
+    #: An empty history alone cannot say this: a pass that produced no output
+    #: also leaves it empty.
+    all_connected: bool = False
 
     def __iter__(self):
         return iter(self.history)
@@ -551,6 +557,7 @@ def complete_unfinished_nets(
         )
         if not targets:
             _log(f"\n   Pass {pass_index + 1}: all signal nets connected -- done.")
+            result.all_connected = True
             break
 
         _log(f"\n   Pass {pass_index + 1}: {len(targets)} unfinished net(s): {', '.join(targets)}")
@@ -636,6 +643,7 @@ def complete_unfinished_nets(
 
         backup.unlink(missing_ok=True)
         if not remaining:
+            result.all_connected = True
             break
 
     return result

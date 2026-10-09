@@ -3771,8 +3771,12 @@ def legacy_main() -> int:
             # improve reach -- never strand copper.  See
             # complete_unfinished_nets().
             completion = complete_unfinished_nets(routed_path)
-            if completion.history and completion.history[-1][1] == 0:
-                # The batch pass closed every remaining unfinished net.
+            if completion.all_connected:
+                # Every signal net is connected -- the batch pass closed the
+                # last unfinished net, or (Issue #6273) there was none left
+                # to close.  ``kct route`` can exit non-zero on a fully
+                # routed board: exit 3 flags pour pads still stranded on the
+                # deliberately skipped pour nets, which step 6c stitches.
                 route_success = True
             if completion.unroutable_links:
                 print("\n   Links still unroutable after batch completion:")

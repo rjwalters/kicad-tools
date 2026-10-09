@@ -726,6 +726,7 @@ def run_fill_zones(
     kicad_cli: Path | None = None,
     *,
     native_clearance: bool = False,
+    time_left: Callable[[], float | None] | None = None,
 ) -> KiCadCLIResult:
     """Fill all copper zones in a PCB using kicad-cli.
 
@@ -745,6 +746,12 @@ def run_fill_zones(
             clearance target in native DRU rules before filling, and let
             KiCad handle the resulting geometry instead of carving saved
             polygons. Opt-in, in-place only; preserves other callers' policy.
+        time_left: Issue #6273.  Seconds the caller can still spend
+            (``None`` = unbounded), e.g. what is left of ``kct route
+            --timeout``.  The fill's kicad-cli call is bounded by it (a fill
+            that would overrun is stopped and reported as failed, with the
+            board's previous fills restored), and the starved-thermal
+            remediation only starts a pass the time left can cover.
 
     Returns:
         KiCadCLIResult with success status and output path
@@ -763,6 +770,20 @@ def run_fill_zones(
                 success=False,
                 stderr=kicad_cli_unavailable_message(),
             )
+
+    # Issue #6273: a caller on a hard deadline bounds the kicad-cli call.  The
+    # keyword is only passed when bounded so unbounded callers (and test
+    # doubles of the two fill helpers) see the historical call unchanged.
+    fill_kwargs: dict[str, float] = {}
+    if time_left is not None:
+        budget = time_left()
+        if budget is not None:
+            if budget <= 0.0:
+                return KiCadCLIResult(
+                    success=False,
+                    stderr="Zone fill skipped: no --timeout budget left (issue #6273)",
+                )
+            fill_kwargs["timeout"] = budget
 
     # Pre-fill normalization (Issues #3727 / #3729): legacy zones use thermal
     # relief for *all* pads, which starves pads that cannot form the 2 spokes
@@ -788,11 +809,12 @@ def run_fill_zones(
         normalized_tmp = _stage_normalized_pad_connection(pcb_path)
         fill_input = normalized_tmp if normalized_tmp is not None else pcb_path
 
+    fill_started = _monotonic()
     try:
         if _kicad_cli_has_fill_zones(kicad_cli):
-            result = _run_fill_zones_native(fill_input, output_path, kicad_cli)
+            result = _run_fill_zones_native(fill_input, output_path, kicad_cli, **fill_kwargs)
         else:
-            result = _run_fill_zones_via_drc(fill_input, output_path, kicad_cli)
+            result = _run_fill_zones_via_drc(fill_input, output_path, kicad_cli, **fill_kwargs)
     finally:
         if normalized_tmp is not None:
             normalized_tmp.unlink(missing_ok=True)
@@ -838,14 +860,27 @@ def run_fill_zones(
         already_freshly_refilled = (not _kicad_cli_has_fill_zones(kicad_cli)) and (
             _kicad_drc_supports_refill(kicad_cli)
         )
+        remediation_kwargs: dict = {}
+        if time_left is not None:
+            # Issue #6273: the fill just measured is one KiCad load + refill.
+            remediation_kwargs = {
+                "time_left": time_left,
+                "refill_cost_estimate": _monotonic() - fill_started,
+            }
         _remediate_starved_thermal(
             result.output_path,
             kicad_cli,
             settle=None if native_clearance else _apply_foreign_pad_clearance,
             skip_first_refill=already_freshly_refilled,
+            **remediation_kwargs,
         )
 
     return result
+
+
+#: Issue #6273: a remediation step is only started when the time left covers
+#: its estimated kicad-cli cost times this factor.
+_REMEDIATION_DEADLINE_SAFETY = 1.25
 
 
 def _remediate_starved_thermal(
@@ -855,6 +890,8 @@ def _remediate_starved_thermal(
     settle: Callable[[Path], None] | None = None,
     *,
     skip_first_refill: bool = False,
+    time_left: Callable[[], float | None] | None = None,
+    refill_cost_estimate: float = 0.0,
 ) -> None:
     """Force solid connection on the pads KiCad's DRC flags (Issue #3729).
 
@@ -890,6 +927,13 @@ def _remediate_starved_thermal(
             Every later pass still refills unconditionally: once
             ``force_solid_on_pads_by_uuid``/``save_pcb`` below mutate the
             board, a real refill is required again.
+        time_left: Issue #6273.  Seconds the caller can still spend
+            (``None`` = unbounded).  A pass (refill + read-only DRC, about
+            two kicad-cli runs) or the closing refill is only started when
+            the time left covers its estimated cost; otherwise the board is
+            left as the last completed step wrote it.
+        refill_cost_estimate: Seconds of one KiCad refill of this board
+            (the caller's measured fill).  Measured passes replace it.
     """
     import json
     import os
@@ -951,8 +995,23 @@ def _remediate_starved_thermal(
         if settle is not None:
             settle(pcb_path)
 
+    pass_costs: list[float] = []
+
+    def _affordable(kicad_runs: int) -> bool:
+        if time_left is None:
+            return True
+        left = time_left()
+        if left is None:
+            return True
+        estimate = max(pass_costs) if (kicad_runs == 2 and pass_costs) else 0.0
+        estimate = max(estimate, kicad_runs * refill_cost_estimate)
+        return left >= estimate * _REMEDIATION_DEADLINE_SAFETY
+
     try:
         for pass_num in range(max_passes):
+            if not _affordable(2):
+                return  # Issue #6273: out of --timeout budget; keep the fill.
+            pass_started = _monotonic()
             # Refill the zones (bakes in prior overrides), then apply the
             # foreign-pad carve so the DRC we read reflects the shipped copper.
             # Issue #5617: pass 0's refill is skippable when the caller
@@ -977,10 +1036,11 @@ def _remediate_starved_thermal(
                 # is already on disk and we cannot improve it; stop here.
                 return
             save_pcb(doc, pcb_path)
+            pass_costs.append(_monotonic() - pass_started)
             # Next pass refills (reverting the carve), re-applies it, re-checks.
         # Pass budget exhausted with overrides still pending: do a final
         # refill + carve so the shipped copper reflects both.
-        if _run_drc(refill=True) is not None:
+        if _affordable(1) and _run_drc(refill=True) is not None:
             _settle()
     except ModuleNotFoundError:
         # shapely unavailable -> the carve/remediation is not clearance-
@@ -1080,6 +1140,7 @@ def _run_fill_zones_native(
     pcb_path: Path,
     output_path: Path | None,
     kicad_cli: Path,
+    timeout: float | None = None,
 ) -> KiCadCLIResult:
     """Fill zones using the native ``kicad-cli pcb fill-zones`` subcommand.
 
@@ -1099,7 +1160,9 @@ def _run_fill_zones_native(
     cmd.append(str(pcb_path))
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Issue #6273: ``timeout`` (seconds) bounds a caller on a hard
+        # deadline; an expiry surfaces as SubprocessError below.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
         expected_path = output_path if output_path is not None else pcb_path
 
@@ -1896,6 +1959,7 @@ def _run_fill_zones_via_drc(
     pcb_path: Path,
     output_path: Path | None,
     kicad_cli: Path,
+    timeout: float | None = None,
 ) -> KiCadCLIResult:
     """Fill zones by running ``kicad-cli pcb drc`` as a side-effect.
 
@@ -1970,7 +2034,10 @@ def _run_fill_zones_via_drc(
             # Inside the try so an OSError/Ctrl-C here still restores.
             stripped = target_pcb.read_bytes()
             stripped_mtime_ns = target_pcb.stat().st_mtime_ns
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Issue #6273: ``timeout`` bounds a caller on a hard deadline.  An
+        # expiry raises TimeoutExpired (a SubprocessError, handled below) and
+        # the ``finally`` restores the board's previous fills.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
         # DRC returns non-zero when there are violations, but the zones
         # are still filled.  We treat it as success when the DRC report

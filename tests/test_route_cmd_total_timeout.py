@@ -827,9 +827,9 @@ class TestRoutingDeadlineSplit:
     loops bail at the routing deadline so auto-fix has its reserved time.
     """
 
-    def test_routing_deadline_equals_wall_clock_without_autofix(self):
-        """When ``--auto-fix`` is not requested, routing deadline == wall
-        clock deadline (no reserve carved out)."""
+    def test_routing_deadline_holds_back_post_route_reserve_without_autofix(self):
+        """Without ``--auto-fix`` the routing deadline still holds back the
+        post-route finishing reserve (issue #6273): 15% of 1500 s = 225 s."""
         from kicad_tools.cli.route_cmd import _set_wall_clock_deadline
 
         args = SimpleNamespace(
@@ -838,13 +838,15 @@ class TestRoutingDeadlineSplit:
         _set_wall_clock_deadline(args)
         assert args._wall_clock_deadline is not None
         assert args._routing_deadline is not None
-        # Routing deadline == wall-clock deadline exactly (no reserve).
-        assert abs(args._routing_deadline - args._wall_clock_deadline) < 0.001
+        delta = args._wall_clock_deadline - args._routing_deadline
+        assert abs(delta - 225.0) < 0.01
         assert args._auto_fix_reserve == 0.0
+        assert args._post_route_reserve == 225.0
 
     def test_routing_deadline_carves_reserve_with_autofix(self):
         """When ``--auto-fix`` is requested, routing deadline is wall
-        clock deadline minus the auto-fix reserve."""
+        clock deadline minus the auto-fix reserve and the post-route
+        finishing reserve (#6273)."""
         from kicad_tools.cli.route_cmd import _set_wall_clock_deadline
 
         args = SimpleNamespace(
@@ -853,17 +855,20 @@ class TestRoutingDeadlineSplit:
         _set_wall_clock_deadline(args)
         assert args._wall_clock_deadline is not None
         assert args._routing_deadline is not None
-        # Reserve is 300s (20% of 1500).
+        # Auto-fix reserve is 300s (20% of 1500) + 225s post-route reserve.
         delta = args._wall_clock_deadline - args._routing_deadline
-        assert abs(delta - 300.0) < 0.01
+        assert abs(delta - 525.0) < 0.01
         assert args._auto_fix_reserve == 300.0
+        assert args._post_route_reserve == 225.0
 
     def test_remaining_budget_returns_routing_budget(self):
         """``_remaining_budget`` returns routing budget (deadline minus
-        reserve), so outer loops naturally stop in time for auto-fix.
+        reserves), so outer loops naturally stop in time for auto-fix and
+        the finishing stages.
 
-        AC #1: the negotiated router's effective ceiling drops to <=
-        0.80 * 1500s = 1200s when ``--timeout 1500 --auto-fix`` is set.
+        AC #1 (#3238): the negotiated router's effective ceiling drops to
+        <= 0.80 * 1500s = 1200s when ``--timeout 1500 --auto-fix`` is set;
+        #6273 additionally holds back 225s for the post-route stages.
         """
         from kicad_tools.cli.route_cmd import _remaining_budget, _set_wall_clock_deadline
 
@@ -871,11 +876,11 @@ class TestRoutingDeadlineSplit:
             timeout=1500.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
         )
         _set_wall_clock_deadline(args)
-        # Immediately after stamping: routing budget is ~1200s (1500 - 300).
+        # Immediately after stamping: routing budget is ~975s (1500 - 525).
         remaining = _remaining_budget(args)
         assert remaining is not None
         # Allow small monotonic jitter.
-        assert 1199.0 < remaining <= 1200.0
+        assert 974.0 < remaining <= 975.0
 
     def test_total_remaining_budget_returns_full_budget(self):
         """``_total_remaining_budget`` returns the *full* wall-clock budget
@@ -923,6 +928,62 @@ class TestRoutingDeadlineSplit:
         assert args._wall_clock_deadline is None
         assert args._routing_deadline is None
         assert args._auto_fix_reserve == 0.0
+
+
+class TestPostRouteReserve:
+    """Issue #6273: routing never consumes the finishing stages' time.
+
+    Board 05's legacy recipe (``--timeout 900``) never produced an accepted
+    board: the last escalation attempt's fair slice was "everything left", so
+    the optimize / save / zone-fill / DRC tail ran into the hard deadline and
+    the supervisor quarantined the unsaved run.
+    """
+
+    @staticmethod
+    def _reserve(timeout, **kw):
+        from kicad_tools.cli.route_cmd import _post_route_reserve
+
+        return _post_route_reserve(SimpleNamespace(timeout=timeout, **kw))
+
+    def test_unbounded_run_reserves_nothing(self):
+        for value in (None, 0, -5.0):
+            assert self._reserve(value) == 0.0
+
+    def test_fraction_floor_and_cap(self):
+        # 15% of 900 s = 135 s (the board 05 legacy recipe).
+        assert self._reserve(900.0) == pytest.approx(135.0)
+        # Short budgets hit the 60 s floor ...
+        assert self._reserve(300.0) == pytest.approx(60.0)
+        # ... unless the 25% cap is smaller.
+        assert self._reserve(120.0) == pytest.approx(30.0)
+
+    def test_board_05_last_attempt_slice_leaves_the_reserve(self):
+        """The final escalation attempt can no longer take the whole budget."""
+        from kicad_tools.cli.route_cmd import (
+            _per_attempt_budgeted_timeout,
+            _set_wall_clock_deadline,
+            _total_remaining_budget,
+        )
+
+        args = SimpleNamespace(timeout=900.0, auto_fix=False, dry_run=False, skip_drc=False)
+        _set_wall_clock_deadline(args)
+        last = _per_attempt_budgeted_timeout(args, attempt_index=1, max_attempts=2)
+        total = _total_remaining_budget(args)
+        assert last is not None and total is not None
+        assert total - last == pytest.approx(135.0, abs=0.5)
+
+    def test_reserves_together_never_exceed_half_the_budget(self):
+        from kicad_tools.cli.route_cmd import _set_wall_clock_deadline
+
+        args = SimpleNamespace(
+            timeout=100.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        _set_wall_clock_deadline(args)
+        # Auto-fix already takes the 50% cap (50 s); nothing is left over.
+        assert args._auto_fix_reserve == 50.0
+        assert args._post_route_reserve == 0.0
+        delta = args._wall_clock_deadline - args._routing_deadline
+        assert delta == pytest.approx(50.0, abs=0.01)
 
 
 class TestAutoFixStructuredStatus:

@@ -39,6 +39,43 @@ if TYPE_CHECKING:
     from ..sparse import Corridor
 
 
+def routed_net_count(net_order: list[int], net_routes: dict[int, list[Route]]) -> int:
+    """Count the nets in ``net_order`` that currently hold any copper.
+
+    Issue #6273.  ``NegotiatedRouter.rip_up_nets`` leaves a ripped net in
+    ``net_routes`` as an EMPTY list, and a re-route that fails never puts its
+    copper back, so this count drops whenever a rip-up iteration loses a net
+    -- including the iteration a wall-clock timeout cuts off mid-reroute,
+    which by construction leaves the rest of its rip-up cohort unrouted.
+    """
+    return sum(1 for net in net_order if net_routes.get(net))
+
+
+def two_phase_state_key(
+    clearance_violations: int, routed_nets: int, overflow: int
+) -> tuple[int, int, int]:
+    """Lexicographic best-state key for the two-phase rip-up loop (smaller wins).
+
+    Order: clearance violations ascending (Issue #3002: a DRC-clean snapshot
+    beats a dirty one), then routed nets DESCENDING (Issue #6273), then grid
+    overflow ascending (Issue #2305).
+
+    Before #6273 the key was ``(clearance_violations, overflow)`` alone, and
+    dropping a net's copper trivially lowers overflow.  So a rip-up iteration
+    the stage deadline cut off mid-reroute -- its cohort ripped, only part of
+    it re-landed -- outscored the complete snapshot it started from, and the
+    post-loop restore kept the gutted state.  On board 05 (seed 7, 4L
+    SIG-GND-PWR-SIG) that turned a 36/36 post-stall-recovery pass into a
+    32/36 attempt result, which then failed ``--min-completion`` and
+    escalated to a second 4L attempt that the 900 s budget could not finish.
+    The negotiated loop's :class:`~kicad_tools.router.core.IterationMetrics`
+    already ranks routed copper above overflow (Issues #2540 / #3117); this
+    brings the two-phase loop in line without reordering its #3002
+    clearance-first contract.
+    """
+    return (clearance_violations, -routed_nets, overflow)
+
+
 class TwoPhaseRouter:
     """Two-phase global+detailed routing algorithm.
 
@@ -903,6 +940,10 @@ class TwoPhaseRouter:
         # baseline.  Memo enables the mid-iter call below to reuse this
         # result if no rip-up has happened yet.
         best_overflow = overflow
+        # Issue #6273: routed-net count participates in the comparator so a
+        # snapshot that lost copper (failed re-route, or an iteration the
+        # deadline cut off mid-reroute) cannot win on lower overflow alone.
+        best_routed = routed_net_count(net_order, net_routes)
         # Issue #3020: combine seg-via and via-seg violator counts so
         # both directions of the clearance matrix participate in the
         # best-state comparator.
@@ -1204,11 +1245,17 @@ class TwoPhaseRouter:
                 # improves.  Clearance violations take precedence so a
                 # hook-driven re-route that fixes a violation without
                 # reducing overflow survives the post-loop restore.
-                current_key = (current_clearance_violations, overflow)
-                best_key = (best_clearance_violations, best_overflow)
+                current_routed = routed_net_count(net_order, net_routes)
+                current_key = two_phase_state_key(
+                    current_clearance_violations, current_routed, overflow
+                )
+                best_key = two_phase_state_key(
+                    best_clearance_violations, best_routed, best_overflow
+                )
                 if current_key < best_key:
                     best_clearance_violations = current_clearance_violations
                     best_overflow = overflow
+                    best_routed = current_routed
                     best_routes = copy.deepcopy(list(self.routes))
                     best_net_routes = copy.deepcopy(net_routes)
                     best_iteration = iteration
@@ -1295,14 +1342,17 @@ class TwoPhaseRouter:
             extra_routes=_extra_final,
         )
         final_clearance_violations = len(_final_seg_via) + len(_final_via_seg) + len(_final_seg_seg)
-        best_key = (best_clearance_violations, best_overflow)
-        final_key = (final_clearance_violations, final_overflow)
+        final_routed = routed_net_count(net_order, net_routes)
+        best_key = two_phase_state_key(best_clearance_violations, best_routed, best_overflow)
+        final_key = two_phase_state_key(final_clearance_violations, final_routed, final_overflow)
         if best_key < final_key:
             flush_print(
                 f"  Restoring iteration {best_iteration} state "
                 f"(clearance_viol={best_clearance_violations}, "
+                f"routed={best_routed}, "
                 f"overflow={best_overflow}) instead of final "
                 f"(clearance_viol={final_clearance_violations}, "
+                f"routed={final_routed}, "
                 f"overflow={final_overflow})"
             )
             # Restore geometry/indexes as well as congestion: later collision

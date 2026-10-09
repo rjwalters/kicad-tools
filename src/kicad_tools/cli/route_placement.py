@@ -242,9 +242,14 @@ def finish(args, exit_code: int) -> int:
         report["auto_fix_status"] = "rejected"
         report["auto_fix_error"] = repair_error
         report["clean_success"] = False
-    if (fill_error or repair_error) and exit_code == 0:
+    # Issue #6273: an unverified would-be success (exit 10) is still a
+    # would-be success here -- a known placement failure outranks it.
+    from kicad_tools.cli.route_cmd import EXIT_UNVERIFIED
+
+    _clean = (0, EXIT_UNVERIFIED)
+    if (fill_error or repair_error) and exit_code in _clean:
         exit_code = 3
-    if disposition.requested_invalid_nets and exit_code == 0:
+    if disposition.requested_invalid_nets and exit_code in _clean:
         exit_code = 2
     if exit_code != 0:
         report["clean_success"] = False
