@@ -25,6 +25,16 @@ Python helpers with `uv run python scripts/<name>.py`, from the repository root.
 
 ## Subdirectories
 
+### `boards/`
+
+Producers for committed demo-board evidence that `kct readiness` cannot regenerate,
+because the package is recipe-finalised or the report records board-specific checks.
+
+| Script | Purpose |
+|--------|---------|
+| `refresh_readiness.py` | Gated re-pin of `readiness.json` for boards 05/06/07. Works on a staged copy: re-runs native ERC, rebuilds `kicad_project.zip` / `design-source.zip` / `manufacturing.zip` deterministically (sorted entries, fixed timestamps), re-hashes `manifest.json`, then runs `kicad-cli pcb drc --refill-zones`, `kct check --mfr`, `kct net-status` and `kct validate --sync`. It publishes nothing if a gate fails or a measured metric differs from the report (#6076). |
+| `regenerate_uuids_6076.py` | One-shot deterministic-UUID regeneration of boards 05/06/07 design files. Regenerates the schematic and unrouted PCB with each board's generator, and remaps the routed PCB's generator-sourced UUIDs without re-routing. Evidence is left to `refresh_readiness.py` (#6076). |
+
 ### `ci/`
 
 Gate scripts invoked by GitHub Actions (and vendored into consumer repos by
