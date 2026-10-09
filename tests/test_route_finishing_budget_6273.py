@@ -241,7 +241,9 @@ class TestPostRouteDrcBudget:
             time_left=20.0,
             drc_cost_estimate=40.0,
         )
-        assert (errors, warnings) == (0, 0)
+        # Issue #6273 review: never (0, 0) -- that reads as "DRC passed".
+        assert (errors, warnings) == route_cmd.DRC_SKIPPED_FOR_TIME
+        assert (errors, warnings) != (0, 0)
         # The .kicad_pro / .kicad_dru sidecars still ship with the board.
         assert written == ["dru"]
         out = capsys.readouterr().out
@@ -294,12 +296,15 @@ class TestPostRouteDrcBudget:
     def test_skipped_when_nothing_is_left(self, monkeypatch, tmp_path):
         self._forbid_verification(monkeypatch)
         monkeypatch.setattr(route_cmd, "_write_drc_constraint_sidecars", lambda *a, **k: None)
-        assert route_cmd.run_post_route_drc(
-            output_path=tmp_path / "b.kicad_pcb",
-            manufacturer="jlcpcb",
-            layers=2,
-            time_left=0.0,
-        ) == (0, 0)
+        assert (
+            route_cmd.run_post_route_drc(
+                output_path=tmp_path / "b.kicad_pcb",
+                manufacturer="jlcpcb",
+                layers=2,
+                time_left=0.0,
+            )
+            == route_cmd.DRC_SKIPPED_FOR_TIME
+        )
 
     def test_budget_kwargs_follow_the_run(self):
         args = _stamped(900.0, 100.0)

@@ -127,7 +127,9 @@ def configure(args: Any) -> None:
 def _finish(invocation: _Invocation, exit_code: int) -> None:
     # Fatal setup / constraint-propagation failures must not publish an apparent
     # current result, even if a PCB was written before the failure was detected.
-    if exit_code not in {0, 2, 3, 4, 5, 8, 124, 130}:
+    # 10 (issue #6273): a saved board whose verification was skipped for
+    # --timeout is a real result -- publish it; the exit code flags it.
+    if exit_code not in {0, 2, 3, 4, 5, 8, 10, 124, 130}:
         return
     for board in sorted(invocation.published):
         before = invocation.outputs.get(board)

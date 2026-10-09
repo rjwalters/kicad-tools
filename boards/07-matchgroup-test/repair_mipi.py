@@ -208,7 +208,9 @@ def main() -> int:
             env={**os.environ, "PYTHONHASHSEED": "42"},
             timeout=720,
         )
-    if run.returncode not in (0, 2, 3) or not routed.exists():
+    # 10 (issue #6273): routed and saved, but the post-route DRC was skipped
+    # for --timeout -- this script runs its own check below, so carry on.
+    if run.returncode not in (0, 2, 3, 10) or not routed.exists():
         raise RuntimeError(f"Routing failed ({run.returncode}); see {output / 'route.log'}")
     text, tuning = tune_mipi(routed.read_text())
     routed.write_text(text)

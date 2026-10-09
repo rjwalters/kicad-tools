@@ -3995,7 +3995,7 @@ def _add_route_parser(subparsers) -> None:
         "--timeout",
         type=float,
         default=None,
-        help="HARD TOTAL routing invocation budget in seconds (default: unbounded). Nothing escapes it -- escalation, placement feedback, placement-delta probes and auto-fix all share it. Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124. Use --search-timeout to bound an individual search stage inside it.",
+        help="HARD TOTAL routing invocation budget in seconds (default: unbounded). Nothing escapes it -- escalation, placement feedback, placement-delta probes and auto-fix all share it. Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124. Routing stops early enough to leave time for save / zone fill / DRC; when the post-route DRC or stranded-pour check still cannot fit, it is skipped and the run exits 10 (UNVERIFIED -- run 'kct check'). Use --search-timeout to bound an individual search stage inside it.",
     )
     route_parser.add_argument(
         "--search-timeout",

@@ -511,6 +511,75 @@ def _post_route_drc_budget(args) -> dict:
     }
 
 
+#: Issue #6273: what :func:`run_post_route_drc` returns when it skipped the
+#: verification because the hard ``--timeout`` could not cover it.  Distinct
+#: from ``(-1, -1)`` ("DRC tried to run and failed") and, above all, from
+#: ``(0, 0)`` ("DRC ran and passed"): a board nobody checked is never clean.
+DRC_SKIPPED_FOR_TIME: tuple[int, int] = (-2, -2)
+
+#: Issue #6273: exit code of a run that met its completion threshold with no
+#: failure found, but whose post-route verification (the DRC and/or the
+#: #5785 stranded-pour check) was skipped because ``--timeout`` ran out.  The
+#: board is saved but unverified; ``kct check`` it before manufacturing.  It
+#: only ever replaces exit 0 -- a run with a known failure keeps that code.
+EXIT_UNVERIFIED = 10
+
+
+def _record_post_route_drc(args, drc_errors: int) -> None:
+    """Remember whether the last post-route DRC was skipped for time (#6273).
+
+    Assigned (not latched) on every DRC call, so an escalation wrapper that
+    routes again judges the attempt it actually ships.
+    """
+    with contextlib.suppress(AttributeError, TypeError):
+        args._drc_skipped_for_time = drc_errors == DRC_SKIPPED_FOR_TIME[0]
+
+
+def _unverified_checks(args) -> list[str]:
+    """Post-route checks this run skipped for ``--timeout`` (issue #6273).
+
+    Empty when every verification that should have run did run.  The
+    stranded-pour check only counts when its verdict would gate the run
+    (i.e. without ``--allow-stranded-pour-pads``).
+    """
+    checks: list[str] = []
+    if getattr(args, "_drc_skipped_for_time", False) is True:
+        checks.append("post-route DRC")
+    if getattr(args, "_stranded_pour_unknown", False) is True and not getattr(
+        args, "_allow_stranded_pour_pads", False
+    ):
+        checks.append("stranded-pour check")
+    return checks
+
+
+def _unverified_exit(rc: int, args) -> int:
+    """Map a would-be exit 0 to :data:`EXIT_UNVERIFIED` when a check was skipped."""
+    if rc == 0 and _unverified_checks(args):
+        return EXIT_UNVERIFIED
+    return rc
+
+
+def _verdict_for_exit(exit_code: int) -> str:
+    """The JSON ``summary.verdict`` for a final exit code (#6239, #6273)."""
+    if exit_code == 0:
+        return "success"
+    if exit_code == EXIT_UNVERIFIED:
+        return "unverified"
+    return "failed"
+
+
+def _print_unverified_banner(args, output_path, headline: str) -> None:
+    """Replace a SUCCESS banner whose verification was skipped (issue #6273)."""
+    checks = _unverified_checks(args)
+    print(f"UNVERIFIED: {headline}")
+    print(f"  Skipped for --timeout: {', '.join(checks)} -- the board was NOT verified.")
+    print(
+        f"  Run 'kct check {output_path} --mfr {getattr(args, 'manufacturer', 'jlcpcb')}' "
+        "before manufacturing (exit code "
+        f"{EXIT_UNVERIFIED})."
+    )
+
+
 def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
     """Rebuild route-derived state from the selected copper before post-passes.
 
@@ -3756,8 +3825,10 @@ def run_post_route_drc(
             refill).
 
     Returns:
-        Tuple of (error_count, warning_count); ``(0, 0)`` when the
-        verification was skipped for time.
+        Tuple of (error_count, warning_count); :data:`DRC_SKIPPED_FOR_TIME`
+        (``(-2, -2)``) when the verification was skipped for time, and
+        ``(-1, -1)`` when it failed to run.  Neither is a pass: callers
+        record the skip with :func:`_record_post_route_drc`.
     """
     record_stage("post-route-drc")
     from kicad_tools.schema.pcb import PCB
@@ -3858,7 +3929,9 @@ def run_post_route_drc(
             f"left, under the ~{_verify_need:.0f}s a KiCad DRC of this board needs "
             "(issue #6273).  The saved board is UNVERIFIED -- run `kct check` on it."
         )
-        return 0, 0
+        # Never (0, 0): that reads as "DRC passed".  Callers record this
+        # sentinel via _record_post_route_drc and exit EXIT_UNVERIFIED.
+        return DRC_SKIPPED_FOR_TIME
 
     try:
         # Load the routed PCB
@@ -6931,12 +7004,17 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
     the exit-code gate) and returns it.  Never raises: a missing kicad-cli, a
     placement-preserving run or any internal failure leaves the board
     untouched and the count at 0 (the strict-DRC machinery already reports a
-    kicad-cli that did not run).
+    kicad-cli that did not run).  Issue #6273: a check the ``--timeout``
+    stopped before its first DRC sets ``args._stranded_pour_unknown`` instead,
+    so the run exits :data:`EXIT_UNVERIFIED` rather than passing the gate.
     """
     from kicad_tools.router.completion_verdict import allow_stranded_pour_pads, oracle_rounds
-    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS
+    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS, STOP_DEADLINE
 
     args._stranded_pour_links = 0
+    # Issue #6273: True when the check was cut by --timeout before KiCad
+    # reported anything -- the count above is then unknown, not 0.
+    args._stranded_pour_unknown = False
     args._allow_stranded_pour_pads = allow_stranded_pour_pads(
         bool(getattr(args, "allow_stranded_pour_pads", False))
     )
@@ -6995,6 +7073,13 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
     if not result.ran:
         if not quiet:
             print(f"  skipped: {result.note or 'kicad-cli DRC did not run'}")
+        if result.stop_reason == STOP_DEADLINE:
+            # Issue #6273: the deadline, not KiCad, ended the check, so the
+            # stranded-pad count was never measured.  0 would pass the #5785
+            # gate vacuously; the run is reported unverified instead.
+            args._stranded_pour_unknown = True
+            if not quiet:
+                print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         return 0
     args._stranded_pour_links = result.final_links
     args._oracle_completion = result
@@ -10074,6 +10159,9 @@ def route_with_layer_escalation(
             router=final_result.router,
         )
 
+        # Issue #6273: a DRC skipped for --timeout is "unverified", not a pass.
+        _record_post_route_drc(args, drc_errors)
+
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
             fix_result = _run_auto_fix(
@@ -10127,6 +10215,13 @@ def route_with_layer_escalation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif final_result.success and _unverified_checks(args):
+            # Issue #6273: never "SUCCESS" for a board nobody verified.
+            _print_unverified_banner(
+                args,
+                output_path,
+                f"Design requires minimum {final_result.layer_count} layers",
+            )
         elif final_result.success:
             print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
         else:
@@ -10181,12 +10276,17 @@ def route_with_layer_escalation(
         # detected") already covers this case semantically.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(
-            _stranded_pour_escalation_exit(
-                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
-                args,
+        # Issue #6273: a clean result whose DRC / stranded-pour check was
+        # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
+        return _unverified_exit(
+            _layer_intent_escalation_exit(
+                _stranded_pour_escalation_exit(
+                    _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                    args,
+                ),
+                _layer_intent,
             ),
-            _layer_intent,
+            args,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -11032,6 +11132,9 @@ def route_with_rule_relaxation(
             router=final_result.router,
         )
 
+        # Issue #6273: a DRC skipped for --timeout is "unverified", not a pass.
+        _record_post_route_drc(args, drc_errors)
+
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
             fix_result = _run_auto_fix(
@@ -11083,6 +11186,9 @@ def route_with_rule_relaxation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif final_result.success and _unverified_checks(args):
+            # Issue #6273: never "SUCCESS" for a board nobody verified.
+            _print_unverified_banner(args, output_path, "Routing complete with adaptive rules")
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
             if final_result.tier > 0:
@@ -11123,12 +11229,17 @@ def route_with_rule_relaxation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(
-            _stranded_pour_escalation_exit(
-                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
-                args,
+        # Issue #6273: a clean result whose DRC / stranded-pour check was
+        # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
+        return _unverified_exit(
+            _layer_intent_escalation_exit(
+                _stranded_pour_escalation_exit(
+                    _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                    args,
+                ),
+                _layer_intent,
             ),
-            _layer_intent,
+            args,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -11610,8 +11721,10 @@ def route_with_mfr_tier_escalation(
             # forward (if the next tier offers via-in-pad capability).
             last_router = getattr(args, "_last_router", None)
 
-            # Successful routing -- stop escalation.
-            if inner_rc == 0:
+            # Successful routing -- stop escalation.  Issue #6273: a routing
+            # success whose verification was skipped for --timeout is still a
+            # routing success; another tier would only run out of time too.
+            if inner_rc in (0, EXIT_UNVERIFIED):
                 saw_terminating_success = True
                 if not quiet:
                     flush_print(
@@ -11632,7 +11745,7 @@ def route_with_mfr_tier_escalation(
             # on success the mutation is intentional (and surfaced via the
             # cost-note recommendation).  On failure, restore so subsequent
             # CLI calls aren't surprised.
-            if last_exit_code != 0:
+            if last_exit_code not in (0, EXIT_UNVERIFIED):
                 args.manufacturer = original_mfr
             # Issue #2891: always clear the escalation-in-progress flag
             # on exit so callers that re-use ``args`` aren't surprised by
@@ -13549,6 +13662,9 @@ def route_with_combined_escalation(
             router=final_result.router,
         )
 
+        # Issue #6273: a DRC skipped for --timeout is "unverified", not a pass.
+        _record_post_route_drc(args, drc_errors)
+
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
             fix_result = _run_auto_fix(
@@ -13600,6 +13716,14 @@ def route_with_combined_escalation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif final_result.success and _unverified_checks(args):
+            # Issue #6273: never "SUCCESS" for a board nobody verified.
+            _print_unverified_banner(
+                args,
+                output_path,
+                f"Minimum viable config = {final_result.layer_count} layers + "
+                f"tier {final_result.tier} rules",
+            )
         elif final_result.success:
             print(
                 f"SUCCESS: Minimum viable config = {final_result.layer_count} layers + "
@@ -13642,12 +13766,17 @@ def route_with_combined_escalation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(
-            _stranded_pour_escalation_exit(
-                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
-                args,
+        # Issue #6273: a clean result whose DRC / stranded-pour check was
+        # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
+        return _unverified_exit(
+            _layer_intent_escalation_exit(
+                _stranded_pour_escalation_exit(
+                    _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                    args,
+                ),
+                _layer_intent,
             ),
-            _layer_intent,
+            args,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -17789,14 +17918,14 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 nets_to_route_ids=multi_pad_ids,
                 single_pad_count=getattr(last, "single_pad_count", 0),
                 # Issue #6239: the exit code is the run's single final verdict.
-                verdict="success" if exit_code == 0 else "failed",
+                verdict=_verdict_for_exit(exit_code),
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
     print(
         json.dumps(
-            {"exit_code": exit_code, "verdict": "success" if exit_code == 0 else "failed"},
+            {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)},
             indent=2,
         ),
         file=json_stdout(),
@@ -20757,6 +20886,9 @@ def _run_main_impl(args, parser, argv) -> int:
             router=router,
         )
 
+        # Issue #6273: a DRC skipped for --timeout is "unverified", not a pass.
+        _record_post_route_drc(args, drc_errors)
+
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
             fix_result = _run_auto_fix(
@@ -20868,6 +21000,12 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         else "failed"
     )
+    # Issue #6273: a would-be success whose DRC / stranded-pour check was
+    # skipped for --timeout is "unverified" (exit EXIT_UNVERIFIED), never
+    # "success".
+    _unverified = _unverified_checks(args)
+    if _final_verdict == "success" and _unverified:
+        _final_verdict = "unverified"
 
     if not quiet:
         print("\n" + "=" * 60)
@@ -20901,6 +21039,18 @@ def _run_main_impl(args, parser, argv) -> int:
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif _unverified and drc_passed and (all_nets_routed or meets_threshold):
+            # Issue #6273: verification was skipped for --timeout, so neither
+            # "SUCCESS" nor "DRC passed" may be printed for this board.
+            if all_nets_routed:
+                _headline = f"All signal nets routed{summary_suffix}"
+            else:
+                _headline = (
+                    f"Routed {stats['nets_routed']}/{nets_to_route} signal nets "
+                    f"({completion_ratio * 100:.0f}%, meets "
+                    f"{args.min_completion * 100:.0f}% threshold){summary_suffix}"
+                )
+            _print_unverified_banner(args, output_path, _headline)
         elif all_nets_routed and drc_passed:
             if drc_ran and drc_errors == 0:
                 print(f"SUCCESS: All signal nets routed, DRC passed!{summary_suffix}")
@@ -21062,6 +21212,8 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Exit codes:
     # 0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)
+    #     (``--skip-drc`` / a DRC that failed to run; NOT one skipped for
+    #     --timeout, which is exit 10 below)
     # 1 = Fatal failure — no nets routed, no useful output
     # 2 = Partial routing — some nets routed but below --min-completion threshold
     # 3 = Meets threshold but DRC violations detected (includes seg-seg violations).
@@ -21124,6 +21276,12 @@ def _run_main_impl(args, parser, argv) -> int:
     #       Overridden by the existing --force.
     #     For both, the fix layer is placement / escape planning / stackup,
     #     not the router.
+    # 10 = UNVERIFIED (EXIT_UNVERIFIED, issue #6273): everything that would
+    #     have returned 0, except that the post-route DRC and/or the #5785
+    #     stranded-pour check was skipped because the hard --timeout could
+    #     not cover it.  The board is saved; run ``kct check`` on it.  Only
+    #     ever replaces 0 -- a known failure keeps its own code.  JSON
+    #     ``summary.verdict`` is ``"unverified"``.
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.
@@ -21186,7 +21344,9 @@ def _run_main_impl(args, parser, argv) -> int:
         and pairwise_violation_count == 0
         and not stranded_pour_blocking
     ):
-        return 0
+        # Issue #6273: EXIT_UNVERIFIED when the DRC / stranded-pour check
+        # was skipped for --timeout -- a board nobody verified is not exit 0.
+        return EXIT_UNVERIFIED if _unverified else 0
     elif meets_threshold and (
         not drc_passed
         or seg_seg_violation_count > 0
