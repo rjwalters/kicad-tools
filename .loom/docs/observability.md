@@ -536,6 +536,31 @@ Import it with `POST /api/v1/rules` or paste its query into a new ClickHouse
 alert. The rule's shape has not yet been tested against a live SigNoz. Standing queries are in
 `defaults/observability/signoz/queue-dwell.sql`.
 
+**Fleet singleton outputs (#10916).** A one-host fleet job can stop producing
+while every host looks healthy (2026-10-07: 28 of ~30 repos had no
+`eta.estimate` for ~31 h). `defaults/observability/signoz/alerts/fleet-singleton-output.json`
+is the cross-host detector: over the logs table it takes the newest record per
+`loom.kind` (and per `loom.repo` for per-repo rows) and fires when one is older
+than its row's deadline in `fleet_outputs::SINGLETON_OUTPUTS` (2 x cadence, or
+the row's override). It checks the output, never the owning host, and a kind
+with no record in the 72 h window fires. A per-repo output (`eta.fleet_refresh`)
+is expected for every repo the fleet is working on, read from an independent
+roster: any repo with a `pass.summary`, `role_tick.outcome` or `sweep.started`
+record in the window (emitted by the host that works the repo, never by a
+fleet singleton). A roster repo with no output in the window fires, so a repo
+the producing host does not cover, or an outage older than the window, stays
+visible while that activity continues. The roster is activity, not
+configuration: a repo with none of those records in the window (no work finder
+or role runner serving it, or none exporting OTLP) is not expected. An
+`eta.estimate` repo is judged only while it owes estimates: an item stops
+owing once a `land` `eta.outcome` closes it or its newest estimate is a
+refusal. That row is not roster-expanded (owing needs the forge's open items,
+which SigNoz does not hold), so an estimate outage older than the window is
+left to the in-daemon path. `signoz_fleet_singleton_output_alert.rs` asserts
+each embedded deadline equals the registry's. Captain-gauge rows (a
+fleet-store heartbeat, not a log kind) and the Warning `ci.run` row are not in
+this critical rule. The in-daemon `fleet_alert` path is #10924.
+
 **Subscription quota utilization (#9005).** The per-account `tokens.snapshot`
 gauges carry both Claude limit windows: `loom.tokens.usage_fraction` (5-hour)
 and `loom.tokens.usage_fraction_weekly` (rolling 7-day, from the

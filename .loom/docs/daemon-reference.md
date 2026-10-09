@@ -1767,8 +1767,8 @@ workspace's default branch (never the working tree) and classifies it:
 | `W0` | the installed files equal this daemon's payload | nothing |
 | `W1` | compatible, but the files differ | tries the claim |
 | `W3` | too old for this daemon or the floor, and the files differ | as `W1`, first |
-| `W4` | the installed files need a newer daemon | reports only |
-| `repo-ahead` | installed by a newer daemon, or at a version that cannot be ordered | reports only |
+| `W4` | the installed files need a newer daemon, or record a version that cannot be ordered | reports only |
+| `repo-ahead` | installed by a newer daemon, and still compatible with this one | reports only |
 | `skipped` | the Loom source repo, a non-GitHub origin, or no Loom on the default branch | nothing |
 
 - **An empty payload diff is `W0`, whatever the stamp says.** A resync that
@@ -1776,7 +1776,9 @@ workspace's default branch (never the working tree) and classifies it:
   claim and no commit, and a stamp that is old or lacks `requires_daemon` over
   matching files is left alone.
 - **Never a downgrade.** `W4` and `repo-ahead` are never claimed or written.
-  They are left to the host roll (#10719).
+  `W4` holds dispatch and asks for a host roll; `repo-ahead` does neither,
+  except that an interrupted resync to a newer release is held (and asks for
+  no roll). See "Dispatch holds" below.
 - **Only from H0.** A host claims and writes only when all of these hold: it is
   a verified official release build (below), a fleet-sync pass has completed,
   dispatch is not paused (a drain, a roll's pause or a fleet hold, which is how
@@ -1791,6 +1793,110 @@ workspace's default branch (never the working tree) and classifies it:
   again immediately before the claim, and again immediately before the push.
   A newer release merely existing is not a reason to wait.
 - **Writes need `fleet.autoApply`**, like every other timer write.
+
+#### Dispatch holds (#10719)
+
+Dispatch runs each repo's own installed files: agent worktrees start from the
+default branch, and the spawn script and role runs come from the host's
+checkout. After every workspace pass the daemon judges **both copies** of each
+registered workspace and holds new dispatch into a workspace when either one
+cannot work with this daemon. The checkout copy is
+`<root>/.loom/install-metadata.json` in the working tree.
+
+| Verdict for a copy | Hold | Typed outcome | Asks for a roll |
+|---|---|---|---|
+| its `requires_daemon` is above the running daemon (`W4`) | held | `daemon-too-old` | yes |
+| a contract field that cannot be ordered, such as `0.20.0-rc1`, and `requires_daemon` above the running daemon | held | `daemon-too-old` | yes, for `requires_daemon` |
+| a contract field that cannot be ordered, and `requires_daemon` at or below the running daemon | held | `daemon-too-old` | no |
+| a contract field that cannot be ordered, and no `requires_daemon` that parses | held | `daemon-too-old` | yes, for any release after this one; WARN once per workspace |
+| too old for this daemon or the floor, **and** the files differ from the payload (`W3`) | held | `install-incompatible` | no |
+| a resync to a release above this daemon was interrupted there (`resync_pending`) | held | `install-incompatible` | no |
+| too old by its stamp, files equal to the payload (`W0`) | not held | | no |
+| installed by a newer daemon, `requires_daemon` at or below this one (`repo-ahead`) | not held | | no |
+| compatible, or a resync owed (no `requires_daemon`) | not held | | no |
+| could not be read this pass | the previous verdict stands | | as before |
+
+- **The ratchet guard.** A repo that is only *ahead* of this daemon is
+  neither held nor a reason to roll. Hosts roll at different moments, so a
+  host that has just rolled resyncs repos to a release the others do not run
+  yet. If that alone made them roll, one straggler would pull the whole fleet
+  forward one release at a time. While the newer files' `requires_daemon` is
+  at or below this daemon, this host keeps working the repo, never resyncs it
+  downward, and reports `repo-ahead`.
+- **A version that cannot be ordered rolls only for a need.** Such a copy
+  is held, because it may be newer than this daemon. Whether it also asks
+  for a roll is decided by its `requires_daemon` alone when that parses:
+  above this daemon it asks for that version, at or below it asks for
+  nothing. Asking for "any newer release" there would make the host chase
+  every new release for as long as the odd version stays. Only when
+  `requires_daemon` is missing or cannot be ordered either does the copy ask
+  for any release after this one, and the daemon logs that at WARN once per
+  workspace so a person fixes the metadata.
+- **An interrupted newer resync is held, and asks for no roll.** When
+  `resync_pending` names a release above this daemon, some of that release's
+  files are in place while the stamp, written last, is still the old
+  release's. The files are a mix of two releases and their `requires_daemon`
+  is not on record, so nothing is dispatched into the workspace. It names a
+  release, not a need, so it raises no roll demand: the ratchet guard holds
+  here too. It clears when a host on that release finishes the resync, or
+  when a person reruns the interrupted resync in the checkout. The daemon's
+  own resync commits only after the stamp, so in practice this is an
+  interrupted CLI resync in a checkout.
+- **A hold is per workspace and stops new dispatch only.** The host is never
+  paused, in-flight sweeps and role runs are not touched, no other workspace
+  is affected, and the workspace is still resynced. IPC `force` does not
+  bypass a hold.
+- **Where it is enforced.** Every path on which the daemon starts new work
+  in a workspace refuses a held one:
+
+  | Path | Refused by |
+  |---|---|
+  | Sweeps: the work finder, IPC/MCP `DispatchSweep`, epic child sweeps, watchdog re-dispatch, crash resume | the sweep registry, for issue and PR-set dispatch, with a typed `WorkspaceHeldDispatchError` before any lock, label flip or forge call |
+  | Work-finder selection, the pre-flight recovery probe, the red-main fix lane | the per-root pre-filter: the held workspace's batch is skipped once per tick with `workspace_halted` rows whose cause is `install_incompatible` or `daemon_too_old` |
+  | Role runner, interval ticks | the tick's root filter; the hold is logged once when it starts and once when it ends |
+  | Role runner, idle-edge (`onIdle`) runs | the idle-edge planner. A hold stops new sweeps, so the workspace drains and goes idle; the hold therefore causes the idle edge, and the planner refuses it. The edge is spent: the role fires on the next idle edge after the hold clears |
+  | Epic supervisor (`LOOM_EPIC_SUPERVISOR=1`): singleton roles (Architect, Champion) and epic child sweeps | the supervisor skips the held workspace's whole tick, logged each tick. Its role dispatch runs the checkout's spawn script outside the registry, so it also refuses on its own with the same typed `WorkspaceHeldDispatchError` before that script runs |
+
+  Three things are not refused, on purpose. The pause-and-roll resume
+  relaunches sweeps and role runs that were already in flight when the host
+  rolled; a hold is about new work. The workspace resync still runs, because
+  it is what clears a `W3` hold. A terminal a person opens over IPC is not
+  dispatch. Until the first workspace pass after a restart has finished there
+  are no holds at all (see "After a restart" below).
+- **How it clears.** The holds are rebuilt on every pass. `W3` clears on the
+  first pass after a resync has landed on the default branch and this host's
+  checkout is current. `W4` clears once this host runs a daemon at or above
+  `requires_daemon`. A workspace that leaves the registry is dropped.
+- **A hold that stands for 30 minutes alerts** at ERROR, and again every 30
+  minutes for as long as it stands. Every set, clear and standing alert is
+  published on the event-bus topic `fleet_sync.workspace_hold`. The
+  `Fleet store:` block of `loom-daemon status` shows each held workspace with
+  its kind, which copy holds it and since when.
+- **A hold can outlive its evidence, and says so.** A copy that cannot be
+  read keeps its previous verdict, so its hold stands until a pass can read
+  it again. Each hold records when a pass last judged its copy (`verdictAt`).
+  The repeated ERROR names that time when the latest pass could not read the
+  copy. `loom-daemon status` appends `hold verdict is N minutes old` once the
+  verdict is older than three sync intervals, which is also what a host whose
+  workspace passes have stopped shows.
+- **A workspace in backoff stays what it was found to be.** A `W4` workspace
+  whose remote starts failing is reported from its backoff with the same
+  `requires_daemon`, so its roll demand and the versions in its hold do not
+  change while the remote is down.
+- **The roll.** The highest version a `daemon-too-old` copy asks for is the
+  host's repo-ahead demand. The self-update loop treats it like the fleet
+  floor: the target is the newest release at or above it, pinned to the exact
+  tag, with no settle wait, through the same pause-and-roll, recorded as
+  `target_source = repo_ahead` (`floor` when the floor drives too). A fleet
+  host makes this roll even when its floor is met: it is the one roll besides
+  the floor's (#10885). A demand no release satisfies is reported at ERROR
+  and arms nothing; that one workspace stays held and every other workspace
+  keeps dispatching.
+- **The Loom source repo** installs from its own tree and is never resynced,
+  so it is judged for `W4` only. Its `loom_version` moves with every release
+  and never asks for a roll.
+- **After a restart** there are no holds until the first workspace pass has
+  finished.
 
 **Only an official release build pushes.** A daemon resyncs from the payload it
 embeds, so the binary must be a release's. Both of these must hold:
@@ -6161,11 +6267,12 @@ What it does depends on whether the host reads a fleet store (`fleet.repo`):
 | Floor | Running vs floor | This tick |
 |---|---|---|
 | no fleet store | n/a | Opt-in `autoUpdate` as before: the newest release (or a newer source checkout) behind `settleSecs` and its `6 ×` ceiling. `target_source = autoupdate` |
-| unknown | n/a | No version roll. `last tick:` says `fleet floor not known (…)` and why |
+| unknown | n/a | No roll for the floor. `last tick:` says `fleet floor not known (…)` and why. A workspace that needs a newer daemon still rolls the host (the last row) |
 | set | below; the newest release is at or above it | Pause-and-roll now, no settle, to that release's exact tag. `target_source = floor` |
 | set | below; the newest release is below it | `FLEET FLOOR UNSATISFIABLE` at ERROR. No roll; dispatch continues |
 | set | below; no release resolved | No roll; the next tick asks again |
-| set | at or above | **No roll**, whatever newer release, re-published artifact or source HEAD exists |
+| set | at or above | **No roll**, whatever newer release, re-published artifact or source HEAD exists, unless a registered workspace needs a newer daemon (the next row) |
+| any store, floor unknown included | a workspace's installed Loom needs a newer daemon (`W4`, #10719) | Pause-and-roll now, no settle, to the newest published release (binary and `.sha256` present) at or above its `requires_daemon`. `target_source = repo_ahead` (`floor` when the floor drives too). See [Dispatch holds](#dispatch-holds-10719) |
 
 - **A fleet host moves only when the floor moves.** It does not chase the
   newest release and does not rebuild itself from source as `main` advances.
@@ -6180,9 +6287,10 @@ What it does depends on whether the host reads a fleet store (`fleet.repo`):
 - **The floor is unknown** when a store is configured but no floor is known:
   the startup pass has not completed and no earlier snapshot records one, the
   store carries no `loom_min_version`, or the store could not be started. The
-  host does nothing rather than fall back to chasing the latest release, logs
-  one WARN when it enters that state, and repeats the reason on every tick's
-  note. Before the first pass of a new process completes, the floor the
+  host does nothing for the floor rather than fall back to chasing the latest
+  release, logs one WARN when it enters that state, and repeats the reason on
+  every tick's note. It still rolls for a workspace that needs a newer daemon
+  (the last table row), to a real published release. Before the first pass of a new process completes, the floor the
   previous process recorded in `fleet-sync-status.json` counts as set.
 - **A floor bump rolls every host within about one sync interval.** Rolls are
   not staggered. A roll is a pause, a restart and a resume (#10831, #10832), so
@@ -13170,7 +13278,8 @@ window and stampede-gate deadline with `intervalSecs` (default 900) /
 pause with the `pauseRoll.*` budgets (#10831). On a host that reads a fleet
 store, everything below about chasing the newest release, the source fallback
 and the settle window is replaced by one rule: the host rolls only when it is
-below `loom_min_version` (#10885, see
+below `loom_min_version`, or when a registered workspace needs a newer daemon
+(#10719) (#10885, see
 [The fleet floor drives rolls](#the-fleet-floor-drives-rolls-no-roll-windows-10885)). All knobs resolve **env > config > default** through
 `config_resolver`, so the `.loom-project/` tier is honored like every other
 `autonomous.*` block.
