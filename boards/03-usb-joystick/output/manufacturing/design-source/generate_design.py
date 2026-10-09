@@ -315,12 +315,22 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
         print("\n   WARNING: kicad-cli not found - skipping zone fill")
         return 0
 
+    from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
+
     print(f"\n1. Filling zones in: {routed_path}")
+    authored_uuids = uuids_in_file(routed_path)
     result = run_fill_zones(routed_path, kicad_cli=kicad_cli, native_clearance=True)
 
     if not result.success:
         print(f"\n   WARNING: Zone fill failed: {result.stderr or '(no stderr)'}")
         return 0
+
+    # Issue #6076: KiCad adds the mandatory footprint fields it finds missing
+    # (Datasheet, Description) on load and saves them with random UUIDs.
+    # Re-key exactly those from their parent footprint so the saved board is
+    # byte-reproducible; every UUID that existed before the fill, and the
+    # fill itself, is left untouched.
+    canonicalize_pcb_file_uuids(routed_path, keep=authored_uuids)
 
     try:
         text = routed_path.read_text()
@@ -1048,19 +1058,7 @@ def main() -> int:
         # (manufacturing-profile floors) so the fill engine both bonds the
         # freshly-added vias and computes copper under the SAME rules
         # downstream DRC/LVS/CI/net-status check the saved bytes against.
-        from kicad_tools.core.canonical_uuids import (
-            canonicalize_pcb_file_uuids,
-            uuids_in_file,
-        )
-
-        authored_uuids = uuids_in_file(routed_path)
         fill_zones_in_routed_pcb(routed_path)
-        # Issue #6076: KiCad adds the mandatory footprint fields it finds
-        # missing (Datasheet, Description) on load and saves them with
-        # random UUIDs.  Re-key exactly those from their parent footprint so
-        # the saved board is byte-reproducible; every UUID that existed
-        # before the fill, and the fill itself, is left untouched.
-        canonicalize_pcb_file_uuids(routed_path, keep=authored_uuids)
 
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)

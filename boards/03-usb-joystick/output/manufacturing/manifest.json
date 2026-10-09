@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.22.0",
-  "generated_at": "2026-10-09T00:38:07.107170+00:00",
+  "generated_at": "2026-10-09T01:35:59.497562+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -49,8 +49,8 @@
       "size": 6324
     },
     "design-source/generate_design.py": {
-      "sha256": "27b12d6b1f9f350c86761a074b469278158c708654adfdbdbd3cc598f4020bbf",
-      "size": 51887
+      "sha256": "7db8238da3cf0afc8f9bcbcfe5f9da06973d2aff604b4e0a20e174973aa851f5",
+      "size": 51818
     },
     "design-source/generate_pcb.py": {
       "sha256": "a2d4d8bf7034d20092888e2d42c513c68a715b511dba5d6281e4b6ede3d1e125",
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "d6eeeabf874ce6b2eb7d2827925e6aaddf5990bf6f242db6bb8a12f2cc7db0c2",
-      "size": 189744
+      "sha256": "109921749a4e1dc794e2e5ba1291d0feaef369fee6d76ece815643a7eeab9b32",
+      "size": 189743
     },
     "images/assembly.png": {
       "sha256": "5116f2d20c6863b59b216a57f7e1e58d88e719b839c7076caa7faf6b5b3e78d6",
@@ -213,7 +213,7 @@
       "size": 486470
     },
     "kicad_project.zip": {
-      "sha256": "d4503f5662d08b30a93b084792ca8812a14ecb487762cbf44b469898199919a8",
+      "sha256": "558e9cfe70d79365c19abb17596feb14e423e23b79b3f0ebc8910e8677e0e17b",
       "size": 282157
     },
     "manual-assembly-bom.csv": {
