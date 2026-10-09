@@ -2099,6 +2099,16 @@ example `peer_claim` or `workspace_halted:token_pool`, and it equals the
 explanation's `path.dispatch.not_here`. See
 [`eta.md`](eta.md#the-model).
 
+**Inputs as attributes, and the size cap (#10930).** An `eta.estimate` for a
+fitted heuristic carries `loom.eta.fit_id` (joins `eta.fit`), and one with
+queue features carries `loom.eta.queue_rank`, `loom.eta.queue_ready`,
+`loom.eta.queue_running` and `loom.eta.max_concurrent`: scalar integers on the
+existing row, so no new record kind and no per-path data. The 32 KiB body cap
+now cuts what no replay reads first, keeps the input vector
+(`Features::INPUT_VECTOR`) when it cuts `features`, and marks the record
+`replayable: false` (with `replayable_reason`) if it must drop a replay input.
+`loom-daemon eta explain --file F [--diff F2]` replays an exported body.
+
 **Provenance is required on both.** `version`, the full 40-hex `revision`
 (or `unknown` for a tarball build), `tree_state` and `complete` (a full SHA
 and a `clean`/`dirty` tree) of the computing daemon,

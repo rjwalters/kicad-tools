@@ -511,8 +511,11 @@ fixture. A behaviour change is a new id registered beside the old one
        point (`ANSWER_RATE_SLACK`) below `current`'s. It is counted
        **once per tracker pass** per live subject, carrying each heuristic's
        last emitted state forward — never as answered rows over all rows, because a refusal
-       is emitted once and never refreshed while an answer is refreshed every
+       is emitted once and never refreshed (bar `stale_inputs`, re-emitted every pass, #10973) while an answer is refreshed every
        few minutes;
+       a `stale_inputs` series re-emits at most 10 times an hour (half the
+       hourly cap, so the recovery row is never starved), and those refusal
+       rows score nothing, so they never form shadow pairs;
      - its p25–p75 coverage inside `[40%, 60%]`;
      - the **day consistency check**: pairs are folded by the UTC day of
        their `as_of`, a day goes to whichever side had the lower mean
@@ -2470,7 +2473,8 @@ triggers:
   ETA failure costs only ETA and never the observability collector.
 
 An unchanged estimate is refreshed every `refreshSecs` (300); a changed stage,
-rework count or refusal reason emits at once; a series is capped at 20
+rework count or refusal reason emits at once, and a `stale_inputs` refusal is
+re-emitted every pass while it persists (#10973); a series is capped at 20
 emissions per rolling hour. Every emitted estimate waits for its outcome in
 `.loom/state/eta/pending.jsonl`, which survives a restart (an entry whose
 heuristic is no longer registered is dropped on restore). It is per-host
@@ -2629,7 +2633,7 @@ items which are not in it at all.
 
 ## CLI (`loom-daemon eta`)
 
-Ten subcommands. All are read-only except `eta promote --apply`, which writes
+Eleven subcommands. All are read-only except `eta promote --apply`, which writes
 one config key, `eta fleet backfill|refresh`, which writes only the snapshot
 cache, `eta fit`, which writes only a coefficient file, and `eta retire
 --file`, which files issues and records them. Nothing here writes
@@ -2640,6 +2644,17 @@ accepts `--repo-root PATH` (default: the current directory).
 - **`loom-daemon eta backfill [--repo OWNER/NAME] [--limit N] [--dry-run]`** —
   seeds `.loom/logs/eta-stage-samples.jsonl` from `pr-latency`'s own
   forge-derived history (#9325).
+- **`loom-daemon eta explain --file F [--diff F2] [--id ID] [--json]`** —
+  replays one logged estimate from its explanation export (one
+  `eta-explanation/v1` object per line, or a single object), checks the replay
+  against the recorded p25/p50/p75/p90 (`exact`, `MISMATCH`, or `not replayable`
+  with the reason when the 32 KiB cap dropped a replay input), prints the
+  per-stage breakdown and each input's marginal `Δp50` / `Δp90` (perturbed one at
+  a time, deterministic seed). With `--diff` it swaps each changed input from the
+  first estimate into the second and ranks them by `|Δp50|`, printing the
+  non-additive residual (#10930). Runs anywhere; reads no live state. Explain by
+  `estimate_id` from SigNoz, a live `repo#N`, and the hindsight
+  `loom.eta.input_error.*` outcome attributes are later slices of #10930.
 - **`loom-daemon eta backtest --heuristic ID [--compare ID] [--since RFC3339] [--json]`**
   — leak-free replay of a heuristic against real `sweep.outcome` history: mean
   pinball loss, p25–p75 coverage and bias, stability of the predicted landing

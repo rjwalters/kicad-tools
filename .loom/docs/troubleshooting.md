@@ -3375,6 +3375,12 @@ clears an existing halt. Running sweeps drain; nothing is killed. Grep the
 daemon log for `disk_full_halt:` (edges) and `eager_reclaim:` (what each
 reclaim step freed).
 
+**Alerts.** SigNoz pages before this point (`signoz/alerts/`): `host-disk-low`
+(warning: under 30 GB or 10%, or full within 6 h at the last hour's rate) and
+`host-disk-critical` (under 5 GB or 3%, or full within 1 h), keyed on
+`loom.host.worktree_root_free_gb`; `work-finder-stale` when a host still
+heartbeats but its work finder has not ticked for 2x its own interval.
+
 **Free disk on the worker.**
 
 1. `df -h` the worktree volume; find the consumer (`du -xh --max-depth=2`).

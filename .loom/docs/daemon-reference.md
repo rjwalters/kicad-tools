@@ -6083,7 +6083,9 @@ concurrency ceiling 5" and share it with the team:
       "excludedRepos": [],
       "logCaptureEnabled": false,
       "logCaptureMaxBytes": 5242880,
-      "logCaptureExcludedRepos": []
+      "logCaptureExcludedRepos": [],
+      "journalRotateBytes": 268435456,
+      "journalRotateKeep": 2
     },
     "sweepOutcomeWriteback": {
       "enabled": false
@@ -6228,7 +6230,7 @@ knobs not yet audited here.
 | `safehouse.rooms.byRepo` | `LOOM_SAFEHOUSE_ROOMS_BY_REPO` (`repo=room,…`) | `{}` | Attention-class routing (#4225): per-repo **firehose** room ids keyed by workspace-root basename — `task`/`chat` narration. A repo absent from the map is created lazily as `fleet-<repo>`; a refused creation degrades that repo to the signal room with one `warn!`. The env form replaces the whole map |
 | `safehouse.claimReconcileIntervalSecs` | `LOOM_CLAIM_RECONCILE_INTERVAL_SECS` | `1800` when `safehouse.enabled`, else `600` | Periodic `loom:building`/PR-claim reconciliation cadence (#4431). With safehouse peer-claims carrying the fast in-flight signal (re-advertised each reaper tick), label reconciliation demotes to a slow healing sweep. Env wins on any host; floored at 60s |
 | *(host identity)* | `LOOM_HOST_ID` | `$HOSTNAME` → `hostname` → `unknown-host` | This host's identity string, used in collision log records (#4085) **and** peer-claim self-recognition (#4028); set it where the daemon runs without `$HOSTNAME` exported |
-| `autonomous.autoUpdate.enabled` | `LOOM_AUTO_UPDATE` | `false` | Autonomous self-update loop on/off (#4055). **Opt-in** (it rebuilds + restarts the daemon process). Exactly one loop per daemon, not a per-workspace fan-out. See [Autonomous self-update loop](#autonomous-self-update-loop-4055) below |
+| `autonomous.autoUpdate.enabled` | `LOOM_AUTO_UPDATE` | `false` | Autonomous self-update loop on/off (#4055) **on a host with no fleet store only**. **Opt-in** there (it rebuilds + restarts the daemon process). On a fleet host (`fleet.repo` set) it governs nothing: the loop runs whatever it says, for the fleet floor and for a workspace that needs a newer daemon, and never chases the newest release (#10954, see [The fleet floor drives rolls](#the-fleet-floor-drives-rolls-no-roll-windows-10885)). Exactly one loop per daemon, not a per-workspace fan-out. See [Autonomous self-update loop](#autonomous-self-update-loop-4055) below |
 | `autonomous.autoUpdate.intervalSecs` | `LOOM_AUTO_UPDATE_INTERVAL_SECS` | `900` | Cadence between staleness checks. Zero/invalid → default |
 | `autonomous.autoUpdate.settleSecs` | `LOOM_AUTO_UPDATE_SETTLE_SECS` | `600` | Settle window: wait this long after first observing a stale commit — resetting on every further commit — before rolling, so a burst of merges collapses into one roll. Zero/invalid → default. **Only on a host with no fleet store** (#10885): a fleet host rolls for its floor on the tick that sees it and never waits on settle |
 | `autonomous.transcriptIngest.enabled` | `LOOM_TRANSCRIPT_INGEST` | **`true`** | Periodic transcript token/cost ingestion into `~/.loom/activity.db` (#8059, flipped default-on by #8477). **Deliberately defaults ON against FLAGS-OFF**, like the `autonomous.eta.*` writers: it generates no work (a passive, ledgered, idempotent telemetry writer), while default-*off* silently destroyed data — Claude Code deletes transcripts after `cleanupPeriodDays` (default 30), so every host that never hand-set the env var lost its cost history permanently. Env `0`/`false`/`no`/`off` opts out; an unrecognized value falls through to config/default rather than silently disabling. **Restart required** — resolved once before the thread is spawned. See [`transcript-token-ingest.md`](transcript-token-ingest.md) |
@@ -6254,6 +6256,8 @@ knobs not yet audited here.
 | `autonomous.ciTelemetry.logCaptureEnabled` | `LOOM_CI_TELEMETRY_LOG_CAPTURE_ENABLED` | `false` | Phase 2 (#8825) gate. **Restart required** — resolved once by `spawn_task` before the poll loop starts |
 | `autonomous.ciTelemetry.logCaptureMaxBytes` | `LOOM_CI_TELEMETRY_LOG_CAPTURE_MAX_BYTES` | `5242880` (5 MiB) | Per-job cap on captured log text. Zero/invalid → default. **Restart required** |
 | `autonomous.ciTelemetry.logCaptureExcludedRepos` | *(config only)* | `[]` | Repos excluded from **log capture only** — their `ci.run`/`ci.job` records and duration metrics are still captured unconditionally, same admission rule (`repo` + non-empty `reason`) as `excludedRepos`. Distinct key from `excludedRepos` deliberately: excluding a repo there would also drop its metrics, which the ci-observability policy forbids. **Restart required** |
+| `autonomous.ciTelemetry.journalRotateBytes` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_BYTES` | `268435456` (256 MiB) | Rotate `.loom/logs/ci-telemetry.jsonl` once the export cursor has passed this many bytes **and** every line is exported (#11045). The observability export pass rotates it under `poll.lock`. Zero/invalid → default. Read on every export pass, no restart needed. See [`ci-observability.md`](ci-observability.md#journal-rotation-11045) |
+| `autonomous.ciTelemetry.journalRotateKeep` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_KEEP` | `2` | Rotated journals kept (`ci-telemetry.jsonl.1` newest … `.N` oldest; capped at 32). `0` deletes the journal at rotation instead of keeping it. Read on every export pass |
 | `autonomous.sweepOutcomeWriteback.enabled` | `LOOM_SWEEP_OUTCOME_WRITEBACK` | `false` | Post-`Success` issue write-back comment (#9056). Opt-in, unlike the safety backstops above — it posts a forge-visible comment, not a dispatch decision. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. Resolved fresh at each terminal `Success` transition (not cached at startup), so a config edit takes effect on the very next sweep to finish with no daemon restart. See "Sweep-outcome issue write-back (#9056)" below |
 
 ### The fleet floor drives rolls; no roll windows (#10885)
@@ -6262,11 +6266,15 @@ There is no roll window, no per-host offset and no jitter. On startup and on
 every tick the self-update loop compares the fleet floor (`loom_min_version`,
 above) with the version it is running, and acts on that tick.
 
-What it does depends on whether the host reads a fleet store (`fleet.repo`):
+What it does depends on whether the host reads a fleet store (`fleet.repo`).
+**This applies to every fleet host, whatever `autonomous.autoUpdate.enabled`
+says** (#10954): the loop is spawned on every host with a fleet store, and
+`enabled` only decides whether a host with no fleet store runs it at all.
 
 | Floor | Running vs floor | This tick |
 |---|---|---|
-| no fleet store | n/a | Opt-in `autoUpdate` as before: the newest release (or a newer source checkout) behind `settleSecs` and its `6 ×` ceiling. `target_source = autoupdate` |
+| no fleet store, `autoUpdate.enabled=false` | n/a | No loop and no roll, as before |
+| no fleet store, `autoUpdate.enabled=true` | n/a | Opt-in `autoUpdate` as before: the newest release (or a newer source checkout) behind `settleSecs` and its `6 ×` ceiling. `target_source = autoupdate` |
 | unknown | n/a | No roll for the floor. `last tick:` says `fleet floor not known (…)` and why. A workspace that needs a newer daemon still rolls the host (the last row) |
 | set | below; the newest release is at or above it | Pause-and-roll now, no settle, to that release's exact tag. `target_source = floor` |
 | set | below; the newest release is below it | `FLEET FLOOR UNSATISFIABLE` at ERROR. No roll; dispatch continues |
@@ -6299,8 +6307,25 @@ What it does depends on whether the host reads a fleet store (`fleet.repo`):
 - **Backoff still applies.** A failed fetch backs off as before, and a roll
   whose new binary did not take is held back per target by the failed-roll
   guard (#10832) inside the pause-and-roll itself.
-- The loop still runs only when `autonomous.autoUpdate.enabled` is true. A
-  fleet host with it off does not roll for the floor.
+- **Every fleet host runs the loop, `autoUpdate.enabled` or not** (#10954).
+  The mode is chosen once at startup, after the startup fleet-sync pass has
+  classified the host: a store that is named but unusable is a fleet host
+  whose floor is unknown, so the loop runs and does nothing for the floor.
+  Status says why the loop runs: `Auto-update loop: fleet floor only
+  (autoUpdate.enabled=false)` (`auto_update.mode` in `status --json`). On a
+  fleet host `enabled` has no effect, since a fleet host never chases the
+  newest release; on a host with no fleet store it still switches the opt-in
+  loop on and off. Should a floor-only loop's host stop reading a fleet store
+  while running, its ticks check nothing rather than start chasing.
+- **There is no per-host opt-out from a floor roll.** `autoUpdate.enabled=false`
+  does not stop one, and neither does the fleet store's `paused` run state
+  ([Run-state enforcement](#run-state-enforcement-9598)): a fleet-paused host
+  below the floor still rolls. The roll replaces the pause's hold with a
+  supervised drain, restarts once nothing is in flight, and the daemon comes
+  back still paused (#10979). An operator stop on record (written by `restart
+  --drain --then-exit` or `fleet drain`) does hold a roll: that tick is
+  skipped. `restart --abort-drain` clears that record and releases the hold.
+  A `stopped` host exits at boot, before the loop starts.
 
 ### Sweep-outcome issue write-back (#9056)
 
@@ -13271,8 +13296,9 @@ drives a roll, and the source checkout is only the fallback — see
 [Artifact-first auto-update ticks](#artifact-first-auto-update-ticks-7609)
 below.
 
-**Opt-in, default OFF** (it has side effects on the running process). Enable via
-`autonomous.autoUpdate.enabled` / `LOOM_AUTO_UPDATE=1`; tune the cadence, settle
+**Opt-in, default OFF on a host with no fleet store** (it has side effects on
+the running process); a fleet host always runs it, for the floor (#10954).
+Enable via `autonomous.autoUpdate.enabled` / `LOOM_AUTO_UPDATE=1`; tune the cadence, settle
 window and stampede-gate deadline with `intervalSecs` (default 900) /
 `settleSecs` (default 600) / `deferDeadlineSecs` (default 21600), and the roll's
 pause with the `pauseRoll.*` budgets (#10831). On a host that reads a fleet

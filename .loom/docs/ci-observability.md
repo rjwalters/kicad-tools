@@ -585,6 +585,35 @@ offers every line past a byte cursor (`export-cursor.json`) to the configured
 exporter queue(s), so records reach SigNoz whenever `observability` is
 enabled. Only complete lines are read.
 
+### Journal rotation (#11045)
+
+The journal is never read whole. The torn-tail repair reads only the last
+block, the export seeks to the cursor and streams line by line, and the
+crash-recovery replay streams the journal and keeps only the pending
+envelopes' identities. Startup memory therefore does not depend on journal
+size. Before #11045 it did: a 5.4 GB journal OOM-killed the fleet captain at
+every start.
+
+The export pass runs under the per-host cycle lock (`poll.lock`), the same
+lock a poll cycle holds, so the two never touch the journal at once. When a
+cycle holds the lock, the export pass is skipped until the next backfill tick.
+
+Once the export cursor has passed `journalRotateBytes` (default 256 MiB)
+**and** sits at the end of the file (every line exported, no torn tail), the
+export pass rotates the journal. It renames `ci-telemetry.jsonl` to
+`ci-telemetry.jsonl.1`, shifts older rotations up, deletes any beyond
+`journalRotateKeep` (default 2) and resets the cursor's byte offset to 0. The
+next append starts a fresh file. Rotation never drops an unexported line, and
+it does not affect dedup: the ledger (`seen.jsonl`) is the "never emit twice"
+authority, and the crash-recovery replay also checks the retained rotations.
+A journal on a host with no exporter configured is never exported, so it is
+never rotated.
+
+| Key | Env override | Default |
+|---|---|---|
+| `journalRotateBytes` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_BYTES` | `268435456` (256 MiB) |
+| `journalRotateKeep` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_KEEP` | `2` (`0` deletes instead of keeping) |
+
 ### Attribute allowlist
 
 The attribute and label vocabulary is declared once, in
