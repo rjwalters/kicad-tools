@@ -50,10 +50,10 @@
       "netlist_vacuous": false
     },
     "manifest": {
-      "status": "FAILED",
-      "detail": "STALE/unverified: routed PCB content differs from the manifest-bound project archive"
+      "status": "PASSED",
+      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
     },
-    "overall": "FAILED",
+    "overall": "PASSED",
     "schematic_missing": false
   },
   "fabrication_overrides": {

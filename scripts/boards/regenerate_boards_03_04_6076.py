@@ -101,6 +101,13 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return proc
 
 
+def require_manifest_passed(report: dict, what: str) -> None:
+    """Evidence must be computed against the final bundle, never a stale one."""
+    status = report.get("meta_checks", {}).get("manifest", {}).get("status")
+    if status != "PASSED":
+        raise RuntimeError(f"{what}: manifest meta-check is {status!r}, expected 'PASSED'")
+
+
 def drop_bytecode(board: Path) -> None:
     """Never let an interpreter cache under output/ into a hashed bundle."""
     for cache in (board / "output").rglob("__pycache__"):
@@ -239,7 +246,6 @@ def board04() -> None:
     log(f"  unrouted PCB identical modulo UUIDs; routed remap {stats}")
 
     routed, sch = out / "stm32_devboard_routed.kicad_pcb", out / "stm32_devboard.kicad_sch"
-    log(f"  recipe run_drc: {recipe['run_drc'](routed)}")
     from kicad_tools.lvs import write_lvs_report
 
     log(
@@ -276,9 +282,17 @@ def board04() -> None:
         report = (Path(tmp) / "check-report.json").read_bytes()
     log(f"  check_manufacturing: {data['summary']['errors']} errors, "
         f"{data['summary']['warnings']} warnings, overall {data['meta_checks']['overall']}")  # fmt: skip
+    require_manifest_passed(data, "board 04 check-report.json")
     (mfg / "check-report.json").write_bytes(report)
     (readiness / "kct-check.json").write_bytes(report)
     refresh_tools.refresh_manifest_files(mfg)
+    # The recipe's DRC report runs the manifest meta-check against the bundle,
+    # so it must come after the final archive/manifest rebuild (output/
+    # drc_report.json is not itself part of the bundle).
+    log(f"  recipe run_drc: {recipe['run_drc'](routed)}")
+    require_manifest_passed(
+        json.loads((out / "drc_report.json").read_text()), "board 04 drc_report.json"
+    )
     refresh_tools.rebuild_archive(out / "manufacturing.zip", [mfg])
     log("  readiness.json NOT re-pinned (legacy format, no producer; see #6269 / #6020)")
 
@@ -309,6 +323,7 @@ def board03(base_commit: str) -> None:
          str(mfg / "check-report.json")], capture_output=True, text=True,
     )  # fmt: skip
     data = json.loads((mfg / "check-report.json").read_text())
+    require_manifest_passed(data, "board 03 check-report.json")
     log(f"  check_manufacturing (exit {proc.returncode}): {data['summary']['errors']} errors, "
         f"{data['summary']['warnings']} warnings")  # fmt: skip
     run([py, str(board / "generate_design.py"), str(out)])  # manifest now covers check-report
