@@ -1024,7 +1024,7 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
                 "context_sha256": {
                     path.relative_to(saved.parent).as_posix(): _sha256_file(path)
                     for path in sorted(saved.parent.rglob("*"))
-                    if path.is_file()
+                    if path.is_file() and not _is_transient_local(path.relative_to(saved.parent))
                 },
             }
         )
@@ -1086,6 +1086,17 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
             blockers=[f"Saved/refilled copper could not be measured: {exc}"],
         )
     finally:
+        # kicad-cli leaves per-user files (e.g. ``<board>.kicad_prl``) beside the
+        # boards it saved; they are not evidence and VCS ignores them (#6076).
+        for name in ("fill-saved", "fill-refilled"):
+            directory = options.evidence_dir / name
+            if directory.is_dir():
+                for path in sorted(directory.rglob("*"), reverse=True):
+                    if _is_transient_local(path.relative_to(directory)):
+                        if path.is_dir():
+                            shutil.rmtree(path, ignore_errors=True)
+                        elif path.exists():
+                            path.unlink()
         evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
 
 
@@ -1553,12 +1564,30 @@ def _gate_hv_isolation(options: ReadinessOptions) -> CheckOutcome | None:
 # ---------------------------------------------------------------------------
 
 
+#: KiCad per-user / transient files (Issue #6076).  kicad-cli writes them as a
+#: side effect (a ``.kicad_prl`` beside every board it saves), and VCS ignores
+#: them, so they can never be hash-bound evidence or shipped package content:
+#: a fresh clone would read every report pinning one as "checked files are
+#: missing".
+_TRANSIENT_SUFFIXES = frozenset({".kicad_prl", ".lck"})
+_TRANSIENT_NAMES = frozenset({"fp-info-cache", ".DS_Store"})
+
+
+def _is_transient_local(path: Path) -> bool:
+    """True for KiCad/OS per-user or transient files that must not be evidence."""
+    if path.suffix in _TRANSIENT_SUFFIXES or path.name in _TRANSIENT_NAMES:
+        return True
+    return any(part == "__pycache__" or part.endswith("-backups") for part in path.parts)
+
+
 def _bundle_files(output_dir: Path, exclude: Sequence[str] = ()) -> list[Path]:
     excluded = set(exclude)
     return sorted(
         p
         for p in output_dir.rglob("*")
-        if p.is_file() and p.relative_to(output_dir).as_posix() not in excluded
+        if p.is_file()
+        and p.relative_to(output_dir).as_posix() not in excluded
+        and not _is_transient_local(p.relative_to(output_dir))
     )
 
 
@@ -2282,7 +2311,13 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     if spec.is_file():
         paths.add(spec.resolve())
 
-    return sorted(p for p in paths if p.is_relative_to(root) and p.name != _REPORT_NAME)
+    return sorted(
+        p
+        for p in paths
+        if p.is_relative_to(root)
+        and p.name != _REPORT_NAME
+        and not _is_transient_local(p.relative_to(root))
+    )
 
 
 def build_report(

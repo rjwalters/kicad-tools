@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import shutil
 import zipfile
 
 from kicad_tools.cli import readiness_cmd as cmd
@@ -132,3 +133,36 @@ def test_kct_check_evidence_records_the_board_relative_pcb(tmp_path):
     assert rc == 0, report["blockers"]
     evidence = json.loads((board / "output/readiness/kct-check.json").read_text())
     assert evidence["file"] == "output/demo_routed.kicad_pcb"
+
+
+def test_kicad_per_user_files_are_never_hash_bound_evidence(tmp_path):
+    """kicad-cli writes ``<board>.kicad_prl`` beside every board it saves; VCS
+    ignores it, so pinning it would make a fresh clone read ``unverified``."""
+    board = make_board(tmp_path)
+    (board / "output/demo_routed-backups").mkdir()
+    (board / "output/demo_routed-backups/old.zip").write_bytes(b"backup")
+    (board / "output/fp-info-cache").write_text("cache")
+    fake = FakeEngines(board)
+    inner = fake.refill
+
+    def refill(pcb):
+        run = inner(pcb)
+        pcb.with_suffix(".kicad_prl").write_text('{"board": {"active_layer": 0}}')
+        return run
+
+    fake.refill = refill
+    rc, report = _generate(board, fake.bundle())
+    assert rc == 0, report["blockers"]
+    transient = [
+        name
+        for name in report["inputs"]
+        if name.endswith((".kicad_prl", "fp-info-cache")) or "-backups/" in name
+    ]
+    assert transient == []
+    assert not list((board / "output/readiness").rglob("*.kicad_prl"))
+    # Simulate a fresh clone: VCS never carries the ignored per-user files.
+    for path in board.rglob("*.kicad_prl"):
+        path.unlink()
+    shutil.rmtree(board / "output/demo_routed-backups")
+    (board / "output/fp-info-cache").unlink()
+    assert read_readiness(board)["status"] == "ready"
