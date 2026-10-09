@@ -210,7 +210,6 @@ def test_route_argv_is_iteration_bounded_and_seeded(tmp_path):
         seed=7,
         timeout_s=900,
         manufacturer="jlcpcb",
-        layers=2,
     )
     joined = " ".join(argv)
     assert "--deterministic-budget" in argv
@@ -218,7 +217,8 @@ def test_route_argv_is_iteration_bounded_and_seeded(tmp_path):
     assert "--per-net-iterations 1234" in joined
     assert "--seed 7" in joined
     assert "--no-placement-feedback" in argv  # the router never moves parts
-    assert "--starting-layers 2 --max-layers 2" in joined
+    assert "--no-auto-layers" in argv  # one attempt on the board's own stack (#6277)
+    assert "--max-layers" not in joined
     assert "--mfr jlcpcb" in joined
 
 
