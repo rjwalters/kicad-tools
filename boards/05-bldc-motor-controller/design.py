@@ -2963,6 +2963,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # blocking count does not regress (per #3822 the board-05 CI job is the
     # only authoritative instrument for this board).
     skip_nets = ["+24V", "+5V", "+3V3", "GND", "PHASE_A", "PHASE_B", "PHASE_C"]
+    #
+    # Issue #6287 (measured, NOT applied): this ``route_pcb`` belongs to
+    # ``legacy_main()`` (the archived DRV8301 regression fixture, #4993).
+    # The accepted board is built by ``main()`` -> ``redesign/build.py``
+    # (revision B), which already routes PHASE_A/B/C.  Un-skipping them here
+    # (and dropping them from ``_RESCUE_EXCLUDED_NETS``), seed 7, 900 s
+    # budget, local run: global routing found corridors for 39/39 nets, but
+    # the C++ A* reported "open set exhausted" (blocked_path) on PHASE_A and
+    # PHASE_C -- i.e. blocked corridors, not trace width -- the detailed pass
+    # hit the 900 s --timeout at net 8/39, and the result was 16/39 nets with
+    # the finishing stages skipped.  Fixing that needs placement/escape
+    # relief on the legacy layout, which is placement research (#3822).
 
     cmd = [
         sys.executable,
