@@ -1,5 +1,5 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb",
+  "file": "output/voltage_divider_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
   "layers": 2,
   "summary": {
@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 2,
     "waived": 0,
-    "rules_checked": 43,
+    "rules_checked": 56,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -16,31 +16,24 @@
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1
     },
-    "passed": true
+    "passed": true,
+    "stale_waivers": 0,
+    "coverage_checked": 28,
+    "coverage_skipped": 8,
+    "coverage_unknown": [],
+    "coverage_blocking_unknown": []
   },
   "violations": [
-    {
-      "rule_id": "connector_edge_distance",
-      "type": "unknown",
-      "severity": "info",
-      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 4.15mm from nearest board edge",
-      "location": [
-        138.5,
-        87.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": 4.150000000000001,
-      "required_value": null,
-      "items": [
-        "J1"
-      ],
-      "nets": [],
-      "status": "info",
-      "waived": false
-    },
     {
       "rule_id": "connector_edge_distance",
       "type": "unknown",
@@ -58,13 +51,37 @@
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": "ev2:83fc93fe488b4d73"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 4.15mm from nearest board edge",
+      "location": [
+        138.5,
+        87.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 4.150000000000001,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev2:4efad749ae38e79d"
     }
   ],
+  "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "43 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "56 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -80,10 +97,10 @@
       "netlist_vacuous": false
     },
     "manifest": {
-      "status": "PASSED",
-      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
+      "status": "NOT RUN",
+      "detail": "no manufacturing bundle; run `kct export` first"
     },
-    "overall": "PASSED",
+    "overall": "INCOMPLETE",
     "schematic_missing": false
   },
   "routing_quality": {
@@ -99,5 +116,223 @@
     "off_axis_count": 0,
     "staircase_step_count": 0,
     "staircase_fraction": 0.0
+  },
+  "coverage": {
+    "ampacity": {
+      "status": "skipped:no_declared_targets",
+      "state": "skipped",
+      "reason": "no_declared_targets",
+      "blocking": true
+    },
+    "clearance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connectivity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connector_access": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "copper_sliver": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "courtyard_overlap": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dangling_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "diffpair_clearance_intra": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_length_skew": {
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
+      "blocking": true
+    },
+    "diffpair_routing_continuity": {
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
+      "blocking": true
+    },
+    "dimensions": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "doc_drift": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "edge": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "impedance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "isolated_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "mask_to_copper": {
+      "status": "skipped:opt_in:--mask-copper-config",
+      "state": "skipped",
+      "reason": "opt_in:--mask-copper-config",
+      "blocking": true
+    },
+    "match_group_length_skew": {
+      "status": "skipped:no_net_class_map",
+      "state": "skipped",
+      "reason": "no_net_class_map",
+      "blocking": true
+    },
+    "netclass_clearance_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netclass_floor": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netlist": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "pad_grid": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "path_ampacity": {
+      "status": "skipped:no_declared_current_paths",
+      "state": "skipped",
+      "reason": "no_declared_current_paths",
+      "blocking": true
+    },
+    "physical_copper_gap": {
+      "status": "skipped:opt_in:--physical-copper-gap",
+      "state": "skipped",
+      "reason": "opt_in:--physical-copper-gap",
+      "blocking": true
+    },
+    "pin1_marker": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "sch_fields": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "segment_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "silkscreen": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "single_pad_net": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "solder_mask": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_under_body": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "width_consistency": {
+      "status": "skipped:opt_in:--only",
+      "state": "skipped",
+      "reason": "opt_in:--only",
+      "blocking": false
+    },
+    "zero_length_segment": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "zones": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    }
   }
 }

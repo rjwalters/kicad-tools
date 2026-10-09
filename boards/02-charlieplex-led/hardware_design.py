@@ -115,12 +115,17 @@ def build_pcb() -> PCB:
         layers=2,
         title="ATtiny85 Charlieplex LED Grid",
         revision="B",
+        # Pinned so a rebuild is byte-reproducible (PCB.create otherwise
+        # stamps today's date; Issue #6076).
+        board_date="2026-09-10",
     )
     for ref, _, value, footprint, nets, pos, _ in components():
         fp = pcb.add_footprint(footprint, ref, *pos, value=value)
         # Retain the full library ID for BOM and schematic/PCB comparison.
         for node in pcb._sexp.find_all("footprint"):
-            if node.find("uuid").get_string(0) == fp.uuid:
+            # Direct child only: placed pads carry their own (uuid ...) nodes,
+            # which a descendant search would hit first (Issue #6076).
+            if node.find_child("uuid").get_string(0) == fp.uuid:
                 node.set_value(0, footprint)
                 fp.name = footprint
                 break

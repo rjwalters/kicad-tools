@@ -1,4 +1,28 @@
 {
-  "B.Cu": 0.0,
-  "F.Cu": 0.0
+  "changed_layer_inventory": [],
+  "context_sha256": {
+    "voltage_divider.kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
+    "voltage_divider_routed.kicad_dru": "0714e8b4cb73fde358fa3c1d35adfab2755f47561476f85015a9f03c02e745d8",
+    "voltage_divider_routed.kicad_pcb": "076ae364276c2fa432449239e5af6dc2c72da97079afacc5f400609841df9831",
+    "voltage_divider_routed.kicad_pro": "9e3fc8b018068097e12d10fcbdd183d00b786685ebdac48ad0f42d3cb528b87d"
+  },
+  "deltas_mm2": {
+    "B.Cu": 0.0,
+    "F.Cu": 0.0
+  },
+  "engine": "10.0.6",
+  "refill_returncode": 0,
+  "refilled_areas_mm2": {
+    "B.Cu": 699.983515,
+    "F.Cu": 677.082687
+  },
+  "refilled_pcb": "output/readiness/fill-refilled/voltage_divider_routed.kicad_pcb",
+  "refilled_sha256": "076ae364276c2fa432449239e5af6dc2c72da97079afacc5f400609841df9831",
+  "saved_areas_mm2": {
+    "B.Cu": 699.983515,
+    "F.Cu": 677.082687
+  },
+  "saved_pcb": "output/readiness/fill-saved/voltage_divider_routed.kicad_pcb",
+  "saved_sha256": "076ae364276c2fa432449239e5af6dc2c72da97079afacc5f400609841df9831",
+  "tolerance_mm2": 0.01
 }

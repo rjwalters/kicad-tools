@@ -1,34 +1,49 @@
-Manufacturing package: voltage_divider_routed.kicad_pcb
-Fabrication target: jlcpcb
-Mode: assembly (SMT placement plus manual through-hole assembly)
+Manufacturing package for voltage_divider_routed.kicad_pcb
 
-Hand-solder after SMT assembly: J1, J2
+Fabrication tier : jlcpcb
+Mode             : assembly
+Generated        : 2026-10-09T00:56:48.039295+00:00
 
-Fresh kct check and refilled native KiCad DRC: zero errors.
-Per-rule kct warnings: none.
-Per-rule native KiCad warnings: none.
-All assembly-affecting warning counts are zero. No accepted-risk waivers.
-Procurement identities reviewed against supplier listings; see procurement-review.md and source project.kct.
+Assembly package: BOM and CPL are included.
 
-Files:
-README.txt: Package contents and assembly instructions
-assembly-back.pdf: Back copper/silkscreen/outline drawing
-assembly-front.pdf: Front copper/silkscreen/outline drawing
-bom_jlcpcb.csv: Verified component identities for sourcing
-check-report.json: kct manufacturing/electrical evidence
-cpl_jlcpcb.csv: SMT placement coordinates; excludes hand-solder parts
-gerbers/gerbers.zip: Gerber and drill files for PCB fabrication
-images/assembly.png: Board/schematic preview image
-images/layer_B_Cu.png: Board/schematic preview image
-images/layer_F_Cu.png: Board/schematic preview image
-images/pcb_back.png: Board/schematic preview image
-images/pcb_copper.png: Board/schematic preview image
-images/pcb_front.png: Board/schematic preview image
-images/schematic_voltage_divider.png: Board/schematic preview image
-kicad_project.zip: KiCad PCB, schematic and project sources
-manifest.json: Full-package SHA256 checksums
-native-drc.json: Independent native KiCad DRC with zone refill
-procurement-review.md: Supplier identity review and sources
-report.md: Design report text
-report.pdf: Design report
-schematic.pdf: Schematic drawing
+Contents
+--------
+  assembly-back.pdf
+  assembly-front.pdf
+  bom_jlcpcb.csv
+  check-report.json
+  cpl_jlcpcb.csv
+  gerbers/gerbers.zip
+  images/assembly.png
+  images/layer_B_Cu.png
+  images/layer_F_Cu.png
+  images/pcb_back.png
+  images/pcb_copper.png
+  images/pcb_front.png
+  images/schematic_voltage_divider.png
+  kicad_project.zip
+  manifest.json
+  native-drc.json
+  procurement-review.md
+  report.md
+  report.pdf
+  schematic.pdf
+
+Hand-solder / through-hole items
+--------------------------------
+  The following parts are EXCLUDED from the SMT CPL and must be hand-soldered:
+  J1, J2
+
+Warning review (per rule)
+-------------------------
+  no warnings reported
+  All assembly-affecting warning counts are zero.
+
+Accepted-risk waivers
+---------------------
+  no accepted-risk waivers
+
+Sign-off
+--------
+  Fresh kct check and native KiCad DRC (saved and refilled copper): zero errors.
+  Procurement identities reviewed against supplier listings; see procurement-review.md and source project.kct.
