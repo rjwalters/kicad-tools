@@ -21,7 +21,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-SRC_HOOK="$REPO_ROOT/defaults/hooks/methodology-inject.sh"
+# Prefer the installed hook (a Loom-installed consumer repo has no defaults/
+# directory at all); fall back to defaults/ for Loom's own source tree. See
+# issue #6496. DEFAULTS_HOOK stays strictly the defaults/ path -- it is the
+# source-of-truth side of the "defaults/ vs .loom/ sync" check below, which
+# must remain a real cross-copy diff, not a self-diff.
+SRC_HOOK="$REPO_ROOT/.loom/hooks/methodology-inject.sh"
+[[ -r "$SRC_HOOK" ]] || SRC_HOOK="$REPO_ROOT/defaults/hooks/methodology-inject.sh"
+DEFAULTS_HOOK="$REPO_ROOT/defaults/hooks/methodology-inject.sh"
 
 PASS=0
 FAIL=0
@@ -294,7 +301,9 @@ fi
 
 # --- defaults/ vs .loom/ sync -----------------------------------------------
 DEPLOY_HOOK="$REPO_ROOT/.loom/hooks/methodology-inject.sh"
-if [[ -f "$DEPLOY_HOOK" ]] && diff -q "$SRC_HOOK" "$DEPLOY_HOOK" >/dev/null 2>&1; then
+if [[ ! -f "$DEFAULTS_HOOK" ]]; then
+    echo "SKIP: defaults/hooks/methodology-inject.sh not present (bare consumer layout) -- sync check not applicable"
+elif [[ -f "$DEPLOY_HOOK" ]] && diff -q "$DEFAULTS_HOOK" "$DEPLOY_HOOK" >/dev/null 2>&1; then
     pass ".loom/ hook byte-identical to defaults/"
 else
     fail ".loom/ hook byte-identical to defaults/"

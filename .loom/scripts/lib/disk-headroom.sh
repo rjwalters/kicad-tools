@@ -37,7 +37,12 @@
 #                "one level deep" NESTING rule is untouched by this scaling.
 #
 # Constants (all overridable via env for large-repo / tuning cases):
-#   LOOM_PER_WORKTREE_GB   default 2   Conservative per-worktree disk estimate.
+#   LOOM_PER_WORKTREE_GB   default 8   Conservative per-worktree disk estimate
+#                                      (calibrated in #8370 from measured cargo
+#                                      target dirs: median 8.2 GB per worktree
+#                                      for a full build). Keep in lockstep with
+#                                      DEFAULT_PER_WORKTREE_GB in
+#                                      loom-daemon/src/disk_headroom.rs.
 #                                      A fixed estimate keeps the math pure and
 #                                      testable; runtime footprint measurement
 #                                      is intentionally out of scope for v1.
@@ -211,7 +216,7 @@ loom_subagent_target_from_cores() {
 loom_wave_size_from_disk() {
     local mechanism="$1" candidate_count="$2" free_gb="$3"
 
-    local per="${LOOM_PER_WORKTREE_GB:-2}"
+    local per="${LOOM_PER_WORKTREE_GB:-8}"
     local daemon_target="${LOOM_DAEMON_WAVE_TARGET:-10}"
     local subagent_cap="${LOOM_SUBAGENT_WAVE_CAP:-3}"
 

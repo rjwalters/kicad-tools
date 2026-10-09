@@ -43,9 +43,60 @@
 #     tool_result on the same id, or a non-error TERMINAL TaskOutput poll of
 #     the recovered agentId, resolves it; a <status>running</status> poll does
 #     NOT; existing Task-named fixtures continue to pass unmodified
+#   - synchronous Agent/Task dispatch resolution (#5243): a
+#     `run_in_background: false` dispatch blocks the turn, so its first and only
+#     tool_result is the real final result -- any tool_result on the id resolves
+#     it, even when the text incidentally carries "Async agent launched
+#     successfully" boilerplate; an ASYNC dispatch with only its launch ack still
+#     blocks (the short-circuit must not leak to async ids); a mixed sync/async
+#     transcript with all dispatches completed allows the stop on the first try
+#   - <task-notification> resolution for Agent dispatches (#5713): a
+#     correctly-awaited async Agent dispatch's completion arrives ONLY as a
+#     <task-notification> -- never a second, distinct tool_result -- so pattern 1
+#     must accept it, the same evidence pattern 2 (background Bash) already
+#     accepts; resolves via EITHER a <tool-use-id> match on the dispatch id OR a
+#     <task-id> match on the agentId recovered from the launch ack; a genuinely
+#     unresolved dispatch (no notification, no distinct tool_result, no terminal
+#     TaskOutput poll) still blocks; a session dispatching N agents and observing
+#     N completion notifications stops cleanly on the first attempt
 #   - jq absent -> allow (fail-open)
 #   - contract: block output is valid JSON with decision=="block" and a
 #     non-empty reason; exit code is always 0
+#   - block reason names a context-safe await recipe for local_agent
+#     Task/Agent subagents (issue #6168): a bounded, NON-BLOCKING `TaskOutput`
+#     poll (`block: false`) -- not a flat "blocking TaskOutput" instruction,
+#     which can return a raw JSONL transcript dump on timeout instead of just
+#     status -- and (issue #6645) it no longer prescribes "just end the turn",
+#     the action the guard itself used to block
+#   - session-mode detection (issue #6645): the SAME transcript with one
+#     genuinely unresolved dispatch must BLOCK in headless mode and be ALLOWED
+#     (a `continue: true` + `systemMessage` advisory, never a `decision:
+#     block`) in interactive mode. Every resolution step is covered:
+#     `LOOM_SESSION_MODE` override, the `LOOM_HEADLESS_SESSION` marker
+#     spawn-claude.sh exports for print-mode spawns, an `sdk*`
+#     `CLAUDE_CODE_ENTRYPOINT`, and a real argv probe of the owning `claude`
+#     process (two live placeholder processes named `claude`, one with `-p`
+#     and one without, pointed at via `CLAUDE_PID`). The FAIL-CLOSED default
+#     is asserted explicitly -- an unresolvable `CLAUDE_PID`, a dead pid, and
+#     an unrecognized `LOOM_SESSION_MODE` value all BLOCK -- because a
+#     false "interactive" reading silently reintroduces the #4257 hazard.
+#     The `stop_hook_active` loop guard is asserted to still short-circuit
+#     ahead of the new branch in BOTH modes (allow, silent, no advisory), and
+#     a fully-resolved transcript stays silent in interactive mode too
+#   - /loop dynamic-mode continuation exemption (issue #6175): an armed
+#     ScheduleWakeup whose prompt starts with "/loop" (with or without
+#     arguments) or carries the "<<autonomous-loop-dynamic>>" sentinel is
+#     recognized as an intentional loop re-entry and excluded entirely from
+#     the outstanding-timer count -- a session whose only armed timer is a
+#     recognized loop continuation allows the stop with no block at all. A
+#     ScheduleWakeup whose prompt merely mentions "/loop" mid-text (not a
+#     recognized prefix/sentinel) still blocks, and a Monitor is never
+#     exempted regardless of its input fields (recognition is scoped to
+#     ScheduleWakeup only). A mixed transcript (one orphaned Monitor + one
+#     recognized loop-continuation ScheduleWakeup) still blocks on the
+#     orphaned Monitor, counts exactly one outstanding timer, and the block
+#     reason names the loop-continuation timer separately as
+#     recognized/allowed/not-counted so the transcript reads unambiguously.
 #
 # The hook under test is the canonical source at defaults/ (the version-
 # controlled source of truth), copied into an isolated temp git tree so the
@@ -56,7 +107,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-SRC_HOOK="$REPO_ROOT/defaults/hooks/guard-background-subagents.sh"
+# Prefer the installed hook (a Loom-installed consumer repo has no defaults/
+# directory at all); fall back to defaults/ for Loom's own source tree. See
+# issue #6496.
+SRC_HOOK="$REPO_ROOT/.loom/hooks/guard-background-subagents.sh"
+[[ -r "$SRC_HOOK" ]] || SRC_HOOK="$REPO_ROOT/defaults/hooks/guard-background-subagents.sh"
 
 PASS=0
 FAIL=0
@@ -67,7 +122,15 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"' EXIT
+FAKE_PIDS=()
+cleanup() {
+    local p
+    for p in ${FAKE_PIDS[@]+"${FAKE_PIDS[@]}"}; do
+        kill "$p" 2>/dev/null || true
+    done
+    rm -rf "$TMPROOT"
+}
+trap cleanup EXIT
 git init -q "$TMPROOT"
 mkdir -p "$TMPROOT/.loom/hooks"
 cp "$SRC_HOOK" "$TMPROOT/.loom/hooks/guard-background-subagents.sh"
@@ -115,6 +178,59 @@ AGENT5086_ACK_POLLED='{"type":"user","message":{"role":"user","content":[{"type"
 AGENT5086_POLL_USE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_poll03","name":"TaskOutput","input":{"agentId":"aagent03","block":true,"timeout":600}}]}}'
 AGENT5086_POLL_RESULT_TERMINAL='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_poll03","content":"<retrieval_status>success</retrieval_status>\n<status>completed</status>\nWork complete: opened PR #5556 for issue #3."}]}}'
 AGENT5086_POLL_RESULT_RUNNING='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_poll03","content":"<retrieval_status>timeout</retrieval_status>\n<status>running</status>\nStill working..."}]}}'
+
+# --- <task-notification> resolution for Agent dispatches (issue #5713) -------
+# The only completion signal a correctly-awaited ASYNC Agent dispatch actually
+# produces in this harness is a <task-notification> — never a second, distinct
+# tool_result on the dispatch id. Pattern 2 (background Bash) already accepted
+# this evidence; pattern 1 did not, so a correctly-awaited agent could never
+# resolve and the unresolved count only grew across a session.
+
+# (d5713a) dispatched Agent resolved by a <task-notification> whose
+# <tool-use-id> echoes the dispatch id (the <task-id> is deliberately a
+# DIFFERENT value here, to isolate the tool-use-id matching branch).
+AGENT5713_USE_TOOLID='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent04","name":"Agent","input":{"prompt":"implement issue #4"}}]}}'
+AGENT5713_ACK_TOOLID='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent04","content":"Async agent launched successfully. agentId: aagent04. Use SendMessage with to: aagent04 to communicate. You will be notified automatically when it completes."}]}}'
+AGENT5713_NOTIFICATION_TOOLID='{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>unrelated999</task-id>\n<tool-use-id>toolu_agent04</tool-use-id>\n<status>completed</status>\n<result>Work complete: opened PR #7001 for issue #4.</result>\n</task-notification>"}'
+
+# (d5713b) dispatched Agent resolved by a <task-notification> whose <task-id>
+# equals the agentId recovered from the launch ack — the notification carries
+# ONLY <task-id>, no <tool-use-id> at all (the shape some completions use).
+AGENT5713_USE_TASKID='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent05","name":"Agent","input":{"prompt":"implement issue #5"}}]}}'
+AGENT5713_ACK_TASKID='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent05","content":"Async agent launched successfully. agentId: aagent05. Use SendMessage with to: aagent05 to communicate. You will be notified automatically when it completes."}]}}'
+AGENT5713_NOTIFICATION_TASKID='{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>aagent05</task-id>\n<status>completed</status>\n<result>Work complete: opened PR #7002 for issue #5.</result>\n</task-notification>"}'
+
+# (d5713c) genuinely unresolved: dispatched Agent with only its launch ack, no
+# task-notification, no distinct tool_result, no terminal TaskOutput poll ->
+# must still block (proves the fix does not simply disable pattern 1).
+AGENT5713_USE_ORPHAN='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent06","name":"Agent","input":{"prompt":"implement issue #6"}}]}}'
+AGENT5713_ACK_ORPHAN='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent06","content":"Async agent launched successfully. agentId: aagent06. Use SendMessage with to: aagent06 to communicate. You will be notified automatically when it completes."}]}}'
+
+# --- synchronous Agent/Task dispatch fixtures (issue #5243) -------------------
+# A `run_in_background: false` dispatch is a STRUCTURAL guarantee: the harness
+# cannot advance the turn (or reach a Stop) past a blocking tool_use until its
+# result has landed, so the dispatch's first and only tool_result is always the
+# real, final result — never a launch ack. Any tool_result on the id resolves it.
+
+# (s5243) sync Agent whose only tool_result is the inline final result — no
+# separate launch ack — resolves.
+AGENT5243_SYNC_USE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_sync01","name":"Agent","input":{"prompt":"do the thing","run_in_background":false}}]}}'
+AGENT5243_SYNC_RESULT='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sync01","content":"Work complete: opened PR #6001 for issue #10."}]}}'
+
+# (s5243 edge) sync dispatch whose inline result text INCIDENTALLY contains the
+# "Async agent launched successfully" boilerplate (e.g. shared harness ack
+# wording) — must STILL resolve, because the launch-ack text exclusion is skipped
+# for sync ids. This is the exact false-positive #5243 was filed for.
+AGENT5243_SYNC_ACKTEXT_USE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_sync02","name":"Agent","input":{"prompt":"do the other thing","run_in_background":false}}]}}'
+AGENT5243_SYNC_ACKTEXT_RESULT='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sync02","content":"Async agent launched successfully. agentId: async99. Work complete: PR #6002 opened."}]}}'
+
+# (s5243 contrast) an ASYNC dispatch (run_in_background:true) with ONLY its launch
+# ack must STILL block — the sync short-circuit must NOT leak to async ids.
+AGENT5243_ASYNC_USE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_async01","name":"Agent","input":{"prompt":"async work","run_in_background":true}}]}}'
+AGENT5243_ASYNC_ACK='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_async01","content":"Async agent launched successfully. agentId: async01. You will be notified automatically when it completes."}]}}'
+# Sync Task (back-compat tool name) with run_in_background:false and inline result.
+TASK5243_SYNC_USE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_sync03","name":"Task","input":{"subagent_type":"loom-builder","run_in_background":false}}]}}'
+TASK5243_SYNC_RESULT='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sync03","content":"Subagent completed: opened PR #6003."}]}}'
 
 # Background Bash (issue #4389 — the #4257 recurrence via run_in_background)
 # fixtures. A background dispatch gets an IMMEDIATE tool_result ack (NOT
@@ -231,6 +347,28 @@ AGENT_READ_RESULT='{"type":"user","message":{"role":"user","content":[{"type":"t
 FG_FINAL_TURN='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_fg30","name":"Bash","input":{"command":"gh issue create"}}]}}'
 FG_FINAL_RESULT='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fg30","content":"https://github.com/x/y/issues/1"}]}}'
 
+# --- issue #5976 fixtures: a background dispatch that NEVER STARTED ----------
+# Reproduced byte-for-byte from the interactive session behind #5976 (a
+# kicad-tools transcript, 2026-08-10): a `run_in_background: true` Bash
+# dispatch DENIED by a PreToolUse guard hook. The tool never ran, so no
+# background task, no task id, and no completion notification will EVER exist
+# for it — yet the pre-#5976 detector counted it as outstanding on every stop
+# for the rest of the session (the reported "1 background Bash command(s) ...
+# have no completion notification" false positive, with `pgrep` showing no
+# live process). The Monitor detector has always retired a failed arming call
+# for exactly this reason ("d. The arming call itself erroring: no timer
+# exists"); the background-Bash detector never consulted the ack's error flag.
+#
+# (v1) the real shape: `is_error: true` with a string body (guard denial).
+BG_USE_DENIED='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bg20","name":"Bash","input":{"command":"S=/tmp/scratch; uv run kct route board.kicad_pcb > \"$S/b03-route.log\" 2>&1","run_in_background":true}}]}}'
+BG_ACK_DENIED='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bg20","is_error":true,"content":"BLOCKED: Bash-tool write target '"'"'\"$S/b03-route.log\"'"'"' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands. Unresolvable write targets fail closed (#4921). (#4178)"}]}}'
+
+# (v2) the other error encoding `results.err` recognizes: no `is_error` flag,
+# but a `<tool_use_error>` envelope in the body (harness input-validation
+# rejection of the dispatch itself).
+BG_USE_DENIED_ENVELOPE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bg21","name":"Bash","input":{"command":"sleep 100","run_in_background":true}}]}}'
+BG_ACK_DENIED_ENVELOPE='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bg21","content":"<tool_use_error>InputValidationError: Bash failed due to the following issue: an unexpected parameter was provided</tool_use_error>"}]}}'
+
 # Build stdin JSON. Args: <transcript_path> <stop_hook_active>
 make_input() {
     local transcript="$1" active="${2:-false}"
@@ -238,11 +376,34 @@ make_input() {
         '{session_id: "test", transcript_path: $tp, stop_hook_active: $active, hook_event_name: "Stop"}'
 }
 
+# Session-mode signals the hook reads (issue #6645). The suite itself usually
+# runs INSIDE a Claude session, so the ambient environment carries real
+# CLAUDE_PID / CLAUDE_CODE_ENTRYPOINT / LOOM_* values that would otherwise leak
+# into every fixture and make results depend on whether the suite was launched
+# from an interactive or a headless session. Strip them all, then pin the mode
+# explicitly per invocation.
+HOOK_ENV_BASE=(-u LOOM_SESSION_MODE -u LOOM_HEADLESS_SESSION -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_PID)
+
+# Default invocation: mode pinned HEADLESS, so every pre-#6645 expectation in
+# this suite (block/allow) is asserted against the blocking branch exactly as
+# before. A trailing `LOOM_SESSION_MODE=...` in "$@" wins (env applies
+# assignments left to right).
 run_hook() {
     local transcript="$1" active="${2:-false}"
     shift; [[ $# -gt 0 ]] && shift
     local exit_code=0 output
-    output=$(cd "$TMPROOT" && env "$@" bash "$HOOK" < <(make_input "$transcript" "$active") 2>/dev/null) || exit_code=$?
+    output=$(cd "$TMPROOT" && env "${HOOK_ENV_BASE[@]}" LOOM_SESSION_MODE=headless "$@" bash "$HOOK" < <(make_input "$transcript" "$active") 2>/dev/null) || exit_code=$?
+    printf '%s|%s' "$exit_code" "$output"
+}
+
+# Detection-path invocation: NO mode pin, so `loom_session_mode()` actually
+# resolves the signals passed in "$@" (or falls through to its fail-closed
+# default). Used only by the #6645 session-mode tests below.
+run_hook_detect() {
+    local transcript="$1" active="${2:-false}"
+    shift; [[ $# -gt 0 ]] && shift
+    local exit_code=0 output
+    output=$(cd "$TMPROOT" && env "${HOOK_ENV_BASE[@]}" "$@" bash "$HOOK" < <(make_input "$transcript" "$active") 2>/dev/null) || exit_code=$?
     printf '%s|%s' "$exit_code" "$output"
 }
 
@@ -253,6 +414,34 @@ assert_allow() {
         pass "$desc"
     else
         fail "$desc (expected exit 0 + empty output, got exit=$code output=$out)"
+    fi
+}
+
+# Interactive-mode outcome (issue #6645): the stop is ALLOWED (no
+# `decision` field at all, so nothing blocks) and the hook emits at most a
+# one-line `systemMessage` advisory. Anything containing `decision: block` or
+# the "STOP BLOCKED" banner fails this assertion.
+assert_advisory() {
+    local desc="$1" result="$2"
+    local code="${result%%|*}" out="${result#*|}"
+    if [[ "$code" != "0" ]]; then
+        fail "$desc (expected exit 0, got NONZERO exit=$code)"
+        return
+    fi
+    local decision cont msg
+    decision=$(echo "$out" | jq -r '.decision // empty' 2>/dev/null || true)
+    cont=$(echo "$out" | jq -r '.continue // empty' 2>/dev/null || true)
+    msg=$(echo "$out" | jq -r '.systemMessage // empty' 2>/dev/null || true)
+    if [[ -n "$decision" ]]; then
+        fail "$desc (expected NO decision field, got decision=$decision)"
+    elif [[ "$cont" != "true" ]]; then
+        fail "$desc (expected continue=true, got: $out)"
+    elif [[ -z "$msg" ]]; then
+        fail "$desc (expected a non-empty systemMessage, got: $out)"
+    elif [[ "$msg" == *"STOP BLOCKED"* ]]; then
+        fail "$desc (advisory must never say STOP BLOCKED, got: $msg)"
+    else
+        pass "$desc"
     fi
 }
 
@@ -356,6 +545,26 @@ write_transcript "$T5086cb" "$AGENT5086_USE_POLLED" "$AGENT5086_ACK_POLLED" \
 result=$(run_hook "$T5086cb" false)
 assert_block "(c5086b) TaskOutput poll still <status>running</status> -> still block" "$result"
 
+# (n5713i) per-dispatch matching must be per-ID, not "any evidence anywhere":
+# one agent resolved by a TERMINAL TaskOutput poll of ITS OWN agentId, plus one
+# genuinely orphaned dispatch -> STILL block. `$arr | index(.)` rebinds `.` to
+# $arr, so the pre-#5721 lookup matched for any non-empty evidence list and
+# resolved unrelated dispatches wholesale (the same defect the notification
+# branches from #5713 had to avoid).
+T5713i="$TMPROOT/transcript-agent-poll-plus-orphan.jsonl"
+write_transcript "$T5713i" \
+    "$AGENT5086_USE_POLLED" "$AGENT5086_ACK_POLLED" \
+    "$AGENT5086_POLL_USE" "$AGENT5086_POLL_RESULT_TERMINAL" \
+    "$AGENT5713_USE_ORPHAN" "$AGENT5713_ACK_ORPHAN"
+raw_5713i=$(run_hook "$T5713i" false)
+assert_block "(n5713i) terminal-polled agent + one orphan -> block" "$raw_5713i"
+reason_5713i=$(echo "${raw_5713i#*|}" | jq -r '.reason // empty' 2>/dev/null || true)
+if [[ "$reason_5713i" == *"1 dispatched Task/Agent"* ]]; then
+    pass "(n5713j) polled+orphan transcript counts exactly 1 orphaned Task/Agent"
+else
+    fail "(n5713j) polled+orphan transcript counts exactly 1 orphaned Task/Agent (got: $reason_5713i)"
+fi
+
 # (d5086) existing Task-named fixtures continue to pass unmodified
 # (back-compat): the original unresolved/resolved Task cases from (a)/(b)
 # above are re-asserted here under the new dual-name (Task|Agent) matcher to
@@ -364,6 +573,134 @@ result=$(run_hook "$T1" false)
 assert_block "(d5086) back-compat: unresolved Task-named dispatch -> still block" "$result"
 result=$(run_hook "$T2" false)
 assert_allow "(d5086) back-compat: resolved Task-named dispatch -> still allow" "$result"
+
+# --- <task-notification> resolution for Agent dispatches (issue #5713) ------
+# Pattern 1 must accept a <task-notification> as resolution -- the same
+# evidence pattern 2 (background Bash) already accepts -- since it is the
+# ONLY completion signal a correctly-awaited async Agent dispatch produces.
+
+# (a5713) dispatched Agent resolved ONLY by a <task-notification> whose
+# <tool-use-id> matches the dispatch id -> allow.
+T5713a="$TMPROOT/transcript-agent-notif-toolid.jsonl"
+write_transcript "$T5713a" "$AGENT5713_USE_TOOLID" "$AGENT5713_ACK_TOOLID" "$AGENT5713_NOTIFICATION_TOOLID"
+result=$(run_hook "$T5713a" false)
+assert_allow "(a5713) Agent dispatch resolved by <task-notification> tool-use-id match -> allow" "$result"
+
+# (b5713) dispatched Agent resolved ONLY by a <task-notification> whose
+# <task-id> equals the agentId recovered from the launch ack (no
+# <tool-use-id> tag in the notification at all) -> allow.
+T5713b="$TMPROOT/transcript-agent-notif-taskid.jsonl"
+write_transcript "$T5713b" "$AGENT5713_USE_TASKID" "$AGENT5713_ACK_TASKID" "$AGENT5713_NOTIFICATION_TASKID"
+result=$(run_hook "$T5713b" false)
+assert_allow "(b5713) Agent dispatch resolved by <task-notification> task-id==agentId match -> allow" "$result"
+
+# (c5713) genuinely unresolved Agent dispatch (launch ack only, no
+# notification, no distinct tool_result, no terminal TaskOutput poll) ->
+# STILL block. Proves the fix does not simply disable pattern 1.
+T5713c="$TMPROOT/transcript-agent-orphan.jsonl"
+write_transcript "$T5713c" "$AGENT5713_USE_ORPHAN" "$AGENT5713_ACK_ORPHAN"
+result=$(run_hook "$T5713c" false)
+assert_block "(c5713) genuinely unresolved Agent dispatch (no notification) -> still block" "$result"
+
+# (d5713) acceptance-criteria regression: a session that dispatches N=3 agents
+# (one resolved via a distinct tool_result, one via tool-use-id notification,
+# one via task-id notification) and observes completion for all of them stops
+# cleanly on the FIRST attempt.
+T5713d="$TMPROOT/transcript-agent-n-notified.jsonl"
+write_transcript "$T5713d" \
+    "$AGENT5086_USE_COMPLETED" "$AGENT5086_ACK_COMPLETED" "$AGENT5086_RESULT_COMPLETED" \
+    "$AGENT5713_USE_TOOLID" "$AGENT5713_ACK_TOOLID" "$AGENT5713_NOTIFICATION_TOOLID" \
+    "$AGENT5713_USE_TASKID" "$AGENT5713_ACK_TASKID" "$AGENT5713_NOTIFICATION_TASKID"
+result=$(run_hook "$T5713d" false)
+assert_allow "(d5713) N dispatched agents + N completion notifications -> allow on first attempt" "$result"
+
+# (e5713) mixed transcript: the same N=3 resolved agents from (d5713) PLUS one
+# genuinely orphaned dispatch -> block, and the count is exactly 1 (no
+# over-count of the resolved agents, no under-count of the orphan).
+T5713e="$TMPROOT/transcript-agent-mixed-one-orphan.jsonl"
+write_transcript "$T5713e" \
+    "$AGENT5086_USE_COMPLETED" "$AGENT5086_ACK_COMPLETED" "$AGENT5086_RESULT_COMPLETED" \
+    "$AGENT5713_USE_TOOLID" "$AGENT5713_ACK_TOOLID" "$AGENT5713_NOTIFICATION_TOOLID" \
+    "$AGENT5713_USE_TASKID" "$AGENT5713_ACK_TASKID" "$AGENT5713_NOTIFICATION_TASKID" \
+    "$AGENT5713_USE_ORPHAN" "$AGENT5713_ACK_ORPHAN"
+raw_5713e=$(run_hook "$T5713e" false)
+assert_block "(e5713) N resolved agents + 1 orphan -> block" "$raw_5713e"
+reason_5713e=$(echo "${raw_5713e#*|}" | jq -r '.reason // empty' 2>/dev/null || true)
+if [[ "$reason_5713e" == *"1 dispatched Task/Agent"* ]]; then
+    pass "(f5713) mixed transcript counts exactly 1 orphaned Agent dispatch"
+else
+    fail "(f5713) mixed transcript counts exactly 1 orphaned Agent dispatch (got: $reason_5713e)"
+fi
+
+# (g5713) a resolved-by-notification transcript re-scanned on a second stop
+# sequence also allows (no one-shot/stateful matching -- durable transcript
+# facts stay resolved).
+result=$(run_hook "$T5713a" false)
+assert_allow "(g5713) Agent resolved by notification -> allow again on second stop sequence" "$result"
+
+# --- synchronous Agent/Task dispatch resolution (issue #5243) ----------------
+# A `run_in_background: false` dispatch blocks the turn, so its first and only
+# tool_result is the real final result — never a launch ack. Any tool_result on
+# the id resolves it, even when the text incidentally carries ack boilerplate.
+
+# (s5243a) sync Agent whose only tool_result is the inline final result -> allow.
+T5243a="$TMPROOT/transcript-agent-sync.jsonl"
+write_transcript "$T5243a" "$AGENT5243_SYNC_USE" "$AGENT5243_SYNC_RESULT"
+result=$(run_hook "$T5243a" false)
+assert_allow "(s5243a) sync Agent (run_in_background:false) + inline result -> allow" "$result"
+
+# (s5243b) sync Agent whose inline result text incidentally contains the
+# "Async agent launched successfully" boilerplate -> STILL allow (the exact
+# false positive #5243 was filed for; the launch-ack exclusion is skipped here).
+T5243b="$TMPROOT/transcript-agent-sync-acktext.jsonl"
+write_transcript "$T5243b" "$AGENT5243_SYNC_ACKTEXT_USE" "$AGENT5243_SYNC_ACKTEXT_RESULT"
+result=$(run_hook "$T5243b" false)
+assert_allow "(s5243b) sync Agent whose result text contains ack boilerplate -> allow" "$result"
+
+# (s5243c) sync Task (back-compat tool name) with run_in_background:false -> allow.
+T5243c="$TMPROOT/transcript-task-sync.jsonl"
+write_transcript "$T5243c" "$TASK5243_SYNC_USE" "$TASK5243_SYNC_RESULT"
+result=$(run_hook "$T5243c" false)
+assert_allow "(s5243c) sync Task (run_in_background:false) + inline result -> allow" "$result"
+
+# (s5243d) true-positive retained: an ASYNC dispatch (run_in_background:true) with
+# ONLY its launch ack must STILL block. The sync short-circuit must not leak to
+# async ids.
+T5243d="$TMPROOT/transcript-agent-async-ack-only.jsonl"
+write_transcript "$T5243d" "$AGENT5243_ASYNC_USE" "$AGENT5243_ASYNC_ACK"
+result=$(run_hook "$T5243d" false)
+assert_block "(s5243d) async Agent (run_in_background:true) with only launch ack -> block" "$result"
+
+# (s5243e) acceptance-criterion regression fixture: mixed sync + async dispatches,
+# ALL completed -> guard allows the stop on the first try. One sync Agent (inline
+# result), one sync Task (inline result), one async Agent resolved by a later
+# distinct completion tool_result, and one async Agent resolved via a blocking
+# TaskOutput poll.
+T5243e="$TMPROOT/transcript-mixed-sync-async-all-done.jsonl"
+write_transcript "$T5243e" \
+    "$AGENT5243_SYNC_USE" "$AGENT5243_SYNC_RESULT" \
+    "$TASK5243_SYNC_USE" "$TASK5243_SYNC_RESULT" \
+    "$AGENT5086_USE_COMPLETED" "$AGENT5086_ACK_COMPLETED" "$AGENT5086_RESULT_COMPLETED" \
+    "$AGENT5086_USE_POLLED" "$AGENT5086_ACK_POLLED" "$AGENT5086_POLL_USE" "$AGENT5086_POLL_RESULT_TERMINAL"
+result=$(run_hook "$T5243e" false)
+assert_allow "(s5243e) mixed sync/async dispatches all completed -> allow first try" "$result"
+
+# (s5243f) mixed transcript with one genuinely-orphaned async dispatch amid the
+# resolved sync/async work -> STILL block exactly ONE Task/Agent (no under-count
+# from the sync short-circuit, no over-count of the resolved ones).
+T5243f="$TMPROOT/transcript-mixed-one-orphan.jsonl"
+write_transcript "$T5243f" \
+    "$AGENT5243_SYNC_USE" "$AGENT5243_SYNC_RESULT" \
+    "$TASK5243_SYNC_USE" "$TASK5243_SYNC_RESULT" \
+    "$AGENT5243_ASYNC_USE" "$AGENT5243_ASYNC_ACK"
+raw_5243f=$(run_hook "$T5243f" false)
+assert_block "(s5243f) mixed sync-done + one orphaned async -> block" "$raw_5243f"
+reason_5243f=$(echo "${raw_5243f#*|}" | jq -r '.reason // empty' 2>/dev/null || true)
+if [[ "$reason_5243f" == *"1 dispatched Task/Agent"* ]]; then
+    pass "(s5243g) mixed transcript counts exactly 1 orphaned Task/Agent"
+else
+    fail "(s5243g) mixed transcript counts exactly 1 orphaned Task/Agent (got: $reason_5243f)"
+fi
 
 # --- background Bash (run_in_background) detection (issue #4389) -----------
 
@@ -582,6 +919,92 @@ write_transcript "$T21" "$WAKE_USE_ERRORED" "$WAKE_ACK_ERRORED"
 result=$(run_hook "$T21" false)
 assert_allow "(s4) ScheduleWakeup whose arming call errored -> allow" "$result"
 
+# --- /loop dynamic-mode continuation exemption (issue #6175) ----------------
+# A `/loop`-style dynamic-mode session re-arms `ScheduleWakeup` on every
+# iteration by design, precisely so it survives turn boundaries in an
+# INTERACTIVE session -- ending the turn does not kill it, unlike the headless
+# `-p` orphaning hazard this guard exists to catch. Blocking on the armed
+# continuation timer is a false positive repeating once per loop iteration
+# (15+ blocks/day observed). The guard recognizes a ScheduleWakeup whose
+# `input.prompt` starts with `/loop` (optionally with arguments) or carries
+# the `<<autonomous-loop-dynamic>>` sentinel, and excludes it entirely from
+# the outstanding-timer count -- while a genuinely orphaned timer (a
+# non-matching ScheduleWakeup, or any Monitor) still blocks.
+NOW_TS6175="$(date -u +%Y-%m-%dT%H:%M:%S).000Z"
+
+# (w6175a) armed ScheduleWakeup with prompt "/loop", still fresh (delay not
+# elapsed) -> allow. The recognized loop re-entry is not counted at all, so a
+# session whose ONLY armed timer is this one is allowed to stop with no block.
+LOOP_USE_SLASH="{\"type\":\"assistant\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_loop01\",\"name\":\"ScheduleWakeup\",\"input\":{\"delaySeconds\":30,\"prompt\":\"/loop\"}}]}}"
+LOOP_ACK_SLASH="{\"type\":\"user\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_loop01\",\"content\":\"Next wakeup scheduled for 23:59:30 (in 30s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives.\"}]}}"
+T22L="$TMPROOT/transcript-loop-slash.jsonl"
+write_transcript "$T22L" "$LOOP_USE_SLASH" "$LOOP_ACK_SLASH"
+result=$(run_hook "$T22L" false)
+assert_allow "(w6175a) armed ScheduleWakeup prompt '/loop' (fresh) -> allow" "$result"
+
+# (w6175b) armed ScheduleWakeup carrying the `<<autonomous-loop-dynamic>>`
+# sentinel instead of a literal `/loop` prefix -> allow.
+LOOP_USE_SENTINEL="{\"type\":\"assistant\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_loop02\",\"name\":\"ScheduleWakeup\",\"input\":{\"delaySeconds\":30,\"prompt\":\"<<autonomous-loop-dynamic>>\"}}]}}"
+LOOP_ACK_SENTINEL="{\"type\":\"user\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_loop02\",\"content\":\"Next wakeup scheduled for 23:59:30 (in 30s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives.\"}]}}"
+T22M="$TMPROOT/transcript-loop-sentinel.jsonl"
+write_transcript "$T22M" "$LOOP_USE_SENTINEL" "$LOOP_ACK_SENTINEL"
+result=$(run_hook "$T22M" false)
+assert_allow "(w6175b) armed ScheduleWakeup with <<autonomous-loop-dynamic>> sentinel -> allow" "$result"
+
+# (w6175c) armed ScheduleWakeup whose prompt is "/loop" followed by arguments
+# -> allow. The recognition must not require an exact, argument-free match.
+LOOP_USE_ARGS="{\"type\":\"assistant\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_loop03\",\"name\":\"ScheduleWakeup\",\"input\":{\"delaySeconds\":30,\"prompt\":\"/loop --dynamic tick 3\"}}]}}"
+LOOP_ACK_ARGS="{\"type\":\"user\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_loop03\",\"content\":\"Next wakeup scheduled for 23:59:30 (in 30s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives.\"}]}}"
+T22N="$TMPROOT/transcript-loop-args.jsonl"
+write_transcript "$T22N" "$LOOP_USE_ARGS" "$LOOP_ACK_ARGS"
+result=$(run_hook "$T22N" false)
+assert_allow "(w6175c) armed ScheduleWakeup prompt '/loop --dynamic tick 3' -> allow" "$result"
+
+# (w6175d) armed ScheduleWakeup whose prompt merely MENTIONS "/loop" mid-text,
+# not as a recognized re-entry -> STILL block. Regression guard: the
+# recognition must stay narrow (prefix/sentinel only), not "any prompt
+# containing the substring /loop".
+LOOP_USE_MENTION="{\"type\":\"assistant\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_loop04\",\"name\":\"ScheduleWakeup\",\"input\":{\"delaySeconds\":30,\"prompt\":\"please check the /loop docs before the next tick\"}}]}}"
+LOOP_ACK_MENTION="{\"type\":\"user\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_loop04\",\"content\":\"Next wakeup scheduled for 23:59:30 (in 30s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives.\"}]}}"
+T22O="$TMPROOT/transcript-loop-mention.jsonl"
+write_transcript "$T22O" "$LOOP_USE_MENTION" "$LOOP_ACK_MENTION"
+result=$(run_hook "$T22O" false)
+assert_block "(w6175d) ScheduleWakeup prompt merely mentioning /loop (not a re-entry) -> still block" "$result"
+
+# (w6175e) a genuinely orphaned Monitor is NEVER exempted, even when its
+# (nonstandard) input happens to carry a "/loop"-shaped `prompt` field --
+# recognition is scoped to `ScheduleWakeup` only, `Monitor` has no prompt
+# semantics at all.
+MON_USE_LOOPLIKE="{\"type\":\"assistant\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_loop05\",\"name\":\"Monitor\",\"input\":{\"command\":\"sleep 90\",\"prompt\":\"/loop\",\"persistent\":true}}]}}"
+MON_ACK_LOOPLIKE="{\"type\":\"user\",\"timestamp\":\"$NOW_TS6175\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_loop05\",\"content\":\"Monitor started (task bmonloop5, persistent — runs until TaskStop or session end). You will be notified on each event.\"}]}}"
+T22P="$TMPROOT/transcript-monitor-looklike.jsonl"
+write_transcript "$T22P" "$MON_USE_LOOPLIKE" "$MON_ACK_LOOPLIKE"
+result=$(run_hook "$T22P" false)
+assert_block "(w6175e) Monitor with a /loop-shaped 'prompt' field is NOT exempted -> still block" "$result"
+
+# (w6175f) mixed transcript: one genuinely orphaned Monitor (blocks) + one
+# recognized loop-continuation ScheduleWakeup (allowed) armed at the same
+# time -> block (from the orphaned Monitor), the orphan count is exactly 1
+# (the loop timer is not double-counted), and the reason distinguishes the
+# two: the orphaned timer's sentence names it as blocking while a separate,
+# clearly-labeled sentence names the loop timer as recognized/allowed/not
+# counted -- so the transcript reads unambiguously.
+T22Q="$TMPROOT/transcript-monitor-plus-loop.jsonl"
+write_transcript "$T22Q" "$MON_USE_UNRESOLVED" "$MON_ACK_UNRESOLVED" "$LOOP_USE_SLASH" "$LOOP_ACK_SLASH"
+raw_mix6175=$(run_hook "$T22Q" false)
+assert_block "(w6175f) orphaned Monitor + loop-continuation ScheduleWakeup -> block" "$raw_mix6175"
+reason_mix6175=$(echo "${raw_mix6175#*|}" | jq -r '.reason // empty' 2>/dev/null || true)
+if [[ "$reason_mix6175" == *"1 armed Monitor/ScheduleWakeup timer(s)"* ]]; then
+    pass "(w6175f2) mixed transcript counts exactly 1 orphaned timer (loop timer excluded)"
+else
+    fail "(w6175f2) mixed transcript counts exactly 1 orphaned timer (loop timer excluded) (got: $reason_mix6175)"
+fi
+if [[ "$reason_mix6175" == *"NOT blocking"* && "$reason_mix6175" == *"loop-continuation"* ]]; then
+    pass "(w6175f3) reason names the loop-continuation timer separately as allowed/not blocking"
+else
+    fail "(w6175f3) reason names the loop-continuation timer separately as allowed/not blocking (got: $reason_mix6175)"
+fi
+
 # (t) background Bash explicitly TaskStop'd instead of completing -> allow. The
 # same false-positive class as the Monitor gap: a stopped task cannot be
 # orphaned by ending the turn (#4696).
@@ -646,6 +1069,102 @@ else
     fail "(u4b) block counts exactly the 1 genuinely-running background Bash task (got: $reason_u4)"
 fi
 
+# --- a background dispatch that never started (issue #5976) ------------------
+# A `run_in_background: true` Bash dispatch whose tool_result is an ERROR (a
+# PreToolUse guard denial, or a harness input-validation rejection) never
+# created a background task: no task id was ever minted, so no completion
+# notification, no blocking read and no TaskStop can ever exist for it. It must
+# be retired exactly the way the Monitor detector has always retired a failed
+# arming call — otherwise it is counted as outstanding on every stop for the
+# rest of the session.
+
+# (v5976a) guard-denied background dispatch (is_error:true) -> allow.
+T26="$TMPROOT/transcript-bg-denied.jsonl"
+write_transcript "$T26" "$BG_USE_DENIED" "$BG_ACK_DENIED"
+result=$(run_hook "$T26" false)
+assert_allow "(v5976a) guard-denied background Bash dispatch -> allow" "$result"
+
+# (v5976b) same transcript, second stop sequence -> still allow. The field
+# report was of a block that RECURRED on every stop; a durable transcript fact
+# (the error ack) must hold on every scan, not just the first.
+result=$(run_hook "$T26" false)
+assert_allow "(v5976b) guard-denied background dispatch -> allow again on second stop sequence" "$result"
+
+# (v5976c) <tool_use_error>-envelope rejection (no is_error flag) -> allow.
+T27="$TMPROOT/transcript-bg-denied-envelope.jsonl"
+write_transcript "$T27" "$BG_USE_DENIED_ENVELOPE" "$BG_ACK_DENIED_ENVELOPE"
+result=$(run_hook "$T27" false)
+assert_allow "(v5976c) <tool_use_error>-rejected background dispatch -> allow" "$result"
+
+# (v5976d) the full reported session shape: a denied dispatch alongside a
+# completed+notified background task, a completed Monitor and a completed
+# Agent -> allow on the FIRST attempt (nothing is genuinely outstanding).
+T28="$TMPROOT/transcript-5976-interactive.jsonl"
+write_transcript "$T28" \
+    "$BG_USE_DENIED" "$BG_ACK_DENIED" \
+    "$BG_USE_RESOLVED" "$BG_ACK_RESOLVED" "$BG_NOTIFICATION_QUEUEOP" \
+    "$MON_USE_RESOLVED" "$MON_ACK_RESOLVED" "$MON_NOTIFICATION_QUEUEOP" \
+    "$AGENT5713_USE_TOOLID" "$AGENT5713_ACK_TOOLID" "$AGENT5713_NOTIFICATION_TOOLID" \
+    "$FG_FINAL_TURN" "$FG_FINAL_RESULT"
+result=$(run_hook "$T28" false)
+assert_allow "(v5976d) denied dispatch + completed bg/Monitor/Agent -> allow" "$result"
+
+# (v5976e) true positive retained: a denied dispatch does NOT mask a genuinely
+# running background task in the same transcript, and the count is exactly 1.
+T29="$TMPROOT/transcript-bg-denied-plus-running.jsonl"
+write_transcript "$T29" "$BG_USE_DENIED" "$BG_ACK_DENIED" \
+    "$BG_USE_UNRESOLVED" "$BG_ACK_UNRESOLVED"
+result=$(run_hook "$T29" false)
+assert_block "(v5976e) denied dispatch + genuinely running task -> block" "$result"
+reason_v5=$(echo "${result#*|}" | jq -r '.reason // empty' 2>/dev/null || true)
+if [[ "$reason_v5" == *"1 background Bash"* ]]; then
+    pass "(v5976f) denied dispatch is not counted (exactly 1 outstanding)"
+else
+    fail "(v5976f) denied dispatch is not counted (exactly 1 outstanding) (got: $reason_v5)"
+fi
+
+# --- the block names WHICH ids it believes are outstanding (issue #5976) -----
+# Without the ids, diagnosing a false positive means eliminating every dispatch
+# in the session by hand. Each detector's clause must name its own ids.
+if [[ "$reason_v5" == *"toolu_bg01"* && "$reason_v5" != *"toolu_bg20"* ]]; then
+    pass "(w5976a) background-Bash block names the outstanding dispatch id"
+else
+    fail "(w5976a) background-Bash block names the outstanding dispatch id (got: $reason_v5)"
+fi
+
+raw_ids_task=$(run_hook "$T1" false)
+reason_ids_task=$(echo "${raw_ids_task#*|}" | jq -r '.reason // empty' 2>/dev/null || true)
+if [[ "$reason_ids_task" == *"toolu_01"* ]]; then
+    pass "(w5976b) Task/Agent block names the unresolved dispatch id"
+else
+    fail "(w5976b) Task/Agent block names the unresolved dispatch id (got: $reason_ids_task)"
+fi
+
+raw_ids_mon=$(run_hook "$T7" false)
+reason_ids_mon=$(echo "${raw_ids_mon#*|}" | jq -r '.reason // empty' 2>/dev/null || true)
+if [[ "$reason_ids_mon" == *"toolu_mon01"* ]]; then
+    pass "(w5976c) Monitor block names the still-armed timer id"
+else
+    fail "(w5976c) Monitor block names the still-armed timer id (got: $reason_ids_mon)"
+fi
+
+# (w5976d) the id list is bounded — a session with many outstanding dispatches
+# must not emit an unbounded reason string.
+T30="$TMPROOT/transcript-bg-many-outstanding.jsonl"
+: > "$T30"
+for i in 40 41 42 43 44 45 46 47 48 49 50 51; do
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_bg$i\",\"name\":\"Bash\",\"input\":{\"command\":\"sleep 100\",\"run_in_background\":true}}]}}" >> "$T30"
+    printf '%s\n' "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_bg$i\",\"content\":\"Command running in background with ID: bgmany$i. You will be notified when it completes.\"}]}}" >> "$T30"
+done
+raw_many=$(run_hook "$T30" false)
+reason_many=$(echo "${raw_many#*|}" | jq -r '.reason // empty' 2>/dev/null || true)
+if [[ "$reason_many" == *"12 background Bash"* && "$reason_many" == *"+4 more"* \
+      && "$reason_many" == *"toolu_bg40"* && "$reason_many" != *"toolu_bg51"* ]]; then
+    pass "(w5976d) outstanding-id list is truncated with a '+N more' suffix"
+else
+    fail "(w5976d) outstanding-id list is truncated with a '+N more' suffix (got: $reason_many)"
+fi
+
 # --- block reason mentions the #3822/#4257 hazard ---------------------------
 raw=$(run_hook "$T1" false)
 out="${raw#*|}"
@@ -654,6 +1173,30 @@ if [[ "$reason" == *"claude -p"* && "$reason" == *"#3822"* ]]; then
     pass "block reason explains the headless -p kill-signal hazard"
 else
     fail "block reason explains the headless -p kill-signal hazard (got: $reason)"
+fi
+
+# --- block reason names a context-safe await recipe, not a blind blocking
+# TaskOutput (issue #6168) -----------------------------------------------
+# The block only ever fires in HEADLESS mode now (#6645), so the message names
+# the headless recipe: a bounded, NON-BLOCKING TaskOutput poll -- not a flat
+# "blocking TaskOutput", which can return a raw JSONL transcript dump.
+if [[ "$reason" == *"#6168"* && "$reason" == *"HEADLESS"* \
+      && "$reason" == *"NON-BLOCKING"* && "$reason" == *"block: false"* ]]; then
+    pass "block reason names a context-safe await recipe (#6168)"
+else
+    fail "block reason names a context-safe await recipe (#6168) (got: $reason)"
+fi
+
+# --- block reason no longer prescribes the action it blocks (issue #6645) ---
+# The pre-#6645 message told the orchestrator that in an INTERACTIVE session
+# the correct recipe is to "just end the turn" -- and then blocked exactly
+# that. The block is headless-only now, so that sentence must be gone.
+if [[ "$reason" != *"just end the turn"* \
+      && "$reason" != *"arrive on a later turn"* \
+      && "$reason" == *"#6645"* ]]; then
+    pass "(m6645-msg) block reason no longer prescribes the action it blocks"
+else
+    fail "(m6645-msg) block reason no longer prescribes the action it blocks (got: $reason)"
 fi
 
 # --- contract: block output is valid JSON -----------------------------------
@@ -683,6 +1226,130 @@ EOF
 result=$(run_hook "$T1" false LOOM_GUARD_BACKGROUND_SUBAGENTS=1)
 assert_block "LOOM_GUARD_BACKGROUND_SUBAGENTS=1 overrides config:false -> block" "$result"
 rm -f "$TMPROOT/.loom/config.json"
+
+# =============================================================================
+# Session-mode detection (issue #6645)
+#
+# The SAME transcript -- one genuinely unresolved dispatch, present in every
+# case below -- must BLOCK in headless mode and be ALLOWED (advisory only) in
+# interactive mode. Every case that cannot positively establish "interactive"
+# must land on the blocking branch: that fail-closed default is the #4257
+# safety floor and is asserted explicitly, not assumed.
+# =============================================================================
+echo "--- session-mode detection (#6645) ---"
+
+# (m6645a) explicit interactive override -> allow with a systemMessage advisory
+result=$(run_hook_detect "$T1" false LOOM_SESSION_MODE=interactive)
+assert_advisory "(m6645a) LOOM_SESSION_MODE=interactive + unresolved dispatch -> allow (advisory)" "$result"
+
+# (m6645b) explicit headless override -> block, byte-for-byte the old behaviour
+result=$(run_hook_detect "$T1" false LOOM_SESSION_MODE=headless)
+assert_block "(m6645b) LOOM_SESSION_MODE=headless + unresolved dispatch -> block" "$result"
+
+# (m6645c) the two modes genuinely DIVERGE on identical input -- the core
+# acceptance criterion, asserted as one comparison rather than two isolated
+# expectations.
+raw_int=$(run_hook_detect "$T1" false LOOM_SESSION_MODE=interactive)
+raw_head=$(run_hook_detect "$T1" false LOOM_SESSION_MODE=headless)
+if [[ "${raw_int#*|}" != "${raw_head#*|}" \
+      && "${raw_head#*|}" == *"STOP BLOCKED"* \
+      && "${raw_int#*|}" != *"STOP BLOCKED"* ]]; then
+    pass "(m6645c) same unresolved transcript: headless blocks, interactive does not"
+else
+    fail "(m6645c) same unresolved transcript: headless blocks, interactive does not (interactive=${raw_int#*|} headless=${raw_head#*|})"
+fi
+
+# (m6645d) LOOM_HEADLESS_SESSION=1 (the marker spawn-claude.sh exports for every
+# print-mode spawn) -> headless, with no LOOM_SESSION_MODE pin in play.
+result=$(run_hook_detect "$T1" false LOOM_HEADLESS_SESSION=1)
+assert_block "(m6645d) LOOM_HEADLESS_SESSION=1 -> block" "$result"
+
+# (m6645e) an SDK entrypoint is programmatic, never a human at a terminal.
+result=$(run_hook_detect "$T1" false CLAUDE_CODE_ENTRYPOINT=sdk-cli)
+assert_block "(m6645e) CLAUDE_CODE_ENTRYPOINT=sdk-* -> block" "$result"
+
+# (m6645f/g) argv probe of the owning `claude` process. Two REAL processes are
+# spawned whose argv[0..1] basename is `claude` -- one carrying `-p` (print
+# mode) and one not -- and CLAUDE_PID is pointed at each in turn. This
+# exercises the actual /proc (or `ps`) read, not a stubbed-out branch.
+mkdir -p "$TMPROOT/fakebin"
+cat > "$TMPROOT/fakebin/claude" <<'EOF'
+#!/bin/bash
+sleep 60
+EOF
+chmod +x "$TMPROOT/fakebin/claude"
+
+# stdout/stderr go to /dev/null so these placeholders never hold this suite's
+# own output pipe open past the last assertion.
+"$TMPROOT/fakebin/claude" -p "/loom:sweep 1" --dangerously-skip-permissions >/dev/null 2>&1 &
+FAKE_PRINT_PID=$!
+FAKE_PIDS+=("$FAKE_PRINT_PID")
+"$TMPROOT/fakebin/claude" --dangerously-skip-permissions >/dev/null 2>&1 &
+FAKE_TTY_PID=$!
+FAKE_PIDS+=("$FAKE_TTY_PID")
+# Let the kernel publish each child's argv before probing it.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -n "$(tr '\0' ' ' < "/proc/$FAKE_PRINT_PID/cmdline" 2>/dev/null || ps -o args= -p "$FAKE_PRINT_PID" 2>/dev/null)" ]] && break
+    sleep 0.2
+done
+
+result=$(run_hook_detect "$T1" false "CLAUDE_PID=$FAKE_PRINT_PID")
+assert_block "(m6645f) owning claude process argv carries -p -> block" "$result"
+
+result=$(run_hook_detect "$T1" false "CLAUDE_PID=$FAKE_TTY_PID")
+assert_advisory "(m6645g) owning claude process argv has no print flag -> allow (advisory)" "$result"
+
+# (m6645h) FAIL-CLOSED: CLAUDE_PID is set but resolves to nothing we can call
+# `claude`, so the session mode is undetermined -> block, never allow.
+result=$(run_hook_detect "$T1" false "CLAUDE_PID=$$")
+assert_block "(m6645h) CLAUDE_PID resolves to a non-claude process -> block (fail closed)" "$result"
+
+result=$(run_hook_detect "$T1" false "CLAUDE_PID=2147483647")
+assert_block "(m6645i) CLAUDE_PID names no live process -> block (fail closed)" "$result"
+
+# (m6645j) an unrecognized LOOM_SESSION_MODE value is not a licence to allow.
+result=$(run_hook_detect "$T1" false LOOM_SESSION_MODE=banana "CLAUDE_PID=2147483647")
+assert_block "(m6645j) unrecognized LOOM_SESSION_MODE value -> block (fail closed)" "$result"
+
+# (m6645k) precedence: an explicit interactive override beats the
+# LOOM_HEADLESS_SESSION marker AND a print-mode argv (operator escape hatch for
+# a misclassified session).
+result=$(run_hook_detect "$T1" false LOOM_SESSION_MODE=interactive LOOM_HEADLESS_SESSION=1 "CLAUDE_PID=$FAKE_PRINT_PID")
+assert_advisory "(m6645k) LOOM_SESSION_MODE=interactive beats marker + print argv" "$result"
+
+# (m6645l) precedence the safe way round: the marker beats a non-print argv.
+result=$(run_hook_detect "$T1" false LOOM_HEADLESS_SESSION=1 "CLAUDE_PID=$FAKE_TTY_PID")
+assert_block "(m6645l) LOOM_HEADLESS_SESSION=1 beats a non-print argv -> block" "$result"
+
+# (m6645m) the loop guard is untouched by the new branch: stop_hook_active=true
+# allows in BOTH modes, and interactive mode does not even emit the advisory
+# (the hook exits at the loop guard, long before any detection runs).
+result=$(run_hook_detect "$T1" true LOOM_SESSION_MODE=interactive)
+assert_allow "(m6645m) stop_hook_active=true + interactive -> allow, silent" "$result"
+result=$(run_hook_detect "$T1" true LOOM_SESSION_MODE=headless)
+assert_allow "(m6645m) stop_hook_active=true + headless -> allow, silent" "$result"
+
+# (m6645n) a fully-resolved transcript is silent in interactive mode too -- the
+# advisory must fire only when something is actually outstanding, never on
+# every stop.
+result=$(run_hook_detect "$T2" false LOOM_SESSION_MODE=interactive)
+assert_allow "(m6645n) resolved transcript + interactive -> allow, no advisory" "$result"
+
+# (m6645o) the interactive advisory still reports the SAME accounting the block
+# would have: it names the outstanding dispatch id and says the stop is allowed.
+raw_adv=$(run_hook_detect "$T1" false LOOM_SESSION_MODE=interactive)
+adv_msg=$(echo "${raw_adv#*|}" | jq -r '.systemMessage // empty' 2>/dev/null || true)
+if [[ "$adv_msg" == *"toolu_01"* && "$adv_msg" == *"INTERACTIVE"* \
+      && "$adv_msg" == *"ALLOWED"* && "$adv_msg" == *"#6645"* ]]; then
+    pass "(m6645o) interactive advisory names the outstanding id and says ALLOWED"
+else
+    fail "(m6645o) interactive advisory names the outstanding id and says ALLOWED (got: $adv_msg)"
+fi
+
+# (m6645p) the guard toggle still wins over everything: disabled means silent
+# in interactive mode too (no advisory leaks out of a disabled guard).
+result=$(run_hook_detect "$T1" false LOOM_GUARD_BACKGROUND_SUBAGENTS=0 LOOM_SESSION_MODE=interactive)
+assert_allow "(m6645p) guard disabled + interactive -> allow, silent" "$result"
 
 # --- jq absent -> allow (fail-open) -----------------------------------------
 NOJQ_DIR="$(mktemp -d)"

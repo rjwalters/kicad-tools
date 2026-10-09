@@ -1127,7 +1127,7 @@ shellcheck scripts/*.sh # Shell scripts (if applicable)
 
 | File | Load when |
 |---|---|
-| [`cargo-target-isolation.md`](../loom-cargo-target-isolation/SKILL.md) | Before a local cargo result counts as "the fix works": a shared target dir may hold another worktree's binary (#8457). |
+| [`cargo-target-isolation.md`](../loom-cargo-target-isolation/SKILL.md) | Any cargo build: use exported `CARGO_TARGET_DIR` or `<worktree>/target`; never `/tmp`, `~`, `.loom/target-*` (#8370). |
 | [`ci-refusals-reference.md`](../loom-ci-refusals-reference/SKILL.md) | A CI read got 403/429, or a job needs a re-run. |
 
 ### Step 5: Verify Remote CI After Push

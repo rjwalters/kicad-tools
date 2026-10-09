@@ -158,6 +158,25 @@
 # reordering is a larger, riskier restructuring of the self-update deferral
 # #4669 established.
 #
+# DAEMON RESYNC (#10895): `loom-daemon`'s workspace resync (#10718) refreshes
+# the same installed files from the release the daemon is running, with no
+# checkout of the Loom source. Its surfaces are one table,
+# loom-daemon/src/init/payload/surfaces.rs, and a parity test
+# (init/resync_surface_parity_tests.rs) fails when a surface this script
+# writes is in neither that table nor its install-time-only list. It covers:
+# every pure-copy surface above, `.agents/skills/` (same marker gate),
+# `.claude/README.md` and `.github/CONFIGURATION.md` (when present),
+# `.claude/biome.jsonc`, the managed `.gitignore` block, the retired-payload
+# sweep, and `.loom/CLAUDE.md` / `.loom/AGENTS.md` (re-rendered from the
+# template with the install date the file carries, which this script does not
+# do). It honors `.loom/resync-ignore` in the forms this script reports.
+#
+# Still done ONLY here or by the installer, never by the daemon resync: the
+# package.json stub `version` removal (#4285), the root CLAUDE.md version
+# header removal (#6612), the `merge=ours` driver (#4528), the forge label
+# drift check, and anything in .loom/config.json (out of scope below too).
+# Adding a surface here means deciding it there in the same change.
+#
 # EXPLICITLY OUT OF SCOPE (never touched by resync — updated by other mechanisms):
 #   .loom/config.json       - operator-owned; needs merge-semantics design.
 #                             LOAD-BEARING for session mode (#8884): the

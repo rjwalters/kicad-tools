@@ -2499,7 +2499,7 @@ In step 7, run only the tests relevant to the changed files (**scoped test execu
 
 | File | Load when |
 |---|---|
-| [`cargo-target-isolation.md`](../loom-cargo-target-isolation/SKILL.md) | Before a local cargo result informs a verdict: a shared target dir may hold another worktree's binary (#8457). |
+| [`cargo-target-isolation.md`](../loom-cargo-target-isolation/SKILL.md) | Any cargo build: use exported `CARGO_TARGET_DIR` or `<worktree>/target`; never `/tmp`, `~`, `.loom/target-*` (#8370). |
 
 ## Feedback Style
 

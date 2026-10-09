@@ -50,7 +50,20 @@ PROTECTED_DIRS=(
 
 # Determine log directory relative to this script's location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo ".")"
-HOOK_ERROR_LOG="${SCRIPT_DIR}/../logs/hook-errors.log"
+
+# Runtime log directory (#7882) — same resolution as the other Loom guards. At
+# runtime SCRIPT_DIR is the installed hook's dir (.loom/hooks/), so ../logs is
+# .loom/logs. A copy living under defaults/hooks/ (the vendored source tree that
+# ships to every consumer repo) redirects to the repo's own .loom/logs instead,
+# so running a guard from source never deposits telemetry into defaults/.
+_LOOM_HOOK_PARENT="${SCRIPT_DIR%/*}"
+if [[ "${_LOOM_HOOK_PARENT##*/}" == "defaults" ]]; then
+    HOOK_LOG_DIR="${_LOOM_HOOK_PARENT%/*}/.loom/logs"
+else
+    HOOK_LOG_DIR="${SCRIPT_DIR}/../logs"
+fi
+
+HOOK_ERROR_LOG="${HOOK_LOG_DIR}/hook-errors.log"
 
 # Log a diagnostic error message (best-effort, never fails the script)
 log_hook_error() {

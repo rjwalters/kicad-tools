@@ -167,6 +167,12 @@ roots). With the opt-in on, those sessions' `OTEL_RESOURCE_ATTRIBUTES` is
 extended (never replaced) with `loom.role=<role>` and `loom.sweep_id=<tick or
 dispatch id>`, so per-request records group by role and tick.
 
+That opt-in points a session's exporter **directly** at an endpoint. To have
+launched sessions export **through the daemon** instead — identity bound and
+secrets scrubbed by the daemon, no separate collector — see the agent telemetry
+relay in [`observability.md` §3d](observability.md#3d-agent-telemetry-relay-issue-10964)
+(#10964); when both are on, the relay's endpoint wins.
+
 Phase timing has two explicit forms. An explicitly launched role has an observed
 start; its checkpoint completes that attempt. A role performed inside one
 third-party CLI session has only an observed checkpoint completion, represented

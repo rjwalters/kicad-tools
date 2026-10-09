@@ -33,7 +33,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-SRC_HOOK="$REPO_ROOT/defaults/hooks/guard-loom-workflow.sh"
+# Prefer the installed hook/library (a Loom-installed consumer repo has no
+# defaults/ directory at all); fall back to defaults/ for Loom's own source
+# tree. See issue #6496. DEFAULTS_HOOK stays strictly the defaults/ path --
+# it is the source-of-truth side of the "defaults/ vs .loom/ sync" check
+# below, which must remain a real cross-copy diff, not a self-diff.
+SRC_HOOK="$REPO_ROOT/.loom/hooks/guard-loom-workflow.sh"
+[[ -r "$SRC_HOOK" ]] || SRC_HOOK="$REPO_ROOT/defaults/hooks/guard-loom-workflow.sh"
+DEFAULTS_HOOK="$REPO_ROOT/defaults/hooks/guard-loom-workflow.sh"
+CONFIG_RESOLVER="$REPO_ROOT/.loom/scripts/lib/config-resolver.sh"
+[[ -r "$CONFIG_RESOLVER" ]] || CONFIG_RESOLVER="$REPO_ROOT/defaults/scripts/lib/config-resolver.sh"
 
 PASS=0
 FAIL=0
@@ -53,7 +62,7 @@ chmod +x "$TMPROOT/.loom/hooks/guard-loom-workflow.sh"
 # resolver at the equivalent installed-layout path (mirrors
 # test-guard-worktree-paths.sh) so decision_log_enabled() exercises the real
 # tiered resolution rather than silently no-op'ing.
-cp "$REPO_ROOT/defaults/scripts/lib/config-resolver.sh" "$TMPROOT/.loom/scripts/lib/config-resolver.sh"
+cp "$CONFIG_RESOLVER" "$TMPROOT/.loom/scripts/lib/config-resolver.sh"
 HOOK="$TMPROOT/.loom/hooks/guard-loom-workflow.sh"
 
 pass() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); printf "${GREEN}PASS${NC} %s\n" "$1"; }
@@ -205,7 +214,9 @@ rm -rf "$NOJQ_DIR"
 
 # --- defaults/ vs .loom/ sync ------------------------------------------------
 DEPLOY_HOOK="$REPO_ROOT/.loom/hooks/guard-loom-workflow.sh"
-if [[ -f "$DEPLOY_HOOK" ]] && diff -q "$SRC_HOOK" "$DEPLOY_HOOK" >/dev/null 2>&1; then
+if [[ ! -f "$DEFAULTS_HOOK" ]]; then
+    echo "SKIP: defaults/hooks/guard-loom-workflow.sh not present (bare consumer layout) -- sync check not applicable"
+elif [[ -f "$DEPLOY_HOOK" ]] && diff -q "$DEFAULTS_HOOK" "$DEPLOY_HOOK" >/dev/null 2>&1; then
     pass ".loom/ hook byte-identical to defaults/"
 else
     fail ".loom/ hook byte-identical to defaults/"

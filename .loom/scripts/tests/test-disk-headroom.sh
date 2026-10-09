@@ -57,10 +57,14 @@ assert_eq "$(wave daemon 20 100)" "10|target" "daemon: plentiful disk + candidat
 # Candidate-bound: only 3 issues, disk and target both higher.
 assert_eq "$(wave daemon 3 100)" "3|candidates" "daemon: 3 candidates clamps to 3 (candidates)"
 
-# Disk-bound: free=6 GB, per=2 -> max_by_disk=3, below target and candidates.
-assert_eq "$(wave daemon 10 6)" "3|disk" "daemon: 6GB free (per 2) clamps to 3 (disk)"
+# Disk-bound: free=24 GB, per=8 (the default, #8370) -> max_by_disk=3, below
+# target and candidates.
+assert_eq "$(wave daemon 10 24)" "3|disk" "daemon: 24GB free (per 8) clamps to 3 (disk)"
 
-# Floor-of-1: nearly full disk (free=1, per=2 -> 0) never returns 0.
+# The default is 8, not the pre-#8370 2: 16 GB fits two worktrees, not eight.
+assert_eq "$(wave daemon 10 16)" "2|disk" "daemon: 16GB free (default per 8) clamps to 2 (disk)"
+
+# Floor-of-1: nearly full disk (free=1, per=8 -> 0) never returns 0.
 assert_eq "$(wave daemon 10 1)" "1|floor" "daemon: 1GB free floors to 1 (floor)"
 
 # --- Test 2: pure wave-size math (subagent path, explicit cap) ---
@@ -80,8 +84,8 @@ assert_eq "$(wave subagent 20 100)" "3|target" "subagent: plentiful -> 3 (explic
 # Candidate-bound: 2 issues -> 2.
 assert_eq "$(wave subagent 2 100)" "2|candidates" "subagent: 2 candidates clamps to 2"
 
-# Disk-bound below the cap: free=2, per=2 -> 1.
-assert_eq "$(wave subagent 10 2)" "1|disk" "subagent: 2GB free (per 2) clamps to 1 (disk)"
+# Disk-bound below the cap: free=8, per=8 -> 1.
+assert_eq "$(wave subagent 10 8)" "1|disk" "subagent: 8GB free (per 8) clamps to 1 (disk)"
 
 # Floor: free=0 -> 1.
 assert_eq "$(wave subagent 10 0)" "1|floor" "subagent: 0GB free floors to 1"

@@ -22,8 +22,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-SRC_HOOK="$REPO_ROOT/defaults/hooks/skill-router.sh"
-SRC_CONFIG="$REPO_ROOT/defaults/config/skill-routes.json"
+# Prefer the installed hook/config (a Loom-installed consumer repo has no
+# defaults/ directory at all); fall back to defaults/ for Loom's own source
+# tree. See issue #6496. DEFAULTS_HOOK/DEFAULTS_CONFIG stay strictly the
+# defaults/ paths -- they back the config-hygiene assertions below (which
+# intentionally police the committed defaults/ source, not whichever copy
+# happens to be installed) and the "defaults/ vs .loom/ sync" diff, which
+# must remain a real cross-copy diff, not a self-diff.
+SRC_HOOK="$REPO_ROOT/.loom/hooks/skill-router.sh"
+[[ -r "$SRC_HOOK" ]] || SRC_HOOK="$REPO_ROOT/defaults/hooks/skill-router.sh"
+SRC_CONFIG="$REPO_ROOT/.loom/config/skill-routes.json"
+[[ -r "$SRC_CONFIG" ]] || SRC_CONFIG="$REPO_ROOT/defaults/config/skill-routes.json"
+DEFAULTS_HOOK="$REPO_ROOT/defaults/hooks/skill-router.sh"
+DEFAULTS_CONFIG="$REPO_ROOT/defaults/config/skill-routes.json"
 
 PASS=0
 FAIL=0
@@ -156,6 +167,60 @@ reset_markers
 out=$(run_hook "please open an issue with rjwalters/loom about this")
 assert_no_output "report example 'open an issue with rjwalters/loom' -> no route" "$out"
 
+# --- Anti-route suppression: explicit declines near a route keyword (#5327) --
+# A prompt matching a route pattern (e.g. "fix") while explicitly declining
+# Loom usage must emit no AGENT_ROUTE at all.
+reset_markers
+out=$(run_hook "just fix it here and commit and push; we don't need to use loom for every tiny change")
+assert_no_output "anti-route: 'don't need to use loom' -> no route" "$out"
+
+reset_markers
+out=$(run_hook "don't use loom to fix this")
+assert_no_output "anti-route: 'don't use loom to fix this' -> no route" "$out"
+
+reset_markers
+out=$(run_hook "no need for a loom agent, just fix it inline")
+assert_no_output "anti-route: 'just fix it inline' -> no route" "$out"
+
+reset_markers
+out=$(run_hook "fix this yourself without loom")
+assert_no_output "anti-route: 'fix this yourself without loom' -> no route" "$out"
+
+# Positive control: a genuine fix request (no decline phrase) must still route.
+reset_markers
+out=$(run_hook "fix the failing test in tests/test_foo.py")
+ctx=$(context_of "$out")
+assert_contains "'fix the failing test in <file>' -> AGENT_ROUTE present" "$ctx" "AGENT_ROUTE:"
+assert_contains "'fix the failing test in <file>' -> routes to /loom:doctor" "$ctx" "/loom:doctor"
+
+# --- Anti-route must NOT over-suppress: bare adverbs are not declines --------
+# "myself" / "inline" / "directly" appear in plenty of ordinary prompts that
+# never decline Loom. They must not be anti-route phrases — every phrase in
+# ANTI_ROUTE_PHRASES has to mention "loom" explicitly.
+reset_markers
+out=$(run_hook "help me build this feature, I want to do the core logic myself")
+ctx=$(context_of "$out")
+assert_contains "no over-suppression: '...myself' -> AGENT_ROUTE present" "$ctx" "AGENT_ROUTE:"
+assert_contains "no over-suppression: '...myself' -> routes to /loom:builder" "$ctx" "/loom:builder"
+
+reset_markers
+out=$(run_hook "please clean up this code inline, no separate refactor commit")
+ctx=$(context_of "$out")
+assert_contains "no over-suppression: '...inline' -> AGENT_ROUTE present" "$ctx" "AGENT_ROUTE:"
+assert_contains "no over-suppression: '...inline' -> routes to /loom:hermit" "$ctx" "/loom:hermit"
+
+reset_markers
+out=$(run_hook "please review this PR directly, I want your feedback fast")
+ctx=$(context_of "$out")
+assert_contains "no over-suppression: 'review...directly' -> AGENT_ROUTE present" "$ctx" "AGENT_ROUTE:"
+assert_contains "no over-suppression: 'review...directly' -> routes to /loom:judge" "$ctx" "/loom:judge"
+
+reset_markers
+out=$(run_hook "fix the bug directly in the config file")
+ctx=$(context_of "$out")
+assert_contains "no over-suppression: 'fix...directly' -> AGENT_ROUTE present" "$ctx" "AGENT_ROUTE:"
+assert_contains "no over-suppression: 'fix...directly' -> routes to /loom:doctor" "$ctx" "/loom:doctor"
+
 # --- Per-session dedup of the agent table -----------------------------------
 reset_markers
 out1=$(run_hook "please implement the new feature" "session-abc")
@@ -215,34 +280,43 @@ for probe in "the weather is quite nice today" "please implement the new feature
     fi
 done
 
-# --- Config hygiene ---------------------------------------------------------
-if jq empty "$SRC_CONFIG" 2>/dev/null; then
-    pass "defaults config is valid JSON"
+# --- Config hygiene (policing the committed defaults/ source; skipped in a
+# bare consumer layout where defaults/ does not exist) -----------------------
+if [[ ! -f "$DEFAULTS_CONFIG" ]]; then
+    echo "SKIP: defaults/config/skill-routes.json not present (bare consumer layout) -- config-hygiene checks not applicable"
 else
-    fail "defaults config is valid JSON"
-fi
+    if jq empty "$DEFAULTS_CONFIG" 2>/dev/null; then
+        pass "defaults config is valid JSON"
+    else
+        fail "defaults config is valid JSON"
+    fi
 
-if grep -q "shepherd" "$SRC_CONFIG"; then
-    fail "dead shepherd route removed from defaults config"
-else
-    pass "dead shepherd route removed from defaults config"
-fi
+    if grep -q "shepherd" "$DEFAULTS_CONFIG"; then
+        fail "dead shepherd route removed from defaults config"
+    else
+        pass "dead shepherd route removed from defaults config"
+    fi
 
-if grep -Eq '"/(shepherd|architect|judge|doctor|hermit|builder|curator|guide|auditor|loom)"' "$SRC_CONFIG"; then
-    fail "no un-namespaced /<role> agents in defaults config"
-else
-    pass "all agents are namespaced /loom:<role> in defaults config"
+    if grep -Eq '"/(shepherd|architect|judge|doctor|hermit|builder|curator|guide|auditor|loom)"' "$DEFAULTS_CONFIG"; then
+        fail "no un-namespaced /<role> agents in defaults config"
+    else
+        pass "all agents are namespaced /loom:<role> in defaults config"
+    fi
 fi
 
 # --- defaults/ vs .loom/ sync (both hook and config) ------------------------
 DEPLOY_HOOK="$REPO_ROOT/.loom/hooks/skill-router.sh"
 DEPLOY_CONFIG="$REPO_ROOT/.loom/config/skill-routes.json"
-if [[ -f "$DEPLOY_HOOK" ]] && diff -q "$SRC_HOOK" "$DEPLOY_HOOK" >/dev/null 2>&1; then
+if [[ ! -f "$DEFAULTS_HOOK" ]]; then
+    echo "SKIP: defaults/hooks/skill-router.sh not present (bare consumer layout) -- sync check not applicable"
+elif [[ -f "$DEPLOY_HOOK" ]] && diff -q "$DEFAULTS_HOOK" "$DEPLOY_HOOK" >/dev/null 2>&1; then
     pass ".loom/ hook byte-identical to defaults/"
 else
     fail ".loom/ hook byte-identical to defaults/"
 fi
-if [[ -f "$DEPLOY_CONFIG" ]] && diff -q "$SRC_CONFIG" "$DEPLOY_CONFIG" >/dev/null 2>&1; then
+if [[ ! -f "$DEFAULTS_CONFIG" ]]; then
+    echo "SKIP: defaults/config/skill-routes.json not present (bare consumer layout) -- sync check not applicable"
+elif [[ -f "$DEPLOY_CONFIG" ]] && diff -q "$DEFAULTS_CONFIG" "$DEPLOY_CONFIG" >/dev/null 2>&1; then
     pass ".loom/ config byte-identical to defaults/"
 else
     fail ".loom/ config byte-identical to defaults/"

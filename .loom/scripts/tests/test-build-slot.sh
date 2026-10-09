@@ -61,7 +61,10 @@ new_slot_dir() {
 }
 
 export LOOM_BUILD_SLOT_WAIT_SECS=1
-unset LOOM_BUILD_SLOT_HELD || true
+unset LOOM_BUILD_SLOT_HELD LOOM_BUILD_SLOTS LOOM_BUILD_SLOT_STALE_SECS || true
+# #11014: a suite-wide default, so a case that forgets its own LOOM_BUILD_SLOT_DIR
+# lands in the temp root, never in the host's ~/.loom/locks/build-slot.
+export LOOM_BUILD_SLOT_DIR="$TMPROOT/default/build-slot"
 
 echo ""
 echo "=== build-slot.sh: acquire / release round-trip ==="

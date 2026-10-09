@@ -560,6 +560,58 @@ Directories orphaned *before* this landed have no worktree left to resolve
 from, so they must be removed by hand — check them against `git worktree list`
 first, and stop anything still building into them.
 
+### `StorageFull` in an unrelated test means: check `df` first (#8370)
+
+**Symptom**: a test that has nothing to do with your change fails with
+`Error code 13: database or disk is full`, `StorageFull`, `No space left on
+device` or `ENOSPC`, often on a `tempfile` path, sometimes alongside your own
+tool calls failing with "the temp filesystem ... is full". It is easy to read
+as "main is broken" and misdiagnose a valid change.
+
+**Check the disk before believing the suite:**
+
+```bash
+df -h . /tmp "${TMPDIR:-/tmp}"
+```
+
+If a volume is at or near 100%, the failure says nothing about the code. The
+usual cause is leaked cargo target dirs, 3-22 GB each. Look under the
+prefixes the orphan sweep knows:
+
+```bash
+du -sh <repo>/.loom/targets/* <repo>/.loom/target-* /tmp/loom-target-* \
+  /tmp/cargo-target-* "${TMPDIR:-/tmp}"/cargo-target-* ~/.cache/cargo-target-* 2>/dev/null
+```
+
+**Fix**: `loom-daemon clean --dry-run` lists the orphans and the bytes they
+hold, and `loom-daemon clean -y` removes them. A dir is an orphan only when its
+newest file is older than 3 hours (`LOOM_TARGET_ORPHAN_RECLAIM_MAX_AGE_HOURS`),
+no process holds it open, no live claim names its issue, and it is not your
+configured `CARGO_TARGET_DIR` / `build.target-dir`. The daemon runs the same
+sweep every 15 minutes and whenever free disk drops below the floor
+(`category=cargo_target_orphan` in its log). Then re-run the test.
+
+**What the sweep will not touch.** Under `/tmp`, `$TMPDIR` and `~/.cache` it
+matches agent-shaped names only (`cargo-target-issue-<N>`,
+`cargo-target-review-<N>`, `loom-target-<N>-doctor`: role or `issue` /
+`review` / `pr` words plus a number) and only dirs owned by the daemon's own
+user. Your own `~/.cache/cargo-target-shared` is never a candidate, whether or
+not the daemon can see your `CARGO_TARGET_DIR`. Under `<repo>/.loom/targets/`
+it removes only dirs carrying Loom's `.loom-run-owner` marker. If `.loom` or
+`.loom/targets` is a symlink (say, to a bigger volume) the sweep refuses that
+root and logs `not scanning … is a symlink`; set `CARGO_TARGET_DIR` or
+`build.target-dir` to relocate builds instead. To turn the sweep off entirely:
+`LOOM_TARGET_ORPHAN_RECLAIM=0`.
+
+**Prevention**: every role run now gets a Loom-owned `CARGO_TARGET_DIR` under
+`<repo>/.loom/targets/`. A role-runner tick's dir is removed when the run
+ends; a daemon sweep's or manual spawn's is collected by the orphan sweep
+after its owner exits. Agents must use it (or
+their worktree's `target/`) and never create one under `/tmp`, `~`, `~/.cache`
+or `.loom/target-*`; see `cargo-target-isolation.md`. The disk-headroom
+estimate per worktree (`LOOM_PER_WORKTREE_GB`) defaults to 8 GB, measured
+from full builds of this workspace.
+
 ### Building into a private target dir you can actually delete afterwards (#8460)
 
 **Symptom**: you build into a private `CARGO_TARGET_DIR` to get a hermetic test
@@ -568,6 +620,11 @@ binary, #8453), and then `rm -rf` on it is denied —
 `BLOCKED: rm target outside repo scope (LOOM_RM_SCOPE=repo)`. The directory is
 outside the repo by construction, so `rmScope=repo` refuses it. Three agents in
 one day each gave up at this point and abandoned 3.5–11 GB apiece.
+
+A role run no longer needs this: it is handed a Loom-owned `CARGO_TARGET_DIR`
+that Loom removes itself, and can otherwise build into its worktree's
+`target/` (#8370, `cargo-target-isolation.md`). This section is for an
+interactive session that has neither.
 
 **Fix**: put the private target dir at the one out-of-repo path the guard can
 prove you own — `<scratch-root>/<your session id>`, marked with a

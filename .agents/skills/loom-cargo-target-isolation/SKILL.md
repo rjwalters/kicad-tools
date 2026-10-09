@@ -39,54 +39,47 @@ evidence.** Treat a pass or a fail observed there as uninformative — not as
 grounds to approve, reject, or declare a fix confirmed — until you have
 reproduced it from an isolated build.
 
-## The recipe: a private `CARGO_TARGET_DIR`
+## The recipe: the `CARGO_TARGET_DIR` Loom gave you
 
-Run the build/test, and its cleanup, in a **single Bash tool call** (this
-matters for the cleanup step below):
+Decide once, before your first verdict-bearing build:
 
-```bash
-CARGO_TARGET_DIR="$(mktemp -d)"
-export CARGO_TARGET_DIR
-cargo test -p loom-daemon --test the_test_you_need   # or the scoped command you'd otherwise run
-rm -rf "$CARGO_TARGET_DIR"
-```
+1. **`$CARGO_TARGET_DIR` is set to a Loom-owned dir**: a path under
+   `<repo>/.loom/targets/`, or the per-worktree dir named in your worktree's
+   `.loom-cargo-target-dir`. Use it as given. Loom created it for this run
+   and reclaims it (see Cleanup). Do not export another or delete it.
+2. **Otherwise** (unset, a shared cache, an operator value, or you are one of
+   several agents building concurrently in one session, which all inherit the
+   same value): build into your worktree's own `target/`.
 
-This is a full rebuild into a directory nobody else touches (3.5-11 GB,
-several minutes) — worth it because a wrong verdict costs more than a rebuild.
-Only the result of a run against a private `CARGO_TARGET_DIR` (or a repo's own
-per-worktree target dir, once the structural fix in the parent issue lands) is
-verdict-bearing.
+   ```bash
+   CARGO_TARGET_DIR="$WORKTREE_ABS/target" cargo test -p loom-daemon --test the_test_you_need
+   ```
 
-## Cleanup depends on how you do it (`rmScope`)
+   Nobody else builds there, and it is removed with the worktree.
+3. **Never create one anywhere else.** No `mktemp -d`, nothing under `/tmp`,
+   `$TMPDIR`, `~`, `~/.cache`, or `<repo>/.loom/target-*`. Nothing owns those
+   paths, so a failed or interrupted run leaks the whole build: 85 GB of
+   `.loom/target-*` on one fleet host and 45 GB of `/tmp/cargo-target-*` on
+   another (#8370). The daemon's orphan sweep reclaims them only hours later.
 
-The `rmScope` guard (`defaults/docs/guard-hooks.md` → "Repo-Scoped rm Guard")
-is repo-scoped by default: it **denies** (a hard block, not an ask) an `rm -rf`
-whose target cannot be proven to resolve inside the repo/worktree or a known
-ephemeral temp root. Verified directly against the guard (not assumed) — two
-shapes are safe, one is not:
+A private dir means a full rebuild (3.5-11 GB, several minutes; sccache
+softens it). That is worth it, because a wrong verdict costs more than a
+rebuild. Only a result from one of the two dirs above is verdict-bearing.
 
-- **Same-Bash-call cleanup (preferred, the recipe above)**: a bare
-  `rm -rf "$NAME"` is allowed when the *same command* also contains exactly
-  one assignment `NAME="$(mktemp -d)"` (or `mktemp` with no template/prefix)
-  and nothing else reassigns `NAME` — the guard's
-  `rm_scope_mktemp_same_command_safe()` fast path (#6520) proves the target is
-  `/tmp`-or-`$TMPDIR`-rooted and skips the scope check entirely.
-- **Cleanup in a later, separate Bash call, by literal path**: `mktemp -d`'s
-  default output root (`/tmp`, `/var/tmp`, or `$TMPDIR`) is on the guard's
-  built-in **ephemeral allowlist** — so `rm -rf /tmp/tmp.AbC123` (the actual
-  printed path, not the `$VAR` reference) is allowed even from a later call
-  with no same-command assignment. Print the path once
-  (`echo "$CARGO_TARGET_DIR"`) so you have it verbatim if creation and cleanup
-  end up split across turns.
-- **Not safe**: a bare `rm -rf "$CARGO_TARGET_DIR"` in a call that does *not*
-  also contain the mktemp assignment. The guard cannot resolve what a prior,
-  separate call bound the variable to, and denies unconditionally
-  (`rm-scope-unresolved-var`, "unexpanded shell variable ... fail closed").
+## Cleanup
 
-Do not work around the guard to force an unresolved-variable cleanup through.
-If you end up with a target dir you cannot remove by either safe shape above,
-say so explicitly in your output — a stated, small `/tmp` leak is better than
-a silent one.
+There is none for you to do. A case-1 dir is removed at run end only on a
+role-runner tick (the daemon's periodic `/loom:<role>` dispatch), once the
+harness and its process group have exited. For a daemon sweep spawn or a
+manual `spawn-worker.sh` nothing waits on the run, so the daemon's orphan
+sweep collects the dir 3 h or more after its owner exits. A case-2 dir goes
+with the worktree. Do not background a build and end your run: it keeps the
+dir until the sweep. If
+you find a leftover dir that an earlier
+run created under `/tmp` (from before this recipe), remove it by its literal
+printed path (`rm -rf /tmp/cargo-target-123`). The `rmScope` guard
+(`defaults/docs/guard-hooks.md`) allows `/tmp` and `$TMPDIR` literals and
+denies an `rm -rf "$VAR"` it cannot resolve. Do not work around it.
 
 ## Not the same fix as `require-daemon-bin.sh` or a per-worktree target dir
 
@@ -100,6 +93,7 @@ replace either:
   rule). That covers suites built on that harness; it does
   not cover a Judge/Doctor/Builder's own direct `cargo test`/`cargo build`
   invocation of `loom-daemon/tests/*.rs`, which is what this recipe is for.
-- A genuine **per-worktree** `CARGO_TARGET_DIR` (so builds never share a
-  target dir at all) is the structural fix and a separate, larger sub-issue
-  of #8453 — this recipe is the stopgap until it lands.
+- The structural fixes are the per-worktree dir a claim-owning sweep gets
+  when the repo opts in (#8458) and the Loom-owned per-run dir every other
+  role run gets (#8370). This recipe tells you which one you have and what
+  to do when you have neither.

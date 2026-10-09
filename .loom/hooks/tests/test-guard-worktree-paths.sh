@@ -28,7 +28,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-SRC_HOOK="$REPO_ROOT/defaults/hooks/guard-worktree-paths.sh"
+# Prefer the installed hook/libraries (a Loom-installed consumer repo has no
+# defaults/ directory at all); fall back to defaults/ for Loom's own source
+# tree. See issue #6496. DEFAULTS_HOOK stays strictly the defaults/ path --
+# it is the source-of-truth side of the "defaults/ vs .loom/ sync" check
+# below, which must remain a real cross-copy diff, not a self-diff.
+SRC_HOOK="$REPO_ROOT/.loom/hooks/guard-worktree-paths.sh"
+[[ -r "$SRC_HOOK" ]] || SRC_HOOK="$REPO_ROOT/defaults/hooks/guard-worktree-paths.sh"
+DEFAULTS_HOOK="$REPO_ROOT/defaults/hooks/guard-worktree-paths.sh"
+CONFIG_RESOLVER="$REPO_ROOT/.loom/scripts/lib/config-resolver.sh"
+[[ -r "$CONFIG_RESOLVER" ]] || CONFIG_RESOLVER="$REPO_ROOT/defaults/scripts/lib/config-resolver.sh"
+CANONICAL_PATH_LIB="$REPO_ROOT/.loom/scripts/lib/canonical-path.sh"
+[[ -r "$CANONICAL_PATH_LIB" ]] || CANONICAL_PATH_LIB="$REPO_ROOT/defaults/scripts/lib/canonical-path.sh"
 
 PASS=0
 FAIL=0
@@ -48,12 +59,12 @@ chmod +x "$TMPROOT/.loom/hooks/guard-worktree-paths.sh"
 # #4262) relative to its own SCRIPT_DIR — stage the real resolver at the
 # equivalent installed-layout path so the guards.worktreeIsolation /
 # worktree.root reads exercise the actual tiered resolution, not a stub.
-cp "$REPO_ROOT/defaults/scripts/lib/config-resolver.sh" "$TMPROOT/.loom/scripts/lib/config-resolver.sh"
+cp "$CONFIG_RESOLVER" "$TMPROOT/.loom/scripts/lib/config-resolver.sh"
 # The hook also sources ../scripts/lib/canonical-path.sh (#4495) for
 # symlink-aware target canonicalization. Stage it at the installed-layout path
 # so the symlink-escape cases below exercise the real resolver rather than the
 # lexical fallback.
-cp "$REPO_ROOT/defaults/scripts/lib/canonical-path.sh" "$TMPROOT/.loom/scripts/lib/canonical-path.sh"
+cp "$CANONICAL_PATH_LIB" "$TMPROOT/.loom/scripts/lib/canonical-path.sh"
 HOOK="$TMPROOT/.loom/hooks/guard-worktree-paths.sh"
 
 pass() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); printf "${GREEN}PASS${NC} %s\n" "$1"; }
@@ -150,6 +161,22 @@ else
     fail "deny reason warns against retrying via Bash redirection (#4178) (got: $reason)"
 fi
 
+# --- #6110: deny reason names the sanctioned escape hatch, and steers toward
+# the RELIABLE .loom/config.json route rather than an inline env prefix
+# (which does not reach this hook -- it runs as a separate process and reads
+# its own env, the same trap documented for LOOM_GUARD_STASH_SCOPE).
+if [[ "$reason" == *"guards.worktreeIsolation:false in .loom/config.json"* ]]; then
+    pass "deny reason names the guards.worktreeIsolation escape hatch (#6110)"
+else
+    fail "deny reason names the guards.worktreeIsolation escape hatch (#6110) (got: $reason)"
+fi
+
+if [[ "$reason" == *"LOOM_GUARD_WORKTREE_ISOLATION=0"* && "$reason" == *"does NOT work"* ]]; then
+    pass "deny reason warns the inline LOOM_GUARD_WORKTREE_ISOLATION=0 prefix does NOT work (#6110)"
+else
+    fail "deny reason warns the inline LOOM_GUARD_WORKTREE_ISOLATION=0 prefix does NOT work (#6110) (got: $reason)"
+fi
+
 # --- fail-open: no sentinel anywhere -----------------------------------
 rm -rf "$TMPROOT/.loom/worktrees"
 result=$(run_hook "$TMPROOT/CLAUDE.md")
@@ -179,6 +206,50 @@ cat > "$WT2/.loom-managed" <<'EOF'
 EOF
 result=$(run_hook "$WT2/other-issue-file.txt")
 assert_allow "cross-issue worktree write is allowed (not the guarded failure mode)" "$result"
+
+# --- #7415: registered-but-unmanaged worktree nested under the main checkout -
+# A worktree created with a plain `git worktree add` carries no `.loom-managed`
+# sentinel. Nested under the main checkout (`<main>/.claude/worktrees/x`, a
+# layout some repos document) it matched the main-root prefix test and was
+# denied, even though git treats it as a separate working tree sharing nothing
+# with the main checkout's index or tracked files. `git worktree list
+# --porcelain` is now consulted; the MAIN worktree entry is excluded, so the
+# checkout this guard protects stays denied.
+#
+# TMPROOT needs a commit before `git worktree add` will run; --allow-empty
+# keeps the fixture inert for every other case in this file.
+git -C "$TMPROOT" -c user.email=loom@test -c user.name=loom \
+    commit -q --allow-empty -m init >/dev/null 2>&1 || true
+mkdir -p "$TMPROOT/.claude/worktrees"
+git -C "$TMPROOT" worktree add -q "$TMPROOT/.claude/worktrees/x" \
+    -b nested/x >/dev/null 2>&1 || true
+NESTED_WT="$TMPROOT/.claude/worktrees/x"
+mkdir -p "$NESTED_WT/src" "$TMPROOT/.claude/worktrees/not-a-worktree"
+
+result=$(run_hook "$NESTED_WT/src/paper.pdf")
+assert_allow "(#7415) target inside a registered-but-unmanaged nested worktree -> allow" "$result"
+
+result=$(run_hook "src/paper.pdf" "$NESTED_WT")
+assert_allow "(#7415) relative target + cwd inside the nested unmanaged worktree -> allow" "$result"
+
+result=$(run_hook "$TMPROOT/CLAUDE.md")
+assert_deny "(#7415) main-root target still denies while a nested worktree is registered" "$result"
+
+result=$(run_hook "$TMPROOT/.claude/worktrees/not-a-worktree/f.txt")
+assert_deny "(#7415) a plain dir under .claude/worktrees that is NOT a registered worktree still denies" "$result"
+
+result=$(run_hook "$TMPROOT/.claude/worktrees/stray.txt")
+assert_deny "(#7415) the nested worktree's PARENT dir (not itself a worktree) still denies" "$result"
+
+# --- #7415: the deny hint names the ACTUALLY configured worktree root --------
+raw=$(run_hook "$TMPROOT/CLAUDE.md")
+out="${raw#*|}"
+reason=$(echo "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null || true)
+if [[ "$reason" == *"$TMPROOT/.loom/worktrees/issue-<N>"* ]]; then
+    pass "(#7415) deny reason names the resolved worktree root, not a bare relative hint"
+else
+    fail "(#7415) deny reason names the resolved worktree root, not a bare relative hint (got: $reason)"
+fi
 
 # --- LOOM_WORKTREE_PATH fast path (tmux/manual) is unchanged ---------------
 result=$(run_hook "$WT/src/foo.rs" "" "LOOM_WORKTREE_PATH=$WT")
@@ -305,7 +376,9 @@ fi
 
 # --- defaults/ vs .loom/ sync ------------------------------------------------
 DEPLOY_HOOK="$REPO_ROOT/.loom/hooks/guard-worktree-paths.sh"
-if [[ -f "$DEPLOY_HOOK" ]] && diff -q "$SRC_HOOK" "$DEPLOY_HOOK" >/dev/null 2>&1; then
+if [[ ! -f "$DEFAULTS_HOOK" ]]; then
+    echo "SKIP: defaults/hooks/guard-worktree-paths.sh not present (bare consumer layout) -- sync check not applicable"
+elif [[ -f "$DEPLOY_HOOK" ]] && diff -q "$DEFAULTS_HOOK" "$DEPLOY_HOOK" >/dev/null 2>&1; then
     pass ".loom/ hook byte-identical to defaults/"
 else
     fail ".loom/ hook byte-identical to defaults/"
