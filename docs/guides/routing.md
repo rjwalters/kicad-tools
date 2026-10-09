@@ -138,7 +138,8 @@ fills, authored netclass minima, sibling escapes from the same pass, drilled
 holes (same-net vias included), the board edge and cut-outs, and the full
 drilled barrel on every copper layer. It must also not merge into another
 branch of its own net (committed copper, a sibling escape, or another
-terminal's pad) before the shunt. A failed search leaves the original escape
+terminal's pad -- SMT or through-hole, no same-net pad exemption) before the
+shunt. A failed search leaves the original escape
 unchanged. Nothing relaxes a clearance, layer, process limit or search budget.
 
 *After commit.* A recovery that actually commits is excluded from sibling
@@ -168,10 +169,8 @@ from kicad_tools.router import load_pcb_for_routing, merge_routes_into_pcb
 board = Path("board.kicad_pcb")
 router, _net_map = load_pcb_for_routing(str(board), skip_nets=["GND"])
 router.route_with_escape()  # escape pre-phase (incl. Kelvin access) + main pass
-print(sorted(router._kelvin_access_protected_nets))  # nets given inward access
-Path("routed.kicad_pcb").write_text(
-    merge_routes_into_pcb(board.read_text(), router.to_sexp())
-)
+print(sorted(router.kelvin_access_nets))  # nets given inward access
+Path("routed.kicad_pcb").write_text(merge_routes_into_pcb(board.read_text(), router.to_sexp()))
 ```
 
 `tests/router/test_kelvin_escape_access.py` is a self-contained four-terminal

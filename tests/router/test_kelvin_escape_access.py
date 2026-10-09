@@ -9,7 +9,8 @@ so :func:`detect_kelvin_topology` recognises it.
 Covered: the recovery itself (an ordinary manufacturable via on the inward
 side, topology unchanged), and adversarial controls -- foreign copper (track,
 via, pad, inner-layer track beyond the landing, board edge / cut-out, unknown
-holes), a shared force path (committed and sibling same-net copper), an
+holes, drill-to-drill spacing on its own), a shared force path (committed
+and sibling same-net copper, another terminal's SMD or through-hole land), an
 ineligible via, degenerate layer transitions, a non-Kelvin net, and the
 sibling rip-up protection of a committed recovery.
 """
@@ -297,7 +298,64 @@ def test_inner_landing_keeps_ordinary_barrel_full_stack():
     assert '(layers "F.Cu" "B.Cu")' in via.to_sexp()
 
 
-def test_same_net_sibling_drills_still_need_spacing():
+def _small_ring_via(x: float, y: float, net: int) -> Via:
+    """A via whose copper ring is thin (annular 0.075 mm) around a 0.3 mm drill.
+
+    Against the recovered 0.6/0.3 mm via, a centre distance ``d`` gives a
+    copper gap of ``d - 0.525`` but a hole edge gap of ``d - 0.3``.  So for
+    ``0.725 <= d < 0.8`` copper (and Kelvin branch isolation) clears the
+    0.2 mm requirement while the holes violate the 0.5 mm ``min_hole_to_hole``
+    -- only the drill-to-drill check can reject it.
+    """
+    return Via(x=x, y=y, diameter=0.45, drill=0.3, layers=(Layer.F_CU, Layer.B_CU), net=net)
+
+
+def _sibling_via_escape(pad: Pad, via: Via) -> EscapeRoute:
+    return EscapeRoute(
+        pad=pad,
+        direction=EscapeDirection.SOUTH,
+        escape_point=(via.x, via.y),
+        escape_layer=Layer.B_CU,
+        via=via,
+    )
+
+
+@pytest.mark.parametrize("same_net", [False, True], ids=["foreign_net", "same_net"])
+def test_drill_spacing_is_enforced_when_copper_clears(same_net):
+    """Pins the hole-to-hole check on its own: copper is legal, holes are not.
+
+    Same-net copper may merge with ordinary vias, but holes never may -- and
+    here the same-net neighbour also clears branch isolation (copper gap
+    >= clearance), so the only thing standing between this candidate and a
+    drill-spacing violation is ``hole_gap``.
+    """
+    from kicad_tools.router.clearance_shapes import copper_gap, hole_gap, via_shape
+
+    router, package, escapes, pads = fixture()
+    good = _recovered(router, package, escapes, pads)
+    via = good.via
+    assert via is not None and (via.x, via.y) == pytest.approx((10.0, 8.7))
+    owner = pads[0] if same_net else package.pads[1]
+    drill_gap = max(router.rules.min_drill_clearance, router.rules.min_hole_to_hole)
+
+    near = _small_ring_via(via.x + 0.76, via.y, owner.net)
+    assert copper_gap(via_shape(via), via_shape(near)) >= 0.2
+    assert hole_gap(via_shape(via), via_shape(near)) < drill_gap
+    blocked = [*escapes, _sibling_via_escape(owner, near)]
+    assert not kelvin_access_candidate_clear(router, good, blocked, pads, 0.2, replaced=escapes[0])
+
+    # Control: the same neighbour with legal hole spacing is accepted, so
+    # the rejection above is the drill check and nothing else.
+    far = _small_ring_via(via.x + 0.81, via.y, owner.net)
+    assert hole_gap(via_shape(via), via_shape(far)) >= drill_gap
+    clear = [*escapes, _sibling_via_escape(owner, far)]
+    assert kelvin_access_candidate_clear(router, good, clear, pads, 0.2, replaced=escapes[0])
+
+
+def test_same_net_overlapping_sibling_via_is_refused():
+    """A same-net sibling via on the inward site is refused (it fails branch
+    isolation as well as drill spacing; the drill check alone is pinned by
+    :func:`test_drill_spacing_is_enforced_when_copper_clears`)."""
     router, package, escapes, pads = fixture()
     escapes.append(
         EscapeRoute(
@@ -334,6 +392,109 @@ def test_kelvin_access_cannot_merge_into_existing_force_branch(location):
             )
         )
     assert recover_kelvin_escapes(router, package, escapes, pads)[0] is escapes[0]
+
+
+def _same_net_terminal(x: float, y: float, *, through_hole: bool, size: float = 0.5) -> Pad:
+    """Another terminal of the Kelvin net ``VSNS`` -- a force-side part, not
+    the shunt (``detect_kelvin_topology`` still roots at ``R82``)."""
+    return Pad(
+        x=x,
+        y=y,
+        width=size,
+        height=size,
+        layer=Layer.F_CU,
+        net=1,
+        net_name="VSNS",
+        ref="J5",
+        pin="1",
+        through_hole=through_hole,
+        drill=0.3 if through_hole else 0.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "dx",
+    [1.0, 1.05, 1.1, 1.2],
+    ids=["overlap", "touching", "gap_0.05", "gap_0.15"],
+)
+def test_kelvin_access_cannot_land_on_same_net_through_hole_terminal(dx):
+    """Regression (PR #6271 review): a same-net THT force terminal beside the
+    inward site.  The old own-net through-hole exemption let the via touch it
+    (dx=1.05 -> copper gap 0.0) or sit 0.05 / 0.15 mm from it (dx=1.1 / 1.2),
+    merging the sense branch into the force terminal before the shunt."""
+    from kicad_tools.router.clearance_shapes import copper_gap, pad_shape, via_shape
+
+    router, package, escapes, pads = fixture()
+    terminal = _same_net_terminal(10 + dx, 8.7, through_hole=True, size=1.5)
+    pads.append(terminal)
+    router.grid.add_pad(terminal)
+    net_pads = [p for p in pads if p.net == 1]
+    topology = detect_kelvin_topology(net_pads)
+    assert topology is not None and net_pads[topology.root_index].ref == "R82"
+    assert kelvin_net_ids(pads) == frozenset({1})
+
+    result = recover_kelvin_escapes(router, package, escapes, pads)[0]
+    if result.via is not None:  # any recovery must keep the branch isolated
+        assert copper_gap(via_shape(result.via), pad_shape(terminal)) >= 0.2 - 1e-6
+    assert result is escapes[0]
+
+
+@pytest.mark.parametrize("through_hole", [False, True], ids=["smd", "tht"])
+def test_predicate_rejects_via_next_to_another_same_net_terminal(through_hole):
+    """Another terminal's land of the same net (SMD or THT) within clearance of
+    the via is a branch merge -- rejected; moved just clear, accepted.
+
+    The through-hole land is 1.5 mm so its drill stays >= ``min_hole_to_hole``
+    from the via in both positions: only copper isolation can reject it.
+    """
+    from kicad_tools.router.clearance_shapes import copper_gap, pad_shape, via_shape
+
+    router, package, escapes, pads = fixture()
+    good = _recovered(router, package, escapes, pads)
+    via = good.via
+    assert via is not None
+    size = 1.5 if through_hole else 0.5
+    near_dx, far_dx = (1.1, 1.3) if through_hole else (0.6, 0.8)
+    near = _same_net_terminal(via.x + near_dx, via.y, through_hole=through_hole, size=size)
+    assert copper_gap(via_shape(via), pad_shape(near)) < 0.2
+    assert not kelvin_access_candidate_clear(
+        router, good, escapes, [*pads, near], 0.2, replaced=escapes[0]
+    )
+    far = _same_net_terminal(via.x + far_dx, via.y, through_hole=through_hole, size=size)
+    assert copper_gap(via_shape(via), pad_shape(far)) >= 0.2
+    assert kelvin_access_candidate_clear(
+        router, good, escapes, [*pads, far], 0.2, replaced=escapes[0]
+    )
+
+
+def test_kelvin_access_cannot_land_beside_same_net_smd_terminal():
+    """End-to-end: a same-net SMD terminal spanning the whole inward budget."""
+    router, package, escapes, pads = fixture()
+    terminal = Pad(
+        x=10.6,
+        y=8.0,
+        width=0.5,
+        height=2.0,
+        layer=Layer.F_CU,
+        net=1,
+        net_name="VSNS",
+        ref="J5",
+        pin="1",
+    )
+    pads.append(terminal)
+    router.grid.add_pad(terminal)
+    assert kelvin_net_ids(pads) == frozenset({1})
+    assert recover_kelvin_escapes(router, package, escapes, pads)[0] is escapes[0]
+
+
+def test_recovered_via_clears_its_own_land():
+    """The trapped pin's own SMT pad gets no exemption: the via is off-pad."""
+    from kicad_tools.router.clearance_shapes import copper_gap, pad_shape, via_shape
+
+    router, package, escapes, pads = fixture()
+    good = _recovered(router, package, escapes, pads)
+    assert good.via is not None
+    assert copper_gap(via_shape(good.via), pad_shape(good.pad)) >= 0.2 - 1e-6
 
 
 def test_same_net_merge_is_what_the_ordinary_validators_would_accept():

@@ -2202,6 +2202,18 @@ class Autorouter:
         return grid, router, zone_manager
 
     @property
+    def kelvin_access_nets(self) -> frozenset[int]:
+        """Net ids given a committed Kelvin inward off-pad access (Issue #5398).
+
+        Populated by :meth:`generate_escape_routes` (and therefore
+        :meth:`route_with_escape`) when a trapped Kelvin sense terminal of a
+        dense package received a validated inward via escape that actually
+        committed.  These nets are excluded from sibling rip-up.  Empty when
+        the recovery never fired.  Read-only snapshot.
+        """
+        return frozenset(self._kelvin_access_protected_nets)
+
+    @property
     def use_waypoint_injection(self) -> bool:
         """Effective waypoint-injection state (Issue #3441).
 

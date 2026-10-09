@@ -47,8 +47,10 @@ modelled on every copper layer).  It rejects a candidate that
   barrel's span);
 * is not a manufacturable ordinary via for the active process (microvia, or
   drill / annular ring below the manufacturer minimum);
-* comes within clearance of any physical pad (own-net SMT lands included --
-  the via must be genuinely off-pad), committed foreign copper, foreign
+* comes within clearance of any physical pad -- every pad, with no same-net
+  exemption: the trapped pin's own land (the via must be genuinely off-pad)
+  and every other terminal of the same net, SMT or through-hole -- committed
+  foreign copper, foreign
   sibling escapes generated in the same pass, fixed fills, or the board edge;
 * puts its drill too close to any other drilled hole (same-net vias included:
   same-net copper may merge, holes may not);
@@ -58,8 +60,14 @@ modelled on every copper layer).  It rejects a candidate that
   Kelvin net that merge would move the tap off the shunt, so it is refused
   here explicitly.
 
+Kernel-side checks against *sibling* escapes and pads of this pass use the
+package clearance scalar; authored per-net floors (#6243) reach the candidate
+only through the grid validators for committed copper.  That is sufficient
+here because ``apply_escape_routes`` revalidates every escape at commit time.
+
 Committed recoveries are reported back to the caller, which adds their nets to
-``Autorouter._kelvin_access_protected_nets``: both sibling rip-up variants
+``Autorouter._kelvin_access_protected_nets`` (read-only public view:
+``Autorouter.kelvin_access_nets``): both sibling rip-up variants
 (``route_all`` and negotiated) exclude those nets, so a later higher-priority
 net's rip-up cannot strip the recovered access.
 
@@ -254,16 +262,26 @@ def kelvin_access_candidate_clear(
     k_via = via_shape(via)  # kernel KVia: copper on every layer
     k_segs = [segment_shape(seg) for seg in candidate.segments]
 
-    # Physical pads.  The via must be off every SMT land (own net included --
-    # this is an ordinary via, not via-in-pad); an own-net through-hole pad may
-    # be touched.  The stub may leave its own pad but must clear every other
-    # land, own-net lands included (a merge there would bypass the shunt).
+    # Physical pads.  The via clears EVERY pad by the full copper
+    # requirement, with no same-net exemption of any kind:
+    #
+    # * the trapped pin's own land (``candidate.pad``, always SMT -- see
+    #   :func:`_trapped_on_pad`): this is an ordinary off-pad via, never
+    #   via-in-pad, so it must sit genuinely off its own land;
+    # * every other terminal of the same Kelvin net, SMT *or* through-hole
+    #   (force/load terminals and the shunt itself): touching one would
+    #   merge the sense branch into that terminal's branch before the shunt
+    #   -- exactly the merge branch isolation refuses.  (An earlier own-net
+    #   through-hole exemption only ever applied to *other* terminals,
+    #   because the trapped pad is SMT; it let the via land on a force-side
+    #   THT terminal.)
+    #
+    # The stub may leave its own pad but must clear every other land, own-net
+    # lands included (a merge there would bypass the shunt).
     for pad in pads:
         k_pad = pad_shape(pad)
-        own = pad.net == net
-        if not (own and pad.through_hole):
-            if copper_gap(k_via, k_pad) < clearance - _GAP_EPS:
-                return False
+        if copper_gap(k_via, k_pad) < clearance - _GAP_EPS:
+            return False
         if pad is candidate.pad:
             continue
         for k_seg in k_segs:
