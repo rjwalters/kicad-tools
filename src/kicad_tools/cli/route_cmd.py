@@ -6994,6 +6994,32 @@ def _complete_pour_nets_with_oracle(output_path: Path, *, args, quiet: bool = Fa
             _canonicalize_routed_uuids(output_path, args=args)
 
 
+def _pour_closure_fallback_clearance(output_path: Path, args, working_mm: float) -> float | None:
+    """Clearance a failed pour closure is retried at (Issue #6288).
+
+    The oracle closer works at ``args.clearance`` (the router's own working
+    value).  Board 05's U3 has 0.5 mm-pitch pads boxed in by copper kept that
+    far apart, so no via site or link route exists at it, yet the board's
+    declared rule -- what ``kicad-cli`` measures -- is the fab floor
+    (0.1016 mm).  The retry value is the strictest rule the emitted board
+    declares; ``None`` when it is not tighter or nothing is declared.
+    """
+    try:
+        from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+        from kicad_tools.router.oracle_completion import relaxed_closure_clearance
+
+        declared = read_declared_clearance_rules(
+            output_path, board_net_classes=_board_declared_net_classes(output_path)
+        )
+        # The emitted .kicad_pro / .kicad_dru already carry the layer-aware fab
+        # floor (the profile's flat min_clearance is looser than what a 4+
+        # layer tier declares), so the declared rule alone is the floor.
+        return relaxed_closure_clearance(declared, None, working_mm)
+    except Exception as exc:  # advisory: no fallback is the pre-#6288 behaviour
+        logger.debug("pour closure fallback clearance unavailable: %s", exc)
+        return None
+
+
 def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> int:
     """Run the KiCad-oracle completion loop on the pour nets (Issue #5785).
 
@@ -7052,6 +7078,9 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
             clearance=float(getattr(args, "clearance", 0.2)),
             trace_width=float(getattr(args, "trace_width", 0.2)),
             refill=refill,
+            fallback_clearance=_pour_closure_fallback_clearance(
+                output_path, args, float(getattr(args, "clearance", 0.2))
+            ),
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")

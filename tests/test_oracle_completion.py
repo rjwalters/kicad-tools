@@ -8,6 +8,7 @@ import pytest
 
 from kicad_tools.drc.geometric import GeometricDRCResult
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
+from kicad_tools.router import oracle_completion as oc
 from kicad_tools.router.completion_verdict import (
     ALLOW_STRANDED_ENV,
     ORACLE_DISABLE_ENV,
@@ -321,3 +322,96 @@ class TestCliSurfaces:
             incomplete_count=1, blocking_incomplete_count=1, unrouted_count=0
         )
         assert exit_code_for(signal_gap, True) == 2  # opt-in never hides a signal gap
+
+
+class TestDeclaredClearanceRetry:
+    """Issue #6288: links the working clearance cannot close are retried at the
+    board's declared clearance (board 05 U3: 0.5 mm-pitch pads boxed in by
+    copper the router kept 0.15 mm apart, while the board declares 0.1016 mm).
+    """
+
+    @staticmethod
+    def _link() -> oc.OracleLink:
+        a = oc.OracleEndpoint.parse("Pad 7 [GND] of U3 on F.Cu", 136.25, 83.75)
+        b = oc.OracleEndpoint.parse("Zone [GND] on F.Cu", 150.0, 92.0)
+        return oc.OracleLink(net="GND", a=a, b=b)
+
+    def test_relaxed_clearance_is_the_declared_rule(self) -> None:
+        from kicad_tools.router.clearance_resolver import DeclaredClearanceRules
+
+        declared = DeclaredClearanceRules(dru_mm=0.1016, project_min_clearance_mm=0.1016)
+        assert oc.relaxed_closure_clearance(declared, None, 0.15) == pytest.approx(0.1016)
+
+    def test_no_relaxation_when_not_tighter_or_undeclared(self) -> None:
+        from kicad_tools.router.clearance_resolver import DeclaredClearanceRules
+
+        declared = DeclaredClearanceRules(dru_mm=0.2)
+        assert oc.relaxed_closure_clearance(declared, None, 0.15) is None
+        assert oc.relaxed_closure_clearance(DeclaredClearanceRules(), None, 0.15) is None
+        assert oc.relaxed_closure_clearance(None, None, 0.15) is None
+
+    def _patch_close(self, monkeypatch, closes_at: float | None):
+        calls: list[tuple[float, int]] = []
+
+        def fake_close(self, pcb_path, links, banned):
+            calls.append((self.clearance, len(links)))
+            attempt = oc.ClosureAttempt()
+            if closes_at is not None and abs(self.clearance - closes_at) < 1e-9:
+                for lk in links:
+                    attempt.footprints[oc._route_key(lk)] = [(0.0, 0.0, 1.0, 0.0, 0.1)]
+                    attempt.applied += 1
+            else:
+                attempt.notes.append("GND U3.7: no valid via location")
+            return attempt, list(links)
+
+        monkeypatch.setattr(oc.PourLinkCloser, "_close", fake_close)
+        return calls
+
+    def _closer(self, fallback: float | None) -> oc.PourLinkCloser:
+        return oc.PourLinkCloser(
+            via_size=0.6,
+            via_drill=0.3,
+            clearance=0.15,
+            trace_width=0.2,
+            fallback_clearance=fallback,
+        )
+
+    def test_open_link_is_retried_at_declared_clearance(self, monkeypatch, tmp_path) -> None:
+        calls = self._patch_close(monkeypatch, closes_at=0.1016)
+        attempt = self._closer(0.1016)(tmp_path / "b.kicad_pcb", [self._link()], frozenset())
+        assert calls == [(0.15, 1), (0.1016, 1)]
+        assert attempt.applied == 1
+        assert oc._route_key(self._link()) in attempt.footprints
+
+    def test_closed_link_is_not_retried(self, monkeypatch, tmp_path) -> None:
+        calls = self._patch_close(monkeypatch, closes_at=0.15)
+        attempt = self._closer(0.1016)(tmp_path / "b.kicad_pcb", [self._link()], frozenset())
+        assert calls == [(0.15, 1)]
+        assert attempt.applied == 1
+
+    def test_retry_disabled_without_fallback(self, monkeypatch, tmp_path) -> None:
+        calls = self._patch_close(monkeypatch, closes_at=0.1016)
+        attempt = self._closer(None)(tmp_path / "b.kicad_pcb", [self._link()], frozenset())
+        assert calls == [(0.15, 1)]
+        assert attempt.applied == 0
+
+    def test_banned_link_is_not_retried(self, monkeypatch, tmp_path) -> None:
+        calls = self._patch_close(monkeypatch, closes_at=0.1016)
+        banned = frozenset({oc._route_key(self._link())})
+        self._closer(0.1016)(tmp_path / "b.kicad_pcb", [self._link()], banned)
+        assert calls == [(0.15, 1)]
+
+    def test_route_stage_resolves_fallback_from_emitted_project(self, tmp_path) -> None:
+        import json
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _pour_closure_fallback_clearance
+
+        pcb = tmp_path / "board_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240108))\n")
+        pcb.with_suffix(".kicad_pro").write_text(
+            json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.1016}}}})
+        )
+        args = SimpleNamespace(manufacturer="jlcpcb-tier1")
+        assert _pour_closure_fallback_clearance(pcb, args, 0.15) == pytest.approx(0.1016)
+        assert _pour_closure_fallback_clearance(pcb, args, 0.1016) is None
