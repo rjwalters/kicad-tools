@@ -29,7 +29,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "VBUS": {
     "name": "Power",
@@ -61,7 +62,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "GND": {
     "name": "Power",
@@ -93,7 +95,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "XTAL1": {
     "name": "Clock",
@@ -125,7 +128,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "XTAL2": {
     "name": "Clock",
@@ -157,7 +161,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "USB_D+": {
     "name": "HighSpeed",
@@ -189,7 +194,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "USB_D-": {
     "name": "HighSpeed",
@@ -221,7 +227,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "USB_MCU_D+": {
     "name": "HighSpeed",
@@ -253,7 +260,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "USB_MCU_D-": {
     "name": "HighSpeed",
@@ -285,6 +293,7 @@
     "skew_tolerance_mm": null,
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   }
 }

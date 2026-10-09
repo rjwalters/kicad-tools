@@ -1,5 +1,5 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5044/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6076-regen-b/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 0,
   "summary": {
@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 0,
     "waived": 0,
-    "rules_checked": 43,
+    "rules_checked": 56,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -16,12 +16,21 @@
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1
     },
-    "passed": true
+    "passed": true,
+    "stale_waivers": 0
   },
   "violations": [],
+  "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
@@ -42,7 +51,7 @@
     },
     "manifest": {
       "status": "PASSED",
-      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
+      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
     },
     "overall": "PASSED",
     "schematic_missing": false
@@ -58,6 +67,7 @@
     "via_in_pad": false,
     "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
     "suppressed_findings": 0,
+    "waived_findings": 0,
     "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5009"
   }
 }

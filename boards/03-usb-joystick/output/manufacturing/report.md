@@ -1,8 +1,8 @@
 ---
 title: "usb_joystick_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-15 | jlcpcb-tier1"
+author: "kicad-tools 0.22.0"
+date: "Rev 1 | 2026-10-09 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -12,12 +12,6 @@ header-includes:
   - \usepackage{array}
   - \usepackage{float}
 ---
-
-## Candidate Qualification
-
-The native-consumed clearance repair removes the prior saved/refilled copper divergence and 12 native sliver warnings. Exact recipe source: `bd992dc7572cf7af93be092ded9e259c721ab3e9`, based on factory-rule parent `581087a5`. Saved PCB SHA256: `17d3fc83cb535fcd0ccac2e7b1a6036e272ec5d15a7936400217900b84e20a53`.
-
-This is digital candidate evidence, not supplier approval or physical bring-up. Independent combined-head review and main-target CI remain required before parent integration. Bundled `native-clearance-qualification/provenance.json` identifies the separate recipe, factory checker and corrected readiness verifier.
 
 ## Board Summary
 
@@ -75,7 +69,13 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 ## ERC Status
 
-Fresh exact-source recipe native ERC: **0 errors, 0 warnings**. Retained evidence: `native-erc.json`. Exact-source board manufacturing checker independently reports ERC PASSED.
+| Metric | Count |
+|--------|-------|
+| Errors | 0 |
+| Warnings | 0 |
+
+**Status**: SKIPPED -- ERC skipped by user request
+
 
 \newpage
 
@@ -153,23 +153,33 @@ Fresh exact-source recipe native ERC: **0 errors, 0 warnings**. Retained evidenc
 
 ## DRC Status
 
-Pinned native KiCad 10.0.5: **0 errors, 0 warnings, 0 unconnected items**, both on saved copper without refill and on a separate independent native-refilled copy. Exact recipe-source Python factory check: **54 rules, 0 errors, 0 warnings, 0 waived findings**. Strict connectivity covers 27 complete nets; copper LVS is clean over 129 bound pads. Evidence is in `native-clearance-qualification/`.
+| Metric | Count |
+|--------|-------|
+| Errors | 0 |
+| Warnings | 16 |
+| Blocking | 0 |
 
-The earlier export collector reported 14 hole-spacing warnings and optional fill suggestions. Those diagnostics omitted the final scoped factory context; they are superseded by the retained exact-source factory receipt and independent native receipts. No severity, tolerance or allowance was changed. The existing fabrication sidecar and explicit tier remain binding. Optional path-ampacity analysis has no declared current-path sidecar and is not a claimed qualification.
+**Status**: PASS
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| hole_to_hole_clearance | 14 |
+| silk_edge_clearance | 2 |
+
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Physical candidate gates: PASSED. Release review: PENDING.**
+**Verdict**: WARNING
 
-- Saved versus independently refilled copper has **0 mm² symmetric difference on all four layers** (full polygon comparison, not area equality alone).
-- Native saved and refilled DRC: **0 findings and 0 opens**. The previous 12 copper slivers are absent.
-- The conservative zone-to-foreign-copper target is an explicit native `0.3mm` rule, preserving stronger authored rules by refusal. A valid `2.0mm` negative rule on unchanged `0.3mm`-filled saved copper produces 506 clearance errors; false-condition controls demonstrate rule reachability.
-- Factory/process constraints, circuit connectivity, and the immutable historical witness remain preserved. Use the exact four-layer Epoxy-filled & Capped POFV/VIPPO process in the supplied manufacturing requirements.
-- Independent exact combined-head review and main-target CI remain required. Supplier approval, assembly inspection, and physical USB qualification remain outstanding.
+### Action Items
 
-The readiness verifier's final machine-readable receipt is authoritative for its package checks. It is identified separately from the exact recipe-source factory checker; passing generic main checks cannot substitute for the stronger factory-rule parent.
+- **[OPTIONAL]** Verify zone fill in KiCad: 12 nets appear incomplete but may be connected via zone fills
+- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Review 16 DRC warnings
+
 
 \newpage
 

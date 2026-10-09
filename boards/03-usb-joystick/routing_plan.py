@@ -12,6 +12,8 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
+from kicad_tools.core.canonical_uuids import canonicalize_board_uuids
+from kicad_tools.core.schematic_uuids import uuids_in_text
 from kicad_tools.manufacturers.fabrication_overrides import (
     FABRICATION_OVERRIDES_SIDECAR_BASENAME,
     FabricationOverride,
@@ -361,6 +363,13 @@ def apply_plan(input_path, output_path, plan_path=PLAN):
         fp.children = [n for n in fp.children if not _silk_text(n)]
         for node in replacements:
             fp.add(node)
+    # Issue #6076: library footprint pads/graphics reach this point without a
+    # ``(uuid ...)``, and KiCad gives each a random one on its first load
+    # (the zone fill), so two replays of the same plan never saved the same
+    # bytes.  Fill every missing UUID from (parent UUID, tag, ordinal) now,
+    # before KiCad sees the board.  Every UUID already present -- generated
+    # footprints, reviewed plan copper and silk text -- is kept as-is.
+    canonicalize_board_uuids(doc, keep=uuids_in_text(serialize_sexp(doc)))
     output_path = Path(output_path)
     candidate = output_path.with_name(f".{output_path.stem}.candidate.kicad_pcb")
     try:

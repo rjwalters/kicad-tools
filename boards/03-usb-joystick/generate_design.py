@@ -315,12 +315,22 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
         print("\n   WARNING: kicad-cli not found - skipping zone fill")
         return 0
 
+    from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
+
     print(f"\n1. Filling zones in: {routed_path}")
+    authored_uuids = uuids_in_file(routed_path)
     result = run_fill_zones(routed_path, kicad_cli=kicad_cli, native_clearance=True)
 
     if not result.success:
         print(f"\n   WARNING: Zone fill failed: {result.stderr or '(no stderr)'}")
         return 0
+
+    # Issue #6076: KiCad adds the mandatory footprint fields it finds missing
+    # (Datasheet, Description) on load and saves them with random UUIDs.
+    # Re-key exactly those from their parent footprint so the saved board is
+    # byte-reproducible; every UUID that existed before the fill, and the
+    # fill itself, is left untouched.
+    canonicalize_pcb_file_uuids(routed_path, keep=authored_uuids)
 
     try:
         text = routed_path.read_text()
@@ -857,8 +867,14 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
     with zipfile.ZipFile(mfg_dir / "kicad_project.zip", "a", zipfile.ZIP_DEFLATED) as archive:
         additions = [routed_path.with_suffix(".kicad_dru"), output_dir / "fp-lib-table"]
         additions.extend(sorted((output_dir / "footprints").rglob("*.kicad_mod")))
+        # The exporter already archives the board's sibling .kicad_dru; a
+        # second member of the same name is a duplicate file identity that
+        # readiness provenance rejects (Issue #6076 regeneration).
+        present = set(archive.namelist())
         for path in additions:
-            archive.write(path, path.relative_to(output_dir).as_posix())
+            name = path.relative_to(output_dir).as_posix()
+            if name not in present:
+                archive.write(path, name)
 
     manifest = mfg_dir / "manifest.json"
     data = json.loads(manifest.read_text())

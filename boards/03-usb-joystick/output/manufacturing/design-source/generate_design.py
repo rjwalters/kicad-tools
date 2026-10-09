@@ -107,9 +107,11 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     sys.path.insert(0, str(Path(__file__).parent))
     import generate_pcb as _pcb_gen
 
-    pcb_path = output_dir / "usb_joystick.kicad_pcb"
     output_dir.mkdir(parents=True, exist_ok=True)
-    pcb_path.write_text(_pcb_gen.generate_pcb())
+    # ``write_pcb`` (not ``generate_pcb`` + ``write_text``) so this recipe and
+    # every other entry point share one placement, including the #5744
+    # silk-to-pad repair it performs -- see ``generate_pcb.write_pcb``.
+    pcb_path = _pcb_gen.write_pcb(output_dir / "usb_joystick.kicad_pcb")
     _pcb_gen.stage_local_footprints(output_dir)
     print(f"   PCB: {pcb_path}")
     print(f"\n   Board size: {_pcb_gen.BOARD_WIDTH}mm x {_pcb_gen.BOARD_HEIGHT}mm")
@@ -313,12 +315,22 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
         print("\n   WARNING: kicad-cli not found - skipping zone fill")
         return 0
 
+    from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
+
     print(f"\n1. Filling zones in: {routed_path}")
+    authored_uuids = uuids_in_file(routed_path)
     result = run_fill_zones(routed_path, kicad_cli=kicad_cli, native_clearance=True)
 
     if not result.success:
         print(f"\n   WARNING: Zone fill failed: {result.stderr or '(no stderr)'}")
         return 0
+
+    # Issue #6076: KiCad adds the mandatory footprint fields it finds missing
+    # (Datasheet, Description) on load and saves them with random UUIDs.
+    # Re-key exactly those from their parent footprint so the saved board is
+    # byte-reproducible; every UUID that existed before the fill, and the
+    # fill itself, is left untouched.
+    canonicalize_pcb_file_uuids(routed_path, keep=authored_uuids)
 
     try:
         text = routed_path.read_text()
@@ -394,8 +406,8 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
     USB-C F.Cu-only GND pad is already stitched).
     """
     import re as _re
-    import uuid as _uuid
 
+    from kicad_tools.core.schematic_uuids import UuidMinter, uuids_in_text
     from kicad_tools.lvs.board_lvs import _schematic_pin_to_net
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
@@ -530,6 +542,9 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
         print("\n   All single-layer USB-C GND pads already stitched -- no vias added.")
         return 0
 
+    # Content-keyed via UUIDs that avoid every UUID already on the board, so
+    # the same routed input always gets the same stitch vias (Issue #6076).
+    via_uuids = UuidMinter(uuids_in_text(text))
     via_blocks = []
     for anchor, x, y in vias:
         via_blocks.append(
@@ -538,7 +553,7 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
             "\t\t(size 0.6)\n"
             "\t\t(drill 0.3)\n"
             '\t\t(layers "F.Cu" "B.Cu")\n'
-            f'\t\t(uuid "{_uuid.uuid4()}")\n'
+            f'\t\t(uuid "{via_uuids.mint("board03-gnd-stitch", x, y)}")\n'
             f"\t\t(net {gnd_net_id})\n"
             "\t)\n"
         )
@@ -852,8 +867,14 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
     with zipfile.ZipFile(mfg_dir / "kicad_project.zip", "a", zipfile.ZIP_DEFLATED) as archive:
         additions = [routed_path.with_suffix(".kicad_dru"), output_dir / "fp-lib-table"]
         additions.extend(sorted((output_dir / "footprints").rglob("*.kicad_mod")))
+        # The exporter already archives the board's sibling .kicad_dru; a
+        # second member of the same name is a duplicate file identity that
+        # readiness provenance rejects (Issue #6076 regeneration).
+        present = set(archive.namelist())
         for path in additions:
-            archive.write(path, path.relative_to(output_dir).as_posix())
+            name = path.relative_to(output_dir).as_posix()
+            if name not in present:
+                archive.write(path, name)
 
     manifest = mfg_dir / "manifest.json"
     data = json.loads(manifest.read_text())

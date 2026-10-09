@@ -25,8 +25,8 @@
       "size": 526
     },
     "check-report.json": {
-      "sha256": "9ef387edd2d43b5ff2f2d7de2a13555ef2c097ed9f4acbcf98548d201a5b2a68",
-      "size": 1750
+      "sha256": "20f1cc08d34a406eadaf83dad80ebf873b2f8a20f6785bd121762cba3357f5d7",
+      "size": 2097
     },
     "cpl_jlcpcb.csv": {
       "sha256": "37e5b9f828f7f03ccef10b2917183b996290219aab9975f419ecb23f79dbd0cc",
@@ -37,20 +37,20 @@
       "size": 3223
     },
     "design-source/README.md": {
-      "sha256": "ac5ff9582e3e2ba8d15f7baafd2d787e63b4ecd65671cb2ce476872340595154",
-      "size": 9704
+      "sha256": "e63cd1d87bcf00548f7ea9834738f8e8a069c633d8d597b5a6771c6d84198499",
+      "size": 9888
     },
     "design-source/check_manufacturing.py": {
-      "sha256": "0ae6e8d759bd2fce826f56c4bd0fe9d25c7b72a96b59af1f64ad4c0e1ac0a3f2",
-      "size": 1869
+      "sha256": "54bc5d15ad2fd3792be5cb60932071729d3391cb3f6d343fb097c7177c05bcd0",
+      "size": 2429
     },
     "design-source/generate_design.py": {
-      "sha256": "5dba22bbf988d0494e06b3f7fc5412554b216568690a74b30b61a7478e0dfab4",
-      "size": 113125
+      "sha256": "0be230207cb70e796e9b0dd3c85bc23bcf36713ae061ff0f8caa1e849a954157",
+      "size": 114090
     },
     "design-source/manufacturing_process.py": {
-      "sha256": "72a88b1c0cd2f28876544ca4e200326d190fdd4b7a64b93c187d66145ef214f9",
-      "size": 10439
+      "sha256": "34fddc4c2ad9f1fcfa0420c8329e2a59af4e22782bb784d863739c2d2aa7f088",
+      "size": 20977
     },
     "design-source/project.kct": {
       "sha256": "ab100511243df8b8a25dd5e094e15d7ab57240d3c60b14ca16bf32bc94592702",
@@ -93,8 +93,8 @@
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "60ee5f6c022e7d00914423b52afe8a063241b1a314c926f78b49b4344593b936",
-      "size": 70418
+      "sha256": "b000897360d97c5a326360000e1c81c2a1a9d4e8b7cd3a7994684246a1b5e5ea",
+      "size": 69738
     },
     "manual-assembly-bom.csv": {
       "sha256": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",
@@ -105,15 +105,15 @@
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "c3fb69e2f59f2ffd07db5c4a64c3fa13d8fe08efb6fecabfb32beb76e4661a8b",
-      "size": 1213
+      "sha256": "34eb7f28ffc1b8773639f4183f1ef7edc569a97517bec8b49a17d2807d01a6b1",
+      "size": 4638
     },
     "native-erc-linux.json": {
-      "sha256": "175aaa61bf18b3ac08a1d94650e97e171fbd0c469d1a432664ec73b2977e05bb",
+      "sha256": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
       "size": 987
     },
     "native-erc.json": {
-      "sha256": "1e1244c1b8e14a832c30cfd4e376f7eebb359580260630523240d962ecee9c1a",
+      "sha256": "a63705556bc9c62121b86b9ba175962761eddaf7107211dc068c4acba96251ff",
       "size": 987
     },
     "procurement-review.md": {

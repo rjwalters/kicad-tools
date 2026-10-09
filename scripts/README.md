@@ -34,6 +34,7 @@ because the package is recipe-finalised or the report records board-specific che
 |--------|---------|
 | `refresh_readiness.py` | Gated re-pin of `readiness.json` for boards 05/06/07. Works on a staged copy: re-runs native ERC, rebuilds `kicad_project.zip` / `design-source.zip` / `manufacturing.zip` deterministically (sorted entries, fixed timestamps), re-hashes `manifest.json`, then runs `kicad-cli pcb drc --refill-zones`, `kct check --mfr`, `kct net-status` and `kct validate --sync`. It publishes nothing if a gate fails or a measured metric differs from the report (#6076). |
 | `regenerate_uuids_6076.py` | One-shot deterministic-UUID regeneration of boards 05/06/07 design files. Regenerates the schematic and unrouted PCB with each board's generator, and remaps the routed PCB's generator-sourced UUIDs without re-routing. Evidence is left to `refresh_readiness.py` (#6076). |
+| `regenerate_boards_03_04_6076.py` | Deterministic-UUID regeneration of boards 03/04 plus their evidence. Reuses the two scripts above' helpers. Board 03 re-runs its own recipe, `check_manufacturing.py` and `kct readiness --verify`. Board 04 regenerates its generator outputs and does a pure routed-PCB UUID remap, then refreshes native ERC/DRC, LVS, fill consistency, `kicad_project.zip`, the manifest and the outer archive. Board 04's legacy `readiness.json` is not re-pinned (#6076, #6269). |
 
 ### `ci/`
 

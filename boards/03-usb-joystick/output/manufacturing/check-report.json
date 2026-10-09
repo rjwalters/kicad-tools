@@ -1,13 +1,13 @@
 {
-  "file": "/tmp/5380-publication-board/output/usb_joystick_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6076-regen-b/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
     "errors": 0,
-    "warnings": 0,
+    "warnings": 2,
     "infos": 6,
     "waived": 0,
-    "rules_checked": 54,
+    "rules_checked": 64,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -19,31 +19,20 @@
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1
     },
-    "passed": true
+    "passed": true,
+    "stale_waivers": 0
   },
   "violations": [
-    {
-      "rule_id": "connector_edge_distance",
-      "type": "unknown",
-      "severity": "info",
-      "message": "J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge",
-      "location": [
-        149.475,
-        63.3
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0,
-      "required_value": null,
-      "items": [
-        "J1"
-      ],
-      "nets": [],
-      "status": "info",
-      "waived": false
-    },
     {
       "rule_id": "connector_edge_distance",
       "type": "unknown",
@@ -61,7 +50,30 @@
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge",
+      "location": [
+        149.475,
+        63.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": null
     },
     {
       "rule_id": "diffpair_length_skew",
@@ -78,7 +90,9 @@
         "USB_D-"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_length_skew||USB_D+,USB_D-|",
+      "evidence_hash": null
     },
     {
       "rule_id": "diffpair_length_skew",
@@ -95,7 +109,9 @@
         "USB_MCU_D-"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_length_skew||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": null
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -112,7 +128,9 @@
         "USB_D-"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_routing_continuity||USB_D+,USB_D-|",
+      "evidence_hash": null
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -129,14 +147,60 @@
         "USB_MCU_D-"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_routing_continuity||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "silk_edge_clearance",
+      "type": "silk_edge_clearance",
+      "severity": "warning",
+      "message": "Silkscreen J1 (fp_line) to board edge 0.125mm < minimum 0.20mm",
+      "location": [
+        149.475,
+        63.3
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12500000000000375,
+      "required_value": 0.2,
+      "items": [
+        "J1 (fp_line@7.57/6~7.57/8.73)",
+        "Edge.Cuts"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false,
+      "key": "silk_edge_clearance|Edge.Cuts,J1 (fp_line@7.57/6~7.57/8.73)||F.SilkS",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "silk_edge_clearance",
+      "type": "silk_edge_clearance",
+      "severity": "warning",
+      "message": "Silkscreen J1 (fp_line) to board edge 0.125mm < minimum 0.20mm",
+      "location": [
+        149.475,
+        63.3
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12500000000000283,
+      "required_value": 0.2,
+      "items": [
+        "J1 (fp_line@-1.62/6~-1.62/8.73)",
+        "Edge.Cuts"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false,
+      "key": "silk_edge_clearance|Edge.Cuts,J1 (fp_line@-1.62/6~-1.62/8.73)||F.SilkS",
+      "evidence_hash": null
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
-      "status": "PASSED",
-      "detail": "0 errors, 0 warnings; reviewed 0.45 mm pad-hole floor"
+      "status": "FAILED",
+      "detail": "0 errors, 2 warnings; reviewed 0.45 mm pad-hole floor"
     },
     "erc": {
       "status": "PASSED",
@@ -155,7 +219,7 @@
       "status": "PASSED",
       "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
     },
-    "overall": "PASSED",
+    "overall": "FAILED",
     "schematic_missing": false
   },
   "fabrication_overrides": {

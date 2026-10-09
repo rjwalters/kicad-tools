@@ -1,7 +1,7 @@
 {
     "$schema": "https://schemas.kicad.org/drc.v1.json",
     "coordinate_units": "mm",
-    "date": "2026-09-10T12:48:04",
+    "date": "2026-10-08T21:19:00",
     "ignored_checks": [
         {
             "description": "Footprint has no courtyard defined",
@@ -36,5 +36,98 @@
     "schematic_parity": [],
     "source": "stm32_devboard_routed.kicad_pcb",
     "unconnected_items": [],
-    "violations": []
+    "violations": [
+        {
+            "description": "Silkscreen clipped by solder mask (rule 'Silk to Pad - jlcpcb-tier1' clearance 0.1500 mm; actual 0.1179 mm)",
+            "items": [
+                {
+                    "description": "Reference field of U2",
+                    "pos": {
+                        "x": 149.5,
+                        "y": 84.0
+                    },
+                    "uuid": "73611722-7884-59d8-84da-a3779916c39c"
+                },
+                {
+                    "description": "Pad 44 [BOOT0] of U2 on F.Cu",
+                    "pos": {
+                        "x": 148.75,
+                        "y": 85.3375
+                    },
+                    "uuid": "b837f4b6-8f86-5336-a559-fa4d12845d5c"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask (rule 'Silk to Pad - jlcpcb-tier1' clearance 0.1500 mm; actual 0.0772 mm)",
+            "items": [
+                {
+                    "description": "Reference field of U2",
+                    "pos": {
+                        "x": 149.5,
+                        "y": 84.0
+                    },
+                    "uuid": "73611722-7884-59d8-84da-a3779916c39c"
+                },
+                {
+                    "description": "Pad 43 [<no net>] of U2 on F.Cu",
+                    "pos": {
+                        "x": 149.25,
+                        "y": 85.3375
+                    },
+                    "uuid": "ea479c98-9df9-566f-af76-350ea258a9b2"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask (rule 'Silk to Pad - jlcpcb-tier1' clearance 0.1500 mm; actual 0.0702 mm)",
+            "items": [
+                {
+                    "description": "Reference field of U2",
+                    "pos": {
+                        "x": 149.5,
+                        "y": 84.0
+                    },
+                    "uuid": "73611722-7884-59d8-84da-a3779916c39c"
+                },
+                {
+                    "description": "Pad 42 [<no net>] of U2 on F.Cu",
+                    "pos": {
+                        "x": 149.75,
+                        "y": 85.3375
+                    },
+                    "uuid": "5062c948-7bf3-5607-b234-c4229607d748"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        },
+        {
+            "description": "Silkscreen clipped by solder mask (rule 'Silk to Pad - jlcpcb-tier1' clearance 0.1500 mm; actual 0.1452 mm)",
+            "items": [
+                {
+                    "description": "Reference field of U2",
+                    "pos": {
+                        "x": 149.5,
+                        "y": 84.0
+                    },
+                    "uuid": "73611722-7884-59d8-84da-a3779916c39c"
+                },
+                {
+                    "description": "Pad 41 [<no net>] of U2 on F.Cu",
+                    "pos": {
+                        "x": 150.25,
+                        "y": 85.3375
+                    },
+                    "uuid": "699ce174-6584-5ce3-bed7-7e3ede72b928"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_over_copper"
+        }
+    ]
 }
