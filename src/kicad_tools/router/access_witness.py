@@ -850,7 +850,11 @@ class AccessWitness:
     """Journal records the replay walked."""
 
     evaluations: int = 0
-    """:func:`~kicad_tools.router.pad_access.compute_access_set` calls made."""
+    """:func:`~kicad_tools.router.pad_access.compute_access_set` calls made.
+
+    Issue #6292: records that add copper to an already-empty access set are
+    not re-evaluated (they provably cannot change it), so this counts fewer
+    calls than the pre-#6292 replay did for the same verdicts."""
 
     truncated: bool = False
     """True when the journal, the pad list, or the evaluation budget was cut."""
@@ -1121,7 +1125,10 @@ def replay(
         def evaluate(key: tuple[str, str]) -> AccessSet:
             nonlocal evaluations
             evaluations += 1
-            return compute_access_set(pads[key], grid, resolved_rules)
+            # Issue #6292: the replay reads only ``is_empty()``, ``bbox`` and
+            # (for an empty set) ``closing_copper`` -- none of which needs the
+            # via-site tests once a stub is legal.  See ``presence_only``.
+            return compute_access_set(pads[key], grid, resolved_rules, presence_only=True)
 
         state: dict[tuple[str, str], AccessSet] = {}
         for key in keys:
@@ -1146,11 +1153,23 @@ def replay(
                 break
             envelope = route_envelope(record.route, resolved_rules)
             for key in affected_pads(state, envelope):
+                previous = state.get(key)
+                if record.added and previous is not None and previous.is_empty():
+                    # Issue #6292: adding copper can only reject more
+                    # candidates -- every legality predicate is a conjunction
+                    # over the obstacles present -- so an empty access set
+                    # stays empty, and an empty set's bbox is fixed (its
+                    # candidates are pure geometry: every stub, plus the
+                    # in-pad via).  Re-evaluating would reproduce ``previous``
+                    # in every field the witness reads and cannot be a
+                    # non-empty -> empty transition, so skip it.  Only a
+                    # removal can reopen the pad, and removals are always
+                    # re-evaluated.
+                    continue
                 if evaluations >= budget or (deadline is not None and time.monotonic() >= deadline):
                     truncated = True
                     break
                 access = evaluate(key)
-                previous = state.get(key)
                 state[key] = access
                 # #5639: attribute a record only on a genuine non-empty ->
                 # empty TRANSITION.  A pad that was already empty when this
