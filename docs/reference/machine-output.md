@@ -155,6 +155,15 @@ general single-document stdout contract. Callers must not treat parser flag
 coverage alone as proof that the entire stream is one JSON document. See the
 [route reference](cli.md#routing-around-invalid-placement) for disposition scope.
 
+Every `kct route --format json` code path that finishes routing prints the
+same document -- `summary` (with `nets_requested`, `nets_routed` and the single
+final `summary.verdict`), `successful_routes`, `failed_routes`, `suggestions`
+and `placement_disposition` -- whether layer escalation is on or off
+(`--no-auto-layers`), quiet or not, and for every `--strategy` (Issue #6277).
+Only runs that never built a router (dry runs, early validation exits) fall back
+to the minimal `{"exit_code", "verdict"}` document, and a run killed by
+`--timeout` prints no document.
+
 Every default route also builds a report-only `RoutingPlan` (tile-level
 demand/capacity/overflow from the tile-based global-routing pass) written
 as a `<output_stem>.routing_plan.json` sidecar and surfaced under the

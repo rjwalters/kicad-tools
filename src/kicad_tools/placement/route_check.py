@@ -337,15 +337,13 @@ def route_check_argv(
     seed: int,
     timeout_s: float,
     manufacturer: str | None,
-    layers: int | None = None,
 ) -> list[str]:
     """``kct route`` arguments for one bounded, deterministic check route.
 
-    ``--starting-layers L --max-layers L`` (L = the board's own copper layer
-    count) makes the layer ladder a single attempt on the board's own stack,
-    so no placement is judged on a stack it was not given.
-    ``--no-auto-layers`` would do the same, but on that path ``--format json``
-    prints no routing summary, only ``exit_code``/``verdict``.
+    ``--no-auto-layers`` makes the route a single attempt on the board's own
+    stack, so no placement is judged on a stack it was not given. Since #6277
+    that path prints the same ``--format json`` routing summary as the layer
+    ladder, so the check no longer has to pin the layer count by hand.
     ``--no-placement-feedback`` stops the router from moving parts, since it
     is the placement that is being judged. The other switches drop
     report-only or polish stages that cannot change which nets route: the
@@ -373,11 +371,8 @@ def route_check_argv(
         "--no-routing-plan",
         "--oracle-rounds",
         "0",
+        "--no-auto-layers",
     ]
-    if layers:
-        if layers in (2, 4, 6):
-            argv += ["--starting-layers", str(layers)]
-        argv += ["--max-layers", str(layers)]
     if manufacturer:
         argv += ["--mfr", manufacturer]
     return argv
@@ -438,12 +433,6 @@ def bounded_route(
     own_dir = workdir is None
     work = Path(tempfile.mkdtemp(prefix="kct-route-check-")) if workdir is None else workdir
     output = work / f"{pcb.stem}.routed.kicad_pcb"
-    try:
-        from kicad_tools.schema.pcb import PCB
-
-        layers: int | None = len(PCB.load(str(pcb)).copper_layers) or None
-    except Exception:  # noqa: BLE001 -- let the router auto-detect
-        layers = None
     cmd = [
         sys.executable,
         "-m",
@@ -456,7 +445,6 @@ def bounded_route(
             seed=seed,
             timeout_s=timeout_s,
             manufacturer=manufacturer,
-            layers=layers,
         ),
     ]
     t0 = time.perf_counter()

@@ -4941,6 +4941,11 @@ def _fill_zones_after_route(
         print("  Zone fill: complete")
 
 
+def _single_pad_net_count(router) -> int:
+    """Nets with exactly one pad -- nothing to route, but reported (issue #6277)."""
+    return sum(1 for net, pads in router.nets.items() if net > 0 and len(pads) == 1)
+
+
 @dataclass
 class LayerEscalationResult:
     """Result of a layer escalation routing attempt."""
@@ -4955,6 +4960,9 @@ class LayerEscalationResult:
     success: bool
     stats: dict | None = None
     overflow: int = 0
+    # Issue #6277: single-pad nets the router ignored; the JSON summary reports
+    # them identically on the direct and escalation paths.
+    single_pad_count: int = 0
 
 
 @dataclass
@@ -4975,6 +4983,7 @@ class RuleRelaxationResult:
     success: bool
     layer_count: int = 2  # May be set by layer escalation integration
     stats: dict | None = None
+    single_pad_count: int = 0  # Issue #6277
 
 
 def _is_better_result(
@@ -9279,6 +9288,7 @@ def route_with_layer_escalation(
             success=completion >= args.min_completion,
             stats=stats,
             overflow=overflow,
+            single_pad_count=_single_pad_net_count(router),
         )
 
         # Track best result (Issue #2396: absolute nets_routed comparison)
@@ -10434,6 +10444,7 @@ def route_with_rule_relaxation(
             success=completion >= args.min_completion,
             layer_count=layer_stack.num_layers,
             stats=stats,
+            single_pad_count=_single_pad_net_count(router),
         )
 
         # Track best result (Issue #2396: absolute nets_routed comparison)
@@ -12875,6 +12886,7 @@ def route_with_combined_escalation(
                 success=completion >= args.min_completion,
                 layer_count=layer_count,
                 stats=stats,
+                single_pad_count=_single_pad_net_count(router),
             )
 
             # Track best result (Issue #2396: absolute nets_routed comparison)
@@ -20693,34 +20705,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 )
 
             # Show comprehensive routing summary with successes, failures, and suggestions
-            # Use JSON format if requested
-            if args.format == "json":
-                # Issue #5519 (Epic #5510, Phase 1): surface the report-only
-                # RoutingPlan's overflow summary + sidecar path under the
-                # "routing_plan" key.  Absent (not null) when no plan was
-                # built for this run.
-                _routing_plan = getattr(router, "routing_plan", None)
-                _routing_plan_json = None
-                if _routing_plan is not None:
-                    _routing_plan_json = {
-                        "overflow_report": _routing_plan.overflow_report.to_dict()
-                        if _routing_plan.overflow_report
-                        else None,
-                        "sidecar": str(
-                            output_path.parent / f"{output_path.stem}.routing_plan.json"
-                        ),
-                    }
-                print_routing_diagnostics_json(
-                    router,
-                    net_map,
-                    nets_to_route,
-                    current_strategy=args.strategy,
-                    nets_to_route_ids=multi_pad_net_ids,
-                    single_pad_count=len(single_pad_nets),
-                    routing_plan=_routing_plan_json,
-                    verdict=_final_verdict,
-                )
-            else:
+            # (--format json is emitted below, outside the banner block: #6277)
+            if args.format != "json":
                 # Verbose mode shows detailed path analysis for each failure
                 verbose = args.verbose or args.diagnostics
                 show_routing_summary(
@@ -20734,6 +20720,34 @@ def _run_main_impl(args, parser, argv) -> int:
                     nets_to_route_ids=multi_pad_net_ids,
                     single_pad_count=len(single_pad_nets),
                 )
+
+    # Issue #6277: the JSON summary must not depend on the text banner chain
+    # (``if not quiet``) or on the outcome being PARTIAL, so every direct-route
+    # finish -- success, partial, quiet or not -- emits the same document.
+    if args.format == "json":
+        # Issue #5519 (Epic #5510, Phase 1): surface the report-only
+        # RoutingPlan's overflow summary + sidecar path under the
+        # "routing_plan" key.  Absent (not null) when no plan was
+        # built for this run.
+        _routing_plan = getattr(router, "routing_plan", None)
+        _routing_plan_json = None
+        if _routing_plan is not None:
+            _routing_plan_json = {
+                "overflow_report": _routing_plan.overflow_report.to_dict()
+                if _routing_plan.overflow_report
+                else None,
+                "sidecar": str(output_path.parent / f"{output_path.stem}.routing_plan.json"),
+            }
+        print_routing_diagnostics_json(
+            router,
+            net_map,
+            nets_to_route,
+            current_strategy=args.strategy,
+            nets_to_route_ids=multi_pad_net_ids,
+            single_pad_count=len(single_pad_nets),
+            routing_plan=_routing_plan_json,
+            verdict=_final_verdict,
+        )
 
     # Save partial results on clean partial exit (not just SIGINT)
     if not all_nets_routed and not args.dry_run and router.routes:
