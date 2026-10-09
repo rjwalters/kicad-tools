@@ -1,5 +1,5 @@
 {
-  "file": "/tmp/kct-readiness-candidate-br93d3j9/board/output/simple_led_routed.kicad_pcb",
+  "file": "output/simple_led_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
   "layers": 2,
   "summary": {
@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 1,
     "waived": 0,
-    "rules_checked": 54,
+    "rules_checked": 56,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -16,6 +16,8 @@
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
       "netclass_track_width": 1,
       "netclass_clearance": 1,
       "netclass_via_diameter": 1,
@@ -26,7 +28,7 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 27,
+    "coverage_checked": 28,
     "coverage_skipped": 8,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
@@ -58,11 +60,11 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "54 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "56 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
-      "detail": "0 error(s), 10 warning(s)"
+      "detail": "0 error(s), 0 warning(s)"
     },
     "lvs": {
       "status": "PASSED",
@@ -195,6 +197,12 @@
       "status": "skipped:no_net_class_map",
       "state": "skipped",
       "reason": "no_net_class_map",
+      "blocking": true
+    },
+    "netclass_clearance_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "netclass_floor": {
