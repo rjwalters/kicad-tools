@@ -32,6 +32,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -327,6 +328,12 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "create-pcb": ["{sch}", "--dry-run"],
     "build": ["{dir}/missing.kct", "--dry-run"],
     "screenshot": ["{pcb}", "-o", "{dir}/shot.png"],
+    # Issue #6316: matplotlib only, no kicad-cli (``list`` needs neither).
+    "board-view overview": ["{pcb}", "-o", "{dir}/view.png"],
+    "board-view net": ["{pcb}", "NET1", "-o", "{dir}/view.png"],
+    "board-view layers": ["{pcb}", "NET1", "-o", "{dir}/view.png"],
+    "board-view crop": ["{pcb}", "0", "0", "30", "20", "-o", "{dir}/view.png"],
+    "board-view list": ["{pcb}"],
     "report generate": ["{pcb}", "-o", "{dir}/reports", "--skip-erc", "--no-figures"],
     "export": ["{pcb}", "-o", "{dir}/export", "--dry-run"],
     "optim fom-debug": ["{pcb}"],
@@ -427,6 +434,7 @@ NEEDS_KICAD_CLI: frozenset[str] = frozenset(
 )
 
 _SUBPROCESS_TIMEOUT_S = 50
+_MPLCONFIGDIR = Path(tempfile.gettempdir()) / "kct-contract-mplconfig"
 
 
 def _iter_json_leaves(parser: argparse.ArgumentParser, path: tuple[str, ...] = ()):
@@ -474,6 +482,11 @@ def _hermetic_env(scratch: Path) -> dict[str, str]:
             "XDG_DATA_HOME": str(home / ".local" / "share"),
             "NO_COLOR": "1",
             "PYTHONIOENCODING": "utf-8",
+            # matplotlib keeps its font cache under HOME and rebuilds it when
+            # HOME is fresh: ~18 s per ``board-view`` image leaf on macOS
+            # (issue #6316).  One cache outside the user's HOME, shared by
+            # every leaf and xdist worker, keeps the run hermetic and fast.
+            "MPLCONFIGDIR": str(_MPLCONFIGDIR),
         }
     )
     return env
