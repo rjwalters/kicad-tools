@@ -2566,7 +2566,42 @@ _interrupt_state: dict[str, Any] = {
     # #5639: path of the ``.access_witness.json`` the last partial save wrote,
     # so the deadline handler can name it in the ``.timeout.json`` receipt.
     "access_witness_path": None,
+    # Issue #6314 -- the three keys ``_reset_partial_save_state`` owns:
+    #
+    # ``pre_save_hook``: registered by a stage that mutates the router and the
+    # placement IN PLACE while it works (the placement-delta feedback loop).
+    # ``_save_partial_results`` calls it first; it puts the router back in its
+    # last accepted state and returns ``(info, placement_text | None)``.
+    "pre_save_hook": None,
+    # ``placement_text``: the board text the router's copper was routed
+    # against, when that is no longer ``pcb_path``'s (a placement delta was
+    # kept).  Held in memory rather than as a path on purpose: the only file
+    # that carries the moved placement is ``<output>``, which the normal save
+    # path later overwrites with the ROUTED board.
+    "placement_text": None,
+    # ``partial_save_info``: what the last partial save wrote (which state,
+    # which placement), for the ``.timeout.json`` receipt.
+    "partial_save_info": None,
 }
+
+
+def _reset_partial_save_state() -> None:
+    """Forget the previous route flow's partial-save overrides (issue #6314).
+
+    Called wherever a flow (re)binds ``_interrupt_state["pcb_path"]``: a
+    moved-placement text or a restore hook belongs to one router and one
+    placement source, and must never be paired with another flow's copper.
+    """
+    _interrupt_state["pre_save_hook"] = None
+    _interrupt_state["placement_text"] = None
+    _interrupt_state["partial_save_info"] = None
+
+
+def _pcb_text(pcb: Any) -> str:
+    """The text ``PCB.save`` would write, without writing it (issue #6314)."""
+    from kicad_tools.sexp import serialize_sexp
+
+    return serialize_sexp(pcb._sexp, preserve_source=True)
 
 
 def _handle_interrupt(signum, frame):
@@ -2662,10 +2697,29 @@ def _process_state_guard() -> "Iterator[None]":
         _interrupt_state["pcb_path"] = None
         _interrupt_state["interrupted"] = False
         _interrupt_state["access_witness_path"] = None
+        _reset_partial_save_state()
 
 
 def _save_partial_results() -> bool:
     """Save partial routing results if interrupted.
+
+    The saved board is a placement text with the router's copper inserted, so
+    the two have to describe the same placement (issue #6314).  Normally the
+    placement is ``pcb_path`` and the copper is whatever the router holds.  Two
+    things change that, both owned by the placement-delta feedback loop:
+
+    * a ``pre_save_hook`` is registered while the loop runs.  It discards a
+      trial that is in flight -- unaccepted, only partly re-routed copper
+      routed against a moved footprint -- and reports whether the accepted
+      placement is still the source board's;
+    * ``placement_text`` holds the moved board once a delta has been kept.
+
+    What was saved is recorded in ``_interrupt_state["partial_save_info"]``
+    (``snapshot_state`` / ``snapshot_placement`` / ``snapshot_discarded_trial``)
+    for the ``.timeout.json`` receipt.  If the hook fails, the save still
+    happens and ``snapshot_state`` is ``"inconsistent"``: an interrupted run
+    should leave its copper behind, but must not pass a board whose copper and
+    footprints may disagree off as a good one.
 
     Returns:
         True if partial results were saved, False otherwise.
@@ -2678,14 +2732,43 @@ def _save_partial_results() -> bool:
     if router is None or output_path is None or pcb_path is None:
         return False
 
+    # Issue #6314: restore BEFORE looking at ``router.routes``.  A trial clears
+    # every route before it re-routes, so an interrupt early in one would
+    # otherwise find nothing to save while the accepted routes sat in the hook.
+    info: dict[str, Any] = {
+        "snapshot_state": "live",
+        "snapshot_placement": "source",
+        "snapshot_discarded_trial": None,
+    }
+    _interrupt_state["partial_save_info"] = info
+    placement_text = _interrupt_state.get("placement_text")
+    hook = _interrupt_state.get("pre_save_hook")
+    if hook is not None:
+        started = time.perf_counter()
+        try:
+            hook_info, hook_text = hook()
+            info.update(hook_info)
+            if hook_text is not None:
+                placement_text = hook_text
+        except Exception as e:
+            info["snapshot_state"] = "inconsistent"
+            info["snapshot_restore_error"] = f"{type(e).__name__}: {e}"
+            if not quiet:
+                print(f"  Warning: could not restore the last accepted routing state ({e})")
+                print("  The saved copper may not match the saved footprint positions.")
+        info["snapshot_restore_seconds"] = round(time.perf_counter() - started, 3)
+    if placement_text is not None:
+        info["snapshot_placement"] = "moved"
+
     if not router.routes:
         if not quiet:
             print("  No routes to save.")
         return False
 
     try:
-        # Read original PCB content
-        original_content = pcb_path.read_text()
+        # The placement the copper was routed against: the source board, or
+        # the moved one when a placement delta has been kept (issue #6314).
+        original_content = placement_text if placement_text is not None else pcb_path.read_text()
 
         # Get partial route S-expressions.  Issue #4416: match the input
         # dialect so the interrupted save does not flip name-based copper to
@@ -4641,6 +4724,20 @@ def _run_placement_delta_feedback(
     placement source.  Without this, the saved artifact would pair moved-pad
     copper with the original footprint positions -- copper to nowhere.
 
+    Interrupted runs (issue #6314): the same hazard applies to the PARTIAL
+    save a deadline or Ctrl+C triggers, in two ways.  While a trial is being
+    probed the router holds unaccepted, partly re-routed copper for a moved
+    footprint; and once a delta is kept, the placement the copper belongs to is
+    no longer ``pcb_path``.  So while the loop runs a ``pre_save_hook`` is
+    registered that restores the last accepted state and hands the save the
+    live board's text, and after a kept delta that text is left in
+    ``_interrupt_state["placement_text"]`` for every later stage's save.  The
+    hook is deliberately NOT removed in a ``finally``: a deadline unwinds
+    through this function (``RouteDeadlineExpired`` is a ``BaseException``)
+    BEFORE the save runs, and Ctrl+C saves inside the signal handler with
+    nothing unwound at all.  Nothing here writes ``output_path`` early --
+    the deadline supervisor would quarantine it as the run's checkpoint.
+
     Args:
         router: The ``Autorouter`` whose state the loop mutates in place.
         pcb_path: Path to the PCB the routing pass read (already staged).
@@ -4737,6 +4834,31 @@ def _run_placement_delta_feedback(
     with contextlib.suppress(OSError):
         delta_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Issue #6314: only speak for the router the partial save will serialize.
+    # (An escalation flow can run this loop on a router that is not the one
+    # pinned in ``_interrupt_state``; that save must be left alone.)
+    owns_partial_save = _interrupt_state.get("router") is router
+    loops: list[Any] = []
+
+    def _restore_for_partial_save(
+        rebuild_grid: bool = False,
+    ) -> tuple[dict[str, Any], str | None]:
+        if not loops:
+            return {}, None
+        loop = loops[0]
+        trial = loop.trial_in_flight
+        restored = loop.restore_last_accepted(rebuild_grid=rebuild_grid)
+        hook_info: dict[str, Any] = {}
+        if restored:
+            hook_info["snapshot_state"] = "last-accepted"
+            hook_info["snapshot_discarded_trial"] = f"{trial.target_ref} {trial.kind}"
+        # With a delta kept, the accepted copper belongs to the live board,
+        # not to ``pcb_path``.  Serialize it here, in memory.
+        return hook_info, (_pcb_text(pcb) if loop.accepted_deltas else None)
+
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = _restore_for_partial_save
+
     try:
         result = router.route_with_placement_delta_feedback(
             pcb=pcb,
@@ -4758,14 +4880,52 @@ def _run_placement_delta_feedback(
             # (--placement-delta-feedback default off), so the default `kct
             # route` path stays byte-identical.
             net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #6314: reach the loop so an interrupted run can restore
+            # its last accepted state before saving.
+            loop_observer=loops.append,
         )
     except Exception as exc:
+        # The loop died mid-flight and the run carries on, so the state has to
+        # be one the run can stand behind (issue #6314): undo the trial that
+        # was in flight -- routes, pads, placement AND grid, since the stages
+        # after this read it -- and keep whatever was accepted before it.
+        result = None
+        applied = []
+        restore_error: Exception | None = None
+        try:
+            _restore_for_partial_save(rebuild_grid=True)
+            if loops:
+                applied = list(loops[0].accepted_deltas)
+        except Exception as restore_exc:
+            restore_error = restore_exc
         if not quiet:
-            print(f"  Warning: placement-delta feedback failed ({exc}); keeping initial routes")
-        return None
+            kept = f"the {len(applied)} delta(s) kept before it" if applied else "initial routes"
+            print(f"  Warning: placement-delta feedback failed ({exc}); keeping {kept}")
+            if restore_error is not None:
+                print(
+                    f"  Warning: could not restore the last accepted state ({restore_error}); "
+                    "routes may not match the placement"
+                )
 
-    applied = list(getattr(result, "applied_deltas", []))
-    if not quiet:
+    if result is not None:
+        applied = list(getattr(result, "applied_deltas", []))
+
+    # The loop is over (never reached by a deadline or Ctrl+C -- see the
+    # docstring), so nothing is in flight and the hook has nothing left to
+    # restore.  But with a delta kept, the router's copper now belongs to the
+    # MOVED board, and a partial save in ANY later stage (optimize, DRC nudge,
+    # ...) must read its footprints from it.  Hand that over BEFORE retiring
+    # the hook, so no instant exists in which neither covers the save.
+    if owns_partial_save:
+        if applied:
+            try:
+                _interrupt_state["placement_text"] = _pcb_text(pcb)
+            except Exception as exc:
+                if not quiet:
+                    print(f"  Warning: could not snapshot the moved placement ({exc})")
+        _interrupt_state["pre_save_hook"] = None
+
+    if not quiet and result is not None:
         print(f"  Feedback iterations: {result.iterations}")
         print(f"  Exit reason:        {getattr(result, 'exit_reason', 'n/a')}")
         print(f"  Deltas proposed:    {len(getattr(result, 'proposed_deltas', []))}")
@@ -10576,6 +10736,7 @@ def route_with_rule_relaxation(
     # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
     _interrupt_state["interrupted"] = False
@@ -13027,6 +13188,7 @@ def route_with_combined_escalation(
     # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
     _interrupt_state["interrupted"] = False
@@ -15844,11 +16006,19 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
             witness_arg = str(witness_sidecar) if witness_sidecar is not None else None
             if witness_arg:
                 print(f"  Access-witness sidecar: {witness_arg}", file=sys.stderr)
+            # Issue #6314: say WHICH state the snapshot holds.  Added keys only:
+            # ``snapshot_state`` is ``live`` (the router's copper as it stood),
+            # ``last-accepted`` (a placement-delta trial was in flight and was
+            # discarded) or ``inconsistent`` (that restore failed; copper and
+            # footprints may disagree); ``snapshot_placement`` is ``source`` or
+            # ``moved`` (a kept placement delta is in the snapshot's footprints).
+            snapshot_info = (_interrupt_state.get("partial_save_info") or {}) if saved else {}
             record_stage(
                 "partial-save",
                 snapshot_saved=saved,
                 snapshot=snapshot,
                 access_witness=witness_arg,
+                **snapshot_info,
             )
             return TIMEOUT_EXIT
 
@@ -19278,6 +19448,7 @@ def _run_main_impl(args, parser, argv) -> int:
     _interrupt_state["router"] = router
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
     _interrupt_state["quiet"] = quiet
     _interrupt_state["interrupted"] = False
     signal.signal(signal.SIGINT, _handle_interrupt)

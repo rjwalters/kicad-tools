@@ -65,6 +65,32 @@ class _PadNetSnapshot:
     router_bindings: list[_RouterPadNetBinding]
 
 
+@dataclass
+class _TrialInFlight:
+    """The last ACCEPTED state, held while a delta trial is in flight (#6314).
+
+    ``run_delta`` mutates the router and the board in place: it moves the
+    target's pads, clears every route and re-routes.  Until the trial is kept
+    or reverted, the live state is unaccepted and only partly re-routed, and
+    the state the run could stand behind exists only in these snapshots.  They
+    used to be locals of ``run_delta``, so an interrupt (a routing deadline or
+    Ctrl+C) that saved a partial board had nothing to restore from.
+
+    ``mirror_applied`` tracks the one transform the placement snapshot cannot
+    undo by itself: a ``mirror`` also flips the footprint's silk/fab cosmetics,
+    and only re-applying it (an involution) puts those back.  It is true
+    exactly while the board carries one un-reverted application.
+    """
+
+    delta: PlacementDelta
+    strategy: ResolutionStrategy
+    placement: dict[str, _FootprintState]
+    router_pads: list[tuple[Any, float, float, Any]]
+    pad_nets: _PadNetSnapshot | None
+    routes: list[Route]
+    mirror_applied: bool = False
+
+
 def _router_pad_key(pad: Any) -> tuple[str, str]:
     """The ``Autorouter.nets`` membership key for a router ``Pad``.
 
@@ -1514,6 +1540,61 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         # ``swap_proposal`` on the ``_placement_delta.json`` artifact.
         # ``None`` (the default) is byte-identical to pre-#5522 behavior.
         self.net_class_map: dict[str, NetClassRouting] | None = net_class_map
+        # Issue #6314: the deltas ``run_delta`` has KEPT so far, live while the
+        # loop runs (the result object only exists once it returns), and the
+        # pre-trial snapshot of the trial currently being probed, if any.
+        self.accepted_deltas: list[PlacementDelta] = []
+        self._trial: _TrialInFlight | None = None
+
+    # --- interrupt recovery (issue #6314) ----------------------------------
+
+    @property
+    def trial_in_flight(self) -> PlacementDelta | None:
+        """The delta being probed right now, or ``None`` between trials."""
+        return self._trial.delta if self._trial is not None else None
+
+    def restore_last_accepted(self, *, rebuild_grid: bool = False) -> bool:
+        """Discard an in-flight trial, putting back the last accepted state.
+
+        For a caller that reaches the loop while ``run_delta`` is stopped
+        mid-trial: ``kct route``'s deadline and Ctrl+C partial saves, and its
+        handler for a loop that raised.  Restores the pad->net bindings, the
+        placement, the router's pad geometry and ``router.routes`` from the
+        pre-trial snapshot -- the same state a revert restores -- so the copper
+        the router serializes and the footprints the board serializes agree
+        again.  Any delta kept earlier (:attr:`accepted_deltas`) stays applied.
+
+        Args:
+            rebuild_grid: Also re-derive the routing grid from the restored
+                routes, as a revert inside the loop does.  Off by default,
+                which is right for a caller that only serializes
+                ``router.routes`` and exits: the rebuild is the one step here
+                whose cost grows with the board (a routing-trial reset --
+                measured 380 ms on board 05 against 1-2 ms for everything
+                else), and a partial save runs inside a 5 s kill window.
+                Pass ``True`` when the run will carry on and later stages will
+                read ``router.grid``.
+
+        Returns:
+            ``True`` when a trial was in flight and has been undone, ``False``
+            when there was nothing to undo (the live state already IS the last
+            accepted state).  Safe to call repeatedly.
+        """
+        trial = self._trial
+        if trial is None:
+            return False
+        if trial.mirror_applied and self.pcb is not None:
+            self._strategy_applicator.apply_strategy(self.pcb, trial.strategy)
+            trial.mirror_applied = False
+        self._restore_pad_nets(trial.pad_nets)
+        self._restore_placement(trial.placement)
+        self._restore_router_pads(trial.router_pads)
+        if rebuild_grid:
+            self._rebuild_grid_for_routes(trial.routes)
+        else:
+            self.router.routes = trial.routes
+        self._trial = None
+        return True
 
     # --- delta proposal / selection ----------------------------------------
 
@@ -2273,7 +2354,12 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             total = len(self.router.nets) - 1  # -1 for net 0
             return total - len(self.router.get_failed_nets())
 
+        # ``applied`` is the loop's own attribute, not a local, so a partial
+        # save that interrupts the loop can tell whether the accepted placement
+        # still is the source board's (issue #6314).
         applied: list[PlacementDelta] = []
+        self.accepted_deltas = applied
+        self._trial = None
         proposed: list[PlacementDelta] = []
         skipped: list[PlacementDelta] = []
         skip_reasons: list[str] = []
@@ -2381,12 +2467,28 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                     f"to {delta.target_ref} (net {delta.net_name})"
                 )
 
+            # Issue #6314: from here until the keep/revert decision the live
+            # router and board hold an UNACCEPTED trial.  Publish the pre-trial
+            # snapshot so ``restore_last_accepted`` can undo it if the run is
+            # interrupted (deadline / Ctrl+C) before that decision is reached.
+            trial = _TrialInFlight(
+                delta=delta,
+                strategy=strategy,
+                placement=pre_placement,
+                router_pads=pre_pads,
+                pad_nets=pre_pad_nets,
+                routes=pre_routes,
+            )
+            self._trial = trial
+
             result = self._strategy_applicator.apply_strategy(self.pcb, strategy)
             if not result.success:
+                self._trial = None
                 exit_reason = "pd_apply_failed"
                 if self.verbose:
                     print(f"  Delta application failed: {result.message}")
                 break
+            trial.mirror_applied = delta.kind == "mirror"
             # Keep the router's flat pad geometry in lockstep with the PCB.
             self._apply_delta_to_router_pads(delta)
 
@@ -2430,7 +2532,14 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 and not regressed_creepage
                 and not regressed_keepout
             ):
+                # Record the keep BEFORE retiring the snapshot (issue #6314):
+                # an interrupt between the two then restores the pre-trial
+                # state with the delta still listed, which only makes a
+                # partial save read the placement from the live board -- the
+                # truth either way.  The other order would leave a kept
+                # delta's copper paired with the source placement.
                 applied.append(delta)
+                self._trial = None
                 if self.verbose:
                     print(f"  Kept: routed {pre_count} -> {new_count} (strict improvement)")
                 if new_count > best_count:
@@ -2468,10 +2577,13 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 # found.  A no-op for every other kind.
                 if delta.kind == "mirror":
                     self._strategy_applicator.apply_strategy(self.pcb, strategy)
+                    trial.mirror_applied = False
                 self._restore_pad_nets(pre_pad_nets)
                 self._restore_placement(pre_placement)
                 self._restore_router_pads(pre_pads)
                 self._rebuild_grid_for_routes(pre_routes)
+                # Issue #6314: the revert is complete; nothing is in flight.
+                self._trial = None
                 if regressed_drc:
                     reason = f"clearance violations {pre_violations} -> {post_violations}"
                 elif regressed_creepage:
