@@ -10,35 +10,52 @@ The idea rests on one premise — *a board that is partial at 1x becomes
 complete when expanded* — and on the boards that are actually partial, the
 premise fails:
 
-- **Both boards that are partial at 1x got worse when expanded.** Board 05
-  went from 4 unfinished signal nets to 6 at 1.5x; chorus-test from 29 to 31.
-  Neither could be measured at 2x: the router refuses one and cannot finish
-  the other's 1x board in budget.
+- **Neither board that is partial at 1x improved when expanded; each got worse
+  or stayed level.** Unfinished signal nets, 1x → 1.5x, under two protocols:
+  board 05 went 4 → 6 and 9 → 9; chorus-test 29 → 31 and 30 → 34. The 4 → 6
+  and 29 → 31 pairs are confounded by host load (the expanded arm ran on a far
+  busier host), so they overstate the harm; the one pair run at equal load is
+  the 9 → 9. These are single runs, in `uniform` mode only. Neither board has
+  a 2x row: the router refuses board 05 at 2x and chorus at 2x was not run.
 - **Expansion costs the one resource those boards are short of.** Both are
-  budget-bound at 1x, and at 1.5x the routing grid is 1.5–1.6x larger.
-- **`kct route` as shipped refuses the 2x boards that matter.** Its auto-grid
-  is cell-budgeted, so a 4x-area board gets a coarser grid, which fails the
-  router's own `clearance/2` safety rule on a board with a fine-pitch part
-  (boards 04 and 05 here; board 02, which has none, routes).
+  budget-bound at 1x, and at 1.5x the router's grid-cell estimate is 1.5–1.6x
+  larger.
+- **`kct route` as shipped refuses 2x boards that have a fine-pitch part.** Its
+  auto-grid is cell-budgeted, so a 4x-area board gets a coarser grid, which
+  fails the router's own `clearance/2` safety rule (boards 04 and 05 here;
+  board 02, which has no such part, routes).
 - **More room is not reliably better.** Board 04 routes 9/9 at 1x and 8/9
-  uniformly spread to 2x on the same grid. Board 03 is complete at 1.5x and
-  broken at 2x.
+  uniformly spread to 2x on the same grid. On board 03's explicit grid the
+  `rigid` rows are complete at 1.5x and two signal nets short at 2x, while the
+  `uniform` rows on the same grid run the other way (no gain at 1.5x, the
+  stuck net routed at 2x). See the caveats on that 2x row below before
+  reading it as a trend.
 
-**There is one positive, and it should not be lost in the verdict.** On board
+**There is a positive, and it should not be lost in the verdict.** On board
 03 with an explicit 0.05 mm grid, net `USB_D+` is unfinished at 1x and the
 board is fully complete — 27/27 nets, zero errors on both DRC engines — when
-its placement is expanded 1.5x with decoupling held rigid to its IC. That is
-exactly what the proposal predicts. It is one net on one board, in a grid
-configuration where the *default* grid already routes that net at 1x, so it
-does not change the verdict; but it is a real instance of the premise holding,
-and a single shrink of that one route is the cheapest possible test of the
-rest of the idea. That probe is filed as #6310.
+its placement is expanded 1.5x with decoupling held rigid to its IC. (The
+`uniform` 2x row on that grid also routes `USB_D+` with zero errors, leaving
+only a discontinuous `GND` pour.) That is exactly what the proposal predicts.
+It is one net on one board, in a grid configuration where the *default* grid
+already routes that net at 1x, so it does not change the verdict; but it is a
+real instance of the premise holding, and a single shrink of that one route is
+the cheapest possible test of the rest of the idea. That probe is filed as
+#6310.
 
-Phase 2 was run on everything, because it answers the question the issue
-flagged as the main risk: would shrinking be geometry, or re-topology? Across
-34 expanded routes, **8 of 3,820** inter-footprint gaps carrying copper hold
-more than they could at 1x (four on each of chorus's two 1.5x routes, nowhere
-else). Shrinking would be almost entirely geometry. The idea fails at step 3 (route), not step 4
+**The largest hole in the evidence is `rigid` mode on the two partial
+boards**, which was not run. It is tracked as #6312, with one qualification
+that matters: the harness's clustering rule finds almost nothing to cluster on
+chorus (see ["How much each board clusters"](#how-much-each-board-clusters)),
+so only board 05 can be tested as the harness stands.
+
+Phase 2 answers the question the issue flagged as the main risk: would
+shrinking be geometry, or re-topology? In the eight expanded routes tabulated
+below, **4 of 1,550** inter-footprint gaps carrying copper hold more than they
+could at 1x, all four on chorus at 1.5x. (The untabulated runs were reported
+as adding four more, on chorus's other 1.5x route, and none elsewhere; those
+totals can no longer be checked — see the Phase 2 section.) Shrinking would be
+almost entirely geometry. The idea fails at step 3 (route), not step 4
 (shrink) — the opposite of where the risk was expected.
 
 What the data suggests building instead is in
@@ -76,7 +93,41 @@ Two placement modes:
   such anchor wins. Sharing a net is what separates "this cap decouples that
   IC" from "this resistor happens to sit beside it" — without that condition a
   dense board collapses into one cluster and nothing expands. The rule is
-  conservative: board 04 forms one two-part cluster out of 17 footprints.
+  conservative, and how conservative varies a great deal by board — see the
+  next section.
+
+### How much each board clusters
+
+`rigid` differs from `uniform` only for footprints that land in a multi-part
+cluster, so these counts say how much a `rigid` row can mean on each board.
+They are `rigid_clusters()` on the unrouted inputs at this branch's head
+(the chorus fixture is out of tree).
+
+| Board | Footprints | Anchors (≥ 6 pads) | Parts with ≤ 2 pads | …within 3 mm of an anchor | …and sharing a net with it | Multi-part clusters (sizes) | Footprints in them |
+|---|---|---|---|---|---|---|---|
+| 00 | 3 | 0 | 3 | 0 | 0 | 0 | 0 |
+| 01 | 4 | 0 | 4 | 0 | 0 | 0 | 0 |
+| 02 | 19 | 2 | 17 | 2 | 2 | 1 (3) | 3 |
+| 03 | 38 | 5 | 27 | 12 | 12 | 4 (9, 3, 2, 2) | 16 |
+| 04 | 17 | 2 | 14 | 1 | 1 | 1 (2) | 2 |
+| 05 | 42 | 5 | 35 | 10 | 10 | 4 (5, 5, 2, 2) | 14 |
+| chorus | 90 | 3 | 76 | 4 | 1 | 1 (2) | 2 |
+
+Three things follow, and they qualify every statement about `rigid` below.
+
+- **Board 03 is the only board run in `rigid` mode that has a large cluster**
+  (one of nine parts; 16 of 38 footprints clustered). Every `rigid` result
+  that differs from its `uniform` twin by more than two parts' positions
+  comes from it.
+- **On boards 02 and 04 `rigid` moves two or three footprints differently**,
+  and on 00 and 01 none. Those rows are near-replicates of `uniform`, not
+  tests of clustering.
+- **On chorus `rigid` would be `uniform` with one part moved differently.**
+  Only three footprints qualify as anchors and only four of the 76 small parts
+  sit within 3 mm of one. A chorus `rigid` run under this rule would say
+  nothing about rigid clustering; it needs a different rule first. Board 05,
+  by contrast, clusters about as much as board 03 (14 of 42). Neither was run
+  in `rigid` mode (#6312).
 
 Choices worth stating because they are not obviously right:
 
@@ -148,7 +199,14 @@ rescue stages (which are not `kct route`).
   `loadavg_end` is in the harness JSON. Wall-clock seconds are indicative
   only. Where load could have decided a comparison it is called out next to
   the table.
-- `--seed 42` and `PYTHONHASHSEED=0` in every run. **One run per row.**
+- `--seed 42` and `PYTHONHASHSEED=0` in every run. **One run per row.** A fixed
+  seed did not guarantee an identical route on re-run; see "Run-to-run
+  variance" under [Not measured](#not-measured).
+- **The harness result JSON and routed boards were kept in a scratch directory,
+  were not committed, and no longer exist.** Every number in this note was
+  transcribed from them at the time. Numbers that appear in a table can be
+  cross-checked against other rows; the few that were only ever totals over
+  untabulated rows cannot, and are marked where they occur.
 - Grading is the same referee `krt_compare.py` uses
   (`kicad_tools.benchmark.external.metrics`): strict-geometry completion, both
   DRC engines (`kct check` in-process and `kicad-cli pcb drc --refill-zones`),
@@ -251,8 +309,13 @@ Three things happen in this table, and they point in three directions.
   signal nets unfinished and 2,750 `kct check` errors (2,605 of them
   `clearance_segment_zone`). It used 862 s of its 900 s budget — a uniform
   0.05 mm grid over 160 x 120 mm is four times the cells — and its pour
-  completion was cut off by the deadline. Whatever expansion buys this board, it buys at 1.5x
-  and loses again by 2x.
+  completion was cut off by the deadline. So in `rigid` mode, on this grid,
+  the gain seen at 1.5x is not there at 2x. That sentence should not be
+  stretched further, for three reasons in the tables themselves: the `uniform`
+  rows on the same grid run the other way (no gain at 1.5x, `USB_D+` routed
+  with zero errors at 2x, in 391 s); under the `area` policy board 03 at rigid
+  2x is 27/27 with zero errors (next table); and this is one run that ended
+  within 40 s of its deadline, so it is at least partly a budget result.
 - **Board 04 regresses.** At uniform 2x it loses net `SWO`. The log shows the
   net was routed, collided with `NRST`, failed recovery, and was demoted to
   unrouted — on a board with four times the free area. The `area`-policy run
@@ -364,9 +427,11 @@ out equal: 9 and 9. Chorus's *1x* run had the loaded host, and the expanded
 board still finished four fewer nets. Both chorus rows are deadline artifacts.
 
 Put the two protocols together and the reading is: **at best parity (05, equal
-load), otherwise worse, and never better** — on four independent 1x/1.5x
-pairs. The premise needed a large
-improvement to be worth a shrink loop, and there is no improvement.
+load), otherwise worse, and never better** — on four 1x/1.5x pairs. Those
+four are two boards under two protocols with one seed and one run each, not
+four independent samples, and three of the four chorus rows are deadline
+artifacts. The premise needed a large improvement to be worth a shrink loop,
+and there is no improvement.
 (Host load favoured the 1x arm in two of the four pairs, the expanded arm in
 one, and neither in one.)
 
@@ -377,9 +442,14 @@ nobody repeats the protocol; not evidence either way.
 
 **Not measured:** board 05 and chorus at 2x (the router refuses 05 under
 `default` and `area`, and the only protocol that could route it — explicit
-grid — could not finish even the 1x board in budget); and either partial board
-in `rigid` mode. Given what `rigid` did for board 03, the second is the more
-important omission.
+grid — could not finish even the 1x board in budget; chorus at 2x was not
+run); and either partial board in `rigid` mode. Given what `rigid` did for
+board 03 at 1.5x, the second is the more important omission, and it is tracked
+as #6312. It is not the same size of omission on the two boards: board 05
+forms four multi-part clusters covering 14 of its 42 footprints, so a `rigid`
+run there is a real test; chorus forms one two-part cluster out of 90, so a
+`rigid` run there would be a `uniform` run in all but one part's position
+(["How much each board clusters"](#how-much-each-board-clusters)).
 
 A side observation on chorus's DRC columns: the fixture is DRC-dirty **before
 any copper is added**. The copper-less snapshot from trap 2, graded once by
@@ -464,18 +534,28 @@ than transiting the gap; it is the conservative count.
 | chorus | (a) | 1x | 29 | 860 | 680 | 0 | 0 | 1.56 / 0.85 mm / 2 |
 | chorus | (a) | uniform 1.5 | 31 | 860 | 688 | **4** | **2** | 0.18 / 0.5 mm / 1 |
 
-(Of the rows not shown — every other scale and mode, the `area`-policy runs,
-and protocol (b) — all are zero except chorus at 1.5x under protocol (b), which
-has the same four. In total: 34 expanded routes, 3,820 loaded gaps, 8 over
-capacity.)
+The eight expanded rows above carry copper in 1,550 gaps, of which 4 are over
+1x capacity — all on the one chorus row.
+
+Rows not shown — every other scale and mode, the `area`-policy runs, and
+protocol (b) — were recorded at the time as all zero except chorus at 1.5x
+under protocol (b), which had the same four gaps, for totals of "34 expanded
+routes, 3,820 loaded gaps, 8 over capacity". **Those totals cannot be audited
+and should be treated as unverified.** The result JSON
+they were summed from was not committed and no longer exists, and the route
+count does not reconcile with this note's own tables: the Phase 1 tables hold
+31 expanded routes that produced a board, or 35 counting the omitted `rigid`
+rows for boards 00 and 01. Nothing below depends on the 3,820; the per-row
+figures in the table are what the conclusions rest on.
 
 Every 1x row is zero, as it must be for a board with no clearance errors
 between its own traces — that is the metric's control. The four chorus gaps
 are sub-0.5 mm slots between adjacent parts (`C11`–`J2` is 0.18 mm wide at 1x)
 that carry nothing at 1x and one trace each at 1.5x: exactly the "topology
 found with free space that cannot exist at final size" the issue was worried
-about. It is real, it reproduces across both chorus 1.5x routes, and it is
-0.6% of chorus's loaded gaps.
+about. It is real, it is 0.6% of that route's loaded gaps (4 of 688), and it
+was recorded as recurring on chorus's protocol (b) 1.5x route, which is among
+the rows that can no longer be checked.
 
 Two readings, and the second is the more useful.
 
@@ -509,14 +589,25 @@ Three reasons, in decreasing order of how much of the result they explain.
    it has to cross is stuck at every scale; it needs a via, a layer, or a part
    rotated — not millimetres. Scaling only relieves *channel capacity*, and
    Phase 2 says channel capacity is not binding on boards 05 and chorus.
+   (This is an explanation, not a law the data obeys everywhere: board 03's
+   `USB_D+` is stuck at `uniform` 1x and 1.5x and routes at `uniform` 2x on
+   the explicit grid.)
 2. **Pin-field geometry does not scale, and that is where the density is.**
    The proposal anticipated this for `ESCAPE_BLOCKED` nets specifically. It is
    more general: a 0.5 mm-pitch QFP presents the same escape problem on a
    60 mm board and a 120 mm one.
 3. **The router is budget-bound on precisely the boards that are partial, and
-   expansion spends the budget.** Cells grow as s² at fixed pitch (board 05:
-   3.93 M → 5.79 M estimated at 1.5x; 4x at 2x), paths are s times longer, and
-   A\* expansions grow with both. Under protocol (a), 11 of the 33 unfinished
+   expansion spends the budget.** The *coarse* grid grows as s² at fixed
+   pitch, but the router's cell estimate does not, because on these boards
+   much of it is fine-grid zones around individual parts, and a footprint does
+   not grow when the placement is scaled. Board 05's logged estimate goes
+   3.93 M → 5.79 M at 1.5x, which is 1.47x, not 2.25x: re-reading the grid
+   plan from the router's log at this branch's head, the coarse 0.065 mm grid
+   is 1.49 M → 3.36 M cells (the 2.25x) on top of about 2.44 M fine-zone cells
+   at both scales (1.98 M of them one zone, `U3` at 0.005 mm).
+   Chorus's estimate grows 1.61x (3.09 M → 4.98 M). No 2x estimate exists for
+   either board. Paths are s times longer, and A\* expansions grow with both
+   cells and path length. Under protocol (a), 11 of the 33 unfinished
    signal nets at 1x across the two partial boards are `BUDGET_STARVED` before
    anything is expanded, and none of them completes.
 
@@ -525,7 +616,10 @@ that finishes well inside its budget at 1.5x, and — the part `rigid` supplies 
 a placement change that is *not* purely affine, because the clusters keep
 their internal geometry while the space between them opens. Reason 1 applies
 to `uniform`; it applies less to `rigid`. That is the most interesting thing
-this experiment did not get to test on the hard boards.
+this experiment did not get to test on the hard boards (#6312) — and board 03
+is also the only board run in `rigid` mode on which the clustering rule groups
+more than three footprints, so "what `rigid` does" currently means "what it
+did on board 03".
 
 The anytime property — a complete, clean board at every step — was the
 proposal's main attraction, and it depends on step 3 delivering a complete,
@@ -539,13 +633,13 @@ prototype.
 
 | Question from the issue | Answer |
 |---|---|
-| Do boards that are partial at 1x reach 100% expanded? | No. 0 of 2 under the shipped router; both lose nets. |
-| Does anything complete expanded that does not at 1x? | Yes, once: board 03 on an explicit grid, rigid 1.5x (27/27, 0 DRC both engines). The default grid already routes the net concerned at 1x. |
-| Do boards that are complete at 1x stay complete? | Not reliably: board 04 loses a net at uniform 2x; board 03 loses two at rigid 2x. |
+| Do boards that are partial at 1x reach 100% expanded? | No. 0 of 2 at 1.5x `uniform`, under either protocol. Under the shipped router (protocol b) board 05's unfinished signal nets are unchanged (9 and 9) and chorus has four more (30 → 34). Not tested: 2x, and `rigid` (#6312). |
+| Does anything complete expanded that does not at 1x? | Yes, on board 03 with an explicit grid only: rigid 1.5x is fully complete (27/27, 0 DRC both engines), and uniform 2x routes the same net with 0 DRC errors (26/27, `GND` pour discontinuous). The default grid already routes that net at 1x. |
+| Do boards that are complete at 1x stay complete? | Not reliably: board 04 loses a net at uniform 2x under both grid policies. Boards 02 and 03 stay signal-complete at every scale under the `area` policy. (Board 03 on the explicit grid is not complete at 1x; its rigid 2x row routes the 1x-stuck net and leaves two others unfinished.) |
 | Do `ESCAPE_BLOCKED` nets fail to benefit, as predicted? | Untestable — none exist at 1x on this fleet. |
-| Do `PLACEMENT_BOUND` nets benefit, as predicted? | On board 03, yes (1 of 1). On 05 and chorus, about one in four, with more nets newly stuck than freed. |
-| Is shrinking geometry or re-topology? | Geometry: 8 of 3,820 loaded gaps over 1x capacity, all on chorus. |
-| Minimum feasible scale per board, both DRC engines? | Not measured — it needs the shrink step. Only board 03 has an expanded starting point (rigid 1.5x) that is better than its 1x run, and only against the explicit grid. |
+| Do `PLACEMENT_BOUND` nets benefit, as predicted? | On board 03, yes (1 of 1). On 05 and chorus, 4 of 15 under (a) and 5 of 26 under (b), with more nets newly stuck than freed across all classes (10 against 6, and 9 against 5). |
+| Is shrinking geometry or re-topology? | Geometry, as far as this metric sees: 4 of 1,550 loaded gaps over 1x capacity in the tabulated expanded routes, all on chorus. |
+| Minimum feasible scale per board, both DRC engines? | Not measured — it needs the shrink step. Only board 03 has an expanded starting point that is better than its 1x run (rigid 1.5x, and uniform 2x for signal nets), and only against the explicit grid. |
 
 What would change the verdict, in order of cost:
 
@@ -553,27 +647,47 @@ What would change the verdict, in order of cost:
    1x with `USB_D+` intact and both DRC engines clean, with repair confined to
    trace ends at pads.
 2. **`rigid` mode helps a board that is partial under the shipped router.** Not
-   measured here. One run each of board 05 and chorus at rigid 1.25–1.5x under
-   protocol (a), on an unloaded host, would settle it.
+   measured here; tracked as #6312. Board 05 at rigid 1.25–1.5x under protocol
+   (a), on an unloaded host and run more than once, would be informative as
+   the harness stands. Chorus would not: the clustering rule groups two of
+   its 90 footprints, so it needs a different rule before a `rigid` run tests
+   anything.
 3. **A board on which inter-footprint channel capacity is the binding
    constraint** — the `gaps` subcommand reporting at- or over-capacity gaps on
-   a 1x partial route. None of the seven boards here is one. A dense two-layer
-   board with long parallel buses between rows of parts is where to look.
+   a 1x partial route. None of the boards in the Phase 2 table is one. A dense
+   two-layer board with long parallel buses between rows of parts is where to
+   look.
 
 ## Refinements the data suggests
 
 Ordered by how directly the measurements support them.
 
-1. **If anything is scaled, keep clusters rigid — and treat that as the idea,
-   not a detail of it.** Every positive in this experiment is a `rigid` row:
-   board 03 complete at 1.5x, its pour discontinuity cleared under both grids,
-   board 04 not regressing at 2x. `uniform` is electrically wrong and never
-   won a comparison. The mechanism is plausible too: a rigid-cluster spread is
-   not affine, so it can change which channels exist, where a uniform scale
-   only widens the ones already there.
-2. **Expand a little, not a lot.** Board 03's gain is at 1.5x and is gone by
-   2x; the s² grid cost is the reason. The proposal's "~2x" is past the useful
-   range on every board measured. If this is revisited, sweep 1.1–1.5x.
+1. **If anything is scaled, `rigid` is the variant to try first — on thin
+   evidence.** Most of the positives are `rigid` rows: board 03 fully complete
+   at 1.5x on the explicit grid, its pour discontinuity cleared (27/27) in
+   three rows, board 04 not regressing at 2x where `uniform` does. But not
+   all: on board 03's explicit grid at 2x, `uniform` routes the stuck net with
+   zero errors and `rigid` is the worst row in the table (2 unfinished, 2,750
+   errors), so `uniform` wins that comparison outright. And the `rigid` wins
+   come from one board: 03 is the only one run in `rigid` mode where the rule
+   clusters more than three footprints, and board 04's win turns on a single
+   part.
+   `uniform` is electrically wrong in what it does to decoupling, which is a
+   reason to prefer `rigid` independent of these counts. The mechanism is
+   plausible too: a rigid-cluster spread is not affine, so it can change which
+   channels exist, where a uniform scale only widens the ones already there.
+   Whether any of this carries to a partial board is #6312.
+2. **The data does not locate a useful scale; cost argues for starting
+   small.** The one row that suggests "1.5x good, 2x bad" is board 03 `rigid`
+   on the explicit grid, a single run that used 862 s of 900 s. `uniform` on
+   the same grid gains only at 2x, board 03 `rigid` at 2x under the `area`
+   policy is 27/27 with zero errors, and board 04 `uniform` regresses at 2x.
+   The two partial boards have no 2x data at all, so nothing here says the
+   proposal's "~2x" is past a useful range for them. What is established is
+   cost: at a fixed pitch the coarse grid is four times the cells at 2x, and
+   the auto-grid refuses boards 04 and 05 at 2x outright. If this is
+   revisited, sweep 1.1–1.5x first because it is cheaper and routable, not
+   because 2x has been shown not to work.
 3. **Expand virtually, in the global router, instead of geometrically.** The
    useful output of an expanded route is the list of places where the 1x board
    runs out of room. That list can be had without scaling anything: run the
@@ -586,8 +700,8 @@ Ordered by how directly the measurements support them.
    fleet Phase 2 says that list may be nearly empty.
 4. **Spread locally, where capacity binds, not globally.** If a gap is over
    capacity, move the two parts that bound it; do not scale the other forty.
-   Global expansion pays the full s² cost to relieve gaps that were never
-   tight.
+   Global expansion pays for a coarse grid s² times larger to relieve gaps
+   that were never tight.
 5. **Treat "more room made it worse" as a router bug, not a curiosity.** A
    router whose completion is not monotone in available space will mislead any
    search over board size, including `auto_pcb_size.py`'s grow-on-failure loop,
@@ -601,7 +715,11 @@ Ordered by how directly the measurements support them.
 ## Not measured
 
 - **Board 05 and chorus at 2x**, and either in `rigid` mode. See "Boards that
-  are partial at 1x". The second is the gap most likely to matter.
+  are partial at 1x". The second is the gap most likely to matter, and is
+  tracked as #6312. Under the current clustering rule it is a real gap for
+  board 05 (14 of 42 footprints clustered) and close to an empty one for
+  chorus (2 of 90), which needs a better rule before a `rigid` run means
+  anything.
 - **Scales between 1x and 1.5x.** A 1.25x sweep was started under the abandoned
   protocol (c) and has no usable rows.
 - **Boards 06, 07, 08, 09.** 06 and 07 arrive with routed copper and are
@@ -616,16 +734,27 @@ Ordered by how directly the measurements support them.
 - **Run-to-run variance.** One run per row, on a loaded shared host. The board
   05 and chorus differences are two to four nets each from single pairs of
   runs, and are not individually significant. What carries the verdict is that
-  four independent pairs across two protocols show no improvement in any of
-  them — including the one pair where load favoured the expanded arm — and
-  that the premise needed a large improvement, not parity. The board 03 result (0 vs 1 unfinished) is
+  four pairs — two boards under two protocols, one seed, so not independent
+  samples — show no improvement in any of them, including the one pair where
+  load favoured the expanded arm, and that the premise needed a large
+  improvement, not parity. The board 03 result (0 vs 1 unfinished) is
   likewise a single pair; #6310 should re-run it before building on it.
+  **A fixed seed is not run-to-run determinism.** In review of this note,
+  board 01 was re-run at 1.5x under the `area` policy with the same `--seed
+  42` and `PYTHONHASHSEED=0` and came back with 2 vias / 88.1 mm against the
+  table's 3 / 89.7 (completion 3/3 both times; 1x and 2x matched the table).
+  Two further re-runs of the same three rows on this branch reproduced the
+  table exactly, so the variation is real but occasional, and its cause was
+  not investigated. On a three-net board it changed one via; nothing here
+  bounds what it does to a 37-net board at its budget limit, which is one
+  more reason not to read the two-to-four-net differences as signal.
 
 ## Follow-ups filed
 
 | Issue | What |
 |---|---|
 | #6310 | Probe: shrink board 03's rigid 1.5x route back to 1x once and see whether `USB_D+` survives. Decides whether a compaction pass is worth building at all. |
+| #6312 | Measure `rigid` expansion on the boards that are partial at 1x: board 05 as the harness stands; chorus only after a clustering rule that actually clusters it. The omission this note ranks first. |
 | #6309 | Evaluate reporting over-capacity global-routing edges as a placement-spread trigger (refinement 3). |
 | #6307 | Router: board 04 loses net `SWO` when its placement is spread to 2x. |
 | #6306 | `kct route` refuses a 120 x 80 mm board with one LQFP-48; the auto-grid error omits `--max-cells` and advises enlarging the board. |
