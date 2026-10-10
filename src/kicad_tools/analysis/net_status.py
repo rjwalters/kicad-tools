@@ -92,6 +92,11 @@ class NetStatus:
             for the net (``island_count - 1``) rather than over-counting
             them as ``unconnected_count`` (which collapses every non-largest
             island into individual pads).
+        islands: The islands themselves, as lists of :class:`PadInfo`,
+            largest first (issue #6316). ``islands[0]`` holds the same pads
+            as ``connected_pads`` and ``len(islands) == island_count``. A
+            ratsnest needs the groups, which ``unconnected_pads`` flattens
+            together. Not part of :meth:`to_dict`.
     """
 
     net_number: int
@@ -111,6 +116,8 @@ class NetStatus:
     # Defaults to 0 so a hand-constructed NetStatus with no pads reports a
     # consistent "no islands"; ``_analyze_net`` always sets a real value.
     island_count: int = 0
+    # Issue #6316: the pad groups behind ``island_count``, largest first.
+    islands: list[list[PadInfo]] = field(default_factory=list, repr=False)
 
     @property
     def open_connections(self) -> int:
@@ -696,6 +703,7 @@ class NetStatusAnalyzer:
             status.connected_pads = pad_infos
             # Issue #4934: one pad is trivially one island; zero pads is none.
             status.island_count = len(pad_infos)
+            status.islands = [list(pad_infos)] if pad_infos else []
             return status
 
         # Build connectivity graph
@@ -714,6 +722,17 @@ class NetStatusAnalyzer:
             connected_names = set(islands[0])
         else:
             connected_names = set()
+
+        # Issue #6316: keep the groups (largest first, matching the sort
+        # above).  Legacy mode keys pads by REF.PAD, which duplicate pad
+        # numbers can share, so one id may stand for several pads.
+        pads_by_id: dict[str, list[PadInfo]] = {}
+        for pad_info in pad_infos:
+            pads_by_id.setdefault(pad_info.connectivity_id, []).append(pad_info)
+        status.islands = [
+            [pad for node in dict.fromkeys(island) for pad in pads_by_id.get(node, [])]
+            for island in islands
+        ]
 
         # Classify pads
         for pad_info in pad_infos:

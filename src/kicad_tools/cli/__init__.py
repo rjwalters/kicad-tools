@@ -575,6 +575,11 @@ def _dispatch_command(args) -> int:
     elif args.command == "screenshot":
         return _run_screenshot_command(args)
 
+    elif args.command == "board-view":
+        from .commands.board_view import run_board_view_command
+
+        return run_board_view_command(args)
+
     elif args.command == "report":
         return _run_report_command(args)
 

@@ -212,6 +212,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_detect_mistakes_parser(subparsers)
     _add_calibrate_parser(subparsers)
     _add_screenshot_parser(subparsers)
+    _add_board_view_parser(subparsers)
     _add_report_parser(subparsers)
     _add_export_parser(subparsers)
     _add_optim_parser(subparsers)
@@ -10089,6 +10090,17 @@ def _add_calibrate_parser(subparsers) -> None:
         dest="calibrate_verbose",
         help="Show detailed progress information",
     )
+
+
+def _add_board_view_parser(subparsers) -> None:
+    """Add ``board-view`` (issue #6316).
+
+    Declared in the command module, the only place it is declared, so there
+    is no second parser to drift from this one.
+    """
+    from .commands.board_view import add_board_view_parser
+
+    add_board_view_parser(subparsers)
 
 
 def _add_screenshot_parser(subparsers) -> None:
