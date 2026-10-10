@@ -574,8 +574,8 @@ def _paragraphs(
     if report.pour_advisory:
         names = ", ".join(entry["net"] for entry in report.pour_advisory)
         head += (
-            f" Pour nets with pads the fill does not reach (advisory in kct check, no link "
-            f"drawn): {names}."
+            " Pour nets whose fill leaves pads in separate islands (advisory in kct check, "
+            f"no link drawn): {names}."
         )
     window = ", ".join(_fmt(v) for v in box)
     frame = f"{_frame_note(geo)} Window x0, y0, x1, y1 = {window}."

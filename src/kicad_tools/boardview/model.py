@@ -410,7 +410,9 @@ def missing_links(pcb: PCB, *, absolute: bool = False) -> LinkReport:
     pour copper and is incomplete only by an advisory residual is not an
     error there, so it gets no link here and is listed under
     ``pour_advisory`` instead.  A net therefore has links exactly when
-    ``kct check`` reports it, and ``len(links) == open_connections``.
+    ``kct check`` reports it, and ``len(links) == open_connections``.  A
+    ``pour_advisory`` entry lists the net's islands as pad names; it does not
+    say which island the fill belongs to, because the analyzer does not.
 
     Each link is the closest pad pair (centre to centre) between the islands
     joined so far and one not yet joined (Prim's algorithm, starting from the
@@ -437,7 +439,7 @@ def missing_links(pcb: PCB, *, absolute: bool = False) -> LinkReport:
                 {
                     "net": status.net_name,
                     "open_connections": status.open_connections,
-                    "stranded_pads": sorted(end.name for island in islands[1:] for end in island),
+                    "islands": [sorted(end.name for end in island) for island in islands],
                     "zone_layers": list(status.plane_layers),
                 }
             )

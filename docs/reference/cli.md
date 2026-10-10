@@ -83,6 +83,7 @@ kct [--help] [--version] <command> [options]
 | | `calibrate` | Calibrate routing performance settings |
 | **Reporting** | `render` | Render per-board 2D SVGs + 3D PNGs |
 | | `screenshot` | Capture a PNG of a KiCad board or schematic |
+| | `board-view` | Board images for a routing question: net highlight, ratsnest, mm axes |
 | | `report` | Generate a Markdown design report |
 | **Utilities** | `config` | View/manage configuration |
 | | `interactive` | Launch interactive REPL mode |
@@ -1754,6 +1755,56 @@ diagnosis. Both are **absent** (not null) without a sidecar. A sidecar built
 for a different board, or older than the PCB, is reported on stderr and
 ignored rather than guessed from. Full reference:
 [`routing-plan.md`](routing-plan.md).
+
+### `board-view`
+
+Draw a routed or partly routed board to answer a routing question. Where
+`kct screenshot` plots layers through `kicad-cli`, this reads the board model
+and draws what that plot lacks: mm axes, reference designators, pad net
+labels, one net outlined in white, and the connections still missing as
+magenta dashed ratsnest lines. Needs matplotlib
+(`pip install 'kicad-tools[visualization]'`), not `kicad-cli`.
+Implemented in [`src/kicad_tools/boardview/`](../../src/kicad_tools/boardview/).
+
+```bash
+kct board-view overview <pcb_file>                    # whole board, every missing link
+kct board-view net <pcb_file> <net>                   # crop round one net, net highlighted
+kct board-view layers <pcb_file> <net>                # that crop, one panel per copper layer
+kct board-view crop <pcb_file> x0 y0 x1 y1 [--net N]  # an explicit window, in mm
+kct board-view list <pcb_file>                        # missing pad pairs as JSON, no image
+```
+
+| Option | Views | Meaning |
+|---|---|---|
+| `-o, --output PATH` | image views | PNG path (default `<pcb>-<view>[-<net>].png` beside the board) |
+| `--absolute` | all | Sheet-absolute coordinates instead of board-relative |
+| `--max-size PX` | image views | Longest image side (default 1568) |
+| `--margin MM` | `net`, `layers` | Margin round the net (default 4) |
+| `--format text\|json` | all | `list` defaults to `json`; the others to `text` |
+
+**Coordinate frame.** Axes are board-relative by default: (0, 0) is the
+`Edge.Cuts` minimum corner. That is the frame of `kct net-status` and
+`kct pcb move-footprint --to`, so a position read off the image can be passed
+straight to them. `kct check` reports violation locations sheet-absolute,
+which is the axis value plus the board origin; `--absolute` draws in that
+frame, so a `crop` window can be taken from a `kct check` location. The image
+title and the JSON both name the frame and give the origin.
+
+**Missing links.** They come from the connectivity model behind `kct check`
+(`NetStatusAnalyzer`, which traces zone fill), one link per open connection,
+drawn between the closest pads of two copper islands. A pour net that
+`kct check` treats as advisory (it owns filled copper that misses a pad) gets
+no link and is listed under `pour_advisory`. Zone pours themselves are not
+drawn, so a pad with no track into it may still be connected.
+
+**Reading the image.** Good for: why a net is stuck, where a via could go,
+whether the placement is sensible, whether one layer carries everything. Not
+for clearances, widths, connectivity or counts, which `kct check`,
+`kct net-status` and `kicad-cli pcb drc` compute exactly. A reading is a
+hypothesis; confirm it with those tools before acting on it.
+
+Pad net labels appear only when the scale reaches 40 px/mm (a window of about
+35 mm or less); the highlighted net's pads are labelled `pad:net`.
 
 ---
 

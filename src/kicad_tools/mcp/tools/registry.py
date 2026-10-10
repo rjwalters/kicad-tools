@@ -2120,6 +2120,122 @@ register_tool(
 )
 
 
+def _handler_board_view(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle board_view tool call (issue #6316).
+
+    Same result shape as ``screenshot_board`` (``image_base64``, size,
+    ``output_path``) plus the frame and the missing-link list.  The ``list``
+    view returns no image, so it carries no ``_mcp_content``.
+    """
+    from kicad_tools.boardview import board_view
+
+    result = board_view(
+        params["pcb_path"],
+        params.get("view", "overview"),
+        net=params.get("net"),
+        window=params.get("window"),
+        absolute=params.get("absolute", False),
+        margin_mm=params.get("margin_mm", 4.0),
+        max_size_px=params.get("max_size_px", 1568),
+        output_path=params.get("output_path"),
+    )
+
+    if result.get("success") and result.get("image_base64"):
+        meta = {k: v for k, v in result.items() if k != "image_base64"}
+        result["_mcp_content"] = [
+            {"type": "text", "text": json.dumps(meta, indent=2)},
+            {
+                "type": "image",
+                "data": result["image_base64"],
+                "mimeType": "image/png",
+            },
+        ]
+
+    return result
+
+
+register_tool(
+    name="board_view",
+    description=(
+        "Draw a routed or partly routed PCB to answer a routing question. Unlike "
+        "screenshot_board, the image carries net identity: mm axes, reference "
+        "designators, pad net labels, one net highlighted, and the connections "
+        "still missing drawn as ratsnest lines. Views: 'overview' (whole board, "
+        "every missing link), 'net' (crop round one net's missing links, or its "
+        "pads if it is complete), 'layers' (that crop as one panel per copper "
+        "layer), 'crop' (an explicit window), 'list' (missing links as data, no "
+        "image). Good for: why is this net stuck, where could a via go, is the "
+        "placement sensible, is one layer carrying everything. Not for clearances, "
+        "widths, connectivity or counts, which DRC and LVS compute exactly. Treat "
+        "anything read off the image as a hypothesis and confirm it with "
+        "net_status or a DRC check before acting on it. Axes are board-relative "
+        "by default (origin at the Edge.Cuts minimum corner, the frame net-status "
+        "and move-footprint use); DRC locations are sheet-absolute, which "
+        "'absolute' selects. The result names the frame and gives board_origin_mm. "
+        "Missing links come from the same connectivity model as the connectivity "
+        "check, so the two cannot disagree; pour nets whose fill misses a pad are "
+        "listed under pour_advisory with no link. Zone pours are not drawn. Needs "
+        "matplotlib, not kicad-cli."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "view": {
+                "type": "string",
+                "enum": ["overview", "net", "layers", "crop", "list"],
+                "description": "Which view to draw. Default: overview.",
+                "default": "overview",
+            },
+            "net": {
+                "type": "string",
+                "description": (
+                    "Net to highlight. Required for 'net' and 'layers', optional for 'crop'."
+                ),
+            },
+            "window": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4,
+                "description": (
+                    "Window for the 'crop' view as [x0, y0, x1, y1] in mm, in the selected frame."
+                ),
+            },
+            "absolute": {
+                "type": "boolean",
+                "description": (
+                    "Use sheet-absolute coordinates (the frame DRC locations are "
+                    "reported in) instead of board-relative ones."
+                ),
+                "default": False,
+            },
+            "margin_mm": {
+                "type": "number",
+                "description": "Margin round the net for 'net' and 'layers', in mm. Default: 4.",
+                "default": 4.0,
+            },
+            "max_size_px": {
+                "type": "integer",
+                "description": (
+                    "Maximum image dimension in pixels. Default: 1568 (fits common vision-model input limits)."
+                ),
+                "default": 1568,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Optional file path to save the PNG image to disk.",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_board_view,
+    category="screenshot",
+)
+
+
 def _handler_screenshot_schematic(params: dict[str, Any]) -> dict[str, Any]:
     """Handle screenshot_schematic tool call."""
     from kicad_tools.mcp.tools.screenshot import screenshot_schematic

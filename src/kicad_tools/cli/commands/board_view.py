@@ -167,8 +167,11 @@ def _print_links(result: dict[str, Any]) -> None:
         for pair in pairs:
             print(f"  {net}: {pair['from']} -> {pair['to']}  {pair['length_mm']:.2f} mm")
     for entry in result["pour_advisory"]:
-        pads = ", ".join(entry["stranded_pads"])
-        print(f"  {entry['net']}: pour does not reach {pads} (advisory in kct check, no link)")
+        groups = " | ".join(", ".join(island) for island in entry["islands"])
+        print(
+            f"  {entry['net']}: pour leaves {len(entry['islands'])} separate islands "
+            f"({groups}); advisory in kct check, no link"
+        )
 
 
 def run_board_view_command(args: Namespace) -> int:

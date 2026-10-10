@@ -71,3 +71,20 @@ Install the packaged `kct` skills, rendered for your harness
   timeout. A hang means the second engine did not run, so the board is not
   signed off. Grant the terminal Documents access, or run `kicad-cli` from the
   `kicad/kicad:10.0` container.
+
+## 6. When to look at the board
+
+`kct board-view net <pcb> <net>` draws one net with mm axes, pad net labels
+and its missing connections as dashed lines. `kct board-view overview <pcb>`
+shows the whole board; `layers` and `crop` narrow it down. Axes are
+board-relative, like `kct net-status <pcb>` positions; `kct check <pcb>`
+locations are sheet-absolute, which `--absolute` selects.
+
+- **Ask an image**: why is this net stuck, where could a via go, is the
+  placement sensible, is one layer carrying everything.
+- **Ask the exact tools**: clearances, widths, connectivity and counts.
+  `kct check <pcb>`, `kct net-status <pcb>` and `kct board-view list <pcb>`
+  compute them; a picture only suggests them.
+
+What you read off an image is a hypothesis. Confirm it with those tools
+before acting on it. Zone pours are not drawn.
