@@ -17,9 +17,11 @@ visibly stranded pads.
 
 from __future__ import annotations
 
+import copy
 import json
 import signal
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -176,6 +178,150 @@ class _CopperRouter(FakeRouter):
         )
 
 
+class _Rewind(_Deadline):
+    """Discard the trial from inside its own re-route, then let it carry on.
+
+    The effect of an interrupt whose partial save ran but whose process did
+    not stop.  Not hypothetical: ``_handle_interrupt`` saves and then raises
+    ``SystemExit``, and Python throws that away when the signal was delivered
+    inside a ``__del__`` (#6324).
+    """
+
+    loop: PlacementDeltaFeedbackLoop
+
+    def __call__(self) -> None:
+        assert self.loop.restore_last_accepted() is True
+
+
+class _SwallowedCtrlC(_Deadline):
+    """Ctrl+C delivered while a destructor runs: saved, but not stopped.
+
+    The real handler, called from a real ``__del__``, so the ``SystemExit`` is
+    discarded by the interpreter itself rather than by this test.
+    """
+
+    def __call__(self) -> None:
+        class _Dying:
+            def __del__(self) -> None:
+                route_cmd._handle_interrupt(signal.SIGINT, None)
+
+        _Dying()
+
+
+class _SwallowedCtrlCThenCrash(_SwallowedCtrlC):
+    """... and the re-route, resumed over the rewound state, then blows up."""
+
+    def __call__(self) -> None:
+        super().__call__()
+        raise RuntimeError("router exploded")
+
+
+class _GridRouter(_CopperRouter):
+    """A ``_CopperRouter`` that is like the real router in three more ways.
+
+    * It has a **grid** (the two internals the loop's revert drives,
+      ``_reset_for_new_trial`` and ``_mark_route``): the pad positions it was
+      last reset from, plus every route marked on it since.
+    * A net counts as routed when the router **holds copper for it**, which is
+      how ``Autorouter.get_failed_nets`` decides.  ``_CopperRouter`` asks the
+      live pad geometry instead, which hides a re-route that finished over
+      pads someone moved back: its copper says "routed", its pads say "not".
+    * Its re-route does not stop when an interrupt's save returns to it.  It
+      either still holds its results and publishes them at the end
+      (``in_place=False``) or goes on appending to ``self.routes``, whatever
+      list that has become in the meantime (``in_place=True``).
+    """
+
+    def __init__(
+        self,
+        interrupt: _Deadline | None = None,
+        r2_move_helps: bool = True,
+        in_place: bool = False,
+    ):
+        self.in_place = in_place
+        self.grid: dict = {}
+        super().__init__(interrupt, r2_move_helps)
+        initial = self.routes
+        self._reset_for_new_trial()
+        for route in initial:
+            self._lay(route)
+
+    def _reset_for_new_trial(self) -> None:
+        self.routes = []
+        self.grid = {"pads": {key: (pad.x, pad.y) for key, pad in self.pads.items()}, "copper": []}
+
+    def _mark_route(self, route: _Trace) -> None:
+        self.grid["copper"].append(route)
+
+    def _lay(self, route: _Trace) -> None:
+        self.routes.append(route)
+        self._mark_route(route)
+
+    def get_failed_nets(self) -> list[int]:
+        return sorted(set(self.nets) - {0} - {route.net for route in self.routes})
+
+    def _route_everything_reachable(self) -> list[_Trace]:
+        unreachable = set(self._failing(self))
+        routes = []
+        for net, keys in self.nets.items():
+            if net == 0 or net in unreachable:
+                continue
+            a, b = (self.pads[key] for key in keys)
+            routes.append(_Trace(net, a.x, a.y, b.x, b.y))
+        return routes
+
+    def route_all_negotiated(self, **kwargs):
+        self.route_calls += 1
+        # Routed against the pads as they are NOW (moved, inside a trial).
+        routes = self._route_everything_reachable()
+        done = 0
+        if self.interrupt is not None and self.route_calls == self.interrupt.on_call:
+            done = self.interrupt.rerouted
+            for route in routes[:done]:
+                self._lay(route)
+            self.interrupt()
+        if self.in_place:
+            for route in routes[done:]:
+                self._lay(route)
+        else:
+            for route in routes[done:]:
+                self._mark_route(route)
+            self.routes = routes
+        return self.routes
+
+
+def _state(router: _GridRouter, pcb: PCB | None = None) -> dict:
+    """Everything a trial touches, by value: copper, pads, grid and board."""
+    state = {
+        "routes": copy.deepcopy(router.routes),
+        "pads": {key: (pad.x, pad.y) for key, pad in router.pads.items()},
+        "grid": copy.deepcopy(router.grid),
+    }
+    if pcb is not None:
+        # The board as it would be SAVED, re-read: a revert re-serializes
+        # ``(at 30.0 10.0)`` as ``(at 30 10)``, so the text itself is no guide.
+        with tempfile.TemporaryDirectory() as scratch:
+            saved = Path(scratch) / "board.kicad_pcb"
+            saved.write_text(route_cmd._pcb_text(pcb))
+            state["board"] = {
+                fp.reference: (
+                    fp.position,
+                    fp.layer,
+                    [(pad.number, pad.position, pad.net_name) for pad in fp.pads],
+                )
+                for fp in PCB.load(saved).footprints
+            }
+    return state
+
+
+def _assert_grid_matches_the_copper(router: _GridRouter) -> None:
+    """The grid is the one a fresh reset + mark of the live routes would give."""
+    assert router.grid == {
+        "pads": {key: (pad.x, pad.y) for key, pad in router.pads.items()},
+        "copper": router.routes,
+    }
+
+
 def _deltas() -> list[PlacementDelta]:
     return [
         PlacementDelta(net_name="B", target_ref="R2", kind="translate", dx=_MOVE, dy=0.0),
@@ -218,7 +364,11 @@ def _clean_interrupt_state():
 
 def _arm(router, source: Path, output: Path) -> None:
     """What every route flow does before routing starts."""
-    route_cmd._reset_partial_save_state()
+    # Looked up, not called by name: against source that predates the fix the
+    # tests must fail on the DEFECT (stranded pads), not on a missing helper.
+    reset = getattr(route_cmd, "_reset_partial_save_state", None)
+    if reset is not None:
+        reset()
     route_cmd._interrupt_state.update(
         router=router,
         output_path=output,
@@ -353,6 +503,242 @@ class TestLoopRestore:
 
         assert loop.trial_in_flight is None
         assert loop.accepted_deltas == []
+
+
+# --------------------------------------------------------------------------- #
+# Loop level: the trial is discarded, but the loop is still running it         #
+# --------------------------------------------------------------------------- #
+
+
+class _RewoundAtTheCommit(PlacementDeltaFeedbackLoop):
+    """Fires ``restore_last_accepted`` in the keep's last unguarded instant.
+
+    That instant is after the delta has been listed as kept and before the
+    trial is retired.  Nothing the loop calls runs there, so the test hooks
+    the retiring assignment itself, just before it takes effect.
+    """
+
+    armed = False
+    _slot = None
+
+    @property
+    def _trial(self):
+        return self._slot
+
+    @_trial.setter
+    def _trial(self, value) -> None:
+        listed = self.accepted_deltas[-1:] if self._slot is not None else []
+        if self.armed and value is None and listed and listed[0] is self._slot.delta:
+            self.armed = False
+            assert self.restore_last_accepted() is True
+        self._slot = value
+
+
+class TestTrialRewoundUnderTheLoop:
+    """``restore_last_accepted`` ran mid-trial and the run did NOT stop.
+
+    The loop must notice at whichever point it resumes, finish the undo
+    (including the grid, which the save path skips), keep nothing from the
+    discarded trial and start no other.
+    """
+
+    @staticmethod
+    def _loop(router, tmp_path: Path, cls=PlacementDeltaFeedbackLoop):
+        source = tmp_path / "board.kicad_pcb"
+        source.write_text(_board_text())
+        pcb = PCB.load(source)
+        loop = cls(router=router, pcb=pcb, verbose=False, delta_proposer=lambda _pcb: _deltas())
+        return loop, pcb
+
+    @staticmethod
+    def _assert_stopped_on(result, loop, target: str) -> None:
+        assert result.exit_reason == "pd_interrupted"
+        assert result.interrupted_delta is not None
+        assert result.interrupted_delta.target_ref == target
+        assert target not in [d.target_ref for d in result.applied_deltas]
+        assert result.reverted_deltas == [], "it was never measured, so it is not 'reverted'"
+        assert f"interrupted: {target} translate" in result.summary()
+        assert loop.trial_in_flight is None
+        assert loop.restore_last_accepted() is False
+
+    @pytest.mark.parametrize(
+        "in_place", [False, True], ids=["publishes-at-end", "appends-in-place"]
+    )
+    @pytest.mark.parametrize("rerouted", [0, 1, 3], ids=["no-net-back", "one-net-back", "all-back"])
+    def test_a_trial_rewound_during_its_re_route_is_not_kept(
+        self, tmp_path: Path, in_place: bool, rerouted: int
+    ):
+        """The reviewed defect: the re-route finishes over rewound pads and is KEPT."""
+        interrupt = _Rewind(on_call=1, rerouted=rerouted)
+        router = _GridRouter(interrupt=interrupt, in_place=in_place)
+        loop, pcb = self._loop(router, tmp_path)
+        interrupt.loop = loop
+        before = _state(router, pcb)
+
+        result = loop.run_delta(reuse_existing_routes=True)
+
+        assert result.applied_deltas == [], "a discarded trial must never be kept"
+        assert loop.accepted_deltas == []
+        self._assert_stopped_on(result, loop, "R2")
+        assert router.route_calls == 1, "no further trial may start after an interrupt"
+        # Copper, pads, grid and board are the pre-trial ones again.
+        assert _state(router, pcb) == before
+        assert router.pads[("R2", "1")].x == pytest.approx(29.5)
+        assert next(fp for fp in pcb.footprints if fp.reference == "R2").position[0] == 30.0
+        assert sorted(route.net for route in router.routes) == [1, 3]
+        _assert_grid_matches_the_copper(router)
+
+    @pytest.mark.parametrize(
+        "in_place", [False, True], ids=["publishes-at-end", "appends-in-place"]
+    )
+    def test_a_rewound_second_trial_leaves_the_first_kept_delta_and_its_copper(
+        self, tmp_path: Path, in_place: bool
+    ):
+        # What the accepted state is once R2 alone has been kept.
+        reference = _GridRouter(in_place=in_place)
+        reference_loop, reference_pcb = self._loop(reference, tmp_path)
+        reference_loop.run_delta(reuse_existing_routes=True, max_adjustments=1)
+        accepted = _state(reference, reference_pcb)
+
+        interrupt = _Rewind(on_call=2)
+        router = _GridRouter(interrupt=interrupt, in_place=in_place)
+        loop, pcb = self._loop(router, tmp_path)
+        interrupt.loop = loop
+
+        result = loop.run_delta(reuse_existing_routes=True)
+
+        assert [d.target_ref for d in result.applied_deltas] == ["R2"]
+        self._assert_stopped_on(result, loop, "R4")
+        assert _state(router, pcb) == accepted
+        assert router.pads[("R4", "1")].x == pytest.approx(29.5)
+        _assert_grid_matches_the_copper(router)
+
+    @pytest.mark.parametrize("where", ["board", "router-pads"])
+    def test_a_rewind_while_the_delta_is_being_applied_is_undone_before_routing(
+        self, tmp_path: Path, where: str
+    ):
+        """The rewind lands first; the application then moves things again."""
+        router = _GridRouter()
+        loop, pcb = self._loop(router, tmp_path)
+        before = _state(router, pcb)
+
+        if where == "board":
+            applicator = loop._strategy_applicator
+            apply_strategy = applicator.apply_strategy
+
+            def rewound_apply(board, strategy):
+                assert loop.restore_last_accepted() is True
+                return apply_strategy(board, strategy)
+
+            applicator.apply_strategy = rewound_apply
+        else:
+            move_pads = loop._apply_delta_to_router_pads
+
+            def rewound_move(delta):
+                assert loop.restore_last_accepted() is True
+                move_pads(delta)
+
+            loop._apply_delta_to_router_pads = rewound_move
+
+        result = loop.run_delta(reuse_existing_routes=True)
+
+        assert result.applied_deltas == []
+        self._assert_stopped_on(result, loop, "R2")
+        assert router.route_calls == 0, "a discarded trial is not worth a re-route"
+        assert _state(router, pcb) == before
+        _assert_grid_matches_the_copper(router)
+
+    def test_a_rewind_during_the_loops_own_revert_stops_the_loop(self, tmp_path: Path):
+        """Both undo the same trial at once; the result is still the pre-trial state."""
+        router = _GridRouter(r2_move_helps=False)
+        loop, pcb = self._loop(router, tmp_path)
+        before = _state(router, pcb)
+        restore_placement = loop._restore_placement
+        fired = []
+
+        def rewound_restore(snapshot):
+            if not fired:
+                fired.append(True)
+                assert loop.restore_last_accepted() is True
+            restore_placement(snapshot)
+
+        loop._restore_placement = rewound_restore
+
+        result = loop.run_delta(reuse_existing_routes=True)
+
+        assert fired
+        # Without the stop, the R4 trial would run next and be kept.
+        assert result.applied_deltas == []
+        assert router.route_calls == 1
+        # This probe WAS measured before the interrupt, so it is a real revert.
+        assert [d.target_ref for d in result.reverted_deltas] == ["R2"]
+        assert result.exit_reason == "pd_interrupted"
+        assert result.interrupted_delta is None
+        assert loop.trial_in_flight is None
+        assert _state(router, pcb) == before
+        _assert_grid_matches_the_copper(router)
+
+    def test_a_rewind_just_before_the_keep_is_committed_takes_the_delta_back(self, tmp_path: Path):
+        router = _GridRouter()
+        loop, pcb = self._loop(router, tmp_path, cls=_RewoundAtTheCommit)
+        before = _state(router, pcb)
+        loop.armed = True
+
+        result = loop.run_delta(reuse_existing_routes=True)
+
+        assert loop.armed is False, "the rewind fired"
+        assert result.applied_deltas == []
+        assert loop.accepted_deltas == []
+        self._assert_stopped_on(result, loop, "R2")
+        assert router.route_calls == 1
+        assert _state(router, pcb) == before
+        _assert_grid_matches_the_copper(router)
+
+    def test_a_rewind_between_trials_changes_nothing(self, tmp_path: Path):
+        """Nothing is in flight outside a trial, so there is nothing to notice."""
+        router = _GridRouter()
+        loop, _pcb = self._loop(router, tmp_path)
+        propose = loop._propose_deltas
+        seen = []
+
+        def rewound_propose():
+            seen.append(loop.restore_last_accepted())
+            return propose()
+
+        loop._propose_deltas = rewound_propose
+
+        result = loop.run_delta(reuse_existing_routes=True)
+
+        assert seen and not any(seen)
+        assert [d.target_ref for d in result.applied_deltas] == ["R2", "R4"]
+        assert result.exit_reason != "pd_interrupted"
+        _assert_grid_matches_the_copper(router)
+
+    def test_a_crash_after_the_rewind_still_gets_its_grid_back(self, tmp_path: Path):
+        """The save skipped the grid; the loop then died before it could rebuild it."""
+
+        class _RewindThenCrash(_Rewind):
+            def __call__(self) -> None:
+                super().__call__()
+                raise RuntimeError("router exploded")
+
+        interrupt = _RewindThenCrash(on_call=1)
+        router = _GridRouter(interrupt=interrupt)
+        loop, pcb = self._loop(router, tmp_path)
+        interrupt.loop = loop
+        before = _state(router, pcb)
+
+        with pytest.raises(RuntimeError, match="router exploded"):
+            loop.run_delta(reuse_existing_routes=True)
+        assert router.grid != before["grid"], "the save-path restore leaves the trial's grid"
+
+        # Nothing is in flight any more, and a save-path call still does nothing ...
+        assert loop.restore_last_accepted() is False
+        assert router.grid != before["grid"]
+        # ... but the caller that carries on asks for the grid, and gets it.
+        assert loop.restore_last_accepted(rebuild_grid=True) is False
+        assert _state(router, pcb) == before
+        _assert_grid_matches_the_copper(router)
 
 
 # --------------------------------------------------------------------------- #
@@ -543,6 +929,78 @@ class TestCtrlCDuringATrial:
         assert not output.exists()
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+class TestCtrlCThatDoesNotStopTheRun:
+    """Ctrl+C lands in a destructor: the handler saves, the exit is discarded.
+
+    Python drops an exception raised out of ``__del__``, ``SystemExit``
+    included, so ``_handle_interrupt`` returns into the trial's re-route as if
+    nothing had happened (#6324) -- after its save hook put the pads, the
+    footprints and the routes back.  Whatever the run goes on to write must
+    still be copper on the placement it was routed against.
+    """
+
+    @pytest.mark.parametrize(
+        "in_place", [False, True], ids=["publishes-at-end", "appends-in-place"]
+    )
+    def test_the_interrupted_trial_is_not_kept(self, board, in_place):
+        source, output = board
+        router = _GridRouter(interrupt=_SwallowedCtrlC(on_call=1), in_place=in_place)
+        before = _state(router)
+
+        returned = _run_loop(router, source, output)
+
+        # The handler really ran, saved a consistent board, and did not exit.
+        assert route_cmd._interrupt_state["interrupted"] is True
+        info = route_cmd._interrupt_state["partial_save_info"]
+        assert info["snapshot_state"] == "last-accepted"
+        assert info["snapshot_discarded_trial"] == "R2 translate"
+        assert _routed_nets_with_copper_on_every_pad(_partial(output)) == {"A", "C"}
+        assert _positions(_partial(output)) == _PARTS
+
+        # The run carried on.  It must not report the discarded trial as kept
+        # (it used to: "Deltas kept: 1", "Moved placement persisted", with the
+        # footprint unmoved and NODE's copper ending 1 mm beside its pad).
+        assert returned is None, "no delta was kept, so no moved placement is persisted"
+        assert not output.exists()
+        assert route_cmd._interrupt_state["placement_text"] is None
+        assert _state(router) == before
+        _assert_grid_matches_the_copper(router)
+
+        # What the run would write next: the router's copper on that placement.
+        _partial(output).unlink()
+        assert route_cmd._save_partial_results() is True
+        assert _routed_nets_with_copper_on_every_pad(_partial(output)) == {"A", "C"}
+        assert _positions(_partial(output)) == _PARTS
+
+    def test_after_a_kept_delta_only_that_delta_is_persisted(self, board):
+        source, output = board
+        router = _GridRouter(interrupt=_SwallowedCtrlC(on_call=2))
+
+        returned = _run_loop(router, source, output)
+
+        assert returned == output
+        assert _positions(output)["R2"] == (30.0 + _MOVE, 10.0)
+        assert _positions(output)["R4"] == _PARTS["R4"], "the discarded trial moved nothing"
+        assert sorted(route.net for route in router.routes) == [1, 2, 3]
+        _assert_grid_matches_the_copper(router)
+        _partial(output).unlink()
+        assert route_cmd._save_partial_results() is True
+        assert _routed_nets_with_copper_on_every_pad(_partial(output)) == {"A", "B", "C"}
+        assert _positions(_partial(output))["R4"] == _PARTS["R4"]
+
+    def test_a_crash_after_the_swallowed_interrupt_still_restores_the_grid(self, board):
+        """The handler's restore skips the grid; the crash handler must not."""
+        source, output = board
+        router = _GridRouter(interrupt=_SwallowedCtrlCThenCrash(on_call=1))
+        before = _state(router)
+
+        assert _run_loop(router, source, output) is None
+
+        assert _state(router) == before
+        _assert_grid_matches_the_copper(router)
+
+
 # --------------------------------------------------------------------------- #
 # After the loop: a later stage's partial save reads the moved placement       #
 # --------------------------------------------------------------------------- #
@@ -649,6 +1107,35 @@ class TestLoopFailureMidTrial:
         assert route_cmd._save_partial_results() is True
         assert _routed_nets_with_copper_on_every_pad(_partial(output)) == {"A", "B", "C"}
         assert _positions(_partial(output))["R2"] == (30.0 + _MOVE, 10.0)
+
+    @pytest.mark.parametrize("rerouted", [0, 1, 3], ids=["no-net-back", "one-net-back", "all-back"])
+    def test_a_crash_in_the_first_trial_restores_the_grid_too(self, board, rerouted):
+        """The run carries on, and optimize / DRC nudge / clearance read the grid.
+
+        Restoring the routes and the pads is not enough: the crashed trial
+        reset the grid from the MOVED pads and marked its own copper on it.
+        """
+        source, output = board
+        router = _GridRouter(interrupt=_Crash(on_call=1, rerouted=rerouted))
+        before = _state(router)
+
+        assert _run_loop(router, source, output) is None
+
+        assert router.grid["pads"][("R2", "1")] == (29.5, 10.0), "reset from the restored pads"
+        assert router.grid == before["grid"]
+        assert _state(router) == before
+        _assert_grid_matches_the_copper(router)
+
+    def test_a_crash_after_a_kept_delta_restores_the_grid_of_the_kept_state(self, board):
+        source, output = board
+        router = _GridRouter(interrupt=_Crash(on_call=2))
+
+        assert _run_loop(router, source, output) == output
+
+        assert sorted(route.net for route in router.routes) == [1, 2, 3]
+        assert router.grid["pads"][("R2", "1")] == (29.5 + _MOVE, 10.0), "the kept move"
+        assert router.grid["pads"][("R4", "1")] == (29.5, 30.0), "not the crashed trial's"
+        _assert_grid_matches_the_copper(router)
 
 
 # --------------------------------------------------------------------------- #

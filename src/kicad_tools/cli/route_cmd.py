@@ -4738,6 +4738,13 @@ def _run_placement_delta_feedback(
     nothing unwound at all.  Nothing here writes ``output_path`` early --
     the deadline supervisor would quarantine it as the run's checkpoint.
 
+    The hook rewinds LIVE state, which is only safe if the trial it rewound
+    never resumes.  The Ctrl+C handler cannot promise that (its ``SystemExit``
+    is discarded when the signal lands in a destructor, #6324), so the loop
+    checks for a trial discarded underneath it, finishes the undo with a grid
+    rebuild, keeps nothing from it and stops (``exit_reason``
+    ``pd_interrupted``).
+
     Args:
         router: The ``Autorouter`` whose state the loop mutates in place.
         pcb_path: Path to the PCB the routing pass read (already staged).
@@ -4910,9 +4917,12 @@ def _run_placement_delta_feedback(
     if result is not None:
         applied = list(getattr(result, "applied_deltas", []))
 
-    # The loop is over (never reached by a deadline or Ctrl+C -- see the
-    # docstring), so nothing is in flight and the hook has nothing left to
-    # restore.  But with a delta kept, the router's copper now belongs to the
+    # The loop is over, so nothing is in flight and the hook has nothing left
+    # to restore.  (A deadline never gets here -- see the docstring.  A Ctrl+C
+    # normally does not either, but one whose ``SystemExit`` Python discarded
+    # does, #6324: the loop has then already thrown away the trial the save
+    # rewound and stopped, so ``applied`` is still only what was accepted.)
+    # But with a delta kept, the router's copper now belongs to the
     # MOVED board, and a partial save in ANY later stage (optimize, DRC nudge,
     # ...) must read its footprints from it.  Hand that over BEFORE retiring
     # the hook, so no instant exists in which neither covers the save.
@@ -4947,6 +4957,14 @@ def _run_placement_delta_feedback(
             strict=False,
         ):
             print(f"    skipped: {delta.target_ref} {delta.kind} -- {reason}")
+        # Issue #6314: an interrupt saved partial results mid-trial but the
+        # process did not stop (#6324).  The loop discarded that trial.
+        interrupted = getattr(result, "interrupted_delta", None)
+        if interrupted is not None:
+            print(
+                f"    interrupted: {interrupted.target_ref} {interrupted.kind} "
+                f"(net {interrupted.net_name}) -- trial discarded by a partial save; not kept"
+            )
         print(f"  Final failed nets:  {len(result.failed_nets)}")
         print(f"  Placement delta saved to: {delta_path}")
 
