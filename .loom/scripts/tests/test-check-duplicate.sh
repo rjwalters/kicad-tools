@@ -193,6 +193,13 @@ chmod +x "$STUB_DIR/git"
 #   gh api repos/{owner}/{repo}/pulls?state=closed&...   -> REST fallback (#4526): cat
 #                                                           $STUB_DIR/rest-prs.json (or [];
 #                                                           fails if $STUB_DIR/rest-prs-fail exists)
+#   gh api search/issues?q=...                           -> the windowed closed-issue search (#9208):
+#                                                           appends the path to $STUB_DIR/search-calls.log,
+#                                                           then cat $STUB_DIR/search-issues.json. With NO
+#                                                           fixture it FAILS (printing $STUB_DIR/search-fail
+#                                                           if present), so every case that predates the
+#                                                           search exercises the recency-list fallback
+#                                                           exactly as it always did.
 #
 # Note (#4659): check-duplicate.sh no longer calls `gh repo view` anywhere --
 # repo resolution (get_repo_nwo(), used only by search_cross_references())
@@ -280,6 +287,12 @@ case "$1" in
       canned="$STUB_DIR_FROM_ENV/timeline-$num.json"
       if [[ -f "$canned" ]]; then cat "$canned"; else echo "[]"; fi
       exit 0
+    elif [[ "$path" == "search/issues?"* ]]; then  # before the next branch: this path contains "/issues?" too
+      echo "$path" >> "$STUB_DIR_FROM_ENV/search-calls.log"
+      canned="$STUB_DIR_FROM_ENV/search-issues.json"
+      if [[ -f "$canned" && ! -f "$STUB_DIR_FROM_ENV/search-fail" ]]; then cat "$canned"; exit 0; fi
+      if [[ -f "$STUB_DIR_FROM_ENV/search-fail" ]]; then cat "$STUB_DIR_FROM_ENV/search-fail" >&2; else echo "stub gh: no search fixture" >&2; fi
+      exit 1
     elif [[ "$path" == *"/issues?"* ]]; then
       if [[ -f "$STUB_DIR_FROM_ENV/rest-issues-fail" ]]; then
         echo "stub gh: rest issues api call failed" >&2
@@ -312,6 +325,11 @@ chmod +x "$STUB_DIR/gh"
 
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
+# The windowed closed-issue search (#9208) is a daemon-side forge call, so the
+# daemon must spawn the stub above too -- never a host forge-egress policy's
+# managed launcher, which would send every case's query to the real forge.
+export LOOM_GH_NO_POLICY_LAUNCHER=1
+unset LOOM_GH_BIN LOOM_REPO LOOM_FORGE_TYPE
 
 reset_state() {
     rm -f "$STUB_DIR"/issues-*.json "$STUB_DIR"/prs-merged.json "$STUB_DIR"/timeline-*.json
@@ -320,6 +338,29 @@ reset_state() {
     rm -f "$STUB_DIR"/issue-list-rate-limit-* "$STUB_DIR/pr-list-rate-limit"
     rm -f "$STUB_DIR/rest-issues-fail" "$STUB_DIR/rest-prs-fail"
     rm -f "$STUB_DIR/rate-limit-message" "$STUB_DIR/auth-fail" "$STUB_DIR/rate-limit.json"
+    rm -f "$STUB_DIR/search-issues.json" "$STUB_DIR/search-fail" "$STUB_DIR/search-calls.log"
+}
+
+# How many search requests were made since the last reset_state, and the path
+# of the last one.
+search_calls() { if [[ -f "$STUB_DIR/search-calls.log" ]]; then wc -l < "$STUB_DIR/search-calls.log" | tr -d ' '; else echo 0; fi; }
+last_search() { tail -n 1 "$STUB_DIR/search-calls.log" 2>/dev/null || true; }
+# UTC date N days back, as the search's closed:>= qualifier spells it (BSD or GNU date).
+days_ago() { date -u -v-"$1"d +%F 2>/dev/null || date -u -d "$1 days ago" +%F; }
+# The last search's close-date bound is one of the two dates given (sampled
+# either side of the run, so a UTC midnight in between cannot fail the case).
+assert_window() {
+    local before="$1" after="$2" msg="$3" q
+    q="$(last_search)"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$q" == *"closed%3A%3E%3D${before}%20"* || "$q" == *"closed%3A%3E%3D${after}%20"* ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: $msg"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: $msg"
+        echo "    Expected a closed:>= bound of $before (or $after) in: '$q'"
+    fi
 }
 
 run_cds() {
@@ -1332,6 +1373,144 @@ echo "X Failed to log in to github.com account someone (default)" > "$STUB_DIR/a
 run_cds --title "Alpha Bravo Charlie Delta"
 assert_eq "2" "$RC" "(ra4) Bad token -> exit 2"
 assert_contains "$ERR" "Not authenticated with forge" "(ra4) ...keeps the auth message"
+
+echo ""
+echo "Testing check-duplicate.sh windowed closed-issue search (issue #9208)..."
+
+# The closed pool used to be the 20 most recently CREATED closed issues --
+# about a day of this repo's history -- so #6808, closed five weeks before its
+# re-file #9167, was never a candidate. It is now ONE keyword search bounded
+# by close date; the recency list survives only as the fallback.
+SEARCH_PREFIX="search/issues?q=repo%3Aowner%2Frepo%20is%3Aissue%20is%3Aclosed%20closed%3A%3E%3D"
+EMPTY_SEARCH='{"total_count": 0, "incomplete_results": false, "items": []}'
+
+# (cw1) The acceptance case: the matching closed issue is in the search answer
+# and NOT in the recency list. A decoy that WOULD match sits in the recency
+# list, so its absence proves that list was not consulted once search answered.
+reset_state
+echo "[]" > "$STUB_DIR/issues-open.json"
+cat > "$STUB_DIR/issues-closed.json" <<'EOF'
+[{"number": 9900, "title": "Alpha Bravo Charlie Delta", "body": ""}]
+EOF
+cat > "$STUB_DIR/search-issues.json" <<'EOF'
+{"total_count": 3, "incomplete_results": false, "items": [
+  {"number": 6808, "title": "Alpha Bravo Charlie Delta", "body": null, "state": "closed"},
+  {"number": 6810, "title": "Alpha Bravo Charlie Delta", "body": "", "pull_request": {"url": "u"}},
+  {"number": 6811, "title": "Yankee Zulu Xray Whiskey", "body": "unrelated", "state": "closed"}
+]}
+EOF
+before="$(days_ago 90)"
+run_cds --include-merged-prs --threshold 50 --title "Alpha Bravo Charlie Delta"
+after="$(days_ago 90)"
+assert_eq "1" "$RC" "(cw1) Closed issue outside the recency list but inside the window -> exit 1"
+assert_contains "$OUT" "Closed #6808: Alpha Bravo Charlie Delta (similarity: 100%)" "(cw1) ...reported in the unchanged Closed #N row format"
+assert_not_contains "$OUT" "#9900" "(cw1) Recency list not consulted once the search answered"
+assert_not_contains "$OUT" "#6810" "(cw1) A pull request in the search answer is not a closed issue"
+assert_not_contains "$OUT" "#6811" "(cw1) Search hits are candidates, not verdicts: the threshold still decides"
+assert_eq "1" "$(search_calls)" "(cw1) Exactly one search request"
+assert_contains "$(last_search)" "$SEARCH_PREFIX" "(cw1) Query is the fixed qualifiers..."
+assert_contains "$(last_search)" "%20alpha%20OR%20bravo%20OR%20charlie%20OR%20delta&per_page=50" "(cw1) ...plus OR-joined keywords, one page of 50"
+assert_window "$before" "$after" "(cw1) Default window is 90 days back, on close date"
+
+# (cw1j) Same answer through --json: the match type is unchanged.
+run_cds --json --include-merged-prs --threshold 50 --title "Alpha Bravo Charlie Delta"
+assert_eq "closed_issue" "$(echo "$OUT" | jq -r '.matches[0].type')" "(cw1j) --json reports it as a closed_issue match"
+assert_eq "6808" "$(echo "$OUT" | jq -r '.matches[0].number')" "(cw1j) ...with its number"
+
+# (cw2) The search bucket refuses (403): the recency list still answers, with
+# a warning, one request and no retry -- and the exit code is the verdict, not 2.
+reset_state
+echo "[]" > "$STUB_DIR/issues-open.json"
+cat > "$STUB_DIR/issues-closed.json" <<'EOF'
+[{"number": 9900, "title": "Alpha Bravo Charlie Delta", "body": ""}]
+EOF
+echo "$EMPTY_SEARCH" > "$STUB_DIR/search-issues.json"
+echo "gh: API rate limit exceeded for user ID 12345667. (HTTP 403)" > "$STUB_DIR/search-fail"
+run_cds --include-merged-prs --threshold 50 --title "Alpha Bravo Charlie Delta"
+assert_eq "1" "$RC" "(cw2) Search 403 -> recency list answers -> exit 1 (not 2)"
+assert_contains "$OUT" "Closed #9900: Alpha Bravo Charlie Delta (similarity: 100%)" "(cw2) Recency list still finds the closed issue"
+assert_contains "$ERR" "falling back to the most recently created closed issues" "(cw2) stderr warns about the fallback"
+assert_contains "$ERR" "HTTP 403" "(cw2) ...and names why"
+assert_eq "1" "$(search_calls)" "(cw2) One search request, never retried"
+assert_not_contains "$OUT" "RATE_LIMIT_FALLBACK" "(cw2) A search refusal is not the GraphQL->REST sentinel"
+
+# (cw2b) ...and with nothing in the recency list either, a refused search
+# does not turn a passing check into exit 2.
+reset_state
+echo "gh: You have exceeded a secondary rate limit. (HTTP 429)" > "$STUB_DIR/search-fail"
+run_cds --include-merged-prs --title "Alpha Bravo Charlie Delta"
+assert_eq "0" "$RC" "(cw2b) Refused search + empty recency list -> exit 0"
+assert_eq "1" "$(search_calls)" "(cw2b) ...after one request"
+
+# (cw3) Hostile title text never reaches the query: no foreign repo, no state
+# qualifier, no quote, no operator -- only keyword tokens after the fixed part.
+reset_state
+echo "$EMPTY_SEARCH" > "$STUB_DIR/search-issues.json"
+run_cds --include-merged-prs --title 'repo:other/thing is:open "quoted phrase" NOT author:evil -label:x'
+assert_eq "0" "$RC" "(cw3) Hostile title, empty search answer -> exit 0"
+assert_eq "1" "$(search_calls)" "(cw3) One search request"
+q="$(last_search)"
+assert_contains "$q" "$SEARCH_PREFIX" "(cw3) Fixed qualifiers intact: own repo, closed issues only"
+tail_q="${q#"$SEARCH_PREFIX"}"; tail_q="${tail_q#*%20}"
+assert_eq "repo%20OR%20thing%20OR%20open%20OR%20quoted%20OR%20phrase%20OR%20author&per_page=50" "$tail_q" "(cw3) Only keyword tokens follow, six at most"
+assert_not_contains "$tail_q" "%3A" "(cw3) No ':' -- nothing binds as a qualifier"
+assert_not_contains "$tail_q" "%22" "(cw3) No quote"
+assert_not_contains "$tail_q" "NOT" "(cw3) No injected operator"
+
+# (cw4) No keywords -> no search request at all.
+reset_state
+echo "$EMPTY_SEARCH" > "$STUB_DIR/search-issues.json"
+run_cds --include-merged-prs --title "the a an is it"
+assert_eq "0" "$RC" "(cw4) Keyword-less query -> exit 0"
+assert_eq "0" "$(search_calls)" "(cw4) ...and no search request is spent on it"
+
+# (cw5) The window is overridable, and 0 switches the search off.
+reset_state
+echo "$EMPTY_SEARCH" > "$STUB_DIR/search-issues.json"
+before="$(days_ago 30)"
+run_cds --include-merged-prs --closed-window-days 30 --title "Alpha Bravo Charlie Delta"
+after="$(days_ago 30)"
+assert_window "$before" "$after" "(cw5) --closed-window-days 30 bounds the search 30 days back"
+reset_state
+echo "$EMPTY_SEARCH" > "$STUB_DIR/search-issues.json"
+cat > "$STUB_DIR/issues-closed.json" <<'EOF'
+[{"number": 9900, "title": "Alpha Bravo Charlie Delta", "body": ""}]
+EOF
+run_cds --include-merged-prs --closed-window-days 0 --threshold 50 --title "Alpha Bravo Charlie Delta"
+assert_eq "0" "$(search_calls)" "(cw5) --closed-window-days 0 makes no search request"
+assert_contains "$OUT" "Closed #9900:" "(cw5) ...and reads the recency list instead"
+assert_not_contains "$ERR" "could not answer" "(cw5) ...without a fallback warning (it was asked for)"
+run_cds --include-merged-prs --closed-window-days soon --title "Alpha Bravo Charlie Delta"
+assert_eq "2" "$RC" "(cw5) Non-numeric --closed-window-days -> exit 2"
+assert_contains "$ERR" "--closed-window-days must be a number" "(cw5) ...with a specific message"
+
+# (cw6) --issue self-exclusion threads through the searched pool too.
+reset_state
+echo "[]" > "$STUB_DIR/issues-open.json"
+cat > "$STUB_DIR/search-issues.json" <<'EOF'
+{"items": [{"number": 4659, "title": "Alpha Bravo Charlie Delta", "body": ""}]}
+EOF
+run_cds --include-merged-prs --issue 4659 --threshold 50 --title "Alpha Bravo Charlie Delta"
+assert_eq "0" "$RC" "(cw6) Self-match in the searched closed pool excluded via --issue -> exit 0"
+assert_eq "1" "$(search_calls)" "(cw6) ...and the search did run"
+
+# (cw7) An answer that is not a search result (an error body with exit 0) is
+# "did not answer", not "found nothing": the recency list is consulted.
+reset_state
+echo '{"message": "Validation Failed"}' > "$STUB_DIR/search-issues.json"
+cat > "$STUB_DIR/issues-closed.json" <<'EOF'
+[{"number": 9900, "title": "Alpha Bravo Charlie Delta", "body": ""}]
+EOF
+run_cds --include-merged-prs --threshold 50 --title "Alpha Bravo Charlie Delta"
+assert_contains "$OUT" "Closed #9900:" "(cw7) Unparseable search answer -> recency list answers"
+assert_eq "1" "$(search_calls)" "(cw7) ...after one request"
+
+# (cw8) The search is closed-pool only: without --include-merged-prs (the
+# create-issue.sh backstop's shape) no search request is ever made.
+reset_state
+echo "$EMPTY_SEARCH" > "$STUB_DIR/search-issues.json"
+run_cds --title "Alpha Bravo Charlie Delta"
+assert_eq "0" "$(search_calls)" "(cw8) No --include-merged-prs -> no search request"
 
 # --- Summary ---
 echo ""

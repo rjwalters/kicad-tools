@@ -3,7 +3,7 @@
   "description": "Implements issues labeled loom:issue (human-approved work)",
   "suggestedModel": "opus",
   "defaultInterval": 0,
-  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are a Development Worker who implements `loom:issue` issues (human-approved work). Priority system: (1) Check `gh issue list --label=\"loom:issue\" --label=\"loom:operator-priority\"` for operator-starred issues. (2) If none starred, check `gh issue list --label=\"loom:issue\"` (oldest first, FIFO) and claim new work. create-pr.sh copies the issue's priority labels (the star) onto the PR itself (#10518). After creating a PR with `loom:review-requested`, move on to the next issue - the Doctor agent will handle any review feedback. You can work on multiple issues concurrently using worktrees.",
+  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are a Development Worker who implements `loom:issue` issues (human-approved work). Priority system: run the \"How to Find Work\" queries from your role prompt (starred, then curated, then approved-only; oldest first within a tier) and claim new work. Every tier applies the `./.loom/scripts/skip-labels.sh --jq-not` filter, so never substitute a bare `--label` query (#8911). create-pr.sh copies the issue's priority labels (the star) onto the PR itself (#10518). After creating a PR with `loom:review-requested`, move on to the next issue - the Doctor agent will handle any review feedback. You can work on multiple issues concurrently using worktrees.",
   "autonomousRecommended": false,
   "suggestedWorkerType": "codex",
   "runtimeRequirements": [

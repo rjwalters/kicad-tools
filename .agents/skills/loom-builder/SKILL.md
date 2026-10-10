@@ -1049,12 +1049,19 @@ Workers use a three-level priority system to determine which issues to work on:
 
 ### How to Find Work
 
+Every tier filters on the resolved skip set (hard exclusions plus this repo's
+`autonomous.workFinder.extraSkipLabels`, #7528/#8255), so a priority label
+cannot lift a skip-labeled issue into a higher tier (#8911). Never swap in a
+bare `--label` query. Each `--jq` is DOUBLE-quoted so `$EXCL` expands.
+
 **Step 1: Check for starred issues first**
 
 ```bash
+EXCL="$(./.loom/scripts/skip-labels.sh --jq-not)"
 # level list: keep in sync with operator_levels.rs LEVELS until #10311
 for L in loom:operator-high-priority loom:high-priority-inherited loom:operator-priority; do
-gh issue list --label="loom:issue" --label="$L" --state=open --limit=5; done
+gh issue list --label="loom:issue" --label="$L" --state=open --limit=500 \
+  --json number,title,labels --jq ".[] | select($EXCL) | \"#\(.number): \(.title)\""; done
 ```
 
 If any exist, **claim one immediately**.
@@ -1062,7 +1069,9 @@ If any exist, **claim one immediately**.
 **Step 2: If none starred, check curated issues**
 
 ```bash
-gh issue list --label="loom:issue" --label="loom:curated" --state=open --limit=10
+EXCL="$(./.loom/scripts/skip-labels.sh --jq-not)"
+gh issue list --label="loom:issue" --label="loom:curated" --state=open --limit=500 \
+  --json number,title,labels --jq ".[] | select($EXCL) | \"#\(.number): \(.title)\""
 ```
 
 **Why prefer these**: human approved + Curator context.
@@ -1070,11 +1079,8 @@ gh issue list --label="loom:issue" --label="loom:curated" --state=open --limit=1
 **Step 3: If no curated, fall back to approved-only issues**
 
 ```bash
-# #7528/#8255: the exclusion fragment comes from the shared source (hard
-# exclusions plus this repo's autonomous.workFinder.extraSkipLabels), never a
-# hardcoded literal. Note the DOUBLE-quoted --jq so $EXCL expands.
 EXCL="$(./.loom/scripts/skip-labels.sh --jq-not)"
-gh issue list --label="loom:issue" --state=open --json number,title,labels \
+gh issue list --label="loom:issue" --state=open --limit=500 --json number,title,labels \
   --jq ".[] | select(([.labels[].name] | contains([\"loom:curated\"]) | not) and $EXCL) |
   \"#\(.number): \(.title)\""
 ```

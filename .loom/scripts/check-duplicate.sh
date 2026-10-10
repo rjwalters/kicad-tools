@@ -6,9 +6,9 @@
 # keyword matching and similarity heuristics. Used by Architect, Hermit, and
 # Auditor roles before creating new issues.
 #
-# With --include-merged-prs, also checks recently merged PRs and recently
-# closed issues to catch near-duplicate issues that arrive right after their
-# counterpart's PR merges.
+# With --include-merged-prs, also checks recently merged PRs and issues CLOSED
+# in the last 90 days (--closed-window-days; one keyword search, #9208), so a
+# re-file of closed work is caught weeks after it closed, not just for a day.
 #
 # Usage:
 #   check-duplicate.sh "Issue title" ["Issue body"]
@@ -212,7 +212,10 @@ OPTIONS:
                              issues are known to be indistinguishable, which
                              is why it warns rather than blocks. Ignored when
                              0 or >= --threshold.
-    --include-merged-prs    Also check recently merged PRs and closed issues
+    --include-merged-prs    Also check recently merged PRs, and issues closed in
+                             the last 90 days that match the title/body keywords
+    --closed-window-days N  Override that 90-day closed-issue window (0 = only
+                             the 20 most recently created closed issues)
     --issue N               Also probe for OPEN issues/PRs that cross-reference
                              issue N (GitHub timeline API). Curator use --
                              surfaces "related open work" distinct from
@@ -442,27 +445,27 @@ search_merged_prs() {
     loom_exec_script_helper duplicate-scan "${scan_args[@]}" <<< "$prs"
 }
 
-# Search for similar recently closed issues. Fetch here, scan in the daemon
-# (#8360) -- same split as search_similar_issues().
+# Search for similar closed issues. The pool is ONE daemon-side issue search
+# bounded by close date (#9208); the recency list is only its fallback.
 search_closed_issues() {
     local title="$1"
     local body="${2:-}"
-    local threshold="${3:-18}"
-    local self_issue="${4:-}"
+    local scan_args=(--pool closed-issues --title "$title" --body "$body" --threshold "${3:-18}")
+    [[ -n "${4:-}" ]] && scan_args+=(--self-issue "$4")
 
-    # Search recently closed issues. On a GraphQL rate-limit failure, retry
-    # via REST (#4526).
-    local issues
-    local rest_fallback=false
+    # Any non-zero exit (search refused or unsupported, window 0, a daemon
+    # predating the flag) prints no rows and falls through to the recency list.
+    (loom_exec_script_helper duplicate-scan "${scan_args[@]}" --closed-window-days "${5:-90}" </dev/null) && return 0
+
+    # Recently created closed issues; GraphQL rate-limited -> REST (#4526),
+    # where `gh api` resolves "{owner}/{repo}" locally (#4659).
+    local issues rest_issues
     if ! issues=$($FORGE issue list --state=closed --limit=20 --json number,title,body 2>&1); then
         if is_rate_limit_error "$issues"; then
-            # See the matching comment in search_similar_issues(): `gh api`
-            # resolves "{owner}/{repo}" locally, no GraphQL call (#4659).
-            local rest_issues
             if rest_issues=$("$GH_READ" api "repos/{owner}/{repo}/issues?state=closed&per_page=20" 2>&1); then
                 # REST's /issues endpoint also returns PRs; exclude them.
                 issues=$(echo "$rest_issues" | jq -c '[.[] | select(.pull_request == null)]')
-                rest_fallback=true
+                scan_args+=(--rest-fallback)
             else
                 print_error "GraphQL rate-limited fetching closed issues, and REST fallback also failed: ${rest_issues}"
                 return 2
@@ -471,12 +474,6 @@ search_closed_issues() {
             print_warning "Failed to fetch closed issues: $issues"
             return 0
         fi
-    fi
-
-    local scan_args=(--pool closed-issues --title "$title" --body "$body" --threshold "$threshold")
-    [[ -n "$self_issue" ]] && scan_args+=(--self-issue "$self_issue")
-    if $rest_fallback; then
-        scan_args+=(--rest-fallback)
     fi
     loom_exec_script_helper duplicate-scan "${scan_args[@]}" <<< "$issues"
 }
@@ -561,7 +558,7 @@ main() {
     local threshold=18
     local warn_threshold=""
     local json_output=false
-    local include_merged_prs=false
+    local include_merged_prs=false closed_window_days=90
     local issue=""
 
     # Parse arguments. `end_of_options` tracks whether a bare "--" has been
@@ -602,6 +599,7 @@ main() {
                 --include-merged-prs)
                     include_merged_prs=true
                     ;;
+                --closed-window-days) shift; closed_window_days="${1:-}" ;;
                 --issue)
                     shift
                     issue="$1"
@@ -655,6 +653,7 @@ main() {
         print_error "Threshold must be a number"
         exit 2
     fi
+    [[ "$closed_window_days" =~ ^[0-9]+$ ]] || { print_error "--closed-window-days must be a number"; exit 2; }
 
     # Validate --warn-threshold, when given (#8289). A value at/above
     # --threshold cannot describe a band BELOW it, so it disables the band
@@ -752,7 +751,7 @@ main() {
         local merged_exit_code=0
         local closed_exit_code=0
         merged_result=$(search_merged_prs "$title" "$body" "$threshold" "$issue") || merged_exit_code=$?
-        closed_result=$(search_closed_issues "$title" "$body" "$threshold" "$issue") || closed_exit_code=$?
+        closed_result=$(search_closed_issues "$title" "$body" "$threshold" "$issue" "$closed_window_days") || closed_exit_code=$?
 
         # #4526: a GraphQL rate-limit that ALSO fails via REST means this
         # pool genuinely could not be checked. Record it; the final verdict

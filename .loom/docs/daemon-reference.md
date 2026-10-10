@@ -9512,7 +9512,8 @@ flows outside GitHub-hosted CI (see `docker/worker/README.md` and
       "keepLastN": 2,
       "minIntervalSecs": 1800,
       "trackedRepos": ["loom-worker", "loom-worker-session"],
-      "allowlist": ["eda"]
+      "allowlist": ["eda"],
+      "unusedMaxAgeDays": 7
     }
   }
 }
@@ -9525,6 +9526,19 @@ flows outside GitHub-hosted CI (see `docker/worker/README.md` and
 | `LOOM_DOCKER_IMAGE_RETENTION_MIN_INTERVAL_SECS` | `autonomous.dockerImageRetention.minIntervalSecs` | env > config > default | `1800` (30 min) |
 | — | `autonomous.dockerImageRetention.trackedRepos` | config > default | `loom-worker`, `loom-worker-session`, `loom-worker-native`, and their `ghcr.io/rjwalters/...` aliases |
 | — | `autonomous.dockerImageRetention.allowlist` | config > default | `[]` (empty — a shared long-lived image must be opted in explicitly) |
+| `LOOM_DOCKER_IMAGE_RETENTION_UNUSED_MAX_AGE_DAYS` | `autonomous.dockerImageRetention.unusedMaxAgeDays` | env > config > default | `7` |
+
+**Untagged images and disk pressure (#11195).** An image is untagged when every
+`RepoTags` entry is `<none>:<none>` or a digest ref (`repo@sha256:...`, the shape
+a superseded image keeps on containerd-store hosts); these are removed on every
+pass. An image that also has a real `repo:tag` alias is not untagged. When free
+space on the Docker data volume is below `autonomous.worktreeReaper.diskWarnFreeGb`,
+images that no container (running or stopped) references and that are at least
+`unusedMaxAgeDays` old are also removed, largest first, until the free-space
+deficit is covered. Docker has no portable "last used" time, so the age is the
+image's **creation** time (conservative toward removal, but only under pressure).
+Container-referenced and `allowlist`ed images are never removed. Below the floor
+the pass logs an INFO line with the bytes it left reclaimable.
 
 **Expected steady-state footprint.** On a container-enabled host running these
 flows regularly, steady state is: the `keepLastN` newest images per tracked

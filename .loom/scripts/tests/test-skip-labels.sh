@@ -27,7 +27,10 @@
 #     mirrors the work finder's own defensive filter;
 #   - the `--jq-not` fragment actually filters a `journal`-labelled issue out
 #     of a realistic `gh issue list --json number,labels` payload;
-#   - an unknown option is a usage error, not a silently-empty list.
+#   - an unknown option is a usage error, not a silently-empty list;
+#   - every find-work tier in `builder.md` (not just the fallback) applies the
+#     fragment, and `builder.json`'s interval prompt restates none unfiltered
+#     (#8911).
 #
 # Needs a BUILT `loom-daemon` (the subject is a stub over a Rust
 # subcommand) — same shape as test-classify-dependency-block.sh, wired in
@@ -210,6 +213,132 @@ if [[ "$help_rc" -eq 0 ]]; then
     pass "--help exits 0"
 else
     fail "expected --help to exit 0, got $help_rc: $help_out"
+fi
+
+# --- 7. #8911: EVERY builder.md find-work tier applies the skip set -----
+# #8255 wired the filter into the fallback tier only, so an issue carrying a
+# configured skip label AND a higher-priority label (the star, loom:curated)
+# was still offered — from the HIGHEST tier. Each tier's fenced block is run
+# verbatim here (cwd = fixture repo, the real skip-labels.sh behind the
+# `./.loom/scripts/` path the block names, a fake `gh` that ANDs `--label`
+# like the real one), so the prompt's own quoting is what is under test.
+BUILDER_MD="$REPO_ROOT/defaults/.claude/commands/loom/builder.md"
+BUILDER_JSON="$REPO_ROOT/defaults/roles/builder.json"
+
+# The first ```bash block under "**Step <n>".
+step_block() {
+    awk -v s="**Step $1" 'index($0, s) == 1 { f = 1; next }
+        f && /^```bash/ { b = 1; next }
+        b && /^```/ { exit }
+        b { print }' "$BUILDER_MD"
+}
+
+# Structural drift guard: every Step that lists claimable issues, including a
+# future fourth tier, resolves and uses the fragment, with no small pre-filter cap.
+queried=0
+while IFS= read -r n; do
+    block="$(step_block "$n")"
+    [[ "$block" == *"gh issue list"* ]] || continue
+    queried=$((queried + 1))
+    # shellcheck disable=SC2016  # literal prompt text, not an expansion
+    if [[ "$block" == *'skip-labels.sh --jq-not'* && "$block" == *'select('*'$EXCL'* \
+        && "$block" == *'--limit=500'* ]]; then
+        pass "builder.md Step $n filters on skip-labels.sh --jq-not with --limit=500 (#8911)"
+    else
+        fail "builder.md Step $n is a claim query without the \$EXCL skip filter / --limit=500"
+    fi
+done < <(sed -n 's/^\*\*Step \([0-9][0-9]*\).*/\1/p' "$BUILDER_MD")
+if [[ "$queried" -ge 3 ]]; then
+    pass "found $queried find-work tier queries in builder.md"
+else
+    fail "expected at least 3 find-work tier queries in builder.md, found $queried"
+fi
+
+if command -v jq >/dev/null 2>&1; then
+    FAKE_BIN="$WORKDIR/fake-bin"
+    mkdir -p "$FAKE_BIN"
+    cat >"$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+want='[]'; prog='.'
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --label=*) want="$(jq -c --arg l "${1#--label=}" '. + [$l]' <<<"$want")" ;;
+        --jq) prog="$2"; shift ;;
+    esac
+    shift
+done
+jq -c --argjson want "$want" 'map(select(($want - [.labels[].name]) == []))' "$GH_FIXTURE" \
+    | jq -r "$prog"
+EOF
+    chmod +x "$FAKE_BIN/gh"
+    for repo in "$NO_CONFIG_REPO" "$JOURNAL_REPO"; do
+        mkdir -p "$repo/.loom/scripts"
+        printf '#!/usr/bin/env bash\nexec bash "%s" "$@"\n' "$SUBJECT" >"$repo/.loom/scripts/skip-labels.sh"
+        chmod +x "$repo/.loom/scripts/skip-labels.sh"
+    done
+
+    # Fixture: per tier label T, issue <i>1 = T, <i>2 = T + journal,
+    # <i>3 = T + external. The tier-1 labels are read out of the prompt's own
+    # `for L in` list so this is not one more hand-synced level list.
+    levels="$(step_block 1 | sed -n 's/^for L in \(.*\); do$/\1/p')"
+    export GH_FIXTURE="$WORKDIR/issues.json"
+    i=0; rows=""; star_plain=""; star_all=""
+    for t in $levels loom:curated ""; do
+        i=$((i + 1))
+        rows+="{\"n\":$i,\"t\":\"$t\"}"
+        if [[ "$t" == loom:curated ]]; then cur=$i
+        elif [[ -n "$t" ]]; then star_plain+="${i}1 "; star_all+="${i}1 ${i}2 "
+        else bare=$i; fi
+    done
+    jq -sc '[.[] | .n as $n | .t as $t | (["", "journal", "external"] | to_entries[]) |
+        {number: ($n * 10 + .key + 1), title: "t",
+         labels: (["loom:issue", $t, .value] | map(select(. != "") | {name: .}))}]' \
+        <<<"$rows" >"$GH_FIXTURE"
+
+    # run_tier <step> <repo> -> surviving issue numbers, space-joined, sorted.
+    run_tier() {
+        (cd "$2" && PATH="$FAKE_BIN:$PATH" bash -c "$(step_block "$1")" 2>&1) \
+            | sed 's/^#\([0-9]*\): t$/\1/' | sort -n | tr '\n' ' '
+    }
+    expect_tier() {
+        local got; got="$(run_tier "$1" "$2")"
+        if [[ "$got" == "$3" ]]; then pass "$4"; else fail "$4 — expected '$3', got '$got'"; fi
+    }
+    sorted() { printf '%s\n' "$@" | sort -n | tr '\n' ' '; }
+
+    if [[ "$(wc -w <<<"$levels")" -ge 3 ]]; then
+        pass "Step 1 iterates $(wc -w <<<"$levels" | tr -d ' ') priority-level labels"
+    else
+        fail "could not read Step 1's priority-level list from builder.md: '$levels'"
+    fi
+    # shellcheck disable=SC2086  # deliberate word-splitting of number lists
+    {
+        # Configured repo: the skip-labeled twin never survives, in ANY tier.
+        expect_tier 1 "$JOURNAL_REPO" "$(sorted $star_plain)" \
+            "tier 1: a starred issue with a configured skip label is dropped, at every level (AC2)"
+        expect_tier 2 "$JOURNAL_REPO" "$(sorted ${cur}1)" \
+            "tier 2: a curated issue with a configured skip label is dropped (AC3)"
+        expect_tier 3 "$JOURNAL_REPO" "$(sorted $star_plain ${bare}1)" \
+            "tier 3: uncurated kept, skip-labeled dropped, curated excluded (AC4)"
+        # Unconfigured repo: unchanged except that `external` drops out.
+        expect_tier 1 "$NO_CONFIG_REPO" "$(sorted $star_all)" \
+            "tier 1, no extraSkipLabels: only the external issue is dropped (AC5)"
+        expect_tier 2 "$NO_CONFIG_REPO" "$(sorted ${cur}1 ${cur}2)" \
+            "tier 2, no extraSkipLabels: only the external issue is dropped (AC5)"
+        expect_tier 3 "$NO_CONFIG_REPO" "$(sorted $star_all ${bare}1 ${bare}2)" \
+            "tier 3, no extraSkipLabels: only the external issue is dropped (AC5)"
+    }
+
+    # AC6: the interval reminder must not restate a tier query without the filter.
+    interval="$(jq -r '.defaultIntervalPrompt' "$BUILDER_JSON")"
+    if [[ "$interval" != *"gh issue list"* || "$interval" == *"skip-labels.sh"* ]] \
+        && [[ "$interval" != *'--label="loom:issue"'* ]]; then
+        pass "builder.json's interval prompt carries no unfiltered tier query (AC6)"
+    else
+        fail "builder.json's defaultIntervalPrompt restates an unfiltered gh issue list query"
+    fi
+else
+    echo "note: jq not installed — skipping the #8911 tier checks" >&2
 fi
 
 echo ""
