@@ -57,9 +57,9 @@ dataclass is frozen and carries world millimetres only.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from .layers import Layer
 from .mfr_limits import MfrLimits, get_mfr_limits
@@ -85,6 +85,7 @@ __all__ = [
     "direction_name",
     "has_access",
     "route_envelope",
+    "stub_candidate_segments",
     "via_candidate_geometry",
 ]
 
@@ -323,6 +324,17 @@ class DefaultAccessLegality:
     ``hard_same_net`` names same-net copper that must nonetheless be treated as
     a hard obstacle -- the Kelvin sibling-branch case, which every geometric
     predicate would otherwise skip because it shares the terminal's net.
+
+    ``memoize_inventories`` (issue #6292) caches the foreign-copper inventories
+    :meth:`via_legal` hands to ``point_clear_of_copper`` and the drill registry
+    for the adapter's lifetime.  Each is a full walk of ``grid._pads`` +
+    ``grid.routes``, and an access set tests up to ``3 x 33`` via candidates
+    against the *same* copper, so rebuilding them per candidate dominated a
+    full evaluation.  Only safe when the copper cannot change while the adapter
+    is alive -- which is why only :func:`compute_access_set` /
+    :func:`has_access`, whose adapter lives for exactly one read-only call,
+    turn it on.  The cached inventories are the very lists the uncached path
+    would rebuild, so no verdict can change.
     """
 
     def __init__(
@@ -331,6 +343,7 @@ class DefaultAccessLegality:
         rules: DesignRules,
         *,
         hard_same_net: Sequence[Route | Pad] = (),
+        memoize_inventories: bool = False,
     ) -> None:
         self.grid = grid
         self.rules = rules
@@ -341,6 +354,7 @@ class DefaultAccessLegality:
         self._hard_routes: tuple[Route, ...] = tuple(
             item for item in self.hard_same_net if isinstance(item, Route)
         )
+        self._memo: dict[tuple[str, int], list[Any]] | None = {} if memoize_inventories else None
 
     # -- stubs ------------------------------------------------------------
 
@@ -432,27 +446,52 @@ class DefaultAccessLegality:
     def _routes(self) -> Sequence[Route]:
         return getattr(self.grid, "routes", ())
 
+    def _memoized(self, kind: str, net: int, build: Callable[[], list[Any]]) -> list[Any]:
+        """``build()``, cached per ``(kind, net)`` when memoization is on.
+
+        Callers only ever read the returned list, so sharing one instance
+        across candidates is safe.
+        """
+        if self._memo is None:
+            return build()
+        key = (kind, net)
+        cached = self._memo.get(key)
+        if cached is None:
+            cached = build()
+            self._memo[key] = cached
+        return cached
+
     def _foreign_pads(self, net: int) -> list[ForeignPadTuple]:
         """Foreign pads as rect-aware 5-tuples; a through via spans every layer."""
-        pads: list[ForeignPadTuple] = []
-        for pad, _is_hard in _iter_obstacle_pads(self.grid, net, self._hard_pads):
-            half_w, half_h = pad_half_extents(pad)
-            pads.append((pad.x, pad.y, half_w * 2, half_h * 2, pad.net))
-        return pads
+
+        def build() -> list[Any]:
+            pads: list[ForeignPadTuple] = []
+            for pad, _is_hard in _iter_obstacle_pads(self.grid, net, self._hard_pads):
+                half_w, half_h = pad_half_extents(pad)
+                pads.append((pad.x, pad.y, half_w * 2, half_h * 2, pad.net))
+            return pads
+
+        return self._memoized("pads", net, build)
 
     def _foreign_tracks(self, net: int) -> list[TrackSegmentLike]:
-        tracks: list[TrackSegmentLike] = []
-        for route, _is_hard in _iter_obstacle_routes(self.grid, net, self._hard_routes):
-            for seg in route.segments:
-                tracks.append(_TrackAdapter(seg.x1, seg.y1, seg.x2, seg.y2, seg.width))
-        return tracks
+        def build() -> list[Any]:
+            tracks: list[TrackSegmentLike] = []
+            for route, _is_hard in _iter_obstacle_routes(self.grid, net, self._hard_routes):
+                for seg in route.segments:
+                    tracks.append(_TrackAdapter(seg.x1, seg.y1, seg.x2, seg.y2, seg.width))
+            return tracks
+
+        return self._memoized("tracks", net, build)
 
     def _foreign_vias(self, net: int) -> list[tuple[float, float, float, int]]:
-        vias: list[tuple[float, float, float, int]] = []
-        for route, _is_hard in _iter_obstacle_routes(self.grid, net, self._hard_routes):
-            for via in route.vias:
-                vias.append((via.x, via.y, via.diameter, via.net))
-        return vias
+        def build() -> list[Any]:
+            vias: list[tuple[float, float, float, int]] = []
+            for route, _is_hard in _iter_obstacle_routes(self.grid, net, self._hard_routes):
+                for via in route.vias:
+                    vias.append((via.x, via.y, via.diameter, via.net))
+            return vias
+
+        return self._memoized("vias", net, build)
 
     def drill_registry(
         self, *, exclude_point: tuple[float, float] | None = None
@@ -464,16 +503,23 @@ class DefaultAccessLegality:
         ``exclude_point`` drops an exact-coordinate self-match so a candidate
         never conflicts with its own hole.
         """
-        drills: list[tuple[float, float, float]] = []
-        for pad in self._pads():
-            if not getattr(pad, "through_hole", False):
-                continue
-            drill = float(getattr(pad, "drill", 0.0))
-            if drill > 0.0:
-                drills.append((float(pad.x), float(pad.y), drill))
-        for route in self._routes():
-            for via in route.vias:
-                drills.append((float(via.x), float(via.y), float(via.drill)))
+
+        def build() -> list[Any]:
+            base: list[tuple[float, float, float]] = []
+            for pad in self._pads():
+                if not getattr(pad, "through_hole", False):
+                    continue
+                drill = float(getattr(pad, "drill", 0.0))
+                if drill > 0.0:
+                    base.append((float(pad.x), float(pad.y), drill))
+            for route in self._routes():
+                for via in route.vias:
+                    base.append((float(via.x), float(via.y), float(via.drill)))
+            return base
+
+        # Copied: the caller owns the returned list (the uncached path always
+        # handed out a fresh one), so the memoized base must never leak.
+        drills = list(self._memoized("drills", 0, build))
         if exclude_point is not None:
             ex, ey = exclude_point
             drills = [d for d in drills if abs(d[0] - ex) > EPS or abs(d[1] - ey) > EPS]
@@ -968,6 +1014,45 @@ def _stub_candidates(
     return candidates, out_of_bounds
 
 
+def _stub_dimensions(
+    grid: object, rules: DesignRules, trace_width: float | None
+) -> tuple[float, float]:
+    """``(width, stub_length)`` of every exit-stub candidate.
+
+    Shared by :func:`compute_access_set`, :func:`has_access` and
+    :func:`stub_candidate_segments` so the three can never size a candidate
+    differently.
+    """
+    width = rules.trace_width if trace_width is None else trace_width
+    resolution = float(getattr(grid, "resolution", rules.grid_resolution))
+    return width, _round_up_to_cells(width + 2 * rules.trace_clearance, resolution)
+
+
+def stub_candidate_segments(
+    pad: Pad,
+    grid: object,
+    rules: DesignRules,
+    *,
+    trace_width: float | None = None,
+) -> list[Segment]:
+    """Every in-bounds exit-stub candidate of ``pad``, legal or not.
+
+    Exactly the candidates :func:`compute_access_set` tests, on every
+    terminal layer, in the same order.  Pure geometry: the result does not
+    depend on any committed copper, which is what lets the witness replay
+    (issue #6292) keep a per-candidate legality table across journal records.
+    """
+    width, stub_length = _stub_dimensions(grid, rules, trace_width)
+    bounds = _grid_world_bounds(grid)
+    segments: list[Segment] = []
+    for layer in _terminal_layers(grid, pad):
+        candidates, _out_of_bounds = _stub_candidates(
+            pad, width=width, stub_length=stub_length, bounds=bounds, layer=layer
+        )
+        segments.extend(seg for _direction, seg in candidates)
+    return segments
+
+
 def _terminal_layers(grid: object, pad: Pad) -> tuple[Layer, ...]:
     """Every copper layer a first move out of ``pad`` may start on.
 
@@ -1030,11 +1115,9 @@ def has_access(
     otherwise identical to :func:`compute_access_set`; both share
     :func:`_stub_candidates` so the candidates they test cannot drift apart.
     """
-    width = rules.trace_width if trace_width is None else trace_width
-    resolution = float(getattr(grid, "resolution", rules.grid_resolution))
-    stub_length = _round_up_to_cells(width + 2 * rules.trace_clearance, resolution)
+    width, stub_length = _stub_dimensions(grid, rules, trace_width)
     adapter: AccessLegality = (
-        DefaultAccessLegality(grid, rules, hard_same_net=hard_same_net)
+        DefaultAccessLegality(grid, rules, hard_same_net=hard_same_net, memoize_inventories=True)
         if legality is None
         else legality
     )
@@ -1080,6 +1163,7 @@ def compute_access_set(
     legality: AccessLegality | None = None,
     trace_width: float | None = None,
     hard_same_net: Sequence[Route | Pad] = (),
+    presence_only: bool = False,
 ) -> AccessSet:
     """Compute the access set of one routing terminal.
 
@@ -1102,16 +1186,26 @@ def compute_access_set(
         hard_same_net: Same-net copper that must be treated as a hard obstacle
             (Kelvin sibling branches).  Ignored when a custom ``legality`` is
             supplied that does not consult it.
+        presence_only: Issue #6292.  When True and at least one exit stub is
+            legal, the via-site legality tests are skipped and ``via_sites``
+            is left empty.  Everything a caller asking *"is there still a way
+            out, and where could copper affect that?"* reads is unchanged:
+            :meth:`AccessSet.is_empty` (a legal stub alone makes the set
+            non-empty), ``bbox`` (built from the via-candidate *positions*,
+            which do not depend on via legality) and ``closing_copper``
+            (populated only for an empty set, which always takes the full
+            path).  The witness replay asks exactly that question once per
+            journal record, and the via tests -- up to three per candidate,
+            each a walk of every committed segment -- were most of its cost.
+            Do not use the result's ``via_sites`` when this is set.
 
     Returns:
         The :class:`AccessSet`.  ``closing_copper`` is populated only when the
         set is empty.
     """
-    width = rules.trace_width if trace_width is None else trace_width
-    resolution = float(getattr(grid, "resolution", rules.grid_resolution))
-    stub_length = _round_up_to_cells(width + 2 * rules.trace_clearance, resolution)
+    width, stub_length = _stub_dimensions(grid, rules, trace_width)
     adapter: AccessLegality = (
-        DefaultAccessLegality(grid, rules, hard_same_net=hard_same_net)
+        DefaultAccessLegality(grid, rules, hard_same_net=hard_same_net, memoize_inventories=True)
         if legality is None
         else legality
     )
@@ -1163,7 +1257,10 @@ def compute_access_set(
         via_candidates.append((stub.x1, stub.y1, False, index, stub.layer))
 
     via_sites: list[ViaSite] = []
-    for x, y, in_pad, from_stub, from_layer in via_candidates:
+    # Issue #6292: a legal stub already settles emptiness, and the bbox below
+    # reads candidate positions only, so the via tests can be skipped.
+    test_vias = not (presence_only and stubs)
+    for x, y, in_pad, from_stub, from_layer in via_candidates if test_vias else ():
         for other_layer in _other_copper_layers(grid, from_layer):
             candidate = Via(
                 x=x,
