@@ -1479,10 +1479,8 @@ diagnosed-but-orthogonal case, and it escalates rather than settling. See
 **Problem this section fixes**: the re-check above runs on *every* Curator pass
 over a `loom:blocked` issue, and multiple invocations (manual, autonomous, sweep-triggered)
 land on the same stale issue. Without a dedup rule the steady state is "one
-comment per pick-up, forever" — #4736 collected six near-identical "still
-blocked on PR #4743, no change" comments between 2026-07-31 and 2026-08-01,
-several less than an hour apart, each restating the same blocker with zero new
-information.
+comment per pick-up, forever" — #4736 got six near-identical "still blocked
+on PR #4743, no change" comments in a day.
 
 **Rule**: a Dependencies re-check comment is only worth posting when its
 *conclusion* differs from the conclusion you last reported on that issue.
@@ -1518,7 +1516,8 @@ below decides whether to claim at all:
   (`loom:changes-requested` or `loom:blocked` — presence/absence only, not the
   full label set) and its merge-state bucket (mergeable vs conflicting), plus
   the block reason when the block came from the secondary heuristic rather
-  than a linked PR.
+  than a linked PR (hashed case/space-folded since v0.19.187, #8320;
+  older builds hashed it verbatim — see `recheck.rs`, #9308).
 
 Two passes have the *same* conclusion only when both parts match exactly. A
 different blocking number, a blocker that closed or merged, a superseding-block

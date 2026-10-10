@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.982",
-  "loom_commit": "8d038ca850cb0369d216f31263a21b2b5b0f9725",
+  "loom_version": "0.19.996",
+  "loom_commit": "0d2be7e9ae05753e2c9232a83b7399d45de5396e",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -379,9 +379,21 @@
     ".loom/scripts/tests/test-spawn-claude-credential-proxy.sh",
     ".loom/scripts/tests/test-worktree-stale-closed-branch.sh",
     ".loom/scripts/tests/test-worktree-stash-baseline.sh",
-    ".loom/docs/telemetry-replay.md"
+    ".loom/docs/telemetry-replay.md",
+    ".loom/docs/comment-body-heredoc-quoting.md",
+    ".agents/skills/loom-auditor/SKILL.md",
+    ".agents/skills/loom-comment-body-literal-path/SKILL.md",
+    ".agents/skills/loom-curator/SKILL.md",
+    ".claude/commands/loom/comment-body-literal-path.md",
+    ".loom/docs/comment-trust.md",
+    ".loom/docs/merge-pr-exit-code-exceptions.md",
+    ".loom/roles/comment-body-literal-path.md",
+    ".loom/scripts/tests/test-check-ci-status.sh",
+    ".loom/scripts/tests/test-dep-recheck-fingerprint.sh",
+    ".loom/scripts/tests/test-merge-pr-label-freshness.sh",
+    ".loom/scripts/tests/test-spawn-codex-session-exec.sh"
   ],
-  "last_resync": "2026-10-09",
+  "last_resync": "2026-10-10",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.772"
 }

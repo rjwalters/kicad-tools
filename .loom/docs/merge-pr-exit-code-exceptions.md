@@ -410,8 +410,9 @@ are ordered oldest-lock-first, so they cannot hold each other.
 ### Bounded so it cannot wedge `main`
 
 - **Cap**: `LOOM_CHAIN_LOCK_CAP_SECS` > config `champion.chainLockCapSecs` >
-  1200 s default, clamped like `LOOM_REDATE_BUDGET` (zero or unparseable
-  falls through a tier; anything above 3600 s is clamped to 3600 s).
+  7200 s default (sized above measured required-CI duration, ~45 min as of
+  #11221), clamped like `LOOM_REDATE_BUDGET` (zero or unparseable falls
+  through a tier; anything above 10800 s is clamped to 10800 s).
 - **No budget bypass**: the lock is a separate marker that the #9590 chain
   position never reads, so taking it neither spends nor refunds a re-date.
 - **API cost** (#10448): a repo-wide `GET issues/comments?since=…` listing

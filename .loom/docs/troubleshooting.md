@@ -177,6 +177,33 @@ so the decision lives once, in `loom-daemon worktree-closed-pr-branch`. A
 daemon predating the subcommand degrades to the pre-#9083 reuse behavior
 rather than surfacing a clap usage error.
 
+### An existing worktree still aliases `node_modules` on a pnpm workspace (#9152)
+
+**Symptom**: on a pnpm workspace, `ls -l .loom/worktrees/issue-N/node_modules`
+shows a symlink into the primary clone's `node_modules` (or a nested
+`apps/*/node_modules` does). #8944 stopped `worktree-link` creating these, but
+only for **new** worktrees: re-running `worktree.sh N` on an existing worktree
+returns early and never re-links. The alias is dangerous — pnpm purges
+**through** it into the main workspace, destroying every worktree's
+dependencies at once.
+
+**Fix**: retire the aliases once per repo, from the primary clone:
+
+```bash
+loom-daemon worktree-link --retire-aliases --repo-root "$(git rev-parse --show-toplevel)"
+# or one worktree:   ... --worktree .loom/worktrees/issue-N
+```
+
+Then run `pnpm install` in each worktree it names (cheap — hardlinks from
+pnpm's store).
+
+**What it touches**: only a symlink named `node_modules` whose target resolves
+to a directory inside the main workspace and outside that worktree. It
+`unlink`s the link — never its target, never a real directory (someone's own
+install), never a link pointing elsewhere. It does nothing on a non-pnpm repo
+or when `worktree.linkNodeModules` is `true`. The stale `.git/info/exclude`
+entry is harmless and left in place. Exit 1 only if an unlink failed.
+
 ### `git push --force-with-lease` prints a rejection for a ref update that landed (#6695)
 
 On a repository using Git LFS, `git push --force-with-lease=<branch>:<old-sha>
@@ -584,10 +611,12 @@ du -sh <repo>/.loom/targets/* <repo>/.loom/target-* /tmp/loom-target-* \
 ```
 
 **Fix**: `loom-daemon clean --dry-run` lists the orphans and the bytes they
-hold, and `loom-daemon clean -y` removes them. A dir is an orphan only when its
-newest file is older than 3 hours (`LOOM_TARGET_ORPHAN_RECLAIM_MAX_AGE_HOURS`),
-no process holds it open, no live claim names its issue, and it is not your
-configured `CARGO_TARGET_DIR` / `build.target-dir`. The daemon runs the same
+hold, and `loom-daemon clean -y` removes them. A dir is an orphan only when no
+process holds it open, no live claim names its issue, it is not your
+configured `CARGO_TARGET_DIR` / `build.target-dir`, and its newest file is old
+enough: 10 minutes for a `.loom/targets` run dir whose recorded owner has
+exited (`LOOM_TARGET_ORPHAN_RECLAIM_DEAD_OWNER_GRACE_MINUTES`), 3 hours for
+everything else (`LOOM_TARGET_ORPHAN_RECLAIM_MAX_AGE_HOURS`). The daemon runs the same
 sweep every 15 minutes and whenever free disk drops below the floor
 (`category=cargo_target_orphan` in its log). Then re-run the test.
 
@@ -605,8 +634,10 @@ root and logs `not scanning … is a symlink`; set `CARGO_TARGET_DIR` or
 
 **Prevention**: every role run now gets a Loom-owned `CARGO_TARGET_DIR` under
 `<repo>/.loom/targets/`. A role-runner tick's dir is removed when the run
-ends; a daemon sweep's or manual spawn's is collected by the orphan sweep
-after its owner exits. Agents must use it (or
+ends, and a daemon sweep's when the daemon sees the sweep end (completed,
+failed, cancelled or watchdog-cancelled); a manual spawn's, or one kept at run
+end, is collected by the orphan sweep about 10 minutes after its owner
+exits. Agents must use it (or
 their worktree's `target/`) and never create one under `/tmp`, `~`, `~/.cache`
 or `.loom/target-*`; see `cargo-target-isolation.md`. The disk-headroom
 estimate per worktree (`LOOM_PER_WORKTREE_GB`) defaults to 8 GB, measured

@@ -253,17 +253,14 @@ analyze_status() {
     # Analyze workflow runs (#5495): a workflow run that is `queued` or
     # `in_progress` counts as pending even when it has dispatched zero jobs
     # yet -- and therefore has no corresponding entries at all in $check_runs
-    # above. This is deliberately additive-only: a `completed` workflow run
-    # contributes nothing here because its job-level detail already arrived
-    # via $check_runs (double-counting it would risk over-counting success/
-    # failure, not just pending).
-    while IFS= read -r run; do
-        local wf_status
-        wf_status=$(echo "$run" | jq -r '.status')
-        if [[ "$wf_status" != "completed" ]]; then
-            ((pending++))
-        fi
-    done < <(echo "$workflow_runs" | jq -c '.[]')
+    # above. A `completed` run adds nothing to the counts (its job-level
+    # detail already arrived via $check_runs) -- EXCEPT a run that completed
+    # `cancelled` with no successful run of the same workflow (#10415): a
+    # superseded run can be cancelled before creating any job, so nothing in
+    # $check_runs speaks for it. That is NO VERDICT (ci-principles.md), and
+    # must not resolve to success because unrelated workflows passed.
+    pending=$((pending + $(echo "$workflow_runs" | jq '[.[] | select(.status != "completed")] | length')))
+    local no_verdict; no_verdict=$(echo "$workflow_runs" | jq '[group_by(.name)[] | select(any(.[]; .conclusion == "cancelled") and (any(.[]; .conclusion == "success") | not))] | length')
 
     # Determine overall status
     local overall_status
@@ -271,6 +268,8 @@ analyze_status() {
         overall_status="failure"
     elif [[ $pending -gt 0 ]]; then
         overall_status="pending"
+    elif [[ $no_verdict -gt 0 ]]; then
+        overall_status="unknown"
     elif [[ $success -gt 0 || $completed -gt 0 ]]; then
         overall_status="success"
     elif [[ "$combined_state" == "success" ]]; then
@@ -302,7 +301,7 @@ analyze_status() {
         --argjson success "$success" \
         --argjson failure "$failure" \
         --argjson pending "$pending" \
-        --argjson skipped "$skipped" \
+        --argjson skipped "$skipped" --argjson no_verdict "$no_verdict" \
         --argjson check_runs "$check_runs" \
         --argjson workflow_runs "$workflow_runs" \
         '{
@@ -316,7 +315,8 @@ analyze_status() {
                 success: $success,
                 failure: $failure,
                 pending: $pending,
-                skipped: $skipped
+                skipped: $skipped,
+                no_verdict: $no_verdict
             },
             check_runs: $check_runs,
             workflow_runs: $workflow_runs
@@ -493,6 +493,8 @@ else
     [[ "$SUCCESS_COUNT" -gt 0 ]] && echo -e "  ${GREEN}$SUCCESS_COUNT passed${NC}"
     [[ "$FAILURE_COUNT" -gt 0 ]] && echo -e "  ${RED}$FAILURE_COUNT failed${NC}"
     [[ "$PENDING_COUNT" -gt 0 ]] && echo -e "  ${YELLOW}$PENDING_COUNT pending${NC}"
+
+    [[ "$STATUS" == "unknown" ]] && echo "$RESULT" | jq -r '.workflow_runs[] | select(.conclusion == "cancelled") | "  \(.name): cancelled workflow run, no verdict (#10415)"'
 
     # Show failed checks
     if [[ "$FAILURE_COUNT" -gt 0 ]]; then

@@ -1965,7 +1965,7 @@ assert_contains "# LOOM_DISPATCH_MODE mode=bare-metal" "$output" "containment di
 echo '{"runtimes": {"containment": {"enabled": true}}}' > "$CONTAIN_WS/.loom/config.json"
 : > "$DOCKER_LOG"
 output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
-    LOOM_SWEEP_CPU_QUOTA=0 \
+    LOOM_SWEEP_CPU_QUOTA=0 CARGO_PROFILE_DEV_DEBUG=full CARGO_PROFILE_TEST_DEBUG='' \
     "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
 assert_contains "containerized dispatch ENABLED" "$output" \
     "runtimes.containment.enabled=true: spawn-claude logs the containment decision (#7429)"
@@ -1989,7 +1989,19 @@ assert_contains "--memory" "$docker_log" "containerized dispatch: --memory is ap
 # shared-target-dir host it is orphaned disk (213 GB / 6,402 session dirs on
 # one fleet host). The --memory assert above and this one are single-line so
 # the frozen-at-1822-code-lines file stays within the file-size ratchet.
-assert_contains "-e CARGO_INCREMENTAL=0" "$docker_log" "containerized dispatch: the worker env carries CARGO_INCREMENTAL=0 (#8456)"
+# Issue #11190: the debuginfo cap the host-side seam chose (or an operator's
+# own value, here `full`) is forwarded BY NAME — `-e VAR` with no `=value` in
+# argv — so the in-container cargo builds with the value the worker log
+# reports. The names ride the generic env passthrough, so their position
+# follows `env` order: the assert extracts the `-e` flags, sorts them, and
+# compares the exact set (a `NAME=value` form would fail the equality).
+# CARGO_PROFILE_TEST_DEBUG is set but EMPTY in this run and must NOT be
+# forwarded: cargo fails every build on an empty value (`invalid value:
+# string ""`) instead of reading it as unset, so the passthrough drops it.
+# (Both names share one `case` arm; the Rust containment tests cover the
+# two-names-forwarded shape.) Folded into the same single assert line for
+# the same ratchet reason.
+assert_eq "-e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG" "$(grep -oE -- '-e CARGO_(INCREMENTAL|PROFILE_[A-Z]+_DEBUG)(=[^ ]*)?' <<<"$docker_log" | sort -u | paste -sd' ' -)" "containerized dispatch: the worker env carries CARGO_INCREMENTAL=0 (#8456) and the debuginfo cap by name, no value in argv, a set-but-empty one dropped (#11190)"
 assert_contains "# LOOM_DISPATCH_MODE mode=container" "$output" \
     "containerized dispatch: the canonical LOOM_DISPATCH_MODE marker names mode=container (#7430)"
 assert_contains "cpus=none" "$output" \

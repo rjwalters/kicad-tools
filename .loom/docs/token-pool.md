@@ -94,7 +94,8 @@ equivalent credential variable. Raw provider capacity counts enabled inventory
 candidates only. Quota health, cooldown, ranking, and failover are layered on
 later and do not alter this inventory contract.
 
-> **Secrets:** use external `~/.claude-monitor/accounts.env` or an explicitly
+> **Secrets:** use external `~/.llm-monitor/accounts.env` (`~/.claude-monitor` on
+> an llm-monitor 1.x host) or an explicitly
 > selected external source, mode `0600`. Do not create repo-local
 > `.loom/accounts.env`, `.env` or `.loom/tokens/` credentials.
 
@@ -134,7 +135,7 @@ storage policy. Higher-precedence sources override by account email.
 
 | Source | Default location | Override |
 |--------|------------------|----------|
-| **claude-monitor master** (primary) | `~/.claude-monitor/accounts.env` | `LOOM_CLAUDE_MONITOR_DIR` env var (directory) |
+| **llm-monitor master** (primary; formerly claude-monitor) | `<monitor dir>/accounts.env` — see [monitor directory resolution](#monitor-directory-resolution-8849) | `LOOM_LLM_MONITOR_DIR` env var (directory); deprecated `LOOM_CLAUDE_MONITOR_DIR` still honored |
 | **Repo-local** | `<repo>/.loom/accounts.env` if present, else legacy `<repo>/.env` | `--env <path>` on `bootstrap` |
 | **Home master** (opt-in only, #3704) | *no default location* — read **only** when explicitly pointed at | `LOOM_ACCOUNTS_ENV` env var (a path enables it, `""` disables); `--home-env <path>` / `--no-home` on `bootstrap` |
 
@@ -158,11 +159,27 @@ effective merged set (and where each account came from) is printed by `bootstrap
 and `bootstrap --dry-run`. A repo with only a legacy `.env` and no other source
 behaves exactly as before.
 
+### Monitor directory resolution (#8849)
+
+claude-monitor was renamed **llm-monitor** in 2.0 and moved its data directory
+from `~/.claude-monitor` to `~/.llm-monitor`. Loom resolves the one monitor
+directory used for `accounts.env`, `ranking.json`, and `usage.db` in this order:
+
+1. `$LOOM_LLM_MONITOR_DIR` (nonblank; `~` expanded)
+2. `$LOOM_CLAUDE_MONITOR_DIR` (deprecated; nonblank; `~` expanded)
+3. `~/.llm-monitor`, if it exists as a directory
+4. `~/.claude-monitor` (legacy fallback for a host still on llm-monitor 1.x)
+
+An explicit override is authoritative even if the path does not exist. All
+three files come from the selected directory — a file missing there is treated
+as unavailable, never read from the other directory. `import-from-monitor --db`
+still overrides the database path.
+
 ## Importing live tokens from claude-monitor (#4006)
 
 `accounts.env` is a **snapshot** — a file someone wrote by hand at some point.
 claude-monitor keeps the **live** credentials in its SQLite store
-(`~/.claude-monitor/usage.db` → `oauth_credentials`) and refreshes them as
+(`<monitor dir>/usage.db` → `oauth_credentials`, usually `~/.llm-monitor/usage.db`) and refreshes them as
 accounts are re-authenticated. The two drift, and the drift is silent and total:
 
 ```text
@@ -348,8 +365,8 @@ For Pro/Max plans, Loom supports rotating between multiple Claude Code OAuth
 tokens. This spreads load across accounts and recovers automatically when a single
 token hits its weekly limit.
 
-1. Declare account credentials in a default source — the shared claude-monitor
-   master `~/.claude-monitor/accounts.env` (primary) or per-repo in
+1. Declare account credentials in a default source — the shared llm-monitor
+   master `~/.llm-monitor/accounts.env` (primary; `~/.claude-monitor` on 1.x) or per-repo in
    `<repo>/.loom/accounts.env` (falls back to legacy `<repo>/.env`). The
    `~/.loom/accounts.env` home master is **opt-in only** since #3704 (no longer
    auto-read); point `LOOM_ACCOUNTS_ENV=~/.loom/accounts.env` (or `--home-env
@@ -590,7 +607,7 @@ reads as "unknown" and a wrong one reads as a fact.
 Both ranking backends populate it:
 
 - The **claude-monitor backend** (`tokens_pool::monitor`) reads
-  `accounts[].resets["5h"]` and `["7d"]` from `~/.claude-monitor/ranking.json`
+  `accounts[].resets["5h"]` and `["7d"]` from `<monitor dir>/ranking.json`
   and normalizes them to the instant format. It previously reported no reset at
   all, which is why the CLI's reset column was empty on every monitor-sourced
   run even though the data was on disk the whole time.
@@ -1750,7 +1767,7 @@ the `.ranking` file is what rules it out, and re-probing is the recovery.
 
 `exhausted`/`blocked` are the #5629 hard exclusions — never readmitted without a
 successful re-probe. Under the default `--source auto`, though, Loom derives the
-ranking from claude-monitor's `~/.claude-monitor/ranking.json` whenever that file
+ranking from llm-monitor's `<monitor dir>/ranking.json` whenever that file
 is fresh, and **returns before the probe loop**. So when a credential is *revoked*
 upstream, claude-monitor's own `usage.db` stops refreshing that account, its
 `ranking.json` row freezes, and Loom copied `exhausted` plus a reset instant days

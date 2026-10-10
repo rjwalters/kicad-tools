@@ -1083,6 +1083,15 @@ can still opt a single command back in with an inline `CARGO_INCREMENTAL=1
 cargo …` prefix. Full rationale:
 [`build-gate.md` → Worker builds run with `CARGO_INCREMENTAL=0`](build-gate.md).
 
+Beside it, the dispatcher caps dev/test debuginfo (#11190):
+`CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are set to
+`line-tables-only`. These are `${VAR:-default}` defaults. An ambient value, or a
+`debug` key the repo sets in its `dev` or `test` profile table, is kept. The
+per-repo opt-out is `cargo.debuginfo: "full"` or `false` (env
+`LOOM_CARGO_DEBUGINFO`).
+Details:
+[`build-gate.md` → Worker builds cap debuginfo at `line-tables-only`](build-gate.md).
+
 ### Adapter observability markers
 
 Daemon-compatible runners emit a small, secret-free contract on stderr:

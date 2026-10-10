@@ -299,6 +299,24 @@ assert_eq "loom:pr" "$PR_LABELS" \
   "plain gh (no wrapper): the fetch succeeds and yields the current label set"
 assert_eq "c0ffee1" "$PR_HEAD_SHA" "plain gh (no wrapper): the response is parsed, not an empty '{}' fallback"
 
+# T7 (#9192): a FAILED fetch names its cause. The helper used to run
+# `gh api ... 2>/dev/null`, so a 401, a rate-limit 403 and a 404 all surfaced as
+# the same bare "Could not fetch PR #N". Each stub below emits the exact
+# stdout-body + stderr shape real `gh api` produces for that status.
+for _case in \
+  '401|{"message":"Bad credentials","status":"401"}|gh: Bad credentials (HTTP 401)|HTTP 401 auth failure|re-authenticate' \
+  '403|{"message":"API rate limit exceeded for user ID 4242.","status":"403"}|gh: API rate limit exceeded for user ID 4242. (HTTP 403)|HTTP 403 rate limit|user ID 4242' \
+  '404|{"message":"Not Found","status":"404"}|gh: Not Found (HTTP 404)|HTTP 404 not found|Not Found'; do
+  IFS='|' read -r _code _body _err _want1 _want2 <<<"$_case"
+  printf '#!/usr/bin/env bash\nprintf %%s\\\\n %q\nprintf %%s\\\\n %q >&2\nexit 1\n' "$_body" "$_err" > "$WORKDIR/bin/gh"
+  set +e; _out="$( (run_fetch "$WORKDIR/bin/gh") 2>&1 )"; _rc=$?; set -e
+  assert_eq "1" "$_rc" "HTTP $_code: the fetch still refuses the merge (exit 1)"
+  assert_contains "$_out" "Could not fetch PR #8462 -- $_want1" "HTTP $_code: the error names the status and its meaning"
+  assert_contains "$_out" "$_want2" "HTTP $_code: the error carries the forge's own message / remedy"
+done
+_rl_out="$( (printf '#!/usr/bin/env bash\necho "gh: API rate limit exceeded for user ID 4242. (HTTP 403)" >&2; exit 1\n' > "$WORKDIR/bin/gh"; run_fetch "$WORKDIR/bin/gh") 2>&1 || true)"
+assert_not_contains "$_rl_out" "auth failure" "a rate-limit 403 is NOT reported as an auth problem (the #9192 misdiagnosis)"
+
 # --- Source guards (fail if a refactor reintroduces the cached fetch) ---
 echo ""
 echo "Testing merge-pr.sh source guards..."

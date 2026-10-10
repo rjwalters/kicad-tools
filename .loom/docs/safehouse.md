@@ -55,7 +55,7 @@ below.
 ## The degradation contract (read this first)
 
 Safehouse is a **best-effort side-channel with no hard dependency** — it mirrors
-the claude-monitor optional-integration pattern. **Loom never blocks a sweep on
+the llm-monitor (formerly claude-monitor) optional-integration pattern. **Loom never blocks a sweep on
 safehouse.** Concretely:
 
 - `safehouse.enabled` false/absent ⇒ **byte-for-byte no-op**: the daemon does

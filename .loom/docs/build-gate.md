@@ -829,6 +829,70 @@ would silently re-enable both failure modes. A worker that genuinely wants
 incremental for one command still can — an inline `CARGO_INCREMENTAL=1 cargo
 build` prefix outranks the ambient value for that invocation only.
 
+### Worker builds cap debuginfo at `line-tables-only` (#11190)
+
+The same dispatcher seam also sets `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
+and `CARGO_PROFILE_TEST_DEBUG=line-tables-only` for every Loom-spawned worker.
+Cargo's default `dev`/`test` profile emits full DWARF, and in a workspace whose
+`tests/*.rs` files are each a crate linking the whole library, every
+integration-test binary carries its own copy: on loom-worker-1 (2026-10-09) one
+loom sweep's run dir reached 26 GB, and a typical test binary was 438 MB, of
+which 425 MB was `.debug_*` sections. `line-tables-only` keeps `file:line` in
+panic backtraces and drops nearly all of the rest. Loom's own CI has built this
+way since #9065 (`.github/workflows/ci.yml`).
+
+Unlike `CARGO_INCREMENTAL=0`, this default never overrides a choice that was
+already made, because a `CARGO_PROFILE_*` variable outranks every `[profile]`
+table cargo reads:
+
+- **Ambient env wins.** A `CARGO_PROFILE_DEV_DEBUG` or `CARGO_PROFILE_TEST_DEBUG`
+  already in the spawning environment is left as it is.
+- **The repo's profile wins.** A `debug` key in the `dev` or `test` profile
+  table of the repo's root `Cargo.toml`, or of a cargo config file a
+  build there reads (`.cargo/config.toml` in the repo or an ancestor, then
+  `$CARGO_HOME/config.toml`), suppresses that profile's variable.
+- **`test` inherits from `dev`.** When `dev` was chosen either way, the `test`
+  variable is not set either, so test binaries keep the inherited choice.
+
+The level is configurable per repo, with an opt-out:
+
+```json
+{ "cargo": { "debuginfo": "full" } }
+```
+
+`cargo.debuginfo` (env override `LOOM_CARGO_DEBUGINFO`; env > config > default)
+takes `line-tables-only` (the default), `limited`, `line-directives-only`,
+`none`, `0` or `1` to inject that level, and `full`, `inherit` or `false` (the
+JSON bool works too) to inject nothing and leave cargo's own resolution alone. Use the opt-out for a repo whose
+agents need a debugger. An unrecognized value falls back to the default. Each
+spawn writes one `# LOOM_CARGO_DEBUGINFO …` line to the worker log saying what
+it set and what it kept, and why. For example:
+`dev=kept(repo-profile) test=kept(inherits-dev)`.
+
+Docker boundaries:
+
+- **Native containment** (Pi, OpenCode) re-execs `spawn-worker.sh`, which
+  re-enters the seam inside the container. Both variables are in its by-name
+  env passthrough, so a value set on the host is ambient in the container and
+  is kept.
+- **Claude containment** re-execs `spawn-claude.sh`, not `spawn-worker.sh`, so
+  nothing in the container re-runs the seam. `spawn-claude.sh` forwards both
+  variables by name next to `-e CARGO_INCREMENTAL=0`, carrying the values the
+  host-side seam chose or kept.
+- `spawn-codex.sh`'s session-exec forwards both variables by name with the other
+  Loom context variables. The private-workspace Codex transport does not
+  forward them.
+
+A host that shares one `CARGO_TARGET_DIR` between worker and interactive builds
+no longer shares artifacts between the two: cargo does not reuse an artifact
+built with a different debuginfo setting. Set `cargo.debuginfo: "full"`, or the same
+`CARGO_PROFILE_*_DEBUG` in the interactive shell, if that matters more than the
+disk the cap saves.
+
+Not covered: a cargo workspace that is not at the repo root (for example
+`src-tauri/`). Its `[profile]` table is not read, so the cap applies over it.
+Set `cargo.debuginfo: "full"` for such a repo if its profile must win.
+
 ## Failure semantics
 
 A gate failure is **not** the same as a builder failure: the issue is automatically re-queued (`loom:issue`) and a future builder can take a fresh attempt. The `PhaseResult.data` block carries:

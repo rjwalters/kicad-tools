@@ -1,6 +1,6 @@
 ---
 name: loom-comment-body-literal-path
-description: "This is the single canonical copy of this warning. Every role prompt that carries a short \"`--body @path` Does NOT Expand\" pointer refers here for the full pitfall, incident citation, and fixes."
+description: "Single canonical copy; role prompts' short pointers refer here."
 ---
 <!-- loom-managed-skill -->
 <!-- GENERATED FILE — DO NOT EDIT DIRECTLY.
@@ -15,9 +15,7 @@ description: "This is the single canonical copy of this warning. Every role prom
 
 # `--body @path` Does NOT Expand — It Posts the Literal String (canonical)
 
-This is the single canonical copy of this warning. Every role prompt that
-carries a short "`--body @path` Does NOT Expand" pointer refers here for the
-full pitfall, incident citation, and fixes.
+Single canonical copy; role prompts' short pointers refer here.
 
 **If a comment/review body you're posting (via `gh issue comment`, `gh pr
 comment`, or `gh api ... comments`) lives in a scratch/scratchpad file, do not
@@ -60,6 +58,8 @@ the value of `--body`/`-b` with an `@` prefix — that flag takes literal text
 only. **After posting, re-fetch the comment** (`gh pr view <number>
 --comments` / `gh issue view <number> --comments`) to confirm it renders your
 prose, not a path string.
+
+Why `<<'EOF'` must stay quoted: `.loom/docs/comment-body-heredoc-quoting.md`.
 
 ### Name every staged body file after its issue/PR number — never a fixed name (#6381)
 

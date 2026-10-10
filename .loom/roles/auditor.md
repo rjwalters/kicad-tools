@@ -752,8 +752,8 @@ Each tick, read the Judge rejections that landed since your last pass and watch 
 
 **Workflow (run each tick):**
 
-1. List `loom:changes-requested` label-**add** events since the last pass — index on the **event**, not the `<!-- loom:verdict-sha ... -->` comment marker: the marker was measured at ~50% recall while the label event is server-generated and therefore exact (#5850 §2, §4).
-2. Join each event to its verdict comment: the newest comment strictly preceding the event within 120s (`judge.md` chains the comment write and the label write with `&&`, so the gap is bounded — measured at 1–8s).
+1. List `loom:changes-requested` label-**add** events since the last pass — index on the server-generated **event** (exact), not the `loom:verdict-sha` marker (~50% recall; #5850 §2, §4).
+2. Join each event to the newest comment strictly preceding it within 120s (`judge.md` chains the comment and label writes with `&&`; measured gap 1–8s). Drop pairs whose trusted comment opens `<!-- loom:base-conflict flagged -->` — a daemon flag (#8922), not a Judge rejection (#9062).
 3. Classify each pair as a **code-specific finding** (no action) or a **process pattern**.
 4. Keep the running tally in the pass's own issue/comment trail — **no new state file**, the forge is the state store.
 5. File a proposal only once the same pattern reaches **three or more independent instances**, citing the specific PR numbers.

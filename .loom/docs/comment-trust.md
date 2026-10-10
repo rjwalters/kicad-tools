@@ -73,6 +73,7 @@ The predicate lives once, in `loom-daemon/src/comment_trust.rs`:
   | Lease probes (claim reconciliation, orphan recovery, dispatch tie-break, mid-build watchdog) | `loom:lease` | Not a lease: it can neither hold a claim, win the tie-break, nor fence a cleanup. |
   | Claim reconciliation | `loom:claim-activity` / `loom:standdown` | Not claimant activity: it cannot keep a dead claim alive. |
   | Review-conflict pass | `loom:base-conflict flagged` | Not "ours", so a Judge's verdict is never undone. |
+  | Outcome telemetry (`label_timeline`) | `loom:base-conflict flagged` | Not a flag: the rejection still counts. |
   | Quarantine reconciliation | `Auto-quarantined by loom-daemon (#3939)` | Not the daemon's quarantine; the marker must also *start* the comment. |
   | Dependency classification | `champion:proposal-escalated` / `dep-cycle` / `proposal-unescalated` | Absent. |
   | `premise-check` | `loom:premise-check … verdict=` | Absent (comments; a body counts only when its author is trusted). |

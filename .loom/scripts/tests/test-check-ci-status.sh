@@ -250,6 +250,53 @@ EOF
 run_ccs --commit "$SHA" --quiet
 assert_eq "success" "$OUT" "(c) completed workflow run -> quiet output 'success' (not double-counted)"
 
+# (c2) #10415: the primary "CI" run completed `cancelled` with ZERO jobs
+# (superseded before dispatch), while unrelated checks passed. No check-run
+# speaks for CI, so this is NO VERDICT -- never "success".
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "cancelled"}, {"name": "loc", "status": "completed", "conclusion": "success"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "unknown" "$OUT" "(c2) cancelled zero-job CI run + passing unrelated checks -> 'unknown' (no verdict), not 'success'"
+assert_eq "3" "$RC" "(c2) Exit code 3 (no verdict)"
+run_ccs --commit "$SHA" --json
+assert_eq "1" "$(echo "$OUT" | jq -r '.counts.no_verdict')" "(c2) --json .counts.no_verdict counts the cancelled workflow"
+run_ccs --commit "$SHA"
+assert_contains "$OUT" "CI: cancelled workflow run, no verdict" "(c2) human output names the no-verdict workflow"
+
+# (c3) A replacement run of the same workflow completed successfully: the
+# cancelled run is superseded, so the genuine success stands.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success"}, {"name": "CI", "status": "completed", "conclusion": "cancelled"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(c3) cancelled CI run with a successful replacement -> 'success'"
+
+# (c4) Failure precedence is preserved: a failed check-run still dominates a
+# cancelled zero-job workflow run.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<'EOF'
+{"total_count": 2, "check_runs": [{"name": "loc", "status": "completed", "conclusion": "success"}, {"name": "Shellcheck", "status": "completed", "conclusion": "failure"}]}
+EOF
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "cancelled"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "failure" "$OUT" "(c4) failed check + cancelled CI run -> 'failure' (failure precedence kept)"
+
+# (c5) A queued replacement run keeps the verdict pending, not no-verdict.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "queued", "conclusion": null}, {"name": "CI", "status": "completed", "conclusion": "cancelled"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "pending" "$OUT" "(c5) cancelled CI run with a queued replacement -> 'pending'"
+
 # (d) Graceful degradation: the workflow-runs API call itself fails (e.g.
 # Actions scope/permissions issue). This must NOT break the script -- it
 # should fall back to check-run-only behavior, exactly like the pre-fix

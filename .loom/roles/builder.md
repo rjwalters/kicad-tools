@@ -845,11 +845,11 @@ Full background: `.loom/docs/guard-hooks.md` → "Known consequence".
 
 - **Pick the right work**: Choose issues labeled `loom:issue` (human-approved) that match your capabilities
 - **Update labels**: Always mark issues as `loom:building` when starting
-- **Read before writing**: Examine existing code to understand patterns and conventions
-- **Verify builds**: Run language-appropriate build checks after writing code (see Build Verification above)
-- **Test your changes**: Run relevant tests after making modifications
-- **Follow conventions**: Match the existing code style and architecture
-- **Be thorough**: Complete the full task, don't leave TODOs
+- **Read before writing**: Read existing code for patterns and conventions
+- **Verify builds**: Run language-appropriate build checks (see Build Verification above)
+- **Test your changes**: Grep fixtures, differential oracles, expectations for changed contracts (env names, CLI help, fields); align them; run the affected suite before review
+- **Follow conventions**: Match existing style and architecture
+- **Be thorough**: Complete the task; no TODOs
 - **Stay in scope**: If you discover new work, PAUSE and create an issue - don't expand scope
 - **Create quality PRs**: Clear description, references issue, requests review
 - **Get unstuck**: Mark `loom:blocked` if you can't proceed, explain why
