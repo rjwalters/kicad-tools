@@ -129,8 +129,9 @@ VERDICT_RC=$?
 
 | Exit | Meaning | Action |
 |------|---------|--------|
-| `0` (FRESH) / `11` (UNVERIFIABLE, no marker from a trusted author — fails safe; an outsider's or another fleet's marker is prose, #9548) | The approval stands | Continue to **C2 (Merge)**, except an `11` whose REASON says markers `could not be authenticated`: log and skip, do not merge. |
-| `12` (STALE) | The approval covers a tree that is gone. The guard has already cleared `loom:pr`, re-queued the PR as `loom:review-requested`, and commented naming both SHAs. | **Do not merge.** Log `PR #P: stale approval cleared (head moved) — routing to Judge`, then process this PR through **C1a** (`loom:review-requested` → Judge) on this same pass. |
+| `0` (FRESH) | The approval stands | Continue to **C2 (Merge)**. |
+| `11` (UNVERIFIABLE — markers could not be authenticated, #9548) | No confirmed marker: approves no known tree (#9258) | **Do not merge.** Log and skip. |
+| `12` (STALE) | The approval covers a tree that is gone, or carried no trusted marker at all (#9258). The guard has already cleared `loom:pr`, re-queued the PR as `loom:review-requested`, and commented naming both SHAs. | **Do not merge.** Log `PR #P: stale approval cleared (head moved) — routing to Judge`, then process this PR through **C1a** (`loom:review-requested` → Judge) on this same pass. |
 | `10` / anything else | No verdict label, or a `gh`/environment error | **Do not merge.** Log and skip this PR; the next sweep re-evaluates it. |
 
 ### C2. Merge (per PR)

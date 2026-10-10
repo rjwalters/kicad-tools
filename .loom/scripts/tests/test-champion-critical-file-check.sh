@@ -9,10 +9,10 @@
 # Champion's criterion #3 (`champion-pr-merge.md` "Critical File Exclusion
 # Check") is prose an LLM instance reads and executes, not a standalone
 # script (same situation as test-dependency-parse.sh) — so this file mirrors
-# the documented check-loop (and, since #6147, the `version_only_diff()`
-# carve-out, and since #6879, the durable-hold labeling) in local functions
-# and pins the shipped markdown's exact commands with `assert_doc_contains`,
-# catching drift between the two.
+# the documented check-loop (since #9611 the shipped `version_only_diff()` is
+# extracted and run, not mirrored; since #6879, the durable-hold labeling) in
+# local functions and pins the shipped markdown's exact commands with
+# `assert_doc_contains`, catching drift between the two.
 #
 # Incident recap: on PR #4611 (117 changed files), a concurrent Champion
 # evaluation posted "no critical-file changes" despite the PR removing
@@ -169,45 +169,33 @@ champion_critical_file_check() {
 }
 
 # =====================================================================
-# Version-only diff carve-out (#6147), mirrored verbatim from criterion #3's
-# `version_only_diff()` in champion-pr-merge.md. The doc's version reads the
-# diff via `gh api .../pulls/<n>/files --jq '... | .patch'`; this mirror
-# takes the patch text directly (stdin) so it can be exercised against fixed
-# fixtures without a live PR.
+# Version-only diff carve-out (#6147, #9611). The decision lives in `loom-daemon
+# forge version-only-diff` (its Rust unit tests own the PR #6118 patch
+# fixtures). The old mirror here re-implemented only the grep half on stdin, so
+# it passed while the shipped `gh api --jq --arg` fetch failed open on every
+# call. Now the SHIPPED `version_only_diff()` is extracted from the doc and run
+# against a stub `loom-daemon` that exits with the code `STUB_RCS` assigns to a
+# file ("file=rc ..."; unlisted files exit 1).
 # =====================================================================
-version_only_diff_from_patch() {
-    local file="$1"
-    local pattern
-    case "$file" in
-        package.json|mcp-loom/package.json|mcp-loom/package-lock.json)
-            pattern='^[+-][[:space:]]*"version":[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+",?[[:space:]]*$'
-            ;;
-        loom-daemon/Cargo.toml|loom-api/Cargo.toml|Cargo.lock)
-            pattern='^[+-]version = "[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*$'
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+STUB_DIR="$(mktemp -d)" && trap 'rm -rf "$STUB_DIR"' EXIT
+mkdir -p "$STUB_DIR/bin" "$STUB_DIR/noexec" "$STUB_DIR/empty"
+printf '%s\n' "#!$(command -v bash)" '[ "$1 $2" = "forge version-only-diff" ] || exit 64' \
+    'for kv in $STUB_RCS; do [ "${kv%=*}" = "$4" ] && exit "${kv##*=}"; done; exit 1' \
+    >"$STUB_DIR/bin/loom-daemon"
+chmod +x "$STUB_DIR/bin/loom-daemon"
+: >"$STUB_DIR/noexec/loom-daemon"
+eval "$(sed -n '/^version_only_diff() {$/,/^}$/p' "$CHAMPION_MD")"
+export STUB_RCS=""
+vod() { PATH="$1" version_only_diff "$2" 42 2>/dev/null && echo 0 || echo 1; }
 
-    local bad_lines
-    bad_lines=$(grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -vE "$pattern")
-    [ -z "$bad_lines" ]
-}
-
-# champion_critical_file_check, extended to apply the version-only carve-out.
-# $2 (optional, per-invocation) supplies a patch-lookup function name; when a
-# critical-pattern match is one of the 6 version-bearing files, that function
-# is called as `"$patch_lookup_fn" "$file"` and piped into
-# version_only_diff_from_patch to decide PASS vs FAIL for that file alone.
+# The criterion #3 check-loop as shipped, calling the shipped version_only_diff.
 champion_critical_file_check_with_carveout() {
-    local patch_lookup_fn="$1"
     local file
     while IFS= read -r file; do
         [ -z "$file" ] && continue
         for pattern in "${CRITICAL_PATTERNS[@]}"; do
             if [[ "$file" == *"$pattern"* ]]; then
-                if "$patch_lookup_fn" "$file" | version_only_diff_from_patch "$file"; then
+                if PATH="$STUB_DIR/bin:$PATH" version_only_diff "$file" 42 2>/dev/null; then
                     echo "PASS (version-only carve-out): $file"
                 else
                     echo "FAIL: $file"
@@ -360,126 +348,39 @@ assert_eq "PASS" "$out" \
     "paths with 'sql'/'.sql' inside a directory or identifier name (no schema file) pass"
 
 echo
-echo "--- version_only_diff_from_patch: real PR #6118 version-bump diff shapes carve out cleanly (#6147) ---"
+echo "--- version_only_diff (shipped): only a daemon exit 0 is eligible; every other exit fails closed (#9611) ---"
 
-# Fixture patch bodies copied verbatim (patch-line shape) from PR #6118's
-# actual diff for each of the 6 version-bearing files.
-pr6118_patch_loom_api_cargo_toml=$'@@ -1,6 +1,6 @@\n [package]\n name = "loom-api"\n-version = "0.18.38"\n+version = "0.18.39"\n edition = "2021"\n description = "External REST API for Loom analytics data access"\n '
-pr6118_patch_loom_daemon_cargo_toml=$'@@ -1,6 +1,6 @@\n [package]\n name = "loom-daemon"\n-version = "0.18.38"\n+version = "0.18.39"\n edition = "2021"\n \n [dependencies]'
-pr6118_patch_cargo_lock=$'@@ -1247,7 +1247,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"\n \n [[package]]\n name = "loom-api"\n-version = "0.18.38"\n+version = "0.18.39"\n dependencies = [\n "anyhow",\n "axum",\n@@ -1265,7 +1265,7 @@ dependencies = [\n \n [[package]]\n name = "loom-daemon"\n-version = "0.18.38"\n+version = "0.18.39"\n dependencies = [\n "anyhow",'
-pr6118_patch_package_json=$'@@ -1,6 +1,6 @@\n {\n   "name": "loom",\n-  "version": "0.18.38",\n+  "version": "0.18.39",\n   "description": "AI-powered development orchestration...",\n   "type": "module",'
-pr6118_patch_mcp_package_json=$'@@ -1,6 +1,6 @@\n {\n   "name": "@loom/mcp",\n-  "version": "0.18.38",\n+  "version": "0.18.39",\n   "description": "Unified MCP server for Loom",\n   "type": "module",'
-pr6118_patch_mcp_package_lock_json=$'@@ -1,12 +1,12 @@\n {\n   "name": "@loom/mcp",\n-  "version": "0.18.38",\n+  "version": "0.18.39",\n   "lockfileVersion": 3,\n   "requires": true,\n   "packages": {\n     "": {\n       "name": "@loom/mcp",\n-      "version": "0.18.38",\n+      "version": "0.18.39",\n       "dependencies": {'
-
-if printf '%s\n' "$pr6118_patch_loom_api_cargo_toml" | version_only_diff_from_patch "loom-api/Cargo.toml"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's loom-api/Cargo.toml diff is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_loom_daemon_cargo_toml" | version_only_diff_from_patch "loom-daemon/Cargo.toml"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's loom-daemon/Cargo.toml diff is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_cargo_lock" | version_only_diff_from_patch "Cargo.lock"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's Cargo.lock diff (two [[package]] version bumps) is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_package_json" | version_only_diff_from_patch "package.json"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's package.json diff is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_mcp_package_json" | version_only_diff_from_patch "mcp-loom/package.json"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's mcp-loom/package.json diff is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_mcp_package_lock_json" | version_only_diff_from_patch "mcp-loom/package-lock.json"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's mcp-loom/package-lock.json diff (two version lines) is recognized as version-only"
-
-echo
-echo "--- version_only_diff_from_patch: a real (non-version) change to a critical file still fails (#6147) ---"
-
-# A genuine dependency bump alongside the version line — the carve-out must
-# NOT apply; this file still fails criterion #3 as before.
-real_dep_change_cargo_toml=$'@@ -1,7 +1,7 @@\n [package]\n name = "loom-api"\n-version = "0.18.38"\n+version = "0.18.39"\n edition = "2021"\n \n [dependencies]\n-anyhow = "1.0"\n+anyhow = "1.1"'
-if printf '%s\n' "$real_dep_change_cargo_toml" | version_only_diff_from_patch "loom-api/Cargo.toml"; then
-    r=0; else r=1; fi
-assert_eq "1" "$r" \
-    "a Cargo.toml diff with a real dependency-version change (not just the package version) still fails the carve-out"
-
-# A new field added alongside the version bump in package.json.
-real_new_field_package_json=$'@@ -1,7 +1,8 @@\n {\n   "name": "loom",\n-  "version": "0.18.38",\n+  "version": "0.18.39",\n+  "private": true,\n   "description": "...",\n   "type": "module",'
-if printf '%s\n' "$real_new_field_package_json" | version_only_diff_from_patch "package.json"; then
-    r=0; else r=1; fi
-assert_eq "1" "$r" \
-    "a package.json diff with a new field alongside the version bump still fails the carve-out"
-
-# A critical file NOT in the 6-file allowlist is never eligible for the
-# carve-out, even with a version-only-shaped diff — e.g. a hypothetical
-# some-crate/Cargo.toml.
-version_only_shaped_other_toml=$'@@ -1,3 +1,3 @@\n [package]\n-version = "1.2.3"\n+version = "1.2.4"'
-if printf '%s\n' "$version_only_shaped_other_toml" | version_only_diff_from_patch "some-crate/Cargo.toml"; then
-    r=0; else r=1; fi
-assert_eq "1" "$r" \
-    "a critical Cargo.toml outside the 6-file allowlist is never eligible for the carve-out, even with a version-only-shaped diff"
+STUB_RCS="package.json=0 loom-api/Cargo.toml=1 Cargo.lock=2 loom-daemon/Cargo.toml=70"
+assert_eq "0" "$(vod "$STUB_DIR/bin" package.json)" "daemon exit 0 (version-only) is eligible"
+assert_eq "1" "$(vod "$STUB_DIR/bin" loom-api/Cargo.toml)" "daemon exit 1 (not eligible / forge error) is not eligible"
+assert_eq "1" "$(vod "$STUB_DIR/bin" Cargo.lock)" "daemon exit 2 (a daemon predating the verb: clap error) is not eligible"
+assert_eq "1" "$(vod "$STUB_DIR/bin" loom-daemon/Cargo.toml)" "any other non-zero daemon exit is not eligible"
+assert_eq "1" "$(vod "$STUB_DIR/noexec" package.json)" "a non-executable loom-daemon (exit 126) is not eligible"
+assert_eq "1" "$(vod "$STUB_DIR/empty" package.json)" "a missing loom-daemon binary (exit 127) is not eligible"
 
 echo
 echo "--- champion_critical_file_check_with_carveout: full check-loop integration (#6147) ---"
 
-# Patch-lookup stub used by the integration tests below: dispatches by
-# filename to the fixtures already defined.
-patch_lookup_pr6118_clean() {
-    case "$1" in
-        loom-api/Cargo.toml) printf '%s\n' "$pr6118_patch_loom_api_cargo_toml" ;;
-        loom-daemon/Cargo.toml) printf '%s\n' "$pr6118_patch_loom_daemon_cargo_toml" ;;
-        Cargo.lock) printf '%s\n' "$pr6118_patch_cargo_lock" ;;
-        package.json) printf '%s\n' "$pr6118_patch_package_json" ;;
-        mcp-loom/package.json) printf '%s\n' "$pr6118_patch_mcp_package_json" ;;
-        mcp-loom/package-lock.json) printf '%s\n' "$pr6118_patch_mcp_package_lock_json" ;;
-        *) printf '' ;;
-    esac
-}
-
+STUB_RCS="loom-api/Cargo.toml=0 loom-daemon/Cargo.toml=0 package.json=0 mcp-loom/package.json=0"
 fixture=$'defaults/scripts/merge-pr.sh\nloom-api/Cargo.toml\nloom-daemon/Cargo.toml\nCargo.lock\npackage.json\nmcp-loom/package.json\nmcp-loom/package-lock.json'
-out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout patch_lookup_pr6118_clean)"
-# The loop only calls version_only_diff on files that match a CRITICAL_PATTERNS
-# entry in the first place; per the current pattern list that is
-# loom-api/Cargo.toml, loom-daemon/Cargo.toml, package.json, and
-# mcp-loom/package.json (Cargo.lock and mcp-loom/package-lock.json don't match
-# any pattern substring today, so they never even reach version_only_diff —
-# harmless, and version_only_diff still recognizes them defensively in case
-# CRITICAL_PATTERNS is ever extended to cover lockfiles). The overall result
-# must have no FAIL line and end on the loop's final "PASS".
-last_line="$(printf '%s' "$out" | tail -1)"
-fail_count="$(printf '%s\n' "$out" | grep -c '^FAIL:' || true)"
-assert_eq "PASS" "$last_line" \
-    "a PR #6118-shaped file list (6 version-only critical files + one non-critical substantive file) ends on overall PASS"
-assert_eq "0" "$fail_count" \
-    "a PR #6118-shaped file list (6 version-only critical files + one non-critical substantive file) produces zero FAIL lines"
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout)"
+# Only files matching a CRITICAL_PATTERNS entry reach version_only_diff
+# (Cargo.lock and mcp-loom/package-lock.json match none today).
 assert_eq "PASS (version-only carve-out): loom-api/Cargo.toml
 PASS (version-only carve-out): loom-daemon/Cargo.toml
 PASS (version-only carve-out): package.json
 PASS (version-only carve-out): mcp-loom/package.json
 PASS" "$out" \
-    "the 4 files that match a CRITICAL_PATTERNS entry (loom-api/Cargo.toml, loom-daemon/Cargo.toml, package.json, mcp-loom/package.json) each pass via the version-only carve-out"
+    "a PR #6118-shaped file list passes via the carve-out on the 4 critical-pattern files, ending on PASS"
 
-# Same file list, but loom-api/Cargo.toml now carries a real dependency
-# change too — the whole check must fail again, on that file.
-patch_lookup_pr6118_dirty() {
-    case "$1" in
-        loom-api/Cargo.toml) printf '%s\n' "$real_dep_change_cargo_toml" ;;
-        loom-daemon/Cargo.toml) printf '%s\n' "$pr6118_patch_loom_daemon_cargo_toml" ;;
-        Cargo.lock) printf '%s\n' "$pr6118_patch_cargo_lock" ;;
-        package.json) printf '%s\n' "$pr6118_patch_package_json" ;;
-        mcp-loom/package.json) printf '%s\n' "$pr6118_patch_mcp_package_json" ;;
-        mcp-loom/package-lock.json) printf '%s\n' "$pr6118_patch_mcp_package_lock_json" ;;
-        *) printf '' ;;
-    esac
-}
-
-fixture=$'defaults/scripts/merge-pr.sh\nloom-api/Cargo.toml\nloom-daemon/Cargo.toml\nCargo.lock\npackage.json\nmcp-loom/package.json\nmcp-loom/package-lock.json'
-out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout patch_lookup_pr6118_dirty)"
+STUB_RCS="loom-daemon/Cargo.toml=0 package.json=0 mcp-loom/package.json=0"
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout)"
 assert_eq "FAIL: loom-api/Cargo.toml" "$out" \
-    "the same file list still fails criterion #3 when one version-bearing file also carries a real dependency change"
+    "the same list fails criterion #3 when the daemon finds one file not version-only"
+
+STUB_RCS="" out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout)"
+assert_eq "FAIL: loom-api/Cargo.toml" "$out" \
+    "with every daemon answer non-zero (forge down, old daemon) criterion #3 FAILS rather than PASSes"
 
 echo
 echo "--- Doc pins: shipped markdown uses the paginated REST endpoint, not the truncating gh pr view field ---"
@@ -557,20 +458,12 @@ assert_doc_contains "$CHAMPION_MD" \
     "criterion #3 defines the version_only_diff() carve-out function"
 
 assert_doc_contains "$CHAMPION_MD" \
-    'package.json|mcp-loom/package.json|mcp-loom/package-lock.json)' \
-    "version_only_diff() case-matches the 3 JSON version-bearing files exactly (not by substring)"
+    'loom-daemon forge version-only-diff "$number" "$file" >/dev/null || return 1' \
+    "version_only_diff() delegates to the fail-closed daemon verb (#9611)"
 
-assert_doc_contains "$CHAMPION_MD" \
-    'loom-daemon/Cargo.toml|loom-api/Cargo.toml|Cargo.lock)' \
-    "version_only_diff() case-matches the 3 TOML-style version-bearing files exactly (not by substring)"
-
-assert_doc_contains "$CHAMPION_MD" \
-    'pattern='"'"'^[+-][[:space:]]*"version":[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+",?[[:space:]]*$'"'" \
-    "version_only_diff() ships the JSON version-line pattern"
-
-assert_doc_contains "$CHAMPION_MD" \
-    'pattern='"'"'^[+-]version = "[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*$'"'" \
-    "version_only_diff() ships the TOML version-line pattern"
+assert_doc_lacks "$CHAMPION_MD" \
+    '--jq --arg' \
+    "no gh api --jq --arg pipeline (gh's --jq takes no --arg; it errored and failed open, #9611)"
 
 assert_doc_contains "$CHAMPION_MD" \
     'if version_only_diff "$file" <number>; then' \

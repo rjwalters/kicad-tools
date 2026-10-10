@@ -228,6 +228,18 @@ D="$LOOM_TEST_STUB_DIR"
 # The #10581 capability probe asks `forge <verb> --help`. Answered here (and
 # not logged) so the scenario files below drive only the real calls; with
 # old-daemon present it answers like a binary that predates the verbs.
+# #9258: `forge verdict-body-check` classifies the body on stdin (its rules are
+# unit-tested in loom_daemon::verdict_body and run for real in
+# test-post-verdict-gate.sh). Here it records what it was handed (body-check-
+# input.txt) and answers from body-answer ("<rc> <line>"), default OK;
+# body-check-missing (or old-daemon) answers like a binary without the verb.
+if [[ "${1:-} ${2:-}" == "forge verdict-body-check" ]]; then
+  if [[ -f "$D/body-check-missing" || -f "$D/old-daemon" ]]; then echo "error: unrecognized subcommand 'verdict-body-check'" >&2; exit 2; fi
+  [[ "${3:-}" == --help ]] && exit 0
+  cat > "$D/body-check-input.txt"
+  [[ -f "$D/body-answer" ]] || { echo "LOOM-VERDICT-BODY OK"; exit 0; }
+  read -r rc line < "$D/body-answer"; echo "$line"; exit "$rc"
+fi
 if [[ "${1:-}" == forge && "${2:-}" == verdict-* && "${3:-}" == --help ]]; then
   [[ -f "$D/old-daemon" ]] && { echo "error: unrecognized subcommand '$2'" >&2; exit 2; }
   exit 0
@@ -274,7 +286,7 @@ reset_state() {
     "$STUB_DIR"/ci-stdout "$STUB_DIR"/ci-stderr "$STUB_DIR"/ci-garbage "$STUB_DIR"/ci-absent "$STUB_DIR"/ci-empty "$STUB_DIR"/ci-required \
     "$STUB_DIR"/final-head "$STUB_DIR"/final-head-fail "$STUB_DIR/wait-checks-calls.log" \
     "$STUB_DIR/gate-answer" "$STUB_DIR/reconcile-answer" "$STUB_DIR"/reconcile-answer.* "$STUB_DIR/labels-fail" "$STUB_DIR/lock-fail" "$STUB_DIR/daemon-calls.log" \
-    "$STUB_DIR/old-daemon" "$STUB_DIR/delete-fail" "$STUB_DIR/labels-read-fail" "$STUB_DIR/pr-edit.log" "$STUB_DIR/pr-edit-fail"
+    "$STUB_DIR/old-daemon" "$STUB_DIR/body-answer" "$STUB_DIR/body-check-missing" "$STUB_DIR/body-check-input.txt" "$STUB_DIR/delete-fail" "$STUB_DIR/labels-read-fail" "$STUB_DIR/pr-edit.log" "$STUB_DIR/pr-edit-fail"
 }
 
 run_pv() {
@@ -366,16 +378,95 @@ reset_state
 run_pv 109 approved abc1234 --body ""
 assert_eq "2" "$EXIT_CODE" "empty --body -> exit 2"
 
-# T10b: --body starting with '@' is refused — the same
-# --body-@path-does-not-expand anti-pattern the Bash guard hard-denies for a
-# literal `gh pr comment` call, reproduced here because that guard
-# pattern-matches literal command text and cannot see a call routed through
-# this script (#6382).
+# T10b: a literal @path body is refused — the --body-@path-does-not-expand
+# anti-pattern the Bash guard hard-denies for a literal `gh pr comment` call,
+# reproduced here because that guard cannot see a call routed through this
+# script (#6382). Since #9258 the decision is `forge verdict-body-check`'s.
+REJECT_AT="1 LOOM-VERDICT-BODY REJECT the body is a lone '@' token ('@-' or '@path'): it reads nothing"
 reset_state
+echo "$REJECT_AT" > "$STUB_DIR/body-answer"
 run_pv 109 approved abc1234 --body "@/tmp/review-109.md"
-assert_eq "2" "$EXIT_CODE" "--body starting with @ -> exit 2"
-assert_contains "$OUTPUT" "does NOT read the file" "error explains the @path anti-pattern"
+assert_eq "2" "$EXIT_CODE" "--body @path -> exit 2"
+assert_contains "$OUTPUT" "lone '@' token" "error carries the predicate's reason"
+assert_eq "@/tmp/review-109.md" "$(cat "$STUB_DIR/body-check-input.txt")" "the predicate saw the body"
 assert_eq "" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "no comment posted with a literal @path body"
+
+# T10c (#9258): every body spelling reaches the predicate, and a refusal posts
+# nothing — including the stdin forms the pre-#9258 '@*' check never saw.
+REJECT_SHORT="1 LOOM-VERDICT-BODY REJECT the body is exactly '-'"
+for case_ in "--body|-" "--body|   " "--body|@-"; do
+  reset_state
+  echo "$REJECT_SHORT" > "$STUB_DIR/body-answer"
+  run_pv 109 approved abc1234 "${case_%%|*}" "${case_#*|}"
+  assert_eq "2" "$EXIT_CODE" "#9258: ${case_%%|*} '${case_#*|}' refused -> exit 2"
+  assert_eq "${case_#*|}" "$(cat "$STUB_DIR/body-check-input.txt")" "#9258: predicate saw '${case_#*|}'"
+  assert_eq "" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "#9258: nothing posted for '${case_#*|}'"
+done
+for content in "@-" "@/tmp/x"; do
+  reset_state
+  echo "$REJECT_AT" > "$STUB_DIR/body-answer"
+  printf '%s' "$content" > "$STUB_DIR/body-at.txt"
+  run_pv 109 approved abc1234 --body-file "$STUB_DIR/body-at.txt"
+  assert_eq "2" "$EXIT_CODE" "#9258: --body-file holding '$content' -> exit 2"
+  assert_eq "$content" "$(cat "$STUB_DIR/body-check-input.txt")" "#9258: predicate saw the file content '$content'"
+  assert_eq "" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "#9258: nothing posted for file '$content'"
+  reset_state
+  echo "$REJECT_AT" > "$STUB_DIR/body-answer"
+  set +e; OUTPUT=$(printf '%s' "$content" | "$POST_VERDICT" 109 approved abc1234 --body-file - 2>&1); EXIT_CODE=$?; set -e
+  assert_eq "2" "$EXIT_CODE" "#9258: --body-file - (stdin '$content') -> exit 2"
+  assert_eq "$content" "$(cat "$STUB_DIR/body-check-input.txt")" "#9258: predicate saw the stdin content '$content'"
+  assert_eq "" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "#9258: nothing posted for stdin '$content'"
+done
+
+# T10d (#9258): @mention prose is no longer refused by a shell '@*' test.
+reset_state
+run_pv 109 approved abc1234 --body "@reviewer this looks good because the tests cover it"
+assert_eq "0" "$EXIT_CODE" "#9258: --body '@reviewer ...' prose posts"
+assert_contains "$LAST_BODY" "@reviewer this looks good" "#9258: the prose is the posted body"
+
+# T10e (#9258): the verb is present but gives no answer -> an approval is
+# refused (fail closed); a changes-requested still posts, loudly.
+reset_state
+echo "0 garbage" > "$STUB_DIR/body-answer"
+run_pv 109 approved abc1234 --body "a perfectly fine rationale here"
+assert_eq "2" "$EXIT_CODE" "#9258: unanswered body check -> approval refused"
+assert_contains "$OUTPUT" "gave no answer" "#9258: the refusal says why"
+assert_eq "" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "#9258: nothing posted on an unanswered check"
+reset_state
+echo "0 garbage" > "$STUB_DIR/body-answer"
+run_pv 109 changes-requested abc1234 --body "please fix the failing test"
+assert_eq "0" "$EXIT_CODE" "#9258: unanswered body check -> changes-requested still posts"
+assert_contains "$OUTPUT" "body check unavailable" "#9258: ... with a warning"
+
+# T10f (#9258): a binary WITHOUT the verb (capability probe, as #10581) keeps
+# the pre-#9258 non-empty check and warns, so a script roll never stalls.
+reset_state
+touch "$STUB_DIR/body-check-missing"
+run_pv 109 approved abc1234 --body "a perfectly fine rationale here"
+assert_eq "0" "$EXIT_CODE" "#9258: verb-less binary -> approval still posts"
+assert_contains "$OUTPUT" "Roll loom-daemon" "#9258: ... loudly, naming the fix"
+# ... but a verb-less binary is never weaker than pre-#9258: a lone '-' or
+# '@'-token body is refused in shell for every verdict and posts nothing.
+for body in "@/tmp/x" "@-" "-" "  @-  "; do
+  for verdict in approved changes-requested; do
+    reset_state
+    touch "$STUB_DIR/body-check-missing"
+    run_pv 109 "$verdict" abc1234 --body "$body"
+    assert_eq "2" "$EXIT_CODE" "#9258: verb-less binary + $verdict body '$body' -> exit 2"
+    assert_contains "$OUTPUT" "degraded check" "#9258: verb-less refusal of '$body' names the degraded check"
+    assert_eq "" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "#9258: verb-less binary posts nothing for '$body'"
+  done
+done
+reset_state
+touch "$STUB_DIR/body-check-missing"
+printf '%s' "@-" > "$STUB_DIR/body-at.txt"
+run_pv 109 approved abc1234 --body-file "$STUB_DIR/body-at.txt"
+assert_eq "2" "$EXIT_CODE" "#9258: verb-less binary + --body-file holding '@-' -> exit 2"
+reset_state
+touch "$STUB_DIR/body-check-missing"
+run_pv 109 changes-requested abc1234 --body "@reviewer please fix the failing test"
+assert_eq "0" "$EXIT_CODE" "#9258: verb-less binary + @mention prose still posts"
+assert_eq "109" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "#9258: ... and the comment was posted"
 
 # T11: a `gh pr comment` failure propagates as a non-zero exit — the caller's
 # `&&`-chained label edit must not run on a failed comment.

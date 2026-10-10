@@ -2643,8 +2643,10 @@ after `as_of`. `unattributed_sec` holds what no stage explains: inexactly
 observed time, an applied stall, and a calibration or regime shift. The parts
 always sum to `error_sec`. `dominant_stage` names the largest contribution.
 Each stage boundary is also its own record, `eta.stage_outcome` (entry, exit,
-dwell and exit kind, plus the newest open estimate per series), so a
-predicted-vs-actual stage timeline can be drawn per item. The nightly
+dwell and exit kind), so a predicted-vs-actual stage timeline can be drawn per
+item. Since #11126 that record is produced by `fleet.state`, not by the ETA
+tracker, and no longer links estimates (see
+[telemetry-schema](telemetry-schema.md#etastage_outcome)). The nightly
 per-heuristic, per-stage bias rollup is a follow-up.
 
 **Nothing else is an outcome.** A PR closed unmerged and a sweep that ended
@@ -3450,8 +3452,9 @@ the primary history source, with forge reads only filling gaps.
   daemon time. Repeats within a source collapse.
 - **Merge and close instants.** Webhook `closed` rows are primary. The daemon's
   `pr.resolved` record (see [telemetry-schema](telemetry-schema.md)) covers
-  windows and repos the export does not. It is built from the pass's existing
-  reads, with no new forge read.
+  windows and repos the export does not. Since #11126 it is built by
+  `fleet.state` from one `pulls/{n}` read per PR that left the review
+  listings, and carries the forge's `merged_at` / `closed_at`.
 - **Point-in-time.** Every row is filtered by `observed_at <= cutoff`
   (`eta::point_in_time`) before anything else, so a later row cannot change an
   earlier answer. A webhook row is knowable at its receipt time. A daemon row

@@ -118,7 +118,8 @@
 # Exit codes:
 #   0 - comment posted
 #   1 - the `gh pr comment` call failed
-#   2 - invalid arguments (bad PR number, verdict token, or SHA; missing body)
+#   2 - invalid arguments (bad PR number, verdict token, or SHA; missing body,
+#       or one forge verdict-body-check refuses: empty, -, @-, @path, too short)
 #   3 - approval refused by the formal-review reconciliation gate (#7647)
 #   5 - approval refused, CI not settled or unverifiable on <sha> (#10485):
 #       pending, head moved, reader error/absent. Post nothing approving,
@@ -146,7 +147,7 @@
 set -uo pipefail
 
 usage() {
-  sed -n '2,144p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+  sed -n '2,145p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -194,19 +195,6 @@ if [[ -z "$PR" || ! "$PR" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-# `gh pr comment --body @path` does NOT expand @path — it posts the literal
-# string as the comment (the anti-pattern that destroyed a Judge review on PR
-# #4457, and is a hard-denied Bash pattern for a LITERAL `gh pr comment ...
-# --body @path` call — see comment-body-literal-path.md). That guard
-# pattern-matches the literal command text, so it does not see this call
-# (the top-level command is `post-verdict.sh`, not `gh pr comment`) — refuse
-# the identical mistake here rather than silently reintroducing the hole one
-# layer down.
-if [[ "$HAVE_BODY" == "true" && "$BODY" == @* ]]; then
-  echo "post-verdict.sh: --body starts with '@' — like 'gh pr comment --body @path', this posts the literal string, it does NOT read the file. Use --body-file <path> instead." >&2
-  exit 2
-fi
-
 if [[ "$VERDICT" != "approved" && "$VERDICT" != "changes-requested" ]]; then
   echo "post-verdict.sh: verdict must be 'approved' or 'changes-requested', got: '$VERDICT'" >&2
   exit 2
@@ -237,10 +225,25 @@ if [[ -n "$BODY_FILE" ]]; then
   fi
 fi
 
-if [[ -z "$BODY" ]]; then
-  echo "post-verdict.sh: --body or --body-file is required (and must be non-empty)" >&2
-  exit 2
-fi
+[[ -n "$BODY" ]] || { echo "post-verdict.sh: --body or --body-file is required (and must be non-empty)" >&2; exit 2; }
+# Is the body a rationale at all? (#9258) `gh pr comment --body @path` / `--body
+# @-` post the literal string (PR #4457 lost a review that way; #9258 merged on an
+# approval whose whole body was `@-`). The Bash guard matches literal command text
+# and cannot see this call, and `--body-file` content was never checked, so every
+# body spelling goes through `loom-daemon forge verdict-body-check`
+# (loom_daemon::verdict_body): empty, `-`, a lone `@`-token or under 20
+# non-whitespace chars is refused here; this script owns none of those rules. A
+# binary WITHOUT the verb (the #10581 capability-probe posture) keeps a degraded
+# shell refusal of a lone `-`/`@`-token (never weaker than pre-#9258), loudly; one
+# that has the verb but gives no answer refuses an approval (fail closed).
+VB_OUT="$(printf '%s' "$BODY" | "${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-body-check 2>&1)"; VB_RC=$?
+case "$VB_RC:$VB_OUT" in
+  "0:LOOM-VERDICT-BODY OK"*) ;;
+  "1:LOOM-VERDICT-BODY REJECT"*) echo "post-verdict.sh: refusing to post: ${VB_OUT#LOOM-VERDICT-BODY REJECT } (#9258). Nothing was posted; write the rationale to a file and pass --body-file <path>." >&2; exit 2 ;;
+  *) "${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-body-check --help >/dev/null 2>&1 && [[ "$VERDICT" == approved ]] && { echo "post-verdict.sh: REFUSING to post an approval: 'forge verdict-body-check' gave no answer: ${VB_OUT:0:300} (#9258). Nothing was posted." >&2; exit 2; }
+     [[ "$BODY" =~ ^[[:space:]]*(-|@[^[:space:]]*)[[:space:]]*$ ]] && { echo "post-verdict.sh: refusing to post: the body is a lone '-' or '@' token, which reads nothing (#9258; degraded check, 'forge verdict-body-check' unavailable). Nothing was posted; write the rationale to a file and pass --body-file <path>." >&2; exit 2; }
+     echo "post-verdict.sh: WARNING — verdict body check unavailable (${VB_OUT:0:200}); posting with only the degraded lone-token check. Roll loom-daemon to a build with 'forge verdict-body-check' (#9258)." >&2 ;;
+esac
 
 # --- Formal-review reconciliation gate (#7647) -----------------------------
 # Runs on APPROVALS ONLY — a changes-requested verdict cannot merge anything,

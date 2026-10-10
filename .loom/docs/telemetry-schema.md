@@ -242,6 +242,8 @@ cycle) is added only when loom-ui's error tracking shows it is needed.
 | [`host.health`](#hosthealth) | gauges, native + OTLP | `observability/collector.rs` (+ `exporter.rs`, `sender.rs`) |
 | [`host.export`](#hostexport) | log, OTLP only | `observability/collector.rs` |
 | Captain gauges: `loom.captain.gauge_age_seconds`, `loom.captain.gauge_fallback`, `loom.forge.stage_dwell`, `loom.forge.stage_items` ([`metric.points`](#metricpoints)) | metric | `observability/captain_gauges.rs`, `observability/ops/stage_dwell.rs` |
+| [`eta.stage_outcome`](#etastage_outcome) (kept, non-ETA owner since #11126) | log, OTLP only | `observability/fleet_state/outcomes.rs` (diff of two `fleet.state` views) |
+| [`pr.resolved`](#prresolved) (kept, non-ETA owner since #11126) | log, OTLP only | `observability/fleet_state/outcomes.rs` (a PR that left the review listings) |
 
 The captain gauges are emitted by non-ETA code. Since Stage 2 of #11098,
 `fleet.captainGauges.ref` has its own default (`eta-fit`, the branch the
@@ -256,8 +258,8 @@ loom-ui confirms it; track each disposition on #11098.
 
 | Record | Signal | Sole emit site (under `loom-daemon/src/`) | ETA-only | Disposition |
 |---|---|---|---|---|
-| [`eta.stage_outcome`](#etastage_outcome) (stage-journal rows) | log, OTLP only | `observability/eta/stage_outcome.rs` | yes | **open: needs loom-ui input.** Either keep it under a non-ETA owner or drop it. It is the one stage-boundary fact loom-ui cannot easily rebuild from webhooks. |
-| [`pr.resolved`](#prresolved) | log, OTLP only | `observability/eta/pr_resolved.rs` | yes | **open: needs loom-ui input.** Either keep it under a non-ETA owner or drop it. loom-ui's webhooks already cover merge and close. |
+| [`eta.stage_outcome`](#etastage_outcome) | log, OTLP only | none since #11126 | no | **kept, non-ETA owner**: moved to the stable table above. The wire tag and attribute keys are unchanged; three estimate-derived fields were dropped with loom-ui's agreement. |
+| [`pr.resolved`](#prresolved) | log, OTLP only | none since #11126 | no | **kept, non-ETA owner**: moved to the stable table above. The wire tag and attribute keys are unchanged. |
 | [`eta.estimate` / `eta.outcome`](#etaestimate--etaoutcome) | log, OTLP only | `observability/eta.rs` | yes | drop, pending loom-ui agreement (predictions, not facts) |
 | [`eta.snapshot`](#etasnapshot) | native only | `observability/eta_snapshot.rs` | yes | drop, pending loom-ui agreement. loom-ui consumes it natively today. |
 | [`eta.fit`](#etafit) | log, OTLP only | `observability/eta_fit.rs` | yes | drop, pending loom-ui agreement |
@@ -277,8 +279,12 @@ ETA-only records leave the daemon by two kinds of path, not one:
   `observability/eta_fleet_refresh.rs`, and `eta.backtest.fold` /
   `eta.backtest.summary` from `observability/eta_nightly_folds.rs`.
 
-Removal stages must cover both paths. The `eta.stage_outcome` and
-`pr.resolved` rows are owned by the files named in the table above.
+Removal stages must cover both paths. `eta.stage_outcome` and `pr.resolved`
+are no longer on either path: their record types
+(`telemetry/kinds/stage_outcome.rs`, `telemetry/kinds/pr_resolved.rs`), their
+OTLP mapping (`observability/otlp/mapping/outcome_facts.rs`) and their
+attribute-key list (`OUTCOME_FACT_LOG_ATTRIBUTE_KEYS`) live outside every path
+Stage 3 deletes.
 
 **Non-ETA records that borrow an ETA type.**
 [`pass.summary` / `pass.verdict`](#passsummary-and-passverdict),
@@ -291,7 +297,8 @@ Stage 3); the wire shape is unchanged, pinned by that module's serialization
 test.
 
 **Naming note.** The issue text said `eta.stage_sample`, but no record kind
-has that name. The stage-journal rows are exported as `eta.stage_outcome`.
+has that name. Stage exits were exported as `eta.stage_outcome`, from the
+stage journal until #11126 and from `fleet.state` views since.
 `StageSample` is only an in-memory type in `eta/fleet.rs`.
 
 ## Record kinds
@@ -2427,84 +2434,118 @@ The daemon also keeps the last record at `.loom/state/eta/health/fit-check.json`
 
 ### `pr.resolved`
 
-A PR the ETA pass saw leave the review listings, with its merge or close
-instant (Issue #10519). Envelopes carry `schema_version: 12`. **OTLP-only**
-(native: `false`). It gives the SigNoz timeline reader
-(`eta::fleet_signoz_timeline`) a merge/close instant wherever the loom-ui
-webhook export has none. When both exist, the webhook's `closed` row is
-primary and this record corroborates it. **No new forge read**: the record is
-built from the `pr.resolved` stage-journal rows the pass already writes, from
-its existing review listing and the PR read the tracker already makes. Only
-the fleet's ETA authority runs the pass, so only it emits these. At most one
-record per `(repo, pr_number, state)` per pass.
+A PR that left the review listings, with its forge merge or close instant
+(Issue #10519). Envelopes carry `schema_version: 12`. **OTLP-only**
+(native: `false`). It gives a SigNoz reader a merge/close instant wherever the
+loom-ui webhook export has none. When both exist, the webhook's `closed` row
+is primary and this record corroborates it.
 
-**Natural key: `(repo, pr_number, state)`.** The record carries
+**Producer (since #11126): `observability/fleet_state/outcomes.rs`, not ETA
+code.** On each `fleet.state` pass, a PR that was in a repo's complete review
+listings on the previous pass and is not on this one is read once
+(`pulls/{n}`). A merged or closed PR gives one record; a PR that is still open
+(its review labels were removed) gives none. A repo whose listing failed is
+not compared. **Every host that observes the PR leave emits the record**;
+nothing is elected, and the reader collapses the duplicates by
+`loom.fact_id`. It emits with `autonomous.eta.enabled = false`.
+
+**Natural key: `(repo, pr_number, state, closed_at)`.** The record carries
 `loom.fact_id = derived_hex(["loom.fact", "pr.resolved", repo, pr_number,
-state], 16)`, the same on every host (no `host_id`, no `emitted_at`), so a
-reader dedupes the fact across hosts with `LIMIT 1 BY loom.fact_id`; see
-[`telemetry-replay.md`](telemetry-replay.md).
+state, closed_at], 16)` (`closed_at` as RFC 3339 UTC, nanoseconds). Every
+part is a forge fact, the same on every host, so a reader dedupes the fact
+across hosts with `LIMIT 1 BY loom.fact_id`; a PR closed, reopened and closed
+again is two facts. A record with no `closed_at` (an older build) carries no
+`loom.fact_id`; see [`telemetry-replay.md`](telemetry-replay.md).
 
 The log record's **time is `resolved_at`** and its **observed timestamp is
 `observed_at`** (the knowable-at time, see "Event time vs knowable-at"
 above). The body is the record's JSON. The scalars ride as `loom.repo`,
 `loom.pr_number`, `loom.issue` and `loom.eta.pr.*` attributes (in
-`ETA_LOG_ATTRIBUTE_KEYS`, allowlisted in the collector's `transform/privacy`).
-Provenance is required, as for `eta.estimate`, and exports as
-`loom.eta.version` / `revision` / `tree_state` / `provenance_complete`.
+`OUTCOME_FACT_LOG_ATTRIBUTE_KEYS`, allowlisted in the collector's
+`transform/privacy`; the keys keep their `loom.eta.` prefix under the Stage 1
+promise). Provenance is required, and exports as `loom.eta.version` /
+`revision` / `tree_state` / `provenance_complete`.
 
 | Field | Type | Notes |
 |---|---|---|
-| `repo` | string | `owner/repo` |
+| `repo` | string | `owner/repo` (lowercased) |
 | `pr_number` | integer | the PR |
-| `issue` | integer? | the issue the tracker follows the PR for |
+| `issue` | integer? | the issue the PR body links (a closing keyword first, else `Part of`) |
 | `state` | string | `merged` or `closed` |
-| `resolved_at` | RFC3339 | merge: the forge's `merged_at`; close: the pass that saw it closed (the forge read carries no close instant) |
+| `resolved_at` | RFC3339 | merge: the forge's `merged_at`; close: the forge's `closed_at` (since #11126; before, the pass that saw it closed) |
 | `observed_at` | RFC3339 | when this daemon observed it; never earlier than `resolved_at` |
-| `resolution_sec` | integer | how late `resolved_at` can be: `0` for a merge, the listing interval for a close (polling time) |
+| `resolution_sec` | integer | how late `resolved_at` can be: `0`, a forge instant (since #11126; before, a close carried the listing interval) |
+| `closed_at` | RFC3339? | the forge's `closed_at` (a merge closes the PR too); part of the fact key. Added by #11126 |
 | `loom` | object | the observing daemon's provenance (required) |
 
 ### `eta.stage_outcome`
 
 One stage an item actually left (Issue #10929). Envelopes carry
-`schema_version: 12`. **OTLP-only** (native: `false`), and emitted only by the
-fleet's ETA authority (#10498, with `loom.eta.authority`). The record is
-built from the stage-journal rows the tracker already writes at each
-boundary, so it needs **no new forge read**. Those boundaries are bus phases,
-review-label transitions, verdicts, `merge_hold` overlays and the
-`pr.resolved` read. A slot-turnover sample has no issue and gives no
-record. The record joins the issue's story trace when an open estimate
-knew the repo id.
+`schema_version: 12`. **OTLP-only** (native: `false`). The wire tag keeps its
+`eta.` prefix and every `loom.eta.stage_outcome.*` key is kept (Stage 1 is
+additive only), but the record has no ETA owner since #11126.
 
-**Natural key: `(repo, issue, stage, left_at)`.** The record carries
-`loom.fact_id = derived_hex(["loom.fact", "eta.stage_outcome", repo, issue,
-stage, left_at], 16)` (`left_at` as RFC 3339 UTC, nanoseconds), the same on
-every host; see [`telemetry-replay.md`](telemetry-replay.md).
+**Producer (since #11126): `observability/fleet_state/outcomes.rs`**, a diff of
+two consecutive `fleet.state` views of the same host (held sweeps, review
+PRs, ready queue). A row whose stage changed gives one record (`next_stage`
+is the new stage). A row that left the view gives one record with no
+`next_stage`: `landed` when its PR merged, `cut_short` when it closed or is
+still open without review labels, `unknown` otherwise (a sweep that ended).
+A `ready_wait` row that left the view is not a record until a repo's ready
+listing is known whole (#11139), and a row of a repo no longer managed is not
+a record. **Every host that observes a transition emits it**; nothing is
+elected. `loom.eta.authority` is still emitted, and now names the emitting
+host, not an elected authority. It emits with `autonomous.eta.enabled =
+false`.
+
+**Natural key: `(repo, issue, stage, next_stage, forge_transition_at)`.** The
+record carries `loom.fact_id = derived_hex(["loom.fact", "eta.stage_outcome",
+repo, issue, stage, next_stage, forge_transition_at], 16)` (`next_stage` empty
+when the item left the view; `forge_transition_at` as RFC 3339 UTC,
+nanoseconds). `forge_transition_at` is the forge's own instant: the new review
+label's `labeled` event (one paginated issue-events read per actual move,
+with no per-pass limit, every page of the history, and only when it falls
+inside the pass window), or the PR's
+`merged_at` / `closed_at`. Every part is the same on every host, whatever its
+polling time. **A transition with no forge instant** (a sweep stage, a ready
+row, a failed read) **is emitted without
+`loom.fact_id`**; readers dedupe it by `(repo, issue, next_stage)` within a
+short window (see [`telemetry-replay.md`](telemetry-replay.md)).
 
 The log record's **time is `left_at`** and its **observed timestamp is
 `observed_at`**. The body is the record's JSON. The scalars ride as
 `loom.repo`, `loom.issue`, `loom.pr_number` and the
 `loom.eta.stage_outcome.*` attributes (`stage`, `exit`, `next_stage`,
-`entered_at`, `left_at`, `dwell_sec`, `open_estimates`). Provenance is
-required and exports as `loom.eta.version` / `revision` / `tree_state` /
-`provenance_complete`.
+`entered_at`, `left_at`, `dwell_sec`), in `OUTCOME_FACT_LOG_ATTRIBUTE_KEYS`.
+Provenance is required and exports as `loom.eta.version` / `revision` /
+`tree_state` / `provenance_complete`. The record no longer joins a story
+trace (that needed the dropped `repo_id`).
+
+**Changed by #11126 (loom-ui sign-off:
+https://github.com/rjwalters/loom/issues/11098#issuecomment-6081499763).**
+`open_estimates`, `estimate_ids[]` and `repo_id` (and the
+`loom.eta.stage_outcome.open_estimates` attribute) are **dropped**: they
+referred to Loom's own estimates, which no longer exist; loom-ui joins stage
+exits to its own estimates on `(repo, issue)`. `event` is now the source that
+observed the transition (`fleet.state`), no longer a journal event name.
+`resolution_sec` is now `0` for a forge instant, else the observing host's
+pass interval. `forge_transition_at` is new (additive).
 
 | Field | Type | Notes |
 |---|---|---|
-| `repo` | string | `owner/repo` |
-| `repo_id` | integer? | from an open estimate, for the story trace |
+| `repo` | string | `owner/repo` (lowercased) |
 | `issue` | integer | the issue |
 | `pr_number` | integer? | the PR, when known |
-| `stage` | string | the stage left |
-| `entered_at` | RFC3339? | present only when the entry was observed exactly (absent for a stage first seen mid-way) |
-| `left_at` | RFC3339 | the event time |
+| `stage` | string | the stage left: `ready_wait`, `sweep.curator`, `sweep.builder`, `review_wait`, `doctor`, `merge_wait`, `merge_hold` |
+| `entered_at` | RFC3339? | present only when the entry has an exact source: a sweep's own checkpoint timestamp. Absent for a polled (review or ready) row, whose entry fell between two passes, and for a stage first seen mid-way |
+| `left_at` | RFC3339 | the event time: `forge_transition_at` when known, else the observing pass |
 | `dwell_sec` | integer? | `left_at − entered_at`, only when the stage completed with an exact entry; never a lower bound |
-| `exit` | string | `advance`, `pass`, `rework`, `hold`, `released`, `judged` (the sweep's Judge phase ended before the verdict was known), `landed`, `cut_short` (closed unmerged, or ended without completing), `unknown` |
-| `next_stage` | string? | the stage entered next |
-| `event` | string | the journal event (`sweep.phase`, `label.transition`, `pr.resolved`, …) |
+| `exit` | string | `advance`, `pass` (`review_wait` → `merge_wait`), `rework` (into `doctor`), `hold`, `released`, `landed`, `cut_short` (closed unmerged, or ended without completing), `unknown`. `judged` is no longer produced |
+| `next_stage` | string? | the stage entered next; absent when the item left the view |
+| `event` | string | the observing source: `fleet.state` |
 | `observed_at` | RFC3339 | when this daemon observed it (knowable-at) |
-| `resolution_sec` | integer? | how late `left_at` can be: a listing interval, `0` for a bus event |
-| `open_estimates` | integer | every estimate open for the item with `as_of < left_at` |
-| `estimate_ids[]` | array | the newest such estimate per `(kind, heuristic)` series. Bounded by the registry, not by refreshes. Any other estimate joins on `(repo, issue)` with `as_of < left_at` |
+| `resolution_sec` | integer? | how late `left_at` can be: `0` for a forge instant, else the pass interval |
+| `forge_transition_at` | RFC3339? | the forge's instant for the transition; the fact-id key. Absent when unknown |
 | `loom` | object | the observing daemon's provenance (required) |
 
 ### `eta.backtest.fold` and `eta.backtest.summary`

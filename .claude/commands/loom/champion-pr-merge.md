@@ -214,8 +214,8 @@ VERDICT_RC=$?
 |------|---------|--------|
 | `0` | **FRESH** — the approval was rendered against the current head SHA | Proceed to criterion 1. |
 | `10` | No verdict label (raced away between listing and now) | **Skip this PR** — it is no longer merge-eligible. |
-| `11` | **UNVERIFIABLE** — no marker from a trusted author for this verdict: a pre-convention verdict, or (most often, #6319) a dropped marker. An outsider's or another fleet's marker is prose, not a marker (#9548) | Proceed to criterion 1, unless REASON says markers `could not be authenticated` (loom-daemon lacks `forge trusted-comments`): then do not merge; say so and skip. The guard fails **safe** (verdict kept); that is the pre-#5686 risk posture, a real exposure. Since #6319 Judge's `--anchor` sweep and `loom-daemon`'s `reconcile_pr_verdicts` stamp the missing marker at the then-current head, so a PR that keeps reporting `11` is on a hold or something is wrong: say so in the completion summary. |
-| `12` | **STALE** — the approval covers a tree that is gone | **Do NOT merge.** The guard already removed `loom:pr`, re-queued the PR as `loom:review-requested`, and posted a comment naming both SHAs. `continue` to the next PR. |
+| `11` | **UNVERIFIABLE** — no trusted marker could be confirmed for this verdict (on `loom:pr` this now means markers `could not be authenticated`: loom-daemon lacks `forge trusted-comments`, #9548) | **Do NOT merge** a `loom:pr` PR on `11`: skip it and report it in the completion summary. `post-verdict.sh` marks every verdict (#6382), so an approval with no confirmed marker approves no known tree (#9258: one merged with the literal body `@-`). |
+| `12` | **STALE** — the approval covers a tree that is gone, or (#9258) it carried no trusted marker at all, so it never covered a known tree. Never anchored | **Do NOT merge.** The guard already removed `loom:pr`, re-queued the PR as `loom:review-requested`, and posted a comment naming both SHAs. `continue` to the next PR. |
 | any other | `gh`/environment error | **Do NOT merge.** Treat exactly like any other `gh` failure in this document — skip the PR this pass and retry next tick. Never read an error as "the approval is fine". |
 
 **Exit 12 is not a rejection of the PR** — it is a statement that no verdict
@@ -257,7 +257,7 @@ For each `loom:pr` PR, verify ALL 6 safety criteria. If ANY criterion fails, do 
 
 ### 1. Label Check
 - [ ] PR has `loom:pr` label (Judge approval)
-- [ ] That approval is **not stale** — the Verdict-State Janitor's Part 2 above returned `0` (FRESH) or `11` (UNVERIFIABLE), never `12` (STALE). A `loom:pr` label rendered against a head SHA that has since moved is not an approval of the tree you are about to merge (#5686).
+- [ ] That approval is **not stale** — the Verdict-State Janitor's Part 2 above returned `0` (FRESH), never `11` (UNVERIFIABLE: an approval with no confirmed marker bypassed `post-verdict.sh`, #9258) or `12` (STALE). A `loom:pr` label rendered against a head SHA that has since moved is not an approval of the tree you are about to merge (#5686).
 
 **Verification command**:
 ```bash
@@ -1052,43 +1052,17 @@ CRITICAL_PATTERNS=(
 # 100%-reproducing false positive confirmed on 7 separate PRs (#6018, #6092,
 # #6114, #6118, #6137, #6142, #6146) that permanently blocked auto-merge with
 # no override (`loom:auto-merge-ok` overrides only criterion #2, not #3).
-# This function returns success (0) ONLY when $file is one of the exact 6
-# paths below (`==`, never a substring match — a hypothetical
-# `some-crate/Cargo.toml` is NOT in scope for this carve-out) AND every
-# changed (+/-) content line in that file's diff matches the version-line
-# pattern for its format. Any other change to the file's content — a real
-# dependency bump, a new field, a changed description, anything — makes it
-# return failure, and the file fails criterion #3 exactly as it did before
-# this carve-out existed.
+# The decision is `loom-daemon forge version-only-diff` (#9611): exit 0 ONLY
+# when $file is exactly one of the 6 version-bearing files (never a substring
+# match), the paginated file-list read succeeded, the file has a non-empty
+# patch, and every changed (+/-) line is that format's version line. ANY
+# non-zero exit — not eligible, a forge error, 2 (a daemon predating the
+# verb), 126/127 (no binary) — means the file FAILS criterion #3. Never
+# re-derive this inline: the old `gh api` pipeline handed jq's `--arg` to
+# `--jq`, errored on every call and read its empty output as PASS (#9611).
 version_only_diff() {
   local file="$1" number="$2"
-  local pattern
-  case "$file" in
-    package.json|mcp-loom/package.json|mcp-loom/package-lock.json)
-      # JSON: `  "version": "X.Y.Z",` at any indentation.
-      pattern='^[+-][[:space:]]*"version":[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+",?[[:space:]]*$'
-      ;;
-    loom-daemon/Cargo.toml|loom-api/Cargo.toml|Cargo.lock)
-      # TOML: `version = "X.Y.Z"`. Cargo.lock repeats this line once per
-      # touched [[package]] block (loom-api and loom-daemon bump together),
-      # so more than one changed pair is expected and still eligible as long
-      # as every pair matches.
-      pattern='^[+-]version = "[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*$'
-      ;;
-    *)
-      return 1  # not one of the 6 version-bearing files — never eligible
-      ;;
-  esac
-
-  # Every +/- content line in the file's diff must match $pattern. Diff
-  # metadata lines (+++/---) are excluded; unchanged context lines never
-  # start with +/- so they are already excluded by the first grep.
-  local bad_lines
-  bad_lines=$(gh api "repos/{owner}/{repo}/pulls/$number/files" --paginate \
-    --jq --arg f "$file" '.[] | select(.filename == $f) | .patch' \
-    | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -vE "$pattern")
-
-  [ -z "$bad_lines" ]
+  loom-daemon forge version-only-diff "$number" "$file" >/dev/null || return 1
 }
 
 # Check each file against patterns. This loop MUST actually run over the full
@@ -1118,7 +1092,9 @@ echo "PASS: No critical files modified (or only version-only carve-out files)"
 ```
 
 **Version-only diff carve-out (#6147)**: the carve-out is a deterministic,
-textual check — it never becomes a judgment call. It applies file-by-file:
+textual check — it never becomes a judgment call, and it fails closed: when
+`loom-daemon forge version-only-diff` cannot prove a version-only diff, for any
+reason, the file fails criterion #3 (#9611). It applies file-by-file:
 a PR that touches `loom-api/Cargo.toml` with only the version bump AND
 `package.json` with a real new dependency still fails criterion #3 overall
 (on `package.json`), even though `loom-api/Cargo.toml` alone would have
@@ -1136,7 +1112,7 @@ This criterion is deliberately kept **in addition to** the merge-risk judgment i
 
 **Regression note (#4613, PR #4611 incident, 2026-07-30)**: a concurrent Champion evaluation of a 117-changed-file PR posted a comment claiming "no critical-file changes" while the PR actually removed a `.github/workflows/*.yml` file matching this criterion's own pattern list. The evaluation used `gh pr view --json files`, which truncates at 100 files with no error, and/or asserted the pass without re-running the loop above. Always fetch files via the paginated `gh api .../pulls/<number>/files --paginate` command shown above, and never assert this criterion's result in prose without having just executed that loop against the full file list.
 
-**Verified against PR #6118 (#6147)**: PR #6118's `scripts/version.sh bump` commit touched `Cargo.lock`, `loom-api/Cargo.toml`, `loom-daemon/Cargo.toml`, `mcp-loom/package.json`, `mcp-loom/package-lock.json`, and `package.json` — every changed line in each of those 6 files' diffs was confirmed to match the version-line patterns above, so `version_only_diff` returns success for all 6 and the carve-out applies. The same PR's substantive change (a fix to `defaults/scripts/merge-pr.sh` and its tests) touches no critical-file pattern at all, so it was never subject to this criterion in the first place — it went through criterion #2's judgment as normal, unaffected by this carve-out.
+**Verified against PR #6118 (#6147)**: PR #6118's `scripts/version.sh bump` commit touched `Cargo.lock`, `loom-api/Cargo.toml`, `loom-daemon/Cargo.toml`, `mcp-loom/package.json`, `mcp-loom/package-lock.json`, and `package.json` — every changed line in each of those 6 files' diffs matches the version-line patterns (pinned as unit-test fixtures of `forge version-only-diff`), so `version_only_diff` returns success for all 6 and the carve-out applies. The same PR's substantive change (a fix to `defaults/scripts/merge-pr.sh` and its tests) touches no critical-file pattern at all, so it was never subject to this criterion in the first place — it went through criterion #2's judgment as normal, unaffected by this carve-out.
 
 **Durable hold on FAIL, not a transient retry (#6879, #9016)**: a critical-file FAIL is a **one-way terminal state** — nothing about a diff's critical-file-ness changes without a human decision or a later push that narrows the diff — so it gets its own durable hold, never the shared "Transient failures" template in "PR Rejection Workflow" (`critical-file` is not one of that section's `CRITERION_KEY` values).
 

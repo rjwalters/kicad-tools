@@ -22,17 +22,20 @@ comment`, or `gh api ... comments`) lives in a scratch/scratchpad file, do not
 pass it as `--body @path`.** Unlike some shells' `@file` conventions, `gh pr
 comment --body @path` and `gh issue comment --body @path` do **not** read the
 file — they post the literal text `@path` as the comment. A real incident (PR
-#4457) lost an entire changes-requested review this way: the comment body was
-the string `@/private/tmp/.../scratchpad/review.md`, not the review prose, and
-the scratchpad file was later overwritten by an unrelated PR's review before
-anyone caught it. It recurred again later via `gh api ... -f body=@path`
-(`-f`/`--raw-field` never expands `@path` either) — see #5252.
+#4457) lost an entire changes-requested review this way (the body was the
+string `@/private/tmp/.../review.md`; the file was overwritten before anyone
+caught it). It recurred again later via `gh api ... -f body=@path`
+(`-f`/`--raw-field` never expands `@path` either) — see #5252. The stdin
+spelling fails identically: `--body @-` and `-f body=@-` post the literal `@-`
+(#9258: a PR merged on an approval whose whole body was `@-`). Only `gh api
+... -F body=@-` reads stdin; `post-verdict.sh` takes `--body-file -`.
 
 ```
 ❌ POSTS THE LITERAL STRING "@path" — NOT THE FILE CONTENTS
    gh pr comment 123 --body @/tmp/review-123.md
    gh pr comment 123 --body "@/tmp/review-123.md"
    gh issue comment 123 --body @/tmp/comment-123.md
+   gh pr comment 123 --body @-        (stdin spelling: still the literal "@-")
 
 ❌ ALSO POSTS THE LITERAL STRING — a variable does NOT change what the flag does
    REVIEW_FILE="@/tmp/review-123.md"; gh pr comment 123 --body "$REVIEW_FILE"
@@ -49,15 +52,11 @@ anyone caught it. It recurred again later via `gh api ... -f body=@path`
    gh api repos/{owner}/{repo}/issues/123/comments -F body=@/tmp/review-123.md
 ```
 
-Prefer the inline heredoc pattern above when the body is short/dynamic; use
-`-F/--body-file <path>` when the body genuinely lives in a file (e.g. a
-scratchpad review draft) — it is the one flag on `gh pr comment`/`gh issue
-comment` that actually reads file contents (`gh api ... -F body=@path` also
-works — but `-f`/`--raw-field` does **not**). **Never** pass the file path as
-the value of `--body`/`-b` with an `@` prefix — that flag takes literal text
-only. **After posting, re-fetch the comment** (`gh pr view <number>
---comments` / `gh issue view <number> --comments`) to confirm it renders your
-prose, not a path string.
+Prefer the heredoc for a short/dynamic body and `--body-file <path>` for one
+that lives in a file (`gh api ... -F body=@path` also reads it; `-f` does
+**not**). `--body`/`-b` takes literal text only. **After posting, re-fetch the
+comment** (`gh pr view <number> --comments`) to confirm it renders your prose,
+not a path string.
 
 Why `<<'EOF'` must stay quoted: `.loom/docs/comment-body-heredoc-quoting.md`.
 

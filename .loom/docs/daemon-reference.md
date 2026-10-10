@@ -4280,16 +4280,17 @@ the missing marker, recording the head SHA as of that tick.
 | Property | Behavior |
 |----------|----------|
 | Kill switch | `LOOM_VERDICT_ANCHOR` (`0`/`false`/`no`/`off` disables), nested inside `LOOM_VERDICT_STALENESS_RECONCILE`. Defaults **ON**. |
-| Labels | **None are written.** Anchoring cannot approve, reject, or un-park anything — the verdict label stays exactly as it was; the only state that changes is that the verdict becomes invalidatable. |
+| Labels | **None are written by an anchor.** Anchoring cannot approve, reject, or un-park anything — the verdict label stays exactly as it was; the only state that changes is that the verdict becomes invalidatable. |
+| Unmarked approval (#9258) | **Never anchored** — that would launder an approval of an unknown tree into `Fresh`. `decide_anchor` returns `RequeueApproval`: auto-merge is disarmed, `loom:pr` (and any `loom:changes-requested`) removed, `loom:review-requested` added, and a `<!-- loom:verdict-stale unanchored head=… -->` comment says why. Gated by `LOOM_VERDICT_STALENESS_RECONCILE` only, not `LOOM_VERDICT_ANCHOR`. Only `loom:changes-requested` is anchored. |
 | Already marked | Never touched (`Skip(AlreadyAnchored)`) — an already-marked verdict behaves byte-for-byte as it did before #6319. |
 | Held PR | `Skip(Held)` — its comments are never fetched, and a PR a human parked should not collect automated comments either. |
 | Comment fetch failed | `Skip(MarkerScanFailed)` — a failed fetch is indistinguishable from "no marker"; anchoring on it would post one duplicate comment per tick for the length of an API outage. |
 | Idempotency | The marker posted is exactly what `extract_latest_verdict_sha` scans for, so the next tick reads `Fresh` and never anchors twice. |
-| Counters | `VerdictReconcileStats { checked, invalidated, unverifiable, anchored }`. `unverifiable` counts only PRs whose comments were positively read, and the residual (`unverifiable - anchored`) is logged at `warn` — before #6319 this outcome had no counter anywhere in the daemon. |
+| Counters | `VerdictReconcileStats { checked, invalidated, unverifiable, anchored, unanchored_approvals_requeued }`. `unverifiable` counts only PRs whose comments were positively read, and the residual (`unverifiable - anchored - unanchored_approvals_requeued`) is logged at `warn` — before #6319 this outcome had no counter anywhere in the daemon. |
 
 **What anchoring does not do**: it cannot reconstruct which tree was actually
-reviewed. A head move *before* the anchor is unrecoverable, and the verdict then
-reads `Fresh` against a tree nobody read. It bounds future exposure from
+reviewed. A head move *before* the anchor is unrecoverable (which is why an
+approval is re-queued instead, #9258). It bounds future exposure from
 "forever" to "one tick"; it is a backstop for judge.md's marker, never a
 substitute for it.
 
