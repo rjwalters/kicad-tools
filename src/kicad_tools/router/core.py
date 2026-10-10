@@ -19155,6 +19155,7 @@ class Autorouter:
         require_no_creepage_regression: bool = True,
         require_no_keepout_intrusion: bool = True,
         net_class_map: Any = None,
+        loop_observer: Any = None,
     ) -> PlacementDeltaFeedbackResult | PlacementFeedbackResult:
         """Close the router<->placement loop with classifier-driven deltas (#4467).
 
@@ -19216,6 +19217,15 @@ class Autorouter:
                 ``swap_proposal`` on the ``_placement_delta.json`` artifact.
                 ``None`` (the default) is byte-identical to pre-#5522
                 behavior.
+            loop_observer: Optional ``Callable[[PlacementDeltaFeedbackLoop],
+                None]``, called once with the loop before it runs (issue
+                #6314).  The loop mutates this router and ``pcb`` in place
+                while it probes a trial, so a caller that may have to save
+                mid-run (``kct route``'s deadline / Ctrl+C partial save) needs
+                the loop to call
+                :meth:`~kicad_tools.router.placement_feedback.PlacementDeltaFeedbackLoop.restore_last_accepted`
+                first.  Not called when the toggle is off (the legacy loop
+                never moves the router's pads).
 
         Returns:
             A :class:`PlacementDeltaFeedbackResult` when the delta loop runs, or
@@ -19247,6 +19257,8 @@ class Autorouter:
             excluded_nets=excluded_nets,
             net_class_map=net_class_map,
         )
+        if loop_observer is not None:
+            loop_observer(loop)
         result = loop.run_delta(
             max_adjustments=max_adjustments,
             use_negotiated=use_negotiated,
