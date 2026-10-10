@@ -52,7 +52,6 @@ Present it grouped like this (keep descriptions terse, one line each):
 | `/loom:architect` | Analyze the codebase and file architectural proposals (`loom:architect`). |
 | `/loom:hermit` | Find bloat and file simplification proposals (`loom:hermit`). |
 | `/loom:auditor` | Build and run `main` to verify it actually works; file bugs on failure. |
-| `/loom:concierge` | Opt-in operator persona: room intent to typed daemon verbs. |
 | `/loom:driver` | Plain shell environment with no assumed role, for ad-hoc tasks. |
 
 ### Project / meta

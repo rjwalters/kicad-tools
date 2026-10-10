@@ -41,7 +41,7 @@ no journal is created, when no OTLP exporter runs.
 | `candidates_total` | integer | candidates considered, before the cap |
 | `candidates[]` | array | in the ranker's order, **capped at 50**: `rank` (1-based), `repo` (forge slug, or `repo_unresolved`; never a local path), `number`, `stage`, `sort_key` (`name`, `value`) |
 | `acted[]` | array | `repo`, `number`, `action`, capped at 50. Work finder: `dispatched`. Roles: one entry per distinct observed write, from the closed set below; may name an item outside `candidates` |
-| `skipped[]` | array | one `{repo, number, reason}` per skipped candidate listed in `candidates` |
+| `skipped[]` | array | one `{repo, number, reason}` per skipped candidate listed in `candidates`, plus an optional `detail`: today only a work-finder `deferred_file_overlap` row sets it, to the shared `## Affected Files` paths (`file overlap: a, b`, one line, truncated at 160 chars, #9781). Additive (absent otherwise and on older daemons), so `schema_version` stays `2`; no other disposition's detail (e.g. dispatch-error text) is carried |
 | `candidate_source` | string | `ready_queue` (work finder), `serving_queue` (the role's `pr-queue` result), `listing` (the issue/PR listings the role read, e.g. Curator), `gate_listing` (fallback: the daemon's gate listing), `none` (nothing observed) |
 | `decisions_observed` | boolean | `true` when the agent's writes were observed, so every candidate without an action is a real skip; `false` when only a ranking was seen, and an unexplained candidate is then in neither `acted` nor `skipped` |
 
@@ -128,7 +128,7 @@ it, only a hold label names a reason; other candidates are undecided.
 
 | Reason | Meaning | Work-finder dispositions mapped to it |
 |---|---|---|
-| `overlap_chain` | overlaps an in-flight chain of stacked work | roles: the candidate carries `loom:sequenced` |
+| `overlap_chain` | overlaps an in-flight chain of stacked work, or (work finder) its `## Affected Files` overlap same-repo work admitted earlier this tick or already in flight | `deferred_file_overlap` (#9781; `detail` names the shared paths); roles: the candidate carries `loom:sequenced` |
 | `pr_open_skip` | the item already has an open PR | `open_pr`, `open_pr_backoff` |
 | `operator_hold` | held for a human | `parked`, `hard_exclusion`, `declined`; roles: a merge-hold / park label on the PR |
 | `quota` | token pool or quota would not admit it | roles: `skipped_no_token_pool`, `skipped_pool_exhausted` ticks |

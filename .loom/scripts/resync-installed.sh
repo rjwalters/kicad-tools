@@ -12,20 +12,18 @@
 # (check-main-freshness.sh) DETECTS the drift with a warning; this script FIXES
 # it. The intended flow is: "freshness warning says you're stale -> run resync."
 #
-# PRECONDITION (#6202): that flow only works when a defaults/ SOURCE tree can
-# be resolved (see resolve_defaults() below) — this checkout IS the Loom
-# source repo, OR the gitignored `.loom/loom-source-path` sidecar points at a
-# local clone of it. Neither holds on a checkout that never ran the Loom
-# installer locally (a fresh developer clone, a CI checkout, a machine that
-# received the repo rather than installing into it) — the exact population
-# most likely to be running stale surfaces, since they never ran the
-# installer that would have refreshed them. On that population this script
-# fails on first use with "Could not locate a defaults/ source tree to sync
-# from"; check-main-freshness.sh now detects the same gap and says so before
-# you get here (see its own #6202 note), but if you landed on this file
-# directly: clone https://github.com/rjwalters/loom locally, then either
-# re-run its installer against this repo or write the sidecar yourself
-# (`echo /path/to/local/loom-clone > .loom/loom-source-path`).
+# SOURCE (#6202, #8961): the files come from a defaults/ SOURCE tree (see
+# resolve_defaults() below) — this checkout IS the Loom source repo, OR the
+# gitignored `.loom/loom-source-path` sidecar points at a local clone of it.
+# Neither holds on a checkout that never ran the Loom installer locally (a
+# fresh developer clone, a CI checkout, a re-clone): the sidecar is host-local
+# and does not come with the repo. There this script hands off to `loom-daemon
+# resync-payload`, which resyncs from the payload embedded in the installed
+# daemon: same pins and symlink rules, never a downgrade, official release
+# builds only, and without this script's own extra steps (it names them).
+# Only with no source tree AND no daemon able to do that does it fail with
+# "Could not locate a defaults/ source tree to sync from": install or update
+# loom-daemon, or point .loom/loom-source-path at a local Loom source clone.
 #
 # It is idempotent (a no-op when already in sync), reports per-file
 # updated/created/removed/unchanged/skipped, only ever touches files that
@@ -812,11 +810,12 @@ resolve_defaults() {
     return 1
 }
 
+# requires-daemon: resync-payload optional   #8961 no source tree: resync from the daemon's embedded payload; an absent/older binary (no such verb) or a refusal (exit 1) keeps the failure below.
 if ! resolve_defaults; then
-    err "Could not locate a defaults/ source tree to sync from."
-    err "Looked in: \$REPO_ROOT/defaults, .loom/loom-source-path, .loom/install-metadata.json."
-    err "Re-run the Loom installer, or set .loom/loom-source-path to the Loom source repo."
-    exit 1
+    _rp="${LOOM_DAEMON_BIN:-$(command -v loom-daemon || echo "${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}/loom-daemon")}"; _rpa=(--workspace "$REPO_ROOT"); [[ "$DRY_RUN" -eq 1 ]] && _rpa+=(--dry-run); _rpw="found no loom-daemon that has it (looked at $_rp: missing or too old)"
+    if [[ -z "$OUTPUT_DIR" ]] && "$_rp" resync-payload --help >/dev/null 2>&1; then "$_rp" resync-payload "${_rpa[@]}"; _rprc=$?; [[ "$_rprc" -eq 1 ]] || exit "$_rprc"; _rpw="$_rp refused or failed (see above)"; fi
+    err "Could not locate a defaults/ source tree to sync from: no \$REPO_ROOT/defaults, no usable path in the gitignored .loom/loom-source-path sidecar (missing on a fresh clone), no loom_source in .loom/install-metadata.json."
+    err "Fallback \`loom-daemon resync-payload\` (the daemon's embedded payload, #8961): $_rpw. Install or update loom-daemon, or set .loom/loom-source-path to a local clone of the Loom source repo."; exit 1
 fi
 SOURCE_ROOT="$(dirname "$DEFAULTS_DIR")"
 

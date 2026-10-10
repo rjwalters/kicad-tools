@@ -426,9 +426,13 @@ says its allowance ran out. This is deliberately **post-hoc**, not live
 interception: a native harness spawn `exec`s the child to preserve PID/signal
 parity for the reaper and role runner, so no Loom process survives to watch
 the stream — the same shape `sweep_registry`'s Codex health bridge and
-`worker_spawn::launch_outcome` already use. The cost, stated plainly: the mark
-lands when the run exits rather than the moment it fails, and a run whose
-output Loom never retains is never ingested. Four guards keep it from marking
+`worker_spawn::launch_outcome` already use. For a daemon-dispatched sweep the
+reaper also tails that same log on every tick while the run is still live
+(`api_keys_pool::live_watch`, #11286) and marks an **exhaustion** the moment
+the provider's words reach the log, so concurrent spawns stop landing on the
+empty seat; a rate limit is still marked only at exit, because the harnesses
+retry it in-process and often succeed. Role ticks and hand launches are marked
+at exit, and a run whose output Loom never retains is never ingested. Four guards keep it from marking
 a healthy account — only a pool-selected credential (never an operator's
 one-off `export`), only from Loom's own `# LOOM_LAUNCH` record, never from an
 exit-0 run, and never from an auth failure (below).
@@ -447,6 +451,20 @@ documentation. The captured `provider.auth`/401 event above is real (OpenCode
 *exhaustion* string has been captured yet**, so those rows remain documented
 shapes and a unit test keeps that labelling honest. Fold each new capture in
 as it is observed.
+
+*Reset-aligned cooldowns (#11286).* An automatic mark (log ingest, in-run
+watch, or the egress proxy) lasts until, in order: a reset instant the
+provider printed (a JSON `reset_at`-style field, `retry-after`, or a prose
+`… will reset at <timestamp>`; a timezone-less timestamp is read as UTC, the
+late side for providers east of UTC); else, for an exhaustion, the account's
+declared plan window — `api-keys limit <provider> <name> --exhaustion-window
+7d` for a weekly-capped Z.ai seat; else the old defaults (6 h exhausted, 60 s
+rate-limited). A parsed instant in the past or more than 8 days out is
+ignored. These shapes are generic HTTP conventions, **not** captures from a
+real exhausted Z.ai seat — the tests that exercise them are labelled
+synthetic. `--plan-token-limit <tokens>` declares the plan's allowance per
+window; it is exported (`loom.pool.plan_token_limit`) for the dashboard's
+utilization figure and is not enforced.
 
 *Model-class scoping.* `--model-class <model-id>` (e.g. `glm-5.3-flash`, an
 `#effort` suffix is stripped) scopes a mark to one allowance, mirroring the

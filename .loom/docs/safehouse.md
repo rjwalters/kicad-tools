@@ -2295,7 +2295,7 @@ accepts-nobody config that still reports as enabled.
 **Two independent opt-ins, because one of them is a chat room.** The
 `concierge` role is excluded from the role runner's "unset `roles` ⇒ all
 defaults" fallback (like `architect`), **and** gated a second time on this block
-resolving (`role_runner::role_is_config_gated`). Naming it in
+resolving (a role-runner config gate, removed in #11112). Naming it in
 `autonomous.roleRunner.roles` is not sufficient. An install without safehouse,
 or with safehouse but without this block, is byte-for-byte unaffected: no role
 tick, no budget file, no socket, no listener.
@@ -2390,9 +2390,7 @@ and gets exactly today's read-only narrator.
 
 ### Implementation (phase 3b)
 
-- `defaults/.claude/commands/loom/concierge.md` — the role prompt (symlinked as
-  `defaults/roles/concierge.md`), with `defaults/roles/concierge.json` for
-  cadence metadata.
+- The concierge role prompt and its cadence metadata (removed in #11112).
 - `loom-daemon/src/concierge.rs` — config resolution, the sender allowlist.
 - `loom-daemon/src/concierge/intent.rs` — `RoomMessage`, the injection scan, the
   five-variant `Verb`, and the conservative prose → `Proposal` map.
@@ -2405,7 +2403,8 @@ and gets exactly today's read-only narrator.
 - `loom-daemon/src/concierge/budget.rs` — the per-tick + per-day ledger.
 - `loom-daemon/src/cli/concierge.rs` — the six subcommands above.
 - `loom-daemon/src/role_runner.rs` — the `concierge` `RoleSpec` (300s listening
-  cadence, `interval_default: false`) and `role_is_config_gated`.
+  cadence, `interval_default: false`) and its config gate (both removed in
+  #11112).
 
 > Out of scope here, as in 3a: any widening of the daemon's typed enum. Phase 4
 > (interface parity, digests, watch-results posted into the room) landed as
@@ -2469,7 +2468,7 @@ digest's suppression makes a listening cadence safe for a summary cadence.
 
 ### What the persona may and may not do with them
 
-The concierge prompt (`.loom/roles/concierge.md`) carries the one-line rule —
+The concierge prompt (removed in #11112) carried the one-line rule —
 "you run them, you never author, re-render, or continue them". The reasoning
 behind each clause lives here, so the always-loaded prompt does not pay for it:
 

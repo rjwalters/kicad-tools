@@ -3200,24 +3200,24 @@ overwrites it, list its relative path (e.g. `hooks/guard-destructive.sh`,
 init` / installer run already performs the equivalent recursive copy, so a normal
 reinstall keeps the copies current too.
 
-**Precondition: this flow needs a resolvable `defaults/` source tree (#6202).**
-`resync-installed.sh` resolves its source in priority order: (1) this checkout
-IS the Loom source repo (`defaults/hooks` or `defaults/scripts` present), (2)
-the gitignored `.loom/loom-source-path` sidecar (written only by a local
-`install.sh` / `install-loom.sh` run) points at a local clone of it, or (3) a
-legacy `install-metadata.json` `"loom_source"` field (dead for any post-#5624
-install — that field is no longer written, since it leaked the installing
-machine's absolute path). **None of these exist on a checkout that never ran
-the Loom installer locally** — a fresh developer clone, a CI checkout, or any
-machine that received the repo rather than installing into it — which is
-exactly the population most likely to be running stale surfaces, since they
-never ran the installer that would have refreshed them. On that population the
-script fails on first use with `Could not locate a defaults/ source tree to
-sync from`. `check-main-freshness.sh` now detects the same gap and appends a
-note to its own staleness warning before you reach that failure, rather than
-only after (#6202). Fix: clone <https://github.com/rjwalters/loom> locally,
-then either re-run its installer against this repo or write the sidecar
-yourself: `echo /path/to/local/loom-clone > .loom/loom-source-path`.
+**Where the files come from: a `defaults/` source tree, else the daemon's
+embedded payload (#6202, #8961).** `resync-installed.sh` resolves its source in
+priority order: (1) this checkout IS the Loom source repo (`defaults/hooks` or
+`defaults/scripts` present), (2) the gitignored `.loom/loom-source-path`
+sidecar (written only by a local `install.sh` / `install-loom.sh` run) points
+at a local clone of it, or (3) a legacy `install-metadata.json` `"loom_source"`
+field (dead for any post-#5624 install). **None of these exist on a checkout
+that never ran the Loom installer locally** (a fresh clone, a re-clone, a CI
+checkout). There the script hands off to `loom-daemon resync-payload`, which
+resyncs from the payload embedded in the installed daemon: same pins and
+symlink rules, exit `2` on `--dry-run` drift, never a downgrade, and only a
+verified official release build applies. It skips the script-only steps and
+names them in its output. A refusal prints its reason and exits `1`. Only with
+no source tree AND no `loom-daemon` that has that subcommand does the script
+fail with `Could not locate a defaults/ source tree to sync from`
+(`check-main-freshness.sh` says which path is next). Fix for that case: install
+or update `loom-daemon`, or clone <https://github.com/rjwalters/loom> and run
+`echo /path/to/local/loom-clone > .loom/loom-source-path`.
 
 **`.loom/loom-source-path` is a DURABLE pointer — never point it into scratch
 space (#6780).** Every future `resync-installed.sh` / `check-main-freshness.sh`

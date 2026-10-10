@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1010",
-  "loom_commit": "b12b5c6f784b92d9671624dbf4c0e47fdabbd161",
+  "loom_version": "0.19.1019",
+  "loom_commit": "febfc4335d0554865fadbecba718245cd88c6678",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -401,6 +401,6 @@
     ".loom/scripts/tests/test-sweep-lease-renew-lifecycle.sh"
   ],
   "last_resync": "2026-10-10",
-  "loom_source_remote": "git@github.com:rjwalters/loom.git",
+  "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.772"
 }
