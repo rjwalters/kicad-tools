@@ -610,31 +610,26 @@ never to fall back to the other tool for the same target path — that fallback
 is exactly how sweep #4063 escaped and edited live guard hooks in the main
 checkout.
 
-### NEVER run `resync-installed.sh` from your worktree (#4563)
+### Never run `resync-installed.sh` against main; mirror inside your worktree (#4563, #11291)
 
-**Do not run `./.loom/scripts/resync-installed.sh` (or any variant of it) while
-working an issue.** It always resolves the installed `.loom/` against the
-**primary** worktree, so running it from `.loom/worktrees/issue-<N>` writes to the
-**main checkout** — not to your worktree. Nothing in your own `git status`
-changes, so the contamination is invisible to you until `check-main-clean.sh`
-quarantines it (that is exactly what happened on 2026-07-30: a wave-2 builder
-resynced from its worktree and wrote four installed paths into `main` mid-sweep).
+**Do not run `./.loom/scripts/resync-installed.sh` bare or with `--allow-worktree`
+mid-issue**: it resolves installed `.loom/` against the **primary** checkout, so
+from `.loom/worktrees/issue-<N>` it writes into **main** (invisible in your
+`git status`; `check-main-clean.sh` quarantines it). A refusal (exit `1`) means
+stop. `--output` does not help either: it stages a copy of the *primary's*
+`defaults/`, not your unmerged edits.
 
-You never need it: **editing `defaults/` is the whole job.** Propagating those
-edits into the installed `.loom/hooks|scripts|roles|docs|bin/` +
-`.claude/commands/loom/` copies is the periodic `chore: resync installed Loom
-surfaces` commit's job, made from the main checkout **after** your PR merges. Do
-not "helpfully" refresh the installed copies in your PR.
+In `rjwalters/loom` the installed mirrors are tracked and CI requires them current
+before merge (`check-hooks-defaults-parity.sh`, `check-docs-defaults-parity.sh`,
+`check-dangling-links.sh`). So when your diff touches one, update it by hand
+**inside your worktree** (paths via `$WORKTREE_ABS`):
 
-The script now refuses to run from a linked worktree (exit `1`, `--dry-run`
-included). If you see that refusal, the fix is to **stop**, not to re-run with
-`--allow-worktree` — that override exists for a human operator deliberately
-rewriting the main checkout's installed copies, not for a Builder mid-issue.
-(A separate `--output <dir>` staging mode, #6106, exists for an operator who
-needs a complete resync generated safely while the fleet is live — it is also
-not for a Builder mid-issue: see
-`.loom/docs/troubleshooting.md` if you land
-here as the human operator rather than a Builder subagent.)
+- `defaults/hooks/X.sh` -> `cp -p defaults/hooks/X.sh .loom/hooks/X.sh`
+- new `defaults/docs/X.md` -> `ln -s ../../defaults/docs/X.md .loom/docs/X.md`
+- roles, scripts: `.loom/roles`, `.loom/scripts` are directory symlinks; nothing to do
+- skill copies: `loom-daemon generate-agent-skills`
+
+Then run the parity scripts above. Consumer repos: next section.
 
 ### Never fix an installed Loom file in place (consumer repos)
 

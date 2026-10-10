@@ -2187,6 +2187,7 @@ from an older template is brought up to date.
 | Surface | Why |
 |---|---|
 | `.loom/config.json` | Consumer configuration. The installer merges it on a reinstall and nothing migrates a key afterwards, so **a release that renames or retires a config key must keep reading the old key**. Fleet-wide configuration reaches hosts through the fleet store instead |
+| `.loom/config/` (`skill-routes.json`) | Consumer-editable configuration. The installer, `loom-daemon init` included, copies each `defaults/config/*.json` only when the file is absent (#9129); only `scripts/install-loom.sh --force`/`--clean` overwrites one. A resync never overwrites an edit and never re-creates a deleted file, which is the documented way to switch the skill router off. Put local routes in `skill-routes.local.json` |
 | `package.json` (`loom-workspace` stub) | The removal of its `version` field is a one-time migration (#4285) |
 | root `CLAUDE.md` | Repo-customized. Removing a leftover `**Loom Version**` header is a one-time migration (#6612, #8147) |
 | `.gitattributes` `merge=ours` block and the local `merge.ours.driver` | They resolve per-host resync commits that conflict on the stamp (#4528). The daemon resync has one writer per change. An existing block is left as it is, and local git config cannot be committed |
@@ -2972,12 +2973,12 @@ ordering (superseded by the weighted draw in [`priority-model.md`](priority-mode
 - **Work-finder ordering** — `work_finder::tick_multi` now takes a
   `priorities: &[u32]` slice parallel to the workspaces. Instead of dispatching
   each repo's backlog in registration order, it gathers **every** eligible
-  candidate across all workspaces into one queue, sorts it by `candidate_cmp` —
-  **(workspace priority asc, issue age asc/oldest-first, issue number asc)**,
-  behind the two #9244 lanes below — and fills the single shared concurrency
-  budget in that global order. The cap/budget mechanics (#3811/#3930) are unchanged; this only
-  orders the queue. `createdAt` is added to the `gh issue list --json` fields for
-  the age key.
+  candidate across all workspaces and orders them by **weighted workspace
+  draws** (#11103, [`priority-model.md`](priority-model.md)): each draw picks a
+  workspace weighted by its priority and places its next issue (level, oldest,
+  number). It fills the single shared concurrency budget in that order. The
+  cap/budget mechanics (#3811/#3930) are unchanged; this only orders the queue.
+  `candidate_cmp` (below) now only ranks the published ready-queue rows.
 
 - **Epic supervisor** — `spawn_multi_supervisor_thread` reorders its cached
   per-repo supervisors by workspace priority each tick (stable within a tier) before
@@ -2987,10 +2988,10 @@ ordering (superseded by the weighted draw in [`priority-model.md`](priority-mode
   **Managed repos** table (a `PRIO` column) and the `--json` `per_repo[].priority`
   field, with the breakdown sorted highest-priority first.
 
-**Starvation stance (v1):** strict priority is intentional — tool repos are small
-queues that drain fast. A permanently-full higher tier **will** starve lower tiers;
-fairness knobs (per-tier slot reservations) and cross-repo dependency awareness are
-explicit follow-ups, deferred until observed to matter.
+**Starvation stance:** since #11103 the cross-repo order is a weighted draw, not
+strict tiers: a default-priority repo is drawn less often than a tool repo, never
+starved. A repo with `loom:very-important` work next wins the draw outright.
+Cross-repo dependency awareness stays a role judgment (label the blocker).
 
 **`tier:*` labels do not affect dispatch order.** `tier:goal-advancing` and its
 siblings are triage metadata; no daemon code reads them. Neither does
@@ -3048,8 +3049,8 @@ a key. Only the six keys below order the queue.
 5. `createdAt`, oldest first.
 6. Issue number ascending.
 
-The single-workspace tick sorts by keys 1-3 only, so its listing order is
-unchanged when nothing is starred or red.
+Since #11103 these keys rank the ready-queue rows only; dispatch follows the
+workspace draw, and the single-workspace tick uses level, oldest, number.
 
 **Starred issues outside `loom:issue`.** Besides the `loom:issue` listing, each
 tick makes a second ETag-cached listing of open `loom:operator-priority` issues

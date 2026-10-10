@@ -44,11 +44,13 @@ no journal is created, when no OTLP exporter runs.
 | `skipped[]` | array | one `{repo, number, reason}` per skipped candidate listed in `candidates`, plus an optional `detail`: today only a work-finder `deferred_file_overlap` row sets it, to the shared `## Affected Files` paths (`file overlap: a, b`, one line, truncated at 160 chars, #9781). Additive (absent otherwise and on older daemons), so `schema_version` stays `2`; no other disposition's detail (e.g. dispatch-error text) is carried |
 | `candidate_source` | string | `ready_queue` (work finder), `serving_queue` (the role's `pr-queue` result), `listing` (the issue/PR listings the role read, e.g. Curator), `gate_listing` (fallback: the daemon's gate listing), `none` (nothing observed) |
 | `decisions_observed` | boolean | `true` when the agent's writes were observed, so every candidate without an action is a real skip; `false` when only a ranking was seen, and an unexplained candidate is then in neither `acted` nor `skipped` |
+| `workspace_draw` | object, optional | work finder only (#11103), absent when nothing was drawn: `seed` (decimal string), `draws_total`, and `draws[]` (first 50, in order), each `{pool, candidates[{repo, weight}], total_weight, roll, picked, number}`. Replaying the draws from `seed` reproduces the dispatch order; see [`priority-model.md`](priority-model.md) |
 
 ## What "ranking" means per source
 
-- **Work finder.** `candidates` are the ready-queue rows in the daemon's real
-  dispatch order (`work_finder::candidate_cmp`). `stage` is `loom:issue`;
+- **Work finder.** `candidates` are the ready-queue rows in comparator rank
+  order (`work_finder::candidate_cmp`); since #11103 the order dispatch actually
+  used is the workspace draw, recorded in `workspace_draw`. `stage` is `loom:issue`;
   `sort_key` is `candidate_cmp`, valued with the plan's comparator keys
   (`name=value,...`) or the rank. Each row is *acted* (`dispatched`) or *skipped*
   with a reason mapped from its `QueueDisposition`.

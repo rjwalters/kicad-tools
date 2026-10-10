@@ -163,7 +163,10 @@ These writers differ from `apply` in two documented ways:
   `release-stale-blocked` and the role runner): an archived repository is
   read-only, so nothing is listed, `--json` reports `archived: true` and the
   human report is one line. A probe that fails is NOT EVALUATED, never
-  archived and never clear (`archived: null`).
+  archived and never clear (`archived: null`). Champion's merge-risk hold
+  digest issue (exact title, or body starting with its marker) is exempt from
+  this pass, the notifier and the release pass: it is `loom:blocked` only to
+  stay out of curation and has no blocker to cite (#9397).
 - `guide.md`'s `check_and_unblock` / `check_and_unblock_prs` — the active
   unblock sweep. A rendered park record's `Blocked by: #N` line already
   matches `parse_dependencies`'s existing pattern, so no separate parser is

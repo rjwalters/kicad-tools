@@ -283,31 +283,27 @@ Root cause verification (for process/behavior issues):
 Local verification:
 - [ ] The project's check command passes (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command, e.g. `pnpm check:ci`)
 - [ ] Formatter + linter run on changed files (see "Format and Lint Changed Files" below) — a format-only CI failure is a guaranteed Judge rejection
-- [ ] Commits are signed off if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` requirement — `git commit --signoff`; see "DCO sign-off" above)
-- [ ] Relevant tests pass
-- [ ] Each criterion has explicit verification (not "I think it works")
-- [ ] Ran the "defaults/ Version-Bearing-Files Gate" command block below (not just read it) — exited 0. It fails if this PR hand-edits any version-bearing file's value (`package.json`, `mcp-loom/package.json`, `Cargo.toml`, `VERSION`) — those are now bumped automatically at merge time (#7743), never by hand in a feature PR.
+- [ ] Commits are signed off if required (`commit.signoff: true` or a DCO requirement — `git commit --signoff`; see "DCO sign-off" above)
+- [ ] Relevant tests pass. Production shell changed and CI runs `shell-budget --check`? After the final commit, `loom-daemon shell-budget --check --base <PR base, default origin/main>`: nonzero = this branch's own growth (never pre-existing); no review until counted shell is cut or moved to the daemon and a rerun exits 0. Comments, follow-up issues or arbitrary trailers are not permission
+- [ ] Diff adds/moves a direct forge caller? Rebase onto the landing base; no `defaults/forge/manifest.toml` there = no inventory command. Else declare it under its `[[operation.callers]]` (`defaults/forge/README.md`; a move must drop the old path, which no command flags), then run `loom-daemon forge-inventory validate --manifest-dir defaults/forge` and `gate --manifest-dir defaults/forge --baseline defaults/forge/call-bypass-baseline.toml` (bare forms read the binary's embedded copy). Nonzero blocks review, even if pre-existing: fix, rerun; never add baseline debt or weaken the gate.
+- [ ] Each criterion has explicit verification
+- [ ] Ran the "defaults/ Version-Bearing-Files Gate" block below (not just read it) — exited 0 (version-bearing files bump at merge, #7743).
 ```
 
-**Run the defaults/ Version-Bearing-Files Gate locally — an actual command, not a checklist bullet to read (#6675, recurring Judge rejection: #6598, #6599, #6610, #6611, #6630, #6668 all hit this in CI because it was never run pre-PR). A single automated workflow (`.github/workflows/version-bump-on-merge.yml`, #7743) now owns bumping `VERSION` and the other version-bearing files, once, right after any merge that touched `defaults/` — a feature PR must not carry its own edit to any of them. `./.loom/scripts/create-pr.sh` also runs a version-bearing-file consistency check (`version-check-gate.sh`, #6730) before creating the PR, so running the block below by hand is defense-in-depth, not the only line of defense; still run it locally to catch a hand-edit before pushing rather than at CI time:**
+**Run the defaults/ Version-Bearing-Files Gate locally — an actual command, not a bullet to read (#6675; #6598, #6599, #6610, #6611, #6630, #6668 hit this in CI). `.github/workflows/version-bump-on-merge.yml` (#7743) owns bumping `VERSION` and the other version-bearing files after any merge touching `defaults/`; a feature PR must not edit them. `create-pr.sh` also runs `version-check-gate.sh` (#6730); this is defense-in-depth before CI:**
 
 ```bash
 # Run from your worktree, AFTER your last commit, BEFORE
 # ./.loom/scripts/create-pr.sh. Mirrors the CI job "PRs Must Not Hand-Edit
 # Version-Bearing Files" (.github/workflows/ci.yml) — no PR exists yet at
 # Builder time, so use the merge-base with origin/main as --base instead of
-# a PR base sha. (`--forbid-bump` also narrows to merge-base(base, head)
-# internally since #7823, so passing one here is idempotent, not redundant
-# belt-and-braces you could drop: it keeps this block correct on an older
-# installed copy of the script too.)
+# a PR base sha (kept for older installed copies of the script; #7823).
 MERGE_BASE="$(git merge-base origin/main HEAD)"
 
 # Exit 0 = no version-bearing file's VALUE changed anywhere in your diff;
 # exit 1 = your PR hand-edits one of package.json/mcp-loom/package.json/
-# Cargo.toml/VERSION. Do NOT "fix" a failure here by running
-# ./scripts/version.sh bump patch -- that command is now exclusively the
-# post-merge workflow's job; a Builder should never run it. Revert the
-# edit(s) to the flagged file(s) instead.
+# Cargo.toml/VERSION. Never "fix" it with ./scripts/version.sh bump (the
+# post-merge workflow's job only); revert the flagged edit(s) instead.
 if ! bash defaults/scripts/check-defaults-version-bump.sh --forbid-bump --base "$MERGE_BASE" --head HEAD; then
   echo "BLOCKER: this PR hand-edits a version-bearing file's value (see the diff above)." >&2
   echo "Fix: revert the change(s) to that file -- version bumps happen automatically at merge (#7743), never in a feature PR." >&2
@@ -317,7 +313,7 @@ fi
 echo "OK: no version-bearing file's value was hand-edited."
 ```
 
-**Treat a non-zero exit above as a hard local blocker** — revert your edit to the flagged file(s) and re-run the block until it prints the final `OK:` line before calling `create-pr.sh`. Do not proceed on the strength of having merely read the checklist bullet.
+**Treat a non-zero exit above as a hard local blocker** — revert your edit to the flagged file(s) and re-run the block until it prints the final `OK:` line before calling `create-pr.sh`.
 
 ### Step 4: Document Verification in PR Description
 

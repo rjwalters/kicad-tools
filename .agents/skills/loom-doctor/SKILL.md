@@ -1257,7 +1257,7 @@ Read the full review, not just individual comments; check what the reviewer alre
 
 ### Make Focused Changes
 
-Address exactly what was requested — no new features or refactoring beyond the feedback (see "Scope Discipline"). Keep commits focused and well-described, and run tests after each change.
+Address exactly what was requested, nothing beyond it (see "Scope Discipline"); keep commits focused and run tests after each change.
 
 ### Fixing a Role Prompt or Dispatch Brief
 
@@ -1273,7 +1273,11 @@ Comment on the PR when pushing fixes ("Addressed: formatting, added tests for ed
 
 ### Quality Checks
 ```bash
-# Run full CI; Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated
+# Full CI; Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated.
+# Production shell changed + CI runs shell-budget --check? After the final commit, before re-review:
+# `loom-daemon shell-budget --check --base <PR base, default origin/main>`; nonzero = this branch's
+# growth (never pre-existing): cut counted shell or move it to the daemon, rerun to exit 0.
+# Comments, follow-up issues or arbitrary trailers are not permission.
 pnpm check:ci   # repo check: buildGate.command in .loom/config.json
 
 # If review mentioned tests / style / types:
@@ -1287,28 +1291,13 @@ pnpm exec tsc --noEmit
 When running tests during PR fixes, truncate verbose output to conserve tokens:
 
 ```bash
-# Failures + summary only (recommended)
+# Failures + summary only
 pnpm test 2>&1 | grep -E "(FAIL|PASS|Error|✓|✗|Summary|Tests:)" | head -100
-
-# Just the summary
-pnpm test 2>&1 | tail -30
-
-# Show only failures with context
-pnpm test 2>&1 | grep -A 5 -B 2 "FAIL\|Error\|✗"
 ```
 
-**Why truncate?**
-- Test output can exceed 10,000+ lines
-- Most of that is passing tests (not actionable)
-- Wastes tokens that could be used for actual fix work
-- Pollutes context for subsequent operations
+**Why truncate?** Output can exceed 10,000 lines of mostly passing, non-actionable tests that waste tokens and pollute context.
 
-**Report failures concisely:**
-```
-❌ 2 tests failing after fix:
-1. `state.test.ts:45` - still returns undefined (need null check)
-2. `worktree.test.ts:89` - timeout (async issue remains)
-```
+Report failures concisely: one `file:line` - cause line per failing test.
 
 ## Example Commands
 

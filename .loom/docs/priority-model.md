@@ -18,6 +18,17 @@ roles (Guide, Champion), not to dispatch.
 The reference implementation is `loom-daemon/src/priority_pick.rs` (pure,
 seedable, unit-tested). Rollout status is tracked on #11103.
 
+**Wired into dispatch.** The multi-workspace work-finder tick orders its
+candidates by repeated draws (`work_finder/workspace_draw.rs`): each draw
+picks a workspace as below and places that workspace's next issue; the
+shared concurrency budget is filled in that order. The RNG is seeded once
+per tick, and the seed plus every draw are exported as
+`pick.decision.workspace_draw` (and the published plan's `position` is the
+draw order). The single-workspace tick uses the in-workspace order alone.
+Until the old labels are migrated, a legacy bridge maps
+`loom:operator-priority` to important, and `loom:operator-high-priority` and
+a verified red-main fix to very important.
+
 ## Selection: workspace first, then issue
 
 1. **Pick a workspace** among those with dispatchable work, at random,
