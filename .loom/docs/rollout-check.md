@@ -1,7 +1,7 @@
 # Rollout Check
 
 A merged PR that moves work between hosts can pass CI and review and still be wrong
-on the live fleet (#10498 moved ETA authority to one host and nothing confirmed it
+on the live fleet (#10498 moved a fleet signal's authority to one host and nothing confirmed it
 did what was intended). The rollout check makes that confirmation a tracked step.
 It is **tracked, not automated**: no daemon feature runs it (automation is deferred
 until the singleton watchdog, #10897 / #10898, lands).

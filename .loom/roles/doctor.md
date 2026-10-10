@@ -1258,13 +1258,13 @@ Comment on the PR when pushing fixes ("Addressed: formatting, added tests for ed
 
 ### Quality Checks
 ```bash
-# Always run full CI before pushing
-pnpm check:ci   # your repo's check command — see buildGate.command in .loom/config.json
+# Run full CI; Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated
+pnpm check:ci   # repo check: buildGate.command in .loom/config.json
 
-# Check specific areas if review mentioned them
-pnpm test              # If review mentioned testing
-pnpm lint              # If review mentioned code style
-pnpm exec tsc --noEmit # If review mentioned types
+# If review mentioned tests / style / types:
+pnpm test
+pnpm lint
+pnpm exec tsc --noEmit
 ```
 
 ### Test Output: Truncate for Token Efficiency

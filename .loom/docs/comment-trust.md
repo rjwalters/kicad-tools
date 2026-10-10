@@ -220,9 +220,9 @@ Anything unverifiable is a refusal. Reads are never gated.
   `write_scope::tests::daemon_write_paths_are_scoped` fails when a new daemon
   file writes to the forge without being reviewed into its list. One
   autonomous write sits outside the rule above, scoped narrower by that test:
-  the declared captain's ETA fit publication (#10395) goes to the configured
+  the declared captain's gauge heartbeat (#10395) goes to the configured
   fleet store (`fleet.repo`, never gh's resolution) under its writer App, and
-  only to the dedicated `fleet.etaFitRef` branch, never the reviewed one.
+  only to the dedicated `fleet.captainGauges.ref` branch, never the reviewed one.
 - **Shell:** `loom-daemon forge may-write [--repo OWNER/REPO]` prints the
   repository to name on the write (exit 0) or the reason (exit 1).
   `loom_write_repo` in `lib/forge-helpers.sh` wraps it. Every script that

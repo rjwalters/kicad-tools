@@ -217,8 +217,7 @@ synthetic zero-duration completion, the two `loom.timing_source` values in
 nothing either way, and guessing would publish a measurement that was never
 taken. Any percentile/dwell aggregate over `loom.role_attempt` must filter
 `loom.attempt.worked = "true"` — unconditioned, the `false` population
-dominates and the median collapses to milliseconds (see
-[`eta.md`](eta.md) § "Role-attempt stages: which percentile to read").
+dominates and the median collapses to milliseconds.
 
 Since #9438 the role runner removes most of that population at the source: a
 role-runner tick opens its `loom.role_attempt` root only at the launch (the

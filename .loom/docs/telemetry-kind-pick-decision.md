@@ -2,7 +2,7 @@
 
 One record per **role tick** (Judge, Doctor, Champion, Curator and every other
 role-runner role) and per **work-finder tick**: what it looked at, in the order
-it ranked it, what it acted on, and why it skipped the rest. A queue-aware ETA
+it ranked it, what it acted on, and why it skipped the rest. A queue-aware estimator
 needs an item's position *as the serving role sees it*; this is the only record
 of that, and it cannot be reconstructed afterwards.
 
@@ -181,8 +181,7 @@ LIMIT 1 BY role, host
 
 (`LIMIT 1 BY role, host` keeps each role's newest record per host at or before
 the instant.) This query is **not yet run against a live SigNoz or the pinned
-ClickHouse** (no `signoz_eta_queries`-style harness covers it); the function
-shapes are the ones the ETA queries already use.
+ClickHouse** (no engine-level harness covers it).
 
 Service cadence and stalls per host: `max(tick_at) - lag(tick_at)` over the same
 filter grouped by `role, host`.

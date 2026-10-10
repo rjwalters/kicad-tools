@@ -84,7 +84,9 @@ if [[ "${GH_TOKEN:-}" == ghs_app* && -f "$D/app-fail-$method" ]]; then
   exit 1
 fi
 if [[ "$method" == "GET" && "$path" == repos/*/issues/*/comments* ]]; then
-  echo "$path" >> "$D/list-calls.log"; cat "$D/comments.json"; exit 0
+  echo "$path" >> "$D/list-calls.log"
+  [[ ! -f "$D/comments-fail" ]] || { echo "stub gh: HTTP 502 comments read failed" >&2; exit 1; }
+  cat "$D/comments.json"; exit 0
 fi
 if [[ "$method" == "GET" && "$path" == repos/*/issues/[0-9]* ]]; then
   echo "$path" >> "$D/state-calls.log"
@@ -120,7 +122,7 @@ unset GH_TOKEN GITHUB_TOKEN LOOM_PERSONAL_GH_TOKEN LOOM_TERMINAL_ID LOOM_HOST_ID
 reset_state() {
     rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/issue-state* "$STUB_DIR"/state-calls.log \
         "$STUB_DIR"/list-calls.log "$STUB_DIR"/patch-calls.log "$STUB_DIR"/renewer-* "$STUB_DIR"/r2-out.* \
-        "$STUB_DIR"/cred.log "$STUB_DIR"/app-* "$STUB_DIR"/forge-token-args.log "$STUB_DIR"/z-*.log
+        "$STUB_DIR"/comments-fail "$STUB_DIR"/cred.log "$STUB_DIR"/app-* "$STUB_DIR"/forge-token-args.log "$STUB_DIR"/z-*.log
     rm -rf "$LOOM_LEASE_RENEW_STATE_DIR" 2> /dev/null || true
     echo "[$Y_LEASE]" > "$STUB_DIR/comments.json"
 }
@@ -382,6 +384,27 @@ N="$(patch_n)"
 "$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep --cached-lease 42@2026-10-01T05:00:00Z > /dev/null 2>&1
 assert_eq "4" "$?" "(z5) a yield inside the sliding window still trips the own-yield guard"
 assert_eq "$N" "$(patch_n)" "(z5) ...and nothing is PATCHed"
+
+# (z5b) a transient failure of the CACHED window read is not a cache miss: no
+# --paginate re-list, no PATCH of an unverified target, the cache is kept (exit 1).
+reset_state
+touch "$STUB_DIR/comments-fail"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep --cached-lease 42@2026-10-01T05:00:00Z 2>&1)"
+assert_eq "1" "$?" "(z5b) a failed window read fails the cycle (exit 1), it is not a miss"
+assert_eq "1" "$(wc -l < "$STUB_DIR/list-calls.log" | tr -d ' ')" "(z5b) exactly one read, no re-list"
+assert_eq "true" "$(yb grep -q 'comments?since=' "$STUB_DIR/list-calls.log")" "(z5b) and it was the one-page since-window"
+assert_eq "0" "$(patch_n)" "(z5b) nothing was PATCHed"
+assert_eq "false" "$([[ "$OUT" == *"lease-cache="* ]] && echo true || echo false)" "(z5b) no cache token is reported, so the loop keeps its previous one"
+
+# (z2b) an App that cannot READ (404: not installed) falls back to the caller's
+# credential for the read, tagged; the PATCH is not guessed to fail with it.
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+echo 404 > "$STUB_DIR/app-fail-GET"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep 2>&1)"
+assert_eq "0" "$?" "(z2b) renewal succeeds after the App read attempt fails"
+assert_eq "true" "$([[ "$OUT" == *"lease-credential=ambient-fallback: the read call failed"* ]] && echo true || echo false)" "(z2b) the read fallback is tagged"
+assert_eq "PATCH tok=ghs_app-write cred=app" "$(grep '^PATCH' "$STUB_DIR/cred.log" | sed 's/ repos[^ ]*//')" "(z2b) the PATCH still ran on the writer App"
 
 # (z6) no lease to renew: the loop stops after two consecutive misses instead
 # of paying a --paginate listing every interval forever; the parent lives on.

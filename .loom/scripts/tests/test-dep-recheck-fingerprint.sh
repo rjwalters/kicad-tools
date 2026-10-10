@@ -131,6 +131,7 @@ assert_ne "" "$(field "$out1" CONCLUSION_HASH)" "T1c: CONCLUSION_HASH is non-emp
 # --- T2: no linked PR at all -> VERDICT=clear, empty BLOCKERS ---------------
 out="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin)"
 assert_eq "clear" "$(field "$out" VERDICT)" "T2: an empty prs list defaults to VERDICT=clear"
+assert_eq "d88c83f77b541ea4" "$(field "$out" CONCLUSION_HASH)" "T2: pinned CONCLUSION_HASH for the no-PR, no-flag re-check (#9041: quoting is emission-only)"
 # An empty value is now the same shell_quote()'d `''` literal that REFS has
 # always used for its own empty case (#8323 made BLOCKERS/DEPS consistent
 # with REFS's existing quoting) -- eval still resolves it to an empty string,
@@ -211,19 +212,96 @@ assert_eq "$(field "$out_pa" CONCLUSION_HASH)" "$(field "$out_pb" CONCLUSION_HAS
 #         no linked PR at all) ----------------------------------------------
 out="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason "doctor cycle exhausted")"
 assert_eq "blocked" "$(field "$out" VERDICT)" "T7a: --verdict overrides the mechanical (empty-prs -> clear) default"
-assert_eq "doctor cycle exhausted" "$(field "$out" BLOCK_REASON)" "T7b: --block-reason is echoed back and folded into the hash"
+# #9041: BLOCK_REASON is shell_quote()'d, so its echo is read the way curator.md
+# reads it - through `eval` (eval_var) - never off the raw line with field().
+assert_eq "doctor cycle exhausted" "$(eval_var "$out" BLOCK_REASON)" "T7b: --block-reason is echoed back and folded into the hash"
+assert_eq "0dd03d0c991d4be0" "$(field "$out" CONCLUSION_HASH)" "T7b: pinned CONCLUSION_HASH for curator.md's own multi-word reason (#9041)"
 out2="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason "Sweep coordination: blocking")"
 assert_ne "$(field "$out" CONCLUSION_HASH)" "$(field "$out2" CONCLUSION_HASH)" \
     "T7c: a changed --block-reason (same verdict) still changes CONCLUSION_HASH"
 # #8254: --block-reason is canonicalized (trim/collapse/casefold) before hashing; #9308:
 # the hash is PERSISTED, so pin a report-shaped string to the digest recheck/tests.rs also pins.
 out_9308="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason 'depends on #64, itself blocked on cross-repo example-org/tool-repo#1962 (OPEN)')"
-assert_eq "11c70776d73fce96|depends on #64, itself blocked on cross-repo example-org/tool-repo#1962 (OPEN)" "$(field "$out_9308" CONCLUSION_HASH)|$(field "$out_9308" BLOCK_REASON)" "T7f: #9308 golden CONCLUSION_HASH, reason echoed verbatim"
+assert_eq "11c70776d73fce96|depends on #64, itself blocked on cross-repo example-org/tool-repo#1962 (OPEN)" "$(field "$out_9308" CONCLUSION_HASH)|$(eval_var "$out_9308" BLOCK_REASON)" "T7f: #9308 golden CONCLUSION_HASH, reason echoed verbatim"
 out_case="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason "  Doctor   Cycle	Exhausted ")"
 assert_eq "$(field "$out" CONCLUSION_HASH)" "$(field "$out_case" CONCLUSION_HASH)" \
     "T7d: a --block-reason differing only in case/whitespace yields the SAME CONCLUSION_HASH"
-assert_eq "  Doctor   Cycle	Exhausted " "$(field "$out_case" BLOCK_REASON)" \
+assert_eq "  Doctor   Cycle	Exhausted " "$(eval_var "$out_case" BLOCK_REASON)" \
     "T7e: the echoed BLOCK_REASON stays verbatim -- only the hash input is canonicalized"
+
+# --- T7g-T7l (#9041): the two caller-supplied free-text pass-throughs survive
+# the documented `eval "$(...)"`. They were emitted RAW until #9041, so a
+# multi-word value word-split (the caller got its first word, the shell ran the
+# rest), `$(...)` executed, and a newline could open a forged `KEY=` line.
+# Every value goes through each flag SEPARATELY, and each case asserts: eval
+# exits 0, prints nothing on stderr, hands the argument back byte for byte, and
+# the output is still exactly the five keys, one line each, in order.
+PT_KEYS="VERDICT BLOCKERS BLOCK_REASON ORTHOGONAL CONCLUSION_HASH"
+PT_DIR="$(mktemp -d)"
+trap 'rm -rf "$PT_DIR" 2>/dev/null || true' EXIT
+pt_values=(
+    'two words'
+    'two words; and a semicolon'
+    "reason \$(touch $PT_DIR/probe) \`touch $PT_DIR/probe\` end"
+    "it's blocked"
+    'says "blocked" in review'
+    $'line1\nCONCLUSION_HASH=deadbeef'
+    "  Doctor   Cycle	Exhausted "
+    ''
+)
+pt_n=0
+for pt_value in "${pt_values[@]}"; do
+    pt_n=$((pt_n + 1))
+    for pt_flag in block-reason orthogonal; do
+        pt_var="BLOCK_REASON"
+        [[ "$pt_flag" == "orthogonal" ]] && pt_var="ORTHOGONAL"
+        pt_out="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked "--$pt_flag" "$pt_value")"
+        rc=0
+        # The trailing sentinel keeps `$(...)` from eating a value's own
+        # trailing newlines; stderr is captured apart so it can be asserted empty.
+        pt_got="$(eval_var "$pt_out" "$pt_var" 2>"$PT_DIR/stderr" && printf x)" || rc=$?
+        pt_label="T7g.$pt_n --$pt_flag $(printf '%q' "$pt_value")"
+        assert_eq "0" "$rc" "$pt_label: eval \"\$(...)\" exits 0 (#9041)"
+        assert_eq "" "$(cat "$PT_DIR/stderr")" "$pt_label: eval prints nothing on stderr (#9041)"
+        assert_eq "${pt_value}x" "$pt_got" "$pt_label: \$$pt_var equals the argument byte for byte (#9041)"
+        assert_eq "$PT_KEYS" "$(cut -d= -f1 <<<"$pt_out" | tr '\n' ' ' | sed 's/ $//')" \
+            "$pt_label: key set and order unchanged, one line per key (#9041)"
+    done
+done
+rc=0
+[[ ! -e "$PT_DIR/probe" ]] || rc=1
+assert_eq "0" "$rc" "T7h: neither \$(...) nor backticks in a pass-through executed under eval - no probe file (#9041)"
+
+# T7i: the forged-key shape. A reason carrying a newline used to emit a bare
+# `CONCLUSION_HASH=deadbeef` line AHEAD of the real one, which a first-match
+# line parser (this suite's own field()) read as the hash.
+out_forge="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason $'line1\nCONCLUSION_HASH=deadbeef')"
+assert_eq "1" "$(grep -c '^CONCLUSION_HASH=' <<<"$out_forge")" "T7i: a newline in --block-reason cannot forge a second CONCLUSION_HASH= line (#9041)"
+assert_ne "deadbeef" "$(field "$out_forge" CONCLUSION_HASH)" "T7i: a first-match line parser reads the real hash, not the forged one (#9041)"
+assert_eq "$(eval_var "$out_forge" CONCLUSION_HASH)" "$(field "$out_forge" CONCLUSION_HASH)" "T7i: eval and a line parser agree on CONCLUSION_HASH (#9041)"
+
+# T7j: raw-line shapes. A safe word stays bare (byte-identical to before); the
+# empty default becomes the same `''` literal BLOCKERS/DEPS/REFS already use.
+out_safe="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason "doctor-cycle-exhausted" --orthogonal "epic-open-but-complete:owner/repo/14")"
+assert_eq "doctor-cycle-exhausted|epic-open-but-complete:owner/repo/14" "$(field "$out_safe" BLOCK_REASON)|$(field "$out_safe" ORTHOGONAL)" \
+    "T7j: a safe-word pass-through is still emitted bare (#9041)"
+out_empty="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "''|''" "$(field "$out_empty" BLOCK_REASON)|$(field "$out_empty" ORTHOGONAL)" \
+    "T7j: empty pass-throughs render as the shell_quote()'d '' literal (#9041)"
+
+# T7k: stored-hash stability (#9308). CONCLUSION_HASH is persisted in comment
+# markers fleet-wide, so the quoting must be emission-only. These digests were
+# measured on the PRE-fix binary (0.19.955); T2 and T7b pin two more.
+out_semi="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason 'two words; and a semicolon')"
+assert_eq "c4297ce756ac2bce" "$(field "$out_semi" CONCLUSION_HASH)" "T7k: pinned CONCLUSION_HASH is unchanged by quoting the echo (#9041)"
+
+# T7l: --json is the stable interface for line parsers and is byte-identical to
+# the pre-fix binary's output for the same input (captured on 0.19.955).
+# shellcheck disable=SC2016
+out_json="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason 'it'"'"'s "two" words; $(x) `y`' --orthogonal 'epic-open-but-complete:owner/repo#14' --json)"
+# shellcheck disable=SC2016
+assert_eq '{"verdict":"blocked","blockers":"","block_reason":"it'"'"'s \"two\" words; $(x) `y`","orthogonal":"epic-open-but-complete:owner/repo#14","conclusion_hash":"e28191be9d654691"}' "$out_json" \
+    "T7l: --json output is byte-identical to the pre-#9041 binary (no shell quoting in JSON)"
 
 # --- T8: --orthogonal folds into the hash without disturbing the ordinary
 #         (empty) case -------------------------------------------------------
@@ -234,6 +312,13 @@ assert_ne "$(field "$out_ordinary" CONCLUSION_HASH)" "$(field "$out_orthogonal" 
 out_orthogonal2="$(echo "$FIXTURE_CLEARED" | "$TARGET_SCRIPT" dep-recheck --stdin --orthogonal "")"
 assert_eq "$(field "$out_ordinary" CONCLUSION_HASH)" "$(field "$out_orthogonal2" CONCLUSION_HASH)" \
     "T8b: an empty --orthogonal (the default) leaves the hash exactly as before"
+# T8c (#9041): the documented orthogonal identity carries a `#`, which is outside
+# shell_quote()'s safe set - so its raw line is quoted, and the value curator.md
+# writes into `<!-- curator:orthogonal-block:$ORTHOGONAL -->` is the whole id.
+assert_eq "'epic-open-but-complete:owner/repo#14'" "$(field "$out_orthogonal" ORTHOGONAL)" \
+    "T8c: the documented --orthogonal id is emitted single-quoted (#9041)"
+assert_eq "epic-open-but-complete:owner/repo#14" "$(eval_var "$out_orthogonal" ORTHOGONAL)" \
+    "T8c: the eval-consumed ORTHOGONAL is the whole id, not a truncation (#9041)"
 
 # --- T9: --json output -------------------------------------------------------
 out="$(echo "$FIXTURE_BLOCKED" | "$TARGET_SCRIPT" dep-recheck --stdin --json)"
@@ -267,7 +352,7 @@ assert_eq "$(field "$p1" CONCLUSION_HASH)" "$(field "$p_reordered" CONCLUSION_HA
 
 # --- T13: live --number mode (stubbed gh) -----------------------------------
 STUB_DIR="$(mktemp -d)"
-trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
+trap 'rm -rf "$STUB_DIR" "$PT_DIR" 2>/dev/null || true' EXIT
 
 # The stub is REPO-AWARE (#8502): it looks for a repo-qualified fixture
 # `<owner>__<name>-issue-N.json` first and only then the unqualified

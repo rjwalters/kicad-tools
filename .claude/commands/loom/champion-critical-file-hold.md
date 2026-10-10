@@ -70,11 +70,6 @@ PR_NUMBER=<number>
 HOLD_MARKER="<!-- champion:critical-file-hold -->"
 CLEARED_MARKER="<!-- champion:critical-file-hold-cleared -->"
 RELEASED_MARKER="<!-- champion:critical-file-release-respected -->"
-# Mail (#10000): `.loom/docs/inbox-mail.md`.
-_im=$(awk '/^```bash inbox-mail/{f=1;next} /^```/{f=0} f' .loom/docs/inbox-mail.md 2>/dev/null)
-[ -n "$_im" ] && eval "$_im"
-type inbox_mail >/dev/null 2>&1 || inbox_mail() { [ "$1" != on ]; }
-CF_MAIL_KEY=$(inbox_mail key crithold-pr "$PR_NUMBER")
 
 # Plain `gh` — NOT "$GH_READ": a cached label set misses a human's decision.
 # Markers count from TRUSTED authors only (#9548). Unfiltered, the raw read may
@@ -125,11 +120,6 @@ if [ "$CRITERION3_RESULT" = "FAIL" ]; then
     CF_ACTION=rearm         # a genuinely different diff, or a legacy hold
   fi
   [ "$CF_TRUST" = ok ] || case "$CF_ACTION" in none|respect) CF_ACTION=defer ;; esac
-
-  # Mail (#10000) once otherwise mergeable; a human merge: `resolve-merged`.
-  case "$CF_ACTION" in hold|rearm|stands) inbox_mail on &&
-    [ "$(gh pr view "$PR_NUMBER" --json mergeStateStatus -q .mergeStateStatus 2>/dev/null)" = CLEAN ] &&
-      inbox_mail send "$CF_MAIL_KEY" "PR #$PR_NUMBER changes a critical file and needs a human merge: $(gh pr view "$PR_NUMBER" --json url -q .url)" ;; esac
 
   case "$CF_ACTION" in
     none)
@@ -199,7 +189,6 @@ The merge is yours: \`./.loom/scripts/merge-pr.sh $PR_NUMBER\`. A push that chan
 
 ---
 *Automated by Champion role*"
-      inbox_mail resolve "$CF_MAIL_KEY"   # the human acted
       echo "Critical-file release respected for #$PR_NUMBER at $HEAD_SHA (${CF_EQUIV_KIND:-same-head}) — not reapplying loom:operator (#9016)"
       ;;
   esac
@@ -214,7 +203,6 @@ A later push narrowed this PR off every critical-file pattern. Re-evaluating nor
 
 ---
 *Automated by Champion role*"
-  inbox_mail resolve "$CF_MAIL_KEY"
   echo "Critical-file hold cleared for #$PR_NUMBER — re-evaluating normally"
 fi
 ```

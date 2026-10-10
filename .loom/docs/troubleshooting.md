@@ -3394,7 +3394,7 @@ outcome) even though the identity changed.
 starting `disk_full: <n> GB free`, `loom-daemon status` reports the host
 breaker `open` with the same reason, and `dispatch_sweep` is refused. On the
 2026-10-08 incident a worker's worktree volume reached 0 GB and, because that
-host was the ETA authority, fleet ETAs went `stale_inputs` for hours.
+host was the ETA authority, fleet ETAs went `stale_inputs` for hours (ETA has since been removed from Loom, #11098).
 
 **What the daemon does by itself.** Each work-finder tick samples free GB on
 the worktree-root volume. Two consecutive readings below the floor
@@ -3422,11 +3422,3 @@ heartbeats but its work finder has not ticked for 2x its own interval.
 4. Reclaim only touches Loom-managed paths. Space held by anything else (logs,
    caches, another tenant) must be freed by hand.
 5. The halt lifts within a tick or two of free space reaching the resume level.
-
-**Move the ETA authority off a sick host.** Set `fleet.etaAuthority` in the
-committed config to a healthy host id (or `LOOM_ETA_AUTHORITY=<host id>` on
-that host), per "One ETA authority per fleet" above, and confirm with
-`loom-daemon eta doctor`. Caveat (#10933): estimates issued before the move
-may never receive an `eta.outcome` (no outcome-coverage accounting or backfill
-yet), so headline ETA scores can look optimistic until that lands; do not
-read the gap as a regression.

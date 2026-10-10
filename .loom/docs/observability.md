@@ -536,30 +536,11 @@ Import it with `POST /api/v1/rules` or paste its query into a new ClickHouse
 alert. The rule's shape has not yet been tested against a live SigNoz. Standing queries are in
 `defaults/observability/signoz/queue-dwell.sql`.
 
-**Fleet singleton outputs (#10916).** A one-host fleet job can stop producing
-while every host looks healthy (2026-10-07: 28 of ~30 repos had no
-`eta.estimate` for ~31 h). `defaults/observability/signoz/alerts/fleet-singleton-output.json`
-is the cross-host detector: over the logs table it takes the newest record per
-`loom.kind` (and per `loom.repo` for per-repo rows) and fires when one is older
-than its row's deadline in `fleet_outputs::SINGLETON_OUTPUTS` (2 x cadence, or
-the row's override). It checks the output, never the owning host, and a kind
-with no record in the 72 h window fires. A per-repo output (`eta.fleet_refresh`)
-is expected for every repo the fleet is working on, read from an independent
-roster: any repo with a `pass.summary`, `role_tick.outcome` or `sweep.started`
-record in the window (emitted by the host that works the repo, never by a
-fleet singleton). A roster repo with no output in the window fires, so a repo
-the producing host does not cover, or an outage older than the window, stays
-visible while that activity continues. The roster is activity, not
-configuration: a repo with none of those records in the window (no work finder
-or role runner serving it, or none exporting OTLP) is not expected. An
-`eta.estimate` repo is judged only while it owes estimates: an item stops
-owing once a `land` `eta.outcome` closes it or its newest estimate is a
-refusal. That row is not roster-expanded (owing needs the forge's open items,
-which SigNoz does not hold), so an estimate outage older than the window is
-left to the in-daemon path. `signoz_fleet_singleton_output_alert.rs` asserts
-each embedded deadline equals the registry's. Captain-gauge rows (a
-fleet-store heartbeat, not a log kind) and the Warning `ci.run` row are not in
-this critical rule. The in-daemon `fleet_alert` path is #10924.
+**Fleet singleton outputs (#10916).** The in-daemon `fleet_alert` path
+(#10924) judges the registered one-host fleet outputs (`ci.run` and the
+captain gauges) against `fleet_outputs::SINGLETON_OUTPUTS`. The SigNoz
+cross-host alert that watched the ETA singletons was removed with the ETA
+subsystem (#11098).
 
 **Subscription quota utilization (#9005).** The per-account `tokens.snapshot`
 gauges carry both Claude limit windows: `loom.tokens.usage_fraction` (5-hour)
@@ -817,8 +798,7 @@ operational check on a fleet host (shadow recipe above), not a CI check.
 **Long-running task liveness and self-update decisions (#10414).** Each
 long-running daemon loop beats a process-global liveness registry
 (`crate::task_liveness`) once per finished iteration. The loops are the
-self-update loop (`auto_update`), the ETA fleet refresh
-(`eta_fleet_refresh`), the 5-minute ETA pass (`eta_pass`) and each role-runner
+self-update loop (`auto_update`) and each role-runner
 loop (`role_runner.<role>`). Every 60 s, on its own ticker independent of the
 collector pass, the daemon exports `loom.daemon.task_alive{task}`. The value
 is `1` while the loop has beaten within its staleness window. That window is
@@ -828,9 +808,7 @@ marked itself dead. So a loop that exited, or whose blocking cycle never
 returns, reads `0` within one window. Before #10414 it simply went silent.
 `loom.daemon.task_faults{task,reason}` counts `panic` (an iteration panicked
 and the loop caught it), `overrun` (an iteration ran past the loop's own
-bound), `exit` (the loop stopped for good) and, on `task=eta_pass` only,
-`eta_non_authority_emit` (a host that is not the fleet's ETA authority reached
-the ETA sink; the records were dropped, #10498). The same entries are listed
+bound) and `exit` (the loop stopped for good). The same entries are listed
 under `Task liveness:` in `loom-daemon status`, and as `task_liveness` in
 `status --json`. Alert on `task_alive == 0`, and also on the series going
 silent: that means the sampler or the whole daemon stopped. The self-update

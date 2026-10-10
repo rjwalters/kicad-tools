@@ -1587,9 +1587,9 @@ else
 fi
 ```
 
-`eval` is safe here exactly as it is for `claim-staleness.sh`: the script
-emits only `KEY=VALUE` lines built from a fixed enum, pre-sorted plain-text
-blocker lines and a hex hash — never raw forge text. **If
+`eval` is safe here because every value is shell-quoted, not because of its
+source: `BLOCK_REASON`/`ORTHOGONAL` are your own free text, echoed back
+as one quoted word each (#9041). **If
 `.loom/scripts/dep-recheck-fingerprint.sh` is missing** (an older install
 that has not been resynced yet): fall back to computing `VERDICT`/`BLOCKERS`
 inline exactly as this section did before #7281, but apply the same UNKNOWN
@@ -1768,7 +1768,7 @@ with `loom:operator-only`. Read body, escalation comment, and bounce comment, th
   then `loom-daemon operator-decision apply <number>` (clears the bounce label).
   Same for a prose `loom:operator-decision` issue you touch, if faithful.
 - **No real operator call**: remove the label, comment why, and re-route per
-  `label-state-machine.md` (normal flow, `loom:operator-objective`, or inbox mail).
+  `label-state-machine.md` (normal flow, `loom:operator-objective`, or a human-gated park).
 - **No-loop guard**: a decision-bounce comment newer than your repair marker means
   the repair bounced. Comment once and leave it alone.
 

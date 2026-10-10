@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1001",
-  "loom_commit": "be7061927944ebcc89235c083bd5d776632f5855",
+  "loom_version": "0.19.1009",
+  "loom_commit": "8889f7bd1eccfb4bc8239e7f5669b65f9815c30e",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -341,7 +341,6 @@
     ".claude/commands/loom/cargo-target-isolation.md",
     ".claude/commands/loom/sweep-backend-detection.md",
     ".claude/commands/loom/sweep-reference.md",
-    ".loom/docs/eta.md",
     ".loom/docs/tracing.md",
     ".loom/hooks/guard-readonly-dirs.sh.template",
     ".loom/hooks/tests/test-guard-background-subagents.sh",
@@ -391,7 +390,15 @@
     ".loom/scripts/tests/test-check-ci-status.sh",
     ".loom/scripts/tests/test-dep-recheck-fingerprint.sh",
     ".loom/scripts/tests/test-merge-pr-label-freshness.sh",
-    ".loom/scripts/tests/test-spawn-codex-session-exec.sh"
+    ".loom/scripts/tests/test-spawn-codex-session-exec.sh",
+    ".loom/docs/priority-model.md",
+    ".claude/commands/loom/champion-critical-file-hold.md",
+    ".loom/docs/label-state-machine.md",
+    ".loom/docs/lease-record.md",
+    ".loom/docs/rollout-check.md",
+    ".loom/docs/telemetry-kind-pick-decision.md",
+    ".loom/scripts/dep-recheck-fingerprint.sh",
+    ".loom/scripts/tests/test-sweep-lease-renew-lifecycle.sh"
   ],
   "last_resync": "2026-10-10",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",

@@ -30,7 +30,7 @@
 - [Forge-side pipeline snapshot (`status --pipeline`, #3977)](#forge-side-pipeline-snapshot-status---pipeline-3977)
 - [Section-scoped status (`status --json --section`, #10787)](#section-scoped-status-status---json---section-10787)
 - [One-shot fleet vitals (`loom-daemon health`, #4761)](#one-shot-fleet-vitals-loom-daemon-health-4761)
-- [ETA tracker (`autonomous.eta`, #9289)](#eta-tracker-autonomouseta-9289)
+- [`.loom/state/` tracking contract (#9592)](#loomstate-tracking-contract-9592)
 - [Reaper task](#reaper-task)
 - [Stale-claim reconciliation & the sweep journal (#3953, fixed #3975, extended to PR-side claims #4367)](#stale-claim-reconciliation--the-sweep-journal-3953-fixed-3975-extended-to-pr-side-claims-4367)
 - [Stacked-PR dependency — #3729 (v1), #3747 (v2 item 1)](#stacked-pr-dependency--3729-v1-3747-v2-item-1)
@@ -1414,7 +1414,9 @@ answering the on-command verbs below.
 | `fleet.repo` | `LOOM_FLEET_REPO` | *(unset: feature off)* | The store, `OWNER/REPO`. Read from the daemon workspace's effective config (any tier) |
 | `fleet.ref` | `LOOM_FLEET_REF` | `main` | Branch, tag or commit to read |
 | `fleet.syncIntervalSecs` | `LOOM_FLEET_SYNC_INTERVAL_SECS` | `300` | Cadence of the daemon's own sync timer; clamped up to a `30`s floor |
-| `fleet.autoApply` | `LOOM_FLEET_AUTO_APPLY` | `false` | Let a **timer** pass write (render) and apply (roster) on its own. Off by default — `roster --apply` deregisters workspaces |
+| `fleet.autoApply` | `LOOM_FLEET_AUTO_APPLY` | `false` | Let a **timer** pass write (render) and apply (roster) on its own, cloning a desired repo that is not cloned yet ([Roster clones](#roster-clones-11218)). Off by default — `roster --apply` deregisters workspaces |
+| `fleet.cloneMaxPerPass` | `LOOM_FLEET_CLONE_MAX_PER_PASS` | `2` | Most missing clones one `autoApply` timer pass clones; the rest wait for the next pass. `0` never clones |
+| `fleet.cloneTimeoutSecs` | `LOOM_FLEET_CLONE_TIMEOUT_SECS` | `300` | Wall-clock cap on one clone (clamped up to `30`); a clone that hits it is killed, removed and retried next pass |
 | *(startup cap)* | `LOOM_FLEET_SYNC_STARTUP_TIMEOUT_SECS` | `60` | Wall-clock cap on the startup pass, so a hanging forge cannot hold up boot. `0` waits indefinitely |
 | *(host identity)* | `LOOM_HOST_ID` | `$HOSTNAME` → `hostname` | This host's name in the store (`fleet/hosts/<host>/`, `fleet/state.yml`); `--host` overrides it per command |
 
@@ -1599,7 +1601,9 @@ through the same code paths as `loom-daemon workspace remove` / `hold` /
 `release` / `add` / `set-priority` (removes first, then mode changes; a
 maintain-only add is registered maintain-only in the same write), and only for
 repos already cloned under
-`root` — a missing clone is reported and exits `1`, and is never cloned here.
+`root` — a missing clone is reported and exits `1`, and is never cloned here
+(the daemon's `fleet.autoApply` timer pass clones it: [Roster
+clones](#roster-clones-11218)).
 
 **Fails closed.** The roster carries the fleet's firewall inputs, so it is
 read only from a snapshot the forge confirmed current in the same invocation
@@ -1695,7 +1699,8 @@ runs the same reader the verbs above use, twice over:
   published on the event bus as `fleet.sync.drift`, and recorded for
   `loom-daemon status` — and **nothing is written**, unless `fleet.autoApply` is
   on, in which case a timer pass renders and applies exactly as `render` /
-  `roster --apply` would. `autoApply` is ignored (with a warning) on a repo that
+  `roster --apply` would, and also clones a desired repo that is not cloned
+  yet ([Roster clones](#roster-clones-11218)). `autoApply` is ignored (with a warning) on a repo that
   sets `daemon.delegatedTo`.
 
 Three properties are preserved deliberately:
@@ -1720,6 +1725,57 @@ drift, roster drift, and whether anything was written), and `status --json`
 carries the same record under `fleet_store`. Both are read host-locally from
 `~/.loom/fleet-sync-status.json`, so they still answer when the daemon does not
 — including when the startup pass itself is what went wrong.
+
+### Roster clones (#11218)
+
+Admitting a repo is a fleet-store merge and nothing else. A timer pass with
+`fleet.autoApply` on **clones** a desired repo that has no clone under `root`
+yet, then registers it in the same pass, exactly as an existing clone is
+registered (its `fleet_priority`, `fleet: maintain`, `add_and_trust`; nothing
+is written into the working tree). Without `autoApply` the missing clone is
+only reported, as before.
+
+- **Only from a fail-closed roster.** The clone acts on the plan the
+  fail-closed roster read just built, so an unconfirmable snapshot, a
+  `firewall: true` record or a both-flags roster never reaches it.
+- **HTTPS, with this daemon's forge credential.** The record's `remote` names
+  the repo (`git@github.com:o/n.git`, `ssh://git@github.com/o/n.git` or
+  `https://github.com/o/n(.git)`); the clone always uses
+  `https://github.com/o/n.git`, never SSH. Git runs as every other daemon git
+  network call does: no prompt, the host's credential helper, and, for an owner
+  with its own per-owner credential, that owner's `GH_CONFIG_DIR`. It also runs
+  with `protocol.allow=never`, `protocol.https.allow=always` and
+  `protocol.ssh.allow=never`, so a host `url.*.insteadOf` rewrite to SSH fails
+  the clone rather than using SSH. A record
+  with no `remote`, or one that is not a github.com repo, is reported
+  (`clone REFUSED`) and never guessed at.
+- **Never over something.** A path that exists and is not an empty directory
+  is refused and left untouched. The clone is made in a uniquely-named hidden
+  sibling (`.<dir>.loom-clone-<random>`) whose first content is a Loom marker
+  file, and renamed into place only when complete, so a failed or killed clone
+  never leaves a half-repo the next pass would register; the sibling is
+  removed on failure. A leftover sibling is reclaimed only when it carries the
+  marker; one with that name and no marker (or a symlink) is left untouched
+  and the clone is refused with a report. A volume below the `diskWarnFreeGb`
+  floor skips the clone.
+- **Bounded.** At most `fleet.cloneMaxPerPass` clones per pass, each capped
+  at `fleet.cloneTimeoutSecs`; the rest are `deferred`. A failure is recorded
+  and retried after a per-repo backoff (5 minutes, doubling to 2 hours; held
+  in memory, so a restart resets it), never a crash and never a roster error.
+  Repos that have never failed are tried first, then the least recently
+  failed, so a repo that keeps failing cannot use up the cap. The
+  startup pass never clones (boot does not wait on a transfer), and neither
+  does a pass whose run state is `paused` or `stopped`. A clone runs on the
+  timer's own pass, so a slow one delays the next tick by at most
+  `cloneMaxPerPass × cloneTimeoutSecs`, and a `paused`/`stopped` order that
+  lands during a clone is read that much later.
+- **Visible.** Each attempt is a `roster: CLONED …` / `clone FAILED …` /
+  `clone REFUSED …` / `clone deferred …` line on the `Fleet store:` status
+  block, a `roster.clones[]` entry (`name`, `repo`, `path`, `outcome`,
+  `durationMs`, `registered`, `detail`) in `fleet-sync-status.json`, a daemon
+  log line, and an event on the bus topic `fleet_sync.clone` (`host`, `repo`,
+  `name`, `dir`, `outcome`, `durationMs`, `registered`, `detail`, with no
+  absolute path).
 
 ### Run-state enforcement (#9598)
 
@@ -2274,9 +2330,6 @@ For each workspace the first rule that matches ends the attempt:
   both only bring the checkout to `origin/<default>`, so a race converges. A
   checkout left dirty by the retired shell resync shows up once and needs a
   one-time clean-up.
-- **Not the fleet-refresh task.** `eta-fleet-refresh` (#10263) refreshes ETA
-  snapshots through the forge API on the fleet captain. It runs no git command
-  in any checkout and is unrelated to this step.
 - **A host behind a repo still fast-forwards.** The checkout moves to whatever
   is on the default branch, even when those installed files are newer than this
   daemon. Whether that pair may dispatch is the host roll's decision (#10719).
@@ -2327,17 +2380,6 @@ Reporting:
   the two in-flight states are reported only after three passes in a row. The
   memory behind this is per process: a restarted daemon reports each standing
   skip state once more.
-
-### ETA fit publication branch (#10395)
-
-Besides the reviewed state on `fleet.ref`, the store carries one machine
-artifact on its own branch, `fleet.etaFitRef` (default `eta-fit`): the fleet
-captain's fitted ETA coefficients (`eta/fit/<fit_id>.json` plus the
-`eta-fit-pub/v1` envelope `eta/fit/latest.json`). The captain's writer App needs
-`contents: write` on the store and the branch must be exempt from the `main`
-ruleset; other hosts read it with the App they already use. `fleet.etaFitMaxAgeDays`
-(default 3) bounds how old a publication may be. Contract, verification and
-fallback: [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263).
 
 ## Fleet model A/B — `sweep-experiment plan` (#8055 phase 1)
 
@@ -2896,7 +2938,7 @@ command needs to run again at all before those checks ever see it.
 By default the multi-repo work-finder and epic supervisor iterate
 `effective_roots()` in **registration order**, so a deep product-repo backlog can
 starve the tool repos whose fixes compound. Priority tiers add cross-repo dispatch
-ordering:
+ordering (superseded by the weighted draw in [`priority-model.md`](priority-model.md), #11103):
 
 - **Registry schema** — each `~/.loom/workspaces.json` entry gains an optional
   `priority` integer (`Workspace.priority`, `loom-daemon/src/workspace_registry.rs`):
@@ -3132,13 +3174,10 @@ at most once per `reminderHours` (so 24h is `1 + floor(24h / reminder)` alerts).
 Active alerts persist in `.loom/logs/fleet-alert-state.json`, so a restart does
 not re-announce them.
 
-Delivery is two independent sinks (one failing never suppresses the other):
-the event bus (an `operator_priority.escalation` event with issue `0`, which the
-Safehouse sink relays to the team Matrix room) and the loom-ui inbox
-(`LOOM_UI_INBOX_URL` + `LOOM_UI_INGEST_KEY`; keyed
-`mail-<host>-fleet-degraded-<condition>`, `resolve: true` on clear; the key is
-sent only as a Bearer header, never on argv or in logs; unset logs once and
-skips). **No forge call is made anywhere in this path**, so it still delivers
+Delivery is the event bus (an `operator_priority.escalation` event with issue
+`0`, which the Safehouse sink relays to the team Matrix room); with no bus the
+thread does not start. Loom sends no inbox mail (#11087).
+**No forge call is made anywhere in this path**, so it still delivers
 while `gh` is rate-limited. `loom-daemon health` output and exit codes are
 unchanged.
 
@@ -3560,7 +3599,6 @@ visibility" below:
 | `queues` | per-root ready (`loom:issue`) counts **plus the review-side axes** (`loom:review-requested` / `loom:changes-requested` / `loom:pr`), and a per-repo *review stall* verdict | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
 | `throughput` | merges across managed repos inside the window | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
 | `operator_attention` | fleet-wide open PRs labeled `loom:operator` (the first-class, re-evaluable "a human is needed" hold, #5502) — count, `CONFLICTING`-mergeable sub-count, oldest age in days — plus open issues labeled `loom:operator-only` (the hard park). **Always `GREEN`** (#8091): held work is normal steady state, not a fault, so this section can never move `health`'s exit code — see "`operator_attention` is always GREEN" below | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
-| `inbox_mail` | **conditional** (#10137): only on a host meant to send operator mail (`LOOM_UI_INBOX_URL` set, or a real observability endpoint -- not a placeholder host, not `enabled: false`) that cannot resolve the inbox URL or ingest key file — Degraded, naming each missing item and its fix (paths only, never the key) | `inbox_config::collect_health` (same resolution as `loom-daemon forge inbox-config`) |
 
 #### `queues`: the review-stall rule (#5021)
 
@@ -3776,19 +3814,9 @@ subprocess — and is the *only* place any verdict rule lives:
 - `loom-daemon status` keeps its own (unchanged) rendering; `fleet status`
   reuse is a follow-up (it would need a `health --json` fan-out over ssh).
 
-## ETA tracker (`autonomous.eta`, #9289)
+## `.loom/state/` tracking contract (#9592)
 
-Per-issue `finish` / `land` estimates with a recomputable explanation, scored
-against their outcomes and exported as `eta.estimate` / `eta.outcome` (OTLP
-only). **On by default** wherever observability runs: a bus subscriber
-re-estimates on every sweep transition, and the collector's 5-minute pass
-reads the review-label listings, resolves PRs that left review, and refreshes
-every live estimate. Every observed stage boundary is appended to
-`.loom/logs/eta-stage-samples.jsonl` as it is seen; pending estimates persist
-in `.loom/state/eta/pending.jsonl` (per-host, never git-tracked — see the
-`.loom/state/` contract below).
-
-**`.loom/state/` tracking contract (#9592).** Everything the daemon writes
+Everything the daemon writes
 under `.loom/state/` is per-host runtime state and is never tracked: the
 managed gitignore block ignores `.loom/state/*` wholesale, so a new
 subsystem's directory is covered without registering it. The one tracked
@@ -3799,30 +3827,6 @@ negation only for a file a human writes and wants committed, never for
 daemon output. `post_init.rs`'s
 `every_daemon_state_path_is_ignored_by_the_managed_block` test checks both
 rules with `git check-ignore`.
-
-| key | env | default |
-|---|---|---|
-| `autonomous.eta.enabled` | `LOOM_ETA_ENABLED` | `true` |
-| `autonomous.eta.dryRun` | `LOOM_ETA_DRY_RUN` | `false` (log `eta: would emit …`, enqueue nothing) |
-| `autonomous.eta.refreshSecs` | `LOOM_ETA_REFRESH_SECS` | `300` |
-| `autonomous.eta.historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` — `local` (this host's journals), `augment` (plus the cached fleet snapshot) or `fleet` (the snapshot alone). A no-op until a snapshot is cached (#9343); since #10263 the fleet refresh task below caches one by default, so live estimates switch to `scope = fleet` on a host with reader Apps. `local` opts out |
-| `autonomous.eta.fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily coefficient refit (#10245). It checks hourly, fits at most once per UTC day into `.loom/state/eta/fit/`, makes no forge call, and runs only with `autonomous.eta.enabled`. A no-op until a snapshot is cached. With `fleetRefresh.enabled` (below, #10263) the check runs at the end of every fleet refresh cycle instead of on its own task, so it always sees fresh snapshots. Read at start |
-| `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
-| `autonomous.eta.shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `14` registered heuristics per kind (floor 1, #10525): `current` plus the 13 `eta.snapshot` alternates (#10521; 13 since #10549, was 10). A build over it does not start the ETA tracker; the error names the excess heuristics. Read at start. See [eta → shadow fleet management](eta.md#shadow-fleet-management) |
-| `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. Since #10918 the key is re-read every tick (no restart): `false` makes this host's tick `disabled` (no forge call), **except on the host `fleet.etaAuthority` names explicitly, which refreshes regardless**, so a worker-level `false` override does not starve the authority's fit. The env `LOOM_ETA_FLEET_REFRESH_ENABLED=0` is the hard stop on any host, the authority included (read at start: the loop is not spawned). **With `fleet.etaAuthority` set, the authority, not the captain, is the one refresher** and runs the nightly folds too ([eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498)). Otherwise, **on a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
-| `fleet.etaAuthority` | `LOOM_ETA_AUTHORITY` | unset (#10498). The one host that computes and emits `eta.*` records and fits locally. When set, it also runs the `eta-fleet-refresh` and `eta-nightly-folds` singleton jobs in place of `fleet.captain` (#10918). Unset: the declared `fleet.captain`, else the host whose own `fleetRefresh.enabled` is on; several candidates fall back to the lowest host id with a warning. Re-read every pass. See [eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498) |
-| `autonomous.eta.fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor `900`); first cycle 120 s after start |
-| `autonomous.eta.fleetRefresh.maxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_MAX_CALLS` | `300` forge calls per cycle for refresh passes, host-wide (`304`s and errors count) |
-| `autonomous.eta.fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `600` per cycle for backfill passes, host-wide (was `1500`, most of a 5,000/h installation, #10329); a larger backfill resumes next cycle. Spend per hour is `budget × 3600 / intervalSecs`, so a lowered `intervalSecs` multiplies it |
-| `autonomous.eta.fleetRefresh.reserveCalls` | `LOOM_ETA_FLEET_REFRESH_RESERVE` | `1500` — below this many remaining core calls, skip the rest of that reader installation's repos (App and repo owner, #10329) this cycle |
-| `autonomous.eta.fleetRefresh.backfillDays` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_DAYS` | `21` (floor `15`, the fit window + 1) |
-| `autonomous.eta.fleetRefresh.gapFillMaxCallsPerPass` | `LOOM_ETA_FLEET_REFRESH_GAP_FILL_MAX_CALLS` | `100` (floor `2`) forge reads per repo per cycle while SigNoz is the history source (#10520), the raw-event sync's included: a window SigNoz fully covers makes none (its raw-event cache is not advanced meanwhile, and star coverage ends at the cache's `synced_through` stamp, so later cutoffs read unknown, not unstarred); the rest fill gaps (items SigNoz cannot answer alone, or a window it does not reach back over). Spent: the pass stops `budget`, logs and checkpoints (an interrupted timeline keeps its pages), and resumes next cycle. Not applied when the SigNoz walk fails (the pass-kind budgets still are; reads are still counted). `eta doctor` reports the last count per repo |
-| `autonomous.eta.fleetRefresh.signoz.*` (`enabled`, `endpoint`, `user`, `credentialFile`, `pageSize`, `maxPages`) | `LOOM_ETA_FLEET_SIGNOZ_*` (`_ENABLED`, `_ENDPOINT`, `_USER`, `_CREDENTIAL_FILE`, `_PAGE_SIZE`, `_MAX_PAGES`) | `false` (#9758). Caches the fleet's `sweep.outcome` records from SigNoz (the in-sweep half). Needs `endpoint` (ClickHouse HTTP) and `credentialFile`, the path of an owner-only password file outside every repo, never the secret. `pageSize` `500`, `maxPages` `200`. Runs inside the fleet refresh cycle, so it also needs `fleetRefresh.enabled`. With `enabled`, `historyPrimary` (`LOOM_ETA_FLEET_SIGNOZ_HISTORY_PRIMARY`, default `false`, opt-in, #10520), when set, also takes each fleet-refresh pass's PR history from the SigNoz timeline first, reading the forge only to gap-fill under `gapFillMaxCallsPerPass`. See [`eta.md` → SigNoz in-sweep half](eta.md#signoz-in-sweep-half-fleetrefreshsignoz-9758) |
-
-Model, heuristics, explanation schema, scoring and queries:
-[`eta.md`](eta.md); the fleet refresh task's passes, resume files, rate-limit
-backoff and calls per refresh: [`eta.md` → Fleet refresh
-task](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263).
 
 ## Reaper task
 
@@ -4212,7 +4216,7 @@ are unaffected:
 Stale-Check: Structural Checks (Role Prompt Prefix Ratchet)
 Stale-Clause: the base move and this PR both touch this check's coupled inputs
 Coupled-Base-Path: CLAUDE.md
-Coupled-PR-Path: defaults/docs/eta.md
+Coupled-PR-Path: defaults/docs/guard-hooks.md
 ```
 
 | Property | Behavior |
@@ -8190,47 +8194,6 @@ Full module-level rationale (including why `evaluate()` stays pure while
 `run()` writes): `loom-daemon/src/fleet_captain.rs`'s "Two arm registries" /
 "Staleness policy" doc sections.
 
-#### The ETA fleet refresh: a fail-open singleton (#10329)
-
-`autonomous.eta.fleetRefresh` (#10263) publishes fleet-wide snapshots that are
-byte-deterministic and host-independent, from reader installations every host
-resolves identically. Running it on N hosts buys nothing and spends N times
-the shared reader budgets. Each tick re-reads the gate for the singleton job
-**`eta-fleet-refresh`**:
-
-| Gate | What the tick does |
-|---|---|
-| `Armed` (this host is the captain) | Arms `eta-fleet-refresh` (`host.health.armed_singleton_jobs`) and runs the cycle |
-| `Refused` (another host is) | **No forge call** (snapshots, backfill, raw events) and no `eta.fleet_refresh` record. The daily fit check still runs, on the snapshots this host has |
-| `NoCaptainDeclared` | Runs the cycle **unarmed**, and logs once that a multi-host fleet should declare a captain. Not listed in `captainless_singleton_jobs` |
-
-**An explicit `fleet.etaAuthority` takes the job over (#10918).** When the key,
-or `LOOM_ETA_AUTHORITY`, names a host, that host arms `eta-fleet-refresh` and
-runs the cycle (gauge state `authority`). It does so even with its own
-`fleetRefresh.enabled` off in config. Every other host, the captain included,
-stands down as `Refused` above. `eta-nightly-folds` follows the same owner. See
-[eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498).
-
-**Why it fails open, unlike `ci-telemetry-poll`**: the gate's fail-closed
-contract protects dedup-sensitive alerts, where a duplicate is a bug. A
-duplicate refresh only costs budget (each writer replaces whole files
-atomically and the output is deterministic). The task is on by default, so
-failing closed would silently stop every single-host install's fit.
-
-**A non-captain host's fit** sees the captain's snapshots only when its
-`LOOM_ETA_FLEET_SNAPSHOT_DIR` points at a directory shared with the captain.
-It then also honours the captain's six-hour backfill hold, read from the
-`refresh/` state beside the snapshots. Otherwise it fits on its own older
-snapshots, or has nothing to fit. The stand-down log line says which. Shipping
-the captain's coefficients to other hosts is separate follow-up work.
-
-**Operator step**: on a multi-host fleet, declare `fleet.captain` naming a
-host that has reader Apps, the OTLP exporter, and every fleet repo provisioned
-or already snapshotted (the repo set is that host's provisioned roots, its own
-repo, and every existing snapshot). Then re-enable `fleetRefresh` on any host
-where it was turned off as a mitigation; the other hosts stand down by
-themselves.
-
 #### Fleet gauges produced by the captain (W12)
 
 Some collector gauges describe the forge, not the host. The forge label-stage
@@ -8257,7 +8220,7 @@ are unchanged on every host. Code: `observability/captain_gauges.rs`.
 
 **How a dispatcher knows the captain is fresh.** Hosts have no channel to
 each other's telemetry, so the captain publishes a heartbeat to the fleet
-store (`fleet.repo`), beside its ETA fit and through the same transport and
+store (`fleet.repo`), through the same transport and
 credentials (#10395): `captain/gauges.json`, schema `captain-gauges/v1`, with
 per job the `as_of` of the captain's last finished pass (its points handed to
 the OTLP sink) and the repos it covered. A dispatcher reads it once per
@@ -8362,12 +8325,7 @@ confirm the captain's `loom.captain.gauge_age_seconds` stays under
 `gauge_age_seconds{task="star-facts"}`, then set the same key on the
 dispatchers. The captain needs the
 OTLP exporter, the fleet repos provisioned, and the writer App's
-`contents:write` on the store's publication branch (already true where the ETA
-fit is published).
-
-**ETA queue friction** is already a singleton: it runs inside the ETA pass,
-which only the ETA authority runs (#10498), and the authority defaults to the
-declared captain. It needs no heartbeat.
+`contents:write` on the store's publication branch .
 
 #### Intake reconcile on the captain (W7)
 

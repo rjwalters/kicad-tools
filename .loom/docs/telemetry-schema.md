@@ -65,10 +65,10 @@ dedupe id (`derived_hex(["loom.record", kind, host_id, emitted_at, record JSON],
 
 Every OTLP **log** record carries its record kind as the ordinary string
 attribute `loom.kind`, equal to the envelope's `kind` tag (`sweep.outcome`,
-`eta.estimate`, `ci.job`, `pr.resolved`, …). That holds for every kind whose
+`ci.job`, `pr.resolved`, …). That holds for every kind whose
 registry row says `otlp: Logs`. Filter logs by kind on this key, never on the
 log `name` column (SigNoz lowers `name` to a JSON function this ClickHouse build
-rejects, loom-ui#747) and never on `body`: the JSON-body kinds (`eta.*`,
+rejects, loom-ui#747) and never on `body`: the JSON-body kinds (`eta.stage_outcome`,
 `pr.resolved`, `pass.*`, `pick.decision`, `auto_update.tick`,
 `token_ranking.refresh`, `ci.job.log`, `session.output`) have a body that is
 not the event name. The mapping stamps it once, after the per-kind mapping, at
@@ -76,8 +76,8 @@ index 1 right after `loom.record_id`, so the 64-attribute bound never drops
 it. The collector's log `keep_keys` admits it. Records exported before #10899
 lack it for every kind except the `sweep.*` lifecycle kinds (other than
 `sweep.phase`), `role_tick.outcome`, `session.summary`, `session.analysis`,
-`pick.decision` and `pass.*`. The `loom.eta.*` attribute filters the ETA
-queries use are unchanged and still valid. Contract:
+`pick.decision` and `pass.*`. The `loom.eta.*` attribute keys of `pr.resolved` and
+`eta.stage_outcome` are unchanged and still valid. Contract:
 `observability/otlp/mapping/tests/loom_kind.rs`, which walks the kind registry.
 
 ### `schema_version` semantics
@@ -252,54 +252,39 @@ fallback), and `captain_gauges/store.rs` uses the neutral
 `fleet_store/publication.rs` helpers instead of `crate::eta::fit`. What is
 emitted did not change.
 
-**ETA-only records.** Only ETA code emits these. Each one either gets a non-ETA
-owner or is dropped with loom-ui's agreement. No disposition is final until
-loom-ui confirms it; track each disposition on #11098.
+**Retired ETA-only records (Stage 3 of #11098).** Loom no longer computes or
+exports ETA. These kinds and metrics were removed with the ETA subsystem, with
+loom-ui's agreement that it computes and scores its own estimates from the
+records above. Their wire tags are retired, not reused.
 
-| Record | Signal | Sole emit site (under `loom-daemon/src/`) | ETA-only | Disposition |
-|---|---|---|---|---|
-| [`eta.stage_outcome`](#etastage_outcome) | log, OTLP only | none since #11126 | no | **kept, non-ETA owner**: moved to the stable table above. The wire tag and attribute keys are unchanged; three estimate-derived fields were dropped with loom-ui's agreement. |
-| [`pr.resolved`](#prresolved) | log, OTLP only | none since #11126 | no | **kept, non-ETA owner**: moved to the stable table above. The wire tag and attribute keys are unchanged. |
-| [`eta.estimate` / `eta.outcome`](#etaestimate--etaoutcome) | log, OTLP only | `observability/eta.rs` | yes | drop, pending loom-ui agreement (predictions, not facts) |
-| [`eta.snapshot`](#etasnapshot) | native only | `observability/eta_snapshot.rs` | yes | drop, pending loom-ui agreement. loom-ui consumes it natively today. |
-| [`eta.fit`](#etafit) | log, OTLP only | `observability/eta_fit.rs` | yes | drop, pending loom-ui agreement |
-| [`eta.fleet_refresh`](#etafleet_refresh) | log, OTLP only | `observability/eta_fleet_refresh.rs` | yes | drop, pending loom-ui agreement |
-| [`eta.backtest.fold` / `eta.backtest.summary`](#etabacktestfold-and-etabacktestsummary) | log, OTLP only | `observability/eta_nightly_folds.rs` | yes | drop, pending loom-ui agreement |
-| `loom.eta.health.*` (14 gauges, [`metric.points`](#metricpoints)) | metric | `observability/ops/eta_health.rs` | yes | drop, pending loom-ui agreement |
+| Retired record | Was |
+|---|---|
+| `eta.estimate` / `eta.outcome` | per-estimate explanation and scored outcome (OTLP) |
+| `eta.snapshot` | native-HTTPS live estimate set |
+| `eta.fit` | daily coefficient-fit check |
+| `eta.fleet_refresh` | one repo's outcome in a fleet snapshot refresh cycle |
+| `eta.backtest.fold` / `eta.backtest.summary` | nightly walk-forward backtest |
+| `loom.eta.health.*` | per-host ETA pipeline health gauges |
 
-ETA-only records leave the daemon by two kinds of path, not one:
+`eta.stage_outcome` and `pr.resolved` are not retired: they have a non-ETA
+owner (`observability/fleet_state/outcomes.rs`) and stay under the stability
+promise above. Their record types (`telemetry/kinds/stage_outcome.rs`,
+`telemetry/kinds/pr_resolved.rs`), OTLP mapping
+(`observability/otlp/mapping/outcome_facts.rs`) and attribute-key list
+(`OUTCOME_FACT_LOG_ATTRIBUTE_KEYS`) live outside the deleted tree.
 
-- **Collector tick.** The `eta::record`, `eta_snapshot::record` and
-  `ops::eta_health::record` calls in `observability/collector.rs` emit
-  `eta.estimate` / `eta.outcome`, `eta.snapshot` and the `loom.eta.health.*`
-  gauges.
-- **Separate task paths.** Each of these has its own `spawn_task`
-  registration in `observability/mod.rs` and offers to the sink directly:
-  `eta.fit` from `observability/eta_fit.rs`, `eta.fleet_refresh` from
-  `observability/eta_fleet_refresh.rs`, and `eta.backtest.fold` /
-  `eta.backtest.summary` from `observability/eta_nightly_folds.rs`.
-
-Removal stages must cover both paths. `eta.stage_outcome` and `pr.resolved`
-are no longer on either path: their record types
-(`telemetry/kinds/stage_outcome.rs`, `telemetry/kinds/pr_resolved.rs`), their
-OTLP mapping (`observability/otlp/mapping/outcome_facts.rs`) and their
-attribute-key list (`OUTCOME_FACT_LOG_ATTRIBUTE_KEYS`) live outside every path
-Stage 3 deletes.
-
-**Non-ETA records that borrow an ETA type.**
+**Non-ETA records that carried an ETA type.**
 [`pass.summary` / `pass.verdict`](#passsummary-and-passverdict),
 [`auto_update.tick`](#auto_updatetick),
 [`token_ranking.refresh`](#token_rankingrefresh), and the `release_fetch` and
-`stale_blocked` release telemetry use `Provenance` as their `loom` object.
-They stay. Stage 2 of #11098 moved `Provenance` to the neutral
-`telemetry/provenance.rs` (`crate::eta::Provenance` is a re-export until
-Stage 3); the wire shape is unchanged, pinned by that module's serialization
-test.
+`stale_blocked` release telemetry use `Provenance` as their `loom` object,
+which lives in the neutral `telemetry/provenance.rs`; the wire shape is
+unchanged, pinned by that module's serialization test.
 
 **Naming note.** The issue text said `eta.stage_sample`, but no record kind
 has that name. Stage exits were exported as `eta.stage_outcome`, from the
 stage journal until #11126 and from `fleet.state` views since.
-`StageSample` is only an in-memory type in `eta/fleet.rs`.
+
 
 ## Record kinds
 
@@ -1724,7 +1709,7 @@ land".
 Long-running task liveness (Issue #10414, `observability/ops/liveness.rs`).
 `task_alive` is sampled every 60 s on its own ticker, not on the collector's
 pass. `task_faults` is emitted when a fault happens. The `task` label is a
-fixed daemon loop name: `auto_update`, `eta_fleet_refresh`, `eta_pass` or
+fixed daemon loop name: `auto_update` or
 `role_runner.<role>`. It is never a repo, issue or path.
 
 | Metric | Unit | Labels | Meaning |
@@ -1759,29 +1744,8 @@ error frame) or `join_error` (the build task did not complete); an outcome
 not seen in the interval emits no point. The section set is deliberately not
 a label.
 
-ETA pipeline health (Issue #10391, `observability/ops/eta_health.rs`). All
-gauges, sampled once per collector pass, so they stay alive when no
-`eta.fleet_refresh` record is emitted (a stood-down host). An unmeasurable
-reading emits no point. `kind` is `start`/`finish`/`land`; `heuristic` is a
-registered heuristic id; `repo` is `owner/repo` of a cached fleet snapshot.
-Never an issue number, sha or path.
-
 | Metric | Unit | Labels | Meaning |
 |---|---|---|---|
-| `loom.eta.health.items` | `{item}` | `kind`, `heuristic`, `reason` ∈ `answered` or a `no_estimate_reason` | live items in the tracker's pending set (newest estimate per item and heuristic). Answer rate is `answered / sum`. Omitted when ETA is disabled |
-| `loom.eta.health.fit_loaded` | `1` | none | `1` when a coefficient file is loaded, else `0` |
-| `loom.eta.health.fit_age_seconds` | `s` | none | now minus the loaded file's cutoff. Omitted when none is loaded |
-| `loom.eta.health.fit_check_age_seconds` | `s` | `reason` (the last fit check's outcome or skip reason) | time since the last fit check. Omitted until one has run in this process |
-| `loom.eta.health.snapshot_age_seconds` | `s` | `repo` | now minus each cached fleet snapshot's `as_of` |
-| `loom.eta.health.refresh_gate` | `1` | `state` ∈ `captain`, `authority`, `no_captain`, `stand_down`, `disabled` | `1` for the current gate state, `0` for the other four. `authority` (#10918): this host refreshes as the explicit `fleet.etaAuthority`; `captain`: it refreshes as `fleet.captain` (no explicit authority); `disabled`: its own `fleetRefresh.enabled` is off and it is not the explicit authority. Before the first tick it is the state the read-only gate resolver reports (`disabled` when the loop does not run) |
-| `loom.eta.health.refresh_last_cycle_age_seconds` | `s` | none | time since the last refresh tick (stand-down ticks count). Omitted before the first tick; keeps growing if the loop stalls |
-| `loom.eta.health.refresh_repos` | `{repository}` | `reason` (a fleet-refresh stop reason) | repos per stop reason in the last tick that refreshed; a reason that drops out is exported once as `0` |
-| `loom.eta.health.snapshot_rows` | `{row}` | none | rows in the last `eta.snapshot` this process built. Omitted until one was built |
-| `loom.eta.health.snapshot_alternates_rows` | `{row}` | none | of those, rows with non-empty `alternates` (#10390) |
-| `loom.eta.health.snapshot_rows_truncated` | `{row}` | none | rows the last `eta.snapshot` dropped at its 2000-row cap or 1 MiB budget (#10928). Above `0`, the dashboard has no fresh ETA for those items: alert on it |
-| `loom.eta.health.snapshot_alternates_truncated` | `{row}` | none | rows the last `eta.snapshot` sent without their `alternates` because they did not fit the 1 MiB budget (#10928) |
-| `loom.eta.health.snapshot_bytes` | `By` | none | compact JSON size of the last `eta.snapshot`, at most 1 MiB (#10928): headroom against the dashboard's 2 MiB state value |
-| `loom.eta.health.pending_over_cap` | `{estimate}` | none | cumulative pending estimates evicted by the `MAX_PENDING` cap since process start (#10496). Omitted before the first ETA pass; a rising value means refreshes are being thinned (redundant middles, then pairs to their earliest). Whole series are evicted only when distinct series alone exceed the cap; the daemon log's `whole series lost` count reports those |
 | `loom.codex_session.state` | `1` | `account`, `state` ∈ `running`, `stopped`, `restarting`, `missing`, `stale_mounts`, `container` | per session-managed Codex account, `1` for the container's current state and `0` for the other four (#10455). `restarting`: Docker is backing off a crash loop (`State.Restarting`; counts as down). `stale_mounts`: the container's workspace mounts differ from what its workspace label would mount today: a registered root under the label is not mounted, a mount is no longer registered, or a mount is one `session start` now refuses although still registered (home, `firewall: true`) (#10364; the reconciler's own definition since #10600). No drift verdict, so never `stale_mounts`, while the workspace registry cannot be read. Only emitted when an enabled account is session-managed, and omitted for a pass where docker could not be queried (never reported as `missing`) |
 | `loom.codex_session.record` | `1` | `account`, `kind` ∈ `hold`, `drift_removal`, `container` | per session-managed Codex account, `1` while that on-disk record stands, else `0` (#10600): `hold` is an operator `accounts session stop` (`.session-hold.json`); `drift_removal` is the reconciler's fail-closed removal for a denied mount (`.session-drift-removed.json`), which keeps the seat down. Emitted with `loom.codex_session.state`, and omitted the same way |
 | `loom.codex_session.mount_drift` | `{path}` | `account`, `kind` ∈ `missing`, `extra`, `denied`, `container` | per session-managed Codex account whose container has a drift verdict (#10600): how many workspace paths drift that way. `missing`: registered roots it does not mount; `extra`: mounts no longer registered; `denied`: mounts `session start` refuses today (not counted in `extra`). Omitted for a missing, private-clone or unlabelled container, and while the registry cannot be read |
@@ -2170,158 +2134,6 @@ retried batch never makes a stalled work finder look live. The fleet
 dashboard renders it as the overview's "Work queue" section, a fleet-wide
 work queue (host, phase, wait, blocking reason, links) and a per-host panel.
 
-### `eta.estimate` / `eta.outcome`
-
-Per-issue ETA estimates and their scored outcomes (Issue #9289). The model,
-the heuristics and the `eta-explanation/v1` schema are in [`eta.md`](eta.md).
-Envelopes carry `schema_version: 12`. **OTLP-only** (native: `false`):
-explanations and outcomes live in SigNoz, per the operator decision on #9289.
-Each record is one log record whose **body is the record's JSON**. For an
-estimate that is the whole explanation, so ClickHouse can `JSONExtract` any
-field; the scalars ride as `loom.eta.*` attributes (`ETA_LOG_ATTRIBUTE_KEYS`,
-allowlisted in the collector's `transform/privacy`). Both kinds set the
-envelope's `trace_context` to the issue's D32 story
-(`story_context(repo_id, issue)`), so they land in the issue's story trace;
-a repo with no resolvable `repo_id` gets none.
-
-**One emitter per fleet (#10498).** Only the fleet's ETA authority emits these
-kinds (and `eta.snapshot`, `eta.fit`); every record carries the attribute
-`loom.eta.authority`, the authority's host id, which equals the envelope's
-`host_id`. `uniqExact(host.id)` over `eta.*` in the last hour is `1`. See
-[`eta.md`](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498).
-
-**Ready rows this host does not dispatch (#10903).** An `eta.estimate` for a
-ready row the authority's own planner gave no position, but the fleet can
-dispatch, carries `loom.eta.not_here`. Its value is the row's disposition, for
-example `peer_claim` or `workspace_halted:token_pool`, and it equals the
-explanation's `path.dispatch.not_here`. See
-[`eta.md`](eta.md#the-model).
-
-**Inputs as attributes, and the size cap (#10930).** An `eta.estimate` for a
-fitted heuristic carries `loom.eta.fit_id` (joins `eta.fit`), and one with
-queue features carries `loom.eta.queue_rank`, `loom.eta.queue_ready`,
-`loom.eta.queue_running` and `loom.eta.max_concurrent`: scalar integers on the
-existing row, so no new record kind and no per-path data. The 32 KiB body cap
-now cuts what no replay reads first, keeps the input vector
-(`Features::INPUT_VECTOR`) when it cuts `features`, and marks the record
-`replayable: false` (with `replayable_reason`) if it must drop a replay input.
-`loom-daemon eta explain --file F [--diff F2]` replays an exported body.
-
-**Provenance is required on both.** `version`, the full 40-hex `revision`
-(or `unknown` for a tarball build), `tree_state` and `complete` (a full SHA
-and a `clean`/`dirty` tree) of the computing daemon,
-taken from `telemetry::trace::provenance::daemon()`, the source every span's
-`loom.daemon.*` attributes use. A record without them does not deserialize,
-and one whose provenance does not validate is never emitted. An incomplete
-build (`unknown` revision or tree state) is still emitted with
-`complete: false` (`loom.eta.provenance_complete`), and the accuracy queries
-exclude it. An outcome
-carries **both** the estimating build (`estimate.loom`, exported as
-`loom.eta.version` / `revision` / `tree_state`) and the observing build
-(`loom`, exported as `loom.eta.outcome_version` / `_revision` /
-`_tree_state`).
-
-`eta.estimate`:
-
-| Field | Type | Notes |
-|---|---|---|
-| `trigger` | string | `first`, `transition` (stage, rework or refusal changed) or `refresh` (every `refreshSecs`, default 300) |
-| `explanation` | object | the `eta-explanation/v1` record: `estimate_id`, `heuristic`, `kind`, `loom` (required), `as_of`, `subject`, `current_stage`, `history` (`scope`: `local` until #9343 adds `fleet`; per-source and per-host sample counts), `stages[]`, `branches`, `combination`, `result` (with `p90_sec`, #10211, and `stage_marks`, #9366), `contributions`, `stage_predictions` (#10929, see below), `features` (including the queue, drain and friction group, #10201: `ahead`, `n_stage_repo`/`_fleet`, `exits_repo_*`/`exits_fleet_*`, `merges_repo_24h`, `merges_fleet_6h`, `since_merge_sec`, `open_prs_repo`, `fleet_scope_repos`, `repo_pr_open_skip`; and the item facts, #10231: `tier`, `workspace_priority`, `issue_created_at`, `issue_age_sec`, `sweep_runtime`, `sweep_model`, `sweep_effort`, `attempt`, `judge_verdicts_so_far`, `repo_first_pass_approval_rate`, with `urgent` deprecated and always null; additive, the schema stays v1, omission reasons are free-form strings; see [`eta.md` → Features](eta.md#features)), `features_omitted`, `no_estimate_reason`, `truncated` |
-
-A refusal is an estimate too: `explanation.result` is absent (never zero) and
-`no_estimate_reason` names why. Refusals are emitted when the reason first
-appears and are not refreshed.
-
-`eta.outcome` (one per emitted estimate, when its event resolves):
-
-| Field | Type | Notes |
-|---|---|---|
-| `estimate` | object | the estimate as emitted: `estimate_id`, `kind`, `heuristic`, `loom` (required), `repo`, `repo_id`, `issue`, `pr_number`, `as_of`, `stage`, `age_sec`, `p25_sec`/`p50_sec`/`p75_sec`/`p90_sec` (absent on a refusal; `p90_sec` also absent on an estimate from before #10211), `samples_min`, `no_estimate_reason`, `stage_quartiles[]` |
-| `loom` | object | the observing daemon's provenance (required) |
-| `score` | object | `outcome` (`started` (#9326), `landed`, `finished`, `abandoned`, `censored` (#10233: expired unresolved with p90 already passed — `actual_at` is the censoring instant and only `above_p90` is set)), `actual_at`, `lead_sec`, `error_sec` (`actual − p50`), `abs_error_sec`, `covered` (`p25 ≤ actual ≤ p75`), `below_p25`, `above_p75`, `above_p90` (the late surprise, `actual > p90`, #10211), `pinball_loss_sec` (q = .25, .5, .75), `pinball4_loss_sec` (q = .25, .5, .75, .9, #10211), `horizon_bucket`, `age_bucket`, `stage_at_estimate`, `samples_min`, `stages_actual[]`, `rework_rounds_actual` |
-| `outcome_source` | string | `bus` (in-sweep merge), `pulls_read` (the PR's merge time), `issues_read` (the issue's close state), `sweep_terminal`, `pending_expiry` (a `censored` outcome, #10233) |
-| `outcome_resolution_sec` | integer? | how late the resolution may be |
-| `result` | string? | `finish`: the sweep's terminal class, `exited` or `crashed` |
-| `attribution` | object? | the error split by stage (#10929, see below). Absent when the estimate forecast no stage or the outcome has no `error_sec` |
-
-**Per-stage forecasts and attribution (#10929).** A path-engine estimate's
-explanation carries `stage_predictions`, keyed by stage. It covers each stage
-still ahead and holds `entry_p50` / `entry_p90` (the first entry) and
-`dwell_p50` / `dwell_p90` (total time in the stage across visits), all in
-whole seconds from `as_of` and conditional on reaching the stage. It also
-holds `reach_pct` (the percentage of simulated paths that visit the stage) and
-`alloc` (the stage's share of the p50 total; the stages' `alloc` values sum to
-the simulated p50). These are read off the draws the simulation already made,
-so no quantile moves. Other heuristics omit the field, which means "not
-modelled". The pending summary (`estimate.stage_predictions`) keeps it, so
-the outcome can attribute.
-
-`eta.outcome.attribution` holds `stages`, keyed by stage. Each entry has
-`predicted_entry_sec?`, `predicted_dwell_sec` (`alloc`),
-`actual_entry_sec?`, `actual_dwell_sec` (time observed in the stage after
-`as_of`, summed over visits) and `contribution_sec`
-(`actual_dwell_sec − predicted_dwell_sec`). The object also holds
-`unattributed_sec` and `dominant_stage?` (the largest `|contribution_sec|`).
-**Invariant:** `Σ contribution_sec + unattributed_sec = score.error_sec`.
-`unattributed_sec` collects time the tracker did not observe exactly, an
-applied stall, and a calibration or regime shift between the simulated and
-served p50. It is `0` on a fully observed, unshifted path. The attributes
-are `loom.eta.attribution.dominant_stage` and
-`loom.eta.attribution.unattributed_sec`.
-
-Absent is never zero: `abandoned` outcomes (the issue closed as **not
-planned**) and outcomes of refusals carry no error fields at all, so they are
-counted and never scored. A PR closed unmerged and a sweep that ended before
-any PR are not outcomes at all — the issue's own state decides, and until it
-closes those estimates stay pending.
-
-**`merge_hold` (#10218).** An approved PR held for a human is the
-`merge_hold` stage, so `merge_hold` is a possible `stage` /
-`stage_at_estimate` value (and a `stage_marks[]` / `stages[]` stage) on
-`eta.estimate` and `eta.outcome`, but **only from a heuristic that models the
-hold**: today the shadow `land-2026-10-04-twin-otter-b` and the hold-aware
-wrappers over it (`land-2026-10-04-twin-otter` itself is retired, #10528). Every path-engine
-heuristic refuses it as `blocked`, exactly as before. In `eta.snapshot` it
-never becomes a row's `stage` while `current.land` is one of them; a shadow's
-estimate appears only under the row's `alternates[]` (stage-less, #10390). Once a hold-aware
-heuristic is promoted, consumers must render an unknown `stage` value
-gracefully.
-
-### `eta.fleet_refresh`
-
-One repo's outcome in one cycle of the daemon's fleet snapshot refresh task
-(Issue #10263; the task is in [`eta.md` → Fleet refresh
-task](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263)). Envelopes
-carry `schema_version: 12`. **OTLP-only** (native: `false`), one log record per
-repo per cycle, **skipped repos included**, so a repo the task never manages
-to refresh shows up as such. The body is the record's JSON; the scalars ride as
-`loom.repo` plus `loom.eta.fleet.*` attributes (in `ETA_LOG_ATTRIBUTE_KEYS`,
-allowlisted in the collector's `transform/privacy`). The record time is the
-cycle's start. Provenance is required, as for `eta.estimate`: `loom` exports as
-`loom.eta.version` / `revision` / `tree_state` / `provenance_complete`, and a
-record whose provenance does not validate is never emitted.
-
-| Field | Type | Notes |
-|---|---|---|
-| `repo` | string | `owner/repo` (`loom.repo`) |
-| `cycle_id` | string | derived, never random: `derived_hex(["loom.eta.fleet_refresh", host_id, cycle start])`; shared by every repo of one cycle |
-| `started_at` | RFC3339 | the cycle's start |
-| `pass` | string | `backfill`, `refresh`, or `none` (skipped before a pass was chosen) |
-| `stop_reason` | string | `complete`, `not_modified`, `budget`, `reserve`, `rate_limited`, `coverage`, `breaker_open`, `backoff`, `no_reader`, `unsupported_forge`, `forge_error`, `write_error`, `shutdown` |
-| `promoted` | bool | the pass completed and its snapshot was published |
-| `prs_read` | integer | PR timelines read this cycle |
-| `pass_done` | integer | PRs the pass has read in total |
-| `timelines_incomplete` | integer | timelines that did not parse (counted, contribute nothing) |
-| `samples_added` | integer | published samples after minus before |
-| `raw_events_added` | integer? | rows appended to the raw event cache (#10197), when its sync ran |
-| `forge_calls` | integer | requests made, `304`s and failures included |
-| `not_modified_calls` | integer | of which `304`s |
-| `ratelimit_remaining_min` | integer? | the lowest `x-ratelimit-remaining` seen |
-| `reader_app` | string? | the reader App's id (not a secret) |
-| `snapshot_id` / `as_of` | string? / RFC3339? | the published snapshot after the cycle |
-| `duration_ms` | integer | wall time spent on the repo |
-| `loom` | object | the computing daemon's provenance (required) |
-
 ### `auto_update.tick`
 
 One self-update loop decision (Issue #10414). The loop is described in
@@ -2390,48 +2202,6 @@ token's prefix inside the probing process.
 | `duration_ms` | integer | wall time of the round |
 | `loom` | object | the running daemon's provenance (required) |
 
-### `eta.fit`
-
-One daily-fit check (Issue #10391), whether it fitted or not. Envelopes carry
-`schema_version: 12`. **OTLP-only** (native: `false`). Each caller of the fit
-check emits exactly one record per check: the fleet refresh tick's end-of-cycle
-check (`trigger: fleet_refresh`, every host including a stand-down one) and the
-standalone daily task (`trigger: daily_task`, when fleet refresh is off). They
-double as the fit loop's heartbeat, about 24 per host per day. The body is the
-record's JSON; the scalars ride as `loom.eta.fit.*` attributes (in
-`ETA_LOG_ATTRIBUTE_KEYS`, allowlisted in the collector's `transform/privacy`).
-The record time is the check's start. Provenance is required, as for
-`eta.estimate`: it exports as `loom.eta.version` / `revision` / `tree_state` /
-`provenance_complete`, and a record whose provenance does not validate is never
-emitted. **Absent is never zero**: every `?` field is omitted when it does not
-apply. `fit_id` joins to the `fit_id` on every twin-otter explanation.
-
-| Field | Type | Notes |
-|---|---|---|
-| `check_id` | string | derived, never random: `derived_hex(["loom.eta.fit_check", host_id, started_at])` |
-| `trigger` | string | `fleet_refresh` or `daily_task` |
-| `started_at` | RFC3339 | the check's start |
-| `outcome` | string | `written`, `skipped`, `error` or `panic` |
-| `skip_reason` | string? | present exactly when `outcome = skipped`: `disabled`, `held`, `today_exists`, `no_snapshots` or `stale_before_grace` |
-| `error` | string? | `error` only; at most 512 bytes of daemon-authored text |
-| `fit_id` | string? | the coefficient file's content id: on `written`, and on `today_exists` (the existing file's) |
-| `cutoff` | RFC3339? | the fit's `T` |
-| `window_start`, `window_days`, `data_through` | RFC3339? / integer? / RFC3339? | the training window and the data horizon `H` |
-| `snapshots` | integer | snapshots read (`0` on `no_snapshots`) |
-| `snapshot_oldest_as_of`, `snapshot_newest_as_of` | RFC3339? | ages are derivable at query time |
-| `snapshot_as_of` | object? | body only: `{repo: as_of}` |
-| `stages` | object? | body only: per fit stage `{rows, exits, exit_censored, merge_events, merge_censored, hazard, aft}`; `exit_censored` counts rows with no exit label, `merge_censored` is `rows - merge_events` |
-| `rows_total`, `rows_censored` | integer? | rows over every stage, and those with a censored exit label |
-| `rows_dropped_missing`, `rows_dropped_no_flags`, `rows_star_unknown`, `dwells`, `pruned` | integer? | the fit report's counts |
-| `coeff_file` | string? | file name, never a path |
-| `coeff_bytes`, `coeff_sha256` | integer? / string? | size and sha256 of the file as written |
-| `duration_ms` | integer | wall time of the check |
-| `loom` | object | the computing daemon's provenance (required) |
-
-The daemon also keeps the last record at `.loom/state/eta/health/fit-check.json`
-(byte-identical to the body) and the last refresh tick at
-`refresh-cycle.json`, for `loom-daemon eta doctor`.
-
 ### `pr.resolved`
 
 A PR that left the review listings, with its forge merge or close instant
@@ -2447,7 +2217,7 @@ listings on the previous pass and is not on this one is read once
 (its review labels were removed) gives none. A repo whose listing failed is
 not compared. **Every host that observes the PR leave emits the record**;
 nothing is elected, and the reader collapses the duplicates by
-`loom.fact_id`. It emits with `autonomous.eta.enabled = false`.
+`loom.fact_id`. It does not depend on any ETA setting.
 
 **Natural key: `(repo, pr_number, state, closed_at)`.** The record carries
 `loom.fact_id = derived_hex(["loom.fact", "pr.resolved", repo, pr_number,
@@ -2495,8 +2265,7 @@ A `ready_wait` row that left the view is not a record until a repo's ready
 listing is known whole (#11139), and a row of a repo no longer managed is not
 a record. **Every host that observes a transition emits it**; nothing is
 elected. `loom.eta.authority` is still emitted, and now names the emitting
-host, not an elected authority. It emits with `autonomous.eta.enabled =
-false`.
+host, not an elected authority.
 
 **Natural key: `(repo, issue, stage, next_stage, forge_transition_at)`.** The
 record carries `loom.fact_id = derived_hex(["loom.fact", "eta.stage_outcome",
@@ -2547,134 +2316,6 @@ pass interval. `forge_transition_at` is new (additive).
 | `resolution_sec` | integer? | how late `left_at` can be: `0` for a forge instant, else the pass interval |
 | `forge_transition_at` | RFC3339? | the forge's instant for the transition; the fact-id key. Absent when unknown |
 | `loom` | object | the observing daemon's provenance (required) |
-
-### `eta.backtest.fold` and `eta.backtest.summary`
-
-The fleet captain's nightly walk-forward backtest (Issue #10492; see
-[eta.md](eta.md#nightly-backtest-folds-autonomousetanightlyfolds-10492)).
-Envelopes carry `schema_version: 12`. **OTLP-only** (native: `false`). Scalars
-ride as `loom.eta.backtest.fold.*` / `loom.eta.backtest.summary.*` attributes
-(in `ETA_LOG_ATTRIBUTE_KEYS`, allowlisted in the collector's
-`transform/privacy`); the body is the record's JSON. The record time is the
-fold's cutoff (the end of its UTC day). Ids are derived from `(heuristic, day)`
-alone. Provenance is required and exports as `loom.eta.version` / `revision` /
-`tree_state` / `provenance_complete`. **Absent is never zero.**
-
-`eta.backtest.fold` (one per registered `land` heuristic per day; the day's
-cohort is the cases first known on it, each scored with its prediction day's
-coefficient file): `fold_id`,
-`heuristic`, `kind`, `day`, `cutoff`, `compared_to` (the `current` heuristic),
-`is_current`, `n_cases`, `n_answered`, `answer_rate?`, `pinball4_loss_sec?`,
-`cov_25_75?`, `late_surprise?`, `paired_pairs`, `delta_pinball4_loss_sec?`,
-`delta_answer_rate?`, `delta_late_surprise?`, `win?`, `fit_id?`, `loom`.
-
-`eta.backtest.summary` (one per non-`current` heuristic): `summary_id`,
-`heuristic`, `kind`, `compared_to`, `as_of_day`, `cutoff`, `cases`, `days`,
-`wins`, `ties`, `win_rate?`, `ci_low?`, `ci_high?` (95% Wilson), `min_folds`,
-`gate_ready`, `gate_detail`, `fitted_from?` (the first prediction day with a
-retained coefficient file; absent with none), `cases_before_fit` (cases
-predicted earlier, left out), `fit_id?`, `loom`.
-
-### `eta.snapshot`
-
-This host's **live** ETA estimate set (Issue #9329) — one row per
-`(repo, issue, kind)` it currently estimates. Envelopes carry
-`schema_version: 12`. **Native-HTTPS only**: the OTLP exporter never receives
-it, the mirror of `queue.snapshot` and the opposite of the OTLP-only
-`eta.estimate` / `eta.outcome` above.
-
-Two kinds, because they answer two questions. `eta.estimate` is an *event* —
-one estimate with its whole explanation, kept in SigNoz for accuracy scoring.
-`eta.snapshot` is a *state* — what this host believes right now, host-scoped
-and newest-wins (the `eta:<hostId>` key in the dashboard's `FleetState`
-Durable Object, like `queue:<hostId>`). It carries no explanation: the
-dashboard's "why this ETA?" fetches the full `eta-explanation/v1` record from
-SigNoz on demand by `estimate_id`, and the accuracy panel queries
-`eta.outcome` there. It is deliberately **not** folded into `queue.snapshot`
-either — that record is the work finder's ready queue, while `land` estimates
-cover building and in-review items that are not in it at all.
-
-The collector samples it on the `host.health` interval, immediately after the
-ETA pass, and **only when the estimate set has changed** since the previous
-snapshot. A tracker that stops estimating therefore shows up as an ageing
-`as_of`, never as a re-stamped copy. **No record at all** (never an empty
-one) in three cases: ETA is disabled (`autonomous.eta.enabled = false`), no
-HTTPS exporter is configured, or nothing is currently estimated — an empty
-snapshot would assert "this host estimates nothing", which is a different
-fact from "this host is not estimating".
-
-| Field | Type | Notes |
-|---|---|---|
-| `as_of` | RFC 3339 | the newest row's `as_of` — the freshness stamp |
-| `rows[]` | array | one row per `(repo, issue, kind)`, at most 2000 and 1 MiB of compact JSON for the whole record (#10928; 200 before). Sent in cut-priority order (`land` with `p50`, then `land` refusals, then `start`/`finish`), `(repo, issue, kind)` within a rank, so a reader that keeps a prefix keeps the rows that matter most; past either bound the lowest-priority rows are dropped |
-| `rows_truncated` | integer | rows dropped by the row cap or the byte budget |
-| `alternates_truncated` | integer | rows sent without the `alternates[]` they have, because those did not fit the 1 MiB budget (#10928). Rows keep alternates in row order, so these are the last rows that have any. `0` (or absent, from older daemons) when none were cut |
-| `rows_truncated_by_kind` | object, optional | `rows_truncated` per kind (`start`/`finish`/`land` -> count). Omitted when nothing was dropped and on older daemons |
-
-Each row:
-
-| Field | Type | Notes |
-|---|---|---|
-| `repo` | string | forge `owner/repo`, never a local path |
-| `visibility` | `public` / `private` | per row; missing or unknown decodes to `private` |
-| `issue` | integer | issue number |
-| `pr` | integer, optional | the PR the work is in, when one is known |
-| `kind` | string | `start`, `finish` or `land` |
-| `p25` / `p50` / `p75` | integer, optional | **remaining seconds** from `as_of`, not an instant. All three absent on a refusal |
-| `heuristic` | string | the heuristic that made it — always the kind's **`current`** one. A shadow candidate's estimate (#9328) is never shown as the ETA; it appears only under `alternates[]` |
-| `estimate_id` | string | the derived id of the `eta.estimate` record in SigNoz: the join key for "why this ETA?" |
-| `as_of` | RFC 3339 | the instant this estimate describes |
-| `stage` | string, optional | the stage the item was in (`ready_wait`, `sweep.curator`, …) |
-| `no_estimate_reason` | string, optional | why there is no estimate (`blocked`, `human_gated`, `insufficient_samples`, …), present exactly when the quantiles are absent |
-| `alternates[]` | array, optional | shadow heuristics' estimates for the same item (#10390); omitted when empty, so `start`/`finish` rows and hosts without shadows are unchanged |
-| `stages` | object, optional | the row's own per-stage forecast (#10929), keyed by stage name (`review_wait`, `doctor`, `merge_wait`, …), covering only the stages still ahead. Omitted on a refusal and for a heuristic that forecasts no stage |
-
-**`stages` (#10929)** is additive: `schema_version` stays 12. It feeds the
-dashboard's Time-stage track (loom-ui#2753). It sits on the row only, never
-on an alternate. Like `alternates[]`, it never costs a row under the 1 MiB
-budget (#10928). The forecasts ride in row order while they fit, and before
-any alternate. Each entry holds whole seconds from the row's `as_of`:
-
-| Field | Type | Notes |
-|---|---|---|
-| `entry_p50` / `entry_p90` | integer | first entry into the stage, over the simulated paths that reach it |
-| `dwell_p50` / `dwell_p90` | integer | total time in the stage across visits, over the same paths |
-| `reach_pct` | integer | percentage (0–100) of simulated paths that reach the stage; entry and dwell are conditional on it, so a `doctor` stage at 30 is a 30% branch |
-
-**`alternates[]` (#10390)** is additive: `schema_version` stays 12 and older
-readers ignore it. One entry per registered non-current heuristic of the row's
-kind that has a pending estimate for the item — the newest per heuristic
-(matched by item, never by equal `as_of`), sorted by `heuristic`, at most 13
-(#10521; 12 since #10549, was 8; a loom-ui that still slices lower reads the
-first ones by id, so either deploy order is safe). Built only from estimates the tracker already holds; an
-alternate never creates a row, a row cut by the row cap takes its alternates
-with it, and alternates are the first thing the 1 MiB budget gives up
-(`alternates_truncated`, #10928). A change to a shadow estimate alone triggers a new
-snapshot. Each alternate:
-
-| Field | Type | Notes |
-|---|---|---|
-| `heuristic` | string | e.g. `land-2026-10-04-twin-otter-b` |
-| `tier` | string, optional | `baseline` or `candidate` (#10525); the ETA chooser offers only `candidate`. Absent only for an id the emitting build does not know, or from a build before tiers |
-| `estimate_id` | string | that heuristic's own `eta.estimate` id, for "why this ETA?" |
-| `as_of` | RFC 3339 | the alternate's own `as_of`, which may differ from the row's; the ETA anchor for `p50` |
-| `p25` / `p50` / `p75` / `p90` | integer, optional | remaining seconds from the alternate's `as_of`. Absent on a refusal (the `p25`/`p50`/`p75` triple is all-or-nothing) |
-| `no_estimate_reason` | string, optional | why the shadow refused (`no_model`, `blocked`, …) |
-
-There is no `stage` on an alternate; consumers use the row's.
-
-**Absent is never zero**, and a refusal is a row. An issue the model cannot
-estimate is carried with its `no_estimate_reason` and no quantiles: that it
-*cannot* be estimated, and why, is the answer — dropping the row would render
-as "no such issue" instead. No field carries forge free text (no title, no
-label text, no comment body): every value is an enum, a number, or a
-daemon-derived id.
-
-**The contract is a golden (#10391).**
-`loom-daemon/src/telemetry/kinds/fixtures/eta-snapshot-golden.json` is the
-wire record byte for byte; changing it means re-vendoring it in the downstream loom-ui consumer.
-A vendored loom-ui consumer fixture (`fixtures/loom-ui/`) must find every key
-path it reads in the golden with a compatible type.
 
 ### `pick.decision`
 
@@ -2763,12 +2404,17 @@ and its ready queue (Issue #10196). It is the state record of the replay
 contract ([`telemetry-replay.md`](telemetry-replay.md)). Envelopes carry
 `schema_version: 12` (the shared post-#8921 gate). The kind is **OTLP-only**:
 one log record per envelope, with the record JSON as the log **body** and a few
-`loom.fleet.*` scalars as attributes. `queue.snapshot` and `eta.snapshot` stay
-native-HTTPS dashboard keys and are unchanged.
+`loom.fleet.*` scalars as attributes. `queue.snapshot` stays a
+native-HTTPS dashboard key and is unchanged.
 
-The collector builds it on the `host.health` interval. **Every host emits its
-own view; nothing is elected.** The record does not depend on ETA: it is sent
-whenever an OTLP exporter exists, whatever `autonomous.eta.enabled` says, and
+The daemon builds and diffs it after **every work-finder tick** (default
+60 s, `autonomous.workFinder.intervalSecs`) and on the collector's 5-minute
+`host.health` pass (#11161). Only the 5-minute pass reads the forge (the
+review listings, repo slugs and visibility); a tick pass reuses what that
+pass read and makes no forge call, so the review rows and census change at
+most once per 5-minute pass while held and `ready_wait` rows follow every
+tick. **Every host emits its own view; nothing is elected.** The record is sent
+whenever an OTLP exporter exists and
 **no record at all** only when there is no OTLP exporter. An anchor with zero
 rows is still sent, because it truthfully says "nothing here". Rows come from
 three non-ETA sources:
@@ -2794,8 +2440,9 @@ its absence from the tick.
 
 **Anchors and deltas.** The first pass of a daemon process sends a full
 **anchor** (`anchor: true`, every row), and so does any pass at which the last
-anchor is at least 3600 s old or the planner stamps changed (a regime
-boundary). Between anchors a pass sends a **delta** (`anchor: false`) only if
+anchor is at least 300 s old (`ANCHOR_INTERVAL_SECS`) or the planner stamps
+changed (a regime boundary). A lost delta therefore leaves a reader's
+reconstruction wrong for at most about 5 minutes. Between anchors a pass sends a **delta** (`anchor: false`) only if
 rows, a census, a repo's `ready_complete` or the plan slots changed. A delta holds the added or changed
 rows, the issues that left (`removed`), and the **full** census of each repo it
 names. **Ready replacement:** a repo with `ready_complete: false` is sent with `ready_replace: true`. Its `ready_wait` rows are not
@@ -2830,6 +2477,7 @@ all `chunk_count` chunks of that `(host, as_of)`.
 | `planner_version` | string | the daemon version whose planner produced the ranks |
 | `planner_config_hash` | string | 12 hex of sha256 over the canonical JSON (sorted keys, no whitespace) of the effective `autonomous.workFinder` and `autonomous.mergeSequencing` blocks; unrelated config never moves it |
 | `fleet_config_hash` | string, optional | the fleet store commit this host's last fleet-sync config pass resolved; absent on a host with no fleet store |
+| `tick_interval_secs` | integer, optional | the seconds between the emitter's passes, its sampling resolution: the work finder's resolved tick interval once it has ticked in this process, else `300` (#11161). Absent from an older emitter, which sampled every 300 s |
 | `census_at` | RFC 3339, optional | when the review listings were read |
 | `slots` | object, optional | `{max_concurrent, occupancy?}` from the last work-finder dispatch plan |
 | `capacity` | object, optional | host capacity beside `slots` (never repeating `max_concurrent` / `occupancy`); additive on `fleet-state/v1`, absent from older emitters. All discrete: `live_workers` (sweeps this host runs), `accounts_usable` (ranking accounts with status `available`) / `accounts_exhausted` (ranking accounts with status `exhausted` only; `blocked`, `rate_limited` and unknown statuses count in neither), both absent when the ranking is unreadable or lists no account, `host_breaker` / `rate_limit_breaker` (`closed` / `open` / `cooldown`, absent when none is enabled), `admission_brake_held` (bool, absent when none is enabled). No utilisation fraction is carried, so a quiet host stays quiet: a change in any field above is a delta, drift is not |
@@ -3187,7 +2835,7 @@ in `daemon-reference.md` for the full design:
   call resolved `Armed` here). Omitted/empty on a host that is not the
   captain, on a host with no declared singleton jobs at all, and on a record
   from a pre-#8848 daemon. The in-daemon job names are `ci-telemetry-poll`,
-  `eta-fleet-refresh`, `stage-dwell` and `intake-reconcile` (W7; its absence
+  `stage-dwell` and `intake-reconcile` (W7; its absence
   on the captain is today's only sign that the fleet has no intake producer).
 - `exporters` / `exported_kinds` (#10196) — export coverage: the exporter names
   that actually started in the emitting process (misconfigured, never-started
