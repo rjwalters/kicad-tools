@@ -264,6 +264,42 @@ falls back to this CLI's own native probe when one isn't present; `monitor`
 never falls back (an empty report when claude-monitor has nothing fresh);
 `probe` always uses the native probe, ignoring claude-monitor entirely.
 
+**`--source probe` probes bad-marked accounts too; nothing else does (#8972).**
+An account with a standing `auth` or `malformed-timestamp` entry in
+`.bad_tokens` is skipped by `auto`, by `monitor`, and by the overdue-reset
+re-probe — those run periodically, and probing a revoked credential every cycle
+is wasted. An **explicitly resolved** `probe` (the flag, or
+`LOOM_RANKING_SOURCE=probe`) sends the request anyway, because it is the command
+an operator runs to ask "is this mark still true?". A host that sets
+`LOOM_RANKING_SOURCE=probe` for its periodic refresh therefore spends one
+`max_tokens: 1` request per marked account per cycle. This is **reporting
+only**: a healthy answer never edits `.bad_tokens`, and the account stays
+excluded from selection — and `<name>|blocked` in `.ranking` — until
+`loom-daemon tokens unblock <name>`.
+
+Every row says whether it is a measurement or a stored record:
+
+| Field (`--json`) | Meaning |
+|---|---|
+| `probed` | Always present. `true` only when a request was sent for this account in this run; `false` for a monitor-served row and for a row that only reports a stored mark. |
+| `bad_mark` | Present only while a `.bad_tokens` entry stands: `{class, reason, marked_at}`. `marked_at` is the recorded timestamp verbatim — an unparseable one is shown as the raw text, never as an invented instant. |
+| `probe_status` | Present only when a permanent mark stands **and** the account was probed: the live verdict (`available`, `blocked`, …). `status` itself stays `blocked`, because it describes selectability. |
+| `error` | The live probe's error (`auth_401`, `timeout`, …) when `probed` is `true`. On an unprobed marked row it still carries the pre-#8972 `"<class>: <reason>"` text. |
+
+How to read a marked account:
+
+| `probed` | `probe_status` / `error` | Table note | Meaning |
+|---|---|---|---|
+| `true` | `available` (or `rate_limited` / `exhausted`), no `error` | `probed live: available — bad-mark recorded … looks stale; still excluded until …tokens unblock <name>` | The credential authenticates. The mark is stale; clear it with `tokens unblock`. |
+| `true` | `blocked`, `auth_401` | `probed live: blocked, auth_401 — confirms bad-mark recorded …` | Confirmed dead just now. Re-authenticate, then `tokens unblock`. |
+| `true` | `error`, `timeout` / `http_5xx` / … | `probed live: error, … inconclusive — bad-mark recorded … stands` | The request failed; nothing was learned. |
+| `false` | — | `not probed — bad-mark recorded …` | A stored record only. Re-run with `--source probe` to test it. |
+
+A self-clearing `exhaustion` mark was already probed under every source
+(#7522); its `status` is the live one and it now also reports its `bad_mark`.
+The table header reads `probed at <time>` only when at least one request was
+sent, and `ranked at <time>; no account was probed in this run` otherwise.
+
 **Provider-dispatched probing (issue #5608).** `--source probe` resolves each
 account's provider from `index.json` (a `.token` file with no manifest row is
 treated as `claude`) and only ever sends a `claude` credential to Anthropic's
@@ -315,7 +351,10 @@ the first probe of each run.
 Status assignment: `available` (utilizations < 99%), `exhausted`
 (`7d_utilization >= 0.99`), `rate_limited` (current 429), `blocked` (401 auth
 failure or token listed in `.bad_tokens`). Probe failures (network, timeout, 5xx)
-are logged and skipped — one bad account does not abort the run.
+are logged and skipped — one bad account does not abort the run. A `blocked`
+row is a live finding only when its `probed` field is `true`; see the
+`--source probe` table above for telling a confirmed-dead credential from a
+stale stored mark.
 
 OAuth tokens shaped `sk-ant-oat01-*` are sent with `Authorization: Bearer` +
 `anthropic-beta: oauth-2025-04-20`; plain API keys use `x-api-key`.
@@ -1574,6 +1613,14 @@ print "No matching entries removed" and exit `0` (the pre-#4212 silent no-op tha
 let an operator dispatch onto a still-poisoned pool), `unblock` now **names the
 still-blocked accounts and exits `3`**. Re-run with `--all-reasons` to drop them,
 or wait for the cooldown to expire them automatically.
+
+**Is an `auth` mark still true? (#8972)** Nothing expires an `auth` entry, and
+re-authenticating an account does not clear it. Before unblocking, run
+`loom-daemon tokens check --source probe`: it probes the marked account and
+reports the live result beside the mark (and the mark's recorded timestamp), so
+`probed live: available … looks stale` means `unblock` is safe and `probed
+live: blocked, auth_401 — confirms …` means the credential still needs a
+re-auth first. The check itself never unblocks anything.
 
 ### Permanence: auth vs exhaustion, at read time and on disk
 
