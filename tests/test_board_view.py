@@ -110,6 +110,53 @@ def board_text(*, outline: tuple[float, float] = (140.0, 80.0), cut_sig: bool = 
     return text
 
 
+# What the rotated fixture adds, in sheet-absolute file coordinates.  The pad
+# centres are worked out by hand from KiCad's convention (a footprint angle is
+# counter-clockwise on screen, y grows downward), not by calling the code under
+# test: R5 sits at (134, 56) turned 90 degrees, so its pad at local (-1, 0)
+# lands at (134, 57); R6 sits at (133, 73) turned 180 degrees, so its pad at
+# local (-1, 0) lands at (134, 73).  Without the rotation they would be at
+# (133, 56) and (132, 73), a millimetre or more off the track.
+ROT_R5_1 = (134.0, 57.0)
+ROT_R6_1 = (134.0, 73.0)
+ROT_VIA = (134.0, 65.0)
+ROT_VIA_SIZE = 0.8
+
+ROT_FOOTPRINTS = """  (footprint "Resistor_SMD:R_0805" (layer "F.Cu") (at 134 56 90)
+    (property "Reference" "R5" (at 0 -2 90) (layer "F.SilkS") (uuid "r5-ref"))
+    (pad "1" smd rect (at -1 0 90) (size 1 1) (layers "F.Cu") (net 4 "ROT") (uuid "r5-1"))
+  )
+  (footprint "Resistor_SMD:R_0805" (layer "F.Cu") (at 133 73 180)
+    (property "Reference" "R6" (at 0 -2 180) (layer "F.SilkS") (uuid "r6-ref"))
+    (pad "1" smd rect (at -1 0 180) (size 1 1) (layers "F.Cu") (net 4 "ROT") (uuid "r6-1"))
+  )
+"""
+ROT_COPPER = """  (segment (start 134 57) (end 134 65) (width 0.25) (layer "F.Cu") (net 4) (uuid "t1"))
+  (segment (start 134 65) (end 134 73) (width 0.25) (layer "F.Cu") (net 4) (uuid "t2"))
+  (via (at 134 65) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 4) (uuid "v1"))
+"""
+
+
+def rotated_board_text() -> str:
+    """``board_text()`` plus net ``ROT``: two rotated footprints and a via.
+
+    ``ROT`` runs R5.1 - via - R6.1 on F.Cu, fully routed.  Both tracks end on
+    the via and each ends on a pad whose position depends on its footprint's
+    rotation, so a pad placed without the rotation, or a via left in the other
+    frame, no longer meets its track.
+    """
+    text = board_text()
+    for anchor, addition in (
+        ('  (net 3 "GND")\n', '  (net 4 "ROT")\n'),
+        ("  (gr_rect ", ROT_FOOTPRINTS),
+        ("  (zone ", ROT_COPPER),
+    ):
+        assert text.count(anchor) == 1
+        before = anchor.endswith("\n")
+        text = text.replace(anchor, anchor + addition if before else addition + anchor)
+    return text
+
+
 @pytest.fixture
 def board(tmp_path: Path) -> Path:
     path = tmp_path / "views.kicad_pcb"
@@ -122,6 +169,14 @@ def cut_board(tmp_path: Path) -> Path:
     """The same board with one SIG trace removed."""
     path = tmp_path / "cut.kicad_pcb"
     path.write_text(board_text(cut_sig=True))
+    return path
+
+
+@pytest.fixture
+def rotated_board(tmp_path: Path) -> Path:
+    """The board with two rotated footprints and a via (net ``ROT``)."""
+    path = tmp_path / "rotated.kicad_pcb"
+    path.write_text(rotated_board_text())
     return path
 
 
@@ -147,6 +202,50 @@ def _is_point(candidate, point, tol: float = 1e-9) -> bool:
     return math.isclose(candidate[0], point[0], abs_tol=tol) and math.isclose(
         candidate[1], point[1], abs_tol=tol
     )
+
+
+def _in_frame(point, absolute: bool) -> tuple[float, float]:
+    """A sheet-absolute file coordinate in the requested drawing frame."""
+    if absolute:
+        return (point[0], point[1])
+    return (point[0] - ORIGIN[0], point[1] - ORIGIN[1])
+
+
+def _drawn_track_ends(ax) -> list[tuple[float, float]]:
+    from matplotlib.collections import LineCollection
+
+    return [
+        (float(point[0]), float(point[1]))
+        for c in ax.collections
+        if isinstance(c, LineCollection)
+        for segment in c.get_segments()
+        for point in (segment[0], segment[-1])
+    ]
+
+
+def _drawn_pad_centres(ax) -> list[tuple[float, float]]:
+    from matplotlib.collections import PolyCollection
+
+    return [
+        tuple(path.vertices[:4].mean(axis=0))
+        for c in ax.collections
+        if isinstance(c, PolyCollection)
+        for path in c.get_paths()
+    ]
+
+
+def _drawn_circles(ax) -> list[tuple[tuple[float, float], float]]:
+    """(centre, diameter) of every circle patch drawn, in data coordinates."""
+    from matplotlib.collections import PatchCollection
+
+    circles = []
+    for c in ax.collections:
+        if not isinstance(c, PatchCollection):
+            continue
+        for path in c.get_paths():
+            box = path.get_extents()
+            circles.append((((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2), box.width))
+    return circles
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +298,7 @@ class TestCoordinateFrame:
         assert min(p[0] for p in outline) == pytest.approx(100.0)
 
     def test_pad_and_track_end_coincide_in_image_data_coordinates(self, board: Path):
+        pytest.importorskip("matplotlib")
         from matplotlib.collections import LineCollection, PolyCollection
 
         pcb = PCB.load(board)
@@ -223,6 +323,120 @@ class TestCoordinateFrame:
             x0, x1 = sorted(ax.get_xlim())
             y0, y1 = sorted(ax.get_ylim())
             assert x0 <= centre[0] <= x1 and y0 <= centre[1] <= y1
+
+    def test_rotated_fixture_adds_only_a_complete_net(self, rotated_board: Path):
+        """Precondition: the tracks really do reach the rotated pads and the via."""
+        pcb = PCB.load(rotated_board)
+        assert sorted(fp.rotation for fp in pcb.footprints) == [0.0, 0.0, 0.0, 0.0, 90.0, 180.0]
+        assert len(pcb.vias) == 1
+        rot = NetStatusAnalyzer(pcb).analyze().get_net("ROT")
+        assert rot is not None
+        assert rot.status == "complete"
+        assert set(missing_links(pcb).links) == {"OPEN"}, "same links as the plain board"
+
+    @pytest.mark.parametrize("absolute", [False, True], ids=["board-relative", "sheet-absolute"])
+    def test_rotated_pads_meet_their_track_ends_in_the_model(
+        self, rotated_board: Path, absolute: bool
+    ):
+        """A pad is placed through its footprint's rotation, in either frame."""
+        pcb = PCB.load(rotated_board)
+        geo = collect_geometry(pcb, absolute=absolute)
+        ends = [end for t in geo.tracks if t.net == "ROT" for end in (t.start, t.end)]
+        rot = NetStatusAnalyzer(pcb).analyze().get_net("ROT")
+        assert rot is not None
+
+        for name, in_file in (("R5.1", ROT_R5_1), ("R6.1", ROT_R6_1)):
+            expected = _in_frame(in_file, absolute)
+            pad = next(p for p in geo.pads if p.name == name)
+            assert (pad.x, pad.y) == pytest.approx(expected), name
+            assert any(_is_point(end, (pad.x, pad.y)) for end in ends), f"no track ends on {name}"
+            # kct net-status prints PadInfo.position, always board-relative.
+            listed = next(p for p in rot.connected_pads if p.full_name == name)
+            shift = ORIGIN if absolute else (0.0, 0.0)
+            assert (listed.position[0] + shift[0], listed.position[1] + shift[1]) == pytest.approx(
+                (pad.x, pad.y)
+            ), name
+
+    @pytest.mark.parametrize("absolute", [False, True], ids=["board-relative", "sheet-absolute"])
+    def test_via_meets_its_track_ends_in_the_model(self, rotated_board: Path, absolute: bool):
+        """Vias move with the rest of the copper when the frame changes."""
+        geo = collect_geometry(PCB.load(rotated_board), absolute=absolute)
+        (via,) = geo.vias
+        assert (via.x, via.y) == pytest.approx(_in_frame(ROT_VIA, absolute))
+        assert via.net == "ROT"
+        on_via = [
+            end
+            for t in geo.tracks
+            if t.net == "ROT"
+            for end in (t.start, t.end)
+            if _is_point(end, (via.x, via.y))
+        ]
+        assert len(on_via) == 2, "both ROT tracks end on the via"
+        # ... and the via is inside the outline it is drawn against.
+        assert geo.bounds is not None
+        x0, y0, x1, y1 = geo.bounds
+        assert x0 < via.x < x1 and y0 < via.y < y1
+
+    @pytest.mark.parametrize("absolute", [False, True], ids=["board-relative", "sheet-absolute"])
+    def test_rotated_pads_and_via_meet_their_track_ends_in_image_data_coordinates(
+        self, rotated_board: Path, absolute: bool
+    ):
+        pytest.importorskip("matplotlib")
+        pcb = PCB.load(rotated_board)
+        geo = collect_geometry(pcb, absolute=absolute)
+        assert geo.bounds is not None
+        ax = _axes(geo, missing_links(pcb, absolute=absolute), geo.bounds)
+
+        ends = _drawn_track_ends(ax)
+        centres = _drawn_pad_centres(ax)
+        for name, in_file in (("R5.1", ROT_R5_1), ("R6.1", ROT_R6_1)):
+            expected = _in_frame(in_file, absolute)
+            assert any(_is_point(c, expected) for c in centres), f"pad {name} not drawn in place"
+            assert any(_is_point(end, expected) for end in ends), f"no track drawn to {name}"
+
+        via_at = _in_frame(ROT_VIA, absolute)
+        barrels = [
+            centre
+            for centre, diameter in _drawn_circles(ax)
+            if math.isclose(diameter, ROT_VIA_SIZE, abs_tol=1e-6)
+        ]
+        assert len(barrels) == 1, "the one via barrel is drawn once"
+        assert _is_point(barrels[0], via_at, tol=1e-6), "via not drawn at its frame position"
+        assert sum(_is_point(end, via_at) for end in ends) == 2, "both ROT tracks end on the via"
+        x0, x1 = sorted(ax.get_xlim())
+        y0, y1 = sorted(ax.get_ylim())
+        assert x0 <= via_at[0] <= x1 and y0 <= via_at[1] <= y1
+
+    def test_net_view_outlines_the_highlighted_nets_tracks(self, rotated_board: Path):
+        """The title promises "tracks ... outlined white": a white line under each."""
+        pytest.importorskip("matplotlib")
+        from matplotlib.collections import LineCollection
+        from matplotlib.colors import to_rgba_array
+
+        pcb = PCB.load(rotated_board)
+        geo = collect_geometry(pcb)
+        report = missing_links(pcb)
+        assert geo.bounds is not None
+
+        def white_segments(net: str | None) -> list[list[tuple[float, float]]]:
+            ax = _axes(geo, report, geo.bounds, net=net)
+            return sorted(
+                [(float(x), float(y)) for x, y in segment]
+                for c in ax.collections
+                if isinstance(c, LineCollection)
+                and (to_rgba_array(c.get_colors()) == to_rgba_array("white")).all()
+                for segment in c.get_segments()
+            )
+
+        assert white_segments(None) == [], "nothing is outlined until a net is named"
+        for net, count in (("ROT", 2), ("SIG", 3)):
+            expected = sorted(
+                [(float(x), float(y)) for x, y in track.points]
+                for track in geo.tracks
+                if track.net == net
+            )
+            assert len(expected) == count
+            assert white_segments(net) == expected, f"{net}: outline is not exactly its tracks"
 
     def test_y_axis_grows_downward(self, board: Path):
         pcb = PCB.load(board)
