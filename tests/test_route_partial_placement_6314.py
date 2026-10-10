@@ -1062,6 +1062,48 @@ class TestSaveAfterAKeptDelta:
             "the hook must not outlive a loop that returned"
         )
 
+    def test_a_failed_handoff_snapshot_is_retried_at_save_time(self, board, monkeypatch):
+        """A transient ``_pcb_text`` failure at the handoff must not strand the save
+        on the source placement: the later save retries and gets the moved one."""
+        source, output = board
+        real = route_cmd._pcb_text
+        calls = {"n": 0}
+
+        def flaky(pcb):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return real(pcb)
+
+        router = _CopperRouter()
+        monkeypatch.setattr(route_cmd, "_pcb_text", flaky)
+        _run_loop(router, source, output)
+        assert route_cmd._interrupt_state["placement_text"] is None
+        assert route_cmd._interrupt_state["pre_save_hook"] is not None
+
+        assert route_cmd._save_partial_results() is True
+        assert _positions(_partial(output))["R2"] == (30.0 + _MOVE, 10.0)
+        info = route_cmd._interrupt_state["partial_save_info"]
+        assert info["snapshot_placement"] == "moved"
+        assert info["snapshot_state"] == "live"
+
+    def test_a_persistent_handoff_failure_is_never_labelled_a_valid_source_snapshot(
+        self, board, monkeypatch
+    ):
+        source, output = board
+        router = _CopperRouter()
+
+        def broken(pcb):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(route_cmd, "_pcb_text", broken)
+        _run_loop(router, source, output)
+
+        assert route_cmd._save_partial_results() is True
+        info = route_cmd._interrupt_state["partial_save_info"]
+        assert info["snapshot_state"] == "inconsistent"
+        assert "boom" in info["snapshot_restore_error"]
+
     def test_a_new_route_flow_forgets_the_previous_flows_placement(self, board):
         source, output = board
         _run_loop(_CopperRouter(), source, output)

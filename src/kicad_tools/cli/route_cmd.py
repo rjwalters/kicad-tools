@@ -4930,10 +4930,22 @@ def _run_placement_delta_feedback(
         if applied:
             try:
                 _interrupt_state["placement_text"] = _pcb_text(pcb)
+                _interrupt_state["pre_save_hook"] = None
             except Exception as exc:
                 if not quiet:
                     print(f"  Warning: could not snapshot the moved placement ({exc})")
-        _interrupt_state["pre_save_hook"] = None
+
+                # The router's copper belongs to the moved board but no text
+                # for it exists.  Leave a hook that retries the serialization
+                # at save time; if that fails too it raises, and the save
+                # records ``snapshot_state: inconsistent`` rather than
+                # presenting the source placement as a valid pairing.
+                def _retry_moved_placement() -> tuple[dict[str, Any], str | None]:
+                    return {}, _pcb_text(pcb)
+
+                _interrupt_state["pre_save_hook"] = _retry_moved_placement
+        else:
+            _interrupt_state["pre_save_hook"] = None
 
     if not quiet and result is not None:
         print(f"  Feedback iterations: {result.iterations}")
