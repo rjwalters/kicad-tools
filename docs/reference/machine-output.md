@@ -164,6 +164,13 @@ Only runs that never built a router (dry runs, early validation exits) fall back
 to the minimal `{"exit_code", "verdict"}` document, and a run killed by
 `--timeout` prints no document.
 
+`summary.verdict` is `"success"` (exit 0), `"unverified"` (exit 10) or
+`"failed"` (any other non-zero exit). `"unverified"` means the post-route DRC
+and/or the stranded-pour check was skipped because `--timeout` ran out: the
+board is saved but not verified, so run `kct check` on it before
+manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
+[`kct route` exit-code ladder](cli.md#kct-route-ladder)).
+
 Every default route also builds a report-only `RoutingPlan` (tile-level
 demand/capacity/overflow from the tile-based global-routing pass) written
 as a `<output_stem>.routing_plan.json` sidecar and surfaced under the
