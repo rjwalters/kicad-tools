@@ -46,6 +46,7 @@ unit-testable without kicad-cli.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import re
@@ -75,6 +76,7 @@ __all__ = [
     "OracleRound",
     "PourLinkCloser",
     "links_from_violations",
+    "relaxed_closure_clearance",
     "run_oracle_completion",
 ]
 
@@ -593,6 +595,34 @@ def _same_comp(a: dict, b: dict) -> bool:
     return a.keys() == b.keys() and all(a[k].equals(b[k]) for k in a)
 
 
+def relaxed_closure_clearance(
+    declared: Any, fab_floor_mm: float | None, working_mm: float
+) -> float | None:
+    """The clearance a failed pour closure may be retried at (Issue #6288).
+
+    ``declared`` is a :class:`~kicad_tools.router.clearance_resolver.DeclaredClearanceRules`
+    read from the board's own files; the result is the strictest copper
+    clearance they declare, floored at the fab minimum -- what ``kicad-cli``
+    measures.  ``None`` when that is not tighter than ``working_mm`` (nothing
+    to gain) or when neither source says anything (never guess a floor).
+    """
+    values: list[float] = []
+    if fab_floor_mm and fab_floor_mm > 0:
+        values.append(float(fab_floor_mm))
+    if declared is not None:
+        for req in (
+            declared.project_requirement(),
+            declared.board_requirement(),
+            declared.via_requirement(),
+        ):
+            if req is not None and req[0] > 0:
+                values.append(float(req[0]))
+    if not values:
+        return None
+    relaxed = max(values)
+    return relaxed if relaxed < working_mm - 1e-9 else None
+
+
 def _route_key(link: OracleLink) -> str:
     return f"route:{link.net}:{link.a.description}|{link.b.description}"
 
@@ -634,10 +664,53 @@ class PourLinkCloser:
     #: Close whole copper clusters instead of the items KiCad happened to name
     #: (Issue #5934).  See :meth:`_cluster_links`.
     canonical_clusters: bool = True
+    #: Issue #6288: the clearance the board is actually judged at (its declared
+    #: rule / the fab floor), when that is tighter than ``clearance`` (the
+    #: router's own working clearance).  Links the working-clearance pass could
+    #: not close are retried once at this value.  ``None`` disables the retry.
+    fallback_clearance: float | None = None
 
     def __call__(
         self, pcb_path: Path, links: Sequence[OracleLink], banned: frozenset[str]
     ) -> ClosureAttempt:
+        attempt, worked = self._close(pcb_path, links, banned)
+        fallback = self.fallback_clearance
+        if fallback is None or fallback >= self.clearance:
+            return attempt
+        # Pour pads on fine-pitch parts (board 05 U3, 0.5 mm pitch) sit between
+        # copper the router kept ``clearance`` apart; at that value no via site
+        # or link route exists although the declared rule (and so KiCad's DRC)
+        # allows one.  Retry only what is still open, at the declared value --
+        # links the first pass closed are untouched, so a board that converges
+        # today is byte-identical.
+        open_links = [
+            lk
+            for lk in worked
+            if not (lk.a.kind == "zone" and lk.b.kind == "zone")
+            and f"pad:{lk.net}:{lk.a.pad_key}" not in attempt.footprints
+            and f"pad:{lk.net}:{lk.b.pad_key}" not in attempt.footprints
+            and _route_key(lk) not in attempt.footprints
+            and _route_key(lk) not in banned
+        ]
+        if not open_links:
+            return attempt
+        relaxed = dataclasses.replace(self, clearance=fallback, fallback_clearance=None)
+        second, _ = relaxed._close(pcb_path, open_links, banned)
+        if second.applied:
+            for key, caps in second.footprints.items():
+                attempt.footprints.setdefault(key, []).extend(caps)
+            attempt.applied += second.applied
+            attempt.notes[:] = second.notes
+            attempt.notes.append(
+                f"retried {len(open_links)} open link(s) at clearance {fallback:g}mm"
+            )
+        else:
+            attempt.notes.append(f"no closure at the declared clearance {fallback:g}mm either")
+        return attempt
+
+    def _close(
+        self, pcb_path: Path, links: Sequence[OracleLink], banned: frozenset[str]
+    ) -> tuple[ClosureAttempt, list[OracleLink]]:
         attempt = ClosureAttempt()
         links = canonical_links(links)
         if self.canonical_clusters:
@@ -662,7 +735,7 @@ class PourLinkCloser:
 
         if attempt.applied and self.refill is not None:
             self.refill(pcb_path)
-        return attempt
+        return attempt, list(links)
 
     # -- canonical clusters (Issue #5934) ---------------------------------------
 
