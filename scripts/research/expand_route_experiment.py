@@ -58,6 +58,17 @@ traps" before trusting a number from a new run: the auto-selected grid changes
 with board size (use ``--grid-policy pinned`` for a clean A/B), and a run cut
 off by ``--timeout`` leaves an artifact that is graded but is not a result.
 
+Issue #6312 added three subcommands that route nothing, and they are the
+cheap checks to run before spending route time on a new comparison:
+
+* ``clusters`` -- what a rigid-clustering rule does to each board;
+* ``plan`` -- the grid plan (every fine zone) each scaled board would get;
+* ``summary`` -- the per-row table of one or more ``route --json`` files, with
+  a zone-checked unfinished-net count and an excluded-net column.
+
+``route`` always passes ``--no-cache``: without it a repeated row replays the
+first run's copper instead of routing.
+
 Usage::
 
     uv run kct build-native --check
