@@ -485,3 +485,231 @@ def test_fleet_boards_scale_without_error():
         tree = load_pcb(ere.resolve_board_path(ere.BOARDS[key]))
         report = ere.scale_board_tree(tree, 2.0)
         assert report.footprints_moved > 0, key
+
+
+# ---------------------------------------------------------------------------
+# Issue #6312: sidecar facts, load/seed, vias per net, cluster-rule flags
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_sidecar_facts_are_copied_and_missing_keys_are_not_invented(tmp_path):
+    import json
+
+    routed = tmp_path / "b_routed.kicad_pcb"
+    assert ere.timeout_sidecar_facts(routed) == {}  # no deadline: no sidecar
+
+    sidecar = tmp_path / "b_routed.timeout.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "stage": "partial-save",
+                "snapshot_state": "last-accepted",
+                "snapshot_placement": "source",
+                "snapshot_discarded_trial": "C4 nudge",
+                "status": "partial",
+                "timeout_seconds": 1200,
+            }
+        )
+    )
+    assert ere.timeout_sidecar_facts(routed) == {
+        "timeout_sidecar": True,
+        "timeout_stage": "partial-save",
+        "snapshot_state": "last-accepted",
+        "snapshot_placement": "source",
+        "snapshot_discarded_trial": "C4 nudge",
+    }
+
+    # A sidecar from before PR #6323 has no snapshot fields. Their absence must
+    # stay an absence: defaulting to "live" would vouch for an unchecked board.
+    sidecar.write_text(json.dumps({"stage": "routing"}))
+    assert ere.timeout_sidecar_facts(routed) == {
+        "timeout_sidecar": True,
+        "timeout_stage": "routing",
+    }
+    # An explicit null (no trial discarded) is a fact and is kept.
+    sidecar.write_text(json.dumps({"stage": "routing", "snapshot_discarded_trial": None}))
+    assert ere.timeout_sidecar_facts(routed)["snapshot_discarded_trial"] is None
+
+    sidecar.write_text("not json")
+    assert ere.timeout_sidecar_facts(routed) == {}
+    sidecar.write_text("[1, 2]")
+    assert ere.timeout_sidecar_facts(routed) == {}
+
+
+def test_vias_are_counted_per_net(tmp_path):
+    vias = (
+        '\n  (via (at 5 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1 "A"))'
+        '\n  (via (at 6 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1 "A"))'
+        '\n  (via (at 7 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2 "B"))'
+    )
+    text = _board(TWO_PARTS, vias).replace('(net 1 "A")\n', '(net 1 "A") (net 2 "B")\n', 1)
+    assert ere.vias_by_net(_pcb(tmp_path, "v.kicad_pcb", text)) == {"A": 2, "B": 1}
+    assert ere.vias_by_net(_pcb(tmp_path, "n.kicad_pcb", _board(TWO_PARTS))) == {}
+
+
+def _stub_route(monkeypatch, *, sidecar: dict | None = None, graded: list | None = None):
+    """Replace the router and the graders so ``run_one`` can be tested offline."""
+    import json
+
+    def fake_route(inp, out, extra, timeout, log):
+        log.write_text("  Coarse grid: 0.065mm\n")
+        if sidecar is None:
+            out.write_text(inp.read_text())
+        else:
+            out.with_name(f"{out.stem}_partial.kicad_pcb").write_text(inp.read_text())
+            out.with_suffix(".timeout.json").write_text(json.dumps(sidecar))
+        return {"cmd": " ".join(extra), "exit_code": 0 if sidecar is None else 124, "wall_s": 0.1}
+
+    def fake_grade(routed, board):
+        if graded is not None:
+            graded.append(routed.name)
+        return {"nets_complete": 1, "nets_total": 1}
+
+    monkeypatch.setattr(ere, "run_route", fake_route)
+    monkeypatch.setattr(ere, "grade", fake_grade)
+
+
+def test_row_records_seed_and_load_at_both_ends(tmp_path, monkeypatch):
+    _stub_route(monkeypatch)
+    loads = iter([(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)])
+    monkeypatch.setattr(ere.os, "getloadavg", lambda: next(loads))
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text(_board(TWO_PARTS))
+
+    row = ere.run_one(ere.Board("x", "b.kicad_pcb"), src, 1.5, "uniform", tmp_path / "w", 43, 60)
+
+    assert row["seed"] == 43
+    assert "--seed 43" in row["cmd"]
+    assert row["loadavg_start"] == [1.0, 2.0, 3.0]
+    assert row["loadavg_end"] == [4.0, 5.0, 6.0]
+    assert row["artifact"] == "final"
+    assert "snapshot_state" not in row and "timeout_sidecar" not in row
+
+
+def test_deadline_row_carries_the_sidecar_snapshot_state(tmp_path, monkeypatch):
+    graded: list[str] = []
+    _stub_route(
+        monkeypatch,
+        sidecar={
+            "stage": "partial-save",
+            "snapshot_state": "inconsistent",
+            "snapshot_placement": "moved",
+            "snapshot_discarded_trial": None,
+        },
+        graded=graded,
+    )
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text(_board(TWO_PARTS))
+
+    row = ere.run_one(ere.Board("x", "b.kicad_pcb"), src, 1.0, "uniform", tmp_path / "w", 42, 60)
+
+    # Read even though a _partial board exists -- the case the harness used to
+    # skip, and the one where the snapshot can be inconsistent (Issue #6314).
+    assert graded == ["b_routed_partial.kicad_pcb"]
+    assert row["artifact"] == "deadline"
+    assert row["snapshot_state"] == "inconsistent"
+    assert row["snapshot_placement"] == "moved"
+    assert row["snapshot_discarded_trial"] is None
+    assert row["timeout_stage"] == "partial-save"
+
+
+def _cluster_parts() -> str:
+    """A 6-pad IC, a 4-pad regulator, and one wired cap beside each."""
+    reg = _footprint("U2", 30, 10, [(str(i + 1), -1.5 + i, 0.0, f"R{i}") for i in range(4)])
+    return (
+        _ic("U1", 10, 10, "N")
+        + reg
+        + _footprint("C1", 10, 12, [("1", -0.6, 0, "N0"), ("2", 0.6, 0, "GND")])
+        + _footprint("C2", 30, 12, [("1", -0.6, 0, "R0"), ("2", 0.6, 0, "GND")])
+        + _footprint("C3", 30, 16, [("1", -0.6, 0, "R1"), ("2", 0.6, 0, "GND")])
+    )
+
+
+def test_cluster_report_shows_the_funnel_and_the_shared_nets(tmp_path):
+    pcb = _pcb(tmp_path, "c.kicad_pcb", _board(_cluster_parts()))
+
+    default = ere.cluster_report(pcb)
+    assert default["rule"] == {"anchor_min_pads": 6, "satellite_max_pads": 2, "max_gap_mm": 3.0}
+    assert default["pad_count_histogram"] == {"2": 3, "4": 1, "6": 1}
+    assert (default["footprints"], default["anchors"], default["small_parts"]) == (5, 1, 3)
+    # Under the default rule the 4-pad regulator is neither anchor nor satellite.
+    assert default["small_parts_near_and_sharing_a_net"] == 1
+    assert (default["multi_part_clusters"], default["cluster_sizes"]) == (1, [2])
+    assert default["clusters"] == [{"anchor": "U1", "anchor_pads": 6, "satellites": {"C1": ["N0"]}}]
+
+    # Lowering the anchor threshold admits the regulator and its near cap ...
+    lowered = ere.cluster_report(pcb, ere.ClusterRule(anchor_min_pads=3))
+    assert (lowered["anchors"], lowered["multi_part_clusters"]) == (2, 2)
+    assert lowered["footprints_in_multi_part_clusters"] == 4
+    # ... and widening the gap admits the far one.
+    wide = ere.cluster_report(pcb, ere.ClusterRule(anchor_min_pads=3, max_gap_mm=6.0))
+    assert wide["cluster_sizes"] == [3, 2]
+    assert wide["clusters"][1]["satellites"] == {"C2": ["R0"], "C3": ["R1"]}
+    # The report and the clustering the scaler applies must agree.
+    assert (
+        sum(1 for g in ere.rigid_clusters(pcb, anchor_min_pads=3, max_gap_mm=6.0) if len(g) > 1)
+        == 2
+    )
+
+    table = ere.render_clusters(
+        [{"board": "x", **wide}, {"board": "y", "error": "input not found"}]
+    )
+    assert "| x | 3, 2, 6 | 5 | 2 | 3 | 3 | 3 | 2 (3, 2) | 5 |" in table
+    assert "| y | -- | ERROR: input not found |" in table
+
+
+def test_rigid_scaling_uses_and_records_the_cluster_rule(tmp_path):
+    src = tmp_path / "c.kicad_pcb"
+    src.write_text(_board(_cluster_parts()))
+
+    _, default = ere.write_scaled_board(src, tmp_path / "a", 1.5, "rigid")
+    assert default.clustered_footprints == 2
+    assert default.to_dict()["cluster_rule"] == ere.ClusterRule().to_dict()
+
+    rule = ere.ClusterRule(anchor_min_pads=3, max_gap_mm=6.0)
+    _, revised = ere.write_scaled_board(src, tmp_path / "b", 1.5, "rigid", rule)
+    assert revised.clustered_footprints == 5
+    assert revised.to_dict()["cluster_rule"] == {
+        "anchor_min_pads": 3,
+        "satellite_max_pads": 2,
+        "max_gap_mm": 6.0,
+    }
+    # No rule is applied in uniform mode, so none is claimed.
+    _, uniform = ere.write_scaled_board(src, tmp_path / "c", 1.5, "uniform", rule)
+    assert uniform.to_dict()["cluster_rule"] is None
+
+
+def test_cluster_flags_reach_the_route_and_clusters_commands(tmp_path, monkeypatch, capsys):
+    seen: list = []
+
+    def fake_run_one(*args):
+        seen.append(args)
+        return {"board": "05", "scale": 1.5, "mode": "rigid", "error": "stub"}
+
+    monkeypatch.setattr(ere, "run_one", fake_run_one)
+    argv = ["route", "--boards", "05", "--scales", "1.5", "--modes", "rigid"]
+    argv += ["--work-dir", str(tmp_path), "--seed", "44", "--anchor-min-pads", "3"]
+    # A single-token --extra must use the = form; argparse rejects the other.
+    argv += ["--max-gap-mm", "5", "--extra=--no-placement-delta-feedback"]
+    assert ere.main(argv) == 0
+    (call,) = seen
+    assert call[5] == 44
+    assert call[-2] == ("--no-placement-delta-feedback",)
+    assert call[-1] == ere.ClusterRule(3, 2, 5.0)
+    with pytest.raises(SystemExit):
+        ere.main([*argv[:-1], "--extra", "--no-placement-delta-feedback"])
+    capsys.readouterr()
+
+    # The no-route report on the in-tree boards, at the rule the note used.
+    out = tmp_path / "clusters.json"
+    assert ere.main(["clusters", "--boards", "03,05", "--json", str(out), "--members"]) == 0
+    printed = capsys.readouterr().out
+    assert "| 03 | 6, 2, 3 | 38 | 5 | 27 | 12 | 12 | 4 (9, 3, 2, 2) | 16 |" in printed
+    assert "| 05 | 6, 2, 3 | 42 | 5 | 35 | 10 | 10 | 4 (5, 5, 2, 2) | 14 |" in printed
+    assert "05: U1 (32 pads) <- " in printed
+    import json
+
+    rows = json.loads(out.read_text())["rows"]
+    assert [r["footprints_in_multi_part_clusters"] for r in rows] == [16, 14]
+    with pytest.raises(SystemExit, match="unknown board"):
+        ere.main(["clusters", "--boards", "nope"])

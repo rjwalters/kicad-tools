@@ -214,9 +214,11 @@ class ScaleReport:
     clusters: int = 0
     clustered_footprints: int = 0  # footprints riding in a multi-part cluster
     outline_mm: tuple[float, float] = (0.0, 0.0)  # scaled outline bbox size
+    cluster_rule: dict | None = None  # rigid_clusters() parameters; None in uniform mode
 
     def to_dict(self) -> dict:
         return {
+            "cluster_rule": self.cluster_rule,
             "scale_x": self.scale_x,
             "scale_y": self.scale_y,
             "mode": self.mode,
@@ -520,6 +522,27 @@ def _segment_hits_rect(p1, p2, rect) -> bool:
     return any(_segments_cross(p1, p2, corners[i], corners[(i + 1) % 4]) for i in range(4))
 
 
+def _satellite_owners(
+    bodies: list[Body], anchor_min_pads: int, satellite_max_pads: int, max_gap_mm: float
+) -> dict[int, int]:
+    """Footprint index of each satellite -> footprint index of the anchor it joins."""
+    anchors = [b for b in bodies if b.pad_count >= anchor_min_pads]
+    owner: dict[int, int] = {}
+    for body in bodies:
+        if body.pad_count > satellite_max_pads:
+            continue
+        best: tuple[float, int] | None = None
+        for anchor in anchors:
+            if not (body.nets & anchor.nets):
+                continue
+            gap = rect_gap(body.rect, anchor.rect)
+            if gap <= max_gap_mm and (best is None or gap < best[0]):
+                best = (gap, anchor.index)
+        if best is not None:
+            owner[body.index] = best[1]
+    return owner
+
+
 def rigid_clusters(
     pcb,
     *,
@@ -540,26 +563,120 @@ def rigid_clusters(
     resistor happens to sit beside it"; without it a dense board collapses into
     one cluster and nothing expands at all.
     """
-    bodies = footprint_bodies(pcb)
-    anchors = [b for b in bodies if b.pad_count >= anchor_min_pads]
-    owner: dict[int, int] = {}
-    for body in bodies:
-        if body.pad_count > satellite_max_pads:
-            continue
-        best: tuple[float, int] | None = None
-        for anchor in anchors:
-            if not (body.nets & anchor.nets):
-                continue
-            gap = rect_gap(body.rect, anchor.rect)
-            if gap <= max_gap_mm and (best is None or gap < best[0]):
-                best = (gap, anchor.index)
-        if best is not None:
-            owner[body.index] = best[1]
+    owner = _satellite_owners(
+        footprint_bodies(pcb), anchor_min_pads, satellite_max_pads, max_gap_mm
+    )
     groups: dict[int, list[int]] = {}
     for index in range(len(pcb.footprints)):
         key = owner.get(index, index)
         groups.setdefault(key, []).append(index)
     return [sorted(members) for _, members in sorted(groups.items())]
+
+
+@dataclass(frozen=True)
+class ClusterRule:
+    """The three :func:`rigid_clusters` parameters, as one value (Issue #6312).
+
+    The defaults are the rule every row in the research note up to #6311 was
+    run with; they exclude nearly all of chorus-test, whose ICs have five pads.
+    """
+
+    anchor_min_pads: int = 6
+    satellite_max_pads: int = 2
+    max_gap_mm: float = 3.0
+
+    def to_dict(self) -> dict:
+        return {
+            "anchor_min_pads": self.anchor_min_pads,
+            "satellite_max_pads": self.satellite_max_pads,
+            "max_gap_mm": self.max_gap_mm,
+        }
+
+
+DEFAULT_RULE = ClusterRule()
+
+
+def cluster_report(pcb, rule: ClusterRule = DEFAULT_RULE) -> dict:
+    """What *rule* does to one board, without routing anything (Issue #6312).
+
+    Reports the funnel (footprints -> anchors -> small parts -> small parts
+    near an anchor -> ...that also share a net with it) and each multi-part
+    cluster by reference, with the nets every satellite shares with its
+    anchor. That last column is what tells "a cap on this IC's own pin" from
+    "a part that only shares ``GND`` with it": when the shared net is always a
+    plane net, the shared-net test filters nothing and nearest-anchor is doing
+    all the work.
+    """
+    bodies = footprint_bodies(pcb)
+    by_index = {b.index: b for b in bodies}
+    anchors = [b for b in bodies if b.pad_count >= rule.anchor_min_pads]
+    small = [b for b in bodies if b.pad_count <= rule.satellite_max_pads]
+
+    def near(body: Body) -> list[Body]:
+        return [
+            a
+            for a in anchors
+            if a.index != body.index and rect_gap(body.rect, a.rect) <= rule.max_gap_mm
+        ]
+
+    small_near = [b for b in small if near(b)]
+    small_near_sharing = [b for b in small_near if any(b.nets & a.nets for a in near(b))]
+    groups = rigid_clusters(pcb, **rule.to_dict())
+    multi = [g for g in groups if len(g) > 1]
+    owners = _satellite_owners(
+        bodies, rule.anchor_min_pads, rule.satellite_max_pads, rule.max_gap_mm
+    )
+    by_anchor: dict[int, list[int]] = {}
+    for satellite, anchor in owners.items():
+        by_anchor.setdefault(anchor, []).append(satellite)
+    detail = [
+        {
+            "anchor": by_index[anchor].ref,
+            "anchor_pads": by_index[anchor].pad_count,
+            "satellites": {
+                by_index[i].ref: sorted(by_index[i].nets & by_index[anchor].nets)
+                for i in sorted(satellites)
+            },
+        }
+        for anchor, satellites in sorted(by_anchor.items())
+    ]
+    histogram = Counter(b.pad_count for b in bodies)
+    return {
+        "rule": rule.to_dict(),
+        "footprints": len(pcb.footprints),
+        "pad_count_histogram": {str(k): histogram[k] for k in sorted(histogram)},
+        "anchors": len(anchors),
+        "small_parts": len(small),
+        "small_parts_near_an_anchor": len(small_near),
+        "small_parts_near_and_sharing_a_net": len(small_near_sharing),
+        "multi_part_clusters": len(multi),
+        "cluster_sizes": sorted((len(g) for g in multi), reverse=True),
+        "footprints_in_multi_part_clusters": sum(len(g) for g in multi),
+        "clusters": detail,
+    }
+
+
+def render_clusters(rows: list[dict]) -> str:
+    out = [
+        "| Board | anchor_min_pads, satellite_max_pads, max_gap_mm | Footprints | Anchors "
+        "| Small parts | ...near an anchor | ...and sharing a net | Multi-part clusters (sizes) "
+        "| Footprints in them |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        if "error" in r:
+            out.append(f"| {r['board']} | -- | ERROR: {r['error']} | -- | -- | -- | -- | -- | -- |")
+            continue
+        rule = r["rule"]
+        sizes = ", ".join(str(n) for n in r["cluster_sizes"])
+        out.append(
+            f"| {r['board']} | {rule['anchor_min_pads']}, {rule['satellite_max_pads']}, "
+            f"{rule['max_gap_mm']:g} | {r['footprints']} | {r['anchors']} | {r['small_parts']} "
+            f"| {r['small_parts_near_an_anchor']} | {r['small_parts_near_and_sharing_a_net']} "
+            f"| {r['multi_part_clusters']} ({sizes or '--'}) "
+            f"| {r['footprints_in_multi_part_clusters']} |"
+        )
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -731,9 +848,16 @@ def _check_same_order(tree, pcb) -> None:
 
 
 def write_scaled_board(
-    src: Path, dest_dir: Path, scale: float, mode: str
+    src: Path,
+    dest_dir: Path,
+    scale: float,
+    mode: str,
+    cluster_rule: ClusterRule = DEFAULT_RULE,
 ) -> tuple[Path, ScaleReport]:
-    """Copy *src* into *dest_dir* with its placement scaled; returns the new path."""
+    """Copy *src* into *dest_dir* with its placement scaled; returns the new path.
+
+    *cluster_rule* is used (and recorded in the report) in ``rigid`` mode only.
+    """
     from kicad_tools.core.sexp_file import load_pcb, save_pcb
 
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -743,9 +867,11 @@ def write_scaled_board(
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(src))
-        clusters = rigid_clusters(pcb)
+        clusters = rigid_clusters(pcb, **cluster_rule.to_dict())
         _check_same_order(tree, pcb)
     report = scale_board_tree(tree, scale, mode=mode, clusters=clusters)
+    if mode == "rigid":
+        report.cluster_rule = cluster_rule.to_dict()
     dst = dest_dir / src.name
     save_pcb(tree, dst)
     for suffix in (".kicad_pro", ".kicad_dru"):
@@ -839,6 +965,46 @@ def parse_route_log(text: str) -> dict:
 #: The classifier's label for a pour net whose zone fill does not join its pads.
 POUR_CLASS = "pour_discontinuous"
 
+#: Keys of ``<output>.timeout.json`` copied into a row as ``timeout_<key>``
+#: (``snapshot_*`` keep their own names). ``snapshot_state`` says what the
+#: graded best-so-far board actually is: ``live`` (the router's copper as it
+#: stood), ``last-accepted`` (a placement-delta trial was discarded) or
+#: ``inconsistent`` (copper and footprints may disagree -- Issue #6314).
+SIDECAR_KEYS = ("stage", "snapshot_state", "snapshot_placement", "snapshot_discarded_trial")
+
+
+def timeout_sidecar_facts(routed: Path) -> dict:
+    """What the hard-timeout sidecar says about the board that was left behind.
+
+    Empty when the run did not hit the deadline (no sidecar) or the sidecar is
+    unreadable. A key the sidecar does not carry is omitted, never invented:
+    a sidecar written before PR #6323 has no ``snapshot_state`` at all, and
+    that absence must not read as ``live``.
+    """
+    sidecar = routed.with_suffix(".timeout.json")
+    try:
+        state = json.loads(sidecar.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    out: dict = {"timeout_sidecar": True}
+    for key in SIDECAR_KEYS:
+        if key in state:
+            out[key if key.startswith("snapshot_") else f"timeout_{key}"] = state[key]
+    return out
+
+
+def vias_by_net(pcb) -> dict[str, int]:
+    """Via count per net name on a routed board, nets without vias omitted.
+
+    #6304's gap metric does not charge vias, so it cannot see the hypothesis
+    that room helps by making space for them; this is the per-net number that
+    can (Issue #6312).
+    """
+    counts = Counter(via.net_name or f"#{via.net_number}" for via in pcb.vias)
+    return dict(sorted(counts.items()))
+
 
 def grade(routed: Path, board: Board) -> dict:
     """Completion, both DRC engines, copper, and the stuck-class breakdown."""
@@ -863,6 +1029,13 @@ def grade(routed: Path, board: Board) -> dict:
         "connections_routed": comp["connections_routed"],
         "connections_total": comp["connections_total"],
         "via_count": cop["via_count"],
+        # None, not 0.0, when nothing routed: a ratio over zero connections is
+        # not "no vias".
+        "vias_per_connection": (
+            round(cop["via_count"] / comp["connections_routed"], 3)
+            if comp["connections_routed"]
+            else None
+        ),
         "wirelength_mm": round(cop["wirelength_mm"], 1),
         "kct_check_errors": check.error_count if check.ran else None,
         "kct_check_by_rule": dict(sorted(check.errors_by_rule.items())),
@@ -882,6 +1055,12 @@ def grade(routed: Path, board: Board) -> dict:
         row["stuck_nets"] = {d.net_name: d.classification_value for d in stuck.diagnoses}
     except Exception as exc:  # the classifier must never sink a measured row
         row["stuck_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        row["vias_by_net"] = vias_by_net(PCB.load(str(routed)))
+    except Exception as exc:  # same rule: a bookkeeping failure must not sink the row
+        row["vias_by_net_error"] = f"{type(exc).__name__}: {exc}"
     return row
 
 
@@ -960,6 +1139,7 @@ def run_one(
     grid_mm: float | None = None,
     search_timeout: float | None = None,
     extra_args: tuple[str, ...] = (),
+    cluster_rule: ClusterRule = DEFAULT_RULE,
 ) -> dict:
     suffix = "" if grid_policy == "area" else f"-{grid_policy}"
     run_dir = work_dir / f"{board.key}-{mode}-{scale:g}{suffix}"
@@ -970,9 +1150,14 @@ def run_one(
         "scale": scale,
         "mode": mode,
         "grid_policy": grid_policy,
+        "seed": seed,
     }
+    # Sampled before the board is scaled, so it is the load the route starts
+    # under and not the load the route itself has already added.
+    with contextlib.suppress(OSError):
+        row["loadavg_start"] = [round(x, 2) for x in os.getloadavg()]
     try:
-        inp, report = write_scaled_board(src, run_dir, scale, mode)
+        inp, report = write_scaled_board(src, run_dir, scale, mode, cluster_rule)
     except ScaleError as exc:
         row["error"] = f"could not scale: {exc}"
         return row
@@ -996,6 +1181,7 @@ def run_one(
     row.update(parse_route_log(log.read_text(errors="replace")))
     if grid_policy == "pinned":
         row["pinned_grid_mm"] = grid_mm
+    row.update(timeout_sidecar_facts(routed))
     artifact, kind = pick_artifact(routed)
     if artifact is not None:
         row["routed"] = str(artifact)
@@ -1169,6 +1355,7 @@ def _cmd_route(args) -> int:
                         args.grid_mm,
                         args.search_timeout,
                         tuple(args.extra.split()),
+                        _rule_from_args(args),
                     )
                 rows.append(row)
                 print(json.dumps({k: v for k, v in row.items() if k != "stuck_nets"}), flush=True)
@@ -1180,6 +1367,61 @@ def _cmd_route(args) -> int:
     print(render_route(rows))
     print()
     print(render_transitions(stuck_transitions(rows)))
+    return 0
+
+
+def _rule_from_args(args) -> ClusterRule:
+    return ClusterRule(args.anchor_min_pads, args.satellite_max_pads, args.max_gap_mm)
+
+
+def _add_rule_args(parser) -> None:
+    default = DEFAULT_RULE
+    parser.add_argument(
+        "--anchor-min-pads",
+        type=int,
+        default=default.anchor_min_pads,
+        help="rigid mode: a footprint with at least this many pads is a cluster anchor",
+    )
+    parser.add_argument(
+        "--satellite-max-pads",
+        type=int,
+        default=default.satellite_max_pads,
+        help="rigid mode: a footprint with at most this many pads may join an anchor",
+    )
+    parser.add_argument(
+        "--max-gap-mm",
+        type=float,
+        default=default.max_gap_mm,
+        help="rigid mode: largest pad-bbox-to-pad-bbox distance from satellite to anchor",
+    )
+
+
+def _cmd_clusters(args) -> int:
+    """Cluster counts per board under the given rule. Routes nothing."""
+    from kicad_tools.schema.pcb import PCB
+
+    keys = [k.strip() for k in args.boards.split(",") if k.strip()]
+    rule = _rule_from_args(args)
+    rows: list[dict] = []
+    for key in keys:
+        if key not in BOARDS:
+            raise SystemExit(f"unknown board {key!r}; known: {','.join(BOARDS)}")
+        src = resolve_board_path(BOARDS[key], args.chorus_pcb)
+        if src is None:
+            rows.append({"board": key, "error": "input not found"})
+            continue
+        rows.append({"board": key, "input": str(src), **cluster_report(PCB.load(str(src)), rule)})
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps({"rows": rows}, indent=2) + "\n")
+    print(render_clusters(rows))
+    if args.members:
+        for r in rows:
+            for c in r.get("clusters", ()):
+                sats = "; ".join(
+                    f"{ref} via {', '.join(nets)}" for ref, nets in c["satellites"].items()
+                )
+                print(f"{r['board']}: {c['anchor']} ({c['anchor_pads']} pads) <- {sats}")
     return 0
 
 
@@ -1246,7 +1488,20 @@ def main(argv: list[str] | None = None) -> int:
         help="extra kct route arguments for every run, as one quoted string",
     )
     route.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
+    _add_rule_args(route)
     route.set_defaults(func=_cmd_route)
+
+    clusters = sub.add_parser(
+        "clusters", help="rigid-cluster counts per board under a rule; routes nothing"
+    )
+    clusters.add_argument("--boards", default="03,05,chorus")
+    clusters.add_argument("--json", type=Path)
+    clusters.add_argument(
+        "--members", action="store_true", help="also list each cluster and the shared nets"
+    )
+    clusters.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
+    _add_rule_args(clusters)
+    clusters.set_defaults(func=_cmd_clusters)
 
     gaps = sub.add_parser("gaps", help="Phase 2: gaps carrying more copper than fits at 1x")
     gaps.add_argument("--from-json", type=Path, required=True, help="a `route --json` file")
