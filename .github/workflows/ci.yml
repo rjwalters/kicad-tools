@@ -362,7 +362,7 @@ jobs:
     # not a target). Newest five (run/job): 38095351857/114340019801 55m30s,
     # 38083225866/114304283760 54m56s, 38080252788/114295530259 32m30s,
     # 38071430743/114269508068 53m52s, 38013132377/114097451692 54m01s.
-    # `Run tests` is 22-39 min of that. This is a dated snapshot, not a
+    # `Run tests` was 21m13s-38m29s of that across those five. This is a dated snapshot, not a
     # budget: re-measure before relying on it.
     #
     # The old 60 left 3m19s over the observed max, and a run killed by the
