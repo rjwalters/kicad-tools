@@ -1226,6 +1226,41 @@ The config read tolerates a missing config file, a missing `runtimes` block, and
 a missing `jq` — all of these degrade silently to the built-in `claude` default,
 so a bare install with no `runtimes` config sees no behavior change.
 
+### Per-dispatch runtime override (`runtime` / `modelProfile`, #11284)
+
+`loom-daemon dispatch <N> --runtime opencode --model-profile zai-flash`, the
+MCP `dispatch_sweep` tool (`runtime`, `model_profile`) and the daemon's
+`DispatchSweep` request all accept an optional explicit tap for **one sweep**.
+It is an operator pin: it wins over `rolePreference`/`preference` and
+**disables fall-through**.
+
+- **Scope.** Only the coding phases, **Builder and Doctor**, launch on the
+  tap (`worker run --role builder|doctor`). Curator, Judge and the
+  orchestrator keep their role policy, and `excludedRoles` of a profile
+  still applies.
+- **Refusal, never fallback.** At dispatch the daemon admits the tap for
+  Builder and checks its credential pool. A malformed request (a
+  `modelProfile` without a `runtime`, an invalid identifier), an unadmitted
+  runtime/profile, or one with no spawnable seat right now is refused with
+  the reason (`RuntimeRejected`, selected by `explicit`); no sweep starts and
+  the preference list is not consulted. A Doctor launch re-checks the same
+  tap when it runs and fails the same way if the seat has gone away.
+  PR-set sweeps cannot carry a tap (they have no issue to key it on).
+- **Compatibility.** Both fields are `#[serde(default)]`; a request without
+  them behaves exactly as before.
+- **Persistence.** The accepted tap is recorded in
+  `.loom/sweep-dispatch-tap/issue-<N>.json` (runtime, profile, timestamp; no
+  credentials). The phase runner reads it by issue (`--issue`, or the
+  daemon-exported `LOOM_SWEEP_CLAIM_OWNED` for a Doctor), so a resumed sweep
+  or a Doctor retry keeps the override. A record expires after 7 days, and a
+  later `dispatch` of the same issue without a tap clears it; automatic
+  re-dispatch (work finder, watchdog, crash resume) leaves it in place.
+- **Reporting.** The launch is stamped `source=explicit` with the tap
+  (`opencode:zai-flash`), so `sweep-outcomes summary --group-by tap` groups
+  it with the same taps chosen by preference.
+
+Seat-aware work-finder concurrency and free-seat status are a later slice.
+
 ### The `runtimes` config block
 
 Add to `.loom/config.json`:
