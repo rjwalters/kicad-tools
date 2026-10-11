@@ -36,7 +36,14 @@ import contextlib
 
 from . import via_conflict as _via_conflict_module
 from . import wall_deadline as _wall_deadline
-from .access_ripup import AccessLossTargeter, AccessLossWitness
+from .access_ripup import (
+    PLAN_NOTHING,
+    PLAN_REFUSE,
+    PLAN_TRADE,
+    AccessLossTargeter,
+    AccessLossWitness,
+    RipupCycleGuard,
+)
 from .access_witness import (
     PASS_ESCAPE,
     PASS_FIXED,
@@ -2045,6 +2052,9 @@ class Autorouter:
         # / matrix boards where multiple sibling NODE nets compete for the
         # same inter-row corridor.
         self._route_all_ripup_history: dict[int, int] = {}
+        # Issue #6342: the negotiated loop's rip-up cycle guard, exposed for
+        # tests and reports (``None`` until ``route_all_negotiated`` runs).
+        self._ripup_cycle_guard: RipupCycleGuard | None = None
         # Issue #3470: both budgets are now CLI-configurable via
         # ``--max-ripups-per-net`` (route_cmd sets these attributes after
         # constructing the router).  ``_route_all_max_ripups_per_net``
@@ -2491,6 +2501,10 @@ class Autorouter:
         failed_net: int,
         net_routes: dict[int, list[Route]],
         log: Callable[[str], None] | None = None,
+        *,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int | None = None,
+        guard: RipupCycleGuard | None = None,
     ) -> set[int]:
         """Committed nets the access witness names as sealing ``failed_net`` in.
 
@@ -2517,6 +2531,13 @@ class Autorouter:
         rippable, no terminal has lost its access, or the targeting budget is
         exhausted.  A diagnostic must never fail a route, so an unexpected
         error here is logged and treated as "named nothing".
+
+        Issue #6342: ``ripup_history`` / ``max_ripups_per_net`` / ``guard``
+        only change the *log line*.  A named net whose per-net rip-up budget
+        is spent, or which the cycle guard protects as a victim that already
+        won against ``failed_net``, is shown as "not ripping" instead of the
+        old unconditional "ripping X" -- the filtering itself happens later,
+        in ``targeted_ripup`` and :meth:`_guarded_targeted_ripup`.
         """
         targeter = self._access_loss_gate()
         if targeter is None:
@@ -2538,8 +2559,90 @@ class Autorouter:
         if witness is None:
             return set()
         if log is not None:
-            log(f"      + access-loss witness: {witness.one_line()}")
+            held_back: dict[int, str] = {}
+            if guard is not None:
+                for net in guard.protected_from(failed_net):
+                    held_back[net] = "protected victim"
+            if ripup_history is not None and max_ripups_per_net is not None:
+                for net in witness.blocking_nets:
+                    if ripup_history.get(net, 0) >= max_ripups_per_net:
+                        held_back.setdefault(net, "rip-up budget spent")
+            log(f"      + access-loss witness: {witness.one_line(held_back)}")
         return set(witness.blocking_nets)
+
+    def _guarded_targeted_ripup(
+        self,
+        neg_router: Any,
+        guard: RipupCycleGuard,
+        *,
+        failed_net: int,
+        blocking_nets: set[int],
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: Callable[[Route], Any],
+        ripup_history: dict[int, int],
+        max_ripups_per_net: int,
+        per_net_timeout: float | None,
+        log: Callable[[str], None] | None = None,
+    ) -> bool:
+        """``targeted_ripup`` behind the issue #6342 rip-up cycle guard.
+
+        Shared by the three negotiated-loop sites that rip blockers for a
+        failed net.  The guard (:class:`~kicad_tools.router.access_ripup.RipupCycleGuard`)
+        drops blockers that are protected victims of ``failed_net``, refuses a
+        third rip of the same ``(victim, blocker set)`` pair, and lets the
+        second attempt *trade* -- keep the victim's fully-routed copper even
+        if a blocker cannot re-land, leaving that blocker to the ordinary
+        failed-net recovery to route around it.  The structured outcome is
+        logged next to the access-loss witness line.
+        """
+        name = self.net_names.get(failed_net, f"Net_{failed_net}")
+        plan = guard.plan(failed_net, blocking_nets)
+
+        def _names(nets: Any) -> str:
+            return ", ".join(sorted(self.net_names.get(n, f"Net_{n}") for n in nets))
+
+        if plan.mode == PLAN_NOTHING:
+            if log is not None:
+                log(
+                    f"      = rip-up for {name} skipped: every named blocker "
+                    f"({_names(plan.held_back)}) is a protected victim (issue #6342)"
+                )
+            return False
+        if plan.mode == PLAN_REFUSE:
+            guard.refuse(plan)
+            if log is not None:
+                log(
+                    f"      = rip-up of {_names(plan.blockers)} for {name} refused: "
+                    f"pair already ripped {plan.attempt}x this run (issue #6342)"
+                )
+            return False
+        guard.charge(plan)
+
+        success = neg_router.targeted_ripup(
+            failed_net=failed_net,
+            blocking_nets=set(plan.blockers),
+            net_routes=net_routes,
+            routes_list=self.routes,
+            pads_by_net=pads_by_net,
+            present_cost_factor=present_cost_factor,
+            mark_route_callback=mark_route_callback,
+            ripup_history=ripup_history,
+            max_ripups_per_net=max_ripups_per_net,
+            per_net_timeout=per_net_timeout,
+            allow_trade=plan.mode == PLAN_TRADE,
+        )
+        outcome = getattr(neg_router, "last_ripup_outcome", None)
+        guard.record(outcome)
+        if log is not None and outcome is not None:
+            trade = ", trade allowed" if plan.mode == PLAN_TRADE else ""
+            log(
+                f"      = targeted rip-up for {name} (pair attempt "
+                f"{plan.attempt}/{guard.max_repeats}{trade}): "
+                f"{outcome.describe(self.net_names)}"
+            )
+        return bool(success)
 
     def _mark_route(self, route: Route, *, enforce_pad_access: bool = False) -> bool:
         """Mark a route on both Python and C++ grids.
@@ -10750,6 +10853,10 @@ class Autorouter:
         # (Issue #762: escape strategies need this even when use_targeted_ripup=False)
         pads_by_net: dict[int, list[Pad]] = {}
         ripup_history: dict[int, int] = {}
+        # Issue #6342: (victim, blocker set) repeat guard + victim protection
+        # shared by the targeted rip-up sites below.
+        ripup_guard = RipupCycleGuard()
+        self._ripup_cycle_guard = ripup_guard
         # Issue #3438: per-net relief-probe attempt budget.  Each probe
         # costs up to one per-net A* (and a targeted rip-up on success);
         # cap attempts so a geometrically-infeasible net cannot burn the
@@ -12501,7 +12608,12 @@ class Autorouter:
                             # see that copper -- it is legal, unshared and need
                             # not touch the direct pad-to-pad line.
                             blocking_nets |= self._access_loss_blockers(
-                                failed_net, net_routes, flush_print
+                                failed_net,
+                                net_routes,
+                                flush_print,
+                                ripup_history=ripup_history,
+                                max_ripups_per_net=max_ripups_per_net,
+                                guard=ripup_guard,
                             )
 
                             if blocking_nets:
@@ -12509,17 +12621,19 @@ class Autorouter:
                                 def mark_route(route: Route) -> None:
                                     self._mark_route(route)
 
-                                success = neg_router.targeted_ripup(
+                                success = self._guarded_targeted_ripup(
+                                    neg_router,
+                                    ripup_guard,
                                     failed_net=failed_net,
                                     blocking_nets=blocking_nets,
                                     net_routes=net_routes,
-                                    routes_list=self.routes,
                                     pads_by_net=pads_by_net,
                                     present_cost_factor=present_factor,
                                     mark_route_callback=mark_route,
                                     ripup_history=ripup_history,
                                     max_ripups_per_net=max_ripups_per_net,
                                     per_net_timeout=iter_per_net_cap,
+                                    log=flush_print,
                                 )
                                 if success:
                                     targeted_ripup_count += 1
@@ -13082,7 +13196,12 @@ class Autorouter:
                                 # the direct-line scan above structurally
                                 # cannot find.
                                 blocking_nets |= self._access_loss_blockers(
-                                    failed_net, net_routes, flush_print
+                                    failed_net,
+                                    net_routes,
+                                    flush_print,
+                                    ripup_history=ripup_history,
+                                    max_ripups_per_net=max_ripups_per_net,
+                                    guard=ripup_guard,
                                 )
 
                                 # Issue #2475/#2530: only invoke targeted_ripup
@@ -13106,17 +13225,19 @@ class Autorouter:
                                     def _mark_route_fallback(route: Route) -> None:
                                         self._mark_route(route)
 
-                                    success = neg_router.targeted_ripup(
+                                    success = self._guarded_targeted_ripup(
+                                        neg_router,
+                                        ripup_guard,
                                         failed_net=failed_net,
                                         blocking_nets=blocking_nets,
                                         net_routes=net_routes,
-                                        routes_list=self.routes,
                                         pads_by_net=pads_by_net,
                                         present_cost_factor=present_factor,
                                         mark_route_callback=_mark_route_fallback,
                                         ripup_history=ripup_history,
                                         max_ripups_per_net=max_ripups_per_net,
                                         per_net_timeout=iter_per_net_cap,
+                                        log=flush_print,
                                     )
                                     if success:
                                         targeted_fallback_count += 1
@@ -13245,24 +13366,31 @@ class Autorouter:
                                     # access-loss shape's natural home -- a
                                     # sealed pad emits no overflow at all.
                                     blocking_nets |= self._access_loss_blockers(
-                                        failed_net, net_routes, flush_print
+                                        failed_net,
+                                        net_routes,
+                                        flush_print,
+                                        ripup_history=ripup_history,
+                                        max_ripups_per_net=max_ripups_per_net,
+                                        guard=ripup_guard,
                                     )
                                     if blocking_nets:
 
                                         def _mark_route_silent(route: Route) -> None:
                                             self._mark_route(route)
 
-                                        if neg_router.targeted_ripup(
+                                        if self._guarded_targeted_ripup(
+                                            neg_router,
+                                            ripup_guard,
                                             failed_net=failed_net,
                                             blocking_nets=blocking_nets,
                                             net_routes=net_routes,
-                                            routes_list=self.routes,
                                             pads_by_net=pads_by_net,
                                             present_cost_factor=present_factor,
                                             mark_route_callback=_mark_route_silent,
                                             ripup_history=ripup_history,
                                             max_ripups_per_net=max_ripups_per_net,
                                             per_net_timeout=iter_per_net_cap,
+                                            log=flush_print,
                                         ):
                                             silent_resolved += 1
                                             continue
