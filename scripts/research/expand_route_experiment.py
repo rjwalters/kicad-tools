@@ -1007,7 +1007,13 @@ POUR_CLASS = "pour_discontinuous"
 #: graded best-so-far board actually is: ``live`` (the router's copper as it
 #: stood), ``last-accepted`` (a placement-delta trial was discarded) or
 #: ``inconsistent`` (copper and footprints may disagree -- Issue #6314).
-SIDECAR_KEYS = ("stage", "snapshot_state", "snapshot_placement", "snapshot_discarded_trial")
+SIDECAR_KEYS = (
+    "stage",
+    "snapshot_saved",
+    "snapshot_state",
+    "snapshot_placement",
+    "snapshot_discarded_trial",
+)
 
 
 def timeout_sidecar_facts(routed: Path) -> dict:
@@ -1016,7 +1022,12 @@ def timeout_sidecar_facts(routed: Path) -> dict:
     Empty when the run did not hit the deadline (no sidecar) or the sidecar is
     unreadable. A key the sidecar does not carry is omitted, never invented:
     a sidecar written before PR #6323 has no ``snapshot_state`` at all, and
-    that absence must not read as ``live``.
+    that absence must not read as ``live``. Nor is it only old sidecars: a
+    worker killed after writing ``_partial`` but before publishing the
+    ``partial-save`` stage leaves ``snapshot_saved: false`` and no
+    ``snapshot_state`` beside a board that does exist (seen on board 05 at
+    1.5x with feedback on, Issue #6312) -- hence ``snapshot_saved`` is copied
+    too, so "a snapshot of unknown state" is distinguishable from "none".
     """
     sidecar = routed.with_suffix(".timeout.json")
     try:
