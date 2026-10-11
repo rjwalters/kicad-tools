@@ -1437,6 +1437,26 @@ def render_summary(
     return "\n".join(out)
 
 
+def render_net_matrix(labelled: list[tuple[str, dict]]) -> str:
+    """Net by row: each net that is unfinished in any row, and its state in every row.
+
+    A cell is ``ok`` or the classifier's class, followed by that net's via
+    count on that board. Pour-classed nets are listed too -- which of them
+    have a zone is ``zone_nets`` in the row, not a judgement made here.
+    """
+    graded = [(label, r) for label, r in labelled if "stuck_nets" in r]
+    nets = sorted({n for _, r in graded for n in r["stuck_nets"]})
+    head = [f"{label} {r['mode']} {r['scale']:g}" for label, r in graded]
+    out = ["| Net | " + " | ".join(head) + " |", "|---|" + "---|" * len(head)]
+    for net in nets:
+        cells = [
+            f"{r['stuck_nets'].get(net, 'ok')} ({r.get('vias_by_net', {}).get(net, 0)} v)"
+            for _, r in graded
+        ]
+        out.append(f"| {net} | " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
 def render_gaps(rows: list[dict]) -> str:
     out = [
         "| Board | Mode | Scale | Nets | Gaps examined | Carrying copper | Over 1x capacity "
@@ -1654,6 +1674,9 @@ def _cmd_summary(args) -> int:
         (path.stem, row) for path in args.json_files for row in json.loads(path.read_text())["rows"]
     ]
     print(render_summary(labelled, exclude, fallback))
+    if args.net_matrix:
+        print()
+        print(render_net_matrix(labelled))
     if args.nets:
         print()
         for label, row in labelled:
@@ -1778,6 +1801,11 @@ def main(argv: list[str] | None = None) -> int:
         "`zone_nets` themselves (a row's own record always wins)",
     )
     summary.add_argument("--nets", action="store_true", help="also list each row's unfinished nets")
+    summary.add_argument(
+        "--net-matrix",
+        action="store_true",
+        help="also print net x row: the state and via count of every net unfinished in any row",
+    )
     summary.set_defaults(func=_cmd_summary)
 
     gaps = sub.add_parser("gaps", help="Phase 2: gaps carrying more copper than fits at 1x")

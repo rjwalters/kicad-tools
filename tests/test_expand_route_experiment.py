@@ -898,3 +898,31 @@ def test_plan_command_dry_runs_the_scaled_board_with_the_rows_grid_arguments(
     assert calls[1][calls[1].index("--max-cells") + 1] == "1125000"
     assert rows[2]["fine_zones"] == {"U2": {"pitch_mm": 0.05, "cells": 48555}}
     assert rows[2]["scale_report"]["clustered_footprints"] == 14
+
+
+def test_net_matrix_follows_each_unfinished_net_across_rows():
+    rows = [
+        (
+            "a",
+            {
+                "mode": "uniform",
+                "scale": 1.0,
+                "stuck_nets": {"PHASE_A": "budget_starved"},
+                "vias_by_net": {"GND_SENSE": 6},
+            },
+        ),
+        (
+            "a",
+            {
+                "mode": "rigid",
+                "scale": 1.25,
+                "stuck_nets": {"GND_SENSE": "congestion_saturated"},
+                "vias_by_net": {"PHASE_A": 1, "GND_SENSE": 4},
+            },
+        ),
+        ("a", {"mode": "rigid", "scale": 1.5, "error": "no routed output"}),  # ungraded: no column
+    ]
+    table = ere.render_net_matrix(rows).splitlines()
+    assert table[0] == "| Net | a uniform 1 | a rigid 1.25 |"
+    assert table[2] == "| GND_SENSE | ok (6 v) | congestion_saturated (4 v) |"
+    assert table[3] == "| PHASE_A | budget_starved (0 v) | ok (1 v) |"
