@@ -3635,6 +3635,37 @@ class Autorouter:
                     self.routes.append(route)
         return [r for r in routes if r.segments]
 
+    def _drain_netset_cache(self, nets: list[int]) -> list[Route] | None:
+        """Serve already-negotiated whole-netset routes for ``nets`` (issue #6341).
+
+        The lattice and mesh engines negotiate the WHOLE net set on the first
+        ``route_net`` call and cache the per-net results; later calls only
+        serve the cache.  When that negotiation consumes ``route_all``'s outer
+        wall-clock budget, the between-nets timeout check used to ``break``
+        before the remaining nets were served, so routes that had already been
+        computed never reached ``self.routes`` (board 05: a 56/57-connection
+        negotiation wrote 0 nets).
+
+        Serving is a dict lookup plus a list append, so it cannot overrun the
+        budget.  It commits exactly what a run with more budget would have
+        served from the same negotiation -- no per-net rescue / rip-up runs.
+
+        Returns ``None`` when no netset cache is populated (grid strategy, or
+        the negotiation never ran), so callers keep the historical behaviour
+        byte-for-byte; otherwise the list of committed routes (possibly empty).
+        """
+        strategy = getattr(self, "_strategy", "grid")
+        if strategy == "lattice" and self._lattice_net_routes is not None:
+            serve = self._route_net_lattice
+        elif strategy == "mesh" and self._mesh_net_routes is not None:
+            serve = self._route_net_mesh
+        else:
+            return None
+        drained: list[Route] = []
+        for net in nets:
+            drained.extend(serve(net))
+        return drained
+
     def _ensure_lattice_pathfinder(self) -> Any:
         """Lazily construct the per-board :class:`LatticePathfinder` (built once).
 
@@ -8894,6 +8925,19 @@ class Autorouter:
                         f"({elapsed:.1f}s >= {timeout}s) after {i}/{total_nets} nets; "
                         f"returning partial result."
                     )
+                    # Issue #6341: lattice / mesh negotiate the whole netset
+                    # on the first net and cache every net's routes.  Serve
+                    # the remaining cached nets (a dict lookup, cannot
+                    # overrun) instead of discarding computed copper.
+                    drained = self._drain_netset_cache(nets_to_route[i:])
+                    if drained is not None:
+                        all_routes.extend(drained)
+                        served_nets = len({r.net for r in drained})
+                        flush_print(
+                            f"  route_all: served {served_nets} cached "
+                            f"{self._strategy} net(s) "
+                            f"({len(drained)} routes) after outer timeout."
+                        )
                     break
 
             if progress_callback is not None:
