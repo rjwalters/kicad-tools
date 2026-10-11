@@ -372,6 +372,7 @@ def test_route_log_facts_are_extracted():
         "layers_used": 4,
         "router_nets": "18/33",
         "hit_timeout": True,
+        "cache_hit": False,
     }
     assert ere.parse_route_log("nothing relevant")["hit_timeout"] is False
     # A late stage cut short by the budget is a timeout too, even on exit 4.
@@ -713,3 +714,92 @@ def test_cluster_flags_reach_the_route_and_clusters_commands(tmp_path, monkeypat
     assert [r["footprints_in_multi_part_clusters"] for r in rows] == [16, 14]
     with pytest.raises(SystemExit, match="unknown board"):
         ere.main(["clusters", "--boards", "nope"])
+
+
+def test_quoted_deadline_marker_in_the_startup_warning_is_not_a_timeout():
+    """Every --deterministic-budget run prints this warning; none of them timed out for it."""
+    warning = (
+        "[deterministic-budget] WARNING: --timeout 1200s is set.  If it fires, the run is no "
+        "longer machine-independent; a '[deterministic-budget] stage deadline fired' log line "
+        "will mark exactly when that happens.\n"
+    )
+    assert ere.parse_route_log(warning)["hit_timeout"] is False
+    fired = warning + "[deterministic-budget] stage deadline fired -- run is not reproducible\n"
+    assert ere.parse_route_log(fired)["hit_timeout"] is True
+
+
+def test_a_cache_replay_is_flagged_and_the_harness_asks_for_a_fresh_route(tmp_path, monkeypatch):
+    replay = "--- Checking routing cache ---\n  Cache HIT: 56 nets routed\n"
+    assert ere.parse_route_log(replay)["cache_hit"] is True
+    assert ere.parse_route_log("  Cache MISS (key: 1f46...)\n")["cache_hit"] is False
+
+    seen: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        seen.append(cmd)
+        return _Done()
+
+    monkeypatch.setattr(ere.subprocess, "Popen", fake_popen)
+    ere.run_route(tmp_path / "in.kicad_pcb", tmp_path / "out.kicad_pcb", [], 60, tmp_path / "log")
+    assert "--no-cache" in seen[0]
+
+
+def test_summary_counts_unfinished_nets_with_and_without_the_excluded_ones(tmp_path, capsys):
+    import json
+
+    row = {
+        "board": "05",
+        "scale": 1.5,
+        "mode": "rigid",
+        "seed": 43,
+        "cmd": "-m kicad_tools.cli route in -o out --no-placement-delta-feedback --seed 43",
+        "nets_complete": 30,
+        "kct_check_errors": 4,
+        "kicad_drc_errors": 0,
+        "via_count": 120,
+        "vias_per_connection": 0.896,
+        "coarse_grid_mm": 0.065,
+        "exit_code": 2,
+        "hit_timeout": False,
+        "artifact": "final",
+        "cache_hit": False,
+        "wall_s": 610.2,
+        "loadavg_start": [5.5, 6.0, 7.0],
+        "loadavg_end": [8.25, 7.0, 7.0],
+        "stuck_nets": {
+            "EN_B": "congestion_saturated",
+            "PHASE_A": "budget_starved",
+            "PHASE_C": "budget_starved",
+            "GND": "pour_discontinuous",
+        },
+    }
+    phase = frozenset({"PHASE_A", "PHASE_B", "PHASE_C"})
+    assert ere.unfinished_signal_nets(row) == ["EN_B", "PHASE_A", "PHASE_C"]  # pour net dropped
+    assert ere.unfinished_signal_nets(row, phase) == ["EN_B"]
+    assert ere.unfinished_signal_nets({"error": "no routed output"}) is None
+
+    path = tmp_path / "05_off_s43.json"
+    replay = {**row, "scale": 1.0, "mode": "uniform", "cmd": "route --seed 43", "cache_hit": True}
+    failed = {"board": "05", "scale": 1.25, "mode": "rigid", "error": "no routed output"}
+    path.write_text(json.dumps({"rows": [row, replay, failed]}))
+    argv = ["summary", str(path), "--exclude-nets", "PHASE_A,PHASE_B,PHASE_C", "--nets"]
+    assert ere.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "...without PHASE_A/PHASE_B/PHASE_C" in out
+    assert (
+        "| 05_off_s43 | 1.5 | rigid | off | 43 | 3 | 1 | 4 | 0 | 120 | 0.896 | 0.065 | 2 | no | no "
+        "| 610.2 | 5.5 -> 8.25 | -- |" in out
+    )
+    # Feedback left at its default, and a cache replay, are both visible per row.
+    assert (
+        "| 05_off_s43 | 1 | uniform | default | 43 | 3 | 1 | 4 | 0 | 120 | 0.896 | 0.065 | 2 | no | yes |"
+        in out
+    )
+    assert "| 05_off_s43 | 1.25 | rigid | ERROR: no routed output |" in out
+    assert "05_off_s43 rigid 1.5: EN_B (congestion_saturated), PHASE_A (budget_starved)" in out

@@ -907,6 +907,9 @@ def run_route(inp: Path, out: Path, extra: list[str], timeout: float, log: Path)
         str(out),
         "--timeout",
         str(int(timeout)),
+        # Every row must be a route, not a replay of an earlier row's cached
+        # copper: without this a same-seed replicate is a cache hit.
+        "--no-cache",
         *extra,
     ]
     env = dict(os.environ, PYTHONHASHSEED="0")
@@ -956,9 +959,18 @@ def parse_route_log(text: str) -> dict:
     tallies = re.findall(r"Nets routed:\s+(\d+)/(\d+)", text)
     if tallies:
         out["router_nets"] = f"{tallies[-1][0]}/{tallies[-1][1]}"
+    # "stage deadline fired --" with its dashes: under --deterministic-budget
+    # the router prints a startup WARNING that *quotes* the marker ("a
+    # '[deterministic-budget] stage deadline fired' log line will mark ..."),
+    # and matching the bare phrase flagged every such run as timed out.
     out["hit_timeout"] = bool(
-        re.search(r"deadline (?:reached|exceeded)|stage deadline fired|\(deadline\)", text, re.I)
+        re.search(r"deadline (?:reached|exceeded)|stage deadline fired --|\(deadline\)", text, re.I)
     )
+    # ``kct route`` keeps a result cache keyed on the board bytes and the CLI
+    # recipe. A hit replays stored copper and routes nothing, so a "repeat" of
+    # a row is not a second sample. The harness passes --no-cache; this records
+    # the fact per row so a hit can never pass silently (Issue #6312).
+    out["cache_hit"] = bool(re.search(r"^\s*Cache HIT", text, re.M))
     return out
 
 
@@ -1295,6 +1307,50 @@ def render_transitions(transitions: list[dict]) -> str:
     return "\n".join(out)
 
 
+def unfinished_signal_nets(row: dict, exclude: frozenset[str] = frozenset()) -> list[str] | None:
+    """Unfinished non-pour nets of a graded row, minus *exclude*; ``None`` if ungraded.
+
+    *exclude* exists for nets a known router defect leaves unfinished whatever
+    the placement (board 05's ``PHASE_A/B/C``, Issue #6315): counted in, they
+    can mask a placement effect in either direction.
+    """
+    stuck = row.get("stuck_nets")
+    if stuck is None:
+        return None
+    return sorted(n for n, cls in stuck.items() if cls != POUR_CLASS and n not in exclude)
+
+
+def render_summary(labelled: list[tuple[str, dict]], exclude: frozenset[str]) -> str:
+    """One line per row of several ``route --json`` files, for the research note."""
+    without = f"...without {'/'.join(sorted(exclude))}" if exclude else "(no nets excluded)"
+    out = [
+        "| File | Scale | Mode | Feedback | Seed | Signal nets unfinished "
+        f"| {without} | kct check err | kicad-cli DRC err | Vias | Vias / routed connection "
+        "| Grid mm | rc | Timed out | Cache hit | Wall s | Load 1 min, start -> end "
+        "| Snapshot state |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for label, r in labelled:
+        head = f"| {label} | {r['scale']:g} | {r['mode']} "
+        if "nets_complete" not in r:
+            out.append(f"{head}| ERROR: {r.get('error', '?')} |" + " -- |" * 14)
+            continue
+        feedback = "off" if "--no-placement-delta-feedback" in r.get("cmd", "") else "default"
+        nets = unfinished_signal_nets(r)
+        kept = unfinished_signal_nets(r, exclude)
+        start, end = r.get("loadavg_start"), r.get("loadavg_end")
+        load = f"{start[0]:g} -> {end[0]:g}" if start and end else "--"
+        out.append(
+            f"{head}| {feedback} | {r.get('seed', '--')} "
+            f"| {'--' if nets is None else len(nets)} | {'--' if kept is None else len(kept)} "
+            f"| {r['kct_check_errors']} | {r['kicad_drc_errors']} | {r['via_count']} "
+            f"| {r.get('vias_per_connection', '--')} | {r.get('coarse_grid_mm', '--')} "
+            f"| {r['exit_code']} | {_timeout_cell(r)} | {'yes' if r.get('cache_hit') else 'no'} "
+            f"| {r['wall_s']} | {load} | {r.get('snapshot_state', '--')} |"
+        )
+    return "\n".join(out)
+
+
 def render_gaps(rows: list[dict]) -> str:
     out = [
         "| Board | Mode | Scale | Nets | Gaps examined | Carrying copper | Over 1x capacity "
@@ -1425,6 +1481,23 @@ def _cmd_clusters(args) -> int:
     return 0
 
 
+def _cmd_summary(args) -> int:
+    """The note's per-row table, straight from committed ``route --json`` files."""
+    exclude = frozenset(n.strip() for n in args.exclude_nets.split(",") if n.strip())
+    labelled = [
+        (path.stem, row) for path in args.json_files for row in json.loads(path.read_text())["rows"]
+    ]
+    print(render_summary(labelled, exclude))
+    if args.nets:
+        print()
+        for label, row in labelled:
+            nets = unfinished_signal_nets(row)
+            if nets is not None:
+                shown = ", ".join(f"{n} ({row['stuck_nets'][n]})" for n in nets) or "(none)"
+                print(f"{label} {row['mode']} {row['scale']:g}: {shown}")
+    return 0
+
+
 def _cmd_gaps(args) -> int:
     from kicad_tools.schema.pcb import PCB
 
@@ -1502,6 +1575,18 @@ def main(argv: list[str] | None = None) -> int:
     clusters.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
     _add_rule_args(clusters)
     clusters.set_defaults(func=_cmd_clusters)
+
+    summary = sub.add_parser(
+        "summary", help="one table line per row of one or more `route --json` files"
+    )
+    summary.add_argument("json_files", type=Path, nargs="+")
+    summary.add_argument(
+        "--exclude-nets",
+        default="",
+        help="comma list of nets to leave out of the second unfinished-net column",
+    )
+    summary.add_argument("--nets", action="store_true", help="also list each row's unfinished nets")
+    summary.set_defaults(func=_cmd_summary)
 
     gaps = sub.add_parser("gaps", help="Phase 2: gaps carrying more copper than fits at 1x")
     gaps.add_argument("--from-json", type=Path, required=True, help="a `route --json` file")
