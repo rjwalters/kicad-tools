@@ -208,15 +208,16 @@ out instead of keeping a healthy run's p95 red forever.
 
 ### Querying end-to-end latency
 
-In SigNoz (ClickHouse `signoz_logs`), use `created_at` — the backend's **own
-insert clock** — as the observation time. Three clocks are in play and only two
+In SigNoz (ClickHouse `signoz_logs`), use `inserted_at_unix_milli` — the backend's
+**own insert clock** (`Int64` epoch ms; the store owner adds it, see `telemetry-replay.md`;
+SigNoz's stock logs tables have none, checked 2026-10-11) — as the observation time. Three clocks are in play and only two
 of them are the producer's:
 
 | Column | Clock | Meaning |
 |---|---|---|
 | `timestamp` | source | when the agent emitted it |
 | `observed_timestamp` | producer | when the producer read it |
-| `created_at` (or `inserted_at`) | backend | when it became queryable |
+| `inserted_at_unix_milli` | backend | when it became queryable |
 
 > **Do not use `now64()` as the observation time.** `now64() - timestamp`
 > measures how *old the row is at query time*, not how long it took to arrive —
@@ -226,7 +227,7 @@ of them are the producer's:
 
 ```sql
 -- Source-to-queryable latency, end to end AND pipeline-only, over the last hour.
--- `created_at` is the backend's insert clock, so the result does not drift with
+-- `inserted_at_unix_milli` is the backend's insert clock, so the result does not drift with
 -- when the query is run.
 --
 -- Both time filters are load-bearing. The `timestamp` bound keeps a replayed
@@ -241,8 +242,8 @@ SELECT
   round(quantile(0.95)(pipeline_ms))  AS pipeline_p95_ms
 FROM (
   SELECT
-    toUnixTimestamp64Milli(created_at) - intDiv(timestamp, 1000000)          AS e2e_ms,
-    toUnixTimestamp64Milli(created_at) - intDiv(observed_timestamp, 1000000) AS pipeline_ms
+    inserted_at_unix_milli - intDiv(timestamp, 1000000)          AS e2e_ms,
+    inserted_at_unix_milli - intDiv(observed_timestamp, 1000000) AS pipeline_ms
   FROM signoz_logs.distributed_logs_v2
   WHERE attributes_string['loom.session.output.event_id'] != ''
     AND attributes_string['loom.session.output.category'] IN ('output','tool_start','tool_finish')
@@ -634,7 +635,7 @@ repository's config → SigNoz):
 | Two attempts of one issue separable | issue 9766 `loom.attempt` 1 and 2 — distinct `sweep_id`, `stream_id` and `event_id` |
 | Worktree name unrelated to forge repo | `loom.repo` is the forge slug on every row; no `stream_id` contains a path fragment |
 | Runtime coverage recorded | `claude → live` (2 rows); `codex`, `pi`, `opencode` → `unsupported` (1 row each, severity `Warn`) |
-| Source-to-queryable latency, both clocks | e2e p50 **211 ms** / p95 **239 ms** / max **239 ms** over 9 content rows, using `created_at` as the observation clock |
+| Source-to-queryable latency, both clocks | e2e p50 **211 ms** / p95 **239 ms** / max **239 ms** over 9 content rows, using the backend insert clock as the observation clock (measured before the 2026-10-11 finding that the live logs tables have no such column; re-measure with `inserted_at_unix_milli` once it exists) |
 | Historical timestamp not a latency | A 6 h-old source event was published (and sorts at its source time, `producer_lag_ms = 21600032`) while the run's heartbeat reported `lag_p95_ms = 1`, `lag_samples = 1`, `lag_historical_excluded = 1` — the outlier excluded from the distribution, and the exclusion visible |
 | Credentials cannot pass | 4 live credential shapes plus a prompt canary in the source; the published body contained only `[REDACTED:*]` markers, the prompt line produced no record at all, and a `tool_use.input` holding a token produced a `tool_start` carrying only the tool name |
 | Cannot enable managed-cloud export | `native: false` is asserted in two separate tests; `resolve_exporters` is byte-identical with live output on and off |

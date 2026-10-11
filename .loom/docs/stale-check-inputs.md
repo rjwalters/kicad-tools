@@ -135,7 +135,8 @@ The guard's live reads are cheap to repeat and cannot burst:
   `x-ratelimit-reset` only when `x-ratelimit-remaining` is `0`, otherwise one
   minute. A hold never lasts more than an hour, even if the stored value says
   otherwise. The hold is per forge host, credential and repo owner, and is
-  shared by every process on the host. So the next merge pass on the same
+  shared by every process on the host (one file per scope; writing a hold
+  removes expired ones). So the next merge pass on the same
   credential fails closed at once instead of retrying. Another token or owner
   is not held.
   The ledger records these answers as `secondary_limited`, apart from primary

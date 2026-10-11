@@ -2337,10 +2337,51 @@ two consecutive `fleet.state` views of the same host (held sweeps, review
 PRs, ready queue). A row whose stage changed gives one record (`next_stage`
 is the new stage). A row that left the view gives one record with no
 `next_stage`: `landed` when its PR merged, `cut_short` when it closed or is
-still open without review labels, `unknown` otherwise (a sweep that ended).
+still open without review labels. A row with no resolved PR (a sweep stage)
+reads its issue instead (#11398): `landed` at the issue's `closed_at` when its
+latest `closed` event carries a `commit_id`, or a PR referencing the issue
+merged within 120s of `closed_at` (a `Closes #N` merge leaves `commit_id`
+null, so the timeline's merged PR is the evidence), `abandoned`
+at `closed_at` when neither holds (a hand close, whatever its
+`state_reason`), `unknown` at `closed_at` when no `closed` event is found, and
+`unknown` with no forge instant while it is still open. Every close keeps its
+`closed_at` as `forge_transition_at`, so it has a `loom.fact_id`. A failed issue read emits nothing and is retried each pass; after
+`PENDING_ISSUE_MAX_PASSES` (12) failed retries it is one `unknown` stamped at
+the pass that first saw the row gone, with no forge instant, and is never
+emitted again. A transferred or deleted issue answers 404 to that read, so
+it takes this path: no forge instant is knowable for it.
 A `ready_wait` row that left the view is not a record until a repo's ready
-listing is known whole (#11139), and a row of a repo no longer managed is not
-a record. **Every host that observes a transition emits it**; nothing is
+listing is known whole (#11139). A `ready_wait` departure whose history is
+the issue's `closed` event takes the same classification at that event's
+instant (#11398; before, it was `cut_short`); a claim or unlabel is still
+`advance` / `cut_short`, and a failed issue read waits like a departure the
+forge does not show yet (`PENDING_READY_MAX_PASSES`, then `unknown`).
+
+**Pre-ready closes (#11398).** The producer also lists each managed repo's
+open `loom:triage` issues (one ETag-cached listing, like `loom:curated`). An
+issue gone from a repo's complete `loom:triage` or `loom:curated` listing,
+in neither listing and no row now, is read once (`issues/{n}`): a close ends
+the pre-ready stay its history shows open at the close (`triage_wait` from the
+latest reopen or creation until a curated / ready label, else
+`approval_wait` from the latest `loom:curated` label) with the
+classification above, `next_stage` empty, `left_at` / `forge_transition_at`
+the close, and `dwell_sec`. An open issue was relabelled (no record); an
+approved one is the ready path's. A failed read is retried up to 12 passes,
+then is `unknown` at the pass that first saw it gone. A triage stay never
+labelled `loom:triage`, `loom:curated` or `loom:issue` is never listed, so no
+host can observe its close.
+
+**Fleet removal (#11398).** A repo in the previous pass's managed set and not
+in this one keeps its stays (vanished rows, pending reads, its last curated /
+triage listings). An **empty** managed set is a failed enumeration, never a
+removal, and a repo back within `REPO_REMOVAL_CONFIRM_PASSES` (3) passes was a
+blip: its stays return to the ordinary diff. Once the removal holds, each stay
+ends exactly once: its issue is read (from any checkout; the path names the
+repo) and a close takes the classification above at `closed_at`; an open
+issue or a failed read is
+`unknown` at the pass that first saw the stay gone, with no forge instant
+(keyed per #11401 below when it has a sweep id or forge-dated entry). A row
+of the removed repo that vanishes later ends the same way, at once. **Every host that observes a transition emits it**; nothing is
 elected. `loom.eta.authority` is still emitted, and now names the emitting
 host, not an elected authority.
 
@@ -2352,7 +2393,8 @@ nanoseconds). `forge_transition_at` is the forge's own instant: the new review
 label's `labeled` event (one paginated issue-events read per actual move,
 with no per-pass limit, every page of the history, and only when it falls
 inside the pass window), or the PR's
-`merged_at` / `closed_at`, or for a hold release (`merge_hold` →
+`merged_at` / `closed_at`, or (a row with no PR) the issue's `closed_at`
+(#11398), or for a hold release (`merge_hold` →
 `merge_wait`) the hold label's `unlabeled` event (#11401). Every part is the
 same on every host, whatever its polling time.
 
@@ -2404,7 +2446,7 @@ pass interval. `forge_transition_at` is new (additive).
 | `entered_at` | RFC3339? | present only when the entry has an exact source: a sweep's own checkpoint timestamp. Absent for a polled (review or ready) row, whose entry fell between two passes, and for a stage first seen mid-way |
 | `left_at` | RFC3339 | the event time: `forge_transition_at` when known, else the observing pass |
 | `dwell_sec` | integer? | `left_at − entered_at`, only when the stage completed with an exact entry; never a lower bound |
-| `exit` | string | `advance`, `pass` (`review_wait` → `merge_wait`), `rework` (into `doctor`), `hold`, `released`, `landed`, `cut_short` (closed unmerged, or ended without completing), `unknown`. `judged` is no longer produced |
+| `exit` | string | `advance`, `pass` (`review_wait` → `merge_wait`), `rework` (into `doctor`), `hold`, `released`, `landed`, `cut_short` (PR closed unmerged, or ended without completing), `abandoned` (#11398: the issue was closed with no commit closing it, whatever its `state_reason`, ending a stay with no resolved PR: a sweep stage, `ready_wait`, `triage_wait`, `approval_wait`, or a stay of a repo removed from the fleet; `left_at` is the close instant, `dwell_sec` and `loom.fact_id` are set. A merge-closed issue is `landed`; a close with no `closed` event is `unknown` at `closed_at`; an open, transferred/404 or never-readable issue is `unknown` — see the producer notes above), `unknown`. `judged` is no longer produced |
 | `next_stage` | string? | the stage entered next; absent when the item left the view |
 | `event` | string | the observing source: `fleet.state` |
 | `observed_at` | RFC3339 | when this daemon observed it (knowable-at) |

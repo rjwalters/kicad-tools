@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1068",
-  "loom_commit": "fcc4454e112d13e088464bb0a178b75c0dc96c0f",
+  "loom_version": "0.19.1071",
+  "loom_commit": "dcab8265613676d08b763cddc911b93c7ab7d9d4",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -411,7 +411,8 @@
     ".loom/runtimes/gemini.json",
     ".claude/commands/loom/sweep-doctor-glm-escalation.md",
     ".loom/docs/stale-check-inputs.md",
-    ".loom/docs/fleet-config-lifecycle.md"
+    ".loom/docs/fleet-config-lifecycle.md",
+    ".loom/docs/session-output.md"
   ],
   "last_resync": "2026-10-11",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",

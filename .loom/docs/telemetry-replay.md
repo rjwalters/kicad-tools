@@ -17,7 +17,7 @@ conflated.
 | Clock | OTLP column | Meaning |
 |-------|-------------|---------|
 | **Event time** | `timestamp` (`time_unix_nano`) | When the thing happened (usually the envelope's `emitted_at`; `session.output` overrides it with its own source instant). |
-| **Knowable-at** | `created_at` (SigNoz insert time) | When the record became *available to a reader*. The OTLP `observed_timestamp` is only a producer-side lower bound (see below). |
+| **Knowable-at** | `inserted_at_unix_milli` (backend insert time, `Int64` epoch ms) | When the record became *available to a reader*. The OTLP `observed_timestamp` is only a producer-side lower bound (see below). |
 
 Delivery is batched, retried and at-least-once, so a `sweep.outcome` can reach
 SigNoz long after its event time. A query over `timestamp < t` returns rows
@@ -32,12 +32,14 @@ decides membership.
 
 ### The knowable-at column (design decision, #10196 R3)
 
-**A reader uses SigNoz's own insert clock, `created_at` on
-`signoz_logs.distributed_logs_v2`, as the knowable-at instant.** It is set by
-the backend when the row becomes queryable, so it cannot be earlier than the
-moment a reader could have seen the record. `session-output.md` (Querying
-end-to-end latency) already relies on it and measured it against the producer
-clocks.
+**A reader uses a backend-side insert clock, `inserted_at_unix_milli`
+(`Int64`, epoch milliseconds) on `signoz_logs.distributed_logs_v2`, as the
+knowable-at instant.** It is set by the backend when the row becomes queryable,
+so it cannot be earlier than the moment a reader could have seen the record.
+It is the name SigNoz already uses on its metrics tables
+(`signoz_metrics.samples_v4`). The replay SQL exposes it as the `knowable_at`
+alias, `fromUnixTimestamp64Milli(inserted_at_unix_milli)`, defined once per
+query. `session-output.md` (Querying end-to-end latency) uses the same column.
 
 `observed_timestamp` is NOT the knowable-at column. The OTLP exporter sets it
 to a copy of `emitted_at` (`log_record_for` in `observability/otlp/mapping.rs`;
@@ -45,28 +47,69 @@ only `session.output` overrides it with the producer's read time). That is a
 producer-side value: a record delayed in the export queue still claims to have
 been observed at its event time. Use it only as a lower bound.
 
-This makes the collector-side receive stamp planned in slice 1 unnecessary: the
-collector processor is superseded and no collector change is needed.
-
-**Verification status: unverified on a live store.** The check below must
-return `0` in the second column. It was not run from the worker that wrote this
-change (no ClickHouse access), so treat `created_at` as verified only after its
-first live run. If the count is not `0`, fall back to
-`greatest(created_at, observed_timestamp)` and say so here.
+**Verification status (2026-10-11, live harness-ops store, ClickHouse
+25.12.5): the column does not exist yet.** An earlier version of this page
+named SigNoz's `created_at` here as "unverified on a live store". The first
+live check showed it is false: `signoz_logs.logs_v2` and
+`distributed_logs_v2` carry only `timestamp` and `observed_timestamp` as time
+columns, and `created_at` exists only on the `schema_migrations_v2` tables.
+Only metrics have an insert clock. Until the store owner adds the column, the
+replay SQL cannot run, and `telemetry-replay` / `--check` say so (see
+"Preflight" below) instead of surfacing ClickHouse's `UNKNOWN_IDENTIFIER`.
+The live change is tracked in #11463 and is not made by Loom; the owner's
+statement (option 1 there) is:
 
 ```sql
+ALTER TABLE signoz_logs.logs_v2 ADD COLUMN IF NOT EXISTS inserted_at_unix_milli
+    Int64 DEFAULT toUnixTimestamp64Milli(now64(3));
+-- and the same on signoz_logs.distributed_logs_v2, in the deployment's
+-- ON CLUSTER form if it has one.
+```
+
+Rows that predate the ALTER have no stored value; the non-materialized
+DEFAULT evaluates at read time, i.e. "knowable now". That is conservative and
+never leaks into the past, but it also means an instant earlier than the ALTER
+cannot be reconstructed: see "Before the column existed".
+
+The check below (query 0, rewritten) must return `0` in the second column once
+the column exists. Record the owner, the ALTER instant and its first live
+result in #11463.
+
+```sql
+WITH fromUnixTimestamp64Milli(inserted_at_unix_milli) AS knowable_at
 SELECT count(),
-       countIf(created_at < fromUnixTimestamp64Nano(toInt64(observed_timestamp)))
+       countIf(knowable_at < fromUnixTimestamp64Nano(toInt64(observed_timestamp)))
 FROM signoz_logs.distributed_logs_v2
 WHERE timestamp > toUnixTimestamp64Nano(now64(9) - INTERVAL 1 DAY);
 ```
+
+#### Before the column existed
+
+A record has a knowable-at only from the moment the column began to hold real
+insert times (the ALTER instant). An instant `t` earlier than that is
+**unknown**, reason `no_knowable_at`: the reader never falls back to
+`observed_timestamp`, which would leak delayed records into earlier instants.
+The reader is told the ALTER instant with `--knowable-since <RFC3339>` (the SQL
+parameter `knowable_since`); it is required for a live read, because the column
+alone cannot say it (an old row's value is the read-time DEFAULT). A replay with
+`--as-of` before it prints `unknown: no_knowable_at` and no hosts or items;
+query 3 reports each host's state as `no_knowable_at` (not `no_anchor`), and in
+`--check` such instants count as uncovered with that reason.
+
+#### Preflight
+
+Before any replay query, `telemetry-replay` and `telemetry-replay --check` look
+the column up in `system.columns` for `signoz_logs.distributed_logs_v2`. If it
+is absent they print ``knowable-at column `inserted_at_unix_milli` absent on the
+store`` and exit 2. `--print-sql` and `--from-file` make no store call and skip
+the preflight.
 
 The replay SQL is committed at
 [`observability/signoz/replay-queries.sql`](https://github.com/rjwalters/loom/blob/main/defaults/observability/signoz/replay-queries.sql):
 fleet state at `t` (anchors plus deltas, merged per `(repo, issue)`, preferring
 the row that carries a `host`), the spread between hosts' views, coverage at
 `t`, anchor completeness and volume, outcome facts, and agreement with the
-forge (queries 6-7, below). It filters on `created_at < t` and dedupes with
+forge (queries 6-7, below). It filters on `knowable_at < t` and dedupes with
 `LIMIT 1 BY`. It introduces no row caps. The shared prefix rebuilds the state
 at a run of sample instants (`t`, `t - step`, … `t - span`, each reading only
 records knowable before itself); queries 1-3 read the instant `t` only and
@@ -114,8 +157,8 @@ nothing is elected, so duplicates across hosts are expected.
 
 | Kind | Natural key | Event time | Knowable-at | Notes |
 |------|-------------|------------|-------------|-------|
-| `pr.resolved` | `(repo, pr_number, state, closed_at)` | `resolved_at` | `created_at` | `state` is `merged` or `closed`; `closed_at` is the forge's, so a PR closed, reopened and closed again is two facts. |
-| `eta.stage_outcome` | `(repo, issue, stage, next_stage, forge_transition_at)` | `left_at` | `created_at` | `forge_transition_at` is the forge's own instant (a label event's `created_at`, a PR's `merged_at` / `closed_at`); `next_stage` is empty when the item left the view. Instants are RFC 3339 UTC, nanosecond precision. Re-homed outside ETA by #11126; the wire kind name and `loom.eta.*` attribute keys are kept (stage 1 is additive only). |
+| `pr.resolved` | `(repo, pr_number, state, closed_at)` | `resolved_at` | `inserted_at_unix_milli` | `state` is `merged` or `closed`; `closed_at` is the forge's, so a PR closed, reopened and closed again is two facts. |
+| `eta.stage_outcome` | `(repo, issue, stage, next_stage, forge_transition_at)` | `left_at` | `inserted_at_unix_milli` | `forge_transition_at` is the forge's own instant (a label event's `created_at`, a PR's `merged_at` / `closed_at`); `next_stage` is empty when the item left the view. Instants are RFC 3339 UTC, nanosecond precision. Re-homed outside ETA by #11126; the wire kind name and `loom.eta.*` attribute keys are kept (stage 1 is additive only). |
 
 Every key part is a forge-observed fact, identical on every host whatever its
 polling time. A host's own polling time (`left_at` for a polled move,
