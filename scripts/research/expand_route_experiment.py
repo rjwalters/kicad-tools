@@ -1095,7 +1095,13 @@ def grade(routed: Path, board: Board) -> dict:
     try:
         from kicad_tools.schema.pcb import PCB
 
-        row["vias_by_net"] = vias_by_net(PCB.load(str(routed)))
+        pcb = PCB.load(str(routed))
+        row["vias_by_net"] = vias_by_net(pcb)
+        # Which nets actually have a zone. The classifier calls any incomplete
+        # power-typed net ``pour_discontinuous`` whether or not a pour exists
+        # for it (board 05's ``VM`` has none), and ``signal_nets_unfinished``
+        # inherits that; this is what lets a reader count such a net back in.
+        row["zone_nets"] = sorted({z.net_name for z in pcb.zones if z.net_name})
     except Exception as exc:  # same rule: a bookkeeping failure must not sink the row
         row["vias_by_net_error"] = f"{type(exc).__name__}: {exc}"
     return row
@@ -1332,8 +1338,18 @@ def render_transitions(transitions: list[dict]) -> str:
     return "\n".join(out)
 
 
-def unfinished_signal_nets(row: dict, exclude: frozenset[str] = frozenset()) -> list[str] | None:
+def unfinished_signal_nets(
+    row: dict,
+    exclude: frozenset[str] = frozenset(),
+    zone_nets: frozenset[str] | None = None,
+) -> list[str] | None:
     """Unfinished non-pour nets of a graded row, minus *exclude*; ``None`` if ungraded.
+
+    With *zone_nets* ``None`` this is the classifier's reading, the one
+    ``signal_nets_unfinished`` and every table up to #6311 use: a net classed
+    ``pour_discontinuous`` is a pour net. Given the set of nets that really
+    have a zone, a ``pour_discontinuous`` net **without** one is counted as
+    unfinished: nothing but routed copper can connect it.
 
     *exclude* exists for nets a known router defect leaves unfinished whatever
     the placement (board 05's ``PHASE_A/B/C``, Issue #6315): counted in, they
@@ -1342,34 +1358,68 @@ def unfinished_signal_nets(row: dict, exclude: frozenset[str] = frozenset()) -> 
     stuck = row.get("stuck_nets")
     if stuck is None:
         return None
-    return sorted(n for n, cls in stuck.items() if cls != POUR_CLASS and n not in exclude)
+    return sorted(
+        n
+        for n, cls in stuck.items()
+        if n not in exclude
+        and (cls != POUR_CLASS or (zone_nets is not None and n not in zone_nets))
+    )
 
 
-def render_summary(labelled: list[tuple[str, dict]], exclude: frozenset[str]) -> str:
-    """One line per row of several ``route --json`` files, for the research note."""
-    without = f"...without {'/'.join(sorted(exclude))}" if exclude else "(no nets excluded)"
+def row_zone_nets(row: dict, fallback: frozenset[str] | None = None) -> frozenset[str] | None:
+    """The row's own ``zone_nets`` if it recorded them, else *fallback* (``--zone-nets``)."""
+    recorded = row.get("zone_nets")
+    return frozenset(recorded) if recorded is not None else fallback
+
+
+def render_summary(
+    labelled: list[tuple[str, dict]],
+    exclude: frozenset[str],
+    zone_nets: frozenset[str] | None = None,
+) -> str:
+    """One line per row of several ``route --json`` files, for the research note.
+
+    Two unfinished-net counts, each also given without *exclude*: the
+    classifier's ("signal") and the zone-checked one ("routed"), which adds
+    back nets the classifier calls ``pour_discontinuous`` that have no zone.
+    The second is ``--`` for a row with no zone information.
+    """
+    less = f"without {'/'.join(sorted(exclude))}" if exclude else "no nets excluded"
     out = [
         "| File | Scale | Mode | Feedback | Seed | Signal nets unfinished "
-        f"| {without} | kct check err | kicad-cli DRC err | Vias | Vias / routed connection "
-        "| Grid mm | rc | Timed out | Cache hit | Wall s | Load 1 min, start -> end "
-        "| Snapshot state |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        f"| ...{less} | Routed nets unfinished (zone-checked) | ...{less} "
+        "| kct check err | kicad-cli DRC err | Vias | Vias / routed connection "
+        "| Grid mm | Cell estimate | rc | Timed out | Cache hit | Wall s "
+        "| Load 1 min, start -> end | Snapshot state |",
+        "|" + "---|" * 21,
     ]
+
+    def count(nets: list[str] | None) -> str:
+        return "--" if nets is None else str(len(nets))
+
     for label, r in labelled:
         head = f"| {label} | {r['scale']:g} | {r['mode']} "
         if "nets_complete" not in r:
-            out.append(f"{head}| ERROR: {r.get('error', '?')} |" + " -- |" * 14)
+            out.append(f"{head}| ERROR: {r.get('error', '?')} |" + " -- |" * 17)
             continue
         feedback = "off" if "--no-placement-delta-feedback" in r.get("cmd", "") else "default"
-        nets = unfinished_signal_nets(r)
-        kept = unfinished_signal_nets(r, exclude)
+        zones = row_zone_nets(r, zone_nets)
+        checked = (None, None)
+        if zones is not None:
+            checked = (
+                unfinished_signal_nets(r, zone_nets=zones),
+                unfinished_signal_nets(r, exclude, zones),
+            )
         start, end = r.get("loadavg_start"), r.get("loadavg_end")
         load = f"{start[0]:g} -> {end[0]:g}" if start and end else "--"
+        cells = r.get("cell_estimate")
         out.append(
             f"{head}| {feedback} | {r.get('seed', '--')} "
-            f"| {'--' if nets is None else len(nets)} | {'--' if kept is None else len(kept)} "
+            f"| {count(unfinished_signal_nets(r))} | {count(unfinished_signal_nets(r, exclude))} "
+            f"| {count(checked[0])} | {count(checked[1])} "
             f"| {r['kct_check_errors']} | {r['kicad_drc_errors']} | {r['via_count']} "
             f"| {r.get('vias_per_connection', '--')} | {r.get('coarse_grid_mm', '--')} "
+            f"| {'--' if cells is None else f'{cells:,}'} "
             f"| {r['exit_code']} | {_timeout_cell(r)} | {'yes' if r.get('cache_hit') else 'no'} "
             f"| {r['wall_s']} | {load} | {r.get('snapshot_state', '--')} |"
         )
@@ -1586,14 +1636,17 @@ def _cmd_plan(args) -> int:
 def _cmd_summary(args) -> int:
     """The note's per-row table, straight from committed ``route --json`` files."""
     exclude = frozenset(n.strip() for n in args.exclude_nets.split(",") if n.strip())
+    fallback = None
+    if args.zone_nets is not None:
+        fallback = frozenset(n.strip() for n in args.zone_nets.split(",") if n.strip())
     labelled = [
         (path.stem, row) for path in args.json_files for row in json.loads(path.read_text())["rows"]
     ]
-    print(render_summary(labelled, exclude))
+    print(render_summary(labelled, exclude, fallback))
     if args.nets:
         print()
         for label, row in labelled:
-            nets = unfinished_signal_nets(row)
+            nets = unfinished_signal_nets(row, zone_nets=row_zone_nets(row, fallback))
             if nets is not None:
                 shown = ", ".join(f"{n} ({row['stuck_nets'][n]})" for n in nets) or "(none)"
                 print(f"{label} {row['mode']} {row['scale']:g}: {shown}")
@@ -1707,6 +1760,11 @@ def main(argv: list[str] | None = None) -> int:
         "--exclude-nets",
         default="",
         help="comma list of nets to leave out of the second unfinished-net column",
+    )
+    summary.add_argument(
+        "--zone-nets",
+        help="comma list of the nets that have a zone, for rows that did not record "
+        "`zone_nets` themselves (a row's own record always wins)",
     )
     summary.add_argument("--nets", action="store_true", help="also list each row's unfinished nets")
     summary.set_defaults(func=_cmd_summary)

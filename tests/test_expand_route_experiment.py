@@ -760,11 +760,12 @@ def test_summary_counts_unfinished_nets_with_and_without_the_excluded_ones(tmp_p
         "seed": 43,
         "cmd": "-m kicad_tools.cli route in -o out --no-placement-delta-feedback --seed 43",
         "nets_complete": 30,
-        "kct_check_errors": 4,
+        "kct_check_errors": 5,
         "kicad_drc_errors": 0,
         "via_count": 120,
         "vias_per_connection": 0.896,
         "coarse_grid_mm": 0.065,
+        "cell_estimate": 10577933,
         "exit_code": 2,
         "hit_timeout": False,
         "artifact": "final",
@@ -777,32 +778,54 @@ def test_summary_counts_unfinished_nets_with_and_without_the_excluded_ones(tmp_p
             "PHASE_A": "budget_starved",
             "PHASE_C": "budget_starved",
             "GND": "pour_discontinuous",
+            "VM": "pour_discontinuous",  # power-typed, but there is no VM zone
         },
     }
     phase = frozenset({"PHASE_A", "PHASE_B", "PHASE_C"})
-    assert ere.unfinished_signal_nets(row) == ["EN_B", "PHASE_A", "PHASE_C"]  # pour net dropped
+    zones = frozenset({"GND", "+5V"})
+    # The classifier's reading: both pour-classed nets dropped.
+    assert ere.unfinished_signal_nets(row) == ["EN_B", "PHASE_A", "PHASE_C"]
     assert ere.unfinished_signal_nets(row, phase) == ["EN_B"]
+    # Zone-checked: VM has no pour to be discontinuous, so it is unfinished.
+    assert ere.unfinished_signal_nets(row, zone_nets=zones) == ["EN_B", "PHASE_A", "PHASE_C", "VM"]
+    assert ere.unfinished_signal_nets(row, phase, zones) == ["EN_B", "VM"]
     assert ere.unfinished_signal_nets({"error": "no routed output"}) is None
+    # A row's own record beats the command-line fallback.
+    assert ere.row_zone_nets({"zone_nets": ["GND"]}, zones) == frozenset({"GND"})
+    assert ere.row_zone_nets({}, zones) == zones and ere.row_zone_nets({}) is None
 
     path = tmp_path / "05_off_s43.json"
     replay = {**row, "scale": 1.0, "mode": "uniform", "cmd": "route --seed 43", "cache_hit": True}
+    replay["zone_nets"] = ["GND", "VM"]
     failed = {"board": "05", "scale": 1.25, "mode": "rigid", "error": "no routed output"}
     path.write_text(json.dumps({"rows": [row, replay, failed]}))
     argv = ["summary", str(path), "--exclude-nets", "PHASE_A,PHASE_B,PHASE_C", "--nets"]
     assert ere.main(argv) == 0
     out = capsys.readouterr().out
     assert "...without PHASE_A/PHASE_B/PHASE_C" in out
+    # No zone information for this row and none supplied: the zone-checked cells stay empty.
     assert (
-        "| 05_off_s43 | 1.5 | rigid | off | 43 | 3 | 1 | 4 | 0 | 120 | 0.896 | 0.065 | 2 | no | no "
-        "| 610.2 | 5.5 -> 8.25 | -- |" in out
+        "| 05_off_s43 | 1.5 | rigid | off | 43 | 3 | 1 | -- | -- | 5 | 0 | 120 | 0.896 | 0.065 "
+        "| 10,577,933 | 2 | no | no | 610.2 | 5.5 -> 8.25 | -- |" in out
     )
-    # Feedback left at its default, and a cache replay, are both visible per row.
+    # Feedback left at its default, a cache replay, and a row that recorded a VM zone.
     assert (
-        "| 05_off_s43 | 1 | uniform | default | 43 | 3 | 1 | 4 | 0 | 120 | 0.896 | 0.065 | 2 | no | yes |"
-        in out
+        "| 05_off_s43 | 1 | uniform | default | 43 | 3 | 1 | 3 | 1 | 5 | 0 | 120 | 0.896 | 0.065 "
+        "| 10,577,933 | 2 | no | yes |" in out
     )
     assert "| 05_off_s43 | 1.25 | rigid | ERROR: no routed output |" in out
     assert "05_off_s43 rigid 1.5: EN_B (congestion_saturated), PHASE_A (budget_starved)" in out
+
+    assert ere.main([*argv, "--zone-nets", "GND,+5V"]) == 0
+    out = capsys.readouterr().out
+    assert "| 05_off_s43 | 1.5 | rigid | off | 43 | 3 | 1 | 4 | 2 | 5 | 0 |" in out
+    assert (
+        "| 05_off_s43 | 1 | uniform | default | 43 | 3 | 1 | 3 | 1 | 5 | 0 |" in out
+    )  # own record wins
+    assert (
+        "05_off_s43 rigid 1.5: EN_B (congestion_saturated), PHASE_A (budget_starved), PHASE_C (budget_starved), VM (pour_discontinuous)"
+        in out
+    )
 
 
 def test_grid_plan_is_read_per_zone_not_just_at_the_coarse_pitch():
