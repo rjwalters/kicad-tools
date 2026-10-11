@@ -894,6 +894,31 @@ def _kill_group(proc: subprocess.Popen) -> None:
             continue
 
 
+_FINE_ZONE = re.compile(r"^\s+(\S+): ([\d.]+)mm \([\d.]+x[\d.]+mm, ~([\d,]+) cells\)", re.M)
+
+
+def parse_grid_plan(text: str) -> dict:
+    """The auto-selected grid plan from a ``kct route`` log: coarse pitch and every fine zone.
+
+    The coarse pitch alone does not make two rows grid-matched. The plan also
+    gives each dense part its own finer zone, and the pitch chosen for a zone
+    depends on where the part lands: on board 05 the driver IC's zone is
+    0.05 mm at 1x and 0.005 mm -- a hundred times the cells -- at some scales
+    and not others, at the same 0.065 mm coarse pitch (Issue #6312).
+    """
+    out: dict = {}
+    for key in ("coarse_grid_mm", "cell_estimate"):
+        match = _LOG_PATTERNS[key].search(text)
+        if match:
+            raw = match.group(1).replace(",", "")
+            out[key] = float(raw) if "." in raw else int(raw)
+    out["fine_zones"] = {
+        ref: {"pitch_mm": float(pitch), "cells": int(cells.replace(",", ""))}
+        for ref, pitch, cells in _FINE_ZONE.findall(text)
+    }
+    return out
+
+
 def run_route(inp: Path, out: Path, extra: list[str], timeout: float, log: Path) -> dict:
     """Run ``kct route`` on *inp*. ``--timeout`` is the router's own hard budget;
     the subprocess is additionally killed (whole group) 5 minutes past it."""
@@ -1481,6 +1506,83 @@ def _cmd_clusters(args) -> int:
     return 0
 
 
+def render_plans(rows: list[dict], finer_than_mm: float) -> str:
+    out = [
+        "| Board | Mode | Scale | Coarse grid mm | Cell estimate | Fine zones "
+        f"| Zones finer than {finer_than_mm:g} mm (pitch mm, cells) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        head = f"| {r['board']} | {r['mode']} | {r['scale']:g} "
+        if "fine_zones" not in r:
+            out.append(f"{head}| ERROR: {r.get('error', '?')} | -- | -- | -- |")
+            continue
+        fine = "; ".join(
+            f"{ref} {z['pitch_mm']:g}, {z['cells']:,}"
+            for ref, z in r["fine_zones"].items()
+            if z["pitch_mm"] < finer_than_mm
+        )
+        cells = r.get("cell_estimate")
+        out.append(
+            f"{head}| {r.get('coarse_grid_mm', '--')} | {'--' if cells is None else f'{cells:,}'} "
+            f"| {len(r['fine_zones'])} | {fine or '--'} |"
+        )
+    return "\n".join(out)
+
+
+def _cmd_plan(args) -> int:
+    """The grid plan ``kct route`` would pick for each scaled board. Routes nothing.
+
+    Runs ``kct route --dry-run`` (about 3 s) on the same scaled input and with
+    the same grid arguments a ``route`` row would get, so which rows are
+    grid-matched can be known before any route time is spent.
+    """
+    keys = [k.strip() for k in args.boards.split(",") if k.strip()]
+    scales = [float(v) for v in args.scales.split(",") if v.strip()]
+    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    rule = _rule_from_args(args)
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    for key in keys:
+        if key not in BOARDS:
+            raise SystemExit(f"unknown board {key!r}; known: {','.join(BOARDS)}")
+        board = BOARDS[key]
+        src = resolve_board_path(board, args.chorus_pcb)
+        for mode in modes:
+            for scale in scales:
+                if math.isclose(scale, 1.0) and mode != modes[0]:
+                    continue
+                row: dict = {"board": key, "mode": mode, "scale": scale}
+                rows.append(row)
+                if src is None:
+                    row["error"] = "input not found"
+                    continue
+                run_dir = args.work_dir / f"plan-{key}-{mode}-{scale:g}"
+                if run_dir.exists():
+                    shutil.rmtree(run_dir)
+                try:
+                    inp, report = write_scaled_board(src, run_dir, scale, mode, rule)
+                except ScaleError as exc:
+                    row["error"] = f"could not scale: {exc}"
+                    continue
+                row["scale_report"] = report.to_dict()
+                cmd = [sys.executable, "-m", "kicad_tools.cli", "route", str(inp)]
+                cmd += ["-o", str(run_dir / "unused.kicad_pcb"), "--dry-run", "--no-cache"]
+                cmd += [*board.kct_args, *args.extra.split()]
+                cmd += grid_args(scale, args.grid_policy, args.grid_mm)
+                done = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=300)
+                row["cmd"] = " ".join(cmd[1:])
+                row.update(parse_grid_plan(done.stdout + done.stderr))
+                if not row["fine_zones"] and "coarse_grid_mm" not in row:
+                    row["error"] = f"no grid plan in the dry-run output (exit {done.returncode})"
+                    del row["fine_zones"]
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps({"rows": rows}, indent=2) + "\n")
+    print(render_plans(rows, args.finer_than_mm))
+    return 0
+
+
 def _cmd_summary(args) -> int:
     """The note's per-row table, straight from committed ``route --json`` files."""
     exclude = frozenset(n.strip() for n in args.exclude_nets.split(",") if n.strip())
@@ -1575,6 +1677,27 @@ def main(argv: list[str] | None = None) -> int:
     clusters.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
     _add_rule_args(clusters)
     clusters.set_defaults(func=_cmd_clusters)
+
+    plan = sub.add_parser(
+        "plan", help="the grid plan each scaled board would be routed on; routes nothing"
+    )
+    plan.add_argument("--boards", default="05")
+    plan.add_argument("--scales", default="1.0,1.25,1.5")
+    plan.add_argument("--modes", default="uniform,rigid")
+    plan.add_argument("--work-dir", type=Path, required=True)
+    plan.add_argument("--json", type=Path)
+    plan.add_argument("--grid-policy", choices=("pinned", "area", "default"), default="area")
+    plan.add_argument("--grid-mm", type=float)
+    plan.add_argument("--extra", default="", help="extra kct route arguments, as for `route`")
+    plan.add_argument(
+        "--finer-than-mm",
+        type=float,
+        default=0.03,
+        help="list fine zones below this pitch in the printed table (all are in --json)",
+    )
+    plan.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
+    _add_rule_args(plan)
+    plan.set_defaults(func=_cmd_plan)
 
     summary = sub.add_parser(
         "summary", help="one table line per row of one or more `route --json` files"

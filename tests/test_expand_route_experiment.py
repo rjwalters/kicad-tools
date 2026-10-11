@@ -803,3 +803,67 @@ def test_summary_counts_unfinished_nets_with_and_without_the_excluded_ones(tmp_p
     )
     assert "| 05_off_s43 | 1.25 | rigid | ERROR: no routed output |" in out
     assert "05_off_s43 rigid 1.5: EN_B (congestion_saturated), PHASE_A (budget_starved)" in out
+
+
+def test_grid_plan_is_read_per_zone_not_just_at_the_coarse_pitch():
+    """Two rows at one coarse pitch are not grid-matched if a part's fine zone differs."""
+    log = (
+        "Multi-Resolution Grid Plan (adaptive)\n  Coarse grid: 0.065mm\n  Fine zones: 3\n"
+        "    U1: 0.0400mm (12.3x12.3mm, ~95,481 cells) offset=(0.0200,0.0000)\n"
+        "    U2: 0.0050mm (9.7x12.4mm, ~4,845,540 cells)\n"
+        "    C2: 0.0635mm (5.9x4.0mm, ~5,859 cells) offset=(0.0575,0.0000)\n"
+        "  Total cell estimate: 10,577,933\n"
+    )
+    plan = ere.parse_grid_plan(log)
+    assert plan["coarse_grid_mm"] == 0.065 and plan["cell_estimate"] == 10577933
+    assert plan["fine_zones"] == {
+        "U1": {"pitch_mm": 0.04, "cells": 95481},
+        "U2": {"pitch_mm": 0.005, "cells": 4845540},
+        "C2": {"pitch_mm": 0.0635, "cells": 5859},
+    }
+    assert ere.parse_grid_plan("no plan here") == {"fine_zones": {}}
+
+    rows = [
+        {"board": "05", "mode": "rigid", "scale": 1.5, **plan},
+        {"board": "05", "mode": "rigid", "scale": 2.0, "error": "could not scale: copper"},
+    ]
+    table = ere.render_plans(rows, 0.03)
+    assert "| 05 | rigid | 1.5 | 0.065 | 10,577,933 | 3 | U2 0.005, 4,845,540 |" in table
+    assert "| 05 | rigid | 2 | ERROR: could not scale: copper |" in table
+
+
+def test_plan_command_dry_runs_the_scaled_board_with_the_rows_grid_arguments(
+    tmp_path, monkeypatch, capsys
+):
+    import json
+
+    calls: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = "  Coarse grid: 0.065mm\n    U2: 0.0500mm (9.7x12.4mm, ~48,555 cells)\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _Done()
+
+    monkeypatch.setattr(ere.subprocess, "run", fake_run)
+    out = tmp_path / "plan.json"
+    argv = ["plan", "--boards", "05", "--scales", "1.0,1.5", "--modes", "uniform,rigid"]
+    argv += ["--work-dir", str(tmp_path / "w"), "--json", str(out), "--extra", "--layers 4"]
+    assert ere.main(argv) == 0
+    capsys.readouterr()
+
+    rows = json.loads(out.read_text())["rows"]
+    # 1x once (under the first mode), then 1.5x in each mode.
+    assert [(r["mode"], r["scale"]) for r in rows] == [
+        ("uniform", 1.0),
+        ("uniform", 1.5),
+        ("rigid", 1.5),
+    ]
+    assert all("--dry-run" in c and "--no-cache" in c and "--layers" in c for c in calls)
+    assert "--max-cells" not in calls[0]
+    assert calls[1][calls[1].index("--max-cells") + 1] == "1125000"
+    assert rows[2]["fine_zones"] == {"U2": {"pitch_mm": 0.05, "cells": 48555}}
+    assert rows[2]["scale_report"]["clustered_footprints"] == 14
