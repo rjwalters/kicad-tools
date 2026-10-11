@@ -722,43 +722,20 @@ them into the one you are curating. Never absorb a sibling that has:
 
 > **Verify enumerations.** If the issue body lists specific callers, files, sites, or line numbers, treat the enumeration as a *starting point*, not authoritative. Run a comprehensive `git ls-files <pattern> | xargs grep -nE '<pattern>'` to verify completeness. Report any additions in your curator comment so the builder gets the correct scope.
 
-> **Verify against build base (origin/main).** You run in the user's working tree (uncommitted files visible); the builder runs in a fresh worktree off `origin/main`. If your "Affected Files" enumeration silently includes uncommitted paths, the builder will block on a broken setup. Before applying `loom:curated`, verify every path you enumerated under `## Affected Files` exists on the build base:
+> **Verify against build base (origin/main).** You run in the user's working tree (uncommitted files visible); the Builder runs in a fresh worktree off `origin/main`. Before applying `loom:curated`, save the text holding your `## Affected Files` section (issue body or comment draft) to a file and classify its paths:
 >
 > ```bash
-> # Curator pre-flight: verify Affected Files exist on origin/main
 > git fetch origin --quiet
->
-> # AFFECTED_FILES is the set of paths you enumerated under `## Affected Files`
-> MISSING=()
-> for path in "${AFFECTED_FILES[@]}"; do
->   if ! git ls-tree -r origin/main --name-only | grep -qFx "$path"; then
->     MISSING+=("$path")
->   fi
-> done
->
-> if (( ${#MISSING[@]} > 0 )); then
->   # Surface in a warning comment + apply loom:blocked; do NOT apply loom:curated
->   COMMENT="⚠️ **Curator pre-flight: uncommitted source files**
->
-> The following files in the Affected Files enumeration are not on \`origin/main\`:
-> $(printf -- '- \`%s\`\n' "${MISSING[@]}")
->
-> This will block the Builder, which dispatches into a fresh worktree off \`origin/main\`. Either:
-> - Commit + push these files first, then remove the \`loom:blocked\` label, OR
-> - Adjust the Affected Files section to scope down to committed-only changes."
->   ./.loom/scripts/post-comment.sh "$N" --body "$COMMENT"
->   loom-daemon park-record apply --issue "$N" --reason "uncommitted Affected Files" --by curator
->   # Exit without further state changes — the next curator tick will re-evaluate.
->   exit 0
-> fi
+> loom-daemon affected-files check --body-file "$BODY_FILE"; rc=$?   # prints <class><TAB><path>
 > ```
 >
-> Implementation notes:
-> - Use `grep -qFx` (exact match) — not `grep -qF` — so `src/foo.ts` doesn't match `src/foo.ts.bak`.
-> - Run `git fetch origin --quiet` once at the top of the verification pass; do not refetch per file.
-> - If the issue has no `## Affected Files` section yet, this check is a no-op for this tick — add the section in the same pass and let the next curator tick run the verification.
-> - The `loom:blocked` label is the right escape hatch: it's already in the workflow, and is removed by the user (not by Loom) once the underlying files are committed and pushed. No numbered blocker exists; the `COMMENT` above is the recorded reason ("Adding Dependencies").
-> - If this instead names a resolvable dependency on another issue/PR, record it as a park record — see `.loom/docs/park-record.md`.
+> Branch on `rc` alone:
+> - **`0`**: proceed. Every path is on `origin/main` or marked new (no section yet: also `0`).
+> - **`11`** (an `uncommitted` path: in your working tree, not on `origin/main`): the Builder's worktree would lack it. Comment naming those paths and the two fixes (commit + push them, or rescope the section to committed files), then `loom-daemon park-record apply --issue "$N" --reason "uncommitted Affected Files" --by curator`. Do not apply `loom:curated`; stop. The user removes `loom:blocked` once the files are pushed.
+> - **`10`** (an `unknown` path: on neither): a typo, or a file the issue creates that you did not mark. If you can tell which, fix the section (correct the path, or mark it new) and re-run (two fixes at most). Still `10`, or you cannot tell: name the paths in your curator comment, ask which it is, and continue curating. **Never `loom:blocked`**, with one exception: a path an open issue/PR is to create is a dependency, parked with `park-record apply --blocked-by <that number>` (`.loom/docs/park-record.md`).
+> - **anything else** (`3`; `2`/`127` from a daemon without this verb): the check did not run. Say so in your curator comment and continue: never park on it, never report it as passed.
+>
+> **Mark a file the issue creates** with `(new)` after its path, or list it under a `### New files` sub-heading; unmarked, it reads as `unknown`.
 
 ### Date-stamp volatile facts
 
@@ -1231,7 +1208,7 @@ behavior with no inferred mechanism attached.]
 
 ### Affected Files
 - \`path/to/file.ts\` - [what changes are needed]
-- \`path/to/other.py\` - [what changes are needed]
+- \`path/to/created.py\` (new) - [what it adds]
 
 ### Test Plan
 - [ ] Manual verification: [describe how to verify the fix/feature works]
@@ -2191,7 +2168,7 @@ Every curated issue MUST have an `## Affected Files` section listing files/compo
 ## Affected Files
 
 - `path/to/file.ts` - [what changes are needed]
-- `path/to/another.py` - [what changes are needed]
+- `path/to/created.py` (new) - [a file this issue creates]
 ```
 
 **How to find affected files**:

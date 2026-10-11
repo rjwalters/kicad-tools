@@ -1272,7 +1272,7 @@ strands the seats already paid for.
 {
   "runtimes": {
     "preference": ["claude", "codex", {"runtime": "opencode", "modelProfile": "zai-metered"}],
-    "rolePreference": { "judge": ["codex", "claude", "opencode"] }
+    "rolePreference": { "judge": ["codex", "claude"] }
   }
 }
 ```
@@ -1314,6 +1314,41 @@ or Doctor**, however high it sits in the list. For build work
 entry is recorded as skipped with reason `not-admitted(worktreeIsolation)`, which
 is materially different from "Codex had no credential" and should be read that
 way.
+
+**Model-profile role exclusion (`excludedRoles`, #11400).** A model profile may
+list roles it must never run, e.g. `"excludedRoles": ["judge", "curator"]` on the
+shipped `zai-flash` profile (review and triage stay off GLM). Admission enforces
+it for **every** selection source, judged against the profile the launch will
+actually use — a tap's `modelProfile`, else `LOOM_MODEL_PROFILE`, else
+`runtimes.defaultModelProfile`, else the bundled `zai-flash` default (so a bare
+`opencode` entry or `runtimes.roles.judge: "opencode"` is judged against
+`zai-flash` too):
+
+- a preference entry is skipped as `not-admitted(excludedRole)`, like
+  `not-admitted(worktreeIsolation)` above, and the walk continues;
+- a `runtimes.roles` binding, `LOOM_RUNTIME_<ROLE>` / `LOOM_RUNTIME` with
+  `LOOM_MODEL_PROFILE`, or an explicit per-dispatch runtime is **refused** with
+  the reason (exit 78) — a pin is never re-routed;
+- a native sweep runs Judge and Curator in its own session, so a sweep on an
+  excluding profile is refused through its review phase;
+- `spawn-worker` re-checks the profile it actually selected (an explicit
+  `--profile` included) before launching.
+
+Only native runtimes (`pi`, `opencode`, `kimi`) are checked, and only when the
+profile declares a provider for that harness. `loom-daemon validate` rejects an
+`excludedRoles` entry that is not a known role name.
+
+**GLM-first Builder and Doctor (this repo's committed config).**
+`.loom/config.json` sets `rolePreference.builder` and `.doctor` to
+`[{"runtime":"opencode","modelProfile":"zai-flash"}, "claude"]` (a sweep's
+Builder phase resolves through it via `worker run`, #11303): the role runs on a
+Z.ai seat while the `zai` api-keys pool has a selectable account, else on Claude.
+A host with **no** `zai` pool counts as unavailable, not unobservable: guarded
+launches never reuse OpenCode's own login, so unless an exported key,
+`LOOM_NATIVE_AUTH_FILE`, or a gateway route supplies it, the tap is skipped.
+`rolePreference.judge` is `["codex", "claude"]`; `zai-flash`'s `excludedRoles`
+would skip a GLM Judge entry anyway. A machine-tier pin such as
+`runtimes.roles.doctor = "claude"` still wins outright.
 
 **Judge independence.** A native sweep runs every phase in **one session with no
 subagents**, so a preference list that lands Builder and Judge on the same

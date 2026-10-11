@@ -134,6 +134,42 @@ The timer half is **detection, not convergence** by default: it reports drift
 and writes nothing unless `fleet.autoApply` is on. A change that must take
 effect without waiting for a restart still needs one.
 
+## Where each kind of key lives (#11441)
+
+Tier 1 (fleet-gitops `config.defaults` / `config.hosts.<h>`, rendered to the
+machine-level `defaults.json`) is where **fleet policy** is decided. Tier 2/3
+(`.loom/config.json`, `.loom-project/project.json`) are deep-merged **over** it
+key by key, so a fleet key committed in a repo silently wins for that repo and
+fleet-gitops alone no longer tells you what runs. The classification below is
+the human view of `CLASSIFICATION` in `loom-daemon/src/fleet_policy.rs`, which
+`loom-daemon validate`, CI and `loom-daemon status` all read.
+
+| Class | Top-level keys | Lives in |
+|-------|----------------|----------|
+| **Fleet** | `autonomous`, `runtimes`, `safehouse`, `observability`, `offlineMode`, `guide`, `sweep`, `daemon`, `fleet` | fleet-gitops only |
+| **Repo** | `terminals`, `buildGate`, `branchProtection`, `guards`, `labels`, `forge`, `reflection`, `version` | tracked `.loom/config.json` / `.loom-project/project.json` |
+| **Host** | `worktree`, `health_monitoring` (and per-host paths, see below) | `.loom-local/local.json` |
+
+This supersedes the "Project (default) or Local" ownership of `autonomous.*`,
+`safehouse.*` and `observability.*` in `docs/design/config-resolution-tiers.md`
+section 3: a repo is not the place to decide fleet behaviour. A repo with no
+`.loom/config.json` resolves entirely from tier 1 (the resolver soft-fails each
+missing tier).
+
+Enforcement:
+
+- `loom-daemon validate --strict` (CI runs the narrower `validate . --fleet-policy-only`) exits 2 on a Fleet key present in
+  a tracked repo tier (a `null` value counts: it clears the tier-1 value) unless `.loom/fleet-policy-allow.json` has an entry
+  `{"key": "...", "reason": "..."}` for it. An entry with an empty reason is
+  itself rejected. Use the allow-list only for a deliberate per-repo override.
+- The install template (`defaults/config.json`) seeds no Fleet keys.
+- `loom-daemon status` lists, per managed repo, each tracked-tier leaf of a
+  Fleet key that differs from tier 1, with the fleet value and the effective
+  value (a value equal to tier 1 is not reported).
+
+Migrating existing values into fleet-gitops is an operator step; until a repo's
+values move, its keys are allow-listed with a reason pointing at the migration.
+
 ## Applying the rule
 
 Any role about to close an issue, or merge/label a PR `Closes #N`, whose

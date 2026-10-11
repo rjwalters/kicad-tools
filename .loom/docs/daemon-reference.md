@@ -3390,7 +3390,10 @@ by `candidate_cmp`, with what the tick did with it:
   `host_constraint`, `host_class_refused` (#9034), `workspace_halted` (the whole repo's dispatch is held: red
   `main`, a gate in flight, a pre-flight or token-pool hold, a drain, or the
   host-distress breaker; the row does not say which), `workspace_commands_missing`,
-  `dispatch_error` (with the error text)
+  `dispatch_error` (with the error text), `already_landed` (#11429: the issue
+  is closed, or this host recorded a `landed` sweep for it in the last 30
+  minutes; detail `forge_closed` or `journal_landed`), `already_closed`
+  (#11429: the issue is closed as not planned)
 
 Each disposition is recorded next to the `TickReport` counter it matches, so the
 rows and the counters agree. Issues dropped before the sort are still ranked by the same
@@ -7261,8 +7264,8 @@ after a daemon restart), or if the recheck itself cannot answer, or if the PR is
 no longer open, the probe still concedes and dispatch still proceeds — a genuine
 forge outage can never wedge the daemon. Disable with `LOOM_OPEN_PR_MEMO=0`.
 
-**The memo only refuses (W9).** A memo answer is never renewed and never
-outlives 15 minutes; past that, the next attempt probes live, and leg 0 of that
+**The memo only refuses (W9).** A memo answer never outlives 15 minutes from
+its last verified forge answer; past that, the next attempt probes live, and leg 0 of that
 probe (the ETag'd open-PR listing, #10514) is a free `304` on an unchanged
 repo. A crash resume (#4256) is the one decision where an `Open(pr)` answer
 *permits* a dispatch, so it never consults the fresh memo: the reaper's
@@ -7773,6 +7776,28 @@ error, timeout, or unparseable output lets dispatch proceed, so a `gh` outage ca
 never wedge the daemon. It is GitHub-only (uses the `closedByPullRequestsReferences`
 closes-graph, filtered to `state == "OPEN"`); a Gitea workspace fails open and
 keeps today's behavior.
+
+**Batched pre-filter (#8865).** The multi-workspace tick no longer pays a full
+`dispatch()` attempt per PR-blocked candidate. The first candidate of a
+workspace to reach the dispatch point triggers ONE read of that workspace's
+ETag-cached open-PR listing, classified for all of its candidates with the
+guard's own classifier (`work_finder/open_pr_prefilter.rs`). A candidate with a
+verified open linked PR is counted in `pr-open-skip` and reported `open_pr`
+without a dispatch attempt: no `work_finder: attempting issue` line, no
+`loom.dispatch.admission` span, no dispatch backoff, and so no `pr-open-backoff`
+ticks in between. Its skip line is logged when the block starts, not every tick.
+The pre-filter only removes candidates and fails open: with the listing
+unreadable every candidate goes to `dispatch()` and the step 2.6 guard above,
+which is unchanged and still the authority for every route. A tick in which
+nothing reaches the dispatch point (at capacity, saturated, halted) makes no
+read. Each read that succeeds also feeds the #6788 memo, which the 2.6 probe no
+longer writes for these candidates: a verified open PR records or refreshes the
+issue's entry, a verified absence removes it (a closed PR frees its issue that
+tick), an unreadable listing changes nothing. So when the listing cannot be
+read, 2.5 refuses on the fresh entry, and the known-PR recheck still has its PR
+if every other leg fails. An open-PR refusal that `dispatch()` still makes arms the #4485 ladder as
+before, but as its own streak, logged as a guard refusal rather than as
+`consecutive failed dispatch(es)`.
 
 **A large held-PR backlog can masquerade as work starvation here — a distinct
 mechanism from #5715.** Because the guard keys on openness only, a PR that

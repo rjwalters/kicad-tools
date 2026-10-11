@@ -143,6 +143,8 @@ it, only a hold label names a reason; other candidates are undecided.
 | `error` | the dispatch attempt failed | `dispatch_error` |
 | `tick_skipped` | the role tick did not run for another reason | roles: runtime rejected, model/runtime mismatch, load, queue gate |
 | `not_selected` | the role ran, its writes were observed, and it did not act on this candidate | roles only, with `decisions_observed` |
+| `already_landed` | the item's work already landed: the issue is closed, or this host recorded a `landed` sweep for it in the last 30 minutes (#11429) | `already_landed` |
+| `already_closed` | the issue is closed as not planned (#11429) | `already_closed` |
 
 `QueueDisposition::Dispatched` is the one disposition with no reason: it is
 *acted*. The mapping is a total match in
