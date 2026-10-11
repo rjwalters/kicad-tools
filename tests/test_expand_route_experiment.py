@@ -556,6 +556,59 @@ def test_vias_are_counted_per_net(tmp_path):
     assert ere.vias_by_net(_pcb(tmp_path, "n.kicad_pcb", _board(TWO_PARTS))) == {}
 
 
+def test_vias_per_connection_divides_by_routed_connections(tmp_path, monkeypatch):
+    """The ratio is over *routed* connections, and is None when there are none.
+
+    A deadline row can lose a third of its connections (board 05 ``rigid``
+    1.5x routed 88 of 142, Issue #6312); dividing by the total would make such
+    a row look via-sparse instead of saying what its routes cost.
+    """
+    from types import SimpleNamespace
+
+    from kicad_tools.benchmark.external import metrics
+
+    routed_connections = {"n": 4}
+
+    def as_dict(**fields):
+        return SimpleNamespace(to_dict=lambda: fields)
+
+    monkeypatch.setattr(
+        metrics,
+        "measure_completion",
+        lambda _routed: as_dict(
+            nets_complete=1,
+            nets_total=2,
+            nets_blocking_incomplete=1,
+            connections_routed=routed_connections["n"],
+            connections_total=10,
+        ),
+    )
+    monkeypatch.setattr(
+        metrics, "measure_copper", lambda _routed: as_dict(via_count=6, wirelength_mm=12.34)
+    )
+    monkeypatch.setattr(
+        metrics,
+        "run_kct_check",
+        lambda _routed, **_kw: SimpleNamespace(ran=True, error_count=0, errors_by_rule={}),
+    )
+    monkeypatch.setattr(
+        metrics,
+        "run_kicad_cli_drc",
+        lambda _routed, **_kw: SimpleNamespace(ran=True, violation_count=0, by_type={}, note=""),
+    )
+    routed = tmp_path / "r.kicad_pcb"
+    routed.write_text(_board(TWO_PARTS))
+    board = ere.Board("x", "r.kicad_pcb")
+
+    row = ere.grade(routed, board)
+    assert row["via_count"] == 6
+    assert (row["connections_routed"], row["connections_total"]) == (4, 10)
+    assert row["vias_per_connection"] == 1.5  # 6 / 4 routed, not 6 / 10 total
+
+    routed_connections["n"] = 0
+    assert ere.grade(routed, board)["vias_per_connection"] is None
+
+
 def _stub_route(monkeypatch, *, sidecar: dict | None = None, graded: list | None = None):
     """Replace the router and the graders so ``run_one`` can be tested offline."""
     import json
