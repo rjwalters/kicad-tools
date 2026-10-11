@@ -372,6 +372,7 @@ def test_route_log_facts_are_extracted():
         "layers_used": 4,
         "router_nets": "18/33",
         "hit_timeout": True,
+        "cache_hit": False,
     }
     assert ere.parse_route_log("nothing relevant")["hit_timeout"] is False
     # A late stage cut short by the budget is a timeout too, even on exit 4.
@@ -485,3 +486,496 @@ def test_fleet_boards_scale_without_error():
         tree = load_pcb(ere.resolve_board_path(ere.BOARDS[key]))
         report = ere.scale_board_tree(tree, 2.0)
         assert report.footprints_moved > 0, key
+
+
+# ---------------------------------------------------------------------------
+# Issue #6312: sidecar facts, load/seed, vias per net, cluster-rule flags
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_sidecar_facts_are_copied_and_missing_keys_are_not_invented(tmp_path):
+    import json
+
+    routed = tmp_path / "b_routed.kicad_pcb"
+    assert ere.timeout_sidecar_facts(routed) == {}  # no deadline: no sidecar
+
+    sidecar = tmp_path / "b_routed.timeout.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "stage": "partial-save",
+                "snapshot_state": "last-accepted",
+                "snapshot_placement": "source",
+                "snapshot_discarded_trial": "C4 nudge",
+                "status": "partial",
+                "timeout_seconds": 1200,
+            }
+        )
+    )
+    assert ere.timeout_sidecar_facts(routed) == {
+        "timeout_sidecar": True,
+        "timeout_stage": "partial-save",
+        "snapshot_state": "last-accepted",
+        "snapshot_placement": "source",
+        "snapshot_discarded_trial": "C4 nudge",
+    }
+
+    # A sidecar from before PR #6323 has no snapshot fields. Their absence must
+    # stay an absence: defaulting to "live" would vouch for an unchecked board.
+    sidecar.write_text(json.dumps({"stage": "routing"}))
+    assert ere.timeout_sidecar_facts(routed) == {
+        "timeout_sidecar": True,
+        "timeout_stage": "routing",
+    }
+    # The worker was killed before it published the partial-save stage: a
+    # _partial board may exist, but nothing says what it holds.
+    sidecar.write_text(json.dumps({"stage": "placement-delta-feedback", "snapshot_saved": False}))
+    assert ere.timeout_sidecar_facts(routed) == {
+        "timeout_sidecar": True,
+        "timeout_stage": "placement-delta-feedback",
+        "snapshot_saved": False,
+    }
+    # An explicit null (no trial discarded) is a fact and is kept.
+    sidecar.write_text(json.dumps({"stage": "routing", "snapshot_discarded_trial": None}))
+    assert ere.timeout_sidecar_facts(routed)["snapshot_discarded_trial"] is None
+
+    sidecar.write_text("not json")
+    assert ere.timeout_sidecar_facts(routed) == {}
+    sidecar.write_text("[1, 2]")
+    assert ere.timeout_sidecar_facts(routed) == {}
+
+
+def test_vias_are_counted_per_net(tmp_path):
+    vias = (
+        '\n  (via (at 5 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1 "A"))'
+        '\n  (via (at 6 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1 "A"))'
+        '\n  (via (at 7 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2 "B"))'
+    )
+    text = _board(TWO_PARTS, vias).replace('(net 1 "A")\n', '(net 1 "A") (net 2 "B")\n', 1)
+    assert ere.vias_by_net(_pcb(tmp_path, "v.kicad_pcb", text)) == {"A": 2, "B": 1}
+    assert ere.vias_by_net(_pcb(tmp_path, "n.kicad_pcb", _board(TWO_PARTS))) == {}
+
+
+def test_vias_per_connection_divides_by_routed_connections(tmp_path, monkeypatch):
+    """The ratio is over *routed* connections, and is None when there are none.
+
+    A deadline row can lose a third of its connections (board 05 ``rigid``
+    1.5x routed 88 of 142, Issue #6312); dividing by the total would make such
+    a row look via-sparse instead of saying what its routes cost.
+    """
+    from types import SimpleNamespace
+
+    from kicad_tools.benchmark.external import metrics
+
+    routed_connections = {"n": 4}
+
+    def as_dict(**fields):
+        return SimpleNamespace(to_dict=lambda: fields)
+
+    monkeypatch.setattr(
+        metrics,
+        "measure_completion",
+        lambda _routed: as_dict(
+            nets_complete=1,
+            nets_total=2,
+            nets_blocking_incomplete=1,
+            connections_routed=routed_connections["n"],
+            connections_total=10,
+        ),
+    )
+    monkeypatch.setattr(
+        metrics, "measure_copper", lambda _routed: as_dict(via_count=6, wirelength_mm=12.34)
+    )
+    monkeypatch.setattr(
+        metrics,
+        "run_kct_check",
+        lambda _routed, **_kw: SimpleNamespace(ran=True, error_count=0, errors_by_rule={}),
+    )
+    monkeypatch.setattr(
+        metrics,
+        "run_kicad_cli_drc",
+        lambda _routed, **_kw: SimpleNamespace(ran=True, violation_count=0, by_type={}, note=""),
+    )
+    routed = tmp_path / "r.kicad_pcb"
+    routed.write_text(_board(TWO_PARTS))
+    board = ere.Board("x", "r.kicad_pcb")
+
+    row = ere.grade(routed, board)
+    assert row["via_count"] == 6
+    assert (row["connections_routed"], row["connections_total"]) == (4, 10)
+    assert row["vias_per_connection"] == 1.5  # 6 / 4 routed, not 6 / 10 total
+
+    routed_connections["n"] = 0
+    assert ere.grade(routed, board)["vias_per_connection"] is None
+
+
+def _stub_route(monkeypatch, *, sidecar: dict | None = None, graded: list | None = None):
+    """Replace the router and the graders so ``run_one`` can be tested offline."""
+    import json
+
+    def fake_route(inp, out, extra, timeout, log):
+        log.write_text("  Coarse grid: 0.065mm\n")
+        if sidecar is None:
+            out.write_text(inp.read_text())
+        else:
+            out.with_name(f"{out.stem}_partial.kicad_pcb").write_text(inp.read_text())
+            out.with_suffix(".timeout.json").write_text(json.dumps(sidecar))
+        return {"cmd": " ".join(extra), "exit_code": 0 if sidecar is None else 124, "wall_s": 0.1}
+
+    def fake_grade(routed, board):
+        if graded is not None:
+            graded.append(routed.name)
+        return {"nets_complete": 1, "nets_total": 1}
+
+    monkeypatch.setattr(ere, "run_route", fake_route)
+    monkeypatch.setattr(ere, "grade", fake_grade)
+
+
+def test_row_records_seed_and_load_at_both_ends(tmp_path, monkeypatch):
+    _stub_route(monkeypatch)
+    loads = iter([(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)])
+    monkeypatch.setattr(ere.os, "getloadavg", lambda: next(loads))
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text(_board(TWO_PARTS))
+
+    row = ere.run_one(ere.Board("x", "b.kicad_pcb"), src, 1.5, "uniform", tmp_path / "w", 43, 60)
+
+    assert row["seed"] == 43
+    assert "--seed 43" in row["cmd"]
+    assert row["loadavg_start"] == [1.0, 2.0, 3.0]
+    assert row["loadavg_end"] == [4.0, 5.0, 6.0]
+    assert row["artifact"] == "final"
+    assert "snapshot_state" not in row and "timeout_sidecar" not in row
+
+
+def test_deadline_row_carries_the_sidecar_snapshot_state(tmp_path, monkeypatch):
+    graded: list[str] = []
+    _stub_route(
+        monkeypatch,
+        sidecar={
+            "stage": "partial-save",
+            "snapshot_state": "inconsistent",
+            "snapshot_placement": "moved",
+            "snapshot_discarded_trial": None,
+        },
+        graded=graded,
+    )
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text(_board(TWO_PARTS))
+
+    row = ere.run_one(ere.Board("x", "b.kicad_pcb"), src, 1.0, "uniform", tmp_path / "w", 42, 60)
+
+    # Read even though a _partial board exists -- the case the harness used to
+    # skip, and the one where the snapshot can be inconsistent (Issue #6314).
+    assert graded == ["b_routed_partial.kicad_pcb"]
+    assert row["artifact"] == "deadline"
+    assert row["snapshot_state"] == "inconsistent"
+    assert row["snapshot_placement"] == "moved"
+    assert row["snapshot_discarded_trial"] is None
+    assert row["timeout_stage"] == "partial-save"
+
+
+def _cluster_parts() -> str:
+    """A 6-pad IC, a 4-pad regulator, and one wired cap beside each."""
+    reg = _footprint("U2", 30, 10, [(str(i + 1), -1.5 + i, 0.0, f"R{i}") for i in range(4)])
+    return (
+        _ic("U1", 10, 10, "N")
+        + reg
+        + _footprint("C1", 10, 12, [("1", -0.6, 0, "N0"), ("2", 0.6, 0, "GND")])
+        + _footprint("C2", 30, 12, [("1", -0.6, 0, "R0"), ("2", 0.6, 0, "GND")])
+        + _footprint("C3", 30, 16, [("1", -0.6, 0, "R1"), ("2", 0.6, 0, "GND")])
+    )
+
+
+def test_cluster_report_shows_the_funnel_and_the_shared_nets(tmp_path):
+    pcb = _pcb(tmp_path, "c.kicad_pcb", _board(_cluster_parts()))
+
+    default = ere.cluster_report(pcb)
+    assert default["rule"] == {"anchor_min_pads": 6, "satellite_max_pads": 2, "max_gap_mm": 3.0}
+    assert default["pad_count_histogram"] == {"2": 3, "4": 1, "6": 1}
+    assert (default["footprints"], default["anchors"], default["small_parts"]) == (5, 1, 3)
+    # Under the default rule the 4-pad regulator is neither anchor nor satellite.
+    assert default["small_parts_near_and_sharing_a_net"] == 1
+    assert (default["multi_part_clusters"], default["cluster_sizes"]) == (1, [2])
+    assert default["clusters"] == [{"anchor": "U1", "anchor_pads": 6, "satellites": {"C1": ["N0"]}}]
+
+    # Lowering the anchor threshold admits the regulator and its near cap ...
+    lowered = ere.cluster_report(pcb, ere.ClusterRule(anchor_min_pads=3))
+    assert (lowered["anchors"], lowered["multi_part_clusters"]) == (2, 2)
+    assert lowered["footprints_in_multi_part_clusters"] == 4
+    # ... and widening the gap admits the far one.
+    wide = ere.cluster_report(pcb, ere.ClusterRule(anchor_min_pads=3, max_gap_mm=6.0))
+    assert wide["cluster_sizes"] == [3, 2]
+    assert wide["clusters"][1]["satellites"] == {"C2": ["R0"], "C3": ["R1"]}
+    # The report and the clustering the scaler applies must agree.
+    assert (
+        sum(1 for g in ere.rigid_clusters(pcb, anchor_min_pads=3, max_gap_mm=6.0) if len(g) > 1)
+        == 2
+    )
+
+    table = ere.render_clusters(
+        [{"board": "x", **wide}, {"board": "y", "error": "input not found"}]
+    )
+    assert "| x | 3, 2, 6 | 5 | 2 | 3 | 3 | 3 | 2 (3, 2) | 5 |" in table
+    assert "| y | -- | ERROR: input not found |" in table
+
+
+def test_rigid_scaling_uses_and_records_the_cluster_rule(tmp_path):
+    src = tmp_path / "c.kicad_pcb"
+    src.write_text(_board(_cluster_parts()))
+
+    _, default = ere.write_scaled_board(src, tmp_path / "a", 1.5, "rigid")
+    assert default.clustered_footprints == 2
+    assert default.to_dict()["cluster_rule"] == ere.ClusterRule().to_dict()
+
+    rule = ere.ClusterRule(anchor_min_pads=3, max_gap_mm=6.0)
+    _, revised = ere.write_scaled_board(src, tmp_path / "b", 1.5, "rigid", rule)
+    assert revised.clustered_footprints == 5
+    assert revised.to_dict()["cluster_rule"] == {
+        "anchor_min_pads": 3,
+        "satellite_max_pads": 2,
+        "max_gap_mm": 6.0,
+    }
+    # No rule is applied in uniform mode, so none is claimed.
+    _, uniform = ere.write_scaled_board(src, tmp_path / "c", 1.5, "uniform", rule)
+    assert uniform.to_dict()["cluster_rule"] is None
+
+
+def test_cluster_flags_reach_the_route_and_clusters_commands(tmp_path, monkeypatch, capsys):
+    seen: list = []
+
+    def fake_run_one(*args):
+        seen.append(args)
+        return {"board": "05", "scale": 1.5, "mode": "rigid", "error": "stub"}
+
+    monkeypatch.setattr(ere, "run_one", fake_run_one)
+    argv = ["route", "--boards", "05", "--scales", "1.5", "--modes", "rigid"]
+    argv += ["--work-dir", str(tmp_path), "--seed", "44", "--anchor-min-pads", "3"]
+    # A single-token --extra must use the = form; argparse rejects the other.
+    argv += ["--max-gap-mm", "5", "--extra=--no-placement-delta-feedback"]
+    assert ere.main(argv) == 0
+    (call,) = seen
+    assert call[5] == 44
+    assert call[-2] == ("--no-placement-delta-feedback",)
+    assert call[-1] == ere.ClusterRule(3, 2, 5.0)
+    with pytest.raises(SystemExit):
+        ere.main([*argv[:-1], "--extra", "--no-placement-delta-feedback"])
+    capsys.readouterr()
+
+    # The no-route report on the in-tree boards, at the rule the note used.
+    out = tmp_path / "clusters.json"
+    assert ere.main(["clusters", "--boards", "03,05", "--json", str(out), "--members"]) == 0
+    printed = capsys.readouterr().out
+    assert "| 03 | 6, 2, 3 | 38 | 5 | 27 | 12 | 12 | 4 (9, 3, 2, 2) | 16 |" in printed
+    assert "| 05 | 6, 2, 3 | 42 | 5 | 35 | 10 | 10 | 4 (5, 5, 2, 2) | 14 |" in printed
+    assert "05: U1 (32 pads) <- " in printed
+    import json
+
+    rows = json.loads(out.read_text())["rows"]
+    assert [r["footprints_in_multi_part_clusters"] for r in rows] == [16, 14]
+    with pytest.raises(SystemExit, match="unknown board"):
+        ere.main(["clusters", "--boards", "nope"])
+
+
+def test_quoted_deadline_marker_in_the_startup_warning_is_not_a_timeout():
+    """Every --deterministic-budget run prints this warning; none of them timed out for it."""
+    warning = (
+        "[deterministic-budget] WARNING: --timeout 1200s is set.  If it fires, the run is no "
+        "longer machine-independent; a '[deterministic-budget] stage deadline fired' log line "
+        "will mark exactly when that happens.\n"
+    )
+    assert ere.parse_route_log(warning)["hit_timeout"] is False
+    fired = warning + "[deterministic-budget] stage deadline fired -- run is not reproducible\n"
+    assert ere.parse_route_log(fired)["hit_timeout"] is True
+
+
+def test_a_cache_replay_is_flagged_and_the_harness_asks_for_a_fresh_route(tmp_path, monkeypatch):
+    replay = "--- Checking routing cache ---\n  Cache HIT: 56 nets routed\n"
+    assert ere.parse_route_log(replay)["cache_hit"] is True
+    assert ere.parse_route_log("  Cache MISS (key: 1f46...)\n")["cache_hit"] is False
+
+    seen: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        seen.append(cmd)
+        return _Done()
+
+    monkeypatch.setattr(ere.subprocess, "Popen", fake_popen)
+    ere.run_route(tmp_path / "in.kicad_pcb", tmp_path / "out.kicad_pcb", [], 60, tmp_path / "log")
+    assert "--no-cache" in seen[0]
+
+
+def test_summary_counts_unfinished_nets_with_and_without_the_excluded_ones(tmp_path, capsys):
+    import json
+
+    row = {
+        "board": "05",
+        "scale": 1.5,
+        "mode": "rigid",
+        "seed": 43,
+        "cmd": "-m kicad_tools.cli route in -o out --no-placement-delta-feedback --seed 43",
+        "nets_complete": 30,
+        "kct_check_errors": 5,
+        "kicad_drc_errors": 0,
+        "via_count": 120,
+        "vias_per_connection": 0.896,
+        "coarse_grid_mm": 0.065,
+        "cell_estimate": 10577933,
+        "exit_code": 2,
+        "hit_timeout": False,
+        "artifact": "final",
+        "cache_hit": False,
+        "wall_s": 610.2,
+        "loadavg_start": [5.5, 6.0, 7.0],
+        "loadavg_end": [8.25, 7.0, 7.0],
+        "stuck_nets": {
+            "EN_B": "congestion_saturated",
+            "PHASE_A": "budget_starved",
+            "PHASE_C": "budget_starved",
+            "GND": "pour_discontinuous",
+            "VM": "pour_discontinuous",  # power-typed, but there is no VM zone
+        },
+    }
+    phase = frozenset({"PHASE_A", "PHASE_B", "PHASE_C"})
+    zones = frozenset({"GND", "+5V"})
+    # The classifier's reading: both pour-classed nets dropped.
+    assert ere.unfinished_signal_nets(row) == ["EN_B", "PHASE_A", "PHASE_C"]
+    assert ere.unfinished_signal_nets(row, phase) == ["EN_B"]
+    # Zone-checked: VM has no pour to be discontinuous, so it is unfinished.
+    assert ere.unfinished_signal_nets(row, zone_nets=zones) == ["EN_B", "PHASE_A", "PHASE_C", "VM"]
+    assert ere.unfinished_signal_nets(row, phase, zones) == ["EN_B", "VM"]
+    assert ere.unfinished_signal_nets({"error": "no routed output"}) is None
+    # A row's own record beats the command-line fallback.
+    assert ere.row_zone_nets({"zone_nets": ["GND"]}, zones) == frozenset({"GND"})
+    assert ere.row_zone_nets({}, zones) == zones and ere.row_zone_nets({}) is None
+
+    path = tmp_path / "05_off_s43.json"
+    replay = {**row, "scale": 1.0, "mode": "uniform", "cmd": "route --seed 43", "cache_hit": True}
+    replay["zone_nets"] = ["GND", "VM"]
+    failed = {"board": "05", "scale": 1.25, "mode": "rigid", "error": "no routed output"}
+    path.write_text(json.dumps({"rows": [row, replay, failed]}))
+    argv = ["summary", str(path), "--exclude-nets", "PHASE_A,PHASE_B,PHASE_C", "--nets"]
+    assert ere.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "...without PHASE_A/PHASE_B/PHASE_C" in out
+    # No zone information for this row and none supplied: the zone-checked cells stay empty.
+    assert (
+        "| 05_off_s43 | 1.5 | rigid | off | 43 | 3 | 1 | -- | -- | 5 | 0 | 120 | 0.896 | 0.065 "
+        "| 10,577,933 | 2 | no | no | 610.2 | 5.5 -> 8.25 | -- |" in out
+    )
+    # Feedback left at its default, a cache replay, and a row that recorded a VM zone.
+    assert (
+        "| 05_off_s43 | 1 | uniform | default | 43 | 3 | 1 | 3 | 1 | 5 | 0 | 120 | 0.896 | 0.065 "
+        "| 10,577,933 | 2 | no | yes |" in out
+    )
+    assert "| 05_off_s43 | 1.25 | rigid | ERROR: no routed output |" in out
+    assert "05_off_s43 rigid 1.5: EN_B (congestion_saturated), PHASE_A (budget_starved)" in out
+
+    assert ere.main([*argv, "--zone-nets", "GND,+5V"]) == 0
+    out = capsys.readouterr().out
+    assert "| 05_off_s43 | 1.5 | rigid | off | 43 | 3 | 1 | 4 | 2 | 5 | 0 |" in out
+    assert (
+        "| 05_off_s43 | 1 | uniform | default | 43 | 3 | 1 | 3 | 1 | 5 | 0 |" in out
+    )  # own record wins
+    assert (
+        "05_off_s43 rigid 1.5: EN_B (congestion_saturated), PHASE_A (budget_starved), PHASE_C (budget_starved), VM (pour_discontinuous)"
+        in out
+    )
+
+
+def test_grid_plan_is_read_per_zone_not_just_at_the_coarse_pitch():
+    """Two rows at one coarse pitch are not grid-matched if a part's fine zone differs."""
+    log = (
+        "Multi-Resolution Grid Plan (adaptive)\n  Coarse grid: 0.065mm\n  Fine zones: 3\n"
+        "    U1: 0.0400mm (12.3x12.3mm, ~95,481 cells) offset=(0.0200,0.0000)\n"
+        "    U2: 0.0050mm (9.7x12.4mm, ~4,845,540 cells)\n"
+        "    C2: 0.0635mm (5.9x4.0mm, ~5,859 cells) offset=(0.0575,0.0000)\n"
+        "  Total cell estimate: 10,577,933\n"
+    )
+    plan = ere.parse_grid_plan(log)
+    assert plan["coarse_grid_mm"] == 0.065 and plan["cell_estimate"] == 10577933
+    assert plan["fine_zones"] == {
+        "U1": {"pitch_mm": 0.04, "cells": 95481},
+        "U2": {"pitch_mm": 0.005, "cells": 4845540},
+        "C2": {"pitch_mm": 0.0635, "cells": 5859},
+    }
+    assert ere.parse_grid_plan("no plan here") == {"fine_zones": {}}
+
+    rows = [
+        {"board": "05", "mode": "rigid", "scale": 1.5, **plan},
+        {"board": "05", "mode": "rigid", "scale": 2.0, "error": "could not scale: copper"},
+    ]
+    table = ere.render_plans(rows, 0.03)
+    assert "| 05 | rigid | 1.5 | 0.065 | 10,577,933 | 3 | U2 0.005, 4,845,540 |" in table
+    assert "| 05 | rigid | 2 | ERROR: could not scale: copper |" in table
+
+
+def test_plan_command_dry_runs_the_scaled_board_with_the_rows_grid_arguments(
+    tmp_path, monkeypatch, capsys
+):
+    import json
+
+    calls: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = "  Coarse grid: 0.065mm\n    U2: 0.0500mm (9.7x12.4mm, ~48,555 cells)\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _Done()
+
+    monkeypatch.setattr(ere.subprocess, "run", fake_run)
+    out = tmp_path / "plan.json"
+    argv = ["plan", "--boards", "05", "--scales", "1.0,1.5", "--modes", "uniform,rigid"]
+    argv += ["--work-dir", str(tmp_path / "w"), "--json", str(out), "--extra", "--layers 4"]
+    assert ere.main(argv) == 0
+    capsys.readouterr()
+
+    rows = json.loads(out.read_text())["rows"]
+    # 1x once (under the first mode), then 1.5x in each mode.
+    assert [(r["mode"], r["scale"]) for r in rows] == [
+        ("uniform", 1.0),
+        ("uniform", 1.5),
+        ("rigid", 1.5),
+    ]
+    assert all("--dry-run" in c and "--no-cache" in c and "--layers" in c for c in calls)
+    assert "--max-cells" not in calls[0]
+    assert calls[1][calls[1].index("--max-cells") + 1] == "1125000"
+    assert rows[2]["fine_zones"] == {"U2": {"pitch_mm": 0.05, "cells": 48555}}
+    assert rows[2]["scale_report"]["clustered_footprints"] == 14
+
+
+def test_net_matrix_follows_each_unfinished_net_across_rows():
+    rows = [
+        (
+            "a",
+            {
+                "mode": "uniform",
+                "scale": 1.0,
+                "stuck_nets": {"PHASE_A": "budget_starved"},
+                "vias_by_net": {"GND_SENSE": 6},
+            },
+        ),
+        (
+            "a",
+            {
+                "mode": "rigid",
+                "scale": 1.25,
+                "stuck_nets": {"GND_SENSE": "congestion_saturated"},
+                "vias_by_net": {"PHASE_A": 1, "GND_SENSE": 4},
+            },
+        ),
+        ("a", {"mode": "rigid", "scale": 1.5, "error": "no routed output"}),  # ungraded: no column
+    ]
+    table = ere.render_net_matrix(rows).splitlines()
+    assert table[0] == "| Net | a uniform 1 | a rigid 1.25 |"
+    assert table[2] == "| GND_SENSE | ok (6 v) | congestion_saturated (4 v) |"
+    assert table[3] == "| PHASE_A | budget_starved (0 v) | ok (1 v) |"

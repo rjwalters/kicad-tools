@@ -58,6 +58,17 @@ traps" before trusting a number from a new run: the auto-selected grid changes
 with board size (use ``--grid-policy pinned`` for a clean A/B), and a run cut
 off by ``--timeout`` leaves an artifact that is graded but is not a result.
 
+Issue #6312 added three subcommands that route nothing, and they are the
+cheap checks to run before spending route time on a new comparison:
+
+* ``clusters`` -- what a rigid-clustering rule does to each board;
+* ``plan`` -- the grid plan (every fine zone) each scaled board would get;
+* ``summary`` -- the per-row table of one or more ``route --json`` files, with
+  a zone-checked unfinished-net count and an excluded-net column.
+
+``route`` always passes ``--no-cache``: without it a repeated row replays the
+first run's copper instead of routing.
+
 Usage::
 
     uv run kct build-native --check
@@ -214,9 +225,11 @@ class ScaleReport:
     clusters: int = 0
     clustered_footprints: int = 0  # footprints riding in a multi-part cluster
     outline_mm: tuple[float, float] = (0.0, 0.0)  # scaled outline bbox size
+    cluster_rule: dict | None = None  # rigid_clusters() parameters; None in uniform mode
 
     def to_dict(self) -> dict:
         return {
+            "cluster_rule": self.cluster_rule,
             "scale_x": self.scale_x,
             "scale_y": self.scale_y,
             "mode": self.mode,
@@ -520,6 +533,27 @@ def _segment_hits_rect(p1, p2, rect) -> bool:
     return any(_segments_cross(p1, p2, corners[i], corners[(i + 1) % 4]) for i in range(4))
 
 
+def _satellite_owners(
+    bodies: list[Body], anchor_min_pads: int, satellite_max_pads: int, max_gap_mm: float
+) -> dict[int, int]:
+    """Footprint index of each satellite -> footprint index of the anchor it joins."""
+    anchors = [b for b in bodies if b.pad_count >= anchor_min_pads]
+    owner: dict[int, int] = {}
+    for body in bodies:
+        if body.pad_count > satellite_max_pads:
+            continue
+        best: tuple[float, int] | None = None
+        for anchor in anchors:
+            if not (body.nets & anchor.nets):
+                continue
+            gap = rect_gap(body.rect, anchor.rect)
+            if gap <= max_gap_mm and (best is None or gap < best[0]):
+                best = (gap, anchor.index)
+        if best is not None:
+            owner[body.index] = best[1]
+    return owner
+
+
 def rigid_clusters(
     pcb,
     *,
@@ -540,26 +574,120 @@ def rigid_clusters(
     resistor happens to sit beside it"; without it a dense board collapses into
     one cluster and nothing expands at all.
     """
-    bodies = footprint_bodies(pcb)
-    anchors = [b for b in bodies if b.pad_count >= anchor_min_pads]
-    owner: dict[int, int] = {}
-    for body in bodies:
-        if body.pad_count > satellite_max_pads:
-            continue
-        best: tuple[float, int] | None = None
-        for anchor in anchors:
-            if not (body.nets & anchor.nets):
-                continue
-            gap = rect_gap(body.rect, anchor.rect)
-            if gap <= max_gap_mm and (best is None or gap < best[0]):
-                best = (gap, anchor.index)
-        if best is not None:
-            owner[body.index] = best[1]
+    owner = _satellite_owners(
+        footprint_bodies(pcb), anchor_min_pads, satellite_max_pads, max_gap_mm
+    )
     groups: dict[int, list[int]] = {}
     for index in range(len(pcb.footprints)):
         key = owner.get(index, index)
         groups.setdefault(key, []).append(index)
     return [sorted(members) for _, members in sorted(groups.items())]
+
+
+@dataclass(frozen=True)
+class ClusterRule:
+    """The three :func:`rigid_clusters` parameters, as one value (Issue #6312).
+
+    The defaults are the rule every row in the research note up to #6311 was
+    run with; they exclude nearly all of chorus-test, whose ICs have five pads.
+    """
+
+    anchor_min_pads: int = 6
+    satellite_max_pads: int = 2
+    max_gap_mm: float = 3.0
+
+    def to_dict(self) -> dict:
+        return {
+            "anchor_min_pads": self.anchor_min_pads,
+            "satellite_max_pads": self.satellite_max_pads,
+            "max_gap_mm": self.max_gap_mm,
+        }
+
+
+DEFAULT_RULE = ClusterRule()
+
+
+def cluster_report(pcb, rule: ClusterRule = DEFAULT_RULE) -> dict:
+    """What *rule* does to one board, without routing anything (Issue #6312).
+
+    Reports the funnel (footprints -> anchors -> small parts -> small parts
+    near an anchor -> ...that also share a net with it) and each multi-part
+    cluster by reference, with the nets every satellite shares with its
+    anchor. That last column is what tells "a cap on this IC's own pin" from
+    "a part that only shares ``GND`` with it": when the shared net is always a
+    plane net, the shared-net test filters nothing and nearest-anchor is doing
+    all the work.
+    """
+    bodies = footprint_bodies(pcb)
+    by_index = {b.index: b for b in bodies}
+    anchors = [b for b in bodies if b.pad_count >= rule.anchor_min_pads]
+    small = [b for b in bodies if b.pad_count <= rule.satellite_max_pads]
+
+    def near(body: Body) -> list[Body]:
+        return [
+            a
+            for a in anchors
+            if a.index != body.index and rect_gap(body.rect, a.rect) <= rule.max_gap_mm
+        ]
+
+    small_near = [b for b in small if near(b)]
+    small_near_sharing = [b for b in small_near if any(b.nets & a.nets for a in near(b))]
+    groups = rigid_clusters(pcb, **rule.to_dict())
+    multi = [g for g in groups if len(g) > 1]
+    owners = _satellite_owners(
+        bodies, rule.anchor_min_pads, rule.satellite_max_pads, rule.max_gap_mm
+    )
+    by_anchor: dict[int, list[int]] = {}
+    for satellite, anchor in owners.items():
+        by_anchor.setdefault(anchor, []).append(satellite)
+    detail = [
+        {
+            "anchor": by_index[anchor].ref,
+            "anchor_pads": by_index[anchor].pad_count,
+            "satellites": {
+                by_index[i].ref: sorted(by_index[i].nets & by_index[anchor].nets)
+                for i in sorted(satellites)
+            },
+        }
+        for anchor, satellites in sorted(by_anchor.items())
+    ]
+    histogram = Counter(b.pad_count for b in bodies)
+    return {
+        "rule": rule.to_dict(),
+        "footprints": len(pcb.footprints),
+        "pad_count_histogram": {str(k): histogram[k] for k in sorted(histogram)},
+        "anchors": len(anchors),
+        "small_parts": len(small),
+        "small_parts_near_an_anchor": len(small_near),
+        "small_parts_near_and_sharing_a_net": len(small_near_sharing),
+        "multi_part_clusters": len(multi),
+        "cluster_sizes": sorted((len(g) for g in multi), reverse=True),
+        "footprints_in_multi_part_clusters": sum(len(g) for g in multi),
+        "clusters": detail,
+    }
+
+
+def render_clusters(rows: list[dict]) -> str:
+    out = [
+        "| Board | anchor_min_pads, satellite_max_pads, max_gap_mm | Footprints | Anchors "
+        "| Small parts | ...near an anchor | ...and sharing a net | Multi-part clusters (sizes) "
+        "| Footprints in them |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        if "error" in r:
+            out.append(f"| {r['board']} | -- | ERROR: {r['error']} | -- | -- | -- | -- | -- | -- |")
+            continue
+        rule = r["rule"]
+        sizes = ", ".join(str(n) for n in r["cluster_sizes"])
+        out.append(
+            f"| {r['board']} | {rule['anchor_min_pads']}, {rule['satellite_max_pads']}, "
+            f"{rule['max_gap_mm']:g} | {r['footprints']} | {r['anchors']} | {r['small_parts']} "
+            f"| {r['small_parts_near_an_anchor']} | {r['small_parts_near_and_sharing_a_net']} "
+            f"| {r['multi_part_clusters']} ({sizes or '--'}) "
+            f"| {r['footprints_in_multi_part_clusters']} |"
+        )
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -731,9 +859,16 @@ def _check_same_order(tree, pcb) -> None:
 
 
 def write_scaled_board(
-    src: Path, dest_dir: Path, scale: float, mode: str
+    src: Path,
+    dest_dir: Path,
+    scale: float,
+    mode: str,
+    cluster_rule: ClusterRule = DEFAULT_RULE,
 ) -> tuple[Path, ScaleReport]:
-    """Copy *src* into *dest_dir* with its placement scaled; returns the new path."""
+    """Copy *src* into *dest_dir* with its placement scaled; returns the new path.
+
+    *cluster_rule* is used (and recorded in the report) in ``rigid`` mode only.
+    """
     from kicad_tools.core.sexp_file import load_pcb, save_pcb
 
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -743,9 +878,11 @@ def write_scaled_board(
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(src))
-        clusters = rigid_clusters(pcb)
+        clusters = rigid_clusters(pcb, **cluster_rule.to_dict())
         _check_same_order(tree, pcb)
     report = scale_board_tree(tree, scale, mode=mode, clusters=clusters)
+    if mode == "rigid":
+        report.cluster_rule = cluster_rule.to_dict()
     dst = dest_dir / src.name
     save_pcb(tree, dst)
     for suffix in (".kicad_pro", ".kicad_dru"):
@@ -768,6 +905,31 @@ def _kill_group(proc: subprocess.Popen) -> None:
             continue
 
 
+_FINE_ZONE = re.compile(r"^\s+(\S+): ([\d.]+)mm \([\d.]+x[\d.]+mm, ~([\d,]+) cells\)", re.M)
+
+
+def parse_grid_plan(text: str) -> dict:
+    """The auto-selected grid plan from a ``kct route`` log: coarse pitch and every fine zone.
+
+    The coarse pitch alone does not make two rows grid-matched. The plan also
+    gives each dense part its own finer zone, and the pitch chosen for a zone
+    depends on where the part lands: on board 05 the driver IC's zone is
+    0.05 mm at 1x and 0.005 mm -- a hundred times the cells -- at some scales
+    and not others, at the same 0.065 mm coarse pitch (Issue #6312).
+    """
+    out: dict = {}
+    for key in ("coarse_grid_mm", "cell_estimate"):
+        match = _LOG_PATTERNS[key].search(text)
+        if match:
+            raw = match.group(1).replace(",", "")
+            out[key] = float(raw) if "." in raw else int(raw)
+    out["fine_zones"] = {
+        ref: {"pitch_mm": float(pitch), "cells": int(cells.replace(",", ""))}
+        for ref, pitch, cells in _FINE_ZONE.findall(text)
+    }
+    return out
+
+
 def run_route(inp: Path, out: Path, extra: list[str], timeout: float, log: Path) -> dict:
     """Run ``kct route`` on *inp*. ``--timeout`` is the router's own hard budget;
     the subprocess is additionally killed (whole group) 5 minutes past it."""
@@ -781,6 +943,9 @@ def run_route(inp: Path, out: Path, extra: list[str], timeout: float, log: Path)
         str(out),
         "--timeout",
         str(int(timeout)),
+        # Every row must be a route, not a replay of an earlier row's cached
+        # copper: without this a same-seed replicate is a cache hit.
+        "--no-cache",
         *extra,
     ]
     env = dict(os.environ, PYTHONHASHSEED="0")
@@ -830,14 +995,74 @@ def parse_route_log(text: str) -> dict:
     tallies = re.findall(r"Nets routed:\s+(\d+)/(\d+)", text)
     if tallies:
         out["router_nets"] = f"{tallies[-1][0]}/{tallies[-1][1]}"
+    # "stage deadline fired --" with its dashes: under --deterministic-budget
+    # the router prints a startup WARNING that *quotes* the marker ("a
+    # '[deterministic-budget] stage deadline fired' log line will mark ..."),
+    # and matching the bare phrase flagged every such run as timed out.
     out["hit_timeout"] = bool(
-        re.search(r"deadline (?:reached|exceeded)|stage deadline fired|\(deadline\)", text, re.I)
+        re.search(r"deadline (?:reached|exceeded)|stage deadline fired --|\(deadline\)", text, re.I)
     )
+    # ``kct route`` keeps a result cache keyed on the board bytes and the CLI
+    # recipe. A hit replays stored copper and routes nothing, so a "repeat" of
+    # a row is not a second sample. The harness passes --no-cache; this records
+    # the fact per row so a hit can never pass silently (Issue #6312).
+    out["cache_hit"] = bool(re.search(r"^\s*Cache HIT", text, re.M))
     return out
 
 
 #: The classifier's label for a pour net whose zone fill does not join its pads.
 POUR_CLASS = "pour_discontinuous"
+
+#: Keys of ``<output>.timeout.json`` copied into a row as ``timeout_<key>``
+#: (``snapshot_*`` keep their own names). ``snapshot_state`` says what the
+#: graded best-so-far board actually is: ``live`` (the router's copper as it
+#: stood), ``last-accepted`` (a placement-delta trial was discarded) or
+#: ``inconsistent`` (copper and footprints may disagree -- Issue #6314).
+SIDECAR_KEYS = (
+    "stage",
+    "snapshot_saved",
+    "snapshot_state",
+    "snapshot_placement",
+    "snapshot_discarded_trial",
+)
+
+
+def timeout_sidecar_facts(routed: Path) -> dict:
+    """What the hard-timeout sidecar says about the board that was left behind.
+
+    Empty when the run did not hit the deadline (no sidecar) or the sidecar is
+    unreadable. A key the sidecar does not carry is omitted, never invented:
+    a sidecar written before PR #6323 has no ``snapshot_state`` at all, and
+    that absence must not read as ``live``. Nor is it only old sidecars: a
+    worker killed after writing ``_partial`` but before publishing the
+    ``partial-save`` stage leaves ``snapshot_saved: false`` and no
+    ``snapshot_state`` beside a board that does exist (seen on board 05 at
+    1.5x with feedback on, Issue #6312) -- hence ``snapshot_saved`` is copied
+    too, so "a snapshot of unknown state" is distinguishable from "none".
+    """
+    sidecar = routed.with_suffix(".timeout.json")
+    try:
+        state = json.loads(sidecar.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    out: dict = {"timeout_sidecar": True}
+    for key in SIDECAR_KEYS:
+        if key in state:
+            out[key if key.startswith("snapshot_") else f"timeout_{key}"] = state[key]
+    return out
+
+
+def vias_by_net(pcb) -> dict[str, int]:
+    """Via count per net name on a routed board, nets without vias omitted.
+
+    #6304's gap metric does not charge vias, so it cannot see the hypothesis
+    that room helps by making space for them; this is the per-net number that
+    can (Issue #6312).
+    """
+    counts = Counter(via.net_name or f"#{via.net_number}" for via in pcb.vias)
+    return dict(sorted(counts.items()))
 
 
 def grade(routed: Path, board: Board) -> dict:
@@ -863,6 +1088,13 @@ def grade(routed: Path, board: Board) -> dict:
         "connections_routed": comp["connections_routed"],
         "connections_total": comp["connections_total"],
         "via_count": cop["via_count"],
+        # None, not 0.0, when nothing routed: a ratio over zero connections is
+        # not "no vias".
+        "vias_per_connection": (
+            round(cop["via_count"] / comp["connections_routed"], 3)
+            if comp["connections_routed"]
+            else None
+        ),
         "wirelength_mm": round(cop["wirelength_mm"], 1),
         "kct_check_errors": check.error_count if check.ran else None,
         "kct_check_by_rule": dict(sorted(check.errors_by_rule.items())),
@@ -882,6 +1114,18 @@ def grade(routed: Path, board: Board) -> dict:
         row["stuck_nets"] = {d.net_name: d.classification_value for d in stuck.diagnoses}
     except Exception as exc:  # the classifier must never sink a measured row
         row["stuck_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(routed))
+        row["vias_by_net"] = vias_by_net(pcb)
+        # Which nets actually have a zone. The classifier calls any incomplete
+        # power-typed net ``pour_discontinuous`` whether or not a pour exists
+        # for it (board 05's ``VM`` has none), and ``signal_nets_unfinished``
+        # inherits that; this is what lets a reader count such a net back in.
+        row["zone_nets"] = sorted({z.net_name for z in pcb.zones if z.net_name})
+    except Exception as exc:  # same rule: a bookkeeping failure must not sink the row
+        row["vias_by_net_error"] = f"{type(exc).__name__}: {exc}"
     return row
 
 
@@ -960,6 +1204,7 @@ def run_one(
     grid_mm: float | None = None,
     search_timeout: float | None = None,
     extra_args: tuple[str, ...] = (),
+    cluster_rule: ClusterRule = DEFAULT_RULE,
 ) -> dict:
     suffix = "" if grid_policy == "area" else f"-{grid_policy}"
     run_dir = work_dir / f"{board.key}-{mode}-{scale:g}{suffix}"
@@ -970,9 +1215,14 @@ def run_one(
         "scale": scale,
         "mode": mode,
         "grid_policy": grid_policy,
+        "seed": seed,
     }
+    # Sampled before the board is scaled, so it is the load the route starts
+    # under and not the load the route itself has already added.
+    with contextlib.suppress(OSError):
+        row["loadavg_start"] = [round(x, 2) for x in os.getloadavg()]
     try:
-        inp, report = write_scaled_board(src, run_dir, scale, mode)
+        inp, report = write_scaled_board(src, run_dir, scale, mode, cluster_rule)
     except ScaleError as exc:
         row["error"] = f"could not scale: {exc}"
         return row
@@ -996,6 +1246,7 @@ def run_one(
     row.update(parse_route_log(log.read_text(errors="replace")))
     if grid_policy == "pinned":
         row["pinned_grid_mm"] = grid_mm
+    row.update(timeout_sidecar_facts(routed))
     artifact, kind = pick_artifact(routed)
     if artifact is not None:
         row["routed"] = str(artifact)
@@ -1109,6 +1360,114 @@ def render_transitions(transitions: list[dict]) -> str:
     return "\n".join(out)
 
 
+def unfinished_signal_nets(
+    row: dict,
+    exclude: frozenset[str] = frozenset(),
+    zone_nets: frozenset[str] | None = None,
+) -> list[str] | None:
+    """Unfinished non-pour nets of a graded row, minus *exclude*; ``None`` if ungraded.
+
+    With *zone_nets* ``None`` this is the classifier's reading, the one
+    ``signal_nets_unfinished`` and every table up to #6311 use: a net classed
+    ``pour_discontinuous`` is a pour net. Given the set of nets that really
+    have a zone, a ``pour_discontinuous`` net **without** one is counted as
+    unfinished: nothing but routed copper can connect it.
+
+    *exclude* exists for nets a known router defect leaves unfinished whatever
+    the placement (board 05's ``PHASE_A/B/C``, Issue #6315): counted in, they
+    can mask a placement effect in either direction.
+    """
+    stuck = row.get("stuck_nets")
+    if stuck is None:
+        return None
+    return sorted(
+        n
+        for n, cls in stuck.items()
+        if n not in exclude
+        and (cls != POUR_CLASS or (zone_nets is not None and n not in zone_nets))
+    )
+
+
+def row_zone_nets(row: dict, fallback: frozenset[str] | None = None) -> frozenset[str] | None:
+    """The row's own ``zone_nets`` if it recorded them, else *fallback* (``--zone-nets``)."""
+    recorded = row.get("zone_nets")
+    return frozenset(recorded) if recorded is not None else fallback
+
+
+def render_summary(
+    labelled: list[tuple[str, dict]],
+    exclude: frozenset[str],
+    zone_nets: frozenset[str] | None = None,
+) -> str:
+    """One line per row of several ``route --json`` files, for the research note.
+
+    Two unfinished-net counts, each also given without *exclude*: the
+    classifier's ("signal") and the zone-checked one ("routed"), which adds
+    back nets the classifier calls ``pour_discontinuous`` that have no zone.
+    The second is ``--`` for a row with no zone information.
+    """
+    less = f"without {'/'.join(sorted(exclude))}" if exclude else "no nets excluded"
+    out = [
+        "| File | Scale | Mode | Feedback | Seed | Signal nets unfinished "
+        f"| ...{less} | Routed nets unfinished (zone-checked) | ...{less} "
+        "| kct check err | kicad-cli DRC err | Vias | Vias / routed connection "
+        "| Grid mm | Cell estimate | rc | Timed out | Cache hit | Wall s "
+        "| Load 1 min, start -> end | Snapshot state |",
+        "|" + "---|" * 21,
+    ]
+
+    def count(nets: list[str] | None) -> str:
+        return "--" if nets is None else str(len(nets))
+
+    for label, r in labelled:
+        head = f"| {label} | {r['scale']:g} | {r['mode']} "
+        if "nets_complete" not in r:
+            out.append(f"{head}| ERROR: {r.get('error', '?')} |" + " -- |" * 17)
+            continue
+        feedback = "off" if "--no-placement-delta-feedback" in r.get("cmd", "") else "default"
+        zones = row_zone_nets(r, zone_nets)
+        checked = (None, None)
+        if zones is not None:
+            checked = (
+                unfinished_signal_nets(r, zone_nets=zones),
+                unfinished_signal_nets(r, exclude, zones),
+            )
+        start, end = r.get("loadavg_start"), r.get("loadavg_end")
+        load = f"{start[0]:g} -> {end[0]:g}" if start and end else "--"
+        cells = r.get("cell_estimate")
+        out.append(
+            f"{head}| {feedback} | {r.get('seed', '--')} "
+            f"| {count(unfinished_signal_nets(r))} | {count(unfinished_signal_nets(r, exclude))} "
+            f"| {count(checked[0])} | {count(checked[1])} "
+            f"| {r['kct_check_errors']} | {r['kicad_drc_errors']} | {r['via_count']} "
+            f"| {r.get('vias_per_connection', '--')} | {r.get('coarse_grid_mm', '--')} "
+            f"| {'--' if cells is None else f'{cells:,}'} "
+            f"| {r['exit_code']} | {_timeout_cell(r)} | {'yes' if r.get('cache_hit') else 'no'} "
+            f"| {r['wall_s']} | {load} | {r.get('snapshot_state', '--')} |"
+        )
+    return "\n".join(out)
+
+
+def render_net_matrix(labelled: list[tuple[str, dict]]) -> str:
+    """Net by row: each net that is unfinished in any row, and its state in every row.
+
+    A cell is ``ok`` or the classifier's class, followed by that net's via
+    count on that board. Pour-classed nets are listed too -- which of them
+    have a zone is ``zone_nets`` in the row, not a judgement made here.
+    """
+    graded = [(label, r) for label, r in labelled if "stuck_nets" in r]
+    nets = sorted({n for _, r in graded for n in r["stuck_nets"]})
+    head = [f"{label} {r['mode']} {r['scale']:g}" for label, r in graded]
+    out = ["| Net | " + " | ".join(head) + " |", "|---|" + "---|" * len(head)]
+    for net in nets:
+        cells = [
+            f"{r['stuck_nets'].get(net, 'ok')} ({r.get('vias_by_net', {}).get(net, 0)} v)"
+            for _, r in graded
+        ]
+        out.append(f"| {net} | " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
 def render_gaps(rows: list[dict]) -> str:
     out = [
         "| Board | Mode | Scale | Nets | Gaps examined | Carrying copper | Over 1x capacity "
@@ -1169,6 +1528,7 @@ def _cmd_route(args) -> int:
                         args.grid_mm,
                         args.search_timeout,
                         tuple(args.extra.split()),
+                        _rule_from_args(args),
                     )
                 rows.append(row)
                 print(json.dumps({k: v for k, v in row.items() if k != "stuck_nets"}), flush=True)
@@ -1180,6 +1540,161 @@ def _cmd_route(args) -> int:
     print(render_route(rows))
     print()
     print(render_transitions(stuck_transitions(rows)))
+    return 0
+
+
+def _rule_from_args(args) -> ClusterRule:
+    return ClusterRule(args.anchor_min_pads, args.satellite_max_pads, args.max_gap_mm)
+
+
+def _add_rule_args(parser) -> None:
+    default = DEFAULT_RULE
+    parser.add_argument(
+        "--anchor-min-pads",
+        type=int,
+        default=default.anchor_min_pads,
+        help="rigid mode: a footprint with at least this many pads is a cluster anchor",
+    )
+    parser.add_argument(
+        "--satellite-max-pads",
+        type=int,
+        default=default.satellite_max_pads,
+        help="rigid mode: a footprint with at most this many pads may join an anchor",
+    )
+    parser.add_argument(
+        "--max-gap-mm",
+        type=float,
+        default=default.max_gap_mm,
+        help="rigid mode: largest pad-bbox-to-pad-bbox distance from satellite to anchor",
+    )
+
+
+def _cmd_clusters(args) -> int:
+    """Cluster counts per board under the given rule. Routes nothing."""
+    from kicad_tools.schema.pcb import PCB
+
+    keys = [k.strip() for k in args.boards.split(",") if k.strip()]
+    rule = _rule_from_args(args)
+    rows: list[dict] = []
+    for key in keys:
+        if key not in BOARDS:
+            raise SystemExit(f"unknown board {key!r}; known: {','.join(BOARDS)}")
+        src = resolve_board_path(BOARDS[key], args.chorus_pcb)
+        if src is None:
+            rows.append({"board": key, "error": "input not found"})
+            continue
+        rows.append({"board": key, "input": str(src), **cluster_report(PCB.load(str(src)), rule)})
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps({"rows": rows}, indent=2) + "\n")
+    print(render_clusters(rows))
+    if args.members:
+        for r in rows:
+            for c in r.get("clusters", ()):
+                sats = "; ".join(
+                    f"{ref} via {', '.join(nets)}" for ref, nets in c["satellites"].items()
+                )
+                print(f"{r['board']}: {c['anchor']} ({c['anchor_pads']} pads) <- {sats}")
+    return 0
+
+
+def render_plans(rows: list[dict], finer_than_mm: float) -> str:
+    out = [
+        "| Board | Mode | Scale | Coarse grid mm | Cell estimate | Fine zones "
+        f"| Zones finer than {finer_than_mm:g} mm (pitch mm, cells) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        head = f"| {r['board']} | {r['mode']} | {r['scale']:g} "
+        if "fine_zones" not in r:
+            out.append(f"{head}| ERROR: {r.get('error', '?')} | -- | -- | -- |")
+            continue
+        fine = "; ".join(
+            f"{ref} {z['pitch_mm']:g}, {z['cells']:,}"
+            for ref, z in r["fine_zones"].items()
+            if z["pitch_mm"] < finer_than_mm
+        )
+        cells = r.get("cell_estimate")
+        out.append(
+            f"{head}| {r.get('coarse_grid_mm', '--')} | {'--' if cells is None else f'{cells:,}'} "
+            f"| {len(r['fine_zones'])} | {fine or '--'} |"
+        )
+    return "\n".join(out)
+
+
+def _cmd_plan(args) -> int:
+    """The grid plan ``kct route`` would pick for each scaled board. Routes nothing.
+
+    Runs ``kct route --dry-run`` (about 3 s) on the same scaled input and with
+    the same grid arguments a ``route`` row would get, so which rows are
+    grid-matched can be known before any route time is spent.
+    """
+    keys = [k.strip() for k in args.boards.split(",") if k.strip()]
+    scales = [float(v) for v in args.scales.split(",") if v.strip()]
+    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    rule = _rule_from_args(args)
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    for key in keys:
+        if key not in BOARDS:
+            raise SystemExit(f"unknown board {key!r}; known: {','.join(BOARDS)}")
+        board = BOARDS[key]
+        src = resolve_board_path(board, args.chorus_pcb)
+        for mode in modes:
+            for scale in scales:
+                if math.isclose(scale, 1.0) and mode != modes[0]:
+                    continue
+                row: dict = {"board": key, "mode": mode, "scale": scale}
+                rows.append(row)
+                if src is None:
+                    row["error"] = "input not found"
+                    continue
+                run_dir = args.work_dir / f"plan-{key}-{mode}-{scale:g}"
+                if run_dir.exists():
+                    shutil.rmtree(run_dir)
+                try:
+                    inp, report = write_scaled_board(src, run_dir, scale, mode, rule)
+                except ScaleError as exc:
+                    row["error"] = f"could not scale: {exc}"
+                    continue
+                row["scale_report"] = report.to_dict()
+                cmd = [sys.executable, "-m", "kicad_tools.cli", "route", str(inp)]
+                cmd += ["-o", str(run_dir / "unused.kicad_pcb"), "--dry-run", "--no-cache"]
+                cmd += [*board.kct_args, *args.extra.split()]
+                cmd += grid_args(scale, args.grid_policy, args.grid_mm)
+                done = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=300)
+                row["cmd"] = " ".join(cmd[1:])
+                row.update(parse_grid_plan(done.stdout + done.stderr))
+                if not row["fine_zones"] and "coarse_grid_mm" not in row:
+                    row["error"] = f"no grid plan in the dry-run output (exit {done.returncode})"
+                    del row["fine_zones"]
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps({"rows": rows}, indent=2) + "\n")
+    print(render_plans(rows, args.finer_than_mm))
+    return 0
+
+
+def _cmd_summary(args) -> int:
+    """The note's per-row table, straight from committed ``route --json`` files."""
+    exclude = frozenset(n.strip() for n in args.exclude_nets.split(",") if n.strip())
+    fallback = None
+    if args.zone_nets is not None:
+        fallback = frozenset(n.strip() for n in args.zone_nets.split(",") if n.strip())
+    labelled = [
+        (path.stem, row) for path in args.json_files for row in json.loads(path.read_text())["rows"]
+    ]
+    print(render_summary(labelled, exclude, fallback))
+    if args.net_matrix:
+        print()
+        print(render_net_matrix(labelled))
+    if args.nets:
+        print()
+        for label, row in labelled:
+            nets = unfinished_signal_nets(row, zone_nets=row_zone_nets(row, fallback))
+            if nets is not None:
+                shown = ", ".join(f"{n} ({row['stuck_nets'][n]})" for n in nets) or "(none)"
+                print(f"{label} {row['mode']} {row['scale']:g}: {shown}")
     return 0
 
 
@@ -1246,7 +1761,63 @@ def main(argv: list[str] | None = None) -> int:
         help="extra kct route arguments for every run, as one quoted string",
     )
     route.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
+    _add_rule_args(route)
     route.set_defaults(func=_cmd_route)
+
+    clusters = sub.add_parser(
+        "clusters", help="rigid-cluster counts per board under a rule; routes nothing"
+    )
+    clusters.add_argument("--boards", default="03,05,chorus")
+    clusters.add_argument("--json", type=Path)
+    clusters.add_argument(
+        "--members", action="store_true", help="also list each cluster and the shared nets"
+    )
+    clusters.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
+    _add_rule_args(clusters)
+    clusters.set_defaults(func=_cmd_clusters)
+
+    plan = sub.add_parser(
+        "plan", help="the grid plan each scaled board would be routed on; routes nothing"
+    )
+    plan.add_argument("--boards", default="05")
+    plan.add_argument("--scales", default="1.0,1.25,1.5")
+    plan.add_argument("--modes", default="uniform,rigid")
+    plan.add_argument("--work-dir", type=Path, required=True)
+    plan.add_argument("--json", type=Path)
+    plan.add_argument("--grid-policy", choices=("pinned", "area", "default"), default="area")
+    plan.add_argument("--grid-mm", type=float)
+    plan.add_argument("--extra", default="", help="extra kct route arguments, as for `route`")
+    plan.add_argument(
+        "--finer-than-mm",
+        type=float,
+        default=0.03,
+        help="list fine zones below this pitch in the printed table (all are in --json)",
+    )
+    plan.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
+    _add_rule_args(plan)
+    plan.set_defaults(func=_cmd_plan)
+
+    summary = sub.add_parser(
+        "summary", help="one table line per row of one or more `route --json` files"
+    )
+    summary.add_argument("json_files", type=Path, nargs="+")
+    summary.add_argument(
+        "--exclude-nets",
+        default="",
+        help="comma list of nets to leave out of the second unfinished-net column",
+    )
+    summary.add_argument(
+        "--zone-nets",
+        help="comma list of the nets that have a zone, for rows that did not record "
+        "`zone_nets` themselves (a row's own record always wins)",
+    )
+    summary.add_argument("--nets", action="store_true", help="also list each row's unfinished nets")
+    summary.add_argument(
+        "--net-matrix",
+        action="store_true",
+        help="also print net x row: the state and via count of every net unfinished in any row",
+    )
+    summary.set_defaults(func=_cmd_summary)
 
     gaps = sub.add_parser("gaps", help="Phase 2: gaps carrying more copper than fits at 1x")
     gaps.add_argument("--from-json", type=Path, required=True, help="a `route --json` file")

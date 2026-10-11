@@ -11,15 +11,22 @@ complete when expanded* — and on the boards that are actually partial, the
 premise fails:
 
 - **Neither board that is partial at 1x improved when expanded; each got worse
-  or stayed level.** Unfinished signal nets, 1x → 1.5x, under two protocols:
+  or stayed level.** (These #6304 rows are unverified since #6314; see the
+  marked subsection and the #6312 re-measurement of board 05 below.)
+  Unfinished signal nets, 1x → 1.5x, under two protocols:
   board 05 went 4 → 6 and 9 → 9; chorus-test 29 → 31 and 30 → 34. The 4 → 6
   and 29 → 31 pairs are confounded by host load (the expanded arm ran on a far
   busier host), so they overstate the harm; the one pair run at equal load is
   the 9 → 9. These are single runs, in `uniform` mode only. Neither board has
   a 2x row: the router refuses board 05 at 2x and chorus at 2x was not run.
-- **Expansion costs the one resource those boards are short of.** Both are
-  budget-bound at 1x, and at 1.5x the router's grid-cell estimate is 1.5–1.6x
-  larger.
+- **Expansion costs the one resource those boards are short of.** In #6304's
+  rows both ran to their time budget at 1x, and at 1.5x the router's grid-cell
+  estimate is 1.5–1.6x larger. (Those rows are unverified since #6314, and
+  #6312's re-runs of board 05 with feedback off do not show it budget-bound
+  at 1x: the three 1x runs took 553, 786 and 606 s of 1200, and `PHASE_A`,
+  classed `budget_starved` at 1x in all three, finished in 9 of the 10
+  expanded rows. The one #6312 run of 1x with feedback at its default, as
+  #6304 had it, did run to 1188 s.)
 - **`kct route` as shipped refuses 2x boards that have a fine-pitch part.** Its
   auto-grid is cell-budgeted, so a 4x-area board gets a coarser grid, which
   fails the router's own `clearance/2` safety rule (boards 04 and 05 here;
@@ -43,11 +50,21 @@ real instance of the premise holding, and a single shrink of that one route is
 the cheapest possible test of the rest of the idea. That probe is filed as
 #6310.
 
-**The largest hole in the evidence is `rigid` mode on the two partial
-boards**, which was not run. It is tracked as #6312, with one qualification
-that matters: the harness's clustering rule finds almost nothing to cluster on
-chorus (see ["How much each board clusters"](#how-much-each-board-clusters)),
-so only board 05 can be tested as the harness stands.
+**`rigid` mode on board 05 has since been measured (#6312), and it does not
+help, under protocol (a) at a 1200 s budget.** On board 05 with
+placement-delta feedback off, 1x leaves 4 routed nets unfinished in each of
+three runs; seven `rigid` runs at five scales from 1.1x to 1.5x leave 4 to 7,
+and `kct check` errors rise from 4 to between 5 and 7. One run per row except
+two rows run twice. Seeds are not independent samples here: in one pair of
+runs, of which the seed-43 one is not committed, seeds 42 and 43 gave the same
+route, while the committed seed-43 run and a same-seed repeat each differ
+from the first run in copper (though not in which nets finish). So there is
+no replication across seeds. No row varied the time or iteration budget, and
+the two `rigid` 1.5x runs are the only feedback-off rows it cut short.
+The one row level with 1x (`rigid` 1.2x) has a single run. Full tables, what
+was cut, and what the result does not cover are in
+["Rigid mode on the partial boards"](#rigid-mode-on-the-partial-boards-issue-6312).
+chorus-test was not routed in `rigid` mode.
 
 Phase 2 answers the question the issue flagged as the main risk: would
 shrinking be geometry, or re-topology? In the eight expanded routes tabulated
@@ -117,17 +134,22 @@ Three things follow, and they qualify every statement about `rigid` below.
 
 - **Board 03 is the only board run in `rigid` mode that has a large cluster**
   (one of nine parts; 16 of 38 footprints clustered). Every `rigid` result
-  that differs from its `uniform` twin by more than two parts' positions
+  that differs from its `uniform` twin by more than three parts' positions
   comes from it.
 - **On boards 02 and 04 `rigid` moves two or three footprints differently**,
   and on 00 and 01 none. Those rows are near-replicates of `uniform`, not
   tests of clustering.
-- **On chorus `rigid` would be `uniform` with one part moved differently.**
+- **On chorus `rigid` would differ from `uniform` in one relative position.**
+  The rule forms a single two-part cluster there. A cluster translates by the
+  displacement of the mean of its members' positions, so both of its
+  footprints land somewhere other than where `uniform` puts them; what is
+  preserved, and what differs from `uniform`, is the one offset between them.
   Only three footprints qualify as anchors and only four of the 76 small parts
   sit within 3 mm of one. A chorus `rigid` run under this rule would say
   nothing about rigid clustering; it needs a different rule first. Board 05,
   by contrast, clusters about as much as board 03 (14 of 42). Neither was run
-  in `rigid` mode (#6312).
+  in `rigid` mode in #6304; see
+  ["Rigid mode on the partial boards"](#rigid-mode-on-the-partial-boards-issue-6312).
 
 Choices worth stating because they are not obviously right:
 
@@ -203,7 +225,8 @@ rescue stages (which are not `kct route`).
   seed did not guarantee an identical route on re-run; see "Run-to-run
   variance" under [Not measured](#not-measured).
 - **The harness result JSON and routed boards were kept in a scratch directory,
-  were not committed, and no longer exist.** Every number in this note was
+  were not committed, and no longer exist.** (This is #6304's data. #6312's
+  result JSON is committed under `data/research/expand_route_shrink/`.) Every number in this note was
   transcribed from them at the time. Numbers that appear in a table can be
   cross-checked against other rows; the few that were only ever totals over
   untabulated rows cannot, and are marked where they occur.
@@ -386,6 +409,31 @@ Three things in this table are not about signal-net completion:
 
 ### Boards that are partial at 1x
 
+> **The rows in this subsection are unverified (added for #6312).** Every
+> board-05 and chorus row below was run with placement-delta feedback at its
+> default, and ran to or near its time budget. #6314 (fixed in PR #6323, on
+> `main` from `ee1d255f`) found that a deadline during the feedback loop could
+> save one trial's copper against the original placement; #6312's update
+> reports a protocol-(a) run of board 05 at 1x graded at 18 unfinished signal
+> nets from such a file, while the route it held before the loop had 5
+> unrouted nets by the router's own count (not re-measured here). Whether any row here went through that path was never checked,
+> and the boards no longer exist. **None of these numbers is used as a
+> baseline anywhere below**: the 1x rows were re-run with feedback off in
+> ["Rigid mode on the partial boards"](#rigid-mode-on-the-partial-boards-issue-6312).
+> The rows are kept as a record of what #6304 reported, not as results. The
+> same caveat applies wherever they are quoted: the summary at the top of this
+> note, "By stuck class", the Phase 2 rows for 05 and chorus, "Go / no-go",
+> reason 3 of "Why it mostly does not work", and the "Anything above 1200 s"
+> and "Run-to-run variance" entries under "Not measured". Where #6312's
+> committed rows contradict one of those passages, and not merely leave it
+> unverified, the passage says so in place: that is the case for the claims
+> that board 05 is budget-bound at 1x and that no `BUDGET_STARVED` net
+> completes when expanded.
+> Two further problems found in #6312 apply to them as well: the "signal nets
+> unfinished" column leaves out `VM` on board 05 whenever the classifier calls
+> it a pour net (it has no zone), and "grid-matched" below means the coarse
+> pitch only (see [the traps](#four-more-measurement-traps-issue-6312)).
+
 Two protocols that finish, and one that was abandoned.
 
 **(a) Pinned layers, iteration-budgeted search, 1200 s.** `--layers 4
@@ -440,7 +488,9 @@ hard deadline in a late stage (05: 10 unfinished; chorus: 48), the sweep was
 stopped, and the numbers are noise for the reason given in trap 2. Mentioned so
 nobody repeats the protocol; not evidence either way.
 
-**Not measured:** board 05 and chorus at 2x (the router refuses 05 under
+**Not measured in #6304** (board 05 in `rigid` mode has since been run, see
+["Rigid mode on the partial boards"](#rigid-mode-on-the-partial-boards-issue-6312))**:**
+board 05 and chorus at 2x (the router refuses 05 under
 `default` and `area`, and the only protocol that could route it — explicit
 grid — could not finish even the 1x board in budget; chorus at 2x was not
 run); and either partial board in `rigid` mode. Given what `rigid` did for
@@ -448,7 +498,7 @@ board 03 at 1.5x, the second is the more important omission, and it is tracked
 as #6312. It is not the same size of omission on the two boards: board 05
 forms four multi-part clusters covering 14 of its 42 footprints, so a `rigid`
 run there is a real test; chorus forms one two-part cluster out of 90, so a
-`rigid` run there would be a `uniform` run in all but one part's position
+`rigid` run there would differ from a `uniform` run in one relative position
 (["How much each board clusters"](#how-much-each-board-clusters)).
 
 A side observation on chorus's DRC columns: the fixture is DRC-dirty **before
@@ -495,8 +545,13 @@ On the two partial boards:
 - `PLACEMENT_BOUND`: 4 of 15 completed under (a), 5 of 26 under (b) — about
   one in four or five. Meanwhile 9 nets (a) and 5 nets (b) that were complete
   at 1x became `PLACEMENT_BOUND` when expanded.
-- `BUDGET_STARVED`: 0 of 11 under (a), 0 of 12 under (b). Expected — these nets
-  are short of search budget, and a larger board makes every search longer.
+- `BUDGET_STARVED`: 0 of 11 under (a), 0 of 12 under (b). #6304 called this
+  expected — these nets are short of search budget, and a larger board makes
+  every search longer. **#6312's committed rows do not repeat it on board
+  05:** with feedback off, three nets are `budget_starved` at 1x in each of
+  three runs, and one of them, `PHASE_A`, finished in 9 of the 10 expanded
+  rows. (The other two, `PHASE_B` and `PHASE_C`, finished in none; see
+  #6315.)
 - `CONGESTION_SATURATED`: 2 of 7 under (a), 0 of 1 under (b).
 
 So expansion does move individual nets — under (a), six completed that were
@@ -578,6 +633,604 @@ footprint-to-board-edge; vias sitting in a gap are not charged; and capacity
 inside a pin field (between the pads of one part) is not measured at all — it
 does not scale, so it is outside what this experiment can change.
 
+## Rigid mode on the partial boards (Issue #6312)
+
+#6304 left one question open and ranked it first: does spreading a placement
+with decoupling held rigid to its IC help a board the shipped router cannot
+finish? This section measures it on board 05. chorus-test was not routed; why
+is under ["chorus-test"](#chorus-test-a-clustering-rule-and-no-route).
+
+**Result: no, under protocol (a) at a 1200 s budget.** On board 05, with
+placement-delta feedback off, no `rigid` row finishes more routed nets than
+1x, at any of the five scales run
+(1.1, 1.2, 1.25, 1.4, 1.5). 1x leaves 4 unfinished in each of three runs.
+`rigid` leaves 6, 4, 5 and 6, 6, and 7 and 6 (at 1.1x, 1.2x, 1.25x twice,
+1.4x, and 1.5x twice). `kct check` errors are 4 at 1x and 5 to 7 in every
+`rigid` row; `kicad-cli` DRC errors are 0 in every feedback-off row.
+`uniform` is no better (7, 6 and 5 unfinished at 1.1x, 1.25x and 1.5x). One
+run per expanded row, except `rigid` 1.25x and 1.5x, which have two each.
+
+Three things to hold against that sentence:
+
+- It is board 05 only, and it says nothing about any other board.
+- It is one budget. No row varied the 1200 s ceiling or the per-net iteration
+  cap, and the two `rigid` 1.5x runs (7 and 6 unfinished) are the only
+  feedback-off rows the budget cut short. See "Deadline and load" under
+  ["Verdict under the decision rule"](#verdict-under-the-decision-rule).
+- Expansion does change *which* nets are stuck, consistently: `PHASE_A` is
+  unfinished at 1x and finished in 9 of the 10 feedback-off expanded rows,
+  while `GND_SENSE` and `VM`, both finished at 1x, are each unfinished in 9
+  of them. The total does not improve: on routed nets every expanded row
+  leaves unfinished at least as many nets that 1x finished as it finishes
+  nets that 1x did not. See ["Net by net"](#net-by-net).
+- The count the earlier tables in this note use ("signal nets unfinished", the
+  classifier's) reads one lower than the truth on most expanded rows, because
+  the classifier files `VM` as a pour net and board 05 has no `VM` zone. By
+  that count `rigid` 1.2x is one better than 1x (3 against 4). Both counts are
+  in the table.
+
+### What was run
+
+Board 05 under protocol (a) (`--layers 4 --no-auto-layers
+--deterministic-budget --per-net-iterations 1000000`), `--grid-policy area`,
+`--timeout 1200`, `PYTHONHASHSEED=0`, one route at a time. `main` at
+`ee1d255f` plus this branch (harness and tests only; nothing under `src/`),
+C++ backend build version 49, macOS, 8 logical CPUs, KiCad 10.0.6, on
+2026-10-10. The host was shared: the 1-minute load average at the start of a
+row ranged from 5.6 to 28.2 and is in the table for every row.
+
+| Block | Rows | Feedback | Why |
+|---|---|---|---|
+| P | 1x; `uniform` and `rigid` at 1.25x and 1.5x; seed 42 | off | The planned comparison. |
+| D | 1x again, seed 42 | off | Does a row reproduce? |
+| seed 43 | 1x, and `rigid` 1.5x | off | Does the seed change the route? |
+| M | `uniform` 1.1x; `rigid` 1.1x, 1.2x, 1.4x; seed 42 | off | Rows whose grid plan matches 1x around the driver IC (trap 7 below). Chosen from the grid plan before routing, not from results. |
+| R | `rigid` 1.25x again, seed 42 | off | A second run of a `rigid` row at one of the two scales the decision rule names; in block P it came out level with 1x on the classifier's count. It is not the row closest to 1x: that is `rigid` 1.2x in block M, which the load column puts before this run and which has no second run. |
+| S | 1x and `uniform` 1.5x, seed 42 | default | Continuity with #6304, which left feedback on. |
+
+Feedback is off in the primary rows because placement-delta feedback moves
+footprints, and an experiment about placement has to route the placement it
+set.
+
+**What was cut from the plan, and what was added.** The plan was block P at
+three seeds (42, 43, 44), block D, block S, and a chorus block. Cut: seed 44
+entirely, seed 43 except the two rows above, and every chorus route. Added:
+blocks M and R. The seeds were cut because, in the one pair compared at the
+time, a second seed reproduced the first seed's route exactly (next
+subsection but one), which suggested that further seeds would be repeats.
+The seed-43 run of that pair is not committed, and the committed seed-43 run
+at 1x does not match seed 42 (120 vias and 1108.0 mm against 122 and 1123.4),
+so the committed data does not show that on its own. M spends the time on
+rows that answer a question the planned rows could not (trap 7), and R on a
+second run of `rigid` 1.25x. R did not repeat the closest row. The row
+closest to 1x is `rigid` 1.2x (4 routed nets unfinished against 4; 3 against
+4 on the classifier's count), and by the load column block M, which holds
+it, ran before block R (`rigid` 1.4x ends at 15.49; `05_off_s42_rep2` starts
+at 15.05). So 1.2x was in hand when 1.25x was repeated, and it has one run.
+
+```bash
+uv run kct build-native --check
+W=/tmp/ers-6312
+X="--layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000"
+run() {   # name seed scales modes extra [--append]
+  uv run python scripts/research/expand_route_experiment.py route \
+      --boards 05 --grid-policy area --timeout 1200 --seed "$2" \
+      --scales "$3" --modes "$4" --extra "$5" $6 \
+      --work-dir "$W/$1" --json "$W/05_$1.json"
+}
+OFF="$X --no-placement-delta-feedback"
+run off_s42         42 1.0,1.25,1.5 uniform "$OFF"            # P
+run off_s42         42 1.25,1.5     rigid   "$OFF" --append
+run off_s42_rep     42 1.0          uniform "$OFF"            # D
+run off_s43         43 1.0          uniform "$OFF"
+run off_s43         43 1.5          rigid   "$OFF" --append
+run on_s42          42 1.0,1.5      uniform "$X"              # S
+run off_s42_matched 42 1.1          uniform "$OFF"            # M
+run off_s42_matched 42 1.1,1.2,1.4  rigid   "$OFF" --append
+run off_s42_rep2    42 1.25         rigid   "$OFF"            # R
+```
+
+One work directory and one JSON file per seed and per repeat: a run directory
+is `<work-dir>/<board>-<mode>-<scale>`, with no seed in it, and it is deleted
+at the start of each run. The harness now passes `--no-cache` itself. The
+result files are committed unedited in
+[`data/research/expand_route_shrink/`](../../data/research/expand_route_shrink/).
+Every number in the results table and the net matrix below is in one of
+them, and those two tables are the output of the command below. That is not
+true of the seeds table: one of its rows is a run whose JSON was not
+committed, and its last column was read from routed boards that are not
+committed. Both are marked there.
+
+```bash
+D=data/research/expand_route_shrink
+uv run python scripts/research/expand_route_experiment.py summary \
+    $D/05_off_s42.json $D/05_off_s42_rep.json $D/05_off_s43.json \
+    $D/05_off_s42_matched.json $D/05_off_s42_rep2.json $D/05_on_s42.json \
+    --exclude-nets PHASE_A,PHASE_B,PHASE_C --zone-nets GND,+5V,V3P3,VIN --net-matrix
+```
+
+(`--zone-nets` supplies the board's zone nets for the rows written before the
+harness recorded them itself. The routed boards are not committed.)
+
+### Four more measurement traps (Issue #6312)
+
+Numbered on from the four above. Each is handled in the harness and pinned by
+a test; three are filed because they are not only harness hazards.
+
+5. **A repeated row can be a cache replay.** `kct route` caches results keyed
+   on the board's bytes and the command line. The first same-seed repeat here
+   came back in 66 s with `Cache HIT ... Original compute time: 588369ms`: it
+   had routed nothing. The harness now passes `--no-cache` and records
+   `cache_hit` per row. This bears on #6304's remark, under "Run-to-run
+   variance", that two re-runs of board 01 "reproduced the table exactly":
+   whether those were cache hits was not checked and can no longer be.
+6. **The harness's "timed out" flag was set on every row of the first runs
+   here, none of which had timed out.** `--deterministic-budget` with
+   `--timeout` prints a startup warning that quotes the marker the harness
+   searched for (`'[deterministic-budget] stage deadline fired' log line will
+   mark ...`). It now matches the real line only. In the table below "Timed out: yes" means a stage was cut short by
+   the budget (here, always pour stitching, `unconnected pour link(s)
+   (deadline)`) or the run hit the hard deadline.
+7. **Rows at one coarse pitch are not grid-matched.** The auto grid also gives
+   each dense part its own finer zone, and the pitch of that zone depends on
+   where the part lands. On board 05 the driver IC `U2` (59 pads; `PHASE_A`,
+   `PHASE_B`, `PHASE_C`, `EN_B`, `nFAULT` and `nTRIP` each have a pad on it)
+   gets a 0.05 mm zone (48,555 cells) at 1x and a
+   0.005 mm zone (4,845,540 cells) at some scales and not others, with the
+   coarse pitch 0.065 mm throughout. From `kct route --dry-run` (the harness's
+   new `plan` subcommand; all zones for all rows are in
+   `05_grid_plan_scan.json`):
+
+   | Scale | `uniform`: `U2` zone mm | cell estimate | `rigid`: `U2` zone mm | cell estimate |
+   |---|---|---|---|---|
+   | 1 | 0.05 | 3,932,679 | (same board) |  |
+   | 1.05 | 0.005 | 8,856,279 | 0.005 | 8,905,820 |
+   | 1.1 | 0.05 | 4,239,955 | 0.05 | 4,239,320 |
+   | 1.15 | 0.05 | 4,388,452 | 0.005 | 9,213,265 |
+   | 1.2 | 0.005 | 9,382,926 | 0.05 | 4,596,822 |
+   | 1.25 | 0.005 | 9,601,586 | 0.005 | 9,596,006 |
+   | 1.3 | 0.05 | 4,840,014 | 0.0125 | 5,567,343 |
+   | 1.35 | 0.005 | 9,988,909 | 0.05 | 5,197,783 |
+   | 1.4 | 0.005 | 10,160,179 | 0.05 | 5,368,495 |
+   | 1.45 | 0.05 | 5,551,221 | 0.005 | 10,382,896 |
+   | 1.5 | 0.05 | 5,792,108 | 0.005 | 10,577,933 |
+
+   So of the planned rows only `uniform` 1.5x shares 1x's `U2` zone; `uniform`
+   1.25x and both `rigid` rows were routed with `U2` on a zone of a hundred
+   times the cells, and `rigid` 1.5x (both runs) ran into the budget during pour
+   stitching. Block M adds `rigid` rows at 1.1x, 1.2x and 1.4x and a `uniform`
+   row at 1.1x, where the `U2` zone is 0.05 mm as at 1x. Other zones still
+   differ from row to row (`D3` is 0.04 mm at 1x and 0.025 mm in most expanded
+   plans; the zone count runs from 24 to 41), so "matched" here means the
+   `U2` zone and the coarse pitch, not the whole plan. #6304's statement that
+   its protocol-(a) pairs were "grid-matched" rested on the coarse pitch
+   alone. Filed as #6328.
+8. **"Signal nets unfinished" leaves out a net that has no pour.** The stuck
+   classifier labels any incomplete power-typed net `pour_discontinuous`,
+   zone or no zone, and the harness subtracts that class. Board 05's zones
+   are `GND`, `+5V`, `V3P3` and `VIN`; `VM` has none, so a stranded `VM` pad
+   is a routing failure that the column did not count. `kct check` does count
+   it (`connectivity: Net 'VM' is partially routed`), and `kct board-view
+   list` reports its missing links pad to pad. Rows now record `zone_nets`
+   and the summary prints a zone-checked count beside the classifier's. On
+   every feedback-off row the zone-checked count equals `kct check`'s
+   `connectivity` error count. Filed as #6327.
+
+### Seeds are not samples here; repeats are, weakly
+
+The plan was three seeds as three samples. The check that had to pass first
+did not:
+
+| Run | Seed | Load 1 min, start -> end | Vias | Wire mm | Unfinished nets | Copper compared with the first row |
+|---|---|---|---|---|---|---|
+| `05_off_s42`, 1x | 42 | 5.61 -> 13.01 | 122 | 1123.4 | `EN_B`, `PHASE_A`, `PHASE_B`, `PHASE_C` | -- |
+| **not committed** (run before trap 6 was fixed; no committed file holds this row) | 43 | 18.37 -> 8.35 | 122 | 1123.4 | the same four | **identical on all 31 nets** |
+| `05_off_s42_rep`, 1x (block D) | 42 | 25.1 -> 24.82 | 116 | 1123.5 | the same four | differs on 4 nets: `+5V`, `GND`, `GND_SENSE`, `VM` |
+| `05_off_s43`, 1x | 43 | 24.82 -> 27.09 | 120 | 1108.0 | the same four | differs on the same 4 nets |
+
+(Copper was compared net by net, segments and vias, on the routed boards,
+which are not committed. The load, via, wirelength and unfinished-net cells
+of the three committed rows are in the JSON. Every cell of the uncommitted
+row, and the whole last column, can be checked against no committed file.)
+
+- **A different seed gave the same route, to the last segment, in one pair of
+  runs, and the seed-43 run of that pair is the uncommitted row.** `--seed`
+  only calls `random.seed()`; nothing here shows it reaching this code path
+  with the C++ backend. The committed seed-43 run does differ from the first
+  row (120 vias and 1108.0 mm against 122 and 1123.4), as the same-seed
+  repeat does (116 and 1123.5). So the committed rows show runs differing
+  both at one seed and across two, and cannot separate the seed's effect
+  from run-to-run variation. "The seed does not vary the route" rests on the
+  one uncommitted pair.
+- **The same seed gave a different route in block D**, on four of the 31 nets
+  that carry copper. The two seed-42 logs first differ inside the negotiated
+  loop (iteration 3 reports `overflow=73` in one and `overflow=110` in the
+  other). The two runs that agree ran at lower load than the two that do not,
+  which would fit a wall-clock-bounded stage, but that is four runs and load
+  was not varied on purpose. Filed as #6329.
+- **None of it changed which nets finish at 1x.** Three committed runs, the
+  same four nets each time. At `rigid` 1.5x the two runs differ by one net
+  (`RESET`), and so do the two runs at `rigid` 1.25x (also `RESET`; their copper
+  differs on 5 nets: `+5V`, `GND`, `RESET`, `SPEED`, `VM`).
+
+So the rows below are not replicated across seeds. The uncommitted pair
+suggests that running seeds 43 and 44 through the whole matrix would have
+produced repeats, not independent samples; the committed rows neither
+confirm nor refute that. A repeat is still worth something, because repeats
+do vary; the two expanded rows with a second run are `rigid` 1.25x and
+`rigid` 1.5x. **Treat a difference of one net between two rows as within
+the noise.**
+
+### Results
+
+`...without PHASE` drops `PHASE_A`, `PHASE_B` and `PHASE_C`: #6315 shows
+`PHASE_C` cannot be routed whenever `PHASE_B` is, on an otherwise empty board
+at 1x, so those nets can be stuck for a reason no placement change touches.
+"Signal nets unfinished" is the classifier's count, as used in the rest of
+this note; "routed nets unfinished" is the zone-checked one (trap 8).
+
+| File | Scale | Mode | Feedback | Seed | Signal nets unfinished | ...without PHASE_A/PHASE_B/PHASE_C | Routed nets unfinished (zone-checked) | ...without PHASE_A/PHASE_B/PHASE_C | kct check err | kicad-cli DRC err | Vias | Vias / routed connection | Grid mm | Cell estimate | rc | Timed out | Cache hit | Wall s | Load 1 min, start -> end | Snapshot state |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 05_off_s42 | 1 | uniform | off | 42 | 4 | 1 | 4 | 1 | 4 | 0 | 122 | 0.91 | 0.065 | 3,932,679 | 2 | no | no | 553.1 | 5.61 -> 13.01 | -- |
+| 05_off_s42 | 1.25 | uniform | off | 42 | 5 | 3 | 6 | 4 | 6 | 0 | 107 | 0.817 | 0.065 | 9,601,586 | 2 | no | no | 914.5 | 13.01 -> 6.04 | -- |
+| 05_off_s42 | 1.5 | uniform | off | 42 | 4 | 2 | 5 | 3 | 5 | 0 | 102 | 0.773 | 0.065 | 5,792,108 | 2 | no | no | 956.8 | 6.04 -> 9.59 | -- |
+| 05_off_s42 | 1.25 | rigid | off | 42 | 4 | 2 | 5 | 3 | 5 | 0 | 126 | 0.955 | 0.065 | 9,596,006 | 2 | no | no | 1027.8 | 9.59 -> 11.51 | -- |
+| 05_off_s42 | 1.5 | rigid | off | 42 | 6 | 4 | 7 | 5 | 7 | 0 | 65 | 0.739 | 0.065 | 10,577,933 | 4 | yes | no | 1188.8 | 11.51 -> 28.62 | -- |
+| 05_off_s42_rep | 1 | uniform | off | 42 | 4 | 1 | 4 | 1 | 4 | 0 | 116 | 0.866 | 0.065 | 3,932,679 | 2 | no | no | 785.7 | 25.1 -> 24.82 | -- |
+| 05_off_s43 | 1 | uniform | off | 43 | 4 | 1 | 4 | 1 | 4 | 0 | 120 | 0.896 | 0.065 | 3,932,679 | 2 | no | no | 605.8 | 24.82 -> 27.09 | -- |
+| 05_off_s43 | 1.5 | rigid | off | 43 | 5 | 3 | 6 | 4 | 7 | 0 | 78 | 0.886 | 0.065 | 10,577,933 | 4 | yes | no | 1162.3 | 27.09 -> 8.55 | -- |
+| 05_off_s42_matched | 1.1 | uniform | off | 42 | 7 | 4 | 7 | 4 | 7 | 0 | 118 | 0.908 | 0.065 | 4,239,955 | 2 | no | no | 1157.4 | 28.19 -> 20.59 | -- |
+| 05_off_s42_matched | 1.1 | rigid | off | 42 | 5 | 3 | 6 | 4 | 6 | 0 | 107 | 0.843 | 0.065 | 4,239,320 | 2 | no | no | 1146.4 | 20.59 -> 17.37 | -- |
+| 05_off_s42_matched | 1.2 | rigid | off | 42 | 3 | 1 | 4 | 2 | 5 | 0 | 128 | 0.977 | 0.065 | 4,596,822 | 4 | no | no | 789.1 | 17.37 -> 7.72 | -- |
+| 05_off_s42_matched | 1.4 | rigid | off | 42 | 5 | 3 | 6 | 4 | 7 | 0 | 130 | 0.985 | 0.065 | 5,368,495 | 2 | no | no | 728.4 | 7.72 -> 15.49 | -- |
+| 05_off_s42_rep2 | 1.25 | rigid | off | 42 | 5 | 3 | 6 | 4 | 6 | 0 | 122 | 0.931 | 0.065 | 9,596,006 | 2 | no | no | 897.5 | 15.05 -> 9.06 | -- |
+| 05_on_s42 | 1 | uniform | default | 42 | 4 | 1 | 4 | 1 | 5 | 0 | 82 | 0.901 | 0.065 | 3,932,679 | 4 | yes | no | 1188.1 | 8.55 -> 23.64 | -- |
+| 05_on_s42 | 1.5 | uniform | default | 42 | 4 | 2 | 5 | 3 | 10 | 320 | 63 | 1.26 | 0.065 | 5,792,108 | 124 | yes (graded best-so-far) | no | 1205.9 | 23.64 -> 19.87 | -- |
+
+Reading it, feedback-off rows only:
+
+- **1x:** 4 unfinished in all three runs, the same four nets (`EN_B`,
+  `PHASE_A`, `PHASE_B`, `PHASE_C`), 4 `kct check` errors.
+- **`rigid`**, at 1.1x, 1.2x, 1.25x (two runs), 1.4x, 1.5x (two runs):
+  routed nets unfinished 6, 4, 5 and 6, 6, 7 and 6. By the classifier's count
+  5, 3, 4 and 5, 5, 6 and 5. `kct check` errors 6, 5, 5 and 6, 7, 7 and 7.
+  One row is level with 1x on routed nets (1.2x); none is better. One row is
+  better on the classifier's count (1.2x, 3 against 4), and that row has `VM`
+  unfinished and one more `kct check` error than 1x.
+- **`uniform`**, at 1.1x, 1.25x, 1.5x: routed nets unfinished 7, 6, 5; the
+  classifier's count 7, 5, 4; `kct check` errors 7, 6, 5.
+- **`rigid` against `uniform` at one scale** (routed nets unfinished): 6
+  against 7 at 1.1x, 5 and 6 against 6 at 1.25x, 7 and 6 against 5 at 1.5x.
+  No consistent order.
+- **Without the `PHASE` nets** every expanded row is worse than 1x on routed
+  nets: 1 at 1x; 4, 2, 3 and 4, 4, 5 and 4 for `rigid`; 4, 4, 3 for
+  `uniform`. Taking the `PHASE` nets out makes expansion look worse, not
+  better, because `PHASE_A` is the net expansion most reliably finishes.
+- **The finer `U2` zone is not what makes the expanded rows worse.** Rows on
+  1x's 0.05 mm zone: `uniform` 1.1x and 1.5x (7, 5), `rigid` 1.1x, 1.2x, 1.4x
+  (6, 4, 6). Rows on the 0.005 mm zone: `uniform` 1.25x (6), `rigid` 1.25x
+  (5, 6), `rigid` 1.5x (7, 6). Both groups sit at or above 1x's 4.
+- **New error types:** `kct check` reports one `hole_to_hole_clearance` error
+  in three `rigid` rows (1.2x, 1.4x, and the second run at 1.5x) and none in
+  any 1x or `uniform` feedback-off row. Every other feedback-off `kct check`
+  error is `connectivity`.
+- **Time:** 553 to 786 s at 1x, 728 to 1189 s expanded. Both `rigid` 1.5x
+  runs were cut short in pour stitching by the budget; no feedback-off row
+  hit the hard deadline (`rc` 124).
+
+**Vias per routed connection** does not separate the arms. It is 0.87 to 0.91
+at 1x (three runs) and 0.74 to 0.99 across the feedback-off expanded rows,
+on both sides of the 1x range. The denominator is all connections including
+pour links, and the two `rigid` 1.5x rows lost about a third of their
+connections to the cut-short pour stitching (88 of 142 routed, against 127 to
+134 elsewhere), so the ratio is not a clean per-route figure on those rows.
+
+### Net by net
+
+Each net that is unfinished in any row, and its state in every row. A cell is
+`ok` or the classifier's class, then that net's via count on that board.
+`GND` and `+5V` have zones; `VM` does not.
+
+| Net | 05_off_s42 uniform 1 | 05_off_s42 uniform 1.25 | 05_off_s42 uniform 1.5 | 05_off_s42 rigid 1.25 | 05_off_s42 rigid 1.5 | 05_off_s42_rep uniform 1 | 05_off_s43 uniform 1 | 05_off_s43 rigid 1.5 | 05_off_s42_matched uniform 1.1 | 05_off_s42_matched rigid 1.1 | 05_off_s42_matched rigid 1.2 | 05_off_s42_matched rigid 1.4 | 05_off_s42_rep2 rigid 1.25 | 05_on_s42 uniform 1 | 05_on_s42 uniform 1.5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| +5V | ok (16 v) | ok (16 v) | ok (17 v) | ok (16 v) | pour_discontinuous (0 v) | ok (16 v) | ok (16 v) | pour_discontinuous (0 v) | ok (17 v) | ok (16 v) | pour_discontinuous (15 v) | ok (17 v) | ok (16 v) | pour_discontinuous (0 v) | pour_discontinuous (0 v) |
+| EN_B | congestion_saturated (0 v) | placement_bound (0 v) | congestion_saturated (0 v) | ok (4 v) | placement_bound (0 v) | congestion_saturated (0 v) | congestion_saturated (0 v) | placement_bound (0 v) | ok (4 v) | placement_bound (0 v) | congestion_saturated (0 v) | placement_bound (0 v) | ok (4 v) | placement_bound (0 v) | placement_bound (0 v) |
+| EN_C | ok (2 v) | ok (4 v) | ok (2 v) | ok (2 v) | ok (2 v) | ok (2 v) | ok (2 v) | ok (2 v) | placement_bound (0 v) | ok (2 v) | ok (6 v) | ok (2 v) | ok (2 v) | ok (2 v) | ok (2 v) |
+| GND | pour_discontinuous (25 v) | pour_discontinuous (23 v) | pour_discontinuous (23 v) | pour_discontinuous (24 v) | pour_discontinuous (0 v) | pour_discontinuous (25 v) | pour_discontinuous (25 v) | pour_discontinuous (0 v) | pour_discontinuous (24 v) | pour_discontinuous (24 v) | pour_discontinuous (24 v) | pour_discontinuous (24 v) | pour_discontinuous (24 v) | pour_discontinuous (0 v) | pour_discontinuous (0 v) |
+| GND_SENSE | ok (6 v) | congestion_saturated (2 v) | congestion_saturated (2 v) | congestion_saturated (4 v) | congestion_saturated (4 v) | ok (6 v) | ok (6 v) | congestion_saturated (4 v) | placement_bound (6 v) | congestion_saturated (2 v) | ok (6 v) | congestion_saturated (4 v) | congestion_saturated (4 v) | ok (6 v) | placement_bound (2 v) |
+| IREF | ok (2 v) | ok (3 v) | ok (2 v) | ok (2 v) | ok (2 v) | ok (2 v) | ok (2 v) | ok (6 v) | ok (4 v) | ok (2 v) | ok (4 v) | congestion_saturated (0 v) | ok (2 v) | ok (2 v) | ok (2 v) |
+| PHASE_A | budget_starved (0 v) | ok (4 v) | ok (1 v) | ok (1 v) | ok (1 v) | budget_starved (0 v) | budget_starved (0 v) | ok (1 v) | budget_starved (0 v) | ok (2 v) | ok (4 v) | ok (2 v) | ok (1 v) | placement_bound (0 v) | ok (1 v) |
+| PHASE_B | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) |
+| PHASE_C | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | budget_starved (0 v) | placement_bound (0 v) | budget_starved (0 v) |
+| RESET | ok (2 v) | placement_bound (4 v) | ok (6 v) | ok (14 v) | placement_bound (2 v) | ok (2 v) | ok (2 v) | ok (4 v) | budget_starved (4 v) | placement_bound (2 v) | ok (6 v) | ok (9 v) | placement_bound (10 v) | ok (2 v) | ok (6 v) |
+| V3P3 | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | pour_discontinuous (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | pour_discontinuous (0 v) |
+| VIN | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | ok (0 v) | pour_discontinuous (0 v) |
+| VM | ok (16 v) | pour_discontinuous (4 v) | pour_discontinuous (4 v) | pour_discontinuous (12 v) | pour_discontinuous (7 v) | ok (10 v) | ok (14 v) | pour_discontinuous (6 v) | ok (14 v) | pour_discontinuous (8 v) | pour_discontinuous (16 v) | pour_discontinuous (18 v) | pour_discontinuous (12 v) | ok (16 v) | pour_discontinuous (4 v) |
+| nFAULT | ok (3 v) | ok (6 v) | ok (6 v) | congestion_saturated (0 v) | ok (4 v) | ok (3 v) | ok (3 v) | ok (6 v) | placement_bound (0 v) | ok (6 v) | ok (6 v) | ok (6 v) | congestion_saturated (0 v) | ok (4 v) | ok (6 v) |
+| nTRIP | ok (8 v) | ok (4 v) | ok (8 v) | ok (6 v) | placement_bound (2 v) | ok (8 v) | ok (8 v) | placement_bound (4 v) | ok (3 v) | ok (5 v) | ok (6 v) | ok (6 v) | ok (6 v) | ok (8 v) | ok (8 v) |
+
+What repeats across the 10 feedback-off expanded rows:
+
+- `PHASE_B` and `PHASE_C` are unfinished in all 13 feedback-off rows (#6315).
+- `PHASE_A`: unfinished in 3 of 3 runs at 1x; **finished in 9 of 10** expanded
+  rows (not at `uniform` 1.1x). Its route has 1 via in five of those rows, 2
+  in two and 4 in two.
+- `GND_SENSE`: finished in 3 of 3 at 1x; **unfinished in 9 of 10** expanded
+  rows (finished at `rigid` 1.2x).
+- `VM`: finished in 3 of 3 at 1x; **unfinished in 9 of 10** expanded rows
+  (finished at `uniform` 1.1x).
+- `EN_B`: unfinished in 3 of 3 at 1x; finished in 3 of 10 expanded rows
+  (both runs of `rigid` 1.25x, and `uniform` 1.1x).
+- Finished in every 1x run and unfinished in some expanded rows: `RESET` (5
+  of 10), `nFAULT` (3), `nTRIP` (2), `EN_C` (1), `IREF` (1).
+
+Counted on routed nets (the zone-checked count), and against the four nets
+1x leaves unfinished: an expanded row finishes one or two of those four
+(`PHASE_A` alone in seven rows, `EN_B` alone at `uniform` 1.1x, both in the
+two `rigid` 1.25x runs) and leaves unfinished one to four nets that 1x
+finished. The one is `VM` at `rigid` 1.2x; the fours are `rigid` 1.5x at
+seed 42, `uniform` 1.1x and the second `rigid` 1.25x run. On the
+classifier's count, which does not see `VM`, the same losses are zero to
+three. Neither figure counts the zone nets `+5V` and `V3P3`, which this
+section leaves out everywhere.
+
+Renders (`kct board-view net`) were made for every net whose state differs
+between 1x and an expanded row of block P; five are committed under
+`data/research/expand_route_shrink/renders/`. **What follows is read from
+images and router logs. Each is a hypothesis, not a measurement.**
+
+- **`PHASE_A` and `GND_SENSE` look like one trade, at one spot.** At 1x
+  (`s42_PHASE_A_uniform-1.png`, `s42_GND_SENSE_uniform-1.png`) `PHASE_A` has
+  no copper at all, and a `GND_SENSE` via sits just left of `U2` pins 5 to 7,
+  between `U2` and `C2`. The 1x log says `PHASE_A`'s search gave up with "all
+  via candidates blocked by stored-via geometry (blocking net GND_SENSE)". In
+  the expanded rows (`s42_PHASE_A_rigid-1.25.png`,
+  `s42_GND_SENSE_rigid-1.25.png`) a `PHASE_A` via sits at that spot and the
+  net runs to `J2` on the back layer, while `GND_SENSE` is left with one
+  missing link of about 2 mm between two pins of `U2` itself (pin 7 to pin
+  10 in the `rigid` 1.25x render, with the unrouted `PHASE_B` and `PHASE_C`
+  pads between them). Two rows do not fit a strict one-or-the-other reading:
+  `rigid` 1.2x finishes both nets (`PHASE_A` with 4 vias, `GND_SENSE` with
+  6), and `uniform` 1.1x finishes neither.
+- **Does `PHASE_A`'s route use a via in space that did not exist at 1x?
+  It does not look like it.** In three of the four block-P expanded rows the
+  route has a single via, 1.6 to 1.8 mm from the centre of pad `U2.5`. In the
+  two `rigid` rows that via is in the gap between `U2` and `C2`, and `C2`
+  rides in `U2`'s rigid cluster, so that gap is the 1x gap exactly. Replaying
+  each via's offset from its nearest footprint onto the 1x board puts it at
+  least 1.7 mm, centre to centre, from the nearest pad of any other footprint
+  — room for a 0.8 mm via — and 0.17 to 0.36 mm from the edge of the
+  `GND_SENSE` via that occupies the spot at 1x. So the space is there at 1x
+  and another net is in it. (The fourth row, `uniform` 1.25x, routes
+  `PHASE_A` with four vias, one of them midway between `C2` and `U2` where
+  the replay depends on which part it is anchored to; that one is not
+  decided by this check.) The check ignores traces and uses pad centres, so
+  it can show that a spot is free of footprints at 1x, not that a route
+  through it exists.
+- **`EN_B`**, finished only at `rigid` 1.25x in block P, takes a via 1.6 mm
+  from its `U2` pad and a long back-layer detour with four vias. Replayed at
+  1x, all four via positions are more than 5 mm from any other footprint's
+  pad. Again space that exists at 1x.
+- **The nets that become stuck when expanded look stuck at a pad, not for
+  want of room.** `RESET` at `uniform` 1.25x (`s42_RESET_uniform-1.25.png`) has
+  copper at both ends of its one missing link, across open board: at `R5.2`
+  a track reaches the pad, and at `U1.29` the copper stops at a via just
+  short of the pad; that row's log reports "post-route
+  clearance validation rejected every candidate" (via-to-pad gaps of 0.09 to
+  0.11 mm) and then a connectivity regression in the optimize phase from 4 of
+  4 pads to 2 of 4. `nFAULT` and `nTRIP` end on adjacent pins of `U2` (18 and
+  19); the logs say "committing it would strand U2.18 (nFAULT)" and "U2.18
+  has no legal exit, closed by DRIVER_SLEEP, U2, U2.17, U2.19, U2.29, nTRIP".
+  These are escapes inside one part's pin field, which does not scale.
+
+Taken together the renders point the same way as #6304's second reason: on
+board 05 the contention is at `U2`'s pins, and spreading the placement moves
+which net loses there. That is a reading of one board's images.
+
+### Feedback at its default (block S)
+
+Two rows, one run each, `uniform` only; a secondary check, not part of the
+verdict.
+
+- **1x:** the same four nets unfinished as with feedback off. 5 `kct check`
+  errors (4 `connectivity`, 1 `hole_to_hole_clearance`), 0 from `kicad-cli`.
+  The run used 1188 s of its 1200 s and pour stitching was cut short by the
+  budget; it did not hit the hard deadline, so there is no timeout sidecar
+  and no `snapshot_state` to report. The run directory's
+  `_placement_delta.json` listed proposed moves and an empty `applied` list
+  (read by hand; not in the committed JSON).
+- **`uniform` 1.5x: a deadline artifact. Do not read its counts.** The run
+  hit the hard deadline (`rc` 124) inside placement-delta feedback and the
+  row is graded from the `_partial` board: 4 signal nets unfinished by the
+  classifier's count, 5 routed nets, 10 `kct check` errors, 320 `kicad-cli`
+  errors (199 `track_width`, 97 `clearance`, 24 `drill_out_of_range`) on raw
+  copper that has had no optimisation. The row's `timeout_stage` is
+  `placement-delta-feedback` and it carries **no `snapshot_state`**: the
+  timeout sidecar had `snapshot_saved: false` and none of the #6314 fields
+  (read from the sidecar by hand; the committed row predates the harness
+  copying that field and holds only `timeout_sidecar: true` and
+  `timeout_stage`),
+  although a `_partial` board had been written at the deadline. So what that
+  board holds (accepted copper or a trial's) is not known. Its footprints are
+  at the input's positions (checked by hand). Filed as #6330; the harness now
+  copies `snapshot_saved` into the row as well.
+
+For what continuity is worth: the unfinished nets at 1x are the same with
+feedback on and off, and the 1.5x artifact lists the same five nets as the
+feedback-off `uniform` 1.5x row. Neither row is evidence that feedback
+changes the comparison, and neither shows that it does not.
+
+### chorus-test: a clustering rule, and no route
+
+The default rule (anchor has 6 or more pads; a part with at most 2 pads joins
+the nearest anchor within 3 mm that shares a net with it) clusters 2 of
+chorus's 90 footprints. The harness now takes the three parameters on the
+command line (`--anchor-min-pads`, `--satellite-max-pads`, `--max-gap-mm`),
+records them in each `rigid` row, and has a `clusters` subcommand that prints
+these counts without routing:
+
+| `anchor_min_pads`, `satellite_max_pads`, `max_gap_mm` | chorus (90 footprints) | 03 (38) | 05 (42) |
+|---|---|---|---|
+| 6, 2, 3 (default; every `rigid` row in this note) | 1 cluster, 2 footprints | 4, 16 | 4, 14 |
+| 3, 2, 3 | 8 clusters, 20 footprints | 5, 19 | 4, 14 |
+| 3, 2, 5 | 11 clusters, 36 footprints | 8, 31 | 5, 22 |
+
+(`clusters_a6_s2_g3.json`, `clusters_a3_s2_g3.json`, `clusters_a3_s2_g5.json`,
+which also list every cluster's members and the nets each shares with its
+anchor.)
+
+What excludes chorus under the default rule is the anchor threshold: its ICs
+have five pads (8 parts with 5 pads, 2 with 4, 1 with 3, against 3 parts with
+20 or more). Lowering it to 3 leaves board 05's clusters unchanged at 3 mm.
+
+**The rule to use on chorus, if it is routed, is 3, 2, 3 — and it is weaker
+than the count suggests.** Of the 12 parts it attaches to an anchor, every
+one shares only supply or ground nets with it: 4 share both a supply and a
+ground (`C38`-`U3`, `C29`-`U7`, `C31`-`Y2`, `C13`-`U1`: plausibly
+decoupling), 3 share a supply only, and 5 share a ground only. So on chorus
+the shared-net condition, which was meant to separate "this cap decouples
+that IC" from "this part happens to sit beside it", mostly reduces to
+"nearest part with three or more pads". Widening the gap to 5 mm makes it
+worse: 25 attached parts, 24 on rails only, 13 on a ground only. For
+comparison, board 05's default clusters attach 10 parts, 8 on rails only, but
+each of those 8 shares both a supply and `GND` with its IC.
+
+**chorus was not routed.** Block C (1x, and 1.5x in both modes) was cut for
+time: board 05 came first, a chorus row is expected to run to its 1200 s
+budget (every chorus row in #6304 ran to its budget), and the rule's clusters cover 20 of 90 footprints
+with only 4 attachments that look like decoupling. A chorus `rigid` run would
+also need trap 7 checked first: nobody has looked at its grid plan across
+scales.
+
+### Verdict under the decision rule
+
+The rule set in #6312, as written there:
+
+> - *Supports revisiting:* `rigid` at 1.25x or 1.5x finishes more signal nets
+>   than 1x at the same seed, in at least two seeds, on rows that did not hit
+>   the deadline or ran at comparable load, with no increase in errors on
+>   either DRC engine.
+> - *Closes it:* `rigid` is level with or worse than 1x. [...]
+> - *Inconclusive, say so:* the difference is within what block D or the
+>   seed-to-seed spread shows, or the grid pitch differs between the rows
+>   compared.
+
+Seeds were not shown to be independent samples (above), so "in at least two
+seeds" is read here as "in at least two runs". That substitution is this
+note's, not the rule's.
+
+**It closes the question for board 05, under protocol (a) at a 1200 s
+budget: on routed nets `rigid` is level with or worse than 1x in every run,
+and better in none.** That is one board, one effective seed, mostly single
+runs, and a budget that was not varied. Read on the feedback-off rows:
+
+| | 1x (3 runs) | `rigid` 1.25x (2 runs) | `rigid` 1.5x (2 runs) |
+|---|---|---|---|
+| Signal nets unfinished (classifier) | 4, 4, 4 | 4, 5 | 6, 5 |
+| ...without `PHASE_A/B/C` | 1, 1, 1 | 2, 3 | 4, 3 |
+| Routed nets unfinished (zone-checked) | 4, 4, 4 | 5, 6 | 7, 6 |
+| ...without `PHASE_A/B/C` | 1, 1, 1 | 3, 4 | 5, 4 |
+| `kct check` errors | 4, 4, 4 | 5, 6 | 7, 7 |
+| `kicad-cli` DRC errors | 0, 0, 0 | 0, 0 | 0, 0 |
+
+No `rigid` run at 1.25x or 1.5x finishes more nets than 1x on either count,
+with or without the `PHASE` nets, and `kct check` errors are higher in all
+four. The best single cell is the first `rigid` 1.25x run on the classifier's
+count: level with 1x, and one worse in its repeat.
+
+Three qualifications, all stated because the rule asks for them:
+
+- **Grid.** The 1.25x and 1.5x `rigid` rows were routed with `U2` on a zone
+  of a hundred times the cells it has at 1x (trap 7), which by the letter of the rule
+  makes those two comparisons inconclusive. The rows chosen to remove that
+  difference do not change the answer: `rigid` at 1.1x, 1.2x and 1.4x leaves
+  6, 4 and 6 routed nets unfinished against 4. The one cell in the whole
+  table where `rigid` beats 1x is 1.2x on the classifier's count (3 against
+  4). That is one net in one run, the size of the difference between repeats
+  of the same row at 1.25x and at 1.5x; the net it gains is `PHASE_A` and the
+  net it loses, `VM`, is one the classifier's count cannot see; and the row
+  has 5 `kct check` errors against 4. It does not meet "more nets and no more
+  errors".
+- **Replication.** One route per row, with second runs of three rows, and a
+  spread of one net between repeats. Against that spread: on routed nets
+  `rigid` is two to three worse than 1x at 1.5x and one to two worse at
+  1.25x; on the classifier's count it is one to two worse at 1.5x and level
+  or one worse at 1.25x. Only the first of those four is clearly outside the
+  spread, and both of its runs are the rows the budget cut short (next
+  point). Two worse than 1x also appears in the single runs at 1.1x and 1.4x
+  and in one of the two runs at 1.25x, none of which was cut short. "Level
+  with or worse" is what the rule asks about, and it holds in every run.
+  "Worse" by more than the one-net spread, in both runs of a repeated row,
+  is seen only at 1.5x, on the rows that ran out of budget; at 1.25x the two
+  runs are one and two worse. So "worse" is not established beyond the
+  spread on any repeated row that ended inside its budget.
+- **Deadline and load.** The rule's first branch asks for rows that did not
+  hit the deadline or ran at comparable load, and the rows this verdict
+  leans on have to meet the same test. The two `rigid` 1.5x runs fail its
+  first half, and load was not controlled in any row.
+  They are the only feedback-off rows with `hit_timeout: true` (a stage cut
+  short by the budget, here pour stitching; not the hard deadline): `rc` 4,
+  88 of 142 connections routed, 1188.8 and 1162.3 s of 1200, with the
+  1-minute load going 11.5 -> 28.6 in one and 27.1 -> 8.6 in the other. The
+  grid point
+  above already calls them inconclusive. As evidence they are the weakest
+  rows in the table, and the 1.5x column of it is those two rows alone.
+  The other eight feedback-off expanded rows have `hit_timeout: false`. Six
+  of them ended with more than 170 s in hand (728 to 1028 s) and two took
+  1146 and 1157 s. All eight leave at least as many routed nets unfinished
+  as 1x's 4: `rigid` 6, 4, 5 and 6, 6 (at 1.1x, 1.2x, 1.25x twice, 1.4x);
+  `uniform` 7, 6, 5. Load does not sort the rows: 1x left the same four nets
+  from a starting load of 5.6, 25.1 and 24.8, and the three expanded rows
+  that started at the lowest load (`uniform` 1.5x at 6.0, `rigid` 1.4x at
+  7.7, the first `rigid` 1.25x run at 9.6) left 5, 6 and 5. So on the rows
+  that ended inside the budget, neither the hard deadline nor host load
+  accounts for the result.
+  What is not excluded is the budget itself, because no row varied it. Every
+  row ran with `--timeout 1200` and `--per-net-iterations 1000000` while the
+  cell estimate rose to as much as 2.7 times 1x's, and none passed
+  `--deterministic-rescue`, so any relief-rescue sub-search kept its 10 s
+  wall-clock limit on a host whose 1-minute load ran from 5.6 to 28.6.
+  Whether `rigid` 1.5x is worse than 1x or only did not finish in 1200 s is
+  not decided by these rows.
+
+With #6304, whose partial-board rows can no longer be relied on, what stands
+is this section alone: on board 05, under protocol (a) at 1200 s, neither
+`uniform` nor `rigid` spreading let the shipped router finish more routed
+nets than it does at 1x.
+
+### Not measured in #6312
+
+- **chorus-test in `rigid` mode**, or at all. See above.
+- **Any board but 05.** Nothing here says what `rigid` spreading does on a
+  board whose stuck nets are not at one part's pins.
+- **Independent replication.** The seed was not shown to be a source of
+  independent variation: one pair, not committed, matched exactly, and the
+  committed runs differ both at one seed and across two. So the rows are
+  read as one route per row plus second runs of 1x (two), `rigid` 1.25x and
+  `rigid` 1.5x. Those repeats differ from their twins, by at most one net in
+  which nets finish.
+- **A second run of `rigid` 1.2x.** It is the only row level with 1x on
+  routed nets and the only one better than 1x on the classifier's count, and
+  it has a single run. Block R repeated 1.25x.
+- **A larger time or iteration budget, and `--deterministic-rescue`.** Every
+  row ran with `--timeout 1200` and `--per-net-iterations 1000000`, without
+  `--deterministic-rescue`. The two `rigid` 1.5x runs were cut short by that
+  budget, and nothing here says what they, or any other expanded row, would
+  do with more.
+- **A fully grid-matched pair.** Block M matches the `U2` zone and the coarse
+  pitch, not every zone. An explicit `--grid` would match everything and was
+  not tried: #6304's protocol (c) could not finish board 05 at 1x on one.
+- **Staging.** #6312's update notes one run that routed `PHASE_A` and
+  `PHASE_B` first and left 3 signal nets unfinished against 6 in a single
+  pass. Not repeated here, at any scale.
+- **Whether a route found expanded survives shrinking.** No expanded row is
+  better than 1x, so there was nothing to shrink.
+- **Scales above 1.5x.** The router refuses board 05 at 2x under this grid
+  policy (#6306).
+- **Why `VM` and `GND_SENSE` copper differs between same-seed runs** (#6329),
+  and whether those two nets' flips in the expanded rows are related to it.
+  They are two of the four nets that vary between 1x repeats.
+
 ## Why it mostly does not work
 
 Three reasons, in decreasing order of how much of the result they explain.
@@ -597,7 +1250,9 @@ Three reasons, in decreasing order of how much of the result they explain.
    more general: a 0.5 mm-pitch QFP presents the same escape problem on a
    60 mm board and a 120 mm one.
 3. **The router is budget-bound on precisely the boards that are partial, and
-   expansion spends the budget.** The *coarse* grid grows as s² at fixed
+   expansion spends the budget.** (This is #6304's reading, from rows that
+   are unverified since #6314. #6312's rows contradict it for board 05; see
+   the end of this item.) The *coarse* grid grows as s² at fixed
    pitch, but the router's cell estimate does not, because on these boards
    much of it is fine-grid zones around individual parts, and a footprint does
    not grow when the placement is scaled. Board 05's logged estimate goes
@@ -607,19 +1262,32 @@ Three reasons, in decreasing order of how much of the result they explain.
    at both scales (1.98 M of them one zone, `U3` at 0.005 mm).
    Chorus's estimate grows 1.61x (3.09 M → 4.98 M). No 2x estimate exists for
    either board. Paths are s times longer, and A\* expansions grow with both
-   cells and path length. Under protocol (a), 11 of the 33 unfinished
-   signal nets at 1x across the two partial boards are `BUDGET_STARVED` before
-   anything is expanded, and none of them completes.
+   cells and path length. Under protocol (a), in #6304's rows, 11 of the 33
+   unfinished signal nets at 1x across the two partial boards were
+   `BUDGET_STARVED` before anything was expanded, and none of them completed.
+   **#6312's committed rows do not bear this out on board 05.** With feedback
+   off, `PHASE_A` is `budget_starved` at 1x in all three runs and finished in
+   9 of the 10 expanded rows; the 1x runs used 553, 786 and 606 s of their
+   1200 s, not all of it. (With feedback at its default, as in #6304, the
+   one #6312 run of 1x did run to 1188 s, so #6304's rows reaching their
+   budget is reproduced; that the routing itself needs the whole budget is
+   not.) (The other two `budget_starved` nets, `PHASE_B`
+   and `PHASE_C`, are unfinished in every row, at 1x and expanded; see
+   #6315.) So on board 05 this reason is not supported as stated. Chorus was
+   not re-run, and what a larger budget would do to the expanded rows was
+   not measured.
 
 Board 03 is the exception that fits the rule: one stuck net, a small board
 that finishes well inside its budget at 1.5x, and — the part `rigid` supplies —
 a placement change that is *not* purely affine, because the clusters keep
 their internal geometry while the space between them opens. Reason 1 applies
 to `uniform`; it applies less to `rigid`. That is the most interesting thing
-this experiment did not get to test on the hard boards (#6312) — and board 03
-is also the only board run in `rigid` mode on which the clustering rule groups
-more than three footprints, so "what `rigid` does" currently means "what it
-did on board 03".
+#6304 did not get to test on the hard boards — and in #6304 board 03 was the
+only board run in `rigid` mode on which the clustering rule groups more than
+three footprints, so there "what `rigid` does" meant "what it did on board
+03". (#6312 has since run board 05, which clusters 14 of its 42 footprints,
+in `rigid` mode: level with or worse than 1x at a 1200 s budget. Chorus is
+still untested.)
 
 The anytime property — a complete, clean board at every step — was the
 proposal's main attraction, and it depends on step 3 delivering a complete,
@@ -633,25 +1301,28 @@ prototype.
 
 | Question from the issue | Answer |
 |---|---|
-| Do boards that are partial at 1x reach 100% expanded? | No. 0 of 2 at 1.5x `uniform`, under either protocol. Under the shipped router (protocol b) board 05's unfinished signal nets are unchanged (9 and 9) and chorus has four more (30 → 34). Not tested: 2x, and `rigid` (#6312). |
-| Does anything complete expanded that does not at 1x? | Yes, on board 03 with an explicit grid only: rigid 1.5x is fully complete (27/27, 0 DRC both engines), and uniform 2x routes the same net with 0 DRC errors (26/27, `GND` pour discontinuous). The default grid already routes that net at 1x. |
+| Do boards that are partial at 1x reach 100% expanded? | No. Board 05, re-measured in #6312 with feedback off, under protocol (a) at 1200 s: 4 routed nets unfinished at 1x in three runs; 5 to 7 in three `uniform` rows and 4 to 7 in seven `rigid` runs, 1.1x to 1.5x. #6304's own rows (0 of 2 at 1.5x `uniform` under either protocol; board 05 9 and 9, chorus 30 → 34 under protocol b) are unverified since #6314. Not tested: 2x, a larger budget, and chorus in `rigid` mode. |
+| Does anything complete expanded that does not at 1x? | Yes, on board 03. For signal nets, with an explicit grid only: rigid 1.5x is fully complete (27/27, 0 DRC both engines), and uniform 2x routes the same net with 0 DRC errors (26/27, `GND` pour discontinuous); the default grid already routes that net at 1x. For the `GND` pour, under the `area` policy too: both `rigid` rows are 27/27 against 26/27 at 1x. |
 | Do boards that are complete at 1x stay complete? | Not reliably: board 04 loses a net at uniform 2x under both grid policies. Boards 02 and 03 stay signal-complete at every scale under the `area` policy. (Board 03 on the explicit grid is not complete at 1x; its rigid 2x row routes the 1x-stuck net and leaves two others unfinished.) |
 | Do `ESCAPE_BLOCKED` nets fail to benefit, as predicted? | Untestable — none exist at 1x on this fleet. |
 | Do `PLACEMENT_BOUND` nets benefit, as predicted? | On board 03, yes (1 of 1). On 05 and chorus, 4 of 15 under (a) and 5 of 26 under (b), with more nets newly stuck than freed across all classes (10 against 6, and 9 against 5). |
 | Is shrinking geometry or re-topology? | Geometry, as far as this metric sees: 4 of 1,550 loaded gaps over 1x capacity in the tabulated expanded routes, all on chorus. |
-| Minimum feasible scale per board, both DRC engines? | Not measured — it needs the shrink step. Only board 03 has an expanded starting point that is better than its 1x run (rigid 1.5x, and uniform 2x for signal nets), and only against the explicit grid. |
+| Minimum feasible scale per board, both DRC engines? | Not measured — it needs the shrink step. Only board 03 has an expanded starting point that is better than its 1x run: on the explicit grid, rigid 1.5x and (for signal nets) uniform 2x; under the `area` policy, the two `rigid` rows, by the `GND` pour alone (27/27 against 26/27). |
 
 What would change the verdict, in order of cost:
 
 1. **#6310 says go** — board 03's rigid 1.5x route survives a single shrink to
    1x with `USB_D+` intact and both DRC engines clean, with repair confined to
    trace ends at pads.
-2. **`rigid` mode helps a board that is partial under the shipped router.** Not
-   measured here; tracked as #6312. Board 05 at rigid 1.25–1.5x under protocol
-   (a), on an unloaded host and run more than once, would be informative as
-   the harness stands. Chorus would not: the clustering rule groups two of
-   its 90 footprints, so it needs a different rule before a `rigid` run tests
-   anything.
+2. **`rigid` mode helps a board that is partial under the shipped router.**
+   Measured on board 05 in #6312, and it does not: see
+   ["Verdict under the decision rule"](#verdict-under-the-decision-rule).
+   That removes board 05 from this list at the budget it was run with; a
+   larger budget, and a second run of the one row level with 1x (`rigid`
+   1.2x), are listed there as not measured. It leaves chorus, which was not
+   routed; a rule that clusters 20 of its 90 footprints now exists
+   (`--anchor-min-pads 3`), with the weakness described in
+   ["chorus-test"](#chorus-test-a-clustering-rule-and-no-route).
 3. **A board on which inter-footprint channel capacity is the binding
    constraint** — the `gaps` subcommand reporting at- or over-capacity gaps on
    a 1x partial route. None of the boards in the Phase 2 table is one. A dense
@@ -676,7 +1347,10 @@ Ordered by how directly the measurements support them.
    reason to prefer `rigid` independent of these counts. The mechanism is
    plausible too: a rigid-cluster spread is not affine, so it can change which
    channels exist, where a uniform scale only widens the ones already there.
-   Whether any of this carries to a partial board is #6312.
+   On the one partial board since measured it does not carry: board 05 in
+   #6312 has `rigid` at 6, 5 and 6, and 7 and 6 routed nets unfinished at
+   1.1x, 1.25x and 1.5x against `uniform`'s 7, 6 and 5, neither better than
+   the other and neither better than 1x.
 2. **The data does not locate a useful scale; cost argues for starting
    small.** The one row that suggests "1.5x good, 2x bad" is board 03 `rigid`
    on the explicit grid, a single run that used 862 s of 900 s. `uniform` on
@@ -714,25 +1388,38 @@ Ordered by how directly the measurements support them.
 
 ## Not measured
 
-- **Board 05 and chorus at 2x**, and either in `rigid` mode. See "Boards that
-  are partial at 1x". The second is the gap most likely to matter, and is
-  tracked as #6312. Under the current clustering rule it is a real gap for
-  board 05 (14 of 42 footprints clustered) and close to an empty one for
-  chorus (2 of 90), which needs a better rule before a `rigid` run means
-  anything.
+- **Board 05 and chorus at 2x**, and chorus in `rigid` mode. Board 05 in
+  `rigid` mode was measured in #6312
+  (["Rigid mode on the partial boards"](#rigid-mode-on-the-partial-boards-issue-6312));
+  that section has its own list of what it did not cover. Chorus clusters 2
+  of 90 footprints under the default rule and 20 of 90 with the anchor
+  threshold lowered to 3 pads; it has not been routed under either.
+- **Whether #6304's partial-board rows were ever right.** They ran with
+  placement-delta feedback on and to their time budgets, which is the path
+  #6314 showed could save an inconsistent board. Their files are gone. They
+  are marked where they appear and are not used as baselines.
 - **Scales between 1x and 1.5x.** A 1.25x sweep was started under the abandoned
-  protocol (c) and has no usable rows.
+  protocol (c) and has no usable rows. (True of #6304. #6312 has since run
+  board 05 at 1.1x, 1.2x, 1.25x and 1.4x.)
 - **Boards 06, 07, 08, 09.** 06 and 07 arrive with routed copper and are
   refused (by design, see above); 08 has no generated PCB; 09's `output/` board
   is already routed.
-- **Anything above 1200 s.** Both partial boards used their whole budget at
-  both scales. A much larger budget might let the expanded board catch up; the
-  shape of the result (cells and path lengths both up, `BUDGET_STARVED` nets
-  0-for-11) gives no reason to expect it to overtake.
+- **Anything above 1200 s.** In #6304's rows (unverified since #6314) both
+  partial boards used their whole budget at both scales, and #6304 read the
+  shape of that result (cells and path lengths both up, `BUDGET_STARVED` nets
+  0-for-11) as giving no reason to expect a much larger budget to let the
+  expanded board overtake. **#6312's committed rows do not support either
+  premise on board 05 once feedback is off:** the 1x runs used 553, 786 and
+  606 s of 1200 (the one 1x run with feedback at its default used 1188 s),
+  and `PHASE_A`, `budget_starved` at 1x in all three, finished in 9 of the
+  10 expanded rows. So that expectation no longer has support for board 05.
+  A larger budget remains unmeasured, in #6304 and in #6312.
 - **Non-uniform (single-axis) scaling.** The harness supports per-axis factors
   and refuses round outlines under them; it was not swept.
-- **Run-to-run variance.** One run per row, on a loaded shared host. The board
-  05 and chorus differences are two to four nets each from single pairs of
+- **Run-to-run variance.** One run per row, on a loaded shared host. (The
+  board-05 and chorus rows discussed here are #6304's, unverified since
+  #6314.) The board
+  05 and chorus differences there are two to four nets each from single pairs of
   runs, and are not individually significant. What carries the verdict is that
   four pairs — two boards under two protocols, one seed, so not independent
   samples — show no improvement in any of them, including the one pair where
@@ -748,13 +1435,22 @@ Ordered by how directly the measurements support them.
   not investigated. On a three-net board it changed one via; nothing here
   bounds what it does to a 37-net board at its budget limit, which is one
   more reason not to read the two-to-four-net differences as signal.
+  (#6312 has since measured it on board 05: same-seed runs differ in copper
+  on four or five nets and in which nets finish by at most one. It also found
+  that a repeat is a cache replay unless `--no-cache` is passed, which the
+  "reproduced the table exactly" re-runs above did not pass; whether they
+  were replays was not checked.)
 
 ## Follow-ups filed
 
 | Issue | What |
 |---|---|
 | #6310 | Probe: shrink board 03's rigid 1.5x route back to 1x once and see whether `USB_D+` survives. Decides whether a compaction pass is worth building at all. |
-| #6312 | Measure `rigid` expansion on the boards that are partial at 1x: board 05 as the harness stands; chorus only after a clustering rule that actually clusters it. The omission this note ranks first. |
+| #6312 | Measure `rigid` expansion on the boards that are partial at 1x. Done for board 05 (no improvement under protocol (a) at 1200 s; budget not varied); chorus has a clustering rule and was not routed. |
+| #6327 | Stuck classifier: a power net with no zone is labelled `pour_discontinuous` (board 05 `VM`), so "signal nets unfinished" undercounts. Found in #6312. |
+| #6328 | Auto-grid: board 05's `U2` fine zone flips between 0.05 mm and 0.005 mm when the part is translated. Found in #6312. |
+| #6329 | `kct route --deterministic-budget --seed`: same-seed runs of board 05 differ on 4 nets, and seeds 42 and 43 can match exactly. Found in #6312. |
+| #6330 | `kct route --timeout`: a deadline during placement-delta feedback can leave a `_partial` board with `snapshot_saved: false` and no `snapshot_state`. Found in #6312. |
 | #6309 | Evaluate reporting over-capacity global-routing edges as a placement-spread trigger (refinement 3). |
 | #6307 | Router: board 04 loses net `SWO` when its placement is spread to 2x. |
 | #6306 | `kct route` refuses a 120 x 80 mm board with one LQFP-48; the auto-grid error omits `--max-cells` and advises enlarging the board. |
