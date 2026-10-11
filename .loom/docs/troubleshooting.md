@@ -2189,9 +2189,38 @@ precisely the shape of the one stash in 148 that mattered.
 - It only ever considers `loom-quarantine:`-labelled entries. An Auditor drift
   shelf, a Judge park stash, or an ad-hoc `git stash` is never a candidate.
 
-**A blind run is an error, not "0 retirable" (#8876).** `stashes` is a
-standalone process, not the daemon: its `gh issue view` lookups run on the
-invoking shell's ambient `gh` auth. When at least one issue was looked up and
+**Which credential reads the issue state (#8876).** `stashes` is a standalone
+process, so it cannot see the credentials the daemon holds in memory. It never
+looks for them on disk either: no token is published into, copied to, or
+discovered from a checkout, `.loom/gh-config`, or a sidecar. Instead the route
+is chosen **once per run**, and the run prints `issue-state route: ...` on
+stderr naming the one that was used:
+
+1. **Daemon-assisted (`daemon-gh/<launcher>`).** If the machine-level daemon
+   socket (`$LOOM_SOCKET_PATH`, else `~/.loom/loom-daemon.sock`) is a socket
+   owned by you in a directory only you can write, and not inside the
+   checkout, `stashes` sends it one read-only `ReadIssueState` request: the
+   repo root, its `owner/repo`, and an issue number. The daemon accepts it only
+   for a root in `~/.loom/workspaces.json`, re-derives the slug from that
+   root's `origin` itself (a mismatch is *unknown*), applies the forge-egress
+   admission gate, and runs the single `gh issue view` through its own
+   `GhInvocation` routing (per-owner App credential, managed launcher). Only
+   `OPEN`/`CLOSED`/unknown and a non-secret route label come back; the daemon
+   may live anywhere, including outside every managed root. Once the daemon
+   has answered, its answer is final for the run: an *unknown* from it is
+   never retried under ambient credentials.
+2. **Standalone (`standalone-gh/<launcher>`).** With no daemon (absent, down,
+   an untrusted socket, a daemon too old to know the request) or a repo the
+   daemon does not manage, the read runs in the CLI process through the same
+   `GhInvocation` facade, behind the same admission gate. An unconfigured host
+   keeps its ambient `gh` login, unchanged. A governed host uses the policy's
+   managed launcher, and a routing refusal (`standalone-refused:<codes>`) is
+   *unknown*, never a direct request.
+
+Whenever no policy-compliant path exists the answer is *unknown*, and unknown
+never retires a stash.
+
+**A blind run is an error, not "0 retirable" (#8876).** When at least one issue was looked up and
 *every* lookup failed, the run prints one line ahead of the per-stash verdicts
 and exits **1**:
 
@@ -2219,7 +2248,10 @@ issue #N` line and exits 0, and stashes with no `issue=` token are never looked
 up, so they neither cause nor hide a blind run. Note that `--issue N` scoped to
 a single unreadable issue *is* a blind run: the only lookup failed.
 
-To fix a blind run, check what the shell's `gh` login can see: `gh issue view
+To fix a blind run, read the `issue-state route:` line first. On
+`daemon-gh/...` the daemon's own credential cannot read the repo (see
+`loom-daemon status` credential preflight). On `standalone-gh/...` check what
+the shell's `gh` login can see: `gh issue view
 <N> --json state` from the repo. A 404 on an issue you know exists means that
 account has no access to the repo; `gh auth login` as one that can read it.
 

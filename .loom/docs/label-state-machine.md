@@ -39,6 +39,7 @@ pipeline state already lives.
 - [PR verdict-label mutual exclusion: three independent layers (#8112)](#pr-verdict-label-mutual-exclusion-three-independent-layers-8112)
 - [Follow-up work](#follow-up-work)
 - [Label registry: the source of truth (#10013)](#label-registry-the-source-of-truth-10013)
+- [No-op hold (#10156)](#no-op-hold-10156)
 <!-- toc:end -->
 
 ## Two ways to reach a human (#10000)
@@ -1030,3 +1031,7 @@ against `requires_base`/`remove_with` (#5671). Changes go in the registry.
 `propagate` holds #10012's propagation table (`null` = never propagates);
 `star_liveness::propagation_rules` derives its rules from it.
 `stale_after_minutes` and `lifecycle` are inert.
+
+## No-op hold (#10156)
+
+A sweep that ends as a no-op (the `noop-cooldown record` IPC, or a Curator-only stop the reaper classifies) is counted per issue. After `autonomous.workFinder.noopCooldown.holdThreshold` consecutive no-ops (default 3, env `LOOM_WORK_FINDER_NOOP_HOLD_THRESHOLD`, `0` disables) with an unchanged fingerprint (labels minus claim churn, non-bot comments, linked-PR state, `## Dependencies` state), the daemon parks the issue: `loom:blocked` when dependencies are named, otherwise `loom:operator-only` + `loom:operator-decision`, with one `<!-- loom:noop-hold (#10156) -->` comment. `loom:operator-priority` does not exempt an issue and is never touched. To unpark, remove the park labels and re-add `loom:issue`; any new comment, label change, linked-PR change or dependency change also restarts the count.

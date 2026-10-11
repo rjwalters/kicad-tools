@@ -1341,6 +1341,17 @@ crash-signal reader takes the entire rest of that line as the runtime name, so
 appending to it would report a runtime called `"opencode tier=2"`. "How much work
 is going to the backstop" reduces to counting markers whose `tier` is not `0`.
 
+**An uninstalled tier-3 tap is skipped, not launched (#9368).** A tier-3
+generic runtime (`gemini`, `aider`, operator-defined) has no credential pool, so
+the one thing the walk can observe about it is its CLI binary: when the name is
+known (`LOOM_GENERIC_CLI_BIN`, else the manifest's `launch.cliBin`) and it is
+not an executable file on the daemon's `PATH`, the tap is passed over as
+`unavailable(binary: 'gemini' not found in PATH …)` and the walk continues, or
+holds if nothing below qualifies. Without a known name (no `launch.cliBin`) the
+tap stays ungated and `spawn-generic.sh`'s own exit-127 check remains the
+backstop, so declare `cliBin` in any tier-3 manifest you list in a preference.
+`claude`, `codex` and the native harnesses are never `PATH`-checked.
+
 Each dispatch seam emits that marker to the **daemon log** (`loom-daemon logs`),
 which is where all three resolve, and (#8599) the daemon carries it to the child
 in `LOOM_RUNTIME_PREFERENCE_MARKER` so `worker_spawn::launch` writes the same
