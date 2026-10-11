@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1063",
-  "loom_commit": "ae8fbb6cfd830939dd8cfbcf37add31a8f171e94",
+  "loom_version": "0.19.1065",
+  "loom_commit": "33bb950d65b9038d5cf119a252820edca1192edf",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -408,7 +408,9 @@
     ".claude/commands/loom/sweep-wave-lifecycle.md",
     ".loom/scripts/tests/test-champion-pr-merge-negation-guard.sh",
     ".loom/docs/native-sweep.md",
-    ".loom/runtimes/gemini.json"
+    ".loom/runtimes/gemini.json",
+    ".claude/commands/loom/sweep-doctor-glm-escalation.md",
+    ".loom/docs/stale-check-inputs.md"
   ],
   "last_resync": "2026-10-11",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
