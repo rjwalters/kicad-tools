@@ -1447,6 +1447,73 @@ orchestrator runs it as a background Bash process writing `exit` and
 `report.json` files and polls in-turn with bounded waits until the exit file
 exists; the recipe is in `native-sweep.md` "Waiting for `worker run`".
 
+#### Usage attribution for `worker run` phases (issue #11360)
+
+A phase launched by `worker run` writes its own log,
+`.loom/logs/worker-run-<role>-<issue>-<unix-ts>.log`, never the sweep log. Its
+first line names the parent sweep, taken from `$LOOM_SWEEP_ID`:
+
+```text
+==== loom-daemon worker run: parent_sweep=<sweep-id> role=<role> issue=<N> ====
+```
+
+The key is `parent_sweep=`, not `sweep_id=`. The parent sweep log is anchored
+by a substring search for `sweep_id=<id>`, so a header carrying that text and
+quoted into the parent's stream (for example, an orchestrator `cat`ing a phase
+log) would move the parent's region past its own launch record.
+
+When the sweep reaches its terminal transition, the outcome journal reads every
+phase log for the issue and keeps only the region after this sweep's header.
+The rules:
+
+- **Kept separate from the parent.** Phase rows go in `phase_tap_usage` on the
+  `sweep-outcomes.jsonl` line, one row per `(role, tap)`. `tap_usage` /
+  `tap_usage_all` still describe only the parent orchestrator's own log. A
+  phase's spend never overwrites the parent's row, and the parent's spend
+  (Curator and Judge, which run in its process) is never charged to a phase tap.
+  The paired `sweep.outcome` telemetry record keeps `config["tap"]` set to the
+  parent and adds a `tap_phase_keys` flag (`builder=<key>,doctor=<key>`). The
+  counters live on the journal line.
+- **Each launch counted once.** Every `# LOOM_LAUNCH` record in a phase log is
+  charged only with the usage events that follow it. A header repeated inside
+  one log counts only its last region. A log that names a different sweep (a
+  resumed sweep's predecessor, or an id that only shares a prefix) adds
+  nothing. Two phase logs for the same sweep (a Builder re-run) are two real
+  launches, and both count.
+- **The tap that actually ran.** A phase whose role resolves to `claude`
+  (including an empty GLM pool falling through to Claude) prints
+  `delegate-to-claude`, writes no phase log, and charges no GLM tap. Its usage
+  is the parent's Claude transcript. A `worker run` with no `$LOOM_SWEEP_ID`
+  stamps `parent_sweep=none`, which no sweep matches.
+- **Escalated Doctor (#11359).** `worker run --role doctor --escalate-claude`
+  prints a `runtime: claude` report with no `log_path`, launches nothing, and
+  writes no phase log. The Doctor then runs as a Claude Task in the parent
+  session, with no `# LOOM_LAUNCH` record, so it charges no tap. Earlier GLM
+  Doctor attempts keep their exact GLM row, and nothing from the Claude
+  attempt lands on it. The escalated model is recorded by the checkpoint's
+  `doctor-done` write, not by tap accounting.
+- **Unmeasured is not zero.** A phase that launched but reported no usage
+  events is a row with `usage_events: 0` and no counters. A truncated final
+  line from an interrupted run is ignored. Cost figures are harness estimates,
+  not charges.
+
+The sweep's total per tap is the fold of the parent rows and the phase rows
+(`RegionAccounting::sweep_totals_by_tap`).
+
+**Operator verification of one live mixed sweep**:
+
+1. `ls .loom/logs/worker-run-*-<N>-*.log`. Each file's first line must name the
+   sweep id as `parent_sweep=<id>`. A phase that ran on Claude (empty-pool
+   fallback or escalation) has no file and no phase row.
+2. `grep '^# LOOM_LAUNCH' <phase log>`. The `tap`/`model`/`profile` must be
+   what actually launched, not just the first preference.
+3. `grep '"issue":<N>' .loom/sweep-outcomes.jsonl`. Check that `tap_usage`
+   names the parent, and that `phase_tap_usage` has one row per phase role and
+   tap, with counters only where the stream reported them.
+4. In the telemetry journal, `config.tap_phase_keys` must list the same keys.
+
+Before attaching evidence, remove account names and host paths.
+
 ### Bounding the metered backstop tier (issue #8555)
 
 The backstop tap is the only entry in a preference list with a **marginal
