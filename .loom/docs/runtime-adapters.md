@@ -1338,17 +1338,45 @@ Only native runtimes (`pi`, `opencode`, `kimi`) are checked, and only when the
 profile declares a provider for that harness. `loom-daemon validate` rejects an
 `excludedRoles` entry that is not a known role name.
 
-**GLM-first Builder and Doctor (this repo's committed config).**
-`.loom/config.json` sets `rolePreference.builder` and `.doctor` to
-`[{"runtime":"opencode","modelProfile":"zai-flash"}, "claude"]` (a sweep's
-Builder phase resolves through it via `worker run`, #11303): the role runs on a
-Z.ai seat while the `zai` api-keys pool has a selectable account, else on Claude.
+**GLM-first Builder and Doctor (fleet policy, tier 1).** The routing comes
+from fleet-gitops `config.defaults`, rendered into each host's machine tier
+(`~/.local/share/loom/config/defaults.json`), not from this repo's
+`.loom/config.json`, which carries no fleet keys (#11450, #11441). It sets
+`defaultModelProfile: "zai-flash"`, `rolePreference.builder` to
+`["opencode", "claude"]` and `.doctor` to `["opencode", "codex", "claude"]`
+(a bare `opencode` entry takes the default profile; a sweep's Builder phase
+resolves through `rolePreference.builder` via `worker run`, #11303): the role
+runs on a Z.ai seat while the `zai` api-keys pool has a selectable account, else
+on Claude (Doctor's Codex step is skipped while Codex's `worktreeIsolation` is
+`partial`).
 A host with **no** `zai` pool counts as unavailable, not unobservable: guarded
 launches never reuse OpenCode's own login, so unless an exported key,
 `LOOM_NATIVE_AUTH_FILE`, or a gateway route supplies it, the tap is skipped.
 `rolePreference.judge` is `["codex", "claude"]`; `zai-flash`'s `excludedRoles`
 would skip a GLM Judge entry anyway. A machine-tier pin such as
 `runtimes.roles.doctor = "claude"` still wins outright.
+
+**Launch-failure hold (role ticks, #11453).** The walk falls through only on
+credential availability, so a tap whose launch fails *deterministically* with a
+healthy pool would be relaunched every tick. A role tick that fails with an
+allowlisted class (`launch-failed`, `toolless-launch`, `preflight-auth-failed`,
+`credential-expired`, `preflight-no-cli-start`, `preflight-mcp-failed`,
+`preflight-token-selection-failed`, `exit-78`, `exit-126`, `exit-127`) extends
+a streak keyed on **(workspace root, role, tap)**. Every other class is
+transient and keeps the retry-next-tick behaviour. That includes rate/quota,
+timeouts, session refusals and `sandbox-unavailable` (the sandbox hold owns
+it). After `LOOM_LAUNCH_FAILURE_HOLD_THRESHOLD` (default 2) identical failures
+in a row, that role's ticks in that workspace skip the tap for
+`LOOM_LAUNCH_FAILURE_HOLD_SECS` (default 1800; `0` disables the feature). The
+skip shows in the marker as `unavailable(launch-failure-hold: <class> xN
+armed=… remaining=…s)`, and the walk falls through `rolePreference`. If every
+tap is held, the tick is skipped pre-spawn as usual. The daemon logs one WARN
+when the hold arms and one INFO when it clears. A hold clears on expiry (the next tick re-tests the tap,
+and one more identical failure re-arms it), on a successful tick, on a change
+to the effective `runtimes` block or the tap's model profile, and on daemon
+restart. A success, a transient failure or a different class resets the
+streak. Sweeps (`resolve_for_dispatch`, `pool_preflight`) and operator pins
+never consult it, and the role itself is never benched (#6201).
 
 **Judge independence.** A native sweep runs every phase in **one session with no
 subagents**, so a preference list that lands Builder and Judge on the same

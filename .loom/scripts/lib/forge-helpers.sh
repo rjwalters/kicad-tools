@@ -721,7 +721,7 @@ forge_get_commit_status() {
 # Get GitHub Actions workflow runs (or the Gitea Actions equivalent) for a
 # commit, independent of the Checks API.
 # Usage: forge_get_workflow_runs NWO COMMIT_SHA
-# Returns JSON: {"workflow_runs": [{"name": ..., "status": ..., "conclusion": ...}]}
+# Returns JSON: {"workflow_runs": [{"name", "status", "conclusion", "event" (GitHub only)}]}
 #
 # Why this exists (#5495): the Checks API (forge_get_check_runs, above) only
 # ever reports check-runs that already exist -- a workflow_run that is still
@@ -778,7 +778,7 @@ forge_get_workflow_runs() {
     echo "$runs_json" | jq '{
       workflow_runs: [(.workflow_runs // [])[] | {
         name: .name,
-        status: .status,
+        status: .status, event: .event,
         conclusion: .conclusion
       }]
     }' 2>/dev/null || echo '{"workflow_runs": []}'

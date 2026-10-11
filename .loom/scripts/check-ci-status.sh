@@ -255,12 +255,12 @@ analyze_status() {
     # yet -- and therefore has no corresponding entries at all in $check_runs
     # above. A `completed` run adds nothing to the counts (its job-level
     # detail already arrived via $check_runs) -- EXCEPT a run that completed
-    # `cancelled` with no successful run of the same workflow (#10415): a
-    # superseded run can be cancelled before creating any job, so nothing in
-    # $check_runs speaks for it. That is NO VERDICT (ci-principles.md), and
-    # must not resolve to success because unrelated workflows passed.
+    # `cancelled` with no successful run of the same workflow (#10415): one
+    # cancelled before creating any job has no $check_runs entry. That is NO
+    # VERDICT (ci-principles.md), never success. A `workflow_run`-event run is
+    # exempt (#11147): the forge files it under the default-branch tip, not this commit.
     pending=$((pending + $(echo "$workflow_runs" | jq '[.[] | select(.status != "completed")] | length')))
-    local no_verdict; no_verdict=$(echo "$workflow_runs" | jq '[group_by(.name)[] | select(any(.[]; .conclusion == "cancelled") and (any(.[]; .conclusion == "success") | not))] | length')
+    local no_verdict; no_verdict=$(echo "$workflow_runs" | jq '[map(select(.event != "workflow_run")) | group_by(.name)[] | select(any(.[]; .conclusion == "cancelled") and (any(.[]; .conclusion == "success") | not))] | length')
 
     # Determine overall status
     local overall_status
@@ -494,7 +494,7 @@ else
     [[ "$FAILURE_COUNT" -gt 0 ]] && echo -e "  ${RED}$FAILURE_COUNT failed${NC}"
     [[ "$PENDING_COUNT" -gt 0 ]] && echo -e "  ${YELLOW}$PENDING_COUNT pending${NC}"
 
-    [[ "$STATUS" == "unknown" ]] && echo "$RESULT" | jq -r '.workflow_runs[] | select(.conclusion == "cancelled") | "  \(.name): cancelled workflow run, no verdict (#10415)"'
+    [[ "$STATUS" == "unknown" ]] && echo "$RESULT" | jq -r '.workflow_runs[] | select(.conclusion == "cancelled" and .event != "workflow_run") | "  \(.name): cancelled workflow run, no verdict (#10415)"'
 
     # Show failed checks
     if [[ "$FAILURE_COUNT" -gt 0 ]]; then

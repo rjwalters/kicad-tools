@@ -21,8 +21,8 @@ in every role prompt that documents a REST fallback for issue/PR writes.
 exist for a **quota** problem: GraphQL's 5000/hr budget is temporarily
 exhausted while REST's independent budget still has headroom, so re-issuing
 the *same* mutation over REST succeeds. Those sections match failures against
-a specific five-signature table (`api rate limit exceeded` / `api rate limit
-already exceeded` / `secondary rate limit` / `abuse detection mechanism` /
+a specific five-signature table (`api rate limit·exceeded` / `api rate
+limit·already exceeded` / `secondary rate limit` / `abuse detection mechanism` /
 `was submitted too quickly`).
 
 **`Body is too long` does not appear in that table, and must never be treated

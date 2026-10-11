@@ -297,6 +297,93 @@ EOF
 run_ccs --commit "$SHA" --quiet
 assert_eq "pending" "$OUT" "(c5) cancelled CI run with a queued replacement -> 'pending'"
 
+# (c6) #11147: a `workflow_run`-event workflow (Build and Release) is filed by
+# the forge under the default-branch tip at trigger time, so its cancelled
+# (superseded, zero-job) and skipped runs are about OTHER commits' CI. Beside
+# a green push `CI` run they must not mask the genuine success. Fixture shape:
+# commit 2db42044eb9a9d9ca71fad5ca920a8abb8456944.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success", "event": "push"}, {"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": "workflow_run"}, {"name": "Build and Release", "status": "completed", "conclusion": "skipped", "event": "workflow_run"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(c6) green push CI + {cancelled, skipped} workflow_run-event runs -> 'success'"
+assert_eq "0" "$RC" "(c6) Exit code 0 (success)"
+run_ccs --commit "$SHA" --json
+assert_eq "0" "$(echo "$OUT" | jq -r '.counts.no_verdict')" "(c6) --json .counts.no_verdict is 0"
+assert_eq "workflow_run" "$(echo "$OUT" | jq -r '.workflow_runs[1].event')" "(c6) --json .workflow_runs[] carries event"
+
+# (c7) #11147: a lone cancelled workflow_run-event run (no skipped sibling).
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success", "event": "push"}, {"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": "workflow_run"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(c7) green push CI + lone cancelled workflow_run-event run -> 'success'"
+assert_eq "0" "$RC" "(c7) Exit code 0 (success)"
+
+# (c8) #11147 must not weaken #10415: a cancelled zero-job run of every
+# commit-verifying event is still NO VERDICT, also beside an exempt
+# workflow_run-event run -- and only the verifying run is named.
+for ev in push pull_request merge_group schedule; do
+    reset_state
+    write_four_fast_checks
+    cat > "$STUB_DIR/workflow-runs.json" <<EOF
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "cancelled", "event": "$ev"}, {"name": "loc", "status": "completed", "conclusion": "success", "event": "$ev"}, {"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": "workflow_run"}]}
+EOF
+    run_ccs --commit "$SHA" --quiet
+    assert_eq "unknown" "$OUT" "(c8) cancelled zero-job CI run [event $ev] -> 'unknown' (no verdict)"
+    assert_eq "3" "$RC" "(c8) Exit code 3 (no verdict) [event $ev]"
+done
+run_ccs --commit "$SHA" --json
+assert_eq "1" "$(echo "$OUT" | jq -r '.counts.no_verdict')" "(c8) --json .counts.no_verdict counts only the commit-verifying workflow"
+run_ccs --commit "$SHA"
+assert_contains "$OUT" "CI: cancelled workflow run, no verdict" "(c8) human output names the no-verdict CI workflow"
+assert_eq "0" "$(echo "$OUT" | grep -c 'Build and Release: cancelled' || true)" "(c8) human output does not name the exempt workflow_run-event run"
+
+# (c9) Gitea shape (no `event` key at all, or an explicit null): unchanged --
+# a cancelled run with no successful sibling is still NO VERDICT, whatever
+# its name. (c2)-(c5) above cover the same key-less shape for "CI".
+for run in '{"name": "Build and Release", "status": "completed", "conclusion": "cancelled"}' \
+           '{"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": null}'; do
+    reset_state
+    write_four_fast_checks
+    cat > "$STUB_DIR/workflow-runs.json" <<EOF
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success"}, $run]}
+EOF
+    run_ccs --commit "$SHA" --quiet
+    assert_eq "unknown" "$OUT" "(c9) cancelled run without an event value -> still 'unknown'"
+    assert_eq "3" "$RC" "(c9) Exit code 3 (no verdict)"
+done
+
+# (c10) The pending count is untouched: a queued (or in-progress)
+# workflow_run-event run still reads pending -- nothing unfinished goes green.
+for st in queued in_progress; do
+    reset_state
+    write_four_fast_checks
+    cat > "$STUB_DIR/workflow-runs.json" <<EOF
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success", "event": "push"}, {"name": "Build and Release", "status": "$st", "conclusion": null, "event": "workflow_run"}]}
+EOF
+    run_ccs --commit "$SHA" --quiet
+    assert_eq "pending" "$OUT" "(c10) $st workflow_run-event run -> 'pending'"
+    assert_eq "2" "$RC" "(c10) Exit code 2 (pending) [$st]"
+done
+
+# (c11) Failure precedence is untouched: a release job that really failed
+# arrives through check_runs and still dominates, exempt run or not.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<'EOF'
+{"total_count": 2, "check_runs": [{"name": "loc", "status": "completed", "conclusion": "success"}, {"name": "publish", "status": "completed", "conclusion": "failure"}]}
+EOF
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success", "event": "push"}, {"name": "Build and Release", "status": "completed", "conclusion": "failure", "event": "workflow_run"}, {"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": "workflow_run"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "failure" "$OUT" "(c11) failed check-run of a workflow_run-event workflow -> 'failure'"
+assert_eq "1" "$RC" "(c11) Exit code 1 (failure)"
+
 # (d) Graceful degradation: the workflow-runs API call itself fails (e.g.
 # Actions scope/permissions issue). This must NOT break the script -- it
 # should fall back to check-run-only behavior, exactly like the pre-fix

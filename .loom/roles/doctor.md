@@ -221,17 +221,22 @@ handoff below) are **GraphQL-backed mutations**. GitHub's GraphQL quota
 (5000/hr, shared across every agent + tool) and its REST quota are
 **independent** — confirmed live during long sweeps (#4526, #4670, #4856):
 GraphQL can read 0 remaining while REST still has ~4000 left. A rejection
-whose text contains one of these five signatures (case-insensitive) is a
-rate limit, not a real failure, and has a REST equivalent — do **not** give
-up or wait idly; retry the same mutation over REST:
+whose text contains one of these five signatures (case-insensitive; `·` is a
+space, #11411) is a rate limit, not a real failure, and has a REST
+equivalent — do **not** give up or wait idly; retry the same mutation over REST:
 
 | Signature | Seen as |
 |---|---|
-| `api rate limit exceeded` | REST itself throttling (rare on the fallback path) |
-| `api rate limit already exceeded` | GraphQL: `GraphQL: API rate limit already exceeded for user ID …` |
-| `secondary rate limit` | either transport, burst throttling |
-| `abuse detection mechanism` | either transport, burst throttling |
-| `was submitted too quickly` | either transport, burst throttling |
+| `api rate limit·exceeded` | REST throttling (rare here) |
+| `api rate limit·already exceeded` | GraphQL, as `GraphQL: … for user ID …` |
+| `secondary rate limit` | burst throttling |
+| `abuse detection mechanism` | burst throttling |
+| `was submitted too quickly` | burst throttling |
+
+A "GitHub API rate limit … sleep until reset" reminder on a tool result is a
+text match on its output (#11411), not a quota reading: check
+`gh api rate_limit` and keep working. Read role files with a file-read tool,
+not `cat`.
 
 REST equivalents for the mutations you actually need mid-fix:
 

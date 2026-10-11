@@ -863,7 +863,9 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
     # on an empty one (`invalid value: string ""`) instead of reading it as
     # unset, so the loop's input drops those two empties and the container
     # sees them as unset. (`grep -v` exiting 1 on no output cannot abort this
-    # script: a process substitution's status is never the shell's.)
+    # script: a process substitution's status is never the shell's.) `-a` is
+    # load-bearing (#11237): GNU grep in a UTF-8 locale otherwise suppresses a
+    # line holding a non-UTF-8 byte, silently un-forwarding that variable.
 
     # --- Env passthrough ---
     # Every LOOM_*/CLAUDE_*/SAFEHOUSE*/CODEX_* var (GH_TOKEN/GITHUB_TOKEN
@@ -890,7 +892,7 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
                 _containment_env+=(-e "$_containment_var")
                 ;;
         esac
-    done < <(env | grep -v '^CARGO_PROFILE_[A-Z]*_DEBUG=$')
+    done < <(env | grep -av '^CARGO_PROFILE_[A-Z]*_DEBUG=$')
     _containment_env+=(-e "LOOM_SPAWN_CONTAINERIZED=1" -e "LOOM_WORKSPACE=${WORKSPACE}" -e "HOME=${HOME:-/home/loom}")
 
     # --- Resource-limit docker flags + observability labels (issue #7430) ---

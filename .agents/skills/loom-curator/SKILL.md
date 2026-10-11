@@ -88,6 +88,11 @@ Either under ~500, or a failed read: claim nothing new, report the rest as
 deferred, no retry loop (finishing/releasing a claim you hold is fine). At most
 ~3 Curators per identity, all repos combined (policy, not enforced).
 
+A "GitHub API rate limit … sleep until reset" reminder on a tool result is a
+text match on its output (#11411), not a quota reading: check
+`gh api rate_limit` and keep working. Read role files with a file-read tool,
+not `cat`.
+
 | File | Load |
 |---|---|
 | [`curator-rate-budget.md`](../loom-curator-rate-budget/SKILL.md) | Changing or measuring this budget only |

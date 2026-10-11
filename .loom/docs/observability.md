@@ -727,7 +727,12 @@ same facts per call (#10343): `github.http.{status,not_modified,requests,source}
 the bucket join keys `github.{resource,account,cred_owner,role}`. Since
 #10752 a span also carries `github.repo`, a write carries `github.number`, and
 a call made by a daemon pass inside its caller scope carries `github.caller`
-(the `loom:blocked` release pass: `stale_blocked_release`). That pass also
+(the `loom:blocked` release pass: `stale_blocked_release`). Since #11407
+every span also names the endpoint: `github.route` (a template such as
+`/repos/{owner}/{repo}/pulls/{n}`, from the same finite table as gh-shim's
+`github.api.route`), `http.request.method`, and `github.command` (`pr view`
+for an agent front read), so `api.rest` and `agent_gh_front` spend can be
+ranked by route. That pass also
 emits a `pass.summary` log per pass and a `pass.verdict` per artifact; see
 [`telemetry-schema.md`](telemetry-schema.md) and
 `defaults/observability/signoz/pass-queries.sql`.

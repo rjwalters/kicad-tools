@@ -1965,7 +1965,7 @@ assert_contains "# LOOM_DISPATCH_MODE mode=bare-metal" "$output" "containment di
 echo '{"runtimes": {"containment": {"enabled": true}}}' > "$CONTAIN_WS/.loom/config.json"
 : > "$DOCKER_LOG"
 output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
-    LOOM_SWEEP_CPU_QUOTA=0 CARGO_PROFILE_DEV_DEBUG=full CARGO_PROFILE_TEST_DEBUG='' \
+    LOOM_SWEEP_CPU_QUOTA=0 CARGO_PROFILE_DEV_DEBUG=full CARGO_PROFILE_TEST_DEBUG='' LC_ALL=C.UTF-8 LOOM_NONUTF8_PROBE=$'caf\xe9' \
     "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
 assert_contains "containerized dispatch ENABLED" "$output" \
     "runtimes.containment.enabled=true: spawn-claude logs the containment decision (#7429)"
@@ -2001,7 +2001,15 @@ assert_contains "--memory" "$docker_log" "containerized dispatch: --memory is ap
 # (Both names share one `case` arm; the Rust containment tests cover the
 # two-names-forwarded shape.) Folded into the same single assert line for
 # the same ratchet reason.
-assert_eq "-e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG" "$(grep -oE -- '-e CARGO_(INCREMENTAL|PROFILE_[A-Z]+_DEBUG)(=[^ ]*)?' <<<"$docker_log" | sort -u | paste -sd' ' -)" "containerized dispatch: the worker env carries CARGO_INCREMENTAL=0 (#8456) and the debuginfo cap by name, no value in argv, a set-but-empty one dropped (#11190)"
+# Issue #11237: the run above also sets LOOM_NONUTF8_PROBE to a value with a
+# non-UTF-8 byte (0xE9) under LC_ALL=C.UTF-8. GNU grep in a UTF-8 locale
+# suppresses such a line unless given `-a`, which silently dropped the
+# variable from the passthrough; the same equality proves it is forwarded,
+# and by name only, and its trailing `0` is the count of lines in the
+# script's output and docker's argv that hold the value. This is RED without
+# `-a` only where `grep` is GNU grep (the Linux CI job); BSD grep on macOS
+# never dropped the line, so there the assert passes either way.
+assert_eq "-e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG -e LOOM_NONUTF8_PROBE 0" "$({ grep -aoE -- '-e (CARGO_(INCREMENTAL|PROFILE_[A-Z]+_DEBUG)|LOOM_NONUTF8_PROBE)(=[^ ]*)?' <<<"$docker_log" | LC_ALL=C sort -u; LC_ALL=C grep -acF $'caf\xe9' <<<"$output$docker_log"; } | paste -sd' ' -)" "containerized dispatch: the worker env carries CARGO_INCREMENTAL=0 (#8456), the debuginfo cap by name, no value in argv, a set-but-empty one dropped (#11190), and a variable whose value has a non-UTF-8 byte, by name (#11237)"
 assert_contains "# LOOM_DISPATCH_MODE mode=container" "$output" \
     "containerized dispatch: the canonical LOOM_DISPATCH_MODE marker names mode=container (#7430)"
 assert_contains "cpus=none" "$output" \
