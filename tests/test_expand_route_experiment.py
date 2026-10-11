@@ -527,6 +527,14 @@ def test_timeout_sidecar_facts_are_copied_and_missing_keys_are_not_invented(tmp_
         "timeout_sidecar": True,
         "timeout_stage": "routing",
     }
+    # The worker was killed before it published the partial-save stage: a
+    # _partial board may exist, but nothing says what it holds.
+    sidecar.write_text(json.dumps({"stage": "placement-delta-feedback", "snapshot_saved": False}))
+    assert ere.timeout_sidecar_facts(routed) == {
+        "timeout_sidecar": True,
+        "timeout_stage": "placement-delta-feedback",
+        "snapshot_saved": False,
+    }
     # An explicit null (no trial discarded) is a fact and is kept.
     sidecar.write_text(json.dumps({"stage": "routing", "snapshot_discarded_trial": None}))
     assert ere.timeout_sidecar_facts(routed)["snapshot_discarded_trial"] is None
