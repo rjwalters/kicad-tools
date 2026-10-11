@@ -825,6 +825,114 @@ else
     fail "(#8676) long-history lineage proof was lost -- phantom block (rc=$RC); out=$OUT"
 fi
 
+# --- the daemon's own resync commit is routine lineage (#8920) ---------------
+#
+# loom-daemon's workspace resync commits its refresh as
+# `chore(loom): resync installed Loom to v<version>` (resync_message() in
+# loom-daemon/src/fleet_sync/workspace_resync/git.rs). The subject rung did not
+# know that spelling, so once the daemon had resynced a repo the last touch of
+# every file it wrote read as "not a routine resync" -- and with no content
+# proof available (unresolvable recorded version) and the install-baseline rung
+# out of reach (the last touch is no longer the install commit), each later
+# upstream line removal was blocked as a phantom local fix, on every run.
+# A Rust test beside resync_message() binds the daemon's string to this
+# script's regex; these groups pin the end-to-end verdict.
+
+# make_daemon_resync_fixture <dirname> <resync-subject>
+#   An unresolvable-version install, then upstream grows a line and a resync
+#   commit titled <resync-subject> writes it to the installed copy. That commit
+#   is now guard.sh's last touch, and it is NOT the install baseline.
+make_daemon_resync_fixture() {
+    local repo
+    repo="$(make_lineage_fixture "$1" 'tooling: install Repo Skills and Loom into the map repo' unresolvable)"
+    printf 'line-one\nline-two\nline-three\nline-four\n' > "$repo/defaults/hooks/guard.sh"
+    git -C "$repo" add defaults/hooks/guard.sh >/dev/null 2>&1
+    git -C "$repo" commit -qm "feat(guard): add line-four" >/dev/null 2>&1
+    cp "$repo/defaults/hooks/guard.sh" "$repo/.loom/hooks/guard.sh"
+    git -C "$repo" add .loom/hooks/guard.sh >/dev/null 2>&1
+    git -C "$repo" commit -qm "$2" >/dev/null 2>&1
+    echo "$repo"
+}
+
+echo "Test group 12: the daemon's resync commit is routine lineage when no content proof is available (#8920)"
+N12=0
+for SUBJECT12 in 'chore(loom): resync installed Loom to v0.19.1021' \
+                 'chore(loom): resync installed Loom to v0.19.1021 (#123)'; do
+    N12=$((N12 + 1))
+    REPO12="$(make_daemon_resync_fixture "repo-daemon-resync-$N12" "$SUBJECT12")"
+    bump_upstream "$REPO12"
+    if [[ "$(git -C "$REPO12" log -1 --format='%s' -- .loom/hooks/guard.sh)" == "$SUBJECT12" ]] \
+        && [[ "$(git -C "$REPO12" log -1 --format='%H' -- .loom/hooks/guard.sh)" != "$(git -C "$REPO12" log --diff-filter=A --format='%H' -- .loom/install-metadata.json | tail -1)" ]]; then
+        pass "(#8920) fixture precondition: last touch is '$SUBJECT12', not the install baseline"
+    else
+        fail "(#8920) fixture precondition unmet for '$SUBJECT12'"
+    fi
+    OUT="$(cd "$REPO12" && bash "$SCRIPT" 2>&1)"
+    RC=$?
+    if [[ $RC -eq 0 ]] && ! grep -qi "blocked" <<<"$OUT" \
+        && [[ "$(cat "$REPO12/.loom/hooks/guard.sh")" == $'line-one\nline-three' ]]; then
+        pass "(#8920) a file last written by '$SUBJECT12' is updated, not blocked"
+    else
+        fail "(#8920) a file last written by '$SUBJECT12' was blocked as a local fix (rc=$RC); out=$OUT"
+    fi
+done
+
+# #8098 still holds for the new alternative: a human EXTENDING the daemon's
+# subject (or merely imitating its opening) carried more than routine output.
+echo "Test group 12b: an extended or look-alike daemon subject is still protected (#8920, #8098)"
+for SUBJECT12 in 'chore(loom): resync installed Loom to v1 and also revert the guard fix' \
+                 'chore(loom): resync installed Loom to vendor my guard fix' \
+                 'chore(loom): resync installed Loom to v0.19.1021 (#123) plus a hotfix' \
+                 'fixup! chore(loom): resync installed Loom to v0.19.1021'; do
+    N12=$((N12 + 1))
+    REPO12="$(make_daemon_resync_fixture "repo-daemon-resync-$N12" "$SUBJECT12")"
+    bump_upstream "$REPO12"
+    OUT="$(cd "$REPO12" && bash "$SCRIPT" 2>&1)"
+    RC=$?
+    if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+        && [[ "$(cat "$REPO12/.loom/hooks/guard.sh")" == $'line-one\nline-two\nline-three\nline-four' ]]; then
+        pass "(#8920) '$SUBJECT12' is not routine lineage -- still blocked"
+    else
+        fail "(#8920) '$SUBJECT12' was waved through as routine lineage (rc=$RC); out=$OUT"
+    fi
+done
+
+# Same deference on the #9178 install-baseline rung (ROUTINE_SUBJECT_PREFIX_RE):
+# an extended daemon subject on the install commit ITSELF stays protected.
+REPO12B="$(make_fixture)"
+git -C "$REPO12B" commit --amend -qm 'chore(loom): resync installed Loom to v1.2.3 and also revert the guard fix' >/dev/null 2>&1
+OUT="$(cd "$REPO12B" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" && [[ "$(cat "$REPO12B/.loom/hooks/guard.sh")" == "OLD" ]]; then
+    pass "(#8920) an extended daemon subject on the install commit is not cleared by the install-baseline rung"
+else
+    fail "(#8920) the install-baseline rung cleared an extended daemon subject (rc=$RC); out=$OUT"
+fi
+
+# Recognising the daemon's commit must not shelter what lands AFTER it: a hand
+# edit is a later commit, so the daemon's subject is no longer the last touch.
+echo "Test group 12c: a hand edit committed after a daemon resync is still blocked (#8920)"
+REPO12C="$(make_daemon_resync_fixture repo-daemon-resync-handedit 'chore(loom): resync installed Loom to v0.19.1021')"
+printf 'line-one\nline-two\nline-three\nline-four\nLOCAL-HOTFIX\n' > "$REPO12C/.loom/hooks/guard.sh"
+git -C "$REPO12C" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO12C" commit -qm "fix(guard): hand-applied hotfix upstream never took" >/dev/null 2>&1
+bump_upstream "$REPO12C"
+OUT="$(cd "$REPO12C" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" && grep -q "hand-applied hotfix upstream never took" <<<"$OUT" \
+    && grep -q "LOCAL-HOTFIX" "$REPO12C/.loom/hooks/guard.sh"; then
+    pass "(#8920) a hand edit after a daemon resync is protected, and the block names its commit"
+else
+    fail "(#8920) a hand edit after a daemon resync was overwritten (rc=$RC); out=$OUT"
+fi
+OUT="$(cd "$REPO12C" && bash "$SCRIPT" --force 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && [[ "$(cat "$REPO12C/.loom/hooks/guard.sh")" == $'line-one\nline-three' ]]; then
+    pass "(#8920) --force still applies the update over that hand edit"
+else
+    fail "(#8920) --force did not apply the update (rc=$RC); out=$OUT"
+fi
+
 # --- summary -----------------------------------------------------------------
 echo ""
 echo "========================================"

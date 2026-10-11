@@ -9,15 +9,19 @@ defaults walk, which mirrors `defaults/.github/` into the workspace):
 
 - **`CONFIGURATION.md`** — this file
 - **`ISSUE_TEMPLATE/task.yml`** — single unified template for all development tasks (Bug Fix,
-  Feature, Refactoring, Documentation, Testing, Infrastructure, Research, Improvement); explains
-  that issues control the development process; redirects discussions to GitHub Discussions
-- **`ISSUE_TEMPLATE/config.yml`** — disables blank issues (forces template use) and links to
-  GitHub Discussions for non-task items
+  Feature, Refactoring, Documentation, Testing, Infrastructure, Research, Improvement); applies
+  `loom:triage` and explains that a task is reviewed before work begins
+- **`ISSUE_TEMPLATE/config.yml`** — leaves blank issues enabled (GitHub's own default) and adds
+  no contact links
 - **`labels.yml`** — the authoritative label set for the label-based workflow (see below)
 
 Everything else under a workspace's `.github/` (e.g. `workflows/`) is consumer-owned — Loom
 never installs, edits, or removes it. If you see a `.github/` file not in this list, it isn't
 from Loom.
+
+Both issue templates are repo-neutral: they name no repository and link nowhere, so they read
+correctly in any workspace. To point filers at your own forum or to require the template, see
+[Customization](#customization).
 
 ## How It Works
 
@@ -56,6 +60,11 @@ Workspaces can customize non-Loom-shipped `.github/` content freely (it's never 
 Loom). Customizing one of the four Loom-shipped files above will be clobbered on the next
 `loom update` / reinstall — instead add workflows from `defaults/optional/`, or fork.
 
+That includes `ISSUE_TEMPLATE/config.yml`: a `contact_links` entry or a
+`blank_issues_enabled: false` added there is overwritten by the next forced reinstall, so
+re-apply it afterwards. A separate template file you add yourself (any other name under
+`ISSUE_TEMPLATE/`) is yours and is left alone.
+
 ## Label-Based Workflow
 
 The issue template integrates with Loom's label-based workflow coordination. `.github/labels.yml`
@@ -67,6 +76,6 @@ See [WORKFLOWS.md](https://github.com/rjwalters/loom/blob/main/docs/workflows.md
 ## Benefits
 
 1. **Workflow Clarity**: Template explains how issues are used
-2. **Reduced Noise**: Discussions redirected away from issue tracker
+2. **No Surprises**: Blank issues stay enabled and filers are not sent to another site
 3. **AI Integration**: Labels coordinate autonomous agent behavior
 4. **Consistent Setup**: Every Loom workspace gets the same configuration

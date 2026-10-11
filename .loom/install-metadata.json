@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1039",
-  "loom_commit": "e83d19dc0a9b217339ea2f14040c50ad6f46700d",
+  "loom_version": "0.19.1042",
+  "loom_commit": "80d818558b6c8f6751624defcfa0b7ef9d736e02",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -409,6 +409,6 @@
     ".loom/scripts/tests/test-champion-pr-merge-negation-guard.sh"
   ],
   "last_resync": "2026-10-11",
-  "loom_source_remote": "git@github.com:rjwalters/loom.git",
+  "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.772"
 }

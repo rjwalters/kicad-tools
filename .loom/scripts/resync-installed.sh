@@ -1252,7 +1252,7 @@ record_blocked() {
 # a real anchoring bug: an installed file's genuinely-last commit is normally
 # provided verbatim by `git log`, not hand-typed, but nothing prevented a
 # hand-amended or hand-rebased subject from taking this exact shape.
-RESYNC_COMMIT_SUBJECT_RE='^(chore: install Loom v[0-9][^[:space:]]*( \(#[0-9]+\))?$|chore: resync installed Loom surfaces( \(#[0-9]+\))?$|(\[skip ci\] )?chore\(loom\): Install Loom [^[:space:]]+ orchestration framework( \(#[0-9]+\))?$)'
+RESYNC_COMMIT_SUBJECT_RE='^(chore: install Loom v[0-9][^[:space:]]*( \(#[0-9]+\))?$|chore: resync installed Loom surfaces( \(#[0-9]+\))?$|(\[skip ci\] )?chore\(loom\): Install Loom [^[:space:]]+ orchestration framework( \(#[0-9]+\))?$|chore\(loom\): resync installed Loom to v[0-9]+\.[0-9]+\.[0-9]+( \(#[0-9]+\))?$)'
 
 # removed_line_count <src> <dst>
 #   Count of non-blank lines present in dst but ABSENT from src (a line-SET
@@ -1573,7 +1573,7 @@ dst_matches_installed_version() {
 # it). Every real #9178 subject is untouched by it: "Install Loom v0.19.174 and
 # Repo Skills v0.11.17 (#7)", "tooling: install Repo Skills and Loom into the
 # map repo" and "Upgrade Loom to 0.18.0 (...)" carry none of these prefixes.
-ROUTINE_SUBJECT_PREFIX_RE='^(\[skip ci\] )?(chore: install Loom v|chore: resync installed Loom surfaces|chore\(loom\): Install Loom )'
+ROUTINE_SUBJECT_PREFIX_RE='^(\[skip ci\] )?(chore: install Loom v|chore: resync installed Loom surfaces|chore\(loom\): Install Loom |chore\(loom\): resync installed Loom to v)'
 
 INSTALL_BASELINE_COMMIT=""
 INSTALL_BASELINE_RESOLVED=0
