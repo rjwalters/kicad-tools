@@ -122,13 +122,21 @@ polling time. A host's own polling time (`left_at` for a polled move,
 `observed_at`) is never part of a key: two hosts that poll one transition at
 different times would otherwise emit two ids for it.
 
-**No forge instant, no fact id.** A stage exit the producer has no forge
-instant for (a sweep stage, a failed read, a label event outside the pass
-window) is emitted **without** `loom.fact_id`. So is a
-`pr.resolved` from a build before #11126 (no `closed_at`). Readers dedupe
-these by `(repo, issue, next_stage)` for `eta.stage_outcome` (`(repo,
-pr_number, state)` for `pr.resolved`) within a short window: two hosts'
-records of one transition are at most one pass interval apart (their
+**No forge instant: a fallback key, else a reason (#11401).** A stage exit
+the producer has no forge instant for keys on the id of the host's sweep that
+held the stage (only that host emits a sweep row, so the id is stable), else
+on the forge-dated `entered_at`: `(repo, issue, stage, next_stage, "sweep",
+sweep_id, checkpoint entered_at)` or `(repo, issue, stage, next_stage,
+"entry", entered_at)`. A forge-instant key is unchanged and always wins.
+With none of these the record has no `loom.fact_id` and carries
+`loom.fact_id_missing_reason` (`forge_read_failed` / `no_forge_instant`)
+instead, never neither, and `host.export` counts it
+(`loom.host_export.fact_id_missing_total`). A fallback id and a peer host's
+forge-instant id for the same move differ; so does a `pr.resolved` from a
+build before #11126 (no `closed_at`, no fact id). Readers dedupe records
+without a fact id by `(repo, issue, next_stage)` for `eta.stage_outcome`
+(`(repo, pr_number, state)` for `pr.resolved`) within a short window: two
+hosts' records of one transition are at most one pass interval apart (their
 `resolution_sec`), so a window of twice the largest `resolution_sec` in the
 group keeps one row per transition, the earliest knowable-at.
 

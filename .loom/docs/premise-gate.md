@@ -55,13 +55,25 @@ The population is narrow — three triggers, checked in this order:
 |---|---|
 | `label:<name>` | `loom:architect` / `loom:hermit` / `loom:auditor` — autonomously-filed proposals, the population #7855 came from |
 | `reversal-claim:<phrase>` | The issue's own text says it reverses/overrides a documented decision, **or** reaches for #7855's "the filing is the ruling" reasoning |
-| `incident-report:<heading>` | A heading naming a host- or fleet-level event: "what happened", "incident", "postmortem", "outage", "timeline", "observed behaviour", … |
+| `incident-report:<heading>` | A heading naming a host- or fleet-level event: "what happened" (qualified only — see below), "what went wrong", "what i observed", "what we observed", "observed behaviour", "observed behavior", "incident", "postmortem", "post-mortem", "outage", "timeline" |
+
+This list is the exact trigger vocabulary — it matches the `INCIDENT_HEADINGS`
+constant in `loom-daemon/src/premise_check/scope.rs`, and a heading matching
+any of it gates. One exception, so a filer can predict the outcome: a heading
+that is **bare** `what happened` — the phrase alone, lowercased, with
+surrounding whitespace and trailing ASCII punctuation (`?`, `!`, `.`, `:`)
+stripped — is ordinary bug-form vocabulary and does **not** gate. `## What
+happened`, `### What happened?`, and `## What happened:` all pass through;
+`## What happened (2026-09-16, robb-pro, launchd)` — the qualifier marks a
+narrated event rather than a form field — still gates, as does any body that
+carries the bare heading alongside another listed heading.
 
 Everything else exits `0` untouched.
 
 **Ordinary bug-report headings are deliberately excluded** — "steps to
-reproduce", "expected", "actual", "symptoms", "description". An ordinary bug
-report is *also* an observation its filer has not diagnosed, so a vocabulary
+reproduce", "expected", "actual", "symptoms", "description", and a **bare**
+"what happened" (see the rule above). An ordinary bug report is *also* an
+observation its filer has not diagnosed, so a vocabulary
 built from those would pull the whole bug queue into the gate. That would
 falsify #8396's "routine bug fixes are demonstrably unaffected" criterion and,
 worse, train every reader to wave the gate through.
@@ -310,8 +322,16 @@ fired on 7 and passed 53 through untouched:
 
 | Fired | Why |
 |---|---|
-| #8413, #8355, #8280 | genuine incident reports ("Incident (observed …)", "What happened") |
+| #8413 | genuine incident report ("Incident (observed …)") |
 | #8396, #8310, #8309, #8269 | the premise-gate family itself — issues literally about reversing documented decisions |
+
+Two of the seven fired in that window do **not** fire today: #8355 and #8280
+gated on the **bare** "What happened" heading, which #9549 narrowed to
+bug-form vocabulary. Both now exit `0`. That is the rule's known trade-off,
+stated rather than hidden: each carried its own diagnosis ("Suspected root
+cause" / "Proposed fix") and neither asked to reverse a documented decision,
+so what they lose is consistent with the gate's purpose — but the numbers
+above are the 2026-09-20 measurement, not the current code's behaviour.
 
 Every ordinary bug fix in the window (#8387, #8377, #8381, #8397, #8410, …)
 exited `0`.

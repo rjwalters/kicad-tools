@@ -2339,11 +2339,29 @@ nanoseconds). `forge_transition_at` is the forge's own instant: the new review
 label's `labeled` event (one paginated issue-events read per actual move,
 with no per-pass limit, every page of the history, and only when it falls
 inside the pass window), or the PR's
-`merged_at` / `closed_at`. Every part is the same on every host, whatever its
-polling time. **A transition with no forge instant** (a sweep stage, a ready
-row, a failed read) **is emitted without
-`loom.fact_id`**; readers dedupe it by `(repo, issue, next_stage)` within a
-short window (see [`telemetry-replay.md`](telemetry-replay.md)).
+`merged_at` / `closed_at`, or for a hold release (`merge_hold` →
+`merge_wait`) the hold label's `unlabeled` event (#11401). Every part is the
+same on every host, whatever its polling time.
+
+**A transition with no forge instant (#11401)** keys on, first match:
+
+1. the holding sweep: `derived_hex(["loom.fact", "eta.stage_outcome", repo,
+   issue, stage, next_stage, "sweep", sweep_id, entered_at], 16)`, where
+   `entered_at` is the sweep checkpoint's (empty otherwise). A row of this
+   host's sweep (`sweep.curator`, `sweep.builder`, and `review_wait` /
+   `doctor` / `merge_wait` while the sweep holds the item) carries the
+   additive body field `sweep_id`; only that host emits it.
+2. the forge-dated entry (`entered_at_source = forge`):
+   `derived_hex(["loom.fact", "eta.stage_outcome", repo, issue, stage,
+   next_stage, "entry", entered_at], 16)`.
+
+With neither, the record has **no `loom.fact_id` and carries
+`loom.fact_id_missing_reason`** instead: `forge_read_failed` (a history or
+`pulls/{n}` read this pass needed failed) or `no_forge_instant`. Every record
+carries exactly one of the two, and `host.export` counts the second kind
+(`fact_id_missing_total`). Ids keyed on a forge instant are unchanged by
+#11401. The body field `fact_id_missing_reason` is the producer's view of why
+no forge instant dates the exit, present even when a fallback key applies.
 
 The log record's **time is `left_at`** and its **observed timestamp is
 `observed_at`**. The body is the record's JSON. The scalars ride as
@@ -2575,6 +2593,7 @@ Each row:
 | `pr` | integer, optional | the PR, when known |
 | `host` | string, optional | the host whose sweep holds the item. Present **only** when the emitting host runs it; absent rather than guessed otherwise |
 | `slot` | `regular` / `overflow`, optional | the dispatch slot that sweep holds (`overflow` = the host's single `loom:operator-priority` overflow slot, #9244). Present exactly when `host` is |
+| `sweep_id` | string, optional | the id of this host's sweep that holds the item, the `loom.fact_id` key of the row's `eta.stage_outcome` when no forge instant dates the exit (#11401). Present exactly when `host` is. Additive on `fleet-state/v1` |
 | `model`, `effort`, `effort_source`, `model_source`, `runtime`, `attempt_index`, `trigger`, `previous_sweep_id` | optional | a row of a sweep this host runs (`sweep.curator`, `sweep.builder`, `review_wait`, `doctor`, `merge_wait`): the [dispatch facts](#sweepstarted) its `sweep.started` carried, with the same values (#11280). Absent for a sweep this daemon did not dispatch (adopted after a restart), and each one absent when unknown. Additive on `fleet-state/v1` |
 | `rank` | integer, optional | `ready_wait` only: this host's planner rank (1-based position in its dispatch order on the last work-finder tick). Per host: two hosts' ranks for one issue are two true answers |
 | `star` | bool, optional | starred at any level (absent = `false`). Every row since #11391: a PR row reads the PR's `loom:operator-priority` / level labels, and a row keeps the star an earlier row of the item carried (a `ready_wait` row is rebuilt from the tick, so an un-star shows there) |
@@ -3012,9 +3031,11 @@ elected, there are no caps, and no rate or estimate is computed in the daemon.
 | `exporters[].queue_depth` | integer | envelopes queued, waiting for a flush |
 | `exporters[].dropped_total` | integer | envelopes dropped (oldest first) at a full queue |
 | `exporters[].last_flush_ok_at` | RFC3339? | last acked batch; omitted when none this process (unknown, not a fabricated time) |
+| `fact_id_missing_total` | integer | `eta.stage_outcome` exits this process emitted without a `loom.fact_id` (each carried `loom.fact_id_missing_reason`, #11401); cumulative per process lifetime like `dropped_total`; `0` on records from before #11401 |
 
 Attributes: `loom.host_export.exporters` (count), `.queue_depth` (sum),
-`.dropped_total` (sum), `.last_flush_ok_at` (latest).
+`.dropped_total` (sum), `.last_flush_ok_at` (latest),
+`.fact_id_missing_total`.
 
 **`dropped_total` is cumulative per process lifetime.** It restarts at 0 when
 the daemon restarts, so a reader computing "drops in a window" must treat a
