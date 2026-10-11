@@ -4662,6 +4662,14 @@ Each tick:
    `Pending` entry in the sweep registry — the authoritative dedup, robust to
    `loom:issue → loom:building` label-flip lag) or that defensively carry any
    skip label (`loom:building` / `loom:blocked` / `loom:operator-only`).
+   A `loom:epic` issue is never a work-finder candidate either, even when it
+   also carries `loom:issue` (#11399): an epic is a tracking container, and
+   only its `loom:epic-phase` children are build work. It is counted as
+   `labeled-skip` and keeps a `parked` ready-queue row naming `loom:epic`
+   (so the coarse pick-decision reason reads `operator_hold`, as it does for
+   every `parked` row, although no human hold is set). The label is a skip,
+   not a park: an explicit `dispatch_sweep` on an epic still runs, and the
+   epic supervisor is unaffected.
 3. Dispatches the remainder through the existing `SweepRegistry::dispatch()`
    path — up to a **work-driven dynamic cap** (Phase B, #3811) recomputed every
    tick and counted against the current live sweep occupancy. `dispatch()`

@@ -1353,6 +1353,26 @@ durably in `role_tick.outcome` as `preference_tier` / `preference_tap` (absent,
 never a fabricated `0`, when no list decided it) — so "how much work is going to
 the backstop" is a query over the journal, not a grep of the daemon log.
 
+### Per-phase runtime: `loom-daemon worker run` (issue #11285)
+
+`loom-daemon worker run --role builder|doctor (--issue N [--base BRANCH] | --pr N) [--json] [--timeout SECS]`
+resolves the role through `resolve_for_dispatch` (so `runtimes.rolePreference.<role>`
+applies; a parent dispatch's inherited `LOOM_RUNTIME`+`LOOM_ROLE` pin is dropped
+first, `LOOM_RUNTIME_<ROLE>` still wins), creates a missing worktree via
+`worktree.sh N [--base BRANCH]` / `pr-worktree.sh`, then launches the guarded native worker (`spawn-worker.sh`) in the
+issue worktree with the chosen tap pinned through `launch_env::apply_launch_env`,
+so the launch record shows the real runtime and model profile. A `claude`
+resolution prints `outcome=delegate-to-claude` and exits 0 without launching.
+Exit codes: 0 artifact, 1 no artifact, 2 usage (Judge/Curator refused),
+75 no eligible runtime/seat, 78 config, 124 timeout. The `/loom:sweep`
+orchestrator calls it before Builder/Doctor Task dispatch; see
+`native-sweep.md` and `sweep-execution-model.md`.
+
+Because a phase can outlast the Bash tool cap (120s default / 600s max), the
+orchestrator runs it as a background Bash process writing `exit` and
+`report.json` files and polls in-turn with bounded waits until the exit file
+exists; the recipe is in `native-sweep.md` "Waiting for `worker run`".
+
 ### Bounding the metered backstop tier (issue #8555)
 
 The backstop tap is the only entry in a preference list with a **marginal
