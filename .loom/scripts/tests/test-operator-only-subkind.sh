@@ -4,7 +4,7 @@
 # `defaults/docs/label-state-machine.md` (#5671) requires that every
 # application of `loom:operator-only` carry exactly one sub-kind label
 # (`loom:operator-blocked` / `loom:operator-mechanical` /
-# `loom:operator-decision` / `loom:operator-objective`) applied in the SAME
+# `loom:operator-decision`) applied in the SAME
 # command — never the base label alone. When only Champion's escalation paths
 # honored that rule, a fleet-wide census found 2 of 78 operator-only issues
 # across the five busiest repos carrying a sub-kind: the roles were behaving
@@ -12,7 +12,8 @@
 # policy-generated steady state.
 #
 # #5819 wired the requirement into Curator, Builder, Doctor, and Judge.
-# #5826 added the fourth sub-kind (`loom:operator-objective`) and reversed
+# #5826 added a fourth, objective sub-kind (retired again in #11105: an
+# unstated objective is filed as a decision, #10000) and reversed
 # the old "loom:operator-decision is the safe default when unsure" rule — a
 # second fleet-wide measurement found manual clearing at scale only moved the
 # operator-only share from 66% to 64.1%, because that "safe default" refilled
@@ -24,8 +25,8 @@
 #      same argument. A shell variable (e.g. `$SUB_KIND`) counts as satisfied;
 #      Champion's escalation picks its sub-kind at runtime.
 #   2. WIRING — each of the five role prompts that can apply the label carries
-#      an "Applying `loom:operator-only`" section that names all four
-#      sub-kinds, does NOT claim `loom:operator-decision` is a safe
+#      an "Applying `loom:operator-only`" section that names all three
+#      sub-kinds (and not the retired objective one), does NOT claim `loom:operator-decision` is a safe
 #      unsure-default, states the axis-naming requirement, and repeats the
 #      machine-readable `Blocked by #N` requirement that
 #      `detect-dependency-cycle.sh` / `warn-operator-gated.sh` parse.
@@ -145,7 +146,6 @@ echo "Test 2: lint accepts compliant applications"
 cat >"$FIXTURE_DIR/good.md" <<'EOF'
 gh issue edit <number> --add-label "loom:operator-only,loom:operator-decision"
 gh pr edit "$PR_NUMBER" --add-label "loom:operator-only,loom:operator-mechanical"
-gh issue edit <number> --add-label "loom:operator-only,loom:operator-objective"
 gh issue edit "$N" --remove-label "loom:evaluating" --add-label "loom:operator-only,$SUB_KIND"
 gh issue list --search "-label:loom:operator-only" --json number
 Prose mentioning loom:operator-only without applying it is fine.
@@ -191,13 +191,19 @@ for role in curator builder doctor judge; do
         fail "$role.md is missing the \"Applying \`loom:operator-only\`\" section"
     fi
     missing=""
-    for sub in loom:operator-blocked loom:operator-mechanical loom:operator-decision loom:operator-objective; do
+    for sub in loom:operator-blocked loom:operator-mechanical loom:operator-decision; do
         grep -q "$sub" "$f" || missing+=" $sub"
     done
     if [[ -z "$missing" ]]; then
-        pass "$role.md names all four sub-kinds"
+        pass "$role.md names all three sub-kinds"
     else
         fail "$role.md does not name:$missing"
+    fi
+    # Split literal: keeps a repo-wide `git grep` for the retired name clean.
+    if grep -q 'loom:operator-objec''tive' "$f"; then
+        fail "$role.md still names the objective sub-kind retired in #11105"
+    else
+        pass "$role.md does not name the retired objective sub-kind"
     fi
     # The pre-#5826 rule was carried by these two literal phrases (a table
     # cell and a prose sentence, each self-contained on its own line in every
@@ -216,9 +222,9 @@ for role in curator builder doctor judge; do
         fail "$role.md is missing the axis-naming requirement for loom:operator-decision"
     fi
     if grep -qiE 'candidate objectives' "$f"; then
-        pass "$role.md states the candidate-objectives requirement for loom:operator-objective"
+        pass "$role.md routes an unstated objective to a decision over candidate objectives"
     else
-        fail "$role.md is missing the candidate-objectives requirement for loom:operator-objective"
+        fail "$role.md does not route an unstated objective to a decision over candidate objectives"
     fi
     if grep -qE 'Blocked by #N' "$f" && grep -qE 'Depends on #N|Requires #N' "$f"; then
         pass "$role.md repeats the machine-readable blocker requirement"

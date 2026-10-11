@@ -83,7 +83,7 @@ loom-daemon park-record apply --issue 812 --blocked-by XXX,YYY,ZZZ --by builder 
 > "Applying `loom:operator-only`"), never "requires judgement". When you do
 > apply it, **never apply it alone** — add exactly one sub-kind in that command
 > (`loom:operator-blocked` / `loom:operator-mechanical` /
-> `loom:operator-decision` / `loom:operator-objective`), e.g.
+> `loom:operator-decision`), e.g.
 > `loom-daemon operator-decision apply 812 --input d.json --also-label loom:operator-only --remove-label loom:building`.
 > Being unsure which sub-kind fits means the analysis isn't finished — it is
 > **not** a reason to default to `loom:operator-decision` (#5826). Full rule,

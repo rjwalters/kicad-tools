@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1072",
-  "loom_commit": "9bf6aabe632be4a126c74cb22875e12e62cd49da",
+  "loom_version": "0.19.1075",
+  "loom_commit": "5f89565fda6919872ca5a32ab8afb99641e8b67a",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -415,6 +415,6 @@
     ".loom/docs/session-output.md"
   ],
   "last_resync": "2026-10-11",
-  "loom_source_remote": "https://github.com/rjwalters/loom.git",
+  "loom_source_remote": "git@github.com:rjwalters/loom.git",
   "requires_daemon": "0.19.772"
 }

@@ -266,7 +266,6 @@ unchanged:
 | `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
 | `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required |
 | `loom:operator-decision` | The act requires authority an agent structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action, "which side ships first") |
-| `loom:operator-objective` | The question is determined once the operator states an objective — name the candidate objectives and the answer under each (#5826) |
 
 ```bash
 # Issue (or PR: same command) holding a decision only a human can make, as
@@ -281,8 +280,8 @@ obvious — before applying it, run the falsifiability test from
 `.loom/docs/label-state-machine.md`: name the axis two well-informed people
 would still disagree on, and show it is a preference, not a fact. If you
 cannot name that axis, the question is answerable — answer it instead of
-routing it. If the only gap is a missing objective, that's
-`loom:operator-objective`, not `loom:operator-decision`.
+routing it. If the only gap is a missing objective, file a decision
+whose options are the candidate objectives (#10000).
 
 **If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
 in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
@@ -293,10 +292,6 @@ pass can tell when the blocker clears.
 
 **If you chose `loom:operator-decision`**, the options' whys MUST name the
 disagreement axis and why it is a preference, not a fact.
-
-**If you chose `loom:operator-objective`**, the same comment MUST list the
-candidate objectives and the answer under each, not just "needs an
-objective."
 
 Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
 "`loom:operator-only` sub-kinds".

@@ -928,7 +928,6 @@ Champion's exclusions, the Priority-2 query above) is unchanged:
 | `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
 | `loom:operator-mechanical` | Needs a human's hands: host or admin access, a credential, hardware — no judgement required |
 | `loom:operator-decision` | The act requires authority an agent structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action) |
-| `loom:operator-objective` | Determined once the operator states an objective — list the candidate objectives and the answer under each (#5826); a missing objective is this, not `-decision` |
 
 ```bash
 # Curator routing a genuine PO-level decision: 2-4 ranked options, each with
@@ -941,15 +940,14 @@ label is safe to reach for (#5826).** `loom:operator-decision` is **not** a
 safe default: run the falsifiability test from
 `.loom/docs/label-state-machine.md` — name the axis two well-informed people
 would still disagree on, and show it is a preference, not a fact. If you
-can't, the item is determined: finish it, don't park it.
+can't, the item is determined: finish it, don't park it. A missing objective
+is a decision whose options are the candidate objectives (#10000).
 
 **Comment requirements, same comment as the label:** `loom:operator-blocked`
 — a literal `Blocked by #N` / `Depends on #N` / `Requires #N` line (the
 phrasings `detect-dependency-cycle.sh` and `warn-operator-gated.sh` parse; a
 backtick-quoted reference does not count). `loom:operator-decision` — name
-the disagreement axis and why it is a preference, not a fact.
-`loom:operator-objective` — the candidate objectives and the answer under
-each. Full taxonomy: `.loom/docs/label-state-machine.md` →
+the disagreement axis and why it is a preference, not a fact. Full taxonomy: `.loom/docs/label-state-machine.md` →
 "`loom:operator-only` sub-kinds".
 
 **Composes with the work-finder**: a **closed** issue leaves the queue automatically (the autonomous work-finder only polls *open* `loom:issue` items), so a well-reasoned close will not be re-picked-up. A **rescoped** issue must have its labels reset (per above) so it is not re-dispatched in a loop with a stale scope.
@@ -1750,7 +1748,7 @@ with `loom:operator-only`. Read body, escalation comment, and bounce comment, th
   then `loom-daemon operator-decision apply <number>` (clears the bounce label).
   Same for a prose `loom:operator-decision` issue you touch, if faithful.
 - **No real operator call**: remove the label, comment why, and re-route per
-  `label-state-machine.md` (normal flow, `loom:operator-objective`, or a human-gated park).
+  `label-state-machine.md` (normal flow or a human-gated park).
 - **No-loop guard**: a decision-bounce comment newer than your repair marker means
   the repair bounced. Comment once and leave it alone.
 
@@ -1853,7 +1851,7 @@ bot's own historical heartbeat comments are never treated as new evidence,
 while a genuine NEW human-authored "Blocked by #N" comment still is.
 
 - **No reference found** (`REFS` empty) → no-op. Most `loom:operator-mechanical` /
-  `loom:operator-decision` / `loom:operator-objective` issues have nothing
+  `loom:operator-decision` issues have nothing
   checkable — leave them exactly as found, silently.
 - **One or more references found** → compute the fingerprint with the same
   shared script "Re-check Idempotency" above uses (a distinct `operator-premise`

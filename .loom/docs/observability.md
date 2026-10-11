@@ -19,6 +19,7 @@
 - [3b-2. Every daemon must export OTLP: `otlp_export` (Issue #11353)](#3b-2-every-daemon-must-export-otlp-otlp_export-issue-11353)
 - [3c. Operational signals from daemon loops (Issue #8860)](#3c-operational-signals-from-daemon-loops-issue-8860)
 - [3d. Agent telemetry relay (Issue #10964)](#3d-agent-telemetry-relay-issue-10964)
+- [3e. Alerts on loom-ui's Alerts page (Issue #11295)](#3e-alerts-on-loom-uis-alerts-page-issue-11295)
 - [4. The backend: deploy your own Cloudflare Worker](#4-the-backend-deploy-your-own-cloudflare-worker)
 - [5. Authenticated vs. public: two views, one redaction policy](#5-authenticated-vs-public-two-views-one-redaction-policy)
 - [5b. Doc-maintenance throughput (Guide, local-only, issue #6136)](#5b-doc-maintenance-throughput-guide-local-only-issue-6136)
@@ -620,7 +621,7 @@ merge-chain head that `main` keeps moving under. Details are in
 **Per-issue dispatch disposition (#9222).** `loom.dispatch.admission` only
 covers candidates that reached a `dispatch()` attempt — a candidate filtered
 out earlier (`workspace_halted`, `parked`, `deferred_saturation`,
-`host_class_refused`, a backoff, a cooldown, …) had no per-issue SigNoz record
+`host_constraint`, a backoff, a cooldown, …) had no per-issue SigNoz record
 at all before this. Every ready-queue row now gets a `loom.dispatch.disposition`
 span on a disposition transition (including first sight), on a periodic
 refresh (`LOOM_DISPATCH_DISPOSITION_REFRESH_SECS`, default 600s = 10 min), or
@@ -1107,6 +1108,37 @@ in view:
 A session that outlives the daemon that launched it (a sweep adopted after a
 restart) keeps a stale address and exports nothing until it is relaunched —
 unless something else now holds that address, as above.
+
+## 3e. Alerts on loom-ui's Alerts page (Issue #11295)
+
+loom-ui is the alert hub for every repo. With the native ingest export
+configured (section 1), the daemon also posts its alerts to
+`POST {loom-ui}/api/alerts/external` (2AMLogic/loom-ui
+`docs/alerts/external.md`) — same ingest key, same host id as `source`, URL
+derived from `observability.endpoint` by replacing its `/ingest` path. No
+ingest config means the output is off. `LOOM_LOOM_UI_ALERTS=0` turns it off
+on a host that exports telemetry; `LOOM_LOOM_UI_ALERTS_URL` overrides the URL.
+The host id must be in loom-ui's `ALERTS_EXTERNAL_HOSTS` (else 403, logged
+and dropped).
+
+| Rule | From | Open / resolved |
+|---|---|---|
+| `fleet.<condition>` (`dispatch-halted`, `roles-persistent`, `capacity-limited`, `star-backlog`, `output-missing`) | `fleet_alert` | condition started (and each reminder) / cleared |
+| `star.<ask kind>` (link = the issue) | `star_liveness` escalations | escalation posted / ask cleared |
+| `daemon.down` (critical) | the watchdog, a separate process | recovery exhausted / any tick ending the outage |
+| `watchdog.peer-coord-degraded` (critical) | the watchdog | coordination degraded / green |
+| `safehouse.unreachable` (critical) | narration sink state | unreachable over 5 minutes / reconnected |
+| `fleet.floor-unsatisfiable` | `auto_update` | the floor ERROR line / floor met |
+
+`tokens-zero-healthy` is not sent: loom-ui derives `provider-pool-exhausted`
+from the daemon's pool gauge itself. Delivery is a bounded FIFO drained by one
+task (open always before resolved): a 2xx is done, any other 4xx except 429 is
+dropped and logged, 429 / 5xx / network errors back off (5 s doubling to
+15 min, at most 20 tries). The watchdog posts synchronously (10 s bound) and
+keeps a `<sentinel>.loom-ui` record so an unanswered post retries next tick.
+
+`fleet_alert` only runs when `autonomous.fleetAlert.enabled` is on (off by
+default here); the fleet defaults (fleet-gitops) are where to enable it.
 
 ## 4. The backend: deploy your own Cloudflare Worker
 

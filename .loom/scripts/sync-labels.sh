@@ -20,6 +20,7 @@
 #   .loom/scripts/sync-labels.sh --repo OWNER/NAME [--dry-run] [--] [WORKTREE_PATH]
 #   .loom/scripts/sync-labels.sh --prune-defaults [--force] [--dry-run] [--] [WORKTREE_PATH]
 #   .loom/scripts/sync-labels.sh --check [--repo OWNER/NAME] [--] [WORKTREE_PATH]
+#   .loom/scripts/sync-labels.sh --prune-undeclared [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
 #
 #   WORKTREE_PATH  Directory containing .github/labels.yml and a git remote.
 #                  Defaults to the current directory. `--` ends option parsing,
@@ -66,6 +67,18 @@
 # use (a read-only forge query) without deleting anything; a bare --dry-run
 # (no --prune-defaults) stays completely forge-free, as before.
 #
+# --prune-undeclared (#11105) is the same opt-in for Loom's OWN leftovers: a
+# live `loom:*` label that labels.yml does not declare (retired, or never
+# declared). The additive sync never deletes those, so without it they live
+# on in the label picker. A label still on an OPEN issue/PR is kept and
+# reported, never deleted. With --dry-run it is the read-only report of every
+# undeclared loom:* label (the one dry run that reads the forge, like
+# --prune-defaults --dry-run); a bare --dry-run deliberately stays forge-free
+# (#4498) and only points at the flag. GitHub-only; the logic is
+# `loom-daemon labels undeclared` (shell-language policy: this is `contract`
+# shell, so only the call-site lives here).
+# requires-daemon: labels optional  only --prune-undeclared needs `labels undeclared`; an older binary is refused with a clear message there and every other path is unaffected
+#
 # This is the installed-tree counterpart of the source-only
 # scripts/install/sync-labels.sh. It is self-contained apart from the
 # shipped .loom/scripts/lib/forge-helpers.sh helper library.
@@ -80,6 +93,7 @@ Usage: sync-labels.sh [--] [WORKTREE_PATH]
        sync-labels.sh --repo OWNER/NAME [--dry-run] [--] [WORKTREE_PATH]
        sync-labels.sh --prune-defaults [--force] [--dry-run] [--] [WORKTREE_PATH]
        sync-labels.sh --check [--repo OWNER/NAME] [--] [WORKTREE_PATH]
+       sync-labels.sh --prune-undeclared [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
 
 Sync Loom workflow labels from .github/labels.yml onto the forge (GitHub or
 Gitea). Creates missing labels and updates existing ones to match
@@ -113,6 +127,10 @@ Options:
       --force       Combined with --prune-defaults, delete an in-use default
                     label anyway (after warning). No effect without
                     --prune-defaults.
+      --prune-undeclared
+                    Delete live loom:* labels labels.yml does not declare,
+                    keeping any still on an open issue/PR. With --dry-run,
+                    only report them. GitHub-only.
       --dry-run     Print the label operations that would run and exit without
                     calling the forge. Recommended before a --repo run.
       --            End of options: every remaining argument is positional, so
@@ -125,6 +143,7 @@ WORKTREE_PATH="."
 REPO_OVERRIDE=""
 DRY_RUN=0
 PRUNE_DEFAULTS=0
+PRUNE_UNDECLARED=0
 FORCE_PRUNE=0
 CHECK_MODE=0
 POSITIONAL_SEEN=0
@@ -186,6 +205,7 @@ while [[ $# -gt 0 ]]; do
       FORCE_PRUNE=1
       shift
       ;;
+    --prune-undeclared) PRUNE_UNDECLARED=1; shift ;;
     --check)
       CHECK_MODE=1
       shift
@@ -908,49 +928,47 @@ if [[ "$PRUNE_DEFAULTS" -eq 1 ]]; then
   done
 else
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "[dry-run] would leave default labels untouched (pass --prune-defaults to remove them): ${DEFAULT_LABELS[*]}"
+    info "[dry-run] would leave default labels untouched (pass --prune-defaults to remove them): ${DEFAULT_LABELS[*]}; pass --prune-undeclared to list undeclared loom:* labels"
   else
     info "Leaving default labels untouched (pass --prune-defaults to remove them): ${DEFAULT_LABELS[*]}"
   fi
 fi
 
+# --prune-undeclared (#11105): the call-site for `loom-daemon labels undeclared`,
+# which prints one UNDECLARED/PRUNED/KEPT line per undeclared loom:* label and
+# exits 0 (none remain), 3 (some remain) or other (it could not run).
+if [[ "$PRUNE_UNDECLARED" -eq 1 ]]; then
+  [[ "$FORGE_TYPE" == "github" ]] || error "--prune-undeclared is GitHub-only"
+  ud_bin="$(source "${SCRIPT_DIR}/lib/locate-daemon-bin.sh" && loom_resolve_self_daemon_bin)"
+  if [[ -z "$ud_bin" ]] || ! "$ud_bin" labels undeclared --help >/dev/null 2>&1; then error "--prune-undeclared needs a loom-daemon with 'labels undeclared' (#11105)"; fi
+  ud_args=(--repo "$REPO" --labels-file "$LABELS_FILE"); [[ "$DRY_RUN" -eq 1 ]] || ud_args+=(--prune)
+  ud_rc=0; "$ud_bin" labels undeclared "${ud_args[@]}" || ud_rc=$?
+  [[ "$ud_rc" -eq 0 || "$ud_rc" -eq 3 ]] || error "loom-daemon labels undeclared failed (exit $ud_rc)"
+  if [[ "$ud_rc" -eq 0 ]]; then success "No undeclared loom:* labels remain on $REPO"; else warning "Undeclared loom:* labels remain on $REPO (listed above)"; fi
+fi
+
 # Sync Loom workflow labels
 info "Syncing Loom workflow labels..."
 
-label_count=0
-while IFS= read -u 3 -r line; do
-  if [[ "$line" =~ ^-\ name:\ (.+)$ ]]; then
-    name="${BASH_REMATCH[1]}"
-    read -u 3 -r desc_line
-    read -u 3 -r color_line
-
-    description=""
-    color=""
-
-    if [[ "$desc_line" =~ description:\ (.+)$ ]]; then
-      description="${BASH_REMATCH[1]}"
-      description="${description//\"/}"
-    fi
-
-    if [[ "$color_line" =~ color:\ \"?([0-9A-Fa-f]{6})\"?.*$ ]]; then
-      color="${BASH_REMATCH[1]}"
-    fi
-
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-      # Deliberately forge-free: a dry run must be answerable offline (it is the
-      # preview an operator runs before pointing --repo at a repo they are not
-      # standing in), so it reports intent from labels.yml alone and never asks
-      # the forge which labels already exist.
-      info "[dry-run] would create or update label: $name (color=$color)"
-    elif [[ "$FORGE_TYPE" == "github" ]]; then
-      github_sync_label "$name" "$description" "$color"
-    elif [[ "$FORGE_TYPE" == "gitea" ]]; then
-      gitea_sync_label "$name" "$description" "$color"
-    fi
-
-    ((label_count++)) || true
+# The same line-triplet parser --check uses (read_declared_labels), so the
+# sync and the drift check can never see a different label set (#11105 folded
+# the loop's own copy of it into that one).
+read_declared_labels
+label_count=${#DECL_NAMES[@]}
+for ((i = 0; i < label_count; i++)); do
+  name="${DECL_NAMES[$i]}" description="${DECL_DESCS[$i]}" color="${DECL_COLORS[$i]}"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    # Deliberately forge-free: a dry run must be answerable offline (it is the
+    # preview an operator runs before pointing --repo at a repo they are not
+    # standing in), so it reports intent from labels.yml alone and never asks
+    # the forge which labels already exist.
+    info "[dry-run] would create or update label: $name (color=$color)"
+  elif [[ "$FORGE_TYPE" == "github" ]]; then
+    github_sync_label "$name" "$description" "$color"
+  elif [[ "$FORGE_TYPE" == "gitea" ]]; then
+    gitea_sync_label "$name" "$description" "$color"
   fi
-done 3< "$LABELS_FILE"
+done
 # One --clear-cache after the run's label writes (#9953): it drops EVERY entry,
 # so clearing per write would empty the cache before the next label's list
 # probe. Mid-run staleness is harmless (each label is probed once, and a

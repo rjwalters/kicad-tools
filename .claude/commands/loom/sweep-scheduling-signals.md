@@ -54,12 +54,12 @@ Whatever overlap the partition **could not** avoid (unavoidable groups, or a rea
 
 ## Capability-aware `loom:operator-mechanical` lane (#6885 Part 2, #6893)
 
-`loom:operator-only` is a hard skip for all four of its sub-kinds. One of them — `loom:operator-mechanical` — means "needs host/admin access or a credential, but **no judgement**" (`.loom/docs/label-state-machine.md` → "`loom:operator-only` sub-kinds"). This section is the *only* place that treats it differently, and it does so under four gates that all have to pass. **Nothing here weakens `loom:operator-only` for any other item**: `loom:operator-decision`, `loom:operator-blocked`, `loom:operator-objective`, `loom:needs-capability` and `loom:blocked` are byte-for-byte unchanged, and the routing tables above land every non-matching case on the ordinary hard-skip row.
+`loom:operator-only` is a hard skip for all three of its sub-kinds. One of them — `loom:operator-mechanical` — means "needs host/admin access or a credential, but **no judgement**" (`.loom/docs/label-state-machine.md` → "`loom:operator-only` sub-kinds"). This section is the *only* place that treats it differently, and it does so under four gates that all have to pass. **Nothing here weakens `loom:operator-only` for any other item**: `loom:operator-decision`, `loom:operator-blocked`, `loom:needs-capability` and `loom:blocked` are byte-for-byte unchanged, and the routing tables above land every non-matching case on the ordinary hard-skip row.
 
 ### Eligibility (all four gates, in order — any failure means "skip exactly as today")
 
 1. **This worker declares capabilities.** `LOOM_WORKER_CAPABILITIES` is set in the environment, e.g. `export LOOM_WORKER_CAPABILITIES="host-sudo,cloud-profile:prod-aws"`. Unset (the default on every host) ⇒ the lane is inert and this whole section is a no-op. It is read from the **environment only, never from `.loom/config.json`** — a capability is a property of the machine and its credentials, and a file committed to git must not be able to assert that the host running it has root.
-2. **The labels are exactly the mechanical shape.** Both `loom:operator-only` and `loom:operator-mechanical` are present, and **none** of `loom:operator-decision` / `loom:operator-blocked` / `loom:operator-objective` / `loom:needs-capability` / `loom:blocked` / `loom:operator` is. A contradictory pairing (mechanical *and* a judgement sub-kind) resolves in favour of the judgement sub-kind — skip.
+2. **The labels are exactly the mechanical shape.** Both `loom:operator-only` and `loom:operator-mechanical` are present, and **none** of `loom:operator-decision` / `loom:operator-blocked` / `loom:needs-capability` / `loom:blocked` / `loom:operator` is. A contradictory pairing (mechanical *and* a judgement sub-kind) resolves in favour of the judgement sub-kind — skip.
 3. **The body declares at least one capability, and every declared value is recognized.** Parse the item body with the reference parser — never a hand-rolled regex, so this side and the daemon's (`loom-daemon/src/capability.rs`) cannot diverge:
    ```bash
    CAPS=$(gh issue view N --json body --jq .body | ./.loom/scripts/extract-capability-markers.sh); RC=$?
@@ -104,7 +104,7 @@ Three rules, all mandatory, all reported in the proposal itself:
   ```bash
   gh issue edit N --remove-label "loom:operator-mechanical" --add-label "loom:operator-decision"
   ```
-  (or `loom:operator-objective` when the blocker is a missing objective rather than an authority call — see the "classifying question" table in `.loom/docs/label-state-machine.md`). The relabel is what makes the stop durable: the item is no longer eligible for this lane on any subsequent pass, by gate 2. **Do not** finish the mechanical part first and flag the judgement afterwards — a partially-completed mechanical action plus an open question is exactly the state this rule exists to prevent.
+  (a missing objective is a decision too: its options are the candidate objectives, #10000). The relabel is what makes the stop durable: the item is no longer eligible for this lane on any subsequent pass, by gate 2. **Do not** finish the mechanical part first and flag the judgement afterwards — a partially-completed mechanical action plus an open question is exactly the state this rule exists to prevent.
 
 ### Scope
 
