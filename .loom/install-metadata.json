@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1033",
-  "loom_commit": "cd3e14084445550429d6bd39f6f8ab44f672c972",
+  "loom_version": "0.19.1039",
+  "loom_commit": "e83d19dc0a9b217339ea2f14040c50ad6f46700d",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -401,9 +401,14 @@
     ".loom/scripts/tests/test-sweep-lease-renew-lifecycle.sh",
     ".loom/scripts/tests/test-check-main-clean-build-trees.sh",
     ".agents/skills/loom-builder-pr/SKILL.md",
-    ".loom/docs/park-record.md"
+    ".loom/docs/park-record.md",
+    ".claude/commands/loom/sweep-execution-model.md",
+    ".claude/commands/loom/sweep-mode-c-lifecycle.md",
+    ".claude/commands/loom/sweep-summary-output.md",
+    ".claude/commands/loom/sweep-wave-lifecycle.md",
+    ".loom/scripts/tests/test-champion-pr-merge-negation-guard.sh"
   ],
-  "last_resync": "2026-10-10",
+  "last_resync": "2026-10-11",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
   "requires_daemon": "0.19.772"
 }

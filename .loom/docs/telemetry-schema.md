@@ -232,7 +232,7 @@ cycle) is added only when loom-ui's error tracking shows it is needed.
 | Record | Signal | Owner (emit site, under `loom-daemon/src/`) |
 |---|---|---|
 | [`sweep.outcome`](#sweepoutcome) | log, native + OTLP | `sweep_registry/outcome_journal.rs`, `observability/collector.rs`, `sweep_registry/prless_retry/durable.rs`, `observability/backfill.rs` |
-| [`sweep.started`](#sweepstarted) / [`sweep.phase`](#sweepphase) / [`sweep.completed`](#sweepcompleted) / [`sweep.identity`](#sweepidentity) | log, native + OTLP | `observability/collector.rs` (+ `collector/identity.rs`), `observability/queue.rs`, `observability/shutdown.rs`, `observability/backfill.rs`; `sweep.started` carries the dispatch facts (`model`, `effort`, `model_source`, `runtime`, `attempt_index`, `trigger`, `previous_sweep_id`, #11280) from `sweep_registry/start_facts.rs` |
+| [`sweep.started`](#sweepstarted) / [`sweep.phase`](#sweepphase) / [`sweep.completed`](#sweepcompleted) / [`sweep.identity`](#sweepidentity) | log, native + OTLP | `observability/collector.rs` (+ `collector/identity.rs`), `observability/queue.rs`, `observability/shutdown.rs`, `observability/backfill.rs`; `sweep.started` carries the dispatch facts (`model`, `effort`, `effort_source`, `model_source`, `runtime`, `attempt_index`, `trigger`, `previous_sweep_id`, #11280) from `sweep_registry/start_facts.rs` |
 | Phase spans (`trace.span`: `loom.phase`, `loom.role_attempt`) | span, OTLP only | `observability/lifecycle.rs` → `observability/otlp/traces.rs`; see [`tracing.md`](tracing.md#owned-lifecycle-instrumentation) |
 | [`pick.decision`](#pickdecision) | log, OTLP only | `observability/pick_decision.rs` (from `role_tick_telemetry.rs` and `work_finder/tick_summary.rs`) |
 | [`queue.snapshot`](#queuesnapshot) (whole ready queue per tick) | native only | `observability/queue_snapshot.rs` |
@@ -366,26 +366,44 @@ A sweep began work on an issue.
 }
 ```
 
-**Dispatch facts** (Issue #11280): `model`, `effort`, `model_source`,
+**Dispatch facts** (Issue #11280): `model`, `effort`, `effort_source`, `model_source`,
 `runtime`, `attempt_index`, `trigger` and `previous_sweep_id` are what the
 dispatch knew when the sweep started, under the same names `sweep.outcome`
 uses, so a reader joins the two by name. A fit or a live estimate can then
 use them at the sweep's start instead of waiting for its outcome. The same
 values ride the native envelope and the OTLP log (`loom.model`,
-`loom.effort`, `loom.model_source`, `loom.runtime`, `loom.attempt_index`,
+`loom.effort`, `loom.effort_source`, `loom.model_source`, `loom.runtime`, `loom.attempt_index`,
 `loom.trigger`, `loom.previous_sweep_id`; `SWEEP_START_FACT_LOG_ATTRIBUTE_KEYS`,
 kept by the collector's `transform/privacy` `keep_keys`, contract-tested), and
 every running row of [`fleet.state`](#fleetstate). Each is omitted when
 unknown, never guessed. They come from the dispatch itself, with no forge read.
 
-- `model` / `effort`: the model and effort level the sweep was launched with
-  (empty-means-unset, mirroring `SweepInfo`). `model` is absent when the
-  runtime picks its own (for example Codex with no configured model).
+- `model`: the **full model id** the sweep was launched with. An alias
+  (`sonnet`, `opus`, `haiku`) is resolved to its id (`claude-sonnet-5-5`, ...)
+  through the single `MODEL_ALIAS_IDS` table in
+  `sweep_registry/resolved_facts.rs`, a full id passes through, and a
+  trailing `@effort` suffix is dropped, so one model is one bucket. It is
+  never `''` and never an alias: when no id can be named (empty, or the
+  runtime picks its own, for example Codex with no configured model) it is
+  absent and `model_source=unknown` (#11370).
+- `effort`: the **resolved** effort, the level that applies, not only an
+  explicit request (#11370). Order: the dispatch's explicit effort, else the
+  `LOOM_EFFORT` the daemon's environment gives the child (applied by
+  `spawn-claude.sh`), else, for the `claude` runtime, the CLI's own session
+  default, the shipped constant `CLAUDE_DEFAULT_EFFORT` (`medium`; the daemon
+  cannot read the CLI's setting, so keep the constant in step with it). Absent
+  only when the runtime has no effort setting. Reporting does not change the
+  `--effort` the child receives.
+- `effort_source`: `explicit` when the dispatch named the effort, `default`
+  for the `LOOM_EFFORT` or runtime default. Absent exactly when `effort` is.
+  `sweep.outcome` carries the same value as `config.effort_source` and
+  `loom.effort_source`, and `config.model_source=unknown` /
+  `loom.model_source` when its `model` is absent.
   `sweep.outcome`'s `model` can later name a different model when the sweep
   mostly ran another one (#9465).
 - `model_source`: `explicit` when the dispatch request named the model,
   `default` when the daemon chose it (`autonomous.model`, an experiment arm,
-  the runtime default) or the runtime does. A watchdog or reaper re-dispatch
+  the runtime default), `unknown` when no id can be named (`model` absent). A watchdog or reaper re-dispatch
   passes the previous sweep's model on, so it reads `explicit`.
 - `attempt_index` / `trigger` / `previous_sweep_id`: the
   [attempt lineage](#sweepoutcome) `sweep.outcome` reports, derived the same
@@ -2351,7 +2369,7 @@ pass interval. `forge_transition_at` is new (additive).
 | `repo` | string | `owner/repo` (lowercased) |
 | `issue` | integer | the issue |
 | `pr_number` | integer? | the PR, when known |
-| `stage` | string | the stage left: `ready_wait`, `sweep.curator`, `sweep.builder`, `review_wait`, `doctor`, `merge_wait`, `merge_hold` |
+| `stage` | string | the stage left: `triage_wait`, `approval_wait` (#11368, never a `fleet.state` row), `ready_wait`, `sweep.curator`, `sweep.builder`, `review_wait`, `doctor`, `merge_wait`, `merge_hold` |
 | `entered_at` | RFC3339? | present only when the entry has an exact source: a sweep's own checkpoint timestamp. Absent for a polled (review or ready) row, whose entry fell between two passes, and for a stage first seen mid-way |
 | `left_at` | RFC3339 | the event time: `forge_transition_at` when known, else the observing pass |
 | `dwell_sec` | integer? | `left_at − entered_at`, only when the stage completed with an exact entry; never a lower bound |
@@ -2557,7 +2575,7 @@ Each row:
 | `pr` | integer, optional | the PR, when known |
 | `host` | string, optional | the host whose sweep holds the item. Present **only** when the emitting host runs it; absent rather than guessed otherwise |
 | `slot` | `regular` / `overflow`, optional | the dispatch slot that sweep holds (`overflow` = the host's single `loom:operator-priority` overflow slot, #9244). Present exactly when `host` is |
-| `model`, `effort`, `model_source`, `runtime`, `attempt_index`, `trigger`, `previous_sweep_id` | optional | a row of a sweep this host runs (`sweep.curator`, `sweep.builder`, `review_wait`, `doctor`, `merge_wait`): the [dispatch facts](#sweepstarted) its `sweep.started` carried, with the same values (#11280). Absent for a sweep this daemon did not dispatch (adopted after a restart), and each one absent when unknown. Additive on `fleet-state/v1` |
+| `model`, `effort`, `effort_source`, `model_source`, `runtime`, `attempt_index`, `trigger`, `previous_sweep_id` | optional | a row of a sweep this host runs (`sweep.curator`, `sweep.builder`, `review_wait`, `doctor`, `merge_wait`): the [dispatch facts](#sweepstarted) its `sweep.started` carried, with the same values (#11280). Absent for a sweep this daemon did not dispatch (adopted after a restart), and each one absent when unknown. Additive on `fleet-state/v1` |
 | `rank` | integer, optional | `ready_wait` only: this host's planner rank (1-based position in its dispatch order on the last work-finder tick). Per host: two hosts' ranks for one issue are two true answers |
 | `star` | bool, optional | `ready_wait` only: starred at any level (absent = `false`) |
 | `star_at` | RFC 3339, optional | `ready_wait` only: when it was starred, when known |

@@ -541,11 +541,11 @@ for pr in wave_prs:
 post_wave_integration_gate()                    # step 8 — buildGate-against-main backstop for cross-file coupling
 ```
 
-`WAVE_MERGED_FILES` is the load-bearing state for the intra-wave collision guard (#3647): it accumulates the changed-file paths of every PR already merged **in this wave**, so the step 7 gate can tell whether the next PR overlaps a sibling that has already landed. Seed it empty at the start of each wave (it does **not** carry across waves — each wave rebases onto a settled `main`). The `post_wave_integration_gate()` call (step 8) is the backstop for the cross-file case the file-path probe cannot see.
+`WAVE_MERGED_FILES` is the load-bearing state for the intra-wave collision guard (#3647): it accumulates the changed-file paths of every PR already merged **in this wave**, so the step 7 gate can tell whether the next PR overlaps a sibling that has already landed. Seed it empty at the start of each wave (it does **not** carry across waves — each wave rebases onto a settled `main`).
 
 **Checkpoint skip.** For each PR:
 - If `CHECKPOINT_PHASE == "judge-done"` for the corresponding issue, the Judge already approved the PR in a prior sweep run. Skip the Judge invocation and route the PR straight to Merge (step 7). The PR should already carry `loom:pr` (judge writes that label as part of the approve path); if it doesn't, the checkpoint and forge state have diverged — log a warning and re-run Judge.
-- If `CHECKPOINT_PHASE == "doctor-done"`, Doctor has already addressed Judge's earlier feedback. **Re-run the Judge phase** for this PR — Judge has not yet evaluated the post-doctor diff in the current sweep run. (The previous Judge result that led to Doctor was `changes-requested`, not `judge-done`.)
+- If `CHECKPOINT_PHASE == "doctor-done"`, Doctor has already run (a feedback fix, or a rebase pass). **Re-run the Judge phase** for this PR — Judge has not yet evaluated the post-doctor diff in the current sweep run.
 - If `CHECKPOINT_PHASE == "judge-rejected"`, an earlier sweep run's Judge already completed and requested changes on this PR — the sweep was killed before the inline Doctor cycle finished. **Do NOT re-run the initial Judge pass.** Route directly to the Doctor phase (step 6) for this PR. **Forge/checkpoint divergence guard:** before trusting this checkpoint, verify the PR still carries `loom:changes-requested`:
   ```bash
   # Plain `gh` — NOT "$GH_READ": this recheck exists precisely to detect that a
@@ -586,7 +586,7 @@ If Judge requests changes on PR `#X` mid-wave, **or `CHECKPOINT_PHASE == "judge-
   # <attempt> is the cycle index + 1: 2 for the first Doctor cycle, 3 for the second, etc.
   ./.loom/scripts/sweep-checkpoint.sh write N doctor-done --task-id "$RUN_ID" --pr-number <PR> --attempt <attempt> --model <doctor-model>
   ```
-  This way, if sweep is killed between Doctor and the follow-up Judge, the resume run will see `doctor-done` and re-enter at the Judge phase (step 5), not redo the Doctor work.
+  So a sweep killed between Doctor and the follow-up Judge resumes at the Judge phase (step 5), not the Doctor work.
 - On completion, re-label the PR from `loom:changes-requested` back to `loom:review-requested` and **re-run the Judge phase** (step 5) for this PR.
 - **Cap: up to `sweep.max_doctor_cycles` Doctor→Judge cycles per PR (default 1).** If Judge still requests changes after the configured number of Doctor passes, mark this PR as blocked (`PR #X blocked: doctor cycle exhausted after <k> Doctor→Judge round(s); human attention required`), log the reason, and proceed to the next PR in the wave (do NOT block the wave on it). **Do NOT write a `judge-rejected` checkpoint for this terminal rejection** — the PR is leaving the sweep for this run, so leave the last checkpoint (`doctor-done`) as-is; the reaper honors that PR-side block and skips its #4256 resume dispatch (#8689), and stale-checkpoint cleanup handles it once the PR is closed or reconciled.
 - **Re-rejection under the cap (multi-cycle, #4185).** If Judge requests changes again and the cap has **not** yet been reached (`sweep.max_doctor_cycles > 1`, or the distinct-defect grace cycle below is granted), write `judge-rejected` for this issue **before** dispatching the next Doctor cycle — same as the initial rejection in step 5, but this time carry `--attempt` matching the value the **next** `doctor-done` write will use, so a kill-and-resume re-enters the correct escalation cycle and the cap survives the kill:
@@ -612,24 +612,24 @@ Before calling `merge-pr.sh` for PR `#X`:
    PROBE_RC=$?
    ```
    - **`PROBE_RC == 0`** (the read itself succeeded — regardless of how many lines came back) is the only case where `$PROBE_FILES` is authoritative:
-     - **Disjoint** (no path in `$PROBE_FILES` shared with `WAVE_MERGED_FILES` — this includes a genuinely empty `$PROBE_FILES`, e.g. a real 0-file-diff PR) → **keep the fast path**: fall straight through to the merge below. Two PRs touching disjoint files are safe (the issue confirms this), so no revalidation latency is added. This is the common case. *(Caveat: file-path granularity cannot see cross-file semantic coupling — e.g. a `to_dict()` in a source file vs. an exact-dict assertion in a test file, which are disjoint paths. That class is the step 8 integration gate's job, not this probe's.)*
+     - **Disjoint** (no path in `$PROBE_FILES` shared with `WAVE_MERGED_FILES` — this includes a genuinely empty `$PROBE_FILES`, e.g. a real 0-file-diff PR) → **keep the fast path**: fall straight through to the merge below. Two PRs touching disjoint files are safe, so no revalidation latency is added — the common case. *(Caveat: file-path granularity cannot see cross-file semantic coupling — e.g. a `to_dict()` in a source file vs. an exact-dict assertion in a test file, which are disjoint paths. That class is the step 8 integration gate's job, not this probe's.)*
      - **Any shared path** → enter the revalidation path (step 2) before merging.
    - **`PROBE_RC != 0`** (the read failed — e.g. a 503/404/timeout during a forge outage or other transient failure) → the file list is **unknown**, not disjoint. An empty or missing `$PROBE_FILES` produced by a failed call carries no evidence either way — do **not** fast-path on it. Fall back to deriving `#X`'s changed-file set locally, scoped to `#X`'s own base/head (never a hardcoded ref — `<base>` is the default branch, or `feature/issue-<parent>` when `#X`'s issue is stacked per `DEPENDS_ON[N]`, and `N` is `#X`'s corresponding issue number):
      ```bash
      git fetch origin feature/issue-N
      git diff --name-only origin/<base>...origin/feature/issue-N
      ```
-     Treat this fallback's output exactly like a successful `gh` read (disjoint → fast path, shared path → step 2). **If the fallback also fails** (no local access to `origin`, unresolvable ref, etc.), the overlap status is genuinely unknown — never guess disjoint. Default to treating `#X` as overlapping and enter the revalidation path (step 2), which is always safe (merely slower) even when it turns out the PRs did not actually overlap.
+     Treat this fallback's output exactly like a successful `gh` read (disjoint → fast path, shared path → step 2). **If the fallback also fails** (no local access to `origin`, unresolvable ref, etc.), the overlap status is genuinely unknown — never guess disjoint. Default to treating `#X` as overlapping and enter the revalidation path (step 2), which is always safe (merely slower) even if the PRs did not overlap.
 2. **Revalidate `#X` against the freshly-merged `main`.** Update `#X`'s branch onto the current `main` so it actually contains the already-merged sibling's changes:
    ```bash
    gh pr update-branch X    # or the forge equivalent (forge_update_branch)
    ```
    Re-check `mergeStateStatus` (`gh pr view X --json mergeStateStatus`) and route:
-   - **`DIRTY`** (the merge introduced a textual conflict) → run an inline Doctor→Judge cycle for `#X` (step 6 — Doctor rebases onto the updated `main` and fixes, then re-Judge), then merge. Reuse — do **not** extend — the step 6 Doctor-cycle budget (a revalidation Doctor counts against `sweep.max_doctor_cycles` for `#X`, same as any other cycle).
+   - **`DIRTY`** (the merge introduced a textual conflict) → `#X` is approved with no rejection outstanding, so this is a **rebase pass**, not a step 6 cycle: Doctor rebases onto the updated `main`, then re-Judge, then merge. It draws on the **rebase budget** (3 per PR per run), never on `sweep.max_doctor_cycles` — "Doctor-cycle cap" in the Execution Model owns the procedure, the park reason once that budget is spent, and the rule that a re-Judge rejection is an ordinary step 6 cycle.
    - **Clean, but the branch was updated** → the update pulled the sibling's changes into `#X`'s branch, so **re-run the Judge phase (step 5) against the integrated branch** before merging — its build/tests catch a *same-file* semantic break the pre-wave Judge could not. If the integrated build/tests fail → route to Doctor (or, if `#X`'s Doctor-cycle budget is spent, park `#X` as below, surface it, and do **not** merge a known-red change).
    - **A real break Doctor cannot clear in one cycle** → park `#X` (`loom-daemon park-record apply --pr <X> --reason "<why>" --by sweep`), log the reason, skip its merge, and continue with the rest of the wave (do not block the whole wave on it). Consistent with the step 6 cap.
 
-Overlapping PRs in a wave are thus **serialized-with-revalidation**; disjoint PRs keep the parallel fast path. Under `--dry-run` nothing here runs — the plan may simply note that overlapping PRs will be serialized-with-revalidation.
+Overlapping PRs in a wave are thus **serialized-with-revalidation**; disjoint PRs keep the parallel fast path. Under `--dry-run` nothing here runs — the plan may simply note the serialization.
 
 Use the merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
 
@@ -648,9 +648,11 @@ It merges via the forge API and cleans the worktree. `--auto` waits for the head
 ./.loom/scripts/sweep-checkpoint.sh delete N
 ```
 
-This is the terminal state. The checkpoint must go, so a later `/loom:sweep` referencing the same issue number (e.g. in a wider candidate set) cannot take a `merge-done` short-circuit on stale state. Step 1's stale-checkpoint cleanup is the belt-and-suspenders backstop if this delete is missed (sweep killed between `merge-pr.sh` success and the delete call): on the next sweep touching the issue it detects the closed-issue + checkpoint mismatch and removes it.
+This is the terminal state. The checkpoint must go, so a later `/loom:sweep` referencing the same issue number cannot take a `merge-done` short-circuit on stale state. Step 1's stale-checkpoint cleanup is the backstop if this delete is missed (sweep killed between `merge-pr.sh` success and the delete call): the next sweep touching the issue detects the closed-issue + checkpoint mismatch and removes it.
 
-If `merge-pr.sh` fails (e.g. a required check failed, or the bounded wait expired before CI settled), do **not** delete the checkpoint — leave it at `judge-done` so the next sweep retries the merge from a clean state. **Before logging why it failed, classify the failure text through "Forge write failure diagnosis (#6425)"** (Mode B, above) — a forge 5xx/outage signature or an unconfirmed permission-scope 403 must be logged as forge-transient / "will retry", never as a "needs operator attention" credential diagnosis without the positive-evidence check.
+**Approved but conflicting (#9265).** If `merge-pr.sh` refuses an approved `#X` for merge conflicts and `gh pr view X --json mergeable` confirms `CONFLICTING` (`main` moved outside this wave), do not consult the Doctor-cycle cap: take the `DIRTY` route above — rebase pass → re-Judge → merge.
+
+If `merge-pr.sh` fails otherwise (e.g. a required check failed, or the bounded wait expired before CI settled), do **not** delete the checkpoint — leave it at `judge-done` so the next sweep retries the merge from a clean state. **Before logging why it failed, classify the failure text through "Forge write failure diagnosis (#6425)"** (Mode B, above) — a forge 5xx/outage signature or an unconfirmed permission-scope 403 must be logged as forge-transient / "will retry", never as a "needs operator attention" credential diagnosis without the positive-evidence check.
 
 ### 8. Wave settled → post-wave integration gate → advance to next wave
 

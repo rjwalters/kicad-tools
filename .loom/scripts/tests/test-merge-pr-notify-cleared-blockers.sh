@@ -3,9 +3,9 @@
 # `loom:blocked` re-check wired into merge-pr.sh (#9102, item 2 of #8927's own
 # deferred "Suggested fix" list).
 #
-# #8927 shipped a fleet-wide, sweep-pre-flight advisory
+# #8927 shipped a per-repository, sweep-pre-flight advisory
 # (`loom-daemon check-stale-blocked`) that re-checks every open `loom:blocked`
-# artifact once per sweep. This closes the highest-value gap #8927 itself
+# artifact in one repository once per sweep. This closes the highest-value gap #8927 itself
 # named: the moment an issue/PR closes, immediately check whether any OTHER
 # open `loom:blocked` artifact cited it as a blocker, rather than waiting for
 # the next sweep. `merge-pr.sh`'s `_notify_cleared_blockers` is a one-line

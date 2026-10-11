@@ -792,6 +792,45 @@ outlives a ~1h App-token lifetime starts 401ing with no automatic fallback. See
 "Long-running sweep children and credential snapshots (#4458)" above for the
 mechanics and the workaround (a long-lived PAT for consistently long workloads).
 
+### Secondary rate limits and hand-rolled loops (#9191)
+
+A loop that runs one `loom-daemon` command (or one `gh` call) per repository
+across many repositories is a hand-rolled loop in the sense above, even when
+each command is read-only and safe on its own. `loom-daemon
+check-stale-blocked` is the worked example: it examines **one repository per
+invocation**, and looping it over a fleet by hand has tripped GitHub's
+**secondary** rate limit, after which REST calls from every session on the
+host answered `403` for more than half an hour. Four facts explain why nothing
+stopped it, and why it was hard to diagnose:
+
+- **A secondary limit does not appear in `gh api rate_limit`.** It is a burst
+  throttle, separate from the hourly buckets that endpoint reports, so `core`
+  can read `5000/5000 remaining` while every REST call is refused. A budget
+  check built on those numbers (including `check-stale-blocked`'s own
+  `--min-core-remaining` / `--min-graphql-remaining` floor) passes throughout.
+  The evidence is in the refused response itself: a `403`/`429` whose message
+  names a secondary rate limit, or that carries `Retry-After`.
+- **The quota is per-user and shared.** As with the hourly pool
+  ([above](#rate-limit-pools-what-actually-splits-the-bucket-9872)), the
+  throttle lands on the credential, so it stalls every other session and agent
+  authenticated as that user, including ones doing unrelated work.
+- **GraphQL is a separate pool.** It kept answering while REST was refused, so
+  a GraphQL-backed read (`gh api graphql`, `gh issue view`) is both the way to
+  confirm the credential is otherwise healthy and the workaround until the
+  throttle lifts.
+- **A one-shot CLI invocation has no breaker.** The breaker exists only in the
+  running daemon process; `loom-daemon check-stale-blocked` runs inline and
+  never registers one, so a secondary-limit refusal neither stops the rest of
+  that invocation nor reaches the next one, and a loop of them keeps bursting.
+  The classifier does match secondary-limit phrasing, which is why the
+  daemon's own every-workspace pass (`release-stale-blocked`) is gated on the
+  breaker and a shell loop is not.
+
+If you do have to visit several repositories from a shell, pace the
+invocations, and stop the whole loop at the first rate-limit refusal instead
+of moving on to the next repository. A partial answer with a healthy
+credential is better than a complete one that throttles the host.
+
 ## Filing issues under GraphQL exhaustion
 
 GitHub's GraphQL quota and REST quota are independent buckets, and `gh issue

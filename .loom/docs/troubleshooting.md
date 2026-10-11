@@ -2189,6 +2189,40 @@ precisely the shape of the one stash in 148 that mattered.
 - It only ever considers `loom-quarantine:`-labelled entries. An Auditor drift
   shelf, a Judge park stash, or an ad-hoc `git stash` is never a candidate.
 
+**A blind run is an error, not "0 retirable" (#8876).** `stashes` is a
+standalone process, not the daemon: its `gh issue view` lookups run on the
+invoking shell's ambient `gh` auth. When at least one issue was looked up and
+*every* lookup failed, the run prints one line ahead of the per-stash verdicts
+and exits **1**:
+
+```
+BLIND RUN: issue state unreadable for all 9 stash(es): every lookup failed (8 distinct issue(s)), so the ambient gh login this command runs under cannot read this repo's issues. Nothing was retired and nothing can be until that is fixed.
+```
+
+The same line is repeated on stderr as `Error: ...`. With `--json`, stdout
+stays one JSON document and carries the condition as an explicit field, which
+is present on every run:
+
+```json
+"issue_state": {
+  "unreadable_for_all": true,
+  "lookups_attempted": 8,
+  "lookups_unknown": 8,
+  "stashes_unknown": 9
+}
+```
+
+This applies to `list`, `retire` and `retire --execute` alike, and nothing is
+dropped. It is deliberately all-or-nothing: a run where some issues were read
+and one was not keeps the per-stash `KEEP ... could not determine the state of
+issue #N` line and exits 0, and stashes with no `issue=` token are never looked
+up, so they neither cause nor hide a blind run. Note that `--issue N` scoped to
+a single unreadable issue *is* a blind run: the only lookup failed.
+
+To fix a blind run, check what the shell's `gh` login can see: `gh issue view
+<N> --json state` from the repo. A 404 on an issue you know exists means that
+account has no access to the repo; `gh auth login` as one that can read it.
+
 ### Taking a stash back off the stack without leaving conflict markers (#6501)
 
 **Never run a bare `git stash pop` in the primary checkout.** Use the verified

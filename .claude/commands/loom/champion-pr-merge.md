@@ -2017,9 +2017,8 @@ NEG_SRC=$(forge_get_pr_body "$(forge_get_repo_nwo)" "$PR_NUMBER" 2>/dev/null)
 M=$(gh pr view "$PR_NUMBER" --json mergeCommit --jq '.mergeCommit.oid // empty' 2>/dev/null)
 [ -n "$NEG_SRC" ] && [ -n "$M" ] && NEG_SRC+=$'\n'$(gh api "repos/{owner}/{repo}/commits/$M" --jq .commit.message 2>/dev/null)
 
-# Check each linked issue. Plain `gh` — NOT "$GH_READ": this runs immediately
-# after your own merge and gates a write (`gh issue close`), so it must observe
-# post-merge state (see "Cached forge reads").
+# Per linked issue. Plain `gh` — NOT "$GH_READ": this runs right after your own
+# merge and gates writes, so it must see post-merge state ("Cached forge reads").
 for issue in $LINKED_ISSUES; do
   # --- Out-of-Band Acceptance-Criteria Gate (#6883) ---
   # Classify this issue's own acceptance criteria BEFORE acting on its state.
@@ -2038,12 +2037,18 @@ for issue in $LINKED_ISSUES; do
     continue   # do NOT close, do NOT confirm — next linked issue
   fi
 
-  # Tri-state exit (#1057): 0 unnegated, 1 negated-only, 3 no textual
-  # reference (e.g. Development-sidebar-only link). Only 1 means disclaimed;
-  # 3 and an older daemon's clap exit 2 fall through to the close below.
+  # Tri-state (#1057): 0 unnegated, 1 negated-only, 3 no textual reference; 3
+  # and an older daemon's clap 2 fall through to the close. On 1, reopen ONLY if
+  # THIS merge closed it (#8942): closed-by-merge exit 0. 1 = no; else no answer.
   printf '%s\n' "$NEG_SRC" | loom-daemon merge-pr-refs has-unnegated-closing-ref --issue "$issue"
   if [ $? -eq 1 ] && [ -n "$NEG_SRC" ]; then
-    [ "$(gh issue view "$issue" --json state --jq .state)" = CLOSED ] && gh issue reopen "$issue" --comment "Reopened: PR #$PR_NUMBER only references this issue negated (#1057)."
+    cbm() { loom-daemon merge-pr closed-by-merge --issue "$issue" --pr "$PR_NUMBER" "$@"; }
+    cbm <<<"$(gh api graphql -F o='{owner}' -F r='{repo}' -f query="$(cbm --print-query)")"
+    case $? in
+      0) gh issue reopen "$issue" --comment "Reopened: PR #$PR_NUMBER only references this issue negated (#1057)." ;;
+      1) ;;
+      *) echo "Issue #$issue: no closed-by-merge answer; NOT reopened (#8942)" ;;
+    esac
     continue
   fi
 

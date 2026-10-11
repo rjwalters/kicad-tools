@@ -144,13 +144,17 @@ assert_contains "One-level-deep callout preserved" 'One level deep'
 assert_contains "Never-dispatch-nested-orchestrator-as-subagent guard preserved (issue-side)" 'Do NOT, under any circumstances, dispatch a nested orchestrator skill (`/loom:sweep`) as a subagent from `/loom:sweep`'
 assert_contains "Never-invoke /loom:sweep, /loom:judge, or /loom:doctor as a subagent (Mode C constraints)" 'Never invoke `/loom:sweep`, `/loom:judge`, or `/loom:doctor` as a subagent from `/loom:sweep`'
 
-# Sequential per-PR Judge.
 assert_contains "Per-PR Judge sequential within wave" 'Per-PR Judge is sequential'
-
 # Configurable Doctor→Judge cycle cap (#3668).
 assert_contains "Configurable Doctor→Judge cycle cap (Mode C, C1b)" 'up to `sweep.max_doctor_cycles`'
 assert_contains "Cap-reached block note (Mode C, C1b)" 'cap reached'
 assert_contains "Distinct-defect exception referenced (Mode C, C1b)" 'distinct defect'
+assert_contains "Rebase pass is not a Doctor cycle (#9265)" 'is a **rebase pass**'
+assert_contains "Rebase budget names its bound (#9265)" 'Rebase budget: 3 rebase passes per PR per sweep run'
+assert_contains "Rebase-churn park reason (#9265)" '--reason "rebase budget exhausted after 3 conflict-only passes; main is moving"'
+assert_contains "Approved-but-conflicting route (Mode C, #9265)" 'Run a **rebase pass** → re-Judge (**C1a**) → **C2**'
+assert_contains "Approved-but-conflicting route (wave, #9265)" 'rebase pass → re-Judge → merge'
+assert_not_contains "Base-conflict Doctor not charged to the cap (#9265)" 'a revalidation Doctor counts against'
 
 # #3373: checkpoint reuse via closingIssuesReferences.
 assert_contains "Checkpoint scope via closingIssuesReferences" 'closingIssuesReferences'
@@ -165,7 +169,6 @@ assert_contains "PR-set dry-run shows would-Doctor-then-Judge" 'would Doctor →
 assert_contains "PR-set dry-run shows would-merge" 'would merge'
 assert_contains "PR-set dry-run shows would-skip with reason" 'would skip (no actionable label)'
 assert_contains "PR-set dry-run footer total" 'No PRs were modified'
-
 # Dry-run gate inviolable contract preserved (issue-side regression).
 assert_contains "Dry-run gate: no label edits" 'no label edits'
 assert_contains "Dry-run gate: no merge-pr.sh" 'no `merge-pr.sh`'
@@ -197,12 +200,9 @@ assert_contains "Limitations entry: PRs without Closes #N" 'PRs without `Closes 
 echo
 echo "--- Anti-regressions (must NOT appear) ---"
 
-# Must not invent a separate /sweep-pr verb.
 assert_not_contains "No /sweep-pr verb invented" '/sweep-pr'
-# Must not create new labels.
 assert_not_contains "No new label 'loom:judging' invented" 'loom:judging'
 assert_not_contains "No new label 'loom:doctoring' invented" 'loom:doctoring'
-# Must not call gh pr merge directly.
 assert_not_contains "No direct gh pr merge call" 'gh pr merge --squash'
 
 echo
