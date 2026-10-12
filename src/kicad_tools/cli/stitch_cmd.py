@@ -5272,6 +5272,24 @@ def run_stitch(
         drills_pool = other_net_drills + [d for d in target_pad_drills if d[3] != pad.net_number]
         return pads_pool, bboxes_pool, drills_pool
 
+    # Issue #6400: the FILL analogue of ``_sibling_pools``.  The
+    # ``other_net_filled_polys`` pool above excludes every stitch-target net,
+    # and ``same_net_filled_polys`` holds the fill of EVERY target net -- so
+    # in a multi-net call (board 03: ``nets=[VBUS, VCC]``) a VCC via could
+    # pass the same-net fill gate by landing on VBUS's fill, and VBUS's fill
+    # was not an obstacle either.  The via then bonded only to a sliver of
+    # VCC copper inside the VBUS pour.  Per pad, the fill gate is the pad's
+    # OWN net's fill, and sibling target nets' fills join the other-net pool
+    # (unless the caller lets foreign fills yield), so each net is gated
+    # exactly as a single-net call for that net would gate it.
+    def _fill_pools(pad: PadInfo) -> tuple[list[FilledPolygon], list[FilledPolygon]]:
+        """Per-pad ``(own_net_fill, other_net_fill)`` polygon pools."""
+        own_fill = [fp for fp in same_net_filled_polys if fp.net_number == pad.net_number]
+        if foreign_fills_yield:
+            return own_fill, other_net_filled_polys
+        sibling_fill = [fp for fp in same_net_filled_polys if fp.net_number != pad.net_number]
+        return own_fill, other_net_filled_polys + sibling_fill
+
     # Net-number -> net-name lookup so skip diagnostics can name the
     # offending signal (e.g. ``net 8 'SWO'``) instead of just a number.
     # See issue #3267 (board 04 U2.35 stitch failure traced to SWO
@@ -5341,6 +5359,8 @@ def run_stitch(
         # Per-pad obstacle pools including SIBLING stitch-net pads (see
         # ``_sibling_pools`` above -- board 07 +1V2 via on +1V8 pad short).
         eff_pads, eff_pad_bboxes, eff_drills = _sibling_pools(pad)
+        # Issue #6400: own-net fill gate + sibling fills as foreign copper.
+        own_net_fill, eff_other_fill = _fill_pools(pad)
 
         # Issue #4432: resolve the via's deep terminus layer -- the plane fill
         # the via must bond to lives there.  The same-net FILL gate rejects a
@@ -5350,7 +5370,7 @@ def run_stitch(
         # genuine clearance obstruction.  Empty ``same_net_filled_polys``
         # (unfilled board) makes the gate a no-op regardless.
         _, terminus_layer = get_via_layers(pad.layer, net_target_layers.get(pad.net_name))
-        fill_gate = same_net_filled_polys if enforce_fill_gate else []
+        fill_gate = own_net_fill if enforce_fill_gate else []
 
         # Calculate via position with clearance checking against all copper,
         # including the connecting trace path from pad to via
@@ -5364,7 +5384,7 @@ def run_stitch(
             other_net_vias=eff_other_net_vias,
             other_net_pads=eff_pads,
             trace_width=trace_width,
-            other_net_filled_polygons=other_net_filled_polys,
+            other_net_filled_polygons=eff_other_fill,
             other_net_pad_bboxes=eff_pad_bboxes,
             other_net_drills=eff_drills,
             via_drill=drill,
@@ -5391,7 +5411,7 @@ def run_stitch(
                 other_net_vias=eff_other_net_vias,
                 other_net_pads=eff_pads,
                 trace_width=trace_width,
-                other_net_filled_polygons=other_net_filled_polys,
+                other_net_filled_polygons=eff_other_fill,
                 via_drill=drill,
                 other_net_drills=eff_drills,
                 min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
@@ -5437,7 +5457,7 @@ def run_stitch(
                             other_net_vias=eff_other_net_vias,
                             other_net_pads=eff_pads,
                             trace_width=trace_width,
-                            other_net_filled_polygons=other_net_filled_polys,
+                            other_net_filled_polygons=eff_other_fill,
                             other_net_pad_bboxes=eff_pad_bboxes,
                             other_net_drills=eff_drills,
                             via_drill=micro_via_drill,
@@ -5457,7 +5477,7 @@ def run_stitch(
                                 other_net_vias=eff_other_net_vias,
                                 other_net_pads=eff_pads,
                                 trace_width=trace_width,
-                                other_net_filled_polygons=other_net_filled_polys,
+                                other_net_filled_polygons=eff_other_fill,
                                 via_drill=micro_via_drill,
                                 other_net_drills=eff_drills,
                                 min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
@@ -5519,6 +5539,9 @@ def run_stitch(
         eff_track_index = (
             build_track_index(eff_other_net_tracks) if cross_net_stitch_tracks else base_track_index
         )
+        # Issue #6400: this pad's own-net fill and its foreign fill pool
+        # (pre-existing other-net fill plus sibling target nets' fills).
+        pad_own_fill, pad_other_fill = _fill_pools(pad)
 
         # Check if already connected (legacy proximity heuristic), then let
         # the strict copper-contact model VETO a "connected" skip for filled
@@ -5587,7 +5610,7 @@ def run_stitch(
                 # where a local via would dangle (``via_dangling``).  Report it
                 # as needing a routed fanout to the fill edge instead of
                 # placing (or reporting a bogus clearance conflict for) it.
-                if same_net_filled_polys and (
+                if pad_own_fill and (
                     _attempt_placement(
                         pad,
                         other_net_tracks,
@@ -5619,7 +5642,7 @@ def run_stitch(
                     other_net_tracks,
                     other_net_vias,
                     diag_pads,
-                    other_net_filled_polys,
+                    pad_other_fill,
                     net_map=obstacle_net_map,
                 )
                 result.skip_details.append((pad, detail))
@@ -5656,7 +5679,7 @@ def run_stitch(
                 extended_pos,
                 fallback_via_size,
                 clearance,
-                other_net_filled_polys,
+                pad_other_fill,
             ):
                 diag_pads, _diag_bboxes, _diag_drills = _sibling_pools(pad)
                 detail = identify_nearest_obstacle(
@@ -5667,7 +5690,7 @@ def run_stitch(
                     other_net_tracks,
                     other_net_vias,
                     diag_pads,
-                    other_net_filled_polys,
+                    pad_other_fill,
                     net_map=obstacle_net_map,
                 )
                 result.skip_details.append((pad, detail))
