@@ -312,6 +312,9 @@ def _claim_owned_halo_cells(
         grid._original_net[layer, hy, hx] = 0
         if grid._static_blocked is not None:
             grid._static_blocked[layer, hy, hx] = True
+        # Issue #6389: a rule-area keep-out is not pad geometry; the native
+        # ``mark_blocked`` below voids ``pad_cell`` the same way.
+        grid._void_pad_provenance(layer, hy, hx)
         if cpp_impl is not None:
             obstacle = grid._is_obstacle
             for x, y in zip(hx.tolist(), hy.tolist(), strict=True):

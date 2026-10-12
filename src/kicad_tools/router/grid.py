@@ -303,6 +303,25 @@ def _pad_rect_segment_centerline_distance(
     )
 
 
+def pad_segment_edge_clearance(
+    pad: Pad, x1: float, y1: float, x2: float, y2: float, half_width: float
+) -> float:
+    """Edge-to-edge gap between a trace centreline ``(x1,y1)-(x2,y2)`` and ``pad``'s copper.
+
+    The single segment-vs-pad distance primitive (Epic #5509): the post-route
+    validator (:meth:`RoutingGrid.validate_segment_clearance`) and the
+    pure-Python A*'s exact pad-cell resolution (Issue #6389, the Python port
+    of #6315) both measure through it, so the search can never accept a gap
+    the validator would measure differently.  Explicitly circular pads use
+    the disc model; every other pad the rotated rectangle (Issue #2908).
+    Negative means the trace overlaps the pad's copper.
+    """
+    if pad.shape == "circle":
+        pad_radius = max(pad.width, pad.height) / 2
+        return _geom_point_to_seg_dist(pad.x, pad.y, x1, y1, x2, y2) - half_width - pad_radius
+    return _pad_rect_segment_centerline_distance(pad, x1, y1, x2, y2) - half_width
+
+
 def _sync_pad_via_policies(py_grid: RoutingGrid, cpp_grid: Any) -> None:
     """Refresh lazily before via acceptance when pad policy inputs change.
 
@@ -1447,6 +1466,15 @@ class RoutingGrid:
         # place.  Allocated lazily -- boards with no registry-less geometry
         # pay nothing.
         self._raster_only_blocked: np.ndarray | None = None
+        # Issue #6389: the Python twin of the native ``GridCell::pad_cell``
+        # provenance (#6315).  ``PAD_PROVENANCE_PAD`` marks a blocked cell of an
+        # SMD pad's copper + clearance envelope, which the pure-Python A* may
+        # resolve with the exact segment-vs-pad test; ``PAD_PROVENANCE_VOID``
+        # is sticky and marks a cell some non-SMD static source also blocked
+        # (a drilled pad, stub copper, a plane-via-site / rule-area keep-out),
+        # mirroring ``Grid3D::mark_blocked``'s ``prior_static_non_pad`` rule.
+        # Allocated lazily on the first pad.
+        self._pad_provenance: np.ndarray | None = None
         # Issue #4794: monotonic occupancy generation.  Allocating (or
         # re-allocating) the planes is itself an occupancy change -- the new
         # buffers share none of the old contents -- so bump rather than reset,
@@ -1741,6 +1769,7 @@ class RoutingGrid:
         self._present_cost_ema = None
         self._static_blocked = None
         self._raster_only_blocked = None
+        self._pad_provenance = None
         # Congestion planes + cached clearance stamps.
         self._congestion = xp.zeros((0, 0, 0), dtype=np.int32)
         self._congestion_counted = None
@@ -2836,10 +2865,14 @@ class RoutingGrid:
         # neighbour pad).  The pad-metal protection that closes the
         # foreign-pad-metal A* gap is the standard-envelope zone, which is
         # what we sync here.
+        # Issue #6315: only SMD copper is resolved by the exact pad test;
+        # a drilled pad also carries hole / NPTH-slot clearances.
+        pad_source = not pad.through_hole and pad.drill <= 0
+        # Issue #6389: the pure-Python A* resolves the same envelope the
+        # native grid receives below, with the same provenance.
+        self._record_pad_provenance(layers_to_block, gx1, gy1, gx2, gy2, pad_source)
         cpp_grid = self._cpp_grid
         if cpp_grid is not None:
-            # Issue #6315: only SMD copper is resolved by the exact pad test;
-            # a drilled pad also carries hole / NPTH-slot clearances.
             _sync_pad_cells_to_cpp_grid(
                 self,
                 cpp_grid,
@@ -2848,8 +2881,128 @@ class RoutingGrid:
                 gy1,
                 gx2,
                 gy2,
-                pad_source=not pad.through_hole and pad.drill <= 0,
+                pad_source=pad_source,
             )
+
+    #: Issue #6389: ``_pad_provenance`` values (see :meth:`_init_arrays`).
+    PAD_PROVENANCE_PAD = 1
+    PAD_PROVENANCE_VOID = 2
+
+    def _record_pad_provenance(
+        self,
+        layers_to_block: list[int],
+        gx1: int,
+        gy1: int,
+        gx2: int,
+        gy2: int,
+        pad_source: bool,
+    ) -> None:
+        """Record a pad envelope's provenance for the Python exact pad test (#6389).
+
+        The Python twin of ``_sync_pad_cells_to_cpp_grid``'s ``pad_source``
+        argument plus ``Grid3D::mark_blocked``'s provenance rule: every
+        blocked cell of the envelope becomes a pad cell when ``pad_source``,
+        unless a non-SMD static source already voided it; a drilled pad
+        voids it for good.  Cells the native sync also refuses at query time
+        (``_pad_policy_cells``, ``_raster_only_blocked``) are filtered in
+        :meth:`pad_cell_resolvable`, so their order relative to the pad does
+        not matter.
+        """
+        ax, ay = max(0, gx1), max(0, gy1)
+        bx, by = min(self.cols - 1, gx2), min(self.rows - 1, gy2)
+        if ax > bx or ay > by:
+            return
+        plane = self._pad_provenance
+        if plane is None:
+            plane = np.zeros((self.num_layers, self.rows, self.cols), dtype=np.int8)
+            self._pad_provenance = plane
+        for layer_idx in layers_to_block:
+            if not (0 <= layer_idx < self.num_layers):
+                continue
+            blocked = to_numpy(self._blocked[layer_idx, ay : by + 1, ax : bx + 1])
+            window = plane[layer_idx, ay : by + 1, ax : bx + 1]
+            if pad_source:
+                window[blocked & (window == 0)] = self.PAD_PROVENANCE_PAD
+            else:
+                window[blocked] = self.PAD_PROVENANCE_VOID
+
+    def _void_pad_provenance(self, layer_idx: int, gy: Any, gx: Any) -> None:
+        """Mark cells as blocked by a non-pad static source (Issue #6389).
+
+        Mirrors the native ``mark_blocked(..., pad_source=False)`` voiding the
+        cell's ``pad_cell`` bit.  ``gy`` / ``gx`` may be scalars or index
+        arrays.  Sticky: a later SMD pad over the cell cannot restore it.
+        """
+        plane = self._pad_provenance
+        if plane is None:
+            plane = np.zeros((self.num_layers, self.rows, self.cols), dtype=np.int8)
+            self._pad_provenance = plane
+        plane[layer_idx, gy, gx] = self.PAD_PROVENANCE_VOID
+
+    def pad_cell_resolvable(self, gx: int, gy: int, layer_idx: int) -> bool:
+        """May the exact segment-vs-pad test decide this blocked cell? (Issue #6389).
+
+        The Python mirror of ``Pathfinder::pad_cell_resolvable``: the cell is
+        blocked only by SMD pad copper or pad clearance (not a drilled pad,
+        not a stitch-via reservation, not any registry-less blocker such as a
+        keep-out, obstacle, region bound or the board edge), is not in use by
+        routed copper, is not reserved and is not a zone.  The routed-copper
+        coverage condition is checked by the caller, which owns the route-halo
+        geometry.
+        """
+        plane = self._pad_provenance
+        if plane is None or plane[layer_idx, gy, gx] != self.PAD_PROVENANCE_PAD:
+            return False
+        if self._pad_cell_key(layer_idx, gy, gx) in self._pad_policy_cells:
+            return False
+        raster_only = self._raster_only_blocked
+        if raster_only is not None and raster_only[layer_idx, gy, gx]:
+            return False
+        if self._usage_count[layer_idx, gy, gx] != 0:
+            return False
+        if self._is_zone[layer_idx, gy, gx]:
+            return False
+        return (layer_idx, gy, gx) not in self._reserved_for_nets
+
+    def pad_step_geometry_clear(
+        self,
+        ax: float,
+        ay: float,
+        bx: float,
+        by: float,
+        layer_idx: int,
+        net: int,
+        half_width: float,
+        clearance: float,
+        pads: Iterable[Pad] | None = None,
+        pad_clearance: Callable[[Pad], float] | None = None,
+    ) -> bool:
+        """Exact clearance of the swept step ``(ax,ay)->(bx,by)`` against foreign pads.
+
+        Issue #6389: the Python twin of ``Grid3D::pad_geometry_clear``.  Every
+        pad of another net on ``layer_idx`` (through-hole pads on every layer)
+        must keep ``max(clearance, the validator's per-component clearance)``
+        to the step's copper, measured with :func:`pad_segment_edge_clearance`
+        -- the validator's own primitive -- so the A* can never accept a gap
+        :meth:`validate_segment_clearance` would reject.  ``pads`` narrows the
+        scan to a pre-filtered candidate set (the router's bucket index); it
+        defaults to every pad.  ``pad_clearance`` returns the pad's own side
+        of the pair rule (its net class clearance), which only ever raises
+        the requirement.
+        """
+        rules = self.rules
+        for pad in self._pads if pads is None else pads:
+            if pad.net == net and net != 0:
+                continue  # own copper
+            if not pad.through_hole and self.layer_to_index(pad.layer.value) != layer_idx:
+                continue
+            required = max(clearance, rules.get_clearance_for_component(pad.ref))
+            if pad_clearance is not None:
+                required = max(required, pad_clearance(pad))
+            # No tolerance: the validator rejects ``gap < required`` exactly.
+            if pad_segment_edge_clearance(pad, ax, ay, bx, by, half_width) < required:
+                return False
+        return True
 
     def _pad_cell_key(self, layer_idx: int, gy: int, gx: int) -> int:
         """Flat ``(layer, y, x)`` key for the #6315 pad-halo bookkeeping."""
@@ -3780,6 +3933,9 @@ class RoutingGrid:
                 blocked_count += 1
                 if self._static_blocked is not None:
                     self._static_blocked[layer_idx, gy, gx] = True
+                # Issue #6389: a non-pad static source (native ``mark_blocked``
+                # without ``pad_source`` voids the provenance the same way).
+                self._void_pad_provenance(layer_idx, gy, gx)
                 if cpp_grid is not None:
                     cpp_grid._impl.mark_blocked(int(gx), int(gy), int(layer_idx), 0, False, False)
             return blocked_count
@@ -3959,6 +4115,9 @@ class RoutingGrid:
             # the own-net pathfinder can traverse and land on it.
             cell.is_obstacle = False
             cell.pad_blocked = False
+            # Issue #6389: stub copper is not pad geometry (mirrors the native
+            # ``mark_blocked`` below voiding ``pad_cell``).
+            self._void_pad_provenance(layer_idx, gy, gx)
 
             cpp_grid = getattr(self, "_cpp_grid", None)
             if cpp_grid is not None:
@@ -4672,24 +4831,14 @@ class RoutingGrid:
             # square rectangles retain their copper corners (#5229).
             # This mirrors PR #2787's distance calculation at
             # ``validate/rules/clearance.py::_segment_circle_clearance``.
-            is_circular_pad = pad.shape == "circle"
-            if is_circular_pad:
-                pad_radius = max(pad.width, pad.height) / 2
-                dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
-                clearance = dist - seg_half_width - pad_radius
-            else:
-                # Rect-aware: signed centerline-to-rect distance.  Negative
-                # means the segment centerline lies inside the pad rectangle
-                # (a real DRC defect; the magnitude is the deepest signed
-                # depth).
-                center_dist = _pad_rect_segment_centerline_distance(
-                    pad,
-                    seg.x1,
-                    seg.y1,
-                    seg.x2,
-                    seg.y2,
-                )
-                clearance = center_dist - seg_half_width
+            # Rect-aware: signed centerline-to-rect distance.  Negative means
+            # the segment centerline lies inside the pad rectangle (a real DRC
+            # defect; the magnitude is the deepest signed depth).  Issue
+            # #6389: the arithmetic lives in ``pad_segment_edge_clearance`` so
+            # the pure-Python A*'s exact pad-cell test measures identically.
+            clearance = pad_segment_edge_clearance(
+                pad, seg.x1, seg.y1, seg.x2, seg.y2, seg_half_width
+            )
 
             # Issue #2933: Apply the same-component carve-out only when the
             # trace clears the neighbour pad's metal (clearance >= 0).
