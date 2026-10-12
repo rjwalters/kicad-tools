@@ -839,6 +839,10 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             - seed: Random seed for this trial
             - base_order: Base net ordering
             - use_negotiated: Whether to use negotiated routing
+            - base_order_forced: Trial 0 forces ``base_order`` (a user
+              ``--order-method`` order) instead of the router default
+            - negotiated_kwargs: Extra ``route_all_negotiated`` kwargs
+            - trial_timeout / per_net_timeout: Wall-clock budgets (#6345)
             - width, height, origin_x, origin_y: Grid dimensions
             - rules_dict: Serialized design rules
             - net_class_map: Net class configuration
@@ -986,17 +990,28 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
 
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
-        net_order = base_order.copy()
+        # Issue #6345: trial 0 is the faithful baseline -- the router's own
+        # default order, unless the parent routed a user-forced order.
+        net_order = base_order.copy() if config.get("base_order_forced") else None
     else:
         # Increasing promotion rate over trials to broaden exploration
         promotion_rate = min(0.1 + 0.05 * trial_num, 0.5)
         net_order = router._shuffle_within_tiers(base_order, promotion_rate=promotion_rate)
 
-    # Run routing
-    if use_negotiated:
-        routes = router.route_all_negotiated()
-    else:
-        routes = router.route_all(net_order)
+    # Issue #6345: route in THIS trial's order.  ``route_all(net_order)``
+    # re-sorted it back to the priority order and ``route_all_negotiated()``
+    # never received it, so every trial routed the same sequence.
+    from kicad_tools.router.algorithms.monte_carlo import route_trial
+
+    routes = route_trial(
+        router,
+        net_order,
+        use_negotiated=use_negotiated,
+        negotiated_kwargs=config.get("negotiated_kwargs"),
+        seed=seed,
+        timeout=config.get("trial_timeout"),
+        per_net_timeout=config.get("per_net_timeout"),
+    )
 
     score = router._evaluate_solution(routes)
 
@@ -8938,6 +8953,11 @@ class Autorouter:
         # overwrite a CLI-selected order).  Only ``_forced_net_order`` toggles
         # this -- a caller-supplied ``net_order`` retains the historical
         # re-sort behaviour to preserve byte-identity for existing callers.
+        # Issue #6345: that re-sort is why Monte Carlo / evolutionary trials
+        # that passed ``route_all(order)`` all routed the same sequence; they
+        # now go through ``algorithms.monte_carlo.route_trial``, which sets
+        # ``_forced_net_order`` instead.  Callers that need their order
+        # honoured must do the same.
         _order_forced = False
         if net_order is None:
             # Issue #3897: honor a CLI-computed explicit ordering
@@ -17031,6 +17051,8 @@ class Autorouter:
         progress_callback: ProgressCallback | None = None,
         num_workers: int | None = None,
         timeout: float | None = None,
+        negotiated_kwargs: dict | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route using Monte Carlo multi-start with randomized net orderings.
 
@@ -17045,6 +17067,9 @@ class Autorouter:
             timeout: Optional wall-clock budget in seconds (issue #6343).  When
                 exceeded no new trial starts, running trials are abandoned and
                 the best completed trial is returned.
+            negotiated_kwargs: Extra ``route_all_negotiated`` kwargs for
+                negotiated trials (issue #6345).
+            per_net_timeout: Per-net wall-clock cap for every trial.
 
         Returns:
             List of routes from the best trial
@@ -17060,6 +17085,8 @@ class Autorouter:
             progress_callback=progress_callback,
             num_workers=num_workers,
             timeout=timeout,
+            negotiated_kwargs=negotiated_kwargs,
+            per_net_timeout=per_net_timeout,
         )
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).
@@ -17075,6 +17102,9 @@ class Autorouter:
         progress_callback: ProgressCallback | None = None,
         num_workers: int | None = None,
         timeout: float | None = None,
+        use_negotiated: bool = False,
+        negotiated_kwargs: dict | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route using evolutionary optimization with GA-style operators.
 
@@ -17093,6 +17123,11 @@ class Autorouter:
             timeout: Optional wall-clock budget in seconds.  If exceeded the GA
                 exits early before starting the next generation and returns
                 the best partial result found so far.
+            use_negotiated: Evaluate each chromosome with
+                ``route_all_negotiated`` instead of one ``route_all`` pass
+                (issue #6345).
+            negotiated_kwargs: Extra ``route_all_negotiated`` kwargs.
+            per_net_timeout: Per-net wall-clock cap for every evaluation.
 
         Returns:
             List of routes from the best chromosome found.
@@ -17108,6 +17143,9 @@ class Autorouter:
             progress_callback=progress_callback,
             num_workers=num_workers,
             timeout=timeout,
+            use_negotiated=use_negotiated,
+            negotiated_kwargs=negotiated_kwargs,
+            per_net_timeout=per_net_timeout,
         )
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).

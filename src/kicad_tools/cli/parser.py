@@ -3763,6 +3763,16 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm")
     route_parser.add_argument("--via-diameter", type=float, default=0.6, help="Via diameter in mm")
     route_parser.add_argument("--mc-trials", type=int, default=10, help="Monte Carlo trials")
+    # Issue #6345: router run by each monte-carlo / evolutionary trial.
+    route_parser.add_argument(
+        "--trial-router",
+        choices=["negotiated", "basic"],
+        default="negotiated",
+        help=(
+            "Router each monte-carlo / evolutionary trial runs: 'negotiated' "
+            "(default, as strong as one default run) or 'basic' (one A* pass)"
+        ),
+    )
     route_parser.add_argument(
         "--pop-size", type=int, default=20, help="Evolutionary optimizer population size"
     )

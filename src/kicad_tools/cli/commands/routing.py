@@ -962,6 +962,9 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--via-diameter", str(args.via_diameter)])
     if args.mc_trials != 10:
         sub_argv.extend(["--mc-trials", str(args.mc_trials)])
+    # Issue #6345: router each multi-start trial runs.
+    if getattr(args, "trial_router", "negotiated") != "negotiated":
+        sub_argv.extend(["--trial-router", args.trial_router])
     # Issue #6267: forward the evolutionary GA size.  The outer parser accepted
     # --pop-size/--generations but never handed them to the inner route
     # command, so every ``kct route --strategy evolutionary`` ran the default
