@@ -40,6 +40,7 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.cli.format_options import (
     FORMAT_JSON,
@@ -54,6 +55,9 @@ from kicad_tools.router.via_clearance import drill_hole_to_hole_clear
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import segment_node, via_node
+
+if TYPE_CHECKING:
+    from kicad_tools.analysis.net_status import NetStatus
 
 #: KiCad's board-setup hole-to-copper clearance default, in mm.  Neither the
 #: manufacturer ``DesignRules`` schema nor the generated ``.kicad_pro``
@@ -5031,6 +5035,15 @@ def _compute_strict_pad_sets(
     contradict each other on the same file).  The connected sets are returned
     for completeness/diagnostics; they deliberately do NOT suppress stitching
     (see the gate comment in ``run_stitch``).
+
+    Issue #6315: the strict model calls the LARGEST island "connected", which
+    is not the plane when a trace joins two stranded pads into a two-pad
+    island while the fill bonds a single pad (board 04: an oracle-completion
+    trace C3.2 -> C10.2 on F.Cu, the GND plane on B.Cu bonding only J1.6).
+    Stitch then skipped both pads as "connected" and they shipped as an open.
+    So whenever the fill anchors at least one island, every pad of an island
+    the fill does NOT anchor is also reported unconnected.  This only ever adds
+    to the veto set (more stitching, never less).
     """
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
@@ -5041,7 +5054,24 @@ def _compute_strict_pad_sets(
     for net in scoped.nets:
         unconnected[net.net_name] = {p.full_name for p in net.unconnected_pads}
         connected[net.net_name] = {p.full_name for p in net.connected_pads}
+        unconnected[net.net_name] |= _pads_off_the_plane(net)
     return unconnected, connected
+
+
+def _pads_off_the_plane(net: "NetStatus") -> set[str]:
+    """``REF.PAD`` names of pads on islands the net's fill does not anchor.
+
+    Empty when the fill anchors no island at all (nothing to compare against
+    -- the largest-island rule stands) -- see :func:`_compute_strict_pad_sets`.
+    """
+    bonded = {p.connectivity_id for p in net.fill_bonded_pads}
+    if not bonded:
+        return set()
+    off: set[str] = set()
+    for island in net.islands:
+        if not any(p.connectivity_id in bonded for p in island):
+            off.update(p.full_name for p in island)
+    return off
 
 
 def run_stitch(

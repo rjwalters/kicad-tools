@@ -407,3 +407,267 @@ def test_normalize_search_failure_maps_cpp_codes() -> None:
     assert normalize_search_failure(5) == "via_via_blocked"
     assert is_budget_search_failure("iteration_limit")
     assert not is_budget_search_failure("no_path")
+
+
+# ---------------------------------------------------------------------------
+# Safety rails on the exact pad test (judge request on PR #6370)
+#
+# The bypass only ever RELAXES the disc on cells whose sole blocker is pad
+# copper + pad clearance.  Each test below pins one rule that keeps it from
+# being looser than the disc it replaces.
+# ---------------------------------------------------------------------------
+
+
+def _attached_grid(width: float = 6.0, height: float = 4.0, resolution: float = 0.05):
+    """A ``RoutingGrid`` with its native mirror attached BEFORE any pad is
+    added, so ``add_pad`` takes the incremental pad sync (the production
+    ``Autorouter.add_component`` order)."""
+    from kicad_tools.router.cpp_backend import CppGrid
+
+    rules = DesignRules(
+        trace_width=0.2,
+        trace_clearance=0.15,
+        via_drill=0.3,
+        via_diameter=0.6,
+        via_clearance=0.15,
+        grid_resolution=resolution,
+    )
+    grid = RoutingGrid(width=width, height=height, rules=rules, layer_stack=LayerStack.two_layer())
+    cpp = CppGrid.from_routing_grid(grid)
+    return grid, cpp, rules
+
+
+def _synced_cells(grid: RoutingGrid, pad: Pad, layer: int = 0):
+    """Native cells inside ``pad``'s marking envelope that the sync blocked."""
+    cpp = grid._cpp_grid
+    reach = max(pad.width, pad.height) / 2 + 0.4
+    gx1, gy1 = grid.world_to_grid(pad.x - reach, pad.y - reach)
+    gx2, gy2 = grid.world_to_grid(pad.x + reach, pad.y + reach)
+    cells = []
+    for gy in range(max(gy1, 0), min(gy2, grid.rows - 1) + 1):
+        for gx in range(max(gx1, 0), min(gx2, grid.cols - 1) + 1):
+            if grid._blocked[layer, gy, gx]:
+                cells.append(cpp._impl.at(gx, gy, layer))
+    return cells
+
+
+@requires_cpp
+class TestDrilledPadsAreNeverPadSource:
+    """(a) A PTH / NPTH pad also carries hole (and NPTH-slot edge) clearances
+    the copper-only pad test does not model, so its cells keep the disc."""
+
+    def test_smd_pad_cells_are_pad_source(self) -> None:
+        grid, _cpp, _ = _attached_grid()
+        pad = Pad(x=3.0, y=2.0, width=1.0, height=1.0, net=1, net_name="N", layer=Layer.F_CU)
+        grid.add_pad(pad)
+        cells = _synced_cells(grid, pad)
+        assert cells and all(c.pad_cell for c in cells)
+
+    @pytest.mark.parametrize("net, name", [(1, "N"), (0, "")], ids=["pth", "npth"])
+    def test_drilled_pad_cells_are_not_pad_source(self, net: int, name: str) -> None:
+        grid, _cpp, _ = _attached_grid()
+        pad = Pad(
+            x=3.0,
+            y=2.0,
+            width=1.6,
+            height=1.6,
+            net=net,
+            net_name=name,
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=1.0,
+        )
+        grid.add_pad(pad)
+        for layer in range(grid.num_layers):
+            cells = _synced_cells(grid, pad, layer)
+            assert cells, f"layer {layer}: the drilled pad blocked nothing"
+            assert not any(c.pad_cell for c in cells), f"layer {layer}: drilled pad is pad_cell"
+
+
+@requires_cpp
+class TestPadCellProvenanceIsSticky:
+    """(b) Once anything other than the pad sync has marked a cell, it is
+    never pad-only again -- not even after a later pad sync."""
+
+    def _pad_cell(self):
+        grid, cpp, _ = _attached_grid()
+        impl = cpp._impl
+        impl.mark_blocked(10, 10, 0, 1, True, False, True, True)
+        cell = impl.at(10, 10, 0)
+        assert cell.pad_cell and cell.shared_pad_halo
+        return impl, cell
+
+    def _resync_as_pad(self, impl) -> None:
+        impl.mark_blocked(10, 10, 0, 1, True, False, True, True)
+
+    def test_set_cell_static_blocked_clears_and_stays_cleared(self) -> None:
+        impl, cell = self._pad_cell()
+        impl.set_cell_static_blocked(10, 10, 0, True)
+        assert not cell.pad_cell and not cell.shared_pad_halo
+        self._resync_as_pad(impl)
+        assert not cell.pad_cell and not cell.shared_pad_halo
+
+    def test_set_cells_static_blocked_clears_and_stays_cleared(self) -> None:
+        impl, cell = self._pad_cell()
+        impl.set_cells_static_blocked([10], [10], [0], True)
+        assert not cell.pad_cell and not cell.shared_pad_halo
+        self._resync_as_pad(impl)
+        assert not cell.pad_cell and not cell.shared_pad_halo
+
+    def test_non_pad_mark_blocked_clears_and_stays_cleared(self) -> None:
+        impl, cell = self._pad_cell()
+        impl.mark_blocked(10, 10, 0, 0, True, False)  # keepout / edge / copper
+        assert not cell.pad_cell and not cell.shared_pad_halo
+        self._resync_as_pad(impl)
+        assert not cell.pad_cell and not cell.shared_pad_halo
+
+    def test_non_pad_mark_before_the_pad_wins(self) -> None:
+        _grid, cpp, _ = _attached_grid()
+        impl = cpp._impl
+        impl.mark_blocked(10, 10, 0, 0, True, False)
+        self._resync_as_pad(impl)
+        assert not impl.at(10, 10, 0).pad_cell
+
+
+@requires_cpp
+class TestBoardEdgeIsNeverPadOnly:
+    """Judge question on PR #6370: ``pad_step_clear`` does not measure the
+    board edge, so an edge-keepout cell must never be a ``pad_cell``,
+    whichever of the edge keepout and the pad is marked first."""
+
+    EDGE = [((0.0, 0.0), (6.0, 0.0))]  # bottom edge of the 6 x 4 mm grid
+
+    def _edge_pad(self) -> Pad:
+        # Its clearance envelope overlaps the 0.3 mm edge keepout.
+        return Pad(x=3.0, y=0.6, width=1.0, height=0.6, net=1, net_name="N", layer=Layer.F_CU)
+
+    def _edge_cells(self, grid: RoutingGrid):
+        raster = grid._raster_only_blocked
+        assert raster is not None
+        cpp = grid._cpp_grid
+        ys, xs = raster[0].nonzero()
+        cells = [cpp._impl.at(int(x), int(y), 0) for y, x in zip(ys, xs, strict=True)]
+        assert cells
+        return cells
+
+    def test_edge_then_pad(self) -> None:
+        grid, _cpp, _ = _attached_grid()
+        grid.add_edge_keepout(self.EDGE, 0.3)
+        grid.add_pad(self._edge_pad())
+        assert not any(c.pad_cell for c in self._edge_cells(grid))
+
+    def test_pad_then_edge(self) -> None:
+        grid, _cpp, _ = _attached_grid()
+        grid.add_pad(self._edge_pad())
+        grid.add_edge_keepout(self.EDGE, 0.3)
+        assert not any(c.pad_cell for c in self._edge_cells(grid))
+
+    def test_python_only_edge_carried_by_the_pad_sync(self) -> None:
+        """The edge keepout reached only the Python grid (no native mirror
+        attached yet), so the pad sync is the first to push those cells to
+        C++ -- with ``pad_source``.  The #5662 raster-only plane must veto it."""
+        grid, cpp, _ = _attached_grid()
+        grid._cpp_grid = None
+        grid.add_edge_keepout(self.EDGE, 0.3)
+        grid._cpp_grid = cpp
+        pad = self._edge_pad()
+        grid.add_pad(pad)
+        cells = self._edge_cells(grid)
+        synced = [c for c in cells if c.blocked]
+        assert synced, "the pad sync should have pushed some edge cells"
+        assert not any(c.pad_cell for c in synced)
+        # Cells of the same pad away from the edge keep the provenance.
+        assert any(c.pad_cell for c in _synced_cells(grid, pad))
+
+
+# Corridor between two foreign pads: a 0.2 mm trace of net N must pass a
+# gap whose clearance cells belong to the pads' halos.  At ``CORRIDOR_GAP``
+# the trace clears each pad by (0.55 - 0.2) / 2 = 0.175 mm: legal at the
+# net's 0.15 mm, illegal at 0.2 mm.
+
+
+CORRIDOR_GAP = 0.55
+
+
+def _corridor(net_class_clearance: float | None = None, hole=None):
+    """Route net N straight through the gap; returns (route_found, gap cell)."""
+    from kicad_tools.router.cpp_backend import CppPathfinder
+
+    grid, cpp, rules = _attached_grid()
+    h = (4.0 - CORRIDOR_GAP) / 2
+    for net, name, y in ((2, "A", h / 2), (3, "B", 4.0 - h / 2)):
+        grid.add_pad(Pad(x=3.0, y=y, width=0.6, height=h, net=net, net_name=name, layer=Layer.F_CU))
+    start = Pad(x=1.0, y=2.0, width=0.4, height=0.4, net=1, net_name="N", layer=Layer.F_CU)
+    end = Pad(x=5.0, y=2.0, width=0.4, height=0.4, net=1, net_name="N", layer=Layer.F_CU)
+    grid.add_pad(start)
+    grid.add_pad(end)
+    if hole is not None:
+        cpp._impl.add_component_hole(hole[0], hole[1], hole[0], hole[1], hole[2])
+    ncm = {}
+    if net_class_clearance is not None:
+        ncm["B"] = NetClassRouting(name="Wide", trace_width=0.2, clearance=net_class_clearance)
+    pf = CppPathfinder(cpp, rules, diagonal_routing=True, net_class_map=ncm)
+    pf.set_routable_layers([0])
+    # Judge the native verdict alone: the Python fallback A* is a different
+    # engine and must not paper over (or mask) the C++ decision.
+    pf._try_python_fallback = lambda *a, **k: None
+    gx, gy = grid.world_to_grid(3.0, 2.0)
+    gap_cell = cpp._impl.at(gx, gy, 0)
+    route = pf.route(start, end, negotiated_mode=False)
+    return route is not None and bool(route.segments), gap_cell
+
+
+@requires_cpp
+class TestExactPadStepRules:
+    def test_corridor_routes_only_through_the_exact_test(self) -> None:
+        """Baseline: the gap centre is a foreign pad-only cell, and the net
+        still routes -- the exact test resolved it."""
+        routed, gap_cell = _corridor()
+        assert gap_cell.blocked and gap_cell.pad_cell
+        assert routed
+
+    def test_net_class_floor_rejects_a_step_legal_only_at_the_net_clearance(self) -> None:
+        """(c) Another net class demands 0.2 mm.  The pair rule is
+        max(own, pad's class) and the pad's class is unknown natively, so the
+        board-wide floor (0.2 mm) applies: 0.175 mm is rejected."""
+        assert _corridor(net_class_clearance=0.15)[0]
+        assert not _corridor(net_class_clearance=0.2)[0]
+
+    def test_step_within_the_hole_guard_is_not_resolved(self) -> None:
+        """(e) A component hole (an NPTH slot) the disc never sees sits
+        0.5 mm from the corridor: inside the 0.75 mm guard, so the exact test
+        declines and the disc decides (blocked)."""
+        assert not _corridor(hole=(2.3, 1.3, 0.1))[0]
+
+    def test_hole_beyond_the_guard_does_not_matter(self) -> None:
+        assert _corridor(hole=(0.4, 0.4, 0.1))[0]
+
+
+@requires_cpp
+def test_kelvin_isolation_voids_and_restores_pad_cell() -> None:
+    """(d) Kelvin branch isolation repaints a same-net terminal's cells as a
+    net-0 obstacle for one search.  The exact pad test cannot see that
+    reason, so ``pad_cell`` / ``shared_pad_halo`` must be voided for the
+    search and restored afterwards."""
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
+
+    router = Autorouter(5, 5, force_python=False, physics_enabled=False)
+    if router.backend_info.get("active") != "cpp":
+        pytest.skip("Autorouter did not select the C++ backend")
+    for ref, x, y in [("R1", 1, 1), ("Q1", 3, 1), ("U1", 3, 3)]:
+        router.add_component(
+            ref, [{"number": "1", "x": x, "y": y, "net": 1, "net_name": "ISENSE_TEST"}]
+        )
+    pads = list(router.pads.values())
+    grid = router.grid
+    cpp = grid._cpp_grid
+    x, y = grid.world_to_grid(3, 1)  # Q1: the non-terminal, isolated pad
+    cell = cpp._impl.at(x, y, 0)
+    cell.shared_pad_halo = True  # exercise both flags
+    assert cell.pad_cell, "precondition: Q1's metal is a pad-only cell"
+    with isolate_kelvin_branch(grid, pads, pads[0], pads[2]):
+        assert not cell.pad_cell
+        assert not cell.shared_pad_halo
+    assert cell.pad_cell
+    assert cell.shared_pad_halo

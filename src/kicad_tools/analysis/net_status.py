@@ -97,6 +97,12 @@ class NetStatus:
             as ``connected_pads`` and ``len(islands) == island_count``. A
             ratsnest needs the groups, which ``unconnected_pads`` flattens
             together. Not part of :meth:`to_dict`.
+        fill_bonded_pads: The pads whose copper reaches this net's poured
+            fill -- directly, or through a via / trace chain -- i.e. the pads
+            the plane itself anchors (issue #6315). An island holding none of
+            them is not on the plane, however many pads it has. Empty when the
+            net has no fill copper (or shapely is unavailable). Not part of
+            :meth:`to_dict`.
     """
 
     net_number: int
@@ -118,6 +124,8 @@ class NetStatus:
     island_count: int = 0
     # Issue #6316: the pad groups behind ``island_count``, largest first.
     islands: list[list[PadInfo]] = field(default_factory=list, repr=False)
+    # Issue #6315: pads bonded to the net's poured fill (the plane anchors).
+    fill_bonded_pads: list[PadInfo] = field(default_factory=list, repr=False)
 
     @property
     def open_connections(self) -> int:
@@ -542,6 +550,8 @@ class NetStatusAnalyzer:
         # Endpoint heuristics cannot represent curved copper or interior contact.
         # Arc-bearing boards therefore require real copper geometry in both modes.
         self.strict = strict or bool(self.pcb.arcs)
+        # Issue #6315: pad ids the current net's poured fill bonds (reset per net).
+        self._fill_bonded_ids: set[str] = set()
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
@@ -707,7 +717,13 @@ class NetStatusAnalyzer:
             return status
 
         # Build connectivity graph
+        self._fill_bonded_ids = set()
         graph = self._build_connectivity_graph(net_number, pad_infos)
+        # Issue #6315: which pads the poured fill itself bonds (recorded by
+        # ``_apply_zone_connectivity`` while the graph was built).
+        status.fill_bonded_pads = [
+            p for p in pad_infos if p.connectivity_id in self._fill_bonded_ids
+        ]
 
         # Find connected components (islands)
         islands = self._find_islands(graph, [p.connectivity_id for p in pad_infos])
@@ -1106,6 +1122,11 @@ class NetStatusAnalyzer:
         groups = self._build_fill_island_groups(
             net_number, pad_positions, pad_layers, vias, segments, segment_components
         )
+        if groups is not None:
+            # Issue #6315: remember which pads the fill really bonds, so a
+            # consumer can tell the plane's island from a pad-only island.
+            for group in groups:
+                self._fill_bonded_ids.update(group)
         if groups is None:
             legacy = self._legacy_zone_connected_pads(
                 pad_positions,

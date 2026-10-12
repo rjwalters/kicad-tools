@@ -483,6 +483,13 @@ def _sync_pad_cells_to_cpp_grid(
     # provenance only while no other static obstacle has touched the cell.
     policy_cells = py_grid._pad_policy_cells
     shared_cells = py_grid._shared_pad_halo
+    # Issue #6315: a cell any registry-less blocker covers (board-edge
+    # keepout, keepout, obstacle, region bound -- #5662's raster-only plane)
+    # is never pad-only, whatever order it was marked in.  The exact pad test
+    # does not see that geometry, so the cell must keep the grid semantics
+    # even when the edge keepout reached the Python grid before the native
+    # mirror was attached (and so never cleared the native provenance).
+    raster_only = py_grid._raster_only_blocked
     rows = py_grid.rows
     cols = py_grid.cols
 
@@ -521,7 +528,9 @@ def _sync_pad_cells_to_cpp_grid(
                     int(py_net[layer_idx, gy, gx]),
                     bool(py_is_obstacle[layer_idx, gy, gx]),
                     bool(py_pad_blocked[layer_idx, gy, gx]),
-                    pad_source and key not in policy_cells,
+                    pad_source
+                    and key not in policy_cells
+                    and not (raster_only is not None and raster_only[layer_idx, gy, gx]),
                     key in shared_cells,
                 )
 
