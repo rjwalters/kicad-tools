@@ -29,11 +29,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .monte_carlo import (
+    _initial_trial_order,
+    baseline_trial_order,
     clear_best_trial,
     deadline_from_timeout,
     publish_best_trial,
     remaining_seconds,
+    route_trial,
     terminate_executor,
+    trial_timeout,
 )
 
 if TYPE_CHECKING:
@@ -51,12 +55,22 @@ if TYPE_CHECKING:
 class RoutingChromosome:
     """Encodes per-net routing parameters for the evolutionary optimizer.
 
+    Only ``net_order`` reaches the router (issue #6345).  The
+    ``astar_weights``, ``preferred_layers`` and ``strategy_flags`` genes are
+    evolved but currently **inert**: no evaluation path forwards them, because
+    ``Autorouter`` has no per-net A* heuristic-weight hook and the per-net
+    layer-preference hook (``net_class_map`` ``preferred_layers``) has no
+    "no preference" value the seed chromosome could carry without changing the
+    baseline.  Whether an evaluation uses negotiated routing is a run-wide
+    choice (``use_negotiated``), not a per-net gene.  Plumbing the remaining
+    genes is tracked as a follow-up to #6345.
+
     Attributes:
         net_order: Permutation of net IDs (routing sequence).
-        astar_weights: Per-net A* heuristic weight multiplier.
+        astar_weights: Per-net A* heuristic weight multiplier (inert).
         preferred_layers: Per-net preferred start layer index (0 = F.Cu,
-            1 = B.Cu, etc.).
-        strategy_flags: Per-net boolean flags (e.g. use_negotiated).
+            1 = B.Cu, etc.) (inert).
+        strategy_flags: Per-net boolean flags (inert).
         fitness: Cached fitness score (higher is better).
     """
 
@@ -229,6 +243,7 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
 
     chrom_idx = config["chrom_idx"]
     seed = config["seed"]
+    # ``None`` = the router's default order (the unperturbed seed chromosome).
     net_order = config["net_order"]
 
     _random.seed(seed)
@@ -332,8 +347,18 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     # config, so replay them onto the worker's own grid before routing.
     install_serialized_obstacles(router, config)
 
-    # Route using the chromosome's net order
-    routes = router.route_all(net_order)
+    # Issue #6345: route in the chromosome's net order.  ``route_all(order)``
+    # re-sorted it back to the priority order, so every chromosome routed the
+    # same sequence and the whole population scored identically.
+    routes = route_trial(
+        router,
+        net_order,
+        use_negotiated=bool(config.get("use_negotiated", False)),
+        negotiated_kwargs=config.get("negotiated_kwargs"),
+        seed=seed,
+        timeout=config.get("trial_timeout"),
+        per_net_timeout=config.get("per_net_timeout"),
+    )
     total_nets = len([n for n in router.nets if n != 0])
     score = _score_routes(routes, total_nets)
 
@@ -458,6 +483,9 @@ def run_evolutionary(
     progress_callback: ProgressCallback | None = None,
     num_workers: int | None = None,
     timeout: float | None = None,
+    use_negotiated: bool = False,
+    negotiated_kwargs: dict | None = None,
+    per_net_timeout: float | None = None,
 ) -> list[Route]:
     """Run evolutionary routing optimization on an Autorouter instance.
 
@@ -477,7 +505,13 @@ def run_evolutionary(
             further chromosome is evaluated (issue #6343: checked between
             chromosomes too, and chromosomes still running in worker
             processes are abandoned) and the best result found so far is
-            returned.  Default ``None`` means no wall-clock limit.
+            returned.  Default ``None`` means no wall-clock limit.  Each
+            evaluation gets an equal share of what is left for the current
+            generation (issue #6345).
+        use_negotiated: Evaluate chromosomes with ``route_all_negotiated``
+            rather than one ``route_all`` pass (issue #6345).
+        negotiated_kwargs: Extra ``route_all_negotiated`` kwargs.
+        per_net_timeout: Per-net wall-clock cap for every evaluation.
 
     Returns:
         List of routes from the best chromosome found.
@@ -493,6 +527,9 @@ def run_evolutionary(
             progress_callback=progress_callback,
             num_workers=num_workers,
             timeout=timeout,
+            use_negotiated=use_negotiated,
+            negotiated_kwargs=negotiated_kwargs,
+            per_net_timeout=per_net_timeout,
         )
     except Exception:
         clear_best_trial(autorouter)
@@ -509,6 +546,9 @@ def _run_evolutionary(
     progress_callback: ProgressCallback | None,
     num_workers: int | None,
     timeout: float | None,
+    use_negotiated: bool = False,
+    negotiated_kwargs: dict | None = None,
+    per_net_timeout: float | None = None,
 ) -> list[Route]:
     start_time = time.monotonic()
     deadline = deadline_from_timeout(timeout)
@@ -528,16 +568,23 @@ def _run_evolutionary(
 
     if verbose:
         print("\n=== Evolutionary Routing Optimizer ===", flush=True)
-        print(f"  Population: {pop_size}, Generations: {generations}", flush=True)
+        print(
+            f"  Population: {pop_size}, Generations: {generations}, Negotiated: {use_negotiated}",
+            flush=True,
+        )
         if num_workers > 1:
             print(f"  Parallel workers: {num_workers}", flush=True)
         if timeout is not None:
             print(f"  Timeout: {timeout:.1f}s", flush=True)
 
-    # Prepare base net order (same as Monte Carlo)
-    base_order = sorted(autorouter.nets.keys(), key=lambda n: autorouter._get_net_priority(n))
-    base_order = autorouter._filter_pour_nets(base_order)
-    base_order = [n for n in base_order if n != 0]
+    # Prepare base net order (same as Monte Carlo; issue #6345: honours a
+    # user ``--order-method`` order)
+    base_order = _initial_trial_order(autorouter)
+    trial_kwargs = {
+        "use_negotiated": use_negotiated,
+        "negotiated_kwargs": dict(negotiated_kwargs or {}),
+        "per_net_timeout": per_net_timeout,
+    }
 
     total_nets = len(base_order)
 
@@ -587,6 +634,8 @@ def _run_evolutionary(
                 num_workers,
                 deadline=deadline,
                 on_result=_on_result,
+                base_order=base_order,
+                trial_kwargs=trial_kwargs,
             )
         else:
             routes_scores = _evaluate_sequential(
@@ -597,6 +646,8 @@ def _run_evolutionary(
                 total_nets,
                 deadline=deadline,
                 on_result=_on_result,
+                base_order=base_order,
+                trial_kwargs=trial_kwargs,
             )
 
         # Issue #6343: an evaluation cut short by the deadline returns with
@@ -685,19 +736,37 @@ def _evaluate_sequential(
     total_nets: int,
     deadline: float | None = None,
     on_result: _ResultCallback | None = None,
+    base_order: list[int] | None = None,
+    trial_kwargs: dict | None = None,
 ) -> list[tuple[list, float]]:
     """Evaluate every chromosome sequentially.
 
     Chromosomes not reached before ``deadline`` score ``-inf`` (issue #6343).
+    Each routes in its own ``net_order`` (issue #6345).
     """
+    trial_kwargs = trial_kwargs or {}
     results: list[tuple[list, float]] = []
     for idx, chrom in enumerate(population):
         if deadline is not None and time.monotonic() >= deadline:
             results.extend([_UNEVALUATED] * (len(population) - idx))
             return results
-        random.seed(base_seed + gen * len(population) + idx)
+        eval_seed = base_seed + gen * len(population) + idx
+        random.seed(eval_seed)
         autorouter._reset_for_new_trial()
-        routes = autorouter.route_all(chrom.net_order)
+        order = (
+            baseline_trial_order(autorouter, chrom.net_order, base_order)
+            if base_order is not None
+            else list(chrom.net_order)
+        )
+        routes = route_trial(
+            autorouter,
+            order,
+            use_negotiated=bool(trial_kwargs.get("use_negotiated", False)),
+            negotiated_kwargs=trial_kwargs.get("negotiated_kwargs"),
+            seed=eval_seed,
+            timeout=trial_timeout(deadline, len(population) - idx),
+            per_net_timeout=trial_kwargs.get("per_net_timeout"),
+        )
         score = _score_routes(routes, total_nets)
         results.append((routes, score))
         if on_result is not None:
@@ -713,6 +782,8 @@ def _evaluate_parallel(
     num_workers: int,
     deadline: float | None = None,
     on_result: _ResultCallback | None = None,
+    base_order: list[int] | None = None,
+    trial_kwargs: dict | None = None,
 ) -> list[tuple[list, float]]:
     """Evaluate every chromosome in parallel using ProcessPoolExecutor.
 
@@ -720,6 +791,9 @@ def _evaluate_parallel(
     then are abandoned (their workers terminated) and score ``-inf``.
     """
     base_config = autorouter._serialize_for_parallel()
+    trial_kwargs = trial_kwargs or {}
+    # Issue #6345: equal share of the time left, over this generation's waves.
+    per_trial_timeout = trial_timeout(deadline, len(population), num_workers)
 
     trial_configs = []
     for idx, chrom in enumerate(population):
@@ -728,7 +802,15 @@ def _evaluate_parallel(
             {
                 "chrom_idx": idx,
                 "seed": base_seed + gen * len(population) + idx,
-                "net_order": chrom.net_order,
+                "net_order": (
+                    baseline_trial_order(autorouter, chrom.net_order, base_order)
+                    if base_order is not None
+                    else list(chrom.net_order)
+                ),
+                "use_negotiated": bool(trial_kwargs.get("use_negotiated", False)),
+                "negotiated_kwargs": dict(trial_kwargs.get("negotiated_kwargs") or {}),
+                "trial_timeout": per_trial_timeout,
+                "per_net_timeout": trial_kwargs.get("per_net_timeout"),
             }
         )
         trial_configs.append(config)

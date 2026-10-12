@@ -397,6 +397,40 @@ def _deterministic_rescue_kwargs(args) -> _RescueKwargs:
     return _RescueKwargs()
 
 
+def _multistart_trial_kwargs(args) -> dict:
+    """Per-trial routing kwargs for ``--strategy monte-carlo|evolutionary``.
+
+    Issue #6345: every trial used to be a single basic ``route_all`` pass --
+    the CLI never passed ``use_negotiated`` -- so 8 Monte Carlo trials on
+    board 05 finished worse than one default (negotiated) run.  With
+    ``--trial-router negotiated`` (the default) each trial runs the same
+    negotiated router, with the same iteration / patience / rip-up settings,
+    as ``--strategy negotiated``; ``--trial-router basic`` restores the old
+    single-pass trials.  ``--seed`` now seeds the run too, so trial 0 is the
+    same route as one default run with that seed.
+
+    Region parallelism and the checkpoint callback are not forwarded: trials
+    already run in worker processes and the callback is not picklable.
+    """
+    negotiated_kwargs: dict = {
+        "max_iterations": args.iterations,
+        "batch_routing": getattr(args, "batch_routing", False)
+        or getattr(args, "high_performance", False),
+        "hierarchical": getattr(args, "hierarchical", False),
+        "perturbation": getattr(args, "perturbation", True),
+        "use_targeted_ripup": getattr(args, "targeted_ripup", False),
+        "max_ripups_per_net": _targeted_ripup_budget(args),
+        "best_stall_patience": (getattr(args, "early_stop_patience", 2) or None),
+        **_deterministic_rescue_kwargs(args),
+    }
+    return {
+        "seed": getattr(args, "seed", None),
+        "use_negotiated": getattr(args, "trial_router", "negotiated") == "negotiated",
+        "negotiated_kwargs": negotiated_kwargs,
+        "per_net_timeout": getattr(args, "per_net_timeout", None) or None,
+    }
+
+
 def _auto_fix_budget(args) -> float:
     """Return the auto-fix reserve in seconds (issue #3238).
 
@@ -9904,6 +9938,7 @@ def route_with_layer_escalation(
             elif args.strategy == "monte-carlo":
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_attempt_timeout,
                 )
@@ -9911,6 +9946,7 @@ def route_with_layer_escalation(
                 router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_attempt_timeout,
                 )
@@ -11094,6 +11130,7 @@ def route_with_rule_relaxation(
             elif args.strategy == "monte-carlo":
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_attempt_timeout,
                 )
@@ -11101,6 +11138,7 @@ def route_with_rule_relaxation(
                 router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_attempt_timeout,
                 )
@@ -13561,6 +13599,7 @@ def route_with_combined_escalation(
                 elif args.strategy == "monte-carlo":
                     router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
+                        **_multistart_trial_kwargs(args),
                         verbose=args.verbose and not quiet,
                         timeout=_attempt_timeout,
                     )
@@ -13568,6 +13607,7 @@ def route_with_combined_escalation(
                     router.route_all_evolutionary(
                         pop_size=args.pop_size,
                         generations=args.generations,
+                        **_multistart_trial_kwargs(args),
                         verbose=args.verbose and not quiet,
                         timeout=_attempt_timeout,
                     )
@@ -16341,7 +16381,24 @@ def _route_parser() -> argparse.ArgumentParser:
         "--mc-trials",
         type=int,
         default=10,
-        help="Number of Monte Carlo trials (default: 10)",
+        help=(
+            "Number of Monte Carlo trials (default: 10).  Each trial routes in "
+            "its own net order; with --trial-router negotiated (default) each "
+            "costs about one default negotiated run, so expect roughly "
+            "ceil(trials / cores) x that wall time (bounded by --timeout)."
+        ),
+    )
+    parser.add_argument(
+        "--trial-router",
+        choices=["negotiated", "basic"],
+        default="negotiated",
+        help=(
+            "Router each --strategy monte-carlo / evolutionary trial runs "
+            "(Issue #6345).  'negotiated' (default) runs the same rip-up and "
+            "negotiation as --strategy negotiated, so a restart strategy is at "
+            "least as strong as one default run; 'basic' runs one A* pass per "
+            "trial (the pre-#6345 behaviour, much faster)."
+        ),
     )
     parser.add_argument(
         "--pop-size",
@@ -20186,12 +20243,14 @@ def _run_main_impl(args, parser, argv) -> int:
                         return router.route_all_evolutionary(
                             pop_size=args.pop_size,
                             generations=args.generations,
+                            **_multistart_trial_kwargs(args),
                             verbose=args.verbose and not quiet,
                             timeout=_budgeted_timeout(args),
                         )
                     elif args.strategy == "monte-carlo":
                         return router.route_all_monte_carlo(
                             num_trials=args.mc_trials,
+                            **_multistart_trial_kwargs(args),
                             verbose=args.verbose and not quiet,
                             timeout=_budgeted_timeout(args),
                         )
@@ -20439,6 +20498,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 if args.strategy == "monte-carlo":
                     return router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
+                        **_multistart_trial_kwargs(args),
                         verbose=args.verbose and not quiet,
                         timeout=_budgeted_timeout(args),
                     )
@@ -20446,12 +20506,14 @@ def _run_main_impl(args, parser, argv) -> int:
                     return router.route_all_evolutionary(
                         pop_size=args.pop_size,
                         generations=args.generations,
+                        **_multistart_trial_kwargs(args),
                         verbose=args.verbose and not quiet,
                         timeout=_budgeted_timeout(args),
                     )
             elif args.strategy == "monte-carlo":
                 return router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_budgeted_timeout(args),
                 )
@@ -20459,6 +20521,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 return router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_budgeted_timeout(args),
                 )
