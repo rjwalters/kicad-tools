@@ -18,13 +18,23 @@ Example CLI usage::
 
 from __future__ import annotations
 
+import concurrent.futures
 import math
 import os
 import random
 import time
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from .monte_carlo import (
+    clear_best_trial,
+    deadline_from_timeout,
+    publish_best_trial,
+    remaining_seconds,
+    terminate_executor,
+)
 
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
@@ -209,7 +219,11 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     """
     import random as _random
 
-    from kicad_tools.router.core import Autorouter, install_serialized_obstacles
+    from kicad_tools.router.core import (
+        Autorouter,
+        install_serialized_obstacles,
+        worker_router_kwargs,
+    )
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.rules import DesignRules
 
@@ -232,6 +246,8 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
         rules=rules,
         net_class_map=config.get("net_class_map"),
         physics_enabled=False,
+        # Issue #6343: same layer stack and search budgets as the parent.
+        **worker_router_kwargs(config),
     )
 
     # Add pads from serialized data
@@ -457,15 +473,45 @@ def run_evolutionary(
         verbose: Whether to print progress.
         progress_callback: Optional callback for progress updates.
         num_workers: Number of parallel workers (None/0 = auto, 1 = sequential).
-        timeout: Optional wall-clock budget in seconds.  If exceeded, the loop
-            exits early before starting the next generation and returns the
-            best partial result found so far.  Default ``None`` means no
-            wall-clock limit.
+        timeout: Optional wall-clock budget in seconds.  If exceeded, no
+            further chromosome is evaluated (issue #6343: checked between
+            chromosomes too, and chromosomes still running in worker
+            processes are abandoned) and the best result found so far is
+            returned.  Default ``None`` means no wall-clock limit.
 
     Returns:
         List of routes from the best chromosome found.
     """
+    clear_best_trial(autorouter)
+    try:
+        return _run_evolutionary(
+            autorouter,
+            pop_size=pop_size,
+            generations=generations,
+            seed=seed,
+            verbose=verbose,
+            progress_callback=progress_callback,
+            num_workers=num_workers,
+            timeout=timeout,
+        )
+    except Exception:
+        clear_best_trial(autorouter)
+        raise
+
+
+def _run_evolutionary(
+    autorouter,
+    *,
+    pop_size: int,
+    generations: int,
+    seed: int | None,
+    verbose: bool,
+    progress_callback: ProgressCallback | None,
+    num_workers: int | None,
+    timeout: float | None,
+) -> list[Route]:
     start_time = time.monotonic()
+    deadline = deadline_from_timeout(timeout)
 
     base_seed = seed if seed is not None else random.randint(0, 2**31 - 1)
     random.seed(base_seed)
@@ -504,6 +550,22 @@ def run_evolutionary(
 
     total_evals = pop_size * generations
 
+    # Issue #6343: publish each new best as soon as its chromosome finishes,
+    # not after the whole generation -- on a large board one generation can
+    # outlast the entire ``--timeout``.  The partial save restores it.
+    best_seen = [float("-inf")]
+
+    def _on_result(gen: int, idx: int, routes: list, score: float) -> None:
+        if score > best_seen[0]:
+            best_seen[0] = score
+            publish_best_trial(
+                autorouter,
+                routes,
+                strategy="evolutionary",
+                trial=gen * pop_size + idx,
+                score=score,
+            )
+
     for gen in range(generations):
         # ----- wall-clock timeout check (Issue #2467) -----
         if timeout is not None and time.monotonic() - start_time >= timeout:
@@ -517,9 +579,29 @@ def run_evolutionary(
 
         # ----- evaluate population -----
         if num_workers > 1:
-            routes_scores = _evaluate_parallel(autorouter, population, base_seed, gen, num_workers)
+            routes_scores = _evaluate_parallel(
+                autorouter,
+                population,
+                base_seed,
+                gen,
+                num_workers,
+                deadline=deadline,
+                on_result=_on_result,
+            )
         else:
-            routes_scores = _evaluate_sequential(autorouter, population, base_seed, gen, total_nets)
+            routes_scores = _evaluate_sequential(
+                autorouter,
+                population,
+                base_seed,
+                gen,
+                total_nets,
+                deadline=deadline,
+                on_result=_on_result,
+            )
+
+        # Issue #6343: an evaluation cut short by the deadline returns with
+        # the unreached chromosomes scored ``-inf``.
+        timed_out = deadline is not None and time.monotonic() >= deadline
 
         # Assign fitness and track best
         gen_best_score = float("-inf")
@@ -534,6 +616,15 @@ def run_evolutionary(
             best_score = gen_best_score
             best_routes = routes_scores[gen_best_idx][0]
             best_gen = gen
+
+        if timed_out:
+            if verbose:
+                print(
+                    f"  Timeout {timeout:.1f}s reached during gen {gen + 1}; "
+                    f"returning best (score={best_score:.2f})",
+                    flush=True,
+                )
+            break
 
         # Progress
         evals_done = (gen + 1) * pop_size
@@ -561,6 +652,9 @@ def run_evolutionary(
         print(f"\n  Best: Gen {best_gen + 1} (score={best_score:.2f})", flush=True)
 
     autorouter.routes = best_routes if best_routes else []
+    # Issue #6343: the result is in ``autorouter.routes`` now; later stages own
+    # it, so the partial save must not swap the published best back in.
+    clear_best_trial(autorouter)
     if progress_callback is not None:
         routed = len({r.net for r in autorouter.routes}) if autorouter.routes else 0
         progress_callback(
@@ -577,21 +671,37 @@ def run_evolutionary(
 # ---------------------------------------------------------------------------
 
 
+_ResultCallback = Callable[[int, int, list, float], None]
+
+# A chromosome not evaluated before the deadline: never selected as a best.
+_UNEVALUATED: tuple[list, float] = ([], float("-inf"))
+
+
 def _evaluate_sequential(
     autorouter,
     population: list[RoutingChromosome],
     base_seed: int,
     gen: int,
     total_nets: int,
+    deadline: float | None = None,
+    on_result: _ResultCallback | None = None,
 ) -> list[tuple[list, float]]:
-    """Evaluate every chromosome sequentially."""
+    """Evaluate every chromosome sequentially.
+
+    Chromosomes not reached before ``deadline`` score ``-inf`` (issue #6343).
+    """
     results: list[tuple[list, float]] = []
     for idx, chrom in enumerate(population):
+        if deadline is not None and time.monotonic() >= deadline:
+            results.extend([_UNEVALUATED] * (len(population) - idx))
+            return results
         random.seed(base_seed + gen * len(population) + idx)
         autorouter._reset_for_new_trial()
         routes = autorouter.route_all(chrom.net_order)
         score = _score_routes(routes, total_nets)
         results.append((routes, score))
+        if on_result is not None:
+            on_result(gen, idx, routes, score)
     return results
 
 
@@ -601,8 +711,14 @@ def _evaluate_parallel(
     base_seed: int,
     gen: int,
     num_workers: int,
+    deadline: float | None = None,
+    on_result: _ResultCallback | None = None,
 ) -> list[tuple[list, float]]:
-    """Evaluate every chromosome in parallel using ProcessPoolExecutor."""
+    """Evaluate every chromosome in parallel using ProcessPoolExecutor.
+
+    Issue #6343: waiting is bounded by ``deadline``; chromosomes still running
+    then are abandoned (their workers terminated) and score ``-inf``.
+    """
     base_config = autorouter._serialize_for_parallel()
 
     trial_configs = []
@@ -619,18 +735,35 @@ def _evaluate_parallel(
 
     # Pre-fill results list
     results: list[tuple[list, float] | None] = [None] * len(population)
+    timed_out = False
 
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+    executor = ProcessPoolExecutor(max_workers=num_workers)
+    try:
         futures = {
             executor.submit(_run_evolutionary_trial, cfg): cfg["chrom_idx"] for cfg in trial_configs
         }
-        for future in as_completed(futures):
-            chrom_idx = futures[future]
-            try:
-                routes, score, _ = future.result()
-                results[chrom_idx] = (routes, score)
-            except Exception:
-                results[chrom_idx] = ([], 0.0)
+        try:
+            for future in as_completed(futures, timeout=remaining_seconds(deadline)):
+                chrom_idx = futures[future]
+                try:
+                    routes, score, _ = future.result()
+                    results[chrom_idx] = (routes, score)
+                except Exception:
+                    results[chrom_idx] = ([], 0.0)
+                    continue
+                if on_result is not None:
+                    on_result(gen, chrom_idx, routes, score)
+        except concurrent.futures.TimeoutError:
+            timed_out = True
+            terminate_executor(executor)
+    except BaseException:
+        # Deadline / Ctrl+C: do not join workers that are mid-trial.
+        terminate_executor(executor)
+        raise
+    if not timed_out:
+        executor.shutdown(wait=True)
 
+    if timed_out:
+        return [(r or _UNEVALUATED) for r in results]
     # Replace any remaining Nones (should not happen)
     return [(r or ([], 0.0)) for r in results]  # type: ignore[misc]

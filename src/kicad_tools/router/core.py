@@ -804,6 +804,29 @@ def install_serialized_obstacles(router: Autorouter, config: dict) -> None:
         router.grid.add_obstacle(obstacle)
 
 
+def worker_router_kwargs(config: dict) -> dict[str, Any]:
+    """Search-budget and layer settings a parallel worker's router must share.
+
+    Issue #6343: ``_serialize_for_parallel`` used to carry none of these, so
+    every Monte Carlo / evolutionary worker built a default ``Autorouter``: a
+    TWO-layer grid whatever ``--layers`` said, no ``--per-net-iterations`` /
+    ``--deterministic-budget`` cap (so a give-up fell through to an unbounded
+    pure-Python A* grind, once per worker), and no ``--max-search-iterations``
+    backstop.  Trials were therefore not comparable with the default strategy
+    routing the same board.  Keys absent from an older payload keep the
+    previous defaults.
+    """
+    kwargs: dict[str, Any] = {}
+    if config.get("layer_stack") is not None:
+        kwargs["layer_stack"] = config["layer_stack"]
+    for key in ("per_net_iterations", "max_search_iterations"):
+        if config.get(key):
+            kwargs[key] = int(config[key])
+    if config.get("force_python"):
+        kwargs["force_python"] = True
+    return kwargs
+
+
 def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     """Run a single Monte Carlo trial in a worker process.
 
@@ -852,6 +875,7 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
         rules=rules,
         net_class_map=config.get("net_class_map"),
         physics_enabled=False,  # Skip physics in workers for simplicity
+        **worker_router_kwargs(config),
     )
 
     # Add pads from serialized data
@@ -3713,6 +3737,37 @@ class Autorouter:
                 if route.segments:
                     self.routes.append(route)
         return [r for r in routes if r.segments]
+
+    def _drain_netset_cache(self, nets: list[int]) -> list[Route] | None:
+        """Serve already-negotiated whole-netset routes for ``nets`` (issue #6341).
+
+        The lattice and mesh engines negotiate the WHOLE net set on the first
+        ``route_net`` call and cache the per-net results; later calls only
+        serve the cache.  When that negotiation consumes ``route_all``'s outer
+        wall-clock budget, the between-nets timeout check used to ``break``
+        before the remaining nets were served, so routes that had already been
+        computed never reached ``self.routes`` (board 05: a 56/57-connection
+        negotiation wrote 0 nets).
+
+        Serving is a dict lookup plus a list append, so it cannot overrun the
+        budget.  It commits exactly what a run with more budget would have
+        served from the same negotiation -- no per-net rescue / rip-up runs.
+
+        Returns ``None`` when no netset cache is populated (grid strategy, or
+        the negotiation never ran), so callers keep the historical behaviour
+        byte-for-byte; otherwise the list of committed routes (possibly empty).
+        """
+        strategy = getattr(self, "_strategy", "grid")
+        if strategy == "lattice" and self._lattice_net_routes is not None:
+            serve = self._route_net_lattice
+        elif strategy == "mesh" and self._mesh_net_routes is not None:
+            serve = self._route_net_mesh
+        else:
+            return None
+        drained: list[Route] = []
+        for net in nets:
+            drained.extend(serve(net))
+        return drained
 
     def _ensure_lattice_pathfinder(self) -> Any:
         """Lazily construct the per-board :class:`LatticePathfinder` (built once).
@@ -8973,6 +9028,19 @@ class Autorouter:
                         f"({elapsed:.1f}s >= {timeout}s) after {i}/{total_nets} nets; "
                         f"returning partial result."
                     )
+                    # Issue #6341: lattice / mesh negotiate the whole netset
+                    # on the first net and cache every net's routes.  Serve
+                    # the remaining cached nets (a dict lookup, cannot
+                    # overrun) instead of discarding computed copper.
+                    drained = self._drain_netset_cache(nets_to_route[i:])
+                    if drained is not None:
+                        all_routes.extend(drained)
+                        served_nets = len({r.net for r in drained})
+                        flush_print(
+                            f"  route_all: served {served_nets} cached "
+                            f"{self._strategy} net(s) "
+                            f"({len(drained)} routes) after outer timeout."
+                        )
                     break
 
             if progress_callback is not None:
@@ -16943,6 +17011,15 @@ class Autorouter:
                 }
                 for obs in self._obstacles
             ],
+            # Issue #6343: layer stack and search budgets.  Without these a
+            # worker routed a 4-layer board on a 2-layer grid and ignored
+            # ``--per-net-iterations`` / ``--deterministic-budget``; see
+            # ``worker_router_kwargs``.  ``LayerStack`` is a plain dataclass
+            # and pickles as-is.
+            "layer_stack": self.layer_stack,
+            "per_net_iterations": getattr(self, "_per_net_iterations", 0),
+            "max_search_iterations": getattr(self, "_max_search_iterations", 0),
+            "force_python": bool(getattr(self, "_force_python", False)),
         }
 
     def route_all_monte_carlo(
@@ -16953,6 +17030,7 @@ class Autorouter:
         verbose: bool = True,
         progress_callback: ProgressCallback | None = None,
         num_workers: int | None = None,
+        timeout: float | None = None,
     ) -> list[Route]:
         """Route using Monte Carlo multi-start with randomized net orderings.
 
@@ -16964,6 +17042,9 @@ class Autorouter:
             progress_callback: Optional callback for progress updates
             num_workers: Number of parallel workers. None or 0 for auto-detection
                 based on CPU count. 1 for sequential execution.
+            timeout: Optional wall-clock budget in seconds (issue #6343).  When
+                exceeded no new trial starts, running trials are abandoned and
+                the best completed trial is returned.
 
         Returns:
             List of routes from the best trial
@@ -16978,6 +17059,7 @@ class Autorouter:
             verbose=verbose,
             progress_callback=progress_callback,
             num_workers=num_workers,
+            timeout=timeout,
         )
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).

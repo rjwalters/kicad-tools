@@ -2700,6 +2700,35 @@ def _process_state_guard() -> "Iterator[None]":
         _reset_partial_save_state()
 
 
+def _restore_best_trial(router: Any, info: dict[str, Any]) -> None:
+    """Put a multi-start run's best completed trial back on the router.
+
+    Issue #6343: ``--strategy monte-carlo`` / ``evolutionary`` hold their best
+    trial outside ``router.routes`` until the whole run finishes -- on the
+    default parallel path every trial runs in a worker process, and the
+    sequential path clears ``router.routes`` at the start of each trial.  An
+    interrupt mid-run therefore found nothing (or only the in-flight trial's
+    partial copper) to save.  The algorithms publish each new best on the
+    router as ``_best_trial_routes`` / ``_best_trial_meta`` and clear it when
+    the run ends normally, so a non-empty value means a run was cut short.
+
+    Cheap by design (it runs inside the five-second save grace): a list copy,
+    no grid rebuild -- serializing only needs ``router.routes``.  With no
+    completed best the live routes stay: on the sequential path that is the
+    in-progress trial; on the parallel path it is nothing (the in-progress
+    copper lives in a worker and cannot be reached).
+    """
+    best = getattr(router, "_best_trial_routes", None)
+    if not isinstance(best, list) or not best:
+        return
+    meta = getattr(router, "_best_trial_meta", None)
+    meta = meta if isinstance(meta, dict) else {}
+    router.routes = list(best)
+    info["snapshot_state"] = "best-trial"
+    info["snapshot_strategy"] = meta.get("strategy")
+    info["snapshot_trial"] = meta.get("trial")
+
+
 def _save_partial_results() -> bool:
     """Save partial routing results if interrupted.
 
@@ -2759,6 +2788,7 @@ def _save_partial_results() -> bool:
         info["snapshot_restore_seconds"] = round(time.perf_counter() - started, 3)
     if placement_text is not None:
         info["snapshot_placement"] = "moved"
+    _restore_best_trial(router, info)
 
     if not router.routes:
         if not quiet:
@@ -9875,6 +9905,7 @@ def route_with_layer_escalation(
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     verbose=args.verbose and not quiet,
+                    timeout=_attempt_timeout,
                 )
             elif args.strategy == "evolutionary":
                 router.route_all_evolutionary(
@@ -11064,6 +11095,7 @@ def route_with_rule_relaxation(
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     verbose=args.verbose and not quiet,
+                    timeout=_attempt_timeout,
                 )
             elif args.strategy == "evolutionary":
                 router.route_all_evolutionary(
@@ -13530,6 +13562,7 @@ def route_with_combined_escalation(
                     router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
                         verbose=args.verbose and not quiet,
+                        timeout=_attempt_timeout,
                     )
                 elif args.strategy == "evolutionary":
                     router.route_all_evolutionary(
@@ -16039,7 +16072,10 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
             # Issue #6314: say WHICH state the snapshot holds.  Added keys only:
             # ``snapshot_state`` is ``live`` (the router's copper as it stood),
             # ``last-accepted`` (a placement-delta trial was in flight and was
-            # discarded) or ``inconsistent`` (that restore failed; copper and
+            # discarded), ``best-trial`` (issue #6343: a Monte Carlo /
+            # evolutionary run was cut short and its best completed trial was
+            # saved -- ``snapshot_strategy`` / ``snapshot_trial`` say which) or
+            # ``inconsistent`` (that restore failed; copper and
             # footprints may disagree); ``snapshot_placement`` is ``source`` or
             # ``moved`` (a kept placement delta is in the snapshot's footprints).
             snapshot_info = (_interrupt_state.get("partial_save_info") or {}) if saved else {}
@@ -20157,6 +20193,7 @@ def _run_main_impl(args, parser, argv) -> int:
                         return router.route_all_monte_carlo(
                             num_trials=args.mc_trials,
                             verbose=args.verbose and not quiet,
+                            timeout=_budgeted_timeout(args),
                         )
                     elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
                         return router.route_all_two_phase(
@@ -20403,17 +20440,20 @@ def _run_main_impl(args, parser, argv) -> int:
                     return router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
                         verbose=args.verbose and not quiet,
+                        timeout=_budgeted_timeout(args),
                     )
                 else:
                     return router.route_all_evolutionary(
                         pop_size=args.pop_size,
                         generations=args.generations,
                         verbose=args.verbose and not quiet,
+                        timeout=_budgeted_timeout(args),
                     )
             elif args.strategy == "monte-carlo":
                 return router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     verbose=args.verbose and not quiet,
+                    timeout=_budgeted_timeout(args),
                 )
             elif args.strategy == "evolutionary":
                 return router.route_all_evolutionary(

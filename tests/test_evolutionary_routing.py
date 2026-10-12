@@ -327,7 +327,7 @@ class TestEvolutionaryTimeout:
 
         # Each "generation" sleeps ~0.3 s so the second iteration's
         # timeout check fires before evaluation.
-        def slow_eval(autorouter, population, base_seed, gen, total_nets):
+        def slow_eval(autorouter, population, base_seed, gen, total_nets, **_kw):
             time.sleep(0.3)
             return [([], 1.0 + idx) for idx, _ in enumerate(population)]
 
@@ -358,7 +358,7 @@ class TestEvolutionaryTimeout:
         from kicad_tools.router.algorithms import evolutionary as evo_mod
 
         # Even if eval is invoked it should not block forever.
-        def fast_eval(autorouter, population, base_seed, gen, total_nets):
+        def fast_eval(autorouter, population, base_seed, gen, total_nets, **_kw):
             return [([], float(idx)) for idx, _ in enumerate(population)]
 
         monkeypatch.setattr(evo_mod, "_evaluate_sequential", fast_eval)
@@ -387,7 +387,7 @@ class TestEvolutionaryTimeout:
 
         gen_count = {"n": 0}
 
-        def counting_eval(autorouter, population, base_seed, gen, total_nets):
+        def counting_eval(autorouter, population, base_seed, gen, total_nets, **_kw):
             gen_count["n"] += 1
             return [([], float(idx)) for idx, _ in enumerate(population)]
 
@@ -433,7 +433,7 @@ class TestEvolutionaryStdoutFlushing:
             "import sys, time\n"
             "from kicad_tools.router.algorithms import evolutionary as evo\n"
             "from kicad_tools.router.core import Autorouter\n"
-            "def slow_eval(autorouter, population, base_seed, gen, total_nets):\n"
+            "def slow_eval(autorouter, population, base_seed, gen, total_nets, **_kw):\n"
             "    time.sleep(0.4)\n"
             "    return [([], float(i)) for i, _ in enumerate(population)]\n"
             "evo._evaluate_sequential = slow_eval\n"
