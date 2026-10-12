@@ -3,8 +3,9 @@
 On board 05 the grid router's wide PHASE_C escape left U2.9 straight, turned
 45 degrees about 0.4 mm past the tip and crossed U2.10's and U2.11's
 straight-out lanes 1.0 and 1.7 mm from their tips, stranding GND_SENSE and VM.
-``pad_lanes`` charges foreign nets a soft per-cell cost inside a lane that is
-one pad short side wide and ``LANE_LENGTH_MM`` long, via the existing #3143
+``pad_lanes`` charges foreign nets a soft per-cell cost inside a lane that runs
+``LANE_LENGTH_MM`` past the tip and tiles the column across (each lane reaches
+the midpoint of the gap to its neighbour), via the existing #3143
 ``PadChannelBudget`` primitive.
 """
 
@@ -18,10 +19,12 @@ from kicad_tools.router.fine_pitch_escape import detect_fine_pitch_regions
 from kicad_tools.router.pad_lanes import (
     DISABLE_ENV,
     LANE_LENGTH_MM,
+    LANE_MAX_GAP_FILL_MM,
     LANE_PENALTY_FACTOR,
     build_pad_lane_budgets,
     compute_pad_lanes,
     lane_grid_rect,
+    lane_half_across,
     pad_lane,
     pad_lanes_disabled,
 )
@@ -101,8 +104,10 @@ def test_left_column_lane_starts_at_tip_and_extends_away_from_body() -> None:
         assert lane.direction == -1
         assert lane.x2 == pytest.approx(LEFT_TIP)
         assert lane.x1 == pytest.approx(LEFT_TIP - LANE_LENGTH_MM)
-        # Exactly one pad short side wide -- not widened by trace/clearance.
-        assert lane.y2 - lane.y1 == pytest.approx(PAD_SHORT)
+        # One pitch wide: the pad's short side plus half of each inter-pad
+        # gap, so adjacent lanes tile the column (not widened by trace width
+        # or clearance).
+        assert lane.y2 - lane.y1 == pytest.approx(PITCH)
         assert (lane.y1 + lane.y2) / 2 == pytest.approx(y)
         assert lane.net == i + 1
 
@@ -158,22 +163,59 @@ def test_no_lane_for_pad_straddling_body_centre() -> None:
     assert pad_lane(exposed, body_center=(12.5, Y0)) is None
 
 
-def test_adjacent_lanes_never_overlap_on_grid() -> None:
-    """At 0.65 mm pitch the cell-centre rects of adjacent lanes stay disjoint."""
+def test_pad_wide_lane_for_isolated_pad_and_capped_gap_fill() -> None:
+    lone = Pad(
+        x=LEFT_X, y=Y0, width=PAD_LONG, height=PAD_SHORT, net=1, net_name="N", ref="U1", pin="1"
+    )
+    assert lane_half_across(lone, [lone]) == pytest.approx(PAD_SHORT / 2)
+    far = Pad(
+        x=LEFT_X,
+        y=Y0 + 5.0,
+        width=PAD_LONG,
+        height=PAD_SHORT,
+        net=2,
+        net_name="M",
+        ref="U1",
+        pin="2",
+    )
+    assert lane_half_across(lone, [lone, far]) == pytest.approx(
+        PAD_SHORT / 2 + LANE_MAX_GAP_FILL_MM
+    )
+    # A pad in another column (different x) is not a same-column neighbour.
+    other_col = Pad(
+        x=RIGHT_X,
+        y=Y0 + 0.1,
+        width=PAD_LONG,
+        height=PAD_SHORT,
+        net=3,
+        net_name="O",
+        ref="U1",
+        pin="3",
+    )
+    assert lane_half_across(lone, [lone, other_col]) == pytest.approx(PAD_SHORT / 2)
+
+
+def test_adjacent_lanes_tile_without_overlap_on_grid() -> None:
+    """Adjacent lanes share a boundary and claim disjoint, contiguous cell rows.
+
+    The inter-pad gap is covered (a via centred in it is charged), and each
+    pad's own centreline row lies only in its own lane, so a straight escape
+    never pays for the next lane.
+    """
+    left = [lane for lane in compute_pad_lanes(_column_pads()) if lane.direction == -1]
+    left.sort(key=lambda lane: lane.y1)
+    for a, b in zip(left, left[1:], strict=False):
+        assert a.y2 == pytest.approx(b.y1)
     for res in (0.05, 0.065, 0.1):
         grid = _Grid(res)
-        rects = [
-            lane_grid_rect(lane, grid)
-            for lane in compute_pad_lanes(_column_pads())
-            if lane.direction == -1
-        ]
-        rects = sorted(r for r in rects if r is not None)
+        rects = sorted(r for r in (lane_grid_rect(lane, grid) for lane in left) if r is not None)
+        assert len(rects) == len(left)
         rows = sorted((r[1], r[3]) for r in rects)
         for (_, hi), (lo, _) in zip(rows, rows[1:], strict=False):
-            assert hi < lo, f"adjacent lanes overlap at resolution {res}"
-        for r in rects:
-            width_cells = r[3] - r[1] + 1
-            assert width_cells * res <= PAD_SHORT + res
+            assert hi + 1 == lo, f"lanes overlap or leave a gap at resolution {res}"
+        for lane, (_, gy1, _, gy2) in zip(left, sorted(rects, key=lambda r: r[1]), strict=True):
+            centre_row = round(((lane.y1 + lane.y2) / 2) / res)
+            assert gy1 <= centre_row <= gy2
 
 
 # ---------------------------------------------------------------------------

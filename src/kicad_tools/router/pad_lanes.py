@@ -15,10 +15,15 @@ detected fine-pitch package:
 
 * **Along the long axis** from the copper tip outward (away from the
   package body) by :data:`LANE_LENGTH_MM`.
-* **Across** exactly the pad's short side -- deliberately NOT widened by
-  trace width or clearance, so adjacent lanes at fine pitch never overlap
-  and a neighbour's own straight escape is never charged for the next
-  lane.
+* **Across** the pad's short side, extended to the midpoint of the gap to
+  the nearest same-column neighbour (capped by :data:`LANE_MAX_GAP_FILL_MM`).
+  Adjacent lanes therefore *tile* the column's outward strip without
+  overlapping (half-open cell bounds), so a neighbour's own straight escape
+  -- whose centreline sits half a pitch from either boundary -- is never
+  charged for the next lane, and a foreign via cannot dodge the cost by
+  centring itself in the 0.25 mm inter-pad gap while its 0.6 mm disc blocks
+  both lanes (measured on board 05: PHASE_C's via at 1.735 mm out, centred
+  between U2.10 and U2.11, with pad-wide lanes).
 * ``layer = -1`` so a foreign *via* landing in the lane is charged on its
   destination layer too (a through via in the lane blocks the pad's
   layer no matter which layers it connects).
@@ -54,6 +59,15 @@ from .primitives import Pad
 #: (over U2.11) and 1.73 mm (PHASE_C's via) from the tips.  One pitch would
 #: not reach them.
 LANE_LENGTH_MM = 2.0
+
+#: Largest amount (mm) a lane is widened past the pad's short side toward a
+#: same-column neighbour.  Enough to close a fine-pitch gap; keeps a coarse
+#: (1.27 mm) pitch lane from swallowing a whole routing channel.
+LANE_MAX_GAP_FILL_MM = 0.4
+
+#: Two pads are in the same column when their long-axis centre coordinates
+#: agree to within this many mm.
+_SAME_COLUMN_TOL_MM = 0.05
 
 #: Per-cell penalty as a multiple of ``rules.cost_straight``.  Same
 #: calibration as the #3201 escape-channel budgets.
@@ -145,19 +159,23 @@ def pad_lane(
     pad: Pad,
     body_center: tuple[float, float],
     length: float = LANE_LENGTH_MM,
+    half_across: float | None = None,
 ) -> PadLane | None:
     """Return ``pad``'s outward lane, or ``None`` when it has none.
 
     The lane runs along the pad's long axis, from the copper tip on the
-    side away from ``body_center`` outward by ``length``, and is exactly
-    the pad's short side wide.  Square, NC, virtual, escape-terminal,
-    through-hole and non-cardinal pads get no lane, and neither does a pad
-    whose long axis straddles the body centre (e.g. an exposed pad).
+    side away from ``body_center`` outward by ``length``.  Across, it spans
+    ``half_across`` either side of the pad centreline (default: half the
+    pad's short side, i.e. exactly pad-wide).  Square, NC, virtual,
+    escape-terminal, through-hole and non-cardinal pads get no lane, and
+    neither does a pad whose long axis straddles the body centre (e.g. an
+    exposed pad).
     """
     if length <= 0.0 or not _lane_eligible(pad):
         return None
     cx, cy = body_center
     if pad.width >= pad.height:
+        hw = pad.height * 0.5 if half_across is None else half_across
         offset = pad.x - cx
         if abs(offset) < pad.width * 0.5:
             return None
@@ -166,14 +184,15 @@ def pad_lane(
         far = tip + direction * length
         return PadLane(
             x1=min(tip, far),
-            y1=pad.y - pad.height * 0.5,
+            y1=pad.y - hw,
             x2=max(tip, far),
-            y2=pad.y + pad.height * 0.5,
+            y2=pad.y + hw,
             net=pad.net,
             pad_key=pad.key,
             axis="x",
             direction=direction,
         )
+    hw = pad.width * 0.5 if half_across is None else half_across
     offset = pad.y - cy
     if abs(offset) < pad.height * 0.5:
         return None
@@ -181,9 +200,9 @@ def pad_lane(
     tip = pad.y + direction * pad.height * 0.5
     far = tip + direction * length
     return PadLane(
-        x1=pad.x - pad.width * 0.5,
+        x1=pad.x - hw,
         y1=min(tip, far),
-        x2=pad.x + pad.width * 0.5,
+        x2=pad.x + hw,
         y2=max(tip, far),
         net=pad.net,
         pad_key=pad.key,
@@ -199,7 +218,9 @@ def compute_pad_lanes(
     """Compute lanes for every eligible pad of one package.
 
     ``pads`` are the pads of a single component; the body centre is the
-    centre of their bounding box.
+    centre of their bounding box.  Each lane is widened from the pad's
+    short side to the midpoint of the gap to its nearest same-column
+    neighbour (see :func:`lane_half_across`).
     """
     cluster = list(pads)
     if not cluster:
@@ -209,28 +230,56 @@ def compute_pad_lanes(
     center = ((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5)
     lanes: list[PadLane] = []
     for pad in cluster:
-        lane = pad_lane(pad, center, length)
+        lane = pad_lane(pad, center, length, lane_half_across(pad, cluster))
         if lane is not None:
             lanes.append(lane)
     return lanes
 
 
-def lane_grid_rect(lane: PadLane, grid: Any) -> tuple[int, int, int, int] | None:
-    """Grid cells whose centres lie inside ``lane`` (inclusive bounds).
+def lane_half_across(pad: Pad, cluster: Iterable[Pad]) -> float:
+    """Half-width of ``pad``'s lane across its long axis.
 
-    Returns ``None`` when the lane covers no cell centre or falls entirely
-    off the grid.  Cell-centre containment keeps the across-lane width at
-    the pad's short side (6 cells for a 0.4 mm pad on a 0.065 mm grid), so
-    lanes of adjacent fine-pitch pads never overlap.
+    Half the pad's short side, extended to half the centre distance to the
+    nearest neighbour in the same column (same long-axis orientation and
+    long-axis centre coordinate), capped at ``short/2 +``
+    :data:`LANE_MAX_GAP_FILL_MM`.  A pad with no same-column neighbour keeps
+    a pad-wide lane.
+    """
+    horizontal = pad.width >= pad.height
+    short_half = (pad.height if horizontal else pad.width) * 0.5
+    nearest: float | None = None
+    for other in cluster:
+        if other is pad or (other.width >= other.height) != horizontal:
+            continue
+        if horizontal:
+            same_column = abs(other.x - pad.x) <= _SAME_COLUMN_TOL_MM
+            gap = abs(other.y - pad.y)
+        else:
+            same_column = abs(other.y - pad.y) <= _SAME_COLUMN_TOL_MM
+            gap = abs(other.x - pad.x)
+        if same_column and gap > 1e-6 and (nearest is None or gap < nearest):
+            nearest = gap
+    if nearest is None:
+        return short_half
+    return min(max(short_half, nearest * 0.5), short_half + LANE_MAX_GAP_FILL_MM)
+
+
+def lane_grid_rect(lane: PadLane, grid: Any) -> tuple[int, int, int, int] | None:
+    """Grid cells whose centres lie in the half-open box ``[x1, x2) x [y1, y2)``.
+
+    Returned bounds are inclusive.  Returns ``None`` when the lane covers no
+    cell centre or falls entirely off the grid.  Half-open containment means
+    two lanes that share a boundary (adjacent pads of a column, which tile
+    the strip) never both claim a cell centred exactly on it.
     """
     res = float(grid.resolution)
     ox = float(grid.origin_x)
     oy = float(grid.origin_y)
     eps = 1e-6
     gx1 = math.ceil((lane.x1 - ox) / res - eps)
-    gx2 = math.floor((lane.x2 - ox) / res + eps)
+    gx2 = math.ceil((lane.x2 - ox) / res - eps) - 1
     gy1 = math.ceil((lane.y1 - oy) / res - eps)
-    gy2 = math.floor((lane.y2 - oy) / res + eps)
+    gy2 = math.ceil((lane.y2 - oy) / res - eps) - 1
     gx1 = max(0, gx1)
     gy1 = max(0, gy1)
     gx2 = min(int(grid.cols) - 1, gx2)

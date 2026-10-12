@@ -19971,8 +19971,8 @@ class Autorouter:
 
         One soft-cost rectangle per long-axis pad of every detected
         fine-pitch package (``grid.get_fine_pitch_regions()``), from the
-        copper tip outward by ``pad_lanes.LANE_LENGTH_MM`` and one pad short
-        side wide.  Foreign nets pay to cross a neighbour's lane close to its
+        copper tip outward by ``pad_lanes.LANE_LENGTH_MM`` and one pin pitch
+        wide (adjacent lanes tile the column).  Foreign nets pay to cross a neighbour's lane close to its
         tip, so a wide net's 45-degree escape turns further out instead of
         sealing the next pins' pocket (board 05: PHASE_C over U2.10/U2.11).
 
