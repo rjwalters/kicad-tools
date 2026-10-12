@@ -326,9 +326,15 @@ Prioritized roadmap of upcoming work, maintained by the Guide role.
 
 <!-- Maintained automatically by the Guide triage agent. Manual edits are fine but may be overwritten. -->
 
-## Operator Priority
+## Very Important
 
-Operator-starred issues (`loom:operator-priority`).
+`loom:very-important` (one counts per workspace); every stage takes these first.
+
+*None.*
+
+## Important
+
+`loom:important`; taken before unlabelled work.
 
 *None.*
 
@@ -362,11 +368,11 @@ Active epics with progress tracking.
 
 ## Backlog Balance
 
-| Tier | Count |
+| Bucket | Count |
 |------|-------|
-| Tier 1 (goal-advancing) | 3 |
-| Tier 2 (goal-supporting) | 2 |
-| Tier 3 (maintenance) | 0 |
+| Very important | 0 |
+| Important | 0 |
+| Ready (`loom:issue`) | 5 |
 
 **Note:** Initial backlog seeded from project bootstrapping. Issue numbers above are placeholders — update after GitHub issues are created.
 ```
@@ -422,7 +428,6 @@ Create 3-5 GitHub issues from the user's feature list so `/loom:sweep` has work 
 ./.loom/scripts/create-issue.sh \
   --title "Project scaffolding and build setup" \
   --label "loom:issue" \
-  --label "tier:goal-advancing" \
   --body "$(cat <<'BODY'
 ## Summary
 Set up the project build system, directory structure, and development tooling.
@@ -440,7 +445,6 @@ BODY
 ./.loom/scripts/create-issue.sh \
   --title "Core {{CORE_COMPONENT}} implementation" \
   --label "loom:issue" \
-  --label "tier:goal-advancing" \
   --body "$(cat <<'BODY'
 ## Summary
 Implement the core {{CORE_COMPONENT}} that other features build on.
@@ -456,19 +460,16 @@ BODY
 ./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_1}}" \
   --label "loom:issue" \
-  --label "tier:goal-advancing" \
   --body "## Summary\n\n{{FEATURE_1_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
 
 ./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_2}}" \
   --label "loom:issue" \
-  --label "tier:goal-supporting" \
   --body "## Summary\n\n{{FEATURE_2_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
 
 ./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_3}}" \
   --label "loom:issue" \
-  --label "tier:goal-supporting" \
   --body "## Summary\n\n{{FEATURE_3_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
 ```
 

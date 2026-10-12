@@ -8,13 +8,13 @@
 #   A. Shell wiring, always run. A stub daemon answers `forge priority-labels`
 #      from a fixture, so what is tested is create-pr.sh's contract with the
 #      verb: append its output to --label (deduplicated), pass its warnings
-#      through, warn naming the issue when the verb is unavailable, and post
-#      the audit comment only once the labels landed.
+#      through, warn naming the issue when the verb is unavailable, and never
+#      call the retired `--audit-pr` (a no-op since #11104, dropped by #11512).
 #   B. The real decision, run when a built loom-daemon is available
 #      (LOOM_TEST_REAL_DAEMON_BIN, else target/{debug,release}/loom-daemon at
 #      the repo root): the same create-pr.sh with the real binary over a stub
 #      `gh` serving per-issue labels -- multi-ref union, `Part of #N`,
-#      unstarred issue, failed lookup.
+#      unprioritized issue, failed lookup.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-create-pr-priority-labels.sh
@@ -165,42 +165,40 @@ reset_fixtures
 printf 'loom:important\n' > "$STUB_DIR/stars.txt"
 run_create_pr --title t --body "Closes #77" --head feature/issue-77 --label loom:review-requested
 assert_eq "0" "$EXIT_CODE" "A1: exit 0"
-assert_contains "$(create_argv)" "--label loom:review-requested --label loom:important" "A1: star added after the caller's label"
+assert_contains "$(create_argv)" "--label loom:review-requested --label loom:important" "A1: priority label added after the caller's label"
 assert_contains "$(cat "$STUB_DIR/daemon-calls.log")" "--repo owner/repo" "A1: the verb is asked about the PR's own repo"
 assert_eq "Closes #77" "$(head -1 "$STUB_DIR/daemon-stdin.txt")" "A1: the body reaches the verb on stdin"
-assert_eq "1" "$(audit_calls)" "A1: one audit call once the PR exists"
+assert_eq "0" "$(audit_calls)" "A1: no --audit-pr call (retired, #11512)"
 assert_eq "https://github.com/owner/repo/pull/1111" "$STDOUT" "A1: stdout is only the URL"
 
-# A2: REST fallback -- the star is in the one labels POST.
+# A2: REST fallback -- the priority labels are in the one labels POST.
 reset_fixtures
 printf 'loom:important\nloom:very-important\n' > "$STUB_DIR/stars.txt"
 echo "$RATE_LIMIT_ERR" > "$STUB_DIR/create-err.txt"
 run_create_pr --title t --body "Fixes #78" --head feature/issue-78 --label loom:review-requested
 assert_eq "0" "$EXIT_CODE" "A2: rate-limited create -> exit 0"
 assert_eq '["loom:review-requested","loom:important","loom:very-important"]' "$(label_payload)" "A2: REST labels POST carries every copied label"
-assert_eq "1" "$(audit_calls)" "A2: audit posted after the REST create"
+assert_eq "0" "$(audit_calls)" "A2: no --audit-pr call after the REST create"
 
-# A3: REST labels POST fails -> no audit for a star that never landed.
+# A3: REST labels POST fails -> the unapplied labels are named.
 reset_fixtures
 printf 'loom:important\n' > "$STUB_DIR/stars.txt"
 echo "$RATE_LIMIT_ERR" > "$STUB_DIR/create-err.txt"
 touch "$STUB_DIR/labels-fail"
 run_create_pr --title t --body "Closes #79" --head feature/issue-79 --label loom:review-requested
 assert_eq "0" "$EXIT_CODE" "A3: exit 0"
-assert_contains "$STDERR" "NOT applied: loom:review-requested loom:important" "A3: the unapplied star is named"
-assert_eq "0" "$(audit_calls)" "A3: no audit comment when the labels did not land"
+assert_contains "$STDERR" "NOT applied: loom:review-requested loom:important" "A3: the unapplied priority label is named"
 
-# A4: a caller that already passed the star gets no duplicate.
+# A4: a caller that already passed the priority label gets no duplicate.
 reset_fixtures
 printf 'loom:important\n' > "$STUB_DIR/stars.txt"
 run_create_pr --title t --body "Closes #80" --head feature/issue-80 --label loom:review-requested --label loom:important
-assert_eq "1" "$(create_argv | grep -o -- '--label loom:important' | wc -l | tr -d ' ')" "A4: star passed once"
+assert_eq "1" "$(create_argv | grep -o -- '--label loom:important' | wc -l | tr -d ' ')" "A4: priority label passed once"
 
-# A5: nothing to copy (unstarred / Part of) -> only the caller's labels, no audit.
+# A5: nothing to copy (no priority / Part of) -> only the caller's labels.
 reset_fixtures
 run_create_pr --title t --body "Part of #81" --head feature/issue-81 --label loom:review-requested
 assert_not_contains "$(create_argv)" "loom:important" "A5: no priority label"
-assert_eq "0" "$(audit_calls)" "A5: no audit call"
 assert_not_contains "$STDERR" "WARNING" "A5: no warning"
 
 # A6: the verb's own warning (a failed lookup) is passed through; PR opens.

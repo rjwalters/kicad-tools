@@ -768,10 +768,10 @@ discover_project_goals() {
     grep -E "^- \[.\]|^## M[0-9]" docs/roadmap.md ROADMAP.md 2>/dev/null | head -10
   fi
 
-  # 3. Goal-advancing and operator-starred work
-  echo "Current goal-advancing work:"
-  "$GH_READ" issue list --label="tier:goal-advancing" --state=open --limit=5
-  "$GH_READ" issue list --label="loom:operator-priority" --state=open --limit=5
+  # 3. Current priority work
+  echo "Current priority work:"
+  "$GH_READ" issue list --label="loom:very-important" --state=open --limit=5
+  "$GH_READ" issue list --label="loom:important" --state=open --limit=5
 
   # 4. Summary
   echo "Simplification proposals should support these focus areas"
@@ -787,34 +787,21 @@ discover_project_goals
 
 ```bash
 check_backlog_balance() {
-  echo "=== Backlog Tier Balance ==="
+  echo "=== Backlog Priority Balance ==="
 
-  # Count issues by tier
-  tier1=$("$GH_READ" issue list --label="tier:goal-advancing" --state=open --json number --jq 'length')
-  tier2=$("$GH_READ" issue list --label="tier:goal-supporting" --state=open --json number --jq 'length')
-  tier3=$("$GH_READ" issue list --label="tier:maintenance" --state=open --json number --jq 'length')
-  unlabeled=$("$GH_READ" issue list --label="loom:issue" --state=open --json number,labels \
-    --jq '[.[] | select([.labels[].name] | any(startswith("tier:")) | not)] | length')
+  # Priority is two labels set by Guide/Champion (#11103); count, never apply.
+  vi=$("$GH_READ" issue list --label="loom:very-important" --state=open --json number --jq 'length')
+  imp=$("$GH_READ" issue list --label="loom:important" --state=open --json number --jq 'length')
+  ready=$("$GH_READ" issue list --label="loom:issue" --state=open --json number --jq 'length')
 
-  total=$((tier1 + tier2 + tier3 + unlabeled))
+  echo "Very important:     $vi"
+  echo "Important:          $imp"
+  echo "Ready (loom:issue): $ready"
 
-  echo "Tier 1 (goal-advancing): $tier1"
-  echo "Tier 2 (goal-supporting): $tier2"
-  echo "Tier 3 (maintenance):     $tier3"
-  echo "Unlabeled:                $unlabeled"
-  echo "Total ready issues:       $total"
-
-  # Check balance
-  if [ "$tier1" -eq 0 ] && [ "$total" -gt 3 ]; then
+  if [ "$vi" -eq 0 ] && [ "$imp" -eq 0 ] && [ "$ready" -gt 3 ]; then
     echo ""
-    echo "WARNING: No goal-advancing issues in backlog!"
+    echo "WARNING: No priority work in the backlog."
     echo "RECOMMENDATION: Prioritize simplifications that support current milestone work."
-  fi
-
-  if [ "$tier3" -gt "$tier1" ] && [ "$tier3" -gt 5 ]; then
-    echo ""
-    echo "WARNING: More maintenance issues than goal-advancing issues."
-    echo "RECOMMENDATION: Focus on simplifications that directly benefit active work."
   fi
 }
 
@@ -823,9 +810,9 @@ check_backlog_balance
 ```
 
 **Interpretation**:
-- **Healthy**: Tier 1 >= Tier 3, and at least 1-2 goal-advancing issues available
-- **Warning**: No goal-advancing issues, or maintenance dominates
-- **Action**: If unhealthy, focus simplification proposals on Tier 1 opportunities
+- **Healthy**: some open work carries a priority label
+- **Warning**: none does, so nothing in the backlog is known to advance a goal
+- **Action**: focus simplification proposals on work that benefits active goals
 
 ### Check Randomization Across Passes
 

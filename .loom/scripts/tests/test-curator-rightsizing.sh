@@ -130,7 +130,7 @@ expect "TOC lists the new section"                    "$TOC" "[Backlog Rightsizi
 
 echo ""
 echo "Test group 4: guide.md hands sibling micro-issues to Curator"
-PRIO="$(section "$GUIDE_MD" '^## Tier Labels and Duplicate Checks')"
+PRIO="$(section "$GUIDE_MD" '^## Priority Labels and Duplicate Checks')"
 expect "guide defers sibling micro-issues to Curator" "$PRIO" "sibling micro-issues: leave for Curator"
 expect "guide points at the curator section"          "$PRIO" "\"Backlog Rightsizing\""
 

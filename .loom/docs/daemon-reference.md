@@ -295,7 +295,7 @@ was removed by #11104; today it is published by the
 clears). Consumer: the Safehouse narration sink, which renders it as a
 `handoff` envelope into the signal room. Room routing, the
 `safehouse.operatorMention` ping and the rendered line are documented in
-[`safehouse.md` → Operator-priority escalations](safehouse.md#operator-priority-escalations-9321).
+[`safehouse.md` → Operator escalations](safehouse.md#operator-escalations-9321).
 
 **`Generic`-topic rule.** A `Generic` topic is allowed only while it (a) is
 listed in this inventory, (b) carries a `source` field naming its producing
@@ -3076,9 +3076,10 @@ starved. A repo whose next candidate is a verified red-main fix wins the draw
 outright; failing that, a repo with `loom:very-important` work next does.
 Cross-repo dependency awareness stays a role judgment (label the blocker).
 
-**`tier:*` labels do not affect dispatch order.** `tier:goal-advancing` and its
-siblings are triage metadata; no daemon code reads them. Only the four keys
-below order the queue.
+**Retired labels do not affect dispatch order.** The tier labels and the
+operator star are retired (#11103; mapping in
+[`priority-model.md`](priority-model.md)); no daemon code reads them. Only the
+four keys below order the queue.
 
 ### Dispatch order and the red-main-fix lane (#11103, #11508, #11547)
 
@@ -3098,7 +3099,7 @@ follows the workspace draw, and the single-workspace tick uses the same four
 keys (passed the repo's real verified-red state). The workspace draw's pool is
 three-tier: workspaces whose next candidate is a verified red-main fix if any
 (`pool: "red-main-fix"`), else those with very-important work
-(`"very-important"`), else all (`"all"`). #11508 removed the legacy keys: the star (`loom:operator-priority`), its
+(`"very-important"`), else all (`"all"`). #11508 removed the legacy keys: the star, its
 levels and inherited levels, the starred-at time and its restart store
 (`starred-<sha16>.json`, no longer read or written; `LOOM_STARRED_AT_PERSIST` is
 ignored), and `workspace_priority` as a rank key (it weights the workspace
@@ -3127,13 +3128,12 @@ only reports whether an overflow sweep an older daemon started is still live
 (its `overflow: true` sweep record and claim-lock stamp are still honoured on
 adoption).
 
-`loom:operator-priority` is **not** `loom:operator` and is not a hold. Code that
-treats a `loom:operator-` prefix match as a hold must exclude it by name (see
-`pr_latency::hold_labels`).
+Neither priority label is a hold (`pr_latency::hold_labels` reads an explicit
+set, never a prefix match).
 
 **Main-health halt admits only fixes.** A repo halted because its `main` is
 verified red still admits its `<!-- loom:main-red-fix -->` candidates, and only
-those; every other ready issue in it, starred or not, keeps `workspace_halted`.
+those; every other ready issue in it, priority or not, keeps `workspace_halted`.
 `report.halted` is unchanged. A hold that is not a verified-red `main` (a gate
 run in flight, a drain, the host-distress breaker, a pre-flight or token-pool
 hold) admits nothing, fixes included. With the main-health gate disabled for a
@@ -3154,8 +3154,7 @@ costs only its own rows. These rows are candidates **only while the repo is
 red** (verified red, or the CI fallback above); on a green repo they are dropped
 before counting, so the marker stays inert there. When red they sort first
 (key 3), are admitted through the main-health halt, and go through every normal
-skip filter; the dispatched sweep starts from Curator, as for a starred
-unpromoted issue. Curator does not promote them. An issue with no workflow label
+skip filter; the dispatched sweep starts from Curator. Curator does not promote them. An issue with no workflow label
 is not listed this way, which is why Doctor files fixes with `loom:triage`.
 
 If a marker-bearing candidate stays unclaimed on a red `main` for longer than
@@ -3230,8 +3229,8 @@ one warning naming the keys and otherwise ignores them. The
 Each multi-workspace tick records one row per ready `loom:issue` it listed, ranked
 by `candidate_cmp`, with what the tick did with it:
 
-- **running**: `dispatched` (detail `overflow` for the host's over-limit
-  starred sweep, #9244), `in_flight`
+- **running**: `dispatched` (detail `overflow` only from an older daemon's
+  over-limit sweep, #9244; the slot is inert since #11508), `in_flight`
 - **ready** (waiting on a limit): `deferred_capacity`, `deferred_ramp_cap`,
   `deferred_saturation`, `deferred_build_backoff` (#9410), `deferred_out_of_slice`,
   `deferred_repo_cap`
@@ -13911,8 +13910,12 @@ overrides the built-in default (`false` / *(none)* / `$HOME/.loom/observability/
 contents never appear in a log line or error message (only the *path* does),
 and requests authenticate via an `Authorization: Bearer <key>` header.
 `loom-daemon` refuses to export (logs a `WARN` and skips both background
-tasks) when enabled without a resolvable `endpoint` or a readable, non-empty
-`ingestKeyFile` — treated the same as "not configured", not a startup
+tasks) when enabled without a resolvable `endpoint` — or, since #11555, when
+no exporter at all can start: a missing or unreadable `ingestKeyFile`
+degrades only the entries that need the key (every `https` entry, an `otlp`
+entry without `headers_file`) to their own `misconfigured` status, while an
+`otlp` entry carrying a `headers_file` starts with no ingest key at all —
+treated the same as "not configured", not a startup
 failure.
 
 `ingestKeyFile` is deliberately **excluded** from the example above and must

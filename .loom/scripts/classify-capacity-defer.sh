@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# classify-capacity-defer.sh - Idempotency for Champion's tier-capacity
-# deferral comment (issue #6729).
+# classify-capacity-defer.sh - Idempotency for Champion's level-capacity
+# deferral comment (issue #6729; tier caps mapped onto priority level, #11512).
 #
 # THE FAILURE MODE THIS EXISTS FOR
 #
-# champion-issue-promo.md's tier-based rate limiting ("Rate Limiting by Tier")
+# champion-issue-promo.md's level-based rate limiting ("Rate Limiting by Level")
 # can decide that a proposal passes all 8 promotion criteria but is held back
-# THIS PASS anyway -- per-pass Tier 2/3 caps and a Tier 3 backlog cap (env
-# vars, defaults 2/1/5 since #10753; the backlog counts promoted issues only).
+# THIS PASS anyway -- today the per-pass cap on no-level promotions (tier2Cap,
+# default 2, #10753; #11512 maps no level to the old Tier 2 cap and leaves no
+# backlog gate). The script also handles an occupant-enumerable backlog cap.
 # Every later Champion pass (cron tick, role-runner
 # tick, or a fresh dispatch) re-derives the same "criteria pass, capacity
 # gate blocks it" conclusion for an issue that has not been revised at all --
-# and, without a guard, posts an equivalent "Tier N backlog cap reached"
+# and, without a guard, posts an equivalent "backlog cap reached"
 # comment EVERY time. Observed live: #6628 accumulated 10 near-identical
 # capacity-deferral comments over ~22 hours; #6647 and #6649 each accumulated
-# 2-3 more, all citing the SAME five occupant tier:maintenance issues.
+# 2-3 more, all citing the SAME five occupant issues.
 #
 # This is the same class of noise the dependency-timing gate
 # (classify-dependency-block.sh --check-defer, #5664) already solved for
@@ -25,17 +26,17 @@
 # is needed, so champion-issue-promo.md's Step 4 never writes a verdict
 # marker for it). This script gives the capacity-deferral path its OWN
 # idempotency marker instead, keyed to the thing that actually decides whether
-# a fresh comment is warranted: the TIER and the OCCUPANT SET of the backlog
+# a fresh comment is warranted: the LEVEL and the OCCUPANT SET of the backlog
 # that is currently blocking promotion.
 #
 # THE RULE
 #
-#   Same tier, same occupant set as the last capacity-deferral comment on this
+#   Same level, same occupant set as the last capacity-deferral comment on this
 #   issue  -> nothing has changed since a human could already see why this is
 #             stuck; SKIP (no new comment; --apply bumps a "seen N times"
 #             counter on the existing comment for audit purposes only).
 #   First deferral, OR a different occupant set (an issue left/joined the
-#   backlog, the tier changed, the cap was reached by a different set)
+#   backlog, the level changed, the cap was reached by a different set)
 #             -> POST a fresh comment; an operator can still see WHEN and WHY
 #                this is stuck, and the composition actually changed.
 #
@@ -47,22 +48,23 @@
 # needs a human would only reintroduce noise for no benefit.
 #
 # Usage:
-#   classify-capacity-defer.sh --issue <N> --tier <label> --occupants <list>
+#   classify-capacity-defer.sh --issue <N> --level <level> --occupants <list>
 #       [--repo <owner/repo>] [--apply] [--comments-file <path>] [--no-cache]
 #
 # Options:
 #   --issue <N>          Issue number being evaluated (required).
-#   --tier <label>        The tier label whose cap is blocking promotion this
-#                         pass, e.g. `tier:maintenance` (required). Scopes the
-#                         marker so a re-tiered issue never matches a stale
-#                         fingerprint recorded under its old tier.
-#   --occupants <list>    The current backlog occupant set for that tier's cap
+#   --level <level>       The priority level whose cap blocks promotion this
+#                         pass, e.g. `default` (no level) (required;
+#                         `--tier` is an alias). Scopes the marker so a
+#                         re-levelled issue never matches a stale fingerprint.
+#   --occupants <list>    The current backlog occupant set for that level's cap
 #                         -- the same issue numbers champion-issue-promo.md's
-#                         "Backlog Balance Check" / tier-limit logic already
+#                         "Backlog Balance Check" / level-limit logic already
 #                         computed (comma- and/or whitespace-separated, `#`
 #                         prefix optional, e.g. "#6612,#6076,#6068,#5512,#4136"
-#                         or "6612 6076 6068 5512 4136"). Required (may be
-#                         empty for a cap that isn't occupant-enumerable).
+#                         or "6612 6076 6068 5512 4136"). Required (empty
+#                         for a per-pass cap, which has no occupant set:
+#                         Champion's Step 3c passes "" today).
 #   --repo <nwo>          owner/repo of --issue (default: current repo's
 #                         origin).
 #   --apply               Only meaningful when SKIP_COMMENT applies: PATCH the
@@ -81,20 +83,20 @@
 # Output (stdout, marker lines -- parseable by the Champion prose):
 #   POST_COMMENT
 #   REASON: first-deferral | composition-changed
-#   TIER: <tier>
+#   LEVEL: <level>
 #   OCCUPANTS: <normalized, sorted, space-separated>
 #   FINGERPRINT: <16 hex>
 #   PRIOR_OCCUPANTS: <normalized prior set>            (composition-changed only)
 #
 #   SKIP_COMMENT
-#   TIER: <tier>
+#   LEVEL: <level>
 #   OCCUPANTS: <normalized, sorted, space-separated>
 #   FINGERPRINT: <16 hex>
 #   PATCHED: <owner/repo>#<issue>                      (--apply only, on success)
 #
 # Exit codes:
 #   0 - SKIP_COMMENT applies (composition unchanged since the last
-#       capacity-deferral comment on this issue for this tier)
+#       capacity-deferral comment on this issue for this level)
 #   1 - POST_COMMENT applies (first deferral, or the composition changed) --
 #       the normal/default action, unaffected by this script existing
 #   2 - error (bad arguments, issue unreadable, missing jq)
@@ -116,13 +118,13 @@ err()  { echo -e "${RED}ERROR: $1${NC}" >&2; }
 warn() { echo -e "${YELLOW}WARNING: $1${NC}" >&2; }
 
 show_help() {
-    sed -n '2,105p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,107p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # ---- defaults ----
 ISSUE=""
 REPO_NWO=""
-TIER=""
+LEVEL=""
 OCCUPANTS_RAW=""
 DO_APPLY=0
 COMMENTS_FILE=""
@@ -160,34 +162,34 @@ normalize_occupants() {
         | sed -E 's/ $//'
 }
 
-# capacity_fingerprint <tier> <normalized occupants>
-# Identity of a (tier, occupant-set) PAIR -- the two facts that jointly
+# capacity_fingerprint <level> <normalized occupants>
+# Identity of a (level, occupant-set) PAIR -- the two facts that jointly
 # explain why THIS deferral fired. Sorted-unique occupants (from
 # normalize_occupants) means the fingerprint is order-independent.
 capacity_fingerprint() {
-    local tier="$1" occupants="$2"
-    printf '%s\n%s' "$tier" "$occupants" | _sha256 | awk '{print substr($1, 1, 16)}'
+    local level="$1" occupants="$2"
+    printf '%s\n%s' "$level" "$occupants" | _sha256 | awk '{print substr($1, 1, 16)}'
 }
 
-# capacity_marker <tier> <fingerprint>
+# capacity_marker <level> <fingerprint>
 capacity_marker() {
     printf '<!-- %s:%s:%s -->' "$MARKER_TAG" "$1" "$2"
 }
 
-# capacity_marker_prefix <tier>
-# The prefix shared by every capacity-deferral marker for this TIER,
+# capacity_marker_prefix <level>
+# The prefix shared by every capacity-deferral marker for this LEVEL,
 # regardless of fingerprint -- used to find the most recent capacity-deferral
 # comment on the issue, whatever occupant set it recorded.
 capacity_marker_prefix() {
     printf '<!-- %s:%s:' "$MARKER_TAG" "$1"
 }
 
-# extract_fingerprint_from_marker <comment-body> <tier>
+# extract_fingerprint_from_marker <comment-body> <level>
 # Pulls the fingerprint out of the LAST capacity-deferral marker line in a
-# comment body for the given tier, or emits nothing if absent.
+# comment body for the given level, or emits nothing if absent.
 extract_fingerprint_from_marker() {
-    local body="$1" tier="$2" prefix escaped_prefix
-    prefix="$(capacity_marker_prefix "$tier")"
+    local body="$1" level="$2" prefix escaped_prefix
+    prefix="$(capacity_marker_prefix "$level")"
     escaped_prefix="$(printf '%s' "$prefix" | sed 's/[][\.*^$/]/\\&/g')"
     printf '%s\n' "$body" \
         | { grep -oE "${escaped_prefix}[0-9a-f]{16} -->" || true; } \
@@ -249,7 +251,7 @@ _get_comments() {
 # failure here does not change the SKIP decision already made.
 _patch_streak() {
     local fingerprint="$1" comments="$2" marker comment_json comment_id comment_body seen next_seen new_body
-    marker="$(capacity_marker "$TIER" "$fingerprint")"
+    marker="$(capacity_marker "$LEVEL" "$fingerprint")"
     comment_json="$(printf '%s\n' "$comments" | jq -c --arg m "$marker" '[.[] | select(.body | contains($m))] | last // empty')"
 
     comment_id="$(printf '%s' "$comment_json" | jq -r '.id // empty' 2>/dev/null)"
@@ -300,7 +302,7 @@ main() {
         case "$1" in
             --issue)          ISSUE="${2:-}"; shift 2 ;;
             --repo)           REPO_NWO="${2:-}"; shift 2 ;;
-            --tier)           TIER="${2:-}"; shift 2 ;;
+            --level|--tier)   LEVEL="${2:-}"; shift 2 ;;
             --occupants)      OCCUPANTS_RAW="${2:-}"; shift 2 ;;
             --apply)          DO_APPLY=1; shift ;;
             --comments-file)  COMMENTS_FILE="${2:-}"; shift 2 ;;
@@ -311,15 +313,15 @@ main() {
     done
 
     if [[ -z "$ISSUE" ]]; then
-        err "Usage: classify-capacity-defer.sh --issue <N> --tier <label> --occupants <list> [--repo <owner/repo>] [--apply]"
+        err "Usage: classify-capacity-defer.sh --issue <N> --level <level> --occupants <list> [--repo <owner/repo>] [--apply]"
         exit 2
     fi
     if ! [[ "$ISSUE" =~ ^[0-9]+$ ]]; then
         err "--issue must be a number (got: $ISSUE)"
         exit 2
     fi
-    if [[ -z "$TIER" ]]; then
-        err "--tier is required"
+    if [[ -z "$LEVEL" ]]; then
+        err "--level is required"
         exit 2
     fi
     if ! command -v jq >/dev/null 2>&1; then
@@ -341,7 +343,7 @@ main() {
 
     local occupants fingerprint comments_json prefix latest_body prior_fp
     occupants="$(normalize_occupants "$OCCUPANTS_RAW")"
-    fingerprint="$(capacity_fingerprint "$TIER" "$occupants")"
+    fingerprint="$(capacity_fingerprint "$LEVEL" "$occupants")"
 
     comments_json="$(_get_comments)"
     if [[ -z "$comments_json" || "$comments_json" == "null" ]]; then
@@ -352,24 +354,24 @@ main() {
         comments_json="[]"
     fi
 
-    prefix="$(capacity_marker_prefix "$TIER")"
+    prefix="$(capacity_marker_prefix "$LEVEL")"
     latest_body="$(printf '%s\n' "$comments_json" \
         | jq -r --arg p "$prefix" '[.[] | select(.body | contains($p))] | last | .body // ""' 2>/dev/null)"
 
     if [[ -z "${latest_body//[[:space:]]/}" ]]; then
         echo "POST_COMMENT"
         echo "REASON: first-deferral"
-        echo "TIER: $TIER"
+        echo "LEVEL: $LEVEL"
         echo "OCCUPANTS: $occupants"
         echo "FINGERPRINT: $fingerprint"
         exit 1
     fi
 
-    prior_fp="$(extract_fingerprint_from_marker "$latest_body" "$TIER")"
+    prior_fp="$(extract_fingerprint_from_marker "$latest_body" "$LEVEL")"
 
     if [[ "$prior_fp" == "$fingerprint" ]]; then
         echo "SKIP_COMMENT"
-        echo "TIER: $TIER"
+        echo "LEVEL: $LEVEL"
         echo "OCCUPANTS: $occupants"
         echo "FINGERPRINT: $fingerprint"
         if [[ "$DO_APPLY" -eq 1 ]]; then
@@ -380,7 +382,7 @@ main() {
 
     echo "POST_COMMENT"
     echo "REASON: composition-changed"
-    echo "TIER: $TIER"
+    echo "LEVEL: $LEVEL"
     echo "OCCUPANTS: $occupants"
     echo "FINGERPRINT: $fingerprint"
     [[ -n "$prior_fp" ]] && echo "PRIOR_FINGERPRINT: $prior_fp"

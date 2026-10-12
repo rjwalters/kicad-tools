@@ -43,11 +43,8 @@ fresh claim from a concurrent Champion evaluation, #4954), as well as
 `loom:operator-only` and `loom:blocked` — both put an issue permanently outside
 Champion's promotion authority per `champion-issue-promo.md`'s "When NOT to
 Promote", so there is no reason to hand them into the evaluation pass at all
-(#5163). Also exclude `loom:issue` and `loom:building` — promotion adds
-`loom:issue` but deliberately leaves `loom:curated` in place as a permanent
-milestone marker (see note below), so without this exclusion every
-already-promoted or already-claimed issue keeps matching this query forever
-(#5285). Exclude `loom:needs-revision` too: Curator holds the issue until it
+(#5163). Also exclude `loom:issue` and `loom:building` (why: the note below
+the query, #5285). Exclude `loom:needs-revision` too: Curator holds the issue until it
 revises the body (#10753). Excluding them here, not just in the evaluation step, so a batch
 doesn't re-discover work another pass already claimed or that is already
 terminal — `title`/`body` feed `champion-issue-promo.md`'s body-hash
@@ -87,12 +84,13 @@ for it, #4966):
 > than looping forever — see Pass 0b for the bound.
 
 ```bash
+# Level, then oldest first (#11103)
 gh issue list \
   --label="loom:curated" \
   --state=open \
   --limit=500 \
-  --json number,title,body,labels,comments \
-  --jq '.[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision")) | not) |
+  --json number,title,body,labels,comments,createdAt \
+  --jq 'sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision")) | not) |
   "#\(.number) \(.title)"'
 ```
 
@@ -116,8 +114,8 @@ gh issue list \
   --label="loom:$P" \
   --state=open \
   --limit=500 \
-  --json number,title,body,labels,comments \
-  --jq '.[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision")) | not) |
+  --json number,title,body,labels,comments,createdAt \
+  --jq 'sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision")) | not) |
   "#\(.number) \(.title) ['"$P"']"'
 done
 ```
@@ -131,14 +129,13 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 If no individual proposals need promotion, check for epic proposals:
 
 ```bash
-# Epic proposals, highest priority level first (#9244, #10307)
-# level list: keep in sync with operator_levels.rs LEVELS until #10311
+# Epic proposals, highest priority level first (#11103)
 gh issue list \
   --label="loom:epic" \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments \
-  --jq 'sort_by([.labels[].name] | if any(test("high-priority")) then 0 elif index("loom:operator-priority") then 1 else 2 end) | .[] | "#\(.number) \(.title) [epic]"'
+  --jq 'sort_by([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end) | .[] | "#\(.number) \(.title) [epic]"'
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-epic.md`**. Epics have their own evaluation criteria focused on structure and phase decomposition.

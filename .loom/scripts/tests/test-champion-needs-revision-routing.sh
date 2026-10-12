@@ -177,9 +177,27 @@ else
     if cmp -s "$FIXTURE_DIR/p2.sh" "$FIXTURE_DIR/p2-old.sh"; then
         fail "negative control: Priority 2's filter does not name loom:needs-revision at all"
     else
-        assert_eq "#1 #2 #11 #12" "$(run_query p2-old.sh | numbers_of)" \
-            "negative control: without the exclusion, every curated issue out at Curator is re-evaluated"
+        assert_eq "#12 #2 #1 #11" "$(run_query p2-old.sh | numbers_of)" \
+            "negative control: without the exclusion, every curated issue out at Curator is re-evaluated (oldest first)"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 1b: Champion discovery orders proposals by level, then oldest first (#11103)"
+cat >"$FIXTURE_DIR/levels.json" <<'EOF'
+[
+ {"number":31,"title":"plain oldest","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:curated"}]},
+ {"number":32,"title":"important newer","createdAt":"2026-10-03T00:00:00Z","labels":[{"name":"loom:curated"},{"name":"loom:important"}]},
+ {"number":33,"title":"important older","createdAt":"2026-10-02T00:00:00Z","labels":[{"name":"loom:curated"},{"name":"loom:important"}]},
+ {"number":34,"title":"very important newest","createdAt":"2026-10-04T00:00:00Z","labels":[{"name":"loom:curated"},{"name":"loom:very-important"}]},
+ {"number":35,"title":"retired star","createdAt":"2026-09-30T00:00:00Z","labels":[{"name":"loom:curated"},{"name":"loom:operator-priority"}]}
+]
+EOF
+if [[ -s "$FIXTURE_DIR/p2.sh" ]]; then
+    LEVELS="$( cd "$FIXTURE_DIR" && PATH="$FIXTURE_DIR/bin:$PATH" LOOM_TEST_ISSUES="$FIXTURE_DIR/levels.json" bash p2.sh 2>&1 | numbers_of )"
+    assert_eq "#34 #33 #32 #35 #31" "$LEVELS" \
+        "very-important, then important (oldest first), then the rest oldest first; a retired star carries no level"
 fi
 
 # ---------------------------------------------------------------------------
@@ -199,56 +217,56 @@ assert_contains "$WORKFLOW" "then \`loom:needs-revision\`) first" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 2b: a starred loom:needs-revision issue takes the revision path, never the star promotion"
+echo "Test 2b: a priority loom:needs-revision issue takes the revision path first, in level order"
 cat >"$FIXTURE_DIR/stars.json" <<'EOF'
 [
- {"number":20,"title":"starred rejected","createdAt":"2026-10-06T00:00:00Z","labels":[{"name":"loom:operator-priority"},{"name":"loom:curated"},{"name":"loom:needs-revision"}]},
- {"number":21,"title":"level 2 rejected","createdAt":"2026-10-07T00:00:00Z","labels":[{"name":"loom:operator-high-priority"},{"name":"loom:curated"},{"name":"loom:needs-revision"}]},
- {"number":22,"title":"inherited rejected","createdAt":"2026-10-08T00:00:00Z","labels":[{"name":"loom:high-priority-inherited"},{"name":"loom:curated"},{"name":"loom:needs-revision"}]},
- {"number":23,"title":"starred fresh","createdAt":"2026-10-09T00:00:00Z","labels":[{"name":"loom:operator-priority"}]},
- {"number":24,"title":"unstarred revision","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:curated"},{"name":"loom:needs-revision"}]},
- {"number":25,"title":"starred disposition round","createdAt":"2026-10-02T00:00:00Z","labels":[{"name":"loom:operator-priority"},{"name":"loom:curated"},{"name":"loom:needs-revision"},{"name":"loom:curating"}]}
+ {"number":20,"title":"important rejected","createdAt":"2026-10-06T00:00:00Z","labels":[{"name":"loom:important"},{"name":"loom:curated"},{"name":"loom:needs-revision"}]},
+ {"number":21,"title":"very important rejected","createdAt":"2026-10-07T00:00:00Z","labels":[{"name":"loom:very-important"},{"name":"loom:curated"},{"name":"loom:needs-revision"}]},
+ {"number":22,"title":"retired star rejected","createdAt":"2026-10-08T00:00:00Z","labels":[{"name":"loom:operator-priority"},{"name":"loom:curated"},{"name":"loom:needs-revision"}]},
+ {"number":23,"title":"important fresh","createdAt":"2026-10-09T00:00:00Z","labels":[{"name":"loom:important"}]},
+ {"number":24,"title":"plain revision","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:curated"},{"name":"loom:needs-revision"}]},
+ {"number":25,"title":"important disposition round","createdAt":"2026-10-02T00:00:00Z","labels":[{"name":"loom:important"},{"name":"loom:curated"},{"name":"loom:needs-revision"},{"name":"loom:curating"}]}
 ]
 EOF
-section_body "Priority 0: Starred" <"$CURATOR_MD" \
-    | bash_block_with 'operator-high-priority' >"$FIXTURE_DIR/curator-star.sh"
+section_body "Priority 0: Priority Issues" <"$CURATOR_MD" \
+    | bash_block_with 'loom:very-important' >"$FIXTURE_DIR/curator-star.sh"
 run_stars() {
     ( cd "$FIXTURE_DIR" && PATH="$FIXTURE_DIR/bin:$PATH" \
         LOOM_TEST_ISSUES="$FIXTURE_DIR/stars.json" bash "$1" 2>&1 )
 }
 if [[ ! -s "$FIXTURE_DIR/curator-star.sh" || ! -s "$FIXTURE_DIR/curator-q.sh" ]]; then
-    fail "could not extract curator.md's star query or revision queue"
+    fail "could not extract curator.md's priority query or revision queue"
 else
     assert_eq "#23" "$(run_stars curator-star.sh | numbers_of)" \
-        "the star query lists only the fresh starred issue, never a starred loom:needs-revision one (all three priority labels)"
+        "the priority query lists only the fresh priority issue, never a priority loom:needs-revision one"
     sed 's/,"loom:needs-revision"//' "$FIXTURE_DIR/curator-star.sh" >"$FIXTURE_DIR/curator-star-old.sh"
-    assert_eq "#21 #22 #20 #23" "$(run_stars curator-star-old.sh | numbers_of)" \
-        "negative control: without the exclusion, starred rejected proposals reach promotion"
-    assert_eq "#21 #22 #20 #24" "$(run_stars curator-q.sh | numbers_of)" \
-        "the revision queue lists level 2 (direct, inherited), then the star, then the rest, skipping the claimed #25"
+    assert_eq "#21 #20 #23" "$(run_stars curator-star-old.sh | numbers_of)" \
+        "negative control: without the exclusion, priority rejected proposals reach the priority pass"
+    assert_eq "#21 #20 #24 #22" "$(run_stars curator-q.sh | numbers_of)" \
+        "the revision queue lists very-important, then important, then the rest (a retired star carries no level), skipping the claimed #25"
 fi
-# Backlog > 30 (gh default page) and priority levels: the queue must see every row, level 2 first.
+# Backlog > 30 (gh default page) and priority levels: the queue must see every row, very-important first.
 jq -n '
   [range(0; 31) | {number: (100 + .), title: "rev \(.)",
                    createdAt: "2026-09-\(. + 1 | tostring | if length < 2 then "0" + . else . end)T00:00:00Z",
                    labels: [{name: "loom:curated"}, {name: "loom:needs-revision"}]}]
-  | (.[0].labels += [{name: "loom:operator-priority"}])   # oldest, ordinary star, outside newest 30
-  + [{number: 200, title: "newer direct level 2", createdAt: "2026-10-05T00:00:00Z",
-      labels: [{name: "loom:operator-high-priority"}, {name: "loom:needs-revision"}]},
-     {number: 201, title: "newest inherited level 2", createdAt: "2026-10-06T00:00:00Z",
-      labels: [{name: "loom:high-priority-inherited"}, {name: "loom:needs-revision"}]}]
+  | (.[0].labels += [{name: "loom:important"}])   # oldest, important, outside newest 30
+  + [{number: 200, title: "newer very important", createdAt: "2026-10-05T00:00:00Z",
+      labels: [{name: "loom:very-important"}, {name: "loom:needs-revision"}]},
+     {number: 201, title: "newest very important", createdAt: "2026-10-06T00:00:00Z",
+      labels: [{name: "loom:very-important"}, {name: "loom:needs-revision"}]}]
 ' >"$FIXTURE_DIR/backlog.json"
 if [[ -s "$FIXTURE_DIR/curator-q.sh" ]]; then
     BACKLOG="$( cd "$FIXTURE_DIR" && PATH="$FIXTURE_DIR/bin:$PATH" LOOM_TEST_ISSUES="$FIXTURE_DIR/backlog.json" bash curator-q.sh 2>&1 | numbers_of )"
     assert_eq "#200 #201 #100 #101" "$(printf '%s\n' "$BACKLOG" | cut -d' ' -f1-4)" \
-        "level 2 (direct and inherited) precedes an older ordinary star, which precedes the rest oldest-first"
-    assert_contains " $BACKLOG " " #100 " "an old starred request outside the newest 30 is still listed (explicit --limit)"
+        "very-important precedes an older important request, which precedes the rest oldest-first"
+    assert_contains " $BACKLOG " " #100 " "an old important request outside the newest 30 is still listed (explicit --limit)"
     sed 's/ --limit 500//' "$FIXTURE_DIR/curator-q.sh" >"$FIXTURE_DIR/curator-q-nolimit.sh"
     NOLIMIT="$( cd "$FIXTURE_DIR" && PATH="$FIXTURE_DIR/bin:$PATH" LOOM_TEST_ISSUES="$FIXTURE_DIR/backlog.json" bash curator-q-nolimit.sh 2>&1 | numbers_of )"
     assert_not_contains " $NOLIMIT " " #100 " "negative control: without --limit the oldest request falls off the default 30-row page"
 fi
-assert_contains "$(section_body "Revising" <"$CURATOR_MD")" "a starred non-epic issue also gets \`loom:issue\`" \
-    "revision completion defines the post-revision star behaviour in the same edit that clears loom:needs-revision"
+assert_not_contains "$(section_body "Revising" <"$CURATOR_MD")" "\`loom:issue\`" \
+    "revision completion never promotes: a priority label is not an approval (#11103)"
 
 # ---------------------------------------------------------------------------
 echo ""

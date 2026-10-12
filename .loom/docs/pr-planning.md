@@ -52,7 +52,7 @@ configuration layers (shared/private fleet defaults and repository overrides):
 ```
 
 Setting it to `false` restores ordinary PR ordering and fallback admission.
-Origin remains recorded and operator stars retain their existing behavior.
+Origin remains recorded and priority labels keep their ordering.
 `loom-daemon pr-queue --role judge|doctor|champion` supplies one shared ordered
 JSON queue with `origin`, `priorityReason` and `mode` explanations. Role prompts
 refresh the queue after each completed/skipped PR and take the next unvisited row.
@@ -60,12 +60,13 @@ Keep a per-pass visited set so a waiting preferred PR cannot loop or idle others
 This lets a human PR arriving during a fleet batch take the next free turn. They
 use that order, preserving their normal tie-breaks: Judge listing order,
 Doctor approved conflicts before review feedback, Champion oldest first.
-Stars lead; with preference enabled interactive PRs follow, then ordinary work.
+Priority PRs lead (`loom:very-important`, then `loom:important`); with preference
+enabled interactive PRs follow, then ordinary work.
 Existing emergency recovery of verified-red main remains a separate higher
 priority workflow; this policy changes neither issue/build planning nor recovery.
 
 Preference is non-preemptive. Finish work already running, use normal concurrency,
-and never interrupt agents, cancel CI, pause the fleet or borrow the star's
+and never interrupt agents, cancel CI, pause the fleet or take an
 extra slot just because a PR is interactive. Every role continues past candidates
 waiting for checks, dependencies, a live claim or a required human response.
 No quota or aging mechanism is added.
