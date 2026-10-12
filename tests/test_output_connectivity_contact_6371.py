@@ -273,10 +273,31 @@ TWO_RESISTOR_BOARD = """(kicad_pcb
 """
 
 
+# Issue #6376: every ``kct route`` flow runs the same post-save verifier.
+# The escalation flows return before main_with_result's tail, so each needs
+# its own coverage -- the default (auto-layers) flow most of all.
+ROUTE_FLOWS = {
+    "no-auto-layers": ["--no-auto-layers", "--layers", "2"],
+    "auto-layers": [],  # the default flow: no --layers, no --no-auto-layers
+    "adaptive-rules": ["--adaptive-rules", "--no-auto-layers"],
+    "auto-layers+adaptive-rules": ["--auto-layers", "--adaptive-rules"],
+}
+# The SUCCESS banner each flow prints on the clean control run -- proves the
+# case really went through that flow rather than main_with_result's tail.
+FLOW_SUCCESS_BANNER = {
+    "no-auto-layers": "SUCCESS: All signal nets routed",
+    "auto-layers": "SUCCESS: Design requires minimum 2 layers",
+    "adaptive-rules": "SUCCESS: Routing complete with adaptive rules",
+    "auto-layers+adaptive-rules": "SUCCESS: Minimum viable config",
+}
+
+
+@pytest.mark.parametrize("flow", list(ROUTE_FLOWS))
 @pytest.mark.parametrize("drop_written_copper", [False, True])
 def test_route_exit_code_follows_post_save_verdict(
-    tmp_path: Path, monkeypatch, capsys, drop_written_copper: bool
+    tmp_path: Path, monkeypatch, capsys, drop_written_copper: bool, flow: str
 ):
+    from kicad_tools.cli import route_cmd
     from kicad_tools.cli.route_cmd import main as route_main
     from kicad_tools.router import io as router_io
 
@@ -293,6 +314,16 @@ def test_route_exit_code_follows_post_save_verdict(
         return real_verify(pcb_content, *args, **kwargs)
 
     monkeypatch.setattr(router_io, "verify_output_connectivity", lossy_verify)
+
+    # Capture the parsed args so the stashed _last_layer_result can be checked.
+    seen_args = []
+    real_layer_escalation = route_cmd.route_with_layer_escalation
+
+    def spy_layer_escalation(*a, **kw):
+        seen_args.append(kw["args"])
+        return real_layer_escalation(*a, **kw)
+
+    monkeypatch.setattr(route_cmd, "route_with_layer_escalation", spy_layer_escalation)
     rc = route_main(
         [
             str(board),
@@ -300,19 +331,50 @@ def test_route_exit_code_follows_post_save_verdict(
             str(out),
             "--skip-drc",
             "--no-cache",
-            "--no-auto-layers",
-            "--layers",
-            "2",
+            *ROUTE_FLOWS[flow],
         ]
     )
     text = capsys.readouterr().out
 
+    assert "--- Output Connectivity Verification ---" in text, text
+    assert (flow == "auto-layers") == bool(seen_args)
     if not drop_written_copper:
         assert rc == 0, text
         assert "All nets verified connected in written output" in text
+        assert FLOW_SUCCESS_BANNER[flow] in text, text
         return
     assert rc == 6, text
     assert "All nets verified connected" not in text
     assert "SUCCESS" not in text
     assert "Nets connected:  0 (verified in written output)" in text
     assert "SIG" in text
+    if seen_args:
+        # Issue #6376: the result an outer --auto-pcb-size wrapper reads
+        # carries the verified count, not the router's pre-write one.
+        last = seen_args[0]._last_layer_result
+        assert last.nets_routed == 0
+        assert last.completion == 0.0
+        assert last.success is False
+
+
+@pytest.mark.parametrize(
+    ("strict", "disconnected", "regressed", "expected"),
+    [
+        (False, False, False, None),
+        (False, True, False, None),  # already-partial net: threshold codes apply
+        (True, True, False, 6),  # --strict: any disconnect is fatal (#2264)
+        (False, True, True, 6),  # counted-connected but open: fatal (#6371)
+        (True, True, True, 6),
+    ],
+)
+def test_output_verification_exit_rule(strict, disconnected, regressed, expected):
+    import argparse
+
+    from kicad_tools.cli.route_cmd import _output_verification_exit, _OutputVerification
+
+    info = {"net_name": "SIG", "connected": False, "total_pads": 2}
+    v = _OutputVerification(
+        disconnected={1: info} if disconnected else {},
+        regressed={1: info} if regressed else {},
+    )
+    assert _output_verification_exit(v, argparse.Namespace(strict=strict)) == expected
