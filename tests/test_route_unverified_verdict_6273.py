@@ -68,7 +68,7 @@ def no_time_for_drc(monkeypatch):
 def stranded_pour_unknown(monkeypatch):
     """The pour-oracle stage ran out of time before its first KiCad DRC."""
 
-    def _stage(output_path, *, args, quiet=False):
+    def _stage(output_path, *, args, quiet=False, **_kw):
         args._stranded_pour_links = 0
         args._allow_stranded_pour_pads = bool(getattr(args, "allow_stranded_pour_pads", False))
         args._stranded_pour_unknown = True

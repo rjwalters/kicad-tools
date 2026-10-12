@@ -7231,7 +7231,9 @@ def _make_pour_oracle(args):
     return oracle
 
 
-def _complete_pour_nets_with_oracle(output_path: Path, *, args, quiet: bool = False) -> int:
+def _complete_pour_nets_with_oracle(
+    output_path: Path, *, args, quiet: bool = False, router=None
+) -> int:
     """Run the oracle stage, then re-canonicalize the board's UUIDs (Issue #6052).
 
     Every route flow calls this right after :func:`_fill_zones_after_route`,
@@ -7242,13 +7244,26 @@ def _complete_pour_nets_with_oracle(output_path: Path, *, args, quiet: bool = Fa
     touches UUIDs and the order of top-level copper, never geometry.
     """
     try:
-        return _run_pour_oracle_stage(output_path, args=args, quiet=quiet)
+        return _run_pour_oracle_stage(output_path, args=args, quiet=quiet, router=router)
     finally:
         if not getattr(args, "dry_run", False) and Path(output_path).exists():
             _canonicalize_routed_uuids(output_path, args=args)
 
 
-def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> int:
+def _pour_closer_net_class_map(router, args) -> dict | None:
+    """The router's effective net-class map for the pour closer (Issue #6374).
+
+    ``router.net_class_map`` with the user's loaded ``--net-class-map``
+    (``args._loaded_net_class_map``) merged over it -- the same map
+    :func:`_write_net_class_map_sidecar` serializes, so the sidecar and the
+    closer cannot disagree.  ``None`` when neither carries an entry.
+    """
+    effective = dict(getattr(router, "net_class_map", None) or {})
+    effective.update(getattr(args, "_loaded_net_class_map", None) or {})
+    return effective or None
+
+
+def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, router=None) -> int:
     """Run the KiCad-oracle completion loop on the pour nets (Issue #5785).
 
     Called right after the zone fill.  Asks ``kicad-cli pcb drc
@@ -7306,6 +7321,8 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
             clearance=float(getattr(args, "clearance", 0.2)),
             trace_width=float(getattr(args, "trace_width", 0.2)),
             refill=refill,
+            # Issue #6374: new pour copper keeps each net's class clearance.
+            net_class_map=_pour_closer_net_class_map(router, args),
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
@@ -7344,6 +7361,9 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
         )
         for lk in result.final_link_details[:5]:
             print(f"    still unconnected: {lk.describe()}")
+        # Issue #6374: a link closed below its class clearance is never silent.
+        for line in result.relaxed_links:
+            print(f"    RELAXED: {line}")
     return result.final_links
 
 
@@ -10499,7 +10519,9 @@ def route_with_layer_escalation(
     # unfilled polygons.
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
+        _complete_pour_nets_with_oracle(
+            output_path, args=args, quiet=quiet, router=final_result.router
+        )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -11478,7 +11500,9 @@ def route_with_rule_relaxation(
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
+        _complete_pour_nets_with_oracle(
+            output_path, args=args, quiet=quiet, router=final_result.router
+        )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -14014,7 +14038,9 @@ def route_with_combined_escalation(
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
+        _complete_pour_nets_with_oracle(
+            output_path, args=args, quiet=quiet, router=final_result.router
+        )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -21350,7 +21376,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # filled zones rather than bare zone outlines.
     if not args.dry_run and stats["nets_routed"] > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
     _rss.mark("post-fill-zones")
 

@@ -50,8 +50,8 @@ import logging
 import math
 import re
 import time
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -85,6 +85,11 @@ DEFAULT_ORACLE_ROUNDS = 3
 
 #: Most floating fill islands bonded per net in one attempt.
 MAX_ISLAND_JOINS = 16
+
+#: Issue #6374: a weld's trace + via land within ``run_stitch``'s escape
+#: distance (4 mm) of the pad; foreign copper this far from a named pad is a
+#: neighbour whose class clearance the weld must keep.
+WELD_NEIGHBOURHOOD_MM = 5.0
 
 #: Why the loop stopped (``OracleCompletionResult.stop_reason``).
 STOP_NOT_RUN = "oracle_not_run"  # kicad-cli absent / timed out on the first call
@@ -314,6 +319,10 @@ class ClosureAttempt:
         default_factory=dict
     )
     notes: list[str] = field(default_factory=list)
+    #: Issue #6374: links closed BELOW their class clearance ``c(P, N)`` by a
+    #: deliberate, opt-in relaxation (e.g. a declared-rule retry).  Every such
+    #: link must be listed here (and in ``notes``) -- never closed silently.
+    relaxed: list[str] = field(default_factory=list)
 
 
 #: ``closer(pcb_path, links, banned_keys) -> ClosureAttempt``; edits the board.
@@ -353,6 +362,10 @@ class OracleCompletionResult:
     rounds: list[OracleRound] = field(default_factory=list)
     final_link_details: list[OracleLink] = field(default_factory=list)
     note: str | None = None
+    #: Issue #6374: every link a KEPT round closed below its class clearance
+    #: (``ClosureAttempt.relaxed`` of the kept attempts).  Empty unless a
+    #: closer deliberately relaxed a link.
+    relaxed_links: list[str] = field(default_factory=list)
 
     @property
     def closed(self) -> int:
@@ -572,6 +585,7 @@ def run_oracle_completion(
             break
         if attempt is not None:
             settled |= set(attempt.footprints)
+            result.relaxed_links.extend(attempt.relaxed)
         geo, links = geo_after, after_links
         say(f"    kept: {count} -> {len(links)} link(s)")
         if not links:
@@ -634,6 +648,53 @@ class PourLinkCloser:
     #: Close whole copper clusters instead of the items KiCad happened to name
     #: (Issue #5934).  See :meth:`_cluster_links`.
     canonical_clusters: bool = True
+    #: Issue #6374: the router's effective ``{net_name: NetClassRouting}``
+    #: map.  New copper on pour net P keeps ``c(P, N) = max(clearance,
+    #: class(P).clearance, class(N).clearance)`` from copper on net N -- the
+    #: grid router's rule (``io._get_pair_clearance``).  ``clearance`` stays
+    #: the floor; ``None`` (or a net with no entry) contributes only it.
+    net_class_map: Mapping[str, Any] | None = None
+
+    # -- net-class clearance (Issue #6374) ----------------------------------------
+
+    def class_clearance(self, net_name: str | None) -> float:
+        """``max(clearance, class(net).clearance)``; the floor for a classless net."""
+        cls = (self.net_class_map or {}).get(net_name or "")
+        value = getattr(cls, "clearance", None) if cls is not None else None
+        return max(self.clearance, float(value)) if value is not None else self.clearance
+
+    def pair_clearance(self, pour_net: str, other_net: str | None) -> float:
+        """``c(P, N)``: the clearance copper on ``pour_net`` keeps from ``other_net``."""
+        return max(self.class_clearance(pour_net), self.class_clearance(other_net))
+
+    def link_rules(self, base: Any, pcb: Any, pour_net: str) -> Any:
+        """``base`` (a ``LinkRouteRules``) specialised to links on ``pour_net``.
+
+        Without a net-class map the rules are returned unchanged (so the
+        routed copper is byte-identical to the single-scalar behaviour).
+        """
+        if not self.net_class_map:
+            return base
+        by_net = {
+            num: self.pair_clearance(pour_net, getattr(net, "name", None))
+            for num, net in pcb.nets.items()
+        }
+        return replace(base, clearance=self.class_clearance(pour_net), clearance_by_net=by_net)
+
+    @staticmethod
+    def record_relaxation(
+        attempt: ClosureAttempt, link: str, used: float, required: float, why: str
+    ) -> None:
+        """Log a link deliberately closed at ``used`` < its class clearance.
+
+        The only sanctioned way to close a pour link below ``c(P, N)``: the
+        line lands in ``attempt.notes`` and ``attempt.relaxed`` (and from
+        there in ``OracleCompletionResult.relaxed_links``, which ``kct route``
+        prints).
+        """
+        line = f"{link}: closed at {used:g} mm < class clearance {required:g} mm ({why})"
+        attempt.notes.append(line)
+        attempt.relaxed.append(line)
 
     def __call__(
         self, pcb_path: Path, links: Sequence[OracleLink], banned: frozenset[str]
@@ -783,6 +844,53 @@ class PourLinkCloser:
 
     # -- pads ---------------------------------------------------------------
 
+    def weld_clearance(self, pcb_path: Path, pads_by_net: dict[str, set[str]]) -> float:
+        """The scalar clearance ``run_stitch`` welds the named pads at (Issue #6374).
+
+        ``run_stitch`` takes one clearance for every net it welds, so this is
+        the largest ``c(P, N)`` over each pour net P and every net N with
+        copper within :data:`WELD_NEIGHBOURHOOD_MM` of one of P's named pads
+        -- the pour net's class always, a neighbour's class only where a weld
+        could actually land next to it.  Without a net-class map it is
+        exactly ``clearance``.
+        """
+        floor = max((self.class_clearance(net) for net in pads_by_net), default=self.clearance)
+        if not self.net_class_map:
+            return floor
+        # Only a neighbour class above the floor can raise the scalar.
+        stricter = {
+            name for name in self.net_class_map if self.class_clearance(name) > floor + 1e-9
+        }
+        if not stricter:
+            return floor
+        try:
+            from kicad_tools.router.link_router import _build_model, terminal_for_pad
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(str(pcb_path))
+            model = _build_model(pcb)
+        except Exception:  # cannot see the neighbours: be conservative
+            return max(floor, *(self.class_clearance(name) for name in stricter))
+        names = {num: getattr(net, "name", None) for num, net in pcb.nets.items()}
+        candidates = [it for it in model.items if names.get(it.net) in stricter]
+        best = floor
+        for net, keys in pads_by_net.items():
+            for key in keys:
+                ref, _, number = key.partition(".")
+                t = terminal_for_pad(pcb, ref, number)
+                if t is None:
+                    continue
+                pad_geom = next(iter(t.layers.values()))
+                for it in candidates:
+                    c = self.pair_clearance(net, names.get(it.net))
+                    if c <= best:
+                        continue
+                    if any(
+                        g.distance(pad_geom) <= WELD_NEIGHBOURHOOD_MM for g in it.layers.values()
+                    ):
+                        best = c
+        return best
+
     def _weld_pads(
         self, pcb_path: Path, pads_by_net: dict[str, set[str]], attempt: ClosureAttempt
     ) -> set[str]:
@@ -790,6 +898,7 @@ class PourLinkCloser:
 
         nets = sorted(pads_by_net)
         only = frozenset(k for keys in pads_by_net.values() for k in keys)
+        clearance = self.weld_clearance(pcb_path, pads_by_net)
 
         def stitch(pads: frozenset[str], force: frozenset[str], fills_yield: bool):
             return run_stitch(
@@ -797,7 +906,7 @@ class PourLinkCloser:
                 nets,
                 via_size=self.via_size,
                 drill=self.via_drill,
-                clearance=self.clearance,
+                clearance=clearance,
                 trace_width=self.trace_width,
                 avoid_pad_overlap=self.avoid_via_in_pad,
                 only_pads=pads,
@@ -875,13 +984,21 @@ class PourLinkCloser:
         pcb = PCB.load(str(pcb_path))
         ox, oy = pcb.board_origin
         model = _build_model(pcb)
-        rules = LinkRouteRules(
+        base_rules = LinkRouteRules(
             trace_width=self.trace_width,
             clearance=self.clearance,
             via_size=self.via_size,
             via_drill=self.via_drill,
         )
         net_ids = {net.name: num for num, net in pcb.nets.items() if net.name}
+        # Issue #6374: per pour net, the class-aware rules (``c(P, N)`` per
+        # neighbour net).  ``rules`` itself when there is no net-class map.
+        rules_by_net: dict[str, Any] = {}
+
+        def rules_for(net: str) -> Any:
+            if net not in rules_by_net:
+                rules_by_net[net] = self.link_rules(base_rules, pcb, net)
+            return rules_by_net[net]
 
         def terminal(end: OracleEndpoint, net_number: int) -> LinkTerminal | None:
             if end.kind == "pad" and end.ref and end.pad:
@@ -927,6 +1044,7 @@ class PourLinkCloser:
                 net_number = net_ids.get(lk.net)
                 if net_number is None:
                     continue
+                rules = rules_for(lk.net)
                 ta, tb = terminal(lk.a, net_number), terminal(lk.b, net_number)
                 route = None
                 if lk.a.kind == "zone" and lk.b.kind == "zone":
@@ -982,7 +1100,10 @@ class PourLinkCloser:
                                 pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
                             )
                 if route is None:
-                    attempt.notes.append(f"{lk.describe()}: no clearance-legal route")
+                    note = f"{lk.describe()}: no clearance-legal route"
+                    if rules is not base_rules:
+                        note += f" at class clearance >= {rules.clearance:g} mm"
+                    attempt.notes.append(note)
                     continue
                 commit(route, _route_key(lk), net_number)
         except BaseException:
