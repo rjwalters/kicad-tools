@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 # diff-pair partner no longer relaxes a barrel, ``route_via_geometry_clear``
 # gained ``trace_clearance`` and ``router_cpp.trace_via_clearance`` is bound.
 # A v48 .so would let a trace land inside an earlier via's floor.
-_REQUIRED_CPP_BUILD_VERSION = 49
+_REQUIRED_CPP_BUILD_VERSION = 50
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``

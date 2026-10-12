@@ -187,9 +187,16 @@ Grid3D::Grid3D(int cols, int rows, int layers, float resolution,
 }
 
 void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
-                          bool pad_blocked) {
+                          bool pad_blocked, bool pad_source, bool shared_pad_halo) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
+    // Issue #6315: pad provenance survives only while every static marking
+    // of the cell came from the pad sync.  A cell first blocked by anything
+    // else (board edge, keepout, preserved copper, stitch reservation) is
+    // never handed to the exact pad-geometry test.
+    const bool prior_static_non_pad = cell.static_blocked && !cell.pad_cell;
+    cell.pad_cell = pad_source && !prior_static_non_pad;
+    cell.shared_pad_halo = cell.pad_cell && shared_pad_halo;
     if (cell.congestion_counted) {
         update_congestion(x, y, layer, -1);
         cell.congestion_counted = false;
@@ -616,7 +623,35 @@ void Grid3D::add_pad(float x, float y, float width, float height,
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
                      clearance_override, is_plane_net, rotation, clearance_override, false, is_circular});
     if (authored_index_) authored_index_pad(pads_.size() - 1);  // Issue #6243
+    index_pad_bucket(pads_.size() - 1);  // Issue #6315
 }
+
+// -----------------------------------------------------------------------
+// Issue #6315: exact pad clearance for pad-derived cells
+// -----------------------------------------------------------------------
+
+namespace {
+constexpr float PAD_BUCKET_MM = 1.0f;
+
+inline int64_t pad_bucket_key(int bx, int by) {
+    return (static_cast<int64_t>(bx) << 32) ^ static_cast<int64_t>(static_cast<uint32_t>(by));
+}
+}  // namespace
+
+void Grid3D::index_pad_bucket(size_t index) {
+    const auto& pad = pads_[index];
+    // Rotation-safe bound: half the diagonal covers the pad in any rotation.
+    const float r = 0.5f * std::sqrt(pad.width * pad.width + pad.height * pad.height);
+    const int bx1 = static_cast<int>(std::floor((pad.x - r) / PAD_BUCKET_MM));
+    const int bx2 = static_cast<int>(std::floor((pad.x + r) / PAD_BUCKET_MM));
+    const int by1 = static_cast<int>(std::floor((pad.y - r) / PAD_BUCKET_MM));
+    const int by2 = static_cast<int>(std::floor((pad.y + r) / PAD_BUCKET_MM));
+    for (int by = by1; by <= by2; ++by)
+        for (int bx = bx1; bx <= bx2; ++bx)
+            pad_buckets_[pad_bucket_key(bx, by)].push_back(static_cast<uint32_t>(index));
+    pad_bucket_max_override_ = std::max(pad_bucket_max_override_, pad.clearance_override);
+}
+
 
 // -----------------------------------------------------------------------
 // Issue #6243: authored per-net clearance minima
@@ -923,6 +958,13 @@ void Grid3D::set_cells_static_blocked(const std::vector<int>& xs,
     route_coverage_dirty_ = true;
 }
 
+int Grid3D::route_coverage_at(int x, int y, int layer) const {
+    if (!is_valid(x, y, layer)) return -1;
+    if (active_route_marks_.empty()) return 0;
+    route_geometry_complete();  // Refresh the coverage map if dirty.
+    return route_geometry_cells_[index(x, y, layer)];
+}
+
 bool Grid3D::route_cell_has_geometry(int x, int y, int layer) const {
     if (!is_valid(x, y, layer)) return false;
     const auto& cell = at(x, y, layer);
@@ -1009,6 +1051,8 @@ void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int n
 
 void Grid3D::clear_validation_data() {
     pads_.clear();
+    pad_buckets_.clear();  // Issue #6315
+    pad_bucket_max_override_ = 0.0f;
     authored_pad_specs_.clear();
     clear_component_holes();
     stored_segments_.clear();
@@ -1251,6 +1295,45 @@ bool Grid3D::edge_foreign_pad_clear(
         const float clearance = center_dist - half_width;
         if (clearance < required - CLEARANCE_EPSILON_MM) {
             return false;
+        }
+    }
+    return true;
+}
+
+bool Grid3D::pad_geometry_clear(
+    float ax, float ay, float bx, float by, int layer, int net,
+    float half_width, float clearance) const {
+    const float reach = half_width + std::max({clearance, pad_bucket_max_override_,
+                                               max_pairwise_clearance_});
+    const int qx1 = static_cast<int>(std::floor((std::min(ax, bx) - reach) / PAD_BUCKET_MM));
+    const int qx2 = static_cast<int>(std::floor((std::max(ax, bx) + reach) / PAD_BUCKET_MM));
+    const int qy1 = static_cast<int>(std::floor((std::min(ay, by) - reach) / PAD_BUCKET_MM));
+    const int qy2 = static_cast<int>(std::floor((std::max(ay, by) + reach) / PAD_BUCKET_MM));
+    for (int qy = qy1; qy <= qy2; ++qy) {
+        for (int qx = qx1; qx <= qx2; ++qx) {
+            const auto it = pad_buckets_.find(pad_bucket_key(qx, qy));
+            if (it == pad_buckets_.end()) continue;
+            // A pad spanning several buckets is checked more than once;
+            // re-checking cannot change the verdict.
+            for (uint32_t i : it->second) {
+                const auto& pad = pads_[i];
+                if (pad.net == net && net != 0) continue;  // own copper
+                if (pad.layer_idx != -1 && pad.layer_idx != layer) continue;
+                float required = std::max(clearance, pad.clearance_override);
+                const float pair = pairwise_required_clearance(net, pad.net);
+                if (pair > required) required = pair;
+                float center_dist;
+                if (pad.is_circular) {
+                    const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
+                    center_dist = point_to_segment_distance(pad.x, pad.y, ax, ay, bx, by)
+                        - pad_radius;
+                } else {
+                    center_dist = pad_rect_distance(pad, ax, ay, bx, by);
+                }
+                if (center_dist - half_width < required - CLEARANCE_EPSILON_MM) {
+                    return false;
+                }
+            }
         }
     }
     return true;

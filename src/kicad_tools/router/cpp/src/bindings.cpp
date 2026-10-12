@@ -61,7 +61,11 @@ NB_MODULE(router_cpp, m) {
         // Issue #4071: per-cell corridor-reservation owner set count
         // (read-only surface for parity tests; the owner nets are written
         // via ``Grid3D::reserve_cell`` / read via ``is_reserved_for``).
-        .def_ro("reserved_count", &GridCell::reserved_count);
+        .def_ro("reserved_count", &GridCell::reserved_count)
+        // Issue #6315: pad-geometry provenance (read-only; written through
+        // ``Grid3D::mark_blocked``'s ``pad_source`` / ``shared_pad_halo``).
+        .def_ro("pad_cell", &GridCell::pad_cell)
+        .def_ro("shared_pad_halo", &GridCell::shared_pad_halo);
 
     // DesignRules struct
     nb::class_<DesignRules>(m, "DesignRules")
@@ -273,7 +277,13 @@ NB_MODULE(router_cpp, m) {
         .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
-             "pad_blocked"_a = false)
+             "pad_blocked"_a = false, "pad_source"_a = false,
+             "shared_pad_halo"_a = false)
+        // Issue #6315: exact swept-edge vs foreign-pad clearance used to
+        // resolve pad-derived cells in the A*.
+        .def("pad_geometry_clear", &Grid3D::pad_geometry_clear,
+             "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
+             "half_width"_a, "clearance"_a)
         .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
         // Route marking

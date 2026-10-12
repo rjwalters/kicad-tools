@@ -298,7 +298,12 @@ namespace router {
 // ``route_via_geometry_clear`` gained a trailing ``trace_clearance`` argument.
 // A v48 .so would let a trace land inside the via floor of an earlier via,
 // so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 49;
+// v50 (Issue #6315): ``GridCell`` gained ``pad_cell`` / ``shared_pad_halo``,
+// ``Grid3D::mark_blocked`` gained the matching trailing ``pad_source`` /
+// ``shared_pad_halo`` arguments, and ``Grid3D::pad_geometry_clear`` resolves
+// pad-derived cells with the exact segment-vs-pad test.  A v49 .so would
+// reject the new ``mark_blocked`` arguments, so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 50;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -350,6 +355,18 @@ struct GridCell {
     // foreign traces may still cross.  Meaningful only when
     // ``reserved_count > 0``.  See ``ROUTER_CPP_BUILD_VERSION`` note.
     bool reserved_soft = false;
+    // Issue #6315: true while this cell's static blockage comes ONLY from
+    // pad copper plus pad clearance (metal, #3233 band, clearance halo),
+    // as pushed by the Python pad sync (``mark_blocked(..., pad_source)``).
+    // Any other static marking of the cell clears it for good.  The A*
+    // resolves such cells with the exact segment-vs-pad test
+    // (``Grid3D::pad_geometry_clear``) instead of treating a foreign-owned
+    // clearance cell as copper.
+    bool pad_cell = false;
+    // Issue #6315: a ``pad_cell`` in the clearance halo of pads on two
+    // different signal nets.  It belongs to neither net alone, so even its
+    // recorded owner must pass the clearance check to step on it.
+    bool shared_pad_halo = false;
 };
 
 // A* node for priority queue

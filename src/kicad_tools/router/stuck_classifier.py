@@ -59,6 +59,7 @@ routing-report feature.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -83,6 +84,8 @@ __all__ = [
     "StuckClassifierResult",
     "classify_stuck_nets",
     "classify_stuck_nets_from_pcb",
+    "is_budget_search_failure",
+    "normalize_search_failure",
 ]
 
 
@@ -1069,6 +1072,7 @@ def classify_stuck_nets_from_pcb(
     strict: bool = True,
     net_class_map: dict[str, NetClassRouting] | None = None,
     access_witness: AccessWitness | None = None,
+    search_failures: Mapping[str, str | int] | None = None,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on *pcb* (already-loaded PCB).
 
@@ -1096,6 +1100,15 @@ def classify_stuck_nets_from_pcb(
     default) leaves every ``StuckNetDiagnosis.access_witness`` unset, which is
     byte-identical to pre-#5517 behavior -- a bare ``.kicad_pcb`` with no
     sidecar can never produce one.
+
+    ``search_failures`` (issue #6315): an optional ``{net_name: reason}`` map
+    of how the router's last search for each net ended, from an in-process
+    caller that has it.  A reason is a label (``"no_path"``,
+    ``"deadline-exceeded"``, ...) or a C++ ``FAILURE_*`` code.  A net whose
+    search ended for a stated GEOMETRIC reason (anything but a time or
+    iteration budget) is never classified :attr:`StuckClass.BUDGET_STARVED`
+    -- the router already proved more budget is not the fix.  ``None`` (the
+    default) is byte-identical to pre-#6315 behaviour.
     """
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
@@ -1209,6 +1222,11 @@ def classify_stuck_nets_from_pcb(
             dense_cluster_threshold=dense_cluster_threshold,
             same_group_congestion=same_group_congestion,
             foreign_congestion=foreign_congestion,
+            search_failure=(
+                normalize_search_failure(search_failures.get(net.net_name))
+                if search_failures
+                else None
+            ),
         )
         # Attach match-group identity (Defect 2): same-group vs foreign split and
         # which blockers are the net's own bundle siblings.
@@ -1542,6 +1560,42 @@ def _build_recommendation(
     return []
 
 
+# Issue #6315: labels for the C++ ``FAILURE_*`` codes (``cpp/include/types.hpp``)
+# so callers can hand the classifier either the raw code or a label.
+_CPP_FAILURE_LABELS: dict[int, str] = {
+    1: "no_path",
+    2: "iteration_limit",
+    3: "timeout",
+    5: "via_via_blocked",
+    7: "pairwise_blocked",
+}
+
+# Substrings that mark a search which stopped because it ran out of time or
+# iterations, i.e. the only failures for which "raise the budget" is advice.
+_BUDGET_FAILURE_MARKERS = ("timeout", "iteration", "deadline", "budget")
+
+
+def normalize_search_failure(reason: str | int | None) -> str | None:
+    """Return a label for a router search-failure *reason* (issue #6315).
+
+    ``None`` / empty / ``0`` (``FAILURE_NONE``) mean "no recorded failure".
+    Integer C++ ``FAILURE_*`` codes map to their labels; strings pass through.
+    """
+    if reason is None or reason == "" or reason == 0:
+        return None
+    if isinstance(reason, bool):
+        return None
+    if isinstance(reason, int):
+        return _CPP_FAILURE_LABELS.get(reason, f"failure_reason={reason}")
+    return str(reason)
+
+
+def is_budget_search_failure(reason: str) -> bool:
+    """True when a search-failure label means "ran out of time/iterations"."""
+    lowered = reason.lower()
+    return any(marker in lowered for marker in _BUDGET_FAILURE_MARKERS)
+
+
 def _decide(
     *,
     net_name: str,
@@ -1555,6 +1609,7 @@ def _decide(
     dense_cluster_threshold: int,
     same_group_congestion: int = 0,
     foreign_congestion: int = 0,
+    search_failure: str | None = None,
 ) -> StuckNetDiagnosis:
     """Apply the decision tree to one net's diagnostics.
 
@@ -1593,6 +1648,15 @@ def _decide(
        split out of PLACEMENT_BOUND.  Reached by geometry alone (no route is
        attempted), so the evidence explicitly disclaims confidence
        ("looks routable ... not confirmed").
+
+       Issue #6315: when the caller supplies ``search_failure`` -- the router's
+       own record of how its last search for this net ended -- and that reason
+       is geometric (not a time / iteration budget), branch 5 does NOT fire:
+       the router searched with budget to spare and found no legal path, so
+       "raise the budget" is wrong.  The net is reported ESCAPE_BLOCKED with
+       the router's reason quoted as evidence (the geometry-only arc probe
+       measures a nominal lane, not the net's real trace width -- board 05's
+       0.4 mm ``PHASE_C`` at U2's 0.65 mm pitch looked escapable to it).
     """
     open_deg = worst_open_arc * (360.0 / ESCAPE_SECTORS)
 
@@ -1668,6 +1732,32 @@ def _decide(
         else "no strict copper nearby"
     )
 
+    if (
+        local_congestion < congestion_threshold
+        and search_failure is not None
+        and not is_budget_search_failure(search_failure)
+    ):
+        evidence = (
+            f"the router's search ended for a geometric reason "
+            f"({search_failure}) with budget to spare, although the "
+            f"geometry-only probe sees a {open_deg:.0f} deg lane ({nb}); "
+            f"more search budget will not route it -- the pad's escape at the "
+            f"net's real trace width is the constraint"
+        )
+        return StuckNetDiagnosis(
+            net_name=net_name,
+            net_number=net_number,
+            classification=StuckClass.ESCAPE_BLOCKED,
+            unconnected_pads=pad_names,
+            blocking_nets=[],
+            evidence=evidence,
+            escape_lane_deg=open_deg,
+            local_congestion=local_congestion,
+            nearest_blocker_mm=nearest_blocker_mm,
+            same_group_congestion=same_group_congestion,
+            foreign_congestion=foreign_congestion,
+        )
+
     if local_congestion < congestion_threshold:
         # Sparse neighbourhood, open lane, nothing rippable: geometrically
         # nothing is in the way.  This is indistinguishable, under pure geometry,
@@ -1731,6 +1821,7 @@ def classify_stuck_nets(
     strict: bool = True,
     net_class_map: dict[str, NetClassRouting] | None = None,
     access_witness_path: str | Path | None = None,
+    search_failures: Mapping[str, str | int] | None = None,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on the PCB at *pcb_path*.
 
@@ -1749,6 +1840,9 @@ def classify_stuck_nets(
     being classified -- the same single-directory convention the
     ``net_class_map.json`` consumers use.  An absent or unreadable sidecar
     resolves to ``None`` and the output is byte-identical to pre-#5517.
+
+    ``search_failures`` (issue #6315): forwarded unchanged to
+    :func:`classify_stuck_nets_from_pcb` -- see its docstring.
     """
     from kicad_tools.router.access_witness import load_access_witness_sidecar
     from kicad_tools.schema.pcb import PCB
@@ -1771,4 +1865,5 @@ def classify_stuck_nets(
         excluded_nets=excluded_nets,
         strict=strict,
         net_class_map=net_class_map,
+        search_failures=search_failures,
     )

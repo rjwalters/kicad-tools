@@ -460,6 +460,12 @@ private:
     }
     int physical_partner_net_ = -1;
     float physical_partner_clearance_ = -1.0f;
+    // Issue #6315: exact swept-step vs foreign-pad clearance, and the
+    // per-cell gate that applies it to ``GridCell::pad_cell`` cells.
+    bool pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net) const;
+    bool pad_cell_clear(int cx, int cy, int layer, int x1, int y1,
+                        int x2, int y2, int net) const;
+    bool pad_cell_resolvable(const GridCell& cell, int cx, int cy, int layer) const;
     bool trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
                                int x2, int y2, int net, int partner = -1) const;
     bool via_route_geometry_clear(int x, int y, int net) const;
