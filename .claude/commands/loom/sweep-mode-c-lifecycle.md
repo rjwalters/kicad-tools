@@ -54,7 +54,7 @@ Apply the following skip rules (each "skip" logs the reason; the PR does NOT con
 
 **`loom:reviewing`/`loom:treating` are claim *overlays*, not one of the three state labels the "two or more" conflict-skip row above counts (Issue #6167).** A PR carrying `loom:review-requested` **and** `loom:reviewing` together (a Judge has claimed it and is mid-review — or died mid-review) still has exactly **one** of `{loom:review-requested, loom:changes-requested, loom:pr}`, so it does not hit the conflict-skip row and routes normally to **C1a**. A *stale* `loom:reviewing` next to an actionable state label is therefore **recoverable, not a human-attention case**:
 
-- judge.md's own "Stale `loom:reviewing` Claim Check" (Step 2, before claiming in C1a) reclaims it inline the moment a Judge is actually dispatched for that PR.
+- judge.md's Step 2 claim (stale check, then a role-keyed PR lease, #9401) reclaims it inline once a Judge is dispatched; a peer's live lease makes it stand down.
 - The sweep-start orphan-recovery pass (`recover-orphaned-shepherds.sh --recover` under the `all` sentinel — see "Build-everything sentinel" below) now also reclaims stale `loom:reviewing`/`loom:treating` claims proactively, across the whole PR set, before any Judge/Doctor is dispatched — so a dead Judge's claim on a PR nobody re-visits cannot sit unrecovered (kicad-tools #4791/#4792, ~36h stale). Doctor's `loom:treating` is the identical overlay for `loom:changes-requested`/C1b, handled the same way.
 
 Determine the **closing issue number** (used for checkpoint scope below) from `closingIssuesReferences`. This is the GitHub-native `Closes/Fixes/Resolves #N` parser (matching the issue-side pre-flight's `closedByPullRequestsReferences`). Record up to one closing issue number per PR:

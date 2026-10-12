@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1081",
-  "loom_commit": "6966a93d1cd1b005f2a6b22bf9691ade8793ed73",
+  "loom_version": "0.19.1084",
+  "loom_commit": "d19177c266a91be56d403ed6f373c834dc751de8",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -423,6 +423,6 @@
     ".loom/scripts/tests/test-version-check-gate-callsites.sh"
   ],
   "last_resync": "2026-10-12",
-  "loom_source_remote": "git@github.com:rjwalters/loom.git",
+  "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1081"
 }

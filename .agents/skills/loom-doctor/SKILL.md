@@ -163,7 +163,7 @@ WT_STATUS=$(git -C "$WORKTREE_ABS" status --porcelain)
 if [ "$WT_HEAD_SHA" != "$PR_HEAD_SHA" ] || [ -n "$WT_STATUS" ]; then
     echo "Worktree drift detected (HEAD=$WT_HEAD_SHA, PR head=$PR_HEAD_SHA, dirty=$([ -n "$WT_STATUS" ] && echo yes || echo no)) - resyncing"
     if [ -n "$WT_STATUS" ]; then
-        ./.loom/scripts/worktree.sh snapshot <ISSUE_NUM> --include-untracked   # save WIP, never a bare `git stash` (see below)
+        ./.loom/scripts/worktree.sh snapshot <ISSUE_NUM> --include-untracked   # save WIP (never bare `git stash`); post its path in a PR comment
         git -C "$WORKTREE_ABS" checkout -- .
     fi
     git -C "$WORKTREE_ABS" pull --ff-only
@@ -348,12 +348,8 @@ Check for an argument passed via the slash command:
 If a number is provided (e.g., `/doctor 123`):
 1. Treat that number as the target **PR** to fix
 2. **Skip** the "Finding Work" section entirely
-3. Claim the PR — run the "Stale `loom:treating` Claim Check" first (a
-   dispatched PR can already be claimed by a concurrent Doctor), then:
-   ```bash
-   gh pr edit <number> --add-label "loom:treating"
-   CLAIM_HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')
-   ```
+3. Claim the PR exactly as in Work Process step 2 (a dispatched PR can
+   already be claimed by a concurrent Doctor)
 4. Proceed directly to fixing that PR
 
 **How judge feedback reaches you.** When `/loom:sweep` dispatches a Doctor after a
@@ -654,7 +650,7 @@ When the user explicitly instructs you to work on a specific PR by number:
 # PR has: no loom labels yet
 
 # ✅ Proceed immediately (still run the stale-claim check if loom:treating is present)
-gh pr edit 588 --add-label "loom:treating"
+loom-daemon lease pr claim 588 --role doctor --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] && gh pr edit 588 --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view 588 --json headRefOid --jq '.headRefOid')
 ./.loom/scripts/post-comment.sh 588 --pr --body "Addressing issues on this PR per user request"
 
@@ -695,9 +691,10 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
 ## Work Process
 
 1. **Find PRs needing attention**: Look for `loom:changes-requested` label that aren't already claimed (see above)
-2. **Claim the PR** (staleness-aware — see "Stale `loom:treating` Claim Check" immediately below **before** running this): Add `loom:treating` to prevent duplicate work, and record the head SHA you are starting from
+2. **Claim the PR** (run the "Stale `loom:treating` Claim Check" below **first**): take the PR lease ("PR Lease" below), add `loom:treating` only once it is held, and record the head SHA you start from
    ```bash
-   gh pr edit <number> --add-label "loom:treating"
+   loom-daemon lease pr claim <number> --role doctor --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"
+   [[ $? =~ ^[02]$ ]] && gh pr edit <number> --add-label "loom:treating"   # else: stand down, touch no worktree
    CLAIM_HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')
    ```
 3. **Check PR details**: `gh pr view <number>` - look for "Changes requested" reviews or conflicts
@@ -718,6 +715,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
 9. **Commit and push**: Push your fixes to the PR branch
    - **Pre-push head-SHA recheck (MANDATORY)**: before the push, re-compare the PR's `headRefOid` against the `CLAIM_HEAD_SHA` you captured in step 2 — see "Pre-Push Head-SHA Recheck" below. If the head moved, another agent pushed while you were working; re-verify the blocker is still unaddressed and stand down rather than duplicating (or clobbering) their fix.
    - **Then run "Pin the lease" below, top to bottom**: the pre-open update from `origin/main` (MANDATORY, #7668, as `builder-pr.md` § "Pre-Push Rebase"; a merge unless `loom-daemon branch-update strategy` says rebase, #10771) and the push (#9487). Never update before it. On a conflict resolve in place (`git add`, then `git commit --no-edit` or `git rebase --continue`), resume at its version gate, not "PR Has Merge Conflicts". No-op if `main` hasn't moved.
+   - **Lease fence (MANDATORY)**: its `lease pr fence` runs right before the push.
    - **DCO / sign-off**: if `commit.signoff` is `true` in `.loom/config.json` (read it the same way as `buildGate.command`), or the repo has a DCO / required `sign-off` check, add `--signoff` to **every** commit you author — including `git commit --amend --signoff` when re-authoring during a rebase — so each carries a `Signed-off-by:` trailer. Harmless when not required; git will not add a duplicate trailer. Reference: `defaults/docs/commit-signoff.md`.
    - **9a. Rebase any stacked children** (best-effort): if the just-pushed branch matches `feature/issue-<N>` (i.e. you amended a stacked *parent*), run:
      ```bash
@@ -725,7 +723,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
      ```
      It rebases open child PRs that went stale onto your new tip (safe children auto-rebase with a *pinned* force-with-lease; a child whose issue is still `loom:building` gets a deferred-reconciliation comment). No-op without stacked children, and **best-effort** — a failure (conflict, non-GitHub forge) never fails your own work; carry on to step 10. `--dry-run` previews.
 10. **Verify CI remotely**: after push, `forge wait-checks <number> --timeout 20` (GREEN/NONE = pass; else CI Assessment Step 5)
-11. **Signal completion and unclaim** (run the Verdict-Time CAS Recheck — see below — immediately before this write; abort/stand down instead if it finds your claim lost or the PR already moved):
+11. **Signal completion and unclaim** (run the lease fence and the Verdict-Time CAS Recheck — see below — immediately before this write; abort/stand down instead if either finds your claim lost or the PR already moved; then `lease pr release`):
     - Remove `loom:changes-requested` and `loom:treating` labels
     - Add `loom:review-requested` label (green badge)
     - Comment to notify reviewer that feedback is addressed
@@ -742,8 +740,7 @@ still alive. Without this check a dead claim blocks the PR from ever being
 treated again; without the *fresh* half of it, two live Doctors duplicate the
 same fix (the failure this section exists to prevent).
 
-**If the PR does NOT carry `loom:treating`:** proceed to claim as today — no
-behavior change: `gh pr edit <number> --add-label "loom:treating"`.
+**If the PR does NOT carry `loom:treating`:** claim it (step 2).
 
 **If the PR DOES carry `loom:treating`:** evaluate the claim with the shared
 staleness evaluator. **Do not hand-roll the timeline/comment arithmetic** —
@@ -768,7 +765,7 @@ Then decide on `$CLAIM_STATE`:
 
 | `$CLAIM_STATE` | Meaning | Action |
 |---|---|---|
-| `unclaimed` | the PR does not actually carry `loom:treating` right now | Claim it normally: `gh pr edit $N --add-label "loom:treating"` |
+| `unclaimed` | the PR does not actually carry `loom:treating` right now | Claim it (step 2). |
 | `fresh` | a Doctor is plausibly still fixing this PR | **Do not stomp the claim.** Record a stand-down (see below), then skip this PR and move to the next candidate in the queue. |
 | `stale` | no *claimant* activity for ≥ `LOOM_STALE_TREATING_MINUTES` (default **60**) — the claiming Doctor's process almost certainly died mid-fix | Reclaim (see below), then proceed with the normal fix from step 3. |
 | `stale-bounded-fallback` | the stand-down streak reached `LOOM_MAX_STANDDOWN_STREAK` (default **3**) **and** the claim's own age is ≥ `LOOM_STALE_TREATING_MINUTES` | Force-reclaim (see below) — the livelock breaker. |
@@ -801,16 +798,10 @@ live claim, so you never hand-assemble it:
 $(./.loom/scripts/claim-staleness.sh marker --number "$N" --label loom:treating)"
 ```
 
-**Stand-down marker convention (#4618 — breaks the livelock)**: a "standing
-down, not stomping" comment is evidence of **no activity**, not activity — it
-means a *later* Doctor pass declined to touch the claim, not that the *original*
-claimant is still working. Before #4618, every comment after the claim counted
-indiscriminately, so each stand-down comment satisfied the very freshness test
-the next pass ran, making the claim look eternally fresh even though nothing was
-happening (the `loom:reviewing` analog played out on PR #4614: 3 consecutive
-stand-down comments over 30+ minutes, never reclaimed). Stand-down comments
-therefore carry their own marker and are counted into the streak, never into
-liveness.
+**Stand-down marker convention (#4618)**: a "standing down, not stomping"
+comment is evidence of **no activity** — a *later* pass declined to touch the
+claim. Stand-down comments carry their own marker and count into the streak,
+never into liveness (counting them made claims look eternally fresh, PR #4614).
 
 **Recording a stand-down** (the `fresh` and `unknown` rows):
 
@@ -826,37 +817,23 @@ It posts the marked stand-down comment the first time, and on every later pass
 <!-- loom:standdown claim=$CLAIMED_AT seq=2 -->
 ```
 
-**This is what keeps the bounded fallback reachable (#6514).** Duplicate
-stand-down suppression (#5123) previously skipped the pass entirely, so
-`STANDDOWN_COUNT` froze at 1 and `LOOM_MAX_STANDDOWN_STREAK` was never reached —
-the second half of the PR #6513 livelock, in which the claim could escape
-neither through the ordinary staleness row nor through the fallback. Bumping in
-place keeps the forge free of near-identical comments (the #5123 goal) while the
-streak still accumulates (the #4618 AC3 goal). A legacy marker with no `seq=`
-counts as `seq=1`. Re-verification of staleness still runs on **every** pass —
-only the redundant *comment* is avoided, never the check.
+**This keeps the bounded fallback reachable (#6514)**: the streak accumulates
+without near-identical comments (#5123). A legacy marker with no `seq=` counts as
+`seq=1`. Staleness is still re-verified on **every** pass.
 
-**Bounded fallback (AC3, #4618; age-floor join added by #4798; unstarved by
-#6514)**: the streak is a hard cap independent of the activity/marker logic
-working correctly — it counts how many stand-down passes have accumulated
-against *this exact* `$CLAIMED_AT` (the marker embeds it, so a genuine reclaim —
-which changes `CLAIMED_AT` — resets the count to zero automatically). But the
-streak by itself measures **peer arrival rate** (how many other Doctors happened
-to revisit this PR), not claim liveness — a claim only minutes old can
-accumulate `LOOM_MAX_STANDDOWN_STREAK` stand-downs from that many concurrent
-Doctors without coming close to stale in the age sense (the `loom:reviewing`
-analog played out on PR #4790: a claim 17m36s old, well under the 30-minute
-default, was force-reclaimed after 3 Judges each stood down within that same
-window). So the fallback fires only once **both** hold:
-`LOOM_MAX_STANDDOWN_STREAK` passes have piled up against the same claim with no
-reclaim, **and** the claim's own age is ≥ `LOOM_STALE_TREATING_MINUTES`. Note
-that this row is keyed on the **claim's** age, not on the idle clock, precisely
-so a claimant stuck in a loop emitting activity markers still cannot hold the
-claim forever. Use this reclaim comment:
+**Bounded fallback (AC3, #4618/#4798/#6514)**: the streak counts stand-down
+passes against *this exact* `$CLAIMED_AT` (a genuine reclaim resets it). A
+streak alone measures peer arrival rate, not liveness (PR #4790), so the
+fallback fires only once **both** hold: `LOOM_MAX_STANDDOWN_STREAK` passes
+against the same claim, **and** the claim's own age (not the idle clock, so a
+looping claimant cannot hold it forever) is ≥ `LOOM_STALE_TREATING_MINUTES`.
+Use this reclaim comment:
 
 ```bash
-gh pr edit $N --remove-label "loom:treating"
-./.loom/scripts/post-comment.sh $N --pr --body "Reclaiming loom:treating claim: $STANDDOWN_COUNT stand-down passes, no fix progress for ${LOOM_STALE_TREATING_MINUTES:-60}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+# The lease first: a live peer lease (exit 4) means stand down, label untouched.
+loom-daemon lease pr claim $N --role doctor --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] &&
+gh pr edit $N --remove-label "loom:treating" &&
+./.loom/scripts/post-comment.sh $N --pr --body "Reclaiming loom:treating claim: $STANDDOWN_COUNT stand-down passes, no fix progress for ${LOOM_STALE_TREATING_MINUTES:-60}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock." &&
 gh pr edit $N --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 # Continue to step 3 (Check PR details) and fix normally
@@ -865,8 +842,10 @@ CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 **Reclaiming a stale claim** (the ordinary idle-clock path):
 
 ```bash
-gh pr edit $N --remove-label "loom:treating"
-./.loom/scripts/post-comment.sh $N --pr --body "Reclaiming stale loom:treating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_TREATING_MINUTES:-60}m, no claimant activity) — the prior process likely died mid-fix."
+# The lease first: a live peer lease (exit 4) means stand down, label untouched.
+loom-daemon lease pr claim $N --role doctor --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] &&
+gh pr edit $N --remove-label "loom:treating" &&
+./.loom/scripts/post-comment.sh $N --pr --body "Reclaiming stale loom:treating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_TREATING_MINUTES:-60}m, no claimant activity) — the prior process likely died mid-fix." &&
 gh pr edit $N --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 # Continue to step 3 (Check PR details) and fix normally
@@ -888,19 +867,30 @@ not been resynced yet): fall back to the **age-only** rule — read the latest
 **not** reintroduce a "any comment after the claim means fresh" test — that is
 precisely the defect this section exists to fix.
 
-**Daemon backstop (#4367, freshness signal fixed by #4618)**: this check is
-the fast path — it only fires when another Doctor happens to revisit the same
-PR. `loom-daemon`'s `claim_reconciliation` pass (`reconcile_pr_claims`)
-reconciles stale `loom:treating` (and `loom:reviewing`) as an always-on
-backstop at startup and on its periodic tick, sharing this exact env var and
-default — and, since #4618, deriving its own age gate from the claim label's
-own `labeled` timeline-event timestamp rather than the PR's aggregate
-`updatedAt`, for the identical reason the marker convention above exists (a
-stand-down comment self-refreshes `updatedAt` but not the label event). That
-pass runs on an interval (up to ~10 minutes of lag) and cannot see an
-*in-flight* Doctor, so it never substitutes for this check or the pre-push
-recheck below. See `defaults/docs/daemon-reference.md` § "Stale-claim
-reconciliation".
+**Daemon backstop (#4367/#4618)**: `loom-daemon`'s `claim_reconciliation`
+pass also reclaims stale `loom:treating` on its tick, with the same env var and
+default, aged from the label's own `labeled` event. It lags up to ~10 minutes
+and cannot see an in-flight Doctor, so it never replaces this check
+(`daemon-reference.md` § "Stale-claim reconciliation").
+
+### PR Lease (Step 2, #9401)
+
+A label is not a mutex: adding one already present is a silent no-op, so two
+Doctors could both "hold" `loom:treating`. `lease pr claim` publishes a
+role-keyed lease comment (a Judge's never contends), orders live leases by
+comment id, and renews yours while your session lives
+(`lease-record.md` § "PR-phase leases"). Same `--watch-pid` every call.
+
+- **claim** exit **0** = held: add `loom:treating` (**2** = an older
+  `loom-daemon` without `lease pr`: label alone, as before). **4** = a peer's
+  live lease wins (a lost race posts your yield record), **5** = unreadable,
+  any other code (**1** = `loom-daemon` failed to start) = unknown: never
+  "label-only" — stand down **before** any worktree, snapshot or label action.
+  Never touch a worktree a peer's lease holds, or its `loom:treating`.
+- **fence** before every push and the completion write (step 11):
+  `lease pr fence <n> --role doctor --watch-pid …`; not 0/2 = lost, stand down.
+- **release** when you finish or stand down: `loom-daemon lease pr release <n>
+  --role doctor --watch-pid …`.
 
 ### Pre-Push Head-SHA Recheck (Step 9)
 
@@ -980,6 +970,8 @@ if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-che
   echo "Aborting: version-bearing files out of sync after update (see BLOCKER:/Fix:)." >&2
   exit 1
 fi
+loom-daemon lease pr fence "$N" --role doctor --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"
+[[ $? =~ ^[02]$ ]] || exit 1  # lease lost: stand down
 if [ "$BRANCH_UPDATE" = rebase ]; then git push --force-with-lease="$BRANCH:$PUSH_LEASE_SHA"; else git push origin "HEAD:$BRANCH"; fi &&
   { PUSH_LEASE_SHA=$(git rev-parse HEAD); PUSH_LEASE_OK=$PUSH_LEASE_SHA; CLAIM_HEAD_SHA=$PUSH_LEASE_SHA; }  # own push: re-pin
 ```
@@ -1041,6 +1033,8 @@ write that actually matters, not just at claim time.
 - [ ] All CI checks pass (verified via `forge wait-checks <number>`)
 - [ ] I ran the stale `loom:treating` claim check before claiming (skipped the PR
       on a fresh claim; reclaimed only on a stale one)
+- [ ] I held the PR lease before adding `loom:treating`, fenced it before each
+      push and the completion write, and release it now (#9401)
 - [ ] I re-compared the PR's `headRefOid` against `CLAIM_HEAD_SHA` immediately
       before pushing, and on a mismatch re-verified the blocker (or stood down)
 - [ ] Merge mode: no rebase, amend or force push; rebase mode: every force-push pinned a
@@ -1407,6 +1401,8 @@ if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-che
 fi
 
 # Merge: plain push (rejected: Head-SHA Recheck, never force). Rebase: PINNED lease.
+loom-daemon lease pr fence 42 --role doctor --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"
+[[ $? =~ ^[02]$ ]] || exit 1  # lease lost: stand down
 if [ "$BRANCH_UPDATE" = rebase ]; then git push --force-with-lease="$BRANCH:$PUSH_LEASE_SHA"; else git push origin "HEAD:$BRANCH"; fi &&
   { PUSH_LEASE_SHA=$(git rev-parse HEAD); PUSH_LEASE_OK=$PUSH_LEASE_SHA; CLAIM_HEAD_SHA=$PUSH_LEASE_SHA; }
 
