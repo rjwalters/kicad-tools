@@ -1129,6 +1129,16 @@ and dropped).
 | `watchdog.peer-coord-degraded` (critical) | the watchdog | coordination degraded / green |
 | `safehouse.unreachable` (critical) | narration sink state | unreachable over 5 minutes / reconnected |
 | `fleet.floor-unsatisfiable` | `auto_update` | the floor ERROR line / floor met |
+| `fleet.floor-malformed` | fleet-sync pass | `loom_min_version` malformed / a valid (or no) floor |
+| `fleet.sync-error` | fleet-sync pass | 3 erroring passes in a row / a clean pass |
+| `daemon.task-dead` (key = task) | `task_liveness`, sampled each minute | loop past its staleness window / beating again or gone |
+| `forge.credential-missing` (critical) | startup credential preflight | no usable GitHub credential / a good start or github-app refresh |
+| `resync.<kind>` (`failure`, `repo-access`, `branch-protection`: key = repo; `network`, `head-query`, `pass-stuck`: key `workspaces`) | workspace resync | its alert threshold (3 in a row) / the repo or host healthy again |
+| `forge.ratelimit-breaker` | rate-limit breaker, sampled each minute | polling held off over 15 minutes / released |
+| `version.pause-failed` (key = version) | pause roll (H7 `pause-failed`) | the failed pause / a start on another version |
+| `version.config-rejected` | pause roll | `pauseRoll.*` tuning rejected / accepted (each roll and each start) |
+| `llm-monitor.stale` | llm-monitor `ranking.json` | older than 30 minutes (or unreadable) on two reads 5 minutes apart / fresh (no file: nothing) |
+| `install.<invariant>` (key = workspace root) | `install_self_check`, when enabled | violation standing after the tick / gone, or the check off |
 
 `tokens-zero-healthy` is not sent: loom-ui derives `provider-pool-exhausted`
 from the daemon's pool gauge itself. Delivery is a bounded FIFO drained by one
@@ -1136,6 +1146,16 @@ task (open always before resolved): a 2xx is done, any other 4xx except 429 is
 dropped and logged, 429 / 5xx / network errors back off (5 s doubling to
 15 min, at most 20 tries). The watchdog posts synchronously (10 s bound) and
 keeps a `<sentinel>.loom-ui` record so an unanswered post retries next tick.
+
+Level-triggered sources keep the incidents they hold open in
+`~/.loom/loom-ui-alerts/<scope>.json`, so a restarted daemon resolves one
+the previous process opened once it finds the condition gone, and keeps one
+open while its failure count (process memory) builds up again; a daemon
+that finds the output off removes those files. The single-key
+watches (safehouse, breaker, llm-monitor) send one `resolved` on their first
+healthy sample instead. Alerts raised before the output starts (credential
+preflight, the fleet-sync startup pass) wait in the outbox. llm-monitor's
+quota step-change alert is not in `ranking.json` yet, so it is not sent.
 
 `fleet_alert` only runs when `autonomous.fleetAlert.enabled` is on (off by
 default here); the fleet defaults (fleet-gitops) are where to enable it.

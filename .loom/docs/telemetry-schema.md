@@ -3127,7 +3127,7 @@ the daemon restarts, so a reader computing "drops in a window" must treat a
 decrease as a counter reset (take the post-reset value, not a negative delta).
 The committed query is
 [`defaults/observability/signoz/host-export-queries.sql`](https://github.com/rjwalters/loom/blob/main/defaults/observability/signoz/host-export-queries.sql):
-hosts with drops, or with no `host.export` at all, in the last 2 h.
+hosts with drops, or with no `host.export` at all, in the last 2 h. Query 3 compares a rendered `hosts.yml` roster against `host.export` to find silent hosts by absence (#11198).
 
 ## Persistence & read surface (`sweep.outcome`, Issue #4704)
 

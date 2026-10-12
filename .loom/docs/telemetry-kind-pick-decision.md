@@ -45,6 +45,7 @@ no journal is created, when no OTLP exporter runs.
 | `candidate_source` | string | `ready_queue` (work finder), `serving_queue` (the role's `pr-queue` result), `listing` (the issue/PR listings the role read, e.g. Curator), `gate_listing` (fallback: the daemon's gate listing), `none` (nothing observed) |
 | `decisions_observed` | boolean | `true` when the agent's writes were observed, so every candidate without an action is a real skip; `false` when only a ranking was seen, and an unexplained candidate is then in neither `acted` nor `skipped` |
 | `workspace_draw` | object, optional | work finder only (#11103), absent when nothing was drawn: `seed` (decimal string), `draws_total`, and `draws[]` (first 50, in order), each `{pool, candidates[{repo, weight}], total_weight, roll, picked, number}`. Replaying the draws from `seed` reproduces the dispatch order; see [`priority-model.md`](priority-model.md) |
+| `very_important_demoted` | array, optional | work finder only (#11509), absent when empty: one `{repo, number, holder}` per `loom:very-important` issue the per-workspace cap ranked as important this tick (`holder` keeps the slot; first 50). Additive, so `schema_version` is unchanged; see [`priority-model.md`](priority-model.md) |
 
 ## What "ranking" means per source
 
