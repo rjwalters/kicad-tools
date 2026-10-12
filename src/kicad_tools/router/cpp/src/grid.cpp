@@ -1346,6 +1346,129 @@ bool Grid3D::pad_geometry_clear(
     return true;
 }
 
+// -----------------------------------------------------------------------
+// Issue #6375: the validator's segment-vs-pad verdict, shared with the A*
+// -----------------------------------------------------------------------
+
+bool Grid3D::segment_pad_clear(const Segment& seg, const PadInfo& pad, int exclude_net,
+                               const std::vector<uint32_t>& exclude_ref_hashes,
+                               const std::vector<uint32_t>& clamp_ref_hashes,
+                               float* gap_out) const {
+    // Skip same-net pads
+    if (pad.net == exclude_net) return true;
+
+    auto in_list = [](const std::vector<uint32_t>& hashes, uint32_t h) {
+        for (auto v : hashes) {
+            if (v == h) return true;
+        }
+        return false;
+    };
+    const bool clamped = in_list(clamp_ref_hashes, pad.ref_hash);
+
+    // Issue #1764 + #2871 + #2908: the same-component-ref exclusion is
+    // intended to permit signal-pin escape routing through the chip's own
+    // perimeter (Issue #1764 reachability fix).  It must NOT permit signal
+    // traces to clip plane-net pads on the same chip: a same-component pad
+    // is excluded ONLY when it is a SIGNAL pad (``!pad.is_plane_net``).
+    // Plane-net pads -- whether ``net == 0`` (skipped-pour) or ``net > 0``
+    // with a power/ground name (classified in ``cpp_backend.py``) -- are
+    // kept.  Issue #2933 further narrows the signal carve-out to traces
+    // that stay OUTSIDE the neighbour pad's metal (deferred skip below).
+    const bool same_component_signal_carveout =
+        !pad.is_plane_net && (clamped || in_list(exclude_ref_hashes, pad.ref_hash));
+
+    // Skip pads on different layers (unless through-hole: layer_idx == -1)
+    if (pad.layer_idx != -1 && pad.layer_idx != seg.layer) return true;
+
+    // Per-component clearance (Issue #1016)
+    float required_clearance = pad.clearance_override;
+
+    // Issue #5229: Only explicitly circular pads use a disc. Equal
+    // dimensions do not imply a circle: square pad corners are copper.
+    // Oval and roundrect pads retain conservative rectangle bounds.
+    const float seg_half_width = seg.width / 2.0f;
+    float clearance;
+    if (pad.is_circular) {
+        const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
+        const float dist = point_to_segment_distance(
+            pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
+        clearance = dist - seg_half_width - pad_radius;
+    } else {
+        // Rect-aware: signed centerline-to-rect distance.  Negative means
+        // the segment centerline lies inside the pad rectangle (a real DRC
+        // defect).
+        const float center_dist = pad_rect_distance(
+            pad, seg.x1, seg.y1, seg.x2, seg.y2);
+        clearance = center_dist - seg_half_width;
+    }
+
+    // Issue #2933: apply the same-component carve-out only when the trace
+    // clears the neighbour pad's metal (clearance >= 0).
+    // Issue #3490: EXCEPTION -- a same-component pad on net 0 (NC) carries
+    // no electrical net, so overlapping its metal is not a short; the
+    // footprint can make reaching the signal pad impossible otherwise.
+    // Issue #5166: a ref in ``clamp_ref_hashes`` reaches the carve-out only
+    // because a configured override resolved smaller than the default, so
+    // the positive-clearance branch ENFORCES that resolved value
+    // (``pad.clearance_override``) instead of skipping.  The net-0 branch
+    // stays an unconditional skip even for a clamped ref.  With an empty
+    // clamp set this is identical to the pre-#5166
+    // ``(clearance >= 0 || net == 0)``.
+    if (same_component_signal_carveout &&
+        (pad.net == 0 || (clearance >= 0.0f && !clamped))) {
+        return true;
+    }
+
+    if (gap_out) *gap_out = clearance;
+
+    // Issue #4510: widen for a cross-domain (HV) pair.  The gap point is the
+    // midpoint between the pad centre and the closest point on the candidate
+    // segment's centreline.  #4507: the attach-zone consult keys on the
+    // PAD's own layer (-1 for a through-hole barrel, which spans every
+    // layer); a same-layer SMD pad has ``pad.layer_idx == seg.layer`` here.
+    if (pairwise_active_) {
+        const float pair = pairwise_required_clearance(exclude_net, pad.net);
+        if (pair > required_clearance) {
+            const auto cp = closest_point_on_segment(
+                pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
+            if (!attach_zone_exempts((pad.x + cp.first) / 2.0f, (pad.y + cp.second) / 2.0f,
+                                     exclude_net, pad.net, pad.layer_idx)) {
+                required_clearance = pair;
+            }
+        }
+    }
+
+    return !(clearance < required_clearance - CLEARANCE_EPSILON_MM);
+}
+
+bool Grid3D::segment_pads_clear(const Segment& seg, int exclude_net,
+                                const std::vector<uint32_t>& exclude_ref_hashes,
+                                const std::vector<uint32_t>& clamp_ref_hashes) const {
+    // Reach: every pad whose copper lies within the widest required
+    // clearance (largest override, largest pairwise floor) of the segment's
+    // edge.  The bucket index covers each pad's circumscribed disc.
+    const float reach = seg.width / 2.0f
+        + std::max(pad_bucket_max_override_, max_pairwise_clearance_)
+        + CLEARANCE_EPSILON_MM;
+    const int qx1 = static_cast<int>(std::floor((std::min(seg.x1, seg.x2) - reach) / PAD_BUCKET_MM));
+    const int qx2 = static_cast<int>(std::floor((std::max(seg.x1, seg.x2) + reach) / PAD_BUCKET_MM));
+    const int qy1 = static_cast<int>(std::floor((std::min(seg.y1, seg.y2) - reach) / PAD_BUCKET_MM));
+    const int qy2 = static_cast<int>(std::floor((std::max(seg.y1, seg.y2) + reach) / PAD_BUCKET_MM));
+    for (int qy = qy1; qy <= qy2; ++qy) {
+        for (int qx = qx1; qx <= qx2; ++qx) {
+            const auto it = pad_buckets_.find(pad_bucket_key(qx, qy));
+            if (it == pad_buckets_.end()) continue;
+            for (uint32_t i : it->second) {
+                if (!segment_pad_clear(seg, pads_[i], exclude_net, exclude_ref_hashes,
+                                       clamp_ref_hashes)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
                                     int partner_net, float partner_clearance) const {
     // Issue #5661 (Epic #5509 Phase 3b): the copper verdict is delegated to
@@ -1694,156 +1817,17 @@ ValidationResult Grid3D::validate_route(
     for (const auto& seg : segments) {
         float seg_half_width = seg.width / 2.0f;
 
-        // 1a. Segment vs pads
+        // 1a. Segment vs pads.  Issue #6375: the per-pad verdict lives in
+        // ``segment_pad_clear`` so the A* own-pad step gate runs the SAME
+        // code (see that function for the carve-out / widening history).
         for (const auto& pad : pads_) {
-            // Skip same-net pads
-            if (pad.net == exclude_net) continue;
-
-            // Issue #1764 + #2871 + #2908: the same-component-ref exclusion
-            // is intended to permit signal-pin escape routing through the
-            // chip's own perimeter (Issue #1764 reachability fix). It must
-            // NOT permit signal traces to clip plane-net pads on the same
-            // chip.
-            //
-            // PR #2873 narrowed the exclusion to ``pad.net != 0`` so the
-            // SKIPPED-net convention (``skip_nets`` rewriting in
-            // ``cpp_backend.py:596-605``) kept plane pads in the validator.
-            // That convention only covers boards that pass ``--skip-nets``;
-            // board 04 routes ``+3.3V`` / ``GND`` as real nets, so the
-            // U2.1 / U2.8 / U2.23 / U2.24 plane pads retained ``net != 0``
-            // and were silently exempted -- 44 ``clearance_pad_segment``
-            // violations on the west edge cluster (Issue #2908).
-            //
-            // Issue #2908 broadens the carve-out: a same-component pad is
-            // excluded ONLY when it is a SIGNAL pad (``!pad.is_plane_net``).
-            // Plane-net pads -- whether ``net == 0`` (skipped-pour) or
-            // ``net > 0`` with a power/ground name (classified in
-            // ``cpp_backend.py``) -- are kept in the validator.  The
-            // rect-aware geometry below ensures the disc-bound short-axis
-            // over-rejection does not regress legitimate signal-vs-signal
-            // corridor traces (the corridor relaxation in
-            // ``_relax_same_component_clearance`` only operates between
-            // non-plane pads).
-            //
-            // Issue #2933: The same-component signal-pad carve-out is
-            // further narrowed -- it now only suppresses clearance complaints
-            // when the trace stays OUTSIDE the neighbour pad's metal.  On
-            // standard-pitch passives like 0805 resistors (R1 at 2mm pitch
-            // on board 02), the router was emitting traces whose centerline
-            // passed THROUGH the opposite pad's metal because the carve-out
-            // silently exempted them.  This produced 144
-            // ``clearance_pad_segment`` errors on board 02 at jlcpcb tier-1.
-            // The metal-overlap check (clearance < 0) is preserved for all
-            // same-component pads via the deferred-skip pattern below.
-            const bool same_component_signal_carveout =
-                !pad.is_plane_net && is_excluded_ref(pad.ref_hash);
-
-            // Skip pads on different layers (unless through-hole: layer_idx == -1)
-            if (pad.layer_idx != -1 && pad.layer_idx != seg.layer) continue;
-
-            // Per-component clearance (Issue #1016)
-            float required_clearance = pad.clearance_override;
-
-            // Issue #5229: Only explicitly circular pads use a disc. Equal
-            // dimensions do not imply a circle: square pad corners are copper.
-            // Oval and roundrect pads retain conservative rectangle bounds.
-            float clearance;
-            if (pad.is_circular) {
-                const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
-                const float dist = point_to_segment_distance(
-                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
-                clearance = dist - seg_half_width - pad_radius;
-            } else {
-                // Rect-aware: signed centerline-to-rect distance.  Negative
-                // means the segment centerline lies inside the pad rectangle
-                // (a real DRC defect).
-                const float center_dist = pad_rect_distance(
-                    pad, seg.x1, seg.y1, seg.x2, seg.y2);
-                clearance = center_dist - seg_half_width;
+            float gap = std::numeric_limits<float>::infinity();
+            const bool clear = segment_pad_clear(seg, pad, exclude_net, exclude_ref_hashes,
+                                                 clamp_ref_hashes, &gap);
+            if (gap < result.min_clearance) {
+                result.min_clearance = gap;
             }
-
-            // Issue #2933: Apply the same-component carve-out only when the
-            // trace clears the neighbour pad's metal (clearance >= 0).
-            // Negative clearance means the trace overlaps pad copper -- a
-            // true defect that no carve-out should silence.
-            //
-            // Issue #3490: EXCEPTION -- a same-component pad on net 0
-            // (an unconnected / NC pad) carries no electrical net, so a
-            // trace endpoint that geometrically overlaps its metal is not
-            // a real short.  When such a pad sits within metal-overlap
-            // distance of the signal pad being routed (an LED whose
-            // net=0 pin is 0.2mm from its signal pin -- the #1764
-            // scenario), reaching the signal pad's center is impossible
-            // without entering the net=0 pad's rectangle.  The footprint
-            // guarantees the geometry, so silence the violation for
-            // negative clearance too -- but ONLY for net=0 pads.  Foreign
-            // SIGNAL pads (net != 0) keep the strict >= 0 guard so the
-            // trace-through-pad-copper pathology (#2933) stays caught.
-            //
-            // Issue #5166: a ref in ``clamp_ref_hashes`` reaches the
-            // carve-out only because a configured override resolved smaller
-            // than the default clearance, so the positive-clearance branch
-            // must ENFORCE that resolved value (``pad.clearance_override``,
-            // which is exactly the floor the check below already uses)
-            // instead of skipping.  The net-0 branch stays an unconditional
-            // skip even for a clamped ref: a same-component NC pad carries no
-            // electrical net, and the #3490 / #1764 geometry (a signal pin
-            // 0.2mm from an NC pin) makes reaching the signal pad's centre
-            // impossible without entering the NC pad's rectangle -- clamping
-            // there would make the configured relaxation unroutable rather
-            // than merely enforced.  With an empty clamp set this condition
-            // is identical to the pre-#5166 ``(clearance >= 0 || net == 0)``.
-            if (same_component_signal_carveout &&
-                (pad.net == 0 ||
-                 (clearance >= 0.0f && !is_clamped_ref(pad.ref_hash)))) {
-                continue;
-            }
-
-            if (clearance < result.min_clearance) {
-                result.min_clearance = clearance;
-            }
-
-            // Issue #4510: widen for a cross-domain (HV) pair.  The gap point
-            // is the midpoint between the pad centre and the closest point on
-            // the candidate segment's centreline -- the pad analogue of the
-            // Python validator's closest-approach midpoint.
-            // #4507: the zone consult keys on the PAD's own layer rather than
-            // on ``seg.layer``.  This loop is NOT layer-blind -- the guard at
-            // the top of it (line 768, ``Skip pads on different layers``:
-            // ``if (pad.layer_idx != -1 && pad.layer_idx != seg.layer)
-            // continue;``) already drops mismatched layers, so a cross-layer
-            // seg-vs-SMD-pad pair can never reach this line.  Only two shapes
-            // survive that filter:
-            //
-            //   (i)  a same-layer SMD pad, where ``pad.layer_idx == seg.layer``
-            //        -- the two candidate keys are literally the same value, so
-            //        the choice is a no-op; and
-            //   (ii) a through-hole pad (``layer_idx == -1``), where passing -1
-            //        keeps the consult layer-agnostic because the barrel really
-            //        does span every copper layer.
-            //
-            // So (ii) is the asymmetry's ONLY behavioural effect, and it is the
-            // whole reason for it.  ``tests/router/test_pairwise_cpp_parity.py::
-            // test_pad_branch_keys_the_waiver_on_the_pads_own_layer`` case (c)
-            // is correspondingly the only case that can distinguish the keys.
-            //
-            // One consequence worth naming: in case (ii) the -1 also exempts
-            // the CANDIDATE's net from the layer check, so this branch can
-            // waive on layers where ``AttachZone.exempts`` would not.  That is
-            // unchanged v18 behaviour and has no Python counterpart to disagree
-            // with -- ``route_pairwise_violation`` / ``find_pairwise_violations``
-            // are segment-vs-segment only and never compare a segment against a
-            // pad -- so it cannot produce the search<->gate thrash #4507 exists
-            // to remove.
-            const int pad_zone_layer = pad.layer_idx;
-            required_clearance = widen(required_clearance, pad.net, pad_zone_layer, [&]() {
-                const auto cp = closest_point_on_segment(
-                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
-                return std::pair<float, float>((pad.x + cp.first) / 2.0f,
-                                               (pad.y + cp.second) / 2.0f);
-            });
-
-            if (clearance < required_clearance - CLEARANCE_EPSILON_MM) {
+            if (!clear) {
                 result.valid = false;
                 result.violation_x = pad.x;
                 result.violation_y = pad.y;

@@ -296,6 +296,28 @@ public:
     // pad test holds every step to at least this floor -- the Python backend
     // pushes the largest net-class clearance on the board.  0 = unset.
     void set_search_pad_clearance_floor(float floor) { search_pad_clearance_floor_ = floor; }
+
+    // Issue #6375: the own-pad step gate.  A planar step onto (or off) a
+    // cell of the routing net's OWN static pad copper/halo (``cell.net ==
+    // net`` and ``pad_cell`` or ``static_blocked``) outside the seed/goal
+    // metal boxes is held to the post-route validator's exact segment-vs-pad
+    // verdict
+    // (``Grid3D::segment_pads_clear``).  Such cells used to be admitted with
+    // no check at all; a net-0 (NC) neighbour never marks a halo shared, so
+    // nothing else looked at them.  The Python backend pushes, per search,
+    // the same same-component carve-out sets ``validate_route`` receives and
+    // the NARROWEST width the route conversion can emit (the neck-down
+    // taper only narrows), so the gate can never be stricter than the
+    // validator.  ``trace_width`` <= 0 falls back to the emit width.
+    void set_search_own_pad_gate(const std::vector<uint32_t>& exclude_ref_hashes,
+                                 const std::vector<uint32_t>& clamp_ref_hashes,
+                                 float trace_width) {
+        search_gate_exclude_refs_ = exclude_ref_hashes;
+        search_gate_clamp_refs_ = clamp_ref_hashes;
+        search_gate_trace_width_ = trace_width;
+    }
+    bool own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net,
+                            float emit_trace_width) const;
     void set_search_fill_clearances(float trace, float via) {
         search_fill_trace_clearance_ = trace;
         search_fill_via_clearance_ = via;
@@ -478,6 +500,12 @@ private:
     float search_via_half_diam_mm_ = 0.0f;
     float search_fill_trace_clearance_ = -1.0f;
     float search_pad_clearance_floor_ = 0.0f;  // Issue #6315
+    // Issue #6375: own-pad step gate state (see ``set_search_own_pad_gate``).
+    std::vector<uint32_t> search_gate_exclude_refs_;
+    std::vector<uint32_t> search_gate_clamp_refs_;
+    float search_gate_trace_width_ = 0.0f;
+    // True when (x, y, layer) is pad copper/halo of ``net`` itself.
+    bool own_pad_cell(int x, int y, int layer, int net) const;
     float search_fill_via_clearance_ = -1.0f;
 
     // Issue #3438: per-step relief penalty helper.  Returns

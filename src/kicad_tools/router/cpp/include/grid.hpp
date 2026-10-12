@@ -666,6 +666,27 @@ public:
         float ax, float ay, float bx, float by, int layer, int net,
         float half_width, float clearance) const;
 
+    // Issue #6375: validate_route()'s segment-vs-pad verdict for ONE pad --
+    // the single implementation both the post-route validator and the A*
+    // own-pad step gate (``Pathfinder::own_pad_step_clear``) call, so the
+    // search and the validator cannot disagree on pad shape, rotation,
+    // required clearance (``pad.clearance_override`` + pairwise widening) or
+    // the same-component carve-outs (#1764 / #2908 / #2933 / #3490 / #5166).
+    // Returns false when ``pad`` rejects ``seg``.  ``gap_out`` receives the
+    // measured edge clearance whenever the pad is measured (untouched when it
+    // is skipped: same net, other layer, or carved out).
+    bool segment_pad_clear(const Segment& seg, const PadInfo& pad, int exclude_net,
+                           const std::vector<uint32_t>& exclude_ref_hashes,
+                           const std::vector<uint32_t>& clamp_ref_hashes,
+                           float* gap_out = nullptr) const;
+
+    // Issue #6375: ``segment_pad_clear`` over every pad the #6315 bucket index
+    // can place within reach of ``seg`` -- the validator's full seg-vs-pad
+    // verdict, cheap enough for the A* inner loop.
+    bool segment_pads_clear(const Segment& seg, int exclude_net,
+                            const std::vector<uint32_t>& exclude_ref_hashes,
+                            const std::vector<uint32_t>& clamp_ref_hashes) const;
+
 private:
     inline size_t index(int x, int y, int layer) const {
         return static_cast<size_t>(layer) * rows_ * cols_ +

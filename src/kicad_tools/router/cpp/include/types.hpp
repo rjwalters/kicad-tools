@@ -303,7 +303,12 @@ namespace router {
 // ``shared_pad_halo`` arguments, and ``Grid3D::pad_geometry_clear`` resolves
 // pad-derived cells with the exact segment-vs-pad test.  A v49 .so would
 // reject the new ``mark_blocked`` arguments, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 50;
+// v51 (Issue #6375): ``Pathfinder::set_search_own_pad_gate`` /
+// ``own_pad_step_clear`` and ``Grid3D::segment_pads_clear`` are bound, and
+// the A* holds steps on the routing net's own pad cells to the validator's
+// seg-vs-pad verdict.  The Python side calls the new setter on every search,
+// so a v50 .so must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 51;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
