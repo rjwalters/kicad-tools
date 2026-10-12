@@ -159,6 +159,8 @@ default that could kill a legitimate long build.
 | `LOOM_SWEEP_INFLIGHT_SWEEPS` | — | *(auto)* | Override the concurrent-sweep divisor instead of asking the local daemon for it. |
 | `LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS` | — | `10` | Hard bound on the `loom-daemon status --json` probe. On timeout the divisor falls back to `1`. |
 | `LOOM_SWEEP_WALLCLOCK_CEILING_SECS` | `autonomous.spawnWallClockCeilingSecs` | `0` (disabled) | Adds `RuntimeMaxSec=<secs>` to the systemd scope when non-zero. |
+| `LOOM_SWEEP_MEMORY_MAX` | — | *(auto)* | Per-scope `MemoryMax` (#11094). Unset = derive from the daemon's observed per-repo peak (`~/.loom/ram-peaks.json`): `max(LOOM_SWEEP_MEMORY_MAX_MIN_MB, high-water * LOOM_SWEEP_MEMORY_MAX_PCT/100)`, and **no limit at all without history** for that repo. `0`/`off` disables; a positive integer is an explicit MiB limit. Paired with `OOMPolicy=continue`, an over-budget build is killed inside its own cgroup instead of by the kernel's global OOM killer. `MemoryMax` rather than `MemoryHigh`: `MemoryHigh` only throttles, so a runaway build on a no-swap host would stall rather than fail. Skipped when the limit would be >= host RAM or systemd rejects it (memory controller not delegated). Computed by `loom-daemon ram-scope-limit`; a binary without that subcommand means no limit. |
+| `LOOM_SWEEP_MEMORY_MAX_PCT` / `_MIN_MB` | — | `200` / `4096` | Multiple of the observed peak, and floor in MiB, for the derived limit. |
 | `LOOM_SWEEP_CPU_BUDGET_CORES` | — | *(output only)* | Exported into the child with this sweep's computed share; read it, don't set it. |
 
 Precedence for the config-backed tunables: env > config > default, the same

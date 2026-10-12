@@ -313,3 +313,8 @@ test-spawn-claude-managed-gh.sh
 # #11076: spawn-claude.sh's systemd scope carries OOMPolicy=continue. Hermetic:
 # systemd-run/systemctl/claude stubs under mktemp -d, no daemon, forge or network.
 test-spawn-claude-oom-policy.sh
+
+# #11094: spawn-claude.sh's systemd scope gets MemoryMax from `loom-daemon
+# ram-scope-limit`. Hermetic: daemon/systemd-run/systemctl/claude stubs under
+# mktemp -d; no real daemon, forge or network.
+test-spawn-claude-memory-max.sh

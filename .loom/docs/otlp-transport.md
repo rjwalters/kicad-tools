@@ -23,18 +23,39 @@ error text is never retained because it can echo secrets or private payloads.
   increments `warnings`, without inventing rejected records.
 - Partial success acknowledges the whole request and records accepted/rejected
   item counts. Rejected items are **never retried**.
+- HTTP 401/403 are credential refusals: the batch is **held** — left queued for
+  the jittered retry loop until the credential is fixed, with a diagnostic that
+  says so — never dropped (Issue #11527).
 - HTTP 429/502/503/504 and transport/timeouts leave items queued for the existing
   jittered retry loop. Other HTTP statuses permanently drop that request.
 - Malformed/oversized HTTP 200 responses are permanent drops with acceptance
   explicitly unknown. This prevents one bad response from starving later data.
   No quarantine payload is retained, so quarantine storage is bounded at zero.
 
+**Every permanent loss is counted, by reason, durably** (Issue #11527). Each
+exporter's queue keeps a loss ledger (`observability-queue[.<name>].loss.json`
+next to its queue file) mapping a reason to a cumulative count:
+`status_<code>` (any other non-200 status), `non_json_response`,
+`response_too_large`, `invalid_response`, `receiver_rejected` (partial
+rejection, in **signal units** — items, not envelopes), `trace_unmappable`
+(trace envelopes the mapping never sends — unsampled or invalid spans;
+counted when the batch's fate is decided — acknowledged or permanently
+dropped — never per retry), `queue_overflow` (capacity eviction) and
+`capacity_shrink` (front-trim on reopen). Each lost envelope is counted under
+exactly one reason. The ledger survives daemon restarts; its sum is `host.export`'s
+`dropped_total` and its map is `dropped_by_reason` (see
+[telemetry-schema.md](telemetry-schema.md) § `host.export`). Each flush with
+losses logs one WARNING naming the reasons and counts. A held batch (401/403,
+transient statuses) is never a loss; a kind OTLP deliberately does not send is
+routing, not loss.
+
 `observability_export.signal_counts` in daemon JSON status is keyed by
 `log_records`, `metric_data_points`, and, when emitted, `spans`. Each entry has
 `accepted`, `rejected`, `dropped`, `retry_scheduled`, and `warnings` counters.
 Counters are process-lifetime totals. `retry_scheduled` counts attempted items
-left queued after a transient failure, not unique records. Queue-capacity drops
-remain the durable queue's separate envelope counter. The older
+left queued after a transient failure — including a held credential refusal —
+not unique records. Queue-capacity drops and transport-level permanent losses
+are the loss ledger's counts, reported through `host.export`. The older
 `records_exported` field counts **fully accepted envelopes**; a partially rejected
 group contributes zero because the receiver does not identify the rejected
 individual envelopes. Use signal counters for actual accepted item counts.

@@ -1239,8 +1239,17 @@ per-issue clean / substantive-rework / environmental-rework split), IE2 (the
 issues whose cost was mostly environment), IE3 (the attempt/trigger
 distribution), IE4 (in-sweep rework by kind), IE5 (how much of the cost the
 classification can attribute at all). It reads the raw `records` store,
-complementing #9446's `sweep_facts` rollup (whose rework columns are
-per-classification *counts*, not per-event durations).
+complementing #9446's `sweep_facts` rollup. That rollup now carries the
+seconds too (#9507): `rework_substantive_sec` / `rework_environmental_sec`
+(Σ measured `duration_sec` per class) and `rework_substantive_open` /
+`rework_environmental_open` (events with no `duration_sec` — open, never
+zero) beside the per-classification counts, in D1 and both ClickHouse
+extractions; `defaults/observability/sweep-facts/issue-effort.sql`'s
+`issue_effort` view applies IE1's arithmetic and trigger → bucket table to
+them (`clean_sec` / `substantive_rework_sec` / `environmental_rework_sec` /
+`unattributed_sec`, plus `overaccounted_sec` and coverage), so dashboards
+reading the bundle get the same split IE1 computes from raw `records`. IE4's
+per-*kind* breakdown remains raw-store-only.
 
 **PR linkage and the model that ran** (Issue #9465): `pr_numbers` (integer
 array, first-seen order) lists every PR the sweep's lifecycle was observed to
@@ -1921,7 +1930,7 @@ tick; otherwise a root of its own. Attributes:
 | `loom.queue.rank` | 1-based dispatch-order rank over every row the tick ranked; absent on a `left_queue` span (the row is no longer ranked) |
 | `loom.queue.candidate_rank` | 1-based queue position at the sampled tick (Issue #9669): the dispatch-plan `position` in the shaped pass-2 candidate order when the row has one, else the comparator `rank` — a blocked row's would-be position once unblocked. Absent on a `left_queue` span |
 | `loom.queue.total_candidates` | the sampled tick's ready-queue row count — the denominator of `loom.queue.candidate_rank` (Issue #9669). Absent on a `left_queue` span |
-| `loom.queue.priority_score` | the comparator keys that placed the row, as one compact JSON object in comparator order, e.g. `{"level":1,"created_at":"2026-10-01T00:00:00Z","number":42}` (Issue #9669; keys re-cut by #11508). The comparator is lexicographic over named keys — there is no numeric score — so this is the weight itself, taken from the row's plan annotation; absent without one |
+| `loom.queue.priority_score` | the comparator keys that placed the row, as one compact JSON object in comparator order, e.g. `{"main_red_fix":false,"level":1,"created_at":"2026-10-01T00:00:00Z","number":42}` (Issue #9669; keys re-cut by #11508; `main_red_fix` leads since #11547). The comparator is lexicographic over named keys — there is no numeric score — so this is the weight itself, taken from the row's plan annotation; absent without one |
 | `loom.queue.transition` | `changed` (first sight, or the disposition itself changed) / `refresh` (same disposition, resent after the refresh window) / `left_queue` (the row disappeared from a repo whose listing succeeded) |
 | `loom.queue.previous_disposition` | present only on a `changed` transition after the first sighting |
 | `loom.queue.park_label` | only for `parked`/`hard_exclusion`, and only when the label is in the row's closed vocabulary — `PARK_LABELS ∪ SKIP_LABELS` for `parked`, `hard_exclusion::HARD_EXCLUSION_LABELS` (e.g. `external`) for `hard_exclusion` (#9672) — so a span names which rule declined the issue. A repo-configured extra skip label, a rule name outside that set, or any other detail text is never exported |
@@ -2610,7 +2619,7 @@ its absence from the tick.
 anchor is at least 300 s old (`ANCHOR_INTERVAL_SECS`) or the planner stamps
 changed (a regime boundary). A lost delta therefore leaves a reader's
 reconstruction wrong for at most about 5 minutes. Between anchors a pass sends a **delta** (`anchor: false`) only if
-rows, a census, a repo's `ready_complete` or the plan slots changed. A delta holds the added or changed
+rows, a census, a repo's `ready_complete`, `main_ci` or `halt`, or the plan slots changed. A delta holds the added or changed
 rows, the issues that left (`removed`), and the **full** census of each repo it
 names. **Ready replacement:** a repo with `ready_complete: false` is sent with `ready_replace: true`. Its `ready_wait` rows are not
 diffed: every record that names it carries the repo's **entire** observed
@@ -2628,7 +2637,7 @@ would exceed ~1 MB (`CHUNK_BYTES`, a quarter of the ~4 MB OTLP/gRPC message
 limit) is split into several log records that share `as_of` and every header
 field, numbered `chunk_index` `0..chunk_count`; rows and `removed` entries are
 packed in order, and a repo that spans chunks repeats its `repo`,
-`visibility`, `census`, `ready_complete` and `ready_replace` in each. A ~3000-row queue (~100-180 bytes a row) is
+`visibility`, `main_ci`, `halt`, `census`, `ready_complete` and `ready_replace` in each. A ~3000-row queue (~100-180 bytes a row) is
 one record with `chunk_count: 1`. A reader uses a record only once it holds
 all `chunk_count` chunks of that `(host, as_of)`.
 
@@ -2648,7 +2657,7 @@ all `chunk_count` chunks of that `(host, as_of)`.
 | `census_at` | RFC 3339, optional | when the review listings were read |
 | `slots` | object, optional | `{max_concurrent, occupancy?}` from the last work-finder dispatch plan |
 | `capacity` | object, optional | host capacity beside `slots` (never repeating `max_concurrent` / `occupancy`); additive on `fleet-state/v1`, absent from older emitters. All discrete: `live_workers` (sweeps this host runs), `accounts_usable` (ranking accounts with status `available`) / `accounts_exhausted` (ranking accounts with status `exhausted` only; `blocked`, `rate_limited` and unknown statuses count in neither), both absent when the ranking is unreadable or lists no account, `host_breaker` / `rate_limit_breaker` (`closed` / `open` / `cooldown`, absent when none is enabled), `admission_brake_held` (bool, absent when none is enabled). No utilisation fraction is carried, so a quiet host stays quiet: a change in any field above is a delta, drift is not |
-| `repos[]` | array | per repo, ordered by slug. An anchor lists every repo with rows or a census; a delta lists only repos that changed |
+| `repos[]` | array | per repo, ordered by slug. An anchor lists every repo with rows, a census, a `main_ci` or a `halt`; a delta lists only repos that changed |
 
 A change in `planner_version`, `planner_config_hash` or `fleet_config_hash`
 marks a regime boundary; the emitter starts a fresh anchor there, so a reader
@@ -2661,7 +2670,8 @@ Each `repos[]` entry:
 | `repo` | string | forge `owner/repo`, lowercased, never a local path |
 | `visibility` | `public` / `private` | missing or unknown decodes to `private` |
 | `census` | object, optional | `{open, by_stage?}`: distinct open PRs under a Loom review label, with `by_stage` keys `review_wait` / `doctor` / `merge_wait` / `merge_hold` / `held` (labels that name no single stage). **Absent means unknown** (listing incomplete or not read), never zero. Open PRs with no review label are not counted |
-| `main_ci` | `green` / `red` / `unknown`, optional | this repo's `main` CI status from the host's main-health gate: `red` = a verified-red run halted dispatch, `unknown` = the gate has not produced a verdict or could not evaluate, `green` otherwise. Per repo, never per host. Additive on `fleet-state/v1`; absent from older emitters. A change is a delta naming the repo |
+| `main_ci` | `green` / `red` / `unknown`, optional | this repo's `main` CI status from the host's main-health gate: `red` = a verified-red run halted dispatch, `green` = the gate completed a green run for this repo, `unknown` = the gate holds no verdict for it: the gate is not enabled for the repo (`autonomous.mainHealthGate.enabled` is off by default, or the repo has no usable `buildGate` block), it has not completed a run since the daemon started, or its last tick could not evaluate. `unknown` is therefore not a statement about CI; a host that does not run the gate reports `unknown` for every repo (#11565). Per repo, never per host. Additive on `fleet-state/v1`; absent from older emitters. A change is a delta naming the repo |
+| `halt` | object, optional | this host's work finder holds the **whole repo** (#11564): `{reason, since, since_lower_bound?}`, present **exactly** when its last tick held the repo, whether or not the repo has ready rows. See [Repo halts and eligible-at](#repo-halts-and-eligible-at). Additive on `fleet-state/v1`; absent from older emitters and on every repo before the host's first work-finder tick |
 | `ready_complete` | bool | `true` when the work finder's last tick walked this repo's ready listing to its last page (#11139), so its `ready_wait` rows are the whole queue. `false` when the walk fell short (a later page failed, the page cap, a mid-walk change), and on emitters before #11139, which listed one page per label. A reader must not treat a `false` repo's `ready_wait` rows as its whole queue. Always sent; missing (an older emitter) decodes to `false` |
 | `ready_replace` | bool, optional | `true` exactly when `ready_complete` is `false`: `rows` carries the repo's **entire** observed `ready_wait` set, and a reader replaces the repo's `ready_wait` rows with it (drop them all, then apply `removed` and `rows`). Removals of `ready_wait` rows are never sent in `removed` for such a repo, and a reader never infers one from absence otherwise. Absent (`false`, or an older emitter): plain diffing |
 | `rows[]` | array, optional | anchor: every row; delta: added or changed rows. Ordered by issue |
@@ -2686,7 +2696,7 @@ Each row:
 | `level` | integer, optional | priority level (absent = `0`); on every row, like `star` (#11391). A `ready_wait` row reads the planner's `level` key since #11508 (1 `loom:important`, 2 `loom:very-important`); other rows still read the legacy level labels until #11510 |
 | `fleet_priority` | integer, optional | `ready_wait` only: the repo's fleet (workspace) priority tier; lower dispatches first |
 | `created_at` | RFC 3339, optional | `ready_wait` only: the issue's creation instant, the planner's age input (age = `as_of - created_at`; the instant is sent so an unchanged row stays unchanged) |
-| `main_red_fix` | bool, optional | `ready_wait` only: the row is a verified red-main fix (marker present and its repo's `main` verified red). Since #11508 a gate bypass, not an ordering key |
+| `main_red_fix` | bool, optional | `ready_wait` only: the row is a verified red-main fix (marker present and its repo's `main` verified red). A gate bypass (#11508) and, since #11547, the leading ordering key (true only while `main` is verified red) |
 | `hold_kind` | string, optional | the item is under a hold now: one of `operator`, `operator_only`, `operator_decision`, `merge_risk`, `critical_file`, `ac_hold`, `blocked`, `other` (the long-standing snake_case hold names). Derived from the PR's labels; the emitter does not read Champion's comments, so it reports `operator` where Champion applied `merge_risk` / `critical_file` / `ac_hold` and leaves that split to the reader. Additive on `fleet-state/v1`; absent = not held (or an older emitter) |
 | `holds` | array of string, optional | every hold the PR's labels name now (#11391), strongest first: `operator_decision`, `operator_only`, `operator`, `blocked`, `sequenced`, `other`. `hold_kind` is the winning one; a row with two holds no longer loses one. Absent = none. Additive on `fleet-state/v1` |
 | `rework` | integer, optional | Judge rejections the item's PR has taken (#11391): each arrival of `loom:changes-requested` in the PR's label history, except a repeat with no `loom:review-requested` / `loom:pr` arrival between (a relabel inside one attempt). Counted once per PR from the history, then +1 each time the row enters `doctor`. It does not read comments, so a daemon base-conflict flag that `sweep.outcome` excludes can count here. Absent = `0` or not read. Additive on `fleet-state/v1` |
@@ -2695,6 +2705,43 @@ Each row:
 | `held_since` | RFC 3339, optional | when the current hold began. Present exactly when `hold_kind` is |
 | `held_since_lower_bound` | bool, optional | present (`true`) when `held_since` is the first pass that saw the hold, not an observed transition |
 | `hold_released_at` | RFC 3339, optional | the hold cleared: the pass that first saw it clear. The clearing delta carries it with `hold_kind` / `held_since` absent, and it is kept while the row is otherwise unchanged. A held item that merges or closes gets none: its removal is the end |
+| `eligible_reason` | string, optional | `ready_wait` only (#11564): the clock the work finder held the item back on at its last tick, one of `recheck_interval`, `dispatch_backoff`, `open_pr_backoff`, `noop_cooldown`, `declined`, `prless_retry`, `build_backoff`. Present on every such row, dated or not. Absent = no clock holds it. Additive on `fleet-state/v1` |
+| `eligible_at` | RFC 3339, optional | `ready_wait` only (#11564): when that clock ends, the absolute expiry the work finder computed (the same instant as `queue.snapshot` `rows[].held_until`). Absent for `build_backoff` (no clock) and when this host cannot date the window. Additive on `fleet-state/v1` |
+
+#### Repo halts and eligible-at
+
+Facts for an ETA reader (#11564): a wait in a halted repo, or behind a
+backoff, cannot be modelled without **that** it is held, **why** and **since
+when**, and per item **when** a time-boxed hold ends. The daemon emits the
+facts; it computes no estimate.
+
+**`repos[].halt`.** The work finder folds every per-repo hold into one cause
+per repo each tick (`work_finder::halt_cause`, #9017), and `fleet.state`
+reports it per repo instead of only on `queue.snapshot`'s capped rows.
+
+| Field | Type | Notes |
+|---|---|---|
+| `reason` | string | closed enum: the `HaltCause` tokens `main_red`, `gate_pending`, `token_pool`, `preflight_advisory`, `drain`, `breaker`, `write_scope`, `ci_billing`, `install_incompatible`, `daemon_too_old`, `maintain_only`, `disk_reservation`, plus `unknown` for a hold no cause names (never omitted). A reader decodes a token it does not know as `unknown` |
+| `since` | RFC 3339 | the first work-finder tick at which this daemon process saw the repo held **with this `reason`**. A reason change restarts it; a tick that sees the repo not held ends the halt |
+| `since_lower_bound` | bool, optional | present (`true`) when the hold was already in force on this process's first tick, so it may predate the process and `since` is only a lower bound. Mirrors `held_since_lower_bound` |
+
+**Delta rule.** A halt starting, changing `reason` (or `since`) or clearing is a
+delta naming the repo. Every record that names a repo carries its current
+`halt`, so a named repo **without** `halt` is not held as of `as_of`; a
+cleared halt is that absence. An unchanged halt sends nothing between anchors.
+
+**`rows[].eligible_reason` / `eligible_at`.** Taken from the work finder's
+last tick row of the item: its disposition names the clock, and the
+disposition's `held_until` (#9311) is the end. A dispatch-backoff or no-op
+cooldown window a **peer** host armed (fleet-wide since #7477) is dated from
+the remaining time its broadcast carried. The build back-off releases when the
+repo's review + merge debt drains, not at a time, so its rows carry
+`eligible_reason: build_backoff` and no `eligible_at`. An item whose dispatch
+failed during the tick itself gets its window's end on the next tick.
+
+**No caps.** Both are carried on every halted repo and every held
+`ready_wait` row the tick saw (all of them, not `queue.snapshot`'s 200), and a
+large record is chunked, never truncated.
 
 Log attributes besides `loom.kind` and `loom.record_id`
 (`FLEET_STATE_LOG_ATTRIBUTE_KEYS`, kept by the collector's `transform/privacy`
@@ -3114,18 +3161,42 @@ elected, there are no caps, and no rate or estimate is computed in the daemon.
 | `exporters` | array | one entry per exporter that started in this process, sorted by name |
 | `exporters[].name` | string | `https` or `otlp` |
 | `exporters[].queue_depth` | integer | envelopes queued, waiting for a flush |
-| `exporters[].dropped_total` | integer | envelopes dropped (oldest first) at a full queue |
+| `exporters[].dropped_total` | integer | records lost over this exporter's lifetime, summed over every reason in `dropped_by_reason`; **durable** (#11527) — survives daemon restarts |
+| `exporters[].dropped_by_reason` | object | the by-reason breakdown behind `dropped_total` (#11527): `queue_overflow`, `capacity_shrink`, `status_<code>`, `non_json_response`, `response_too_large`, `invalid_response`, `trace_unmappable` (envelope counts) and `receiver_rejected` (OTLP partial rejection, in **signal units** — items, not envelopes); omitted when nothing has been lost, and on records from before #11527 |
 | `exporters[].last_flush_ok_at` | RFC3339? | last acked batch; omitted when none this process (unknown, not a fabricated time) |
-| `fact_id_missing_total` | integer | `eta.stage_outcome` exits this process emitted without a `loom.fact_id` (each carried `loom.fact_id_missing_reason`, #11401); cumulative per process lifetime like `dropped_total`; `0` on records from before #11401 |
+| `fact_id_missing_total` | integer | `eta.stage_outcome` exits this process emitted without a `loom.fact_id` (each carried `loom.fact_id_missing_reason`, #11401); cumulative per process lifetime (unlike the durable `dropped_total`, it resets on restart); `0` on records from before #11401 |
 
 Attributes: `loom.host_export.exporters` (count), `.queue_depth` (sum),
 `.dropped_total` (sum), `.last_flush_ok_at` (latest),
-`.fact_id_missing_total`.
+`.fact_id_missing_total`, and `host.lease_id` (#11530).
 
-**`dropped_total` is cumulative per process lifetime.** It restarts at 0 when
-the daemon restarts, so a reader computing "drops in a window" must treat a
-decrease as a counter reset (take the post-reset value, not a negative delta).
-The committed query is
+**`host.lease_id`** is `opaque_host_id(host.id)`: `host-` plus 8 hex chars of
+a salted SHA-256, the same form `loom:lease` comments publish (see
+[`lease-record.md`](lease-record.md)). It is derived in the OTLP mapping from
+the record's `host`, not carried on the wire, so records from older daemons
+still decode. Use it to join a SigNoz row to a lease record.
+
+**Join caveat.** Lease comments are keyed on the *lease* host chain
+(`LOOM_HOST_ID` > `$HOSTNAME` > `hostname`, unchanged so the
+`sweep-lease-*.sh` scripts and the daemon agree), while `host.id` is
+`fleet.hostId` > `LOOM_HOST_ID` > the persisted `~/.loom/host-id` (see
+[`daemon-reference.md`](daemon-reference.md) → `loom-daemon host-id`). The
+join matches only on hosts where both chains resolve to the same string, in
+practice roster hosts where `LOOM_HOST_ID` equals `fleet.hostId`. On any other
+host the SigNoz-to-lease join misses for that host.
+
+**`dropped_total` is durable** (Issue #11527). It is the sum of the
+exporter's on-disk loss ledger (`observability-queue[.<name>].loss.json` next
+to the queue file), so it survives a daemon restart instead of resetting to
+0; HTTP 401/403 no longer drop batches (they are held for retry until the
+credential is fixed), and every remaining loss path — permanent status
+refusals, unreadable responses, partial rejection, queue overflow — is
+counted in `dropped_by_reason`. A reader computing "drops in a window" should
+still treat a decrease as a counter reset (take the post-reset value, not a
+negative delta): only a removed or reset ledger file produces one now, but
+the defensive read stays correct for either shape. `dropped_by_reason` is
+additive (serde-defaulted), so records from before #11527 still parse and no
+`schema_version` bump is needed. The committed query is
 [`defaults/observability/signoz/host-export-queries.sql`](https://github.com/rjwalters/loom/blob/main/defaults/observability/signoz/host-export-queries.sql):
 hosts with drops, or with no `host.export` at all, in the last 2 h. Query 3 compares a rendered `hosts.yml` roster against `host.export` to find silent hosts by absence (#11198).
 

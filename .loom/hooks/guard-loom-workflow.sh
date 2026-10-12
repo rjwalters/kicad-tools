@@ -1787,6 +1787,32 @@ if [[ "$GH_PR_MERGE_SCAN_TEXT" =~ $FORGE_EGRESS_PREFILTER || "${GH_PR_MERGE_SCAN
 fi
 
 # =============================================================================
+# LOOM: Per-role tool restriction (issue #8256) — a role whose JSON declares
+# toolPolicy.allowedCapabilities cannot reach an undeclared sensitive
+# capability (ssh, cloud CLIs, gh secret, credential stores), however it was
+# persuaded to try. Matching and the allowlist live in `loom-daemon
+# role-tool-policy check`, read from THIS hook's own install (not the cwd, so a
+# PR checkout cannot grant itself a capability). Exit 0 allows, exit 1 +
+# prefix denies; any other answer (no binary, a daemon predating `check`)
+# fails CLOSED for the built-in read-only roles. guard-hooks.md has the rule.
+# =============================================================================
+
+# requires-daemon: role-tool-policy optional   #8256 — `check`; with no usable answer the built-in read-only roles are denied, every other role is allowed.
+if [[ -n "${LOOM_ROLE:-}" ]]; then
+    RTP_RC=0
+    # Only heredoc bodies and named text flags (--body/-m/…) are blanked here:
+    # the positional masking above also blanks quoted FILE operands, which would
+    # hide `grep x "$HOME/.ssh/id_rsa"` from the matcher. The matcher itself
+    # tells a grep/rg pattern from a path.
+    RTP_OUT=$("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" role-tool-policy check --roles-dir "$SCRIPT_DIR/../roles" --workspace "$SCRIPT_DIR/../.." --command "$(mask_data_flag_values "$(mask_var_assigned_heredoc_bodies "$(mask_cat_heredoc_bodies "$COMMAND")")")" 2>/dev/null) || RTP_RC=$?
+    if [[ "$RTP_RC" -eq 1 && "$RTP_OUT" == "BLOCKED [role-tool-policy]"* ]]; then
+        deny "$RTP_OUT" "loom:role-tool-policy"
+    elif [[ "$RTP_RC" -ne 0 && " architect auditor champion curator guide hermit judge " == *" $(printf '%s' "$LOOM_ROLE" | tr '[:upper:]_' '[:lower:]-') "* ]]; then
+        deny "BLOCKED [role-tool-policy]: role '$LOOM_ROLE' is restricted, and loom-daemon role-tool-policy check could not answer (exit $RTP_RC), so this command is denied rather than allowed unchecked (#8256). Roll loom-daemon to a release with 'role-tool-policy check'." "loom:role-tool-policy"
+    fi
+fi
+
+# =============================================================================
 # LOOM: Block pip install -e inside worktrees (issue #2495, hardened by #4079)
 #
 # Editable pip installs overwrite a global .pth file in site-packages.

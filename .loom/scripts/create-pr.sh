@@ -291,11 +291,11 @@ close this branch as a duplicate." >&2
 fi
 
 # --- Pre-PR gate receipt (#10476) ---------------------------------------------
-# requires-daemon: preflight optional   no binary, or one predating `preflight`, skips this (only an exact exit 7 refuses)
+# requires-daemon: preflight optional   no binary, or one predating `preflight`, skips this (only exit 7, or 8 = a skip-CI marker in a commit #11389, refuses)
 if [[ -n "$_cpr_loom_daemon" ]]; then
   _cpr_pf_rc=0
-  "$_cpr_loom_daemon" preflight --check || _cpr_pf_rc=$?
-  [[ "$_cpr_pf_rc" -ne 7 ]] || exit 7
+  LOOM_PR_BASE="$BASE_BRANCH" "$_cpr_loom_daemon" preflight --check || _cpr_pf_rc=$?
+  [[ "$_cpr_pf_rc" -ne 7 && "$_cpr_pf_rc" -ne 8 ]] || exit "$_cpr_pf_rc"
 fi
 
 # --- Superseded-target-issue freshness check (#6277) -------------------------

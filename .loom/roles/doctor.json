@@ -9,5 +9,8 @@
   "runtimeRequirements": [
     "worktreeIsolation",
     "loomControl"
-  ]
+  ],
+  "toolPolicy": {
+    "allowedCapabilities": ["*"]
+  }
 }

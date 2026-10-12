@@ -433,6 +433,22 @@ if [[ "${LOOM_SWEEP_CPU_QUOTA:-1}" != "0" ]]; then
         # retries while the daemon has already released the sweep as dead. With
         # `continue` only the offending command fails and the agent can react.
         _cpu_quota_props=(-p "CPUQuota=${_cpu_quota_pct}%" -p "OOMPolicy=continue")
+        # MemoryMax from the daemon's observed per-repo peak (issue #11094):
+        # an over-budget build fails inside its own cgroup rather than the
+        # kernel's global OOM killer choosing a victim. The policy and the
+        # systemd probe live in `loom-daemon ram-scope-limit` (exit 0 apply,
+        # 3 rejected by systemd, anything else — incl. an older binary — no limit).
+        # requires-daemon: ram-scope-limit optional   #11094 — any non-0/3 exit (incl. an older binary's unknown-subcommand error) means the scope runs with no MemoryMax, exactly the pre-#11094 behaviour.
+        # shellcheck source=lib/locate-daemon-bin.sh
+        source "${_script_dir}/lib/locate-daemon-bin.sh"
+        _mem_bin="$(loom_locate_daemon_bin "$WORKSPACE" 2>/dev/null || true)"
+        _mem_rc=0
+        _mem_max_mb="$([[ -n "$_mem_bin" ]] && "$_mem_bin" ram-scope-limit --workspace "$WORKSPACE" --probe 2>/dev/null)" || _mem_rc=$?
+        case "$_mem_rc:$_mem_max_mb" in
+            0:[0-9]*) _cpu_quota_props+=(-p "MemoryMax=${_mem_max_mb}M")
+                log_info "spawn-claude: scope MemoryMax=${_mem_max_mb}M from observed per-repo peak (LOOM_SWEEP_MEMORY_MAX=0 disables; issue #11094)" ;;
+            3:[0-9]*) log_warn "spawn-claude: MemoryMax=${_mem_max_mb}M rejected by systemd (memory controller not delegated?); scope runs without a memory limit (issue #11094)" ;;
+        esac
         if [[ "$_cpu_wallclock" != "0" ]]; then
             _cpu_quota_props+=(-p "RuntimeMaxSec=${_cpu_wallclock}")
         fi
@@ -1409,6 +1425,23 @@ if [[ "$_CONTAINMENT_CRED_PROXY" != "1" && -f "$_mcp_config_lib" ]]; then
             fi
         fi
     fi
+fi
+
+# --- Per-role tool restriction at spawn (#8256) ---
+# Defense in depth for the guard hooks: the role JSON's
+# toolPolicy.allowedCapabilities (plus any forge-egress policy) become
+# --disallowedTools specs, computed by `loom-daemon role-tool-policy
+# deny-specs`. Bypassable on its own (`bash -c 'ssh …'`), which is why the hooks
+# are the backstop. Appended last so no positional follows the variadic flag,
+# and additive to any --disallowedTools the caller passed. No binary or no
+# specs => byte-for-byte no-op; never fails the spawn.
+# requires-daemon: role-tool-policy optional   #8256 — `deny-specs` (since #8322); no binary or no answer injects nothing, and the guard hooks still enforce the role's declaration.
+_rtp_bin="$(loom_locate_daemon_bin "$WORKSPACE" 2>/dev/null || true)"
+_rtp_specs=()
+while IFS= read -r _rtp_spec; do [[ -z "$_rtp_spec" ]] || _rtp_specs+=("$_rtp_spec"); done < <([[ -z "$_rtp_bin" ]] || "$_rtp_bin" role-tool-policy deny-specs --workspace "$WORKSPACE" --roles-dir "$_script_dir/../roles" 2>/dev/null || true)
+if [[ ${#_rtp_specs[@]} -gt 0 ]]; then
+    PASSTHROUGH_ARGS+=(--disallowedTools "${_rtp_specs[@]}")
+    log_info "spawn-claude: per-role tool restriction (#8256): role=${LOOM_ROLE:-unset} gets ${#_rtp_specs[@]} --disallowedTools specs"
 fi
 
 # --- Dispatch ---

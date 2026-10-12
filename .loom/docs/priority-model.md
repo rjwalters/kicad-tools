@@ -39,9 +39,12 @@ no priority side listing), and no priority exempts a candidate from any gate
 
 1. **Pick a workspace** among those with dispatchable work, at random,
    weighted by workspace priority.
-   - A workspace holding any open, dispatchable `loom:very-important` work
-     wins the draw. If several do, the draw is among just those. Otherwise it
-     is over every workspace with dispatchable work.
+   - The pool is three-tier (#11547). A workspace whose next candidate is a
+     verified red-main fix wins the draw (`pool: "red-main-fix"`); else a
+     workspace holding any open, dispatchable `loom:very-important` work wins
+     (`"very-important"`); if several qualify at a tier, the draw is among
+     just those. Otherwise it is over every workspace with dispatchable work
+     (`"all"`).
    - **Weight mapping.** A workspace's `fleet_priority` (the `priority`
      integer in `workspaces.json`; lower = higher priority, default `100`) is
      reinterpreted as a weight: `weight = max(1, 1000 / (1 + priority))`,
@@ -53,16 +56,23 @@ no priority side listing), and no priority exempts a candidate from any gate
      A fixed seed reproduces the exact pick sequence. The draw (pool,
      candidates with weights, total weight, roll, pick) is `WorkspaceDraw`,
      the record `pick.decision` carries.
-2. **Pick the issue within that workspace** by, in order: level
-   (`loom:very-important`, then `loom:important`, then none); oldest
-   `createdAt` first; issue number ascending.
+2. **Pick the issue within that workspace** by, in order: verified
+   red-main fix first; level (`loom:very-important`, then `loom:important`,
+   then none); oldest `createdAt` first; issue number ascending. The
+   published key order is `main_red_fix → level → created_at → number`.
+
+**The red-main-fix lane** (#11547, operator ruling on #11278). A verified
+red-main fix is an issue carrying `<!-- loom:main-red-fix -->` whose repo's
+`main` is verified red this tick. While `main` is red nothing in that repo can
+merge, so the fix leads: first in its workspace and its workspace first in the
+draw. It is not a level and changes no gate: it keeps only its existing bypass
+of the build back-off, the file-overlap gate and the repo-sharding slice,
+which a red `main` would otherwise deadlock. On a green `main` the marker
+grants nothing.
 
 **Removed ordering keys** (gone from dispatch since #11508): the star, the
-starred-at time and its restart store, the red-main-fix key, the
-inherited-level key, and the cross-workspace tier and round-robin interleave.
-A verified red-main fix is not a priority: it gains no place in the order, but
-keeps its bypass of the build back-off, the file-overlap gate and the
-repo-sharding slice, which a red `main` would otherwise deadlock.
+starred-at time and its restart store, the inherited-level key, and the
+cross-workspace tier and round-robin interleave.
 
 ## The very-important cap (#11509)
 
@@ -70,11 +80,17 @@ At any time, a workspace has at most one very-important issue:
 `priority_pick::VERY_IMPORTANT_CAP = 1` (a constant, not a config knob;
 operator ruling on #11278).
 
-- **Which one.** The oldest **open** `loom:very-important` issue of the
-  workspace, by `createdAt` then issue number (`very_important_holders`). Open
-  means any state: an issue being built (`loom:building`) or still in curation
-  keeps the slot, so a second one is not promoted while the first is in
-  flight. Every other open very-important issue ranks as `loom:important`.
+- **Which one.** The oldest **eligible** `loom:very-important` issue of the
+  workspace, by `createdAt` then issue number (`very_important_holders`).
+  Eligible means it carries `loom:issue` or `loom:building` and no hold label
+  (the label registry's `hold` property, `defaults/labels.json`; operator
+  ruling round 3 on #11278, #11559). A building issue keeps the slot, so a
+  second one is not promoted while the first is in flight; an open PR is
+  covered by that same `loom:building`, which stays until the closing merge
+  (#6199). A blocked, operator-held or not-yet-approved very-important issue
+  keeps its label but does not hold the slot while it cannot move. Once a
+  holder exists, every other very-important issue in the ready listing ranks
+  as `loom:important`.
 - **Where.** Labels cannot be refused when applied, so the cap is enforced at
   dispatch, each tick, before the level is read (`work_finder/vi_cap.rs`).
   The work finder reads the workspace's open very-important listing only

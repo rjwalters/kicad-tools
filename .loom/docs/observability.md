@@ -573,8 +573,10 @@ alert. The rule's shape has not yet been tested against a live SigNoz. Standing 
 `defaults/observability/signoz/queue-dwell.sql`.
 
 **Fleet singleton outputs (#10916).** The in-daemon `fleet_alert` path
-(#10924) judges the registered one-host fleet outputs (`ci.run` and the
-captain gauges) against `fleet_outputs::SINGLETON_OUTPUTS`. The SigNoz
+(#10924) judges the registered one-host fleet outputs (`ci.run`, the captain
+gauges, and the intake-reconcile completed-pass heartbeat
+`.loom/state/intake-reconcile/last-pass.json`) against
+`fleet_outputs::SINGLETON_OUTPUTS`. The SigNoz
 cross-host alert that watched the ETA singletons was removed with the ETA
 subsystem (#11098).
 

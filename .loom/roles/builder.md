@@ -1157,7 +1157,7 @@ round — none of which any offline fixture could have caught.
 
 ### MANDATORY: Derive Titles From Your Diff, Not the Issue
 
-**Before committing or creating a PR**, you MUST review your actual code changes and derive titles from them:
+**Before committing or creating a PR**, review your actual changes and derive titles from them:
 
 ```bash
 # Step 1: Review what you actually changed
@@ -1165,21 +1165,22 @@ git diff --stat
 git diff   # Read the actual changes
 
 # Step 2: Write a commit message that describes the CODE CHANGE
-#   Ask: "What does this diff do?" — NOT "What issue is this for?"
+#   Ask: "What does this diff do?", not "What issue is this for?"
 #
 #   WRONG: "feat: implement changes for issue #2678"
 #   WRONG: "Builder generates generic commit/PR titles despite explicit anti-patterns"
-#   WRONG: "feat: bug: MCP status bar noise..." (double prefix — copied issue title prefix)
+#   WRONG: "feat: bug: MCP status bar noise..." (double prefix copied from the issue)
 #   RIGHT: "docs: add mandatory diff-review step before commit/PR creation"
 #
-#   NOTE: If the issue title starts with a prefix like "bug:", "feat:", etc.,
-#   do NOT copy it verbatim. Strip the issue prefix and derive your own from the diff.
-#   "bug:" → use "fix:" in the PR title. See builder-pr.md for the full mapping.
+#   NOTE: never copy an issue-title prefix ("bug:", "feat:") verbatim; derive
+#   your own from the diff ("bug:" → "fix:"; full mapping in builder-pr.md).
+#   Never write a skip-CI marker ("[skip ci]" etc.) literally: no CI runs and
+#   create-pr.sh refuses it (#11389). Put a space inside, or describe it.
 
-# Step 3: Use the same approach for the PR title
+# Step 3: Same approach for the PR title
 ```
 
-**The PR title and commit message MUST describe what the code change does, not reference the issue.** See builder-pr.md for the full rules, anti-patterns, and examples.
+**The PR title and commit message MUST describe what the code change does, not reference the issue.** Full rules and examples: builder-pr.md.
 
 ### Commit Conventions: DCO / sign-off
 

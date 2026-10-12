@@ -1418,7 +1418,7 @@ answering the on-command verbs below.
 | `fleet.cloneMaxPerPass` | `LOOM_FLEET_CLONE_MAX_PER_PASS` | `2` | Most missing clones one `autoApply` timer pass clones; the rest wait for the next pass. `0` never clones |
 | `fleet.cloneTimeoutSecs` | `LOOM_FLEET_CLONE_TIMEOUT_SECS` | `300` | Wall-clock cap on one clone (clamped up to `30`); a clone that hits it is killed, removed and retried next pass |
 | *(startup cap)* | `LOOM_FLEET_SYNC_STARTUP_TIMEOUT_SECS` | `60` | Wall-clock cap on the startup pass, so a hanging forge cannot hold up boot. `0` waits indefinitely |
-| *(host identity)* | `LOOM_HOST_ID` | `$HOSTNAME` → `hostname` | This host's name in the store (`fleet/hosts/<host>/`, `fleet/state.yml`); `--host` overrides it per command |
+| *(host identity)* | `LOOM_HOST_ID` | the persisted `~/.loom/host-id` | This host's name in the store (`fleet/hosts/<host>/`, `fleet/state.yml`): `host_identity()`, see [Host identity](#host-identity-loom-daemon-host-id-11530). A rendered `fleet.hostId` wins over the env var. `--host` overrides it per command |
 
 Every sub-verb takes `--workspace <PATH>` (default: the current repo): the
 daemon workspace whose config names the store and supplies the credentials,
@@ -1550,6 +1550,54 @@ cross-owner repos (`.loom/gh-config-by-owner/<OWNER>/`); else **ambient `gh`
 auth**. A reader that cannot serve the store falls through to the writer after
 one request. The App needs read access to the store repo (`contents: read`).
 Calls are counted in the forge-call stats as `fleet_store`. GitHub only.
+
+### Host identity (`loom-daemon host-id`, #11530)
+
+`host_identity()` (`loom-daemon/src/host_identity.rs`, re-exported as
+`sweep_registry::host_identity`) is this host's one name: telemetry `host.id`,
+the envelope `host_id` (and so ingest-key binding), peer-claim
+self-recognition, collision records, `fleet.captain` matching, the default
+`--host` of `fleet-config`, and the fleet dashboard. Precedence:
+
+1. **`fleet.hostId`** in the machine-tier file (`LOOM_CONFIG_DEFAULTS_FILE`,
+   default `~/.local/share/loom/config/defaults.json`), which `fleet-config
+   render` writes from `fleet/hosts/<host>/defaults.json`. Only that file is
+   read: a committed `.loom/config.json` is shared by every clone and would
+   name every host the same.
+2. **`LOOM_HOST_ID`** (a blank value is ignored).
+3. **The persisted `~/.loom/host-id`** (path override `LOOM_HOST_ID_FILE`),
+   generated once as `loom-host-<16 hex>` from random bytes, written
+   atomically (first writer wins), mode `0600`, then re-read on every start. A
+   pre-seeded file is used verbatim (trimmed).
+4. **`unknown-host`** only when that file can be neither read nor created
+   (no home directory, a read-only `~/.loom`). WARN logged once.
+
+**Never the hostname.** `$HOSTNAME` and the `hostname` binary differ by launch
+context and OS, which is how one machine came to report under two `host.id`s.
+
+`loom-daemon host-id` prints the resolved id, one line, exit 0. `--source`
+adds `source: config|env|persisted|generated` on stderr; stdout stays the bare
+id. On `unknown-host` it prints nothing on stdout, explains on stderr and
+exits non-zero, so a shell caller never adopts the shared sentinel.
+
+**Lease identity is separate and unchanged.** Ids in `loom:lease`,
+`loom:lease-yield`, PR-lease and role-runner roster comments still come from
+`lease_host_identity()` (`LOOM_HOST_ID` > `$HOSTNAME` > `hostname` >
+`unknown-host`), because `defaults/scripts/sweep-lease-*.sh` compute the same
+id with that chain. `host.export` carries `host.lease_id =
+opaque_host_id(host.id)`, which equals the lease id only where both chains
+agree; see [`telemetry-schema.md`](telemetry-schema.md) → `host.export`.
+
+**Migration.** On a host with neither `fleet.hostId` nor `LOOM_HOST_ID`,
+`host.id` changes once, from the hostname to a generated `loom-host-…`.
+SigNoz rows, fleet-store host keys, an ingest key bound to the old name,
+`fleet.captain`, and `loom:host:<id>` affinity labels then see a new id. To
+keep an existing key, set `fleet.hostId` in that host's
+`fleet/hosts/<host>/defaults.json` (or pin `LOOM_HOST_ID`) to the old
+hostname **before** rolling. On a fresh host with no rendered machine tier
+and no `LOOM_HOST_ID`, `fleet-config render` defaults `--host` to the
+generated id and fails with "host not in the store"; set `LOOM_HOST_ID` or
+pass `--host` for that first render.
 
 ### `fleet-config render [--host H] [--check] [--offline] [--allow-reduce]`
 
@@ -2990,35 +3038,45 @@ ordering (superseded by the weighted draw in [`priority-model.md`](priority-mode
 
 **Starvation stance:** since #11103 the cross-repo order is a weighted draw, not
 strict tiers: a default-priority repo is drawn less often than a tool repo, never
-starved. A repo with `loom:very-important` work next wins the draw outright.
+starved. A repo whose next candidate is a verified red-main fix wins the draw
+outright; failing that, a repo with `loom:very-important` work next does.
 Cross-repo dependency awareness stays a role judgment (label the blocker).
 
 **`tier:*` labels do not affect dispatch order.** `tier:goal-advancing` and its
-siblings are triage metadata; no daemon code reads them. Only the three keys
+siblings are triage metadata; no daemon code reads them. Only the four keys
 below order the queue.
 
-### Dispatch order and the red-main-fix lane (#11103, #11508)
+### Dispatch order and the red-main-fix lane (#11103, #11508, #11547)
 
-`candidate_cmp` orders **issues** by three keys ([PR planning](pr-planning.md) is separate):
+`candidate_cmp` orders **issues** by four keys, `main_red_fix → level →
+created_at → number` ([PR planning](pr-planning.md) is separate):
 
+0. **Verified red-main fix** first (`main_red_fix`, #11547): true only for a
+   `<!-- loom:main-red-fix -->` candidate whose repo's `main` is verified red
+   this tick. On a green `main` it is `false` for every candidate.
 1. **Level**, highest first: `loom:very-important`, then `loom:important`, then
    none. The level comes only from those two labels (`Level::of`).
 2. `createdAt`, oldest first (a dated issue before an undated one).
 3. Issue number ascending.
 
 These keys rank the published ready-queue rows (`rank`, `plan.keys`); dispatch
-follows the workspace draw, and the single-workspace tick uses the same three
-keys. #11508 removed the legacy keys: the star (`loom:operator-priority`), its
+follows the workspace draw, and the single-workspace tick uses the same four
+keys (passed the repo's real verified-red state). The workspace draw's pool is
+three-tier: workspaces whose next candidate is a verified red-main fix if any
+(`pool: "red-main-fix"`), else those with very-important work
+(`"very-important"`), else all (`"all"`). #11508 removed the legacy keys: the star (`loom:operator-priority`), its
 levels and inherited levels, the starred-at time and its restart store
 (`starred-<sha16>.json`, no longer read or written; `LOOM_STARRED_AT_PERSIST` is
-ignored), the red-main-fix ordering boost, and `workspace_priority` as a rank
-key (it weights the workspace draw instead). The ready-queue row field
+ignored), and `workspace_priority` as a rank key (it weights the workspace
+draw instead); #11547 restored the red-main-fix key above, live only while
+`main` is verified red. The ready-queue row field
 `operator_priority` is always `false`, kept for wire compatibility;
 `main_red_fix` still marks a verified red-main fix.
 
-**The red-main-fix lane is not a priority.** A candidate carrying
-`<!-- loom:main-red-fix -->` whose repo's `main` is verified red keeps three
-gate bypasses, because while `main` is red nothing merges and holding the fix
+**The red-main-fix lane reorders; it is not a level.** A candidate carrying
+`<!-- loom:main-red-fix -->` whose repo's `main` is verified red leads the
+dispatch order (every slot spent elsewhere while `main` is red is wasted) and
+keeps three gate bypasses, no more, because while `main` is red nothing merges and holding the fix
 would deadlock: the build back-off, the file-overlap gate (it still occupies)
 and the repo-sharding slice (kept in its draw position). On a green `main`
 the marker grants nothing.
@@ -6383,7 +6441,7 @@ knobs not yet audited here.
 | `safehouse.rooms.signal` | `LOOM_SAFEHOUSE_ROOM_SIGNAL` | *(falls back to `safehouse.room`)* | Attention-class routing (#4225): the **signal** room id (`loom-fleet`) — operator conversation, every `handoff`, terminal `ack`/`completion`. Absent **and** no `byRepo` ⇒ single-room mode, byte-identical to pre-#4225 |
 | `safehouse.rooms.byRepo` | `LOOM_SAFEHOUSE_ROOMS_BY_REPO` (`repo=room,…`) | `{}` | Attention-class routing (#4225): per-repo **firehose** room ids keyed by workspace-root basename — `task`/`chat` narration. A repo absent from the map is created lazily as `fleet-<repo>`; a refused creation degrades that repo to the signal room with one `warn!`. The env form replaces the whole map |
 | `safehouse.claimReconcileIntervalSecs` | `LOOM_CLAIM_RECONCILE_INTERVAL_SECS` | `1800` when `safehouse.enabled`, else `600` | Periodic `loom:building`/PR-claim reconciliation cadence (#4431). With safehouse peer-claims carrying the fast in-flight signal (re-advertised each reaper tick), label reconciliation demotes to a slow healing sweep. Env wins on any host; floored at 60s |
-| *(host identity)* | `LOOM_HOST_ID` | `$HOSTNAME` → `hostname` → `unknown-host` | This host's identity string, used in collision log records (#4085) **and** peer-claim self-recognition (#4028); set it where the daemon runs without `$HOSTNAME` exported |
+| `fleet.hostId` (machine tier only) | `LOOM_HOST_ID` | the persisted `~/.loom/host-id` → `unknown-host` | This host's identity string (`host.id`), used in telemetry, collision log records (#4085) **and** peer-claim self-recognition (#4028). **Config wins over env** here, and there is no hostname fallback (#11530); see [Host identity](#host-identity-loom-daemon-host-id-11530) |
 | `autonomous.autoUpdate.enabled` | `LOOM_AUTO_UPDATE` | `false` | Autonomous self-update loop on/off (#4055) **on a host with no fleet store only**. **Opt-in** there (it rebuilds + restarts the daemon process). On a fleet host (`fleet.repo` set) it governs nothing: the loop runs whatever it says, for the fleet floor and for a workspace that needs a newer daemon, and never chases the newest release (#10954, see [The fleet floor drives rolls](#the-fleet-floor-drives-rolls-no-roll-windows-10885)). Exactly one loop per daemon, not a per-workspace fan-out. See [Autonomous self-update loop](#autonomous-self-update-loop-4055) below |
 | `autonomous.autoUpdate.intervalSecs` | `LOOM_AUTO_UPDATE_INTERVAL_SECS` | `900` | Cadence between staleness checks. Zero/invalid → default |
 | `autonomous.autoUpdate.settleSecs` | `LOOM_AUTO_UPDATE_SETTLE_SECS` | `600` | Settle window: wait this long after first observing a stale commit — resetting on every further commit — before rolling, so a burst of merges collapses into one roll. Zero/invalid → default. **Only on a host with no fleet store** (#10885): a fleet host rolls for its floor on the tick that sees it and never waits on settle |
@@ -7273,10 +7331,11 @@ together, any-of semantics):
   the same `<!-- ... -->` way the capability marker
   (`<!-- loom:capability=<name> -->`, `loom-daemon/src/capability.rs`) is,
   but with an **open** value grammar (a host id is whatever
-  `sweep_registry::host_identity()` resolves to on some machine — an explicit
-  `$LOOM_HOST_ID`, or a `$HOSTNAME`/`hostname`-binary fallback that can be
-  mixed-case and dotted, e.g. `Roberts-MacBook-Pro.local` — not a closed list
-  this repo can enumerate).
+  `sweep_registry::host_identity()` resolves to on some machine — a roster
+  `fleet.hostId`, an explicit `$LOOM_HOST_ID`, or a generated
+  `loom-host-<16 hex>` (#11530; before that a `$HOSTNAME`/`hostname` value
+  such as `Roberts-MacBook-Pro.local`) — not a closed list this repo can
+  enumerate).
 
 ```
 <!-- loom:requires-host=loom-worker-2 -->
@@ -7475,6 +7534,7 @@ let one of them be read as the sentinel:
 | `LOOM-CHECKS-TIMEOUT <sha> <pending>` | 2 | the deadline passed with checks pending — including zero rows while required contexts exist (never `NONE`) |
 | `LOOM-CHECKS-ERROR <reason>` | 3 | unreadable or truncated rollup, a classified refusal (see below) or 404, repeated read failures, a required-context lookup still failing after 3 attempts when the wait would otherwise settle (`required-lookup-failed: …`), or Gitea |
 | `LOOM-CHECKS-HEAD-MOVED <old> <new>` | 4 | PR mode: the head changed mid-wait, so no verdict for `<old>` applies to `<new>` |
+| `LOOM-CHECKS-NO-RUN <sha>` | 5 | #11389: after a grace period (`LOOM_WAIT_CHECKS_NO_RUN_GRACE`, default 120s), with nothing observed still running, the head has zero `github-actions` check suites — no workflow run exists, usually because of a skip-CI marker in the head commit message (stderr hint). A queued Actions suite is a run: the wait continues. A failed suite lookup falls back to `TIMEOUT` |
 
 `--timeout 0` is one snapshot poll. Default mode settles on every observed check,
 and before `GREEN` also waits for a required context that has not registered yet
@@ -7550,8 +7610,8 @@ and classifies it:
 - a **claim label** (`loom:building`, `loom:reviewing`, `loom:treating`) already
   present → **collision** (a peer host claimed it first), whether or not
   `loom:issue` is still alongside it. A diagnostic record is logged at `warn` —
-  issue number, repo/workspace, this host's identity (`LOOM_HOST_ID` →
-  `$HOSTNAME` → `hostname` → `unknown-host`), timestamp, the observed claim
+  issue number, repo/workspace, this host's identity (`host_identity()`:
+  `fleet.hostId` → `LOOM_HOST_ID` → persisted id → `unknown-host`), timestamp, the observed claim
   label(s), and the full pre-flip label set — a per-registry cumulative counter
   is incremented, and (#5789) the dispatch backs off instead of proceeding.
 - no claim label, `loom:issue` present → **clean** (this host is first).
@@ -7917,9 +7977,10 @@ worker silently lost the job, or a second host silently duplicated it.
 
 `fleet.captain: "<host id>"` in the **tracked** `.loom/config.json` names the
 one host — by its own `host_identity()` (`loom-daemon/src/sweep_registry/mod.rs`;
-precedence `LOOM_HOST_ID` env var > `$HOSTNAME` > the `hostname` binary >
-`UNKNOWN_HOST` — the same operator-controlled identity issue #5063
-established fleet-wide) — that runs every declared singleton job. This
+precedence `fleet.hostId` > `LOOM_HOST_ID` > the persisted
+`~/.loom/host-id` > `UNKNOWN_HOST`, #11530 — see
+[Host identity](#host-identity-loom-daemon-host-id-11530)) — that runs every
+declared singleton job. This
 follows the `shardCount`/`shardKey`
 "identical fleet-wide, tracked" precedent from the sharding table just above
 (**not** `shardIndex`'s "must differ per host" tier): every host must agree on
@@ -8273,9 +8334,9 @@ pass, on the captain.
 > line against the fleet's repo list.
 >
 > **A dead captain means no intake anywhere.** Unlabelled issues wait until it
-> is back. Today the only signal is `intake-reconcile` missing from the
-> captain's `host.health.armed_singleton_jobs`; there is no per-repo
-> heartbeat or age gauge yet.
+> is back. The signals are `intake-reconcile` missing from the captain's
+> `host.health.armed_singleton_jobs` and the completed-pass heartbeat (below)
+> going stale in the singleton-output watchdog.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -8330,6 +8391,42 @@ captain that dispatches nothing still runs it:
 - **Rate-limit breaker**: no pass while it is open, and the pass stops between
   repos if it opens. A failed or shed listing is not reported to it.
 
+**The completed-pass heartbeat (#10924).** A healthy pass that labels nothing
+emits no forge output, so a watcher could not tell a quiet fleet from a
+stopped reconciler. After every pass the captain folds the outcome into
+`<root>/.loom/state/intake-reconcile/last-pass.json` on the captain
+(`intake_reconcile::singleton::PassHeartbeat`): the record carries the pass's
+counts and outcome, and `last_completed_at` — the timestamp the watchdog ages —
+advances **only** when the pass completed its intended scan (every registered
+repo walked, every listing read). A pass that was stopped early by the
+rate-limit breaker, or shed or failed a listing, is recorded but keeps the
+previous stamp, so it can never masquerade as successful output. Label
+outcomes (a denied write scope, races, reverts, cap leftovers) do not block
+the stamp: the pass retries them next pass by design. A captain with no
+registered repos returns before any scan, so its stamp ages the same way: an
+empty roster surfaces as stale, not as a quiet healthy fleet.
+
+The heartbeat is the `fleet_outputs::SINGLETON_OUTPUTS` row for job
+`intake-reconcile` (record kind `intake-reconcile.pass`, gated on
+`fleet.intakeReconcile.singleton`): a stamp older than twice the *default*
+pass cadence — the row is built from the built-in 300 s constant, so its
+deadline is fixed at 600 s; overriding `LOOM_INTAKE_RECONCILE_INTERVAL_SECS`
+does not move it, and an interval above 600 s would trip the row on every
+quiet gap once the source is wired — or no stamp at all, is a Critical
+`output-missing:` condition once the in-daemon `fleet_alert` output source is
+wired (follow-up slice). The file is local to
+the captain, like the other on-host health records; the cross-host detector
+for a captain that is down entirely is `intake-reconcile` missing from its
+`host.health.armed_singleton_jobs`.
+
+**Rollout signal.** After deploying, confirm on the captain that
+`last_completed_at` in the heartbeat file advances on every pass even when
+nothing was labelled:
+
+```bash
+cat .loom/state/intake-reconcile/last-pass.json   # last_completed_at is fresh
+```
+
 In the forge-call ledger the pass is `intake.list_open`, `intake.recheck`,
 `intake.add_triage` and `intake.remove_triage`; with the singleton on, only
 the captain books them.
@@ -8352,9 +8449,10 @@ label: the write is idempotent and each is preceded by a re-read.
    host that does not see the key runs intake per host as soon as its own
    variable is removed.
 4. Confirm: the captain lists `intake-reconcile` in
-   `host.health.armed_singleton_jobs`, logs the covered slugs you expect, and
+   `host.health.armed_singleton_jobs`, logs the covered slugs you expect,
    is the only host whose `loom-daemon forge calls --by caller` books
-   `intake.*` rows.
+   `intake.*` rows, and its `.loom/state/intake-reconcile/last-pass.json`
+   shows a fresh `last_completed_at` on every pass (#10924).
 5. Remove `LOOM_INTAKE_RECONCILE=0` from the other hosts. They stay off because
    the key, not the environment, now stands them down. A host still on an older
    daemon must keep the variable until it is upgraded.
@@ -8376,7 +8474,7 @@ per-workspace) loop that:
 1. Reads back every roster comment on the issue (REST — `gh api
    repos/{owner}/{repo}/issues/{n}/comments`, never GraphQL, #5047).
 2. Locates this host's own comment (by its opaque id — the same
-   `opaque_host_id(host_identity())` lease records publish, #6322) — or, on a
+   `opaque_host_id(lease_host_identity())` lease records publish, #6322) — or, on a
    fleet host's very first cycle, has none to find.
 3. Publishes a body advertising the `fnv1a64` digest of every
    currently-registered, role-runner-enabled workspace's shard key, sorted
@@ -8578,8 +8676,8 @@ for the full note.
   unchanged.
 - **Self-claim recognition.** A daemon never backs off on its own advertisement:
   the claim body carries the host identity (`host_identity()`:
-  `LOOM_HOST_ID` > `$HOSTNAME` > `hostname` > `unknown-host` — loom's single,
-  derived, restart-stable host concept), and the view ignores ads from this host.
+  `fleet.hostId` > `LOOM_HOST_ID` > the persisted `~/.loom/host-id` >
+  `unknown-host`, #11530 — loom's single, restart-stable host concept), and the view ignores ads from this host.
   safehoused's socket `from` is stamped from the *persona* (all daemons share
   `loom_daemon`) and cannot distinguish hosts, hence the body-carried identity.
 - **Fail-open, no-op when off.** An unreachable/refusing/timing-out socket, a

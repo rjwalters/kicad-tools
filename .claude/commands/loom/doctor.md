@@ -763,19 +763,15 @@ claim's* activity marker —
 <!-- loom:claim-activity claim=$CLAIMED_AT -->
 ```
 
-Every other comment is ignored: it neither pins nor extends the claim. This is
-the fix for the PR #6513 livelock (found on the Judge lane, identical in shape
-here). The old rule counted **any** non-stand-down comment posted after the
-claim (`COMMENTS_AFTER > 0`) as proof the claimant was alive, so a single
-routine Builder post-push status note — a different author, saying nothing about
-the fix — pinned that claim "fresh" for the rest of its life, because
-`CLAIMED_AT` never moves. And claimant activity now only **resets the idle
-clock** rather than pinning the claim, so even a genuine heartbeat buys only
-another `LOOM_STALE_TREATING_MINUTES`.
+Every other
+comment is ignored: it neither pins nor extends the claim (the PR #6513 livelock: a routine Builder
+post-push note used to pin a claim "fresh" forever). Claimant activity only **resets the idle
+clock**, so a genuine heartbeat buys another `LOOM_STALE_TREATING_MINUTES`.
 
 **A Doctor's fix cycle routinely runs long and silent** (assess → fix → verify
 locally → push → re-verify remotely), so post a progress comment ending with
-that marker whenever you cross a long step. The script prints the marker for the
+that marker whenever you cross a long step (esp. before a CI wait); the script also counts your own
+force-push of the PR head via the daemon (`forge claim-liveness`, #10235). The script prints the marker for the
 live claim, so you never hand-assemble it:
 
 ```bash
@@ -1324,10 +1320,10 @@ pnpm check:ci   # your repo's check command — see buildGate.command in .loom/c
 
 # Commit and push
 git add .
-# DCO / sign-off: if commit.signoff is true in .loom/config.json (or the repo has a
-# DCO / required sign-off check), add --signoff so the commit carries a
-# Signed-off-by: trailer — same rule the Builder follows. Applies to EVERY commit
-# you author, including --amend. See defaults/docs/commit-signoff.md.
+# DCO: if commit.signoff is true in .loom/config.json (or a DCO check is required),
+# pass --signoff on EVERY commit, --amend too (defaults/docs/commit-signoff.md).
+# Never write a skip-CI marker ("[skip ci]" etc.) literally — no CI would run
+# (#11389); add a space inside or describe it.
 git commit -m "Address review feedback
 
 - Fix null handling in foo.ts:15

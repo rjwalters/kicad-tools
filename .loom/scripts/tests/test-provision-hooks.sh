@@ -18,6 +18,8 @@
 #     execs the machine-checkout hook inside one (AC1), and defers to a present
 #     per-repo .loom/hooks/ copy (transition dedup, design decision 3)
 #   - deprovision removes ONLY Loom-owned entries, preserving operator hooks
+#   - #8372: the uncommitted-work consumer canary stub is wired on BOTH Stop and
+#     SubagentStop in both install modes, deduped, deferred, and deprovisioned
 #   - #6544: project-level entries are quoted so a project path containing a
 #     space survives `sh -c` execution, and a pre-existing UNQUOTED entry
 #     self-heals to the quoted form on the next re-provision (not left as an
@@ -665,6 +667,189 @@ NONLOOM25=$(mktemp -d); git -C "$NONLOOM25" init -q
 : > "$ARGV25"
 out=$(cd "$NONLOOM25" && LOOM_HOME="$CHK25" LOOM_DAEMON_SELF_BIN="$FAKE25" bash -c "$CMD25" </dev/null 2>&1); rc=$?
 assert_eq "$out|$rc|$(cat "$ARGV25")" "|0|" "non-Loom repo: the wrapper never runs the stub (PATH untouched)"
+
+# ── Test 26: guard-uncommitted-work.sh on Stop AND SubagentStop (#8372) ─────
+echo "Test 26: uncommitted-work consumer canary stub — both events, both install modes, dedup, deprovision (#8372)"
+# Count entries for <name> under ONE hook event type (machine marker).
+count_marker_in() {
+    local file="$1" ev="$2" name="$3"
+    jq --arg ev "$ev" --arg m "defaults/hooks/$name" '
+        [ (.hooks[$ev] // [])[] | .hooks[]? | .command // "" | select(contains($m)) ] | length
+    ' "$file" 2>/dev/null
+}
+count_project_in() {
+    local file="$1" ev="$2" name="$3"
+    jq --arg ev "$ev" --arg m ".loom/hooks/$name" '
+        [ (.hooks[$ev] // [])[] | .hooks[]? | .command // ""
+          | select(contains($m)) | select(contains("defaults/hooks/") | not) ] | length
+    ' "$file" 2>/dev/null
+}
+UW=guard-uncommitted-work.sh
+
+# 26a: user-scope (machine) provisioning — twice — wires each event exactly once.
+HOME26=$(mktemp -d)
+provision_loom_hooks "$HOME26/.claude" >/dev/null 2>&1
+provision_loom_hooks "$HOME26/.claude" >/dev/null 2>&1
+S26="$HOME26/.claude/settings.json"
+assert_eq "$(count_marker_in "$S26" Stop "$UW")" "1" "user-scope: Stop entry wired exactly once after two provisions"
+assert_eq "$(count_marker_in "$S26" SubagentStop "$UW")" "1" "user-scope: SubagentStop entry wired exactly once after two provisions"
+assert_eq "$(count_marker_in "$S26" Stop guard-background-subagents.sh)" "1" "user-scope: the existing Stop guard is still wired once alongside it"
+assert_eq "$(count_marker "$S26" "$UW")" "2" "user-scope: two entries total (one per event), never more"
+
+# 26b: project-copy (quick-install) fallback wires both events, idempotently.
+R26=$(mktemp -d); git -C "$R26" init -q
+make_transition_repo "$R26"
+mkdir -p "$R26/.loom/scripts/lib"
+cp "$REPO_ROOT/defaults/hooks/$UW" "$R26/.loom/hooks/$UW"; chmod +x "$R26/.loom/hooks/$UW"
+printf '{"guards":{"uncommittedWorkConsumerCanary":true}}\n' > "$R26/.loom/config.json"
+printf '{}\n' > "$R26/.claude/settings.json"
+ensure_project_hook_wiring "$R26" >/dev/null 2>&1
+ensure_project_hook_wiring "$R26" >/dev/null 2>&1
+P26="$R26/.claude/settings.json"
+assert_eq "$(count_project_in "$P26" Stop "$UW")" "1" "project-copy: Stop entry asserted exactly once after two runs"
+assert_eq "$(count_project_in "$P26" SubagentStop "$UW")" "1" "project-copy: SubagentStop entry asserted exactly once after two runs"
+
+# 26c: transition dedup — the user-scope wrapper defers to the project copy, so
+# exactly ONE entry point runs per event in a repo wired both ways.
+CHK26=$(mktemp -d); mkdir -p "$CHK26/defaults/hooks"
+printf '#!/usr/bin/env bash\necho MACHINE-RAN\nexit 0\n' > "$CHK26/defaults/hooks/$UW"
+chmod +x "$CHK26/defaults/hooks/$UW"
+for ev in Stop SubagentStop; do
+    CMD26=$(jq -r --arg ev "$ev" --arg m "defaults/hooks/$UW" '.hooks[$ev][] | .hooks[] | .command | select(contains($m))' "$S26" | head -1)
+    OUT26=$(cd "$R26" && LOOM_HOME="$CHK26" bash -c "$CMD26" </dev/null 2>/dev/null); rc26=$?
+    assert_eq "$OUT26|$rc26" "|0" "$ev: user-scope wrapper defers to the project copy (no double-fire)"
+done
+rm -f "$R26/.loom/hooks/$UW"
+for ev in Stop SubagentStop; do
+    CMD26=$(jq -r --arg ev "$ev" --arg m "defaults/hooks/$UW" '.hooks[$ev][] | .hooks[] | .command | select(contains($m))' "$S26" | head -1)
+    OUT26=$(cd "$R26" && LOOM_HOME="$CHK26" bash -c "$CMD26" </dev/null 2>/dev/null)
+    assert_contains "$OUT26" "MACHINE-RAN" "$ev: with no project copy the machine-checkout stub runs"
+done
+
+# 26d: the REAL stub through the REAL user-scope wrapper, against fake daemons.
+CHK26R=$(mktemp -d); mkdir -p "$CHK26R/defaults/hooks"
+cp "$REPO_ROOT/defaults/hooks/$UW" "$CHK26R/defaults/hooks/$UW"
+ln -s "$REPO_ROOT/defaults/scripts" "$CHK26R/defaults/scripts"
+FAKES26=$(mktemp -d)
+printf '#!/bin/sh\ncat >/dev/null\necho %s\n' "'{\"decision\":\"block\",\"reason\":\"fake block\"}'" > "$FAKES26/block"
+printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' > "$FAKES26/allow"
+printf '#!/bin/sh\necho "error: unrecognized subcommand" >&2\nexit 2\n' > "$FAKES26/stale"
+chmod +x "$FAKES26/block" "$FAKES26/allow" "$FAKES26/stale"
+LOG26="$FAKES26/canary.jsonl"
+run26() { # $1=event $2=fake-bin-path -> W26OUT / W26RC
+    local cmd
+    cmd=$(jq -r --arg ev "$1" --arg m "defaults/hooks/$UW" '.hooks[$ev][] | .hooks[] | .command | select(contains($m))' "$S26" | head -1)
+    W26OUT=$(cd "$R26" && LOOM_HOME="$CHK26R" LOOM_DAEMON_SELF_BIN="$2" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$LOG26" \
+        bash -c "$cmd" <<<'{"hook_event_name":"'"$1"'","cwd":"'"$R26"'"}' 2>/dev/null)
+    W26RC=$?
+}
+for ev in Stop SubagentStop; do
+    run26 "$ev" "$FAKES26/block"
+    assert_contains "$W26OUT|$W26RC" '"decision":"block"' "$ev: a successful block verdict passes through the wired stub"
+    assert_eq "$W26RC" "0" "$ev: block is stdout JSON with exit 0"
+    run26 "$ev" "$FAKES26/allow"
+    assert_eq "$W26OUT|$W26RC" "|0" "$ev: an allow is silent"
+    run26 "$ev" "$FAKES26/stale"
+    assert_eq "$W26OUT|$W26RC" "|0" "$ev: a stale daemon (clap exit 2) fails open, never a block"
+    run26 "$ev" "$FAKES26/does-not-exist"
+    assert_eq "$W26RC" "0" "$ev: a missing daemon fails open"
+done
+assert_contains "$(cat "$LOG26" 2>/dev/null)" '"error":"unsupported_subcommand_or_flag"' "stale daemon recorded as a wrapper failure for the opted-in workspace"
+
+# 26d2: effective precedence — a higher-tier false (local) overrides a lower-tier
+# true (.loom/config.json): no wrapper record; reversing the order records one.
+P26X=$(mktemp -d); mkdir -p "$P26X/.loom" "$P26X/.loom-local" "$P26X/defaults/hooks"
+cp "$REPO_ROOT/defaults/hooks/$UW" "$P26X/defaults/hooks/$UW"   # no ../scripts/lib -> lib_missing
+printf '{"guards":{"uncommittedWorkConsumerCanary":true}}\n' > "$P26X/.loom/config.json"
+printf '{"guards":{"uncommittedWorkConsumerCanary":false}}\n' > "$P26X/.loom-local/local.json"
+LOG26X="$P26X/canary.jsonl"
+for ev in Stop SubagentStop; do
+    LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$LOG26X" \
+        bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"'"$ev"'"}' >/dev/null 2>&1
+done
+assert_eq "$(cat "$LOG26X" 2>/dev/null)" "" "effective false (local overrides config true) writes no wrapper record"
+printf '{"guards":{"uncommittedWorkConsumerCanary":false}}\n' > "$P26X/.loom/config.json"
+printf '{"guards":{"uncommittedWorkConsumerCanary":true}}\n' > "$P26X/.loom-local/local.json"
+LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$LOG26X" \
+    bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"Stop"}' >/dev/null 2>&1
+assert_contains "$(cat "$LOG26X" 2>/dev/null)" '"error":"lib_missing"' "effective true (local overrides config false) writes a wrapper record"
+
+# 26d3: the log override may not point inside a Git checkout (main: .git dir) or
+# worktree (.git file), nor reach one via "..": no record, no directory, still exit 0.
+printf '{"guards":{"uncommittedWorkConsumerCanary":true}}\n' > "$P26X/.loom-local/local.json"
+mkdir -p "$P26X/chk/.git" "$P26X/wt"; : > "$P26X/wt/.git"
+for L in "$P26X/chk/sub/canary.jsonl" "$P26X/wt/canary.jsonl" "$P26X/other/../chk/canary.jsonl"; do
+    LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$L" \
+        bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"Stop"}' >/dev/null 2>&1
+    assert_eq "$?|$(ls "$P26X/chk/sub" "$P26X/other" 2>/dev/null)|$([[ -e "$L" ]] && echo wrote)" "0||" "override $L is refused: exit 0, nothing written"
+done
+LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$P26X/ok/canary.jsonl" \
+    bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"Stop"}' >/dev/null 2>&1
+assert_contains "$(cat "$P26X/ok/canary.jsonl" 2>/dev/null)" '"error":"lib_missing"' "an override outside every checkout is still honoured"
+
+# 26d4: a FILE symlink (outside) pointing into a checkout/worktree is resolved
+# before the containment check; nothing is appended through it.
+mkdir -p "$P26X/lnk"; : > "$P26X/chk/target.jsonl"; : > "$P26X/wt/target.jsonl"
+ln -sf "$P26X/chk/target.jsonl" "$P26X/lnk/main.jsonl"; ln -sf "$P26X/wt/target.jsonl" "$P26X/lnk/wt.jsonl"
+for L in "$P26X/lnk/main.jsonl" "$P26X/lnk/wt.jsonl"; do
+    LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$L" \
+        bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"Stop"}' >/dev/null 2>&1
+    assert_eq "$(cat "$P26X/chk/target.jsonl" "$P26X/wt/target.jsonl")" "" "file symlink $L into a checkout appends nothing"
+done
+
+# 26d5: only guards.<key> counts — an unrelated same-name key or a non-boolean
+# higher-tier value must not enable wrapper records.
+: > "$P26X/ok/canary.jsonl"
+for CFG in '{"guards":{"uncommittedWorkConsumerCanary":false},"other":{"uncommittedWorkConsumerCanary":true}}' \
+           '{"other":{"uncommittedWorkConsumerCanary":true}}' \
+           '{"guards":{"uncommittedWorkConsumerCanary":"true"}}'; do
+    printf '%s\n' "$CFG" > "$P26X/.loom-local/local.json"
+    LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$P26X/ok/canary.jsonl" \
+        bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"Stop"}' >/dev/null 2>&1
+    assert_eq "$(cat "$P26X/ok/canary.jsonl" 2>/dev/null)" "" "config $CFG writes no wrapper record"
+done
+printf '{"guards":{"uncommittedWorkConsumerCanary":true}}\n' > "$P26X/.loom-local/local.json"
+
+# 26d6: resolver merge semantics — a higher-tier null, or a scalar replacing the
+# whole `guards` object, clears a lower-tier true (config_resolver.rs deep_merge).
+printf '{"guards":{"uncommittedWorkConsumerCanary":true}}\n' > "$P26X/.loom/config.json"
+for CFG in '{"guards":{"uncommittedWorkConsumerCanary":null}}' '{"guards":null}' '{"guards":"off"}'; do
+    printf '%s\n' "$CFG" > "$P26X/.loom-local/local.json"
+    LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$P26X/ok/canary.jsonl" \
+        bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"Stop"}' >/dev/null 2>&1
+    assert_eq "$(cat "$P26X/ok/canary.jsonl" 2>/dev/null)" "" "local $CFG over config true writes no wrapper record"
+done
+
+# 26d6b: a malformed or non-object tier is ignored as {} (config_resolver.rs
+# soft_read_json_object), so the lower-tier true still records a lib_missing
+# failure on both events.
+for CFG in 'null' '[]' '{broken' '"str"' ''; do
+    for ev in Stop SubagentStop; do
+        : > "$P26X/ok/canary.jsonl"
+        printf '%s' "$CFG" > "$P26X/.loom-local/local.json"
+        LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$P26X/ok/canary.jsonl" \
+            bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"'"$ev"'"}' >/dev/null 2>&1
+        assert_eq "$(grep -c '"error":"lib_missing"' "$P26X/ok/canary.jsonl" 2>/dev/null)" "1" "$ev: invalid local tier [$CFG] is ignored, lower-tier true still records"
+    done
+done
+printf '{"guards":{"uncommittedWorkConsumerCanary":true}}\n' > "$P26X/.loom-local/local.json"
+
+# 26d7: opted in but unable to record -> exit 0 and a non-blocking coverage
+# notice on both events (full log, directory as log, rejected path, relative path).
+head -c 1048576 /dev/zero > "$P26X/full.jsonl"; mkdir -p "$P26X/logdir"
+for ev in Stop SubagentStop; do
+    for L in "$P26X/full.jsonl" "$P26X/logdir" "$P26X/chk/canary.jsonl" "rel/canary.jsonl"; do
+        G26=$(LOOM_PROJECT_ROOT="$P26X" LOOM_CONFIG_DEFAULTS_FILE="" LOOM_UNCOMMITTED_WORK_CANARY_LOG="$L" \
+            bash "$P26X/defaults/hooks/$UW" <<<'{"hook_event_name":"'"$ev"'"}' 2>/dev/null); rc26g=$?
+        assert_eq "$rc26g|$(printf '%s' "$G26" | jq -r '[.continue, (.systemMessage|contains("NOT recorded")), has("decision")]|@csv' 2>/dev/null)" "0|true,true,false" "$ev: unrecordable log $L -> exit 0 + non-blocking coverage notice"
+    done
+done
+assert_eq "$(wc -c < "$P26X/full.jsonl")" "1048576" "a full log is never grown"
+
+# 26e: deprovision removes both events' entries and leaves no empty arrays.
+deprovision_loom_hooks "$HOME26/.claude" >/dev/null 2>&1
+assert_eq "$(count_marker "$S26" "$UW")" "0" "deprovision removed both uncommitted-work entries"
+assert_eq "$(jq -r '.hooks.SubagentStop // "absent"' "$S26")" "absent" "deprovision leaves no empty SubagentStop array behind"
 
 echo ""
 echo "======================================"

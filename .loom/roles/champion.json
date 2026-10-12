@@ -32,5 +32,8 @@
       "future enhancement",
       "could be improved"
     ]
+  },
+  "toolPolicy": {
+    "allowedCapabilities": []
   }
 }

@@ -793,11 +793,10 @@ close #2" closed #2 on merge, and it had to be reopened by hand).
     | grep -inE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#N\b'
   ```
 
-merge-pr.sh backstops some of this — it warns on a whole-line backticked `Part of` trailer,
-warns naming which source carries a contradicting closing keyword, and reopens the issue if
-GitHub closed it anyway — but every warning reaches only whoever runs the merge, a reopen leaves
-a close/reopen flicker plus notification churn, and **nothing checks the `Loom-Issue:` trailer at
-merge time**. Get it right in the body. Full rationale,
+merge-pr.sh backstops some of this — it warns on a whole-line backticked `Part of` trailer
+or an unparseable `Loom-Issue:` one, warns naming which source carries a contradicting closing
+keyword, and reopens the issue if GitHub closed it anyway — but every warning reaches only
+whoever runs the merge, and a reopen leaves close/reopen churn. Get it right in the body. Full rationale,
 incidents, and the trailer's parser contract: `.loom/docs/issue-pr-linking.md`.
 
 ### PR Creation Checklist

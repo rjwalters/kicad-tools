@@ -5,5 +5,8 @@
   "defaultInterval": 900000,
   "defaultIntervalPrompt": "Run a triage pass: assign missing tier labels, recover orphaned issues, unblock resolved dependencies, track epics, and refresh WORK_PLAN.md. Never apply or remove priority labels (loom:operator-priority is human-only).",
   "autonomousRecommended": true,
-  "suggestedWorkerType": "claude"
+  "suggestedWorkerType": "claude",
+  "toolPolicy": {
+    "allowedCapabilities": []
+  }
 }

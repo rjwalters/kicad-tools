@@ -76,6 +76,26 @@ into headless denials without protecting anything.
 value is a `CONTROL_VERSION` bump, because an already-bound session identity
 covers the policy map.
 
+**The bump is CI-enforced (#8858).** The runtime manifest check compares a
+sealed manifest with the same build's `POLICY`, so it cannot notice a policy
+edit that forgot the bump. `loom-daemon check-private-control-version` (the
+`Daemon Checks` job) therefore reads `CONTROL_VERSION` and `POLICY` from
+`loom-daemon/src/tokens_pool/private_workspace/bundle.rs` at the merge base of
+the PR and at its head, straight from git objects (no network), and fails when:
+
+- `POLICY` differs as a key/value map (an entry added, removed or changed;
+  ordering, comments and formatting are ignored) and `CONTROL_VERSION` is not
+  strictly greater than at the merge base;
+- `CONTROL_VERSION` decreased, whatever `POLICY` did;
+- a ref does not resolve, the merge base cannot be found (shallow checkout),
+  or either declaration is missing, duplicated, not a plain literal, has a
+  duplicate policy key, or disagrees with its `[(&str, &str); N]` length.
+
+Run it locally with
+`loom-daemon check-private-control-version --base origin/main --head HEAD`.
+It is a compatibility gate, not permission to weaken the policy, and it does
+not touch the release `VERSION` files.
+
 ### 3. The hook registration and the profile's trust state are immutable from inside (control v2)
 
 Guard *code* being image-owned is not enough on its own, because the file that

@@ -13,6 +13,7 @@ see "Config tiers" below); the operating-core guides (`CLAUDE.md` and
 - [The Ungated Denial Floor](#the-ungated-denial-floor)
 - [Ask-Tier Composition (#7795)](#ask-tier-composition-7795)
 - [Credential content scan on commit and push (#9133)](#credential-content-scan-on-commit-and-push-9133)
+- [Per-role tool restriction (#8256)](#per-role-tool-restriction-8256)
 - [`loom-daemon guards status` and toggle messages (#10434)](#loom-daemon-guards-status-and-toggle-messages-10434)
 - [Custom Guard Hooks](#custom-guard-hooks)
 <!-- toc:end -->
@@ -462,6 +463,105 @@ guard allow, like every other unavailable check.
 A synthetic fixture that trips it goes in `.loom/secret-scan-allow`, one
 fingerprint per line with a reason. Never list a real credential there: remove
 it, and rotate it, since anything pushed to a public remote is disclosed.
+
+## Per-role tool restriction (#8256)
+
+Role prompts are public, and every role reads attacker-reachable text.
+[`untrusted-external-content.md`](untrusted-external-content.md) is prevention;
+it does not hold once a role **is** persuaded. This rule is the harness half: a
+role that does not declare a sensitive capability cannot reach it, whatever it
+was talked into.
+
+**The field.** Each role JSON (`defaults/roles/<role>.json`, installed as
+`.loom/roles/<role>.json`) carries `toolPolicy.allowedCapabilities`. The
+shipped roles split as follows:
+
+| Roles | `allowedCapabilities` |
+|---|---|
+| architect, auditor, champion, curator, guide, hermit, judge | `[]`: reaches none |
+| builder, doctor, driver, loom | `["*"]`: unrestricted, unchanged |
+
+The four capabilities, and the rules for the array (undeclared means
+unrestricted, `"*"` as a whole element is the only wildcard, an unknown name
+is inert), are in [`roles/README.md`](../roles/README.md) ("`toolPolicy.allowedCapabilities`").
+A consumer role with no `toolPolicy` is unrestricted, so adding the control
+never breaks a custom role.
+
+**The subcommand.** `loom-daemon role-tool-policy check` is the one decision:
+
+```bash
+loom-daemon role-tool-policy check [ROLE] --roles-dir <dir> --workspace <dir> --command "<bash line>"
+loom-daemon role-tool-policy check [ROLE] --roles-dir <dir> --workspace <dir> --path <abs path>
+```
+
+`ROLE` defaults to `$LOOM_ROLE`, with the daemon dispatch aliases resolved
+(`sweep-lifecycle` and `development-worker` map to builder, `pr-fixer` to
+doctor). Exit 0 allows. Exit 1 denies, with a reason on stdout that starts
+`BLOCKED [role-tool-policy]`. The matcher is a small shell lexer in
+`loom-daemon/src/role_tool_policy/command_match.rs`, unit-tested per capability:
+
+| Capability | Denied when |
+|---|---|
+| `remote-shell` | `ssh`, `scp`, `sftp`, `ssh-*`, `autossh` is a **command word**; `rsync -e`/`--rsh` or a `host:path` operand; `git -c core.sshCommand=…`, `git config core.sshCommand`; a `GIT_SSH_COMMAND`/`GIT_SSH`/`RSYNC_RSH` assignment |
+| `cloud-cli` | `aws`, `gcloud`, `az`, `doctl`, `fly(ctl)`, `wrangler`, `heroku`, `kubectl`, `eksctl` is a command word |
+| `forge-secrets` | `gh secret`, `gh variable`, `gh auth token/login/refresh/logout/setup-git`, `gh auth status --show-token`, `gh api …/secrets` or `…/variables`, also behind leading options (`gh -R o/r secret list`) |
+| `credential-store` | any word, redirect target or Edit/Write path is under `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.git-credentials`, `~/.kube`, `~/.azure`, `~/.config/gh`, `~/.config/gcloud`, `~/.docker/config.json`, `~/.loom/tokens` or `~/.claude/.credentials.json` |
+
+A command word is found the way the shell would find it. Quotes and backslashes
+are honoured, so `"s"sh` is `ssh` and `gh pr comment --body "use ssh"` is not a
+command. `;`, `&&`, `|` and newlines separate commands. `$(…)`, backticks and
+`<(…)` are analyzed as commands. The common wrappers are looked through:
+`sudo`, `env` (including `-S`), `timeout`, `nice`, `nohup`, `xargs`,
+`find -exec`, `watch`, `flock`, `eval`, `bash -c`, `su -c`/`runuser`,
+`script -c`, `busybox`/`toybox`, every `tmux`/`screen` operand, a git
+`!`-alias or `ext::` remote, and a here-string fed to a shell. A path word is
+normalized lexically before the home test: `.`, `..` and `//` are collapsed
+and `/proc/<pid>/root` resets to `/`, so `/tmp/../home/u/.ssh/x` and
+`/proc/self/root/home/u/.ssh/x` match like `/home/u/.ssh/x`.
+
+**Enforcement points.** Every hook reads the declaration from its **own**
+install (`<hooks>/../roles`), never from the session's cwd, so a PR checked out
+in a worktree cannot grant its own session a capability.
+
+| Where | What |
+|---|---|
+| `guard-loom-workflow.sh` (Bash) | `check --command`, on the command with only heredoc bodies and named text flags (`--body`, `-m`, …) blanked — NOT the positional masking the merge redirect scans, which would hide a quoted file operand (`grep x "$HOME/.ssh/id_rsa"`). The matcher itself treats a `grep`/`rg` search pattern as text and every other operand as a path |
+| `guard-worktree-paths.sh` (Edit/Write) | `check --path` on the canonical target |
+| `guard-codex-bridge.sh` (Codex) | no code of its own: it already runs the two hooks above, so Codex shell and `apply_patch` calls get the same verdict |
+| `spawn-claude.sh` | `role-tool-policy deny-specs` becomes `--disallowedTools`. This is defense in depth only: a deny spec is a prefix glob that `bash -c 'ssh …'` walks past |
+| `spawn-codex.sh` | Codex has no `--disallowedTools`, so nothing is injected at spawn: on Codex a restricted policy is enforced only by the managed hook (through `guard-codex-bridge.sh`) |
+
+**Fail closed.** The hooks honour only two answers from `check`: exit 0, and
+exit 1 with the prefix. Any other answer is treated as an error. That covers a
+missing binary, a daemon that predates `check` (clap exits 2) and a crash. On
+an error the hooks **deny** the built-in read-only roles listed above and
+allow every other role. Allow is never the error path for a restricted role,
+but a Builder is never stopped by a daemon roll. The cost: a host whose
+installed hooks are newer than its daemon denies every Bash and Edit/Write
+call from those roles until the daemon is rolled, and the deny message says so.
+A consumer's own read-only role, unknown to the hook, fails open on this path.
+
+**No toggle, on purpose.** Every `guards.*` category above can be a whole-repo
+category error. This one cannot, because its configuration is the per-role
+declaration. A repo whose Judge really needs `aws` adds `"cloud-cli"` to
+`judge.json`, a reviewed change in the file that grants it. A single switch
+would disarm every role at once, which is the bypass this defends against.
+Toggles such as `guards.cloudCli` and `guards.worktreeIsolation: false` do
+not weaken it. Interactive sessions do not set `LOOM_ROLE`, so they are never
+restricted.
+
+**Known limits.** This is a backstop, not a sandbox. It cannot see a command
+assembled at run time (`p=ss; ${p}h host`), a script the session wrote and
+then ran, text piped into a shell's stdin, or the SSH transport `git fetch`
+uses. **Inline interpreter programs** are the same class as a script file:
+`python3 -c`, `perl -e`, `node -e` (and `ruby -e`, `awk 'BEGIN{system(…)}'`)
+that shell out or open a path are not parsed. The credential-store match
+anchors on a home directory or a relative path that starts with a credential
+directory, so a path built from variables is not seen. Path normalization is
+lexical: a **symlink that already exists on disk** and points into a
+credential directory is not resolved (one created in the same command names
+the credential path and is caught). Where the matcher cannot tell a pattern from a path (an unquoted
+`grep .ssh`), it over-denies.
 
 ## `loom-daemon guards status` and toggle messages (#10434)
 
@@ -1334,18 +1434,140 @@ halves against stub binaries, for both `Stop` and `SubagentStop`. Any future hoo
 wrapper that `exec`s a versioned `loom-daemon` subcommand inherits this hazard and
 needs the same `|| exit 0`.
 
-**Where it is wired (deliberately narrow for now).** The `Stop` /`SubagentStop`
-entries live in this repository's project-level `.claude/settings.json` only.
-Consumer repos get their guard hooks from the user-scope wiring
-`scripts/install/provision-hooks.sh` installs, whose set is the six
-`defaults/hooks/*.sh` scripts — this guard is a `loom-daemon` subcommand, not one
-of them, so it does **not** fire in consumer repos yet. That is a choice, not an
-oversight: this is a new *blocking* turn-end guard, and the only other one
+**Where it is wired.** The dogfood `Stop` / `SubagentStop` entries live in this
+repository's project-level `.claude/settings.json` and run the guard directly
+(`worktree-state stop-hook`, no flag) — that behaviour is unchanged. Consumer
+repos get their hooks from the user-scope wiring `scripts/install/provision-hooks.sh`
+installs (plus the project-copy fallback for quick installs), and since #8372 that
+set includes `defaults/hooks/guard-uncommitted-work.sh` on **both** `Stop` and
+`SubagentStop`. The stub runs `worktree-state stop-hook --consumer-canary`, which is
+**silent unless the workspace opts in** — wiring it everywhere enables nothing by
+itself. This is a new *blocking* turn-end guard, and the only other one
 (`guard-background-subagents.sh`) needed eight follow-up corrections
 (#4389/#4462/#4696/#5013/#5086/#5976/#6175/#6645) before its false-positive rate
-was acceptable fleet-wide. It is dogfooded here — where every Loom sweep in this
-repo exercises it — before being offered to every installed workspace at once.
-Issue #8372 tracks the consumer-repo wiring.
+was acceptable fleet-wide, so consumer rollout is a measured canary, not a default.
+
+#### Consumer canary (`guards.uncommittedWorkConsumerCanary`, #8372)
+
+**Opt in** per workspace, in any config tier of the **main checkout** (resolved
+from a worktree exactly like `guards.uncommittedWork` above — the gitignored
+`.loom-local/local.json` is the natural place for a host-local canary):
+
+```json
+{
+  "guards": {
+    "uncommittedWorkConsumerCanary": true
+  }
+}
+```
+
+Only an explicit boolean `true` opts in; absent, `false`, or any other value is
+off. There is no env override — the opt-in is a per-workspace decision a reviewer
+of the sample can see in config. The two keys are independent:
+
+| `uncommittedWorkConsumerCanary` | `uncommittedWork` | Consumer stub does |
+|---|---|---|
+| absent / `false` | any | nothing — no decision, no record |
+| `true` | absent / `true` | runs the guard, records every decision |
+| `true` | `false` (or `LOOM_GUARD_UNCOMMITTED_WORK=0`) | records an `allow` with `guard_enabled:false`; never blocks |
+
+**Rollback:** set `uncommittedWorkConsumerCanary` to `false` (or delete it). The
+next turn end is silent again; nothing else needs undoing. `deprovision_loom_hooks`
+removes the user-scope entries for a machine-level teardown. **Do not set the
+canary key in Loom's own repo** — it already runs the guard through the dogfood
+wiring, and the key would make a second entry point fire for the same event.
+
+**Failure contract.** Identical to the dogfood wrapper's (#8377): the stub never
+`exec`s, a non-zero daemon exit is swallowed and its partial stdout discarded, and
+missing library / unresolvable binary / clap usage error / panic all exit 0. A
+malformed payload, missing transcript or non-Loom workspace is an allow. A block is
+still `{"decision":"block",…}` on stdout with exit 0, and the one-extra-turn limit
+(`stop_hook_active`) is unchanged. `defaults/scripts/tests/test-stop-hook-subcommand-skew.sh`
+covers the stub; `defaults/scripts/tests/test-provision-hooks.sh` (Test 26) covers
+both events in both install modes, dedup, transition deferral and deprovision.
+
+**Outcome records.** Every opted-in invocation appends one JSON line to
+`~/.loom/logs/uncommitted-work-canary.jsonl` (override:
+`LOOM_UNCOMMITTED_WORK_CANARY_LOG`) — outside every checkout, rotated at 1 MiB with
+4 generations kept (`.1`…`.4`), so disk use is bounded at ~5 MiB per host.
+
+The override is honoured only **outside every Git checkout and worktree**: both the daemon
+and the wrapper resolve symlinks and `..` first (the wrapper via `realpath -m`, so a file
+symlink into a checkout is caught) and reject any path with a `.git` entry in an ancestor.
+The check does not stop at `$HOME` — a home directory that is itself a checkout disqualifies
+the default path. The wrapper additionally rejects a non-absolute override. A rejected
+path fails open (the stop is never blocked) and is a visible coverage gap — the daemon
+returns a non-blocking `systemMessage` ("NOT recorded … inside the Git checkout"); the
+wrapper does the same for an opted-in workspace, and writes no record.
+
+| Field | Meaning |
+|---|---|
+| `schema` | `1` |
+| `ts` | UTC decision time |
+| `source` | `daemon` (a decision) or `wrapper` (the daemon could not run) |
+| `version`, `sha` | the executing `loom-daemon` build (`daemon` records only) |
+| `event` | `Stop` / `SubagentStop` |
+| `invocation_id` | per-invocation correlation id, shared by the stub and the daemon |
+| `session_id`, `transcript_path`, `cwd`, `workspace` | attribution references — never transcript contents |
+| `outcome` | `allow` / `advisory` / `block` / `error` (daemon) or `wrapper_error` (stub) |
+| `error` | `malformed_payload`, or for wrappers `lib_missing` / `binary_unresolved` / `unsupported_subcommand_or_flag` / `daemon_exit_<rc>` |
+| `worktree`, `guard_enabled` | the owned worktree (null if none) and the `uncommittedWork` toggle as resolved |
+| `state` | the measured worktree state at decision time: branch, commit/uncommitted/untracked counts, push state, up to 8 at-risk **paths** (names only, never contents), verdict |
+
+If a record cannot be written, the canary **fails open**: the block is dropped
+and the session sees only a non-blocking `systemMessage` saying the decision was
+**not recorded** — an unrecorded decision is a coverage gap, never a measured
+one, and a canary that cannot log must never keep a session from stopping.
+Wrapper records are written only for a workspace whose *effective* config sets
+the canary key to `true`: `jq` deep-merges the tiers in precedence order — private defaults,
+`.loom/config.json`, `.loom-project/project.json`, `.loom-local/local.json` — with the same
+semantics as the daemon's resolver (a missing, malformed or non-object tier is ignored as `{}`), so a higher-tier `false`, non-boolean, `null`, or a
+scalar replacing the whole `guards` object opts the workspace out (no `jq` means no record).
+For an opted-in workspace whose wrapper record cannot be written (path rejected or
+unresolvable, directory or unwritable log, log at the 1 MiB bound, append failure) the stub
+emits a non-blocking `{"continue":true,"systemMessage":"… NOT recorded …"}` coverage notice
+and still exits 0; it never appends past the size bound.
+
+**Retrieving the sample:**
+
+```bash
+LOG=~/.loom/logs/uncommitted-work-canary.jsonl
+cat "$LOG".4 "$LOG".3 "$LOG".2 "$LOG".1 "$LOG" 2>/dev/null > /tmp/canary.jsonl
+# invocations by workspace / event / outcome (detection denominator: source=daemon)
+jq -r 'select(.source=="daemon") | [.workspace, .event, .outcome] | @tsv' /tmp/canary.jsonl | sort | uniq -c
+# wrapper / version-skew failures — visible, excluded from the denominator
+jq -c 'select(.source=="wrapper")' /tmp/canary.jsonl
+# every block, with the state that drove it, for classification
+jq -c 'select(.outcome=="block") | {ts, session_id, event, worktree, version, sha, state}' /tmp/canary.jsonl
+```
+
+**Spotting missing coverage:** compare the sessions of the sweeps in the window
+(the daemon's sweep registry / `list_sweeps`) against `session_id`s in the log — a
+sweep with no record had no recorded turn end; any `wrapper` record, any
+`not recorded` `systemMessage` in a transcript, or a version/SHA outside the
+declared build is a gap that makes the window incomplete.
+
+**Measurement protocol (close-blocking for #8372).** Run the opt-in canary in two
+named consumer workspaces for at least 7 consecutive days and 50 completed real
+sweeps in total. Publish the version/SHA and UTC window, sweep and hook-invocation
+counts by workspace and event, total blocks, correct blocks, false positives,
+unclassified blocks and wrapper failures. Classify **every** block against the
+`state` recorded at decision time — a worktree found clean later is not evidence the
+block was wrong. Acceptance is zero false positives and zero unclassified blocks
+with complete invocation coverage, plus controlled positive/negative probes on both
+events proving the hook fires (an owned managed-worktree deliverable blocks once;
+committed / empty / scratch-only state and unrelated primary-checkout WIP do not;
+opt-out is silent; an incompatible binary fails open and is recorded as a wrapper
+failure). If natural blocks total zero, say so: probes establish reachability, not a
+natural-block false-positive rate, and the sample is never a statistical guarantee.
+A failed or incomplete window keeps #8372 open — set the canary key to `false` for
+the affected workspace while correcting, then start a fresh window. Raw transcripts
+stay outside repositories; publish only non-secret references and aggregates.
+
+**Broader enablement needs separate approval.** Nothing here changes a default:
+the canary key stays default-off. Turning the guard on for every installed
+workspace (making the consumer gate default-on, or dropping it) is a separate,
+explicitly approved follow-up that reviews the published canary results first.
 
 ### Workspace Registry Guard (`guards.workspaceRegistry` / `LOOM_GUARD_WORKSPACE_REGISTRY`)
 
@@ -2260,6 +2482,19 @@ etc. flags `mask_flag_cat_heredocs()` already recognized — and not extended to
 `mask_unquoted_cat_heredoc_bodies()`'s sibling `NAME=$(cat <<EOF … EOF)`
 variable-assignment capture, which needs its own re-parse read check (#7970) that
 a flag value never does.
+
+**Eighth refinement pass (#9870), CATASTROPHIC TIER, DIRECT FILE-WRITE HEREDOCS:** a
+fixture, doc or note written with `cat > file <<'EOF' … EOF` hard-denied whenever its
+body merely mentioned a catastrophic-tier phrase. `mask_catastrophic_filesink_heredocs()`
+now masks such bodies, but only for a WHOLE-COMMAND allowlist: every line must be a
+quoted-delimiter `cat > file` / `cat >> file` block (or its body, terminator or a blank
+line), with no other command anywhere. The target is also proven inert on disk
+(`heredoc_filesink_targets_are_inert()`): a symlink, FIFO, socket, device or directory
+sink, or a relative target with no hook-input `cwd`, is never masked. The proof fails
+CLOSED -- a failed target extraction (e.g. an awk-dialect parse error) counts as "not
+inert". The extractor uses a dynamic string regex because an unescaped `/` in a
+`/…[…/…]…/` literal is a parse error on BWK awk (macOS); the suite pins this with a
+host-awk extractor row and a failing-awk fail-closed row.
 
 ### When a Legitimate Operation Is Pattern-Blocked
 

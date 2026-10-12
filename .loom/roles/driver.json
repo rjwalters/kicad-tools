@@ -5,5 +5,8 @@
   "defaultInterval": 0,
   "defaultIntervalPrompt": "",
   "autonomousRecommended": false,
-  "suggestedWorkerType": "claude"
+  "suggestedWorkerType": "claude",
+  "toolPolicy": {
+    "allowedCapabilities": ["*"]
+  }
 }

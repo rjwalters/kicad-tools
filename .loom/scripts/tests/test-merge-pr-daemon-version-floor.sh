@@ -67,6 +67,20 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local haystack="$1" needle="$2" msg="$3"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if ! grep -qF -- "$needle" <<<"$haystack"; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: $msg"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: $msg"
+        echo "    unexpected substring: '$needle'"
+        echo "    in: $haystack"
+    fi
+}
+
 assert_eq() {
     local expected="$1" actual="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -92,6 +106,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 FUNCS_FILE="$WORKDIR/funcs.sh"
 awk '
   /^# requires-daemon:/                 { print; next }
+  /^# daemon-verb-hint:/                { print; next }
   /^_mp_daemon_roll_hint\(\) \{/        { print; next }
   /^_mp_refs\(\) \{/                    { capture = 1 }
   capture                               { print }
@@ -389,6 +404,45 @@ else
     echo "    A host between the two passes the declared floor and then has every merge refused,"
     echo "    while _mp_daemon_roll_hint names a version it already satisfies (#8967). Raise the marker."
 fi
+
+echo ""
+echo "Testing a fail-open verb's roll-hint names its OWN floor (#9377, via #11167)…"
+
+# The family `requires-daemon: merge-pr` marker tracks the newest FAIL-CLOSED
+# verb (#8967). A fail-open verb deliberately does not raise it, so a hint
+# that always quoted the family floor named a version unrelated to the verb
+# that actually failed — rjwalters/repo#494: told ">= 0.19.172" on a 0.19.461
+# host that lacked issue-close-gate (first released in 0.19.462). The per-verb
+# `# daemon-verb-hint:` annotation is MESSAGE TEXT ONLY: these assertions pin
+# that the hint uses it, and that nothing gates on it.
+DECLARED_ICG_HINT="$(sed -n '/^# daemon-verb-hint: merge-pr issue-close-gate >= /{s/^# daemon-verb-hint: merge-pr issue-close-gate >= \([0-9][0-9.]*\).*/\1/p;q;}' "$FUNCS_FILE")"
+assert_eq "0.19.462" "$DECLARED_ICG_HINT" \
+  "issue-close-gate carries a daemon-verb-hint naming its own landing version (f4517bb46, #9240 -> v0.19.462)"
+HINT_ICG="$(SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "$WORKDIR/stale-loom-daemon" issue-close-gate)"
+assert_contains "$HINT_ICG" "loom-daemon >= 0.19.462 for 'merge-pr issue-close-gate'" \
+  "fail-open issue-close-gate: the hint names THAT verb and ITS floor"
+assert_not_contains "$HINT_ICG" "loom-daemon >= $DECLARED_MERGEPR_MIN" \
+  "fail-open issue-close-gate: the hint does NOT quote the fail-closed family floor ($DECLARED_MERGEPR_MIN)"
+assert_contains "$HINT_ICG" "merge-pr issue-close-gate --help" \
+  "fail-open issue-close-gate: the confirm step probes the verb itself, not just the family"
+HINT_UNANNOTATED="$(SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "" no-such-verb)"
+assert_contains "$HINT_UNANNOTATED" "loom-daemon >= $DECLARED_MERGEPR_MIN for 'merge-pr'." \
+  "an unannotated verb falls back to the family floor (the pre-#9377 message, unchanged)"
+assert_eq "$HINT_MERGEPR" "$(SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr)" \
+  "two-argument callers are unaffected (no verb -> family floor)"
+assert_contains "$(grep -F "merge-pr issue-close-gate' exited" "$MERGE_PR_SRC")" '2>/dev/null || true)" issue-close-gate)' \
+  "merge-pr.sh's issue-close-gate warning passes its verb to _mp_daemon_roll_hint"
+
+# Every merge-pr `daemon-verb-hint:` must name a verb classified `open` in the
+# fail-direction table above: a fail-CLOSED verb's floor is the family marker
+# itself (#8967), so a per-verb hint for one would let the message and the
+# gate disagree — the exact drift the single marker exists to prevent.
+while read -r _hint_verb; do
+    [[ -n "$_hint_verb" ]] || continue
+    read -r _ignored _dir _ver <<<"$(_verb_row "$_hint_verb")"
+    assert_eq "open" "${_dir:-<unclassified>}" \
+      "daemon-verb-hint for 'merge-pr $_hint_verb' annotates a fail-OPEN verb (message text only, never a gate)"
+done <<<"$(sed -n 's/^# daemon-verb-hint: merge-pr \([a-z][a-z0-9-]*\) >= .*/\1/p' "$FUNCS_FILE")"
 
 echo ""
 echo "Testing the merge.reverifyStaleChecks version-floor warning (#10465)…"

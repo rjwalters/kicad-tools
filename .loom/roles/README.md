@@ -75,14 +75,18 @@ Each role can have an optional JSON metadata file with default settings:
 ### `toolPolicy.allowedCapabilities` — the sensitive-capability allowlist
 
 Optional. Declares which **sensitive capabilities** a role may reach; every
-capability it does not name is to be denied at session spawn (issue #8256).
+capability it does not name is denied (issue #8256): by the guard hooks on
+every tool call, and at session spawn as defense in depth.
 
 `loom-daemon role-tool-policy` is the **only** implementation of the rules below —
-`deny-specs` gives the Claude path its `--disallowedTools` list, `restricted`
-gives the Codex path its predicate — so the spawn scripts call out to it rather
-than re-deriving the answer, and the two runtimes cannot disagree about the same
-role file. No role shipped in `defaults/roles/` declares a `toolPolicy` yet; the
-spawn-side wiring that enforces one lands with #8256.
+`check` gives the guard hooks their verdict, `deny-specs` gives the Claude path
+its `--disallowedTools` list, `restricted` gives the Codex path its predicate —
+so the hooks and spawn scripts call out to it rather than re-deriving the
+answer, and the two runtimes cannot disagree about the same role file. The
+shipped read-only roles (architect, auditor, champion, curator,
+guide, hermit, judge) declare `[]`; builder, doctor, driver and loom declare
+`["*"]`. What `check` matches, and its fail-closed rule, are in
+`defaults/docs/guard-hooks.md` ("Per-role tool restriction").
 
 `deny-specs` also appends the forge-egress bypass specs (#9989) for **every**
 role, whatever its allowlist, when a resolved forge egress policy enforces the
