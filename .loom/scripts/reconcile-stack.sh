@@ -251,20 +251,21 @@ fi
 # _PARENT_REF / _PARENT_PIN_REF.
 eval "$PLAN_OUT"
 
-# Version-bearing-file sync gate (#7168, extended #7341): `rebase --onto`
-# replays ONLY the child's own commits, so it silently absorbs whatever
-# version-bearing values the destination already had. A file the child's own
-# commits never touched (in practice .loom/install-metadata.json) never raises
-# a git conflict, so it can end up stale relative to VERSION/the files that
-# WERE part of the rebase — invisible until CI's "Installer Integration Tests"
-# fails. Run the shared gate in whichever directory the rebase actually ran.
-# Skipped under --dry-run: no rebase happened, so there is nothing to check.
+# Version-bearing-file sync gate (#7168/#7341; why: version-check-gate.sh), in
+# the directory the rebase ran in. Not under --dry-run: nothing was rebased.
 if [[ "$DRY_RUN" != "true" ]] && [[ -x "$SCRIPT_DIR/version-check-gate.sh" ]]; then
     if ! (cd "$LOOM_RS_GIT_DIR" && "$SCRIPT_DIR/version-check-gate.sh" --fix-hint "then push."); then
         err "Version-bearing files are out of sync for '$CHILD_BRANCH' after rebase onto $LOOM_RS_TARGET_COMMIT (see BLOCKER:/Fix: above)."
         exit 2
     fi
 fi
+# loom-daemon discard guard (#9282): a clean rebase can still empty the child or drop a
+# hand-made merge resolution. rc 0 = blocked, exit 2; rc >1 = no answer, warn.
+# requires-daemon: forge optional   rebase-guard (#9282): a binary predating the verb answers clap's exit 2, so the push proceeds unchecked behind a warning
+RG=1
+[[ "$DRY_RUN" == "true" ]] || { RG=0; (cd "$LOOM_RS_GIT_DIR" || exit 5; "$DAEMON_BIN" forge rebase-guard --base "$LOOM_RS_TARGET_COMMIT" --old "origin/$CHILD_BRANCH") || RG=$?; }
+[[ $RG -ne 0 ]] || { err "Not pushing '$CHILD_BRANCH': its rebase onto $LOOM_RS_TARGET_COMMIT would discard work (see BLOCKER:/Fix: above)."; exit 2; }
+[[ $RG -eq 1 ]] || warn "rebase-guard gave no answer (rc=$RG) for '$CHILD_BRANCH' — pushing UNCHECKED for a dropped merge resolution or an emptied branch (#9282)."
 
 run() {
     echo -e "${YELLOW}\$ $*${NC}" >&2
@@ -274,8 +275,7 @@ run() {
     "$@"
 }
 
-# GIT_C runs in the directory the rebase ran in (the child worktree when one
-# holds the branch, else here), so the current branch there is the child.
+# GIT_C runs where the rebase ran, so the current branch there is the child.
 GIT_C=(git -C "$LOOM_RS_GIT_DIR")
 
 # 2. Publish the rewritten child branch with $PUSH_LEASE_ARG — the lease PINNED

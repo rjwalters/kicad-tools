@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1135",
-  "loom_commit": "b4b48e586ced7e12cb8cd01e29da8b845f1e8136",
+  "loom_version": "0.19.1137",
+  "loom_commit": "240bb1a888bb79770ecc3acbc19c6425468fedca",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -420,7 +420,10 @@
     ".agents/skills/loom-builder-worktree/SKILL.md",
     ".loom/scripts/tests/test-judge-payload-drop-guard.sh",
     ".loom/scripts/tests/test-merge-pr-ci-result.sh",
-    ".loom/scripts/tests/test-version-check-gate-callsites.sh"
+    ".loom/scripts/tests/test-version-check-gate-callsites.sh",
+    ".loom/scripts/tests/test-check-promotion-landed.sh",
+    ".loom/scripts/tests/test-merge-pr-closed-issue-cleanup.sh",
+    ".loom/scripts/tests/test-post-verdict-gate.sh"
   ],
   "last_resync": "2026-10-12",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",

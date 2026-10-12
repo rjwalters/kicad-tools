@@ -177,10 +177,10 @@ contains "names the label" "$OUT" "loom:ci-failure"
 check "nothing posted" "" "$POSTED"
 
 echo "== a moved head approves normally; approve is exclusive =="
-state "$(cr_at "$MOVED" 60)" loom:changes-requested loom:reviewing loom:review-requested loom:operator-priority
+state "$(cr_at "$MOVED" 60)" loom:changes-requested loom:reviewing loom:review-requested loom:important
 pv 10580 approved "$HEAD" --body "Approved: covered by the new tests."
 check "exit 0" 0 "$RC"
-check "loom:pr only, unrelated labels kept" "loom:operator-priority loom:pr " "$LABELS"
+check "loom:pr only, unrelated labels kept" "loom:important loom:pr " "$LABELS"
 
 echo "== changes-requested is exclusive, keeps loom:ci-failure =="
 state "[]" loom:pr loom:reviewing loom:ci-failure

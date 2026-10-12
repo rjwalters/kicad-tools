@@ -29,6 +29,9 @@
 #   2. The common case: a genuinely successful rebase (real content
 #      difference vs origin/main afterward) must be UNAFFECTED -- push still
 #      proceeds, no false positive.
+#   3. RESOLUTION_DISCARDED (#9282) blocks the push the same way.
+#   4. An unanswered guard (a daemon predating the verb) warns loudly and
+#      does NOT block the push.
 #
 # Since #10771 the block updates by MERGE unless `loom-daemon branch-update
 # strategy` prints `rebase`. Both cases therefore run three ways, with a
@@ -117,11 +120,13 @@ FENCE_SRC="$(awk '
     infence { print }
 ' "$JUDGE_MD")"
 
-if [[ -z "$FENCE_SRC" || "$FENCE_SRC" != *"PRE_REBASE_AHEAD"* ]]; then
-    echo "FATAL: could not extract the DIRTY-rebase fence (with the #8298 guard) from $JUDGE_MD" >&2
+if [[ -z "$FENCE_SRC" || "$FENCE_SRC" != *"forge rebase-guard --base origin/main"* ]]; then
+    echo "FATAL: could not extract the DIRTY-rebase fence (with the #9282 rebase-guard call) from $JUDGE_MD" >&2
     exit 1
 fi
-pass "extracted the shipped DIRTY-rebase block (with PRE_REBASE_AHEAD) from judge.md"
+pass "extracted the shipped DIRTY-rebase block (with the rebase-guard call) from judge.md"
+assert_not_contains "$FENCE_SRC" "PRE_REBASE_AHEAD" \
+    "the block no longer carries its own inline empty-diff predicate (#9282)"
 
 # The first line is a literal `PR_NUMBER=<number>` placeholder for a human/
 # agent to fill in -- replace it with a real value so the block is runnable,
@@ -197,10 +202,28 @@ esac
 STUB
     chmod +x "$repo/.loom/stub-bin/gh"
 
+    # `loom-daemon` stand-in: `branch-update strategy` prints $STUB_BRANCH_UPDATE
+    # (rebase|merge; `missing` = a daemon predating the subcommand), and
+    # `forge rebase-guard` (#9282) answers per GUARD_MODE:
+    #   emptied (default) -- the verb's EMPTIED predicate in miniature: blocked
+    #                        (rc 0) when HEAD's tree equals the base's, else
+    #                        safe (rc 1);
+    #   discarded         -- RESOLUTION_DISCARDED, rc 0;
+    #   predates          -- clap's "unrecognized subcommand", rc 2.
     cat > "$repo/.loom/stub-bin/loom-daemon" <<'STUB'
 #!/usr/bin/env bash
 if [[ "$1 $2" == "branch-update strategy" && "${STUB_BRANCH_UPDATE:-}" != missing ]]; then
     echo "${STUB_BRANCH_UPDATE:?}"; exit 0
+fi
+if [[ "$1 $2" == "forge rebase-guard" ]]; then
+    echo "$*" >> "$(git rev-parse --show-toplevel 2>/dev/null)/daemon.calls"
+    [[ "$3" == "--base" ]] || exit 64
+    case "${GUARD_MODE:-emptied}" in
+        discarded) echo "RESOLUTION_DISCARDED 0123abc"; echo "BLOCKER: stub" >&2; exit 0 ;;
+        predates) echo "error: unrecognized subcommand 'rebase-guard'" >&2; exit 2 ;;
+    esac
+    if git diff --quiet "$4" HEAD; then echo "EMPTIED"; echo "BLOCKER: stub" >&2; exit 0; fi
+    exit 1
 fi
 echo "error: unrecognized subcommand '$1'" >&2; exit 2
 STUB
@@ -257,8 +280,8 @@ check_case1() {
 
     out="$(run_dirty_block "$repo" "$strategy" 2>&1)"
 
-    assert_contains "$out" "Update silently dropped PR payload" \
-        "[$mode] the payload-drop guard fires and logs why"
+    assert_contains "$out" "EMPTIED" \
+        "[$mode] the guard fires and its blocked answer is surfaced"
     gh_calls="$(cat "$repo/gh.calls" 2>/dev/null || echo "")"
     assert_not_contains "$gh_calls" "Automatically updated the branch" \
         "[$mode] the success path never runs"
@@ -315,8 +338,8 @@ check_case2() {
     gh_calls="$(cat "$repo/gh.calls" 2>/dev/null || echo "")"
     assert_contains "$gh_calls" "Automatically updated the branch from main ($want)" \
         "[$mode] the normal success path runs, updating by $want"
-    assert_not_contains "$out" "Update silently dropped PR payload" \
-        "[$mode] the payload-drop guard does NOT fire on a real, non-empty result (no false positive)"
+    assert_not_contains "$out" "EMPTIED" \
+        "[$mode] the guard does NOT fire on a real, non-empty result (no false positive)"
     assert_eq "1" "$( (cd "$repo" && git diff --quiet origin/main HEAD) && echo 0 || echo 1)" \
         "[$mode] sanity: the updated branch genuinely still differs from origin/main"
 
@@ -337,6 +360,51 @@ check_case1 "$WORKROOT/case1-old"     missing "daemon without branch-update"
 check_case2 "$WORKROOT/case2-rebase"  rebase  "pinned rebase" rebase
 check_case2 "$WORKROOT/case2-merge"   merge   "merge"         merge
 check_case2 "$WORKROOT/case2-old"     missing "daemon without branch-update" merge
+
+# =====================================================================
+# Case 3 (#9282): RESOLUTION_DISCARDED blocks the push exactly like EMPTIED,
+# on an update whose result is clean and non-empty.
+# =====================================================================
+echo
+echo "--- #9282: a dropped hand-made merge resolution blocks the push ---"
+
+BASE3="$WORKROOT/case3"
+REPO3="$(build_case2 "$BASE3")"
+REMOTE_BEFORE3="$(git --git-dir="$BASE3/origin.git" rev-parse feature/issue-999)"
+
+OUT3="$(GUARD_MODE=discarded run_dirty_block "$REPO3" merge 2>&1)"
+
+assert_contains "$OUT3" "RESOLUTION_DISCARDED" "the guard's blocked answer is surfaced"
+assert_not_contains "$(cat "$REPO3/gh.calls" 2>/dev/null)" "Automatically updated the branch" \
+    "the success path never runs"
+assert_eq "$REMOTE_BEFORE3" "$(git --git-dir="$BASE3/origin.git" rev-parse feature/issue-999)" \
+    "the push never happened: origin's PR head is unchanged"
+assert_contains "$(cat "$REPO3/post-verdict.calls" 2>/dev/null)" "changes-requested" \
+    "falls back through the existing post-verdict.sh changes-requested path"
+assert_contains "$(cat "$REPO3/gh.calls" 2>/dev/null)" "loom:merge-conflict" \
+    "reuses the existing loom:merge-conflict label"
+
+# =====================================================================
+# Case 4 (#9282): an UNANSWERED guard does not block. A role prompt newer
+# than the installed binary must not strand every update in the fleet -- but
+# it must say, loudly, that the push went out unchecked.
+# =====================================================================
+echo
+echo "--- #9282: a daemon predating the verb warns and does not block ---"
+
+BASE4="$WORKROOT/case4"
+REPO4="$(build_case2 "$BASE4")"
+
+OUT4="$(GUARD_MODE=predates run_dirty_block "$REPO4" merge 2>&1)"
+
+assert_contains "$OUT4" "WARNING: rebase-guard gave no answer (rc=2) - pushing UNCHECKED (#9282)" \
+    "the unanswered guard is reported loudly, with its exit code"
+assert_contains "$(cat "$REPO4/gh.calls" 2>/dev/null)" "Automatically updated the branch" \
+    "the push still proceeds (non-blocking by design)"
+assert_eq "$(cd "$REPO4" && git rev-parse HEAD)" "$(git --git-dir="$BASE4/origin.git" rev-parse feature/issue-999)" \
+    "the updated head landed on origin"
+assert_eq "" "$(cat "$REPO4/post-verdict.calls" 2>/dev/null || echo "")" \
+    "no change request is posted for an unanswered guard"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
