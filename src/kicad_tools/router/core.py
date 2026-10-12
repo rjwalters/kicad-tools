@@ -4449,10 +4449,17 @@ class Autorouter:
             return {}
 
         # Pairs consume roughly double the corridor capacity of a single
-        # net, so give the negotiation more rip-up pressure headroom when
-        # coupled connections are present (issue #4270).  The default 8
-        # is preserved exactly for pair-free boards.
-        max_iterations = 12 if coupled else 8
+        # net, so the negotiation got 12 passes of rip-up pressure headroom
+        # when coupled connections are present (issue #4270).  Issue #6381:
+        # pair-free boards get the same 12.  Once board 05's PHASE_B could
+        # escape U2.8 through its neck, the three motor phases and GND_SENSE
+        # all compete for U2's west pin field, and negotiation converges on
+        # pass 9 (57/57).  The old cap of 8 stopped one pass short and
+        # shipped the best pass, with PHASE_A or PHASE_C still open.  The cap
+        # only binds on a board that has not converged, and the best-pass
+        # ranking only ever accepts a strictly better pass, so a board that
+        # converges within 8 passes is unchanged.
+        max_iterations = 12
         # Issue #4355: the preserved copper of NON-listed nets
         # (``existing_routes`` loaded under --preserve-existing / --nets /
         # --region, keyed by their real net ids) must be a HARD clearance
