@@ -6303,6 +6303,28 @@ class RoutingGrid:
         self._cpp_unmark_deferred = False
         return routes
 
+    @contextmanager
+    def cpp_unmark_immediate(self) -> Iterator[None]:
+        """Temporarily mirror rip-ups to the C++ grid immediately (Issue #6342).
+
+        Suspends an open corridor-reservation window for the duration of the
+        block without flushing it: ``unmark_route`` applies the C++ unmark at
+        once instead of queuing it, and the window (with whatever it already
+        queued) is restored on exit, including on an exception.
+
+        Used by ``NegotiatedRouter.targeted_ripup``'s retry: inside an open
+        window the blockers a targeted rip-up had just ripped stayed
+        phantom-blocked on the C++ grid, so the victim's reroute failed
+        against copper that was no longer there and the transaction rolled
+        back -- the board-05 "rip the blocker, the pin stays sealed" cycle.
+        """
+        previous = getattr(self, "_cpp_unmark_deferred", False)
+        self._cpp_unmark_deferred = False
+        try:
+            yield
+        finally:
+            self._cpp_unmark_deferred = previous
+
     def _unmark_route_on_cpp_cells(
         self, route: Route, max_trace_width: float | None = None
     ) -> None:
