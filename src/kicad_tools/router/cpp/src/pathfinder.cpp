@@ -1360,38 +1360,47 @@ static void init_pad_bounds(
 // off-centre row gets its row change as a free dogleg inside the pad while a
 // centred landing pays two turns to change rows outside it.  This charges
 // that skipped jog -- two turns plus one straight step per cell of offset --
-// on the step that crosses the pad's tip line (the long-axis end of its
-// copper, not of the eroded metal box) inside the pad's lane, outward for
-// the start pad and inward for the end pad, by the larger centreline offset
-// of its two cells.  Keying on the copper tip line also catches a diagonal
-// that jogs across the tip and a run that slips out of the box sideways at
-// the tip column and then leaves along the pad.  Soft cost only: no seed
+// when a step that leaves the start pad (or reaches the end pad) has a cell
+// more than one grid cell off the pad centreline.  "Leaves"/"reaches" is
+// either of:
+//   * crossing the pad's copper tip line (the long-axis end of its copper)
+//     inside the pad's lane -- this also catches a diagonal that jogs across
+//     the tip and a run that slips out of the box sideways at the tip column;
+//   * crossing the metal box boundary while moving along the long axis --
+//     this catches a diagonal that crosses the centreline inside the pad.
+// A pure side step out of the box is not charged.  Soft cost only: no seed
 // or goal stops being legal.
-static constexpr float kLandingDeadbandCells = 0.5f + 1e-3f;
+static constexpr float kLandingDeadbandCells = 1.0f + 1e-3f;
 
 static float landing_cost(const PadBounds& pb, int ax, int ay, int bx, int by,
                           bool outward, const DesignRules& rules) {
-    int lo, hi, a_along, b_along;
+    int a_along, b_along;
     float a_off, b_off;
     if (pb.long_axis == 0) {
-        lo = pb.tip_lo; hi = pb.tip_hi; a_along = ax; b_along = bx;
+        a_along = ax; b_along = bx;
         a_off = std::fabs(static_cast<float>(ay) - pb.centre_gy);
         b_off = std::fabs(static_cast<float>(by) - pb.centre_gy);
     } else if (pb.long_axis == 1) {
-        lo = pb.tip_lo; hi = pb.tip_hi; a_along = ay; b_along = by;
+        a_along = ay; b_along = by;
         a_off = std::fabs(static_cast<float>(ax) - pb.centre_gx);
         b_off = std::fabs(static_cast<float>(bx) - pb.centre_gx);
     } else {
         return 0.0f;
     }
-    const bool a_in = (a_along >= lo && a_along <= hi);
-    const bool b_in = (b_along >= lo && b_along <= hi);
-    if (outward ? !(a_in && !b_in) : !(!a_in && b_in)) return 0.0f;
-    if (std::min(a_off, b_off) > pb.lane_half_cells + kLandingDeadbandCells) {
-        return 0.0f;  // crossing the tip line beside the pad, not off it
-    }
     const float off = std::max(a_off, b_off);
     if (off <= kLandingDeadbandCells) return 0.0f;
+    const bool a_tip = (a_along >= pb.tip_lo && a_along <= pb.tip_hi);
+    const bool b_tip = (b_along >= pb.tip_lo && b_along <= pb.tip_hi);
+    bool crosses = (outward ? (a_tip && !b_tip) : (!a_tip && b_tip)) &&
+                   std::min(a_off, b_off) <= pb.lane_half_cells + kLandingDeadbandCells;
+    if (!crosses && a_along != b_along) {
+        const bool a_box = (ax >= pb.metal_gx1 && ax <= pb.metal_gx2 &&
+                            ay >= pb.metal_gy1 && ay <= pb.metal_gy2);
+        const bool b_box = (bx >= pb.metal_gx1 && bx <= pb.metal_gx2 &&
+                            by >= pb.metal_gy1 && by <= pb.metal_gy2);
+        crosses = outward ? (a_box && !b_box) : (!a_box && b_box);
+    }
+    if (!crosses) return 0.0f;
     return 2.0f * rules.cost_turn + rules.cost_straight * off;
 }
 
@@ -1910,10 +1919,9 @@ RouteResult Pathfinder::route(
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
             }
-            // Issue #6368: centreline landing cost, charged on the step that
-            // crosses the start pad's tip line outward or the end pad's
-            // inward (after the attractor clamp, so a reservation cannot
-            // cancel it).
+            // Issue #6368: centreline landing cost on a step leaving the start
+            // pad or reaching the end pad (after the attractor clamp, so a
+            // reservation cannot cancel it).
             float landing = 0.0f;
             if (layer_in_end) {
                 landing += landing_cost(ep, current.x, current.y, nx, ny, false, rules_);

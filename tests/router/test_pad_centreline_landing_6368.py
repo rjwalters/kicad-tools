@@ -109,28 +109,69 @@ def _route(width: float, dy: float, *, carveout=False, force_python=False, extra
     return ar
 
 
-def _tip_offsets(ar, x: float, pad_y: float) -> list[float]:
-    """y - pad_y wherever SIG copper crosses the vertical line at ``x``."""
+def _tip_crossings(ar, x: float, pad_y: float) -> list[tuple[float, bool]]:
+    """(y - pad_y, straight) wherever SIG copper crosses the vertical line ``x``."""
     out = []
     for route in ar.routes:
         for s in route.segments:
             if s.x1 != s.x2 and min(s.x1, s.x2) <= x <= max(s.x1, s.x2):
                 y = s.y1 + (s.y2 - s.y1) * (x - s.x1) / (s.x2 - s.x1)
-                out.append(y - pad_y)
+                out.append((y - pad_y, abs(s.y2 - s.y1) < 1e-6))
+    return out
+
+
+def _on_grid(v: float) -> bool:
+    return abs(v / RES - round(v / RES)) < 1e-3
+
+
+def _cells_on_pad(ar, pad_x: float, pad_y: float) -> list[tuple[float, float]]:
+    """Every on-grid SIG vertex on the pad's copper: the first/last grid cells."""
+    out = []
+    for route in ar.routes:
+        for s in route.segments:
+            for x, y in ((s.x1, s.y1), (s.x2, s.y2)):
+                if (
+                    _on_grid(x)
+                    and _on_grid(y)
+                    and abs(x - pad_x) <= PAD_LONG / 2
+                    and abs(y - pad_y) <= PAD_SHORT / 2
+                ):
+                    out.append((x, y))
     return out
 
 
 def _assert_centred(ar, dy: float) -> None:
-    tip_a = A_X + PAD_LONG / 2 + TIP_PROBE
-    tip_b = B_X - PAD_LONG / 2 - TIP_PROBE
-    for name, x, pad_y in (("start", tip_a, ROW_Y), ("end", tip_b, ROW_Y + dy)):
-        offsets = _tip_offsets(ar, x, pad_y)
-        assert offsets, f"no SIG copper crosses the {name} pad's tip lane"
-        for off in offsets:
-            assert abs(off) <= RES + 1e-6, (
-                f"{name} pad: the run leaves the tip {off:+.4f} mm off the "
-                f"centreline (limit +/-{RES} mm)"
+    """The AC, at both pads.
+
+    * Every grid cell the run uses on the pad's copper -- the first cell
+      after the pad-centre tail and any before the run leaves the pad -- is
+      within one grid cell of the centreline.
+    * The copper crosses the pad's tip line within one grid cell of it.
+    * A straight approach is still within one grid cell 0.05 mm outside the
+      tip (the board 05 measurement; a diagonal departure is not a landing).
+    """
+    ends = (("start", A_X, ROW_Y, +1), ("end", B_X, ROW_Y + dy, -1))
+    for name, pad_x, pad_y, side in ends:
+        cells = _cells_on_pad(ar, pad_x, pad_y)
+        assert cells, f"{name} pad: no grid cell of the run lies on the pad"
+        for x, y in cells:
+            assert abs(y - pad_y) <= RES + 1e-6, (
+                f"{name} pad: grid cell ({x:.4f}, {y:.4f}) is {y - pad_y:+.4f} mm "
+                f"off the centreline (limit +/-{RES} mm)"
             )
+        tip = pad_x + side * PAD_LONG / 2
+        crossings = _tip_crossings(ar, tip, pad_y)
+        assert crossings, f"{name} pad: no SIG copper crosses the tip line"
+        for off, _ in crossings:
+            assert abs(off) <= RES + 1e-6, (
+                f"{name} pad: the run crosses the tip line {off:+.4f} mm off the centreline"
+            )
+        for off, straight in _tip_crossings(ar, tip + side * TIP_PROBE, pad_y):
+            if straight:
+                assert abs(off) <= RES + 1e-6, (
+                    f"{name} pad: a straight approach runs {off:+.4f} mm off the "
+                    f"centreline {TIP_PROBE} mm outside the tip"
+                )
 
 
 # Row shifts between the two columns: up, down, a 2-cell and a ~5-cell shift.
@@ -200,7 +241,7 @@ def test_never_stricter_off_centre_landing_when_the_centre_is_blocked() -> None:
     ``main`` too, which is a separate defect.
     """
     ar = _route(0.15, 0.0, extra=[("X1", _blocker())])
-    offsets = _tip_offsets(ar, A_X + PAD_LONG / 2 + TIP_PROBE, ROW_Y)
+    offsets = [off for off, _ in _tip_crossings(ar, A_X + PAD_LONG / 2 + TIP_PROBE, ROW_Y)]
     assert offsets and all(off > RES / 2 for off in offsets), (
         f"expected an off-centre landing above the blocked centre row, got {offsets}"
     )
@@ -253,38 +294,53 @@ def test_landing_geometry() -> None:
     assert geom.lane_half_cells == pytest.approx(4.0)
 
 
+# An x-long pad centred at (10, 10.3) in cells; copper cells 2..18 along x,
+# a metal box eroded to x 4..16, y 9..11.
 GEOM = LandingGeometry(AXIS_X, 10.0, 10.3, 4.0, 2, 18)
+BOX = (4, 9, 16, 11)
 
 
-def _cost(ax, ay, bx, by, outward=True):
-    return landing_cost(GEOM, ax, ay, bx, by, outward, 5.0, 1.0)
+def _cost(ax, ay, bx, by, outward=True, geom=GEOM):
+    return landing_cost(geom, BOX, ax, ay, bx, by, outward, 5.0, 1.0)
 
 
-def test_landing_cost_charges_only_off_centre_tip_crossings() -> None:
-    # Straight off the tip on the nearest row (offset 0.3 cell): free.
+def test_landing_cost_charges_off_centre_tip_crossings() -> None:
+    # Straight off the tip on the nearest row (0.3 cell) or the next one
+    # (0.7 cell): within one grid cell, free.
     assert _cost(18, 10, 19, 10) == 0.0
-    # Two rows up (offset 1.7 cells): two turns plus 1.7 straight steps.
+    assert _cost(18, 11, 19, 11) == 0.0
+    # Two rows up (1.7 cells): two turns plus 1.7 straight steps.
     assert _cost(18, 12, 19, 12) == pytest.approx(10.0 + 1.7)
     # A diagonal jog across the tip is charged by its worse cell.
-    assert _cost(18, 10, 19, 11) == pytest.approx(10.0 + 0.7)
-    # Not a tip crossing: inside the pad, or beyond it.
-    assert _cost(17, 12, 18, 12) == 0.0
+    assert _cost(18, 11, 19, 12) == pytest.approx(11.7)
+    # Not a tip crossing: beyond the pad.
     assert _cost(19, 12, 20, 12) == 0.0
     # Direction matters: outward for the start pad, inward for the end pad.
     assert _cost(19, 12, 18, 12, outward=True) == 0.0
     assert _cost(19, 12, 18, 12, outward=False) == pytest.approx(11.7)
-    # A side step does not cross the tip line.
-    assert _cost(18, 12, 18, 13) == 0.0
     # Crossing the tip line beside the pad (a neighbour's lane) is free.
     assert _cost(18, 20, 19, 20) == 0.0
     # No long axis, no cost.
-    assert landing_cost(GEOM._replace(long_axis=AXIS_NONE), 18, 12, 19, 12, True, 5.0, 1.0) == 0.0
+    assert _cost(18, 12, 19, 12, geom=GEOM._replace(long_axis=AXIS_NONE)) == 0.0
+
+
+def test_landing_cost_charges_off_centre_box_crossings() -> None:
+    # Leaving the eroded box along the long axis, still on the copper: a
+    # diagonal from the next row (0.7 cell) to two rows up is charged...
+    assert _cost(16, 11, 17, 12) == pytest.approx(11.7)
+    # ...a straight step on a centred row is not...
+    assert _cost(16, 10, 17, 10) == 0.0
+    # ...and neither is a pure side step out of the box.
+    assert _cost(10, 11, 10, 12) == 0.0
+    # Reaching the end pad's box diagonally across the centreline.
+    assert _cost(17, 8, 16, 9, outward=False) == pytest.approx(10.0 + 2.3)
 
 
 def test_landing_cost_y_long_axis() -> None:
     geom = LandingGeometry(AXIS_Y, 10.3, 10.0, 4.0, 2, 18)
-    assert landing_cost(geom, 10, 18, 10, 19, True, 5.0, 1.0) == 0.0
-    assert landing_cost(geom, 12, 18, 12, 19, True, 5.0, 1.0) == pytest.approx(11.7)
+    box = (9, 4, 11, 16)
+    assert landing_cost(geom, box, 10, 18, 10, 19, True, 5.0, 1.0) == 0.0
+    assert landing_cost(geom, box, 12, 18, 12, 19, True, 5.0, 1.0) == pytest.approx(11.7)
 
 
 @requires_cpp

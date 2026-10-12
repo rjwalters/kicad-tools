@@ -4135,6 +4135,8 @@ class Router:
         # mirrors the native ``PadBounds`` landing fields).
         start_landing = pad_landing_geometry(start, self.grid)
         end_landing = pad_landing_geometry(end, self.grid)
+        start_landing_box = (start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2)
+        end_landing_box = (end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2)
         landing_cost_turn = float(self.rules.cost_turn)
         landing_cost_straight = float(self.rules.cost_straight)
 
@@ -4781,12 +4783,13 @@ class Router:
                 if attractor_bonus > 0.0:
                     positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
 
-                # Issue #6368: centreline landing cost on the step that crosses
-                # the start pad's tip line outward or the end pad's inward
-                # (after the attractor clamp, as in the native loops).
+                # Issue #6368: centreline landing cost on a step leaving the
+                # start pad or reaching the end pad (after the attractor
+                # clamp, as in the native loops).
                 if end_landing.long_axis >= 0 and nlayer in end_layers:
                     positive_step_cost += landing_cost(
                         end_landing,
+                        end_landing_box,
                         current.x,
                         current.y,
                         nx,
@@ -4798,6 +4801,7 @@ class Router:
                 if start_landing.long_axis >= 0 and nlayer in start_layers:
                     positive_step_cost += landing_cost(
                         start_landing,
+                        start_landing_box,
                         current.x,
                         current.y,
                         nx,

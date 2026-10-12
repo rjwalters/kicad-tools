@@ -12,9 +12,9 @@ displaced towards a neighbour pin (board 05 U2: VCP at -0.125 mm,
 SENSE_IN at +0.070 mm), consuming the neighbour's entry lane.
 
 The landing cost charges exactly that skipped jog -- two turns plus one
-straight step per cell of offset -- on the step that crosses the pad's tip
-line (leaving the start pad, entering the end pad) inside the pad's lane
-when either of its cells is more than half a cell from the pad centreline.
+straight step per cell of offset -- on a step that leaves the start pad or
+reaches the end pad (see :func:`landing_cost`) with a cell more than one
+grid cell from the pad centreline.
 It is a soft cost only: every cell that is a legal seed or goal today stays
 one, so a route that can only land off-centre still does.
 
@@ -30,10 +30,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from .primitives import Pad
 
-# Offsets up to half a cell are the nearest-row quantisation, not a choice.
-# The small epsilon keeps a pad centred exactly between two rows free on
-# both of them despite float noise.
-LANDING_DEADBAND_CELLS = 0.5 + 1e-3
+# A cell within one grid pitch of the centreline is on it, for the grid's
+# purposes: the nearest row is up to half a cell off, and the row beside it
+# up to one cell.  Charging those would only reshuffle routes for no gain
+# (it reordered board 04's fan-out and split its +3.3V pour).  The small
+# epsilon absorbs float noise.
+LANDING_DEADBAND_CELLS = 1.0 + 1e-3
 
 # A pad needs this aspect ratio before it has a long axis worth centring on.
 # Near-square pads (0603 passives, THT lands) keep their old behaviour.
@@ -108,6 +110,7 @@ def pad_landing_geometry(pad: Pad, grid: Any) -> LandingGeometry:
 
 def landing_cost(
     geom: LandingGeometry,
+    box: tuple[int, int, int, int],
     ax: int,
     ay: int,
     bx: int,
@@ -116,16 +119,18 @@ def landing_cost(
     cost_turn: float,
     cost_straight: float,
 ) -> float:
-    """Cost of the step ``(ax, ay) -> (bx, by)`` at a pad's tip line.
+    """Cost of the step ``(ax, ay) -> (bx, by)`` leaving or reaching a pad.
 
-    The step is charged only when it crosses an end of the pad's copper
-    along its long axis -- outward (on -> off the pad) for the start pad,
-    inward for the end pad -- inside the pad's lane, and one of its two cells
-    sits more than half a cell off the pad centreline.  Taking the larger
-    offset charges a diagonal that jogs across the tip as well as a straight
-    run on an off-centre row; keying on the copper tip line, not the eroded
-    metal box edge, also charges a run that slips out of the box sideways
-    and leaves along the pad.
+    ``box`` is the pad's metal box ``(gx1, gy1, gx2, gy2)``.  ``outward``
+    selects the start pad (the step leaves it) over the end pad (the step
+    reaches it).  The step is charged when one of its cells sits more than
+    one grid cell off the pad centreline and it either crosses the pad's
+    copper tip line inside the pad's lane, or crosses the metal box boundary
+    while moving along the long axis.  The first catches a straight run on
+    an off-centre row, a diagonal that jogs across the tip and a run that
+    slips out of the box sideways at the tip column; the second catches a
+    diagonal that crosses the centreline inside the pad.  A pure side step
+    out of the box is not charged.
     """
     if geom.long_axis == AXIS_X:
         a_along, b_along = ax, bx
@@ -135,16 +140,18 @@ def landing_cost(
         a_off, b_off = abs(ax - geom.centre_gx), abs(bx - geom.centre_gx)
     else:
         return 0.0
-    a_in = geom.tip_lo <= a_along <= geom.tip_hi
-    b_in = geom.tip_lo <= b_along <= geom.tip_hi
-    if outward:
-        if not (a_in and not b_in):
-            return 0.0
-    elif not (b_in and not a_in):
-        return 0.0
-    if min(a_off, b_off) > geom.lane_half_cells + LANDING_DEADBAND_CELLS:
-        return 0.0  # crossing the tip line beside the pad, not off it
     off = max(a_off, b_off)
     if off <= LANDING_DEADBAND_CELLS:
+        return 0.0
+    a_tip = geom.tip_lo <= a_along <= geom.tip_hi
+    b_tip = geom.tip_lo <= b_along <= geom.tip_hi
+    crosses = (a_tip and not b_tip) if outward else (b_tip and not a_tip)
+    crosses = crosses and min(a_off, b_off) <= geom.lane_half_cells + LANDING_DEADBAND_CELLS
+    if not crosses and a_along != b_along:
+        gx1, gy1, gx2, gy2 = box
+        a_box = gx1 <= ax <= gx2 and gy1 <= ay <= gy2
+        b_box = gx1 <= bx <= gx2 and gy1 <= by <= gy2
+        crosses = (a_box and not b_box) if outward else (b_box and not a_box)
+    if not crosses:
         return 0.0
     return 2.0 * cost_turn + cost_straight * off
