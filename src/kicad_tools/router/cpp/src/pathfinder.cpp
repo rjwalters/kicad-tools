@@ -260,6 +260,32 @@ bool Pathfinder::pad_cell_clear(int cx, int cy, int layer, int x1, int y1,
     return pad_step_clear(x1, y1, x2, y2, layer, net);
 }
 
+// Issue #6375: a cell of the routing net's own STATIC geometry -- its pads'
+// copper and clearance halos (``pad_cell``), plus own-net static cells whose
+// pad provenance was voided (a drilled pad, a pad sharing a keepout; board
+// 03's USB_D- at J1 is one).  Routed copper (``usage_count``) is never static,
+// so the gate below stays local to pad surroundings.
+bool Pathfinder::own_pad_cell(int x, int y, int layer, int net) const {
+    if (!grid_.is_valid(x, y, layer)) return false;
+    const auto& cell = grid_.at(x, y, layer);
+    return cell.blocked && cell.net == net && (cell.pad_cell || cell.static_blocked);
+}
+
+// Issue #6375: the post-route validator's segment-vs-pad verdict on the swept
+// step (x1,y1)->(x2,y2), via the very function ``validate_route`` calls.
+bool Pathfinder::own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net,
+                                    float emit_trace_width) const {
+    const auto [ax, ay] = grid_.grid_to_world(x1, y1);
+    const auto [bx, by] = grid_.grid_to_world(x2, y2);
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = search_gate_trace_width_ > 0.0f ? search_gate_trace_width_
+                  : (emit_trace_width > 0.0f ? emit_trace_width : rules_.trace_width);
+    segment.layer = layer; segment.net = net;
+    return grid_.segment_pads_clear(segment, net, search_gate_exclude_refs_,
+                                    search_gate_clamp_refs_);
+}
+
 bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
     const auto [wx, wy] = grid_.grid_to_world(x, y);
     Via via;
@@ -1758,6 +1784,26 @@ RouteResult Pathfinder::route(
                 }
             }
 
+            // Issue #6375: own-pad step gate (see ``set_search_own_pad_gate``).
+            // A planar step touching the routing net's own pad copper/halo
+            // outside the seed/goal metal boxes must pass the validator's own
+            // segment-vs-pad verdict -- the ``cell.net == net`` branch above
+            // admits such cells unchecked, and a net-0 neighbour never marks
+            // the halo shared.
+            if (nlayer == current.layer && !is_in_start_metal && !is_in_end_metal &&
+                (own_pad_cell(nx, ny, nlayer, net) ||
+                 own_pad_cell(current.x, current.y, nlayer, net)) &&
+                !own_pad_step_clear(current.x, current.y, nx, ny, nlayer, net,
+                                    emit_trace_width)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                        "REJECT reason=own_pad_step_foreign_pad_too_close\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+
             if (astar_trace_enabled()) {
                 std::fprintf(stderr,
                     "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
@@ -2470,6 +2516,22 @@ RouteResult Pathfinder::run_astar_loop() {
                     }
                     continue;
                 }
+            }
+
+            // Issue #6375: own-pad step gate, as in the one-shot loop.
+            if (nlayer == current.layer && !is_in_start_metal && !is_in_end_metal &&
+                (own_pad_cell(nx, ny, nlayer, search_net_) ||
+                 own_pad_cell(current.x, current.y, nlayer, search_net_)) &&
+                !own_pad_step_clear(current.x, current.y, nx, ny, nlayer, search_net_,
+                                    search_emit_trace_width_)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                        "reason=own_pad_step_foreign_pad_too_close net=%d\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer,
+                        search_net_);
+                }
+                continue;
             }
 
             if (astar_trace_enabled()) {

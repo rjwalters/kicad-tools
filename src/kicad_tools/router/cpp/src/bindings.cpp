@@ -286,6 +286,13 @@ NB_MODULE(router_cpp, m) {
         .def("pad_geometry_clear", &Grid3D::pad_geometry_clear,
              "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
              "half_width"_a, "clearance"_a)
+        // Issue #6375: validate_route()'s seg-vs-pad verdict over the pads
+        // the bucket index places within reach -- the function the A*
+        // own-pad step gate calls (search/validator parity surface).
+        .def("segment_pads_clear", &Grid3D::segment_pads_clear,
+             "seg"_a, "exclude_net"_a,
+             "exclude_ref_hashes"_a = std::vector<uint32_t>{},
+             "clamp_ref_hashes"_a = std::vector<uint32_t>{})
         .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
         // Route marking
@@ -636,6 +643,13 @@ NB_MODULE(router_cpp, m) {
         // Issue #6315: copper clearance a foreign pad may demand (the
         // largest net-class clearance on the board).
         .def("set_search_pad_clearance_floor", &Pathfinder::set_search_pad_clearance_floor)
+        // Issue #6375: the own-pad step gate -- validator carve-out sets
+        // and the narrowest emittable width for this search.
+        .def("set_search_own_pad_gate", &Pathfinder::set_search_own_pad_gate,
+             "exclude_ref_hashes"_a, "clamp_ref_hashes"_a, "trace_width"_a)
+        .def("own_pad_step_clear", &Pathfinder::own_pad_step_clear,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a,
+             "emit_trace_width"_a = 0.0f)
         .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)
         .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
              "trace_half_width_mm"_a, "via_half_diam_mm"_a,
