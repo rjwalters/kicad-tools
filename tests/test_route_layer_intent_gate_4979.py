@@ -191,6 +191,10 @@ def _route_args(pcb: Path, out: Path, net_class_map: Path, *, strict: bool) -> l
         "--layers",
         "4",
         "--no-auto-layers",
+        # These tests pin net-class avoid_layers, not plane reservation: keep
+        # In1/In2 open to unconstrained nets (issue #6350 made the lattice
+        # honour the --layers 4 reservation default).
+        "--no-reserve-plane-layers",
         "--net-class-map",
         str(net_class_map),
         # The gate is not a DRC sub-step; --skip-drc keeps these tests free of
@@ -284,6 +288,9 @@ class TestCompleteMode:
             "--layers",
             "4",
             "--no-auto-layers",
+            # See _route_args: keep In1/In2 open so /SIG_A's inner-layer
+            # crossing proves the wall forces one (issue #6350).
+            "--no-reserve-plane-layers",
             "--strict-layers",
             "--net-class-map",
             str(net_class_map),

@@ -637,16 +637,53 @@ class LatticePathfinder:
         could (and did) land a hard-current net on an explicitly forbidden
         inner plane with no failure reported.
 
-        Returns an empty set when ``net_class`` is ``None`` or declares no
-        hard-avoided layers, preserving byte-identical routing for every
-        connection that does not opt in.
+        Issue #6350: the board-wide ``DesignRules.allowed_layers`` gate is
+        folded in too (see :meth:`_allowed_layers_blocked`).  That is the
+        field ``--reserve-plane-layers`` (the ``--layers 4`` default) sets to
+        keep signal copper off the reference planes; the grid pathfinder and
+        the C++ backend enforce it at search time, but before #6350 the
+        lattice never read it, so ``--route-engine lattice`` routed signal
+        nets on In1.Cu/In2.Cu and ``--no-reserve-plane-layers`` was a no-op.
+
+        Returns an empty set when ``rules.allowed_layers`` is ``None`` and
+        ``net_class`` is ``None`` or declares no hard-avoided layers,
+        preserving byte-identical routing for every connection that does not
+        opt in.
         """
+        blocked = self._allowed_layers_blocked()
         if net_class is None:
-            return frozenset()
+            return blocked
         hard_avoided = getattr(net_class, "hard_avoided_layer_indices", None)
         if hard_avoided is None:
+            return blocked
+        return blocked | frozenset(hard_avoided(self.rules.strict_layers))
+
+    def _allowed_layers_blocked(self) -> frozenset[int]:
+        """Layer indices outside ``rules.allowed_layers`` (issue #6350).
+
+        ``allowed_layers`` holds KiCad layer names (``["F.Cu", "B.Cu"]`` under
+        ``--layers 4`` with plane reservation on); every stack layer whose
+        name is absent is hard-blocked for every net, exactly as the grid
+        pathfinder's ``_is_layer_allowed`` does.  ``None`` (reservation off,
+        ``--layers 4-all``, 2-layer boards) blocks nothing.
+
+        Read at CALL time, never cached: ``route_with_layer_escalation``
+        mutates the shared ``rules`` in place between rungs, and this
+        pathfinder can outlive a rung.
+
+        Blocked inner planes do not strand F.Cu<->B.Cu nets: the via step-over
+        in :meth:`_route_search` hops across them.  A stack whose reserved
+        plane were an OUTER layer would instead trip the via-span guard there
+        (this engine only emits full-stack through vias) and route planar or
+        decline as layer-constrained -- never ship copper on the plane.  None
+        of the built-in stacks does that (``four_layer_sig_sig_gnd_pwr``'s
+        B.Cu is ``MIXED``, so only its In2.Cu is reserved).
+        """
+        allowed = self.rules.allowed_layers
+        if allowed is None:
             return frozenset()
-        return frozenset(hard_avoided(self.rules.strict_layers))
+        allowed_set = set(allowed)
+        return frozenset(ld.index for ld in self.layer_stack.layers if ld.name not in allowed_set)
 
     # -- pad stubs ------------------------------------------------------------
 
