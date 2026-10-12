@@ -2454,6 +2454,20 @@ class CppPathfinder:
                     max(net_trace_clearance, own_floor),
                     max(self._rules.via_clearance, own_floor),
                 )
+            if hasattr(self._impl, "set_search_pad_clearance_floor"):
+                # Issue #6315: the exact pad test resolving pad clearance
+                # cells cannot tell a pad's net class, and the pair rule is
+                # max(own class, pad's class) -- hold it to the largest
+                # class clearance on the board (never looser than the disc).
+                self._impl.set_search_pad_clearance_floor(
+                    max(
+                        [self._rules.trace_clearance]
+                        + [
+                            float(getattr(nc, "clearance", 0.0) or 0.0)
+                            for nc in (self._net_class_map or {}).values()
+                        ]
+                    )
+                )
 
             if self._grid._py_grid is not None:
                 self._sync_stored_routes(self._grid._py_grid)

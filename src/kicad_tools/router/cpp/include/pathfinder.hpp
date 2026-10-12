@@ -291,6 +291,11 @@ public:
         physical_partner_net_ = net;
         physical_partner_clearance_ = clearance;
     }
+    // Issue #6315: the pair clearance against a pad is max(own class, the
+    // pad's class).  The pad's class is not modelled natively, so the exact
+    // pad test holds every step to at least this floor -- the Python backend
+    // pushes the largest net-class clearance on the board.  0 = unset.
+    void set_search_pad_clearance_floor(float floor) { search_pad_clearance_floor_ = floor; }
     void set_search_fill_clearances(float trace, float via) {
         search_fill_trace_clearance_ = trace;
         search_fill_via_clearance_ = via;
@@ -472,6 +477,7 @@ private:
     float search_trace_half_width_mm_ = 0.0f;
     float search_via_half_diam_mm_ = 0.0f;
     float search_fill_trace_clearance_ = -1.0f;
+    float search_pad_clearance_floor_ = 0.0f;  // Issue #6315
     float search_fill_via_clearance_ = -1.0f;
 
     // Issue #3438: per-step relief penalty helper.  Returns

@@ -424,6 +424,7 @@ def _sync_pad_cells_to_cpp_grid(
     gy1: int,
     gx2: int,
     gy2: int,
+    pad_source: bool = True,
 ) -> None:
     """Push a pad's blocked-cell envelope to the paired C++ grid.
 
@@ -457,6 +458,10 @@ def _sync_pad_cells_to_cpp_grid(
         gx1, gy1, gx2, gy2: Inclusive grid-cell bounding box of the pad's
             blocked envelope.  Already clamped to grid bounds by the
             caller's ``_add_pad_unsafe`` loop.
+        pad_source: Issue #6315 -- whether the envelope may be resolved by
+            the C++ exact segment-vs-pad test.  ``False`` for drilled pads,
+            whose hole and board-edge (NPTH slot) clearances the copper-only
+            pad test does not model; their cells keep the grid semantics.
     """
     try:
         from . import router_cpp  # noqa: F401
@@ -516,7 +521,7 @@ def _sync_pad_cells_to_cpp_grid(
                     int(py_net[layer_idx, gy, gx]),
                     bool(py_is_obstacle[layer_idx, gy, gx]),
                     bool(py_pad_blocked[layer_idx, gy, gx]),
-                    key not in policy_cells,
+                    pad_source and key not in policy_cells,
                     key in shared_cells,
                 )
 
@@ -2824,7 +2829,18 @@ class RoutingGrid:
         # what we sync here.
         cpp_grid = self._cpp_grid
         if cpp_grid is not None:
-            _sync_pad_cells_to_cpp_grid(self, cpp_grid, layers_to_block, gx1, gy1, gx2, gy2)
+            # Issue #6315: only SMD copper is resolved by the exact pad test;
+            # a drilled pad also carries hole / NPTH-slot clearances.
+            _sync_pad_cells_to_cpp_grid(
+                self,
+                cpp_grid,
+                layers_to_block,
+                gx1,
+                gy1,
+                gx2,
+                gy2,
+                pad_source=not pad.through_hole and pad.drill <= 0,
+            )
 
     def _pad_cell_key(self, layer_idx: int, gy: int, gx: int) -> int:
         """Flat ``(layer, y, x)`` key for the #6315 pad-halo bookkeeping."""

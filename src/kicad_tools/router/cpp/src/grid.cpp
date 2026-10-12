@@ -944,6 +944,10 @@ void Grid3D::register_route_mark(int kind, int net, int layer, int x1, int y1,
 void Grid3D::set_cell_static_blocked(int x, int y, int layer, bool value) {
     if (!is_valid(x, y, layer)) return;
     at(x, y, layer).static_blocked = value;
+    // Issue #6315: a static-state change from outside the pad sync (keepout
+    // over a pad halo, route-halo restore) voids pad-only provenance.
+    at(x, y, layer).pad_cell = false;
+    at(x, y, layer).shared_pad_halo = false;
     route_coverage_dirty_ = true;
 }
 
@@ -953,7 +957,10 @@ void Grid3D::set_cells_static_blocked(const std::vector<int>& xs,
     const size_t n = std::min({xs.size(), ys.size(), layers.size()});
     for (size_t i = 0; i < n; ++i) {
         if (!is_valid(xs[i], ys[i], layers[i])) continue;
-        at(xs[i], ys[i], layers[i]).static_blocked = value;
+        auto& cell = at(xs[i], ys[i], layers[i]);
+        cell.static_blocked = value;
+        cell.pad_cell = false;         // Issue #6315 (see above).
+        cell.shared_pad_halo = false;
     }
     route_coverage_dirty_ = true;
 }

@@ -62,10 +62,12 @@ NB_MODULE(router_cpp, m) {
         // (read-only surface for parity tests; the owner nets are written
         // via ``Grid3D::reserve_cell`` / read via ``is_reserved_for``).
         .def_ro("reserved_count", &GridCell::reserved_count)
-        // Issue #6315: pad-geometry provenance (read-only; written through
-        // ``Grid3D::mark_blocked``'s ``pad_source`` / ``shared_pad_halo``).
-        .def_ro("pad_cell", &GridCell::pad_cell)
-        .def_ro("shared_pad_halo", &GridCell::shared_pad_halo);
+        // Issue #6315: pad-geometry provenance (normally written through
+        // ``Grid3D::mark_blocked``'s ``pad_source`` / ``shared_pad_halo``;
+        // writable so a caller that temporarily repaints a cell -- the
+        // Kelvin branch isolation -- can void and restore it).
+        .def_rw("pad_cell", &GridCell::pad_cell)
+        .def_rw("shared_pad_halo", &GridCell::shared_pad_halo);
 
     // DesignRules struct
     nb::class_<DesignRules>(m, "DesignRules")
@@ -631,6 +633,9 @@ NB_MODULE(router_cpp, m) {
              "enabled"_a, "cx"_a = -1, "cy"_a = -1, "radius"_a = 0)
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
         .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
+        // Issue #6315: copper clearance a foreign pad may demand (the
+        // largest net-class clearance on the board).
+        .def("set_search_pad_clearance_floor", &Pathfinder::set_search_pad_clearance_floor)
         .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)
         .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
              "trace_half_width_mm"_a, "via_half_diam_mm"_a,

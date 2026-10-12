@@ -212,8 +212,21 @@ bool Pathfinder::pad_step_clear(int x1, int y1, int x2, int y2, int layer, int n
     const auto [bx, by] = grid_.grid_to_world(x2, y2);
     const float half = search_trace_half_width_mm_ > 0 ? search_trace_half_width_mm_
                                                        : rules_.trace_width / 2.0f;
-    const float clearance = search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_
-                                                              : rules_.trace_clearance;
+    // The pair rule is max(own class, pad's class); a pad's class is not
+    // known here and defaults to the board clearance, so never go below it
+    // (a net class tighter than the board default stays on the disc path).
+    const float clearance = std::max({search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_
+                                                                       : rules_.trace_clearance,
+                                      rules_.trace_clearance, search_pad_clearance_floor_});
+    // Drilled holes carry their own hole-to-copper and (NPTH slot) board-edge
+    // clearances, which the copper-only pad test does not model -- and an NPTH
+    // hole can be registered only as a no-copper pad plus a census hole.  Never
+    // resolve a step that comes anywhere near one; the disc keeps deciding.
+    constexpr float PAD_EXACT_HOLE_GUARD_MM = 0.75f;
+    const float half_len = 0.5f * std::hypot(bx - ax, by - ay);
+    if (!grid_.component_holes_clear(0.5f * (ax + bx), 0.5f * (ay + by),
+                                     2.0f * (half + half_len),
+                                     clearance + PAD_EXACT_HOLE_GUARD_MM)) return false;
     if (!grid_.pad_geometry_clear(ax, ay, bx, by, layer, net, half, clearance)) return false;
     if (!grid_.authored_segment_clear(ax, ay, bx, by, 2.0 * half, layer, net)) return false;
     // Routed copper whose clearance halo overlaps a pad's halo does not
