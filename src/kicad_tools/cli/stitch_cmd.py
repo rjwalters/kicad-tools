@@ -38,6 +38,7 @@ import argparse
 import math
 import sys
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1934,6 +1935,7 @@ def calculate_via_position(
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    preferred_positions: Sequence[tuple[float, float]] = (),
 ) -> tuple[float, float] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -1988,6 +1990,15 @@ def calculate_via_position(
             once.  Built on demand when omitted, and a pure superset
             pre-filter either way: the exact per-segment distance tests
             below are unchanged, so the accepted position is identical.
+        preferred_positions: Issue #6401 -- via sites ``kct route`` held
+            free for this pad before signal routing.  They are tried before
+            the eight-direction offsets, against every check below; the one
+            difference is that, when ``other_net_pad_bboxes`` is supplied,
+            the via is cleared against each foreign pad's box instead of its
+            bounding circle -- the model the reservation was planned with.
+            (The circle radius of a 1.5 x 0.3 mm QFP pin is 0.76 mm, so the
+            circle test refuses any site beside a fine-pitch pin row.)
+            Empty (default) leaves the search exactly as before.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -2026,11 +2037,15 @@ def calculate_via_position(
     pad_radius = max(pad.width, pad.height) / 2
     test_offsets = [pad_radius + offset, pad_radius + offset * 1.5, pad_radius + offset * 2]
 
-    for test_offset in test_offsets:
-        for dx, dy in directions:
-            via_x = pad.x + dx * test_offset
-            via_y = pad.y + dy * test_offset
-
+    # Issue #6401: reserved sites first, then the historical offsets.
+    reserved_candidates = [(float(x), float(y), True) for x, y in preferred_positions]
+    offset_candidates = [
+        (pad.x + dx * test_offset, pad.y + dy * test_offset, False)
+        for test_offset in test_offsets
+        for dx, dy in directions
+    ]
+    for candidates in (reserved_candidates, offset_candidates):
+        for via_x, via_y, box_pads in candidates:
             # Check for conflicts with existing same-net vias
             conflict = False
             # Issue #3855: same-net stitch vias must also clear the fab
@@ -2098,13 +2113,23 @@ def calculate_via_position(
                 continue
 
             # Check for conflicts with other-net pads
-            for px, py, p_radius, _pnet in other_net_pads:
-                dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
-                # Clearance is from via edge to pad edge
-                min_dist = via_radius + p_radius + clearance + hole_extra
-                if dist < min_dist:
-                    conflict = True
-                    break
+            if box_pads and other_net_pad_bboxes is not None:
+                # Issue #6401: a reserved site is cleared against pad boxes.
+                for bmin_x, bmin_y, bmax_x, bmax_y, _pnet in other_net_pad_bboxes:
+                    dist = _segment_to_rect_distance(
+                        via_x, via_y, via_x, via_y, bmin_x, bmin_y, bmax_x, bmax_y
+                    )
+                    if dist < via_radius + clearance + hole_extra:
+                        conflict = True
+                        break
+            else:
+                for px, py, p_radius, _pnet in other_net_pads:
+                    dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
+                    # Clearance is from via edge to pad edge
+                    min_dist = via_radius + p_radius + clearance + hole_extra
+                    if dist < min_dist:
+                        conflict = True
+                        break
 
             if conflict:
                 continue
@@ -5127,6 +5152,7 @@ def run_stitch(
     force_pads: frozenset[str] = frozenset(),
     foreign_fills_yield: bool = False,
     strict_drill_overlap: bool = False,
+    preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -5159,6 +5185,10 @@ def run_stitch(
         strict_drill_overlap: Issue #5785 -- with ``avoid_pad_overlap``, also
             drop a via whose drill merely OVERLAPS a same-net SMD pad (the
             current ``via_in_pad`` DRC rule), not only one fully inside it.
+        preferred_sites: Issue #6401 -- ``"REF.PAD"`` -> via sites ``kct
+            route`` reserved for that pad before signal routing.  Each pad's
+            sites are tried first (see ``calculate_via_position``'s
+            ``preferred_positions``); ``None`` keeps the search unchanged.
         only_pads: Issue #5785 -- when given, restrict the work list to these
             ``"REF.PAD"`` keys (the pads a KiCad ``unconnected_items`` report
             named), so the oracle completion loop welds exactly the links
@@ -5405,6 +5435,10 @@ def run_stitch(
             same_net_filled_polygons=fill_gate,
             same_net_fill_layer=terminus_layer,
             other_net_track_index=eff_track_index,
+            # Issue #6401: the site ``kct route`` reserved for this pad.
+            preferred_positions=(preferred_sites or {}).get(
+                f"{pad.reference}.{pad.pad_number}", ()
+            ),
         )
 
         # Track if we're using dog-leg or extended escape routing
