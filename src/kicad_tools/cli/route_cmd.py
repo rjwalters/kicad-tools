@@ -7555,12 +7555,16 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
 
 
 def _closer_reasons_for(link, notes) -> list[str]:
-    """The closer notes (Issue #6399) that name ``link`` or one of its pads."""
-    keys = [link.describe()]
+    """The closer notes (Issue #6399) that name ``link`` or one of its pads.
+
+    A pad matches as a whole ``REF.PAD`` token, so ``U2.3`` does not pick up
+    a note about ``U2.36``.
+    """
+    patterns = [re.compile(re.escape(link.describe()))]
     for end in (link.a, link.b):
         if end.ref and end.pad:
-            keys.append(f"{end.ref}.{end.pad}")
-    return [n for n in notes if any(k in n for k in keys)]
+            patterns.append(re.compile(rf"(?<![\w.]){re.escape(f'{end.ref}.{end.pad}')}(?![\w.])"))
+    return [n for n in notes if any(p.search(n) for p in patterns)]
 
 
 def _print_stranded_pour_failure_banner(args, output_path) -> None:

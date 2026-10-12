@@ -398,6 +398,18 @@ class TestCloserReasonsPrinted:
         notes = ["+3.3V U2.36: no via site", "GND C1.1: other"]
         assert _closer_reasons_for(lk, notes) == ["+3.3V U2.36: no via site"]
 
+    def test_pad_key_matches_whole_token(self):
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink
+
+        pad = OracleEndpoint(
+            description="Pad 3 [+3.3V] of U2", kind="pad", net="+3.3V", x=0, y=0, ref="U2", pad="3"
+        )
+        zone = OracleEndpoint(description="Zone [+3.3V]", kind="zone", net="+3.3V", x=0, y=0)
+        lk = OracleLink(net="+3.3V", a=pad, b=zone)
+        notes = ["+3.3V U2.36: no via site", "+3.3V U2.3: boxed in"]
+        assert _closer_reasons_for(lk, notes) == ["+3.3V U2.3: boxed in"]
+
     def test_result_carries_closer_notes(self, tmp_path):
         board = FakeBoard(tmp_path, 2)
 
