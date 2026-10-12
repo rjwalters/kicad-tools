@@ -203,7 +203,7 @@ def test_worker_roundtrip_preserves_geometric_discrimination(monkeypatch, worker
     )
     restored = []
 
-    def inspect_worker(actual, order):
+    def inspect_worker(actual, order=None, **_kw):  # #6345: trials pass no positional order
         restored.append(actual)
         for ref, valid in [("J1", False), ("J2", True)]:
             pad = actual.pads[(ref, "1")]
