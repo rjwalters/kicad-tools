@@ -33,10 +33,13 @@ from kicad_tools.router.pad_landing import (
     AXIS_NONE,
     AXIS_X,
     AXIS_Y,
+    LANDING_MAX_ROW_PITCH_MM,
+    NO_LANDING,
     LandingGeometry,
     landing_cost,
     pad_landing_geometry,
     pad_long_axis,
+    pad_row_pitch,
 )
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
@@ -265,14 +268,31 @@ def test_never_stricter_off_centre_landing_when_the_centre_is_blocked() -> None:
 # --- the cost function itself -------------------------------------------------
 
 
-def _pad(width: float, height: float, **kw) -> Pad:
-    return Pad(x=1.0, y=1.0, width=width, height=height, net=1, net_name="N", **kw)
+def _pad(width: float, height: float, *, x=1.0, y=1.0, **kw) -> Pad:
+    kw.setdefault("ref", "U1")
+    return Pad(x=x, y=y, width=width, height=height, net=1, net_name="N", **kw)
 
 
 class _Grid:
+    """A grid stub; ``pads`` is the registry ``pad_landing_geometry`` reads."""
+
     resolution = 0.1
     origin_x = 0.0
     origin_y = 0.0
+
+    def __init__(self, *pads: Pad) -> None:
+        self._component_pads: dict[str, list[Pad]] = {}
+        for pad in pads:
+            self._component_pads.setdefault(pad.component_key, []).append(pad)
+
+
+def _row(pad: Pad, pitch: float) -> _Grid:
+    """``pad`` with a same-component neighbour on each side at ``pitch``."""
+    if pad.width >= pad.height:
+        others = [_pad(pad.width, pad.height, x=pad.x, y=pad.y + d) for d in (-pitch, pitch)]
+    else:
+        others = [_pad(pad.width, pad.height, x=pad.x + d, y=pad.y) for d in (-pitch, pitch)]
+    return _Grid(pad, *others)
 
 
 def test_long_axis_detection() -> None:
@@ -285,13 +305,58 @@ def test_long_axis_detection() -> None:
 
 
 def test_landing_geometry() -> None:
-    geom = pad_landing_geometry(_pad(1.6, 0.4), _Grid())
+    pad = _pad(1.6, 0.4)
+    geom = pad_landing_geometry(pad, _row(pad, 0.65))
     assert geom.long_axis == AXIS_X
     assert geom.centre_gx == pytest.approx(10.0)
     assert geom.centre_gy == pytest.approx(10.0)
     # Copper spans x 0.2..1.8 -> cells 2..18; lane = one short side.
     assert (geom.tip_lo, geom.tip_hi) == (2, 18)
     assert geom.lane_half_cells == pytest.approx(4.0)
+
+
+def test_row_pitch_finds_the_neighbour_beside_the_pad() -> None:
+    pad = _pad(1.6, 0.4)
+    grid = _row(pad, 0.65)
+    assert pad_row_pitch(pad, AXIS_X, grid._component_pads["U1"]) == pytest.approx(0.65)
+    # A pad in line with this one (along its long axis) is not beside it.
+    inline = _pad(1.6, 0.4, x=1.0 + 2.0)
+    assert pad_row_pitch(pad, AXIS_X, [pad, inline]) is None
+    # A y-long pad looks across x.
+    ypad = _pad(0.3, 0.8)
+    ygrid = _row(ypad, 0.5)
+    assert pad_row_pitch(ypad, AXIS_Y, ygrid._component_pads["U1"]) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("pitch", [0.4, 0.5, 0.65])
+def test_fine_pitch_rows_are_charged(pitch) -> None:
+    pad = _pad(1.6, 0.25)
+    assert pad_landing_geometry(pad, _row(pad, pitch)).long_axis == AXIS_X
+
+
+@pytest.mark.parametrize("pitch", [0.8, 1.0, 1.27])
+def test_coarse_pitch_rows_are_not_charged(pitch) -> None:
+    """Board 06 (#6368 review): every long pad there is at 0.8 mm or more.
+
+    USB-C (1.0 mm per row), FFC, QFN and QFP fan-outs at 0.8 mm have a lane to
+    spare; charging their landings reordered the MIPI fan-out and stranded
+    MIPI_RST and USB3_RX1-.
+    """
+    assert pitch > LANDING_MAX_ROW_PITCH_MM
+    pad = _pad(0.7, 0.3)
+    assert pad_landing_geometry(pad, _row(pad, pitch)) == NO_LANDING
+    ypad = _pad(0.3, 0.6)
+    assert pad_landing_geometry(ypad, _row(ypad, pitch)) == NO_LANDING
+
+
+def test_lone_pads_and_other_components_are_not_charged() -> None:
+    pad = _pad(1.6, 0.4)
+    assert pad_landing_geometry(pad, _Grid(pad)) == NO_LANDING
+    # A neighbour at 0.65 mm that belongs to another component is not a row.
+    other = _pad(1.6, 0.4, y=1.65, ref="U2")
+    assert pad_landing_geometry(pad, _Grid(pad, other)) == NO_LANDING
+    # No registry at all (a bare grid): no cost.
+    assert pad_landing_geometry(pad, object()) == NO_LANDING
 
 
 # An x-long pad centred at (10, 10.3) in cells; copper cells 2..18 along x,
@@ -351,12 +416,37 @@ def test_native_pad_bounds_carry_the_landing_fields() -> None:
 
     rules = _rules(0.2)
     grid = RoutingGrid(width=12.0, height=12.0, rules=rules, layer_stack=LayerStack.two_layer())
-    pathfinder = CppPathfinder(CppGrid.from_routing_grid(grid), rules, diagonal_routing=True)
-    pad = Pad(x=3.0, y=ROW_Y, width=PAD_LONG, height=PAD_SHORT, net=1, net_name="SIG")
-    bounds = pathfinder._compute_pad_bounds(pad, 0.2)
-    expected = pad_landing_geometry(pad, grid)
+    cpp_grid = CppGrid.from_routing_grid(grid)
+    pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+
+    def _add(ref: str, x: float, pitch: float) -> Pad:
+        pads = [
+            Pad(
+                x=x,
+                y=ROW_Y + d,
+                width=PAD_LONG,
+                height=PAD_SHORT,
+                net=1 if d == 0.0 else 0,
+                net_name="SIG" if d == 0.0 else "",
+                ref=ref,
+                pin=str(i + 1),
+            )
+            for i, d in enumerate((-pitch, 0.0, pitch))
+        ]
+        for p in pads:
+            grid.add_pad(p)
+        return pads[1]
+
+    fine = _add("U1", 3.0, PITCH)
+    bounds = pathfinder._compute_pad_bounds(fine, 0.2)
+    expected = pad_landing_geometry(fine, cpp_grid)
+    assert expected == pad_landing_geometry(fine, grid)
     assert bounds.long_axis == AXIS_X
     assert bounds.centre_gy == pytest.approx(expected.centre_gy, abs=1e-4)
     assert bounds.centre_gx == pytest.approx(expected.centre_gx, abs=1e-4)
     assert bounds.lane_half_cells == pytest.approx(expected.lane_half_cells, abs=1e-4)
     assert (bounds.tip_lo, bounds.tip_hi) == (expected.tip_lo, expected.tip_hi)
+
+    # The same pad in a 0.8 mm row is out of scope: the native cost is off.
+    coarse = _add("U2", 9.0, 0.8)
+    assert pathfinder._compute_pad_bounds(coarse, 0.2).long_axis == AXIS_NONE

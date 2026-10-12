@@ -18,13 +18,35 @@ grid cell from the pad centreline.
 It is a soft cost only: every cell that is a legal seed or goal today stays
 one, so a route that can only land off-centre still does.
 
+Scope: only pads in a fine-pitch row (a same-component neighbour beside the
+pad, across its short axis, at most :data:`LANDING_MAX_ROW_PITCH_MM` away;
+see :func:`pad_row_pitch`).  That is where an off-centre landing eats the
+neighbour's entry lane -- board 05 U2 (0.65 mm), board 04's LQFP (0.5 mm).
+At a coarser pitch there is a lane to spare and the charge only reshuffles
+routes: on board 06 every long pad sits at 0.8 mm or more (USB-C, FFC, QFN
+and QFP fan-outs), and charging them flipped the #5895 corridor-guard
+probe for the MIPI_D0 trunk, which stranded MIPI_RST and USB3_RX1- (20/21
+in CI, 19/21 locally against main's 21/21).
+
 ``Pathfinder::landing_cost`` in ``cpp/src/pathfinder.cpp`` is the native
-twin of :func:`landing_cost`; keep the two in step.
+twin of :func:`landing_cost`; keep the two in step.  The scope is decided
+here, on the Python side: an out-of-scope pad gets ``long_axis = -1``, which
+disables the native cost too.
+
+Known asymmetries (not covered by this module):
+
+* The Python A* multiplies the whole step, landing charge included, by the
+  net-class ``cost_mult``; the native loops apply no such multiplier, as for
+  every other step cost.
+* ``Router.route_bidirectional`` (Python, no caller outside
+  ``pathfinder.py``) does not apply the landing cost; only the one-way
+  Python loop and the two native loops do.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
@@ -36,6 +58,12 @@ if TYPE_CHECKING:
 # (it reordered board 04's fan-out and split its +3.3V pour).  The small
 # epsilon absorbs float noise.
 LANDING_DEADBAND_CELLS = 1.0 + 1e-3
+
+# The landing cost applies only to a pad in a fine-pitch row: a neighbour of
+# the same component beside it at this centre-to-centre distance or less.
+# 0.65 mm is the conventional fine-pitch bound (TSSOP / QFP / QFN at 0.65,
+# 0.5 and 0.4 mm); the epsilon absorbs float noise in pad positions.
+LANDING_MAX_ROW_PITCH_MM = 0.65 + 1e-3
 
 # A pad needs this aspect ratio before it has a long axis worth centring on.
 # Near-square pads (0603 passives, THT lands) keep their old behaviour.
@@ -85,10 +113,54 @@ def pad_long_axis(pad: Pad) -> int:
     return AXIS_NONE
 
 
+def pad_row_pitch(pad: Pad, axis: int, neighbours: Iterable[Pad]) -> float | None:
+    """Distance to the nearest same-row neighbour beside ``pad``, or ``None``.
+
+    A neighbour is beside the pad when its centre lies within the pad's
+    copper along the long axis and off it across the short axis -- the pin
+    whose entry lane an off-centre landing on ``pad`` narrows.  ``neighbours``
+    are the pads of ``pad``'s component (``pad`` itself may be among them).
+    """
+    half_long = (pad.width if axis == AXIS_X else pad.height) / 2
+    best: float | None = None
+    for other in neighbours:
+        if other is pad:
+            continue
+        if axis == AXIS_X:
+            along, side = abs(other.x - pad.x), abs(other.y - pad.y)
+        else:
+            along, side = abs(other.y - pad.y), abs(other.x - pad.x)
+        if along < half_long and side > 1e-2 and (best is None or side < best):
+            best = side
+    return best
+
+
+def _component_pads(pad: Pad, grid: Any) -> Iterable[Pad]:
+    """The pads registered on ``grid`` for ``pad``'s component.
+
+    ``grid`` is a ``RoutingGrid`` or a ``CppGrid`` (which carries its source
+    ``RoutingGrid`` as ``_py_grid``).  A grid without a pad registry yields
+    nothing, so its pads count as not fine-pitch.
+    """
+    source = getattr(grid, "_py_grid", None) or grid
+    registry = getattr(source, "_component_pads", None)
+    if not isinstance(registry, dict) or not pad.component_key:
+        return ()
+    pads: Iterable[Pad] = registry.get(pad.component_key, ())
+    return pads
+
+
 def pad_landing_geometry(pad: Pad, grid: Any) -> LandingGeometry:
-    """Landing-cost inputs for ``pad`` on ``grid`` (cell ``g`` centred at ``g``)."""
+    """Landing-cost inputs for ``pad`` on ``grid`` (cell ``g`` centred at ``g``).
+
+    Returns :data:`NO_LANDING` (no cost) for a pad without a long axis or
+    outside a fine-pitch row (:data:`LANDING_MAX_ROW_PITCH_MM`).
+    """
     axis = pad_long_axis(pad)
     if axis == AXIS_NONE:
+        return NO_LANDING
+    row_pitch = pad_row_pitch(pad, axis, _component_pads(pad, grid))
+    if row_pitch is None or row_pitch > LANDING_MAX_ROW_PITCH_MM:
         return NO_LANDING
     res = grid.resolution
     cgx = (pad.x - grid.origin_x) / res

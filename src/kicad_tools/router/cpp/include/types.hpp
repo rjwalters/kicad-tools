@@ -601,7 +601,8 @@ struct PadBounds {
     int approach_gy2 = 0;
     // Issue #6368: pad centre in fractional grid units, the board axis the
     // pad is long along (0 = x, 1 = y, -1 = none: square, rotated off a
-    // cardinal angle, virtual), the half-width in cells of the lane a run
+    // cardinal angle, virtual, or not in a fine-pitch row -- the scope is
+    // decided by ``pad_landing.pad_landing_geometry``), the half-width in cells of the lane a run
     // off the pad tip occupies (one pad short side) and the cell range along
     // the long axis whose centres lie on the pad copper (its tip lines are
     // the range ends).  ``long_axis = -1`` (the default) disables the centreline
