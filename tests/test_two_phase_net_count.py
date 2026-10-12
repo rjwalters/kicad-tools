@@ -35,7 +35,7 @@ def _make_pad(net: int, x: float, y: float, ref: str = "U1", pin: str = "1") -> 
 
 
 def _make_segment(net: int, x1: float, y1: float, x2: float, y2: float) -> Segment:
-    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=0, net=net)
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=net)
 
 
 def _make_route(net: int, segments: list[Segment]) -> Route:

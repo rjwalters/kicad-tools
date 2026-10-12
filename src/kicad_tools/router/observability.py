@@ -82,16 +82,18 @@ def validate_net_connectivity(
 ) -> dict[int, dict]:
     """Check whether routed segments actually connect all pads in each net.
 
-    For every net that has routes **and** pad information, this builds a
-    union-find over segment endpoints, then checks how many pads belong to the
-    same connected component. Nets with physical land IDs instead require
-    layer-aware copper contact, including pad overlap without routed segments.
+    Every net requires layer-aware copper contact (Issue #6371): segments
+    (by width), vias (by size and layer span) and pads (by outline, PTH pads
+    on every layer) join only where they intersect on a shared layer.  The
+    count is the number of pads in the largest such component.  Pad overlap
+    alone (no routed segments) connects physical-land nets.
 
     Args:
         routes: All routed ``Route`` objects.
         net_pads: Mapping of net ID to the list of ``Pad`` objects that belong
             to that net.  Only nets present in this dict are validated.
-        tolerance: Coordinate tolerance for matching endpoints (mm).
+        tolerance: Retained for API compatibility; unused since the
+            endpoint-snapping heuristic was replaced by contact (Issue #6371).
 
     Returns:
         Dict mapping net ID -> connectivity info dict with keys:
@@ -106,6 +108,8 @@ def validate_net_connectivity(
           connected.  Additive field (issue #4316); existing callers that only
           read the counts are unaffected.
     """
+    from .terminal_connectivity import physical_pad_components
+
     # Group routes by net
     routes_by_net: dict[int, list[Route]] = {}
     for r in routes:
@@ -125,30 +129,10 @@ def validate_net_connectivity(
             continue
 
         net_routes = routes_by_net.get(net_id, [])
-        if any(pad.terminal_id for pad in pads):
-            # Duplicate authored numbers represent independent physical lands.
-            # XY-only endpoint proximity can hide a missing opposite-layer or
-            # nearby land, so require real layer-aware copper contact here.
-            from .terminal_connectivity import physical_pad_components
-
-            components = physical_pad_components(pads, net_routes)
-            counts: dict[int, int] = {}
-            for component in components:
-                counts[component] = counts.get(component, 0) + 1
-            largest = max(counts, key=counts.__getitem__)
-            result[net_id] = {
-                "total_pads": len(pads),
-                "connected_pads": counts[largest],
-                "connected": counts[largest] == len(pads),
-                "stranded_pads": [
-                    _pad_identity(pad)
-                    for pad, component in zip(pads, components, strict=True)
-                    if component != largest
-                ],
-            }
-            continue
-        if not net_routes:
-            # No routes at all for this net — every pad is stranded
+        if not net_routes and not any(pad.terminal_id for pad in pads):
+            # No routes at all for this net — every pad is stranded.
+            # (Physical-land nets still go through the contact model below:
+            # overlapping duplicate-number lands connect without routing.)
             result[net_id] = {
                 "total_pads": len(pads),
                 "connected_pads": 0,
@@ -157,76 +141,27 @@ def validate_net_connectivity(
             }
             continue
 
-        uf = _UnionFind()
-
-        # Union segment endpoints
-        for route in net_routes:
-            for seg in route.segments:
-                p1 = _pt(seg.x1, seg.y1, tolerance)
-                p2 = _pt(seg.x2, seg.y2, tolerance)
-                uf.union(p1, p2)
-            for via in route.vias:
-                via_pt = _pt(via.x, via.y, tolerance)
-                # A via connects to any segment endpoint at the same position
-                # (already handled because the segment endpoints are unioned
-                # with each other; the via shares the same coordinate as an
-                # endpoint, so find() will merge them).
-                uf._ensure(via_pt)
-                # Explicitly union via point with nearby segment endpoints
-                for seg in route.segments:
-                    for sp in [_pt(seg.x1, seg.y1, tolerance), _pt(seg.x2, seg.y2, tolerance)]:
-                        if sp == via_pt:
-                            uf.union(via_pt, sp)
-
-        # Map each pad to its nearest segment endpoint
-        pad_points: list[tuple[float, float]] = []
-        for pad in pads:
-            pad_pt = _pt(pad.x, pad.y, tolerance)
-            # Check if this pad position is already in the union-find
-            # (i.e. a segment starts/ends at this pad).  If not, find
-            # the closest segment endpoint and union with it.
-            best_dist = float("inf")
-            best_pt = pad_pt
-            for route in net_routes:
-                for seg in route.segments:
-                    for sp in [_pt(seg.x1, seg.y1, tolerance), _pt(seg.x2, seg.y2, tolerance)]:
-                        dx = sp[0] - pad_pt[0]
-                        dy = sp[1] - pad_pt[1]
-                        d = dx * dx + dy * dy
-                        if d < best_dist:
-                            best_dist = d
-                            best_pt = sp
-            # Only link pad to segment if within a reasonable proximity
-            # (2mm -- escape stubs are typically short).
-            if best_dist <= 4.0:  # 2mm squared
-                uf.union(pad_pt, best_pt)
-            else:
-                uf._ensure(pad_pt)
-            pad_points.append(pad_pt)
-
-        # Count pads in the largest connected component
-        component_pads: dict[tuple[float, float], int] = {}
-        for pp in pad_points:
-            root = uf.find(pp)
-            component_pads[root] = component_pads.get(root, 0) + 1
-
-        max_component = max(component_pads.values()) if component_pads else 0
-        total = len(pads)
-
-        # Identify which pads are NOT in the largest connected component so
-        # callers can report exactly which pads still need connecting.
-        max_root = max(component_pads, key=lambda r: component_pads[r]) if component_pads else None
-        stranded_pads = [
-            _pad_identity(pad)
-            for pad, pp in zip(pads, pad_points, strict=False)
-            if uf.find(pp) != max_root
-        ]
-
+        # Issue #6371: require real layer-aware copper contact for EVERY net
+        # (previously only nets with duplicate authored pad numbers).  The
+        # old fallback linked each pad to its nearest same-net segment
+        # endpoint within 2 mm on any layer, so a stranded pad 1.6 mm from a
+        # routed sibling (board 03 J1.B7 next to J1.A7) counted as connected
+        # and ``nets_routed`` reported a net complete that ``kct check`` and
+        # kicad-cli both flag as open.
+        components = physical_pad_components(pads, net_routes)
+        counts: dict[int, int] = {}
+        for component in components:
+            counts[component] = counts.get(component, 0) + 1
+        largest = max(counts, key=counts.__getitem__)
         result[net_id] = {
-            "total_pads": total,
-            "connected_pads": max_component,
-            "connected": max_component == total,
-            "stranded_pads": stranded_pads,
+            "total_pads": len(pads),
+            "connected_pads": counts[largest],
+            "connected": counts[largest] == len(pads),
+            "stranded_pads": [
+                _pad_identity(pad)
+                for pad, component in zip(pads, components, strict=True)
+                if component != largest
+            ],
         }
 
     return result

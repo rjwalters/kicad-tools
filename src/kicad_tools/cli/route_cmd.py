@@ -21218,6 +21218,11 @@ def _run_main_impl(args, parser, argv) -> int:
     # Output connectivity verification (Issue #2264)
     # Re-parse written S-expressions and verify pad-to-pad connectivity
     output_has_disconnected = False
+    # Issue #6371: nets the router's own statistics counted as connected but
+    # the written file leaves open.  Both checks now share one layer-aware
+    # contact model, so a disagreement means copper changed between the
+    # count and the write -- the false "24/24 connected" this guards against.
+    output_verification_regressed: dict[int, dict] = {}
     if not args.dry_run and router.pads and router.nets and output_content:
         from kicad_tools.router.io import verify_output_connectivity
 
@@ -21247,6 +21252,33 @@ def _run_main_impl(args, parser, argv) -> int:
 
         if disconnected_nets:
             output_has_disconnected = True
+            _stat_conn = stats.get("connectivity") or {}
+            _nets_with_copper = {r.net for r in router.routes}
+            for nid, info in disconnected_nets.items():
+                counted = (
+                    _stat_conn[nid]["connected"]
+                    if nid in _stat_conn
+                    else (not _stat_conn and nid in _nets_with_copper)
+                )
+                if counted:
+                    output_verification_regressed[nid] = info
+            if output_verification_regressed:
+                # Reconcile the summary with the verified result so neither
+                # "Nets connected" nor the SUCCESS banner can repeat the
+                # router's pre-write count.
+                stats["nets_routed"] = max(
+                    0, stats["nets_routed"] - len(output_verification_regressed)
+                )
+                if "nets_partial" in stats:
+                    stats["nets_partial"] += len(output_verification_regressed)
+                if "nets_fully_connected" in stats:
+                    stats["nets_fully_connected"] = max(
+                        0, stats["nets_fully_connected"] - len(output_verification_regressed)
+                    )
+                    stats["has_disconnected_islands"] = True
+                for nid in output_verification_regressed:
+                    if nid in _stat_conn:
+                        _stat_conn[nid]["connected"] = False
             if not quiet:
                 print("\n--- Output Connectivity Verification ---")
                 print(
@@ -21262,6 +21294,15 @@ def _run_main_impl(args, parser, argv) -> int:
                         f"{info['connected_pads']}/{info['total_pads']} pads connected"
                         f" -- disconnected: {disc_str}"
                     )
+                if output_verification_regressed:
+                    names = ", ".join(
+                        sorted(i["net_name"] for i in output_verification_regressed.values())
+                    )
+                    print(
+                        f"  ERROR: {len(output_verification_regressed)} net(s) counted as "
+                        f"connected before the write are open in the written output: {names}"
+                    )
+                    print(f"  Nets connected (verified): {stats['nets_routed']}/{nets_to_route}")
         else:
             if not quiet:
                 print("\n--- Output Connectivity Verification ---")
@@ -21472,6 +21513,7 @@ def _run_main_impl(args, parser, argv) -> int:
             and not getattr(args, "_placement_fill_error", None)
             and not getattr(args, "_placement_repair_error", None)
             and not _placement_blocked(args)
+            and not output_verification_regressed
             and drc_passed
             and (all_nets_routed or meets_threshold)
         )
@@ -21516,6 +21558,24 @@ def _run_main_impl(args, parser, argv) -> int:
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif output_verification_regressed:
+            # Issue #6371: the written file leaves open a net the router
+            # counted as connected.  Never SUCCESS; report the verified count.
+            print(
+                f"ROUTING FAILED: {len(output_verification_regressed)} net(s) open in the "
+                "written output (post-save connectivity verification)"
+            )
+            print("=" * 60)
+            print()
+            print("Net Statistics:")
+            print(f"  Multi-pad nets:  {nets_to_route}")
+            print(f"  Nets connected:  {stats['nets_routed']} (verified in written output)")
+            for info in sorted(output_verification_regressed.values(), key=lambda i: i["net_name"]):
+                print(
+                    f"  {info['net_name']}: disconnected {', '.join(info['disconnected_pads'][:5])}"
+                )
+            print()
+            print(f"  Run 'kct check {output_path}' for the stranded-pad report")
         elif _unverified and drc_passed and (all_nets_routed or meets_threshold):
             # Issue #6273: verification was skipped for --timeout, so neither
             # "SUCCESS" nor "DRC passed" may be printed for this board.
@@ -21721,10 +21781,15 @@ def _run_main_impl(args, parser, argv) -> int:
     #     below threshold (Issue #1666, extended by #4588); also the
     #     below-threshold form of the #4979 layer-intent failure above.
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
-    # 6 = Connectivity regression detected (--strict mode only): either
-    #     the optimize / DRC nudge phases reduced the number of fully-
-    #     connected nets (issue #2596) or post-save output verification
-    #     reported disconnected pads (issue #2264).
+    # 6 = Connectivity regression detected.  Under --strict: either the
+    #     optimize / DRC nudge phases reduced the number of fully-connected
+    #     nets (issue #2596) or post-save output verification reported
+    #     disconnected pads on any net (issue #2264).  Without --strict
+    #     (issue #6371): post-save verification found a net OPEN in the
+    #     written file that the router's own count had called connected --
+    #     a false completion, never covered by --min-completion.  Nets the
+    #     router already reported as partial/unrouted keep the threshold
+    #     codes below.
     # 7 = Auto-fix was requested but skipped because the total --timeout
     #     budget was exhausted by routing (issue #3238).  Distinct from
     #     exit 3 ("routing succeeded but DRC is dirty after auto-fix
@@ -21767,6 +21832,10 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # --strict: output connectivity verification failure is fatal
     if getattr(args, "strict", False) and output_has_disconnected:
+        return 6
+    # Issue #6371: a verified-open net the router counted as connected is a
+    # false completion; fail it even without --strict.
+    if output_verification_regressed:
         return 6
 
     # Issue #3238: distinct exit code when auto-fix was requested but
