@@ -26,7 +26,10 @@ from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
 from kicad_tools.router.primitives import Pad, Route, Segment
 
 
-def _pad(x: float, y: float, ref: str, net: int, net_name: str) -> Pad:
+def _pad(x: float, y: float, ref: str, net: int, net_name: str, pin: str = "1") -> Pad:
+    # Issue #6371: ``pin`` must match the ``ar.pads`` key.  Two pads sharing
+    # ref+pin are one (jumpered) terminal to the layer-aware contact model
+    # now used for every net, so a cut between them could never register.
     return Pad(
         x=x,
         y=y,
@@ -36,7 +39,7 @@ def _pad(x: float, y: float, ref: str, net: int, net_name: str) -> Pad:
         net_name=net_name,
         layer=Layer.F_CU,
         ref=ref,
-        pin="1",
+        pin=pin,
     )
 
 
@@ -80,8 +83,8 @@ def _make_4_net_routed_autorouter() -> Autorouter:
     for nid, name, x1, x2, y in layout:
         pad_a_key = (f"R{nid}", "1")
         pad_b_key = (f"R{nid}", "2")
-        ar.pads[pad_a_key] = _pad(x1, y, f"R{nid}", nid, name)
-        ar.pads[pad_b_key] = _pad(x2, y, f"R{nid}", nid, name)
+        ar.pads[pad_a_key] = _pad(x1, y, f"R{nid}", nid, name, pin="1")
+        ar.pads[pad_b_key] = _pad(x2, y, f"R{nid}", nid, name, pin="2")
         ar.nets[nid] = [pad_a_key, pad_b_key]
 
     ar.routes = [

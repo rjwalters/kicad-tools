@@ -497,25 +497,38 @@ def test_subcell_break_strands_a_net_and_closing_it_restores_connectivity():
     from kicad_tools.router.observability import validate_net_connectivity
     from kicad_tools.router.primitives import Pad
 
-    dpr, pf = _chain_router_and_pathfinder()
-    route = _chain_route([(2.0, 2.0), (4.0, 2.0)])
-    route.segments.append(
-        Segment(
-            x1=4.0,
-            y1=2.024,
-            x2=6.0,
-            y2=2.024,
-            width=0.1,
-            layer=Layer.F_CU,
-            net=7,
-            net_name="MIPI_CLK-",
-        )
-    )
     pads = [
         Pad(x=2.0, y=2.0, width=0.3, height=0.3, layer=Layer.F_CU, net=7, net_name="MIPI_CLK-"),
         Pad(x=6.0, y=2.024, width=0.3, height=0.3, layer=Layer.F_CU, net=7, net_name="MIPI_CLK-"),
     ]
 
+    def _broken_chain(width: float) -> Route:
+        route = _chain_route([(2.0, 2.0), (4.0, 2.0)])
+        for seg in route.segments:
+            seg.width = width
+        route.segments.append(
+            Segment(
+                x1=4.0,
+                y1=2.024,
+                x2=6.0,
+                y2=2.024,
+                width=width,
+                layer=Layer.F_CU,
+                net=7,
+                net_name="MIPI_CLK-",
+            )
+        )
+        return route
+
+    # Issue #6371: connectivity is judged by copper contact, as KiCad does.
+    # At the real 0.1 mm diff-pair width a 0.024 mm sub-cell break is
+    # overlapping copper, so it no longer strands the net.
+    assert validate_net_connectivity([_broken_chain(0.1)], {7: pads})[7]["connected"] is True
+
+    # A conductor narrower than the break still opens a real copper gap,
+    # which is the symptom the #3540 rollback reacted to.
+    dpr, pf = _chain_router_and_pathfinder()
+    route = _broken_chain(0.02)
     broken = validate_net_connectivity([route], {7: pads})[7]
     assert broken["connected"] is False
     assert broken["connected_pads"] == 1
