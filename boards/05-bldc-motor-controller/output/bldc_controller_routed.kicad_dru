@@ -42,4 +42,91 @@
 (rule "Silkscreen Height - jlcpcb"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_height (min 1.0mm)))
+
+(rule "Reviewed clearance - Audio"
+  (condition "(A.NetClass == 'Audio' || B.NetClass == 'Audio') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Debug"
+  (condition "(A.NetClass == 'Debug' || B.NetClass == 'Debug') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Differential"
+  (condition "(A.NetClass == 'Differential' || B.NetClass == 'Differential') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Digital"
+  (condition "(A.NetClass == 'Digital' || B.NetClass == 'Digital') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Clock"
+  (condition "(A.NetClass == 'Clock' || B.NetClass == 'Clock') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Reviewed clearance - HighCurrentSignal"
+  (condition "(A.NetClass == 'HighCurrentSignal' || B.NetClass == 'HighCurrentSignal') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Reviewed clearance - Power"
+  (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.2mm)))
 # END kct fab floors
+
+# BEGIN kct keepout rules (Issue #6039) -- managed, do not edit
+# Generated from the board's keepout rule areas, board-level (Issue #6039)
+# and footprint-embedded (Issue #6087).
+# kicad-cli 10.0.1 does not enforce rule areas on its own; these
+# explicit intersectsArea rules make `kicad-cli pcb drc` report them.
+(rule "kct keepout Remove isolated pour fragment 2 [620ac875-01ab-47a9-90d0-696b6efc2848]"
+  (layer "F.Cu")
+  (condition "A.intersectsArea('620ac875-01ab-47a9-90d0-696b6efc2848')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 3 [6c093016-a51e-43cd-a49d-c47de72e7bb9]"
+  (layer "F.Cu")
+  (condition "A.intersectsArea('6c093016-a51e-43cd-a49d-c47de72e7bb9')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 0 [6d9604ef-eeeb-46e8-a5b0-bec54b65ec35]"
+  (layer "F.Cu")
+  (condition "A.intersectsArea('6d9604ef-eeeb-46e8-a5b0-bec54b65ec35')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 1 [d76b587a-7142-4050-a0c8-aa0023a1b7fb]"
+  (layer "F.Cu")
+  (condition "A.intersectsArea('d76b587a-7142-4050-a0c8-aa0023a1b7fb')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 6 [754406e3-30b1-4001-a820-b457109de037]"
+  (layer "B.Cu")
+  (condition "A.intersectsArea('754406e3-30b1-4001-a820-b457109de037')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 7 [9c9f0883-d966-47f5-a0a0-b3ef91142660]"
+  (layer "B.Cu")
+  (condition "A.intersectsArea('9c9f0883-d966-47f5-a0a0-b3ef91142660')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 5 [c7c38b22-750f-42a7-9081-eb4d159d66d3]"
+  (layer "B.Cu")
+  (condition "A.intersectsArea('c7c38b22-750f-42a7-9081-eb4d159d66d3')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 4 [ee9a7933-4d10-4580-bcbe-87105fb2cb12]"
+  (layer "B.Cu")
+  (condition "A.intersectsArea('ee9a7933-4d10-4580-bcbe-87105fb2cb12')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 9 [0caa4ac5-9d1f-4684-8935-c429335d3939]"
+  (layer "In1.Cu")
+  (condition "A.intersectsArea('0caa4ac5-9d1f-4684-8935-c429335d3939')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 10 [19563d1b-03c9-4f60-972a-9ef6cbfbe2bb]"
+  (layer "In1.Cu")
+  (condition "A.intersectsArea('19563d1b-03c9-4f60-972a-9ef6cbfbe2bb')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 12 [1b890a28-2d0a-453d-980c-d25c02540cf3]"
+  (layer "In1.Cu")
+  (condition "A.intersectsArea('1b890a28-2d0a-453d-980c-d25c02540cf3')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 8 [cb8e3c02-0740-45e2-8423-c7ed9af5c9f8]"
+  (layer "In1.Cu")
+  (condition "A.intersectsArea('cb8e3c02-0740-45e2-8423-c7ed9af5c9f8')")
+  (constraint disallow zone))
+(rule "kct keepout Remove isolated pour fragment 11 [ef1761f0-c19f-407f-9560-70b1af026326]"
+  (layer "In1.Cu")
+  (condition "A.intersectsArea('ef1761f0-c19f-407f-9560-70b1af026326')")
+  (constraint disallow zone))
+# END kct keepout rules

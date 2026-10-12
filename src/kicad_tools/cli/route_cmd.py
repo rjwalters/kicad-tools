@@ -3958,6 +3958,7 @@ def _write_drc_constraint_sidecars(
     copper_oz: float = 1.0,
     quiet: bool = False,
     source_pcb_path: Path | None = None,
+    net_class_map: dict | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -3998,6 +3999,13 @@ def _write_drc_constraint_sidecars(
         quiet: If True, suppress the confirmation line.
         source_pcb_path: Original PCB for renamed outputs. Source propagation
             failures are blocking and printed even in quiet mode.
+        net_class_map: The router's effective ``{net: NetClassRouting}``
+            map -- the same map :func:`_write_net_class_map_sidecar`
+            serializes (Issue #6390).  Its classes stricter than ``Default``
+            are declared in the ``.kicad_pro`` with exact-name assignments
+            and matching ``.kicad_dru`` rules, so ``kicad-cli`` and
+            ``kct check`` enforce the clearances the router routed to.
+            ``None`` keeps whatever an earlier route declared.
     """
     try:
         from kicad_tools.manufacturers import (
@@ -4039,6 +4047,7 @@ def _write_drc_constraint_sidecars(
             layers=layers,
             copper_oz=copper_oz,
             source_pcb_path=source_pcb_path,
+            router_net_classes=net_class_map,
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -4240,6 +4249,8 @@ def run_post_route_drc(
     # traces).  Writing here -- the shared post-route DRC entry for every
     # route flow -- makes the verdict deterministic and independent of any
     # sidecars a prior run may have left behind.
+    _effective_class_map = dict(net_class_map or {})
+    _effective_class_map.update(loaded_net_class_map or {})
     _write_drc_constraint_sidecars(
         output_path,
         manufacturer,
@@ -4247,6 +4258,7 @@ def run_post_route_drc(
         copper_oz=copper_oz,
         quiet=quiet,
         source_pcb_path=source_pcb_path,
+        net_class_map=_effective_class_map or None,
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -5536,6 +5548,7 @@ def _fill_zones_after_route(
                 copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
                 quiet=quiet,
                 source_pcb_path=Path(args.pcb),
+                net_class_map=_pour_closer_net_class_map(router, args),
             )
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
@@ -5609,6 +5622,7 @@ def _fill_zones_after_route(
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
             quiet=True,
             source_pcb_path=Path(args.pcb),
+            net_class_map=_pour_closer_net_class_map(router, args),
         )
 
     _fill_started = time.monotonic()

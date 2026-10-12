@@ -46,4 +46,28 @@
 (rule "Reviewed clearance - Default"
   (condition "A.NetClass == 'Default' || B.NetClass == 'Default'")
   (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - AUX"
+  (condition "(A.NetClass == 'AUX' || B.NetClass == 'AUX') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.175mm)))
+
+(rule "Reviewed clearance - SDRAM_ADDRESS"
+  (condition "(A.NetClass == 'SDRAM_ADDRESS' || B.NetClass == 'SDRAM_ADDRESS') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.175mm)))
+
+(rule "Reviewed clearance - SDRAM_BYTE0"
+  (condition "(A.NetClass == 'SDRAM_BYTE0' || B.NetClass == 'SDRAM_BYTE0') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.175mm)))
+
+(rule "Reviewed clearance - SDRAM_BYTE1"
+  (condition "(A.NetClass == 'SDRAM_BYTE1' || B.NetClass == 'SDRAM_BYTE1') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.175mm)))
+
+(rule "Reviewed clearance - SDRAM_COMMAND"
+  (condition "(A.NetClass == 'SDRAM_COMMAND' || B.NetClass == 'SDRAM_COMMAND') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.175mm)))
+
+(rule "Reviewed clearance - SWD_CLOCK"
+  (condition "(A.NetClass == 'SWD_CLOCK' || B.NetClass == 'SWD_CLOCK') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (constraint clearance (min 0.175mm)))
 # END kct fab floors
