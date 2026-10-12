@@ -264,6 +264,15 @@ run_helper "sha-100"
 assert_eq "0" "$HELPER_RC" "(1d) exactly 100 check-runs (a full page): rc 0"
 assert_eq "100" "$(rows_in "$HELPER_OUT")" "(1d) exactly 100 check-runs: all 100 rows returned"
 
+# (1e) #11097: each row keeps its check suite, and the rollup names its repo
+# and head, so `merge-pr check-runs-rollup` can drop a superseded twin run.
+reset_pages
+jq -nc '{total_count: 1, check_runs: [{name: "ci", status: "completed", conclusion: "success",
+  html_url: "https://example.test/ci", check_suite: {id: 77}}]}' > "$PAGES_DIR/page-1-001.json"
+run_helper "sha-suite"
+assert_eq "77" "$(jq -r '.check_runs[0].check_suite_id' <<<"$HELPER_OUT")" "(1e) check_suite_id projected from check_suite.id"
+assert_eq "owner/repo sha-suite" "$(jq -r '"\(.repository) \(.head_sha)"' <<<"$HELPER_OUT")" "(1e) rollup names its repository and head_sha"
+
 # =============================================================================
 # Part 2: short reads fail CLOSED; complete reads do not
 # =============================================================================

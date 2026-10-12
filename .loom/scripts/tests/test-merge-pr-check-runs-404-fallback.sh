@@ -165,7 +165,7 @@ _out=""
 _rc=0
 _out="$(forge_get_check_runs "owner/repo" "sha-success")" || _rc=$?
 assert_eq "0" "$_rc" "success: forge_get_check_runs returns 0"
-assert_eq '{"total_count":0,"check_runs":[]}' "$_out" "success: forge_get_check_runs emits the JSON payload on stdout"
+assert_eq '{"total_count":0,"check_runs":[],"repository":"owner/repo","head_sha":"sha-success"}' "$_out" "success: forge_get_check_runs emits the JSON payload on stdout (naming repo + head, #11097)"
 
 echo "404" > "$STUB_DIR/gh-check-runs-sha-404.mode"
 _rc=0

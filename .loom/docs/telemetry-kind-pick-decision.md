@@ -38,14 +38,14 @@ no journal is created, when no OTLP exporter runs.
 | `tick_id` | string | role ticks: the role-execution id (`role-<role>-<instant>`), the same id as the tick's trace `loom.sweep_id` when it launched; work finder: `work_finder-<instant>` |
 | `started_at` / `ended_at` | RFC 3339 | tick bounds. Present on **empty ticks too**, so cadence per host and gaps (stalls) are measurable |
 | `outcome` | string | role: the `role_tick.outcome` result (`success`, `skipped_queue_empty`, ...); work finder: `dispatched`, `halted`, `idle`, `none_dispatched` |
-| `candidates_total` | integer | candidates considered, before the cap |
-| `candidates[]` | array | in the ranker's order, **capped at 50**: `rank` (1-based), `repo` (forge slug, or `repo_unresolved`; never a local path), `number`, `stage`, `sort_key` (`name`, `value`) |
-| `acted[]` | array | `repo`, `number`, `action`, capped at 50. Work finder: `dispatched`. Roles: one entry per distinct observed write, from the closed set below; may name an item outside `candidates` |
+| `candidates_total` | integer | candidates considered (the full count; `candidates[]` lists every one, across chunks) |
+| `candidates[]` | array | in the ranker's order, **every candidate, uncapped** (#11567): `rank` (1-based), `repo` (forge slug, or `repo_unresolved`; never a local path), `number`, `stage`, `sort_key` (`name`, `value`) |
+| `acted[]` | array | `repo`, `number`, `action`, uncapped. Work finder: `dispatched`. Roles: one entry per distinct observed write, from the closed set below; may name an item outside `candidates` |
 | `skipped[]` | array | one `{repo, number, reason}` per skipped candidate listed in `candidates`, plus an optional `detail`: today only a work-finder `deferred_file_overlap` row sets it, to the shared `## Affected Files` paths (`file overlap: a, b`, one line, truncated at 160 chars, #9781). Additive (absent otherwise and on older daemons), so `schema_version` stays `2`; no other disposition's detail (e.g. dispatch-error text) is carried |
 | `candidate_source` | string | `ready_queue` (work finder), `serving_queue` (the role's `pr-queue` result), `listing` (the issue/PR listings the role read, e.g. Curator), `gate_listing` (fallback: the daemon's gate listing), `none` (nothing observed) |
 | `decisions_observed` | boolean | `true` when the agent's writes were observed, so every candidate without an action is a real skip; `false` when only a ranking was seen, and an unexplained candidate is then in neither `acted` nor `skipped` |
-| `workspace_draw` | object, optional | work finder only (#11103), absent when nothing was drawn: `seed` (decimal string), `draws_total`, and `draws[]` (first 50, in order), each `{pool, candidates[{repo, weight}], total_weight, roll, picked, number}`; `pool` is `"red-main-fix"`, `"very-important"` or `"all"` (#11547). Replaying the draws from `seed` reproduces the dispatch order; see [`priority-model.md`](priority-model.md) |
-| `very_important_demoted` | array, optional | work finder only (#11509), absent when empty: one `{repo, number, holder}` per `loom:very-important` issue the per-workspace cap ranked as important this tick (`holder` keeps the slot; first 50). Additive, so `schema_version` is unchanged; see [`priority-model.md`](priority-model.md) |
+| `workspace_draw` | object, optional | work finder only (#11103), absent when nothing was drawn: `seed` (decimal string), `draws_total`, and `draws[]` (every draw, in order; `seed` and `draws_total` repeat on each chunk), each `{pool, candidates[{repo, weight}], total_weight, roll, picked, number}`; `pool` is `"red-main-fix"`, `"very-important"` or `"all"` (#11547). Replaying the draws from `seed` reproduces the dispatch order; see [`priority-model.md`](priority-model.md) |
+| `very_important_demoted` | array, optional | work finder only (#11509), absent when empty: one `{repo, number, holder}` per `loom:very-important` issue the per-workspace cap ranked as important this tick (`holder` keeps the slot; every one, uncapped). Additive, so `schema_version` is unchanged; see [`priority-model.md`](priority-model.md) |
 
 ## What "ranking" means per source
 
@@ -57,16 +57,18 @@ no journal is created, when no OTLP exporter runs.
   with a reason mapped from its `QueueDisposition`.
 - **Judge, Doctor, Champion** (`candidate_source = serving_queue`). The rows of
   the **latest** `loom-daemon pr-queue --role <role>` call the agent made during
-  the tick, in `pr_planning::ordered_queue` order (operator priority level,
+  the tick, in `pr_planning::ordered_queue` order (priority level,
   interactive preference, fallback admission and each role's tie-breaks
   applied), so a fallback-only Judge queue is recorded even though the gate
   listing was empty. Earlier snapshots are not merged in: a refresh that
-  adds a starred item or drops one is ranked as the queue the role last served,
+  adds a priority item or drops one is ranked as the queue the role last served,
   and an item acted on from an earlier snapshot stays in `acted` (actions are
   recorded independently of the ranking). `stage` is the row's workflow
   label (`loom:review-requested`, `loom:changes-requested`, `loom:pr`) or
   `fallback`; `sort_key` is `pr_queue`, valued
-  `level=<operatorPriorityLevel>,reason=<priorityReason>,origin=<origin>,mode=<mode>`.
+  `level=<priorityLevel>,reason=<priorityReason>,origin=<origin>,mode=<mode>`
+  (`priorityLevel` 0 default, 1 `loom:important`, 2 `loom:very-important`;
+  named `operatorPriorityLevel`, over the retired star levels, before #11510).
 - **Curator** and any role that reads its queue with `gh issue|pr list`
   (`candidate_source = listing`). The rows the agent `gh` front served, in the
   order the agent read its listings (Curator's priority queries run in priority
@@ -161,9 +163,15 @@ for `gate_listing`, only the forge listing order (select
 
 Run against `signoz_logs.distributed_logs_v2` (ClickHouse). Substitute the repo,
 number and instant. `rank = 0` means the item was **not** in that role's latest
-list at that instant. `candidates_total` says how many it had; an item beyond
-50 reads `0` even though it was queued, so compare with `candidates_total`
-before concluding it was absent.
+list at that instant. `candidates_total` says how many it had; the list is no longer
+truncated (#11567), so an item the role ranked is always listed. The query below
+reads a single log row, so it is only correct when that record is unsplit
+(`chunk_count = 1`): a chunked tick exports one row per chunk, all with the same
+timestamp, so `LIMIT 1 BY role, host` picks one chunk arbitrarily and
+`arrayFirstIndex` then returns the candidate's position *inside that chunk*, not
+its rank. For a chunked record, take every chunk of the newest `tick_id`, order
+them by `chunk_index`, concatenate their `candidates[]` lists, and read the
+candidate's own `rank` field instead of an array position.
 
 ```sql
 SELECT
@@ -189,7 +197,8 @@ the instant.) This query is **not yet run against a live SigNoz or the pinned
 ClickHouse** (no engine-level harness covers it).
 
 Service cadence and stalls per host: `max(tick_at) - lag(tick_at)` over the same
-filter grouped by `role, host`.
+filter grouped by `role, host`, restricted to `chunk_index = 0` so the chunks of
+one tick are not counted as multiple ticks.
 
 ## Record volume
 
@@ -207,11 +216,27 @@ Derived from the shipped default cadences, **not measured on a live fleet**:
 A role record is only written for a tick that was admitted and run; a root held
 back at admission writes none. With 1 root and the default roles, that is about
 1,440 + 288*3 + 144*3 + 96 + 24 = roughly 2.9 k rows/day per host; each extra
-root adds roughly 1.5 k. Row size is bounded by the 50-entry cap: an empty tick
-is under 400 bytes of JSON, a record with every list at its 50-entry cap under
-20 KB (`pick_decision_record_size_is_bounded` pins both bounds). Worst case at
-the cap on every tick is therefore under about 60 MB/day per host; typical
-ticks (a handful of candidates) are around 1 KB.
+root adds roughly 1.5 k. Lists are not capped (#11567): an empty tick is under 400 bytes of JSON, and a
+work-finder tick with ~575 candidates and ~350 draws is several hundred KB.
+At 1,440 work-finder ticks/day/host that is on the order of 0.5 GB/day/host
+in the worst case (typical ticks with a handful of candidates stay around
+1 KB). A record whose JSON exceeds `CHUNK_BYTES` (1,000,000) is split into
+chunks, so each chunk is bounded
+(`a_busy_tick_splits_into_bounded_chunks_and_reassembles_exactly` pins that);
+the compact `[repo_idx, number, reason_code]` encoding is the fallback
+if volume proves unacceptable.
+
+**Chunking.** Every record carries `chunk_index` (0-based) and `chunk_count`
+(`chunk_index` 0 and `chunk_count` 1 when unsplit; additive, `schema_version`
+stays `2`). Chunks of one
+tick share `tick_id` and repeat the header (`role`, `host`, timestamps,
+`outcome`, `candidates_total`, `candidate_source`, `decisions_observed`,
+`workspace_draw.seed` / `draws_total`); the list entries are packed in order, so
+concatenating the chunks' lists in `chunk_index` order reproduces the original.
+A candidate's `skipped` / `acted` entry may land in a different chunk than its
+`candidates` entry, so reassemble before reading per-candidate verdicts. Role
+ticks remain bounded upstream by the pick journal's 200-row cap
+(`MAX_ROWS_PER_ENTRY`), unchanged here.
 
 The pick journal adds no rows: it is a local file of a few KB per launched role
 tick (each line is capped at 200 rows and the file at 1 MiB), deleted when the

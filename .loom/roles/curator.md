@@ -82,6 +82,7 @@ not `cat`.
 | File | Load |
 |---|---|
 | [`curator-rate-budget.md`](curator-rate-budget.md) | Changing or measuring this budget only |
+| [`curator-estimate.md`](curator-estimate.md) | Before completing each curation |
 
 ## Argument Handling
 
@@ -1105,7 +1106,7 @@ There are **three, and only three**, cost-of-being-wrong strata (issue #4238 add
 | `routine` | The approach is clear once you've read the relevant code, and a mistake would surface in tests or review. Most bug fixes and small features. **Default stratum** — take this one when genuinely torn between it and `mechanical`. |
 | `complex` | Deciding the approach takes judgement, and a mistake could pass tests and review unnoticed — architecture, cross-cutting change, subtle logic. Money, security, and destructive migrations are common cases, not the whole list. |
 
-- **Format**: an HTML comment (invisible in rendered Markdown, trivially greppable). Put it in your enhancement section (e.g. near the Problem Statement). **Always emit the marker explicitly, including `routine`** — do not rely on omission. (The validator below blocks on an absent marker.)
+- Put exactly one HTML comment in the enhancement section, including `routine`; omission fails validation.
 - **What it does**: at Builder dispatch the sweep skill reads it as precedence **tier 2.5** (between tiers 2 and 3) and resolves the Builder's model from `sweep.tierModels[<runtime>][<tier>]` — `mechanical` routes cheaper, `complex` routes more capable. **Never name a model here; the tier is runtime-neutral.** See `sweep.md` → "Tier 2.5 — complexity marker".
 - **Hard bounds**: **never resolves to `fable`, never a label** — the frontier model is reserved for the objective Judge-rejection escalation ladder or an explicit operator param; a `roleConfig.model` pin or explicit dispatch param (tiers 1–2) still overrides the marker.
 - **Cheap when the tier map is unconfigured.** With no `sweep.tierModels` (or `sweep.optimization` unset/`balanced`), the marker is inert and dispatch falls through to the role default — adding markers is safe before a workspace opts into cost/speed routing (`model-selection.md` "Optimization profile switch").
@@ -1121,12 +1122,12 @@ There are **three, and only three**, cost-of-being-wrong strata (issue #4238 add
 
 Exit 2 means repo resolution or the body fetch failed (usually quota; retry later), not an absent marker. Don't edit the body.
 
-### Story points (paused)
+**Every curation:** follow `curator-estimate.md` before applying `loom:curated`.
+Estimate expected work independently of the error-cost routing tier above;
+estimates never change approval, consolidation, dependencies or readiness.
 
-Story-point estimation is disabled for now. Do not assign or refresh `points:*`
-labels or `<!-- loom:points=<N> -->` markers during curation, re-curation or
-rescoping. Leave existing estimates as historical data; missing or invalid
-points never block `loom:curated`. The complexity routing marker remains required.
+Story points remain paused: leave historical `points:*` labels and
+`loom:points` markers alone. They never block curation.
 
 **Related but distinct**: `<!-- loom:capability=<name> -->` (#6892, with `loom:operator-mechanical` only) is a separate convention, no Curator action — see `.loom/docs/label-state-machine.md` → "Capability-declaration convention" (#6885/#6893).
 

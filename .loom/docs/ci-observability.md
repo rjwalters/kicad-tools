@@ -496,6 +496,20 @@ gitignored (the managed block ignores all of `.loom/state/*`, #9592).
   unit again. A `watermark` line records a repo's newest observed
   `run.created_at`. An `emitted` line confirms that every unit up to a given
   sequence number has reached the journal.
+- **Bounded working set (#11159).** Each `unit`/`seen` line carries a
+  `committed_at` stamp (optional; an older daemon ignores it). Loading the
+  ledger streams it line by line and skips any key committed more than 45
+  days (`SEEN_RETENTION_DAYS`) before its repo's watermark — longer than
+  GitHub allows a run to be re-run (30 days) or to last (35 days). Keys with
+  no stamp, keys of a repo with no watermark, and unconfirmed units are always
+  kept; compaction stamps unstamped keys, so they age out later. `status`
+  counts the retained keys.
+  The boundary is enforced for the feed-driven single-run path too
+  (`poll/targeted.rs`): a hinted run whose forge `created_at` is older than
+  its repo's watermark minus 45 days is refused after the one run fetch (no
+  jobs, artifacts or logs), because its expired keys could no longer prove it
+  was already emitted. `created_at` is fixed across re-runs, so legitimate
+  recent re-runs are unaffected.
 - **Commit first, then emit.** For each run, the job units are committed
   first and the run unit last, all in a single fsynced append. Their
   envelopes are then appended (and fsynced) to the journal, and the batch is
@@ -620,6 +634,54 @@ never rotated.
 |---|---|---|
 | `journalRotateBytes` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_BYTES` | `268435456` (256 MiB) |
 | `journalRotateKeep` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_KEEP` | `2` (`0` deletes instead of keeping) |
+
+### Bounded backfill admission and queue pressure (#11115)
+
+A historical CI pass can journal tens of thousands of suite/test spans, far
+more than an exporter queue (`queueCapacity`, default 2000) holds. The export
+pass therefore offers journal lines through a bounded, non-evicting admission
+(`QueueSink::offer_backfill`) instead of the drop-oldest push ordinary
+producers use:
+
+- A queue admits backfill only while its depth is below the **backfill limit**,
+  75% of its capacity. The last quarter is headroom for ordinary lifecycle and
+  CI producers, whose push keeps its drop-oldest behavior. The limit check,
+  the enqueue and the durable write happen under one hold of the queue lock,
+  so a concurrent producer cannot fill the queue in between and a backfill
+  offer never evicts a queued record.
+- At the limit the pass stops at the first unadmitted line. That line and
+  everything after it stay behind the persisted cursor, so the next backfill
+  tick (the 5-minute collector cadence) retries. The pass never waits on
+  network delivery and holds nothing in memory beyond the one line it is
+  reading.
+- With several exporters, a record is pushed only when **every** exporter
+  queue has room, so the smallest or slowest queue paces the replay and no
+  exporter silently misses a record. The offer locks every exporter queue (in
+  config order) before checking any of them, so no queue can fill between the
+  check and the push. If a later queue's disk write fails, the earlier queues
+  keep the record and the cursor does not advance. The retry offers it again:
+  delivery is **at-least-once**, so duplicates are possible and downstream
+  consumers dedupe on the stable GitHub/trace identities.
+- Sampling (`>= 250 ms`, 512 tests per job) and the default capacity are
+  unchanged. Throughput is about one backfill limit per tick if the sender
+  drains between ticks; raise `observability.queueCapacity` to speed a large
+  replay, not to hide loss.
+
+**Pressure counters.** Each entry of `observability_exports` in
+`loom-daemon status --json` carries a `queue` object, per exporter:
+
+| Field | Meaning |
+|---|---|
+| `depth` / `capacity` / `backfill_limit` | Current occupancy and the two bounds. |
+| `dropped_total` | Durable cumulative loss across all ledger reasons, including queue eviction, reopen capacity shrink and exporter-reported losses. Receiver rejection may count signal items rather than envelopes; see `host.export.dropped_by_reason`. |
+| `backfill_deferred_total` | Backfill offers refused at the limit. Not loss: the record is retried, so a record may be counted on every pass. |
+
+`dropped_total` is persisted in the queue loss ledger and survives restart.
+`backfill_deferred_total` is cumulative for the daemon process and resets to
+0 on restart; it is not persisted. A rising `backfill_deferred_total` with
+`dropped_total` flat means the replay is being paced correctly. A rising
+`dropped_total` means recorded loss increased; inspect
+`host.export.dropped_by_reason` to distinguish overflow from other reasons.
 
 ### Attribute allowlist
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-create-pr-priority-labels.sh - create-pr.sh copies the closing issues'
-# priority labels (the operator star and its levels) onto the PR it opens
+# priority labels (loom:important / loom:very-important, #11103) onto the PR it opens
 # (#10518), on the GraphQL path and the REST rate-limit fallback alike.
 #
 # Two legs:
@@ -162,10 +162,10 @@ echo "Leg A: create-pr.sh <-> forge priority-labels wiring (#10518)"
 
 # A1: GraphQL path -- the verb's labels join --label on `gh pr create`.
 reset_fixtures
-printf 'loom:operator-priority\n' > "$STUB_DIR/stars.txt"
+printf 'loom:important\n' > "$STUB_DIR/stars.txt"
 run_create_pr --title t --body "Closes #77" --head feature/issue-77 --label loom:review-requested
 assert_eq "0" "$EXIT_CODE" "A1: exit 0"
-assert_contains "$(create_argv)" "--label loom:review-requested --label loom:operator-priority" "A1: star added after the caller's label"
+assert_contains "$(create_argv)" "--label loom:review-requested --label loom:important" "A1: star added after the caller's label"
 assert_contains "$(cat "$STUB_DIR/daemon-calls.log")" "--repo owner/repo" "A1: the verb is asked about the PR's own repo"
 assert_eq "Closes #77" "$(head -1 "$STUB_DIR/daemon-stdin.txt")" "A1: the body reaches the verb on stdin"
 assert_eq "1" "$(audit_calls)" "A1: one audit call once the PR exists"
@@ -173,33 +173,33 @@ assert_eq "https://github.com/owner/repo/pull/1111" "$STDOUT" "A1: stdout is onl
 
 # A2: REST fallback -- the star is in the one labels POST.
 reset_fixtures
-printf 'loom:operator-priority\nloom:high-priority-inherited\n' > "$STUB_DIR/stars.txt"
+printf 'loom:important\nloom:very-important\n' > "$STUB_DIR/stars.txt"
 echo "$RATE_LIMIT_ERR" > "$STUB_DIR/create-err.txt"
 run_create_pr --title t --body "Fixes #78" --head feature/issue-78 --label loom:review-requested
 assert_eq "0" "$EXIT_CODE" "A2: rate-limited create -> exit 0"
-assert_eq '["loom:review-requested","loom:operator-priority","loom:high-priority-inherited"]' "$(label_payload)" "A2: REST labels POST carries every copied label"
+assert_eq '["loom:review-requested","loom:important","loom:very-important"]' "$(label_payload)" "A2: REST labels POST carries every copied label"
 assert_eq "1" "$(audit_calls)" "A2: audit posted after the REST create"
 
 # A3: REST labels POST fails -> no audit for a star that never landed.
 reset_fixtures
-printf 'loom:operator-priority\n' > "$STUB_DIR/stars.txt"
+printf 'loom:important\n' > "$STUB_DIR/stars.txt"
 echo "$RATE_LIMIT_ERR" > "$STUB_DIR/create-err.txt"
 touch "$STUB_DIR/labels-fail"
 run_create_pr --title t --body "Closes #79" --head feature/issue-79 --label loom:review-requested
 assert_eq "0" "$EXIT_CODE" "A3: exit 0"
-assert_contains "$STDERR" "NOT applied: loom:review-requested loom:operator-priority" "A3: the unapplied star is named"
+assert_contains "$STDERR" "NOT applied: loom:review-requested loom:important" "A3: the unapplied star is named"
 assert_eq "0" "$(audit_calls)" "A3: no audit comment when the labels did not land"
 
 # A4: a caller that already passed the star gets no duplicate.
 reset_fixtures
-printf 'loom:operator-priority\n' > "$STUB_DIR/stars.txt"
-run_create_pr --title t --body "Closes #80" --head feature/issue-80 --label loom:review-requested --label loom:operator-priority
-assert_eq "1" "$(create_argv | grep -o -- '--label loom:operator-priority' | wc -l | tr -d ' ')" "A4: star passed once"
+printf 'loom:important\n' > "$STUB_DIR/stars.txt"
+run_create_pr --title t --body "Closes #80" --head feature/issue-80 --label loom:review-requested --label loom:important
+assert_eq "1" "$(create_argv | grep -o -- '--label loom:important' | wc -l | tr -d ' ')" "A4: star passed once"
 
 # A5: nothing to copy (unstarred / Part of) -> only the caller's labels, no audit.
 reset_fixtures
 run_create_pr --title t --body "Part of #81" --head feature/issue-81 --label loom:review-requested
-assert_not_contains "$(create_argv)" "operator-priority" "A5: no star"
+assert_not_contains "$(create_argv)" "loom:important" "A5: no priority label"
 assert_eq "0" "$(audit_calls)" "A5: no audit call"
 assert_not_contains "$STDERR" "WARNING" "A5: no warning"
 
@@ -239,46 +239,47 @@ if [[ -n "$REAL_BIN" ]] && "$REAL_BIN" forge priority-labels --help >/dev/null 2
   write_scope_register "$FIXTURE_REPO" owner/repo
 
   # B1: multi-ref union over Closes/Fixes/Loom-Issue; Part-of and the
-  #     unstarred issue add nothing; result is deduplicated, in level order.
+  #     default-level issue add nothing; result is deduplicated, in level
+  #     order. A retired operator-star label is not copied (#11510).
   reset_fixtures
-  echo '["loom:issue","loom:operator-priority"]' > "$STUB_DIR/issue-1.labels"
-  echo '["loom:operator-high-priority","loom:operator-priority"]' > "$STUB_DIR/issue-2.labels"
-  echo '["loom:building"]' > "$STUB_DIR/issue-3.labels"
-  echo '["loom:high-priority-inherited"]' > "$STUB_DIR/issue-4.labels"
-  echo '["loom:operator-priority"]' > "$STUB_DIR/issue-9.labels"
+  echo '["loom:issue","loom:important"]' > "$STUB_DIR/issue-1.labels"
+  echo '["loom:very-important","loom:important"]' > "$STUB_DIR/issue-2.labels"
+  echo '["loom:building","loom:operator-priority"]' > "$STUB_DIR/issue-3.labels"
+  echo '["loom:important"]' > "$STUB_DIR/issue-4.labels"
+  echo '["loom:very-important"]' > "$STUB_DIR/issue-9.labels"
   printf 'Closes #1\nFixes #2\nResolves #3\nPart of #9\n\nLoom-Issue: owner/repo#4\n' > "$STUB_DIR/b1.md"
   run_create_pr --title t --body-file "$STUB_DIR/b1.md" --head feature/issue-1 --label loom:review-requested
   assert_eq "0" "$EXIT_CODE" "B1: exit 0"
-  assert_contains "$(create_argv)" "--label loom:review-requested --label loom:operator-priority --label loom:operator-high-priority --label loom:high-priority-inherited" "B1: union of every closing ref's priority labels, in level order"
+  assert_contains "$(create_argv)" "--label loom:review-requested --label loom:important --label loom:very-important" "B1: union of every closing ref's priority labels, in level order"
+  assert_not_contains "$(create_argv)" "operator-priority" "B1: a retired star label is not copied"
   assert_eq "0" "$(grep -c 'issues/9$' "$STUB_DIR/gh-calls.log" || true)" "B1: the Part-of issue is never read"
   audits="$(grep 'issues/1111/comments' "$STUB_DIR/gh-calls.log" || true)"
-  assert_eq "3" "$(grep -c 'inherited_from=#' <<< "$audits" || true)" "B1: one audit comment per contributing issue (#1, #2, #4)"
-  assert_contains "$audits" "inherit-1-1111 action=star inherited_from=#1 -->" "B1: the audit uses #10012 section 2's inherited-star marker"
+  assert_eq "0" "$(grep -c 'inherited_from=#' <<< "$audits" || true)" "B1: no audit comment (--audit-pr is a no-op since #11104)"
   assert_not_contains "$STDERR" "WARNING" "B1: no warning"
 
   # B2: Part of only -> nothing copied, no warning.
   reset_fixtures
-  echo '["loom:operator-priority"]' > "$STUB_DIR/issue-9.labels"
+  echo '["loom:important"]' > "$STUB_DIR/issue-9.labels"
   run_create_pr --title t --body "Part of #9" --head feature/issue-9 --label loom:review-requested
-  assert_not_contains "$(create_argv)" "operator-priority" "B2: Part of #9 copies nothing"
+  assert_not_contains "$(create_argv)" "loom:important" "B2: Part of #9 copies nothing"
   assert_not_contains "$STDERR" "WARNING" "B2: no warning"
 
   # B3: REST fallback with the real verb.
   reset_fixtures
-  echo '["loom:operator-priority"]' > "$STUB_DIR/issue-5.labels"
+  echo '["loom:important"]' > "$STUB_DIR/issue-5.labels"
   echo "$RATE_LIMIT_ERR" > "$STUB_DIR/create-err.txt"
   run_create_pr --title t --body "Closes #5" --head feature/issue-5 --label loom:review-requested
-  assert_eq '["loom:review-requested","loom:operator-priority"]' "$(label_payload)" "B3: REST path carries the star"
+  assert_eq '["loom:review-requested","loom:important"]' "$(label_payload)" "B3: REST path carries the level"
 
   # B4: one lookup fails (no fixture -> HTTP 502) -> warning names it; the
   #     other issue's star is still copied and the PR opens.
   reset_fixtures
-  echo '["loom:operator-priority"]' > "$STUB_DIR/issue-6.labels"
+  echo '["loom:important"]' > "$STUB_DIR/issue-6.labels"
   run_create_pr --title t --body $'Closes #6\nCloses #7' --head feature/issue-6 --label loom:review-requested
   assert_eq "0" "$EXIT_CODE" "B4: exit 0"
   assert_contains "$STDERR" "could not read issue #7's labels" "B4: warning names the failed issue"
   assert_eq "1" "$(grep -c "issue #7's labels" <<< "$STDERR")" "B4: one warning line for it"
-  assert_contains "$(create_argv)" "--label loom:operator-priority" "B4: #6's star still copied"
+  assert_contains "$(create_argv)" "--label loom:important" "B4: #6's level still copied"
 else
   echo ""
   echo "Leg B skipped: no loom-daemon with \`forge priority-labels\` (set LOOM_TEST_REAL_DAEMON_BIN)"

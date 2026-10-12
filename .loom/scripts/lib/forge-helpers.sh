@@ -648,7 +648,7 @@ forge_get_check_runs() {
     out_file=$(mktemp); err_file=$(mktemp)
     gh api "repos/$nwo/commits/$commit/check-runs?per_page=100" --paginate \
       --header "Accept: application/vnd.github+json" \
-      --jq '{total_count: (.total_count // 0), check_runs: [(.check_runs // [])[] | {name: .name, status: .status, conclusion: .conclusion, html_url: .html_url}]}' \
+      --jq '{total_count: (.total_count // 0), check_runs: [(.check_runs // [])[] | {name: .name, status: .status, conclusion: .conclusion, html_url: .html_url, check_suite_id: .check_suite.id}]}' \
       >"$out_file" 2>"$err_file" || rc=$?
 
     if [[ $rc -ne 0 ]]; then
@@ -666,7 +666,7 @@ forge_get_check_runs() {
     # short-read check below). An empty stdout from a `gh` that exited 0 is not
     # an authoritative "this commit has no checks": treat it as a transient
     # failure, the same way a nonzero exit is treated.
-    local merged=""; [[ -s "$out_file" ]] && merged=$(jq -cs '{total_count: ([.[].total_count // 0] | max // 0), check_runs: [.[] | (.check_runs // [])[]]}' "$out_file" 2>/dev/null)
+    local merged=""; [[ -s "$out_file" ]] && merged=$(jq -cs --arg nwo "$nwo" --arg sha "$commit" '{total_count: ([.[].total_count // 0] | max // 0), check_runs: [.[] | (.check_runs // [])[]], repository: $nwo, head_sha: $sha}' "$out_file" 2>/dev/null)
     rm -f "$out_file" "$err_file"
     [[ -n "$merged" ]] || return 1
 

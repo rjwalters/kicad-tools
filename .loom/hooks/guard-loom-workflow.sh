@@ -1855,15 +1855,20 @@ fi
 # allowed roots, guards.cargoTargetDir / LOOM_GUARD_CARGO_TARGET_DIR and the
 # deny span all live in `loom-daemon cargo-target-dir guard`
 # (loom-daemon/src/cargo_target_guard.rs). Fork-free prefilter: only a command
-# that mentions cargo or CARGO_TARGET_DIR reaches it.
+# that mentions cargo or CARGO_TARGET_DIR reaches it. The same verb ASKs (exit
+# 0, ASK [cargo-shared-target]) when a worktree build with no explicit target
+# dir falls through to a shared build.target-dir (#10646).
 # =============================================================================
 
 # requires-daemon: cargo-target-dir optional   #11582 — `guard`; a daemon without the verb exits 2, which this block treats as allow (rule inert).
 if [[ "$GH_PR_MERGE_SCAN_TEXT" == *cargo* || "$GH_PR_MERGE_SCAN_TEXT" == *CARGO_TARGET_DIR* ]]; then
     CTD_RC=0
-    CTD_DENY=$("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" cargo-target-dir guard --cwd "${CWD:-.}" --for-command "$GH_PR_MERGE_SCAN_TEXT" 2>/dev/null) || CTD_RC=$?
-    if [[ "$CTD_RC" -eq 1 && "$CTD_DENY" == "BLOCKED [cargo-target-dir]"* ]]; then
-        deny "$CTD_DENY" "loom:cargo-target-dir"
+    CTD_OUT=$("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" cargo-target-dir guard --cwd "${CWD:-.}" --for-command "$GH_PR_MERGE_SCAN_TEXT" 2>/dev/null) || CTD_RC=$?
+    if [[ "$CTD_RC" -eq 1 && "$CTD_OUT" == "BLOCKED [cargo-target-dir]"* ]]; then
+        deny "$CTD_OUT" "loom:cargo-target-dir"
+    elif [[ "$CTD_RC" -eq 0 && "$CTD_OUT" == "ASK [cargo-shared-target]"* ]]; then
+        log_guard_decision "ask" "ask" "loom:cargo-shared-target" || true
+        ask "$CTD_OUT"
     fi
 fi
 

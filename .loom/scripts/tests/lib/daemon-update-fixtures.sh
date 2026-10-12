@@ -293,6 +293,16 @@ fi
 if [[ "\${1:-}" == "calibrate" ]]; then
     exit 1
 fi
+if [[ "\${1:-}" == "telemetry-capabilities" ]]; then
+    # Answer the post-build OTLP probe (#10700) like a real daemon. Set
+    # FAKE_DAEMON_OTLP_PROBE_EXIT=1 to simulate a binary lacking the exporter.
+    if [[ "\${FAKE_DAEMON_OTLP_PROBE_EXIT:-0}" != "0" ]]; then
+        echo '{"otlp":false}'
+        exit "\${FAKE_DAEMON_OTLP_PROBE_EXIT}"
+    fi
+    echo '{"otlp":true}'
+    exit 0
+fi
 if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
     echo "fake loom-daemon: unsupported subcommand: \$*" >&2
     exit 1
@@ -526,6 +536,16 @@ if [[ "\${1:-}" == "--version" ]]; then
 fi
 if [[ "\${1:-}" == "calibrate" ]]; then
     exit 1
+fi
+if [[ "\${1:-}" == "telemetry-capabilities" ]]; then
+    # Answer the post-build OTLP probe (#10700) like a real daemon. Set
+    # FAKE_DAEMON_OTLP_PROBE_EXIT=1 to simulate a binary lacking the exporter.
+    if [[ "\${FAKE_DAEMON_OTLP_PROBE_EXIT:-0}" != "0" ]]; then
+        echo '{"otlp":false}'
+        exit "\${FAKE_DAEMON_OTLP_PROBE_EXIT}"
+    fi
+    echo '{"otlp":true}'
+    exit 0
 fi
 if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
     echo "fake loom-daemon: unsupported subcommand: \$*" >&2

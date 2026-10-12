@@ -1,10 +1,13 @@
 # OTLP transport and artifact verification
 
-Loom's published daemon artifacts include the `otlp` feature. Export remains
-**disabled by default**; a local `cargo build` still omits this optional dependency.
-For source installs use `cargo build -p loom-daemon --release --features otlp`.
-After installing or updating, run `loom-daemon telemetry-capabilities --require-otlp`.
-An enabled OTLP configuration on a feature-off binary reports `misconfigured`.
+Every `loom-daemon` build includes the OTLP exporter (#10700): a plain
+`cargo build -p loom-daemon --release` exports, as do the published artifacts.
+Export remains **disabled by default** in configuration. The `otlp` Cargo
+feature survives only as a no-op alias, so existing `--features otlp`
+invocations keep working. `scripts/daemon-build.sh` and the self-update source
+path (`loom-daemon-update.sh`) run `loom-daemon telemetry-capabilities
+--require-otlp` on the fresh binary and refuse to install one that fails it;
+run it yourself after any other install.
 
 The daemon sends OTLP/HTTP JSON to the configured base URL's `/v1/logs` and
 `/v1/metrics` paths. Lifecycle and role-tick records become logs; host health and
@@ -91,7 +94,7 @@ inspects the Collector's independently decoded file output for lifecycle and
 role-tick logs, host/token metrics, timestamps, values and absent measurements.
 
 ```console
-cargo test -p loom-daemon --features otlp --test otlp_collector -- --ignored --nocapture
+cargo test -p loom-daemon --test otlp_collector -- --ignored --nocapture
 ```
 
 Docker is required and absence is a failure when explicitly invoked. The regular

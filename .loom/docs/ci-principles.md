@@ -206,11 +206,11 @@ contract's direction A against the release `SUPPORTS_INSTALLED` names, where
 `ci.yml` tests only the release just before the change
 ([`release-cadence.md`](release-cadence.md), "Compatibility contract").
 
-The full **default-feature** suite runs only here (#10823): `ci.yml`'s
-`Rust Unit Tests` legs run the whole workspace with `--features
-loom-daemon/otlp` (the shipped configuration), and the PR gate adds only a
-targeted `--lib` step for the `#[cfg(not(feature = "otlp"))]` tests, whose
-names it derives from source.
+Since #10700 the OTLP exporter is compiled unconditionally, so there is one
+build configuration: `ci.yml`'s `Rust Unit Tests` legs and the nightly
+unpartitioned run test the same code (`--features loom-daemon/otlp` is a no-op
+alias where it still appears), and the former PR-gate step for
+`#[cfg(not(feature = "otlp"))]` tests is gone with the tests themselves.
 
 **A red daily run nobody reads is worse than none**, because it trains people
 to ignore red. So the `report` job is part of the mechanism, not a nicety:

@@ -114,8 +114,8 @@ ASAP" signal; the older urgent label was retired (#9244) and deleted (#11105).
   Builder copies it onto the PR it opens. Nothing propagates it any more: the
   star-liveness pass that relayed loom-ui star intents and wrote inherited
   stars on children was removed (#11104), and `create-issue.sh --parent N` no
-  longer stars a child of a starred N. The registry's `propagate` field is
-  inert.
+  longer stars a child of a starred N. The registry's `propagate` field was
+  removed (#11510).
 - **Starred first, every stage.** Curator curates starred issues first (a
   starred issue with no workflow label counts as `loom:triage`) and promotes
   them straight to `loom:issue`, because the star is the Tier-3 approval. A
@@ -1017,9 +1017,11 @@ registry.
 Every daemon table named by a boolean property above is derived from the
 registry; dep_classify's operator-only names stay consts, lockstep-tested
 against `requires_base`/`remove_with` (#5671). Changes go in the registry.
-`propagate` holds #10012's propagation table (`null` = never propagates);
-it is inert since #11104 removed the star-liveness pass that read it.
-`stale_after_minutes` and `lifecycle` are inert.
+The `propagate` table (#10012) was removed (#11510) after #11104 removed
+the star-liveness pass that read it. `stale_after_minutes` and `lifecycle`
+are inert; `lifecycle: retired` marks a label the daemon no longer reads
+(the operator-star levels and `tier:*`, #11103), kept until its forge
+migration.
 
 ## No-op hold (#10156)
 

@@ -153,6 +153,7 @@ test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-queued-stacked-children.sh
 test-merge-pr-chain-lock.sh
+test-merge-pr-pr-state.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-daemon-version-floor.sh
 test-merge-pr-rate-limit-fallback.sh
@@ -278,6 +279,7 @@ defaults/hooks/tests/test-skill-router.sh
 # previously orphaned entirely — appeared in ci.yml only as a paths-filter
 # trigger, never as an invoked job step). All confirmed hermetic (no live
 # network/forge calls, fake/stub binaries only) and ubuntu-portable.
+tests/install/test-daemon-build-otlp-probe.sh
 tests/install/test-daemon-build-shortcut.sh
 tests/install/test-dry-run-preview-manifest.sh
 tests/install/test-forge-detect.sh

@@ -12,8 +12,8 @@ loom-daemon telemetry-export --input ./comparison-001/envelopes.jsonl --endpoint
 
 The output directory must be new and its parent must exist. The generator never
 overwrites a trial. It publishes `manifest.json` last; an interrupted directory
-without that file is incomplete. The exporter needs an OTLP-enabled binary and
-an explicitly configured Collector. Generation itself works without OTLP.
+without that file is incomplete. The exporter needs an explicitly configured
+Collector (every build is OTLP-enabled since #10700). Generation itself works without OTLP.
 
 Choose the required timestamp inside the backend retention and query windows.
 There is no historical default. Identical run ID and anchor

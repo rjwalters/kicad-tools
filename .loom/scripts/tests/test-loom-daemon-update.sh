@@ -238,12 +238,12 @@ if [[ "\${1:-}" == "restart" ]]; then
 fi
 # See write_fake_daemon's comment (#4799): no real calibrate implementation,
 # exit fast instead of falling into the daemon-body loop below.
-if [[ "\${1:-}" == "calibrate" ]]; then
-    exit 1
-fi
+if [[ "\${1:-}" == "calibrate" ]]; then exit 1; fi
 # Same catch-all as write_fake_daemon (#4799): an unrecognized NON-FLAG
 # subcommand must never fall into the foreground daemon loop and wedge its
 # caller. Flags still reach the daemon body.
+# Answers the post-build OTLP probe (#10700) like a real daemon.
+[[ "\${1:-}" == "telemetry-capabilities" ]] && { echo '{"otlp":true}'; exit 0; }
 if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
     echo "fake loom-daemon: unsupported subcommand: \$*" >&2
     exit 1
@@ -282,9 +282,9 @@ if [[ -n '${status_json}' && "\${1:-}" == "status" ]]; then
     printf '%s\n' '${status_json}'
     exit 0
 fi
-if [[ "\${1:-}" == "calibrate" ]]; then
-    exit 1
-fi
+if [[ "\${1:-}" == "calibrate" ]]; then exit 1; fi
+# Answers the post-build OTLP probe (#10700) like a real daemon.
+[[ "\${1:-}" == "telemetry-capabilities" ]] && { echo '{"otlp":true}'; exit 0; }
 if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
     echo "fake loom-daemon: unsupported subcommand: \$*" >&2
     exit 1

@@ -177,7 +177,8 @@ outside that array for parsing reasons:
   forge-egress bypass deny (`guards.forgeEgress`, #9989 — above the floor: the
   policy's `enforcement.api = required` is still enforced at runtime by the
   managed launcher's `assert` and the worker egress boundary), and the unowned
-  cargo target dir deny (`guards.cargoTargetDir`, #11582). Each
+  cargo target dir deny (`guards.cargoTargetDir`, #11582), and the shared
+  cargo target dir ask (`guards.cargoSharedTarget`, #10646). Each
   is off-able **by design** because each has a legitimate repo class for which it
   is a category error (a database engine, a cloud-management repo, an operator
   editing the main checkout). Promoting any of them into the floor would break
@@ -854,7 +855,7 @@ earlier in the same command, `cd`, and `$(mktemp -d)` are resolved. `make` is
 judged only on an assignment made in the command (`make test
 CARGO_TARGET_DIR=…` or a prefix): it may not run cargo at all, so the
 inherited value alone proves nothing. cargo's `build.target-dir` config is not
-read; that is `guards.cargoCleanScope`'s concern.
+read by the deny; the shared-target ask below reads it for the unset case.
 
 **Allowed:** unset (cargo builds into `<worktree>/target`); anything under
 `<repo>/.loom/targets/` (the per-run dir Loom exports, #8370); anything under
@@ -921,6 +922,41 @@ cargo build --target-dir ~/.cache/doctor-1-target           # DENIED (~/.cache)
 env CARGO_TARGET_DIR="$(mktemp -d)" cargo nextest run       # DENIED ($TMPDIR)
 CARGO_TARGET_DIR=.loom/target-9 cargo check                 # DENIED (.loom/target-*)
 ```
+
+### Shared Cargo Target Dir Ask (`guards.cargoSharedTarget` / `LOOM_GUARD_CARGO_SHARED_TARGET`)
+
+The deny above allows a build with **no** explicit target dir, because that
+normally means `<worktree>/target`. On a host whose `~/.cargo/config.toml` sets
+`build.target-dir`, it does not: a plain `cargo test` in a worktree builds into
+the host's shared dir, where the worktree's path-keyed workspace-crate
+artifacts outlive it and nothing reclaims them (#10646: 427 GB of
+`loom_daemon` in one shared `deps/`). The spawn path exports a per-worktree
+`CARGO_TARGET_DIR`; an in-session Task subagent never goes through it.
+
+So the same verb (`loom-daemon cargo-target-dir guard`, tag
+`loom:cargo-shared-target`) **asks** when all of these hold: the cwd is in a
+Loom-managed worktree (`.loom-managed`); the build sets no `CARGO_TARGET_DIR`
+or `--target-dir` and the session carries none; and cargo's configured target
+dir lies outside the worktree, its per-worktree dir and `<repo>/.loom/targets/`.
+The configured dir is resolved the way cargo does: `CARGO_BUILD_TARGET_DIR`,
+then the closest `.cargo/config.toml` (or `.cargo/config`) from the cwd up,
+then `$CARGO_HOME/config.toml` (`~/.cargo` by default). A relative value is
+anchored at the parent of its `.cargo` dir. `make` never asks. The prompt names
+the dir, where the setting came from, and the prefix to use instead:
+`CARGO_TARGET_DIR="<per-worktree marker dir>"` when the worktree has one
+(#8458), else `CARGO_TARGET_DIR="<worktree>/target"`.
+
+It is an ask, not a deny, because sharing a target dir is sometimes deliberate
+(with sccache, say). The verb prints the ask on exit 0, so a hook older than
+the ask treats it as an allow. Toggle (default on):
+
+1. **`LOOM_GUARD_CARGO_SHARED_TARGET` env var** (Claude Code settings `env`):
+   `0`/`false`/`no` disables; `1`/`true`/`yes` forces on. Overrides config.
+2. **Tiered config**: `guards.cargoSharedTarget` (default `true`); `false`
+   disables:
+   ```json
+   { "guards": { "cargoSharedTarget": false } }
+   ```
 
 ### Worktree Isolation Guard Opt-Out (`guards.worktreeIsolation` / `LOOM_GUARD_WORKTREE_ISOLATION`)
 

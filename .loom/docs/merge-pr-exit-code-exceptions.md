@@ -1,41 +1,53 @@
-# `merge-pr.sh` exit codes 3, 4, 5 and 6 — the four "not a failure" outcomes (plus Champion's 7)
+# `merge-pr.sh` exit codes 3-7 — the "not a failure" outcomes
 
-`merge-pr.sh` reserves four exit codes for outcomes that look like failures to
+`merge-pr.sh` reserves five exit codes for outcomes that look like failures to
 a naive `|| handle_failure` caller but are not: the merge did not happen,
 nothing is wrong, and the correct response is to re-queue the PR for a later
 pass.
 
 One more outcome joined them in #9096 and is covered here too: **no exit code at
 all**, when the caller is killed before the script can return one. It is not a
-"not a failure" outcome — it is a *not-an-outcome*, and unlike the four below
+"not a failure" outcome — it is a *not-an-outcome*, and unlike the ones below
 it does get a PR comment.
 
 Champion's operative handling lives in
 `.claude/commands/loom/champion-pr-merge.md` →
-"Exception: exit codes 3-7". Exit 7 is not a `merge-pr.sh` code: Champion's
-Step 3 sets it when `loom-daemon forge merge-queue step` withholds the direct
-merge, so `merge-pr.sh` never runs (see "Exit 7" below). This file holds the rationale, the design
-decisions behind it, and the forensics notes — the parts a Champion session
-does not need loaded to act correctly.
+"Exception: exit codes 3-7". Exit 7 has two sources, both silent re-queues:
+`merge-pr.sh`'s sequencing hold (#11330), and Champion's Step 3, which sets it
+itself when `loom-daemon forge merge-queue step` withholds the direct merge so
+`merge-pr.sh` never runs (see the two "Exit 7" sections below). This file holds
+the rationale, the design decisions behind it, and the forensics notes — the
+parts a Champion session does not need loaded to act correctly.
 
-| exit | cause | who moved the head |
-|---|---|---|
-| `3` | The PR's head branch changed between the fresh head-SHA read taken immediately before merging and the merge call itself (#5579). | someone else |
-| `4` | The #8248/#8919 required-check freshness guard blocked the merge and `--redate-stale-checks` re-dated the checks with a tree-identical no-op push (#8508). | this run |
-| `5` | `--auto`'s bounded settle-wait expired before this head's checks finished, or before the check-runs API became readable (#8896); or the CI-run conclusion gate has no concluded `CI` run for this exact head yet (#10567); or, on a plain merge, a required status-check context is missing or pending (#10688). | nobody |
-| `6` | Another PR on the same base holds the chain-head merge lock: it was just re-dated and has not landed, so merging now would move the base under it again (#10167). | nobody |
-| `7` | *(Champion Step 3, not `merge-pr.sh`)* `forge merge-queue step` gave no `LOOM-MERGE-QUEUE-DIRECT` verdict, so `merge-pr.sh` never ran (#10256). Queue outcomes are silent; anything else is a surfaced stall (#10628). | nobody |
-| `1` | Everything else, including a #8248 block with no remedy left and a red required context on a plain merge (#10688). | — |
-| *(none)* | The caller was killed before the script could exit at all — not an exit code, and the only outcome that leaves no forge-visible trace (#9096). | unknown |
+## Exit-code table
+
+Every caller that branches on `merge-pr.sh`'s exit (Champion Step 3, the sweep
+merge step, a hand-rolled driver) uses this table. An unknown non-zero code is a
+failure — the safe degradation for a caller older than a new code.
+
+| exit | retryable? | cause | caller action |
+|---|---|---|---|
+| `0` | — | Merged. | Done. |
+| `1` | no | Everything else: a real refusal or failure, including a #8248 block with no remedy left, a red required context on a plain merge (#10688; `--allow-red-required <context>` overrides one named context), and a non-success `CI` run (#10444), whose refusal ends in `LOOM-CI-RESULT-FAILED run=<id> jobs=<names>` (#11330). | Failure handling (Champion's "Merge Failed" comment). The `LOOM-CI-RESULT-FAILED` line is classification only: a driver MAY choose `gh run rerun --failed <id>`; nothing decides "flake vs. real" for it. |
+| `3` | yes | The PR's head moved between the fresh head-SHA read and the merge call (#5579) — someone else moved it. | Re-queue; the verdict does not carry to the new head (#5686). |
+| `4` | yes | The #8248/#8919 freshness guard blocked the merge and `--redate-stale-checks` re-dated the checks with a tree-identical no-op push (#8508) — this run moved the head. | Re-queue; a fresh Judge review is needed. |
+| `5` | yes | Held: `--auto`'s bounded settle-wait expired, or the check-runs API was unreadable (#8896); no concluded `CI` run for this exact head yet (#10567); or, on a plain merge, a required context is missing or pending (#10688). Nobody moved the head. | Re-queue. |
+| `6` | yes | Another PR on the same base holds the chain-head merge lock (#10167). | Re-queue; bounded by the lock's cap. |
+| `7` | yes | `merge-pr.sh`: the PR carries `loom:pr` + `loom:sequenced` and no other blocker; stdout carries `LOOM-SEQUENCED-HOLD pr=<N> after=<M>` (#11330). Or *(Champion Step 3 only)* `forge merge-queue step` gave no `LOOM-MERGE-QUEUE-DIRECT` verdict (#10256, #10628). | Re-queue, like 6. The sequencing hold clears when `<M>` lands (`merge-pr sequence-eval`); a queue stall is surfaced by Step 3. |
+| *(none)* | unknown | The caller was killed before the script could exit — the only outcome that leaves no forge-visible trace (#9096). | Re-read the PR; see "No exit code at all". |
+
+Retryable outcomes never post a failure comment and never count as errors.
 
 <!-- toc:begin generated by scripts/check-doc-tocs.sh --fix; do not edit by hand -->
 **Contents**
 
+- [Exit-code table](#exit-code-table)
 - [Exit 3 — a foreign push raced the merge (#5579)](#exit-3--a-foreign-push-raced-the-merge-5579)
 - [Exit 4 — this run re-dated the stale required checks (#8508)](#exit-4--this-run-re-dated-the-stale-required-checks-8508)
 - [Exit 5 — CI outlasted `--auto`'s bounded settle-wait (#8896)](#exit-5--ci-outlasted---autos-bounded-settle-wait-8896)
 - [Exit 6 — deferred behind a re-dating chain head (#10167)](#exit-6--deferred-behind-a-re-dating-chain-head-10167)
 - [Exit 7 — the merge-queue step withheld the direct merge (#10256, #10628)](#exit-7--the-merge-queue-step-withheld-the-direct-merge-10256-10628)
+- [Exit 7 from `merge-pr.sh` — a sequencing hold (#11330)](#exit-7-from-merge-prsh--a-sequencing-hold-11330)
 - [No exit code at all — the caller was killed (#9096)](#no-exit-code-at-all--the-caller-was-killed-9096)
 - [Merge-ancestry detection trap (applies to all of them)](#merge-ancestry-detection-trap-applies-to-all-of-them)
 <!-- toc:end -->
@@ -80,6 +92,20 @@ human pushing a no-op commit. Neither happens automatically, so a
 Judge-approved, safety-criteria-clean PR could sit blocked indefinitely — and
 invisibly, because Champion's rejection-comment idempotency guard suppresses
 the repeated identical failures, leaving no durable record on the PR at all.
+
+### Version-bump-only base moves are not stale (#11330)
+
+`main` takes a `chore: bump version to …` commit after nearly every merge, and
+a bump touches `Cargo.toml`/`Cargo.lock`. Before #11330 that alone made a
+just-green PR stale whenever the input-scoped predicate (#8919) was unavailable
+and the time rule decided — exit 1, or a needless exit-4 re-date. Now a stale
+verdict is re-assessed once with the base tip's trailing version bumps
+discounted (`loom-daemon/src/merge_pr/stale_checks/bump_tail.rs`): a commit
+counts only when its author is the fleet App bot the bump workflow commits as,
+it has one parent, its paths are within `scripts/version.sh list`'s set (read
+from the script, plus the lockfiles), `VERSION` strictly increases, every line
+is a version-value line, and its `Cargo.lock` lines are workspace crates' own.
+One extra path (`CHANGELOG.md`) or a moved dependency and nothing is discounted.
 
 ### Why an in-place re-run is NOT the first choice (#8914, withdrawn by #8919)
 
@@ -472,7 +498,7 @@ wants the check sets `LOOM_CHAIN_LOCK_GUARD=1`.
 
 ### Caller contract
 
-Exactly exit 3/4/5/6's: nothing merged, nothing failed, no comment, re-queue.
+Exactly exit 3/4/5/7's: nothing merged, nothing failed, no comment, re-queue.
 The PR's head did not move, so its verdict stands. A hold costs one pass; it
 lasts at most one cap.
 
@@ -486,7 +512,7 @@ stands. The two kinds of 7 are handled differently:
 
 | `step`'s first stdout line | Meaning | Champion's handling |
 |---|---|---|
-| `LOOM-MERGE-QUEUE-QUEUED` / `-DROPPED` / `-HANDED-OFF` / `-MERGED` | The queue protocol is working | Silent, exactly like 3-6: the result is logged and the PR is re-queued |
+| `LOOM-MERGE-QUEUE-QUEUED` / `-DROPPED` / `-HANDED-OFF` / `-MERGED` | The queue protocol is working | Silent, like `merge-pr.sh`'s 3-7: the result is logged and the PR is re-queued |
 | anything else: `-UNDETERMINED`, `-REFUSED`, `-DIRECT` with rc≠0, empty output, an invalid `champion.mergeMode`, an old binary that cannot prove direct mode, `command not found` | **A stall.** In a direct-mode repo this stops *every* merge on the host | Logs `CHAMPION-MERGE-QUEUE-STALL pr=N: <stdout lines> <stderr first line> (rc=R)` and posts one PR notice per head (`<!-- champion:merge-queue-stall pr=N sha=HEAD -->`, the same dedup shape as `champion:merge-outcome-unknown`). Then re-queues; not an error |
 
 `step`'s stderr is captured, never discarded, so the cause is named. Before
@@ -531,6 +557,26 @@ version floor that includes `step`, and then this row can become a stall.
 Regression: `defaults/scripts/tests/test-champion-merge-queue-step-no-fallthrough.sh`
 extracts the shipped Step 3 fence and runs every row above against stubs.
 
+## Exit 7 from `merge-pr.sh` — a sequencing hold (#11330)
+
+`loom:sequenced` (#9378) is in the verdict-contradiction guard's blocking set,
+so a PR carrying it beside `loom:pr` is refused. That refusal used to be exit 1,
+which a caller could not tell from a Judge rejection without grepping the text.
+When `loom:sequenced` is the ONLY blocker, `merge-pr.sh` now exits 7 and prints
+`LOOM-SEQUENCED-HOLD pr=<N> after=<M>`: the order resolves on its own when the
+predecessor `<M>` lands. `after` comes from the PR's trusted `loom:sequence`
+marker, best-effort (`after=unknown` when unreadable); the hold itself is still
+decided by the label alone. Any second blocker (`loom:changes-requested`,
+`loom:operator`, …) keeps exit 1, because the PR stays blocked after the
+predecessor lands.
+
+Exit 7 is a separate code, not a reuse of 6: 6 is the chain lock's bounded
+defer with its own cap, while a sequencing hold has no cap of its own (the
+`sequence-eval` pass owns its release). It is opt-in on the daemon side —
+`merge-pr.sh` sets `LOOM_SEQUENCED_HOLD_REPO` — so an older `loom-daemon`
+ignores it and answers exit 1 as before, and an older `merge-pr.sh` never sees
+a 7. Champion already re-queues every 7 silently.
+
 ## No exit code at all — the caller was killed (#9096)
 
 This is the fifth outcome, and the only one that is not an exit code: the
@@ -541,7 +587,7 @@ Bash tool call whose timeout caps at 600s, and `LOOM_AUTO_MERGE_TIMEOUT`
 approaches that budget the tool wins the race, the script is killed mid-wait,
 and the exit-5 branch above never runs.
 
-What that leaves on the forge is worse than any of exits 3/4/5/6: Step 2 has
+What that leaves on the forge is worse than any of exits 3-7: Step 2 has
 already posted "Proceeding with merge…", and then there is nothing. No merge,
 no failure, no label change, no comment — indistinguishable from a dead host.
 That is the 2026-09-26 incident on a private fleet repo: a "Proceeding with
@@ -632,14 +678,14 @@ this section exists to settle:
   action is required — the PR is still Judge-approved and a later pass retries
   it. Posting the failure wording would manufacture an incident out of a
   timeout and park a mergeable PR on a human.
-- **It is also not covered by the exits-3/4/5/6 silence rule.** Those runs stay
+- **It is also not covered by the exits-3-7 silence rule.** Those runs stay
   silent on the forge because they *reported themselves*: the caller knows the
   outcome, records it, and re-queues; commenting on a self-resolving race
   would be noise (see exit 3 above). A killed call reports nothing, so silence
   there is not "an ordinary operational event went unremarked" but "Champion
   announced a merge and vanished." **The silence rule is conditioned on having
   an outcome to be silent about**, and must never be generalised to cover its
-  absence — nor may the notice ever be extended to fire on exits 3/4/5/6, which
+  absence — nor may the notice ever be extended to fire on exits 3-7, which
   stay exactly as silent as they are today.
 
 The notice is therefore worded as a *state report*, not a verdict: what

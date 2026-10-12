@@ -612,10 +612,10 @@ shape. Specific to this feature:
 cargo test -p loom-daemon session_output
 
 # 2. The live path: real adapter → real records → real OTLP/HTTP export →
-#    real collector stages → backend. Needs a reachable collector and the
-#    `otlp` feature; the tests are #[ignore]d so CI never needs either.
+#    real collector stages → backend. Needs a reachable collector; the
+#    tests are #[ignore]d so CI never needs one.
 LOOM_E2E_OTLP_ENDPOINT=http://127.0.0.1:14319 \
-  cargo test -p loom-daemon --features otlp session_output::e2e \
+  cargo test -p loom-daemon session_output::e2e \
   -- --ignored --nocapture
 ```
 

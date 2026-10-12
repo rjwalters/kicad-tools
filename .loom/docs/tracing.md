@@ -2,8 +2,8 @@
 
 Loom's opt-in OTLP exporter carries completed spans alongside lifecycle logs and
 metrics. Trace IDs and span IDs are native OTLP fields, so a backend can join a
-log to its exact execution span. Enable the `otlp` Cargo feature and configure
-`observability.enabled`, `exporter: "otlp"`, an endpoint, and an ingest key file
+log to its exact execution span. Every build includes the exporter (#10700);
+configure `observability.enabled`, `exporter: "otlp"`, an endpoint, and an ingest key file
 as described in [observability](observability.md).
 
 ## Identity and process boundaries
