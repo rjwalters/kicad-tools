@@ -900,6 +900,8 @@ class LatticePathfinder:
         layers: tuple[int, ...] | None,
         exempt_pads: frozenset[int] | None,
         net_class: object | None,
+        allow_vias: bool = True,
+        via_in_pad_override: bool | None = None,
     ) -> tuple[list[tuple[NodeKey, int, list[Pt], float]], float]:
         """Escape stubs for one pad, with an oversize neck-down fallback.
 
@@ -915,6 +917,22 @@ class LatticePathfinder:
         width at the first lattice node.  Never-ship-a-short holds absolutely:
         the neck legs are clearance-checked at the neck width, exactly as the
         full-width legs are checked at the full width (#3906).
+
+        Issue #6381: "the full-width scan produced a stub" is not the same as
+        "the full width can escape".  On a fine-pitch row the full-width
+        centreline band between the neighbour pads can be narrower than the
+        lattice row spacing, so the only nodes a full-width stub reaches are
+        cell centres INSIDE the pad's own copper with no legal full-width
+        outgoing edge.  Those dead-end stubs used to count as success and
+        suppress the neck fallback, so the search popped them and declined.
+        A non-fat full-width stub set now counts only when at least one stub
+        has egress (:meth:`_stub_has_egress` -- a legal full-width lattice
+        edge, or a legal via, out of its landing node, judged by the SAME
+        predicates the A* expands with).  When none does, the neck fallback
+        runs; if the neck finds nothing either, the original full-width stubs
+        are returned unchanged, so the outcome is never worse than before.
+        Stub sets with egress (every connection that routed before) are
+        returned byte-identically.
         """
         body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         full_half, clr = self._conn_geometry(net_class, net)
@@ -932,16 +950,38 @@ class LatticePathfinder:
             net_class=net_class,
         )
         # A successful full-width escape, or a fat coupled agent (whose grown
-        # envelope has its own escape discipline), is returned as-is.
-        if stubs or fat:
+        # envelope has its own escape discipline), is returned as-is.  A
+        # full-width stub set none of whose stubs can LEAVE its landing node
+        # at full width is a dead end, not a success (issue #6381): fall
+        # through to the neck scan, keeping the dead-end set as the
+        # never-worse result if the neck cannot escape either.
+        if fat:
             return stubs, body_w
+        if stubs:
+            if any(
+                self._stub_has_egress(
+                    stub,
+                    net,
+                    committed,
+                    full_half,
+                    clr,
+                    net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
+                )
+                for stub in stubs
+            ):
+                return stubs, body_w
+            dead_end = stubs
+        else:
+            dead_end = []
 
         neck_w = self._neck_width(net_class)
         neck_half = neck_w / 2.0
         if neck_half >= full_half - 1e-9:
             # Not oversize: the neck would not be narrower than the body, so
             # there is nothing to taper -- the honest decline stands.
-            return stubs, body_w
+            return dead_end, body_w
 
         lattice = self.build()
         base_sr = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0)
@@ -1042,7 +1082,134 @@ class LatticePathfinder:
                         ]
                         if neck_stubs:
                             break
+        if not neck_stubs and dead_end:
+            # Issue #6381: the neck found nothing either -- keep the pre-#6381
+            # result (the dead-end full-width stubs) rather than turning a
+            # no-path decline into a pad-escape one.
+            return dead_end, body_w
         return neck_stubs, neck_w
+
+    def _body_edge_legal(
+        self,
+        edge: EdgeKey,
+        layer: int,
+        net: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        *,
+        extra: float,
+        pw: Any,
+        ko: Any,
+    ) -> tuple[bool, bool]:
+        """Single-ended full-width legality of one lattice edge on ``layer``.
+
+        Returns ``(legal, keepout_hit)``.  This is the exact predicate the
+        A* in :meth:`_route_search` expands with (issue #6381 factored it out
+        so the escape-egress check cannot drift from the search); the
+        Edge.Cuts boundary test is applied by the caller.
+        """
+        lattice = self.build()
+        ea = lattice.node_point(edge[0])
+        eb = lattice.node_point(edge[1])
+        ko_hit = ko is not None and ko.segment_blocked(ea, eb, layer, net, half)
+        obstacles = self.obstacles
+        ok = (
+            not ko_hit
+            and not obstacles.edge_blocked(edge, layer, net)
+            and not (extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra))
+            and not (
+                pw is not None
+                and obstacles.pairwise_pad_blocked(ea, eb, layer, net, half, extra, pw)
+            )
+            and committed.seg_clear(ea, eb, layer, net, half, clr)
+        )
+        return ok, ko_hit
+
+    def _body_node_legal(
+        self,
+        key: NodeKey,
+        layer: int,
+        net: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        *,
+        extra: float,
+        pw: Any,
+        ko: Any,
+    ) -> tuple[bool, bool]:
+        """Single-ended full-width legality of one lattice node (``(ok, ko_hit)``).
+
+        Node counterpart of :meth:`_body_edge_legal` (issue #6381).
+        """
+        npt = self.build().node_point(key)
+        ko_hit = ko is not None and ko.segment_blocked(npt, npt, layer, net, half)
+        obstacles = self.obstacles
+        ok = (
+            not ko_hit
+            and not obstacles.node_blocked(key, layer, net)
+            and not (extra > 0.0 and obstacles.segment_blocked(npt, npt, layer, net, extra))
+            and not (
+                pw is not None
+                and obstacles.pairwise_pad_blocked(npt, npt, layer, net, half, extra, pw)
+            )
+            and committed.node_clear(npt, layer, net, half, clr)
+        )
+        return ok, ko_hit
+
+    def _stub_has_egress(
+        self,
+        stub: tuple[NodeKey, int, list[Pt], float],
+        net: int,
+        committed: CommittedCopper | None,
+        half: float,
+        clr: float,
+        *,
+        net_class: object | None = None,
+        allow_vias: bool = True,
+        via_in_pad_override: bool | None = None,
+    ) -> bool:
+        """Whether a full-width stub's landing node can be LEFT (issue #6381).
+
+        True when at least one lattice edge out of the landing ``(node,
+        layer)`` is legal at the full body width (edge + far node, the same
+        predicates and Edge.Cuts test the A* applies), or -- when vias are
+        allowed -- a through via at the node is legal.  A stub without egress
+        is a dead end the search can only pop and drop.
+        """
+        lattice = self.build()
+        if committed is None:
+            committed = self._fresh_committed()
+        key, layer = stub[0], stub[1]
+        extra = max(0.0, half + clr - self._agent_radius)
+        pw, ko = self._pairwise, self._keepouts
+        boundary = self._escape_boundary
+        for nbr, _elen in lattice.adj.get(key, ()):
+            edge = (min(key, nbr), max(key, nbr))
+            if not self._body_edge_legal(
+                edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+            )[0]:
+                continue
+            if not boundary.segment_clear(
+                lattice.node_point(edge[0]), lattice.node_point(edge[1]), half
+            ):
+                continue
+            if self._body_node_legal(
+                nbr, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+            )[0]:
+                return True
+        return bool(
+            allow_vias
+            and self.num_layers > 1
+            and self._via_ok(
+                key,
+                net,
+                committed,
+                via_in_pad_override=via_in_pad_override,
+                clearance=clr if net_class is not None else None,
+            )
+        )
 
     def _keepout_escape_reason(
         self,
@@ -1507,6 +1674,8 @@ class LatticePathfinder:
                     layers=stub_layers,
                     exempt_pads=exempt_pads,
                     net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
                 )
 
             stubs_a, width_a = escape(start)
@@ -1634,25 +1803,11 @@ class LatticePathfinder:
                             committed, pa, pb, layer, pair_nets, extra_clearance
                         )
                     else:
-                        ea = lattice.node_point(edge[0])
-                        eb = lattice.node_point(edge[1])
-                        ko_hit = ko is not None and ko.segment_blocked(ea, eb, layer, net, half)
+                        ok, ko_hit = self._body_edge_legal(
+                            edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                        )
                         if ko_hit:
                             ko_pruned = True
-                        ok = (
-                            not ko_hit
-                            and not obstacles.edge_blocked(edge, layer, net)
-                            and not (
-                                extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra)
-                            )
-                            and not (
-                                pw is not None
-                                and obstacles.pairwise_pad_blocked(
-                                    ea, eb, layer, net, half, extra, pw
-                                )
-                            )
-                            and committed.seg_clear(ea, eb, layer, net, half, clr)
-                        )
                     ok = ok and boundary.segment_clear(
                         lattice.node_point(edge[0]),
                         lattice.node_point(edge[1]),
@@ -1672,25 +1827,11 @@ class LatticePathfinder:
                             committed, npt, layer, pair_nets, extra_clearance
                         )
                     else:
-                        npt = lattice.node_point(nbr)
-                        ko_hit = ko is not None and ko.segment_blocked(npt, npt, layer, net, half)
+                        nok, ko_hit = self._body_node_legal(
+                            nbr, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                        )
                         if ko_hit:
                             ko_pruned = True
-                        nok = (
-                            not ko_hit
-                            and not obstacles.node_blocked(nbr, layer, net)
-                            and not (
-                                extra > 0.0
-                                and obstacles.segment_blocked(npt, npt, layer, net, extra)
-                            )
-                            and not (
-                                pw is not None
-                                and obstacles.pairwise_pad_blocked(
-                                    npt, npt, layer, net, half, extra, pw
-                                )
-                            )
-                            and committed.node_clear(npt, layer, net, half, clr)
-                        )
                     node_ok[nstate] = nok
                 if not nok:
                     continue
@@ -1807,6 +1948,35 @@ class LatticePathfinder:
             # sole cause of the shortfall.
             if ko_pruned:
                 return None, "no-path-keepout-constrained"
+            # Issue #6381: when every surviving escape stub of one end is a
+            # dead end (no legal full-width edge or via out of its landing
+            # node), THAT is why the search failed -- regardless of whether
+            # the hard layer set also pruned stubs elsewhere.  Name it, so a
+            # fine-pitch escape failure is not misreported as a layer
+            # constraint (board 05 PHASE_B read ``no-path-layer-constrained``
+            # because J2.2's inner-layer stubs were dropped, while the real
+            # failure was U2.8's in-pad dead-end stubs).
+            if not fat:
+
+                def no_egress(stubs: list) -> bool:
+                    return not any(
+                        self._stub_has_egress(
+                            stub,
+                            net,
+                            committed,
+                            half,
+                            clr,
+                            net_class=net_class,
+                            allow_vias=allow_vias,
+                            via_in_pad_override=via_in_pad_override,
+                        )
+                        for stub in stubs
+                    )
+
+                if no_egress(stubs_a):
+                    return None, "no-egress-start"
+                if no_egress(stubs_b):
+                    return None, "no-egress-end"
             # Issue #4979: same honesty contract for a hard layer constraint.
             # ``layer_pruned`` is set when the net's hard-avoided set actually
             # removed something from this search -- an escape stub, or a
