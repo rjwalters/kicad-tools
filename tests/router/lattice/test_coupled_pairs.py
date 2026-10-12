@@ -632,6 +632,31 @@ def test_uncoupled_fallback_coupled_pair_unchanged() -> None:
         assert segs == segs0
 
 
+def test_uncoupled_fallback_recovers_coupled_in_later_pass(monkeypatch) -> None:
+    # Regression (#6377 review): a pair that falls back on pass 1 because of
+    # congestion and COUPLES on pass 2 must come out coupled.  Both passes
+    # complete the pair (routed_items ties), so the best-pass tie-break must
+    # rank the coupled pass above the earlier uncoupled-fallback pass.
+    pf, pc = _pair_board()
+    real_pair_impl = pf._route_pair_impl
+    calls = {"n": 0}
+
+    def decline_first_live_call(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None, "pair-blocked-congestion"
+        return real_pair_impl(*args, **kwargs)
+
+    monkeypatch.setattr(pf, "_route_pair_impl", decline_first_live_call)
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    assert stats.iterations == 2, stats
+    assert pf.pair_outcomes[pc.key] == "coupled", pf.pair_outcomes
+    assert stats.converged
+    assert stats.routed == 1 and stats.total == 1, stats
+    assert set(routes) == {(pc.key, "P"), (pc.key, "N")}
+    assert pf.failure_reasons == {}, pf.failure_reasons
+
+
 def test_uncoupled_fallback_extras_land_on_connected_copper() -> None:
     # 3 pads per net: the coupled main run J1 -> U1 is blocked by the slot,
     # and each net has an extra pad anchored (as the autorouter does) on the

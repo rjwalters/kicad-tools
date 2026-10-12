@@ -2540,10 +2540,17 @@ class LatticePathfinder:
         best_reasons: dict[object, str] = {}
         best_pair_outcomes: dict[object, str] = {}
         best_count = -1
-        # Issue #6373: best-pass ranking.  ``best_count`` keeps its pre-#6373
-        # meaning (completed items) and leads the tuple, so with no fallback
-        # the selection is byte-identical; ties then prefer more routed
-        # fallback legs, then more COUPLED pairs.
+        # Issue #6373: best-pass ranking ``(routed_items, coupled_count,
+        # fallback_legs)``.  ``routed_items`` keeps its pre-#6373 meaning
+        # (completed items: a coupled pair and a fully-routed fallback pair
+        # each count once) and leads.  A completion tie then prefers more
+        # COUPLED pairs -- so a later pass that recovers a congested fallback
+        # pair as coupled replaces the earlier uncoupled pass -- and only
+        # then more routed fallback legs (which rewards a partially-routed
+        # fallback pair's lone leg; a full fallback pair is already in
+        # ``routed_items``).  With ``uncoupled_fallback`` off the two
+        # tie-break keys are pinned to 0, so the selection (and escape-plan
+        # release) is exactly the pre-#6373 first-best-pass rule.
         best_score: tuple[int, int, int] = (-1, -1, -1)
         # Leg-unit accounting of the best pass for the honest stats.
         best_fallback_pairs = 0
@@ -2665,7 +2672,11 @@ class LatticePathfinder:
                     continue
                 routed_items += 1
 
-            score = (routed_items, fallback_legs, coupled_count)
+            score = (
+                (routed_items, coupled_count, fallback_legs)
+                if uncoupled_fallback
+                else (routed_items, 0, 0)
+            )
             if escape_plan and score <= best_score:
                 # A local reservation is a proposal, not a permanent lock.
                 # Release it when its full pass fails to improve completion.
@@ -2693,7 +2704,11 @@ class LatticePathfinder:
             # occupants and a later pass can couple it.  A structurally blocked
             # pair (no fresh-board run either) adds no demand and does not
             # hold convergence back.
+            # The empty-board probe IS the pair's desired corridor, so it is
+            # kept and reused by the demand loop below instead of searching
+            # the same fresh board a second time.
             congested_fallback: list[Any] = []
+            fallback_probes: dict[object, Any] = {}
             if fallback_pairs and it < max_iterations - 1:
                 for pc in fallback_pairs:
                     probe, _r = self._route_pair_impl(
@@ -2701,6 +2716,7 @@ class LatticePathfinder:
                     )
                     if probe is not None:
                         congested_fallback.append(pc)
+                        fallback_probes[pc.key] = probe
 
             if not failed and not congested_fallback:
                 converged = True
@@ -2718,9 +2734,14 @@ class LatticePathfinder:
             increment = history_increment_factor * self.rules.cost_congestion * present
             for kind, item in failed:
                 if kind == 1:
-                    desired_pair, _r = self._route_pair_impl(
-                        item, committed=self._fresh_committed(), history=history, present=present
-                    )
+                    desired_pair = fallback_probes.get(item.key)
+                    if desired_pair is None:
+                        desired_pair, _r = self._route_pair_impl(
+                            item,
+                            committed=self._fresh_committed(),
+                            history=history,
+                            present=present,
+                        )
                     desired_resources = desired_pair.resources if desired_pair is not None else None
                     if desired_pair is not None:
                         half, clearance = self._conn_geometry(item.net_class)
