@@ -390,3 +390,16 @@ def test_route_all_monte_carlo_forwards_trial_kwargs(monkeypatch):
     )
     assert captured["use_negotiated"] is True
     assert captured["per_net_timeout"] == 5.0
+
+
+def test_trial_timeout_leaves_headroom_before_the_parent_deadline():
+    import time
+
+    assert mc_mod.trial_timeout(None, 4, 4) is None
+    deadline = time.monotonic() + 4000.0
+    budget = mc_mod.trial_timeout(deadline, 4, 4)  # one wave
+    assert 3500.0 < budget <= 3600.0 + 1.0  # 10% headroom
+    small = mc_mod.trial_timeout(time.monotonic() + 100.0, 1, 1)
+    assert 45.0 <= small <= 50.5  # headroom capped at half the share
+    two_waves = mc_mod.trial_timeout(time.monotonic() + 2000.0, 8, 4)
+    assert 850.0 < two_waves < 910.0

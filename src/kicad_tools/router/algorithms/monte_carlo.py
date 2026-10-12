@@ -362,12 +362,20 @@ def trial_timeout(deadline: float | None, trials_left: int, workers: int = 1) ->
     ``trials_left`` trials on ``workers`` processes take
     ``ceil(trials_left / workers)`` sequential waves; each trial gets an equal
     share of what is left so the last wave is not starved (#2794, #6345).
+
+    The share keeps headroom (10%, at least 90 s, at most half) for the work a
+    trial does past its routing budget -- the negotiated post-sweep (bounded
+    at 60 s), solution scoring and returning the routes to the parent.  On
+    board 05 four negotiated trials given the full share finished within
+    seconds of the parent's deadline, which would have abandoned all of them.
     """
     left = remaining_seconds(deadline)
     if left is None:
         return None
     waves = max(1, math.ceil(max(1, trials_left) / max(1, workers)))
-    return max(1.0, left / waves)
+    share = left / waves
+    headroom = min(0.5 * share, max(0.1 * share, 90.0))
+    return max(1.0, share - headroom)
 
 
 def run_monte_carlo(
