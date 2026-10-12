@@ -3195,6 +3195,26 @@ if [[ -f "$WRITE_ROOT/.github/labels.yml" && -x "$LABELS_SYNC_SCRIPT" ]]; then
     esac
 fi
 
+# ---------- retired forge label migration: PREVIEW ONLY (#11511) ----------
+#
+# Labels Loom retires (defaults/labels.json `retired`, #11513) stay on every
+# other repo's forge, on open items too, because the additive step above never
+# deletes or relabels. `loom-daemon labels migrate` is what moves open items
+# onto the replacements and deletes the retired labels -- an irreversible
+# forge write (a deleted label vanishes from closed items too), so resync only
+# ever runs its read-only dry run, never --apply (#10770: resync's forge
+# writes stay opt-in). When anything is pending it prints the report and the
+# exact command the operator runs to apply it. Reuses the daemon resolved for
+# the .gitignore refresh; an older daemon without the verb is skipped quietly.
+if [[ -n "$EGRESS_BIN" && -f "$WRITE_ROOT/.github/labels.yml" ]] && "$EGRESS_BIN" labels migrate --help >/dev/null 2>&1; then
+    migrate_rc=0; migrate_output="$(cd "$REPO_ROOT" && "$EGRESS_BIN" labels migrate 2>&1)" || migrate_rc=$?
+    if [[ "$migrate_rc" -ne 0 ]]; then
+        printf '%b\n' "${YELLOW}[resync] Retired forge labels pending migration (dry run, read-only -- nothing was changed):${NC}"
+        printf '%s\n' "$migrate_output" | sed 's/^/    /'
+        [[ "$migrate_rc" -ne 3 ]] || printf '%b\n' "  apply with: ${BOLD}(cd $REPO_ROOT && loom-daemon labels migrate --apply)${NC}  (or: .loom/scripts/sync-labels.sh --migrate-retired)"
+    fi
+fi
+
 # ---------- shared: classify this run's working-tree dirt (#9141) ----------
 #
 # ONE `git status --porcelain` walk of WRITE_ROOT, classified into three
