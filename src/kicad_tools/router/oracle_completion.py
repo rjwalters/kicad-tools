@@ -366,9 +366,12 @@ class OracleCompletionResult:
     #: (``ClosureAttempt.relaxed`` of the kept attempts).  Empty unless a
     #: closer deliberately relaxed a link.
     relaxed_links: list[str] = field(default_factory=list)
-    #: Issue #6399: ``ClosureAttempt.notes`` of the closer's LAST attempt (the
-    #: per-pad / per-link reasons a link stayed open), so ``kct route`` can
-    #: print why each ``still unconnected`` link was not closed.
+    #: Issue #6399: the per-pad / per-link reasons a link stayed open, so
+    #: ``kct route`` can print why each ``still unconnected`` link was not
+    #: closed: every ``ClosureAttempt.notes`` line of the LAST round's attempts,
+    #: plus one line per item that round withdrew because its copper raised
+    #: KiCad's DRC count (a round that ends ``no_closer`` after such retries
+    #: has an empty final attempt, so its notes alone would explain nothing).
     closer_notes: list[str] = field(default_factory=list)
 
     @property
@@ -531,6 +534,7 @@ def run_oracle_completion(
         attempt = None
         attempts = 0
         geo_after = geo
+        round_notes: list[str] = []
         for _ in range(1 + max_retries):
             if not affordable(attempt=True):
                 # The board holds the last kept round's bytes here: the first
@@ -540,6 +544,7 @@ def run_oracle_completion(
             attempts += 1
             started = time.monotonic()
             attempt = closer(pcb_path, links, frozenset(banned))
+            round_notes.extend(attempt.notes)
             if attempt.applied == 0:
                 pcb_path.write_bytes(backup)
                 stop = STOP_NO_CLOSER
@@ -559,6 +564,11 @@ def run_oracle_completion(
                 say(
                     f"    DRC +{geo_after.error_count - errors}; retrying without {', '.join(sorted(culprits))}"
                 )
+                round_notes.extend(
+                    f"{c}: withdrawn -- its copper raised KiCad DRC by "
+                    f"{geo_after.error_count - errors}"
+                    for c in sorted(culprits)
+                )
                 banned |= culprits
                 continue
             if len(in_scope(geo_after)) >= count:
@@ -570,8 +580,7 @@ def run_oracle_completion(
         else:
             stop = STOP_DRC_REGRESSED
 
-        if attempt is not None:
-            result.closer_notes = list(attempt.notes)
+        result.closer_notes = list(dict.fromkeys(round_notes))
         after_links = in_scope(geo_after) if kept else links
         result.rounds.append(
             OracleRound(

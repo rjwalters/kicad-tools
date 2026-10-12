@@ -7557,14 +7557,25 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
 def _closer_reasons_for(link, notes) -> list[str]:
     """The closer notes (Issue #6399) that name ``link`` or one of its pads.
 
-    A pad matches as a whole ``REF.PAD`` token, so ``U2.3`` does not pick up
-    a note about ``U2.36``.
+    A note matches when it names the link (``describe()``, or both endpoint
+    descriptions, as a withdrawn route key does) or one of its pads as a
+    whole ``REF.PAD`` token, so ``U2.3`` does not pick up a note about
+    ``U2.36``.
     """
-    patterns = [re.compile(re.escape(link.describe()))]
-    for end in (link.a, link.b):
-        if end.ref and end.pad:
-            patterns.append(re.compile(rf"(?<![\w.]){re.escape(f'{end.ref}.{end.pad}')}(?![\w.])"))
-    return [n for n in notes if any(p.search(n) for p in patterns)]
+    pads = [
+        re.compile(rf"(?<![\w.]){re.escape(f'{end.ref}.{end.pad}')}(?![\w.])")
+        for end in (link.a, link.b)
+        if end.ref and end.pad
+    ]
+
+    def names(note: str) -> bool:
+        if link.describe() in note:
+            return True
+        if link.a.description in note and link.b.description in note:
+            return True
+        return any(p.search(note) for p in pads)
+
+    return [n for n in notes if names(n)]
 
 
 def _print_stranded_pour_failure_banner(args, output_path) -> None:

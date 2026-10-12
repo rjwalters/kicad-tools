@@ -421,3 +421,57 @@ class TestCloserReasonsPrinted:
             board.path, oracle=board.oracle, closer=closer, nets=["GND"], max_rounds=1
         )
         assert res.closer_notes == ["GND C1.1: boxed in"]
+
+    def test_withdrawn_culprit_explains_a_no_closer_round(self, tmp_path):
+        """Board 04's shape: every weld is withdrawn, the last attempt is empty."""
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+
+        b = FakeBoard(tmp_path, 2)
+
+        def oracle(path):
+            links, errors = b.state()
+            geo = _geo(links, errors)
+            if errors:
+                geo.error_violations = [
+                    DRCViolation(
+                        type=ViolationType.CLEARANCE,
+                        type_str="clearance",
+                        severity=Severity.ERROR,
+                        message="x",
+                        locations=[Location(20.0, 5.0)],
+                        items=["Track on F.Cu"],
+                    )
+                ]
+            return geo
+
+        def closer(path, links, banned):
+            if "pad:GND:C1.1" in banned:
+                return ClosureAttempt(applied=0)
+            path.write_text("2,1")
+            return ClosureAttempt(
+                applied=1, footprints={"pad:GND:C1.1": [(20.0, 5.0, 20.0, 5.0, 0.3)]}
+            )
+
+        res = run_oracle_completion(b.path, oracle=oracle, closer=closer, nets={"GND"})
+        assert res.stop_reason == STOP_NO_CLOSER
+        assert res.closer_notes == ["pad:GND:C1.1: withdrawn -- its copper raised KiCad DRC by 1"]
+        lk = links_from_violations(_unconnected(1))[0]  # C1.1 <-> zone
+        assert _closer_reasons_for(lk, res.closer_notes) == res.closer_notes
+
+    def test_route_key_names_its_link(self):
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink, _route_key
+
+        a = OracleEndpoint(description="Pad 2 [GND] of C1 on F.Cu", kind="pad", net="GND", x=0, y=0)
+        b = OracleEndpoint(description="Pad 2 [GND] of U1 on F.Cu", kind="pad", net="GND", x=1, y=0)
+        lk = OracleLink(net="GND", a=a, b=b)
+        other = OracleLink(
+            net="GND",
+            a=a,
+            b=OracleEndpoint(
+                description="Pad 2 [GND] of C10 on F.Cu", kind="pad", net="GND", x=2, y=0
+            ),
+        )
+        note = f"{_route_key(lk)}: withdrawn -- its copper raised KiCad DRC by 3"
+        assert _closer_reasons_for(lk, [note]) == [note]
+        assert _closer_reasons_for(other, [note]) == []
