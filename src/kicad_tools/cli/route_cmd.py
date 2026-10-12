@@ -65,7 +65,7 @@ import signal
 import sys
 import textwrap
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
@@ -1391,6 +1391,190 @@ _COPPER_LOSS_ABORT_FRACTION = 0.10
 # does not fire (a near-empty board legitimately routes to a handful of
 # elements, so the ratio test would be meaningless / falsely tripped).
 _COPPER_LOSS_TRIVIAL_INPUT = 100
+
+
+@dataclass
+class _OutputVerification:
+    """Outcome of :func:`_verify_written_output` (issues #2264, #6371, #6376).
+
+    ``disconnected`` holds every multi-pad net with a disconnected pad in the
+    written file; ``regressed`` is the subset the router's own statistics had
+    counted as connected -- a false completion that exits 6 even without
+    ``--strict``.
+    """
+
+    disconnected: dict[int, dict] = field(default_factory=dict)
+    regressed: dict[int, dict] = field(default_factory=dict)
+
+    @property
+    def has_disconnected(self) -> bool:
+        return bool(self.disconnected)
+
+
+def _verify_written_output(
+    pcb_content: str,
+    router: "Autorouter",
+    multi_pad_net_ids: "set[int]",
+    net_map: "dict[str, int]",
+    stats: dict,
+    nets_to_route: int,
+    *,
+    quiet: bool = False,
+) -> _OutputVerification:
+    """Verify pad-to-pad connectivity of the PCB text just written.
+
+    The single post-save verifier for every ``kct route`` flow (issue #6376):
+    ``main_with_result``'s direct path and the three escalation flows
+    (layer escalation, rule relaxation, combined) all call this after
+    ``_write_routed_pcb``.  It re-parses the written S-expressions with
+    :func:`kicad_tools.router.io.verify_output_connectivity`, classifies each
+    open net as already-partial or counted-connected (issue #6371), reconciles
+    ``stats`` (``nets_routed`` / ``nets_partial`` / ``nets_fully_connected`` /
+    ``connectivity``) in place with the verified result, and prints the
+    ``--- Output Connectivity Verification ---`` section.
+    """
+    result = _OutputVerification()
+    if not (router.pads and router.nets and pcb_content):
+        return result
+
+    # Looked up through the module so tests can monkeypatch it.
+    from kicad_tools.router import io as router_io
+
+    # Build net_pads mapping (same as get_statistics)
+    verify_net_pads: dict[int, list] = {}
+    for net_id, pad_keys in router.nets.items():
+        if net_id not in multi_pad_net_ids:
+            continue
+        pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
+        if len(pad_list) >= 2:
+            verify_net_pads[net_id] = pad_list
+
+    # Build net name lookup
+    reverse_net_map = {v: k for k, v in net_map.items()}
+
+    output_connectivity = router_io.verify_output_connectivity(
+        pcb_content=pcb_content,
+        net_pads=verify_net_pads,
+        net_names=reverse_net_map,
+    )
+
+    disconnected_nets = {
+        nid: info
+        for nid, info in output_connectivity.items()
+        if not info["connected"] and info["total_pads"] >= 2
+    }
+    result.disconnected = disconnected_nets
+    regressed = result.regressed
+
+    if disconnected_nets:
+        _stat_conn = stats.get("connectivity") or {}
+        _nets_with_copper = {r.net for r in router.routes}
+        for nid, info in disconnected_nets.items():
+            counted = (
+                _stat_conn[nid]["connected"]
+                if nid in _stat_conn
+                else (not _stat_conn and nid in _nets_with_copper)
+            )
+            if counted:
+                regressed[nid] = info
+        if regressed:
+            # Reconcile the summary with the verified result so neither
+            # "Nets connected" nor the SUCCESS banner can repeat the
+            # router's pre-write count.
+            stats["nets_routed"] = max(0, stats["nets_routed"] - len(regressed))
+            if "nets_partial" in stats:
+                stats["nets_partial"] += len(regressed)
+            if "nets_fully_connected" in stats:
+                stats["nets_fully_connected"] = max(
+                    0, stats["nets_fully_connected"] - len(regressed)
+                )
+                stats["has_disconnected_islands"] = True
+            for nid in regressed:
+                if nid in _stat_conn:
+                    _stat_conn[nid]["connected"] = False
+        if not quiet:
+            print("\n--- Output Connectivity Verification ---")
+            print(
+                f"  WARNING: {len(disconnected_nets)} net(s) have disconnected "
+                f"pads in written output"
+            )
+            for nid, info in sorted(disconnected_nets.items(), key=lambda x: x[1]["net_name"]):
+                disc_str = ", ".join(info["disconnected_pads"][:5])
+                if len(info["disconnected_pads"]) > 5:
+                    disc_str += f" (+{len(info['disconnected_pads']) - 5} more)"
+                print(
+                    f"  {info['net_name']}: "
+                    f"{info['connected_pads']}/{info['total_pads']} pads connected"
+                    f" -- disconnected: {disc_str}"
+                )
+            if regressed:
+                names = ", ".join(sorted(i["net_name"] for i in regressed.values()))
+                print(
+                    f"  ERROR: {len(regressed)} net(s) counted as "
+                    f"connected before the write are open in the written output: {names}"
+                )
+                print(f"  Nets connected (verified): {stats['nets_routed']}/{nets_to_route}")
+    elif not quiet:
+        print("\n--- Output Connectivity Verification ---")
+        print("  All nets verified connected in written output")
+    return result
+
+
+def _apply_output_verification(
+    final_result, stats: dict, verification: _OutputVerification
+) -> None:
+    """Carry a verified-open regression into an escalation flow's result.
+
+    Issue #6376: ``final_result`` (and therefore ``args._last_layer_result``,
+    which the ``--auto-pcb-size`` wrapper reads) must report the verified
+    count, not the router's pre-write one.  No-op without a regression.
+    """
+    if not verification.regressed:
+        return
+    final_result.nets_routed = stats["nets_routed"]
+    final_result.completion = (
+        final_result.nets_routed / final_result.nets_to_route
+        if final_result.nets_to_route > 0
+        else 1.0
+    )
+    final_result.success = False
+
+
+def _print_output_verification_failure_banner(
+    verification: _OutputVerification,
+    nets_routed: int,
+    nets_to_route: int,
+    output_path,
+) -> None:
+    """Print the issue #6371 ``ROUTING FAILED`` banner body (shared, #6376)."""
+    regressed = verification.regressed
+    print(
+        f"ROUTING FAILED: {len(regressed)} net(s) open in the "
+        "written output (post-save connectivity verification)"
+    )
+    print("=" * 60)
+    print()
+    print("Net Statistics:")
+    print(f"  Multi-pad nets:  {nets_to_route}")
+    print(f"  Nets connected:  {nets_routed} (verified in written output)")
+    for info in sorted(regressed.values(), key=lambda i: i["net_name"]):
+        print(f"  {info['net_name']}: disconnected {', '.join(info['disconnected_pads'][:5])}")
+    print()
+    print(f"  Run 'kct check {output_path}' for the stranded-pad report")
+
+
+def _output_verification_exit(verification: _OutputVerification, args) -> int | None:
+    """Exit 6 for a post-save connectivity failure, else ``None``.
+
+    ``--strict`` makes any disconnected pad fatal (issue #2264); a net the
+    router counted as connected but the written file leaves open is fatal
+    without it (issue #6371).  Shared by every flow (issue #6376).
+    """
+    if getattr(args, "strict", False) and verification.has_disconnected:
+        return 6
+    if verification.regressed:
+        return 6
+    return None
 
 
 def _write_routed_pcb(
@@ -10513,6 +10697,21 @@ def route_with_layer_escalation(
         print(f"  Saved to: {output_path}")
         print(f"  Layer count: {final_result.layer_count}")
 
+    # Issue #6376: post-save output connectivity verification.  This flow
+    # returns before main_with_result's tail, so it runs the shared verifier
+    # itself -- before zone fill, matching main (pour nets are not routed).
+    _output_verification = _verify_written_output(
+        # _write_routed_pcb raises on a failed write, so a missing file
+        # here means the save was stubbed out (tests); nothing to verify.
+        output_path.read_text() if output_path.exists() else "",
+        final_result.router,
+        _final_multi_pad_ids,
+        final_result.net_map,
+        final_stats,
+        final_result.nets_to_route,
+        quiet=quiet,
+    )
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     # Must run BEFORE DRC so the DRC sees filled zones rather than bare
     # zone outlines and does not flag zone-to-trace clearance against
@@ -10600,6 +10799,10 @@ def route_with_layer_escalation(
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
+    # Issue #6376: carry a verified-open regression into ``final_result``
+    # before the banner and before ``args._last_layer_result`` is stashed.
+    _apply_output_verification(final_result, final_stats, _output_verification)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
@@ -10628,6 +10831,15 @@ def route_with_layer_escalation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif _output_verification.regressed:
+            # Issue #6371 / #6376: the written file leaves open a net the
+            # router counted as connected.  Never SUCCESS.
+            _print_output_verification_failure_banner(
+                _output_verification,
+                final_stats["nets_routed"],
+                final_result.nets_to_route,
+                output_path,
+            )
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(
@@ -10677,6 +10889,11 @@ def route_with_layer_escalation(
         # ``RoutingResultMetrics`` and call ``decide_escalation``.
         args._last_layer_result = final_result
 
+    # Issue #6376: post-save connectivity failure exits 6 in every flow
+    # (any disconnect under --strict; a counted-connected net without it).
+    _verify_rc = _output_verification_exit(_output_verification, args)
+    if _verify_rc is not None:
+        return _verify_rc
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline so the
         # caller exits with the distinct exit code (7) rather than the
@@ -11497,6 +11714,21 @@ def route_with_rule_relaxation(
         print(f"  Final trace width: {final_result.trace_width:.3f}mm")
         print(f"  Final clearance: {final_result.clearance:.3f}mm")
 
+    # Issue #6376: post-save output connectivity verification.  This flow
+    # returns before main_with_result's tail, so it runs the shared verifier
+    # itself -- before zone fill, matching main (pour nets are not routed).
+    _output_verification = _verify_written_output(
+        # _write_routed_pcb raises on a failed write, so a missing file
+        # here means the save was stubbed out (tests); nothing to verify.
+        output_path.read_text() if output_path.exists() else "",
+        final_result.router,
+        _final_multi_pad_ids,
+        final_result.net_map,
+        final_stats,
+        final_result.nets_to_route,
+        quiet=quiet,
+    )
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
@@ -11581,6 +11813,10 @@ def route_with_rule_relaxation(
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
+    # Issue #6376: carry a verified-open regression into ``final_result``
+    # before the banner and before ``args._last_layer_result`` is stashed.
+    _apply_output_verification(final_result, final_stats, _output_verification)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
@@ -11607,6 +11843,15 @@ def route_with_rule_relaxation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif _output_verification.regressed:
+            # Issue #6371 / #6376: the written file leaves open a net the
+            # router counted as connected.  Never SUCCESS.
+            _print_output_verification_failure_banner(
+                _output_verification,
+                final_stats["nets_routed"],
+                final_result.nets_to_route,
+                output_path,
+            )
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(args, output_path, "Routing complete with adaptive rules")
@@ -11642,6 +11887,11 @@ def route_with_rule_relaxation(
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
 
+    # Issue #6376: post-save connectivity failure exits 6 in every flow
+    # (any disconnect under --strict; a counted-connected net without it).
+    _verify_rc = _output_verification_exit(_output_verification, args)
+    if _verify_rc is not None:
+        return _verify_rc
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
         if getattr(args, "_auto_fix_status", None) == "skipped_deadline":
@@ -14035,6 +14285,21 @@ def route_with_combined_escalation(
         print(f"  Final trace width: {final_result.trace_width:.3f}mm")
         print(f"  Final clearance: {final_result.clearance:.3f}mm")
 
+    # Issue #6376: post-save output connectivity verification.  This flow
+    # returns before main_with_result's tail, so it runs the shared verifier
+    # itself -- before zone fill, matching main (pour nets are not routed).
+    _output_verification = _verify_written_output(
+        # _write_routed_pcb raises on a failed write, so a missing file
+        # here means the save was stubbed out (tests); nothing to verify.
+        output_path.read_text() if output_path.exists() else "",
+        final_result.router,
+        _final_multi_pad_ids,
+        final_result.net_map,
+        final_stats,
+        final_result.nets_to_route,
+        quiet=quiet,
+    )
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
@@ -14119,6 +14384,10 @@ def route_with_combined_escalation(
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
+    # Issue #6376: carry a verified-open regression into ``final_result``
+    # before the banner and before ``args._last_layer_result`` is stashed.
+    _apply_output_verification(final_result, final_stats, _output_verification)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
@@ -14145,6 +14414,15 @@ def route_with_combined_escalation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif _output_verification.regressed:
+            # Issue #6371 / #6376: the written file leaves open a net the
+            # router counted as connected.  Never SUCCESS.
+            _print_output_verification_failure_banner(
+                _output_verification,
+                final_stats["nets_routed"],
+                final_result.nets_to_route,
+                output_path,
+            )
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(
@@ -14187,6 +14465,11 @@ def route_with_combined_escalation(
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
 
+    # Issue #6376: post-save connectivity failure exits 6 in every flow
+    # (any disconnect under --strict; a counted-connected net without it).
+    _verify_rc = _output_verification_exit(_output_verification, args)
+    if _verify_rc is not None:
+        return _verify_rc
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
         if getattr(args, "_auto_fix_status", None) == "skipped_deadline":
@@ -21243,96 +21526,23 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Output connectivity verification (Issue #2264)
     # Re-parse written S-expressions and verify pad-to-pad connectivity
-    output_has_disconnected = False
     # Issue #6371: nets the router's own statistics counted as connected but
     # the written file leaves open.  Both checks now share one layer-aware
     # contact model, so a disagreement means copper changed between the
     # count and the write -- the false "24/24 connected" this guards against.
-    output_verification_regressed: dict[int, dict] = {}
-    if not args.dry_run and router.pads and router.nets and output_content:
-        from kicad_tools.router.io import verify_output_connectivity
-
-        # Build net_pads mapping (same as get_statistics)
-        verify_net_pads: dict[int, list] = {}
-        for net_id, pad_keys in router.nets.items():
-            if net_id not in multi_pad_net_ids:
-                continue
-            pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
-            if len(pad_list) >= 2:
-                verify_net_pads[net_id] = pad_list
-
-        # Build net name lookup
-        reverse_net_map = {v: k for k, v in net_map.items()}
-
-        output_connectivity = verify_output_connectivity(
-            pcb_content=output_content,
-            net_pads=verify_net_pads,
-            net_names=reverse_net_map,
+    # Issue #6376: the same helper runs in every escalation flow.
+    output_verification = _OutputVerification()
+    if not args.dry_run:
+        output_verification = _verify_written_output(
+            output_content,
+            router,
+            multi_pad_net_ids,
+            net_map,
+            stats,
+            nets_to_route,
+            quiet=quiet,
         )
-
-        disconnected_nets = {
-            nid: info
-            for nid, info in output_connectivity.items()
-            if not info["connected"] and info["total_pads"] >= 2
-        }
-
-        if disconnected_nets:
-            output_has_disconnected = True
-            _stat_conn = stats.get("connectivity") or {}
-            _nets_with_copper = {r.net for r in router.routes}
-            for nid, info in disconnected_nets.items():
-                counted = (
-                    _stat_conn[nid]["connected"]
-                    if nid in _stat_conn
-                    else (not _stat_conn and nid in _nets_with_copper)
-                )
-                if counted:
-                    output_verification_regressed[nid] = info
-            if output_verification_regressed:
-                # Reconcile the summary with the verified result so neither
-                # "Nets connected" nor the SUCCESS banner can repeat the
-                # router's pre-write count.
-                stats["nets_routed"] = max(
-                    0, stats["nets_routed"] - len(output_verification_regressed)
-                )
-                if "nets_partial" in stats:
-                    stats["nets_partial"] += len(output_verification_regressed)
-                if "nets_fully_connected" in stats:
-                    stats["nets_fully_connected"] = max(
-                        0, stats["nets_fully_connected"] - len(output_verification_regressed)
-                    )
-                    stats["has_disconnected_islands"] = True
-                for nid in output_verification_regressed:
-                    if nid in _stat_conn:
-                        _stat_conn[nid]["connected"] = False
-            if not quiet:
-                print("\n--- Output Connectivity Verification ---")
-                print(
-                    f"  WARNING: {len(disconnected_nets)} net(s) have disconnected "
-                    f"pads in written output"
-                )
-                for nid, info in sorted(disconnected_nets.items(), key=lambda x: x[1]["net_name"]):
-                    disc_str = ", ".join(info["disconnected_pads"][:5])
-                    if len(info["disconnected_pads"]) > 5:
-                        disc_str += f" (+{len(info['disconnected_pads']) - 5} more)"
-                    print(
-                        f"  {info['net_name']}: "
-                        f"{info['connected_pads']}/{info['total_pads']} pads connected"
-                        f" -- disconnected: {disc_str}"
-                    )
-                if output_verification_regressed:
-                    names = ", ".join(
-                        sorted(i["net_name"] for i in output_verification_regressed.values())
-                    )
-                    print(
-                        f"  ERROR: {len(output_verification_regressed)} net(s) counted as "
-                        f"connected before the write are open in the written output: {names}"
-                    )
-                    print(f"  Nets connected (verified): {stats['nets_routed']}/{nets_to_route}")
-        else:
-            if not quiet:
-                print("\n--- Output Connectivity Verification ---")
-                print("  All nets verified connected in written output")
+    output_verification_regressed = output_verification.regressed
 
     # Run power plane stitching if requested
     stitch_result = None
@@ -21587,21 +21797,9 @@ def _run_main_impl(args, parser, argv) -> int:
         elif output_verification_regressed:
             # Issue #6371: the written file leaves open a net the router
             # counted as connected.  Never SUCCESS; report the verified count.
-            print(
-                f"ROUTING FAILED: {len(output_verification_regressed)} net(s) open in the "
-                "written output (post-save connectivity verification)"
+            _print_output_verification_failure_banner(
+                output_verification, stats["nets_routed"], nets_to_route, output_path
             )
-            print("=" * 60)
-            print()
-            print("Net Statistics:")
-            print(f"  Multi-pad nets:  {nets_to_route}")
-            print(f"  Nets connected:  {stats['nets_routed']} (verified in written output)")
-            for info in sorted(output_verification_regressed.values(), key=lambda i: i["net_name"]):
-                print(
-                    f"  {info['net_name']}: disconnected {', '.join(info['disconnected_pads'][:5])}"
-                )
-            print()
-            print(f"  Run 'kct check {output_path}' for the stranded-pad report")
         elif _unverified and drc_passed and (all_nets_routed or meets_threshold):
             # Issue #6273: verification was skipped for --timeout, so neither
             # "SUCCESS" nor "DRC passed" may be printed for this board.
@@ -21815,7 +22013,10 @@ def _run_main_impl(args, parser, argv) -> int:
     #     written file that the router's own count had called connected --
     #     a false completion, never covered by --min-completion.  Nets the
     #     router already reported as partial/unrouted keep the threshold
-    #     codes below.
+    #     codes below.  Issue #6376: both rules apply to every flow -- the
+    #     direct path here and the layer-escalation (default), rule-
+    #     relaxation and combined escalation flows -- via the shared
+    #     _verify_written_output / _output_verification_exit helpers.
     # 7 = Auto-fix was requested but skipped because the total --timeout
     #     budget was exhausted by routing (issue #3238).  Distinct from
     #     exit 3 ("routing succeeded but DRC is dirty after auto-fix
@@ -21856,13 +22057,12 @@ def _run_main_impl(args, parser, argv) -> int:
     completion_ratio = stats["nets_routed"] / nets_to_route if nets_to_route > 0 else 1.0
     meets_threshold = completion_ratio >= args.min_completion
 
-    # --strict: output connectivity verification failure is fatal
-    if getattr(args, "strict", False) and output_has_disconnected:
-        return 6
+    # --strict: output connectivity verification failure is fatal.
     # Issue #6371: a verified-open net the router counted as connected is a
     # false completion; fail it even without --strict.
-    if output_verification_regressed:
-        return 6
+    _verify_rc = _output_verification_exit(output_verification, args)
+    if _verify_rc is not None:
+        return _verify_rc
 
     # Issue #3238: distinct exit code when auto-fix was requested but
     # skipped because the total wall-clock budget was exhausted.  This
