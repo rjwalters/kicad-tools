@@ -366,6 +366,10 @@ class OracleCompletionResult:
     #: (``ClosureAttempt.relaxed`` of the kept attempts).  Empty unless a
     #: closer deliberately relaxed a link.
     relaxed_links: list[str] = field(default_factory=list)
+    #: Issue #6399: ``ClosureAttempt.notes`` of the closer's LAST attempt (the
+    #: per-pad / per-link reasons a link stayed open), so ``kct route`` can
+    #: print why each ``still unconnected`` link was not closed.
+    closer_notes: list[str] = field(default_factory=list)
 
     @property
     def closed(self) -> int:
@@ -566,6 +570,8 @@ def run_oracle_completion(
         else:
             stop = STOP_DRC_REGRESSED
 
+        if attempt is not None:
+            result.closer_notes = list(attempt.notes)
         after_links = in_scope(geo_after) if kept else links
         result.rounds.append(
             OracleRound(
@@ -1092,13 +1098,25 @@ class PourLinkCloser:
                                 break
                         if chosen is None:
                             chosen = len(comps) - 1
-                        pair = component_terminals(
-                            comps[chosen], [c for k, c in enumerate(comps) if k != chosen], lk.net
-                        )
-                        if pair is not None:
+                        others = [c for k, c in enumerate(comps) if k != chosen]
+                        # Issue #6399: a link with a Zone end (every link
+                        # ``_cluster_links`` builds has one) is stranded from
+                        # the PLANE, so join to ``comps[0]`` -- the plane-owning
+                        # component -- first; the nearest island (often a
+                        # padless sliver) is only the fallback.
+                        targets: list[list[dict]] = []
+                        if chosen != 0 and "zone" in (lk.a.kind, lk.b.kind):
+                            targets.append([comps[0]])
+                        targets.append(others)
+                        for target in targets:
+                            pair = component_terminals(comps[chosen], target, lk.net)
+                            if pair is None:
+                                continue
                             route = route_link(
                                 pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
                             )
+                            if route is not None:
+                                break
                 if route is None:
                     note = f"{lk.describe()}: no clearance-legal route"
                     if rules is not base_rules:

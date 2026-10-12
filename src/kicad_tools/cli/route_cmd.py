@@ -7545,10 +7545,22 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         )
         for lk in result.final_link_details[:5]:
             print(f"    still unconnected: {lk.describe()}")
+            # Issue #6399: why the closer left it open (last attempt's notes).
+            for reason in _closer_reasons_for(lk, result.closer_notes):
+                print(f"      reason: {reason}")
         # Issue #6374: a link closed below its class clearance is never silent.
         for line in result.relaxed_links:
             print(f"    RELAXED: {line}")
     return result.final_links
+
+
+def _closer_reasons_for(link, notes) -> list[str]:
+    """The closer notes (Issue #6399) that name ``link`` or one of its pads."""
+    keys = [link.describe()]
+    for end in (link.a, link.b):
+        if end.ref and end.pad:
+            keys.append(f"{end.ref}.{end.pad}")
+    return [n for n in notes if any(k in n for k in keys)]
 
 
 def _print_stranded_pour_failure_banner(args, output_path) -> None:
