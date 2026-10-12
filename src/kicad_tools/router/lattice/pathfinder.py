@@ -2303,7 +2303,13 @@ class LatticePathfinder:
         # Attempt each consistent parity through the FULL pipeline: a parity
         # whose shortest path emits degenerate/blocked legs must not doom the
         # pair when the other parity works.
-        reason = "pair-no-path"
+        #
+        # Issue #6373: two different failures used to share the initial
+        # ``pair-no-path`` value and were indistinguishable in the log.
+        # ``pair-no-parity`` now means NO parity had stubs on both ends, so
+        # no search ever ran; ``pair-no-path`` is reserved for an A* that
+        # actually ran and was exhausted.
+        reason = "pair-no-parity"
         for bit in sorted((True, False), key=parity_rank):
             if not by_bit_a[bit] or not by_bit_b[bit]:
                 continue
@@ -2370,6 +2376,56 @@ class LatticePathfinder:
                         return "self-drc-segment-via-coincident"
         return None
 
+    def _route_single_into(
+        self,
+        item: Connection,
+        routes: dict[object, Route],
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+    ) -> str | None:
+        """Route ONE single-ended connection and commit it (one pass).
+
+        Shared by ordinary singles and the #6373 uncoupled-fallback pair legs
+        so both go through the identical search + self-DRC + commit path.
+        Returns ``None`` on success (``routes[key]`` set and the copper
+        committed), else the decline reason -- nothing is committed then.
+        """
+        key, start, end, net_class = item
+        plan_options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
+        result, reason = self._route_impl(
+            start,
+            end,
+            net_class,
+            committed=committed,
+            history=history,
+            present=present,
+            **plan_options,
+        )
+        if result is None:
+            return reason
+        # Final self-DRC gate (#4318): a route whose own segment body
+        # runs across its own via center is malformed copper the
+        # checker cannot repair -- decline it honestly rather than
+        # ship a 0.000mm segment-to-via coincidence.
+        self_reason = self._self_drc_reason(result)
+        if self_reason is not None:
+            return self_reason
+        routes[key] = result.route
+        # Commit each segment at the width it was EMITTED at (issue
+        # #4293): the widened lattice body is spaced against 2.6 mm
+        # copper as 2.6 mm copper, and a tapered escape neck is spaced
+        # honestly as neck copper -- never the taper cheating the
+        # spacing model.  Clearance stays the class clearance (#4271).
+        _half, clr = self._conn_geometry(net_class, start.net)
+        for layer_idx, points, widths in result.runs:
+            committed.add_run_widths(layer_idx, points, start.net, [w / 2.0 for w in widths], clr)
+        for via_pt in result.via_points:
+            committed.add_via(via_pt, start.net, clr)
+        return None
+
     def route_netset(
         self,
         connections: list[Connection],
@@ -2382,6 +2438,7 @@ class LatticePathfinder:
         present_cost_growth: float = 1.6,
         history_increment_factor: float = 1.0,
         deadline: float | None = None,
+        uncoupled_fallback: bool = False,
     ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
         """PathFinder/VPR-style negotiation over capacity-1 lattice resources.
 
@@ -2406,6 +2463,25 @@ class LatticePathfinder:
         gap while the pair's internal gap stays by-construction.  Per-pair
         outcomes ("coupled" or a decline reason) land in
         :attr:`pair_outcomes` for the best pass.
+
+        Issue #6373: with ``uncoupled_fallback=False`` (the default, the
+        #4270 v1 contract) a declined pair is never split -- it emits nothing
+        and its main run stays open.  With ``uncoupled_fallback=True`` a pair
+        whose coupled search declines has its two main-run legs
+        (``pad_p_a -> pad_p_b`` and ``pad_n_a -> pad_n_b``) routed
+        single-ended *in the same pass*, immediately after the decline (so
+        they keep the pair's corridor priority over the singles).  Each leg
+        goes through the ordinary :meth:`_route_impl` + :meth:`_self_drc_reason`
+        gates, is keyed ``(pc.key, "P")`` / ``(pc.key, "N")`` exactly like a
+        coupled success, and a leg that cannot route lands in
+        :attr:`failure_reasons` under its own key -- nothing partial is ever
+        emitted for a leg.  The pair's outcome is recorded as
+        ``"uncoupled-fallback:<decline reason>"``.  Stats count a fallback
+        pair as its two legs (``routed``/``total`` each gain one extra unit),
+        and between passes a fallback pair whose coupled run is still
+        geometrically possible on an empty board keeps accruing demand
+        history, so negotiation may yet recover it as ``"coupled"`` (a pass
+        with more coupled pairs wins a completion tie).
 
         The lattice is built **once** (:attr:`lattice_builds` == 1 across the
         whole negotiation); rip-up resets only the committed-copper model.
@@ -2464,6 +2540,14 @@ class LatticePathfinder:
         best_reasons: dict[object, str] = {}
         best_pair_outcomes: dict[object, str] = {}
         best_count = -1
+        # Issue #6373: best-pass ranking.  ``best_count`` keeps its pre-#6373
+        # meaning (completed items) and leads the tuple, so with no fallback
+        # the selection is byte-identical; ties then prefer more routed
+        # fallback legs, then more COUPLED pairs.
+        best_score: tuple[int, int, int] = (-1, -1, -1)
+        # Leg-unit accounting of the best pass for the honest stats.
+        best_fallback_pairs = 0
+        best_fallback_legs = 0
         converged = False
         iterations_run = 0
         present = present_cost_initial
@@ -2495,6 +2579,10 @@ class LatticePathfinder:
             pair_outcomes: dict[object, str] = {}
             routed_items = 0
             failed: list[tuple[int, Any]] = []
+            # Issue #6373: per-pass uncoupled-fallback bookkeeping.
+            fallback_pairs: list[Any] = []
+            fallback_legs = 0
+            coupled_count = 0
             for _idx, (_length, kind, item) in enumerate(items):
                 # Issue #4472: abort mid-pass on the deadline too, so a single
                 # slow search inside one pass cannot overrun the budget.
@@ -2515,12 +2603,42 @@ class LatticePathfinder:
                     pres, preason = self._route_pair_impl(
                         item, committed=committed, history=history, present=present
                     )
+                    if pres is None and uncoupled_fallback:
+                        # Issue #6373: route the declined pair's main run as
+                        # two single-ended legs, right now, before any single.
+                        pair_outcomes[item.key] = f"uncoupled-fallback:{preason}"
+                        fallback_pairs.append(item)
+                        legs_ok = 0
+                        for pol, pad_a, pad_b in (
+                            ("P", item.pad_p_a, item.pad_p_b),
+                            ("N", item.pad_n_a, item.pad_n_b),
+                        ):
+                            leg_key = (item.key, pol)
+                            leg_item = (leg_key, pad_a, pad_b, item.net_class)
+                            leg_reason = self._route_single_into(
+                                leg_item,
+                                routes,
+                                committed=committed,
+                                history=history,
+                                present=present,
+                                escape_plan=escape_plan,
+                            )
+                            if leg_reason is None:
+                                legs_ok += 1
+                            else:
+                                reasons[leg_key] = leg_reason
+                                failed.append((0, leg_item))
+                        fallback_legs += legs_ok
+                        if legs_ok == 2:
+                            routed_items += 1
+                        continue
                     if pres is None:
                         reasons[item.key] = preason
                         pair_outcomes[item.key] = preason
                         failed.append((kind, item))
                         continue
                     pair_outcomes[item.key] = "coupled"
+                    coupled_count += 1
                     routed_items += 1
                     routes[(item.key, "P")] = pres.routes[0]
                     routes[(item.key, "N")] = pres.routes[1]
@@ -2532,55 +2650,35 @@ class LatticePathfinder:
                         half, clr = self._conn_geometry(item.net_class, leg_net)
                         committed.add_run(layer_idx, points, leg_net, half, clr)
                     continue
-                key, start, end, net_class = item
-                plan_options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
-                result, reason = self._route_impl(
-                    start,
-                    end,
-                    net_class,
+                key = item[0]
+                reason = self._route_single_into(
+                    item,
+                    routes,
                     committed=committed,
                     history=history,
                     present=present,
-                    **plan_options,
+                    escape_plan=escape_plan,
                 )
-                if result is None:
+                if reason is not None:
                     reasons[key] = reason
                     failed.append((kind, item))
                     continue
-                # Final self-DRC gate (#4318): a route whose own segment body
-                # runs across its own via center is malformed copper the
-                # checker cannot repair -- decline it honestly rather than
-                # ship a 0.000mm segment-to-via coincidence.
-                self_reason = self._self_drc_reason(result)
-                if self_reason is not None:
-                    reasons[key] = self_reason
-                    failed.append((kind, item))
-                    continue
                 routed_items += 1
-                routes[key] = result.route
-                # Commit each segment at the width it was EMITTED at (issue
-                # #4293): the widened lattice body is spaced against 2.6 mm
-                # copper as 2.6 mm copper, and a tapered escape neck is spaced
-                # honestly as neck copper -- never the taper cheating the
-                # spacing model.  Clearance stays the class clearance (#4271).
-                _half, clr = self._conn_geometry(net_class, start.net)
-                for layer_idx, points, widths in result.runs:
-                    committed.add_run_widths(
-                        layer_idx, points, start.net, [w / 2.0 for w in widths], clr
-                    )
-                for via_pt in result.via_points:
-                    committed.add_via(via_pt, start.net, clr)
 
-            if escape_plan and routed_items <= best_count:
+            score = (routed_items, fallback_legs, coupled_count)
+            if escape_plan and score <= best_score:
                 # A local reservation is a proposal, not a permanent lock.
                 # Release it when its full pass fails to improve completion.
                 escape_plan = {}
 
-            if routed_items > best_count:
+            if score > best_score:
+                best_score = score
                 best_count = routed_items
                 best_routes = routes
                 best_reasons = reasons
                 best_pair_outcomes = pair_outcomes
+                best_fallback_pairs = len(fallback_pairs)
+                best_fallback_legs = fallback_legs
 
             # Issue #4472: a deadline-truncated pass is NOT convergence -- some
             # items were never attempted, so ``failed`` is incomplete.  Record
@@ -2588,11 +2686,28 @@ class LatticePathfinder:
             if deadline_hit:
                 break
 
-            if not failed:
+            # Issue #6373: a pair served by the uncoupled fallback is routed,
+            # but not the outcome negotiation is aiming for.  When its coupled
+            # run is geometrically possible on an EMPTY board, the decline was
+            # congestion: keep it in the demand set so history pressures the
+            # occupants and a later pass can couple it.  A structurally blocked
+            # pair (no fresh-board run either) adds no demand and does not
+            # hold convergence back.
+            congested_fallback: list[Any] = []
+            if fallback_pairs and it < max_iterations - 1:
+                for pc in fallback_pairs:
+                    probe, _r = self._route_pair_impl(
+                        pc, committed=self._fresh_committed(), history=history, present=present
+                    )
+                    if probe is not None:
+                        congested_fallback.append(pc)
+
+            if not failed and not congested_fallback:
                 converged = True
                 break
             if it == max_iterations - 1:
                 break
+            failed.extend((1, pc) for pc in congested_fallback)
 
             if it == 0:
                 escape_plan = plan_tapered_escapes(self, connections, deadline)
@@ -2656,11 +2771,25 @@ class LatticePathfinder:
         # honest "elapsed of a Ys budget" figure even when the deadline was
         # never reached.  ``None`` when the negotiation ran unbudgeted.
         budget_s = max(0.0, deadline - start_time) if deadline is not None else None
+        # Issue #6373: a fallback pair is two single-ended legs, so it counts
+        # as two units in both ``routed`` and ``total``.  ``best_count`` counts
+        # a fully-routed fallback pair once; add its second leg, plus every
+        # routed leg of a partially-routed fallback pair.
+        routed_units = best_count if best_count >= 0 else 0
+        if best_fallback_pairs:
+            full_pairs = sum(
+                1
+                for pc in pairs
+                if best_pair_outcomes.get(pc.key, "").startswith("uncoupled-fallback:")
+                and (pc.key, "P") in best_routes
+                and (pc.key, "N") in best_routes
+            )
+            routed_units += best_fallback_legs - full_pairs
         stats = LatticeNegotiationStats(
             iterations=iterations_run,
             converged=converged,
-            routed=best_count if best_count >= 0 else 0,
-            total=len(connections) + len(pairs),
+            routed=routed_units,
+            total=len(connections) + len(pairs) + best_fallback_pairs,
             lattice_builds=self.lattice_builds,
             deadline_hit=deadline_hit,
             elapsed_s=time.monotonic() - start_time,

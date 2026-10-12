@@ -4338,9 +4338,15 @@ class Autorouter:
         connections (one per pair main run); their extra same-net pads
         attach to the nearest reserved endpoint as ordinary single-ended
         connections.  A pair that cannot complete a coupled planar run
-        DECLINES with a reason (reported below and in
-        :attr:`_lattice_pair_outcomes`) -- it is never split into uncoupled
-        legs.
+        DECLINES with a reason, and (issue #6373) its main run is then routed
+        as two single-ended legs in the same pass -- the outcome is reported
+        as ``uncoupled-fallback:<reason>`` below and in
+        :attr:`_lattice_pair_outcomes`, a diff-pair *warning*.  Before #6373 a
+        declined pair was never split, which left its main run open and every
+        extra pad anchored to it stranded as an island (board 03 USB_D: the
+        J1.B-row -> R3/R4 trunk crosses the pass-through ESD part U2's own
+        pads, so no planar coupled run exists).  An open net is never better
+        than an uncoupled one, so the fallback is always on for this engine.
 
         Kelvin sense nets (issue #4476): the non-coupled star's hub comes from
         :func:`_star_topology_pads`, so a recognised current-sense net is
@@ -4431,6 +4437,12 @@ class Autorouter:
                 f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}",
                 f"{pc.pad_p_b.ref}.{pc.pad_p_b.pin}",
             )
+            # Issue #6373: the uncoupled-fallback legs carry their own keys.
+            endpoints[(pc.key, "P")] = endpoints[pc.key]
+            endpoints[(pc.key, "N")] = (
+                f"{pc.pad_n_a.ref}.{pc.pad_n_a.pin}",
+                f"{pc.pad_n_b.ref}.{pc.pad_n_b.pin}",
+            )
         self._lattice_connection_endpoints = endpoints
 
         if not connections and not coupled:
@@ -4504,6 +4516,9 @@ class Autorouter:
             fixed_clearance=fixed_clearance,
             max_iterations=max_iterations,
             deadline=deadline,
+            # Issue #6373: a declined coupled pair falls back to two
+            # single-ended legs instead of leaving its main run open.
+            uncoupled_fallback=True,
         )
         self._lattice_negotiation_stats = stats
         # Issue #4477 (epic #4465, Phase 4): copy the per-connection decline
@@ -4528,6 +4543,15 @@ class Autorouter:
                 # Single-ended keys are (net_id, seq); pair keys (#4270) are
                 # ("pair", p_net, n_net) and are named by their pair below.
                 net_id = key[0] if isinstance(key, tuple) else None
+                if (
+                    isinstance(net_id, tuple)
+                    and len(key) == 2
+                    and key[1] in ("P", "N")
+                    and len(net_id) == 3
+                ):
+                    # Issue #6373: an uncoupled-fallback leg keyed
+                    # ``(pair_key, "P"|"N")`` -- name it by its own net.
+                    net_id = net_id[1] if key[1] == "P" else net_id[2]
                 if isinstance(net_id, int):
                     name = self.net_names.get(net_id, str(net_id))
                 else:
@@ -4550,6 +4574,16 @@ class Autorouter:
             print(f"  Diff pairs (lattice): {n_coupled}/{len(self._lattice_pair_outcomes)} coupled")
             for name, outcome in sorted(self._lattice_pair_outcomes.items()):
                 print(f"    {name}: {outcome}")
+            # Issue #6373: a pair routed by the uncoupled fallback is a
+            # diff-pair WARNING (coupling / skew not guaranteed), not an open
+            # net -- connectivity is judged on the legs like any other net.
+            for name, outcome in sorted(self._lattice_pair_outcomes.items()):
+                if outcome.startswith("uncoupled-fallback:"):
+                    print(
+                        f"  WARNING: diff pair {name} routed uncoupled "
+                        f"(coupled run declined: {outcome.split(':', 1)[1]}); "
+                        "intra-pair gap and length matching are not guaranteed"
+                    )
 
         by_net: dict[int, list[Route]] = {}
         for route in routes_by_key.values():

@@ -19,8 +19,11 @@ care that offset vertices sit off-node.
 
 **v1 pair agents are planar** (``allow_vias=False``): a pair that cannot
 complete a coupled run on one layer DECLINES honestly, with a per-pair
-reason -- it never splits into uncoupled legs and never ships a short
-(#3906 discipline).
+reason, and never ships a short (#3906 discipline).  The coupled agent
+itself never splits; issue #6373 added an opt-in (``route_netset(...,
+uncoupled_fallback=True)``, always on from the autorouter) that then routes
+the declined pair's main run as two ordinary single-ended legs, reported as
+``uncoupled-fallback:<reason>`` -- a diff-pair warning, not an open net.
 
 This module holds the pure-geometry / model-query halves of the feature so
 :mod:`.pathfinder` only gains a thin fat-agent branch and

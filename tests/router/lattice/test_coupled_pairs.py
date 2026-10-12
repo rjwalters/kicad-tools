@@ -6,7 +6,12 @@ Unit coverage for the fat-agent centerline + geometric offset emission:
 * exact-pitch emission on the coupled body;
 * polarity-side selection (P leg lands on the P pads' side);
 * decline paths: blocked fat envelope, polarity twist, no planar path --
-  every decline carries a reason and emits NOTHING (never split, #3906);
+  every decline carries a reason and, with the default
+  ``uncoupled_fallback=False``, emits NOTHING (never split, #3906);
+* decline reasons distinguished: ``pair-no-parity`` (no search ran) vs
+  ``pair-no-path`` (an exhausted A*) (issue #6373);
+* the #6373 uncoupled fallback: a declined pair's main run routed as two
+  single-ended legs in the same pass, extras landing on connected copper;
 * engagement gating (``coupled_routing=False`` classes stay single-ended).
 
 The board-06 witness (>= coupled floor, intra-pair validator, DRC) lives in
@@ -239,13 +244,11 @@ def test_pair_routes_coupled_at_exact_pitch_with_correct_polarity() -> None:
 
 def test_pair_declines_when_fat_envelope_is_blocked() -> None:
     # A wall slot 0.8 mm wide: passable for one 0.2/0.15 trace (band 0.3 mm)
-    # but NOT for the 0.3-pitch fat agent (band 0.0 mm).  The pair must
-    # decline with a reason and emit NOTHING -- never split into uncoupled
-    # legs (#4270 v1 semantics).
-    walls = [
-        _pad(15.0, 9.15, 9, "WALL", ref="WT", width=0.5, height=6.5),
-        _pad(15.0, 1.85, 9, "WALL", ref="WB", width=0.5, height=6.5),
-    ]
+    # but NOT for the 0.3-pitch fat agent (band 0.0 mm).  With the default
+    # ``uncoupled_fallback=False`` the pair must decline with a reason and
+    # emit NOTHING -- never split into uncoupled legs (#4270 v1 semantics,
+    # still the pathfinder default; #6373 made the split opt-in).
+    walls = _slot_walls()
     pf, pc = _pair_board(walls)
     routes, stats = pf.route_netset([], coupled=[pc])
     assert pf.pair_outcomes[pc.key] != "coupled"
@@ -385,6 +388,9 @@ def test_pair_declines_with_no_planar_path() -> None:
     assert routes == {}
     assert pf.pair_outcomes[pc.key] != "coupled"
     assert pc.key in pf.failure_reasons
+    # Issue #6373: stubs exist at both ends with a consistent parity, so the
+    # search RAN and was exhausted -> the reason is exactly ``pair-no-path``.
+    assert pf.pair_outcomes[pc.key] == "pair-no-path", pf.pair_outcomes
 
 
 def test_polarity_twist_resolves_via_hook_when_room_exists() -> None:
@@ -479,3 +485,216 @@ def test_core_stays_single_ended_without_coupled_routing_opt_in() -> None:
     assert routes, "single-ended fallback must still route the net"
     # No coupled keys in the negotiated cache: both nets served as singles.
     assert router._lattice_negotiation_stats.total == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #6373: decline-reason split + uncoupled fallback
+# ---------------------------------------------------------------------------
+
+
+def _slot_walls() -> list[Pad]:
+    """Two wall pads leaving a 0.8 mm slot: single-trace OK, fat pair not."""
+    return [
+        _pad(15.0, 9.15, 9, "WALL", ref="WT", width=0.5, height=6.5),
+        _pad(15.0, 1.85, 9, "WALL", ref="WB", width=0.5, height=6.5),
+    ]
+
+
+def _route_touches(route, pad: Pad) -> bool:
+    half_w, half_h = pad.width / 2.0 + 1e-6, pad.height / 2.0 + 1e-6
+    for seg in route.segments:
+        for x, y in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+            if abs(x - pad.x) <= half_w and abs(y - pad.y) <= half_h:
+                return True
+    return False
+
+
+def _net_connected(routes: list, pads: list[Pad]) -> bool:
+    """Every pad lies in ONE component of the routes' segment graph."""
+    parent: dict[object, object] = {}
+
+    def find(x: object) -> object:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: object, b: object) -> None:
+        parent[find(a)] = find(b)
+
+    def pt(x: float, y: float) -> tuple[float, float]:
+        return (round(x, 4), round(y, 4))
+
+    for route in routes:
+        for seg in route.segments:
+            union(pt(seg.x1, seg.y1), pt(seg.x2, seg.y2))
+    for i, pad in enumerate(pads):
+        for route in routes:
+            for seg in route.segments:
+                for x, y in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+                    if (
+                        abs(x - pad.x) <= pad.width / 2.0 + 1e-6
+                        and abs(y - pad.y) <= pad.height / 2.0 + 1e-6
+                    ):
+                        union(("pad", i), pt(x, y))
+    roots = {find(("pad", i)) for i in range(len(pads))}
+    return len(roots) == 1
+
+
+def test_pair_no_parity_reason_when_no_consistent_parity(monkeypatch) -> None:
+    # Force every A-end stub onto parity True and every B-end stub onto
+    # parity False: no parity has stubs on BOTH sides, so no search may run
+    # and the decline is the distinct ``pair-no-parity`` (#6373), never the
+    # exhausted-A* ``pair-no-path``.
+    from kicad_tools.router.lattice import coupled as coupled_mod
+
+    pf, pc = _pair_board()
+    monkeypatch.setattr(coupled_mod, "side_bit", lambda _d, pad_p, _pad_n: pad_p is pc.pad_p_a)
+    searches: list[object] = []
+    real_route_impl = pf._route_impl
+
+    def counting_route_impl(*args, **kwargs):
+        searches.append(kwargs.get("extra_clearance"))
+        return real_route_impl(*args, **kwargs)
+
+    monkeypatch.setattr(pf, "_route_impl", counting_route_impl)
+    pf.build()
+    result, reason = pf._route_pair_impl(
+        pc, committed=pf._fresh_committed(), history={}, present=1.0
+    )
+    assert result is None
+    assert reason == "pair-no-parity"
+    assert searches == [], "no fat search may run without a consistent parity"
+
+
+def test_uncoupled_fallback_routes_both_legs_when_fat_envelope_blocked() -> None:
+    pf, pc = _pair_board(_slot_walls())
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    outcome = pf.pair_outcomes[pc.key]
+    assert outcome.startswith("uncoupled-fallback:"), pf.pair_outcomes
+    # The underlying coupled decline reason is carried in the outcome.
+    assert outcome.split(":", 1)[1].startswith("pair-")
+    assert set(routes) == {(pc.key, "P"), (pc.key, "N")}
+    assert stats.routed == 2 and stats.total == 2, stats
+    assert pf.failure_reasons == {}, pf.failure_reasons
+    assert stats.converged
+    # Each leg is its own net and lands on both of its own pads.
+    route_p, route_n = routes[(pc.key, "P")], routes[(pc.key, "N")]
+    assert route_p.net == 1 and route_n.net == 2
+    assert _route_touches(route_p, pc.pad_p_a) and _route_touches(route_p, pc.pad_p_b)
+    assert _route_touches(route_n, pc.pad_n_a) and _route_touches(route_n, pc.pad_n_b)
+    # Never ships a short: legs keep the full copper gap from each other.
+    copper_gap = _RULES.trace_width + _RULES.trace_clearance
+    for s1 in route_p.segments:
+        for s2 in route_n.segments:
+            if s1.layer == s2.layer:
+                d = seg_seg_dist((s1.x1, s1.y1), (s1.x2, s1.y2), (s2.x1, s2.y1), (s2.x2, s2.y2))
+                assert d >= copper_gap - 1e-6
+
+
+def test_uncoupled_fallback_reports_unroutable_leg_without_emitting_it() -> None:
+    # Full-height wall on both layers: neither the pair NOR a single leg can
+    # cross (legs are routed with vias allowed, but the wall spans both
+    # layers).  Each failing leg is reported under its own key and nothing
+    # partial is emitted.
+    wall_f = _pad(15.0, 6.0, 9, "WALL", ref="WF", width=0.6, height=13.0)
+    wall_b = Pad(
+        x=15.0,
+        y=6.0,
+        width=0.6,
+        height=13.0,
+        net=9,
+        net_name="WALL",
+        layer=Layer.B_CU,
+        ref="WB",
+        pin="1",
+    )
+    pf, pc = _pair_board([wall_f, wall_b])
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    assert pf.pair_outcomes[pc.key] == "uncoupled-fallback:pair-no-path"
+    assert routes == {}
+    assert set(pf.failure_reasons) == {(pc.key, "P"), (pc.key, "N")}
+    assert stats.routed == 0 and stats.total == 2
+
+
+def test_uncoupled_fallback_coupled_pair_unchanged() -> None:
+    # A pair that couples must be byte-for-byte the same with the flag on.
+    pf, pc = _pair_board()
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    pf0, pc0 = _pair_board()
+    routes0, stats0 = pf0.route_netset([], coupled=[pc0])
+    assert pf.pair_outcomes[pc.key] == "coupled"
+    assert stats.routed == stats0.routed == 1 and stats.total == stats0.total == 1
+    for key in ((pc.key, "P"), (pc.key, "N")):
+        segs = [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in routes[key].segments]
+        segs0 = [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in routes0[key].segments]
+        assert segs == segs0
+
+
+def test_uncoupled_fallback_extras_land_on_connected_copper() -> None:
+    # 3 pads per net: the coupled main run J1 -> U1 is blocked by the slot,
+    # and each net has an extra pad anchored (as the autorouter does) on the
+    # FAR reserved endpoint.  Without the fallback the extras form islands
+    # with the far endpoint; with it every pad of each net is one component.
+    extra_p = _pad(27.0, 2.5, 1, "D+", ref="U2")
+    extra_n = _pad(27.0, 8.5, 2, "D-", ref="U2")
+    pf, pc = _pair_board(_slot_walls() + [extra_p, extra_n])
+    singles = [
+        ((1, 0), pc.pad_p_b, extra_p, _HS),
+        ((2, 0), pc.pad_n_b, extra_n, _HS),
+    ]
+
+    routes0, stats0 = pf.route_netset(singles, coupled=[pc])
+    assert stats0.routed == 2, "extras route; only the coupled main run is open"
+    assert not _net_connected(
+        [r for r in routes0.values() if r.net == 1], [pc.pad_p_a, pc.pad_p_b, extra_p]
+    )
+
+    pf2, pc2 = _pair_board(_slot_walls() + [extra_p, extra_n])
+    singles2 = [
+        ((1, 0), pc2.pad_p_b, extra_p, _HS),
+        ((2, 0), pc2.pad_n_b, extra_n, _HS),
+    ]
+    routes, stats = pf2.route_netset(singles2, coupled=[pc2], uncoupled_fallback=True)
+    assert pf2.pair_outcomes[pc2.key].startswith("uncoupled-fallback:")
+    assert stats.routed == stats.total == 4, (stats, pf2.failure_reasons)
+    for net, pads in (
+        (1, [pc2.pad_p_a, pc2.pad_p_b, extra_p]),
+        (2, [pc2.pad_n_a, pc2.pad_n_b, extra_n]),
+    ):
+        assert _net_connected([r for r in routes.values() if r.net == net], pads), net
+
+
+def test_core_uses_uncoupled_fallback_for_blocked_pair(capsys) -> None:
+    # Through the Autorouter (core.py): the lattice engine always enables
+    # the fallback, so a blocked pair is reported as a diff-pair WARNING and
+    # both nets still get copper (issue #6373).
+    router = _autorouter({"D+": _HS, "D-": _HS})
+    for i, wall in enumerate(_slot_walls()):
+        # One single-pad net per wall: an obstacle, never itself routed.
+        wall = Pad(
+            x=wall.x,
+            y=wall.y,
+            width=wall.width,
+            height=wall.height,
+            net=20 + i,
+            net_name=f"WALL{i}",
+            layer=Layer.F_CU,
+            ref=wall.ref,
+            pin="1",
+        )
+        key = (wall.ref, "1")
+        router.pads[key] = wall
+        router.nets.setdefault(wall.net, []).append(key)
+        router.net_names[wall.net] = wall.net_name
+    routes_p = router.route_net(1)
+    outcome = router._lattice_pair_outcomes["D"]
+    assert outcome.startswith("uncoupled-fallback:"), router._lattice_pair_outcomes
+    assert routes_p and all(r.net == 1 for r in routes_p)
+    routes_n = router.route_net(2)
+    assert routes_n and all(r.net == 2 for r in routes_n)
+    out = capsys.readouterr().out
+    assert "WARNING: diff pair D routed uncoupled" in out
+    stats = router._lattice_negotiation_stats
+    assert stats.routed == stats.total == 2
