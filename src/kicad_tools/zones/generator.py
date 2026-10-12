@@ -1227,6 +1227,21 @@ def _existing_zone_priority_by_layer(
     return by_layer
 
 
+def _existing_zone_nets_by_layer(
+    pcb: PCB,
+    pour_net_names: set[str] | None = None,
+) -> dict[str, set[str]]:
+    """Map copper layer -> names of nets owning pre-existing pours (#6402)."""
+    by_layer: dict[str, set[str]] = {}
+    for zone in pcb.zones:
+        if not zone.net_name:
+            continue
+        if pour_net_names and zone.net_name in pour_net_names:
+            continue
+        by_layer.setdefault(zone.layer, set()).add(zone.net_name)
+    return by_layer
+
+
 def _assign_layers_for_pour_nets(
     copper_layer_count: int,
     pour_nets: list[tuple[str, NetClass]],
@@ -1598,6 +1613,7 @@ def _compute_pour_outlines(
     margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
     occupied_layers: Collection[str] | None = None,
     skipped_out: list[ZonePartitionError] | None = None,
+    incumbent_nets_by_layer: dict[str, set[str]] | None = None,
 ) -> dict[str, list[tuple[float, float]] | None]:
     """Compute per-net pour outlines for the given layer assignments.
 
@@ -1654,6 +1670,13 @@ def _compute_pour_outlines(
         occupied_layers: Layers that already host pre-existing zones
             (Issue #5590).  Each such layer is treated as shared even
             when only one new zone lands on it.
+        incumbent_nets_by_layer: Layer -> names of nets owning pre-existing
+            zones on that layer (Issue #6402).  A newly allocated
+            bounding-box outline on such a layer is carved so it does not
+            cover the incumbent nets' pads (see
+            :func:`_carve_incumbent_pads`); otherwise the island cuts those
+            pads off from the incumbent plane (board 03's VBUS island
+            swallowing VCC's U1/C1 on ``In2.Cu``).
         skipped_out: Opt-in degrade-gracefully collector (Issue #5864).
             When a list is supplied, a net whose outline cannot be made
             disjoint is **skipped** instead of aborting the whole
@@ -1929,7 +1952,98 @@ def _compute_pour_outlines(
             winners_union = _union_polygons(winners_union, subtrahend_for_winners)
             winners_so_far.append(net_name)
 
+    # Issue #6402: keep bounding-box islands off the incumbent pours' pads.
+    if incumbent_nets_by_layer:
+        for net_name, layer, _ in assignments:
+            incumbents = incumbent_nets_by_layer.get(layer)
+            outline = outlines.get(net_name)
+            if not incumbents or outline is None:
+                continue
+            incumbent_pads: list[tuple[float, float]] = []
+            for inc in sorted(incumbents - {net_name}):
+                incumbent_pads.extend(_net_pad_positions_absolute(pcb, inc))
+            own_pads = _net_pad_positions_absolute(pcb, net_name)
+            outlines[net_name] = _carve_incumbent_pads(outline, own_pads, incumbent_pads)
+
     return outlines
+
+
+def _carve_incumbent_pads(
+    outline: list[tuple[float, float]],
+    own_pads: list[tuple[float, float]],
+    incumbent_pads: list[tuple[float, float]],
+    margin_mm: float = PAD_SAFE_MARGIN_MM,
+) -> list[tuple[float, float]]:
+    """Carve *outline* so it does not cover *incumbent_pads* (Issue #6402).
+
+    Subtracts a ``margin_mm`` box around every incumbent pad lying inside
+    the outline.  KiCad outlines cannot carry holes, so when the plain
+    difference is not a single hole-free polygon that still covers every
+    own pad, the outline is shrunk to the own pads' tight neighbourhood
+    (pad-safe bbox) and carved again.  If neither yields a valid polygon
+    the outline is returned unchanged (never worse than before).
+    """
+    try:
+        from shapely.geometry import Point, Polygon
+    except ImportError:
+        return outline
+
+    base = Polygon(outline)
+    inside = [p for p in incumbent_pads if base.buffer(margin_mm).contains(Point(p))]
+    if not inside:
+        return outline
+    blockers = None
+    for x, y in inside:
+        box = [
+            (x - margin_mm, y - margin_mm),
+            (x + margin_mm, y - margin_mm),
+            (x + margin_mm, y + margin_mm),
+            (x - margin_mm, y + margin_mm),
+        ]
+        blockers = _union_polygons(blockers, box)
+
+    def _valid(poly: list[tuple[float, float]] | None) -> bool:
+        if poly is None:
+            return False
+        shape = Polygon(poly)
+        if not shape.is_valid:
+            return False
+        return all(shape.buffer(1e-6).contains(Point(p)) for p in own_pads)
+
+    carved = _subtract_polygon(outline, blockers)
+    if _valid(carved):
+        return carved  # type: ignore[return-value]
+
+    # Interior pads would leave a hole: open each blocker toward an outline
+    # edge with a straight notch (same width as the blocker) so the result
+    # stays a single hole-free polygon.
+    minx, miny, maxx, maxy = base.bounds
+    for direction in ("up", "down", "left", "right"):
+        notched = None
+        for x, y in inside:
+            lo_x, hi_x, lo_y, hi_y = x - margin_mm, x + margin_mm, y - margin_mm, y + margin_mm
+            if direction == "up":
+                lo_y = miny - 1.0
+            elif direction == "down":
+                hi_y = maxy + 1.0
+            elif direction == "left":
+                lo_x = minx - 1.0
+            else:
+                hi_x = maxx + 1.0
+            notched = _union_polygons(
+                notched, [(lo_x, lo_y), (hi_x, lo_y), (hi_x, hi_y), (lo_x, hi_y)]
+            )
+        candidate = _subtract_polygon(outline, notched)
+        if _valid(candidate):
+            return candidate  # type: ignore[return-value]
+
+    own_box = _bbox_polygon(own_pads, margin_mm)
+    if own_box is not None:
+        own_box = list(Polygon(own_box).intersection(base).exterior.coords)[:-1]
+        shrunk = _subtract_polygon(own_box, blockers) if len(own_box) >= 3 else None
+        if _valid(shrunk):
+            return shrunk  # type: ignore[return-value]
+    return outline
 
 
 def _polygon_area_simple(polygon: list[tuple[float, float]] | None) -> float:
@@ -2385,6 +2499,9 @@ def auto_create_zones_for_pour_nets(
         gen.board_outline,
         occupied_layers=existing_by_layer.keys() if existing_by_layer else None,
         skipped_out=skipped_out,
+        incumbent_nets_by_layer=_existing_zone_nets_by_layer(
+            gen.pcb, {name for name, _ in pour_nets}
+        ),
     )
 
     # Issue #5864: nets the allocator could not satisfy are absent from
