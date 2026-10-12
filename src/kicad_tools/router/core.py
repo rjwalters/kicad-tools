@@ -10610,6 +10610,11 @@ class Autorouter:
                 )
             per_net_timeout = derived_cap
 
+        # Issue #6382: install the fine-pitch neighbour entry-lane soft cost
+        # here (not in the escape pre-phase) so it also reaches the default
+        # ``--grid auto`` adaptive branch, which never runs that pre-phase.
+        self._install_pad_lane_budgets()
+
         # Issue #4536: record the relief-rescue sub-search bound in the log --
         # it decides whether a rescue commits (reach!), so it must be visible
         # in any routing log used as evidence.  It reports the value THIS call
@@ -19960,6 +19965,48 @@ class Autorouter:
             )
 
         return all_routes
+
+    def _install_pad_lane_budgets(self) -> int:
+        """Install the fine-pitch neighbour entry-lane budgets (Issue #6382).
+
+        One soft-cost rectangle per long-axis pad of every detected
+        fine-pitch package (``grid.get_fine_pitch_regions()``), from the
+        copper tip outward by ``pad_lanes.LANE_LENGTH_MM`` and one pad short
+        side wide.  Foreign nets pay to cross a neighbour's lane close to its
+        tip, so a wide net's 45-degree escape turns further out instead of
+        sealing the next pins' pocket (board 05: PHASE_C over U2.10/U2.11).
+
+        Stored via :meth:`CppPathfinder.set_pad_lane_budgets`, separate from
+        the #3143 escape-channel budgets.  No-op (and clears any previous
+        lanes) under ``KCT_DISABLE_PAD_LANES=1``, on the Python backend, or
+        when no fine-pitch region is detected.
+
+        Returns:
+            Number of lane budgets installed.
+        """
+        setter = getattr(self.router, "set_pad_lane_budgets", None)
+        if setter is None:
+            return 0
+        from .pad_lanes import build_pad_lane_budgets, lane_length_mm, lane_penalty_factor
+
+        get_regions = getattr(self.grid, "get_fine_pitch_regions", None)
+        regions = list(get_regions()) if callable(get_regions) else []
+        budgets = build_pad_lane_budgets(
+            self.grid,
+            self.pads.values(),
+            regions,
+            float(self.rules.cost_straight),
+        )
+        setter(budgets)
+        if budgets and getattr(self, "_pad_lane_budget_count_logged", None) != len(budgets):
+            self._pad_lane_budget_count_logged = len(budgets)
+            flush_print(
+                f"  Pad entry lanes: {len(budgets)} fine-pitch lane(s) "
+                f"({', '.join(getattr(r, 'package_ref', '?') for r in regions)}), "
+                f"length {lane_length_mm():.2f}mm, "
+                f"penalty {lane_penalty_factor():.2f}x cost_straight (Issue #6382)"
+            )
+        return len(budgets)
 
     def _build_pad_channel_budgets(
         self,

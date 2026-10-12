@@ -1591,6 +1591,11 @@ class CppPathfinder:
         # default) means no per-pad budget is configured and the C++
         # search uses the pre-#3143 cost function identically.
         self._pad_channel_budgets: list = []  # list[router_cpp.PadChannelBudget]
+        # Issue #6382: fine-pitch neighbour entry-lane budgets, set by
+        # :meth:`set_pad_lane_budgets` from ``Autorouter.route_all_negotiated``.
+        # Kept separate from the #3143 list so neither setter clobbers the
+        # other; :meth:`_filter_pad_channel_budgets_for_net` concatenates.
+        self._pad_lane_budgets: list = []  # list[router_cpp.PadChannelBudget]
 
     def set_segment_foreign_context(
         self,
@@ -1648,12 +1653,18 @@ class CppPathfinder:
             short-circuit avoids allocating a copy on the hot path when
             no budget is configured at all).
         """
-        if not self._pad_channel_budgets:
+        if not self._pad_channel_budgets and not self._pad_lane_budgets:
             return self._pad_channel_budgets
-        # Use list comprehension; the budget list is bounded by the
-        # number of dense-package escape pads (typically < 30) so even
-        # the O(N) scan is cheap relative to the surrounding A* cost.
-        return [b for b in self._pad_channel_budgets if getattr(b, "source_net", 0) != net]
+        # Use list comprehension; the budget lists are bounded by the
+        # number of dense-package escape pads / fine-pitch lane pads
+        # (typically < 100) so even the O(N) scan is cheap relative to the
+        # surrounding A* cost.  Issue #6382: the lane budgets are appended
+        # after the #3143 channel budgets under the same own-net filter.
+        return [
+            b
+            for b in (*self._pad_channel_budgets, *self._pad_lane_budgets)
+            if getattr(b, "source_net", 0) != net
+        ]
 
     def set_pad_channel_budgets(self, budgets: list | None) -> None:
         """Inject the per-pad lateral-channel budget list (Issue #3143).
@@ -1682,6 +1693,18 @@ class CppPathfinder:
                 Pass ``None`` or ``[]`` to clear.
         """
         self._pad_channel_budgets = list(budgets) if budgets else []
+
+    def set_pad_lane_budgets(self, budgets: list | None) -> None:
+        """Inject the fine-pitch neighbour entry-lane budgets (Issue #6382).
+
+        Same struct and per-net filter as :meth:`set_pad_channel_budgets`,
+        but stored in a separate list so the lane budgets (installed by
+        ``Autorouter.route_all_negotiated``) and the #3143 escape-channel
+        budgets (installed by the dense-package escape pre-phase) coexist:
+        setting one never drops the other.  Each call replaces only the
+        lane list.  Pass ``None`` or ``[]`` to clear.
+        """
+        self._pad_lane_budgets = list(budgets) if budgets else []
 
     def invalidate_pad_geometry_cache(self) -> None:
         """Mirror changed physical drills before the next native via query."""
