@@ -15383,9 +15383,27 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         )
 
     try:
-        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+        from kicad_tools.router.stuck_classifier import (
+            classify_stuck_nets,
+            is_budget_search_failure,
+        )
 
-        diag_by_net = {d.net_name: d for d in classify_stuck_nets(pcb_path).diagnoses}
+        # Issue #6315: hand the classifier the router's own per-net decline
+        # reasons, so a net the search gave up on for a GEOMETRIC reason is
+        # not labelled ``budget_starved``.  A net with several declined links
+        # keeps a geometric reason over a budget one.
+        search_failures: dict[str, str] = {}
+        for _key, _reason in reasons.items():
+            _name = _net_name_for_lattice_key(router, _key)
+            _prev = search_failures.get(_name)
+            if _prev is None or (
+                is_budget_search_failure(_prev) and not is_budget_search_failure(str(_reason))
+            ):
+                search_failures[_name] = str(_reason)
+        diag_by_net = {
+            d.net_name: d
+            for d in classify_stuck_nets(pcb_path, search_failures=search_failures).diagnoses
+        }
     except Exception:
         diag_by_net = {}
 

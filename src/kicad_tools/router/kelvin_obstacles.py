@@ -193,6 +193,11 @@ def isolate_kelvin_branch(
         "pad_blocked": True,
         "static_blocked": True,
         "usage_count": 0,
+        # Issue #6315: the cell now blocks for a reason the exact pad test
+        # cannot see (a same-net terminal's metal), so it must not be
+        # resolved as a pad-only cell for the duration of the search.
+        "pad_cell": False,
+        "shared_pad_halo": False,
     }
     cpp_saved = []
     with grid.locked():

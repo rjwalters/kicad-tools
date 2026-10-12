@@ -416,3 +416,78 @@ class TestAnalyzeNetsScoped:
         analyzer = NetStatusAnalyzer(stranded_pad_pcb, strict=True)
         scoped = analyzer.analyze_nets({"NOT_A_NET"})
         assert scoped.nets == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #6315: a pad-only island is not the plane, however many pads it has
+# ---------------------------------------------------------------------------
+
+
+def _pad_island_board() -> str:
+    """C1.1 reaches the B.Cu plane through a via; C2.1 and C3.1 are joined
+    to EACH OTHER by an F.Cu trace and to nothing else.
+
+    Board 04 at PR #6370: an oracle-completion trace C3.2 -> C10.2 formed
+    exactly this two-pad island while the GND fill bonded a single pad
+    (J1.6).  The strict model's largest-island rule called the two-pad island
+    "connected", so stitch skipped both pads and they shipped as an open.
+    """
+    parts = [_BOARD_HEADER]
+    parts.append('  (net 0 "")\n  (net 1 "GNDA")\n')
+    parts.append(_footprint("C1", 110, 110, '1 "GNDA"'))
+    parts.append(_footprint("C2", 120, 110, '1 "GNDA"'))
+    parts.append(_footprint("C3", 125, 110, '1 "GNDA"'))
+    parts.append(
+        '  (segment (start 110 110) (end 110.8 110) (width 0.25) (layer "F.Cu")'
+        ' (net 1) (uuid "seg-c1"))\n'
+        '  (via (at 110.8 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")'
+        ' (net 1) (uuid "via-c1"))\n'
+        '  (segment (start 120 110) (end 125 110) (width 0.25) (layer "F.Cu")'
+        ' (net 1) (uuid "seg-c2-c3"))\n'
+    )
+    parts.append(_ZONE_GNDA_FILLED)
+    parts.append(")\n")
+    return "".join(parts)
+
+
+class TestPadOnlyIslandIsNotThePlane:
+    @pytest.fixture
+    def pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "pad_island.kicad_pcb"
+        pcb_file.write_text(_pad_island_board())
+        return pcb_file
+
+    def test_net_status_records_which_pads_the_fill_bonds(self, pcb: Path):
+        gnda = NetStatusAnalyzer(pcb, strict=True).analyze().get_net("GNDA")
+        assert gnda is not None
+        assert [p.full_name for p in gnda.fill_bonded_pads] == ["C1.1"]
+        # Precondition for the bug: the unanchored island is the LARGEST one.
+        assert sorted(p.full_name for p in gnda.islands[0]) == ["C2.1", "C3.1"]
+
+    def test_strict_sets_name_the_unanchored_island(self, pcb: Path):
+        from kicad_tools.cli.stitch_cmd import _compute_strict_pad_sets
+
+        unconnected, _connected = _compute_strict_pad_sets(pcb, {"GNDA"})
+        assert {"C2.1", "C3.1"} <= unconnected["GNDA"]
+
+    def test_stitch_acts_on_the_pad_only_island(self, pcb: Path):
+        result = run_stitch(pcb, ["GNDA"], dry_run=True)
+        acted_on = {f"{p.pad.reference}.{p.pad.pad_number}" for p in result.vias_added} | {
+            f"{p.reference}.{p.pad_number}" for p, _reason in result.pads_skipped
+        }
+        assert {"C2.1", "C3.1"} & acted_on, (
+            "the C2.1/C3.1 island never reaches the plane; stitch must not skip "
+            "both of its pads as 'already connected'"
+        )
+
+    def test_no_fill_anchor_keeps_largest_island_rule(self):
+        """With no fill-bonded pad at all nothing is added to the veto set."""
+        from kicad_tools.analysis.net_status import PadInfo
+        from kicad_tools.cli.stitch_cmd import _pads_off_the_plane
+
+        a = PadInfo("C1", "1", (0.0, 0.0), True)
+        b = PadInfo("C2", "1", (1.0, 0.0), False)
+        net = NetStatus(net_number=1, net_name="GNDA", islands=[[a], [b]])
+        assert _pads_off_the_plane(net) == set()
+        net.fill_bonded_pads = [b]
+        assert _pads_off_the_plane(net) == {"C1.1"}

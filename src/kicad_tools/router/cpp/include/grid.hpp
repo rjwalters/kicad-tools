@@ -97,8 +97,16 @@ public:
     // inside a pad's metal area (NOT the surrounding clearance halo),
     // mirroring the Python grid's ``_pad_blocked[metal_slice] = True``
     // at ``grid.py:4458``.
+    //
+    // Issue #6315: ``pad_source`` says the cell is pad copper or pad
+    // clearance (the Python pad sync); it sets ``cell.pad_cell`` unless an
+    // earlier non-pad static marking already owns the cell, and every
+    // non-pad marking (``pad_source == false``) clears it.
+    // ``shared_pad_halo`` marks a halo cell reached by pads of two different
+    // signal nets (``cell.shared_pad_halo``; only kept on a ``pad_cell``).
     void mark_blocked(int x, int y, int layer, int net, bool is_obstacle = false,
-                      bool pad_blocked = false);
+                      bool pad_blocked = false, bool pad_source = false,
+                      bool shared_pad_halo = false);
     void mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,
                            bool is_obstacle = false);
 
@@ -403,6 +411,10 @@ public:
     // Clearing validation geometry invalidates coverage immediately.
     bool route_geometry_complete() const;
     bool route_cell_has_geometry(int x, int y, int layer) const;
+    // Issue #6315: route-mark coverage of a cell -- 0 when no routed copper
+    // halo covers it, the covering net when every covering mark has
+    // registered exact geometry, -1 when an unregistered mark covers it.
+    int route_coverage_at(int x, int y, int layer) const;
     // Issue #5410: replay a Python-side halo mark onto a C++ grid that was
     // bulk-copied from a ``RoutingGrid`` (``CppGrid.from_routing_grid``)
     // rather than built by committing routes through ``mark_segment`` /
@@ -641,6 +653,19 @@ public:
         float ax, float ay, float bx, float by, int layer, int net,
         float half_width, float default_clearance) const;
 
+    // Issue #6315: exact clearance of the swept trace edge (a)->(b) of
+    // ``net`` (half width ``half_width``) against every pad of another net
+    // on ``layer``.  Same geometry as ``edge_foreign_pad_clear``, but the
+    // required clearance is the LARGER of ``clearance``, the pad's own
+    // ``clearance_override`` and the pairwise (HV) floor -- so it is never
+    // looser than the disc it replaces -- and candidates come from a
+    // spatial bucket index, so it is cheap enough for the A* inner loop.
+    // Used to resolve ``GridCell::pad_cell`` cells: a cell blocked only by
+    // pad copper/clearance is passable exactly when the real geometry is.
+    bool pad_geometry_clear(
+        float ax, float ay, float bx, float by, int layer, int net,
+        float half_width, float clearance) const;
+
 private:
     inline size_t index(int x, int y, int layer) const {
         return static_cast<size_t>(layer) * rows_ * cols_ +
@@ -701,6 +726,12 @@ private:
     void authored_index_pad(size_t index);
     void authored_index_segment(size_t index);
     void authored_index_via(size_t index);
+
+    // Issue #6315: 1 mm bucket index over ``pads_`` for
+    // ``pad_geometry_clear`` (key: packed bucket coordinates).
+    std::unordered_map<int64_t, std::vector<uint32_t>> pad_buckets_;
+    float pad_bucket_max_override_ = 0.0f;
+    void index_pad_bucket(size_t index);
 
     // Geometric validation storage (Issue #2439)
     std::vector<PadInfo> pads_;

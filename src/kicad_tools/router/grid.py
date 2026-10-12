@@ -424,6 +424,7 @@ def _sync_pad_cells_to_cpp_grid(
     gy1: int,
     gx2: int,
     gy2: int,
+    pad_source: bool = True,
 ) -> None:
     """Push a pad's blocked-cell envelope to the paired C++ grid.
 
@@ -457,6 +458,10 @@ def _sync_pad_cells_to_cpp_grid(
         gx1, gy1, gx2, gy2: Inclusive grid-cell bounding box of the pad's
             blocked envelope.  Already clamped to grid bounds by the
             caller's ``_add_pad_unsafe`` loop.
+        pad_source: Issue #6315 -- whether the envelope may be resolved by
+            the C++ exact segment-vs-pad test.  ``False`` for drilled pads,
+            whose hole and board-edge (NPTH slot) clearances the copper-only
+            pad test does not model; their cells keep the grid semantics.
     """
     try:
         from . import router_cpp  # noqa: F401
@@ -471,6 +476,22 @@ def _sync_pad_cells_to_cpp_grid(
     py_net = py_grid._net
     py_is_obstacle = py_grid._is_obstacle
     py_pad_blocked = py_grid._pad_blocked
+    # Issue #6315: pad-geometry provenance.  Every cell this helper pushes is
+    # pad copper or pad clearance (``pad_source``) unless a non-geometric
+    # reservation claimed it (``_pad_policy_cells``); halo cells reached by
+    # pads of two different nets are ``shared``.  The C++ side keeps the
+    # provenance only while no other static obstacle has touched the cell.
+    policy_cells = py_grid._pad_policy_cells
+    shared_cells = py_grid._shared_pad_halo
+    # Issue #6315: a cell any registry-less blocker covers (board-edge
+    # keepout, keepout, obstacle, region bound -- #5662's raster-only plane)
+    # is never pad-only, whatever order it was marked in.  The exact pad test
+    # does not see that geometry, so the cell must keep the grid semantics
+    # even when the edge keepout reached the Python grid before the native
+    # mirror was attached (and so never cleared the native provenance).
+    raster_only = py_grid._raster_only_blocked
+    rows = py_grid.rows
+    cols = py_grid.cols
 
     # Clamp the envelope defensively -- callers already clamp, but the
     # numpy slice would silently return empty arrays if the caller's
@@ -499,6 +520,7 @@ def _sync_pad_cells_to_cpp_grid(
             for gx in range(gx1, gx2 + 1):
                 if not py_blocked[layer_idx, gy, gx]:
                     continue
+                key = (layer_idx * rows + gy) * cols + gx
                 impl_mark_blocked(
                     int(gx),
                     int(gy),
@@ -506,6 +528,10 @@ def _sync_pad_cells_to_cpp_grid(
                     int(py_net[layer_idx, gy, gx]),
                     bool(py_is_obstacle[layer_idx, gy, gx]),
                     bool(py_pad_blocked[layer_idx, gy, gx]),
+                    pad_source
+                    and key not in policy_cells
+                    and not (raster_only is not None and raster_only[layer_idx, gy, gx]),
+                    key in shared_cells,
                 )
 
 
@@ -1200,6 +1226,22 @@ class RoutingGrid:
         # never actually covered that cell.  Keyed by ``id(pad)`` so we can
         # store None entries for pads with no recorded pitch.
         self._pad_pin_pitch: dict[int, float | None] = {}
+
+        # Issue #6315: order-independent ownership of pad clearance-halo cells.
+        # ``_pad_halo_owner_dist`` maps a halo cell (flat ``(layer, y, x)``
+        # index) to the distance from its centre to the metal of the pad
+        # that currently owns it, so a later pad of another net can take the
+        # cell when its own metal is nearer (the nearest pad owns the cell,
+        # whatever order the pads were added in).  ``_shared_pad_halo`` holds
+        # the halo cells reached by pads of two different nets: they belong
+        # to neither net alone, so the C++ A* resolves them with exact
+        # segment-vs-pad geometry instead of trusting ``cell.net``.
+        # ``_pad_policy_cells`` holds cells blocked for a reason other than
+        # pad copper plus clearance (the stitch-via reservation, #2842); they
+        # are never handed to the exact-geometry path.
+        self._pad_halo_owner_dist: dict[int, float] = {}
+        self._shared_pad_halo: set[int] = set()
+        self._pad_policy_cells: set[int] = set()
 
         # R-tree spatial index for segment clearance queries (Issue #1249).
         # Per-layer rtree.index.Index for fast envelope-based candidate pruning
@@ -2498,6 +2540,10 @@ class RoutingGrid:
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         cell = self.cell_at(layer_idx, gy, gx)
+                        # Issue #6315: whether ANOTHER pad's metal (or its
+                        # #3233 outer band) already covers this cell.  Read
+                        # before this pad writes anything to the cell.
+                        prior_pad_blocked = cell.pad_blocked
                         cell.blocked = True
                         cell.original_net = pad.net
 
@@ -2557,8 +2603,18 @@ class RoutingGrid:
                         # cells (``cell.net == routing_net``) are still passable.
                         if is_metal_area:
                             cell.pad_blocked = True
-                            if cell.net == 0:
+                            # Issue #6315: a pad's own metal belongs to that
+                            # pad.  Pre-fix the first pad to touch a cell
+                            # owned it, so a neighbour's clearance halo that
+                            # was stamped first kept this pad's edge row
+                            # (the U2.8 halo owned U2.9's top metal row on
+                            # board 05), and a signal pad's halo claimed the
+                            # metal of a net-0 neighbour.  Only metal that
+                            # overlaps ANOTHER pad's metal keeps its first
+                            # owner -- that is a real short, out of scope.
+                            if cell.net == 0 or not prior_pad_blocked:
                                 cell.net = pad.net
+                                self._forget_pad_halo_owner(layer_idx, gy, gx)
                             # Pad metal is physically copper -- foreign nets must
                             # NEVER traverse it.  Set ``is_obstacle = True``
                             # unconditionally (on first touch as well as on
@@ -2594,6 +2650,12 @@ class RoutingGrid:
                             # fine-pitch escape routing.
                             if is_pad_blocked_band:
                                 cell.pad_blocked = True
+                                # Issue #6315: the outer band overlaps this
+                                # pad's metal, so it belongs to this pad too
+                                # (see the metal branch above).
+                                if not prior_pad_blocked:
+                                    cell.net = pad.net
+                                    self._forget_pad_halo_owner(layer_idx, gy, gx)
                             # Issue #2940: rect-aware full-footprint obstacle
                             # marking for isolated pads.  The pre-fix code only
                             # flipped ``is_obstacle = True`` on clearance-halo
@@ -2634,14 +2696,33 @@ class RoutingGrid:
                             # ``static_blocks`` clause with ``usage_count ==
                             # 0`` and the ``pad_blocked`` short-circuit handle
                             # plane-net halo cells; see #2758).
+                            #
+                            # Issue #6315: a halo cell never claims another
+                            # pad's metal or band (``prior_pad_blocked``), and
+                            # a cell reached by the halos of two different
+                            # signal nets is owned by the NEAREST pad and
+                            # recorded as shared -- see
+                            # ``_claim_pad_halo_cell``.
                             if pad.net == 0:
                                 if cell.net != 0:
                                     cell.is_obstacle = True
-                            elif cell.net == 0:
-                                cell.net = pad.net
+                            elif is_pad_blocked_band:
                                 cell.is_obstacle = True
-                            elif cell.net != pad.net:
-                                cell.is_obstacle = True
+                            elif prior_pad_blocked:
+                                if cell.net != pad.net:
+                                    cell.is_obstacle = True
+                            else:
+                                self._claim_pad_halo_cell(
+                                    cell,
+                                    layer_idx,
+                                    gy,
+                                    gx,
+                                    pad.net,
+                                    metal_x1,
+                                    metal_y1,
+                                    metal_x2,
+                                    metal_y2,
+                                )
 
             # Always mark the center cell with this pad's net
             if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:
@@ -2757,7 +2838,90 @@ class RoutingGrid:
         # what we sync here.
         cpp_grid = self._cpp_grid
         if cpp_grid is not None:
-            _sync_pad_cells_to_cpp_grid(self, cpp_grid, layers_to_block, gx1, gy1, gx2, gy2)
+            # Issue #6315: only SMD copper is resolved by the exact pad test;
+            # a drilled pad also carries hole / NPTH-slot clearances.
+            _sync_pad_cells_to_cpp_grid(
+                self,
+                cpp_grid,
+                layers_to_block,
+                gx1,
+                gy1,
+                gx2,
+                gy2,
+                pad_source=not pad.through_hole and pad.drill <= 0,
+            )
+
+    def _pad_cell_key(self, layer_idx: int, gy: int, gx: int) -> int:
+        """Flat ``(layer, y, x)`` key for the #6315 pad-halo bookkeeping."""
+        return (layer_idx * self.rows + gy) * self.cols + gx
+
+    def _forget_pad_halo_owner(self, layer_idx: int, gy: int, gx: int) -> None:
+        """Drop halo bookkeeping for a cell that has become pad metal (#6315)."""
+        if self._pad_halo_owner_dist or self._shared_pad_halo:
+            key = self._pad_cell_key(layer_idx, gy, gx)
+            self._pad_halo_owner_dist.pop(key, None)
+            self._shared_pad_halo.discard(key)
+
+    def _claim_pad_halo_cell(
+        self,
+        cell: Any,
+        layer_idx: int,
+        gy: int,
+        gx: int,
+        pad_net: int,
+        metal_x1: float,
+        metal_y1: float,
+        metal_x2: float,
+        metal_y2: float,
+    ) -> None:
+        """Assign a signal pad's clearance-halo cell (Issue #6315).
+
+        Pre-#6315 the first pad to touch a halo cell owned it.  Between two
+        fine-pitch pads of different nets the whole clearance gap therefore
+        went to whichever pad was added first, and the other net could not
+        leave its own pad through it (board 05 U2.8 ``PHASE_B`` / U2.9
+        ``PHASE_C``: ``PHASE_C`` was unroutable whenever ``PHASE_B`` was a
+        routed net, because the gap and U2.9's top row became ``PHASE_B``'s).
+
+        The rule now:
+
+        * an unclaimed cell (``net == 0``) is claimed, as before;
+        * a cell already in the halo of a pad of ANOTHER signal net is
+          recorded in ``_shared_pad_halo`` and owned by the pad whose metal
+          is nearest the cell centre (ties go to the lower net id), so the
+          owner does not depend on the order the pads were added;
+        * every claimed or contested cell is ``is_obstacle`` (#2940).
+
+        Shared cells belong to neither net alone: the C++ A* resolves them
+        (for the owner too) with the exact segment-vs-pad clearance test,
+        so each net may leave its own pad through the gap whenever the real
+        geometry is legal.
+        """
+        wx = self.origin_x + gx * self.resolution
+        wy = self.origin_y + gy * self.resolution
+        ddx = max(metal_x1 - wx, 0.0, wx - metal_x2)
+        ddy = max(metal_y1 - wy, 0.0, wy - metal_y2)
+        dist = math.hypot(ddx, ddy)
+        key = self._pad_cell_key(layer_idx, gy, gx)
+        owner_dist = self._pad_halo_owner_dist.get(key)
+        cell_net = cell.net
+        if cell_net == 0:
+            cell.net = pad_net
+            cell.is_obstacle = True
+            self._pad_halo_owner_dist[key] = dist
+        elif cell_net == pad_net:
+            if owner_dist is not None and dist < owner_dist:
+                self._pad_halo_owner_dist[key] = dist
+        else:
+            cell.is_obstacle = True
+            if owner_dist is None:
+                # Owned by something other than a signal pad's halo (left
+                # as the pre-#6315 behaviour: the cell keeps its owner).
+                return
+            self._shared_pad_halo.add(key)
+            if dist < owner_dist - 1e-9 or (abs(dist - owner_dist) <= 1e-9 and pad_net < cell_net):
+                cell.net = pad_net
+                self._pad_halo_owner_dist[key] = dist
 
     def _apply_stitch_via_halo(
         self,
@@ -2981,6 +3145,11 @@ class RoutingGrid:
 
                     # ``cell_net`` was already read above for the
                     # sibling-envelope check (Issue #2869); reuse it.
+
+                    # Issue #6315: this cell is reserved for a stitch via,
+                    # not by pad copper + clearance, so the C++ A* must never
+                    # resolve it with the exact segment-vs-pad test.
+                    self._pad_policy_cells.add(self._pad_cell_key(layer_idx, gy, gx))
 
                     if cell_net == 0:
                         # Unclaimed cell (or another plane-net halo cell):

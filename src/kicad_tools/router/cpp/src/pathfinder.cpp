@@ -203,6 +203,63 @@ bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1
                                             search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance);
 }
 
+// Issue #6315: exact clearance of the swept step (x1,y1)->(x2,y2) of ``net``
+// against every pad of another net on ``layer`` (plus the authored per-net
+// minima of #6243).  Width and clearance are the routing net's own (set per
+// search by the Python backend), the same values the disc radius came from.
+bool Pathfinder::pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net) const {
+    const auto [ax, ay] = grid_.grid_to_world(x1, y1);
+    const auto [bx, by] = grid_.grid_to_world(x2, y2);
+    const float half = search_trace_half_width_mm_ > 0 ? search_trace_half_width_mm_
+                                                       : rules_.trace_width / 2.0f;
+    // The pair rule is max(own class, pad's class); a pad's class is not
+    // known here and defaults to the board clearance, so never go below it
+    // (a net class tighter than the board default stays on the disc path).
+    const float clearance = std::max({search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_
+                                                                       : rules_.trace_clearance,
+                                      rules_.trace_clearance, search_pad_clearance_floor_});
+    // Drilled holes carry their own hole-to-copper and (NPTH slot) board-edge
+    // clearances, which the copper-only pad test does not model -- and an NPTH
+    // hole can be registered only as a no-copper pad plus a census hole.  Never
+    // resolve a step that comes anywhere near one; the disc keeps deciding.
+    constexpr float PAD_EXACT_HOLE_GUARD_MM = 0.75f;
+    const float half_len = 0.5f * std::hypot(bx - ax, by - ay);
+    if (!grid_.component_holes_clear(0.5f * (ax + bx), 0.5f * (ay + by),
+                                     2.0f * (half + half_len),
+                                     clearance + PAD_EXACT_HOLE_GUARD_MM)) return false;
+    if (!grid_.pad_geometry_clear(ax, ay, bx, by, layer, net, half, clearance)) return false;
+    if (!grid_.authored_segment_clear(ax, ay, bx, by, 2.0 * half, layer, net)) return false;
+    // Routed copper whose clearance halo overlaps a pad's halo does not
+    // repaint the pad's cells (``mark_segment`` keeps a blocked cell's net),
+    // so the same step must also clear every stored foreign segment / via.
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = 2.0f * half;
+    segment.layer = layer; segment.net = net;
+    return grid_.route_trace_geometry_clear(segment, clearance,
+                                            physical_partner_net_, physical_partner_clearance_,
+                                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_
+                                                                            : rules_.via_clearance);
+}
+
+// Issue #6315: a cell the exact pad test may resolve -- blocked only by pad
+// copper/clearance (``pad_cell``), not in use by a routed net, not reserved,
+// not a zone, and with no routed-copper halo of unknown geometry over it.
+bool Pathfinder::pad_cell_resolvable(const GridCell& cell, int cx, int cy, int layer) const {
+    if (!cell.pad_cell || cell.usage_count != 0 || cell.reserved_count > 0 || cell.is_zone)
+        return false;
+    return grid_.route_coverage_at(cx, cy, layer) >= 0;
+}
+
+bool Pathfinder::pad_cell_clear(int cx, int cy, int layer, int x1, int y1,
+                                int x2, int y2, int net) const {
+    if (!grid_.is_valid(cx, cy, layer)) return false;
+    const auto& cell = grid_.at(cx, cy, layer);
+    if (!cell.blocked || cell.net == net || !pad_cell_resolvable(cell, cx, cy, layer))
+        return false;
+    return pad_step_clear(x1, y1, x2, y2, layer, net);
+}
+
 bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
     const auto [wx, wy] = grid_.grid_to_world(x, y);
     Via via;
@@ -231,6 +288,17 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 from_x >= 0 ? from_x : x, from_y >= 0 ? from_y : y,
                 x, y, net, partner_net) ? 1 : 0;
         return physical_clear != 0;
+    };
+    // Issue #6315: a cell blocked only by pad copper/clearance is resolved
+    // with the exact swept-edge vs pad test (computed at most once per
+    // call) instead of being treated as copper.
+    int pad_exact = -1;
+    auto pad_clear = [&](const GridCell& c, int cx, int cy) {
+        if (!pad_cell_resolvable(c, cx, cy, layer)) return false;
+        if (pad_exact < 0)
+            pad_exact = pad_step_clear(from_x >= 0 ? from_x : x, from_y >= 0 ? from_y : y,
+                                       x, y, layer, net) ? 1 : 0;
+        return pad_exact != 0;
     };
 
     // Issue #2559 / Epic #2556 Phase 1C: when the partner branch is active
@@ -293,6 +361,9 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 continue;
             }
             if (cell.net != net && halo_clear(cx, cy)) {
+                continue;
+            }
+            if (cell.net != net && pad_clear(cell, cx, cy)) {
                 continue;
             }
 
@@ -387,6 +458,9 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 continue;
             }
             if (cell.net != net && halo_clear(cx, cy)) {
+                continue;
+            }
+            if (cell.net != net && pad_clear(cell, cx, cy)) {
                 continue;
             }
 
@@ -557,6 +631,9 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
         const auto& cell = grid_.at(cx, cy, layer);
         if (cell.blocked) {
             if (cell.net != net && trace_halo_cell_clear(cx, cy, layer, x, y, x + dx, y + dy, net))
+                continue;
+            // Issue #6315: pad-derived corner cell, exact geometry clear.
+            if (cell.net != net && pad_cell_clear(cx, cy, layer, x, y, x + dx, y + dy, net))
                 continue;
             if (allow_sharing) {
                 // Negotiated mode: own-net obstacle cells remain
@@ -893,9 +970,16 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
             const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
             const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
             if (dx * dx + dy * dy < drill_radius * drill_radius) {
-                out_blocking_net = pad.net;
-                out_world_x = pad.x;
-                out_world_y = pad.y;
+                // Issue #6315: a via inside the routing net's OWN pad is a
+                // disallowed via-in-pad, not a via-via block -- leave the
+                // blocker unset so the search does not count it towards
+                // FAILURE_VIA_VIA_BLOCKED and report "blocked by stored-via
+                // geometry (blocking net <own net>)".
+                if (pad.net != net) {
+                    out_blocking_net = pad.net;
+                    out_world_x = pad.x;
+                    out_world_y = pad.y;
+                }
                 return true;
             }
         }
@@ -1531,6 +1615,20 @@ RouteResult Pathfinder::route(
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == net) {
+                    // Issue #6315: a shared pad halo belongs to neither net
+                    // alone -- its recorded owner must clear it too.
+                    if (cell.shared_pad_halo &&
+                        is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                         trace_radius_cells, partner_net,
+                                         intra_pair_radius_cells, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=shared_pad_halo_blocked\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer);
+                        }
+                        continue;
+                    }
                     // Same-net blocked cell - allow -- UNLESS the exact swept
                     // edge fails the validator's segment-vs-pad clearance
                     // (Issue #5599; see the twin comment in the resumable
@@ -1558,6 +1656,12 @@ RouteResult Pathfinder::route(
                         }
                         continue;
                     }
+                } else if (pad_cell_clear(nx, ny, nlayer, current.x, current.y, nx, ny, net) &&
+                           !is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                             trace_radius_cells, partner_net,
+                                             intra_pair_radius_cells, current.x, current.y)) {
+                    // Issue #6315: a foreign pad's clearance cell whose exact
+                    // swept-edge geometry is legal.
                 } else if (trace_halo_cell_clear(nx, ny, nlayer, current.x, current.y,
                                                    nx, ny, net, partner_net) &&
                            !is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
@@ -2205,6 +2309,23 @@ RouteResult Pathfinder::run_astar_loop() {
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == search_net_) {
+                    // Issue #6315: a shared pad halo belongs to neither net
+                    // alone -- its recorded owner must clear it too.
+                    if (cell.shared_pad_halo &&
+                        is_trace_blocked(nx, ny, nlayer, search_net_,
+                                         search_negotiated_mode_,
+                                         search_trace_radius_cells_,
+                                         search_partner_net_,
+                                         search_intra_pair_radius_cells_, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=shared_pad_halo_blocked net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                search_net_);
+                        }
+                        continue;
+                    }
                     // Same-net blocked cell - allow -- UNLESS the exact
                     // swept edge fails the validator's own segment-vs-pad
                     // clearance (Issue #5599).  A same-net corridor built
@@ -2251,6 +2372,12 @@ RouteResult Pathfinder::run_astar_loop() {
                         }
                         continue;
                     }
+                } else if (pad_cell_clear(nx, ny, nlayer, current.x, current.y, nx, ny,
+                                          search_net_) &&
+                           !is_trace_blocked(nx, ny, nlayer, search_net_, search_negotiated_mode_,
+                                             search_trace_radius_cells_, search_partner_net_,
+                                             search_intra_pair_radius_cells_, current.x, current.y)) {
+                    // Issue #6315: exact pad geometry, as in the one-shot loop.
                 } else if (trace_halo_cell_clear(nx, ny, nlayer, current.x, current.y,
                                                    nx, ny, search_net_, search_partner_net_) &&
                            !is_trace_blocked(nx, ny, nlayer, search_net_, search_negotiated_mode_,

@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 # diff-pair partner no longer relaxes a barrel, ``route_via_geometry_clear``
 # gained ``trace_clearance`` and ``router_cpp.trace_via_clearance`` is bound.
 # A v48 .so would let a trace land inside an earlier via's floor.
-_REQUIRED_CPP_BUILD_VERSION = 49
+_REQUIRED_CPP_BUILD_VERSION = 50
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -2453,6 +2453,20 @@ class CppPathfinder:
                 self._impl.set_search_fill_clearances(
                     max(net_trace_clearance, own_floor),
                     max(self._rules.via_clearance, own_floor),
+                )
+            if hasattr(self._impl, "set_search_pad_clearance_floor"):
+                # Issue #6315: the exact pad test resolving pad clearance
+                # cells cannot tell a pad's net class, and the pair rule is
+                # max(own class, pad's class) -- hold it to the largest
+                # class clearance on the board (never looser than the disc).
+                self._impl.set_search_pad_clearance_floor(
+                    max(
+                        [self._rules.trace_clearance]
+                        + [
+                            float(getattr(nc, "clearance", 0.0) or 0.0)
+                            for nc in (self._net_class_map or {}).values()
+                        ]
+                    )
                 )
 
             if self._grid._py_grid is not None:

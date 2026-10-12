@@ -11,9 +11,12 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 26 vias / 323.06mm total
+- **Deterministic output**: 22 routes / 20 vias / 320.62mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (24 vias / 321.75mm before the Issue #6272
+  has fully converged.  (26 vias / 323.06mm before the Issue #6315
+  re-baseline, which resolves pad clearance cells by exact geometry, so
+  traces pass a neighbour pin's halo on the same layer instead of
+  changing layer around it.)  (24 vias / 321.75mm before the Issue #6272
   re-baseline, which made every trace-vs-via gate resolve
   ``max(trace_clearance, via_clearance)`` in both insertion orders: a
   trace routed past an earlier foreign via is now held to the 0.20 mm
@@ -833,7 +836,8 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # ``hole_to_hole_clearance`` violations (it reported one before).
     # Prior pin (22, 227-segment-era, 23, 322.77).
     # Issue #6272: 24 -> 26 -- see the #6272 note under EXPECTED_LENGTH.
-    EXPECTED_VIAS = 26
+    # Issue #6315: 26 -> 20 -- see the #6315 note under EXPECTED_LENGTH.
+    EXPECTED_VIAS = 20
     # Re-measured at ff96e855 after local halo-coverage refinement:
     # seeds 42/43/44 yield (22, 226, 24, 326.73), identical copper
     # geometry, 34 preserved/bound pads, and zero native refill/all-track
@@ -911,7 +915,20 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors at the
     # tier1 profile on this output.  Prior pin (22, 219-segment-era, 24,
     # 321.75).
-    EXPECTED_LENGTH = 323.06
+    #
+    # Re-baselined for Issue #6315 (pad clearance cells resolved by exact
+    # geometry).  The native A* no longer treats a foreign pad's clearance
+    # halo as copper: a cell blocked only by pad copper + clearance is
+    # passable exactly when the swept step clears every foreign pad (and
+    # stored copper) at the net's own width and clearance, and a halo shared
+    # by two nets' pads is owned by the nearer pad instead of whichever pad
+    # was added first.  Traces that used to change layer to get around a
+    # neighbour pin's halo now pass it on the same layer: seeds 42/43/44 all
+    # yield (22, 189, 20, 320.62) -- routes (22) and reach UNCHANGED, vias
+    # 26 -> 20, length 323.06 -> 320.62 (-2.44 mm), and
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors.
+    # Prior pin (22, 213-segment-era, 26, 323.06).
+    EXPECTED_LENGTH = 320.62
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
@@ -983,7 +1000,11 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # routes/vias/length pins above are what would signal a real regression.
     # Widened rather than moved, so both platforms' deterministic values stay
     # covered (macOS-arm64 last measured 226 at #5410).
-    EXPECTED_SEGMENTS_RANGE = (212, 240)
+    # #6315: the LOWER bound is widened 212 -> 180.  Six fewer vias remove
+    # the layer-change segment breaks around them: macOS-arm64 measures 189,
+    # bit-identical across seeds 42/43/44 (the coarser direction again; the
+    # exact routes/vias/length pins above are the regression guard).
+    EXPECTED_SEGMENTS_RANGE = (180, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
     expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)
@@ -1001,7 +1022,7 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     assert lo <= got_segments <= hi, (
         f"Board 02 segment count {got_segments} outside the documented "
         f"platform band [{lo}, {hi}] (macOS-arm64: 226 post-#5410 / "
-        "Linux: 219 post-#5854; "
+        "Linux: 219 post-#5854; macOS-arm64: 189 post-#6315; "
         "pre-#4732 it was 476 on macOS-arm64 / ~390-399 on Linux-x86_64 -- "
         "see PLATFORM NOTE above and the #4196 / #4732 re-baselines).  "
         "Routes/vias/length matched the exact pin, so this is a change in "
