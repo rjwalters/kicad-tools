@@ -14,7 +14,8 @@
 #
 # What it does:
 #   git rebase --onto <fetched default-branch COMMIT> <parent-ref> <child-branch>
-#   git push --force-with-lease
+#   git push --force-with-lease=<child-branch>:<child's live remote head, pinned
+#                                               before the rebase>
 #   gh pr edit <child-pr> --base <default-branch>
 #
 # The repo merges with merge commits (setup-repository-settings.sh default,
@@ -32,16 +33,33 @@
 # .loom/docs/shell-language-policy.md. This file keeps its name (merge-pr.sh,
 # role prompts and the sweep lifecycle all invoke it by path) and keeps the
 # three forge/publish steps: resolve the child branch, force-with-lease push,
-# retarget the PR base. New logic goes into the subcommand, not here.
+# retarget the PR base. New logic goes into the subcommand, not here — which is
+# why #9487's pinned-lease logic is `loom-daemon push-lease pin-flag` and this
+# file only calls it, keeps the argument it prints, and refuses on its exit
+# code (see defaults/docs/push-lease-pinning.md).
 #
 # The destination is the commit this run FETCHED from the remote, never the
 # local branch of the same name: a stale local default branch made an
 # apparently-clean rebase silently drop the just-merged parent's
 # implementation (#8583). A fetch failure refuses instead of degrading.
 #
+# Merge-only repos (#10771): where `loom-daemon branch-update strategy` does
+# not say `rebase` (the default, and the answer when anything is unknown), the
+# child is NOT rewritten: step 3's retarget runs and the rebase + force-push
+# of steps 1-2 are skipped. A merge-committed parent leaves nothing more to do;
+# a squash-merged one can leave the PR showing its commits or conflicting,
+# which an ordinary merge of the default branch into the child fixes.
+#
 # Safety:
 #   - Uses --force-with-lease (NEVER a bare --force) so a concurrent push to the
-#     child branch aborts the rebase rather than clobbering it.
+#     child branch aborts the rebase rather than clobbering it, and PINS the
+#     lease to the child's live remote head read before the rebase (#9487) —
+#     the bare flag would compare against refs/remotes/origin/<child>, a ref
+#     shared by every linked worktree that a sibling agent's fetch can advance
+#     out from under this run, defeating the lease entirely.
+#   - Refuses when origin/<child> holds commits this clone has not
+#     incorporated: the pin would be accurate and the push would still delete
+#     them (#9487).
 #   - --dry-run plans (and fetches, and verifies every prerequisite) but
 #     mutates no branch and prints the remaining commands.
 #   - Refuses on a dirty working tree, a failed fetch, a missing remote
@@ -74,7 +92,7 @@ info() { echo -e "${BLUE}ℹ $1${NC}" >&2; }
 warn() { echo -e "${YELLOW}⚠ $1${NC}" >&2; }
 
 show_help() {
-    sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,76p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN=false
@@ -173,8 +191,45 @@ fi
 # forge-helpers.sh is sourced in the subshell because it sets -e.
 WRITE_REPO=""
 [[ "$DRY_RUN" == "true" ]] || WRITE_REPO="$(source "$SCRIPT_DIR/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}")" || { err "Refusing to reconcile: loom-daemon forge may-write refused this checkout's repo (#9548). Nothing was mutated."; exit 1; }
+# #10771: may this repo's PR branches be rebased at all? If not, retarget only:
+# a rebase + force-push here deletes merge commits other agents pushed to the
+# child and orphans every head a reviewer signed. Anything but an explicit
+# `rebase` answer from `loom-daemon branch-update strategy` — including a
+# binary predating the subcommand — is merge.
+# requires-daemon: branch-update optional   #10771 — no answer is read as merge: the child is retargeted, never rewritten
+BRANCH_UPDATE_STRATEGY="$("$DAEMON_BIN" branch-update strategy 2>/dev/null)" || BRANCH_UPDATE_STRATEGY=merge
+retarget_child_base() { gh pr edit "$CHILD_PR" ${WRITE_REPO:+--repo "$WRITE_REPO"} --base "$DEFAULT_BRANCH"; }  # step 3's one call site
+if [[ "$BRANCH_UPDATE_STRATEGY" != "rebase" ]]; then
+    info "PR branches here are not rebased (loom-daemon branch-update strategy: merge, #10771) — '$CHILD_BRANCH' is not rewritten, only its base is retargeted to $DEFAULT_BRANCH. If the PR then shows conflicts or the parent's commits (a squash-merged parent), merge $DEFAULT_BRANCH into it and push plainly."
+    [[ "$DRY_RUN" == "true" ]] && { ok "Dry run complete — would retarget PR #$CHILD_PR's base to $DEFAULT_BRANCH (no rewrite)."; exit 0; }
+    retarget_child_base || { err "Failed to retarget PR #$CHILD_PR base to $DEFAULT_BRANCH. Retarget it manually."; exit 2; }
+    ok "Reconciled (merge mode): PR #$CHILD_PR now targets $DEFAULT_BRANCH; '$CHILD_BRANCH' was not rewritten. Bring it up to date with a merge and a plain push if it is behind."
+    exit 0
+fi
 RECONCILE_ARGS=(--child-branch "$CHILD_BRANCH" --parent-branch "$PARENT_BRANCH" --default-branch "$DEFAULT_BRANCH" --repo-dir "$PWD")
 [[ "$DRY_RUN" == "true" ]] || RECONCILE_ARGS+=(--rebase)
+# #9487: capture the child branch's LIVE remote head NOW — before step 1's
+# rebase rewrites anything — and pin step 2's --force-with-lease to it. A bare
+# --force-with-lease compares against refs/remotes/origin/<child>, a ref SHARED
+# by every linked worktree of this clone: a sibling agent's fetch can advance it
+# to a commit this run never saw, after which the bare lease is satisfied and
+# the push silently deletes that commit (the live PR #9483 incident). Capturing
+# before the rewrite, and never re-reading it later, is the whole point — a
+# fetch taken just before the push would pin the sibling's commit and launder
+# the clobber as "fresh". The query, the rendering, and the ancestry half that
+# catches a commit published BEFORE the pin was taken all live in
+# `loom-daemon push-lease pin-flag` (cli/push_lease.rs) per the shell language
+# policy: exit 3 = origin could not be queried, 4 = origin holds commits this
+# clone never incorporated. There is deliberately no bare-flag fallback.
+# requires-daemon: push-lease >= 0.19.1080   #9487 — the pinned-lease builder. Declared at this repo's VERSION because the subcommand lands WITH this marker; the first release actually carrying it is the post-merge bump. A binary predating it is refused here with the floor rather than degraded to the bare lease
+loom_daemon_version_preflight push-lease "$DAEMON_BIN"
+PIN_RC=0
+PUSH_LEASE_ARG="$("$DAEMON_BIN" push-lease pin-flag --remote origin --branch "$CHILD_BRANCH" --local-ref "refs/heads/$CHILD_BRANCH")" || PIN_RC=$?
+if [[ $PIN_RC -ne 0 ]]; then
+    err "No pinned force-with-lease value for '$CHILD_BRANCH' (loom-daemon push-lease pin-flag exit $PIN_RC — the bracketed prerequisite token naming which half refused is above, #9487; 'unrecognized subcommand' = this loom-daemon predates #9487: roll it). Refusing to rebase+push: the only fallback is the bare lease this exists to replace. Nothing was mutated."
+    exit 1
+fi
+info "Pinned force-with-lease argument for '$CHILD_BRANCH': $PUSH_LEASE_ARG"
 # Refuse a too-old binary with the floor and the roll command (#8385) rather
 # than letting clap's bare "unrecognized subcommand" be the whole diagnosis.
 loom_daemon_version_preflight reconcile-stack "$DAEMON_BIN"
@@ -184,7 +239,7 @@ PLAN_OUT="$("$DAEMON_BIN" reconcile-stack "${RECONCILE_ARGS[@]}")" || PLAN_RC=$?
 if [[ $PLAN_RC -eq 2 ]]; then
     err "Rebase failed (likely a conflict). Resolve it, then re-run this script or finish manually:"
     echo "    git rebase --continue   # after resolving" >&2
-    echo "    git push --force-with-lease" >&2
+    echo "    git push $PUSH_LEASE_ARG origin $CHILD_BRANCH   # pinned, never bare (#9487)" >&2
     echo "    gh pr edit $CHILD_PR --base $DEFAULT_BRANCH" >&2
     exit 2
 elif [[ $PLAN_RC -ne 0 ]]; then
@@ -223,10 +278,11 @@ run() {
 # holds the branch, else here), so the current branch there is the child.
 GIT_C=(git -C "$LOOM_RS_GIT_DIR")
 
-# 2. Publish the rewritten child branch. --force-with-lease (never bare
-#    --force) so a concurrent push aborts rather than clobbers.
-info "Step 2/3: push --force-with-lease"
-if ! run "${GIT_C[@]}" push --force-with-lease; then
+# 2. Publish the rewritten child branch with $PUSH_LEASE_ARG — the lease PINNED
+#    to the head captured above (never bare --force, and never the bare lease
+#    either, #9487) so a concurrent push aborts rather than clobbers.
+info "Step 2/3: push $PUSH_LEASE_ARG"
+if ! run "${GIT_C[@]}" push "$PUSH_LEASE_ARG" origin "$CHILD_BRANCH"; then
     # A reported rejection is not always a real one (#6695): Git LFS's
     # pre-push hook can race the lease re-check on a branch with pending LFS
     # objects, so the ref update lands while the printed rejection reflects a
@@ -246,7 +302,7 @@ fi
 # 3. Retarget the child PR's base to the default branch NAME (not the commit —
 #    a PR base is a branch).
 info "Step 3/3: gh pr edit $CHILD_PR --base $DEFAULT_BRANCH"
-if ! run gh pr edit "$CHILD_PR" ${WRITE_REPO:+--repo "$WRITE_REPO"} --base "$DEFAULT_BRANCH"; then
+if ! run retarget_child_base; then
     err "Failed to retarget PR #$CHILD_PR base to $DEFAULT_BRANCH. Retarget it manually."
     exit 2
 fi

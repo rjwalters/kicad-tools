@@ -309,9 +309,8 @@ restart never chain into it, because their `anchor_as_of` differs.
 ## How to run a replay
 
 ```bash
-loom-daemon telemetry-replay --as-of 2026-10-04T13:00:00Z \
-  --endpoint https://clickhouse.example:8443 --user reader \
-  --credential-file ~/.config/loom/signoz-read.key   # owner-only (chmod 600)
+export TELEMETRY_READER_URL=http://reader.example:14341   # the telemetry-reader's base
+loom-daemon telemetry-replay --as-of 2026-10-04T13:00:00Z
 ```
 
 It runs queries 1 (state) and 3 (coverage) of `replay-queries.sql` exactly as
@@ -323,9 +322,15 @@ every emitting host as `covered`, or `unknown` with the SQL's reason
 An uncovered host is never shown as empty. No row is capped and no host is
 elected; it computes no estimate or statistic.
 
-- **Endpoint config**: flags, then `telemetry.signoz.{endpoint,user,credentialFile}`.
-  The old `autonomous.eta.fleetRefresh.signoz.*` key is still read as a
-  fallback, with one deprecation warning. Nothing else reads `autonomous.eta`.
+- **Reader config**: reads go through the telemetry-reader (a query broker),
+  never to ClickHouse directly. Its base URL comes from `--endpoint`, then
+  `TELEMETRY_READER_URL`, then `telemetry.signoz.endpoint`; no address is
+  built in. There is **no credential**: the reader identifies the caller by
+  its network identity, runs the statement as that caller's read-only store
+  account, and audits it under the caller's name. Any other key under
+  `telemetry.signoz` (the old ClickHouse user and password-file settings) and
+  the retired `autonomous.eta.fleetRefresh.signoz` block are ignored with one
+  notice (#11357).
 - **Offline**: `--print-sql` prints both queries for `clickhouse-client
   --param_t=… --param_window=… --param_repo= --param_span=0 --param_step=300
   --format JSONEachRow`; feed the combined output back with `--from-file`.
@@ -339,9 +344,9 @@ elected; it computes no estimate or statistic.
   queries and reader over R3's fixture store in a pinned ClickHouse.
 
 The reader is the neutral client in `loom-daemon/src/signoz_read.rs` (#11127):
-`ClickhouseHttp` (bound `param_*` parameters, credential read from an
-owner-only file at call time and never logged) and `FileRows`. It survived the
-ETA subsystem's removal (#11098) unchanged.
+`TelemetryReader` (`POST <base>/v1/query`, the SQL as the body, bound values as
+`param_<name>` URL parameters, no credential header — #11357) and `FileRows`
+(an offline export).
 
 ## Agreement with the forge (`--check`, the daily report)
 

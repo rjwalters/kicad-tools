@@ -1216,8 +1216,12 @@ gh pr view <number> --json mergeStateStatus --jq '.mergeStateStatus'
 
 ### If DIRTY: Attempt Automated Rebase
 
-**When a PR has merge conflicts, attempt automated rebase before routing to
+**When a PR has merge conflicts, attempt an automated update before routing to
 Doctor** — this reduces the Doctor→Judge→Merge cycle for simple conflicts.
+**Update = merge** `origin/main` in, unless `loom-daemon branch-update strategy`
+prints `rebase` (#10771): where the repo bars rebase, a rebase deletes other
+agents' merge commits and orphans reviewed heads. Merge mode never force-pushes;
+a rejected plain push means someone pushed — fall back, never force.
 
 **Both `gh pr edit` fallback writes below are verdict-label writes** — run the
 Verdict-Time CAS Recheck immediately before each (see above) and abort instead
@@ -1228,8 +1232,6 @@ PR_NUMBER=<number>
 MERGE_STATE=$(gh pr view $PR_NUMBER --json mergeStateStatus --jq '.mergeStateStatus')
 
 if [ "$MERGE_STATE" = "DIRTY" ]; then
-    echo "PR has merge conflicts - attempting automated rebase"
-
     # Checkout PR branch (worktree-aware — see "PR Branch Isolation")
     ISSUE_NUM=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
     if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
@@ -1239,79 +1241,38 @@ if [ "$MERGE_STATE" = "DIRTY" ]; then
         cd ".loom/worktrees/pr-${PR_NUMBER}"
     fi
 
-    # Verify we're on the correct branch (not detached HEAD)
-    CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
-    if [ "$CURRENT_BRANCH" = "DETACHED" ]; then
-        echo "Checkout resulted in detached HEAD - falling back to change request"
-        # Fall back to current behavior (see below)
-    fi
-
+    GATE_OK=true
+    # Detached HEAD: skip the update, fall back to change request (below)
+    BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null) || GATE_OK=false
+    PUSH_LEASE_SHA=$(git rev-parse HEAD)  # pin BEFORE the update, never re-read (#9487)
+    BRANCH_UPDATE=$(loom-daemon branch-update strategy) || BRANCH_UPDATE=merge  # unknown = merge
     git fetch origin main
+    PRE_REBASE_AHEAD=$(git rev-list --count origin/main..HEAD)  # payload-drop guard (#8298)
 
-    # Commits ahead pre-rebase, for the payload-drop guard below (#8298).
-    PRE_REBASE_AHEAD=$(git rev-list --count origin/main..HEAD)
-
-    # Attempt rebase
-    if git rebase origin/main; then
-        # Version-bearing-file sync gate (#7168/#7341, moot after #7743): gate
-        # BEFORE push since this auto-rebase pushes directly. On failure,
-        # never hand-patch the version-bearing files yourself or run
-        # `version.sh bump` -- fall back below instead.
-        GATE_OK=true
-        if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
-            echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - falling back to change request"
-            GATE_OK=false
-        fi
-        # Payload-drop guard (#8298): rebase succeeded but the tree is now
-        # identical to origin/main, silently dropping this PR's content (only
-        # flagged when the branch had real commits ahead pre-rebase).
-        if [ "$GATE_OK" = true ] && [ "$PRE_REBASE_AHEAD" -gt 0 ] && git diff --quiet origin/main HEAD; then
-            echo "Rebase silently dropped PR payload (empty diff vs origin/main) - falling back to change request"
-            GATE_OK=false
-        fi
-        # Rebase succeeded - push changes
-        if [ "$GATE_OK" = true ] && git push --force-with-lease; then
-            echo "Rebase successful - proceeding with evaluation"
-            gh pr comment $PR_NUMBER --body "🔀 Automatically rebased branch to resolve merge conflicts. Proceeding with code evaluation."
-            # Continue with normal evaluation
-        else
-            echo "Push failed - falling back to change request"
-            git rebase --abort 2>/dev/null || true
-            # Fall back: merge-conflict + changes-requested
-            ./.loom/scripts/post-verdict.sh $PR_NUMBER changes-requested "$VERDICT_SHA" --body "$(cat <<'EOF'
-❌ **Changes Requested - Merge Conflict**
-
-Automated rebase succeeded but push failed (possibly due to branch protection or concurrent changes).
-
-Please rebase your branch manually and push:
-```bash
-git fetch origin
-git rebase origin/main
-git push --force-with-lease
-```
-
-I'll evaluate again once conflicts are resolved.
-EOF
-)" && \
-            gh pr edit $PR_NUMBER --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested" --add-label "loom:merge-conflict"
-        fi
+    if [ "$GATE_OK" = true ]; then
+        if [ "$BRANCH_UPDATE" = rebase ]; then git rebase origin/main; else git merge --no-ff -m "Merge origin/main into $BRANCH (Judge: resolve conflicts)" origin/main; fi || GATE_OK=false
+    fi
+    # Version-bearing-file sync gate (#7168/#7341, moot after #7743): gate BEFORE
+    # the push. On failure never hand-patch the version-bearing files yourself
+    # or run `version.sh bump`.
+    if [ "$GATE_OK" = true ] && [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+        GATE_OK=false
+    fi
+    # Payload-drop guard (#8298): the update left a tree identical to origin/main.
+    if [ "$GATE_OK" = true ] && [ "$PRE_REBASE_AHEAD" -gt 0 ] && git diff --quiet origin/main HEAD; then
+        echo "Update silently dropped PR payload (empty diff vs origin/main)"; GATE_OK=false
+    fi
+    if [ "$GATE_OK" = true ] && if [ "$BRANCH_UPDATE" = rebase ]; then git push --force-with-lease="$BRANCH:$PUSH_LEASE_SHA"; else git push origin "HEAD:$BRANCH"; fi; then
+        gh pr comment $PR_NUMBER --body "🔀 Automatically updated the branch from main ($BRANCH_UPDATE) to resolve merge conflicts. Proceeding with code evaluation."
     else
-        echo "Rebase failed (complex conflicts) - falling back to change request"
-        git rebase --abort
-
-        # Fall back: merge-conflict + changes-requested
+        echo "Update, gate or push failed - falling back to change request"
+        git rebase --abort 2>/dev/null || git merge --abort 2>/dev/null || true
         ./.loom/scripts/post-verdict.sh $PR_NUMBER changes-requested "$VERDICT_SHA" --body "$(cat <<'EOF'
 ❌ **Changes Requested - Merge Conflict**
 
-This PR has merge conflicts that could not be automatically resolved.
+This PR has merge conflicts with main that could not be resolved automatically.
 
-Please rebase your branch on main and resolve conflicts:
-```bash
-git fetch origin
-git rebase origin/main
-# Resolve conflicts
-git push --force-with-lease
-```
+Please bring the branch up to date and resolve them: `git fetch origin && git merge origin/main`, then a plain `git push` (rebase only if `loom-daemon branch-update strategy` prints `rebase`, then push with a pinned `--force-with-lease=<branch>:<sha>`).
 
 I'll re-evaluate once conflicts are resolved, or the Doctor role will handle this.
 EOF
@@ -1321,34 +1282,32 @@ EOF
 fi
 ```
 
-**Edge cases for DIRTY rebase:**
+**Edge cases for the DIRTY update:**
 
 | Scenario | Handling |
 |----------|----------|
-| Push permission denied | Abort rebase, fall back to change request |
-| Concurrent push during rebase | `--force-with-lease` fails safely, fall back |
-| Detached HEAD after checkout | Skip rebase, fall back to change request |
-| Rebase succeeds but CI may fail | Continue to evaluation - CI verification handles this |
-| Rebase succeeds but diff vs `origin/main` is empty | Payload-drop guard fires (#8298); fall back to change request |
+| Push permission denied | Abort, fall back to change request |
+| Concurrent push during the update | Merge mode: the plain push is rejected (non-fast-forward). Rebase mode: only the *pinned* lease rejects it — a bare `--force-with-lease` trusts the shared tracking ref and can silently overwrite (#9487). Either way fall back; never force |
+| Detached HEAD after checkout | Skip the update, fall back to change request |
+| Update succeeds but CI may fail | Continue to evaluation - CI verification handles this |
+| Update succeeds but diff vs `origin/main` is empty | Payload-drop guard fires (#8298); fall back to change request |
 
 ### If BEHIND: Attempt Rebase
 
 ```bash
-# Fetch and rebase
+BRANCH=$(git branch --show-current); PUSH_LEASE_SHA=$(git rev-parse HEAD)  # pin first (#9487)
+BRANCH_UPDATE=$(loom-daemon branch-update strategy) || BRANCH_UPDATE=merge  # #10771
 git fetch origin main
-git rebase origin/main
+if [ "$BRANCH_UPDATE" = rebase ]; then git rebase origin/main; else git merge --no-ff -m "Merge origin/main into $BRANCH (Judge: branch behind main)" origin/main; fi || exit 1
 
-# Version-bearing-file sync gate (#7168/#7341, moot after #7743) -- see
-# DIRTY path's gate above. On failure, abort and request changes naming
-# the file(s) to revert to origin/main's values.
+# Version-bearing-file sync gate -- see the DIRTY path. On failure, abort and
+# request changes naming the file(s) to revert to origin/main's values.
 if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
-  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - aborting push"
+  echo "Version-bearing files out of sync after update (see BLOCKER:/Fix: above) - aborting push"
   exit 1
 fi
 
-# If rebase succeeds (no conflicts)
-git push --force-with-lease
-echo "Branch rebased successfully, continuing evaluation"
+if [ "$BRANCH_UPDATE" = rebase ]; then git push --force-with-lease="$BRANCH:$PUSH_LEASE_SHA"; else git push origin "HEAD:$BRANCH"; fi
 ```
 
 ### Simple vs Complex Conflicts
@@ -1367,19 +1326,17 @@ echo "Branch rebased successfully, continuing evaluation"
 ### For Simple Conflicts (Judge Resolves)
 
 ```bash
-# Resolve the conflict (e.g., keep both additions)
-# git add <resolved-files>
-git rebase --continue
+# Resolve the conflict (e.g., keep both additions), `git add <resolved-files>`, then finish
+if [ "$BRANCH_UPDATE" = rebase ]; then git rebase --continue; else git commit --no-edit; fi
 
-# Version-bearing-file sync gate (#7168, extended #7341): same reasoning as
-# the DIRTY/BEHIND paths above -- gate before this direct push too.
+# Version-bearing-file sync gate (#7168, extended #7341): gate before this push too.
 if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
-  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - aborting push"
+  echo "Version-bearing files out of sync after update (see BLOCKER:/Fix: above) - aborting push"
   exit 1
 fi
 
-git push --force-with-lease
-gh pr comment <number> --body "🔀 Rebased branch and resolved merge conflict (both sides added entries to config)"
+if [ "$BRANCH_UPDATE" = rebase ]; then git push --force-with-lease="$BRANCH:$PUSH_LEASE_SHA"; else git push origin "HEAD:$BRANCH"; fi
+gh pr comment <number> --body "🔀 Updated the branch from main and resolved a merge conflict (both sides added entries to config)"
 ```
 
 ### Version-Bearing-File-Only Conflicts: superseded (#7743)
@@ -1417,7 +1374,7 @@ for a rebase, do **not** treat it as a violation of the new invariant.
 Run the Verdict-Time CAS Recheck immediately before the `gh pr edit` below.
 
 ```bash
-git rebase --abort
+git rebase --abort 2>/dev/null || git merge --abort
 ./.loom/scripts/post-verdict.sh <number> changes-requested "$VERDICT_SHA" --body "$(cat <<'FEEDBACK'
 ❌ **Changes Requested - Merge Conflict**
 
@@ -1426,7 +1383,7 @@ This PR has merge conflicts with main that require manual resolution:
 **Conflicting files:**
 - `src/foo.ts` - overlapping changes in `processData()` function
 
-Please rebase your branch and resolve conflicts, or the Doctor role will handle this.
+Please merge main into your branch (rebase only where `loom-daemon branch-update strategy` says so) and resolve conflicts, or the Doctor role will handle this.
 
 I'll evaluate the code once conflicts are resolved.
 FEEDBACK
@@ -1525,17 +1482,7 @@ EOF
 
 ### When Merge Conflicts Exist
 
-If the PR has merge conflicts (`mergeStateStatus` is `DIRTY`), **attempt automated rebase first** before requesting changes.
-
-**See the "If DIRTY: Attempt Automated Rebase" section above for the complete workflow.**
-
-The automated rebase will:
-1. Checkout the PR branch
-2. Fetch latest main and attempt rebase
-3. If successful: push with `--force-with-lease` and continue evaluation
-4. If failed: abort rebase and apply `loom:merge-conflict` + `loom:changes-requested`
-
-**Fallback behavior** (when automated rebase fails): the DIRTY workflow above applies `loom:merge-conflict` + `loom:changes-requested` (and removes `loom:reviewing`) with a rebase-instructions comment. See "If DIRTY: Attempt Automated Rebase" for the exact commands.
+If the PR has merge conflicts (`mergeStateStatus` is `DIRTY`), **attempt the automated update first** before requesting changes — see "If DIRTY: Attempt Automated Rebase" above: merge `origin/main` in (rebase only in rebase mode, #10771), push without force (rebase mode: pinned lease), and continue evaluation; on failure abort and apply `loom:merge-conflict` + `loom:changes-requested` (removing `loom:reviewing`) with the update-instructions comment.
 
 ### When CI is Pending
 

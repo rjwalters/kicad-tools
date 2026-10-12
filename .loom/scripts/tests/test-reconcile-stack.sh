@@ -235,6 +235,17 @@ while [[ \$_i -lt \${#_args[@]} ]]; do
         *)     _sub="\${_args[\$_i]}"; break ;;
     esac
 done
+if [[ "\$_sub" == "push" && -n "\${LOOM_TEST_PUSH_RACE_SCRIPT:-}" && ! -f "$SANDBOX/.race-fired" ]]; then
+    # #9487: fire a one-shot race hook at the instant of the push — AFTER the
+    # script captured its lease pin. The hook lands a conflicting commit on the
+    # bare remote and fetches it into \$MAIN, so this clone's shared
+    # refs/remotes/origin/<child> now agrees with the moved remote (what a
+    # sibling worktree's fetch does). A BARE --force-with-lease is satisfied by
+    # that agreement and clobbers; the pinned one must still reject.
+    : > "$SANDBOX/.race-fired"
+    "\$LOOM_TEST_PUSH_RACE_SCRIPT"
+    exec "\$REAL_GIT" "\$@"
+fi
 if [[ "\$_sub" == "push" && "\${LOOM_TEST_FAKE_REJECT:-0}" == "1" ]]; then
     "\$REAL_GIT" "\$@"
     rc=\$?
@@ -258,6 +269,9 @@ teardown_sandbox() {
 }
 
 # Run reconcile-stack.sh from $1 (a cwd), capturing combined output + exit code.
+# The scenarios above Scenario M exercise the rebase path, so the policy is
+# pinned to `rebase` unless the caller sets LOOM_BRANCH_UPDATE_STRATEGY
+# (empty = unset, i.e. the daemon's own `auto` answer) (#10771).
 # Result in RUN_OUT / RUN_RC. gh stub + git file-protocol are made available.
 # Extra positional args (e.g. --dry-run) are forwarded to reconcile-stack.sh.
 # LOOM_VERSION_CHECK_SCRIPT, when set in the caller's environment, is
@@ -272,7 +286,10 @@ run_reconcile() {
         cd "$cwd" &&
         PATH="$GIT_STUB_DIR:$GH_STUB_DIR:$PATH" \
         LOOM_DEFAULT_BRANCH="main" \
+        LOOM_BRANCH_UPDATE_STRATEGY="${LOOM_BRANCH_UPDATE_STRATEGY-rebase}" \
+        LOOM_GH_NO_POLICY_LAUNCHER=1 \
         LOOM_TEST_FAKE_REJECT="${LOOM_TEST_FAKE_REJECT:-0}" \
+        LOOM_TEST_PUSH_RACE_SCRIPT="${LOOM_TEST_PUSH_RACE_SCRIPT:-}" \
         LOOM_VERSION_CHECK_SCRIPT="${LOOM_VERSION_CHECK_SCRIPT:-}" \
         GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="protocol.file.allow" GIT_CONFIG_VALUE_0="always" \
         bash "$RECONCILE" "$CHILD_PR" "$PARENT_BR" "$@" 2>&1
@@ -425,7 +442,7 @@ teardown_sandbox
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "Scenario D: push --force-with-lease is genuinely rejected (real conflicting push)"
+echo "Scenario D: a concurrent commit landed BEFORE this run — refused before anything is mutated (#9487)"
 setup_sandbox
 
 # Simulate a concurrent pusher landing a DIFFERENT commit on the child branch,
@@ -438,21 +455,78 @@ git_q -C "$CONFLICT_CLONE" add conflict.txt
 git_q -C "$CONFLICT_CLONE" commit -q -m "concurrent push (not from \$MAIN)"
 git_q -C "$CONFLICT_CLONE" push -q origin "$CHILD_BR"
 
-# $MAIN's rebase in Step 1 still runs locally against its (stale) view, so the
-# subsequent --force-with-lease push genuinely conflicts with the real,
-# already-landed concurrent commit above — a TRUE rejection, not a race.
+CHILD_BEFORE_D="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+
+# Since #9487 the lease pin is read LIVE from origin before the rebase, and the
+# run then checks that this clone has incorporated it. Here it has not — the
+# concurrent commit is on origin and nowhere in $MAIN — so the run refuses as a
+# precondition failure (exit 1) instead of rebasing first and discovering the
+# conflict at push time. Nothing is mutated, locally or remotely.
 run_reconcile "$MAIN"
 
-assert_eq "2" "$RUN_RC" "D: a genuine rejection still exits 2 (never treated as success)"
-assert_contains "$RUN_OUT" "Force-with-lease push was rejected (someone else pushed to $CHILD_BR)" \
-  "D: genuine rejection is reported as an ordinary failure"
+assert_eq "1" "$RUN_RC" \
+  "D: an unincorporated remote head is a precondition failure (exit 1), caught before the rebase"
+assert_contains "$RUN_OUT" "has not incorporated" \
+  "D: the refusal names the unincorporated remote head (#9487)"
+assert_contains "$RUN_OUT" "LEASE-PIN" \
+  "D: the refusal carries the greppable prerequisite token"
 assert_not_contains "$RUN_OUT" "PUSH-LEASE-RACE-DETECTED" \
-  "D: a real rejection is never mislabeled as the race condition"
+  "D: a refused precondition is never mislabeled as the #6695 race condition"
+assert_eq "$CHILD_BEFORE_D" "$(git_q -C "$MAIN" rev-parse "$CHILD_BR")" \
+  "D: the local child branch was never rebased"
 # The concurrent pusher's commit remains on origin — $MAIN's push did not land.
 REMOTE_CHILD_SHA_D="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
 CONFLICT_SHA="$(git_q -C "$CONFLICT_CLONE" rev-parse "$CHILD_BR")"
 assert_eq "$CONFLICT_SHA" "$REMOTE_CHILD_SHA_D" \
-  "D: origin/$CHILD_BR still holds the concurrent commit, unaffected by the rejected push"
+  "D: origin/$CHILD_BR still holds the concurrent commit, unaffected"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "D: the child PR was not retargeted either"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario D2: a sibling pushes AND fetches between the pin and the push — the pinned lease still rejects (#9487)"
+setup_sandbox
+
+# This is the live PR #9483 incident, mechanically. The conflicting push lands
+# *after* reconcile-stack.sh captured its lease pin, and the sibling's fetch
+# fast-forwards this clone's SHARED refs/remotes/origin/<child> to the moved
+# remote head. A bare `--force-with-lease` compares against exactly that ref,
+# finds it in agreement, and clobbers; the pinned lease compares against the
+# pre-race value and must be rejected.
+CONFLICT_CLONE_D2="$SANDBOX/conflict-clone-d2"
+git_q clone --quiet "$REMOTE" "$CONFLICT_CLONE_D2"
+git_q -C "$CONFLICT_CLONE_D2" checkout -q "$CHILD_BR"
+echo "sibling doctor's fix" > "$CONFLICT_CLONE_D2/conflict.txt"
+git_q -C "$CONFLICT_CLONE_D2" add conflict.txt
+git_q -C "$CONFLICT_CLONE_D2" commit -q -m "sibling Doctor's fix (already approved)"
+
+RACE_SCRIPT="$SANDBOX/push-race.sh"
+cat > "$RACE_SCRIPT" <<RACE
+#!/usr/bin/env bash
+# Fired by the stub git at the moment of the push (one-shot).
+set -e
+REAL_GIT="$(command -v git)"
+"\$REAL_GIT" -c protocol.file.allow=always -C "$CONFLICT_CLONE_D2" push -q origin "$CHILD_BR"
+# …and the sibling's fetch advances the SHARED remote-tracking ref in \$MAIN.
+"\$REAL_GIT" -c protocol.file.allow=always -C "$MAIN" fetch -q origin "$CHILD_BR"
+RACE
+chmod +x "$RACE_SCRIPT"
+
+SIBLING_SHA_D2="$(git_q -C "$CONFLICT_CLONE_D2" rev-parse "$CHILD_BR")"
+
+LOOM_TEST_PUSH_RACE_SCRIPT="$RACE_SCRIPT" run_reconcile "$MAIN"
+
+assert_eq "2" "$RUN_RC" \
+  "D2: the pinned lease rejects the clobbering push (exit 2), despite the advanced tracking ref"
+assert_contains "$RUN_OUT" "Force-with-lease push was rejected (someone else pushed to $CHILD_BR)" \
+  "D2: the rejection is reported as an ordinary failure"
+assert_not_contains "$RUN_OUT" "PUSH-LEASE-RACE-DETECTED" \
+  "D2: a real rejection is never mislabeled as the #6695 race condition"
+# The decisive assertion: the sibling's commit is still what origin holds.
+assert_eq "$SIBLING_SHA_D2" "$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")" \
+  "D2: the sibling's already-pushed commit SURVIVES on origin (the #9487 data loss does not occur)"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "D2: the child PR was not retargeted after the rejected push"
 
 teardown_sandbox
 
@@ -618,6 +692,31 @@ assert_eq "" "$(cat "$GH_EDIT_LOG")" "K: the child PR was not retargeted either"
 teardown_sandbox
 
 # ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario M: a merge-only repo retargets the child and never rewrites it (#10771)"
+for M_MODE in merge auto-unknown; do
+    setup_sandbox
+    CHILD_BEFORE_M="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+    REMOTE_BEFORE_M="$(git_q -C "$MAIN" ls-remote origin "refs/heads/$CHILD_BR" | cut -f1)"
+    if [[ "$M_MODE" == "merge" ]]; then
+        LOOM_BRANCH_UPDATE_STRATEGY=merge run_reconcile "$MAIN"
+    else
+        # No override: the daemon asks the forge, the gh stub cannot answer
+        # `api repos/...`, and unknown must fail toward merge.
+        LOOM_BRANCH_UPDATE_STRATEGY="" run_reconcile "$MAIN"
+    fi
+    assert_eq "0" "$RUN_RC" "M ($M_MODE): reconcile exits 0"
+    assert_contains "$RUN_OUT" "#10771" "M ($M_MODE): the output names the merge-only policy"
+    assert_eq "$CHILD_BEFORE_M" "$(git_q -C "$MAIN" rev-parse "$CHILD_BR")" \
+      "M ($M_MODE): the local child branch was not rewritten"
+    assert_eq "$REMOTE_BEFORE_M" "$(git_q -C "$MAIN" ls-remote origin "refs/heads/$CHILD_BR" | cut -f1)" \
+      "M ($M_MODE): nothing was pushed to the child branch"
+    assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --repo owner/repo --base main" \
+      "M ($M_MODE): the child PR base is still retargeted to the default branch"
+    teardown_sandbox
+done
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Source guards: fail loudly if a refactor drops either fix.
 echo ""
 echo "Source guards on reconcile-stack.sh"
@@ -632,6 +731,14 @@ assert_contains "$src" "git -C" \
   "reconcile-stack.sh runs the push in the worktree the rebase ran in via git -C"
 assert_contains "$src" "push_landed_despite_rejection" \
   "reconcile-stack.sh verifies the actual remote ref state after a rejected --force-with-lease push (#6695)"
+assert_contains "$src" '"$DAEMON_BIN" push-lease pin-flag --remote origin --branch "$CHILD_BRANCH" --local-ref "refs/heads/$CHILD_BRANCH"' \
+  "reconcile-stack.sh builds the pinned lease via loom-daemon push-lease pin-flag, not in shell (#9487)"
+assert_contains "$src" 'run "${GIT_C[@]}" push "$PUSH_LEASE_ARG" origin "$CHILD_BRANCH"' \
+  "reconcile-stack.sh pushes with the PINNED lease argument the subcommand printed (#9487)"
+assert_not_contains "$src" 'push --force-with-lease;' \
+  "reconcile-stack.sh never issues a BARE --force-with-lease (#9487)"
+assert_contains "$src" 'loom_daemon_version_preflight push-lease "$DAEMON_BIN"' \
+  "a loom-daemon too old for push-lease is refused with the floor, never degraded to a bare lease (#9487)"
 assert_contains "$src" "PUSH-LEASE-RACE-DETECTED" \
   "reconcile-stack.sh logs a greppable marker when a reported rejection is actually landed"
 assert_contains "$src" '"$SCRIPT_DIR/version-check-gate.sh"' \

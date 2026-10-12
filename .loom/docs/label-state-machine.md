@@ -40,6 +40,7 @@ pipeline state already lives.
 - [Follow-up work](#follow-up-work)
 - [Label registry: the source of truth (#10013)](#label-registry-the-source-of-truth-10013)
 - [No-op hold (#10156)](#no-op-hold-10156)
+- [Partial-increment remainder hold (#9264)](#partial-increment-remainder-hold-9264)
 <!-- toc:end -->
 
 ## Two ways to reach a human (#10000)
@@ -1028,3 +1029,28 @@ against `requires_base`/`remove_with` (#5671). Changes go in the registry.
 ## No-op hold (#10156)
 
 A sweep that ends as a no-op (the `noop-cooldown record` IPC, or a Curator-only stop the reaper classifies) is counted per issue. After `autonomous.workFinder.noopCooldown.holdThreshold` consecutive no-ops (default 3, env `LOOM_WORK_FINDER_NOOP_HOLD_THRESHOLD`, `0` disables) with an unchanged fingerprint (labels minus claim churn, non-bot comments, linked-PR state, `## Dependencies` state), the daemon parks the issue: `loom:blocked` when dependencies are named, otherwise `loom:operator-only` + `loom:operator-decision`, with one `<!-- loom:noop-hold (#10156) -->` comment. `loom:operator-priority` does not exempt an issue and is never touched. To unpark, remove the park labels and re-add `loom:issue`; any new comment, label change, linked-PR change or dependency change also restarts the count.
+
+## Partial-increment remainder hold (#9264)
+
+When a PR merges with a non-closing `Part of #N` / `Contributes to #N` reference,
+`merge-pr.sh` returns issue N from `loom:building` to `loom:issue`. If what is left
+needs a human (an operator decision, a deployment-time check, a hardware step), the
+issue body declares it with an HTML comment marker, added **before** the PR merges:
+
+```text
+<!-- loom:remainder-hold reason="deployment-time checks need the fleet on a release containing this merge" -->
+```
+
+With the marker, the reset swaps `loom:building` -> `loom:operator` instead, logs the
+reason, and posts a "Partial Increment Merged (remainder held)" comment. To release,
+a human removes `loom:operator` and the marker, then re-applies `loom:issue`.
+
+- The marker is honoured from any author: it can only keep an issue out of the
+  ready queue. The `reason` is one line and is only quoted, never evaluated.
+- A marker inside a fenced code block is documentation, not a declaration. A marker
+  with no or an empty `reason` still holds (the log says the reason is unstated).
+- Prose headings ("Deferred", "Needs operator decision") never trigger a hold.
+- Wire protocol: `loom-daemon merge-pr partial-reset` prints `SWAP<TAB>loom:operator`
+  for a held swap and a bare `SWAP` otherwise; an older `merge-pr.sh` reading the
+  former still swaps to `loom:issue`, and a newer script reading a bare `SWAP` does the
+  same. Logic: `loom-daemon/src/merge_pr/partial_reset.rs`.

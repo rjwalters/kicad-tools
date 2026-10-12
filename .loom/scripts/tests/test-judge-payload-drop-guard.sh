@@ -30,6 +30,14 @@
 #      difference vs origin/main afterward) must be UNAFFECTED -- push still
 #      proceeds, no false positive.
 #
+# Since #10771 the block updates by MERGE unless `loom-daemon branch-update
+# strategy` prints `rebase`. Both cases therefore run three ways, with a
+# `loom-daemon` stub on PATH: pinned `rebase` (the original #8298 shape),
+# `merge`, and a daemon that predates the subcommand (clap's "unrecognized
+# subcommand", exit 2), which must degrade to merge. The guard checks for an
+# empty diff after ANY update, so it must fire in merge mode too: a merge whose
+# result equals origin/main has dropped the payload just as surely.
+#
 # Hermetic: local git fixtures (a local bare "origin") under a private
 # TMPDIR. No forge, no network.
 #
@@ -134,13 +142,17 @@ pass "the shipped DIRTY-rebase block parses as bash"
 # Shared fixture helpers
 # =====================================================================
 run_dirty_block() {
-    # Runs the extracted block in $1 (a repo dir already checked out on the
-    # PR branch, with origin fetched). Stubs `gh` and `post-verdict.sh`;
-    # everything else (fetch/rebase/diff/push) is real git.
-    local repo="$1"
+    # run_dirty_block <repo> <strategy> -- runs the extracted block in <repo>
+    # (already checked out on the PR branch, with origin fetched). Stubs `gh`,
+    # `post-verdict.sh` and `loom-daemon`; everything else (fetch/rebase/merge/
+    # diff/push) is real git. <strategy> is what the `loom-daemon` stub's
+    # `branch-update strategy` prints (rebase|merge), or `missing` for a daemon
+    # that predates the subcommand.
+    local repo="$1" strategy="$2"
     (
         cd "$repo" || exit 1
         export PATH="$repo/.loom/stub-bin:$PATH"
+        export STUB_BRANCH_UPDATE="$strategy"
         bash -c "$FENCE_SRC"
     )
 }
@@ -185,6 +197,15 @@ esac
 STUB
     chmod +x "$repo/.loom/stub-bin/gh"
 
+    cat > "$repo/.loom/stub-bin/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "branch-update strategy" && "${STUB_BRANCH_UPDATE:-}" != missing ]]; then
+    echo "${STUB_BRANCH_UPDATE:?}"; exit 0
+fi
+echo "error: unrecognized subcommand '$1'" >&2; exit 2
+STUB
+    chmod +x "$repo/.loom/stub-bin/loom-daemon"
+
     printf '%s' "$repo"
 }
 
@@ -195,112 +216,127 @@ trap 'rm -rf "$WORKROOT"' EXIT
 # Case 1: the #8298 repro shape -- git's own cherry-equivalence detection
 # silently drops the PR commit during rebase (adjacent single-line JSON
 # edits, no separating context, resolving to a content-identical patch).
+# In merge mode the same shape merges cleanly to a tree equal to origin/main.
 # =====================================================================
-echo
-echo "--- #8298 repro: rebase silently drops the PR's payload ---"
-
-BASE1="$WORKROOT/case1"
-REPO1="$(make_fixture "$BASE1")"
-
-cat > "$REPO1/install-metadata.json" <<'EOF'
+build_case1() {
+    local repo
+    repo="$(make_fixture "$1")"
+    cat > "$repo/install-metadata.json" <<'EOF'
 {
   "loom_version": "1.1",
   "loom_commit": "aaaa"
 }
 EOF
-(cd "$REPO1" && git add -A && git commit -qm base && git push -q origin HEAD:main)
+    (cd "$repo" && git add -A && git commit -qm base && git push -q origin HEAD:main)
 
-(cd "$REPO1" && git checkout -qb feature/issue-999)
-cat > "$REPO1/install-metadata.json" <<'EOF'
-{
-  "loom_version": "1.1",
-  "loom_commit": "bbbb"
+    (cd "$repo" && git checkout -qb feature/issue-999)
+    sed -i.bak 's/aaaa/bbbb/' "$repo/install-metadata.json" && rm -f "$repo/install-metadata.json.bak"
+    (cd "$repo" && GIT_AUTHOR_DATE="2026-01-01T00:00:00" GIT_COMMITTER_DATE="2026-01-01T00:00:00" \
+        git commit -qam "chore: resync installed Loom surfaces (PR)" && \
+        git push -qu origin feature/issue-999)
+
+    (cd "$repo" && git checkout -q main)
+    sed -i.bak 's/aaaa/bbbb/' "$repo/install-metadata.json" && rm -f "$repo/install-metadata.json.bak"
+    (cd "$repo" && GIT_AUTHOR_DATE="2026-01-02T00:00:00" GIT_COMMITTER_DATE="2026-01-02T00:00:00" \
+        git commit -qam "chore: resync installed Loom surfaces (main)" && git push -q origin HEAD:main)
+
+    (cd "$repo" && git checkout -q feature/issue-999)
+    printf '%s' "$repo"
 }
-EOF
-(cd "$REPO1" && GIT_AUTHOR_DATE="2026-01-01T00:00:00" GIT_COMMITTER_DATE="2026-01-01T00:00:00" \
-    git commit -qam "chore: resync installed Loom surfaces (PR)" && \
-    git push -qu origin feature/issue-999)
 
-(cd "$REPO1" && git checkout -q main)
-cat > "$REPO1/install-metadata.json" <<'EOF'
-{
-  "loom_version": "1.1",
-  "loom_commit": "bbbb"
+check_case1() {
+    # check_case1 <base> <strategy> <label>
+    local base="$1" strategy="$2" mode="$3" repo out calls gh_calls
+    echo
+    echo "--- #8298 repro ($mode): the update silently drops the PR's payload ---"
+    repo="$(build_case1 "$base")"
+    assert_eq "1" "$(cd "$repo" && git rev-list --count origin/main..HEAD 2>/dev/null || echo "?")" \
+        "[$mode] sanity: the PR branch carries one real commit ahead of origin/main before the block runs"
+    local pre_remote
+    pre_remote="$(git --git-dir="$base/origin.git" rev-parse feature/issue-999)"
+
+    out="$(run_dirty_block "$repo" "$strategy" 2>&1)"
+
+    assert_contains "$out" "Update silently dropped PR payload" \
+        "[$mode] the payload-drop guard fires and logs why"
+    gh_calls="$(cat "$repo/gh.calls" 2>/dev/null || echo "")"
+    assert_not_contains "$gh_calls" "Automatically updated the branch" \
+        "[$mode] the success path never runs"
+    assert_eq "0" "$( (cd "$repo" && git diff --quiet origin/main HEAD) && echo 0 || echo 1)" \
+        "[$mode] sanity: the update really did leave origin/main's content (the underlying hazard)"
+    assert_eq "$pre_remote" "$(git --git-dir="$base/origin.git" rev-parse feature/issue-999)" \
+        "[$mode] nothing was pushed: the remote PR head is unchanged"
+
+    calls="$(cat "$repo/post-verdict.calls" 2>/dev/null || echo "")"
+    assert_contains "$calls" "changes-requested" \
+        "[$mode] falls back through the EXISTING post-verdict.sh changes-requested path (not a new one)"
+    assert_contains "$gh_calls" "loom:merge-conflict" \
+        "[$mode] reuses the existing loom:merge-conflict label"
+    assert_contains "$gh_calls" "loom:changes-requested" \
+        "[$mode] reuses the existing loom:changes-requested label"
 }
-EOF
-(cd "$REPO1" && GIT_AUTHOR_DATE="2026-01-02T00:00:00" GIT_COMMITTER_DATE="2026-01-02T00:00:00" \
-    git commit -qam "chore: resync installed Loom surfaces (main)" && git push -q origin HEAD:main)
-
-(cd "$REPO1" && git checkout -q feature/issue-999)
-PRE_AHEAD="$(cd "$REPO1" && git rev-list --count origin/main..HEAD 2>/dev/null || echo "?")"
-assert_eq "1" "$PRE_AHEAD" "sanity: the PR branch carries one real commit ahead of origin/main before the block runs"
-
-OUT1="$(run_dirty_block "$REPO1" 2>&1)"
-
-assert_contains "$OUT1" "Rebase silently dropped PR payload" \
-    "the payload-drop guard fires and logs why"
-assert_not_contains "$OUT1" "Rebase successful - proceeding with evaluation" \
-    "the success path never runs"
-assert_eq "0" "$(cd "$REPO1" && git rev-list --count origin/main..HEAD)" \
-    "sanity: git really did collapse the branch to origin/main's content (the underlying hazard)"
-
-CALLS1="$(cat "$REPO1/post-verdict.calls" 2>/dev/null || echo "")"
-assert_contains "$CALLS1" "changes-requested" \
-    "falls back through the EXISTING post-verdict.sh changes-requested path (not a new one)"
-
-GH_CALLS1="$(cat "$REPO1/gh.calls" 2>/dev/null || echo "")"
-assert_contains "$GH_CALLS1" "loom:merge-conflict" \
-    "reuses the existing loom:merge-conflict label"
-assert_contains "$GH_CALLS1" "loom:changes-requested" \
-    "reuses the existing loom:changes-requested label"
 
 # =====================================================================
-# Case 2: no regression -- a genuine successful rebase (real content
-# difference vs origin/main afterward) must be unaffected.
+# Case 2: no regression -- a genuine successful update (real content
+# difference vs origin/main afterward) must be unaffected and must push.
 # =====================================================================
-echo
-echo "--- no regression: a normal DIRTY rebase with real post-rebase content still pushes ---"
+build_case2() {
+    local repo
+    repo="$(make_fixture "$1")"
+    echo "unrelated base content" > "$repo/other.txt"
+    (cd "$repo" && git add -A && git commit -qm base && git push -q origin HEAD:main)
 
-BASE2="$WORKROOT/case2"
-REPO2="$(make_fixture "$BASE2")"
+    (cd "$repo" && git checkout -qb feature/issue-999)
+    echo "PR-only change" >> "$repo/other.txt"
+    (cd "$repo" && git commit -qam "pr: add a line" && git push -qu origin feature/issue-999)
 
-echo "unrelated base content" > "$REPO2/other.txt"
-(cd "$REPO2" && git add -A && git commit -qm base && git push -q origin HEAD:main)
+    (cd "$repo" && git checkout -q main)
+    echo "main-only change" > "$repo/main-only.txt"
+    (cd "$repo" && git add -A && git commit -qam "main: unrelated file" && git push -q origin HEAD:main)
 
-(cd "$REPO2" && git checkout -qb feature/issue-999)
-echo "PR-only change" >> "$REPO2/other.txt"
-(cd "$REPO2" && git commit -qam "pr: add a line" && git push -qu origin feature/issue-999)
+    (cd "$repo" && git checkout -q feature/issue-999)
+    printf '%s' "$repo"
+}
 
-(cd "$REPO2" && git checkout -q main)
-echo "main-only change" > "$REPO2/main-only.txt"
-(cd "$REPO2" && git add -A && git commit -qam "main: unrelated file" && git push -q origin HEAD:main)
+check_case2() {
+    # check_case2 <base> <strategy> <label> <expected-mode-in-comment>
+    local base="$1" strategy="$2" mode="$3" want="$4" repo out calls gh_calls pre_remote
+    echo
+    echo "--- no regression ($mode): a normal DIRTY update with real content still pushes ---"
+    repo="$(build_case2 "$base")"
+    assert_eq "1" "$(cd "$repo" && git rev-list --count origin/main..HEAD 2>/dev/null || echo "?")" \
+        "[$mode] sanity: the PR branch carries one real commit ahead of origin/main before the block runs"
+    pre_remote="$(git --git-dir="$base/origin.git" rev-parse feature/issue-999)"
 
-(cd "$REPO2" && git checkout -q feature/issue-999)
-PRE_AHEAD2="$(cd "$REPO2" && git rev-list --count origin/main..HEAD 2>/dev/null || echo "?")"
-assert_eq "1" "$PRE_AHEAD2" "sanity: the PR branch carries one real commit ahead of origin/main before the block runs"
+    # The block's push reaches the real "origin" -- our local bare repo -- so
+    # let it push for real and assert on the result.
+    out="$(run_dirty_block "$repo" "$strategy" 2>&1)"
 
-# `git push --force-with-lease` in the extracted block would try to reach
-# the real "origin" -- that IS our local bare repo here, so let it push for
-# real and assert on the result instead of stubbing it away.
-OUT2="$(run_dirty_block "$REPO2" 2>&1)"
+    gh_calls="$(cat "$repo/gh.calls" 2>/dev/null || echo "")"
+    assert_contains "$gh_calls" "Automatically updated the branch from main ($want)" \
+        "[$mode] the normal success path runs, updating by $want"
+    assert_not_contains "$out" "Update silently dropped PR payload" \
+        "[$mode] the payload-drop guard does NOT fire on a real, non-empty result (no false positive)"
+    assert_eq "1" "$( (cd "$repo" && git diff --quiet origin/main HEAD) && echo 0 || echo 1)" \
+        "[$mode] sanity: the updated branch genuinely still differs from origin/main"
 
-assert_contains "$OUT2" "Rebase successful - proceeding with evaluation" \
-    "the normal success path runs when the rebase genuinely changes content"
-assert_not_contains "$OUT2" "Rebase silently dropped PR payload" \
-    "the payload-drop guard does NOT fire on a real, non-empty rebase result (no false positive)"
+    calls="$(cat "$repo/post-verdict.calls" 2>/dev/null || echo "")"
+    assert_eq "" "$calls" "[$mode] the merge-conflict fallback is never invoked on the common-case path"
 
-POST_REBASE_DIFF_EMPTY2=0
-(cd "$REPO2" && git diff --quiet origin/main HEAD) && POST_REBASE_DIFF_EMPTY2=1
-assert_eq "0" "$POST_REBASE_DIFF_EMPTY2" \
-    "sanity: the rebased branch genuinely still differs from origin/main"
+    assert_eq "$(cd "$repo" && git rev-parse HEAD)" "$(git --git-dir="$base/origin.git" rev-parse feature/issue-999)" \
+        "[$mode] the push actually landed on the (local, hermetic) origin"
+    if [[ "$want" == merge ]]; then
+        assert_eq "0" "$(git --git-dir="$base/origin.git" merge-base --is-ancestor "$pre_remote" feature/issue-999 && echo 0 || echo 1)" \
+            "[$mode] merge mode never rewrites: the old remote head is an ancestor of the new one (no force push)"
+    fi
+}
 
-CALLS2="$(cat "$REPO2/post-verdict.calls" 2>/dev/null || echo "")"
-assert_eq "" "$CALLS2" "the merge-conflict fallback is never invoked on the common-case path"
-
-REMOTE_PR_HEAD2="$(git --git-dir="$BASE2/origin.git" rev-parse feature/issue-999)"
-LOCAL_HEAD2="$(cd "$REPO2" && git rev-parse HEAD)"
-assert_eq "$REMOTE_PR_HEAD2" "$LOCAL_HEAD2" \
-    "the push actually landed on the (local, hermetic) origin -- the common case still pushes"
+check_case1 "$WORKROOT/case1-rebase"  rebase  "pinned rebase"
+check_case1 "$WORKROOT/case1-merge"   merge   "merge"
+check_case1 "$WORKROOT/case1-old"     missing "daemon without branch-update"
+check_case2 "$WORKROOT/case2-rebase"  rebase  "pinned rebase" rebase
+check_case2 "$WORKROOT/case2-merge"   merge   "merge"         merge
+check_case2 "$WORKROOT/case2-old"     missing "daemon without branch-update" merge
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

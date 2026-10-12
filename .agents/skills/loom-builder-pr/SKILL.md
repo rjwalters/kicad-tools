@@ -759,15 +759,16 @@ Loom-Issue: rjwalters/loom#123
 **Write both as PLAIN TEXT — never in backticks (#8796).** A trailer inside an inline code span
 (or a fenced block) is **silently ignored** — merge-pr.sh blanks code spans before matching,
 deliberately (#5234), so the PR looks correct to a reviewer and to Judge while the #3667 reset
-never fires and the issue is stranded at `loom:building` with nothing logged (the
-rjwalters/kicad-tools PR #5686 / #5240 incident).
+never fires and the issue is stranded at `loom:building` with nothing logged.
 
 ```markdown
 Part of #123              <- declaration: parsed, the label reset fires on merge
 `Part of #123`            <- code span: NOT a declaration, reset silently skipped
 ```
 
-**Both the PR body and the commit messages must carry the same reference.** GitHub harvests closing keywords from the PR body and the merge commit's subject (this repo merges with merge commits, #9105) — individual commit bodies are not parsed, but keep the reference consistent in them anyway. When in doubt, prefer `Part of #N`.
+**Both the PR body and the commit messages must carry the same reference.** GitHub harvests closing keywords from the PR body and the merge commit's subject (this repo merges with merge commits, #9105). Prefer `Part of #N`.
+
+If a `Part of #N` remainder needs a human, add `<!-- loom:remainder-hold reason="..." -->` to the issue body before merge (parks it `loom:operator`; see label-state-machine.md).
 
 #### A stray closing keyword ANYWHERE in the body defeats `Part of #N` (#4569)
 
@@ -814,34 +815,32 @@ When creating a PR, verify:
 9. Commits carry a `Signed-off-by:` trailer if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` check — see "DCO sign-off")
 10. `## Test Plan` includes a `TDD:` line for any diff touching executing code (see "Test-First Discipline" above) — omit only for docs/config/ADR-only changes
 11. `## Rollout check` section present if the PR is a host-move PR (see "Rollout check" above)
-12. **Rebased onto latest `origin/main` immediately before push** — see "Pre-Push Rebase: Sync with `origin/main`" below
+12. **Synced with latest `origin/main` immediately before push** — "Pre-Push Rebase: Sync with `origin/main`" below
 
 ### Pre-Push Rebase: Sync with `origin/main` (#7668)
 
 **Immediately before `git push` + opening the PR** — after the checklist above
-passes and right before the Lease Fencing check below — sync your branch onto
-the current tip of `main`:
+passes, right before Lease Fencing below — sync with `main`'s tip (a merge
+unless the repo allows rebase, #10771):
 
 ```bash
+BRANCH_UPDATE=$(loom-daemon branch-update strategy) || BRANCH_UPDATE=merge  # unknown = merge
 git fetch origin main
-git rebase origin/main
+if [ "$BRANCH_UPDATE" = rebase ]; then git rebase origin/main; else git merge --no-ff -m "Merge origin/main (Builder: sync before push)" origin/main; fi
 ```
 
-Do this **unconditionally**, not only when your diff happens to touch a file
-you know is contested. A branch cut even a few hours ago against a busy repo
-can be stale by the time you are ready to push, and the cost of skipping this
-is not hypothetical: three consecutive PRs (example-org/tool-repo#164, #165,
-#166) each landed `DIRTY` with CI never run, purely because every branch was
-cut before the previous PR in the sequence merged and each touched the same
-narrow, frequently-updated surface (a README status paragraph). Each one cost
-a full Judge-rejection + Doctor-rebase round-trip that this step is meant to
-absorb up front, before a reviewer ever sees the PR.
+Do this **unconditionally**, not only when your diff touches a file you know
+is contested: a branch cut hours ago against a busy repo can be stale by push
+time. Three consecutive PRs (example-org/tool-repo#164, #165, #166) each landed
+`DIRTY` with CI never run because each was cut before the previous one merged
+and touched the same README paragraph; each cost a Judge-rejection + Doctor
+round-trip this step absorbs up front.
 
-**If the rebase conflicts, resolve it now — this is the moment, not later
-after a review round-trip:**
+**If the update conflicts, resolve it now, not after a review round-trip:**
 
-1. Resolve each conflicted file, `git add` it, `git rebase --continue`
-   (repeat until the rebase completes).
+1. Resolve each conflicted file, `git add` it, then `git commit --no-edit`
+   (merge) or `git rebase --continue` (rebase; repeat until it completes).
+   A branch already pushed is pushed plain in merge mode — never forced.
 2. Re-run the project's check command (`buildGate.command`, e.g. `pnpm check:ci`)
    — a rebase can silently change behavior even when it resolves cleanly.
 3. **Version-bearing-file sync gate (#7168; moot after #7743)**: a clean rebase
@@ -858,10 +857,8 @@ after a review round-trip:**
    than force a resolution — this is the same bar as any other blocked-work
    outcome in `builder.md`.
 
-This is a pure timing/ordering change — it does not weaken any Judge check,
-label invariant, or lifecycle gate; it only moves a rebase that would
-otherwise happen reactively (via Doctor, after a `loom:changes-requested`
-round-trip) to before the PR is ever opened.
+This only moves an update that would otherwise happen reactively (Doctor,
+after `loom:changes-requested`) to before the PR opens; no gate is weakened.
 
 ### Lease Fencing: Confirm You Still Own the Claim (Epic #6165 Phase 3, #6309)
 

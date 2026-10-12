@@ -4432,7 +4432,9 @@ api` read):
 - **Safe** (child issue not `loom:building`): invokes
   `./.loom/scripts/reconcile-stack.sh <child-pr> feature/issue-<parent>`
   (`git rebase --onto <the FETCHED default-branch commit> <parent-ref>
-  <child-branch>` + `--force-with-lease` + `gh pr edit --base <default>`).
+  <child-branch>` + `--force-with-lease` + `gh pr edit --base <default>`; in a
+  repo whose PR branches are not rebased, only the `gh pr edit`, see
+  [branch-update-strategy.md](branch-update-strategy.md), #10771).
   The destination is the commit that run fetched from the remote, never the
   local branch of the same name: the local default branch is normally stale at
   exactly this moment (the parent merged on the forge), and rebasing onto it
@@ -4476,7 +4478,8 @@ child that branched off its pre-amend tip goes stale. It discovers open child
 PRs with the same `gh pr list --base feature/issue-<parent> --state open` query,
 detects staleness via `git merge-base --is-ancestor`, and rebases safe stale
 children onto the parent's current tip (`git rebase` + `push --force-with-lease`,
-base **not** retargeted — the child stays stacked), deferring children whose
+base **not** retargeted — the child stays stacked; in a merge-only repo stale
+children are only reported, #10771/#9808), deferring children whose
 issue is still `loom:building` with a comment. Doctor invokes it as a documented
 best-effort step after pushing to a `feature/issue-<N>` branch. **Dependency
 auto-detection**, **diamonds / multi-parent**, and **auto-detach** remain **out

@@ -2,6 +2,17 @@
 # push-lease-verify.sh - Verify the *actual* post-push ref state after a
 # `git push --force-with-lease` reports a rejection (#6695).
 #
+# THE OTHER HALF OF THE LEASE PROBLEM LIVES IN THE DAEMON (#9487).
+# `--force-with-lease` can also report *success* for a push that destroyed
+# someone else's commit: with no `=<ref>:<expect>` value it compares against
+# `refs/remotes/<remote>/<branch>`, a ref SHARED by every linked worktree of a
+# Loom clone, which a sibling agent's fetch can advance out from under the
+# pusher (the live PR #9483 incident). The fix is to PIN the expected value to
+# the remote head the work is based on, and that logic is
+# `loom-daemon push-lease pin-flag` — not a function here, per
+# `.loom/docs/shell-language-policy.md`. Mechanism, incident and the
+# "do not freshen the pin" trap: `defaults/docs/push-lease-pinning.md`.
+#
 # Background: Git LFS's pre-push hook can race the lease re-check on a
 # branch with pending LFS objects. The hook uploads LFS objects and the ref
 # update proceeds on the remote, while the client-side lease comparison
@@ -60,3 +71,4 @@ push_landed_despite_rejection() {
 
     [[ -n "$remote_sha" && "$remote_sha" == "$expected_sha" ]]
 }
+

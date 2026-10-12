@@ -1196,6 +1196,17 @@ FAKE_DAEMON_EOF
     chmod +x "$dest"
 }
 
+# run_with_stale_bin <repo> <pattern>... -- resync <repo> with the only PATH
+# loom-daemon a fake emitting <pattern>...; sets $OUT and $RC.
+run_with_stale_bin() {
+    local repo="$1" stale home; shift
+    stale="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"; home="$(mktemp -d)"
+    make_fake_daemon_bin "$stale/loom-daemon" "$@"
+    OUT="$(cd "$repo" && env -u LOOM_DAEMON_BIN PATH="$stale:/usr/bin:/bin" HOME="$home" \
+        LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
+    RC=$?; rm -rf "$home" "$stale"
+}
+
 # A synthetic post_init.rs declaring an "old" pattern (present in every fake
 # binary below) plus a "just-added" pattern (present ONLY in the fresh
 # repo-local build) -- mirrors #5280 adding `.claude/worktrees/` to source
@@ -1215,13 +1226,7 @@ echo "Test group 12h: gitignore refresh prefers a repo-local build over a stale 
 REPO="$(make_fixture)"
 write_fake_post_init "$REPO"
 make_fake_daemon_bin "$REPO/loom-daemon/target/release/loom-daemon" ".loom-in-use" ".fake-newly-added-pattern/"
-STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
-make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
-NO_BIN_HOME="$(mktemp -d)"
-OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
-    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
-RC=$?
-rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+run_with_stale_bin "$REPO" ".loom-in-use"
 if [[ $RC -eq 0 ]]; then
     pass "(#5294) apply exits 0 with a stale PATH binary and a fresh repo-local build present"
 else
@@ -1244,13 +1249,7 @@ REPO="$(make_fixture)"
 write_fake_post_init "$REPO"
 # No repo-local build this time: resolution falls through to the stale PATH
 # binary (the pre-#5294-fix behavior this whole issue is about).
-STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
-make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
-NO_BIN_HOME="$(mktemp -d)"
-OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
-    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
-RC=$?
-rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+run_with_stale_bin "$REPO" ".loom-in-use"
 if [[ $RC -eq 0 ]]; then
     pass "(#5294) apply still exits 0 when only a stale binary resolves"
 else
@@ -1271,13 +1270,7 @@ fi
 echo "Test group 12o: gitignore refresh RESTORES a pattern dropped by a stale binary, not just warns about it (#5991)"
 REPO="$(make_fixture)"
 write_fake_post_init "$REPO"
-STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
-make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
-NO_BIN_HOME="$(mktemp -d)"
-OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
-    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
-RC=$?
-rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+run_with_stale_bin "$REPO" ".loom-in-use"
 if [[ $RC -eq 0 ]]; then
     pass "(#5991) apply still exits 0 when the stale-binary guard has to restore a pattern"
 else
@@ -1305,17 +1298,35 @@ fi
 # byte-identical, fully-restored .gitignore (the stale binary itself never
 # self-heals -- only rebuilding it does; see the warning's own guidance).
 cp "$REPO/.gitignore" "$WORKDIR/gi-before-2nd-5991"
-STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
-make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
-NO_BIN_HOME="$(mktemp -d)"
-(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
-    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT") >/dev/null 2>&1
-RC2=$?
-rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+run_with_stale_bin "$REPO" ".loom-in-use"; RC2=$RC
 if [[ $RC2 -eq 0 ]] && diff -q "$WORKDIR/gi-before-2nd-5991" "$REPO/.gitignore" >/dev/null 2>&1; then
     pass "(#5991) a second run with the same stale binary leaves .gitignore byte-identical (still fully restored)"
 else
     fail "(#5991) second run with the same stale binary left .gitignore in a different (still-regressed?) state (rc=$RC2)"
+fi
+
+# #11323: the mirror image of #5991 -- a binary built BEFORE a pattern was
+# REMOVED from source still emits it (febfc4335 re-added `.loom/concierge/`).
+# The guard must drop it so the result is byte-identical to a fresh binary's.
+echo "Test group 12p: gitignore refresh DROPS an extra pattern a stale binary re-adds after source removed it (#11323)"
+REPO="$(make_fixture)"; write_fake_post_init "$REPO"
+run_with_stale_bin "$REPO" ".loom-in-use" ".loom/concierge/" ".fake-newly-added-pattern/"
+cp "$REPO/.gitignore" "$WORKDIR/gi-stale-11323"; STALE_OUT="$OUT"; STALE_RC=$RC
+REPO="$(make_fixture)"; write_fake_post_init "$REPO"
+run_with_stale_bin "$REPO" ".loom-in-use" ".fake-newly-added-pattern/"
+if [[ $STALE_RC -eq 0 ]] && cmp -s "$WORKDIR/gi-stale-11323" "$REPO/.gitignore" && \
+      grep -qi "WITH 1 extra pattern" <<<"$STALE_OUT" && grep -qF "    .loom/concierge/" <<<"$STALE_OUT"; then
+    pass "(#11323) the extra pattern was named in a warning and dropped: .gitignore is byte-identical to the source-generated one"
+else
+    fail "(#11323) a stale binary's re-added pattern was not warned about and dropped (rc=$STALE_RC)"
+fi
+# No source pattern list (stripped install source) = cannot verify: hands off.
+REPO="$(make_fixture)"
+run_with_stale_bin "$REPO" ".loom-in-use" ".loom/concierge/"
+if grep -qxF ".loom/concierge/" "$REPO/.gitignore"; then
+    pass "(#11323) without a source post_init.rs the managed block is left untouched"
+else
+    fail "(#11323) the guard rewrote the block although no source pattern list was available"
 fi
 
 # --- (#4285) targeted loom-workspace package.json version field edit --------

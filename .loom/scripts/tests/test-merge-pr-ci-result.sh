@@ -67,7 +67,8 @@ if awk '/^_revalidate_merge_guards\(\) \{/ { inf=1 } inf && /^  .*_check_ci_resu
 else
     fail "--auto's post-wait revalidation re-runs the gate" "_check_ci_result settled not called inside _revalidate_merge_guards"
 fi
-regate_line="$(awk '/\[\[ "\$MERGE_PRECONDITION_SHA" == "\$PR_HEAD_SHA" .*\|\| _check_ci_result settled$/ { print NR; exit }' "$MERGE_PR_SRC")"
+# (#10688 appends the plain-path required-context gate to the same line.)
+regate_line="$(awk '/\[\[ "\$MERGE_PRECONDITION_SHA" == "\$PR_HEAD_SHA" .*\|\| _check_ci_result settled(;.*)?$/ { print NR; exit }' "$MERGE_PR_SRC")"
 if [[ -n "$regate_line" && -n "$merge_line" && "$regate_line" -lt "$merge_line" ]]; then
     ok "a head moved by the precondition read is re-gated before the merge call"
 else

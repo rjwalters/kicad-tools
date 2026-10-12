@@ -2726,7 +2726,7 @@ _gitignore_source_ephemeral_patterns() {
     local post_init="$SOURCE_ROOT/loom-daemon/src/init/post_init.rs"
     [[ -f "$post_init" ]] || return 0
     awk '/pub const EPHEMERAL_PATTERNS/ { flag=1; next } flag && /^\];/ { exit } flag' "$post_init" \
-        | sed -n -E 's/^[[:space:]]*"([^"]*)",?[[:space:]]*$/\1/p'
+        | sed -n -E 's/^[[:space:]]*"([^"]*)",?[[:space:]]*(\/\/.*)?$/\1/p'
 }
 
 # #5991: rewrite the Loom-managed `.gitignore` block in place from the given
@@ -2781,47 +2781,38 @@ _gitignore_restore_managed_block() {
     return 1
 }
 
-# #5294 / #5991: verify the managed block `$bin update-gitignore` just wrote
-# actually contains every pattern the CURRENT source declares. A `loom-daemon`
+# #5294 / #5991 / #11323: verify the managed block `$bin update-gitignore` just
+# wrote is EXACTLY the pattern list the CURRENT source declares, in order (git
+# is last-match-wins, so the `!` negation's position matters). A `loom-daemon`
 # binary older than the just-pulled source has EPHEMERAL_PATTERNS compiled in
-# from whenever it was built — if that predates a pattern addition (e.g.
-# #5280's `.claude/worktrees/`), `update-gitignore` exits 0 having *silently*
-# dropped that pattern from the regenerated block. That is precisely how
-# 05cf67e8 reintroduced #5267's gitlink hazard 34 minutes after #5280 fixed
-# it, and how 94fa30f2 reintroduced it a THIRD time (#5985) even after this
-# function existed — because it only warned, never fixed. Detection without
-# enforcement has now demonstrably failed once; never trust the exit code
-# alone, and never leave the regression for a human to notice in the warning
-# scroll: restore the dropped pattern(s) directly from source, or (if that
-# isn't possible) revert the whole file, so the regression cannot land.
+# from whenever it was built, and `update-gitignore` exits 0 either way: it
+# silently DROPS a pattern added since (05cf67e8 / 94fa30f2 reintroduced #5267's
+# gitlink hazard that way, #5985) or re-ADDS one removed since (febfc4335
+# re-added `.loom/concierge/`, #11323). Restore the block from source (else
+# revert the file) so neither lands; no source list = cannot verify, no-op.
 _gitignore_warn_if_stale() {
-    local bin="$1" post_init="$SOURCE_ROOT/loom-daemon/src/init/post_init.rs"
-    local -a missing=() source_patterns=()
-    local pattern block
+    local bin="$1" post_init="$SOURCE_ROOT/loom-daemon/src/init/post_init.rs" pattern block current wanted
+    local -a missing=() extra=() source_patterns=()
 
-    [[ -f "$post_init" ]] || return 0
-    [[ -f "$WRITE_ROOT/.gitignore" ]] || return 0
-
+    while IFS= read -r pattern; do [[ -n "$pattern" ]] && source_patterns+=("$pattern"); done < <(_gitignore_source_ephemeral_patterns)
+    [[ "${#source_patterns[@]}" -gt 0 && -f "$WRITE_ROOT/.gitignore" ]] || return 0
     block="$(sed -n '/# >>> loom-managed/,/# <<< loom-managed/p' "$WRITE_ROOT/.gitignore")"
     [[ -n "$block" ]] || return 0
-
-    while IFS= read -r pattern; do
-        [[ -n "$pattern" ]] || continue
-        source_patterns+=("$pattern")
-        grep -qxF -- "$pattern" <<<"$block" || missing+=("$pattern")
-    done < <(_gitignore_source_ephemeral_patterns)
-
-    [[ "${#missing[@]}" -gt 0 ]] || return 0
-
-    warn "The resolved loom-daemon binary ($bin) regenerated .gitignore WITHOUT ${#missing[@]} pattern(s) that $post_init currently declares:"
-    for pattern in "${missing[@]}"; do
-        warn "    $pattern"
-    done
+    current="$(sed '1,2d;$d' <<<"$block")"
+    wanted="$(printf '%s\n' "${source_patterns[@]}")"
+    [[ "$current" != "$wanted" ]] || return 0
+    for pattern in "${source_patterns[@]}"; do grep -qxF -- "$pattern" <<<"$current" || missing+=("$pattern"); done
+    while IFS= read -r pattern; do [[ -z "$pattern" ]] || grep -qxF -- "$pattern" <<<"$wanted" || extra+=("$pattern"); done <<<"$current"
+    [[ "${#missing[@]}" -eq 0 ]] || warn "The resolved loom-daemon binary ($bin) regenerated .gitignore WITHOUT ${#missing[@]} pattern(s) that $post_init currently declares:"
+    for pattern in ${missing[@]+"${missing[@]}"}; do warn "    $pattern"; done
+    [[ "${#extra[@]}" -eq 0 ]] || warn "The resolved loom-daemon binary ($bin) regenerated .gitignore WITH ${#extra[@]} extra pattern(s) that $post_init no longer declares:"
+    for pattern in ${extra[@]+"${extra[@]}"}; do warn "    $pattern"; done
+    [[ "${#missing[@]}${#extra[@]}" != "00" ]] || warn "The resolved loom-daemon binary ($bin) regenerated .gitignore's managed block out of $post_init's order."
     warn "  '$bin' is likely older than the source just synced (#5294) — rebuild loom-daemon"
     warn "  (cargo build --release -p loom-daemon under $SOURCE_ROOT) and re-run resync-installed.sh."
 
     if _gitignore_restore_managed_block "$block" "${source_patterns[@]}"; then
-        warn "  ${GREEN}restored${NC} the missing pattern(s) directly from $post_init so the regression cannot land (#5991)."
+        warn "  ${GREEN}restored${NC} the missing pattern(s) and dropped the extra ones directly from $post_init so the regression cannot land (#5991, #11323)."
     elif git -C "$WRITE_ROOT" checkout -- .gitignore 2>/dev/null; then
         warn "  Could not rewrite the block in place — ${GREEN}reverted${NC} .gitignore to its last-committed state instead (#5991)."
     else

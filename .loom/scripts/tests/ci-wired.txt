@@ -159,6 +159,7 @@ test-merge-pr-rate-limit-fallback.sh
 test-merge-pr-stacked-child-branch-delete.sh
 test-merge-pr-tree-checks.sh
 test-merge-pr-ci-result.sh
+test-merge-pr-required-checks.sh
 test-nextest-daemon-guard.sh
 test-operator-only-subkind.sh
 test-post-verdict.sh
@@ -213,6 +214,7 @@ test-sweep-lease-renew.sh
 test-sweep-lease-renew-lifecycle.sh
 test-sweep-pr-mode.sh
 test-sweep-run-registry.sh
+test-sweep-wave-judge-done-staleness.sh
 test-sync-labels-check.sh
 test-token-cache-affinity.sh
 test-claude-wrapper-proxy-rotation.sh
