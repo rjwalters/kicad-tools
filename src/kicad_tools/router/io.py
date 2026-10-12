@@ -6134,8 +6134,10 @@ def verify_output_connectivity(
     """Verify connectivity of routed nets in written PCB S-expression output.
 
     Re-parses ``(segment ...)`` and ``(via ...)`` S-expressions from the PCB
-    content and runs union-find against known pad positions to check that all
-    pads in each net are connected by the written traces.  This catches bugs
+    content and checks that all pads in each net are joined by the written
+    copper.  Contact is layer-aware (Issue #6371): a pad is reached only by
+    same-net copper on a layer it occupies that actually intersects its
+    outline -- a nearby endpoint, or one on the wrong layer, is not enough.  This catches bugs
     in ``to_sexp()`` serialization, ``_insert_sexp_before_closing()`` merge,
     and any other transformation that occurs between the internal Route objects
     and the final file.
@@ -6146,7 +6148,10 @@ def verify_output_connectivity(
             to that net.  Only nets present here are validated.
         net_names: Optional mapping of net ID to human-readable net name.
             Used only for diagnostic messages in the returned report.
-        tolerance: Coordinate snapping tolerance in mm (default 0.01).
+        tolerance: Retained for API compatibility.  Since Issue #6371 pads
+            are joined by layer-aware copper contact (segment width, via
+            size, pad outline) rather than by snapping endpoints onto a
+            lattice, so no snapping tolerance applies.
 
     Returns:
         Dict mapping net ID to a connectivity report dict with keys:
@@ -6158,8 +6163,6 @@ def verify_output_connectivity(
         - ``disconnected_pads``: list of ``"<ref>:<pin>"`` strings for pads
           not in the main component (empty when ``connected`` is True)
     """
-    from .observability import _pt, _UnionFind
-
     # Issue #4476: scan each ``(segment ...)`` / ``(via ...)`` block FIRST and
     # read its fields inside that block, instead of one mega-pattern whose
     # lazy ``.*?`` gaps span the whole file.
@@ -6174,11 +6177,18 @@ def verify_output_connectivity(
     # completion output: >4 minutes for this one call (the router's post-save
     # tail appeared to hang), and the verification silently saw ZERO copper.
     #
-    # ``[^()]*\([^()]*\)`` matches a segment/via body exactly (these blocks
-    # nest at most one level deep), so the scan is linear and cannot backtrack
-    # across the file.
-    seg_block_re = re.compile(r"\(segment\b(?:[^()]*\([^()]*\))*[^()]*\)")
-    via_block_re = re.compile(r"\(via\b(?:[^()]*\([^()]*\))*[^()]*\)")
+    # Each alternative is delimited by parentheses, so the scan is linear and
+    # cannot backtrack across the file.
+    #
+    # Issue #6371: allow TWO nesting levels.  KiCad 10 writes vias with
+    # ``(tenting (front yes) (back yes))`` / ``(covering ...)`` children, which
+    # the old one-level pattern never matched -- every such via silently
+    # vanished.  The old endpoint-snapping check hid that (it joined an F.Cu
+    # and a B.Cu endpoint at the same XY with or without a via); the
+    # layer-aware contact model needs the via to bridge the layers.
+    _body = r"(?:[^()]*\((?:[^()]*\([^()]*\))*[^()]*\))*[^()]*\)"
+    seg_block_re = re.compile(r"\(segment\b" + _body)
+    via_block_re = re.compile(r"\(via\b" + _body)
     start_re = re.compile(r"\(start\s+([\d.+-]+)\s+([\d.+-]+)\)")
     end_re = re.compile(r"\(end\s+([\d.+-]+)\s+([\d.+-]+)\)")
     at_re = re.compile(r"\(at\s+([\d.+-]+)\s+([\d.+-]+)\)")
@@ -6211,8 +6221,25 @@ def verify_output_connectivity(
             return int(m.group(1))
         return name_to_id.get(m.group(2).replace('\\"', '"'))
 
+    from .layers import Layer
+    from .primitives import Segment, Via
+    from .terminal_connectivity import physical_copper_components
+
+    # Issue #6371: keep each conductor's layer and width (and each via's
+    # size and layer span) so pads are joined by real layer-aware copper
+    # contact -- the same model ``kct check`` / kicad-cli use -- instead of
+    # "nearest same-net endpoint within 2 mm, any layer".  That XY radius
+    # accepted board 03's stranded J1.B7 because its sibling J1.A7 sits
+    # 1.59 mm away.
+    layer_by_name = {layer.kicad_name: layer for layer in Layer}
+    width_re = re.compile(r"\(width\s+([\d.eE+-]+)\)")
+    size_re = re.compile(r"\(size\s+([\d.eE+-]+)")
+    drill_re = re.compile(r"\(drill\s+([\d.eE+-]+)")
+    layer_re = re.compile(r'\(layer\s+"?([^"\s()]+)"?')
+    layers_re = re.compile(r'\(layers\s+"?([^"\s()]+)"?\s+"?([^"\s()]+)"?')
+
     # Group parsed segments by net
-    segments_by_net: dict[int, list[tuple[tuple[float, float], tuple[float, float]]]] = {}
+    segments_by_net: dict[int, list[Segment]] = {}
     for block_match in seg_block_re.finditer(pcb_content):
         block = block_match.group(0)
         s_m = start_re.search(block)
@@ -6220,22 +6247,53 @@ def verify_output_connectivity(
         net_id = _block_net_id(block)
         if s_m is None or e_m is None or net_id is None:
             continue
-        x1, y1 = float(s_m.group(1)), float(s_m.group(2))
-        x2, y2 = float(e_m.group(1)), float(e_m.group(2))
+        l_m = layer_re.search(block)
+        layer = layer_by_name.get(l_m.group(1)) if l_m else Layer.F_CU
+        if layer is None:
+            # Non-copper or unknown layer name: it cannot carry the net.
+            continue
+        w_m = width_re.search(block)
         segments_by_net.setdefault(net_id, []).append(
-            (_pt(x1, y1, tolerance), _pt(x2, y2, tolerance))
+            Segment(
+                x1=float(s_m.group(1)),
+                y1=float(s_m.group(2)),
+                x2=float(e_m.group(1)),
+                y2=float(e_m.group(2)),
+                width=float(w_m.group(1)) if w_m else 0.0,
+                layer=layer,
+                net=net_id,
+            )
         )
 
     # Group parsed vias by net
-    vias_by_net: dict[int, list[tuple[float, float]]] = {}
+    vias_by_net: dict[int, list[Via]] = {}
     for block_match in via_block_re.finditer(pcb_content):
         block = block_match.group(0)
         at_m = at_re.search(block)
         net_id = _block_net_id(block)
         if at_m is None or net_id is None:
             continue
-        x, y = float(at_m.group(1)), float(at_m.group(2))
-        vias_by_net.setdefault(net_id, []).append(_pt(x, y, tolerance))
+        ls_m = layers_re.search(block)
+        span = (
+            (layer_by_name.get(ls_m.group(1)), layer_by_name.get(ls_m.group(2)))
+            if ls_m
+            else (Layer.F_CU, Layer.B_CU)
+        )
+        first, last = span
+        if first is None or last is None:
+            first, last = Layer.F_CU, Layer.B_CU
+        sz_m = size_re.search(block)
+        dr_m = drill_re.search(block)
+        vias_by_net.setdefault(net_id, []).append(
+            Via(
+                x=float(at_m.group(1)),
+                y=float(at_m.group(2)),
+                drill=float(dr_m.group(1)) if dr_m else 0.0,
+                diameter=float(sz_m.group(1)) if sz_m else 0.0,
+                layers=(first, last),
+                net=net_id,
+            )
+        )
 
     result: dict[int, dict] = {}
     net_names = net_names or {}
@@ -6267,68 +6325,18 @@ def verify_output_connectivity(
             }
             continue
 
-        uf = _UnionFind()
-
-        # Union segment endpoints
-        for p1, p2 in net_segs:
-            uf.union(p1, p2)
-
-        # Ensure via points are in the union-find and union with co-located
-        # segment endpoints
-        for via_pt in net_vias:
-            uf._ensure(via_pt)
-            for p1, p2 in net_segs:
-                if p1 == via_pt:
-                    uf.union(via_pt, p1)
-                if p2 == via_pt:
-                    uf.union(via_pt, p2)
-
-        # Link pads to nearest segment endpoints (same logic as observability)
-        pad_points: list[tuple[tuple[float, float], Pad]] = []
-        for pad in pads:
-            pad_pt = _pt(pad.x, pad.y, tolerance)
-            best_dist = float("inf")
-            best_pt = pad_pt
-            for p1, p2 in net_segs:
-                for sp in (p1, p2):
-                    dx = sp[0] - pad_pt[0]
-                    dy = sp[1] - pad_pt[1]
-                    d = dx * dx + dy * dy
-                    if d < best_dist:
-                        best_dist = d
-                        best_pt = sp
-            # Also check vias
-            for vp in net_vias:
-                dx = vp[0] - pad_pt[0]
-                dy = vp[1] - pad_pt[1]
-                d = dx * dx + dy * dy
-                if d < best_dist:
-                    best_dist = d
-                    best_pt = vp
-
-            if best_dist <= 4.0:  # 2mm squared
-                uf.union(pad_pt, best_pt)
-            else:
-                uf._ensure(pad_pt)
-            pad_points.append((pad_pt, pad))
-
-        # Find largest component
-        component_pads: dict[tuple[float, float], int] = {}
-        for pp, _ in pad_points:
-            root = uf.find(pp)
-            component_pads[root] = component_pads.get(root, 0) + 1
-
-        max_component = max(component_pads.values()) if component_pads else 0
+        components = physical_copper_components(pads, net_segs, net_vias)
+        counts: dict[int, int] = {}
+        for component in components:
+            counts[component] = counts.get(component, 0) + 1
+        main_root = max(counts, key=counts.__getitem__)
+        max_component = counts[main_root]
         total = len(pads)
-
-        # Find the main root (largest component)
-        main_root = max(component_pads, key=component_pads.get) if component_pads else None
-
-        disconnected = []
-        if max_component < total:
-            for pp, pad in pad_points:
-                if main_root is None or uf.find(pp) != main_root:
-                    disconnected.append(f"{pad.ref}:{pad.pin}")
+        disconnected = [
+            f"{pad.ref}:{pad.pin}"
+            for pad, component in zip(pads, components, strict=True)
+            if component != main_root
+        ]
 
         result[net_id] = {
             "net_name": net_name,
