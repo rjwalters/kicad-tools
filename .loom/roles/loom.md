@@ -648,19 +648,17 @@ loom-clean --deep       # Also remove build artifacts
 
 ### Sub-topic: labels
 
-**Label Reference**
-
 **Workflow labels (issue lifecycle):**
 
 | Label | Meaning | Set by |
 |-------|---------|--------|
-| `loom:curating` | Curator is actively enhancing | Curator |
-| `loom:curated` | Issue enhanced, awaiting approval | Curator |
+| `loom:curating` | Curator is enhancing | Curator |
+| `loom:curated` | Enhanced, awaiting approval | Curator |
 | `loom:issue` | Approved and ready for work | Champion/Human |
-| `loom:building` | Builder is implementing | Builder |
+| `loom:building` | Being implemented | Builder |
 | `loom:blocked` | Work is blocked | Builder |
-| `loom:operator-only` | Requires human action; sweep skip | Human |
-| `loom:operator-priority` | Land ASAP | Human |
+| `loom:operator-only` | Needs a human; sweep skips | Human |
+| `loom:important`, `loom:very-important` | Order, promotion cap | Human/Guide/Champion |
 
 **Workflow labels (PR lifecycle):**
 

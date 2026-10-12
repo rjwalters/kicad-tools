@@ -1,31 +1,35 @@
 #!/usr/bin/env bash
 # test-champion-promotion-throughput.sh - Regression test for issue #10753,
-# items 1 and 2: merges must not starve promotion, and the tier caps are
-# configurable.
+# items 1 and 2 (merges must not starve promotion; the promotion caps are
+# configurable), with the caps mapped onto priority level by #11512.
 #
 # THE FAILURE MODES THIS GUARDS AGAINST
 #
 #   pass order    champion.md ran promotion only "if no PRs remain". A repo
 #                 with a held PR queue never reached it (rjwalters/loom on
 #                 2026-10-07: 30 of 38 `loom:pr` PRs held by loom:operator).
-#   fixed caps    The tier caps were literals (2 / 1 / 5) repeated in five
-#                 files, so a fleet could not tune them.
-#   self-pinning  The Tier 3 backlog gate counted every open tier:maintenance
-#                 issue, including proposals still waiting for promotion, so
-#                 waiting Tier 3 proposals blocked each other (19 counted vs
-#                 2 promoted in rjwalters/loom; 19 curated issues held in
-#                 2AMLogic/2am).
+#   fixed caps    The caps were literals (2 / 1 / 5) repeated in five files,
+#                 so a fleet could not tune them.
+#   self-pinning  The backlog gate once counted issues that cannot free a slot
+#                 (waiting proposals, held issues: 19 counted vs 2 promoted in
+#                 rjwalters/loom), so the cap pinned itself.
+#   stale caps    #11103 retired the `tier:*` labels the caps keyed on; #11512
+#                 maps them by population: very-important and important are
+#                 uncapped, no level = tier2Cap per pass with NO backlog gate.
+#                 Keyed on no level, the old Tier 3 backlog gate counted 46
+#                 promoted issues against a cap of 5 and froze promotion.
 #
 # WHAT THIS SUITE DOES
 #
 #   1. BEHAVIOUR -- the Backlog Balance Check block is EXTRACTED from the
 #      shipped champion-issue-promo.md and EXECUTED against a stubbed `gh`:
-#      defaults, env overrides, malformed values, and the promoted-only
-#      occupant count. A copy with the old occupant filter is run as a
-#      negative control, so the occupant assertions cannot pass vacuously.
-#   2. WIRING -- the rate-limit prose names the env vars, no shipped file
-#      still hardcodes the old literals, and champion.md runs promotion every
-#      pass with the two slice knobs.
+#      defaults, env overrides, malformed values, and the per-level occupant
+#      counts. A copy without the held-issue filter is run as a negative
+#      control, so the occupant assertions cannot pass vacuously.
+#   2. WIRING -- the rate-limit prose maps each level to its cap and names the
+#      env vars, no Champion file reads a retired tier label, and the docs
+#      record the knobs.
+#   3. champion.md runs promotion every pass with the two slice knobs.
 #
 # Hermetic: file reads plus a mktemp -d fixture dir with a local `gh` stub.
 # No forge, no network. Requires jq. No `set -o pipefail` on purpose (#7790).
@@ -119,30 +123,27 @@ FIXTURE_DIR="$(mktemp -d)"
 trap 'rm -rf "$FIXTURE_DIR"' EXIT
 mkdir -p "$FIXTURE_DIR/bin"
 
-# Open issues the stub serves. Tier 3: #101-#103 are promoted and unheld (the
-# only real occupants); #104/#109 are curated proposals, #105/#110 Hermit
-# proposals and #106 a triage issue, all still waiting for promotion; #107
-# and #108 are promoted but held (#7613).
-cat >"$FIXTURE_DIR/issues.json" <<'EOF'
+# Open issues the stub serves. No priority level: #101-#103 are promoted and
+# unheld (the only real default-level occupants); #104 (curated) and #105
+# (Hermit) still wait for promotion; #107/#108 are promoted but held (#7613).
+# #201 is very important; #301/#302 are important.
+cat >"$FIXTURE_DIR/issues.json" <<'JSON'
 [
- {"number":101,"labels":[{"name":"tier:maintenance"},{"name":"loom:issue"}]},
- {"number":102,"labels":[{"name":"tier:maintenance"},{"name":"loom:building"}]},
- {"number":103,"labels":[{"name":"tier:maintenance"},{"name":"loom:issue"},{"name":"loom:curated"}]},
- {"number":104,"labels":[{"name":"tier:maintenance"},{"name":"loom:curated"}]},
- {"number":105,"labels":[{"name":"tier:maintenance"},{"name":"loom:hermit"}]},
- {"number":106,"labels":[{"name":"tier:maintenance"},{"name":"loom:triage"}]},
- {"number":107,"labels":[{"name":"tier:maintenance"},{"name":"loom:issue"},{"name":"loom:operator-only"}]},
- {"number":108,"labels":[{"name":"tier:maintenance"},{"name":"loom:building"},{"name":"loom:blocked"}]},
- {"number":109,"labels":[{"name":"tier:maintenance"},{"name":"loom:curated"}]},
- {"number":110,"labels":[{"name":"tier:maintenance"},{"name":"loom:hermit"}]},
- {"number":201,"labels":[{"name":"tier:goal-advancing"},{"name":"loom:issue"}]},
- {"number":301,"labels":[{"name":"tier:goal-supporting"},{"name":"loom:issue"}]},
- {"number":401,"labels":[{"name":"loom:issue"}]}
+ {"number":101,"labels":[{"name":"loom:issue"}]},
+ {"number":102,"labels":[{"name":"loom:building"}]},
+ {"number":103,"labels":[{"name":"loom:issue"},{"name":"loom:curated"}]},
+ {"number":104,"labels":[{"name":"loom:curated"}]},
+ {"number":105,"labels":[{"name":"loom:hermit"}]},
+ {"number":107,"labels":[{"name":"loom:issue"},{"name":"loom:operator-only"}]},
+ {"number":108,"labels":[{"name":"loom:building"},{"name":"loom:blocked"}]},
+ {"number":201,"labels":[{"name":"loom:issue"},{"name":"loom:very-important"}]},
+ {"number":301,"labels":[{"name":"loom:issue"},{"name":"loom:important"}]},
+ {"number":302,"labels":[{"name":"loom:building"},{"name":"loom:important"}]}
 ]
-EOF
+JSON
 
-# `gh issue list --label X ... --jq EXPR`: filter the fixture by label, then
-# apply the caller's OWN --jq expression, so the shipped filter is exercised.
+# `gh issue list --label X ... [--jq EXPR]`: filter the fixture by label, then
+# apply the caller's OWN --jq expression (if any), so the shipped filter runs.
 cat >"$FIXTURE_DIR/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 label=""; expr="."
@@ -176,65 +177,88 @@ if [[ "$BLOCK" != *"check_backlog_balance"* ]]; then
     fail "could not extract the Backlog Balance Check bash block from $PROMO_MD"
 else
     OUT="$(run_balance balance.sh)"
-    assert_contains "$OUT" "Caps this pass: TIER2_CAP=2 TIER3_CAP=1 TIER3_BACKLOG_CAP=5" \
-        "unset env vars give the defaults 2 / 1 / 5"
-    assert_contains "$OUT" "3 promoted (occupants: #101,#102,#103)" \
-        "Tier 3 counts promoted, unheld issues only (#101-#103), not waiting proposals or held issues"
-    assert_not_contains "$OUT" "TIER3_BACKLOG_FULL" \
-        "3 promoted occupants are below the default backlog cap of 5"
+    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " \
+        "unset env var gives the no-level per-pass default of 2 (the old Tier 2 cap)"
+    assert_contains "$OUT" "default (no level):  3 promoted (occupants: #101,#102,#103)" \
+        "the default level counts promoted, unheld, unlevelled issues only (#101-#103)"
+    assert_contains "$OUT" "loom:important:      2 promoted (occupants: #301,#302)" \
+        "loom:important issues are counted under their own level"
+    assert_contains "$OUT" "loom:very-important: 1 promoted" \
+        "loom:very-important issues are counted under their own level"
+    assert_not_contains "$OUT" "BACKLOG" \
+        "no backlog gate: the old Tier 3 gate has no population under the level mapping"
 
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=4 LOOM_CHAMPION_TIER3_CAP=0 LOOM_CHAMPION_TIER3_BACKLOG_CAP=12)"
-    assert_contains "$OUT" "Caps this pass: TIER2_CAP=4 TIER3_CAP=0 TIER3_BACKLOG_CAP=12" \
-        "each env var overrides its default, and 0 is honoured"
+    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=0)"
+    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=0 " "the env var overrides the default, and 0 is honoured"
 
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER3_BACKLOG_CAP=3)"
-    assert_contains "$OUT" "TIER3_BACKLOG_FULL: 3 >= 3" \
-        "a backlog cap at the promoted count blocks Tier 3 this pass"
+    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER3_CAP=0 LOOM_CHAMPION_TIER3_BACKLOG_CAP=1)"
+    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " \
+        "the unused tier3 knobs change nothing (a backlog of 3 vs a cap of 1 does not gate)"
+    assert_not_contains "$OUT" "BACKLOG" "a tiny tier3BacklogCap never gates no-level promotion"
 
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=abc LOOM_CHAMPION_TIER3_CAP=-1 LOOM_CHAMPION_TIER3_BACKLOG_CAP=2.5)"
-    assert_contains "$OUT" "Caps this pass: TIER2_CAP=2 TIER3_CAP=1 TIER3_BACKLOG_CAP=5" \
-        "non-integer values fall back to the defaults instead of breaking the comparison"
-    assert_not_contains "$OUT" "integer expression expected" \
-        "a malformed cap never reaches a numeric test"
+    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=abc)"
+    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " \
+        "a non-integer value falls back to the default"
+    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=-1)"
+    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " "a negative value falls back to the default"
 
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP= LOOM_CHAMPION_TIER3_BACKLOG_CAP=)"
-    assert_contains "$OUT" "TIER2_CAP=2 TIER3_CAP=1 TIER3_BACKLOG_CAP=5" \
-        "an empty value falls back to the default"
+    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=)"
+    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " "an empty value falls back to the default"
 
-    # Negative control: the pre-#10753 occupant filter (every unheld
-    # tier:maintenance issue). The same fixture must read as pinned, or the
-    # occupant assertions above prove nothing.
-    sed 's/select(\[\.labels\[\]\.name\] | any(IN("loom:issue","loom:building"))) |//' \
+    # Negative control: drop the held-issue exclusion (#7613). The same
+    # fixture must then count the two held issues, or the occupant
+    # assertions above prove nothing.
+    sed 's/select(\[\.labels\[\]\.name\] | any(IN("loom:operator-only","loom:blocked")) | not) |//' \
         "$FIXTURE_DIR/balance.sh" >"$FIXTURE_DIR/balance-old.sh"
     if cmp -s "$FIXTURE_DIR/balance.sh" "$FIXTURE_DIR/balance-old.sh"; then
-        fail "negative control: could not strip the promoted-only filter (has the block changed shape?)"
+        fail "negative control: could not strip the held-issue filter (has the block changed shape?)"
     else
         OUT="$(run_balance balance-old.sh)"
-        assert_contains "$OUT" "8 promoted (occupants: #101,#102,#103,#104,#105,#106,#109,#110)" \
-            "negative control: the old filter counts the 5 waiting proposals as occupants"
-        assert_contains "$OUT" "TIER3_BACKLOG_FULL: 8 >= 5" \
-            "negative control: the old filter pins the default cap on this fixture"
+        assert_contains "$OUT" "default (no level):  5 promoted (occupants: #101,#102,#103,#107,#108)" \
+            "negative control: without the filter the held issues count as occupants"
     fi
 fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 2: the rate-limit prose names the env vars; no shipped file hardcodes the old caps"
-RATE="$(section_body "$PROMO_MD" "Tier-Aware Promotion Priority")"
+echo "Test 2: the per-level rate limits are wired; no Champion file reads a retired tier label"
+RATE="$(section_body "$PROMO_MD" "Promotion Order")"
+assert_contains "$RATE" "\`loom:very-important\`, then \`loom:important\`" \
+    "Promotion Order ranks very-important, then important"
+assert_contains "$RATE" "oldest first within a level" "Promotion Order breaks ties oldest first"
 for v in LOOM_CHAMPION_TIER2_CAP LOOM_CHAMPION_TIER3_CAP LOOM_CHAMPION_TIER3_BACKLOG_CAP; do
-    assert_contains "$RATE" "$v" "Rate Limiting by Tier names $v"
+    assert_contains "$RATE" "$v" "Rate Limiting by Level names $v"
 done
+assert_contains "$RATE" "\`LOOM_CHAMPION_TIER3_BACKLOG_CAP\` are currently
+unused" "the tier3 knobs are documented as unused by the level mapping"
+assert_contains "$RATE" "\`loom:very-important\` / \`loom:important\`: promote all qualifying proposals (no limit)" \
+    "both priority levels take the old Tier 1 slot (uncapped)"
+assert_contains "$RATE" "No priority level: promote up to \`\$DEFAULT_CAP\`" \
+    "an unlevelled proposal takes the old Tier 2 per-pass cap"
+assert_not_contains "$RATE" "DEFAULT_BACKLOG_CAP" "no-level promotion has no backlog gate"
+assert_contains "$(section_body "$PROMO_MD" "Setting Priority")" "label the blocker too" \
+    "Champion labels a priority proposal's blocker itself (no daemon inheritance)"
+assert_contains "$(section_body "$PROMO_MD" "Setting Priority")" "never set a level just to get past a capacity cap" \
+    "a priority level is never set to dodge a cap"
+STEP3C="$(section_body "$PROMO_MD" "Promote (All Criteria Pass)")"
+assert_contains "$STEP3C" "Step 3c: Capacity Deferral" "Step 3c capacity deferral is present"
+assert_not_contains "$STEP3C" "below 5" "Step 3c's deferral template does not hardcode the backlog cap"
 for f in "$PROMO_MD" "$COMMON_MD" "$REF_MD" "$AGENT_MD"; do
     for lit in "fewer than 5" "up to 2 per iteration" "≤2 per iteration" "gated at 5"; do
-        assert_doc_lacks "$f" "$lit" "$(basename "$f") no longer hardcodes '$lit'"
+        assert_doc_lacks "$f" "$lit" "$(basename "$f") does not hardcode '$lit'"
     done
 done
-STEP3C="$(section_body "$PROMO_MD" "Promote (All Criteria Pass)")"
-assert_not_contains "$STEP3C" "below 5" "Step 3c's deferral template no longer hardcodes the backlog cap"
+for f in "$CHAMPION_MD" "$PROMO_MD" "$COMMON_MD" "$REF_MD" "$AGENT_MD"; do
+    for lit in "tier:goal" "tier:maintenance" "Rate Limiting by Tier"; do
+        assert_doc_lacks "$f" "$lit" "$(basename "$f") no longer names '$lit'"
+    done
+done
 for v in LOOM_CHAMPION_PR_SLICE LOOM_CHAMPION_PROMOTION_SLICE LOOM_CHAMPION_TIER2_CAP \
          LOOM_CHAMPION_TIER3_CAP LOOM_CHAMPION_TIER3_BACKLOG_CAP; do
     assert_doc_contains "$THROUGHPUT_DOC" "\`$v\`" "promotion-throughput.md documents $v"
 done
+assert_doc_contains "$THROUGHPUT_DOC" "mapped by population" "promotion-throughput.md records the level mapping of the caps"
+assert_doc_contains "$THROUGHPUT_DOC" "46" "promotion-throughput.md cites the measurement behind dropping the backlog gate"
 assert_doc_contains "$THROUGHPUT_DOC" "loom-daemon-start.sh" \
     "promotion-throughput.md says where a fleet sets the knobs"
 

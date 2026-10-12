@@ -101,16 +101,14 @@ Briefly document other options you evaluated and why they were ruled out:
 ```bash
 # Create proposal issue with ALL labels applied ATOMICALLY (#5047) — a
 # follow-up `gh issue edit --add-label` doubles the request count and can
-# half-fail, leaving an unlabelled issue no queue query finds. Choose the
-# tier label that matches goal alignment.
+# half-fail, leaving an unlabelled issue no queue query finds. No priority
+# label: Guide and Champion set priority (#11103).
 ./.loom/scripts/create-issue.sh --title "..." \
   --label "loom:architect" \
-  --label "tier:goal-advancing" \
   --body "$(cat <<'EOF'
 [issue content here]
 EOF
 )"
-# tier label above is one of: tier:goal-advancing | tier:goal-supporting | tier:maintenance
 ```
 
 ---
@@ -455,10 +453,10 @@ discover_project_goals() {
     grep -E "^- \[.\]|^## M[0-9]" docs/roadmap.md ROADMAP.md 2>/dev/null | head -10
   fi
 
-  # 3. Goal-advancing and operator-starred work
-  echo "Current goal-advancing work:"
-  gh issue list --label="tier:goal-advancing" --state=open --limit=5
-  gh issue list --label="loom:operator-priority" --state=open --limit=5
+  # 3. Current priority work
+  echo "Current priority work:"
+  gh issue list --label="loom:very-important" --state=open --limit=5
+  gh issue list --label="loom:important" --state=open --limit=5
 
   # 4. Summary
   echo "Goal-advancing proposals should target these areas"
@@ -481,34 +479,21 @@ Full script for checking backlog balance:
 
 ```bash
 check_backlog_balance() {
-  echo "=== Backlog Tier Balance ==="
+  echo "=== Backlog Priority Balance ==="
 
-  # Count issues by tier
-  tier1=$(gh issue list --label="tier:goal-advancing" --state=open --json number --jq 'length')
-  tier2=$(gh issue list --label="tier:goal-supporting" --state=open --json number --jq 'length')
-  tier3=$(gh issue list --label="tier:maintenance" --state=open --json number --jq 'length')
-  unlabeled=$(gh issue list --label="loom:issue" --state=open --json number,labels \
-    --jq '[.[] | select([.labels[].name] | any(startswith("tier:")) | not)] | length')
+  # Priority is two labels set by Guide/Champion (#11103); count, never apply.
+  vi=$(gh issue list --label="loom:very-important" --state=open --json number --jq 'length')
+  imp=$(gh issue list --label="loom:important" --state=open --json number --jq 'length')
+  ready=$(gh issue list --label="loom:issue" --state=open --json number --jq 'length')
 
-  total=$((tier1 + tier2 + tier3 + unlabeled))
+  echo "Very important:     $vi"
+  echo "Important:          $imp"
+  echo "Ready (loom:issue): $ready"
 
-  echo "Tier 1 (goal-advancing): $tier1"
-  echo "Tier 2 (goal-supporting): $tier2"
-  echo "Tier 3 (maintenance):     $tier3"
-  echo "Unlabeled:                $unlabeled"
-  echo "Total ready issues:       $total"
-
-  # Check balance
-  if [ "$tier1" -eq 0 ] && [ "$total" -gt 3 ]; then
+  if [ "$vi" -eq 0 ] && [ "$imp" -eq 0 ] && [ "$ready" -gt 3 ]; then
     echo ""
-    echo "WARNING: No goal-advancing issues in backlog!"
-    echo "RECOMMENDATION: Prioritize creating Tier 1 proposals that advance current milestone."
-  fi
-
-  if [ "$tier3" -gt "$tier1" ] && [ "$tier3" -gt 5 ]; then
-    echo ""
-    echo "WARNING: More maintenance issues than goal-advancing issues."
-    echo "RECOMMENDATION: Focus on goal-aligned proposals before adding more maintenance work."
+    echo "WARNING: No priority work in the backlog."
+    echo "RECOMMENDATION: Prioritize proposals that advance the current milestone."
   fi
 }
 
@@ -517,9 +502,9 @@ check_backlog_balance
 ```
 
 **Interpretation**:
-- **Healthy**: Tier 1 >= Tier 3, and at least 1-2 goal-advancing issues available
-- **Warning**: No goal-advancing issues, or maintenance dominates
-- **Action**: If unhealthy, focus proposals on Tier 1 opportunities
+- **Healthy**: some open work carries a priority label
+- **Warning**: none does, so nothing in the backlog is known to advance a goal
+- **Action**: focus proposals on goal-advancing opportunities
 
 ---
 

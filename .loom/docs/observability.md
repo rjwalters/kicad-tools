@@ -266,10 +266,10 @@ Back-compat and upgrade rules:
   name, so `"https"` can appear once). An unrecognized kind is logged and
   skipped, never a hard error.
 - A policy failure on one entry (bad endpoint, placeholder host, refused
-  `headers_file`) degrades **that entry** to its own
+  `headers_file`, or a missing/unreadable ingest key when this entry needs
+  one — #11555) degrades **that entry** to its own
   `misconfigured` status while the other exporters run; only when *no*
-  exporter survives — or the shared ingest key is unusable — is export off
-  entirely.
+  exporter survives is export off entirely.
 
 ### Extra request headers from an owner-only file (`headers_file`, #10961)
 
@@ -318,9 +318,14 @@ X-Client-Secret: <client secret>
   is one over 64 KiB.
 - **`Authorization` in the file replaces the default Bearer header** — the
   ingest key is then not sent to this sink at all. Without it, the Bearer
-  header is sent exactly as before, alongside the file's headers.
-  `observability.ingestKeyFile` must still resolve to a readable key either
-  way: it is shared by every exporter and checked before any sink starts.
+  header is sent exactly as before, alongside the file's headers — but only
+  when an ingest key was resolved at all (#11555): a `headers_file` entry
+  carries its own credentials, so it starts with no
+  `observability.ingestKeyFile` configured and sends **no** Bearer header.
+  The key is read only when some surviving entry needs it — every `https`
+  entry, and an `otlp` entry without `headers_file`; such entries are the
+  only ones a missing or unreadable key degrades to `misconfigured`
+  (#7815's read-only-when-needed rule, now per entry).
 
 What gets the entry refused — it degrades to its own `misconfigured` status,
 like any other per-entry policy failure, and other exporters keep running:
@@ -345,9 +350,17 @@ holds them has a redacting `Debug`. The path, the header count and whether the
 file sets `Authorization` are logged once when the exporter starts.
 
 The file is read each time the exporter is built — at daemon start, and when
-the attended live-output tailer builds its own — so **rotating a credential is
-a file write plus a daemon restart**, with no config change and no rebuild.
-It is not watched: a running exporter keeps the headers it started with.
+the attended live-output tailer builds its own — and a **running** exporter
+re-reads it whenever it changes (#11555): before every post the daemon stats
+the file (mtime, length and, on Unix, inode — inode because an atomic
+`rename` rotation keeps the path but swaps the file) and re-reads it on a
+stamp change, so **rotating a credential is just a file write** — no
+restart, no config change, no rebuild. A rotation whose replacement file is
+refused (loose permissions, a malformed line) keeps the **last good
+headers** — the sender never stops — and logs one `WARN` per distinct broken
+state, naming the path and line but never a value. An in-place `chmod` of
+the live file changes none of the stamp's components and so is not
+re-read.
 
 `headers_file` belongs to an `observability.exporters` entry, so it has no
 env override, and `$LOOM_OBSERVABILITY_EXPORTER` — which replaces the whole

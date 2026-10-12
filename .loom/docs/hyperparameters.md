@@ -52,9 +52,9 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | `rework` | `buildBackoffLow` | 25 | 0–100000, `< high` | Per-repo PR-debt level that releases it | `autonomous.workFinder.buildBackoff.low` | — |
 | `champion` | `prSlice` | 10 | 1–1000 | PR rows Champion handles before the promotion pass (#10753) | — | `LOOM_CHAMPION_PR_SLICE` |
 | `champion` | `promotionSlice` | 3 | 1–100 | Fresh promotion verdicts per pause while PR rows remain | — | `LOOM_CHAMPION_PROMOTION_SLICE` |
-| `champion` | `tier2Cap` | 2 | 0–100 (0 disables) | Tier 2 promotions per repo per pass | — | `LOOM_CHAMPION_TIER2_CAP` |
-| `champion` | `tier3Cap` | 1 | 0–100 (0 disables) | Tier 3 promotions per repo per pass | — | `LOOM_CHAMPION_TIER3_CAP` |
-| `champion` | `tier3BacklogCap` | 5 | 0–1000 | Open unheld `tier:maintenance` issues that gate Tier 3 promotion | — | `LOOM_CHAMPION_TIER3_BACKLOG_CAP` |
+| `champion` | `tier2Cap` | 2 | 0–100 (0 disables) | No-level promotions per repo per pass (old Tier 2 cap, mapped by population #11512) | — | `LOOM_CHAMPION_TIER2_CAP` |
+| `champion` | `tier3Cap` | 1 | 0–100 | Unused since #11512; parsed for config compatibility (old Tier 3 per-pass cap) | — | `LOOM_CHAMPION_TIER3_CAP` |
+| `champion` | `tier3BacklogCap` | 5 | 0–1000 | Unused since #11512; parsed for config compatibility (old Tier 3 backlog gate) | — | `LOOM_CHAMPION_TIER3_BACKLOG_CAP` |
 
 The `champion` values enter the run digest. Champion's shell snippets read
 the `LOOM_CHAMPION_*` env vars directly, so the resolver honours them at the

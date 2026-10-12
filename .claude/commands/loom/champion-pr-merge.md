@@ -1684,9 +1684,8 @@ ROT_THRESHOLD_DAYS=3   # continuously CONFLICTING at least this long -> "rotting
 DIGEST_ROWS=""
 CONFLICT_SINCE_MARKERS=""
 HELD_ROTTING=0
-# #9244/#10307: starred held PRs sort to the top (level 2 first), marked ⭐ / ⭐⭐.
-# level list: keep in sync with operator_levels.rs LEVELS until #10311 (LVL and STAR)
-LVL='[.labels[].name] | if (index("loom:operator-high-priority") or index("loom:high-priority-inherited")) then 2 elif index("loom:operator-priority") then 1 else 0 end'
+# #11103: priority held PRs sort to the top (very-important first), marked ⭐⭐ / ⭐.
+LVL='[.labels[].name] | if index("loom:very-important") then 2 elif index("loom:important") then 1 else 0 end'
 for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r "sort_by(-($LVL)) | .[].number"); do
   ROW=$(printf '%s\n' "$HELD_JSON" | jq -c --argjson n "$PR_NUM" '.[] | select(.number == $n)')
   STAR=$(case "$(jq -r "$LVL" <<<"$ROW")" in 2) echo '⭐⭐ ';; 1) echo '⭐ ';; esac)
@@ -3173,16 +3172,16 @@ After each completed/skipped PR, refresh the queue and take the next unvisited r
 line into the pass summary — measurement only, never a merge-order input.
 Full policy: `.loom/docs/pr-congestion-signal.md`.
 
-**Starred PRs first (`loom:operator-priority`, #9244; level 2 before the star, #10307).** The shared queue puts stars
-ahead of interactive work, then ordinary work (oldest first within each class). The star changes order only: all 6
+**Priority PRs first (`loom:very-important`, then `loom:important`, #11103).** The shared queue puts them
+ahead of interactive work, then ordinary work (oldest first within each class). Priority changes order only: all 6
 Safety Criteria, the Verdict-State Janitor, and every hold (merge-risk,
-critical-file, `loom:operator-only`, `loom:blocked`) apply unchanged. A starred
-PR that passes is merged this pass. A starred PR on a hold stays held and is
+critical-file, `loom:operator-only`, `loom:blocked`) apply unchanged. A priority
+PR that passes is merged this pass. A priority PR on a hold stays held and is
 never merged — it is listed first in the hold digest (Step 1 sorts it to the
 top, marked ⭐). A failed merge (exit 1, not the 3-7 re-queues below) on a
-starred PR is retried **once** this pass; if that fails too, post the "Merge
-Failed" comment with the concrete refusal as a starred-PR escalation and do
-not retry it again this pass. Never add or remove the star.
+priority PR is retried **once** this pass; if that fails too, post the "Merge
+Failed" comment with the concrete refusal and do
+not retry it again this pass. A PR's priority label is copied from its issue; set priority on the issue.
 
 The **Capped-PR Recovery Pass** drains the same way (oldest first, one decision per parked PR, continue past individual failures), but only after the `loom:pr` merge queue is empty — merging approved work always outranks reconsidering parked work.
 

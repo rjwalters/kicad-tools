@@ -76,6 +76,19 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local haystack="$1" needle="$2" msg="$3"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$haystack" != *"$needle"* ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: $msg"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: $msg"
+        echo "    Unexpected substring: '$needle'"
+    fi
+}
+
 assert_doc_contains() {
     local file="$1" needle="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -362,59 +375,36 @@ assert_eq "" "$EDITS" "(d) report-only: no label edit issued"
 assert_eq "" "$COMMENTS_POSTED" "(d) report-only: no comment posted"
 
 # (e) Same shape, WITH --apply, and the completing edit's read-back confirms
-#     loom:issue landed -> COMPLETED, exit 12, tier recovered from the verdict
-#     comment's Goal Alignment line, comment posted.
+#     loom:issue landed -> COMPLETED, exit 12, comment posted. Since #11512
+#     the completing edit adds loom:issue only: an old verdict's "Goal
+#     Alignment: Tier N" line no longer maps to a (retired) tier label.
 reset_state
 issue_json "OPEN" "$(labels_json "loom:auditor")" \
   "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance) - cleanup")]" \
   > "$STUB_DIR/issue-6464.json"
-stage_verify 6464 "$(labels_json "loom:issue" "tier:maintenance")"
+stage_verify 6464 "$(labels_json "loom:issue")"
 run_sut --issue 6464 --apply
 assert_eq "12" "$RC" "(e) --apply completes when the read-back confirms the label landed -> exit 12"
 assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(e) DECISION=COMPLETED"
-assert_eq "tier:maintenance" "$(get_field "$OUT" TIER)" "(e) TIER recovered as tier:maintenance from 'Tier 3'"
 assert_contains "$EDITS" "loom:issue" "(e) the completing edit adds loom:issue"
-assert_contains "$EDITS" "tier:maintenance" "(e) the completing edit adds the recovered tier label"
+assert_not_contains "$EDITS" "tier:" "(e) the completing edit adds no retired tier label (#11512)"
 assert_contains "$COMMENTS_POSTED" "6464" "(e) a reconciliation comment is posted on the issue"
 
-# (f) Tier 1 -> tier:goal-advancing.
-reset_state
-issue_json "OPEN" "$(labels_json "loom:architect")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 1 - directly implements the milestone")]" \
-  > "$STUB_DIR/issue-300.json"
-stage_verify 300 "$(labels_json "loom:issue" "tier:goal-advancing")"
-run_sut --issue 300 --apply
-assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(f) DECISION=COMPLETED"
-assert_eq "tier:goal-advancing" "$(get_field "$OUT" TIER)" "(f) TIER recovered as tier:goal-advancing from 'Tier 1'"
-
-# (g) Tier 2 -> tier:goal-supporting.
-reset_state
-issue_json "OPEN" "$(labels_json "loom:hermit")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 2 - supports milestone infra")]" \
-  > "$STUB_DIR/issue-301.json"
-stage_verify 301 "$(labels_json "loom:issue" "tier:goal-supporting")"
-run_sut --issue 301 --apply
-assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(g) DECISION=COMPLETED"
-assert_eq "tier:goal-supporting" "$(get_field "$OUT" TIER)" "(g) TIER recovered as tier:goal-supporting from 'Tier 2'"
-
-# (h) --apply but the tier cannot be recovered from the comment text (no
-#     "Goal Alignment" line at all) -> ESCALATED, exit 13, operator labels added.
+# (f) A current verdict names no tier at all -> still COMPLETED, never an
+#     escalation (before #11512 an unrecoverable tier escalated to an operator).
 reset_state
 issue_json "OPEN" "$(labels_json "loom:curated")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here")]" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: advances the current milestone")]" \
   > "$STUB_DIR/issue-302.json"
+stage_verify 302 "$(labels_json "loom:issue" "loom:curated")"
 run_sut --issue 302 --apply
-assert_eq "13" "$RC" "(h) tier unrecoverable -> exit 13"
-assert_eq "ESCALATED" "$(get_field "$OUT" DECISION)" "(h) DECISION=ESCALATED"
-assert_eq "" "$(get_field "$OUT" TIER)" "(h) TIER is empty when unrecoverable"
-assert_contains "$EDITS" "loom:operator-only" "(h) escalates to loom:operator-only"
-assert_contains "$EDITS" "loom:operator-mechanical" "(h) escalates with loom:operator-mechanical sub-kind"
-assert_contains "$COMMENTS_POSTED" "302" "(h) an escalation comment is posted on the issue"
+assert_eq "12" "$RC" "(f) a verdict with no tier completes -> exit 12"
+assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(f) DECISION=COMPLETED"
+assert_not_contains "$EDITS" "loom:operator-only" "(f) no operator escalation"
 
-# (h2) #6942: re-invoking --apply against the SAME issue after case (h) already
-#     escalated it (loom:operator-only is now present) must NOT post a second
-#     escalation comment or re-run the label edit -- DECISION=ALREADY_ESCALATED,
-#     exit 0, distinguishable from a fresh ESCALATED (exit 13).
+# (h2) #6942: an issue already carrying loom:operator-only (a pre-#11512 run
+#     escalated it, or an operator holds it) gets no label edit and no comment
+#     -- DECISION=ALREADY_ESCALATED, exit 0, distinguishable from ESCALATED (13).
 reset_state
 issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator-only" "loom:operator-mechanical")" \
   "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here")]" \
@@ -422,13 +412,13 @@ issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator-only" "loom:opera
 run_sut --issue 302 --apply
 assert_eq "0" "$RC" "(h2) already loom:operator-only -> exit 0, not 13"
 assert_eq "ALREADY_ESCALATED" "$(get_field "$OUT" DECISION)" "(h2) DECISION=ALREADY_ESCALATED, distinguishable from fresh ESCALATED"
-assert_eq "" "$EDITS" "(h2) no duplicate label edit is issued"
-assert_eq "" "$COMMENTS_POSTED" "(h2) no duplicate escalation comment is posted"
+assert_eq "" "$EDITS" "(h2) no label edit is issued"
+assert_eq "" "$COMMENTS_POSTED" "(h2) no comment is posted"
 
-# (i) --apply, tier recoverable, but the completing edit's OWN read-back still
-#     shows loom:issue missing (the exact #6464 failure mode recurring on the
-#     reconciliation attempt itself) -> ESCALATED, exit 13, never silently
-#     reports success it cannot verify.
+# (i) --apply, but the completing edit's OWN read-back still shows loom:issue
+#     missing (the exact #6464 failure mode recurring on the reconciliation
+#     attempt itself) -> ESCALATED, exit 13, never silently reports success it
+#     cannot verify.
 reset_state
 issue_json "OPEN" "$(labels_json "loom:auditor")" \
   "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance)")]" \
@@ -437,7 +427,6 @@ stage_verify 303 "$(labels_json "loom:auditor")"   # loom:issue still absent pos
 run_sut --issue 303 --apply
 assert_eq "13" "$RC" "(i) read-back still shows loom:issue missing after the completing edit -> exit 13"
 assert_eq "ESCALATED" "$(get_field "$OUT" DECISION)" "(i) DECISION=ESCALATED"
-assert_eq "tier:maintenance" "$(get_field "$OUT" TIER)" "(i) TIER is still reported even though the write did not verify"
 
 # (j) gh issue view (initial read) failure -> exit 1, usage/environment error.
 reset_state

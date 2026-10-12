@@ -648,7 +648,7 @@ body. `--signoff` is harmless when not required. See
 
 **When creating a NEW PR:**
 - Pass only `loom:review-requested`: `create-pr.sh` copies the closing issue's
-  priority labels (the star and its levels) itself (#10518); a role never invents one
+  priority labels (`loom:important` / `loom:very-important`) itself (#10518); a role never invents one
 - This is the ONLY time you add labels to a PR
 
 **After PR creation:**
@@ -963,7 +963,7 @@ still a transient credential window, never a signal to redo the work.
 ```bash
 # CORRECT way to create PR
 # Title MUST use conventional commit format: "fix:", "feat:", "refactor:", etc.
-# create-pr.sh adds the closing issue's priority labels (the star) itself (#10518)
+# create-pr.sh adds the closing issue's priority labels itself (#10518)
 ./.loom/scripts/create-pr.sh --title "fix: descriptive summary of the change" --label "loom:review-requested" --body "$(cat <<'EOF'
 ## Summary
 Brief description of what this PR does and why.

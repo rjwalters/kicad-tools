@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-guide-operator-only-exclude.sh - Regression test for issues #6941,
-# #7071 and #9244.
+# #7071, #9244 and #11103.
 #
 # #6941 / #7071: guide.md's "Finding Work" ready-queue search must exclude
 # `loom:building`, `loom:operator-only` (labels.yml: "sweep skips") and
@@ -10,10 +10,9 @@
 # `has_blocked()` / `has_open_pr_labeled_loom_pr()` helpers and flip guard
 # existed only to feed that duty.)
 #
-# #9244 retired that duty with the urgent label itself. The one priority
-# signal is now `loom:operator-priority`, the operator's human-only star.
-# Guide READS it (WORK_PLAN's "Operator Priority" section) and never writes
-# it.
+# #9244 retired that duty with the urgent label itself. Since #11103 the
+# priority signal is two labels, `loom:important` and `loom:very-important`,
+# which Guide itself applies and removes (and renders in WORK_PLAN).
 #
 # Verifies that:
 #   1. The "Finding Work" ready-queue search still excludes loom:building,
@@ -22,10 +21,10 @@
 #      urgency_rank(), no flip-guard call, no "Maximum Urgent" section, no
 #      has_operator_only()/has_blocked() candidate helpers, and no mention
 #      of the retired urgent label anywhere.
-#   3. guide.md never adds or removes loom:operator-priority (no
-#      `gh issue edit ... loom:operator-priority` write), and states so.
-#   4. render_plan_body() reads loom:operator-priority into an
-#      "Operator Priority" section, executed against a stubbed $GH_READ.
+#   3. guide.md names no retired priority/tier label, states that Guide
+#      applies and removes both priority labels, and labels blockers itself.
+#   4. render_plan_body() renders "Very Important" and "Important"
+#      sections, executed against a stubbed $GH_READ.
 #
 # Hermetic: `gh` is stubbed with fixture JSON; only the real `jq` binary is
 # invoked — no forge/network calls.
@@ -97,15 +96,17 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 3: Guide never writes loom:operator-priority"
-assert_no_grep 'gh issue edit .*loom:operator-priority' "$GUIDE_MD" \
-    "no 'gh issue edit ... loom:operator-priority' write in guide.md"
-assert_grep 'NEVER add or remove `loom:operator-priority`' "$GUIDE_MD" \
-    "guide.md states the star is never added or removed by Guide"
+echo "Test 3: Guide owns the two priority labels and never touches the retired star (#11103)"
+assert_no_grep 'operator-priority|operator-high-priority|high-priority-inherited|tier:(goal|maint)' "$GUIDE_MD" \
+    "guide.md names no retired priority or tier label"
+assert_grep 'You add and remove `loom:important` / `loom:very-important`' "$GUIDE_MD" \
+    "guide.md states Guide applies and removes both priority labels"
+assert_grep 'label the blocker yourself' "$GUIDE_MD" \
+    "guide.md labels a priority issue's blocker itself (no daemon inheritance)"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 4: render_plan_body() renders a read-only Operator Priority section"
+echo "Test 4: render_plan_body() renders one section per priority level"
 
 RPB_BODY="$(awk '/^render_plan_body\(\) \{/{flag=1} flag{print} /^\}/{if(flag){exit}}' "$GUIDE_MD")"
 if [[ -z "$RPB_BODY" ]]; then
@@ -136,22 +137,27 @@ STUB
     chmod +x "$GH_STUB"
     FIX="$TMPROOT/fixtures"
     mkdir -p "$FIX"
-    printf '%s' '[{"number":8191,"title":"Starred issue B"},{"number":4765,"title":"Starred issue A"}]' \
-        > "$FIX/issue-loom_operator-priority.json"
+    printf '%s' '[{"number":8191,"title":"Important issue B"},{"number":4765,"title":"Important issue A"}]' \
+        > "$FIX/issue-loom_important.json"
+    printf '%s' '[{"number":9001,"title":"Very important issue"}]' \
+        > "$FIX/issue-loom_very-important.json"
 
     RENDER="$(LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
-    SECTION="$(awk '/^## Operator Priority$/{f=1;next} f && /^## /{exit} f' <<<"$RENDER")"
-    if grep -q '^- \*\*#4765\*\*: Starred issue A$' <<<"$SECTION" && grep -q '^- \*\*#8191\*\*: Starred issue B$' <<<"$SECTION"; then
-        pass "the Operator Priority section lists every starred issue"
+    SECTION="$(awk '/^## Important$/{f=1;next} f && /^## /{exit} f' <<<"$RENDER")"
+    if grep -q '^- \*\*#4765\*\*: Important issue A$' <<<"$SECTION" && grep -q '^- \*\*#8191\*\*: Important issue B$' <<<"$SECTION"; then
+        pass "the Important section lists every loom:important issue"
     else
-        fail "expected both starred issues in the Operator Priority section (got: $SECTION)"
+        fail "expected both important issues in the Important section (got: $SECTION)"
     fi
     FIRST="$(grep -m1 '^- ' <<<"$SECTION")"
-    assert_eq "$FIRST" "- **#4765**: Starred issue A" "starred issues render in stable number order"
-    if grep -q '^| Operator priority | 2 |$' <<<"$RENDER"; then
-        pass "the Backlog Balance table counts starred issues"
+    assert_eq "$FIRST" "- **#4765**: Important issue A" "important issues render in stable number order"
+    VSECTION="$(awk '/^## Very Important$/{f=1;next} f && /^## /{exit} f' <<<"$RENDER")"
+    assert_eq "$(grep -m1 '^- ' <<<"$VSECTION")" "- **#9001**: Very important issue" \
+        "the Very Important section lists the loom:very-important issue"
+    if grep -q '^| Important | 2 |$' <<<"$RENDER" && grep -q '^| Very important | 1 |$' <<<"$RENDER"; then
+        pass "the Backlog Balance table counts both levels"
     else
-        fail "expected '| Operator priority | 2 |' in the Backlog Balance table"
+        fail "expected '| Very important | 1 |' and '| Important | 2 |' in the Backlog Balance table"
     fi
 fi
 

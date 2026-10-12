@@ -78,13 +78,13 @@ default(disabled)**:
   "socket": null,         // default: $SAFEHOUSED_SOCKET
   "room": null,           // omit only if safehoused joined exactly one room
   "persona": "loom_daemon",
-  "operatorMention": null // who an operator-priority escalation pings (#9321)
+  "operatorMention": null // who an operator escalation pings (#9321)
   // "rooms": { … }       // optional attention-class routing — see below (#4225)
 }
 ```
 
 **`operatorMention` is a handle, not a credential.** It is the Matrix display
-name or user id (`"@operator:example.org"`) prepended to an operator-priority
+name or user id (`"@operator:example.org"`) prepended to an operator
 escalation line so the room actually notifies a human (#9321). Nothing about it
 authenticates anything — the `persona` does that — so it belongs beside the room
 ids rather than in an owner-only credential store. Leave it `null` and the
@@ -596,7 +596,7 @@ each one lands in is decided by its envelope `type` — see
 `ack` / `completion` (blockers, crashes, terminal outcomes) go to the signal room.
 With no `rooms` map configured they all go to the one `room`, as before.
 
-### Operator-priority escalations (#9321)
+### Operator escalations (#9321)
 
 `operator_priority.escalation` — something only the operator can move — is
 narrated as a **`handoff`**, so it lands in the signal room the operator

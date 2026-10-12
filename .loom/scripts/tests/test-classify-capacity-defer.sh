@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # test-classify-capacity-defer.sh - Tests for classify-capacity-defer.sh
-# (issue #6729), the no-comment-stream idempotency for Champion's tier-
-# capacity deferral path.
+# (issue #6729), the no-comment-stream idempotency for Champion's level-
+# capacity deferral path (the old tier caps mapped onto priority level, #11512).
 #
-# Champion's tier-based rate limiting can hold back a proposal that passes
-# all 8 promotion criteria purely on capacity (Tier 3: 1 promotion per
-# iteration, only if fewer than 5 already in the backlog; Tier 2: up to 2 per
-# iteration). Without a guard, every later pass re-derives the same
-# conclusion for an unrevised proposal and posts an equivalent "Tier N
-# backlog cap reached" comment again -- observed live as 10 near-identical
-# comments on #6628 over ~22 hours, and 2-3 more on each of #6647/#6649, all
-# citing the SAME five occupant tier:maintenance issues.
+# Champion's level-based rate limiting can hold back a proposal that passes
+# all 8 promotion criteria purely on capacity (no priority level: up to
+# tier2Cap, default 2, promotions per pass; #11512 maps no level to the old
+# Tier 2 cap, with no backlog gate). Without a guard, every later pass
+# re-derives the same conclusion for an unrevised proposal and posts an
+# equivalent "backlog cap reached" comment again -- observed live as 10
+# near-identical comments on #6628 over ~22 hours, all citing the SAME five
+# occupant issues.
 #
 # This suite is hybrid, mirroring test-classify-dependency-block.sh:
 #
@@ -141,57 +141,57 @@ assert_eq "" "$(normalize_occupants '')" \
     "an empty occupant list normalizes to an empty string"
 
 echo
-echo "--- capacity_fingerprint: identity of the (tier, occupant-set) PAIR ---"
+echo "--- capacity_fingerprint: identity of the (level, occupant-set) PAIR ---"
 
 occ_a="$(normalize_occupants '#3,#5,#9')"
 occ_a_reordered="$(normalize_occupants '#9,#3,#5')"
 occ_b="$(normalize_occupants '#3,#5,#8')"
 
-assert_eq "$(capacity_fingerprint 'tier:maintenance' "$occ_a")" \
-    "$(capacity_fingerprint 'tier:maintenance' "$occ_a_reordered")" \
+assert_eq "$(capacity_fingerprint 'default' "$occ_a")" \
+    "$(capacity_fingerprint 'default' "$occ_a_reordered")" \
     "same set in either order fingerprints identically"
 
-if [[ "$(capacity_fingerprint 'tier:maintenance' "$occ_a")" \
-      == "$(capacity_fingerprint 'tier:maintenance' "$occ_b")" ]]; then
+if [[ "$(capacity_fingerprint 'default' "$occ_a")" \
+      == "$(capacity_fingerprint 'default' "$occ_b")" ]]; then
     fail "a different occupant set fingerprints differently"
 else
     pass "a different occupant set fingerprints differently"
 fi
 
-if [[ "$(capacity_fingerprint 'tier:maintenance' "$occ_a")" \
-      == "$(capacity_fingerprint 'tier:goal-supporting' "$occ_a")" ]]; then
-    fail "the SAME occupant set under a different tier fingerprints differently"
+if [[ "$(capacity_fingerprint 'default' "$occ_a")" \
+      == "$(capacity_fingerprint 'loom:important' "$occ_a")" ]]; then
+    fail "the SAME occupant set under a different level fingerprints differently"
 else
-    pass "the SAME occupant set under a different tier fingerprints differently"
+    pass "the SAME occupant set under a different level fingerprints differently"
 fi
 
 echo
 echo "--- capacity_marker / capacity_marker_prefix / extract_fingerprint_from_marker ---"
 
-fp="$(capacity_fingerprint 'tier:maintenance' "$occ_a")"
-marker="$(capacity_marker 'tier:maintenance' "$fp")"
-assert_eq "<!-- champion:capacity-defer:tier:maintenance:$fp -->" "$marker" \
-    "marker shape is the tag, tier, and fingerprint"
+fp="$(capacity_fingerprint 'default' "$occ_a")"
+marker="$(capacity_marker 'default' "$fp")"
+assert_eq "<!-- champion:capacity-defer:default:$fp -->" "$marker" \
+    "marker shape is the tag, level, and fingerprint"
 
-extracted="$(extract_fingerprint_from_marker "some prose $marker more prose" 'tier:maintenance')"
+extracted="$(extract_fingerprint_from_marker "some prose $marker more prose" 'default')"
 assert_eq "$fp" "$extracted" "the fingerprint round-trips out of a comment body containing the marker"
 
-assert_eq "" "$(extract_fingerprint_from_marker 'no marker in this comment at all' 'tier:maintenance')" \
+assert_eq "" "$(extract_fingerprint_from_marker 'no marker in this comment at all' 'default')" \
     "a comment with no marker at all yields no fingerprint"
 
-other_marker="$(capacity_marker 'tier:goal-supporting' "$fp")"
-assert_eq "" "$(extract_fingerprint_from_marker "$other_marker" 'tier:maintenance')" \
-    "a marker for a DIFFERENT tier is not read as this tier's marker"
+other_marker="$(capacity_marker 'loom:important' "$fp")"
+assert_eq "" "$(extract_fingerprint_from_marker "$other_marker" 'default')" \
+    "a marker for a DIFFERENT level is not read as this level's marker"
 
 # A comment carrying two markers (composition changed, so a fresh marker was
 # posted alongside the record of the prior one in a hypothetical body) -- the
 # LAST one wins, mirroring classify-dependency-block.sh's own "last" convention.
-fp2="$(capacity_fingerprint 'tier:maintenance' "$occ_b")"
-marker2="$(capacity_marker 'tier:maintenance' "$fp2")"
+fp2="$(capacity_fingerprint 'default' "$occ_b")"
+marker2="$(capacity_marker 'default' "$fp2")"
 two_marker_body="$marker
 $marker2"
-assert_eq "$fp2" "$(extract_fingerprint_from_marker "$two_marker_body" 'tier:maintenance')" \
-    "when a comment body carries two markers for this tier, the LAST one is read"
+assert_eq "$fp2" "$(extract_fingerprint_from_marker "$two_marker_body" 'default')" \
+    "when a comment body carries two markers for this level, the LAST one is read"
 
 # =====================================================================
 # Black-box: stub `gh` on PATH, run the real script
@@ -360,20 +360,20 @@ echo
 echo "--- --check-capacity-defer (default mode): no prior comment -> POST_COMMENT, first-deferral ---"
 reset_state
 issue_fixture 'o/r#5'
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5"
 assert_eq "1" "$RC" "exit 1 - post a comment (nothing to defer against yet)"
 assert_contains "$OUT" "POST_COMMENT" "POST_COMMENT marker present"
 assert_contains "$OUT" "REASON: first-deferral" "reason is first-deferral"
 assert_contains "$OUT" "FINGERPRINT: " "a fingerprint is emitted for the caller to seed into the new comment"
 
 echo
-echo "--- same tier + same occupant set as the last deferral comment -> SKIP_COMMENT ---"
+echo "--- same level + same occupant set as the last deferral comment -> SKIP_COMMENT ---"
 reset_state
-fp="$(capacity_fingerprint 'tier:maintenance' "$(normalize_occupants "$OCCUPANTS_5")")"
-issue_fixture 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp -->
+fp="$(capacity_fingerprint 'default' "$(normalize_occupants "$OCCUPANTS_5")")"
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:default:$fp -->
 <!-- champion:capacity-defer-seen:$fp:1 -->
-**Champion Review: Tier 3 backlog cap reached — deferring promotion**"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5_REORDERED"
+**Champion Review: default-level backlog cap reached — deferring promotion**"
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5_REORDERED"
 assert_eq "0" "$RC" "exit 0 - skip, the occupant set (reordered) is the SAME set"
 assert_contains "$OUT" "SKIP_COMMENT" "SKIP_COMMENT marker present"
 assert_contains "$OUT" "FINGERPRINT: $fp" "the matching fingerprint is echoed"
@@ -381,11 +381,11 @@ assert_contains "$OUT" "FINGERPRINT: $fp" "the matching fingerprint is echoed"
 echo
 echo "--- --apply on a SKIP bumps the existing comment's seen-counter, posts NOTHING new ---"
 reset_state
-fp="$(capacity_fingerprint 'tier:maintenance' "$(normalize_occupants "$OCCUPANTS_5")")"
-issue_fixture 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp -->
+fp="$(capacity_fingerprint 'default' "$(normalize_occupants "$OCCUPANTS_5")")"
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:default:$fp -->
 <!-- champion:capacity-defer-seen:$fp:1 -->
-**Champion Review: Tier 3 backlog cap reached — deferring promotion**"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5" --apply
+**Champion Review: default-level backlog cap reached — deferring promotion**"
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5" --apply
 assert_eq "0" "$RC" "exit 0 - skip applies"
 assert_contains "$OUT" "PATCHED: o/r#5" "--apply reports the patch"
 assert_contains "$(patches_log)" "PATCH 1" "the existing comment (id 1) was PATCHed, not a new one created"
@@ -395,7 +395,7 @@ assert_eq "1" "$(jq '.comments | length' "$STUB_DIR/issue-o_r_5.json")" "still e
 
 echo
 echo "--- --apply, called AGAIN on the same (now bumped) state, advances the counter further ---"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5" --apply
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5" --apply
 assert_eq "0" "$RC" "exit 0 - still skip"
 new_body="$(jq -r '.comments[0].body' "$STUB_DIR/issue-o_r_5.json")"
 assert_contains "$new_body" "champion:capacity-defer-seen:$fp:3" "the seen-counter advances again on a second unchanged pass"
@@ -404,42 +404,42 @@ assert_eq "1" "$(jq '.comments | length' "$STUB_DIR/issue-o_r_5.json")" "still e
 echo
 echo "--- occupant set CHANGED since the last deferral comment -> POST_COMMENT, composition-changed ---"
 reset_state
-fp_old="$(capacity_fingerprint 'tier:maintenance' "$(normalize_occupants "$OCCUPANTS_5")")"
-issue_fixture 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_old -->
+fp_old="$(capacity_fingerprint 'default' "$(normalize_occupants "$OCCUPANTS_5")")"
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:default:$fp_old -->
 <!-- champion:capacity-defer-seen:$fp_old:1 -->
-**Champion Review: Tier 3 backlog cap reached — deferring promotion**"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_6"
+**Champion Review: default-level backlog cap reached — deferring promotion**"
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_6"
 assert_eq "1" "$RC" "exit 1 - post again, the backlog gained a 6th occupant"
 assert_contains "$OUT" "POST_COMMENT" "POST_COMMENT marker present"
 assert_contains "$OUT" "REASON: composition-changed" "reason is composition-changed"
 assert_contains "$OUT" "PRIOR_FINGERPRINT: $fp_old" "the prior fingerprint is named for context"
-fp_new="$(capacity_fingerprint 'tier:maintenance' "$(normalize_occupants "$OCCUPANTS_6")")"
+fp_new="$(capacity_fingerprint 'default' "$(normalize_occupants "$OCCUPANTS_6")")"
 assert_contains "$OUT" "FINGERPRINT: $fp_new" "the NEW fingerprint (for the fresh comment) is emitted"
 
 echo
-echo "--- a DIFFERENT tier's cap on the same issue never matches this tier's marker -> POST_COMMENT ---"
+echo "--- a DIFFERENT level's cap on the same issue never matches this level's marker -> POST_COMMENT ---"
 reset_state
-fp_maint="$(capacity_fingerprint 'tier:maintenance' "$(normalize_occupants "$OCCUPANTS_5")")"
-issue_fixture 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+fp_maint="$(capacity_fingerprint 'default' "$(normalize_occupants "$OCCUPANTS_5")")"
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:default:$fp_maint -->
 <!-- champion:capacity-defer-seen:$fp_maint:1 -->
-**Champion Review: Tier 3 backlog cap reached — deferring promotion**"
-run_ccd --issue 5 --repo o/r --tier tier:goal-supporting --occupants "#100,#101"
-assert_eq "1" "$RC" "exit 1 - a tier:maintenance marker is not read as a tier:goal-supporting deferral"
-assert_contains "$OUT" "REASON: first-deferral" "from tier:goal-supporting's perspective this is a first deferral"
+**Champion Review: default-level backlog cap reached — deferring promotion**"
+run_ccd --issue 5 --repo o/r --level loom:important --occupants "#100,#101"
+assert_eq "1" "$RC" "exit 1 - a default-level marker is not read as a loom:important deferral"
+assert_contains "$OUT" "REASON: first-deferral" "from loom:important's perspective this is a first deferral"
 
 echo
 echo "--- only the LATEST capacity-deferral comment is consulted, not an older superseded one ---"
 reset_state
-fp_a="$(capacity_fingerprint 'tier:maintenance' "$(normalize_occupants '#1,#2,#3')")"
-fp_b="$(capacity_fingerprint 'tier:maintenance' "$(normalize_occupants '#1,#2,#4')")"
+fp_a="$(capacity_fingerprint 'default' "$(normalize_occupants '#1,#2,#3')")"
+fp_b="$(capacity_fingerprint 'default' "$(normalize_occupants '#1,#2,#4')")"
 issue_fixture 'o/r#5' \
-    "<!-- champion:capacity-defer:tier:maintenance:$fp_a -->
+    "<!-- champion:capacity-defer:default:$fp_a -->
 <!-- champion:capacity-defer-seen:$fp_a:1 -->
 first deferral" \
-    "<!-- champion:capacity-defer:tier:maintenance:$fp_b -->
+    "<!-- champion:capacity-defer:default:$fp_b -->
 <!-- champion:capacity-defer-seen:$fp_b:1 -->
 second deferral, composition changed"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "#1,#2,#4"
+run_ccd --issue 5 --repo o/r --level default --occupants "#1,#2,#4"
 assert_eq "0" "$RC" "exit 0 - matches the SECOND (latest) comment's occupant set, not the first"
 assert_contains "$OUT" "FINGERPRINT: $fp_b" "the latest comment's fingerprint is the one compared against"
 
@@ -447,9 +447,29 @@ echo
 echo "--- an empty occupant set is handled without erroring (a cap not tied to enumerable occupants) ---"
 reset_state
 issue_fixture 'o/r#5'
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants ""
+run_ccd --issue 5 --repo o/r --level default --occupants ""
 assert_eq "1" "$RC" "exit 1 - first deferral, even with no occupants named"
 assert_contains "$OUT" "OCCUPANTS: " "the (empty) occupants line is still printed"
+
+echo
+echo "--- #11512: the per-pass cap's empty occupant set repeats -> SKIP_COMMENT (one comment per issue) ---"
+reset_state
+fp="$(capacity_fingerprint 'default' "")"
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:default:$fp -->
+<!-- champion:capacity-defer-seen:$fp:1 -->
+**Champion Review: no-level per-pass cap reached — deferring promotion**"
+run_ccd --issue 5 --repo o/r --level default --occupants "" --apply
+assert_eq "0" "$RC" "exit 0 - a repeat per-pass deferral stays silent"
+assert_contains "$OUT" "SKIP_COMMENT" "SKIP_COMMENT for the repeated empty occupant set"
+assert_eq "1" "$(jq '.comments | length' "$STUB_DIR/issue-o_r_5.json")" "still exactly one comment"
+
+echo
+echo "--- #11512: --tier stays an alias of --level; LEVEL is reported ---"
+reset_state
+issue_fixture 'o/r#5'
+run_ccd --issue 5 --repo o/r --tier default --occupants "#1"
+assert_eq "1" "$RC" "exit 1 - --tier is accepted as an alias of --level"
+assert_contains "$OUT" "LEVEL: default" "the level is reported on a LEVEL: line"
 
 # =====================================================================
 # Argument validation
@@ -458,13 +478,13 @@ assert_contains "$OUT" "OCCUPANTS: " "the (empty) occupants line is still printe
 echo
 echo "--- argument validation ---"
 reset_state
-run_ccd --repo o/r --tier tier:maintenance --occupants "#1"
+run_ccd --repo o/r --level default --occupants "#1"
 assert_eq "2" "$RC" "missing --issue exits 2"
-run_ccd --issue notanumber --repo o/r --tier tier:maintenance --occupants "#1"
+run_ccd --issue notanumber --repo o/r --level default --occupants "#1"
 assert_eq "2" "$RC" "non-numeric --issue exits 2"
 run_ccd --issue 5 --repo o/r --occupants "#1"
-assert_eq "2" "$RC" "missing --tier exits 2"
-run_ccd --issue 404 --repo o/r --tier tier:maintenance --occupants "#1"
+assert_eq "2" "$RC" "missing --level exits 2"
+run_ccd --issue 404 --repo o/r --level default --occupants "#1"
 assert_eq "2" "$RC" "unreadable root issue exits 2"
 
 # =====================================================================
@@ -474,9 +494,9 @@ assert_eq "2" "$RC" "unreadable root issue exits 2"
 echo
 echo "--- #9548: an OUTSIDER's capacity marker does not defer ---"
 reset_state
-issue_fixture_untrusted 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+issue_fixture_untrusted 'o/r#5' "<!-- champion:capacity-defer:default:$fp_maint -->
 champion:capacity-defer-seen: 9"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5"
 assert_eq "1" "$RC" "exit 1 - an untrusted author's deferral marker counts as absent (#9548)"
 assert_contains "$OUT" "POST_COMMENT" "the untrusted marker does not produce SKIP_COMMENT"
 if grep -q "capacity-defer" <<<"$OUT"; then
@@ -488,39 +508,39 @@ fi
 echo
 echo "--- #9548: a TRUSTED author's capacity marker still defers ---"
 reset_state
-issue_fixture 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:default:$fp_maint -->
 champion:capacity-defer-seen: 9"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5"
 assert_eq "0" "$RC" "exit 0 - a trusted (OWNER-authored) marker still defers (#9548)"
 assert_contains "$OUT" "SKIP_COMMENT" "the trusted marker produces SKIP_COMMENT"
 
 echo
 echo "--- #9657: a FLEET APP's capacity marker (live read, REST shape) still dedupes ---"
 reset_state
-issue_fixture_fleet_app 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+issue_fixture_fleet_app 'o/r#5' "<!-- champion:capacity-defer:default:$fp_maint -->
 <!-- champion:capacity-defer-seen:$fp_maint:1 -->"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5"
 assert_eq "0" "$RC" "exit 0 - a fleet-App-authored marker (CONTRIBUTOR, [bot]) is believed on the live path"
 assert_contains "$OUT" "SKIP_COMMENT" "the fleet App's marker produces SKIP_COMMENT, not a duplicate deferral comment"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5" --apply
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5" --apply
 assert_eq "0" "$RC" "exit 0 - --apply on the fleet App's marker still skips"
 assert_contains "$(patches_log)" "PATCH 1" "--apply bumps the fleet App's own comment"
 
 echo
 echo "--- #9657: a FOREIGN App's capacity marker counts as absent ---"
 reset_state
-issue_fixture_by 'someone-elses-loom[bot]' Bot CONTRIBUTOR 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+issue_fixture_by 'someone-elses-loom[bot]' Bot CONTRIBUTOR 'o/r#5' "<!-- champion:capacity-defer:default:$fp_maint -->"
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5"
 assert_eq "1" "$RC" "exit 1 - another installation's App is not this fleet's"
 
 echo
 echo "--- #9657: --apply PATCHes the trusted comment, never an outsider's later copy of the marker ---"
 reset_state
-issue_fixture 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:default:$fp_maint -->
 <!-- champion:capacity-defer-seen:$fp_maint:1 -->"
-append_comment 'o/r#5' stranger User NONE "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+append_comment 'o/r#5' stranger User NONE "<!-- champion:capacity-defer:default:$fp_maint -->
 <!-- champion:capacity-defer-seen:$fp_maint:1 -->"
-run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5" --apply
+run_ccd --issue 5 --repo o/r --level default --occupants "$OCCUPANTS_5" --apply
 assert_eq "0" "$RC" "exit 0 - the trusted marker still dedupes"
 assert_eq "PATCH 1" "$(patches_log)" "only the trusted comment (id 1) is PATCHed; the outsider's (id 2) is left alone"
 
@@ -542,6 +562,10 @@ echo "--- Doc pins: the Champion prose actually calls the gate ---"
         "champion-reference.md's edge case documents the capacity-deferral gate"
     assert_doc_contains "$CHAMPION_REF_MD" "Edge Case 5d" \
         "the capacity-deferral gate has its own named edge case"
+    assert_doc_contains "$CHAMPION_PROMO_MD" '--level "default"' \
+        "Step 3c passes the priority level, not a retired tier label (#11512)"
+    assert_doc_contains "$CHAMPION_PROMO_MD" '--occupants ""' \
+        "Step 3c passes no occupants for the per-pass no-level cap (#11512)"
 }
 
 echo

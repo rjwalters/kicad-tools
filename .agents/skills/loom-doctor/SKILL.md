@@ -427,7 +427,7 @@ Use the shared queue and walk its rows in order:
 QUEUE=$(loom-daemon pr-queue --role doctor) || exit 1
 printf '%s\n' "$QUEUE" | jq -r '.[] | [.number, .origin, .priorityReason] | @tsv'
 ```
-Follow `.loom/docs/pr-planning.md`. Stars precede interactive work; the classes
+Follow `.loom/docs/pr-planning.md`. Priority PRs precede interactive work; the classes
 below describe the baseline tie-break, not separate passes ahead of the queue.
 After each completed/skipped PR, refresh the queue and take the next unvisited
 row; keep a per-pass visited set. Preserve PR origin during repairs.

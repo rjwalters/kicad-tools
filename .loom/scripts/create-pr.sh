@@ -55,9 +55,10 @@
 #      endpoint takes no labels. A label failure after a successful create
 #      still exits 0 with the URL (the PR exists; re-running would only adopt
 #      it) and names the unapplied labels on stderr.
-#   6. PRIORITY-LABEL COPY (#10518). The priority labels (operator star and
-#      levels) of every issue the body closes are added to --label, so a
-#      caller passes only `loom:review-requested`. Never for `Part of #N`.
+#   6. PRIORITY-LABEL COPY (#10518). The priority labels (`loom:important` /
+#      `loom:very-important`, #11103) of every issue the body closes are added
+#      to --label, so a caller passes only `loom:review-requested`. Never for
+#      `Part of #N`.
 #
 # Usage:
 #   create-pr.sh --title TITLE (--body BODY | --body-file PATH) \
@@ -373,17 +374,16 @@ fi
 REPO_NWO="$(loom_write_repo "${REPO_NWO:-${LOOM_REPO:-}}")" || { echo "create-pr.sh: not opening a PR for $HEAD_BRANCH: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 1; }
 
 # --- Priority labels from the closing issues (#10518) ------------------------
-# The PR carries each priority label (the operator star and its levels) of
-# every issue its body closes, on the GraphQL and REST paths alike. WHICH
+# The PR carries each priority label (`loom:important` / `loom:very-important`)
+# of every issue its body closes, on the GraphQL and REST paths alike. WHICH
 # issues and labels is `loom-daemon forge priority-labels`'s decision (closing
 # refs + this repo's Loom-Issue trailers; never `Part of #N`); this only
 # appends its output (deduplicated). Fail open: a failed lookup warns, naming
-# the issue; the verb's own warnings go straight to stderr. `_cpr_stars` is
-# emptied again if the labels do not land, so no audit comment claims them.
-# requires-daemon: forge optional   #10518 -- absent or pre-#10518 binary: the star is not copied, with a one-line warning naming the issue
-_cpr_stars="$("${_cpr_loom_daemon:-false}" forge priority-labels --body-file - --repo "$REPO_NWO" <<< "$BODY")" || { _cpr_stars=""
-  [[ -z "$CLOSES_ISSUE" ]] || echo "create-pr.sh: WARNING: issue #$CLOSES_ISSUE was NOT checked for priority labels (no loom-daemon with \`forge priority-labels\`); if it is starred, add the star to this PR by hand (#10518)" >&2; }
-while IFS= read -r _l; do [[ -z "$_l" || " ${LABELS[*]-} " == *" $_l "* ]] || LABELS+=("$_l"); done <<< "$_cpr_stars"
+# the issue; the verb's own warnings go straight to stderr.
+# requires-daemon: forge optional   #10518 -- absent or pre-#10518 binary: the priority label is not copied, with a one-line warning naming the issue
+_cpr_prio="$("${_cpr_loom_daemon:-false}" forge priority-labels --body-file - --repo "$REPO_NWO" <<< "$BODY")" || { _cpr_prio=""
+  [[ -z "$CLOSES_ISSUE" ]] || echo "create-pr.sh: WARNING: issue #$CLOSES_ISSUE was NOT checked for priority labels (no loom-daemon with \`forge priority-labels\`); if it carries loom:important or loom:very-important, add that label to this PR by hand (#10518)" >&2; }
+while IFS= read -r _l; do [[ -z "$_l" || " ${LABELS[*]-} " == *" $_l "* ]] || LABELS+=("$_l"); done <<< "$_cpr_prio"
 
 CREATE_ARGS=(pr create --head "$HEAD_BRANCH" --title "$TITLE" --body "$BODY")
 if [[ -n "$BASE_BRANCH" ]]; then
@@ -413,7 +413,7 @@ if [[ $_cpr_rc -ne 0 ]] && is_rate_limit_error "$(cat "$_cpr_ef")"; then
       '{title: $t, head: $h, base: $b, body: $body, draft: $d}' | gh api --method POST "repos/$REPO_NWO/pulls" --input - --jq '.html_url, .number' 2>"$_cpr_ef")"; then
     _cpr_rc=0; PR_URL="${_cpr_rest%%$'\n'*}"; _cpr_num="${_cpr_rest##*$'\n'}"
     if [[ ${#LABELS[@]} -gt 0 ]] && ! jq -nc '{labels: $ARGS.positional}' --args "${LABELS[@]}" | gh api --method POST "repos/$REPO_NWO/issues/$_cpr_num/labels" --input - >/dev/null 2>"$_cpr_ef"; then
-      _cpr_stars=""; echo "create-pr.sh: WARNING: PR $PR_URL was opened over REST but its label(s) were NOT applied: ${LABELS[*]} ($(cat "$_cpr_ef")). Apply them by hand: gh api --method POST repos/$REPO_NWO/issues/$_cpr_num/labels -f 'labels[]=<label>' (#9226)" >&2
+      echo "create-pr.sh: WARNING: PR $PR_URL was opened over REST but its label(s) were NOT applied: ${LABELS[*]} ($(cat "$_cpr_ef")). Apply them by hand: gh api --method POST repos/$REPO_NWO/issues/$_cpr_num/labels -f 'labels[]=<label>' (#9226)" >&2
     fi
   else echo "create-pr.sh: the REST fallback also failed: $(cat "$_cpr_ef")" >&2; fi
 fi
@@ -428,12 +428,6 @@ fi
 # caller parsing the URL needs no change) — echoed before the best-effort
 # footer step below, which only ever adds stderr.
 echo "$PR_URL"
-
-# #10518: `loom-daemon forge priority-labels --audit-pr` gives a copied star
-# #10012 §2's `inherited_from=#N` audit comment, so it reads as inherited from
-# its issue, not as the operator's own. Best-effort; only once the labels landed.
-[[ -z "$_cpr_stars" ]] || "$_cpr_loom_daemon" forge priority-labels --body-file - --repo "$REPO_NWO" --audit-pr "$PR_URL" <<< "$BODY" >/dev/null ||
-  echo "create-pr.sh: note: could not post the inherited-star audit comment on $PR_URL (best-effort, #10518)" >&2
 
 # --- #9774: the opened PR's body ends with the dashboard footer -------------
 # Best-effort, via the daemon's --patch-created (fetch, footer, PATCH — the

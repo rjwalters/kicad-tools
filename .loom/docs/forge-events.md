@@ -58,6 +58,7 @@ the same as every other daemon subsystem.
 | `events.inFlightPrWatch` | `LOOM_FORGE_EVENTS_IN_FLIGHT_PR_WATCH` | `false` | Let a PR-lifecycle page tick the watch monitor early (§4.1). |
 | `events.ciTelemetryRuns` | `LOOM_FORGE_EVENTS_CI_TELEMETRY_RUNS` | `false` | Let a finished `workflow_run` key make the CI telemetry poller record that run directly, and stretch its repo sweep to a correction floor (§4.2). |
 | `events.minSpacingSecs` | `LOOM_FORGE_EVENTS_WAKE_MIN_SPACING_SECS` | `30` | Minimum distance between any tick and a following **early** tick. The rate bound, shared by every consumer. |
+| `pollGating` | `LOOM_FORGE_EVENTS_POLL_GATING` | `false` | Opt-in event-gated polling (#9255): while the feed is `healthy`, the work finder skips a repo with no event since its last poll, up to a hard cap (10x cadence, max 15 min). Any other status restores base cadence at once. `status` shows the lossy-feed rate and per-workspace state. Expects `repo` on feed events. Read once at daemon startup: an edit needs a restart. |
 
 ```json
 {

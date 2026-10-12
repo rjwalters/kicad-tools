@@ -217,7 +217,7 @@ fi
 
 # --- 7. #8911: EVERY builder.md find-work tier applies the skip set -----
 # #8255 wired the filter into the fallback tier only, so an issue carrying a
-# configured skip label AND a higher-priority label (the star, loom:curated)
+# configured skip label AND a higher-priority label (a priority level, loom:curated)
 # was still offered — from the HIGHEST tier. Each tier's fenced block is run
 # verbatim here (cwd = fixture repo, the real skip-labels.sh behind the
 # `./.loom/scripts/` path the block names, a fake `gh` that ANDs `--label`
@@ -306,7 +306,7 @@ EOF
     }
     sorted() { printf '%s\n' "$@" | sort -n | tr '\n' ' '; }
 
-    if [[ "$(wc -w <<<"$levels")" -ge 3 ]]; then
+    if [[ "$(wc -w <<<"$levels")" -ge 2 ]]; then
         pass "Step 1 iterates $(wc -w <<<"$levels" | tr -d ' ') priority-level labels"
     else
         fail "could not read Step 1's priority-level list from builder.md: '$levels'"
@@ -315,7 +315,7 @@ EOF
     {
         # Configured repo: the skip-labeled twin never survives, in ANY tier.
         expect_tier 1 "$JOURNAL_REPO" "$(sorted $star_plain)" \
-            "tier 1: a starred issue with a configured skip label is dropped, at every level (AC2)"
+            "tier 1: a priority issue with a configured skip label is dropped, at every level (AC2)"
         expect_tier 2 "$JOURNAL_REPO" "$(sorted ${cur}1)" \
             "tier 2: a curated issue with a configured skip label is dropped (AC3)"
         expect_tier 3 "$JOURNAL_REPO" "$(sorted $star_plain ${bare}1)" \

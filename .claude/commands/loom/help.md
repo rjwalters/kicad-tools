@@ -60,7 +60,7 @@ Present it grouped like this (keep descriptions terse, one line each):
 | `/loom:imagine <idea>` | Bootstrap a new Loom-powered project from a natural-language description. |
 | `/loom:epic <goal>` | Break a large goal into a phased epic with implementation issues. |
 | `/loom:bump <level>` | Bump the version + tag for a generic (non-Loom) project. |
-| `/loom:star <what needs doing>` | File one starred issue; checks for related issues first. |
+| `/loom:star <what needs doing>` | File one `loom:important` issue; checks for related issues first. |
 | `/loom:help [command]` | This command — describe the Loom command surface. |
 
 After the tables, close with a short **where to start**:

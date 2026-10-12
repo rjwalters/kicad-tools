@@ -27,8 +27,8 @@ per tick, and the seed plus every draw are exported as
 `pick.decision.workspace_draw` (and the published plan's `position` is the
 draw order). The single-workspace tick uses the in-workspace order alone.
 Since #11508 the level comes only from the two labels: there is no legacy
-bridge, so `loom:operator-priority` / `loom:operator-high-priority` carry no
-dispatch weight until they are migrated (table below).
+bridge, so the retired star labels carry no dispatch weight until they are
+migrated (table below).
 
 **Priority changes order, never eligibility or admission** (operator ruling,
 #11508). A priority issue is dispatched only once it is `loom:issue` (there is
