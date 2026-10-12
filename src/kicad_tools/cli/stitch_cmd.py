@@ -1883,6 +1883,39 @@ def _point_on_same_net_fill(
     return False
 
 
+#: Longest axial step :func:`calculate_dogleg_via_position` takes before
+#: turning (the last entry of its ``axial_distances``).
+DOGLEG_MAX_AXIAL_MM = 1.3
+
+
+def max_via_reach_mm(
+    pad_width: float, pad_height: float, offset: float, escape_distance: float
+) -> float:
+    """Farthest a stitch via centre (or trace waypoint) lands from its pad centre.
+
+    Issue #6384: an upper bound over every placement strategy
+    :func:`run_stitch` runs for a pad, with ``R = max(pad_width,
+    pad_height) / 2``:
+
+    * direct (:func:`calculate_via_position`): ``R + 2 * offset``;
+    * dog-leg (:func:`calculate_dogleg_via_position`): an axial step of at
+      most :data:`DOGLEG_MAX_AXIAL_MM`, then an escape (possibly diagonal) of
+      at most ``R + 2 * offset`` -- ``R + 2 * offset + 1.3`` by the triangle
+      inequality;
+    * extended escape (:func:`calculate_extended_escape_position`, including
+      its polar fallback): every candidate's total path length -- and so its
+      distance from the pad centre -- is capped at ``escape_distance``.
+
+    So the reach is ``max(escape_distance, R + 2 * offset + 1.3)``.  Callers
+    that pick a clearance for the weld (the pour completion loop) add the via
+    radius and the class clearance on top.  **Widening any candidate list in
+    the strategies above must update this bound** (``tests/
+    test_stitch_via_reach_6384.py`` fuzzes it).
+    """
+    pad_radius = max(pad_width, pad_height) / 2
+    return max(escape_distance, pad_radius + 2 * offset + DOGLEG_MAX_AXIAL_MM)
+
+
 def calculate_via_position(
     pad: PadInfo,
     offset: float,
@@ -2452,7 +2485,8 @@ def calculate_dogleg_via_position(
         ]
 
     # Axial distances: how far to move along the row before turning
-    axial_distances = [0.3, 0.5, 0.7, 1.0, 1.3]
+    # Issue #6384: the last entry is DOGLEG_MAX_AXIAL_MM (max_via_reach_mm).
+    axial_distances = [0.3, 0.5, 0.7, 1.0, DOGLEG_MAX_AXIAL_MM]
 
     # Escape offsets: how far to move perpendicular after the axial step
     escape_offsets = [
