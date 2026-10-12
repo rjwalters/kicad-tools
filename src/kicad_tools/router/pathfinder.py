@@ -477,6 +477,12 @@ class Router:
         # #6315).  Same invalidation contract as ``_non_th_pad_cache``: the
         # pad count, plus ``invalidate_pad_geometry_cache`` for in-place moves.
         self._pad_bucket_cache: tuple[int, dict[tuple[int, int], list[Pad]]] | None = None
+        # Issue #6389: memo of ``_pad_step_clear`` verdicts.  The disc, the
+        # centre cell and both diagonal corners of one step all ask the same
+        # question.  Dropped with the pad-geometry caches (every route start)
+        # and whenever the token in ``_pad_step_clear`` changes.
+        self._pad_step_memo: dict[tuple[int, int, int, int, int, int], bool] = {}
+        self._pad_step_memo_token: tuple | None = None
 
         # Issue #2947: World-coord foreign-net clearance context for via
         # placement.  The coarse-grid obstacle map consulted by
@@ -1883,6 +1889,41 @@ class Router:
     def _pad_step_clear(
         self, layer: int, gx: int, gy: int, net: int, from_cell: tuple[int, int] | None
     ) -> bool:
+        """Memoised :meth:`_pad_step_clear_uncached` (Issue #6389).
+
+        The token covers every input that can change inside one search: the
+        grid's occupancy (routed copper, authored index), the route-halo
+        snapshot, the component-hole index and the pad list.  The net class
+        and rules are per route, and the memo is dropped at every route
+        start by :meth:`invalidate_pad_geometry_cache`.
+        """
+        grid = self.grid
+        halo = getattr(grid, "_route_halo", None)
+        holes = grid._component_hole_index
+        token = (
+            grid.occupancy_generation,
+            halo.state_version if halo is not None else None,
+            holes,
+            len(holes.holes),
+            holes.known,
+            len(grid._pads),
+        )
+        if token != self._pad_step_memo_token:
+            self._pad_step_memo.clear()
+            self._pad_step_memo_token = token
+        fx, fy = from_cell or (gx, gy)
+        key = (layer, fx, fy, gx, gy, net)
+        hit = self._pad_step_memo.get(key)
+        if hit is None:
+            hit = self._pad_step_clear_uncached(layer, gx, gy, net, from_cell)
+            if len(self._pad_step_memo) >= self._SITE_CACHE_MAX:
+                self._pad_step_memo.clear()
+            self._pad_step_memo[key] = hit
+        return hit
+
+    def _pad_step_clear_uncached(
+        self, layer: int, gx: int, gy: int, net: int, from_cell: tuple[int, int] | None
+    ) -> bool:
         """Exact clearance of the step ``from_cell -> (gx, gy)`` (Issue #6389).
 
         The Python port of the native ``Pathfinder::pad_step_clear`` (#6315):
@@ -1942,6 +1983,16 @@ class Router:
             return False
         if not self._authored_step_clear(_GridStep(fx, fy), gx, gy, layer, net):
             return False
+        if self._foreign_vias:
+            # The validator's foreign-via context (#3002), which can hold vias
+            # not yet in ``grid.routes`` -- same floor as the validator.
+            step = Segment(ax, ay, bx, by, width, copper_layer, net)
+            floor = trace_via_clearance_mm(self.rules.trace_clearance, self.rules.via_clearance)
+            for via in self._foreign_vias:
+                if via.net != net and not segment_clears_foreign_via(
+                    step, via, trace_clearance=floor, hard_intersection_only=False
+                ):
+                    return False
         halo = getattr(self.grid, "_route_halo", None)
         if halo is None or not halo.marks:
             return True
@@ -3824,6 +3875,8 @@ class Router:
         """
         self._non_th_pad_cache = None
         self._pad_bucket_cache = None  # Issue #6389
+        self._pad_step_memo.clear()
+        self._pad_step_memo_token = None
         # Issue #5617: the two site-level via memos read exactly the state
         # this method invalidates -- ``_non_th_pad_cache`` (the pad-drill
         # sweep) and ``grid._component_hole_index`` (which
