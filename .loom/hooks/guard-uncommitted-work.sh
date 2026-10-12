@@ -69,7 +69,7 @@ _record_wrapper_failure() {
     _canary_effective_true || return 0
     local ov="${LOOM_UNCOMMITTED_WORK_CANARY_LOG:-}" d event="" ws log
     [[ -z "$ov" || "$ov" == /* ]] || { _canary_gap "$1" "relative log override"; return 0; }
-    log="$(realpath -m "${ov:-${HOME:-}/.loom/logs/uncommitted-work-canary.jsonl}" 2>/dev/null)" && [[ "$log" == /* ]] || { _canary_gap "$1" "log path unresolved"; return 0; }  # symlinks/".." resolved first
+    log="${ov:-${HOME:-}/.loom/logs/uncommitted-work-canary.jsonl}"; log="$(realpath -m "$log" 2>/dev/null || printf '%s' "$log" | python3 -c 'import os,sys;sys.stdout.write(os.path.realpath(sys.stdin.read()))' 2>/dev/null)" && [[ "$log" == /* ]] || { _canary_gap "$1" "log path unresolved"; return 0; }  # GNU realpath -m, else python3 realpath (BSD has no -m, #11598); symlinks/".." resolved first
     d="$log"; while [[ "$d" == /?* ]]; do d="${d%/*}"; [[ -e "${d:-/}/.git" ]] && { _canary_gap "$1" "log inside a Git checkout"; return 0; }; done
     mkdir -p "$(dirname "$log")" 2>/dev/null && [[ ! -d "$log" ]] || { _canary_gap "$1" "log not writable"; return 0; }
     [[ "$(wc -c 2>/dev/null <"$log")" -lt 1048576 ]] || { _canary_gap "$1" "log full"; return 0; }  # missing log -> "" -> 0

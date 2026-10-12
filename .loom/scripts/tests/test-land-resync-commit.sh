@@ -344,13 +344,16 @@ else
     fail "no local chore/resync-installed branch is left behind in the primary checkout"
 fi
 # The documented forensic signature (troubleshooting.md): the fallback writes
-# exactly `commit: chore: resync…` immediately followed by `reset: moving to
-# origin/main` on the default branch's reflog -- and never a `rebase`.
+# exactly `loom:resync: chore: resync…` immediately followed by the reset,
+# `loom:resync: updating HEAD`, on the default branch's reflog -- and
+# never a `rebase`. Both are `loom:`-tagged (GIT_REFLOG_ACTION, #11566) so the
+# daemon's out-of-band checkout detector does not report Loom's own landing
+# as a `checkout.external_change`.
 REFLOG="$(git -C "$WORKDIR/primary-d" reflog show --format='%gs' main)"
-if [[ "$(sed -n '1p' <<< "$REFLOG")" == "reset: moving to origin/main" ]] && \
-   [[ "$(sed -n '2p' <<< "$REFLOG")" == "commit: chore: resync installed Loom surfaces" ]] && \
+if [[ "$(sed -n '1p' <<< "$REFLOG")" == "loom:resync: updating HEAD" ]] && \
+   [[ "$(sed -n '2p' <<< "$REFLOG")" == "loom:resync: chore: resync installed Loom surfaces" ]] && \
    ! grep -q "rebase" <<< "$REFLOG"; then
-    pass "the default branch's reflog shows the documented fallback signature (commit, then reset to origin) and no rebase"
+    pass "the default branch's reflog shows the documented loom:-tagged fallback signature (commit, then reset to origin) and no rebase"
 else
     fail "the default branch's reflog shows the documented fallback signature (got: $(tr '\n' '|' <<< "$REFLOG"))"
 fi

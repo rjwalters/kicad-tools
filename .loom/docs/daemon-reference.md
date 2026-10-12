@@ -249,7 +249,7 @@ issue** — the v0.10.0 set is intentionally frozen.
 | `daemon.roll.health_failed` | Pause-and-roll resume (#10832) | `{manifest_id, reason, running_version, to_version, failures}` (health did not hold during probation; nothing is resumed until it does) |
 | `daemon.roll.paused.resumed` | Pause-and-roll resume (#10832) | `{manifest_id, phase, from_version, to_version, running_version, resumed_on, items, resumed, completed, requeued_by_reason, recovered, residue_reaped, health_failures, verify_probation_secs, resume_budget_secs, probation_secs, resume_secs, pause_to_resume_secs, max_age_secs}` (`resumed_on`: `target` or `rollback`) |
 | `forge.event`               | `forge_events.rs` feed consumer (#8765) | `{source: "forge-event-feed", host_id, count, first_seq, last_seq, types}` |
-| `operator_priority.escalation` | Star-liveness pass (#9321)   | `{slug, issue, key, kind, stage, text, url, host, inherited_from?, resolved}` |
+| `operator_priority.escalation` | Fleet alert (#10164; the star-liveness publisher, #9321, was removed by #11104) | `{slug, issue, key, kind, stage, text, url, host, inherited_from?, resolved}` |
 
 The four `epic.issue.{N}.*` topics were authorized by **#3873** (epic #3842
 Phase 4) and are documented in full under [Epic supervisor](#epic-supervisor-3842)
@@ -288,20 +288,13 @@ on-disk journal is the copy, the prompt is a "check now"). Invariant source:
 `loom-daemon/src/forge_events.rs`.
 
 The `operator_priority.escalation` topic was authorized by **#9321** (the
-delivery half of #9244/#9301). Publisher: the star-liveness pass
-(`loom-daemon/src/star_liveness/`); consumer: the Safehouse narration sink,
-which renders it as a `handoff` envelope into the signal room so a starred
-issue's operator ask reaches the human rather than sitting in a forge comment
-nobody reads in time (#9268: four agents commented for seven hours). It is
-emitted on a **state change** like the `*.advisory` topics, but keyed rather
-than boolean: exactly once per `(repo, issue, <kind>:<specifics>)`, and **only
-on the pass that actually posts that key's forge escalation comment**. That
-coupling is what makes it once-per-cause *fleet-wide* rather than per-host — the
-forge marker is the shared lock, so a peer host that finds the comment already
-posted publishes nothing, and neither does a restarted daemon. A second event
-with `resolved: true` fires once when the ask clears, from the host that
-announced it. Room routing, the `safehouse.operatorMention` ping and the
-rendered line are documented in
+delivery half of #9244/#9301). Its first publisher, the star-liveness pass,
+was removed by #11104; today it is published by the
+[fleet-degraded operator alert](#fleet-degraded-operator-alert-autonomousfleetalert-10164)
+(issue `0`, one event per condition key, a `resolved: true` event when it
+clears). Consumer: the Safehouse narration sink, which renders it as a
+`handoff` envelope into the signal room. Room routing, the
+`safehouse.operatorMention` ping and the rendered line are documented in
 [`safehouse.md` → Operator-priority escalations](safehouse.md#operator-priority-escalations-9321).
 
 **`Generic`-topic rule.** A `Generic` topic is allowed only while it (a) is
@@ -2430,6 +2423,47 @@ Reporting:
   memory behind this is per process: a restarted daemon reports each standing
   skip state once more.
 
+#### Self-heal of a Loom-only blockage (#11425)
+
+A checkout that stops at `mid-operation`, `ahead`, `diverged` or `dirty` is
+usually someone's work, and stays untouched. On fleet workers it is often only
+Loom's own stale install: `chore: resync installed Loom surfaces` commits whose
+push a ruleset refused, modified installed files, or a rebase the resync script
+abandoned. Before the rules run, the step repairs a checkout when **every**
+blocker is Loom-owned:
+
+- **What counts as Loom-owned.** The `installed_files` of
+  `.loom/install-metadata.json` at HEAD, at the branch tip and at
+  `origin/<default>`, plus the metadata file. Missing or unparseable metadata
+  on any side means nothing is repaired. Every local commit (and every commit
+  of an in-progress rebase, merge or cherry-pick) may change only those paths,
+  and so may every dirty tracked path. Dirt counts only on a checkout that is
+  behind. Untracked files are never touched; one where `origin` writes a file
+  stops the repair.
+- **Operations and locks.** A rebase of the default branch, a merge or a
+  cherry-pick is repaired only when its state is 30 minutes old and no `git`
+  process has its working directory in the repo. An `index.lock` is removed
+  only when empty, 30 minutes old and no `git` process is live there.
+- **Repair, in order.** `refs/loom/rescue/<UTC ts>` at HEAD (and `<ts>-branch`
+  at the branch tip when an operation moved HEAD); the lock; `stash push` of
+  the dirty paths as `loom-rescue-<ts>` (not during an operation, whose abort
+  discards them); `<op> --abort`; `reset --hard origin/<default>`. A failure
+  stops the repair, before the reset, and the ordinary rules report the
+  checkout as before.
+- **Write gates.** Nothing is written while `fleet.autoApply` is off, the host
+  is held, a main-health gate run or the self-update is in that checkout.
+- **Rescue refs** older than 14 days are pruned
+  (`LOOM_RESCUE_REF_RETAIN_DAYS`).
+- **Escalation.** A hold in one of those four states (or `would-overwrite`)
+  that stays for 120 minutes (`LOOM_CHECKOUT_ESCALATE_AFTER_MINUTES`) produces
+  one `escalated` event and an `error` log line, naming the repo, the state and
+  the command to run, until the hold clears. Memory is per process, so a
+  restart asks once more.
+- **Telemetry.** Each step is an event on `fleet_sync.checkout` with kind
+  `rescue-ref`, `lock-removed`, `stash`, `abort`, `repaired`, `repair-failed`,
+  `rescue-pruned` or `escalated`, and a log line naming the repo path. Carrying
+  these to SigNoz is #11386.
+
 ## Fleet model A/B — `sweep-experiment plan` (#8055 phase 1)
 
 `loom-daemon sweep-experiment` already randomizes **per issue**, by parity
@@ -3169,186 +3203,22 @@ unchanged.
 
 Precedence is env > config > default.
 
-### Starred-issue liveness and loom-ui stars (#9244 C)
+### Starred-issue liveness (removed, #11104)
 
-A starred issue is always either being worked on or escalated to the operator
-with one concrete ask. While the work finder is on, a background pass
-(`loom-daemon/src/star_liveness/`) runs every `intervalSecs` and, for each open
-starred issue in each managed repo:
+The star-liveness pass (#9244 C) is gone. The daemon no longer computes
+landing stages for starred issues, posts `loom:operator-priority-escalation`
+comments, runs the no-progress watchdog, propagates or materializes inherited
+stars or priority levels, or applies loom-ui star intents from the `/ingest`
+ack. Priority is the plain `loom:important` / `loom:very-important` labels
+(#11103), which order dispatch only; loom-ui derives landing state from labels
+and PRs, and a stuck priority item reaching a human is a rule for the
+label-derived notifier.
 
-- computes a **landing stage** (`curating`, `ready`, `building`, `in-review`,
-  `changes-requested`, `mergeable`, `merging`, `blocked-by`, `needs-operator`,
-  `no-capacity`), a next actor and time in stage. It is shown by
-  `loom-daemon status` and `loom-daemon queue` (both also under `--json` as
-  `operator_priority_landing`), in the `operator_attention` section of
-  `loom-daemon health` (still always Green), and on `queue.snapshot` for
-  loom-ui;
-- **escalates at once** when no agent can move it: `loom:operator-only` (or a
-  sub-kind) or `loom:operator-decision` on the issue or its PR; Champion's
-  merge-risk / critical-file hold (`loom:operator` on the PR); a forge merge
-  refusal on its approved PR (a "Merge Failed" report whose error is a 405,
-  ruleset or merge-method refusal, the #9268 shape; transient failures do not
-  count); this host's token pool exhausted with no other host having claimed
-  it, after a `poolsExhaustedGraceMinutes` grace so a peer can claim it first
-  (the row is `no-capacity` meanwhile); `loom:blocked` with no open blocker
-  named, or blocked only by an issue in another repo (stars do not cross
-  repos); a loom-ui star on a repo no workspace here manages;
-- escalates an agent-owned stage with **no forward progress** for
-  `noProgressMinutes`, with what it last saw. Progress is forge-visible only,
-  so every host managing the repo agrees: a label change, a PR update, or a
-  trusted comment on the issue, including the sweep's lease renewal (a long
-  Builder phase with a live lease is not a stall on any host). The stall key
-  hashes only those facts (never the stage, which host-local capacity can
-  change), so N hosts post one comment. A `no-capacity` row the work finder
-  deferred carries a structured `capacity_wait` (gate, binding cap term,
-  host-wide position among waiting stars) and reads e.g. `queued #88 of 106
-  (cap 2, disk-limited)`; its position moving forward is progress, and a
-  queue that stops moving escalates naming that reason, position and what the
-  operator can do (#10214). The host-level causes are fleet-alert asks
-  (`capacity-limited`, `star-backlog`), not per-issue comments.
-
-An escalation is one comment on the issue, carrying
-`<!-- loom:operator-priority-escalation key=<kind>:<specifics> -->`. Each
-(issue, key) is posted once: a per-process ledger skips repeats without a
-forge call, and every host reads the issue's comments for the marker before
-posting. Only a marker from an `OWNER` / `MEMBER` / `COLLABORATOR`, the fleet
-App (any identity in the forge roster — `LOOM_GITHUB_APP_SLUG` > the writer's
-slug, each reader, `legacyLogins` — plus `loom-fleet-dispatch` / `-<digits>`
-exactly, never a prefix; only as an App login, `…[bot]` or `app/…`, which no
-user can register) or the daemon itself counts; an outside commenter cannot
-pre-post one to suppress an ask. The `pools-exhausted` key is the issue's forge state, not the
-host's hold, so every host and every re-exhaustion share it until the issue
-moves.
-
-**Matrix delivery (#9321).** The pass that posts a comment also publishes
-`operator_priority.escalation` on the bus, which the Safehouse sink relays into
-the signal room as a `handoff` — pinging `safehouse.operatorMention` — so the
-ask reaches the operator where they actually are, not only on the issue. One
-post per `(issue, key)` fleet-wide: the notice is produced by the same call that
-posts the comment and *only* when it posts, so the marker dedupe above is the
-only dedupe, and a peer host or a restarted daemon that finds the marker stays
-quiet. One un-pinged `resolved ✓` line follows when the ask clears. With
-`safehouse.enabled` false (or no socket) nothing changes: the comment and the
-`health`/`status`/`queue` surfaces still carry the ask. See
-[`safehouse.md` → Operator-priority escalations](safehouse.md#operator-priority-escalations-9321).
-
-**Blocker inheritance.** The issue blocking a starred issue (named by
-`Blocked by #N` on a `loom:blocked` issue, the incident behind a merge refusal,
-or the repo's red-main fix while `main` is red) inherits the star: its landing
-row is marked `inherited_from`. Since #11508 the work finder no longer reads the
-inheritance (no ordering, no listing outside `loom:issue`). Once it closes or stops blocking, the next pass drops it, and
-a repo unreadable for 3 passes in a row loses its inherited stars until a pass
-succeeds. A merge refusal's incident is an **open issue** named in the refusal
-comment itself, or else the newest open issue, filed by a trusted author,
-quoting one of the forge's three specific refusal phrases word-bounded ("Merge
-commits / Squash merges / Rebase merges are not allowed"; for #9276 that was
-#9268).
-A generic refusal (bare 405, merge method, ruleset) never searches, and
-nothing a later comment mentions ever inherits. With no open incident the ask
-quotes the forge's refusal text instead.
-Every open same-repo blocker inherits, not only the first one named. With
-`propagate` on, a starred issue's children by its own text inherit the same
-way: `<!-- loom:park Blocked by: #C -->` records, `- [ ] #C` task-list entries,
-and the dependency phrases of a `loom:blocked` issue even when it is also held
-for the operator (#10012). Inheritance is transitive to depth 3 (a cycle stops), never crosses
-repos, makes at most 50 walk reads per repo per pass (closed children and
-blocker reads count), and a child of
-several starred issues takes the earliest starred-at.
-
-**Materialized star (#10012 §2–§3).** With `materializeLabels` on (default
-**on**; `false` opts out) together with `propagate` and `escalate`, the pass also writes the inherited star as the `loom:operator-priority` label on
-every open child reached by a link the issue text records (park record, task
-list, the dependency phrase of a `loom:blocked` parent), so Curator, Builder's
-starred-first query, the dashboard and `forge starred` see it too. A
-landing-only edge (a blocker named only in a comment, a merge refusal's
-incident, the red-main fix) orders work in memory but never writes the label.
-Each write posts the inherited audit marker
-(`<!-- loom:operator-priority-intent=… action=star requested_at=<root's
-starred-at> … inherited_from=#P -->`), so the child sorts at the root's star
-time everywhere. A child whose **latest** star event is that daemon marker is
-walked as a child of its root, never as a root of its own. A star whose owner
-is still unread (the read budget below ran out, or the read failed) is neither:
-no walk starts from it, nothing is written from it and it is never removed until
-a later pass reads its owner, so a cold cache cannot restart the depth cap below
-an inherited star. When the root loses
-its star, the next complete pass posts the same marker with `action=unstar`
-and takes the label off every child the root no longer reaches through a
-starred ancestor. Never removed: a star whose latest star event is a human
-`labeled` event, a loom-ui intent or `forge star --direction`; a level-2 or
-higher label; a child of a root that **closed** while starred (labels stay on
-closed issues, so its children keep theirs); anything after an incomplete walk
-(a deferred child, a failed listing). A child the operator unstarred by hand
-after propagation starred it (its latest trusted marker is `action=star`) is
-not starred again. Budget per repo per pass: at most 20 ownership (timeline)
-reads, cached until the item's `updated_at` moves, and at most 10 label writes,
-so a wide epic converges over several passes. Every call honors the rate-limit
-breaker, and only repos passing `write_scope::gate_root` are visited. Links
-written on the child's side (`<!-- loom:parent #P -->`, `Part of #P`, epic
-phase markers, the `[Parent #P]` title prefix, native sub-issues) are not
-walked by the pass; `create-issue.sh --parent` stars such a child at creation.
-The open PR linked to a starred or inherited-star issue (`Closes #N` / `Part of
-#N`) is starred the same way (marker naming the root; for a directly starred
-issue, that issue), and loses the star on the complete pass after its root is
-unstarred, unless its linked issue is still starred or inherited. Known gap
-(accepted): the creation-time copy (Builder, `create-pr.sh`) writes the label
-without an inherited marker, so that star reads as the operator's and is not
-auto-removed on unstar (it fails safe). Closing it needs a `loom-daemon`
-subcommand posting the marker, tracked in #10592.
-
-**What travels to children (#10012 §6).** Each label's `propagate` field in
-`defaults/labels.json` (#10013) says whether it goes from a parent to its
-children, always downward; `star_liveness::propagation_rules` derives its
-table from it. The star goes to child issues and their PRs and
-is removed with the parent's star. `external` goes to child issues and is
-removed when no ancestor carries it any more, so a child of an unapproved
-outside submission cannot get past the maintainer gate. A `tier:*` label is
-only a default: the child gets the nearest tiered ancestor's tier when it has
-none of its own. Propagation never overwrites a child's tier and never removes
-one. Removal only takes off a copy that propagation put there, never one a
-human put on the child, and never after an incomplete walk. The
-`<!-- loom:main-red-fix -->` body marker is copied once, by
-`create-issue.sh --parent`; no pass edits bodies. **Never propagate**: holds
-(`loom:blocked`, `loom:operator`, `loom:operator-only` and its sub-kinds,
-`loom:needs-capability`), claim, lifecycle and PR-lane labels, proposal kinds,
-`loom:epic-phase`, `points:*`, and the
-#10307 level labels, which reach blockers by their own pass: all carry
-`propagate: null`, and a unit test fails if a hold, claim, lifecycle, PR-lane,
-proposal, structural or size label gets a rule. The pass writes only the star so far (above); it
-writes no `external` or `tier:*` label yet.
-
-**loom-ui stars.** The `/ingest` ack may carry `operator_priority_intents`
-(`defaults/docs/telemetry-schema.md`). The pass applies each valid one (an
-operator label of any level — the star or `loom:operator-high-priority`, #10307
-— on a managed repo, with a `requested_by`) idempotently with one audit comment
-whose marker names the `label=`; the intent's `requested_at` is the starred-at.
-
-Config (`.loom/config.json → autonomous.operatorPriority`, **env > config >
-default**):
-
-| Key | Env | Default | Meaning |
-|---|---|---|---|
-| `noProgressMinutes` | `LOOM_OPERATOR_PRIORITY_NO_PROGRESS_MINUTES` | `30` | watchdog window |
-| `escalate` | `LOOM_OPERATOR_PRIORITY_ESCALATE` | `true` | post escalations, apply loom-ui intents, and write the derived level labels and their body markers (#10307); `false` still computes and shows every landing state, and the work finder still sees inherited levels in memory |
-| `intervalSecs` | `LOOM_OPERATOR_PRIORITY_INTERVAL_SECS` | `120` | pass interval |
-| `poolsExhaustedGraceMinutes` | `LOOM_OPERATOR_PRIORITY_POOLS_GRACE_MINUTES` | `10` | wait before a `pools-exhausted` ask; `0` asks at once |
-| `propagate` | `LOOM_OPERATOR_PRIORITY_PROPAGATE` | `true` | a star also reaches its children by park record, task list and dependency phrase; `false` keeps only the blocker / incident / red-main inheritance |
-| `materializeLabels` | `LOOM_OPERATOR_PRIORITY_MATERIALIZE_LABELS` | `true` | write the inherited star as the `loom:operator-priority` label (and on the linked PR) and take it back when the root loses its star ("Materialized star" above); needs `propagate` and `escalate`. Opt out with `false` (env `0`): the inherited star is an in-memory ordering only, no star owner is read and no star label is written |
-| `levelCaps` | — | `{"2": 5}` (the level table) | per-level cap on open issues carrying the level's operator label; over the cap is flagged in the digest, never refused |
-
-**Priority levels (#10307).** Every pass also walks each level ≥ 2 issue's
-(`loom:operator-high-priority`) blockers, transitively and into every managed
-repo, and writes `loom:high-priority-inherited` on each open one. Provenance
-goes into the blocker's **issue body** first, as
-`<!-- loom:priority-inherited inherited_from=owner/repo#N level=2 requested_at=… id=… -->`
-(what loom-ui reads; one marker per level, replaced in place when the source
-changes, nothing else in the body touched). The label is skipped when that
-write fails, so the next pass retries both. The work finder orders the blocker
-at the marker's `requested_at`. The label and marker come off once no level-2
-issue reaches the blocker, after a complete walk only (a failed listing, issue
-read or native-dependency read adds and never removes), and only on a host
-that manages the marker's source repo. Containment (task lists, sub-issues) never carries a
-level. A blocker in an unmanaged repo is listed, not followed; an
-operator-only / operator-decision blocker leads the digest.
+A host config that still carries `autonomous.operatorPriority.*`
+(`noProgressMinutes`, `escalate`, `intervalSecs`, `poolsExhaustedGraceMinutes`,
+`propagate`, `materializeLabels`, `levelCaps`) starts cleanly: the daemon logs
+one warning naming the keys and otherwise ignores them. The
+`LOOM_OPERATOR_PRIORITY_*` env vars are ignored.
 
 ### Ready queue view (`loom-daemon queue`, #8852)
 
@@ -8194,7 +8064,7 @@ are unchanged on every host. Code: `observability/captain_gauges.rs`.
 | `fleet.captainGauges.maxAgeSecs` | `1800` | A job's published `as_of` older than this is stale and the dispatcher produces locally again. Two publish intervals plus two collector passes, the fleet refresh's own liveness rule |
 | `fleet.captainGauges.publishIntervalSecs` | `600` | How often the captain writes the heartbeat |
 | `fleet.captainGauges.ref` | `eta-fit` (legacy fallback: `fleet.etaFitRef`) | The fleet-store branch the heartbeat lives on. Never the store's reviewed branch or `main` |
-| `fleet.captainGauges.starFacts` | `false` | Part 2 job **`star-facts`**. Captain (with `enabled`): list every operator label per repo and publish how many open starred issues each has. Dispatcher (with `standDown`): skip the starred-issue liveness evaluator for a repo the captain freshly reports as having none |
+| `fleet.captainGauges.starFacts` | `false` | Part 2 job **`star-facts`**, **inert since #11104** (its only reader, the star-liveness pass, was removed). Captain (with `enabled`): list every operator label per repo and publish how many open starred issues each has; nothing reads the counts |
 | `fleet.captainGauges.queueBlocked` | `false` | Part 2 job **`queue-blocked`**. Captain: list `loom:blocked` per repo and publish number, creation time and label names. Dispatcher: build its `queue.snapshot` blocked rows from that instead of listing |
 | `fleet.captainGauges.starFactsMaxAgeSecs` | `900` | The staleness bound for `star-facts` alone, in place of `maxAgeSecs`: two collector passes plus slack. A believed "no star here" is a skipped liveness pass, so this bounds how long a new star can go unevaluated when the captain stops reporting. While it produces `star-facts`, the captain republishes at least every `starFactsMaxAgeSecs − 600` s (300 s at the default) so its facts stay inside the bound |
 
@@ -8233,40 +8103,13 @@ it on recovery too, because the dispatchers have sampled it meanwhile.
 
 **Part 2: forge facts.** Two more per-host reads say the same thing on every
 host. Each has its own switch, so a fleet running only part 1 is unchanged.
-Code: `observability/captain_gauges/facts.rs`, `star_liveness/captain.rs`.
+Code: `observability/captain_gauges/facts.rs`.
 
-- **`star-facts`.** The liveness evaluator lists both operator labels of
-  every managed repo every `intervalSecs` (120 s), and for a repo with no
-  open starred issue that is all it does. (The level step that runs after it,
-  #10307, lists the level 2 operator label and its inherited label in every
-  managed repo; it is not covered by this job and still runs on every host.)
-  The captain makes those listings once
-  per collector pass and publishes a count per repo. A dispatcher skips its
-  evaluator for a repo only when all of these hold: the fact is fresh and from
-  the declared captain, judged at the liveness pass's own clock; the captain
-  listed every operator label this host's level table has; this host's last
-  work-finder tick shows no starred row for the repo; and the captain's
-  listing is at least 300 s later than this host's own latest evidence of a
-  star there (a pass that found one, a tick row, a star intent it applied).
-  Skipping is exactly the local pass over an empty listing: no rows and an
-  empty inheritance list for the root. **A repo with a starred issue is
-  evaluated by every host that manages it, as before**: landing rows read the
-  host's own queue and pools, blocker inheritance is that host's dispatch
-  input and never comes from the captain, and escalation comments keep their
-  marker dedupe across hosts. **Worst-case delay for a brand-new star** in a
-  repo the captain reported star-free, before its landing row, escalation
-  and inheritance start on a dispatcher: with a healthy captain, one captain
-  pass (300 s; it publishes the changed fact at once), one dispatcher
-  heartbeat read (300 s) and one liveness pass (120 s), about 12 minutes.
-  With the captain stalled or the heartbeat unreadable, the dispatcher keeps
-  the last report only until it is `starFactsMaxAgeSecs` old, judged at each
-  liveness pass: up to `starFactsMaxAgeSecs` plus the 300 s clock-skew
-  allowance plus one liveness pass, about 22 minutes at the defaults. The
-  report's `as_of` is taken before the captain's first listing of the pass,
-  so a slow pass never overstates it. Meanwhile the starred issue is still
-  ordered first by the work finder's own listing when it is `loom:issue`,
-  and that tick row sends the repo back to local evaluation on the next
-  liveness pass.
+- **`star-facts`.** **Inert since #11104**: it let a dispatcher skip the
+  star-liveness pass for repos with no open starred issue, and that pass is
+  gone. A captain with `starFacts` on still lists the operator labels and
+  publishes the counts; nothing reads them. Leave it off (#11579 retires the
+  job).
 - **`queue-blocked`.** The captain publishes each repo's open `loom:blocked`
   issues as number, creation time and `loom:*` / `tier:*` label names (no
   title, body or author). A dispatcher runs them through the same row
@@ -8284,11 +8127,10 @@ A repo is covered for a job only when every listing it needs succeeded on the
 captain; a failed listing (a rate-limited or withdrawn reader included)
 leaves the repo out, the dispatchers read it themselves, and nothing is
 reported to the host-wide rate-limit breaker. The captain's reads are
-recorded under the callers they replace (`star_liveness`, `queue_blocked`),
-so `loom-daemon forge calls --by caller` shows the same reads on one host.
-Per dispatcher with R covered repos of which S have a star, that is about
-`60 × (R − S)` fewer `star_liveness` listings and up to `12 × R` fewer
-`queue_blocked` listings an hour; the captain adds `36 × R`.
+recorded under the callers they replace (`queue_blocked`; the inert
+`star-facts` listings under `star_facts`), so `loom-daemon forge calls --by
+caller` shows the same reads on one host. Per dispatcher with R covered repos,
+that is up to `12 × R` fewer `queue_blocked` listings an hour.
 
 **Mixed-version safety.** Both switches default off and older daemons ignore
 the keys, so an unconfigured or older host keeps today's behaviour. A

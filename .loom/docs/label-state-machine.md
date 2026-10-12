@@ -80,6 +80,7 @@ each definition, for the terse version of this same table):
 | Label | Question it answers | Does sweep/shepherd skip it? |
 |---|---|---|
 | `loom:blocked` | Waiting on a dependency, but still automatable once that clears | **Yes**, for a *fresh* work-finder candidate — `loom:blocked` is in [`PARK_LABELS`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/work_finder/labels.rs), the daemon's own authoritative park set. "Still automatable once that clears" describes what happens *after* the label is removed, not while it is present — see #8925, which found this exact row previously read "No" while the code already skipped it. The unblock sweep (`guide.md`'s `check_and_unblock`/`check_and_unblock_prs`) and `loom-daemon check-stale-blocked` (plus, at merge time, `merge-pr.sh`'s `notify-cleared-blockers` comment on each citer, #9102) are what re-evaluate it and clear it once its declared blocker resolves (`defaults/docs/park-record.md`). The daemon also runs, from its own task on every host that runs the work finder or the role runner for the repo (shard owner only; default on; `LOOM_RELEASE_STALE_BLOCKED=0` disables, `dry-run` logs the plan only; per-repo outcomes and release/re-park counts on `host.health`'s `managed_repos[].stale_blocked_release`, #10763), `loom-daemon release-stale-blocked` (#10556): deterministic, no LLM, park-record blockers only — it removes the label (restoring `loom:issue` only if the issue was approved before, or a PR's prior review label) once every declared blocker is a closed issue or merged PR, and re-parks to the still-open records when only some are, skipping operator holds, `<!-- loom:permanent-block` (#8742), daemon holds and any other still-open reference |
+| `loom:blocked-unnamed` | A queue marker, **not** a park label: the daemon tick applies it to an open `loom:blocked` *issue* naming no blocker and stating no reason (`check-stale-blocked`'s Undocumented), skipping operator holds, claims, permanent blocks and daemon holds; Curator drains it (`unnamed-block-review.md`) and removes it. Coexists with `loom:blocked`; the tick also clears it once the issue is named, reasoned or unblocked (#10558) | No (`loom:blocked` already skips) |
 | `loom:operator-only` | Requires human action or ruling *outside* automation entirely (credentials, infra, hardware, an owner-gated decision) | **Yes** — sweep/shepherd skip it, except the narrow capability-matched `loom:operator-mechanical` case (#6893, see "Dispatch path" below) |
 | `loom:needs-capability` | Blocked on a missing tool/agent capability — not an operator-by-right decision, but automation genuinely cannot proceed without the capability existing first (#5817) | **Yes** — sweep/shepherd skip it, identically to `loom:operator-only` today |
 | `loom:operator` | The engine has stopped on this specific artifact and a human must act, but the item stays live in its normal queue so the engine's own release conditions can still fire | **New-builder skip only** — the work finder does not *start* a fresh `--claim-owned` build on it (vibesql#6664); re-evaluation lanes (Champion/role ticks, watchdog re-dispatch, reaper resume, explicit `loom-daemon dispatch <N>`) still reach it |
@@ -109,17 +110,12 @@ guard consults.
 act" but "a human wants this landed ASAP, act now". It is the one "land this
 ASAP" signal; the older urgent label was retired (#9244) and deleted (#11105).
 
-- **Operator-derived only (#10012).** No role stars on its own judgment. The
-  daemon relays a loom-ui star intent; Builder copies it onto the PR it opens;
-  `create-issue.sh --parent N` stars a new child of a starred N (audit comment
-  `inherited_from=#N`), and, when `autonomous.operatorPriority.materializeLabels`
-  is on (the default), the star-liveness pass writes it on every open
-  child a starred issue's text links, removing it once that root loses its
-  star (never an operator's own star, never because the root closed).
-  Never propagated: holds, claim/lifecycle labels, `points:*`.
-  Only the star, `external` and (as a default) `tier:*` travel to children;
-  the table is each label's registry `propagate` field; full never-list:
-  `daemon-reference.md` → "What travels to children".
+- **Operator-derived only (#10012).** No role stars on its own judgment.
+  Builder copies it onto the PR it opens. Nothing propagates it any more: the
+  star-liveness pass that relayed loom-ui star intents and wrote inherited
+  stars on children was removed (#11104), and `create-issue.sh --parent N` no
+  longer stars a child of a starred N. The registry's `propagate` field is
+  inert.
 - **Starred first, every stage.** Curator curates starred issues first (a
   starred issue with no workflow label counts as `loom:triage`) and promotes
   them straight to `loom:issue`, because the star is the Tier-3 approval. A
@@ -132,12 +128,11 @@ ASAP" signal; the older urgent label was retired (#9244) and deleted (#11105).
 - **Levels (#10307).** Operator priority has levels, mapped in one table
   (`loom-daemon/src/operator_levels.rs`): level 1 is the star; level 2 is
   `loom:operator-high-priority` (human-only, like the star; capped at 5 open
-  issues fleet-wide by loom-ui, over-cap reported in the star-liveness digest,
-  never refused). Levels nest: level ≥ 2 counts as starred everywhere, and
-  every starred-first pass drains by effective level, highest first. An open
-  blocker of a level-2 issue carries the daemon-written
-  `loom:high-priority-inherited` and is treated exactly like level 2; no role
-  applies or removes it.
+  issues fleet-wide by loom-ui, never refused). Levels nest: level ≥ 2 counts
+  as starred everywhere, and every starred-first pass drains by effective
+  level, highest first. `loom:high-priority-inherited` was written by the
+  star-liveness pass on an open blocker of a level-2 issue; that pass is gone
+  (#11104), so nothing writes or removes it any more.
 - **Red-main fixes** are a body marker, not a label: an issue that fixes a red
   `main` carries `<!-- loom:main-red-fix -->` (Doctor adds it when filing a
   pre-existing failure confirmed on `origin/main`). Curator takes these next,
@@ -1023,7 +1018,7 @@ Every daemon table named by a boolean property above is derived from the
 registry; dep_classify's operator-only names stay consts, lockstep-tested
 against `requires_base`/`remove_with` (#5671). Changes go in the registry.
 `propagate` holds #10012's propagation table (`null` = never propagates);
-`star_liveness::propagation_rules` derives its rules from it.
+it is inert since #11104 removed the star-liveness pass that read it.
 `stale_after_minutes` and `lifecycle` are inert.
 
 ## No-op hold (#10156)

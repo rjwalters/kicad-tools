@@ -276,7 +276,7 @@ If no argument is provided, use the normal "Finding Work" workflow below.
 ```bash
 loom-daemon park-record apply --issue <number> --blocked-by <N> --by builder --remove-label loom:building
 ```
-Never a bare label edit: `check-stale-blocked` (#8927), star-liveness, Guide's unblock sweep and `merge-pr.sh` read the body, not comments. It refuses a closed blocker (#9102). No open numbered blocker? Pass `--reason "<why>"` instead; never invent one. See `.loom/docs/park-record.md`.
+Never a bare label edit: `check-stale-blocked` (#8927), Guide's unblock sweep and `merge-pr.sh` read the body, not comments. It refuses a closed blocker (#9102). No open numbered blocker? Pass `--reason "<why>"` instead; never invent one. See `.loom/docs/park-record.md`.
 
 ### Labels You NEVER Touch
 

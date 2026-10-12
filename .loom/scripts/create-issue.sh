@@ -50,10 +50,9 @@
 #   --parent N            File the issue as a child of #N (#10012): the body
 #                         gets `<!-- loom:parent #N -->` (and N's red-main
 #                         marker, if it has one); after the create the child
-#                         is linked as a native sub-issue (best effort) and,
-#                         when N carries loom:operator-priority, starred with
-#                         the inherited audit comment. Logic: `loom-daemon
-#                         forge parent`; needs loom-daemon (127 if absent; a bad N exits 2).
+#                         is linked as a native sub-issue (best effort).
+#                         Logic: `loom-daemon forge parent`; needs
+#                         loom-daemon (127 if absent; a bad N exits 2).
 #
 # Output: the new issue's URL on stdout (identical to `gh issue create`).
 #
@@ -445,10 +444,10 @@ case " ${LABELS[*]-} " in *" loom:"*) ;; *) LABELS+=("loom:triage") ;; esac
 ISSUE_URL="$(forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}")" || exit 1
 echo "$ISSUE_URL"
 
-# --- #10012: native sub-issue link + inherited star, best effort ------------
+# --- #10012: native sub-issue link, best effort -----------------------------
 [[ -z "${PARENT+x}" ]] \
   || loom-daemon forge parent link --parent "$PARENT" --child "$ISSUE_URL" ${REPO_NWO:+--repo "$REPO_NWO"} >&2 \
-  || echo "create-issue.sh: note: --parent #$PARENT follow-up (star / sub-issue link) incomplete; the issue itself is filed and the loom:parent marker is in its body" >&2
+  || echo "create-issue.sh: note: --parent #$PARENT follow-up (sub-issue link) incomplete; the issue itself is filed and the loom:parent marker is in its body" >&2
 
 # --- #9774: the filed body ends with the dashboard footer -------------------
 # Best-effort, via the daemon's --patch-created (fetch, footer, PATCH — the

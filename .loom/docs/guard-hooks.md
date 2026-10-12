@@ -176,7 +176,8 @@ outside that array for parsing reasons:
   (`guards.worktreeIsolation`), the stash-stack ask (`guards.stashScope`), the
   forge-egress bypass deny (`guards.forgeEgress`, #9989 — above the floor: the
   policy's `enforcement.api = required` is still enforced at runtime by the
-  managed launcher's `assert` and the worker egress boundary). Each
+  managed launcher's `assert` and the worker egress boundary), and the unowned
+  cargo target dir deny (`guards.cargoTargetDir`, #11582). Each
   is off-able **by design** because each has a legitimate repo class for which it
   is a category error (a database engine, a cloud-management repo, an operator
   editing the main checkout). Promoting any of them into the floor would break
@@ -585,7 +586,7 @@ Loom ships with several built-in `PreToolUse` guard hooks, registered independen
 
 - **`guard-destructive.sh`** (`Bash` matcher) — the generic repository-hygiene guard (catastrophic denies like `rm -rf /`, force-push to `main`, `gh repo delete`, fork bombs, curl-pipe-to-shell, cloud/SQL destruction; the segment-parsed lifecycle/cloud-CLI checks; and the `guards.sqlDdl` / `guards.cloudCli` / `guards.reversibleGh` / `guards.rmScope` / `guards.forceScope` toggle machinery documented below). Nothing about this guard is Loom-specific, so as of **#4041 its canonical home is [Repo Skills](https://github.com/rjwalters/repo)** (installed at `.claude/skills/repo/hooks/guard-destructive.sh`, carrying the rjwalters/repo#29 curl-pipe fix). In Loom, `guard-destructive.sh` is now a thin **dispatcher**: when the canonical Repo Skills guard is present **and passes all four of the runtime probes below** it defers to it (and the installer does not install a second generic guard); otherwise it falls back to a clearly-marked **vendored copy** (`guard-destructive-generic.sh`) that Loom ships so standalone-Loom repos — those without Repo Skills — keep full coverage. Exactly one generic guard ever runs; the behavior and all the toggles below are unchanged either way. The pattern list itself is maintained upstream in Repo Skills, not forked in Loom. **Loom-specific exceptions:** the vendored copy also carries the Bash-tool **write-confinement** category (`>`/`>>` redirection, `tee`, `sed -i`, `cp`/`mv`, issue #4178) — see `guards.worktreeIsolation` below — and an **ungated hard deny on `gh pr comment`/`gh issue comment --body @path`** (issue #4523: this shape never expands the file — it posts the literal string `@path` as the comment body, which lost an entire Judge review on PR #4457). That rule deliberately scans the *raw* command rather than the `strip_literal_text()`-redacted copy the rest of the catastrophic scan uses, because redaction would erase the leading `@` inside a quoted `--body "@path"` value and silently defeat the check for exactly the shape most likely to occur in practice — see the comment above the check in `guard-destructive-generic.sh` for the full trap writeup. Because that rule inspects only the *static* text right after the flag, it was bypassed in the field (PR #4600, issue #4601) by the same `@path` value handed over through a shell variable, so two **additive companion denies** now sit beside it: (1) a **correlated** deny when the same command both assigns a path-shaped `@…` value to a shell variable *and* passes that same variable as `--body`/`-b` (correlation is what keeps a legitimate `--body "$SUMMARY"` allowed — an unconditional deny on any variable reference would be far too broad), and (2) a deny on `gh api … -f`/`--raw-field body=@<path>`, since only `-F`/`--field` gives `@<path>` its read-from-file meaning on `gh api` (this one is deliberately **case-sensitive** and anchors the flag on preceding whitespace, or it would match the correct `-F`/`--field` forms and deny them). Both require genuine path shape (`@/…`, `@~/…`, `@./…`, `@../…`, a text-file extension, or since #9258 the bare stdin token `@-`) so bare `@mention`/`@org/team` prose is never matched. Residual gap by construction: a variable assigned in an *earlier* Bash call cannot be seen from one `PreToolUse` payload — that case is covered by the independent second layer, the "re-fetch the posted comment and confirm it renders your prose, not a path" step in the Judge/Doctor checklists. All of these stay Loom-owned even though the rest of the file mirrors upstream, the same way `resolve_worktree_root()`/`guards.rmScope` already do.
   - **Dispatcher handoff is gated by FOUR runtime probes, not one (#4894, #5916, #5974).** Deferring to the canonical guard used to require only a **version** probe — does it carry the `repo#29` curl-pipe-fix marker? That alone is not a **capability** probe: it says nothing about whether the canonical guard actually implements the Loom-only write-confinement category above. Once a consumer repo's Repo Skills install picked up `repo#29` *without* write-confinement (Repo Skills 0.7.0), the dispatcher exec'd it anyway and the `guards.worktreeIsolation` Bash-tool category **stopped running with no warning and no override** — `guards.worktreeIsolation` still read as enabled, the process implementing it was simply never started. So as of #4894 the dispatcher requires the `repo#29` marker (version) **and** the `worktree-write-confinement` decision tag (capability — the same stable tag the vendored guard's `deny()` call for that category emits). As of #5916 it additionally requires a third capability probe: the canonical guard must carry BOTH the `--comment|--search` and `--arg|--argjson` regex-alternation substrings that only appear once a guard masks `gh --search`/`jq --arg`/`--argjson` quoted values before the catastrophic/ask scans (the #5797/#5803/#5809 fix) — without it, a canonical guard that passes the first two probes can still false-DENY a command like `gh issue list --search "docker system prune" --jq '.[] | .number'`. As of #5974 it additionally requires a fourth capability probe: the canonical guard must carry the `gh-comment-body-literal-at` decision tag — the same stable tag the vendored guard's `deny()` call for the `--body @path` literal-string hard deny (issue #4523, described above) emits — without it, a canonical guard that passes the first three probes could still silently drop that protection with no warning. That fourth probe gates on `gh-comment-body-literal-at` alone as a proxy for the whole four-decision-tag `--body @path` rule family (it also covers `gh-edit-body-literal-at` and the two `-var` indirection variants, since all four are added/removed together in guard-destructive-generic.sh's history — see the probe's own comment in `defaults/hooks/guard-destructive.sh` for the full reasoning). Any probe failing routes to the vendored fallback, which always carries all four. The third probe is INERT today (never yet passing) because rjwalters/repo has not ported an equivalent masking fix upstream as of this writing, so every real canonical guard defers to the vendored fallback for this reason alone until it does. See `defaults/hooks/guard-destructive.sh`'s header comment for the exact probe logic and `tests/hooks/test-guard-destructive-dispatcher.sh` (cases 6-7 for the #4894 regression, cases 8-9 for the #5916 regression, cases 10-11 for the #5974 regression) for the regression coverage.
-- **`guard-loom-workflow.sh`** (`Bash` matcher) — the thin, Loom-workflow-specific guard (issue #3604): the `gh pr merge` → `merge-pr.sh` redirect, the `pip install -e` worktree block (keyed on `LOOM_WORKTREE_PATH`, issues #2495 + #4079), the `loom-daemon workspace` registry-mutation ask (issue #4326, below), the policy-gated forge-egress bypass deny (issue #9989, `guards.forgeEgress` below), and the Bash-idiom half of the **installed-file write** denial (issue #7995, `guards.installedFileWrites` below — the Edit/Write half lives in `guard-worktree-paths.sh`). **On the `pip install -e` block:** Loom's own tree no longer contains a load-bearing Python package (epic #4081 Phase 4, #4557, retired `loom-tools` — see [ADR-0013](https://github.com/rjwalters/loom/blob/main/docs/adr/0013-loom-tools-python-retirement.md)), but this guard is deliberately retained and *strengthened*, for two reasons. It protects any **Python repo under Loom orchestration** from the original hazard (parallel builders clobbering the global `.pth`, #2495); and an editable install also drops **frozen console scripts** into `~/.local/bin` that outlive the package and shadow whatever is later installed under the same name — the incident (#4079) in which a stale `pip install -e loom-tools` kept shadowing the Rust `loom-daemon` binary on PATH, and the direct motivation for epic #4081. The deny message points at `.loom/scripts/run-tests.sh` (which sets `PYTHONPATH` for the worktree) as the supported alternative; `loom-daemon-update.sh` warns about survivors that predate the guard. This guard and `guard-worktree-paths.sh` below are specific to the Loom worktree/merge/daemon workflow and stay Loom-owned.
+- **`guard-loom-workflow.sh`** (`Bash` matcher) — the thin, Loom-workflow-specific guard (issue #3604): the `gh pr merge` → `merge-pr.sh` redirect, the `pip install -e` worktree block (keyed on `LOOM_WORKTREE_PATH`, issues #2495 + #4079), the `loom-daemon workspace` registry-mutation ask (issue #4326, below), the policy-gated forge-egress bypass deny (issue #9989, `guards.forgeEgress` below), and the Bash-idiom half of the **installed-file write** denial (issue #7995, `guards.installedFileWrites` below — the Edit/Write half lives in `guard-worktree-paths.sh`), and the unowned cargo target dir deny (issue #11582, `guards.cargoTargetDir` below). **On the `pip install -e` block:** Loom's own tree no longer contains a load-bearing Python package (epic #4081 Phase 4, #4557, retired `loom-tools` — see [ADR-0013](https://github.com/rjwalters/loom/blob/main/docs/adr/0013-loom-tools-python-retirement.md)), but this guard is deliberately retained and *strengthened*, for two reasons. It protects any **Python repo under Loom orchestration** from the original hazard (parallel builders clobbering the global `.pth`, #2495); and an editable install also drops **frozen console scripts** into `~/.local/bin` that outlive the package and shadow whatever is later installed under the same name — the incident (#4079) in which a stale `pip install -e loom-tools` kept shadowing the Rust `loom-daemon` binary on PATH, and the direct motivation for epic #4081. The deny message points at `.loom/scripts/run-tests.sh` (which sets `PYTHONPATH` for the worktree) as the supported alternative; `loom-daemon-update.sh` warns about survivors that predate the guard. This guard and `guard-worktree-paths.sh` below are specific to the Loom worktree/merge/daemon workflow and stay Loom-owned.
 - **`guard-worktree-paths.sh`** (`Edit|Write` matcher, issue #2441 / #4007) — confines Edit/Write tool calls to a builder's issue worktree, denying writes that resolve into the main checkout. Two mechanisms: the `LOOM_WORKTREE_PATH` env fast path (tmux/manual sessions pinned to one worktree) and, when that env var is absent, a **path-derived fallback** — it walks up from the target path looking for the `.loom-managed` sentinel `worktree.sh` writes at every worktree root, and denies a write that lands in the main checkout while at least one managed worktree exists. The fallback exists because a daemon-dispatched sweep hosts multiple Task-subagent builders in one shared process env, so a single process-wide `LOOM_WORKTREE_PATH` cannot cover that path (#3719). Toggle: `guards.worktreeIsolation` / `LOOM_GUARD_WORKTREE_ISOLATION`, documented alongside the other guard toggles below. **This confines the Edit/Write tool matcher only** — a session denied here could historically fall back to a Bash-tool write (`>`, `tee`, `sed -i`, `cp`/`mv`) targeting the same path with nothing to stop it (the #4178 incident: sweep #4063 used exactly this to edit live guard hooks in the main checkout). `guard-destructive-generic.sh`'s write-confinement category (bullet above) now closes that gap under the identical toggle. **Second, independent category (issue #7995):** this hook also denies an Edit/Write that edits an **installed Loom file in place** in a repo that is not Loom's own source tree — separate toggle (`guards.installedFileWrites` / `LOOM_GUARD_INSTALLED_FILE_WRITES`, below), separate verdict, neither toggle short-circuits the other.
 - **`guard-codex-bridge.sh`** (Codex `pre_tool_use` hook, issue #4495) — **not a Claude Code hook.** It is installed into a selected `$CODEX_HOME/hooks.json` by `defaults/scripts/provision-codex-hooks.sh` and is the adapter that makes the three `PreToolUse` guards above fire for a **Codex** worker. It validates the Codex event, classifies the tool (shell / native patch / read-only / MCP / unknown), normalizes the payload into the Claude-shaped request those guards already accept, dispatches into them **unmodified** (no second policy table), and encodes the outcome on Codex's wire. Two behavioral differences from the Claude path are structural, not choices: Codex 0.146.0 accepts only `permissionDecision:"deny"` (an `allow` is expressed as *no output*, and `ask` is not on the wire at all), so every `ask` becomes a **deny** with the original reason preserved — correct anyway for headless `codex exec`, where nobody can answer; and the bridge fails **closed** (malformed payload, unknown tool, unextractable command/path, or a sub-guard that misbehaves all deny) where the Claude guards fail open. `spawn-codex.sh` refuses to start a **mutable** role (Builder/Doctor) unless the managed hook is installed, pinned, readable and the profile has established Codex hook trust — exit 78 before the CLI runs, and never `--dangerously-bypass-hook-trust`. Full reference: [`guardrail-parity-codex.md`](guardrail-parity-codex.md).
 - **`guard-background-subagents.sh`** (`Stop` hook, issue #4257) — a mechanical backstop for the hazard documented in `defaults/.claude/commands/loom/sweep.md` under "Subagent dispatch is async-only" (#3822): in headless `claude -p` mode, ending the orchestrator's turn **terminates the process**, which kills every still-running background Task/Agent subagent (the #4195/#4243 incident this issue traces). This hook fires when the session is about to stop, scans the transcript JSONL for `Task`/`Agent` tool_use entries with no observed completion (issue #5086 — the harness names the tool `Agent`, not `Task`), and **blocks the stop once** with a loud reason explaining the hazard when it finds any unresolved dispatch. **The block is headless-only (issue #6645)**: the hook first classifies the session, and in an *interactive* session — where background children survive the turn boundary and their completion notifications arrive on a later turn — it allows the stop and emits at most a one-line `systemMessage` advisory instead. Every path that cannot positively establish "interactive" resolves to headless, so the #4257 safety floor is unchanged; see "Session-mode detection" in the reference section below. It uses `stop_hook_active` to block **at most once per stop sequence** — this is a heuristic over the transcript file (not a live process check), so a second consecutive block could wedge the session on a false positive (e.g. a slow transcript flush); after one block, the guard always allows. When it does block, the reason **names the specific tool-use ids** each detector believes are outstanding (issue #5976, capped at 8 with a `+N more` suffix) — before that it reported bare counts, and confirming a false positive meant eliminating every dispatch in the session by hand. Toggle: `guards.backgroundSubagents` / `LOOM_GUARD_BACKGROUND_SUBAGENTS`, documented alongside the other guard toggles below.
@@ -829,6 +830,96 @@ CARGO_TARGET_DIR=/tmp/scratch-target cargo clean
 
 # Disable for a whole repo whose shared target-dir is intentional:
 #   .loom/config.json  ->  { "guards": { "cargoCleanScope": false } }
+```
+
+### Cargo Target Dir Guard (`guards.cargoTargetDir` / `LOOM_GUARD_CARGO_TARGET_DIR`)
+
+`guard-loom-workflow.sh` (issue #11582, tag `loom:cargo-target-dir`) **denies**
+a cargo build whose target dir resolves under a root nothing owns: `/tmp`,
+`$TMPDIR`, `~/.cache`, `~`, or any `.loom/target-*`. It is the enforced form of
+the [`cargo-target-isolation.md`](../roles/cargo-target-isolation.md) rule
+(#8370), which agents kept breaking: multi-GB `/tmp/target-pr…` and
+`~/.cache/doctor-…-target` dirs turned up on fleet hosts days after the rule
+shipped, each one a build nobody would ever reclaim.
+
+**What is judged.** `cargo build|check|clippy|test|run|nextest|bench|doc|…`
+(the one-letter aliases too), also behind `env`, `nohup`, `timeout`, `nice`,
+`bash -c '…'`, and `make`. The effective target dir is cargo's own precedence:
+`--target-dir` (`--target-dir=…` too), else a `CARGO_TARGET_DIR=` assignment in
+front of the command (directly or through `env`), else an `export` or
+assignment earlier in the same command, else the `CARGO_TARGET_DIR` the
+session itself carries (the hook reads Claude Code's environment, which is what
+cargo inherits). `~`, `$HOME`, `$TMPDIR`, `$PWD`, `$(pwd)`, variables assigned
+earlier in the same command, `cd`, and `$(mktemp -d)` are resolved. `make` is
+judged only on an assignment made in the command (`make test
+CARGO_TARGET_DIR=…` or a prefix): it may not run cargo at all, so the
+inherited value alone proves nothing. cargo's `build.target-dir` config is not
+read; that is `guards.cargoCleanScope`'s concern.
+
+**Allowed:** unset (cargo builds into `<worktree>/target`); anything under
+`<repo>/.loom/targets/` (the per-run dir Loom exports, #8370); anything under
+the current worktree; the worktree's own per-worktree dir (#8458: its
+`.loom-cargo-target-dir` marker or `LOOM_WORKTREE_CARGO_TARGET_DIR`), wherever
+it lives; and any path outside the forbidden roots, such as an operator's
+deliberate shared volume. `.loom/target-*` is denied even inside a worktree.
+Anything the guard cannot resolve (a variable set in an earlier Bash call, an
+unknown `$( … )`, a single-quoted `$`) is an **allow**: like every guard here,
+ambiguity resolves toward allow, never toward a spurious deny. Prose is not
+judged: `echo`, `grep` patterns, `--body`/`-m` values and heredoc bodies are
+never read as a build (a heredoc fed to a shell, `bash <<EOF`, is therefore a
+known gap, on the allow side).
+
+**The denial** names the path, where the value came from, the forbidden root,
+and the Loom-owned dir to use instead: the run's own `CARGO_TARGET_DIR` when
+the session carries one under `.loom/targets/` (or its per-worktree dir), else
+`CARGO_TARGET_DIR="<worktree>/target"` (or leaving it unset). The decision log
+records it under `loom:cargo-target-dir`.
+
+**Telemetry.** Every deny also emits a `guard.cargo_target_dir.denied` instant
+span with `loom.role`, `loom.guard.root` (the root by name: `/tmp`,
+`$TMPDIR`, `~/.cache`, `~`, `.loom/target-*`) and `loom.guard.source`
+(`inherited`, `inline`, `env`, `export`, `target-dir-flag`, `make-arg`). It
+carries neither the path nor the command. The span is a child of the
+execution span and goes through its trace journal (`LOOM_TRACE_CONTEXT_FILE`),
+which the daemon drains to its OTLP exporters, the same route an agent's `gh`
+invocation span takes. A session outside a traced execution (an attended
+session the operator started) exports nothing. See
+[`telemetry-schema.md`](telemetry-schema.md).
+
+Resolution, the allowed roots, the toggle read and the span all live in
+`loom-daemon cargo-target-dir guard --for-command … --cwd …`
+(`loom-daemon/src/cargo_target_guard.rs`). The hook passes its masked text and
+denies only on exit 1 plus the `BLOCKED [cargo-target-dir]` prefix; a fork-free
+prefilter keeps the daemon off every command that mentions neither `cargo` nor
+`CARGO_TARGET_DIR`, and a daemon too old to have the verb leaves the rule
+inert. The Codex bridge runs the same hook, so the rule applies to Codex
+workers too.
+
+The category is **on by default** and sits **above** the ungated floor. The
+bypass for an operator's attended session is the toggle every guard category
+uses:
+
+1. **`LOOM_GUARD_CARGO_TARGET_DIR` env var** (Claude Code settings `env`) —
+   `0`/`false`/`no` disables; `1`/`true`/`yes` forces on. Overrides config. An
+   inline `LOOM_GUARD_CARGO_TARGET_DIR=0 cargo …` prefix does nothing: the hook
+   never sees the command's environment.
+2. **Tiered config** — `guards.cargoTargetDir` (default `true` when absent);
+   `false` disables:
+   ```json
+   { "guards": { "cargoTargetDir": false } }
+   ```
+3. **Default** — `true`.
+
+**Examples**:
+
+```bash
+cargo test -p loom-daemon                                   # allowed: unset
+CARGO_TARGET_DIR="$WORKTREE_ABS/target" cargo test          # allowed: in the worktree
+CARGO_TARGET_DIR=/repo/.loom/targets/judge-1 cargo build    # allowed: Loom-owned
+CARGO_TARGET_DIR=/tmp/target-pr123 cargo test               # DENIED (/tmp)
+cargo build --target-dir ~/.cache/doctor-1-target           # DENIED (~/.cache)
+env CARGO_TARGET_DIR="$(mktemp -d)" cargo nextest run       # DENIED ($TMPDIR)
+CARGO_TARGET_DIR=.loom/target-9 cargo check                 # DENIED (.loom/target-*)
 ```
 
 ### Worktree Isolation Guard Opt-Out (`guards.worktreeIsolation` / `LOOM_GUARD_WORKTREE_ISOLATION`)

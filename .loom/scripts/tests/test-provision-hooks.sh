@@ -844,7 +844,7 @@ for ev in Stop SubagentStop; do
         assert_eq "$rc26g|$(printf '%s' "$G26" | jq -r '[.continue, (.systemMessage|contains("NOT recorded")), has("decision")]|@csv' 2>/dev/null)" "0|true,true,false" "$ev: unrecordable log $L -> exit 0 + non-blocking coverage notice"
     done
 done
-assert_eq "$(wc -c < "$P26X/full.jsonl")" "1048576" "a full log is never grown"
+assert_eq "$(( $(wc -c < "$P26X/full.jsonl") ))" "1048576" "a full log is never grown"
 
 # 26e: deprovision removes both events' entries and leaves no empty arrays.
 deprovision_loom_hooks "$HOME26/.claude" >/dev/null 2>&1

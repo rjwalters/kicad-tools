@@ -87,8 +87,7 @@ loom-daemon park-record apply --issue 8440 --reason operator --by human   # no b
 
 1. **Refuses** (exit 1, nothing changed) when there is neither `--blocked-by`
    nor an explicit `--reason`. A park with no named blocker reads as
-   `blocked-unnamed` to star-liveness and UNDOCUMENTED to
-   `check-stale-blocked`, and is never released automatically — so it must be
+   UNDOCUMENTED to `check-stale-blocked`, and is never released automatically — so it must be
    a written choice (`--reason operator`, a quarantine/scope ruling …), which
    renders an attributable `Blocked by: (unstated)` record, never an omission.
 2. **Refuses** a blocker that is already closed (#9102) — the unblock sweep

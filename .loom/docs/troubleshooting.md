@@ -3434,10 +3434,11 @@ git reflog show <default-branch>   # every ref update this local checkout has se
 The script leaves exactly two signatures on the default branch's reflog, and
 nothing else:
 
-- **Direct push**: a single `commit: chore: resync installed Loom surfaces`
+- **Direct push**: a single `loom:resync: chore: resync installed Loom surfaces`
   entry (a fresh commit; the branch then matches `origin`).
-- **Branch + PR fallback**: `commit: chore: resync installed Loom surfaces`
-  immediately followed by `reset: moving to origin/<default>` — the reset is
+- **Branch + PR fallback**: `loom:resync: chore: resync installed Loom surfaces`
+  immediately followed by `loom:resync: updating HEAD` (a reset to
+  `origin/<default>`; git omits the target when the entry is tagged) — the reset is
   the script putting the default branch back on `origin`'s tip after pushing
   the commit to the side branch. The commit it moved away from is on
   `origin/chore/resync-installed` (with an open PR for it) — `git log
@@ -3445,8 +3446,12 @@ nothing else:
 
 Anything else is not this script. An entry reading `pull --ff-only` /
 `merge <sha>: Fast-forward` is an ordinary fast-forward picking up someone
-else's merged PR (also benign). A `rebase (finish):` entry — or a `reset:`
-that is *not* immediately preceded by that `commit:` entry, or one moving to
+else's merged PR (also benign). The `loom:resync:` prefix is the script's
+`GIT_REFLOG_ACTION` tag (#11566) — it is what keeps the daemon's out-of-band
+checkout detector from reporting the landing as a `checkout.external_change`;
+copies installed before #11566 wrote the same two entries untagged (`commit:` /
+`reset: moving to origin/<default>`). A `rebase (finish):` entry — or a reset
+that is *not* immediately preceded by that commit entry, or one moving to
 anything other than `origin/<default>` — is the signature this script is
 specifically designed never to produce: if you see one, it did **not** come
 from `land-resync-commit.sh`; track down what did. If a commit's SHA

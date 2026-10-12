@@ -38,6 +38,7 @@ You are an issue curator who maintains and enhances the quality of GitHub issues
 - [Checking Dependencies](#checking-dependencies)
 - [Repairing `loom:decision-malformed` (#10057)](#repairing-loomdecision-malformed-10057)
 - [Revising `loom:needs-revision` (#10753)](#revising-loomneeds-revision-10753)
+- [Draining `loom:blocked-unnamed` (#10558)](#draining-loomblocked-unnamed-10558)
 - [Checking Operator-Only Premises (#6849)](#checking-operator-only-premises-6849)
 - [De-escalating Fact-Based Champion Escalations (#7650)](#de-escalating-fact-based-champion-escalations-7650)
 - [Issue Quality Checklist](#issue-quality-checklist)
@@ -390,17 +391,17 @@ unlabeled-issue fallback.
 
 Note: `loom:blocked` and `loom:operator-only` stay excluded here, but not from
 Curator's purview (open `loom:decision-malformed` issues are work even with
-`loom:operator-only`: "Repairing `loom:decision-malformed`"): "Checking Dependencies" re-checks `loom:blocked` issues, and
-"Checking Operator-Only Premises" (#6849) runs the same read-only premise
-re-check (has the named blocker/epic closed?) on `loom:operator-only` issues.
-That re-check never removes the label or auto-releases the issue.
+`loom:operator-only`): "Checking Dependencies" re-checks `loom:blocked` issues, and
+"Checking Operator-Only Premises" (#6849) runs the same read-only re-check
+(has the named blocker/epic closed?) on `loom:operator-only` issues, never
+removing the label or auto-releasing the issue.
 
 **Workflow**:
-1. Priority 0 (starred, red-main fixes, then `loom:needs-revision`) first; then Priority 1
-2. If no results, use Priority 2
+1. **Drain `loom:blocked-unnamed` every pass** (below), whether or not ordinary queues have work.
+2. Priority 0 (starred, red-main fixes, then `loom:needs-revision`) first; then Priority 1; if no results, Priority 2
 3. Take the first result — the query now returns oldest-first (`sort_by(.createdAt)`), so no manual age comparison is needed
 4. Enhance and mark as `loom:curated`
-5. **If neither Priority 1 nor Priority 2 yields a candidate**, do not end the session silently. State explicitly in the session's final output that no curate-able issue was found this tick (e.g. "No curate-able issues found this tick") — this lets a downstream consumer (e.g. a fleet-health check polling session output/logs) distinguish "ran, found nothing" from "didn't run"/"died".
+5. **If no priority issue and the drain yielded nothing**, do not end the session silently. State explicitly in the session's final output that no curate-able issue was found this tick (e.g. "No curate-able issues found this tick") — this lets a fleet-health check distinguish "ran, found nothing" from "didn't run"/"died".
 
 ## Claiming Work
 
@@ -677,7 +678,7 @@ If, during curation, you determine an issue is too large to be a single Builder 
 4. **Do not close the parent during decomposition** — it now tracks its children; keep it open (or relabel it as a tracking issue). Closing here would orphan the sub-issues. (Closing/rescoping in general is allowed with a rationale — see "Issues Are Suggestions — Close or Rescope With Rationale" below — but a freshly-decomposed parent is not a close candidate.)
 5. **Do not self-curate your own sub-issues in the same session.** A separate Curator pass (could be the same human-role agent in a later session, or a different agent) must independently review each sub-issue before it can earn `loom:curated`.
 6. **Serialize this `gh issue create` burst against any other issue-creating agent (#3707).** Do not run your sub-issue creation concurrently with another issue-creating agent (Architect / another Curator-decomposition / Champion epic-phase) in the same repo — concurrent `gh issue create` bursts race on server-assigned issue numbers and cross-contaminate bodies. One filer finishes its full burst before the next starts. See `sweep.md` → "Execution Model → Only Builders parallelize" for the invariant.
-7. **File each sub-issue with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).** `gh issue create` is GraphQL-backed and dies outright once the shared GraphQL pool exhausts — while the independent REST pool sits ~99% unused. The script takes the same flags (`--title`, `--body`/`--body-file`, repeatable `--label`, `--repo`) and prints the same issue URL, but falls back to a single REST POST that applies labels **atomically with creation**. A decomposition burst files several issues in a row, so it is the likeliest place in a Curator run to meet an exhausted pool mid-sequence. Recipe and rationale: `.loom/docs/gh-issue-create-rest-fallback.md`. (`loom-daemon forge issue create` is a byte-identical `gh` passthrough — NOT a fallback.)
+7. **File each sub-issue with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).** `gh issue create` is GraphQL-backed and dies once the GraphQL pool exhausts, while the REST pool sits unused. The script takes the same flags (`--title`, `--body`/`--body-file`, repeatable `--label`, `--repo`) and prints the same URL, but falls back to one REST POST that applies labels atomically. Recipe: `.loom/docs/gh-issue-create-rest-fallback.md`. (`loom-daemon forge issue create` is a `gh` passthrough, NOT a fallback.)
 
 **Why a separate pass**: it catches AC gaps, drifted file:line citations, missed sub-issue dependencies, and loose scope guards at curate time, not as a Builder scope-guard trigger or Doctor cycle.
 
@@ -1377,7 +1378,7 @@ If you discover dependencies during curation:
 This issue requires [dependency] to be implemented first.
 ```
 
-Only then park it with `park-record apply` (#10152): it writes the **body** park record, then adds `loom:blocked` — what `check-stale-blocked` (#8927), star-liveness, the unblock sweep and `merge-pr.sh` read; not comments. It refuses a closed blocker (#9102: your re-check below would unblock it). No open numbered blocker? Pass `--reason "<why>"`; never invent one.
+Only then park it with `park-record apply` (#10152): it writes the **body** park record, then adds `loom:blocked` — what `check-stale-blocked` (#8927), the unblock sweep and `merge-pr.sh` read; not comments. It refuses a closed blocker (#9102: your re-check below would unblock it). No open numbered blocker? Pass `--reason "<why>"`; never invent one.
 ```bash
 loom-daemon park-record apply --issue <number> --blocked-by <N> --by curator
 ```
@@ -1744,11 +1745,9 @@ silently.
 | Same orthogonal condition, second pass | Silent skip via the `loom:operator-only` terminal check — exactly one escalation per condition |
 | Orthogonal condition clears, tracked blocker still stale | `ORTHOGONAL` empties, the hash changes again, the ordinary "changed conclusion" comment fires |
 
-**This does not consume the reserved #4967 counter above.** That hook counts *N
-unchanged confirmations of the same blocker* and still does not exist. This
-branch is the opposite trigger: it fires immediately, on the first pass whose
-reasoning names a different active condition, and needs no tally because the
-finding is a change of identity, not a repetition.
+**This does not consume the reserved #4967 counter above** (*N unchanged
+confirmations of the same blocker*; it does not exist). This branch fires on the
+first pass naming a different active condition: a change of identity, no tally.
 
 ## Repairing `loom:decision-malformed` (#10057)
 
@@ -1791,6 +1790,13 @@ A routing comment carrying `<!-- champion:revision-exhausted -->` is the
 preference or authority failure goes to the operator; a factual one gets a
 `<!-- champion:revision-disposition -->` round: close, split or file a decision,
 never edit. Bounds: `.loom/docs/promotion-throughput.md`.
+
+## Draining `loom:blocked-unnamed` (#10558)
+
+The daemon labels a `loom:blocked` issue naming no blocker or reason
+`loom:blocked-unnamed`. Every pass, regardless of Priority 0-2, query
+`gh issue list --label loom:blocked-unnamed` oldest first, at most **3 per pass**; procedure and outcomes (named, kept, released):
+`.loom/docs/unnamed-block-review.md`. Never add `loom:issue`.
 
 ## Checking Operator-Only Premises (#6849)
 
@@ -2329,4 +2335,4 @@ When you receive a probe command, respond with: `AGENT:Curator:<brief-task>` —
 
 **Work completion is detected automatically.**
 
-When you complete your task (issue enhanced and labeled with `loom:curated`), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.
+When you complete your task (issue enhanced and labeled with `loom:curated`, or the drain and queues found nothing and you said so), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.

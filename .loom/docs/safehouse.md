@@ -598,12 +598,12 @@ With no `rooms` map configured they all go to the one `room`, as before.
 
 ### Operator-priority escalations (#9321)
 
-`operator_priority.escalation` — a starred (`loom:operator-priority`) issue that
-reached a state only the operator can move — is narrated as a **`handoff`**, so
-it lands in the signal room the operator actually watches rather than a muted
-per-repo firehose. That routing *is* the feature: the escalation already exists
-as a forge comment (#9301), and a forge comment is what nobody read for seven
-hours in #9268.
+`operator_priority.escalation` — something only the operator can move — is
+narrated as a **`handoff`**, so it lands in the signal room the operator
+actually watches rather than a muted per-repo firehose. Its first publisher,
+the star-liveness pass (a starred issue's forge escalation comment), was
+removed by #11104; today the fleet-degraded alert (#10164) publishes it, with
+issue `0` for a host-level condition.
 
 ```
 @operator:example.org: loom#9268 · OPERATOR NEEDED · merge-refused at needs-operator
@@ -613,23 +613,15 @@ https://github.com/rjwalters/loom/issues/9268 · observed by host-a
 
 - **The mention** comes from `safehouse.operatorMention` above; unset ⇒ the same
   line without the ping, never a dropped ask.
-- **Exactly one post per ask, fleet-wide.** The publisher emits only on the pass
-  that actually posts that ask's forge comment, so the comment's
-  `<!-- loom:operator-priority-escalation key=<kind>:<specifics> -->` marker —
-  already the fleet's shared lock — is the *only* dedupe: no repeat across
-  ticks (a per-process ledger), across hosts (a peer finds the marker), or
-  across restarts (the marker is re-read). A non-starred issue produces no
-  liveness row, hence no post.
+- **Dedupe is the publisher's.** The sink is a pure relay; the fleet-alert
+  state machine emits once per condition key (debounced, with reminders).
 - **Recovery.** When the ask clears, one `resolved ✓` line lands in the same
   thread, **without** re-pinging the operator — summoning a human to say
-  "never mind" is noise. Only the host that announced the ask narrates its
-  recovery, and a repo whose pass could not be read resolves nothing (an
-  unreadable repo must not read as "everything cleared").
+  "never mind" is noise.
 - **No `meta`.** Envelope-v1 allows `meta` only on a `completion`, so every fact
   the operator needs is in the body; the structured payload stays on the bus
   event for other consumers.
-- **`safehouse.enabled` false ⇒ unchanged behavior**: the forge comment and the
-  `health`/`status`/`queue` surfaces still carry the ask, nothing reaches Matrix.
+- **`safehouse.enabled` false ⇒ nothing reaches Matrix.**
 
 ### Repo qualification (issue #4201)
 

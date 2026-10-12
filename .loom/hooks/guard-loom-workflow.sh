@@ -14,6 +14,8 @@
 #   4. LOOM: Deny Bash writes that edit an INSTALLED Loom file in place in a
 #      CONSUMER repo (issue #7995) — the Bash-idiom counterpart of the
 #      Edit/Write denial in guard-worktree-paths.sh
+#   5. LOOM: Deny a cargo build whose target dir is under a root nothing owns
+#      (/tmp, $TMPDIR, ~, ~/.cache, .loom/target-*; issue #11582)
 #
 # The generic repository-hygiene guards (catastrophic denies, SQL/cloud toggles,
 # ASK patterns) live in guard-destructive.sh and are being migrated toward Repo
@@ -1842,6 +1844,26 @@ if [[ -n "$WORKTREE_PATH" ]]; then
     if echo "$COMMAND" | grep -qE '(pip|pip3|uv pip)\s+install\s+.*-e\s' || \
        echo "$COMMAND" | grep -qE '(pip|pip3|uv pip)\s+install\s+.*--editable\s'; then
         deny "BLOCKED: 'pip install -e' is not allowed inside worktrees. Editable installs overwrite the global .pth file, breaking parallel builders (issue #2495), and leave frozen console scripts on PATH that shadow later installs (incident #4079). Run the worktree's own code via '.loom/scripts/run-tests.sh' (it sets PYTHONPATH for you) instead of an editable install." "loom:pip-install-editable-worktree"
+    fi
+fi
+
+# =============================================================================
+# LOOM: Deny a cargo build into a target dir nothing owns (issue #11582) — the
+# enforced form of cargo-target-isolation.md's rule (#8370): no target dir
+# under /tmp, $TMPDIR, ~, ~/.cache or <repo>/.loom/target-*. Resolution
+# (--target-dir, inline/env/export assignment, the session's own value),
+# allowed roots, guards.cargoTargetDir / LOOM_GUARD_CARGO_TARGET_DIR and the
+# deny span all live in `loom-daemon cargo-target-dir guard`
+# (loom-daemon/src/cargo_target_guard.rs). Fork-free prefilter: only a command
+# that mentions cargo or CARGO_TARGET_DIR reaches it.
+# =============================================================================
+
+# requires-daemon: cargo-target-dir optional   #11582 — `guard`; a daemon without the verb exits 2, which this block treats as allow (rule inert).
+if [[ "$GH_PR_MERGE_SCAN_TEXT" == *cargo* || "$GH_PR_MERGE_SCAN_TEXT" == *CARGO_TARGET_DIR* ]]; then
+    CTD_RC=0
+    CTD_DENY=$("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" cargo-target-dir guard --cwd "${CWD:-.}" --for-command "$GH_PR_MERGE_SCAN_TEXT" 2>/dev/null) || CTD_RC=$?
+    if [[ "$CTD_RC" -eq 1 && "$CTD_DENY" == "BLOCKED [cargo-target-dir]"* ]]; then
+        deny "$CTD_DENY" "loom:cargo-target-dir"
     fi
 fi
 

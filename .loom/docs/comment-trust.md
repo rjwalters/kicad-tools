@@ -55,7 +55,7 @@ The predicate lives once, in `loom-daemon/src/comment_trust.rs`:
 - **Rust readers** filter at fetch. `claim_reconciliation`'s comment fetch
   returns trusted bodies only, so the verdict backstop, the stale-verdict
   dedup, and the base-conflict "is this flag ours?" check never see an
-  untrusted marker. `star_liveness::trust` delegates to the same predicate.
+  untrusted marker.
 - **Shell readers** call `loom-daemon forge trusted-comments`, which reads a
   comment listing on stdin and prints the trusted subset in the same shape.
   `verdict-staleness-guard.sh` and `check-promotion-landed.sh` use it.
@@ -209,7 +209,7 @@ when all three hold:
 Anything unverifiable is a refusal. Reads are never gated.
 
 - **Daemon:** `loom-daemon/src/write_scope.rs`. Claim reconciliation,
-  quarantine reconciliation, star liveness, sweep dispatch and every
+  quarantine reconciliation, sweep dispatch and every
   scheduled role tick skip a refused workspace, logging the reason once. The
   `forge issue|pr` write passthroughs and `forge auto-merge` /
   `disable-auto-merge` vet their target first. The roster heartbeat checks its

@@ -154,39 +154,11 @@ Both directions are safe:
   by the exporter as "no identity to verify" and is **silently** skipped — it
   never produces a recurring "cannot verify" warning.
 
-**Star intents (#9244 C).** The response may also carry
-`operator_priority_intents`, the stars and unstars loom-ui recorded (loom-ui
-has no GitHub write access, so the daemon applies them):
-
-```json
-{ "accepted": 50, "host_id": "fleet-host-abc",
-  "operator_priority_intents": [
-    { "id": "…", "repo": "owner/repo", "number": 281, "action": "star",
-      "label": "loom:operator-priority",
-      "requested_at": "2026-09-28T08:15:00Z", "requested_by": "operator" } ] }
-```
-
-The actor field is `requested_by`. A missing or `null` field is an older
-backend and a no-op; `[]` is a supporting backend with nothing pending. The
-daemon reads the field as a raw JSON value, so no shape of it (an object, a
-string, a number, a mixed array) can fail the ack or skip the `host_id` check;
-a non-array is ignored and logged, and each array entry that is not a
-well-formed object is dropped on its own. The daemon applies an
-intent only when `label` is exactly `loom:operator-priority`, `action` is
-`star` or `unstar`, `repo` is in this host's workspace registry, and
-`requested_by` is non-empty; anything else is dropped and logged (visible as
-`dropped_intents` in `loom-daemon status --json`). Applying adds or removes the
-label, then posts one audit comment carrying
-`<!-- loom:operator-priority-intent=<id> action=<a> requested_at=<ts> -->`,
-unless a trusted comment with that intent id already exists, so resending an
-intent, or several hosts managing the repo, is harmless. Trusted means an
-`OWNER` / `MEMBER` / `COLLABORATOR`, a fleet App identity (any identity in the forge roster, or `loom-fleet-dispatch` / `-<digits>` exactly, as a `…[bot]` login only), or
-the daemon's own login: a marker an outside commenter posts neither suppresses
-the audit comment nor sets the starred-at. `requested_by` is shown inside a
-code span, so an email address stays whole and an `@name` pings no one. `requested_at` becomes the
-issue's starred-at for dispatch order. The exporter reads at most 64 KiB of
-the response (4 KiB before #9244 C, which truncated a ~12 KiB 50-intent ack
-and lost the `host_id` check along with the intents).
+**Star intents (removed, #11104).** A loom-ui backend may still append
+`operator_priority_intents` (#9244 C) to the response. The daemon ignores the
+field whatever its shape; it never fails the ack or skips the `host_id`
+check. loom-ui sets priority labels on GitHub directly. The exporter still
+reads at most 64 KiB of the response.
 
 ## `RepoVisibility` contract — private by default
 
@@ -241,6 +213,7 @@ cycle) is added only when loom-ui's error tracking shows it is needed.
 | [`loom.dispatch.disposition`](#loomdispatchdisposition-issue-9222-per-issue-why-is-it-waiting) rows (`loom.queue.*` attributes) and `loom.queue.disposition_rows_dropped` | span + metric, OTLP only | `observability/ops/disposition.rs` |
 | [`host.health`](#hosthealth) | gauges, native + OTLP | `observability/collector.rs` (+ `exporter.rs`, `sender.rs`) |
 | [`host.export`](#hostexport) | log, OTLP only | `observability/collector.rs` |
+| [`checkout.external_change`](#checkoutexternal_change) | log, OTLP only | `fleet_sync/checkout_ff/external_change.rs` |
 | Captain gauges: `loom.captain.gauge_age_seconds`, `loom.captain.gauge_fallback`, `loom.forge.stage_dwell`, `loom.forge.stage_items` ([`metric.points`](#metricpoints)) | metric | `observability/captain_gauges.rs`, `observability/ops/stage_dwell.rs` |
 | [`eta.stage_outcome`](#etastage_outcome) (kept, non-ETA owner since #11126) | log, OTLP only | `observability/fleet_state/outcomes.rs` (diff of two `fleet.state` views) |
 | [`pr.resolved`](#prresolved) (kept, non-ETA owner since #11126) | log, OTLP only | `observability/fleet_state/outcomes.rs` (a PR that left the review listings) |
@@ -1983,6 +1956,12 @@ Tokens, providers and pools (Issues #8908, #8931):
 | `loom.egress.request` span | own root trace (derived from launch id, start, sequence) | `loom.egress.{seat,tap,profile,launch_id,status,latency_ms,ttft_ms,error_code,stream}`, `loom.runtime`, `loom.role`, `loom.issue`, `loom.pr_number`, `loom.sweep_id`, `loom.model`, `loom.tokens.*` | the per-request record behind the metrics above, carrying the ids too high-cardinality for a label |
 | `loom.runtime.usage` span | one per **model**, child of the unit it measures (see below) | `loom.usage.scope` (`execution` \| `attempt`), `loom.model`, `loom.tokens.input`, `.output`, `.cache_read`, `.cache_write` (= `.cache_write_5m` + `.cache_write_1h`), `.total`; aliases `gen_ai.usage.input_tokens` (**uncached input only, NOT total input** — decision #9315: kept, following Anthropic's vocabulary and so that `input + cache_read + cache_write` never double-counts; a generic OTel GenAI consumer must add `.cache_read_input_tokens` and `.cache_creation_input_tokens` to get total input, as the downstream telemetry consumer must), `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens`; `llm.billing`, `llm.credential.kind`, `llm.provider.profile` (see [LLM billing class](#llm-billing-class-10749)); `loom.cost.usd_estimate` = `gen_ai.cost.usd_estimate` with `loom.pricing.verified_on` and `loom.pricing.source` (`asset` \| `compiled`); optional `loom.runtime`, `loom.role`, `loom.attempt`, `loom.sweep_id`, `loom.issue`, `loom.pr_number` | one unit's exact token usage for one model (#8908, #9204, #9303). Absent when usage is unknown or has no model rows; a model row's measured-zero counter is `"0"`. No cost attributes for a model the rate card does not know (never a Sonnet fallback) |
 
+Guard denies (Issue #11582):
+
+| Signal | Kind | Unit / attributes | Meaning |
+|---|---|---|---|
+| `guard.cargo_target_dir.denied` span | instant; a child of the agent's execution span, delivered through its trace journal (`LOOM_TRACE_CONTEXT_FILE`), so only a session inside a traced execution exports one | `loom.guard.root` (`/tmp`, `$TMPDIR`, `~/.cache`, `~`, `.loom/target-*`), `loom.guard.source` (`inherited`, `inline`, `env`, `export`, `target-dir-flag`, `make-arg`), `loom.role` | one `loom:cargo-target-dir` deny: a cargo build whose target dir was under a root nothing owns ([`guard-hooks.md`](guard-hooks.md#cargo-target-dir-guard-guardscargotargetdir--loom_guard_cargo_target_dir)). Never the path or the command |
+
 GitHub rate limit (Issue #10022):
 
 | Signal | Kind | Unit / attributes | Meaning |
@@ -2011,7 +1990,7 @@ span's `github.account`, `account` is `app-<app id>`,
 `unknown`. `reason` and
 `loom.ratelimit.source` ∈ `work_finder`, `claim_reconciliation`,
 `role_runner`, `epic_supervisor`, `quarantine_reconciliation`,
-`ci_telemetry`, `outcome_journal`, `star_liveness`, `other`. Names follow the
+`ci_telemetry`, `outcome_journal`, `other` (`star_liveness` until #11104). Names follow the
 `github.ratelimit.*` prefix of an external fleet schema.
 
 **Usage spans: scope, sources, and how to total them (#9204, #9303).**
@@ -2115,7 +2094,7 @@ daemon process or is disabled.
 | `unresolved_rows` | integer | rows dropped because their workspace's forge slug could not be resolved |
 | `rows_truncated` | integer | rows dropped by the 200-row cap |
 | `plan` | object, optional | the tick's dispatch plan block (Issue #9288, below). Absent from older daemons |
-| `operator_priority_landing[]` | array, optional | the landing state of every starred issue this host watches, and of every blocker inheriting a star (#9244 C; below). Omitted when nothing is starred and on older daemons |
+| `operator_priority_landing[]` | array, optional | **removed (#11104)**: the star-liveness landing rows (#9244 C). Only an older daemon sends it |
 
 Each row:
 
@@ -2195,39 +2174,10 @@ only the tick's rows) and are subject to the same 200-row cap. The blocking
 reason itself is usually a forge comment, and comment text is never read or
 exported. This is additive, so there is no `schema_version` bump.
 
-**Starred landing states (#9244 C).** `rows` is what the work finder did
-with its ready listing this tick, and most starred issues are not in it (they
-are being built, reviewed, or are parked). `operator_priority_landing` covers
-all of them, in starred-at order, each inheriting blocker right after the
-issue it blocks. Join it to `rows` on `(repo, issue)`. It is the last pass of
-the daemon's liveness check (`loom-daemon/src/star_liveness/`), which runs
-every `autonomous.operatorPriority.intervalSecs` while the work finder is on.
-Each entry:
-
-| Field | Type | Notes |
-|---|---|---|
-| `repo` | string | forge `owner/repo` |
-| `visibility` | `public` / `private` | per entry; missing or unknown decodes to `private` |
-| `issue` | integer | issue number |
-| `stage` | string | `curating`, `ready`, `building`, `in-review`, `changes-requested`, `mergeable`, `merging`, `blocked-by`, `stale-block` (`loom:blocked` with no open blocker named; the daemon unblocks it or hands it to Curator, #10151), `needs-operator`, `no-capacity` (unknown values are forward-compatible) |
-| `next_actor` | string | `curator`, `builder`, `judge`, `doctor`, `champion`, `work-finder`, `operator`, or `blocker #N` |
-| `stage_since` | RFC 3339, optional | when this host first saw it in `stage` |
-| `time_in_stage_secs` | integer | seconds in `stage` |
-| `pr` | integer, optional | its open PR |
-| `blocked_by` | string, optional | `blocked-by`: `#N`, or `owner/repo#N` across repos |
-| `no_capacity` | string, optional | `no-capacity`: the work finder's fixed reason text, or the pools-exhausted grace note |
-| `ask` | object, optional | set when the operator has been asked: `{kind, key, text}`. `kind` is `operator-only`, `operator-decision`, `merge-risk-hold`, `merge-refused`, `pools-exhausted`, `unmanaged-repo`, `blocked-unnamed` (only after a Curator handoff or an earlier unblock), `blocked-cross-repo` or `no-progress`. `key` is the dedupe key (`<kind>:<specifics>`), identical on every host for the same cause. `text` is the one concrete ask, templated by the daemon; the only forge text it can quote is a `merge-refused` ask with no open incident, which carries the refusal line bounded to 300 characters, stripped of backticks and angle brackets, inside a code span. A `no-progress` ask keeps the agent-owned `stage` |
-| `inherited_from` | integer, optional | this entry is a blocker inheriting the star of that issue |
-| `operator_priority_at` | RFC 3339, optional | the starred-at it sorts by (its own, the inheriting star's, or `created_at`) |
-| `last_progress_at` | RFC 3339, optional | when forward progress was last seen |
-
-A star made in loom-ui for a repo this host does not manage appears here as
-`needs-operator` with an `unmanaged-repo` ask. Only that host knows it does
-not manage the repo, so the fleet view should treat the ask as real when
-**every** reporting host carries it. Additive, so there is no
-`schema_version` bump. The fleet Worker in this repo
-(`loom-ui:src/queueState.ts`) whitelists row fields and does not store it
-yet.
+**Starred landing states (removed, #11104).** Older daemons appended
+`operator_priority_landing`, the star-liveness pass's landing row for every
+starred issue. That pass is gone; a current daemon never sends the field, and
+loom-ui derives landing state from labels and PRs.
 
 Redaction (phase 3, `loom-ui:src/queueState.ts`): the Worker redacts per
 row on `visibility`. On `/public/*` a private row keeps only `rank`,
@@ -3199,6 +3149,66 @@ additive (serde-defaulted), so records from before #11527 still parse and no
 `schema_version` bump is needed. The committed query is
 [`defaults/observability/signoz/host-export-queries.sql`](https://github.com/rjwalters/loom/blob/main/defaults/observability/signoz/host-export-queries.sql):
 hosts with drops, or with no `host.export` at all, in the last 2 h. Query 3 compares a rendered `hosts.yml` roster against `host.export` to find silent hosts by absence (#11198).
+
+### `checkout.external_change`
+
+A managed checkout's history was moved by something that was not Loom (Issue
+#11566). One record per reflog entry, emitted by the `checkout_ff` pass.
+Envelopes carry `schema_version: 12`. **OTLP-only** (native: `false`), severity
+`WARN`, stamped at the **reflog entry's own time** (`at`), not when the daemon
+noticed it. The body is the record's JSON; the scalars ride as `loom.checkout.*`
+attributes (`CHECKOUT_EXTERNAL_CHANGE_LOG_ATTRIBUTE_KEYS`, which the collector's
+`transform/privacy` allowlists), plus `loom.repo` / `loom.repo.visibility`.
+Facts only: it names what the reflog says and what became unreachable; it does
+not guess who ran the command and it repairs nothing.
+
+**How Loom tells its own moves apart.** Every daemon git child that can move a
+ref in a managed checkout runs with `GIT_REFLOG_ACTION=loom:<op>` (`ff`,
+`resync`, `gate`, `update`), so git writes `loom:ff: Fast-forward` instead of
+its default message. On each pass the daemon reads `logs/HEAD` and
+`logs/refs/heads/<default>`, compares them with what it last saw, and reports
+each *new* entry that (a) does not start with `loom:`, (b) moved the ref (old and
+new sha differ), and (c) is a `reset:` / `branch: Reset`, a `checkout: moving
+from`, or a `rebase (start|finish|abort)`. Plain `commit`, `merge` and `pull`
+entries only add history and are not reported. The first sight of a root, a
+reflog that shrank or was rewritten (`gc`, `reflog expire`), and an unreadable
+reflog **seed the comparison and emit nothing**: unknown is not a change.
+
+| Field | Type | Notes |
+|---|---|---|
+| `change_id` | string | stable id: a hash of root, from, to and the reflog time; the hold-clear note cites it |
+| `repo` | string? | `owner/repo` from `origin`, when it parses |
+| `visibility` | `public` \| `private` | `private` until resolved (a missing tag never decodes to public) |
+| `root` | string | the registered root |
+| `host` | string | the host whose checkout it is (the reflog is per clone, so only that host can read it) |
+| `move_kind` | string | `reset`, `checkout` or `rebase` (not `kind`: that is the envelope's record-kind tag) |
+| `ref` | string | the log that carried it: `HEAD` or `refs/heads/<default>` |
+| `reflog_line` | string | the reflog message as git wrote it |
+| `from_sha`, `to_sha` | string | the commit before and after the move |
+| `at` | RFC3339 | when git wrote the entry; the record time |
+| `observed_at` | RFC3339 | when the daemon read it |
+| `discarded_commits` | object? | `{count, subjects[]}`: commits reachable from `from_sha` and from no ref now (`git rev-list <from> --not --all`), subjects newest first, at most 20. Omitted when unknown (the old tip is gone, git failed): unknown, never "nothing" |
+| `hold_active` | boolean | a dispatch hold stood on this checkout when the pass read the entry |
+| `loom` | object | the observing build's provenance (required; a record without valid provenance is not emitted) |
+
+Attributes: `loom.checkout.change_id`, `.kind`, `.ref`, `.from_sha`, `.to_sha`,
+`.discarded_count`, `.hold_active`, and the build as `.version`, `.revision`,
+`.tree_state`, `.provenance_complete`.
+
+**Holds.** When a dispatch hold clears and one or more `checkout.external_change`
+records were emitted for that root since the hold began, the hold-clear log line
+(`workspace_hold: ...: hold cleared ...`) appends `; coincides with
+checkout.external_change <change_id>[, ...]`, so a hold that cleared because the
+checkout was moved by hand is not mistaken for one the resync fixed. Whether the
+hold cleared on the *next* pass is read from that line and the hold `cleared`
+event, not carried on the record (a record cannot know the future).
+
+**Limits.** The reflog is local and expirable; an entry the daemon was not
+running to see, or one removed by `reflog expire` first, is not reported. Git
+invoked by a person *through Loom's own tagged environment* (a shell inheriting
+`GIT_REFLOG_ACTION=loom:...`) is indistinguishable from Loom. The `rebase`
+entries other than start/finish/abort are ignored, so one rebase is one or two
+records, not one per picked commit.
 
 ## Persistence & read surface (`sweep.outcome`, Issue #4704)
 
