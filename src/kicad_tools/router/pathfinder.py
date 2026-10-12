@@ -40,6 +40,7 @@ from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
+from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
@@ -4129,6 +4130,14 @@ class Router:
         # pad_approach_radius=6 which created an oversized clearance-free zone
         # around every pad regardless of actual pad geometry.
         pad_escape_margin = 2  # cells beyond pad metal edge
+
+        # Issue #6368: centreline landing cost inputs (see ``pad_landing``;
+        # mirrors the native ``PadBounds`` landing fields).
+        start_landing = pad_landing_geometry(start, self.grid)
+        end_landing = pad_landing_geometry(end, self.grid)
+        landing_cost_turn = float(self.rules.cost_turn)
+        landing_cost_straight = float(self.rules.cost_straight)
+
         start_approach_gx1 = start_metal_gx1 - pad_escape_margin
         start_approach_gy1 = start_metal_gy1 - pad_escape_margin
         start_approach_gx2 = start_metal_gx2 + pad_escape_margin
@@ -4771,6 +4780,32 @@ class Router:
                 )
                 if attractor_bonus > 0.0:
                     positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
+
+                # Issue #6368: centreline landing cost on the step that crosses
+                # the start pad's tip line outward or the end pad's inward
+                # (after the attractor clamp, as in the native loops).
+                if end_landing.long_axis >= 0 and nlayer in end_layers:
+                    positive_step_cost += landing_cost(
+                        end_landing,
+                        current.x,
+                        current.y,
+                        nx,
+                        ny,
+                        False,
+                        landing_cost_turn,
+                        landing_cost_straight,
+                    )
+                if start_landing.long_axis >= 0 and nlayer in start_layers:
+                    positive_step_cost += landing_cost(
+                        start_landing,
+                        current.x,
+                        current.y,
+                        nx,
+                        ny,
+                        True,
+                        landing_cost_turn,
+                        landing_cost_straight,
+                    )
 
                 new_g = (current.g_score + positive_step_cost) * cost_mult
 
