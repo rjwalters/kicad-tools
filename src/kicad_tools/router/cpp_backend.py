@@ -77,7 +77,11 @@ logger = logging.getLogger(__name__)
 # diff-pair partner no longer relaxes a barrel, ``route_via_geometry_clear``
 # gained ``trace_clearance`` and ``router_cpp.trace_via_clearance`` is bound.
 # A v48 .so would let a trace land inside an earlier via's floor.
-_REQUIRED_CPP_BUILD_VERSION = 50
+# v51 (Issue #6375): ``Pathfinder.set_search_own_pad_gate`` /
+# ``own_pad_step_clear`` and ``Grid3D.segment_pads_clear`` -- the A* holds
+# steps on the routing net's own pad cells to the validator's seg-vs-pad
+# verdict.  ``route()`` calls the setter on every search; a v50 .so lacks it.
+_REQUIRED_CPP_BUILD_VERSION = 51
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -2468,6 +2472,19 @@ class CppPathfinder:
                         ]
                     )
                 )
+            if hasattr(self._impl, "set_search_own_pad_gate"):
+                # Issue #6375: steps on this net's own pad copper/halo are
+                # held to the validator's own seg-vs-pad verdict -- with the
+                # validator's carve-outs and the narrowest width the route
+                # conversion can emit, so the gate is never the stricter one.
+                gate_exclude, gate_clamp = self._carveout_ref_hashes(
+                    self._grid._py_grid, start, end
+                )
+                self._impl.set_search_own_pad_gate(
+                    gate_exclude,
+                    gate_clamp,
+                    self._narrowest_emit_width(start, end, net_trace_width),
+                )
 
             if self._grid._py_grid is not None:
                 self._sync_stored_routes(self._grid._py_grid)
@@ -3507,6 +3524,44 @@ class CppPathfinder:
             return None
         return intra
 
+    def _carveout_ref_hashes(self, py_grid, start: Pad, end: Pad) -> tuple[list[int], list[int]]:
+        """``(exclude_ref_hashes, clamp_ref_hashes)`` for ``validate_route``.
+
+        Issue #6375: shared by :meth:`_validate_route_clearance` and the A*
+        own-pad step gate (``set_search_own_pad_gate``) so the search applies
+        exactly the same-component carve-outs the validator does.  See the
+        Issue #3545 / #5166 notes in :meth:`_validate_route_clearance`.
+        """
+        exclude_ref_hashes: list[int] = []
+        clamp_ref_hashes: list[int] = []
+        for pad in (start, end):
+            if not pad.component_key:
+                continue
+            mode = self._same_component_carveout_mode(py_grid, pad.component_key)
+            if mode == "skip":
+                exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
+            elif mode == "clamp":
+                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
+        return exclude_ref_hashes, clamp_ref_hashes
+
+    def _narrowest_emit_width(self, start: Pad, end: Pad, base_width: float) -> float:
+        """Narrowest trace width :meth:`_convert_result_to_route` can emit.
+
+        Issue #6375: the Issue #1018 neck-down taper only ever NARROWS a
+        segment near a pad, so a search-side check at this width is never
+        stricter than the post-route validator measuring the emitted copper.
+        """
+        width = float(base_width)
+        pitches = self._get_component_pitches()
+        for pad in (start, end):
+            pitch = pitches.get(pad.ref) if pad.ref else None
+            if self._rules.should_apply_neck_down(pad.ref, pitch):
+                width = min(
+                    width,
+                    float(self._rules.get_neck_down_width(0.0, pitch, base_width=base_width)),
+                )
+        return width
+
     def _validate_route_clearance(
         self,
         route: Route,
@@ -3581,16 +3636,7 @@ class CppPathfinder:
         # enforces that resolved per-pad value as a hard floor there,
         # instead of the pre-#5166 unconditional skip that accepted any
         # positive gap (e.g. 0.02mm against an authored 0.10mm).
-        exclude_ref_hashes: list[int] = []
-        clamp_ref_hashes: list[int] = []
-        for pad in (start, end):
-            if not pad.component_key:
-                continue
-            mode = self._same_component_carveout_mode(py_grid, pad.component_key)
-            if mode == "skip":
-                exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
-            elif mode == "clamp":
-                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
+        exclude_ref_hashes, clamp_ref_hashes = self._carveout_ref_hashes(py_grid, start, end)
 
         # Build C++ segment/via lists from route
         cpp_segs: list[router_cpp.Segment] = []
