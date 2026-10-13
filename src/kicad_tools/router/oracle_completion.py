@@ -1114,10 +1114,11 @@ class PourLinkCloser:
                         # component -- first; the nearest island (often a
                         # padless sliver) is only the fallback.
                         targets: list[list[dict]] = []
-                        if chosen != 0 and "zone" in (lk.a.kind, lk.b.kind):
+                        to_plane = chosen != 0 and "zone" in (lk.a.kind, lk.b.kind)
+                        if to_plane:
                             targets.append([comps[0]])
                         targets.append(others)
-                        for target in targets:
+                        for n_target, target in enumerate(targets):
                             pair = component_terminals(comps[chosen], target, lk.net)
                             if pair is None:
                                 continue
@@ -1125,6 +1126,13 @@ class PourLinkCloser:
                                 pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
                             )
                             if route is not None:
+                                if to_plane and n_target > 0:
+                                    who = lk.a.pad_key or lk.b.pad_key
+                                    head = f"{lk.net} {who}" if who else lk.describe()
+                                    attempt.notes.append(
+                                        f"{head}: no clearance-legal route to the plane-owning "
+                                        "copper; joined the nearest island instead"
+                                    )
                                 break
                 if route is None:
                     note = f"{lk.describe()}: no clearance-legal route"

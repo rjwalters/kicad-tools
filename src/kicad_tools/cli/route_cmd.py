@@ -7575,7 +7575,14 @@ def _closer_reasons_for(link, notes) -> list[str]:
             return True
         return any(p.search(note) for p in pads)
 
-    return [n for n in notes if names(n)]
+    hits = [n for n in notes if names(n)]
+    if hits or "pad" in (link.a.kind, link.b.kind):
+        return hits
+    # A pad-less link (KiCad's ``Zone <-> Zone`` for a floating island) names
+    # no pad, while the closer's notes name the pads it rebuilt the link from
+    # (``_cluster_links``): fall back to every note about the link's net.
+    net = re.compile(rf"(?:^|:){re.escape(link.net)}(?:[ :])")
+    return [n for n in notes if net.search(n)]
 
 
 def _print_stranded_pour_failure_banner(args, output_path) -> None:

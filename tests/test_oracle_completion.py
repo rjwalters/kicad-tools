@@ -326,7 +326,7 @@ class TestCliSurfaces:
 class TestIslandJoinTargetsPlane:
     """Issue #6399: a stranded pad island joins the plane, not the nearest sliver."""
 
-    def _board(self, tmp_path: Path) -> Path:
+    def _board(self, tmp_path: Path, walled: bool = False) -> Path:
         def pad(ref, x, y, w, h):
             return (
                 f'  (footprint "T:{ref}" (layer "F.Cu")\n    (at {x:g} {y:g})\n'
@@ -338,11 +338,25 @@ class TestIslandJoinTargetsPlane:
         text = (
             '(kicad_pcb (version 20240108) (generator "pcbnew")\n'
             '  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))\n'
-            '  (net 0 "")\n  (net 1 "GND")\n'
+            '  (net 0 "")\n  (net 1 "GND")\n  (net 2 "SIG")\n'
             + pad("R1", 10, 10, 0.8, 0.8)  # the stranded pad island
             + pad("R9", 22, 10, 4, 8)  # the plane (largest component)
             # A padless sliver nearer to R1 than the plane is.
             + '  (segment (start 13 8) (end 13 12) (width 0.2) (layer "F.Cu") (net 1))\n'
+            # Optionally ring the plane with other-net copper so it is unreachable.
+            + (
+                "".join(
+                    f'  (segment (start {a}) (end {b}) (width 0.3) (layer "F.Cu") (net 2))\n'
+                    for a, b in (
+                        ("18 4", "26 4"),
+                        ("26 4", "26 16"),
+                        ("26 16", "18 16"),
+                        ("18 16", "18 4"),
+                    )
+                )
+                if walled
+                else ""
+            )
             + '  (gr_rect (start 0 0) (end 30 30) (layer "Edge.Cuts") (width 0.1))\n)\n'
         )
         path = tmp_path / "b.kicad_pcb"
@@ -370,6 +384,7 @@ class TestIslandJoinTargetsPlane:
         closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
         closer._route_links(board, [OracleLink(net="GND", a=pad_end, b=zone_end)], attempt)
         assert attempt.applied == 1, attempt.notes
+        assert not any("nearest island" in n for n in attempt.notes)
 
         pcb = PCB.load(str(board))
         # Everything written beyond the original sliver segment.
@@ -377,6 +392,31 @@ class TestIslandJoinTargetsPlane:
         assert new
         # The plane pad spans x in [20, 24]; the route must reach it.
         assert max(max(s.start[0], s.end[0]) for s in new) >= 20.0 - 1e-6
+
+    def test_unreachable_plane_falls_back_and_says_so(self, tmp_path):
+        pytest.importorskip("shapely")
+        from kicad_tools.router.oracle_completion import OracleLink, PourLinkCloser
+
+        board = self._board(tmp_path, walled=True)
+        pad_end = OracleEndpoint(
+            description="Pad 1 [GND] of R1",
+            kind="pad",
+            net="GND",
+            x=10.0,
+            y=10.0,
+            layer="F.Cu",
+            ref="R1",
+            pad="1",
+        )
+        zone_end = OracleEndpoint(description="Zone [GND]", kind="zone", net="GND", x=10.0, y=10.0)
+        attempt = ClosureAttempt()
+        closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+        closer._route_links(board, [OracleLink(net="GND", a=pad_end, b=zone_end)], attempt)
+        assert attempt.applied == 1, attempt.notes
+        assert attempt.notes == [
+            "GND R1.1: no clearance-legal route to the plane-owning copper; "
+            "joined the nearest island instead"
+        ]
 
 
 class TestCloserReasonsPrinted:
@@ -475,3 +515,18 @@ class TestCloserReasonsPrinted:
         note = f"{_route_key(lk)}: withdrawn -- its copper raised KiCad DRC by 3"
         assert _closer_reasons_for(lk, [note]) == [note]
         assert _closer_reasons_for(other, [note]) == []
+
+    def test_padless_link_falls_back_to_its_net(self):
+        """Board 04: KiCad names ``Zone <-> Zone``; the closer's notes name U2.36."""
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink
+
+        z = OracleEndpoint(description="Zone [+3.3V] on F.Cu", kind="zone", net="+3.3V", x=0, y=0)
+        lk = OracleLink(net="+3.3V", a=z, b=z)
+        notes = [
+            "+3.3V U2.36: no valid via location",
+            "pad:+3.3V:U2.36: withdrawn -- its copper raised KiCad DRC by 2",
+            "GND C1.1: boxed in",
+            "+3.3VA U9.1: other net",
+        ]
+        assert _closer_reasons_for(lk, notes) == notes[:2]
