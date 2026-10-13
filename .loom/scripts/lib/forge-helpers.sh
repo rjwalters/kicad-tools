@@ -1255,7 +1255,10 @@ forge_gh_perm_safe() {
 # missing a scope, it is scoped to the wrong repository entirely, so rung 1
 # (ambient) 404s/GraphQL-fails outright and #6074's ladder never fires (its
 # classifier doesn't match either signature above). `sweep-lease-renew.sh`'s
-# renewal loop failed on every cycle as a direct result.
+# renewal loop failed on every cycle as a direct result, and
+# `resolve-tier-model.sh` (which does not source this file at all before this
+# fix) silently fell through to its tier-3 default with a misleading "likely
+# API quota" diagnosis.
 #
 # The fix borrows the SAME mechanism FLEET.md's "Private-repo clones over ssh"
 # contract already documents for a human ssh session on a locked keychain: a

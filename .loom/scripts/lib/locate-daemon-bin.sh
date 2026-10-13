@@ -502,7 +502,7 @@ _loom_daemon_version_lt() {
 # The exit code is LOOM_SCRIPT_HELPER_MISSING_RC, the code each entry point
 # already reserves for "could not run", never a fresh one. That is load-bearing
 # and not stylistic: several of these subcommands use non-zero codes as DATA
-# (`resolve-model --task-alias` exits 3 for "no mapping", `detect-dependency-cycle`
+# (`resolve-model --tier` exits 3 for "no mapping", `detect-dependency-cycle`
 # exits 1 for "cycle found"), so a refusal wearing one of those codes would be
 # read by the caller as an ANSWER -- the precise reason that variable exists.
 _loom_daemon_version_preflight() {

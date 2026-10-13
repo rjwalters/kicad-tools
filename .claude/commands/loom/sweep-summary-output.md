@@ -52,7 +52,7 @@ Wave annotation eases failure triage (e.g., "every issue in wave 2 failed → pr
 | Reason prefix | What died | What fixed it | Operator signal |
 |---|---|---|---|
 | `resumed: <phase> TOKEN_EXPIRED\|TOKEN_EXHAUSTED …` | the Claude **account credential** | token rotation + forge-state re-verification | account pool is thin — check `.bad_tokens` / add accounts |
-| `downgraded: <phase> MODEL_CREDITS_EXHAUSTED on <model> — same attempt re-dispatched on <cheaper>` | the account's credits for **one model tier** | one rung down the cost ladder, same account, same attempt | the sweep is running above the tier the account can sustain — consider a cheaper `roleConfig.model` pin or escalation ladder rather than adding accounts |
+| `downgraded: <phase> MODEL_CREDITS_EXHAUSTED on <model> — same attempt re-dispatched on <cheaper>` | the account's credits for **one model tier** | one rung down the cost ladder, same account, same attempt | the sweep is running above the tier the account can sustain — consider lowering `sweep.tierModels` / `sweep.optimization` rather than adding accounts |
 | `downgraded: <phase> SPEND_LIMIT on <model> — same attempt re-dispatched on session default` | possibly the whole account's **spend cap**, possibly just `<model>`'s tier (scope not knowable from the signature alone) | the `model` param dropped, inheriting the session default | a spend cap is binding on this account — raise it at claude.ai/settings/usage, or check whether it recurs on the session-default model too (account-wide) |
 | `unresumable: …` | any of the above | nothing — human needed | act now |
 

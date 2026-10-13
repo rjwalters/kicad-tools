@@ -47,10 +47,4 @@ for arg in "$@"; do
     esac
 done
 
-# Headless (#11721): the raw daemon needs no tmux. A leading --headless, or a
-# missing tmux, delegates to loom-daemon-start.sh (backgrounds the daemon).
-if [[ "${1:-}" == --headless ]] || ! command -v tmux >/dev/null 2>&1; then
-    [[ "${1:-}" == --headless ]] && shift || echo "start-daemon.sh: no tmux; starting headless" >&2
-    exec "$REPO_ROOT/.loom/scripts/cli/loom-daemon-start.sh" "$@"
-fi
 exec "$LOOM_BIN" start "$@"

@@ -44,7 +44,7 @@
 # Exit-code discipline (load-bearing): `exec` replaces this shell, so the
 # subcommand's own exit code reaches the caller unmodified. Several of these
 # helpers use non-zero codes as *data* rather than errors — `resolve-model
-# --task-alias` and `--downgrade` exit 3 to mean "no mapping, fall through to your
+# --tier` and `--task-alias` exit 3 to mean "no mapping, fall through to your
 # normal precedence chain", and `loom-claim` uses 1/2/3/4 to distinguish
 # already-claimed / bad args / not-found / wrong-agent. Any wrapper that
 # swallowed or remapped those codes would silently change dispatch behavior,

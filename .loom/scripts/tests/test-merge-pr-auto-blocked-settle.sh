@@ -118,7 +118,7 @@ loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr" "merge-pr loom-pr-overrid
 
 # --- Extract the functions under test from the real merge-pr.sh -------------
 FUNCS_FILE="$(mktemp)"
-trap 'rm -f "$FUNCS_FILE" "${CHECK_RUNS_COUNTER:-}" "${COMMENT_CALLS:-}" "${DAEMON_STUB:-}" 2>/dev/null || true' EXIT
+trap 'rm -f "$FUNCS_FILE" "${CHECK_RUNS_COUNTER:-}" "${COMMENT_CALLS:-}" "${CHAIN_LOCK_STUB:-}" 2>/dev/null || true' EXIT
 
 _extract_block() {
     awk -v start="$1" '
@@ -135,13 +135,14 @@ _extract_block() {
     awk '/^_check_verdict_label_contradiction\(\) \{/ { print; exit }' "$MERGE_PR_SRC"
     _extract_block '_wait_for_checks_then_sync_merge() {'
     _extract_block '_revalidate_merge_guards() {'
-    # The CI-run gate (#10567) is defined AND invoked on one line in merge-pr.sh,
-    # so it cannot be extracted; it has its own tests. Stub it as clear here.
-    echo '_check_ci_result() { return 0; }'
+    # #10167: defined AND invoked on one line, so _extract_block (which runs to
+    # a closing-brace line) cannot cut it. Keep the definition, drop the
+    # trailing self-call that would run it at source time.
+    awk '/^_check_chain_lock\(\) \{/ { sub(/; _check_chain_lock$/, ""); print; exit }' "$MERGE_PR_SRC"
 } > "$FUNCS_FILE"
 
 for fn in error_head_moved _check_loom_pr_label _check_verdict_label_contradiction \
-          _wait_for_checks_then_sync_merge _revalidate_merge_guards; do
+          _wait_for_checks_then_sync_merge _revalidate_merge_guards _check_chain_lock; do
     if ! grep -q "^${fn}() {" "$FUNCS_FILE"; then
         echo -e "${RED}FATAL${NC}: could not extract ${fn} from $MERGE_PR_SRC" >&2
         exit 2
@@ -166,29 +167,34 @@ MERGE_PRECONDITION_SHA="490b79f1d"
 PR_LABELS="loom:pr"
 PR_JSON='{"number":8220,"head":{"sha":"490b79f1d","ref":"feature/issue-8199"},"base":{"ref":"main"},"merged":false}'
 
-# The daemon is stubbed through LOOM_DAEMON_BIN (see the stub below).
+# #10167: _revalidate_merge_guards re-runs the chain-head lock guard. The daemon
+# is stubbed through LOOM_DAEMON_BIN; CHAIN_LOCK_RC/CHAIN_LOCK_MSG pick its verdict.
 FORGE_TYPE="github"
 AUTO_MERGE="true"
 DEFAULT_BRANCH_NAME="main"
 REPO_ROOT="."
-# Only `merge-pr revalidate-head` is intercepted,
+# Only `merge-pr chain-lock` is intercepted (plus `merge-pr revalidate-head`,
 # but ONLY when REVALIDATE_HEAD_STUB_RC is set: it then plays a daemon that
 # predates the verb, clap's unknown-subcommand rc 2 or a missing binary's 127);
 # every other subcommand goes to the real daemon the helper resolved above,
 # which the other scenarios rely on.
-DAEMON_STUB="$(mktemp)"
-export STUB_REAL_DAEMON="${LOOM_DAEMON_BIN:-loom-daemon}"
-cat > "$DAEMON_STUB" <<'STUB'
+CHAIN_LOCK_STUB="$(mktemp)"
+export CHAIN_LOCK_REAL_DAEMON="${LOOM_DAEMON_BIN:-loom-daemon}"
+cat > "$CHAIN_LOCK_STUB" <<'STUB'
 #!/usr/bin/env bash
+if [[ "$1" == "merge-pr" && "$2" == "chain-lock" ]]; then
+    echo "${CHAIN_LOCK_MSG:-LOOM-CHAIN-LOCK-CLEAR}"
+    exit "${CHAIN_LOCK_RC:-0}"
+fi
 if [[ "$1" == "merge-pr" && "$2" == "revalidate-head" && -n "${REVALIDATE_HEAD_STUB_RC:-}" ]]; then
     echo "error: unrecognized subcommand 'revalidate-head'" >&2
     exit "$REVALIDATE_HEAD_STUB_RC"
 fi
-exec "$STUB_REAL_DAEMON" "$@"
+exec "$CHAIN_LOCK_REAL_DAEMON" "$@"
 STUB
-chmod +x "$DAEMON_STUB"
-export LOOM_DAEMON_BIN="$DAEMON_STUB"
-unset REVALIDATE_HEAD_STUB_RC
+chmod +x "$CHAIN_LOCK_STUB"
+export LOOM_DAEMON_BIN="$CHAIN_LOCK_STUB"
+unset CHAIN_LOCK_RC CHAIN_LOCK_MSG REVALIDATE_HEAD_STUB_RC
 
 # Speed: no real sleeping, and a deadline the tests set explicitly.
 LOOM_AUTO_MERGE_POLL_INTERVAL=0
@@ -259,7 +265,7 @@ _reset() {
     MERGE_PRECONDITION_SHA="490b79f1d"
     ALLOW_UNAPPROVED=false
     LOOM_AUTO_MERGE_TIMEOUT=1
-    unset REVALIDATE_HEAD_STUB_RC
+    unset CHAIN_LOCK_RC CHAIN_LOCK_MSG REVALIDATE_HEAD_STUB_RC
 }
 
 # Run one of the extracted functions in a subshell, capturing output + rc.
@@ -603,6 +609,37 @@ _old_daemon_case 2 '{}' 1 \
   "an unreadable re-read still refuses (fails closed, #8896)"
 assert_contains "$LAST_OUT" "could not re-read PR #8220" \
   "old daemon: and still names the failed re-read as the reason"
+
+# ===========================================================================
+# #10167 — a chain head may take its merge lock DURING the settle wait.
+# ===========================================================================
+echo ""
+echo "#10167: a chain-head lock taken during the wait must defer the merge..."
+
+# Lock acquired while --auto waited: _revalidate_merge_guards must defer (exit 6).
+_reset
+FRESH_PR_JSON='{"number":8220,"head":{"sha":"490b79f1d"},"merged":false,"labels":[{"name":"loom:pr"}]}'
+CHAIN_LOCK_RC=6 CHAIN_LOCK_MSG="chain head #9000 is re-dating" run_fn _revalidate_merge_guards
+assert_eq "6" "$LAST_RC" \
+  "#10167: a lock taken during the settle wait defers the merge with exit 6"
+assert_contains "$LAST_OUT" "chain head #9000 is re-dating" \
+  "#10167: the deferral names the lock holder"
+
+# No lock -> the re-validation still passes (the guard adds no false block).
+_reset
+FRESH_PR_JSON='{"number":8220,"head":{"sha":"490b79f1d"},"merged":false,"labels":[{"name":"loom:pr"}]}'
+run_fn _revalidate_merge_guards
+assert_eq "0" "$LAST_RC" \
+  "#10167: no lock held -> the re-validation proceeds"
+
+# Daemon too old / failing (non-6 exit) fails open with a warning, never a block.
+_reset
+FRESH_PR_JSON='{"number":8220,"head":{"sha":"490b79f1d"},"merged":false,"labels":[{"name":"loom:pr"}]}'
+CHAIN_LOCK_RC=2 CHAIN_LOCK_MSG="usage" run_fn _revalidate_merge_guards
+assert_eq "0" "$LAST_RC" \
+  "#10167: a daemon that cannot run the lock check fails open"
+assert_contains "$LAST_OUT" "did not run" \
+  "#10167: and says so"
 
 # --- Summary ---
 echo ""

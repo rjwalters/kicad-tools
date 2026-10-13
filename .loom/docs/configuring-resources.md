@@ -12,7 +12,7 @@ linked doc disagree, the linked doc wins.
 
 | Owns | Doc |
 |---|---|
-| Model precedence chain, escalation ladder | [`model-selection.md`](model-selection.md) |
+| Model precedence chain, escalation ladder, `sweep.tierModels`, `sweep.optimization` | [`model-selection.md`](model-selection.md) |
 | `runtimes.*` — runtime resolution, `roles`, `preference`, `rolePreference`, `backstopCeiling`, observability markers | [`runtime-adapters.md`](runtime-adapters.md) |
 | Model profiles, the API-key account pool (`loom-daemon api-keys`) | [`runtime-model-trials.md`](runtime-model-trials.md) |
 | Claude OAuth account pool, rotation, exhaustion holds | [`token-pool.md`](token-pool.md) |
@@ -37,7 +37,7 @@ is two of them being conflated:
 | Axis | The question | Keys |
 |---|---|---|
 | **Tap** | which CLI, drawing on which credential pool | `runtimes.default`, `runtimes.roles`, `runtimes.preference`, `runtimes.rolePreference` |
-| **Model** | which model on that tap | `terminals[].roleConfig.model`, `autonomous.roleRunner.roleModels`, `sweep.escalation` |
+| **Model** | which model on that tap | `terminals[].roleConfig.model`, `sweep.tierModels`, `sweep.optimization`, `autonomous.roleRunner.roleModels`, `sweep.escalation` |
 | **Capacity** | how many accounts, and what happens when they run dry | `loom-daemon tokens` / `accounts` / `api-keys` |
 | **Spend bound** | how much work may fall through to a metered endpoint | `runtimes.backstopCeiling`, `api-keys limit --max-concurrent` |
 
@@ -179,27 +179,66 @@ see Recipe 4 for the worked example where this silently stopped a fleet's Judge.
 
 ## Recipe 2 — minimize wall-clock on code work
 
+The one-line answer:
+
+```json
+{ "sweep": { "optimization": "speed" } }
+```
+
+`sweep.optimization` is `"cost"` | `"speed"` | `"balanced"` (default
+`"balanced"`), with env override `LOOM_SWEEP_OPTIMIZATION` (**env > config >
+default**). The shipped presets, quoted from
+[`model-selection.md`](model-selection.md#optimization-profile-switch-sweepoptimization-issue-4238-phase-b):
+
+| Profile | `mechanical` | `routine` | `complex` |
+|---|---|---|---|
+| `balanced` (default) | *(unset)* | *(unset)* | *(unset)* |
+| `cost` | `haiku` | `sonnet` | `opus` |
+| `speed` | `sonnet` | `opus` | `opus` |
+
+**Why `speed` starts a tier higher rather than picking a faster model.**
 Wall-clock in a sweep is dominated by Judge-rejection / Doctor **round-trip
 count**, not per-turn latency. One avoided rejection is worth more than every
-token of latency you could shave, so buy fewer retries with a stronger Builder:
-pin Builder's model at tier 2, exactly as Recipe 1 Path A pins Judge.
+token of latency you could shave, so `speed` buys fewer retries. `complex` is
+already at the ceiling under `balanced`, so `speed` raises `mechanical` and
+`routine` and leaves `complex` alone.
+
+### What decides which stratum an issue lands in
+
+The Curator's `<!-- loom:complexity=<tier> -->` marker, on the one axis *how
+expensive is it to be wrong?* An issue with no marker counts as `routine`. This
+is a Curator output, so an unenriched issue gets the middle tier by default — if
+your `mechanical` work is not getting the cheap rung, check the marker before
+touching the config.
+
+### Hand-tuning one stratum
+
+An explicit `sweep.tierModels[<runtime>][<tier>]` entry **wins over the preset**,
+so you can take a profile and override exactly one cell:
 
 ```json
 {
-  "terminals": [
-    {
-      "id": "terminal-1",
-      "name": "Builder",
-      "role": "claude-code-worker",
-      "roleConfig": {
-        "workerType": "claude",
-        "roleFile": "builder.md",
-        "model": "opus"
-      }
-    }
-  ]
+  "sweep": {
+    "optimization": "speed",
+    "tierModels": { "claude": { "mechanical": "haiku" } }
+  }
 }
 ```
+
+That is `speed` everywhere except `mechanical`, which stays cheap. The map is
+runtime-neutral in its *tier* names, keyed by runtime for its *model IDs*
+(`"codex": { "routine": "gpt-5", … }`).
+
+### The bounds you cannot configure around
+
+Tier routing is **Builder-only**, **never resolves to `fable`**, is suppressed
+for the forced arm in model-cost experiment mode, and — the one that bites —
+**tier-1 and tier-2 pins still win**:
+
+> Pinning `terminals[].roleConfig.model` for **Builder** disables tier routing
+> for Builder entirely. Tier routing sits at precedence 2.5, *below* the
+> workspace pin. `sweep.optimization` and a Builder `roleConfig.model` pin are
+> mutually exclusive in practice — pick one.
 
 Raising `sweep.max_doctor_cycles` above its default of `1` does the opposite of
 this recipe: it buys more repair attempts at the cost of more round trips (and
@@ -274,7 +313,8 @@ backlog through it, unnoticed, because falling through is what the resolver is
     "preference": ["claude", "codex", {"runtime": "opencode", "modelProfile": "zai-metered"}],
     "backstopCeiling": {
       "maxConcurrent": 2,          // most concurrent metered dispatches this HOST may hold
-      "appliesFrom": 2             // first tier the ceiling governs (default 1)
+      "appliesFrom": 2,            // first tier the ceiling governs (default 1)
+      "minComplexity": "complex"   // work below this stratum never reaches a governed tap
     }
   }
 }
@@ -540,6 +580,7 @@ pin outranks the `sweep.escalation` ladder for that role.
 
 | If you… | Then… | Owner |
 |---|---|---|
+| pin `terminals[].roleConfig.model` for Builder | `sweep.optimization` / `sweep.tierModels` stop applying to Builder (tier 2 beats tier 2.5) | [`model-selection.md`](model-selection.md) |
 | set `runtimes.roles.<role>` without `roleModels.<role>` | the tick is refused before spawn, forever, and `validate` stays green | [`runtime-adapters.md`](runtime-adapters.md) |
 | set `runtimes.rolePreference.judge` expecting it to govern a sweep's Judge phase | it does not — a sweep resolves under `sweep-lifecycle` and runs one runtime throughout | [`runtime-adapters.md`](runtime-adapters.md) |
 | set `LOOM_RUNTIME` / `LOOM_RUNTIME_<ROLE>` | fall-through is disabled; the preference list is bypassed entirely | [`runtime-adapters.md`](runtime-adapters.md) |

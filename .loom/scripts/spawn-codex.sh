@@ -499,7 +499,7 @@ fi
 #
 # Phase-2 minimalism (issue #4468): there is NO logical-tier -> model-ID table
 # here. Loom's logical tiers (`opus`, `sonnet`, `fable`) are Claude names; the
-# `sweep.modelAliases` indirection that would map them onto
+# `sweep.modelAliases`/`sweep.tierModels` indirection that would map them onto
 # OpenAI model IDs is epic #4167 Phase 4. Until then LOOM_MODEL is forwarded
 # verbatim and the adapter's static default is "whatever the profile already
 # chose", which is the operator's own selection.

@@ -1,6 +1,6 @@
 # `merge-pr.sh` exit codes 3-7 — the "not a failure" outcomes
 
-`merge-pr.sh` reserves four exit codes (3, 4, 5, 7) for outcomes that look like failures to
+`merge-pr.sh` reserves five exit codes for outcomes that look like failures to
 a naive `|| handle_failure` caller but are not: the merge did not happen,
 nothing is wrong, and the correct response is to re-queue the PR for a later
 pass.
@@ -32,6 +32,7 @@ failure — the safe degradation for a caller older than a new code.
 | `3` | yes | The PR's head moved between the fresh head-SHA read and the merge call (#5579) — someone else moved it. | Re-queue; the verdict does not carry to the new head (#5686). |
 | `4` | yes | The #8248/#8919 freshness guard blocked the merge and `--redate-stale-checks` re-dated the checks with a tree-identical no-op push (#8508) — this run moved the head. | Re-queue; a fresh Judge review is needed. |
 | `5` | yes | Held: `--auto`'s bounded settle-wait expired, or the check-runs API was unreadable (#8896); no concluded `CI` run for this exact head yet (#10567); or, on a plain merge, a required context is missing or pending (#10688). Nobody moved the head. | Re-queue. |
+| `6` | yes | Another PR on the same base holds the chain-head merge lock (#10167). | Re-queue; bounded by the lock's cap. |
 | `7` | yes | `merge-pr.sh`: the PR carries `loom:pr` + `loom:sequenced` and no other blocker; stdout carries `LOOM-SEQUENCED-HOLD pr=<N> after=<M>` (#11330). Or *(Champion Step 3 only)* `forge merge-queue step` gave no `LOOM-MERGE-QUEUE-DIRECT` verdict (#10256, #10628). | Re-queue, like 6. The sequencing hold clears when `<M>` lands (`merge-pr sequence-eval`); a queue stall is surfaced by Step 3. |
 | *(none)* | unknown | The caller was killed before the script could exit — the only outcome that leaves no forge-visible trace (#9096). | Re-read the PR; see "No exit code at all". |
 
@@ -44,6 +45,7 @@ Retryable outcomes never post a failure comment and never count as errors.
 - [Exit 3 — a foreign push raced the merge (#5579)](#exit-3--a-foreign-push-raced-the-merge-5579)
 - [Exit 4 — this run re-dated the stale required checks (#8508)](#exit-4--this-run-re-dated-the-stale-required-checks-8508)
 - [Exit 5 — CI outlasted `--auto`'s bounded settle-wait (#8896)](#exit-5--ci-outlasted---autos-bounded-settle-wait-8896)
+- [Exit 6 — deferred behind a re-dating chain head (#10167)](#exit-6--deferred-behind-a-re-dating-chain-head-10167)
 - [Exit 7 — the merge-queue step withheld the direct merge (#10256, #10628)](#exit-7--the-merge-queue-step-withheld-the-direct-merge-10256-10628)
 - [Exit 7 from `merge-pr.sh` — a sequencing hold (#11330)](#exit-7-from-merge-prsh--a-sequencing-hold-11330)
 - [No exit code at all — the caller was killed (#9096)](#no-exit-code-at-all--the-caller-was-killed-9096)
@@ -401,6 +403,105 @@ cost nothing but a log line.
 Exit 5 only exists if the script is still alive to return it. See the next
 section.
 
+## Exit 6 — deferred behind a re-dating chain head (#10167)
+
+### The livelock
+
+#10163 measured it: a sequenced chain head blocked by the #8248 freshness
+guard is re-dated (exit 4), and while its re-run checks take ~15 minutes,
+unrelated PRs keep merging. Each of those merges moves `main` under the head
+in a real coupled input (#10163 PR 1 verified the moves were not restamps, so
+the #8919/#9065 discount cannot absorb them), the head's fresh evidence is
+stale again the moment it lands, and the next attempt re-dates again until
+the #9590 budget escalates it. The fix has to stop `main` moving for the few
+minutes the head's checks need.
+
+### The lock
+
+When `merge-pr redate-checks` pushes a re-date, it also posts one comment on
+the chain-head PR:
+
+```text
+<!-- loom:chain-head-lock base=<ref> head=<40-hex> acquired=<rfc3339> cap=<secs> -->
+```
+
+Durable, trusted forge state in the style of the `loom:sequence` marker: no
+process owns it, so a restart cannot lose it and every host reads the same
+answer. Under `--auto` (Champion's path) or `LOOM_CHAIN_LOCK_GUARD=1`,
+`merge-pr.sh` asks `loom-daemon merge-pr chain-lock` right after it reads the
+PR and **before anything writes** (the stacked-children ref pin, a re-date, a
+comment, the merge). While a lock on another open PR on the same base is
+live, it prints the holder and the expiry to stderr and exits **6**.
+
+A lock is live only while all of these hold:
+
+- it is the newest valid marker in a **trusted** author's comment — an
+  outsider's marker is prose (#9548) and never holds a merge;
+- the holder is open, still targets that base, and is not `loom:operator`
+  (budget exhaustion releases the lock);
+- the holder's head is still the marker's `head` — any push voids it;
+- no required check on its head has failed. Green checks do **not** release
+  the lock (#10448): it holds until the head lands (the PR closes), a required
+  check goes red, or the cap, so held PRs cannot all race the head the moment
+  its checks finish and stale it again;
+- less than the cap has passed since the comment's forge-assigned
+  `created_at`. The embedded `acquired=` is never trusted, and the effective
+  cap is the smaller of the marker's and the reader's.
+
+**Which re-dates take the lock**: every fresh-verdict re-date that
+`merge-pr redate-checks` pushes (a `Pushed` outcome), not only sequenced
+chain heads. A head that re-dates is exactly a PR whose evidence the busy base
+keeps staling, so the same hold is wanted for it. A re-date that pushes
+nothing (no budget left, hold escalated) takes no lock, and neither does a
+plain head-sync push. The cap bounds every lock, and `LOOM_CHAIN_LOCK_OVERRIDE`
+skips the guard.
+
+The chain head is never held by its own lock. Two heads that both hold one
+are ordered oldest-lock-first, so they cannot hold each other.
+
+### Bounded so it cannot wedge `main`
+
+- **Cap**: `LOOM_CHAIN_LOCK_CAP_SECS` > config `champion.chainLockCapSecs` >
+  7200 s default (sized above measured required-CI duration, ~45 min as of
+  #11221), clamped like `LOOM_REDATE_BUDGET` (zero or unparseable falls
+  through a tier; anything above 10800 s is clamped to 10800 s).
+- **No budget bypass**: the lock is a separate marker that the #9590 chain
+  position never reads, so taking it neither spends nor refunds a re-date.
+- **API cost** (#10448): a repo-wide `GET issues/comments?since=…` listing
+  finds every marker, recorded in `forge_call_stats` as `chain_lock.comments`.
+  It is read 100 comments per page until a short page, never truncated, and
+  each page is its own ETag'd conditional read. The window start is floored
+  to 5 minutes, so an unchanged re-check is all free 304s, and a new comment
+  re-bills only the last page. Only a PR with an unexpired marker for this
+  base costs a further `GET pulls/N`. A check with no lock present costs one
+  billable call when the window holds fewer than 100 comments, and at most
+  `floor(n / 100) + 1` for `n` comments. A window past 50 pages is reported
+  unreadable (below), not cut short.
+- **Unreadable state** (API error, quota) defers rather than guessing "no
+  lock", and records the first unreadable read in
+  `.loom/state/chain-lock/` (ignored). Once a whole cap has passed since then,
+  no lock taken before the outage can still be live, so the guard fails open
+  (`LOOM-CHAIN-LOCK-FAIL-OPEN`). A good read clears the record, and a record older than twice the cap is a
+  leftover from a past outage that counts as a fresh first failure. If the record
+  cannot be written at all, the guard fails open at once rather than defer
+  without bound.
+- **Older daemon**: any `chain-lock` exit other than 0 or 6 (a binary without
+  the verb) is a warning and the merge proceeds. The lock orders merges; it
+  never judges a tree, so it fails open where a safety guard would fail
+  closed.
+
+### Overrides
+
+`LOOM_CHAIN_LOCK_OVERRIDE=1` skips the guard (no forge reads). A plain
+`merge-pr.sh <N>` by hand — no `--auto` — is never held; an operator who
+wants the check sets `LOOM_CHAIN_LOCK_GUARD=1`.
+
+### Caller contract
+
+Exactly exit 3/4/5/7's: nothing merged, nothing failed, no comment, re-queue.
+The PR's head did not move, so its verdict stands. A hold costs one pass; it
+lasts at most one cap.
+
 ## Exit 7 — the merge-queue step withheld the direct merge (#10256, #10628)
 
 Champion's Step 3 runs `loom-daemon forge merge-queue step <PR> --approved-sha
@@ -469,7 +570,8 @@ decided by the label alone. Any second blocker (`loom:changes-requested`,
 `loom:operator`, …) keeps exit 1, because the PR stays blocked after the
 predecessor lands.
 
-A sequencing hold has no cap of its own (the
+Exit 7 is a separate code, not a reuse of 6: 6 is the chain lock's bounded
+defer with its own cap, while a sequencing hold has no cap of its own (the
 `sequence-eval` pass owns its release). It is opt-in on the daemon side —
 `merge-pr.sh` sets `LOOM_SEQUENCED_HOLD_REPO` — so an older `loom-daemon`
 ignores it and answers exit 1 as before, and an older `merge-pr.sh` never sees

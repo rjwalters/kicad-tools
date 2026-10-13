@@ -56,12 +56,13 @@ assert_contains "$OUT" "NON-CANARY" "loud warning names the guardrail"
 assert_eq "$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 SE resolve-mode --config /nonexistent 2>/dev/null)" "experiment" "canary confirmed -> experiment honored"
 echo ""
 
-echo "Case 3: deterministic arm assignment keyed on the issue number alone"
-A1="$(SE assign-arm --issue 100)"
-A2="$(SE assign-arm --issue 100)"
-assert_eq "$A1" "$A2" "same issue is resume-stable"
-assert_eq "$A1" "A opus" "issue 100 -> A opus (even parity)"
-assert_eq "$(SE assign-arm --issue 101)" "B sonnet" "issue 101 -> B sonnet (odd parity)"
+echo "Case 3: deterministic + stratified arm assignment"
+A1="$(SE assign-arm --issue 100 --complexity routine)"
+A2="$(SE assign-arm --issue 100 --complexity routine)"
+assert_eq "$A1" "$A2" "same issue+complexity is resume-stable"
+assert_eq "$A1" "A opus" "issue 100 routine -> A opus"
+assert_eq "$(SE assign-arm --issue 100 --complexity complex)" "B sonnet" "issue 100 complex -> opposite arm (stratified)"
+assert_eq "$(SE assign-arm --issue 101 --complexity routine)" "B sonnet" "issue 101 routine -> B sonnet (parity)"
 echo ""
 
 echo "Case 3b: N configurable arms + budget-fraction cap (#9122)"
@@ -73,8 +74,8 @@ cat > "$CFG/arms.json" <<'EOF'
   {"id": "HAIKU",  "model": "haiku",  "weight": 8}
 ]}}
 EOF
-N1="$(SE assign-arm --issue 100 --config "$CFG/arms.json")"
-N2="$(SE assign-arm --issue 100 --config "$CFG/arms.json")"
+N1="$(SE assign-arm --issue 100 --complexity routine --config "$CFG/arms.json")"
+N2="$(SE assign-arm --issue 100 --complexity routine --config "$CFG/arms.json")"
 assert_eq "$N1" "$N2" "3-arm assignment is resume-stable"
 case "$N1" in
   "OPUS opus"|"SONNET sonnet"|"HAIKU haiku") pass "3-arm assignment names a configured arm ($N1)" ;;
@@ -83,7 +84,7 @@ esac
 # The heavy arm must dominate: weight 8/10 over a 200-issue sample.
 HAIKU_N=0
 for i in $(seq 1 200); do
-  [[ "$(SE assign-arm --issue "$i" --config "$CFG/arms.json")" == HAIKU* ]] && HAIKU_N=$((HAIKU_N+1))
+  [[ "$(SE assign-arm --issue "$i" --complexity routine --config "$CFG/arms.json")" == HAIKU* ]] && HAIKU_N=$((HAIKU_N+1))
 done
 if (( HAIKU_N > 130 && HAIKU_N < 190 )); then
   pass "weighted assignment converges on the 8/10 arm ($HAIKU_N/200)"
@@ -96,34 +97,35 @@ fi
 cat > "$CFG/fable.json" <<'EOF'
 {"sweep": {"modelExperimentArms": [{"id":"A","model":"opus"},{"id":"F","model":"fable"}]}}
 EOF
-OUT="$(SE assign-arm --issue 100 --config "$CFG/fable.json" 2>&1)"
+OUT="$(SE assign-arm --issue 100 --complexity routine --config "$CFG/fable.json" 2>&1)"
 assert_contains "$OUT" "No-Fable bound" "a fable arm is refused by name"
 assert_contains "$OUT" "A opus" "a rejected roster falls through to the A/B pair"
 cat > "$CFG/glm.json" <<'EOF'
 {"sweep": {"modelExperimentArms": [{"id":"A","model":"opus"},{"id":"GLM","model":"glm-5.3","runtime":"opencode"}]}}
 EOF
-OUT="$(SE assign-arm --issue 100 --config "$CFG/glm.json" 2>&1)"
+OUT="$(SE assign-arm --issue 100 --complexity routine --config "$CFG/glm.json" 2>&1)"
 assert_contains "$OUT" "Claude-only" "a non-Claude runtime arm is refused, not silently ignored"
 assert_contains "$OUT" "A opus" "the non-Claude roster falls through to the A/B pair"
 
 # Budget fraction: 1.0 (the default) is today's always-forced behavior; 0.0
 # samples every issue out (`none -`, no arm, no forced model).
-assert_eq "$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=1.0 SE assign-arm --issue 100 --config /nonexistent)" \
+assert_eq "$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=1.0 SE assign-arm --issue 100 --complexity routine --config /nonexistent)" \
   "A opus" "budget fraction 1.0 reproduces the unconfigured default"
-assert_eq "$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=0 SE assign-arm --issue 100 --config /nonexistent)" \
+assert_eq "$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=0 SE assign-arm --issue 100 --complexity routine --config /nonexistent)" \
   "none -" "budget fraction 0 samples the issue out (null arm)"
-OUT="$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=bogus SE assign-arm --issue 100 --config /nonexistent 2>&1)"
+OUT="$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=bogus SE assign-arm --issue 100 --complexity routine --config /nonexistent 2>&1)"
 assert_contains "$OUT" "A opus" "a malformed budget fraction falls back to 1.0"
 BAN="$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=0 \
-  SE banner --issue 100 --config /nonexistent 2>/dev/null)"
+  SE banner --issue 100 --complexity routine --config /nonexistent 2>/dev/null)"
 assert_contains "$BAN" "NOT IN EXPERIMENT" "the banner names a budget-sampled-out issue"
 rm -rf "$CFG"
 echo ""
 
 echo "Case 4: startup banner names mode + arm"
-BAN="$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 SE banner --issue 100 --config /nonexistent 2>/dev/null)"
+BAN="$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 SE banner --issue 100 --complexity complex --config /nonexistent 2>/dev/null)"
 assert_contains "$BAN" "mode=EXPERIMENT" "banner names experiment mode"
-assert_contains "$BAN" "ARM A" "banner names the assigned arm"
+assert_contains "$BAN" "ARM B" "banner names the assigned arm"
+assert_contains "$BAN" "SUPPRESSED" "banner notes tier-2.5 suppression"
 echo ""
 
 echo "Case 5: record append + harvest with transcript join (exact cost)"
@@ -136,15 +138,12 @@ printf '%s\n' '{"message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,
 cat > "$SESS/index.json" <<EOF
 {"schema":"loom.transcript-index/v1","session_uuid":"UUID1","repo":"myrepo","agents":[{"agent_id":"agent-bld1","role":"loom-builder","transcript":"subagents/agent-bld1.jsonl"}]}
 EOF
-SE record --quiet --stats-file "$STATS" --issue 100 --mode experiment --arm A --model opus --story-points 5 --phase builder --role builder --agent-id agent-bld1 --attempt 1
+SE record --quiet --stats-file "$STATS" --issue 100 --mode experiment --arm A --model opus --complexity routine --phase builder --role builder --agent-id agent-bld1 --attempt 1
 SE record --quiet --stats-file "$STATS" --issue 100 --mode experiment --arm A --phase judge --role judge --verdict pass --attempt 1
 SE record --quiet --stats-file "$STATS" --issue 100 --mode experiment --arm A --phase merge --role merge
 assert_file "$STATS" "stats JSONL created"
 NLINES="$(wc -l < "$STATS" | tr -d ' ')"
 assert_eq "$NLINES" "3" "three JSONL records appended"
-FIRST="$(head -1 "$STATS")"
-assert_contains "$FIRST" '"story_points":5' "record carries story_points"
-case "$FIRST" in *'"complexity"'*) fail "record has no complexity key";; *) pass "record has no complexity key";; esac
 # GNU `stat -c` first, BSD/macOS `stat -f '%Lp'` second. The reverse order is
 # WRONG on Linux: GNU `stat -f` means "show FILESYSTEM status" and *succeeds*,
 # so the `||` fallback never fires and the comparison sees a block-count dump

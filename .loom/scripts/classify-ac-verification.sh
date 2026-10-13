@@ -223,8 +223,8 @@ _extract_ac_items() {
 #
 # `<!-- loom:ac-verified sha=<head> -->`, modeled on judge.md's
 # `<!-- loom:verdict-sha sha=... verdict=... -->` (#5686) and anchored the same
-# way extract-capability-markers.sh anchors its own (the #4840 anchoring
-# rule): the full `<!-- ... -->` comment form with a HEX sha, so prose that
+# way require-complexity-marker.sh / extract-capability-markers.sh anchor theirs
+# (#4840): the full `<!-- ... -->` comment form with a HEX sha, so prose that
 # merely quotes the syntax with a `<head>` placeholder can never be mistaken for
 # a live marker. Prints every marker SHA found, one per line.
 _extract_ac_verified_shas() {

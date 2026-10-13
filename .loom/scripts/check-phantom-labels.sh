@@ -21,7 +21,7 @@
 # excludes:
 #   - slash-command names like `/loom:sweep` (a `/`-prefixed token, never a label)
 #   - prose that merely discusses a label name without an application flag
-#   - HTML-comment markers such as `<!-- loom:points=3 -->`
+#   - HTML-comment markers such as `<!-- loom:complexity=complex -->`
 # so the false positive noted during #3786 curation (`` `loom:sweep` ``, the
 # `/loom:sweep` command) does not trip the check.
 #

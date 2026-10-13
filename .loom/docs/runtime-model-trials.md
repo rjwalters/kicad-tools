@@ -744,7 +744,8 @@ it binds `opencode` as well as `pi`). Nothing is copied into
      "preference": ["claude", "codex", {"runtime": "pi", "modelProfile": "quick-cerebras"}],
      "backstopCeiling": {
        "maxConcurrent": 2,          // most concurrent metered dispatches this HOST may hold
-       "appliesFrom": 2             // first tier the ceiling governs; here, the preset
+       "appliesFrom": 2,            // first tier the ceiling governs; here, the preset
+       "minComplexity": "routine"   // optional: keep trivia off the metered tap
      }
    }
    ```
