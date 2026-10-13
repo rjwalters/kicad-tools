@@ -32,29 +32,40 @@ as well, which models a round pad as its full square, so that the self-check
 agrees with DRC whenever a move allows it.  A shortfall it cannot clear is left
 in place and counted, and the pre-save clearance check still reports it.
 
-Scope: single-ended connections.  Coupled diff-pair legs and their vertices are
-never moved (a one-sided move would break the pair geometry); they still count
-as foreign copper for everyone else.  A board with an HV pairwise projection
-(``--voltage-map``) is skipped entirely, since its attach-zone waivers are not
-modelled here.
+Scope: single-ended connections (``repairable``; coupled and uncoupled-fallback
+pair legs are not passed in, so they never move).  Copper of a diff-pair NET
+that is repairable -- the single-ended stubs to a pair net's extra pads, or a
+declined pair routed entirely on the ordinary star -- is held to a length
+budget (issue #6437): a move is kept only while the PAIR's skew -- the
+difference of the two nets' accumulated length changes -- stays within
+:data:`PAIR_LENGTH_TOLERANCE_MM` (board 03 USB_D: +0.009 mm).  Budgeting each
+net alone would let opposite-sign moves on both nets add up to twice that.  Not
+moving it is worse: the router's post-route backstop then demotes the whole net
+for the shortfall.  Pair-net shortfalls left in place (over budget, or on a
+non-repairable leg) are counted as ``pair_skipped``.  Via-vs-pad
+shortfalls are reported (``via_found`` / ``via_remaining``) but never repaired:
+moving a via moves copper on every layer plus all its incident segments.  A
+board with an HV pairwise projection (``--voltage-map``) is skipped, since its
+attach-zone waivers are not modelled here; the skip is reported as
+``skipped == "voltage-map"`` so the router can log it.
 """
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..authored_clearance import pad_authored_floor
-from ..clearance_shapes import copper_gap, pad_shape, segment_shape
+from ..clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 from ..primitives import Pad, Route, Segment, pad_half_extents
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .pathfinder import LatticePathfinder
 
-__all__ = ["ClassPadRepairStats", "repair_class_pad_pairs"]
+__all__ = ["PAIR_LENGTH_TOLERANCE_MM", "ClassPadRepairStats", "repair_class_pad_pairs"]
 
 #: Extra gap past the requirement for a moved segment, mm.  Absorbs the 4-decimal
 #: rounding of the KiCad writer (5e-5) with a wide safety factor.
@@ -66,6 +77,13 @@ _KEY_DIGITS = 6
 
 _Vertex = tuple[int, float, float]  # (layer index, x, y), rounded
 
+#: Largest total routed-length change a repair may make to one diff-pair net,
+#: mm (issue #6437).  This is epic #6441 P5's skew-regression threshold
+#: (#6447: "cannot change the skew of a pair net by more than 0.01 mm").  It
+#: bounds the pair's skew change (``|drift[P] - drift[N]|``), not each net's
+#: own drift: opposite-sign moves on the two nets would otherwise double it.
+PAIR_LENGTH_TOLERANCE_MM = 0.01
+
 
 @dataclass
 class ClassPadRepairStats:
@@ -74,6 +92,15 @@ class ClassPadRepairStats:
     found: int = 0
     repaired: int = 0
     remaining: int = 0
+    #: Shortfalls on diff-pair net copper left in place: on a pair leg, or a
+    #: move refused by the length budget (issue #6437).  Refused movable ones
+    #: also count in ``remaining``.
+    pair_skipped: int = 0
+    #: Via-vs-pad shortfalls found / left (vias are never moved, so equal).
+    via_found: int = 0
+    via_remaining: int = 0
+    #: Why the repair did not run at all (``"voltage-map"``), else ``None``.
+    skipped: str | None = None
 
 
 @dataclass
@@ -120,6 +147,10 @@ def _pad_gap(seg: Segment, shape: Any, pad: Pad, *, strict: bool) -> float:
     return min(kernel, rect)
 
 
+def _seg_len(seg: Segment) -> float:
+    return math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+
+
 def _point_in_pad(x: float, y: float, pad: Pad) -> bool:
     hw, hh = pad_half_extents(pad)
     return abs(x - pad.x) <= hw + _EPS and abs(y - pad.y) <= hh + _EPS
@@ -131,6 +162,8 @@ def repair_class_pad_pairs(
     net_classes: Mapping[object, object | None],
     *,
     repairable: set[object] | None = None,
+    pair_nets: Collection[int] | Mapping[int, int] = frozenset(),
+    pair_length_tolerance: float = PAIR_LENGTH_TOLERANCE_MM,
     max_passes: int = 4,
 ) -> ClassPadRepairStats:
     """Clear track-vs-pad shortfalls of the pad's own class (in place).
@@ -144,11 +177,20 @@ def repair_class_pad_pairs(
         net_classes: connection key -> net class (``None`` = board default),
             for every key in ``routes``.
         repairable: keys whose copper may move (default: all of ``routes``).
+        pair_nets: diff-pair nets (issue #6437), as a mapping of net id to its
+            partner's net id (a bare collection of ids budgets each net alone).
+            Their repairable copper may move only while the pair's skew change
+            stays within ``pair_length_tolerance``; shortfalls left on them are
+            counted in ``pair_skipped``.
+        pair_length_tolerance: the per-pair skew budget, mm.
         max_passes: repair sweeps; each re-detects shortfalls on the moved copper.
     """
     stats = ClassPadRepairStats()
     classes = pf.pad_class_clearances
-    if classes is None or not routes or pf._pairwise is not None:
+    if classes is None or not routes:
+        return stats
+    if pf._pairwise is not None:
+        stats.skipped = "voltage-map"
         return stats
     pads: Sequence[Pad] = pf.pads
     floors = pf.rules.net_clearance_floors
@@ -156,7 +198,12 @@ def repair_class_pad_pairs(
     pad_req = [max(classes[i], pad_authored_floor(p, floors), base) for i, p in enumerate(pads)]
     if not any(r > base + _EPS for r in pad_req):
         return stats
+    pair_set = frozenset(pair_nets)
+    partners: Mapping[int, int] = pair_nets if isinstance(pair_nets, Mapping) else {}
     movable = set(routes) if repairable is None else set(repairable) & set(routes)
+    # Issue #6437: running length change of each pair net; the budget bounds
+    # the difference between a net's drift and its partner's.
+    pair_drift: dict[int, float] = defaultdict(float)
     pad_layers = [set(pf._pad_layer_indices(p)) for p in pads]
     layer_index: dict[Any, int | None] = {}
 
@@ -230,9 +277,43 @@ def repair_class_pad_pairs(
         out.sort(key=lambda s: s.gap - s.required)
         return out
 
+    def pair_left() -> int:
+        """Shortfalls still on diff-pair net copper (never hidden, #6437)."""
+        return sum(
+            len(pad_shortfalls(key, seg, class_only=True))
+            for key, route in routes.items()
+            if route.net in pair_set
+            for seg in route.segments
+        )
+
+    # Via-vs-pad shortfalls: reported only (a via move drags every layer).
+    n_layers = pf.layer_stack.num_layers
+    for key, route in routes.items():
+        own = own_clr[key]
+        for via in route.vias:
+            la, lb = lidx(via.layers[0]), lidx(via.layers[1])
+            if la is None or lb is None:
+                span = set(range(n_layers))
+            else:
+                span = set(range(min(la, lb), max(la, lb) + 1))
+            shape = via_shape(via)
+            r = via.diameter / 2.0 + reach_max
+            for i, pad in enumerate(pads):
+                if pad.net == route.net or pad_req[i] <= own + _EPS:
+                    continue
+                if not (span & pad_layers[i]):
+                    continue
+                hw, hh = pad_half_extents(pad)
+                if abs(pad.x - via.x) > hw + r or abs(pad.y - via.y) > hh + r:
+                    continue
+                if copper_gap(shape, pad_shape(pad)) < max(own, pad_req[i]) - _EPS:
+                    stats.via_found += 1
+    stats.via_remaining = stats.via_found
+
     stats.found = len(detect(strict=False))
     candidates = detect(strict=True)
     if not candidates:
+        stats.pair_skipped = pair_left()
         return stats
 
     committed = None
@@ -258,7 +339,14 @@ def repair_class_pad_pairs(
                 def pads_ok(key: object, new: Segment, strict: bool = strict) -> bool:
                     return not pad_shortfalls(key, new, class_only=False, strict=strict)
 
-                if _try_move(pf, routes, movable, sf, still[0], own_clr, pads_ok, committed, lidx):
+                budget = (
+                    (pair_drift, partners, pair_length_tolerance)
+                    if routes[sf.key].net in pair_set
+                    else None
+                )
+                if _try_move(
+                    pf, routes, movable, sf, still[0], own_clr, pads_ok, committed, lidx, budget
+                ):
                     committed = None  # geometry changed: rebuild before the next check
                     moved_any = True
                     break
@@ -267,6 +355,7 @@ def repair_class_pad_pairs(
             break
     stats.remaining = len(detect(strict=False))
     stats.repaired = max(0, stats.found - stats.remaining)
+    stats.pair_skipped = pair_left()
     return stats
 
 
@@ -280,8 +369,15 @@ def _try_move(
     pads_ok: Any,
     committed: Any,
     lidx: Any,
+    budget: tuple[dict[int, float], Mapping[int, int], float] | None = None,
 ) -> bool:
-    """Translate (or swing) the offending segment off the pad; keep if clean."""
+    """Translate (or swing) the offending segment off the pad; keep if clean.
+
+    ``budget`` (diff-pair nets, issue #6437) is ``(drift, partners, tolerance)``:
+    the move is refused when it would take the pair's skew change
+    ``|drift[net] - drift[partner]|`` beyond ``tolerance`` (a net with no known
+    partner is held to ``|drift[net]|``); a kept move updates ``drift``.
+    """
     route = routes[sf.key]
     seg = route.segments[sf.seg_index]
     layer = lidx(seg.layer)
@@ -381,6 +477,16 @@ def _try_move(
                 break
         if not ok:
             continue
+        if budget is not None:
+            drift, partners, tolerance = budget
+            delta = sum(
+                _seg_len(new) - _seg_len(routes[key].segments[idx])
+                for (key, idx), new in touched.items()
+            )
+            partner_drift = drift[partners[net]] if net in partners else 0.0
+            if abs(drift[net] + delta - partner_drift) > tolerance + _EPS:
+                continue  # would move the pair's skew beyond P5's threshold
+            drift[net] += delta
         for (key, idx), new in touched.items():
             old = routes[key].segments[idx]
             old.x1, old.y1, old.x2, old.y2 = new.x1, new.y1, new.x2, new.y2
