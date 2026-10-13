@@ -1,8 +1,8 @@
 ---
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb"
+author: "kicad-tools 0.22.0"
+date: "Rev 1 | 2026-10-13 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 6 copper (F.Cu, In1.Cu, In2.Cu, In3.Cu, In4.Cu, B.Cu) |
 | Footprints | 43 (40 SMD, 3 THT, 0 other) |
 | Nets | 55 |
-| Traces | 8739 segments |
+| Traces | 8771 segments |
 | Vias | 192 |
 | Board Size | 100.0 x 80.0 mm |
 
@@ -57,8 +57,6 @@ Board 07 real SDRAM memory test — DRAFT
 | UART | UART_RX, UART_TX |
 
 ### Power Architecture
-
-**Power Rails**: PWR_FLAG
 
 | Regulator | Device |
 |-----------|--------|
