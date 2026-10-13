@@ -47,6 +47,7 @@ test-champion-held-pr-health-pass.sh
 test-champion-issue-promo-escalation-respects-human-hold.sh
 test-champion-merge-queue-step-no-fallthrough.sh
 test-champion-needs-revision-routing.sh
+test-champion-pr-merge-hold-release.sh
 test-champion-pr-merge-negation-guard.sh
 test-champion-premise-false-close.sh
 test-champion-promotion-throughput.sh
@@ -250,6 +251,7 @@ tests/hooks/test-guard-destructive-mkdir-confinement.sh
 tests/hooks/test-guard-destructive-mktemp-canon.sh
 tests/hooks/test-guard-destructive-readonly-fastpath.sh
 tests/hooks/test-guard-destructive-rm-scope.sh
+tests/hooks/test-guard-destructive-sed-operands.sh
 tests/hooks/test-guard-destructive-session-scratch.sh
 tests/hooks/test-guard-destructive-stash-scope.sh
 tests/hooks/test-guard-destructive-write-confinement.sh

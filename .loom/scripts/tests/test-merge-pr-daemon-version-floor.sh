@@ -331,6 +331,7 @@ discovered-worktree open -
 retries-used open -
 pr-state open -
 poll-wait open -
+merge-route open -
 revalidate-head open -
 cleanup-paths open -
 workflow-scope open -"

@@ -13,7 +13,8 @@ carries are policy: [trace identity](trace-identity.md). An issue
 number never identifies an execution: retries and restarts of one issue are
 distinct executions, each with a root span ID derived from its sweep id. An
 issue sweep's trace ID, however, is its issue's **story trace** (#9037), keyed
-per harness-ops D32 v1 (#9068): trace ID and story root span ID are
+per story key v1 (#9068; owner doc: 2AMLogic/2am
+`infra/signoz/docs/story-trace.md`): trace ID and story root span ID are
 SHA-256-derived from `loom-story/v1:github:<repo_id>:<issue>`, where `repo_id`
 is GitHub's numeric id for the checkout's `origin` (resolved once per repo and
 cached), so every sweep of the issue, on any host and across renames, lands in
@@ -37,7 +38,7 @@ it rejects malformed, uppercase, and zero IDs.
 The story's GitHub-shaped **phase spans** are emitted by the 2AMLogic/2am
 storyline reconciler, not by Loom; Loom only derives and accepts their IDs
 (`story_span_id`, `sha256(input:span:<kind>:<source_event_id>)[0..8]`) over
-D32's closed kind list `STORY_SPAN_KINDS`, kept byte-for-byte in parity with
+the story key's closed kind list `STORY_SPAN_KINDS`, kept byte-for-byte in parity with
 2am's `vectors.json` (`loom-daemon/tests/fixtures/story_vectors_d32_v1.json`):
 `story.intake`, `story.queue_dwell`, `story.ci`, `story.ci.queue`,
 `story.ci.run`, `story.review_wait`, `story.rework`, `story.merge`,

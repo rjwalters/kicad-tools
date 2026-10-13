@@ -1,0 +1,35 @@
+# classify_error conformance vectors (#11205).
+#
+# One vector per line, five TAB-separated fields:
+#   expected  exit_code  provider  description  output
+# `output` is the last field and is verbatim: it may contain `|`, quotes, and
+# non-ASCII (the CLI's " · " separator), which is why this is not one of the
+# `|`-separated heredoc tables in test-classify-error.sh. It may not contain a
+# TAB or a newline. Lines starting with `#` and blank lines are skipped.
+#
+# The `output` strings marked "verbatim" are copied from Claude Code 2.1.295:
+# the first was captured live (`claude -p` with a bad token), the rest are the
+# CLI's own message strings.
+TOKEN_EXPIRED	1	claude	401 OAuth access token is invalid, verbatim, captured live	Failed to authenticate. API Error: 401 OAuth access token is invalid.
+TOKEN_EXPIRED	1	claude	the same death as a stream-json result line	{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Failed to authenticate. API Error: 401 OAuth access token is invalid."}
+TOKEN_EXPIRED	1	claude	any other 401 message behind the CLI's auth-failure opening	Failed to authenticate. API Error: 401 Credential is invalid
+TOKEN_EXPIRED	1	claude	OAuth session expired, verbatim	Failed to authenticate: OAuth session expired and could not be refreshed
+TOKEN_EXPIRED	1	claude	401 Invalid API key, verbatim	API Error: 401 Invalid API key · Please run /login
+TOKEN_EXPIRED	1	claude	403 socket closed stays auth (#6424, re-checked in #11205)	Failed to authenticate. API Error: 403 The socket connection was closed unexpectedly
+RECOVERABLE	1	claude	negative: socket closed with no auth-failure opening is transport	The socket connection was closed unexpectedly
+RECOVERABLE	1	claude	negative: a 403 not about the socket is not widened	Failed to authenticate. API Error: 403 Request not allowed
+SUCCESS	0	claude	exit-code-first: a clean exit quoting the 401 stays SUCCESS (#3233)	Failed to authenticate. API Error: 401 OAuth access token is invalid.
+TOKEN_EXHAUSTED	1	claude	team shared budget, verbatim (/model form)	You've hit your team's shared budget. /model to switch models.
+TOKEN_EXHAUSTED	1	claude	team shared budget, verbatim (switch form)	You've hit your team's shared budget. Switch to another model to continue.
+TOKEN_EXHAUSTED	1	claude	team shared budget, verbatim (/usage-credits form, model name filled in)	You've hit your team's shared budget. Run /usage-credits to raise it and keep using Opus or switch models to continue this chat.
+RECOVERABLE	1	claude	negative: a budget mention that is not exhaustion	The team's shared budget was raised to $500
+TOKEN_EXHAUSTED	1	claude	org out of usage, verbatim (add funds)	Your org is out of usage · add funds to continue
+TOKEN_EXHAUSTED	1	claude	org out of usage, verbatim (contact admin)	Your org is out of usage · contact your admin
+TOKEN_EXHAUSTED	1	claude	legacy machine-readable limit line with reset epoch	Claude AI usage limit reached|1760000000
+RECOVERABLE	1	claude	negative: bare API Error: 429 has no usage-exhaustion evidence, stays transient	API Error: 429
+RECOVERABLE	1	claude	negative: API Error: 429 with the API's JSON body stays transient	API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Error"}}
+RECOVERABLE	1	claude	negative: prefixed temporary 429 throttle ("retry after 60 seconds") stays transient	API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests. Please retry after 60 seconds."}}
+SESSION_LIMIT	1	claude	a concurrent-session 429 stays SESSION_LIMIT (#3947 order)	API Error: 429 too many concurrent requests for this account
+RECOVERABLE	1	claude	negative: a 429 without the CLI's prefix stays transient	429 Too Many Requests
+RECOVERABLE	1	codex	negative: codex keeps a prefixed bare 429 transient too	API Error: 429
+SUCCESS	0	claude	exit-code-first: a clean exit quoting a 429 stays SUCCESS (#3233)	API Error: 429

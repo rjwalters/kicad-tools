@@ -1906,12 +1906,18 @@ function has_live_subst(str,    i, c, bs) {
 # Do not restate this as "harmless": state the direction.
 #
 # Shared as a single awk source string so the three parsers cannot drift.
+#
+# SEPARATOR SIDE-CHANNEL (#9405): every `\n` emitted for a `;`/`&&`/`&`/`||`/`|`
+# also records that operator in the global qsplit_op[k] (k = 1..qsplit_nops,
+# reset per call), so qsplit_op[k] is the operator BETWEEN output segments k
+# and k+1. Callers that ignore it are unaffected; parse_force_ops() reads it.
 # =============================================================================
 _QSPLIT_AWK="$_HASLIVESUBST_AWK"'
 function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs, bk) {
     SQ = sprintf("%c", 39)   # single quote
     DQ = sprintf("%c", 34)   # double quote
     out = ""
+    qsplit_nops = 0
     n = length(s)
     i = 1
     while (i <= n) {
@@ -2020,14 +2026,14 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs
             k = i + 1
             while (k < ci) {
                 ch = substr(s, k, 1)
-                if (ch == ";") { out = out "\n"; k++; continue }
+                if (ch == ";") { out = out "\n"; qsplit_op[++qsplit_nops] = ";"; k++; continue }
                 if (ch == "&") {
-                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; k += 2; continue }
-                    out = out "\n"; k++; continue
+                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; qsplit_op[++qsplit_nops] = "&&"; k += 2; continue }
+                    out = out "\n"; qsplit_op[++qsplit_nops] = "&"; k++; continue
                 }
                 if (ch == "|") {
-                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; k += 2; continue }
-                    out = out "\n"; k++; continue
+                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; qsplit_op[++qsplit_nops] = "||"; k += 2; continue }
+                    out = out "\n"; qsplit_op[++qsplit_nops] = "|"; k++; continue
                 }
                 out = out ch
                 k++
@@ -2108,14 +2114,14 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs
             i += 2
             continue
         }
-        if (c == ";") { out = out "\n"; i++; continue }
+        if (c == ";") { out = out "\n"; qsplit_op[++qsplit_nops] = ";"; i++; continue }
         if (c == "&") {
-            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; i += 2; continue }
-            out = out "\n"; i++; continue
+            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; qsplit_op[++qsplit_nops] = "&&"; i += 2; continue }
+            out = out "\n"; qsplit_op[++qsplit_nops] = "&"; i++; continue
         }
         if (c == "|") {
-            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; i += 2; continue }
-            out = out "\n"; i++; continue
+            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; qsplit_op[++qsplit_nops] = "||"; i += 2; continue }
+            out = out "\n"; qsplit_op[++qsplit_nops] = "|"; i++; continue
         }
         out = out c
         i++
@@ -4713,12 +4719,18 @@ parse_force_ops() {
                         if (_cdpwd_rest == "" || _cdpwd_rest == DQ) _cdpwd_closed = 1
                     }
                 }
+                # #9405: only a `&&`/`;` split (or a line break, i == 1) runs
+                # `pwd` in the cd'"'"'d shell. `|`/`&` run each side in its own
+                # subshell and `||` skips `pwd` -- abandon unresolved (ask).
+                if (i > 1 && qsplit_op[i - 1] != "&&" && qsplit_op[i - 1] != ";") _cdpwd_closed = 0
                 if (_cdpwd_closed) {
                     _cdpwd_resolved = resolve_cdpwd_literal(pending_cdpwd_path, curcwd, home)
                     if (_cdpwd_resolved != "") varmap[pending_cdpwd_name] = _cdpwd_resolved
                     pending_cdpwd_name = ""
                     continue
                 }
+                # The shell DID assign NAME even though the close was refused: never keep the stale prior value (ask->allow flip). AMBIG, not delete, so a later conditional reassignment is not trusted.
+                varmap[pending_cdpwd_name] = AMBIG
                 pending_cdpwd_name = ""
             }
             # Record any `NAME=value` assignment(s) leading this segment into
@@ -8958,14 +8970,44 @@ _extract_write_targets_scan() {
                 # every FILE argument after that is still fully scanned, so a
                 # genuine main-checkout target among them still denies.
                 bare_i_pending = 0
+                have_script = 0
+                end_opts = 0
                 sed_skip = 1
                 nf = 0
                 delete nfargs
                 for (j = 2; j <= m; j++) {
                     if (j in stdin_redir) continue
                     if (j in numfd_redir) continue
+                    # `--` ends options (#11074): every later token -- even one
+                    # spelled `-e`/`-f`/`--file=x` -- is an operand, never a
+                    # script option that could swallow the next file.
+                    if (!end_opts && toks[j] == "--") { end_opts = 1; continue }
+                    if (end_opts) {
+                        if (toks[j] == "") continue
+                        if (toks[j] ~ /^<<-?/) {
+                            if (toks[j] == "<<" || toks[j] == "<<-" || toks[j] == "<<<") j++
+                            continue
+                        }
+                        nf++
+                        nfargs[nf] = toks[j]
+                        bare_i_pending = 0
+                        continue
+                    }
                     if (toks[j] == "-i") { has_i = 1; bare_i_pending = 1; continue }
                     if (toks[j] ~ /^-i/) has_i = 1
+                    # Script options (#11074): `-e`/`-f`/`--expression`/`--file`
+                    # (or a short cluster ending in e/f with no `i` before it --
+                    # after `i` the rest is the backup suffix) take the NEXT
+                    # token as script text/file, never a file operand; attached
+                    # forms (`-es/a/b/`, `--file=s.sed`) carry it in-token. Either
+                    # way there is no positional script: every remaining
+                    # non-option token is a file.
+                    if (toks[j] == "--expression" || toks[j] == "--file" || toks[j] ~ /^-[^-eif]*[ef]$/) {
+                        have_script = 1; bare_i_pending = 0; j++; continue
+                    }
+                    if (toks[j] ~ /^--(expression|file)=/ || toks[j] ~ /^-[^-eif]*[ef]./) {
+                        have_script = 1; bare_i_pending = 0; continue
+                    }
                     if (toks[j] ~ /^-/) continue
                     if (toks[j] == "") continue
                     # Same heredoc/herestring exclusion as the `tee` branch
@@ -8984,6 +9026,9 @@ _extract_write_targets_scan() {
                     }
                     bare_i_pending = 0
                 }
+                # With -e/-f there is no positional script: only the BSD `-i ''`
+                # suffix token (sed_skip == 2 -> 1) is left to skip.
+                if (have_script) sed_skip = (sed_skip == 2) ? 1 : 0
                 if (has_i && nf > sed_skip) {
                     for (j = sed_skip + 1; j <= nf; j++) print curcwd SEP resolve_var_q(nfargs[j])
                 }
@@ -9299,8 +9344,24 @@ expand_leading_tilde() {
 #
 # Cheap pre-check keeps awk off the hot path for the ~99% of commands that have
 # no recursive/force rm at all.
-if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
-    RM_TARGETS=$(extract_rm_targets "$COMMAND_ASK_SCAN" | head -20)
+# NON-SHELL INTERPRETER HEREDOC DATA (#10422): COMMAND_ASK_SCAN deliberately
+# leaves bodies fed to python/perl/ruby/node VISIBLE (right for the ask-tier
+# scans). For the rm scan that is a false positive: a python3 stdin heredoc
+# carrying rm-looking TEXT is data the outer shell never executes. Build a
+# rm-scan-only copy that re-runs the selective heredoc masker with
+# shell_only=1, so quoted (or provably expansion-free) bodies of NON-shell
+# interpreters are data, while bash/sh/zsh/dash/ksh/eval/source/. -fed bodies
+# (and `cat <<EOF | bash`, `sh -s`) stay visible and fail closed. The true
+# original $COMMAND is passed so capture-then-reparse shapes still fail closed.
+COMMAND_RM_SCAN="$COMMAND_ASK_SCAN"  # scan-contract: COMMAND_RM_SCAN=deny-safe from=COMMAND_ASK_SCAN
+if [[ "$COMMAND_RM_SCAN" == *"<<"* ]]; then
+    COMMAND_RM_SCAN=$(printf '%s' "$COMMAND_RM_SCAN" | ORIG_COMMAND_FOR_READ_CHECK="$COMMAND" awk "$_MASKHEREDOC_AWK"'
+    BEGIN { origcmd = ENVIRON["ORIG_COMMAND_FOR_READ_CHECK"] }
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END { printf "%s", mask_heredoc_bodies_selective(buf, 1, origcmd) }')
+fi
+if echo "$COMMAND_RM_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
+    RM_TARGETS=$(extract_rm_targets "$COMMAND_RM_SCAN" | head -20)
 
     for target in $RM_TARGETS; do
         # Strip the #8217 provenance mark (0x1E) the span pass prefixes onto

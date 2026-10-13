@@ -273,6 +273,41 @@ ln -s "/elsewhere/star.md" "$HOME13/.claude/commands/star.md"
 deprovision_loom_skills "$CHK10" "$HOME13/.claude" >/dev/null 2>&1
 assert_eq "$(readlink "$HOME13/.claude/commands/star.md")" "/elsewhere/star.md" "deprovision preserved a foreign star.md symlink"
 
+echo "Test 13: resync-installed.sh (re)provisions user-scope links best-effort, never fatal (#10238)"
+set +e
+RESYNC="$REPO_ROOT/defaults/scripts/resync-installed.sh"
+make_resync_repo() {
+    local r; r="$(mktemp -d)"
+    mkdir -p "$r/scripts/install" "$r/defaults/hooks" "$r/.loom/hooks" \
+             "$r/defaults/.claude/commands/loom" "$r/defaults/.claude/agents"
+    cp "$REPO_ROOT/scripts/loom" "$r/scripts/loom"
+    cp "$REPO_ROOT/scripts/install/provision-dispatcher.sh" "$REPO_ROOT/scripts/install/provision-skills.sh" "$r/scripts/install/"
+    echo "# star" > "$r/defaults/.claude/commands/loom/star.md"
+    echo "# loom-builder agent" > "$r/defaults/.claude/agents/loom-builder.md"
+    echo A > "$r/defaults/hooks/guard.sh"; echo OLD > "$r/.loom/hooks/guard.sh"
+    git -C "$r" init -q
+    printf '%s\n' "$r"
+}
+if [[ -f "$RESYNC" ]]; then
+    RR=$(make_resync_repo); HR=$(mktemp -d)
+    (cd "$RR" && HOME="$HR" bash "$RESYNC" >/dev/null 2>&1); rc=$?
+    assert_eq "$rc" "0" "resync exits 0 with provisioning enabled"
+    assert_eq "$(cat "$RR/.loom/hooks/guard.sh")" "A" "resync still syncs the repo surfaces"
+    [[ -L "$HR/.claude/commands/loom" && -L "$HR/.claude/commands/star.md" && -L "$HR/.claude/agents/loom-builder.md" ]] \
+        && pass "resync created the commands, /star and agent links" || fail "resync did not create the user-scope links"
+    # dry-run provisions nothing
+    RR2=$(make_resync_repo); HR2=$(mktemp -d)
+    (cd "$RR2" && HOME="$HR2" bash "$RESYNC" --dry-run >/dev/null 2>&1)
+    [[ -e "$HR2/.claude" ]] && fail "--dry-run provisioned user-scope links" || pass "--dry-run provisions nothing"
+    # a provisioning failure (broken lib) does not change the exit status
+    RR3=$(make_resync_repo); HR3=$(mktemp -d)
+    echo 'provision_loom_skills() { return 1; }; provision_loom_dispatcher() { exit 9; }' > "$RR3/scripts/install/provision-skills.sh"
+    (cd "$RR3" && HOME="$HR3" bash "$RESYNC" >/dev/null 2>&1); rc=$?
+    assert_eq "$rc" "0" "provisioning failure does not change resync's exit status"
+else
+    echo "  SKIP: resync-installed.sh not found"
+fi
+
 echo ""
 echo "======================================"
 echo "test-provision-skills.sh: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

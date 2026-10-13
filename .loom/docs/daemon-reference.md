@@ -3058,7 +3058,11 @@ ordering (superseded by the weighted draw in [`priority-model.md`](priority-mode
   candidate across all workspaces and orders them by **weighted workspace
   draws** (#11103, [`priority-model.md`](priority-model.md)): each draw picks a
   workspace weighted by its priority and places its next issue (level, oldest,
-  number). It fills the single shared concurrency budget in that order. The
+  number). Since #11684 the weight is a softmax over `fleet_priority`,
+  `max(1, round(1e6 * exp(-(p - p_min) / T)))` with `p_min` the pool's top
+  priority and `T` the hyperparameter `dispatch.drawTemperature` (default 80,
+  re-read every tick); `pick.decision` records `temperature` and each draw's
+  `p_min`. It fills the single shared concurrency budget in that order. The
   cap/budget mechanics (#3811/#3930) are unchanged; this only orders the queue.
   `candidate_cmp` (below) now only ranks the published ready-queue rows.
 
@@ -3099,7 +3103,10 @@ follows the workspace draw, and the single-workspace tick uses the same four
 keys (passed the repo's real verified-red state). The workspace draw's pool is
 three-tier: workspaces whose next candidate is a verified red-main fix if any
 (`pool: "red-main-fix"`), else those with very-important work
-(`"very-important"`), else all (`"all"`). #11508 removed the legacy keys: the star, its
+(`"very-important"`), else all (`"all"`). Within the pool the draw weighs each
+workspace by a softmax over `fleet_priority` at temperature
+`dispatch.drawTemperature` (#11684; `p_min` is taken over the pool, so its top
+workspace always weighs the full 1,000,000). #11508 removed the legacy keys: the star, its
 levels and inherited levels, the starred-at time and its restart store
 (`starred-<sha16>.json`, no longer read or written; `LOOM_STARRED_AT_PERSIST` is
 ignored), and `workspace_priority` as a rank key (it weights the workspace
@@ -3112,17 +3119,17 @@ replacing the always-`false` `operator_priority` and the informational
 **The red-main-fix lane reorders; it is not a level.** A candidate carrying
 `<!-- loom:main-red-fix -->` whose repo's `main` is verified red leads the
 dispatch order (every slot spent elsewhere while `main` is red is wasted) and
-keeps three gate bypasses, no more, because while `main` is red nothing merges and holding the fix
-would deadlock: the build back-off, the file-overlap gate (it still occupies)
-and the repo-sharding slice (kept in its draw position). On a green `main`
-the marker grants nothing.
+keeps two gate bypasses, no more, because while `main` is red nothing merges and holding the fix
+would deadlock: the build back-off and the file-overlap gate (it still
+occupies). (The third, the repo-sharding slice, went with the slice, #11682.)
+On a green `main` the marker grants nothing.
 
 **Priority changes order, never eligibility or admission** (operator ruling on
 #11508). There is no priority side listing: a `loom:important` /
 `loom:very-important` issue is dispatched only once it is `loom:issue`, like
 everything else. No priority label exempts a candidate from any gate: the
-concurrency and per-repo caps, the build back-off, the file-overlap gate and the
-repo-sharding slice defer it exactly like plain work. The per-host overflow slot
+concurrency and per-repo caps, the build back-off and the file-overlap gate
+defer it exactly like plain work. The per-host overflow slot
 (#9244) is inert: nothing is admitted over the cap, and `plan.slots.overflow_free`
 only reports whether an overflow sweep an older daemon started is still live
 (its `overflow: true` sweep record and claim-lock stamp are still honoured on
@@ -3232,8 +3239,9 @@ by `candidate_cmp`, with what the tick did with it:
 - **running**: `dispatched` (detail `overflow` only from an older daemon's
   over-limit sweep, #9244; the slot is inert since #11508), `in_flight`
 - **ready** (waiting on a limit): `deferred_capacity`, `deferred_ramp_cap`,
-  `deferred_saturation`, `deferred_build_backoff` (#9410), `deferred_out_of_slice`,
-  `deferred_repo_cap`
+  `deferred_saturation`, `deferred_build_backoff` (#9410), `deferred_repo_cap`.
+  (`deferred_out_of_slice` is retired with the dispatch slice, #11682, and
+  never emitted.)
 - **blocked** (held by something specific to the issue or repo): `parked` (with
   the label), `open_pr` (with the PR number), `dispatch_backoff`,
   `open_pr_backoff`, `quarantined`, `noop_cooldown`, `declined`,
@@ -3248,9 +3256,7 @@ by `candidate_cmp`, with what the tick did with it:
 
 Each disposition is recorded next to the `TickReport` counter it matches, so the
 rows and the counters agree. Issues dropped before the sort are still ranked by the same
-comparator, so their rank shows where they would sit once unblocked. With repo
-sharding (#6243), an out-of-slice row can be passed over for a lower-ranked
-in-slice one; its disposition says so.
+comparator, so their rank shows where they would sit once unblocked.
 
 The rows travel on `last_work_finder_tick.queue` in `loom-daemon status --json`,
 `health --json` and `serve`'s `/api/status`, stamped with the tick's `at`.
@@ -3273,13 +3279,13 @@ observability export on, the queue also reaches SigNoz as
 The fleet dashboard view is phase 3.
 
 **Dispatch plan (#9288).** Each row also carries `position`, `plan_state`
-(`running` / `next` / `queued` / `blocked`), `gate`, `keys`, `in_slice`,
-`hot`, `owning_shard` and `repo_cap`. The tick summary carries a `plan` block:
+(`running` / `next` / `queued` / `blocked`), `gate`, `keys`, `hot`,
+`owning_shard` and `repo_cap` (`in_slice` is retired and absent since #11682). The tick summary carries a `plan` block:
 `slots` (`max_concurrent`, `occupancy`, `free`, `max_admissions_per_tick`,
 `saturation_held`, `any_halted`, `overflow_free`), `tick_interval_secs`, `shard`, `scope` and
 `ordering`. `position` is the order pass 2 actually offered candidates in,
-after the repo-slice and per-repo-cap shaping. `rank` is still the bare
-comparator rank, so the two differ whenever sharding or
+after the per-repo-cap shaping. `rank` is still the bare
+comparator rank, so the two differ whenever
 `maxConcurrentPerRepo` reshapes the list. `loom-daemon queue` shows
 `#<position> <plan_state>[/<gate>]` per row plus a `Plan:` slot line.
 `--json` adds `plan`, and its `ordering` is the daemon's own key list rather
@@ -4746,10 +4752,10 @@ same shape as `occupancy >= maxConcurrent` idling a tick.
 none: the #4123 open-PR dispatch guard already makes an
 issue whose linked PR is in flight a non-candidate (`open_pr`), so the tick's
 next dispatch goes to another repo, and re-engagement when the PR merges is
-automatic. It composes with [repo sharding (#6243)](dispatcher-repo-sharding.md)
-in a fixed order: the sharding slice partition runs first, affinity reorders
-within its result, and the cap gates admission last. No priority is exempt
-(#11508); a verified red-main fix is never deferred by the slice (#9244).
+automatic. Affinity reorders the drawn list and the cap gates admission last.
+No priority is exempt (#11508). (The [repo-sharding slice
+(#6243)](dispatcher-repo-sharding.md) that used to run first is retired from
+dispatch, #11682.)
 
 #### Same-repo file-overlap deferral (#9781)
 
@@ -8379,14 +8385,13 @@ static pair **beats an enabled roster** — that is the documented way to pin a
 deterministic ring during a roster outage or on a deliberately partitioned
 fleet — and the blunt kill switch is still checked before any of it.
 
-**Blast radius: the dispatcher.** `role_shard::decide(root).owned` is also
-`work_finder`'s preferred repo slice ([`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md),
-#6243). A fence **yield** deliberately does *not* reach it: `owned` keeps the
-pre-roster verdict and only the role runner's `admits_role_tick()` flips, so a
-host having forge trouble pauses role rotation without also starving its own
-dispatch. When the fence *admits*, the dispatcher does follow the roster ring
-— a preference reshuffle with a work-conserving fallback, never a dropped
-dispatch.
+**Blast radius: none on dispatch.** `role_shard::decide(root).owned` used to
+be `work_finder`'s preferred repo slice (#6243); that slice is retired
+([`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md), #11682), so the
+ring no longer shapes dispatch at all. A fence **yield** still keeps `owned` at
+the pre-roster verdict and flips only the role runner's `admits_role_tick()`.
+The dispatch plan still reads the ring's `owning_shard` for the fleet merge's
+primary-host rule.
 
 **Visibility.** `loom-daemon status` extends the `Role runner (sharding): …`
 header (when the roster has completed at least one heartbeat cycle) with a
@@ -8729,7 +8734,7 @@ as before, and after a transfer it can only shrink.
 
 ### Installation snapshot: one listing per credential (`LOOM_INSTALLATION_SNAPSHOT`)
 
-Telemetry visibility (`visibility.repo`), the D32 repo identity
+Telemetry visibility (`visibility.repo`), the story-key repo identity
 (`telemetry.repo_identity`) and the write-scope probe (`write_scope.probe`)
 each read `GET repos/<nwo>` once per repository. An App installation token can
 list every repository it reaches in one call, so each credential now keeps one
