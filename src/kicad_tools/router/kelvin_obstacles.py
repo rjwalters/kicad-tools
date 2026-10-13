@@ -199,6 +199,12 @@ def isolate_kelvin_branch(
         "pad_cell": False,
         "shared_pad_halo": False,
     }
+    # Issue #6389: the pure-Python twin of the native ``pad_cell`` reset above.
+    # Without it the Python exact pad test measures these cells against no
+    # pad at all (the terminal metal is same-net, which the pad test skips as
+    # own copper) and resolves the isolation away.
+    if getattr(grid, "_pad_provenance", None) is not None:
+        fields["_pad_provenance"] = grid.PAD_PROVENANCE_VOID
     cpp_saved = []
     with grid.locked():
         saved = {field: getattr(grid, field)[indices].copy() for field in fields}

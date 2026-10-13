@@ -117,7 +117,7 @@ operator ruling on #11278).
 |---|---|
 | `loom:operator-priority` | `loom:important` |
 | `loom:operator-high-priority` | `loom:very-important` |
-| `priority:high` (undeclared) | `loom:important` |
+| `priority:high` | `loom:important` |
 | `loom:high-priority-inherited` | retired, no mapping (it was daemon-derived) |
 | `tier:goal-advancing` / `tier:goal-supporting` / `tier:maintenance` | retired, **no automatic mapping**; Guide applies `loom:important` where warranted |
 
@@ -126,9 +126,10 @@ This table is data: the top-level `retired` array of `defaults/labels.json`
 (`replaced_by: null` = remove, no replacement). It also lists the #11105
 retirements (`loom:urgent`, `loom:heavy`, `loom:operator-objective`). It is
 never rendered into `labels.yml`, so the additive `sync-labels.sh` cannot
-re-create a retired label. `owned: false` (`priority:high`, never declared by
-Loom) means the migration adds the replacement but never removes or deletes
-the old label. The registry change itself mutates no forge.
+re-create a retired label. `owned: false` (a label Loom never declared)
+means the migration adds the replacement but never removes or deletes the old
+label; `priority:high` is `owned: true` (#11675). The registry change itself
+mutates no forge.
 
 ### Running the forge-side migration (#11511)
 

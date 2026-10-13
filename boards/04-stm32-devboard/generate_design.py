@@ -1297,8 +1297,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # pin before signal routing, on by default.  That changes this grid
         # route, so the reviewed escape repair above (fixed via coordinates in
         # ``manufacturing_process.MOVES``) no longer finds its vias.  Opt out
-        # until the escapes are re-reviewed against the reserved route.  On this
-        # grid recipe the reservation also closed fewer oracle links (#6413).
+        # until the escapes are re-reviewed against the reserved route.  The pin
+        # also stays until #6425 lands: the oracle's DRC gate bans every 0.30/0.15
+        # weld on this recipe (three via-dimension rules each), with or without
+        # the reservation, so only via-free links can close (#6413).
         "--no-plane-via-reservation",
         "--placement-feedback",
         "--no-cache",

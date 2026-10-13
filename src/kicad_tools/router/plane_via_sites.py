@@ -106,6 +106,12 @@ class PlaneViaSiteRules:
             1.5 x 0.3 mm QFP pin as a 0.76 mm-radius disc, which leaves no
             site at all beside a 0.5 mm-pitch pin row (board 04's LQFP-48).
             The marked keep-out is the same in both modes.
+        escape_len: Issue #6413 -- length (mm) of the straight outward
+            escape corridor each same-layer signal SMD pin keeps in front of
+            its tip, from that tip along its long axis away from its
+            footprint's centroid.  ``None`` means ``via_diameter +
+            clearance``: room for a fan-out via or a 45-degree jog.  Only
+            used in ``exact_pads`` mode (the escape-corridor guard).
     """
 
     via_diameter: float = 0.6
@@ -115,6 +121,7 @@ class PlaneViaSiteRules:
     stub_width: float = 0.2
     max_reach: float = 2.0
     exact_pads: bool = False
+    escape_len: float | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +168,11 @@ class PlaneViaReservation:
         stubs: One stub per served pad, resolved to its final site
             (Issue #6401: the lattice keep-outs are built from these).
         rules: The site geometry the reservation was planned with.
+        blocked_escapes: Issue #6413 -- ``(signal pin, served pad)`` pairs
+            where the served pad's site or stub blocks the signal pin's
+            straight outward escape from ONE side (the pin can still jog away
+            from it).  A site that would block a pin from both sides is never
+            taken: that pad goes to ``unreserved``.
     """
 
     sites: list[PlaneViaSite] = field(default_factory=list)
@@ -168,6 +180,7 @@ class PlaneViaReservation:
     cells_blocked: int = 0
     stubs: list[PlaneViaStub] = field(default_factory=list)
     rules: PlaneViaSiteRules = field(default_factory=PlaneViaSiteRules)
+    blocked_escapes: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _pad_name(pad: Pad) -> str:
@@ -232,6 +245,63 @@ def _segment_point_distance(
     return math.hypot(ax + t * dx - px, ay + t * dy - py)
 
 
+def _segments_cross(
+    ax: float, ay: float, bx: float, by: float, cx: float, cy: float, dx: float, dy: float
+) -> bool:
+    def orient(px: float, py: float, qx: float, qy: float, rx: float, ry: float) -> float:
+        return (qx - px) * (ry - py) - (qy - py) * (rx - px)
+
+    d1 = orient(cx, cy, dx, dy, ax, ay)
+    d2 = orient(cx, cy, dx, dy, bx, by)
+    d3 = orient(ax, ay, bx, by, cx, cy)
+    d4 = orient(ax, ay, bx, by, dx, dy)
+    return d1 * d2 < 0 and d3 * d4 < 0
+
+
+def _segment_segment_distance(
+    ax: float, ay: float, bx: float, by: float, cx: float, cy: float, dx: float, dy: float
+) -> float:
+    """Distance between segments ``a-b`` and ``c-d`` (zero when they cross)."""
+    if _segments_cross(ax, ay, bx, by, cx, cy, dx, dy):
+        return 0.0
+    return min(
+        _segment_point_distance(ax, ay, bx, by, cx, cy),
+        _segment_point_distance(ax, ay, bx, by, dx, dy),
+        _segment_point_distance(cx, cy, dx, dy, ax, ay),
+        _segment_point_distance(cx, cy, dx, dy, bx, by),
+    )
+
+
+@dataclass(frozen=True)
+class _EscapeCorridor:
+    """A signal pin's straight outward escape (Issue #6413).
+
+    The centreline runs from the pin's tip ``a`` to ``b``, ``escape_len``
+    further along the pin's long axis, away from its footprint's centroid;
+    ``(ux, uy)`` is the unit direction.
+    """
+
+    pad: str
+    layer: object
+    ax: float
+    ay: float
+    bx: float
+    by: float
+    ux: float
+    uy: float
+
+    def sides(self, points: Sequence[tuple[float, float]]) -> frozenset[int]:
+        """Which side(s) of the centreline reserved copper at ``points`` is on.
+
+        ``-1`` / ``+1`` for right / left of the escape direction.  A point on
+        the centreline, or a stub whose ends straddle it, blocks both.
+        """
+        offsets = [self.ux * (py - self.ay) - self.uy * (px - self.ax) for px, py in points]
+        if any(abs(o) <= 1e-9 for o in offsets) or (min(offsets) < 0.0 < max(offsets)):
+            return frozenset((-1, 1))
+        return frozenset((1,) if offsets[0] > 0 else (-1,))
+
+
 def _disc_offsets(radius_cells: float) -> list[tuple[int, int]]:
     reach = int(math.ceil(radius_cells))
     limit = radius_cells * radius_cells
@@ -265,7 +335,13 @@ def _capsule_cells(
 class _SitePlanner:
     """Finds legal sites against the pre-route grid plus pad geometry."""
 
-    def __init__(self, grid: RoutingGrid, rules: PlaneViaSiteRules) -> None:
+    def __init__(
+        self,
+        grid: RoutingGrid,
+        rules: PlaneViaSiteRules,
+        plane_nets: Iterable[str] = (),
+        targets: Sequence[Pad] = (),
+    ) -> None:
         self.grid = grid
         self.rules = rules
         self.pads: list[Pad] = list(grid._pads)
@@ -306,6 +382,165 @@ class _SitePlanner:
             self.stub_probe = rules.stub_width / 2.0 + self.halo
         self.all_layers = list(range(grid.num_layers))
         self.sites: list[PlaneViaSite] = []
+
+        # Issue #6413: escape-corridor guard (exact mode only, the
+        # ``kct route`` path).  Reserved copper is clear of a signal pin's
+        # corridor when a trace on its centreline keeps the clearance.
+        self.plane_nets = frozenset(plane_nets)
+        gap = max(router_rules.trace_clearance, rules.clearance)
+        half_trace = router_rules.trace_width / 2.0
+        self.escape_len = (
+            rules.escape_len
+            if rules.escape_len is not None
+            else rules.via_diameter + rules.clearance
+        )
+        self.site_reach = self.via_r + gap + half_trace
+        self.stub_reach = rules.stub_width / 2.0 + gap + half_trace
+        self.corridors: list[_EscapeCorridor] = self._build_corridors() if rules.exact_pads else []
+        self.at_risk = self._corridors_at_risk(targets)
+        self.corridor_sides: dict[int, frozenset[int]] = {}
+        self.blocked_escapes: list[tuple[str, str]] = []
+        self._near_cache: dict[str, list[int]] = {}
+
+    # -- escape corridors (Issue #6413) ---------------------------------------
+    def _build_corridors(self) -> list[_EscapeCorridor]:
+        """One straight outward corridor per signal SMD pin, every footprint.
+
+        Built across footprints, not just the served pad's own: board 03's
+        crystal ``Y1.2`` site sat in front of ``U1.19``.
+        """
+        by_ref: dict[str, list[Pad]] = {}
+        for p in self.pads:
+            if p.ref and not p.steiner_point:
+                by_ref.setdefault(p.ref, []).append(p)
+        corridors: list[_EscapeCorridor] = []
+        for ref in sorted(by_ref):
+            body = by_ref[ref]
+            if len(body) < 2:
+                continue  # no centroid to escape away from
+            cx = sum(p.x for p in body) / len(body)
+            cy = sum(p.y for p in body) / len(body)
+            for p in body:
+                if not p.net_name or p.net_name in self.plane_nets or p.through_hole:
+                    continue
+                half_w, half_h = pad_half_extents(p)
+                if half_w >= half_h:
+                    ux, uy = (1.0 if p.x >= cx else -1.0), 0.0
+                    ax, ay = p.x + ux * half_w, p.y
+                else:
+                    ux, uy = 0.0, (1.0 if p.y >= cy else -1.0)
+                    ax, ay = p.x, p.y + uy * half_h
+                corridors.append(
+                    _EscapeCorridor(
+                        pad=_pad_name(p),
+                        layer=p.layer,
+                        ax=ax,
+                        ay=ay,
+                        bx=ax + ux * self.escape_len,
+                        by=ay + uy * self.escape_len,
+                        ux=ux,
+                        uy=uy,
+                    )
+                )
+        return corridors
+
+    def _corridors_at_risk(self, targets: Sequence[Pad]) -> frozenset[int]:
+        """Corridors a served pad could reach from BOTH sides.
+
+        Only such a pin can end up flanked.  A pin with served pads on one
+        side at most can be blocked from that side only, and it can still jog
+        away; demoting every site in front of it pushed sites out past the
+        whole pin row (on board 04, U2.35's site 0.65 mm further out, off the
+        B.Cu pour, and the pad lost its weld).
+        """
+        reach = self.rules.max_reach + self.site_reach
+        risky: set[int] = set()
+        for idx, c in enumerate(self.corridors):
+            sides: set[int] = set()
+            for p in targets:
+                if _segment_point_distance(c.ax, c.ay, c.bx, c.by, p.x, p.y) <= reach:
+                    sides |= c.sides([(p.x, p.y)])
+            if len(sides) == 2:
+                risky.add(idx)
+        return frozenset(risky)
+
+    def _near_corridors(self, pad: Pad) -> list[int]:
+        """Corridors any site or stub of ``pad`` within ``max_reach`` can touch."""
+        name = _pad_name(pad)
+        cached = self._near_cache.get(name)
+        if cached is None:
+            reach = self.rules.max_reach + max(self.site_reach, self.stub_reach) + 1e-6
+            cached = [
+                i
+                for i, c in enumerate(self.corridors)
+                if _segment_point_distance(c.ax, c.ay, c.bx, c.by, pad.x, pad.y) <= reach
+            ]
+            self._near_cache[name] = cached
+        return cached
+
+    def _escape_hits(
+        self, pad: Pad, x: float, y: float, *, disc: bool = True
+    ) -> dict[int, frozenset[int]]:
+        """Corridors a site at ``(x, y)`` (and ``pad``'s stub to it) enters.
+
+        The via disc spans every layer; the stub only blocks corridors on the
+        pad's own layer.  ``disc=False`` checks the stub alone (a shared site
+        whose disc is already counted).
+        """
+        hits: dict[int, frozenset[int]] = {}
+        for idx in self._near_corridors(pad):
+            c = self.corridors[idx]
+            sides: frozenset[int] = frozenset()
+            if disc and (
+                _segment_point_distance(c.ax, c.ay, c.bx, c.by, x, y) < self.site_reach - 1e-9
+            ):
+                sides |= c.sides([(x, y)])
+            if c.layer == pad.layer and (
+                _segment_segment_distance(c.ax, c.ay, c.bx, c.by, pad.x, pad.y, x, y)
+                < self.stub_reach - 1e-9
+            ):
+                sides |= c.sides([(pad.x, pad.y), (x, y)])
+            if sides:
+                hits[idx] = sides
+        return hits
+
+    def _flanks(self, hits: dict[int, frozenset[int]]) -> bool:
+        """Would these hits leave some signal pin blocked from both sides?"""
+        return any(
+            len(self.corridor_sides.get(idx, frozenset()) | sides) == 2
+            for idx, sides in hits.items()
+        )
+
+    def _verdict(self, hits: dict[int, frozenset[int]]) -> str:
+        """``"flank"`` (never taken), ``"risky"`` (a last resort: it blocks a
+        pin that could still be flanked) or ``"ok"`` (no hit, or one-sided
+        blocks on pins that cannot be flanked; recorded)."""
+        if self._flanks(hits):
+            return "flank"
+        if any(idx in self.at_risk for idx in hits):
+            return "risky"
+        return "ok"
+
+    def _commit_hits(self, pad: Pad, hits: dict[int, frozenset[int]]) -> None:
+        served = _pad_name(pad)
+        for idx, sides in sorted(hits.items()):
+            self.corridor_sides[idx] = self.corridor_sides.get(idx, frozenset()) | sides
+            pair = (self.corridors[idx].pad, served)
+            if pair not in self.blocked_escapes:
+                self.blocked_escapes.append(pair)
+
+    def _place(self, pad: Pad, x: float, y: float, hits: dict[int, frozenset[int]]) -> PlaneViaSite:
+        site = PlaneViaSite(pad.net_name, x, y, (_pad_name(pad),))
+        self.sites.append(site)
+        self._commit_hits(pad, hits)
+        return site
+
+    def _share(self, idx: int, pad: Pad, hits: dict[int, frozenset[int]]) -> PlaneViaSite:
+        site = self.sites[idx]
+        shared = PlaneViaSite(site.net_name, site.x, site.y, site.pads + (_pad_name(pad),))
+        self.sites[idx] = shared
+        self._commit_hits(pad, hits)
+        return shared
 
     # -- legality ------------------------------------------------------------
     def _cells_free(self, layer: int, cells: Iterable[tuple[int, int]]) -> bool:
@@ -396,16 +631,22 @@ class _SitePlanner:
         rules = self.rules
         res = self.grid.resolution
         # Reuse an existing same-net site within reach before claiming a new
-        # one: two pads sharing a via block half the board area.
+        # one: two pads sharing a via block half the board area.  Issue
+        # #6413: a shared site whose new stub would block a signal pin's
+        # escape is kept only as a fallback behind a clear new site.
+        reuse: tuple[int, dict[int, frozenset[int]]] | None = None
         for idx, site in enumerate(self.sites):
             if site.net_name != pad.net_name:
                 continue
             if math.hypot(site.x - pad.x, site.y - pad.y) > rules.max_reach:
                 continue
             if self._stub_ok(pad, site.x, site.y):
-                shared = PlaneViaSite(site.net_name, site.x, site.y, site.pads + (_pad_name(pad),))
-                self.sites[idx] = shared
-                return shared
+                hits = self._escape_hits(pad, site.x, site.y, disc=False)
+                verdict = self._verdict(hits)
+                if verdict == "ok":
+                    return self._share(idx, pad, hits)
+                if reuse is None and verdict == "risky":
+                    reuse = (idx, hits)
 
         preferred = self._preferred_angle(pad)
         angles = sorted(
@@ -413,7 +654,8 @@ class _SitePlanner:
             key=lambda a: (abs(math.remainder(a - preferred, 2 * math.pi)), a),
         )
         if rules.exact_pads:
-            return self._find_exact(pad, angles, preferred)
+            return self._find_exact(pad, angles, preferred, reuse)
+        # Outside exact mode there are no corridors, so ``reuse`` is unset.
         start = _circumscribed_radius(pad) + self.via_r
         seen: set[tuple[int, int]] = set()
         steps = int(math.ceil(max(0.0, rules.max_reach - start) / res))
@@ -435,7 +677,13 @@ class _SitePlanner:
                     return site
         return None
 
-    def _find_exact(self, pad: Pad, angles: list[float], preferred: float) -> PlaneViaSite | None:
+    def _find_exact(
+        self,
+        pad: Pad,
+        angles: list[float],
+        preferred: float,
+        reuse: tuple[int, dict[int, frozenset[int]]] | None = None,
+    ) -> PlaneViaSite | None:
         """Issue #6401: candidate order for ``exact_pads``.
 
         Candidates lie on the same 16 rays from the pad centre, out to
@@ -445,6 +693,20 @@ class _SitePlanner:
         distance instead would always try the pad's short side first -- the
         gap between neighbouring pins, where the site costs routing most --
         before the outward end of the pad at the same clearance.
+
+        Issue #6413 (escape-corridor guard): a candidate that would leave a
+        signal pin's straight outward corridor blocked from BOTH sides,
+        counting the sites already placed, is never taken -- if nothing else
+        is legal the pad stays unreserved and falls back to the post-route
+        ladders.  A candidate entering the corridor of a pin that served pads
+        could still flank (``at_risk``) is tried only after every other
+        candidate (and after sharing an existing site, ``reuse``).  A
+        one-sided block on a pin that cannot be flanked keeps its #6401 rank
+        and is recorded.  Once the guard has skipped a legal candidate,
+        candidates in the inward half-plane (under the body) wait until the
+        outward half is exhausted, so the guard never trades a pin's outward
+        escape for a via under the part.  When the guard skips nothing the
+        order is exactly the #6401 order.
         """
         rules = self.rules
         res = self.grid.resolution
@@ -466,12 +728,39 @@ class _SitePlanner:
                 key = (int(round(gap / res)), rank[angle])
                 if (gx, gy) not in candidates or key < candidates[(gx, gy)]:
                     candidates[(gx, gy)] = key
-        for (gx, gy), _key in sorted(candidates.items(), key=lambda kv: (kv[1], kv[0])):
+        last_resort: list[tuple[float, float, dict[int, frozenset[int]]]] = []
+        inward: list[tuple[float, float, dict[int, frozenset[int]]]] = []
+        guard_moved = False
+        for (gx, gy), key in sorted(candidates.items(), key=lambda kv: (kv[1], kv[0])):
             x, y = self.grid.grid_to_world(gx, gy)
+            hits = self._escape_hits(pad, x, y)
+            verdict = self._verdict(hits)
+            if verdict != "ok":
+                # Only a LEGAL candidate the guard skips changes the outcome.
+                if self._via_ok(pad, x, y) and self._stub_ok(pad, x, y):
+                    guard_moved = True
+                    if verdict == "risky":
+                        last_resort.append((x, y, hits))
+                continue
+            if guard_moved and (
+                abs(math.remainder(angles[key[1]] - preferred, 2 * math.pi)) > math.pi / 2 + 1e-9
+            ):
+                # The guard skipped a nearer outward site: do not let that
+                # pull the site under the body (the inward half-plane, where
+                # pins escape and ``via_under_body`` objects).  Outward sites
+                # further out are tried first; these come next.
+                inward.append((x, y, hits))
+                continue
             if self._via_ok(pad, x, y) and self._stub_ok(pad, x, y):
-                site = PlaneViaSite(pad.net_name, x, y, (_pad_name(pad),))
-                self.sites.append(site)
-                return site
+                return self._place(pad, x, y, hits)
+        for x, y, hits in inward:
+            if self._via_ok(pad, x, y) and self._stub_ok(pad, x, y):
+                return self._place(pad, x, y, hits)
+        if reuse is not None:
+            return self._share(reuse[0], pad, reuse[1])
+        if last_resort:
+            x, y, hits = last_resort[0]
+            return self._place(pad, x, y, hits)
         return None
 
 
@@ -707,9 +996,9 @@ def reserve_plane_via_sites(
         A :class:`PlaneViaReservation`.
     """
     rules = rules or PlaneViaSiteRules()
-    planner = _SitePlanner(grid, rules)
-    result = PlaneViaReservation(rules=rules)
     targets = list(pads) if pads is not None else _plane_pads(grid, nets)
+    planner = _SitePlanner(grid, rules, set(nets) | {p.net_name for p in targets}, targets)
+    result = PlaneViaReservation(rules=rules)
     served: list[tuple[Pad, PlaneViaSite]] = []
     for pad in targets:
         site = planner.find(pad)
@@ -718,6 +1007,7 @@ def reserve_plane_via_sites(
         else:
             served.append((pad, site))
     result.sites = list(planner.sites)
+    result.blocked_escapes = list(planner.blocked_escapes)
 
     # Resolve each served pad to its FINAL site (a later pad may have been
     # appended to a shared site after this pad was served).

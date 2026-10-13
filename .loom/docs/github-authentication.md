@@ -685,11 +685,8 @@ call under a different credential and returns the last attempt's real error
 on failure, so an over-firing match costs one extra local `gh` call, never a
 wrong result.
 
-Wired call sites: `resolve-tier-model.sh` (issue-body fetch, both the GraphQL
-and REST-fallback attempts) — previously the one call site in this class that
-did not source `forge-helpers.sh` at all, so a wrong-repo 404 there silently
-fell through to the tier-3 default with a misleading "likely API quota"
-diagnostic instead of recovering or naming the real cause.
+Wired call sites: none today. Its one caller, the tier-2.5 issue-body fetch,
+was deleted with tier-2.5 routing (#11665).
 
 ### Long-running sweep children and credential snapshots (#4458)
 

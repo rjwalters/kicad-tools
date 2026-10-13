@@ -13,9 +13,22 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses, current-paths-audit"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, diff, export-dsn, import-ses, current-paths-audit"
         )
         return 1
+
+    # ``diff`` takes two sides (paths or REV:path specs), not one board.
+    if args.pcb_command == "diff":
+        from ..pcb_diff import run_pcb_diff
+
+        return run_pcb_diff(
+            args.old,
+            args.new,
+            fmt=args.format,
+            nets=args.net,
+            layers=args.layer,
+            svg=args.svg,
+        )
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():

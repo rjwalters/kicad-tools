@@ -3,7 +3,7 @@
 from unittest.mock import patch
 
 import pytest
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, box
 
 from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 from kicad_tools.router.grid import RoutingGrid
@@ -114,11 +114,18 @@ def test_unconnected_source_keeps_shortcut_to_connected_target(routing_backend):
     pads, routes, calls, _ = _run([(0, 1), (2, 1)])
     assert _touches(pads[2], routes)
     assert calls[1][2]
-    # The branch can join the tree before reaching the distant P1 terminal.
-    # The native fast path may reach the exact target; its Python fallback
-    # consumes the same optional goal set.
-    if routing_backend == "python":
-        assert not _touches(pads[1], [routes[1]])
+    # The branch is offered the connected tree as optional goals (above).  Which
+    # goal it pops first is the A*'s choice: both backends head for the exact
+    # P1 terminal, whose cell is itself part of the tree.  (This test used to
+    # assert the Python branch never touched P1; that held only because the old
+    # conservative pad disc pushed the route onto B.Cu, where the F.Cu-only
+    # ``_touches`` cannot see it -- Issue #6389.)  What must hold is that the
+    # branch, now free to hug the foreign X pads, keeps their clearance.
+    foreign = [box(1.5, 4.0, 2.5, 5.0), box(4.0, 4.0, 5.0, 5.0)]
+    for s in routes[1].segments:
+        if s.layer == Layer.F_CU:
+            line = LineString([(s.x1, s.y1), (s.x2, s.y2)])
+            assert min(line.distance(pad) for pad in foreign) - s.width / 2 >= 0.2 - 1e-6
 
 
 def test_disjoint_forest_does_not_offer_unrelated_tree_as_goal():
