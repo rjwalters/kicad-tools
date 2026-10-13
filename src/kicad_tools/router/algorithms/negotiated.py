@@ -2752,12 +2752,23 @@ class NegotiatedRouter:
             )
 
         history_before = {net: ripup_history.get(net) for net in blocking_nets}
+        queue_start = self._pending_cpp_unmarks()
         success = _attempt()
         if success or not self._cpp_rip_is_deferred():
             return success
         outcome = self.last_ripup_outcome
         if outcome is None or outcome.reason != RIPUP_VICTIM_GEOMETRIC or not outcome.ripped:
             return success
+
+        # Issue #6363: the first attempt's rollback discarded the victim's
+        # partial reroute, but inside the window that unmark was only queued,
+        # so the partial copper was still on the C++ grid -- foreign-hard for
+        # every blocker the retry re-lands.  Apply exactly those queued
+        # unmarks now.  The ripped-and-restored copper's queued unmarks (the
+        # #3438 corridor reservation) stay queued.
+        flush = getattr(self.grid, "flush_discarded_cpp_unmarks", None)
+        if callable(flush):
+            flush(queue_start)
 
         # Issue #6342: inside an open corridor-reservation window
         # (``RoutingGrid.begin_cpp_unmark_deferral``) a rip-up only QUEUES the
@@ -2780,6 +2791,11 @@ class NegotiatedRouter:
         if self.last_ripup_outcome is not None:
             self.last_ripup_outcome = dataclass_replace(self.last_ripup_outcome, cpp_retry=True)
         return success
+
+    def _pending_cpp_unmarks(self) -> int:
+        """Queued C++ unmarks in the open window (0 without one)."""
+        count = getattr(self.grid, "pending_cpp_unmark_count", None)
+        return int(count()) if callable(count) else 0
 
     def _cpp_rip_is_deferred(self) -> bool:
         """True when a rip-up's C++-grid unmark would be queued, not applied.
