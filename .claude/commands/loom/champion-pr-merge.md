@@ -589,12 +589,17 @@ four-axis judgment below.
 | **Judge review depth** | The Judge's verdict cites specifics from the diff — named files/functions, concrete behavior, what was run or verified. | A short generic approval ("LGTM", "looks good") with no evidence the diff was read, or a review that explicitly defers verification of some part ("did not check X"). |
 | **Revertability** | `git revert -m 1 <merge-sha>` fully undoes it: no data/schema migration, no published artifact, no state written outside the repo. | The change performs a one-way action when it runs (deletes branches/worktrees, rewrites installed files, publishes a release, migrates data, moves credentials), so reverting the commit does not undo the effect. |
 
+**Claim/label machinery is not red by itself (#11416).** Loom's own claim, lease, label-transition, dispatch and hand-back code is judged like any other code. Writing labels or claims *when it runs* is not a one-way action: `git revert` restores the old writer, and the state it wrote is re-derivable (janitors, lease reapers, `loom-recover-orphans` and the next tick repair a stranded claim or misrouted label). "Reverting cannot undo forge labels already changed" or "a defect could strand work fleet-wide" is **not** a red reason. Judge-approved + CI green + revert restores the behavior -> green on blast radius and revertability. "Mediates merging" in the table means kept-set item 2, nothing wider. **Kept set** — only these stay red, held for an operator (name the item in the hold bullet):
+1. **Irreversible migration, no rollback step**: a bulk relabel, or a rename/delete in `.github/labels.yml`, of live labels without a restore step; a lease/checkpoint/registry format the previous release cannot read.
+2. **The merge gate itself** — code whose output decides *whether a PR merges*: criteria #1-#6 and the sticky-hold logic (this file, `champion-critical-file-hold.md`); `merge-pr.sh`'s verdict/label/ordering guards; any code that writes or invalidates a verdict label or marker (`post-verdict.sh`, `verdict-staleness-guard.sh`, the daemon's `reconcile_pr_verdicts`, `check-review-feedback.sh`) or decides whose markers and comments are trusted (`comment_trust.rs`, `forge trusted-comments`). The gate cannot vouch for a change to itself. Writing a verdict label (the Judge's `loom:pr` approval) is part of the gate, not a role hand-back; only routing that cannot make a PR mergeable (Builder/Doctor hand-backs, claims) is outside it.
+3. **The other red entries in the table above**, unchanged. Criterion #3 critical files fail #3 regardless.
+
 **Decision rule**:
 - Docs-only fast path found `ELIGIBLE` **and** no prior hold is still in force -> **PASS**, continue to criterion #3 — the axes are not judged for this PR (see "Docs-only fast path" above).
 - Standing operator authorization matched (`STANDING_AUTH_RESULT=ELIGIBLE`) **and** no prior hold is still in force -> **PASS**, continue to criterion #3 — the axes are not judged for this PR (see "Standing operator authorization (#6850)" above). Name `STANDING_AUTH_ID` in the rationale.
 - All four axes green **and** no prior hold is still in force -> **PASS**, continue to criterion #3.
 - All four axes green **but** the sticky-hold precheck found a hold still in force -> **HOLD the merge** (silently; the axes do not get a vote here — see "Sticky holds" below). The PR is **not** dropped from this pass: continue to the **Held-PR Health Pass** (#6720).
-- Any axis red -> **HOLD the merge** (see hold behavior below), then continue to the **Held-PR Health Pass** (#6720).
+- Any axis red -> **HOLD the merge** (see hold behavior below), then continue to the **Held-PR Health Pass** (#6720) — except a human-released same concern, (e) in "Sticky holds" (#11416).
 - **Unsure on any axis -> HOLD.** Conservative bias: a held PR costs one human merge; a bad auto-merge costs a revert on `main`.
 - Merging a PR that ever carried a hold marker -> **PASS + mandatory reversal comment** (Step 2 must state what changed; see "Sticky holds").
 
@@ -732,26 +737,33 @@ else
     fi
   fi
 
-  # Manual-release detection (#7048, recurrence of #6720): none of (a)-(d)
-  # above recognize a bare `--remove-label loom:operator` (no qualifying
-  # comment) as a release signal, so RELEASE_REASON is untouched by it — that
-  # part is correct, a label removal alone must not skip re-judging the axes.
-  # But "Hold behavior" below also needs to know it happened, because
-  # silently reasserting `loom:operator` for the SAME concern a human just
-  # hand-removed is the defect this issue reports. `loom:operator` is the
-  # only piece of state the bot ever removes and re-adds outside an actual
-  # merge (never on the sticky/re-hold path), so "a hold marker already
-  # exists on this still-open PR AND the label is not currently on it" can
-  # only mean a human removed it by hand since the marker was posted.
+  # (e) A human removed `loom:operator` after the hold (#11416; was #7048's
+  #     "respected, still held"). Proof is a human-identified `unlabeled` event after
+  #     HOLD_AT, not bare absence (a failed `--add-label` is no release). Bot
+  #     removals are Champion's own (Step 2, critical-file "Hold Cleared") and
+  #     never count, like (b). Computed even when (a)-(d) fired.
   OPERATOR_LABEL_NOW=$(jq -r '[.labels[].name] | any(. == "loom:operator")' <<<"$PR_JSON")
-  MANUAL_RELEASE_SINCE_HOLD=false
+  MANUAL_RELEASE_SINCE_HOLD=false; LABEL_REPAIR=false
   if [ "$OPERATOR_LABEL_NOW" = false ]; then
-    MANUAL_RELEASE_SINCE_HOLD=true
+    if REMOVED_BY=$(gh api "repos/{owner}/{repo}/issues/$PR_NUMBER/events" --paginate --jq \
+      ".[] | select(.event == \"unlabeled\" and .label.name == \"loom:operator\" and .created_at > \"$HOLD_AT\" and .actor.type == \"User\" and ((.actor.login // \"\") | length > 0 and (endswith(\"[bot]\") | not))) | \"\(.actor.login) at \(.created_at)\"" 2>/dev/null); then
+      REMOVED_BY=$(tail -n 1 <<<"$REMOVED_BY")
+      [ -z "$REMOVED_BY" ] && LABEL_REPAIR=true   # read OK, no removal on record
+    else
+      REMOVED_BY=""   # unread: neither release nor repair this pass
+    fi
+    if [ -n "$REMOVED_BY" ]; then
+      MANUAL_RELEASE_SINCE_HOLD=true
+      [ -z "$RELEASE_REASON" ] && RELEASE_REASON="\`loom:operator\` removed by $REMOVED_BY"
+    fi
   fi
 fi
 
 if [ "$PRIOR_HOLD" = true ] && [ -z "$RELEASE_REASON" ]; then
   MERGE_BLOCKED_BY_HOLD=true
+  # Label missing, no removal on record: restore it, so a sticky-held PR
+  # never reads as plain approved and stays in the census (#11416).
+  [ "$LABEL_REPAIR" = true ] && gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
   echo "STICKY HOLD: #$PR_NUMBER was held at $HOLD_AT and nothing has changed since — not merging"
   # Post NOTHING (the hold notice is already on the PR — see Hold behavior's
   # idempotency guard) and do NOT merge this PR this pass, whatever the axes say.
@@ -764,14 +776,14 @@ if [ "$PRIOR_HOLD" = true ] && [ -z "$RELEASE_REASON" ]; then
 fi
 ```
 
-**Outcomes** — exactly four, and nothing else:
+**Outcomes** — exactly these, and nothing else:
 
 | Precheck result | What criterion #2 does |
 |---|---|
 | `PRIOR_HOLD=false` | Judge the four axes normally. No behavior change from before #4742. |
 | `PRIOR_HOLD=true`, no `RELEASE_REASON` | **HOLD the merge, silently.** The PR is not merged this pass regardless of how the axes read this tick, and no comment is posted (anti-spam guard already covers it). It is **not** skipped, though: `MERGE_BLOCKED_BY_HOLD=true` routes it to the **Held-PR Health Pass** (#6720), which still evaluates criteria #4/#5/#6. |
 | `PRIOR_HOLD=true`, released by `loom:auto-merge-ok` (`HOLD_OVERRIDE=true`) | Criterion #2 **PASS** by override — the axes are not re-scored. Continue to #3. Step 2's reversal block is **mandatory**. |
-| `PRIOR_HOLD=true`, released by (b), (c), or (d) | Re-judge the four axes normally. Still red -> the hold persists: the re-hold is silent (the notice's idempotency guard already covers it), `MERGE_BLOCKED_BY_HOLD=true`, and the **Held-PR Health Pass** runs — **unless** `MANUAL_RELEASE_SINCE_HOLD=true` and the freshly-derived concern is byte-identical to the prior hold's own bullet, in which case `loom:operator` is **not** reasserted (#7048 — see "Hold behavior"). Now green -> **PASS**, continue to #3, and Step 2's reversal block is **mandatory**. |
+| `PRIOR_HOLD=true`, released by (b), (c), (d), or (e) | Re-judge the four axes normally. Now green -> **PASS**, continue to #3, and Step 2's reversal block is **mandatory**. Still red **and** `MANUAL_RELEASE_SINCE_HOLD=true` **and** the concern is byte-identical to the prior hold's bullet -> **PASS** the same way: a human released exactly that concern (#11416); "Hold behavior"'s first branch executes it (no notice, no label). When your concern *is* the one on record, copy the prior bullet verbatim; write a new bullet only for a concern it does not name. Still red otherwise -> the hold persists: `MERGE_BLOCKED_BY_HOLD=true`, "Hold behavior" below, then the **Held-PR Health Pass**. |
 
 **Once released, stays released.** A release signal is consumed by the change
 itself, not by a counter: after a new commit lands, later ticks keep seeing
@@ -802,13 +814,13 @@ tripping release path (b) or (d).
   question lead-in (which must precede the phrase) fails the anchor. The
   conservative direction is preserved: an unrecognized phrasing leaves the hold in
   force, which costs one human merge; a false release costs a bad auto-merge.
-- **A bare `--remove-label loom:operator`, with no qualifying comment, is
-  deliberately NOT a release signal here either** — it does not touch
-  `RELEASE_REASON`, so the axes still get re-judged fresh exactly as before
-  (#7048 does not weaken criterion #2's judgment). What it *does* set is
-  `MANUAL_RELEASE_SINCE_HOLD`, consumed only by "Hold behavior" below: if the
-  axes are still red for the identical, already-recorded reason, the label is
-  not silently reasserted over that human decision (see "Hold behavior").
+- **A human `--remove-label loom:operator` IS release (e) (#11416)** — before,
+  #7048 only stopped the label being reasserted while the precheck still
+  refused the PR, so it sat as plain `loom:pr`, unmerged and out of the census
+  (#10280). Only a positively identified human counts (`actor.type == "User"`, non-empty login, no `[bot]` suffix); type `Bot`, a `[bot]` login, or a null/missing actor or login is
+  not a release, so a failed merge after Step 2 is never read as one. Limit: where agents run under the operator's own user token, the
+  two are indistinguishable. A missing label with no human removal after the
+  hold is repaired, not released.
 
 **Reversal is one mandatory comment, and the idempotency guard must not eat it.**
 Whenever `PRIOR_HOLD=true` and this PR proceeds to merge, Step 2's pre-merge
@@ -825,7 +837,7 @@ if [ "$PRIOR_HOLD" = true ]; then
 **Reversing a prior merge-risk hold** (held $HOLD_AT):
 
 - **What released it**: $RELEASE_REASON
-- **Axis that flipped**: <NAME_THE_PREVIOUSLY_RED_AXIS and the concrete, falsifiable reason it is now green — same bar as the hold comment itself. Write 'n/a — loom:auto-merge-ok override honored, axes not re-scored' ONLY when the release was the label.>
+- **Axis that flipped**: <NAME_THE_PREVIOUSLY_RED_AXIS and the concrete, falsifiable reason it is now green — same bar as the hold comment itself. Write 'n/a — loom:auto-merge-ok override honored, axes not re-scored' ONLY when the release was that label, or 'none — a human removed loom:operator for this same concern' ONLY for that (e) outcome.>
 - **Original hold concern**: <QUOTE_THE_AXIS_AND_CONCERN_FROM_THE_HOLD_COMMENT>
 "
 else
@@ -857,73 +869,24 @@ HOLD_MARKER="<!-- champion:merge-risk-hold -->"
 HEAD_SHA=$(jq -r '.headRefOid' <<<"$PR_JSON")
 
 # The exact "- **<AXIS>**: <SPECIFIC_CONCERN>" bullet you are about to write
-# below — compute it FIRST (before either branch) so the #7048 comparison
-# against the prior hold's own bullet can run before deciding whether to post
-# anything at all.
+# below — compute it FIRST, so the (e) comparison against the prior hold's
+# own bullet runs before deciding anything (#7048, #11416).
 CONCERN_BULLET="- **<AXIS>**: <SPECIFIC_CONCERN — name the file/function and what could break>"
 PRIOR_CONCERN_BULLET=$(printf '%s\n' "$HOLD_BODY" | grep -m1 -E '^- \*\*.+\*\*:')
 
-# #7048 (recurrence of #6720): a manual `--remove-label loom:operator` is not
-# one of the four durable release signals (see "Sticky holds" edge cases
-# above) — the axes above were still re-judged fresh, unweakened. But
-# silently reasserting the label for a concern that reads byte-for-byte the
-# same as the one already on record is exactly the observed defect: the
-# operator's decision gets overridden within hours with no new information.
-# Only skip the reapply when the concern is UNCHANGED; anything the operator
-# has not already seen (a new/different bullet) still re-holds normally below.
-SKIP_REAPPLY=false
 if [ "$MANUAL_RELEASE_SINCE_HOLD" = true ] && [ "$CONCERN_BULLET" = "$PRIOR_CONCERN_BULLET" ]; then
-  SKIP_REAPPLY=true
-fi
-
-if [ "$SKIP_REAPPLY" = true ]; then
-  # Respect the human decision instead of overriding it: do NOT reassert
-  # `loom:operator` — that label is what excludes a PR from Doctor's
-  # Priority-1 CONFLICTING queue (#5978), so reasserting it here is exactly
-  # what re-creates the all-held deadlock. The ORIGINAL hold notice/marker is
-  # left untouched (never re-posted, never edited — same rule as always).
-  # One transparency comment per distinct head SHA, so a rebase that lands
-  # but changes nothing about the concern does not go completely silent.
-  RESPECT_MARKER="<!-- champion:hold-release-respected:$HEAD_SHA -->"
-  if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$RESPECT_MARKER\"))")" = "true" ]; then
-    echo "Manual release already acknowledged at this head for #$PR_NUMBER — no comment"
-  else
-    ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$RESPECT_MARKER
-**Champion: Respecting a Manual Release (#7048)**
-
-\`loom:operator\` was removed by hand since the merge-risk hold posted at
-\`$HOLD_AT\`, and re-reading this PR's diff finds the same concern already on
-record:
-
-$PRIOR_CONCERN_BULLET
-
-That is not a release signal (see \"Sticky holds\") — the hold itself still
-stands, and this PR is still not auto-merged — but I am not silently
-reasserting \`loom:operator\` over a decision a human already made for this
-same, unchanged reason. It is treated like any other unheld \`CONFLICTING\`
-PR for Doctor routing purposes. If the concern above is stale, clear the hold
-explicitly (see the original hold notice for the phrasing); if a genuinely
-new problem shows up on a later read, the next hold notice will name it and
-\`loom:operator\` returns.
-
----
-*Automated by Champion role*"
-  fi
-  echo "Manual release respected for #$PR_NUMBER — not reapplying loom:operator (#7048)"
+  # Not a hold (#11416): a human removed `loom:operator` for exactly this
+  # concern. PASS — continue to #3; Step 2's reversal block is mandatory.
+  echo "PASS: #$PR_NUMBER — human released this same concern ($RELEASE_REASON)"
 else
   # Idempotency guard (same pattern as the stale-PR and verdict-janitor notices):
-  # a judgment hold does not clear on its own, so comment ONCE per hold episode
-  # instead of re-posting every 10-minute cron tick. The label stays, so the PR
-  # keeps its place in the queue — but the hold now BINDS later ticks (see
-  # "Sticky holds" above): it is released by `loom:auto-merge-ok`, an explicit
-  # operator clearing comment, a new push, or a new Judge review — never by a
-  # fresh re-read of the same diff.
-  # Cached ("$GH_READ") — idempotency-marker grep; see "Cached forge reads".
-  # `startswith`, not a bare substring match — same rationale as the
-  # sticky-hold precheck above (#5371): a later comment quoting this marker
-  # in prose must never be mistaken for the hold notice's own comment, or
-  # the real notice silently never gets posted.
-  if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$HOLD_MARKER\"))")" = "true" ]; then
+  # comment ONCE per hold episode, not every tick. The hold BINDS later ticks
+  # (see "Sticky holds"). Cached ("$GH_READ") marker grep; `startswith`, not a
+  # substring, so a comment quoting the marker in prose is never mistaken for
+  # the notice (#5371). A NEW concern after a human removal (#11416) always
+  # posts: it becomes the hold on record, so the human's next removal releases
+  # it instead of looping on a concern they were never shown.
+  if [ "$MANUAL_RELEASE_SINCE_HOLD" != true ] && [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$HOLD_MARKER\"))")" = "true" ]; then
     echo "Merge-risk hold already posted for #$PR_NUMBER — hold stands, no comment"
   else
     ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$HOLD_MARKER
@@ -936,7 +899,7 @@ auto-merging:
 $CONCERN_BULLET
 
 **Next steps** — this hold stays in force until one of these happens; Champion re-reading the same diff will **not** clear it:
-- A human merges it directly — \`gh pr edit $PR_NUMBER --remove-label \"loom:operator\"\`, then \`./.loom/scripts/merge-pr.sh $PR_NUMBER\`. The removal is **required** (\`merge-pr.sh\` refuses \`loom:pr\` + \`loom:operator\` together, #8112, and has no override flag) and **durable** (#7048: Champion does not re-assert the label for this same concern), so you are not racing a tick
+- A human releases it: \`gh pr edit $PR_NUMBER --remove-label \"loom:operator\"\`. Champion merges on its next tick unless it finds a concern this notice does not name; or run \`./.loom/scripts/merge-pr.sh $PR_NUMBER\` yourself after removing it (\`merge-pr.sh\` refuses \`loom:pr\` + \`loom:operator\` together, #8112)
 - Or applies \`loom:auto-merge-ok\` to override the hold; Champion merges on the next tick
 - Or comments here to clear it explicitly — **start the comment with the instruction**: \`clear the hold — <why>\`, \`cleared: <why>\`, \`override: <why>\`, \`merge anyway, <why>\`, \`ok to merge — <why>\`. Phrasing that only mentions those words later in a sentence, negates them (\`do not merge anyway\`), or asks about them (\`is it ok to merge?\`) deliberately does **not** release the hold, and neither does a bare 'looks fine'
 - Or the situation actually changes: a new push that narrows the concern, or a deeper Judge re-review
@@ -951,25 +914,17 @@ Keeping \`loom:pr\`. This PR stays in the queue and is re-checked each tick agai
 
   # loom:operator (#5502): the first-class "engine will not act further, a
   # human is the only transition out" pipeline state, applied alongside the
-  # marker above (whether freshly posted this tick or already standing from an
-  # earlier one — `--add-label` is idempotent, so it is safe to reassert every
-  # tick the hold binds). UNLIKE loom:operator-only, this must NOT make
-  # sweep/shepherd skip the PR — loom:pr is kept (see above) and the PR stays
-  # in the normal re-evaluation queue precisely so the release precheck
-  # (loom:auto-merge-ok / operator comment / new push / new Judge review, all
-  # above) can still fire and clear it. Never applied in place of loom:pr.
-  #
-  # This is the branch that DOES run when a manual release preceded this tick
-  # but the concern is genuinely new/different from the one on record (#7048)
-  # — the operator has not seen this reason, so it is fair to re-flag it.
+  # marker above (`--add-label` is idempotent, safe to reassert every tick the
+  # hold binds). UNLIKE loom:operator-only, this must NOT make sweep/shepherd
+  # skip the PR — loom:pr is kept and the PR stays in the re-evaluation queue
+  # so the release precheck can still fire. Never applied in place of loom:pr.
   gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
-fi
 
-# Do NOT merge this PR this pass. But do NOT drop it from the pass either
-# (#6720): a hold blocks the merge, it does not suspend the mechanical health
-# criteria. Mark it and fall through to the "Held-PR Health Pass" below, which
-# runs criteria #4/#5/#6 for reporting and routing.
-MERGE_BLOCKED_BY_HOLD=true
+  # Do NOT merge this PR this pass. But do NOT drop it from the pass either
+  # (#6720): a hold blocks the merge, it does not suspend the mechanical health
+  # criteria. Fall through to the "Held-PR Health Pass" below (#4/#5/#6).
+  MERGE_BLOCKED_BY_HOLD=true
+fi
 ```
 
 The concern must be **specific and falsifiable**. Good: *"touches `merge-pr.sh`'s ordering guard — a regression there can delete a worktree branch before the merge lands"*. Bad: *"large PR"*, *"seems risky"*, *"too many lines changed"*.
@@ -1565,15 +1520,15 @@ kept as-is for continuity with existing dashboards and transcripts; read it as
 "Champion-held PRs" (any `loom:operator` hold Champion itself applied), not
 literally "held on criterion #2 alone".
 
-**Undercounts a manually-released, still-open hold by design (#7048, #9016).** A
-PR whose `loom:operator` was hand-removed and is deliberately not reasserted —
-per "Hold behavior" above (same concern, no new information) for a merge-risk
-hold, or per `champion-critical-file-hold.md` (same head) for a critical-file
-one — drops out of this count — it no longer carries a Champion-applied hold label. That is the
-intended trade-off: this is a *label* census, and #7048's whole point is that
-the label must stop tracking an operator's own decision. The
-`champion:merge-risk-hold` marker is never removed, so the PR stays findable
-by comment search if a full audit is ever needed.
+**A hand-released hold is listed, not dropped (#11416).** A merge-risk hold
+whose `loom:operator` a human removed is released (precheck (e)) and merges
+next tick unless criteria #3-#6 block it; a critical-file one waits for the
+operator's own merge (`champion-critical-file-hold.md`, #9016). Either way the
+PR no longer carries the label, so `RELEASED` below lists every open `loom:pr`
+PR still bearing a hold marker without it — never silently plain approved
+(a critical-file hold whose last marker is `-cleared` was auto-cleared, not listed).
+A sticky hold missing its label with no removal on record gets the label back
+(precheck), so it stays in `HELD_COUNT`.
 
 ```bash
 # Cached ("$GH_READ") — an observation scan, never a merge gate.
@@ -1597,11 +1552,15 @@ else
 fi
 
 echo "Merge-risk holds: $HELD_COUNT open PR(s) — $HELD_CONFLICTING conflicting, $HELD_AT_DOCTOR out at Doctor, oldest ${OLDEST_DAYS}d"
+RELEASED=$("$GH_READ" pr list --label "loom:pr" --search "-label:loom:operator" --state open --limit 500 --json number,comments \
+  --jq '"<!-- champion:critical-file-hold" as $cf | [.[] | select(any(.comments[].body; startswith("<!-- champion:merge-risk-hold -->"))
+    or ([.comments[].body | select(startswith($cf))] | last // "" | startswith($cf + " -->"))) | "#\(.number)"] | join(" ")')
+echo "Released holds, not yet merged: ${RELEASED:-none}"
 ```
 
 **Report it even when it is zero** — the command above already emits
 `Merge-risk holds: 0 open PR(s) — 0 conflicting, 0 out at Doctor, oldest 0d` for
-an empty set; copy that line verbatim rather than omitting it. A line that
+an empty set (and `Released holds, not yet merged: none`); copy both verbatim rather than omitting them. A line that
 only appears when something is wrong is a line nobody learns to read; the point
 is that a *growing* pile shows up in the ordinary summary. Never state these
 numbers from memory or a previous pass — run the query in the pass you report
@@ -1764,6 +1723,7 @@ to, and it is **not a work item**: do not curate, build, or promote it.
 
 **Last updated**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 **Aggregate**: Merge-risk holds: $HELD_COUNT open PR(s) — $HELD_CONFLICTING conflicting ($HELD_ROTTING rotting >=${ROT_THRESHOLD_DAYS}d, $HELD_CONFLICTING_CLEAN clean), $HELD_AT_DOCTOR out at Doctor, oldest ${OLDEST_DAYS}d
+**Released, not yet merged**: ${RELEASED:-none}
 
 | PR | Hold reason | Status | Base |
 |---|---|---|---|

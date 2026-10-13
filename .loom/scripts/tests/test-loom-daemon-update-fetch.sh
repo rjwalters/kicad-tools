@@ -1063,14 +1063,51 @@ rcT=$(echo "$outT" | grep -o 'EXIT=[0-9]*' | cut -d= -f2)
 assert_eq "0" "$rcT" "release-gap: a still-usable (newer-than-installed) artifact update still exits 0"
 
 TESTS_RUN=$((TESTS_RUN + 1))
-if grep -q 'Artifact path cannot reach current source' <<<"$outT" \
-    && grep -q '0.20.0' <<<"$outT" && grep -q 'v0.16.0' <<<"$outT"; then
+if grep -q 'Note (informational): this run installs release v0.16.0' <<<"$outT" \
+    && grep -q '0.20.0' <<<"$outT" \
+    && ! grep -q 'will hard-fail' <<<"$outT"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} release-gap: plain run warns when the resolved release is behind source VERSION"
+    echo -e "${GREEN}✓${NC} release-gap: plain run notes (informationally) that the chosen release is behind source VERSION"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} release-gap: plain run warns when the resolved release is behind source VERSION"
+    echo -e "${RED}✗${NC} release-gap: plain run notes (informationally) that the chosen release is behind source VERSION"
     echo "  output: $outT"
+fi
+
+# T3. (#11070) Checkout ahead of the newest release + a forced --fetch whose
+#     release IS newer than installed: the fetch proceeds and succeeds, so no
+#     message may claim a forced --fetch "will hard-fail" (the contradictory
+#     pair the issue reported).
+WT3="$BASE_WORKDIR/w-fetch-t3"
+new_fixture "$WT3"
+write_fake_daemon "$WT3/installed-loom-daemon" "oldc0mm" "$WT3/marker"
+echo "0.16.1" > "$WT3/VERSION"
+WT3_ASSETS="$WT3/gh-assets"
+mkdir -p "$WT3_ASSETS"
+write_fake_artifact_daemon "$WT3_ASSETS/$WT_BIN_NAME" "0.16.0" "artifact-t3"
+sha256_of "$WT3_ASSETS/$WT_BIN_NAME" > "$WT3_ASSETS/$WT_BIN_NAME.sha256"
+WT3_FAKEBIN="$WT3/fakebin"
+mkdir -p "$WT3_FAKEBIN"
+write_fake_gh "$WT3_FAKEBIN/gh" "v0.16.0" "$WT3_ASSETS"
+
+outT3=$( cd "$WT3" && PATH="$WT3_FAKEBIN:$TEST_PATH" \
+    LOOM_DAEMON_BIN="$WT3/installed-loom-daemon" \
+    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
+    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
+    bash "$UPDATE_SCRIPT" --no-restart --fetch 2>&1; echo "EXIT=$?" )
+rcT3=$(echo "$outT3" | grep -o 'EXIT=[0-9]*' | cut -d= -f2)
+assert_eq "0" "$rcT3" "release-gap (#11070): forced --fetch of a release behind source VERSION still installs it (exit 0)"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'preferring fetch over a local rebuild' <<<"$outT3" \
+    && ! grep -q 'will hard-fail' <<<"$outT3" \
+    && ! grep -q 'Artifact path cannot reach current source' <<<"$outT3"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} release-gap (#11070): checkout ahead of release + --fetch prints no contradictory hard-fail warning"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} release-gap (#11070): checkout ahead of release + --fetch prints no contradictory hard-fail warning"
+    echo "  output: $outT3"
 fi
 
 WT2="$BASE_WORKDIR/w-fetch-t2"
