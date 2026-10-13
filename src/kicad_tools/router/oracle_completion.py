@@ -1113,7 +1113,7 @@ class PourLinkCloser:
         """
         import tempfile
 
-        from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
+        from shapely import LineString, Point, Polygon, box  # type: ignore[import-untyped]
 
         from kicad_tools.cli.stitch_cmd import (
             find_pads_on_nets,
