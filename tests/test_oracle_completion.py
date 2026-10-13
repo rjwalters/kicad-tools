@@ -18,6 +18,7 @@ from kicad_tools.router.completion_verdict import (
 )
 from kicad_tools.router.oracle_completion import (
     STOP_CONVERGED,
+    STOP_DEADLINE,
     STOP_DRC_REGRESSED,
     STOP_MAX_ROUNDS,
     STOP_NO_CLOSER,
@@ -321,3 +322,259 @@ class TestCliSurfaces:
             incomplete_count=1, blocking_incomplete_count=1, unrouted_count=0
         )
         assert exit_code_for(signal_gap, True) == 2  # opt-in never hides a signal gap
+
+
+class TestIslandJoinTargetsPlane:
+    """Issue #6399: a stranded pad island joins the plane, not the nearest sliver."""
+
+    def _board(self, tmp_path: Path, walled: bool = False) -> Path:
+        def pad(ref, x, y, w, h):
+            return (
+                f'  (footprint "T:{ref}" (layer "F.Cu")\n    (at {x:g} {y:g})\n'
+                f'    (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))\n'
+                f'    (pad "1" smd rect (at 0 0) (size {w:g} {h:g}) (layers "F.Cu") '
+                f'(net 1 "GND"))\n  )\n'
+            )
+
+        text = (
+            '(kicad_pcb (version 20240108) (generator "pcbnew")\n'
+            '  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))\n'
+            '  (net 0 "")\n  (net 1 "GND")\n  (net 2 "SIG")\n'
+            + pad("R1", 10, 10, 0.8, 0.8)  # the stranded pad island
+            + pad("R9", 22, 10, 4, 8)  # the plane (largest component)
+            # A padless sliver nearer to R1 than the plane is.
+            + '  (segment (start 13 8) (end 13 12) (width 0.2) (layer "F.Cu") (net 1))\n'
+            # Optionally ring the plane with other-net copper so it is unreachable.
+            + (
+                "".join(
+                    f'  (segment (start {a}) (end {b}) (width 0.3) (layer "F.Cu") (net 2))\n'
+                    for a, b in (
+                        ("18 4", "26 4"),
+                        ("26 4", "26 16"),
+                        ("26 16", "18 16"),
+                        ("18 16", "18 4"),
+                    )
+                )
+                if walled
+                else ""
+            )
+            + '  (gr_rect (start 0 0) (end 30 30) (layer "Edge.Cuts") (width 0.1))\n)\n'
+        )
+        path = tmp_path / "b.kicad_pcb"
+        path.write_text(text)
+        return path
+
+    def test_committed_route_ends_on_the_plane(self, tmp_path):
+        pytest.importorskip("shapely")
+        from kicad_tools.router.oracle_completion import OracleLink, PourLinkCloser
+        from kicad_tools.schema.pcb import PCB
+
+        board = self._board(tmp_path)
+        pad_end = OracleEndpoint(
+            description="Pad 1 [GND] of R1",
+            kind="pad",
+            net="GND",
+            x=10.0,
+            y=10.0,
+            layer="F.Cu",
+            ref="R1",
+            pad="1",
+        )
+        zone_end = OracleEndpoint(description="Zone [GND]", kind="zone", net="GND", x=10.0, y=10.0)
+        attempt = ClosureAttempt()
+        closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+        closer._route_links(board, [OracleLink(net="GND", a=pad_end, b=zone_end)], attempt)
+        assert attempt.applied == 1, attempt.notes
+        assert not any("nearest island" in n for n in attempt.notes)
+
+        pcb = PCB.load(str(board))
+        # Everything written beyond the original sliver segment.
+        new = [s for s in pcb.segments if s.start != (13.0, 8.0) and s.end != (13.0, 12.0)]
+        assert new
+        # The plane pad spans x in [20, 24]; the route must reach it.
+        assert max(max(s.start[0], s.end[0]) for s in new) >= 20.0 - 1e-6
+
+    def test_unreachable_plane_falls_back_and_says_so(self, tmp_path):
+        pytest.importorskip("shapely")
+        from kicad_tools.router.oracle_completion import OracleLink, PourLinkCloser
+
+        board = self._board(tmp_path, walled=True)
+        pad_end = OracleEndpoint(
+            description="Pad 1 [GND] of R1",
+            kind="pad",
+            net="GND",
+            x=10.0,
+            y=10.0,
+            layer="F.Cu",
+            ref="R1",
+            pad="1",
+        )
+        zone_end = OracleEndpoint(description="Zone [GND]", kind="zone", net="GND", x=10.0, y=10.0)
+        attempt = ClosureAttempt()
+        closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+        closer._route_links(board, [OracleLink(net="GND", a=pad_end, b=zone_end)], attempt)
+        assert attempt.applied == 1, attempt.notes
+        assert attempt.notes == [
+            "GND R1.1: no clearance-legal route to the plane-owning copper; "
+            "joined the nearest island instead"
+        ]
+
+
+class TestCloserReasonsPrinted:
+    def test_reasons_match_link_pad(self):
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink
+
+        pad = OracleEndpoint(
+            description="Pad 36 [+3.3V] of U2",
+            kind="pad",
+            net="+3.3V",
+            x=0,
+            y=0,
+            ref="U2",
+            pad="36",
+        )
+        zone = OracleEndpoint(description="Zone [+3.3V]", kind="zone", net="+3.3V", x=0, y=0)
+        lk = OracleLink(net="+3.3V", a=pad, b=zone)
+        notes = ["+3.3V U2.36: no via site", "GND C1.1: other"]
+        assert _closer_reasons_for(lk, notes) == ["+3.3V U2.36: no via site"]
+
+    def test_pad_key_matches_whole_token(self):
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink
+
+        pad = OracleEndpoint(
+            description="Pad 3 [+3.3V] of U2", kind="pad", net="+3.3V", x=0, y=0, ref="U2", pad="3"
+        )
+        zone = OracleEndpoint(description="Zone [+3.3V]", kind="zone", net="+3.3V", x=0, y=0)
+        lk = OracleLink(net="+3.3V", a=pad, b=zone)
+        notes = ["+3.3V U2.36: no via site", "+3.3V U2.3: boxed in"]
+        assert _closer_reasons_for(lk, notes) == ["+3.3V U2.3: boxed in"]
+
+    def test_result_carries_closer_notes(self, tmp_path):
+        board = FakeBoard(tmp_path, 2)
+
+        def closer(path, links, banned):
+            board.path.write_text("1,0")
+            return ClosureAttempt(applied=1, notes=["GND C1.1: boxed in"])
+
+        res = run_oracle_completion(
+            board.path, oracle=board.oracle, closer=closer, nets=["GND"], max_rounds=1
+        )
+        assert res.closer_notes == ["GND C1.1: boxed in"]
+
+    def test_deadline_round_keeps_previous_reasons(self, tmp_path):
+        """A round stopped by the deadline before any attempt must not wipe notes."""
+        board = FakeBoard(tmp_path, 3)
+
+        def closer(path, links, banned):
+            n, e = board.state()
+            board.path.write_text(f"{n - 1},{e}")
+            return ClosureAttempt(applied=1, notes=["GND C1.1: boxed in"])
+
+        # Initial DRC and round 1's attempt are affordable; round 2's is not.
+        budget = iter([None, None])
+
+        res = run_oracle_completion(
+            board.path,
+            oracle=board.oracle,
+            closer=closer,
+            nets=["GND"],
+            max_rounds=3,
+            time_left=lambda: next(budget, 0.0),
+            call_cost_estimate=1.0,
+        )
+        assert res.stop_reason == STOP_DEADLINE
+        assert res.rounds[-1].attempts == 0
+        assert res.closer_notes == ["GND C1.1: boxed in"]
+
+    def test_withdrawn_culprit_explains_a_no_closer_round(self, tmp_path):
+        """Board 04's shape: every weld is withdrawn, the last attempt is empty."""
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+
+        b = FakeBoard(tmp_path, 2)
+
+        def oracle(path):
+            links, errors = b.state()
+            geo = _geo(links, errors)
+            if errors:
+                geo.error_violations = [
+                    DRCViolation(
+                        type=ViolationType.CLEARANCE,
+                        type_str="clearance",
+                        severity=Severity.ERROR,
+                        message="x",
+                        locations=[Location(20.0, 5.0)],
+                        items=["Track on F.Cu"],
+                    )
+                ]
+            return geo
+
+        def closer(path, links, banned):
+            if "pad:GND:C1.1" in banned:
+                return ClosureAttempt(applied=0)
+            path.write_text("2,1")
+            return ClosureAttempt(
+                applied=1, footprints={"pad:GND:C1.1": [(20.0, 5.0, 20.0, 5.0, 0.3)]}
+            )
+
+        res = run_oracle_completion(b.path, oracle=oracle, closer=closer, nets={"GND"})
+        assert res.stop_reason == STOP_NO_CLOSER
+        assert res.closer_notes == ["pad:GND:C1.1: withdrawn -- its copper raised KiCad DRC by 1"]
+        lk = links_from_violations(_unconnected(1))[0]  # C1.1 <-> zone
+        assert _closer_reasons_for(lk, res.closer_notes) == res.closer_notes
+
+    def test_route_key_names_its_link(self):
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink, _route_key
+
+        a = OracleEndpoint(description="Pad 2 [GND] of C1 on F.Cu", kind="pad", net="GND", x=0, y=0)
+        b = OracleEndpoint(description="Pad 2 [GND] of U1 on F.Cu", kind="pad", net="GND", x=1, y=0)
+        lk = OracleLink(net="GND", a=a, b=b)
+        other = OracleLink(
+            net="GND",
+            a=a,
+            b=OracleEndpoint(
+                description="Pad 2 [GND] of C10 on F.Cu", kind="pad", net="GND", x=2, y=0
+            ),
+        )
+        note = f"{_route_key(lk)}: withdrawn -- its copper raised KiCad DRC by 3"
+        assert _closer_reasons_for(lk, [note]) == [note]
+        assert _closer_reasons_for(other, [note]) == []
+
+    def test_route_key_does_not_match_longer_ref(self):
+        """``Pad 2 [GND] of C1`` is a substring of ``... of C10``; the key is exact."""
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink, _route_key
+
+        def link(ref):
+            p = OracleEndpoint(
+                description=f"Pad 2 [GND] of {ref}",
+                kind="pad",
+                net="GND",
+                x=0,
+                y=0,
+                ref=ref,
+                pad="2",
+            )
+            z = OracleEndpoint(description="Zone [GND]", kind="zone", net="GND", x=0, y=0)
+            return OracleLink(net="GND", a=p, b=z)
+
+        note = f"{_route_key(link('C10'))}: withdrawn -- its copper raised KiCad DRC by 1"
+        assert _closer_reasons_for(link("C1"), [note]) == []
+        assert _closer_reasons_for(link("C10"), [note]) == [note]
+
+    def test_padless_link_falls_back_to_its_net(self):
+        """Board 04: KiCad names ``Zone <-> Zone``; the closer's notes name U2.36."""
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink
+
+        z = OracleEndpoint(description="Zone [+3.3V] on F.Cu", kind="zone", net="+3.3V", x=0, y=0)
+        lk = OracleLink(net="+3.3V", a=z, b=z)
+        notes = [
+            "+3.3V U2.36: no valid via location",
+            "pad:+3.3V:U2.36: withdrawn -- its copper raised KiCad DRC by 2",
+            "GND C1.1: boxed in",
+            "+3.3VA U9.1: other net",
+        ]
+        assert _closer_reasons_for(lk, notes) == notes[:2]
