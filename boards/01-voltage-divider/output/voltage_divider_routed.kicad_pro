@@ -4,7 +4,18 @@
     "version": 1,
     "manufacturer": "jlcpcb",
     "layers": 2,
-    "copper_oz": 1.0
+    "copper_oz": 1.0,
+    "kct_router_netclasses": {
+      "classes": [
+        "Power"
+      ],
+      "assignments": [
+        "GND",
+        "VIN",
+        "VOUT"
+      ]
+    },
+    "kct_sidecar_sha256": "11e5f4499d485d275670507cae7dfcbe95c1e130b4b24aef71e2b154ce14896c"
   },
   "board": {
     "design_settings": {
@@ -53,10 +64,32 @@
         "via_diameter": 0.6,
         "via_drill": 0.3,
         "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Power",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
       }
     ],
     "meta": {
       "version": 3
+    },
+    "netclass_assignments": {
+      "GND": "Power",
+      "VIN": "Power",
+      "VOUT": "Power"
     }
   },
   "schematic": {
