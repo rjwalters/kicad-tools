@@ -104,7 +104,29 @@ def _count_copper_layers(pcb_path: Path) -> int:
         return 2
 
 
-def _resolve_mfr_via_dimensions(mfr: str, layers: int, copper: float = 1.0) -> tuple[float, float]:
+def _resolve_mfr_rules(mfr: str, layers: int, copper: float = 1.0):
+    """Resolve the manufacturer ``DesignRules`` entry for the stackup.
+
+    Shared by :func:`_resolve_mfr_via_dimensions` and
+    :func:`_resolve_mfr_min_hole_to_hole` so stitching reads the same
+    profile entry that ``kct check --mfr`` does.  Raises
+    ``FileNotFoundError`` when no YAML profile exists for ``mfr``.
+    """
+    return _resolve_mfr_via_dimensions(mfr, layers, copper, _return_rules=True)
+
+
+def _resolve_mfr_min_hole_to_hole(mfr: str, layers: int, copper: float = 1.0) -> float:
+    """Return the fab profile's hole-to-hole minimum (mm, edge-to-edge).
+
+    Issue #6289: the same ``min_hole_to_hole_mm`` the ``hole_to_hole_clearance``
+    rule of ``kct check --mfr`` enforces.
+    """
+    return float(_resolve_mfr_rules(mfr, layers, copper).min_hole_to_hole_mm)
+
+
+def _resolve_mfr_via_dimensions(
+    mfr: str, layers: int, copper: float = 1.0, _return_rules: bool = False
+):
     """Resolve via diameter and drill from a manufacturer YAML profile.
 
     Looks up the manufacturer's design rules for the actual stackup
@@ -168,6 +190,8 @@ def _resolve_mfr_via_dimensions(mfr: str, layers: int, copper: float = 1.0) -> t
             # a usable answer rather than crashing.
             rules = next(iter(rules_dict.values()))
 
+    if _return_rules:
+        return rules
     drill = rules.min_via_drill_mm
     min_annular_ring = rules.min_annular_ring_mm
     mfr_min_diameter = rules.min_via_diameter_mm
@@ -4686,6 +4710,7 @@ def run_thermal_stitch(
     reference_prefixes: tuple[str, ...] | None = None,
     target_layer: str | None = None,
     dry_run: bool = False,
+    min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
 ) -> StitchResult:
     """Place thermal vias under / around MOSFET heat-sink pads.
 
@@ -4792,6 +4817,9 @@ def run_thermal_stitch(
     # their own thermal escape).
     target_pad_circles = [p for p in find_all_pads(sexp) if p[3] in target_net_nums]
     target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in target_net_nums]
+    target_via_drills = [
+        d for d in find_all_drills(sexp, include_pads=False) if d[3] in target_net_nums
+    ]
 
     # Per-net same-net via positions (existing + newly placed).  Treated
     # as obstacles to prevent stacking on the same net.  A via placed for
@@ -4900,9 +4928,16 @@ def run_thermal_stitch(
         other_net_pads_with_siblings = other_net_pads + [
             p for p in target_pad_circles if p[3] != pad_net
         ]
-        other_net_drills_with_siblings = other_net_drills + [
-            d for d in target_pad_drills if d[3] != pad_net
-        ]
+        # Issue #6289: sibling stitch-net VIA drills (pre-existing and placed
+        # earlier in this run) are drilled holes too; the copper-only
+        # ``other_net_vias`` pool let thermal vias land 0.457-0.496 mm from
+        # them, below the fab hole-to-hole floor.
+        other_net_drills_with_siblings = (
+            other_net_drills
+            + [d for d in target_pad_drills if d[3] != pad_net]
+            + [d for d in target_via_drills if d[3] != pad_net]
+            + [(cx, cy, drill, cn) for cx, cy, cn in cross_net_placed_vias if cn != pad_net]
+        )
 
         # Issue #6410: per-candidate fill pools -- the gate uses only this
         # pad's OWN net's fill, and sibling target nets' fills become
@@ -4929,7 +4964,7 @@ def run_thermal_stitch(
                 via_drill=drill,
                 other_net_drills=other_net_drills_with_siblings,
                 hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
-                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                min_hole_to_hole=min_hole_to_hole,
             ):
                 continue
 
@@ -5001,6 +5036,7 @@ def run_blanket_stitch(
     spacing: float = 3.0,
     target_layer: str | None = None,
     dry_run: bool = False,
+    min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
 ) -> StitchResult:
     """Run blanket (grid-based) stitching on a PCB.
 
@@ -5170,7 +5206,7 @@ def run_blanket_stitch(
                     via_drill=drill,
                     other_net_drills=other_net_drills_with_siblings,
                     hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
-                    min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                    min_hole_to_hole=min_hole_to_hole,
                 ):
                     continue
 
@@ -5306,6 +5342,7 @@ def run_stitch(
     strict_drill_overlap: bool = False,
     preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     avoid_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
+    min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -5335,6 +5372,10 @@ def run_stitch(
             manufacturability failure.  Dropped pads are recorded in
             ``StitchResult.pads_skipped`` with a ``via_in_pad`` reason and
             counted in ``StitchResult.via_in_pad_filtered``.
+        min_hole_to_hole: Issue #6289 -- fab hole-to-hole minimum (mm,
+            drill edge-to-edge) every stitch via must clear.  The CLI passes
+            the ``--mfr`` profile's ``min_hole_to_hole_mm`` (the value
+            ``kct check --mfr`` enforces); defaults to the 0.5 mm floor.
         strict_drill_overlap: Issue #5785 -- with ``avoid_pad_overlap``, also
             drop a via whose drill merely OVERLAPS a same-net SMD pad (the
             current ``via_in_pad`` DRC rule), not only one fully inside it.
@@ -5610,6 +5651,7 @@ def run_stitch(
             other_net_filled_polygons=eff_other_fill,
             other_net_pad_bboxes=eff_pad_bboxes,
             other_net_drills=eff_drills,
+            min_hole_to_hole=min_hole_to_hole,
             via_drill=drill,
             same_net_filled_polygons=fill_gate,
             same_net_fill_layer=terminus_layer,
@@ -5641,7 +5683,7 @@ def run_stitch(
                 other_net_filled_polygons=eff_other_fill,
                 via_drill=drill,
                 other_net_drills=eff_drills,
-                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                min_hole_to_hole=min_hole_to_hole,
                 same_net_filled_polygons=fill_gate,
                 same_net_fill_layer=terminus_layer,
                 other_net_track_index=eff_track_index,
@@ -5664,7 +5706,7 @@ def run_stitch(
                     trace_width=trace_width,
                     via_drill=drill,
                     other_net_drills=eff_drills,
-                    min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                    min_hole_to_hole=min_hole_to_hole,
                     same_net_filled_polygons=fill_gate,
                     same_net_fill_layer=terminus_layer,
                     other_net_track_index=eff_track_index,
@@ -5687,6 +5729,7 @@ def run_stitch(
                             other_net_filled_polygons=eff_other_fill,
                             other_net_pad_bboxes=eff_pad_bboxes,
                             other_net_drills=eff_drills,
+                            min_hole_to_hole=min_hole_to_hole,
                             via_drill=micro_via_drill,
                             same_net_filled_polygons=fill_gate,
                             same_net_fill_layer=terminus_layer,
@@ -5707,7 +5750,7 @@ def run_stitch(
                                 other_net_filled_polygons=eff_other_fill,
                                 via_drill=micro_via_drill,
                                 other_net_drills=eff_drills,
-                                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                                min_hole_to_hole=min_hole_to_hole,
                                 same_net_filled_polygons=fill_gate,
                                 same_net_fill_layer=terminus_layer,
                                 other_net_track_index=eff_track_index,
@@ -5729,7 +5772,7 @@ def run_stitch(
                                 trace_width=trace_width,
                                 via_drill=micro_via_drill,
                                 other_net_drills=eff_drills,
-                                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                                min_hole_to_hole=min_hole_to_hole,
                                 same_net_filled_polygons=fill_gate,
                                 same_net_fill_layer=terminus_layer,
                                 other_net_track_index=eff_track_index,
@@ -6179,7 +6222,7 @@ def run_stitch(
     # vs-J1.S2 case (#3855) is a same-net via-vs-pad pair -- two distinct
     # drilled holes that never merge -- so same-net PADS are NOT excluded.
     if result.vias_added:
-        MIN_HOLE_TO_HOLE = MIN_HOLE_TO_HOLE_CLEARANCE
+        MIN_HOLE_TO_HOLE = min_hole_to_hole
         # Issue #4177: the prior ``find_all_drills(sexp, exclude_nets=
         # net_numbers)`` excluded EVERY stitch-target net's drills, so on a
         # ``--net GND --net +3.3V`` run a GND stitch via was never checked
@@ -6207,9 +6250,17 @@ def run_stitch(
         for placement, trace in zip(result.vias_added, result.traces_added, strict=True):
             cand_r = placement.drill / 2.0
             via_net = placement.pad.net_number
-            # Own-net vias are exempt (same-net stacking); every foreign
-            # net's vias and EVERY net's pads remain obstacles.
-            existing_board_drills = all_pad_drills + [d for d in all_via_drills if d[3] != via_net]
+            # Issue #6289: only a COINCIDENT own-net via (true stacking) is
+            # exempt.  A distinct own-net via is a separate drilled hole, so
+            # the fab hole-to-hole floor applies to it exactly as
+            # ``kct check --mfr`` measures it (board 05: +24V/+3V3 stitch
+            # vias 0.457-0.496 mm from an existing same-net via).
+            existing_board_drills = all_pad_drills + [
+                d
+                for d in all_via_drills
+                if d[3] != via_net
+                or math.hypot(d[0] - placement.via_x, d[1] - placement.via_y) > 1e-3
+            ]
             # The via intentionally connects ``placement.pad``; if that pad
             # is itself a drilled (through-hole) hole, a via placed right
             # beside it is the desired escape geometry, not a stray
@@ -7029,9 +7080,11 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
     via_size = args.via_size
     drill = args.drill
     manufacturer: dict | None = None
+    min_h2h = MIN_HOLE_TO_HOLE_CLEARANCE
     if args.mfr is not None:
         try:
             detected_layers = _count_copper_layers(pcb_path)
+            min_h2h = _resolve_mfr_min_hole_to_hole(args.mfr, detected_layers, args.copper)
             mfr_via_size, mfr_drill = _resolve_mfr_via_dimensions(
                 args.mfr, detected_layers, args.copper
             )
@@ -7132,6 +7185,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 reference_prefixes=ref_prefixes,
                 target_layer=args.target_layer,
                 dry_run=args.dry_run,
+                min_hole_to_hole=min_h2h,
             )
         elif args.blanket:
             result = run_blanket_stitch(
@@ -7143,6 +7197,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 spacing=args.spacing,
                 target_layer=args.target_layer,
                 dry_run=args.dry_run,
+                min_hole_to_hole=min_h2h,
             )
         else:
             result = run_stitch(
@@ -7160,6 +7215,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 micro_via_size=args.micro_via_size,
                 micro_via_drill=args.micro_via_drill,
                 avoid_pad_overlap=args.avoid_pad_overlap,
+                min_hole_to_hole=min_h2h,
             )
 
         if not as_json:
