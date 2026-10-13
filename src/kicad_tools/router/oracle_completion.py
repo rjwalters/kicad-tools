@@ -86,10 +86,12 @@ DEFAULT_ORACLE_ROUNDS = 3
 #: Most floating fill islands bonded per net in one attempt.
 MAX_ISLAND_JOINS = 16
 
-#: Issue #6374: a weld's trace + via land within ``run_stitch``'s escape
-#: distance (4 mm) of the pad; foreign copper this far from a named pad is a
-#: neighbour whose class clearance the weld must keep.
-WELD_NEIGHBOURHOOD_MM = 5.0
+#: Issue #6384: the ``offset`` / ``escape_distance`` pad welds pass to
+#: ``run_stitch``.  ``PourLinkCloser.weld_clearance`` derives each pad's
+#: neighbourhood from the SAME values (via ``max_via_reach_mm``), so the
+#: reach it checks and the geometry stitch searches cannot drift apart.
+WELD_OFFSET_MM = 0.5
+WELD_ESCAPE_DISTANCE_MM = 4.0
 
 #: Why the loop stopped (``OracleCompletionResult.stop_reason``).
 STOP_NOT_RUN = "oracle_not_run"  # kicad-cli absent / timed out on the first call
@@ -611,6 +613,18 @@ def _route_key(link: OracleLink) -> str:
     return f"route:{link.net}:{link.a.description}|{link.b.description}"
 
 
+def _pad_size(pcb: Any, ref: str, number: str) -> tuple[float, float] | None:
+    """``(width, height)`` of footprint pad ``ref.number`` -- the size stitch sees."""
+    fp = pcb.get_footprint(ref)
+    if fp is None:
+        return None
+    for pad in fp.pads:
+        if str(pad.number) == str(number):
+            w, h = pad.size
+            return (float(w), float(h))
+    return None
+
+
 @dataclass
 class PourLinkCloser:
     """Close pour-net links: weld the named pads into their planes, route the rest.
@@ -654,6 +668,10 @@ class PourLinkCloser:
     #: grid router's rule (``io._get_pair_clearance``).  ``clearance`` stays
     #: the floor; ``None`` (or a net with no entry) contributes only it.
     net_class_map: Mapping[str, Any] | None = None
+    #: Issue #6384: ``run_stitch``'s ``offset`` / ``escape_distance`` for pad
+    #: welds; also the inputs of the weld neighbourhood (``weld_clearance``).
+    weld_offset: float = WELD_OFFSET_MM
+    weld_escape_distance: float = WELD_ESCAPE_DISTANCE_MM
 
     # -- net-class clearance (Issue #6374) ----------------------------------------
 
@@ -848,11 +866,20 @@ class PourLinkCloser:
         """The scalar clearance ``run_stitch`` welds the named pads at (Issue #6374).
 
         ``run_stitch`` takes one clearance for every net it welds, so this is
-        the largest ``c(P, N)`` over each pour net P and every net N with
-        copper within :data:`WELD_NEIGHBOURHOOD_MM` of one of P's named pads
-        -- the pour net's class always, a neighbour's class only where a weld
-        could actually land next to it.  Without a net-class map it is
+        the largest ``c(P, N)`` over each pour net P and every net N whose
+        copper a weld of one of P's named pads could come within ``c(P, N)``
+        of -- the pour net's class always, a neighbour's class only where a
+        weld could actually land next to it.  Without a net-class map it is
         exactly ``clearance``.
+
+        Issue #6384: "could land next to it" is derived per pad and per
+        neighbour from stitch's own geometry, not a fixed radius.  A weld's
+        via centre (and every trace waypoint) stays within
+        ``D = max_via_reach_mm(pad, weld_offset, weld_escape_distance)`` of
+        the pad centre, and its copper extends ``max(via_size,
+        trace_width) / 2`` beyond that, so N counts exactly when its copper
+        is within ``D + max(via_size, trace_width) / 2 + c(P, N)`` of the pad
+        centre.
         """
         floor = max((self.class_clearance(net) for net in pads_by_net), default=self.clearance)
         if not self.net_class_map:
@@ -864,6 +891,7 @@ class PourLinkCloser:
         if not stricter:
             return floor
         try:
+            from kicad_tools.cli.stitch_cmd import max_via_reach_mm
             from kicad_tools.router.link_router import _build_model, terminal_for_pad
             from kicad_tools.schema.pcb import PCB
 
@@ -873,21 +901,26 @@ class PourLinkCloser:
             return max(floor, *(self.class_clearance(name) for name in stricter))
         names = {num: getattr(net, "name", None) for num, net in pcb.nets.items()}
         candidates = [it for it in model.items if names.get(it.net) in stricter]
+        copper_half = max(self.via_size, self.trace_width) / 2
         best = floor
         for net, keys in pads_by_net.items():
             for key in keys:
                 ref, _, number = key.partition(".")
                 t = terminal_for_pad(pcb, ref, number)
-                if t is None:
+                size = _pad_size(pcb, ref, number)
+                if t is None or size is None:
                     continue
-                pad_geom = next(iter(t.layers.values()))
+                # The pad centre stitch measures from (``t.point`` is this centroid).
+                centre = next(iter(t.layers.values())).centroid
+                reach = (
+                    max_via_reach_mm(size[0], size[1], self.weld_offset, self.weld_escape_distance)
+                    + copper_half
+                )
                 for it in candidates:
                     c = self.pair_clearance(net, names.get(it.net))
                     if c <= best:
                         continue
-                    if any(
-                        g.distance(pad_geom) <= WELD_NEIGHBOURHOOD_MM for g in it.layers.values()
-                    ):
+                    if any(g.distance(centre) <= reach + c for g in it.layers.values()):
                         best = c
         return best
 
@@ -907,6 +940,8 @@ class PourLinkCloser:
                 via_size=self.via_size,
                 drill=self.via_drill,
                 clearance=clearance,
+                offset=self.weld_offset,
+                escape_distance=self.weld_escape_distance,
                 trace_width=self.trace_width,
                 avoid_pad_overlap=self.avoid_via_in_pad,
                 only_pads=pads,
