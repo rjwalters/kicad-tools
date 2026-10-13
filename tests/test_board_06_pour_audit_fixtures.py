@@ -423,6 +423,12 @@ def test_audit_keeps_disconnected_solids_in_one_fill_contour_separate(
     )
     board.write_text(text.replace(fills[0], combined).replace(fills[1], ""))
     assert len(PCB.load(board).zones[0].filled_polygons) == 1
-    assert len(_physical_pad_groups(board)) == 2
+    # One stored ``filled_polygon`` is one KiCad connectivity item, even when
+    # its contour retraces a zero-width edge between two solids: kicad-cli
+    # 10.0.6 reports 0 unconnected on this exact board, and the shared
+    # copper-contact partition agrees (Issue #6452).  The board script's own
+    # audit below still splits the solids -- conservative (it only asks for
+    # more stitching), and outside the shared model.
+    assert len(_physical_pad_groups(board)) == 1
     audit = generate_design_mod._audit_pour_nets(board, ["GND"])["GND"]
     assert not audit["connected"] and len(audit["pad_groups"]) == 2
