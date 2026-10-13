@@ -644,7 +644,6 @@ is `#[serde(default)]`); the fix is at the emitters, not the readers.
   "models_used": ["claude-opus-5", "claude-sonnet-5"],
   "doctor_cycles": 0,
   "judge_verdicts": [{ "attempt": 1, "verdict": "pass" }],
-  "complexity": "routine",
   "story_points": 5,
   "tokens_status": "measured"
 }
@@ -661,7 +660,7 @@ is the latest (`pr_number`). A single-model, single-PR sweep collapses to one
 `config` (free-form string map), `phase_durations`, `model`, `effort`,
 `pr_number`, `pr_numbers`, `tokens_in`, `tokens_out`, `lines_added`,
 `lines_deleted`, `tokens_by_model`, `tokens_unattributed`, `failure_class`,
-`models_used`, `doctor_cycles`, `judge_verdicts`, `complexity`,
+`models_used`, `doctor_cycles`, `judge_verdicts`,
 `story_points`, `tokens_status`, `tokens_status_reason`, and `no_phase_cause`
 are omitted when empty/unset.
 `config` is a map — not fixed fields — so operator-tunable knobs can be
@@ -824,9 +823,9 @@ Neither field is added to the public redaction allowlist, for the same reason as
 the work-output pair above. Cross-file `message.id` dedupe within a window is
 out of scope here (#9315) — the fold this reuses is unchanged.
 
-#### Completeness fields (Issues #8056, #8222, #8542)
+#### Completeness fields (Issues #8056, #8222)
 
-Five more **independently optional** fields, added additively (no
+Four more **independently optional** fields, added additively (no
 `schema_version` bump — none of them is a new record kind). Each answers a
 question that previously required joining the sibling `sweep-outcomes.jsonl`
 by `sweep_id`, or could not be answered at all.
@@ -838,7 +837,6 @@ by `sweep_id`, or could not be answered at all.
 | `models_used` | string array | The distinct `model` ids in `tokens_by_model`, sorted and deduped. | The top-level "did this sweep run more than one model?" signal. Since #9465 `model` names the **dominant** model that actually ran (the largest input+output row in `tokens_by_model`, dispatched model as fallback), so a sweep that escalated to `claude-opus-5` through the Doctor ladder reports `model: "claude-opus-5"` with `config["arm"]` still carrying the dispatch-time arm — `models_used` is what shows that the *earlier* phases ran something else. Inherits `tokens_by_model`'s contract exactly: omitted (never `[]`) when no attributable transcript was found. |
 | `doctor_cycles` | integer | **The forge label timeline** of the PR named by this record's own `pr_number` (Issue #8222 — re-sourced; the #8056 shipment counted sampled checkpoint markers instead): one cycle per `loom:changes-requested` arrival that a later `loom:review-requested` arrival closed the loop on. | A rejection nobody handed back (the sweep hit the Doctor-cycle cap, or died) is **not** a cycle. Because the label events are durable forge state rather than a ~30s sample, a cycle that opens and closes between two reaper ticks is still counted: this is a certified count, **not** the lower-bound proxy it was under #8056. `0` means "the timeline was read and no Doctor cycle completed"; an **absent** key means the timeline was not read at all. |
 | `judge_verdicts` | array of `{ "attempt": int, "verdict": string }` | The same PR's label timeline: `loom:pr` ⇒ `"pass"`, `loom:changes-requested` ⇒ `"fail"`, in lifecycle order. | What makes **first-pass judge approval rate** computable from this journal alone: `judge_verdicts[0].verdict == "pass"` over the records that carry the field. `attempt` is **1-based per PR**, counting `loom:review-requested` arrivals — attempt 1 is the PR as first opened, attempt 2 the pass after the first Doctor hand-back. A repeat of the same verdict inside one attempt (a label removed and re-applied) is one entry, not two. `[]` means "the timeline was read and carried no verdict" (a sweep that died before Judge); an **absent** key means the timeline was not read. |
-| `complexity` | string (`mechanical` \| `routine` \| `complex`) | One more best-effort REST read at the SAME terminal transition, of the sweep's own issue body's `<!-- loom:complexity=<tier> -->` marker (Issue #8542) — the same marker `resolve-tier-model.sh` reads at dispatch time to pick a model, re-read here rather than plumbed through dispatch because there is no single dispatch-time seam shared by every entry point (`dispatch_sweep`, the epic supervisor, the work finder, the role runner). | What makes a model-routing decision (`sweep.tierModels` / `sweep.optimization`, or a future classifier-driven router) evaluable against a labeled outcome. Unlike `resolve-tier-model.sh`'s own dispatch-time fold (an absent/unrecognized marker there is a **safe default**, `routine`, for model selection), this field is never defaulted: an unmarked issue, an out-of-vocabulary value, or a failed/skipped read all omit the key. A routing-evaluation consumer needs the true absence rate, not a default masquerading as data. |
 
 **Which PR the two timeline fields describe.** Exactly the one named by this
 record's `pr_number` — the latest PR the sweep's own checkpoint recorded. A
@@ -854,20 +852,29 @@ together: the sweep opened no PR, the daemon was configured not to touch the
 forge, the fleet rate-limit breaker was suppressing forge polling, or the read
 itself failed/timed out. The fetch is best-effort by contract — it never blocks
 or fails the journal append, and a failure is logged and omitted rather than
-recorded as a zero. `complexity`'s read is independent of `pr_number` (an
-issue's marker exists whether or not a PR was ever opened) but follows the
-exact same fail-open contract: `skip_label_flip`, the rate-limit breaker, or
-any read failure omits the key, never a fabricated `"routine"`.
+recorded as a zero.
 
-All five follow the established "unknown != zero" contract: `0` / `[]` / a
-one-element array / a tier string is an observation, an absent key is not. A
+**Retired: `complexity` (cutover note, #11665).** `sweep.outcome` records no
+longer carry the Curator's `<!-- loom:complexity=<tier> -->` tier
+(issue-sizing design §6.3): the field, its producer and the `--group-by
+complexity|model-complexity` dimensions are deleted, and `story_points` (below)
+is the up-front size signal. Historical records are not rewritten and keep
+their `complexity` key; readers must treat a missing field as absent. The
+cutover Loom version is the first release after `0.19.1151` (the last `VERSION`
+before #11665 merged), so queries can split on it: a record from an older daemon
+may carry `complexity` (and the Jev shadow's tier field), a newer one never
+does. Observe-mode model-experiment stats records (`sweep-experiment.sh
+record`) make the same swap: new records carry `story_points` (absent or `null`
+when unsized) in place of `complexity`.
+
+All four follow the established "unknown != zero" contract: `0` / `[]` / a
+one-element array / a count is an observation, an absent key is not. A
 consumer that coerces a missing `doctor_cycles` to `0` reports "no Doctor
 cycle happened" about a sweep nobody watched; one that coerces a missing
 `judge_verdicts` to `[]` counts an unobserved sweep into its approval-rate
-denominator; one that coerces a missing `complexity` to `"routine"` conflates
-"the Curator marked this routine" with "nobody looked".
+denominator.
 
-None of the five is added to the public redaction allowlist, for the same
+None of the four is added to the public redaction allowlist, for the same
 reason as the work-output fields above.
 
 #### `story_points` — the Curator's size estimate (Issue #9432)
@@ -892,7 +899,7 @@ values are **ordinal, not a unit** — sum the measured point value per bucket
 
 | Field | Type | Source | Notes |
 |---|---|---|---|
-| `story_points` | integer (`1` \| `2` \| `3` \| `5` \| `8` \| `13`) | The `points:*` label in the label list the **same** REST read that sources `complexity` and the disposition end state already returns (`sweep_registry::outcome_journal::complexity_signal`), folded by `crate::story_points`. | **No extra forge round trip** — that read's `--jq` projection already includes `labels`, and using it is what makes the estimate provably about the same issue as `complexity`. The paired `sweep.started` record carries the same field resolved at *dispatch* time, from the label list the #4444 park-label guard already read. |
+| `story_points` | integer (`1` \| `2` \| `3` \| `5` \| `8` \| `13`) | The `points:*` label in the label list the **same** REST read that sources the disposition end state already returns (`sweep_registry::outcome_journal::complexity_signal`), folded by `crate::story_points`. | **No extra forge round trip** — that read's `--jq` projection already includes `labels`, and using it is what makes the estimate provably about the same issue as the end state. The paired `sweep.started` record carries the same field resolved at *dispatch* time, from the label list the #4444 park-label guard already read. |
 
 **Additive** (no `schema_version` bump — not a new record kind), and **absent is
 never a measured zero**, the same contract the fields above follow. Four
@@ -903,7 +910,7 @@ distinct situations all omit the key:
 | no `points:*` label | The issue was never sized — a pre-epic issue, an operator-filed issue, an uncurated issue. `0` would claim a Curator sized it at nothing, and would drag every mean estimate toward zero. |
 | one label, out of vocabulary (`points:21`, `points:xl`) | A curation defect. Folding it onto the nearest legal bucket would invent an estimate nobody made; it is logged at `warn` and omitted. |
 | **more than one** `points:*` label | There is no correct answer, so the daemon does not pick one. Enforced daemon-side (the guard #9431 leaves to this phase): the conflict is logged **loudly** — naming the issue and every offending label — and the key is omitted. First/last/largest/newest would each publish a number no human assigned. |
-| the read failed, timed out, or was skipped | Same fail-open contract as `complexity`: `skip_label_flip`, the fleet rate-limit breaker, or any read failure yields no labels at all, hence no size. |
+| the read failed, timed out, or was skipped | Same fail-open contract as the end state: `skip_label_flip`, the fleet rate-limit breaker, or any read failure yields no labels at all, hence no size. |
 
 The label vocabulary is shared with the older `<!-- loom:points=<N> -->` body
 marker (#9056) via `crate::points_marker::POINTS_VALUES`, so the label family
@@ -975,7 +982,7 @@ signals this record already carries — `result`, `pr_number`, `phase_durations`
 `total_duration_sec`, `failure_class`, `judge_verdicts`, `doctor_cycles` — plus
 one addition that costs **no extra forge round trip**: the issue's own end
 state (`state` / `closed_at` / `labels`), folded into the `--jq` projection of
-the SAME REST read that already fetches the `complexity` marker. That end state
+the SAME REST read that already fetches the issue's labels. That end state
 is what separates "already done" from "the Curator closed it" from "the Curator
 rescoped it", three shapes the local signals cannot tell apart. It follows the
 identical fail-open contract: a skipped or failed read simply yields no forge
@@ -1976,6 +1983,7 @@ Guard denies (Issue #11582):
 | Signal | Kind | Unit / attributes | Meaning |
 |---|---|---|---|
 | `guard.cargo_target_dir.denied` span | instant; a child of the agent's execution span, delivered through its trace journal (`LOOM_TRACE_CONTEXT_FILE`), so only a session inside a traced execution exports one | `loom.guard.root` (`/tmp`, `$TMPDIR`, `~/.cache`, `~`, `.loom/target-*`), `loom.guard.source` (`inherited`, `inline`, `env`, `export`, `target-dir-flag`, `make-arg`), `loom.role` | one `loom:cargo-target-dir` deny: a cargo build whose target dir was under a root nothing owns ([`guard-hooks.md`](guard-hooks.md#cargo-target-dir-guard-guardscargotargetdir--loom_guard_cargo_target_dir)). Never the path or the command |
+| `build_gate.run` span | one per host-side run of `buildGate.command`; pre-flight's is a child of the sweep's execution span, delivered through its trace journal (`LOOM_TRACE_CONTEXT_FILE`; an attended session with no `LOOM_TRACEPARENT` emits none), the main-health gate's is its own root through the ops sink | `loom.build_gate.stage` (`preflight` / `main_health`), `loom.build_gate.tier` (`fast` / `full`), `loom.build_gate.outcome` (`pass` / `pass_flaky` / `fail` / `unresolved` / `timeout` / `unevaluated`), `loom.build_gate.duration_ms`, `loom.build_gate.attempt` (1-based within the pre-flight episode; `1` for main-health) | what host-side gating costs and how often it fails, per stage and tier (#11690: CI is the test gate, pre-flight is the fast tier). Status `error` unless `pass` / `pass_flaky`. Never the command, a path or the output |
 
 GitHub rate limit (Issue #10022):
 
@@ -2467,8 +2475,10 @@ acted on, and a closed-set reason code per skipped candidate. Role ticks record
 the queue the agent actually consumed (`pr-queue`, or Curator's listings) and
 the writes it issued, via a per-tick pick journal (#10432); `candidate_source`
 and `decisions_observed` say what was seen. Empty ticks still
-emit, so per-host service cadence is measurable. Full field reference, the
-SigNoz rank-at-instant query and the rows/day volume:
+emit, so per-host service cadence is measurable. Work-finder ticks also carry
+the `workspace_draw` (seed, softmax `temperature` and each draw's `p_min` since
+#11684; draw `weight`s are relative, read them only as `weight / total_weight`).
+Full field reference, the SigNoz rank-at-instant query and the rows/day volume:
 [`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).
 
 ### `pass.summary` and `pass.verdict`
@@ -3356,11 +3366,13 @@ prompt string appears in neither the journal nor the state file.
 | `last_activity_at` | RFC3339 | last tool call or Stop |
 | `driving[]` | array | issues/PRs this session holds an in-session lease on: `kind` (`issue`/`pr`), `number`, `sweep_id` |
 
-**Producer.** `loom-daemon presence beat`, called by the opt-in hook
+**Producer.** `loom-daemon presence beat`, called by the hook
 `presence-beat.sh` on `UserPromptSubmit`, `PostToolUse` and `Stop`. A prompt
 always emits; other events emit at most once per 5 minutes. The hook is wired
-only when the operator provisions with `LOOM_OPERATOR_PRESENCE=1`
-(`scripts/install/provision-hooks.sh`); it is absent by default.
+by the installer/resync when the fleet key `operatorPresence.enabled` (or
+`LOOM_OPERATOR_PRESENCE=1`) says so, and is absent otherwise; on `Stop` the
+journal is flushed to OTLP with no daemon running. See
+[`operator-presence.md`](operator-presence.md).
 
 **In-session sweeps.** `loom-daemon presence sweep-start` / `sweep-outcome`
 journal `sweep.started` / `sweep.outcome` with `loom.dispatch_origin=operator`
@@ -3603,7 +3615,7 @@ and the live event-bus collector (`observability::collector`) was always first,
 because the journal above is only drained onto the export queue by a periodic
 backfill pass (`observability::backfill`). Its record is thin by construction —
 `config: {}`, `pr_number: None`, `phase_durations: []`, no `judge_verdicts` /
-`doctor_cycles` / `complexity` — so the rich journal record lost the race on
+`doctor_cycles` — so the rich journal record lost the race on
 nearly every sweep. The collector now **suppresses** its own `sweep.outcome`
 for any `sweep_id` it has a correlated identity for (dispatched in this process,
 or adopted from registry evidence per #8720), leaving the journal as the single
@@ -3734,7 +3746,7 @@ unchanged — the two deliberately use different names for different things:
 | | bare `sweep-outcomes` | `sweep-outcomes summary` |
 |---|---|---|
 | scope | one workspace | every workspace in `~/.loom/workspaces.json` (see below) |
-| grouping | model only | `arm` \| `model` \| `repo` \| `host` \| `day` \| `complexity` \| `model-complexity` |
+| grouping | model only | `arm` \| `model` \| `repo` \| `host` \| `day` \| `tap` |
 | failure metric | `success_rate` over every record | `real_failure_rate`, spawn deaths discounted |
 
 Do not compare the two numbers directly.
@@ -3745,13 +3757,6 @@ loom-daemon sweep-outcomes summary --since 7d --group-by arm --exclude-spawn-dea
 
 # Machine-readable, with the rate card and arm provenance named:
 loom-daemon sweep-outcomes summary --since 7d --group-by model --json
-
-# The routing-evaluation question (Issue #8542): does a cheaper tier hold the
-# Judge first-pass rate?
-loom-daemon sweep-outcomes summary --since 7d --group-by complexity
-
-# Within one tier, does a cheaper model hold the approval rate?
-loom-daemon sweep-outcomes summary --since 7d --group-by model-complexity
 
 # Skip the forge merge join (merged counts then report as unavailable, not 0):
 loom-daemon sweep-outcomes summary --since 7d --no-merge-join
@@ -3765,12 +3770,8 @@ table, `first_pass_approval_rate` in JSON) over the group's judged sweeps
 (`JDG_N` / `first_pass_judged`) — `None`/`-` for a group with no judged
 sweeps, never a fabricated `0.0`.
 
-`--group-by complexity` buckets by [`complexity`](#sweepoutcome)'s Curator
-tier (`unknown` for a record with no marker observed, never dropped);
-`--group-by model-complexity` forms the compound `"<model>/<complexity>"` key,
-each side folding exactly as its own single-dimension grouping does
-(`default`/`unknown`) — the cut that answers "within one tier, does a cheaper
-model hold the approval rate?", which neither dimension alone can.
+`--group-by complexity` and `--group-by model-complexity` were retired in
+#11665 (see the `complexity` cutover note under `sweep.outcome`).
 
 Four properties worth knowing before reading the numbers:
 

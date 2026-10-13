@@ -1107,7 +1107,7 @@ echo "Test group 12y: suggest_commit_if_resync_only_dirt() excludes retired-but-
 printf 'ORPHAN\n' > "$REPO/.loom/scripts/some-retired-tool.sh"   # untracked, unignored, no defaults/ counterpart
 printf 'NEW-TEST\n' > "$REPO/.loom/scripts/check-defaults-version-bump.sh"   # untracked, unignored, pure-copy surface
 printf 'NEW-TEST\n' > "$REPO/defaults/scripts/check-defaults-version-bump.sh"   # still shipped today (#6613)
-git -C "$REPO" add defaults/scripts/check-defaults-version-bump.sh >/dev/null 2>&1
+printf '{\n  "version": "9.9.10"\n}\n' > "$REPO/package.json"; git -C "$REPO" add package.json defaults/scripts/check-defaults-version-bump.sh >/dev/null 2>&1
 git -C "$REPO" commit -qm "add new shipped defaults/ file" >/dev/null 2>&1
 OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
 # #6646: the actionable recommendation is now land-resync-commit.sh (which
@@ -1134,10 +1134,12 @@ if grep -q 'check-defaults-version-bump\.sh' <<<"$commit_line"; then
 else
     fail "(#7336) still-shipped pure-copy-surface path was unexpectedly dropped from the 'git add' commit suggestion"
 fi
-# Every real apply re-stamps .loom/install-metadata.json (one of the
-# function's OTHER hardcoded single-file case-block paths, unrelated to the
-# pure-copy-surface pattern this fix touches) -- confirming it is still
+# An apply that bumps the version re-stamps .loom/install-metadata.json (one
+# of the function's OTHER hardcoded single-file case-block paths, unrelated to
+# the pure-copy-surface pattern this fix touches) -- confirming it is still
 # present guards against the fix accidentally narrowing that unrelated case.
+# (#11680: an apply that changes nothing no longer re-stamps, hence the
+# package.json bump in the fixture above.)
 if grep -q 'install-metadata\.json' <<<"$commit_line"; then
     pass "(#7336) other hardcoded single-file case (install-metadata.json) remains in the commit suggestion"
 else

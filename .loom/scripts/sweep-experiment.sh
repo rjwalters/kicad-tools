@@ -21,13 +21,13 @@
 # `--resolve`. An unconfigured repo at the default fraction 1.0 is byte-for-byte
 # the pre-#9122 A/B behavior. An issue the fraction samples OUT prints
 # `none -` from `assign-arm` (no arm, no forced model; the caller proceeds with
-# normal tier-2.5/tier-3 resolution) and a `NOT IN EXPERIMENT` banner.
+# normal tier-3 resolution) and a `NOT IN EXPERIMENT` banner.
 #
 # Usage:
 #   sweep-experiment.sh resolve-mode
-#   sweep-experiment.sh assign-arm --issue N [--complexity complex|routine] [--format json] [--config PATH] [--resolve]
-#   sweep-experiment.sh banner --issue N [--complexity ...] [--config PATH]
-#   sweep-experiment.sh record --issue N --phase P --role R [--model M --arm A ...]
+#   sweep-experiment.sh assign-arm --issue N [--format json] [--config PATH] [--resolve]
+#   sweep-experiment.sh banner --issue N [--config PATH]
+#   sweep-experiment.sh record --issue N --phase P --role R [--model M --arm A --story-points N ...]
 #   sweep-experiment.sh harvest [--archive-dir DIR] [--format text|json]
 #
 # The harvest subcommand is ALSO reachable via `agent-metrics.sh --model-experiment`

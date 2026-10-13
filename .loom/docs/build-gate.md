@@ -1,6 +1,6 @@
-# Post-Builder Quality Gate (`buildGate`)
+# Build Gate (`buildGate`)
 
-The post-builder quality gate is a deterministic, orchestrator-side check that runs **after the builder agent exits but before any PR is opened**. It short-circuits PR creation when the builder's work obviously isn't shippable, releases the issue claim, and lets the next builder re-attempt the issue.
+`buildGate` names the command that proves a change is shippable. Since #11690 **CI is the test gate**: on a host the command runs only as a compile check (the fast tier) before a PR is opened, and the test suites run in CI. See [Where the gate runs](#where-the-gate-runs-11690).
 
 See issue [#3347](https://github.com/rjwalters/loom/issues/3347) for the original proposal.
 
@@ -8,12 +8,12 @@ See issue [#3347](https://github.com/rjwalters/loom/issues/3347) for the origina
 **Contents**
 
 - [Why a gate?](#why-a-gate)
-- [The three checks](#the-three-checks)
+- [Where the gate runs (#11690)](#where-the-gate-runs-11690)
 - [Configuration](#configuration)
 - [In-session pre-PR gate (`loom-daemon preflight`)](#in-session-pre-pr-gate-loom-daemon-preflight)
 - [Examples](#examples)
 - [Failure semantics](#failure-semantics)
-- [Why orchestrator-side?](#why-orchestrator-side)
+- [Why a receipt?](#why-a-receipt)
 <!-- toc:end -->
 
 ## Why a gate?
@@ -26,30 +26,28 @@ Builder agents (Claude Code as well as external engines invoked by parallel swar
 
 Without a gate, the Judge phase has to catch every one of these post-hoc, which wastes review cycles and pollutes the queue. The gate moves that filter ~30s of CPU instead of a multi-minute Judge cycle, and on parallel-sweep fleets the savings compound.
 
-## The three checks
+## Where the gate runs (#11690)
 
-The gate runs three checks in order. Any failure short-circuits PR creation:
+Host-side test runs competed with dispatched work for cores: on a loaded host the in-session pre-flight timed out or deferred for tens of minutes, and Builders then re-ran the suite by hand. The operator direction (#11690) keeps the host to a compile and makes CI the only test gate:
 
-1. **has-commits** — `git rev-list --count origin/main..HEAD > 0` in the worktree.
-   Since #8267 this check has an executable implementation that any caller can
-   reuse — `loom-daemon worktree-state report` (exit `3` = unsaved deliverables)
-   and the turn-end guard built on it, documented under
-   [`guard-hooks.md` → Uncommitted-Work Stop Guard](guard-hooks.md). Ask it
-   rather than writing a second commit-counter: the gate below and the guard
-   must never be able to disagree about whether an agent committed anything.
-2. **has-real-changes** — at least one changed file matches the configured `realChangeGlobs` (or the default scratch-exclusion list when no globs are configured).
-3. **build-passes** — the configured `buildGate.command` exits with code 0 inside the worktree.
+| Runner | Where | What it runs |
+|--------|-------|--------------|
+| Builder pre-flight | `loom-daemon preflight`, in the Builder's session | The **fast tier** (`buildGate.fastCommand`, else `LOOM_BUILD_GATE_TIER=fast <command>`): structural checks, a compile and a startup smoke. No load deferral. See [below](#in-session-pre-pr-gate-loom-daemon-preflight). |
+| PR creation | `create-pr.sh` runs `loom-daemon preflight --check` | Refuses a `HEAD` with no pre-flight receipt (exit `7`) or with a skip-CI marker (exit `8`). Runs nothing. |
+| CI | the PR's workflows | Every test suite. The Builder does not wait for it; the Judge checks it before reviewing, and a red run goes to the Doctor through `loom:changes-requested` + `loom:ci-failure`. |
+| Main-health gate | the daemon, opt-in (`autonomous.mainHealthGate.enabled` / `LOOM_MAIN_HEALTH_GATE`, default off) | The full tier against `main` (fast past `maxDeferSeconds` of load). The one remaining host-side full-suite runner, and only when an operator enables it. Where it is off, the red-main-fix lane reads CI on `main` instead ([daemon-reference](daemon-reference.md)). |
 
-When all three pass the builder phase proceeds normally to PR creation. When any one fails the orchestrator:
+No orchestrator re-runs `buildGate.command` after the Builder exits. The older "three checks" post-builder gate (has-commits, has-real-changes, build-passes) belonged to the retired Python shepherd (epic #4081); has-commits survives as `loom-daemon worktree-state report` (#8267, [`guard-hooks.md`](guard-hooks.md) → Uncommitted-Work Stop Guard).
 
-- Atomically releases the claim: `loom:building` -> `loom:issue`.
-- Logs an `error` milestone with `reason=build_failed_post_builder` and `check=<failed_check>`.
-- Cleans up the stale worktree.
-- Returns a `FAILED` `PhaseResult` so the sweep does not progress to Judge.
+`build-gate.sh` still defaults to the **full** tier when `LOOM_BUILD_GATE_TIER` is unset, so a manual run and the release path's hosted gate (`hosted-build-gate.yml`) are unchanged.
+
+**CI capacity.** When many PRs queue on the plan's concurrent-job cap, their checks sit `queued`. That reads as pending, never red: the Judge skips the PR and re-evaluates later, and nothing is labelled `loom:ci-failure`. The cost is latency, not wrong labels.
+
+**Telemetry.** Every host-side run that executes the command emits one `build_gate.run` span (`loom.build_gate.stage` `preflight` / `main_health`, `tier`, `outcome`, `duration_ms`, `attempt`; [`telemetry-schema.md`](telemetry-schema.md)). Pre-flight is a CLI process, so its span travels through the ambient sweep's trace journal (`LOOM_TRACEPARENT` + `LOOM_TRACE_CONTEXT_FILE`); an attended session with no `LOOM_TRACEPARENT` emits none.
 
 ## Configuration
 
-The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` see zero behavior change — the gate returns immediately.
+The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` see zero behavior change: pre-flight is a no-op and `create-pr.sh` checks only the skip-CI marker.
 
 ```json
 {
@@ -67,14 +65,13 @@ The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` s
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | boolean | `true` when block is present | Set to `false` to disable the gate without removing the block. |
-| `command` | string | _(none)_ | Shell-style command run in the worktree (parsed with `shlex.split`). When omitted, the build check is skipped but the has-commits and has-real-changes checks still run. |
-| `realChangeGlobs` | array of strings | _(default exclusions)_ | Positive globs. A changed file must match at least one to count as "real." When omitted, every changed file counts unless it matches one of the default scratch exclusions: `.loom-*`, `*.log`, `.no-changes-needed`. |
+| `command` | string | _(none)_ | Command run via `sh -c` in the worktree (pre-flight) or the workspace (main-health gate). Without it the gate is disabled. |
+| `realChangeGlobs` | array of strings | _(none)_ | Main-health gate only (#3984): a `main` move touching none of these globs does not re-run the gate. |
 | `timeoutSeconds` | integer | `600` | Timeout for the `command` run. |
 | `preflightMaxAttempts` | integer | `3` | Max failed in-session `loom-daemon preflight` runs before the terminal `preflight_unresolved` outcome (#10476). Timed-out runs are counted separately against the same number. |
-| `preflightPathScopes` | array of objects | _(none)_ | In-session `loom-daemon preflight` only (#10860): `[{"env", "suite", "runWhenChanged": [globs]}]`. A suite whose globs match nothing the worktree changes is dropped by exporting `env` empty to `command`. See [Path-scoped suites](#path-scoped-suites). |
 | `loadThreshold` | number | `0.9` | Daemon main-health gate only (#4259): 1-minute load average per logical CPU at/above which the gate DEFERS instead of running the full suite. Env override `LOOM_BUILD_GATE_LOAD_THRESHOLD`. See "Tiered gate + load-aware deferral". |
 | `maxDeferSeconds` | integer | `1800` | Daemon main-health gate only (#4259): after this many seconds of consecutive load-deferred ticks, the FAST tier runs regardless of load so a permanently-loaded host still reaches a verdict. Env override `LOOM_BUILD_GATE_MAX_DEFER_SECS`. |
-| `fastCommand` | string | _(derived)_ | Daemon main-health gate only (#4259): the command run for the fast tier. When omitted, the base `command` is run with `LOOM_BUILD_GATE_TIER=fast` prefixed. |
+| `fastCommand` | string | _(derived)_ | The fast-tier command: what pre-flight always runs (#11690) and what the main-health gate runs past `maxDeferSeconds` (#4259). When omitted, the base `command` is run with `LOOM_BUILD_GATE_TIER=fast` prefixed. |
 
 > **Not a `buildGate` key:** the daemon-side main-health gate's optional forge
 > verification-workflow name (`autonomous.mainHealthGate.ciWorkflow` /
@@ -84,7 +81,7 @@ The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` s
 
 ## In-session pre-PR gate (`loom-daemon preflight`)
 
-The orchestrator-side gate above runs *after* the Builder exits, so the failing output never reaches the Builder that wrote the change (#10476). `loom-daemon preflight --issue N` runs the **same** `buildGate.command` (same `enabled`, `command`, `timeoutSeconds`) **inside the Builder's session, before the PR is opened**, and hands the failure tail back for in-session repair.
+`loom-daemon preflight --issue N` runs the gate **inside the Builder's session, before the PR is opened** (#10476), so the failure tail goes back to the Builder that wrote the change. Since #11690 it runs the **fast tier** only: `buildGate.fastCommand`, else `LOOM_BUILD_GATE_TIER=fast <command>` (for `build-gate.sh`: structural checks, `cargo build --workspace --lib --bins`, a `--version` smoke). It never defers on host load; `build-gate.sh`'s machine-wide build slot already serialises concurrent compiles. The tests run in CI.
 
 | Exit | Meaning |
 |------|---------|
@@ -92,23 +89,17 @@ The orchestrator-side gate above runs *after* the Builder exits, so the failing 
 | `1` | Failed, attempts remain: the output tail is printed; fix, commit, re-run. |
 | `4` | Attempts exhausted: `reason=preflight_unresolved`. The claim is released via the protected restore path (a parked, closed or PR target is not re-queued, and neither is an issue that did not carry `loom:issue` when it was claimed, #10955; a failed release is reported) and the Builder opens **no PR**. |
 | `5` | Timed out at `timeoutSeconds` (#10860). Not a check failure: it does not count toward the failure cap, writes no receipt, and **never releases the claim**. The message names the running `[build-gate]` stage. The gate's whole process tree is ended first, including stages in other process groups or sessions: SIGTERM, 5 s for the gate's EXIT trap, then SIGKILL (#10955). Re-run when the host is less loaded; once timeouts reach `preflightMaxAttempts` it prints `reason=preflight_timeout`, the Builder opens **no PR** (claim kept), and a further run in the same episode exits `5` without running the gate. |
-| `6` | Deferred (#10955): the host's 1-minute load per CPU is above `buildGate.loadThreshold` (default 0.9, the orchestrator gate's threshold), so the gate was **not run**. Not a failure and not a timeout: no counter moves, and the claim is kept. Re-run in a few minutes. Once deferrals in one episode span `buildGate.maxDeferSeconds` (default 1800) the gate runs regardless of load. |
+| `6` | Retired (#11690). It meant "deferred on host load" (#10955); the fast tier never defers. The number is not reused. |
 | `7` | `--check` only: `HEAD` has no passing receipt. |
 | `8` | `--check` only, every repo (no `buildGate` needed): a commit in `origin/<base>..HEAD` carries a GitHub skip-CI marker (the five bracket spellings or a `skip-checks: true` trailer), named by commit and line (#11389). `LOOM_ALLOW_SKIP_CI=1` opts out. |
 
-**Flaky tests (#10955).** `build-gate.sh` runs nextest with `--retries 1` (`LOOM_BUILD_GATE_TEST_RETRIES` overrides; `0` turns it off), so a test that fails once and passes on its retry does not fail the gate or consume an attempt. Pre-flight then prints `preflight: PASS (flaky, passed on retry: <names>)`. CI does not retry (`retries = 0` in `.config/nextest.toml`), so the same flake can still fail CI: file it.
+**Flaky tests (#10955).** A `fastCommand` that runs tests may still report a test that passed only on nextest's retry: pre-flight then prints `preflight: PASS (flaky, passed on retry: <names>)` and charges no attempt. CI does not retry (`retries = 0` in `.config/nextest.toml`): file the flake.
 
 Attempts and the receipt live in the worktree's git dir (never committed); `buildGate.preflightMaxAttempts` (default 3) bounds the loop within one dispatch episode (`LOOM_SWEEP_ID`); a re-dispatch into the same worktree starts a fresh budget. **Enforcement:** `create-pr.sh` runs `loom-daemon preflight --check` and exits `7` for an un-gated `HEAD`; a binary predating the subcommand skips the check (fail-open, like its sibling guards). A new commit invalidates the receipt, so fixes must be re-gated. Repos with no `buildGate` block skip the receipt check (exit `8` still applies).
 
-### Path-scoped suites
+`buildGate.preflightPathScopes` (#10860) is no longer read: the fast tier runs no bash suites, so there is nothing to scope. `build-gate.sh` still honours `LOOM_BUILD_GATE_INSTALLER_SUITE` exported empty (skip `scripts/test-installer.sh`) for a manual full-tier run.
 
-`buildGate.preflightPathScopes` lets pre-flight skip a slow suite that the change cannot affect (#10860). Pre-flight computes the changed set as the union of the commits since `git merge-base HEAD origin/main`, tracked uncommitted changes, and untracked (not ignored) files; renames count at both paths (`--no-renames`). For each scope whose `runWhenChanged` globs match none of those paths, it exports `env` **empty** to the gate command and prints `preflight: skipping <suite> — diff touches none of its inputs (CI still runs it)`. Otherwise it removes `env` so the suite runs. Globs use the `realChangeGlobs` matcher: a pattern with `/` matches the full path and `*` crosses `/` (`defaults/*` covers the whole tree).
-
-It fails safe: if the merge-base or diff cannot be computed, or the changed set is empty, every suite runs. Malformed entries (no `env`, a non-identifier `env`, no globs) are ignored. Pre-flight always sets `LOOM_BUILD_GATE_INSTALLER_SUITE` explicitly (removed unless skipped), so an inherited value cannot skip it. Only pre-flight reads the key; the post-builder and main-health gates run the full command unless that variable is in the daemon's environment.
-
-`build-gate.sh` honours one such variable, `LOOM_BUILD_GATE_INSTALLER_SUITE`: unset, its bash-suite loop runs `scripts/test-installer.sh` as before; exported empty, it skips that suite and runs the other four. Loom's own `.loom/config.json` scopes it to the installer inputs (`install.sh`, `scripts/install*`, `defaults/*`, `loom-daemon/src/init/*`, the `spawn-worker` sources its dispatcher suite runs, `.claude/settings.json`, the scoping code and its config, …). The transitive reach cannot be fully enumerated; CI runs the full suite as the backstop. The key is not set in `defaults/config.json`, so consumer repos are unaffected.
-
-**Measuring first-pass Judge approval (post-merge observation, not a merge gate).** The target (>80%, from ~43%) is the share of PRs whose first Judge verdict is approve, i.e. PRs with exactly one `loom:review-requested` cycle. Query it in SigNoz on the Judge review spans/verdict events grouped by PR (first verdict per PR = approved vs. changes-requested), comparing before/after this lands; a `preflight_unresolved` log line counts sweeps stopped before any PR existed.
+**Measuring first-pass Judge approval (post-merge observation, not a merge gate).** The share of PRs whose first Judge verdict is approve. `sweep.outcome` carries `judge_verdicts[]` with `attempt` and `verdict`; first-pass means the first verdict is a pass at attempt 1. Compare windows before and after a change in SigNoz; a `preflight_unresolved` log line counts sweeps stopped before any PR existed.
 
 ## Examples
 
@@ -245,9 +236,7 @@ stages in order under `set -euo pipefail`, aborting on the first non-zero exit:
    against a disposable scratch repo `CHANGELOG_REPO_ROOT` — no network, no
    dependency on this repo's own history), `scripts/test-daemon-liveness.sh`
    (#5548), `scripts/test-install-local-mode.sh` and
-   `scripts/test-migrate-consumer.sh` (#5276). In-session pre-flight skips
-   `scripts/test-installer.sh` when the diff touches no installer input (see
-   [Path-scoped suites](#path-scoped-suites)).
+   `scripts/test-migrate-consumer.sh` (#5276).
 
 ### The structural phase (#9140)
 
@@ -537,9 +526,8 @@ which would add unpredictable latency to a gate that also runs once per PR. CI
 600` gives ~2x headroom over the measured ~210s warm-cache total to absorb a
 cold `target/` in a fresh worktree.
 
-Beyond the per-wave step-8 gate, this same command runs after **every** builder
-exit (the "Post-Builder Quality Gate" above), so it is deliberately kept fast
-and free of network/npm dependencies. This is a repo-specific,
+Its fast tier runs in every Builder's pre-flight (#11690), so the command is
+kept free of network/npm dependencies. This is a repo-specific,
 self-hosting-only config; `defaults/config.json` (the generic install template)
 ships with no `buildGate` block. See issue
 [#3749](https://github.com/rjwalters/loom/issues/3749).
@@ -721,9 +709,9 @@ The structural phase (#9140) sits **above** the tier switch, so both tiers run
 it — see "The structural phase" above for why that is unconditional rather than
 full-tier-only.
 
-The default is unchanged when the variable is absent, so **CI parity, manual
-invocations, and the per-builder post-builder gate all behave exactly as
-before**. The fast tier verifies the compile/startup breakage class (#3647
+The default is unchanged when the variable is absent, so **CI parity and
+manual invocations behave exactly as before**; in-session pre-flight asks for
+the fast tier (#11690). The fast tier verifies the compile/startup breakage class (#3647
 step-8 — a `cargo build --workspace` catch) plus that the binary it just built
 actually starts.
 
@@ -836,7 +824,7 @@ Full rationale, telemetry, and the env-knob table live in
 > **Rule of thumb:** if a check's outcome can differ between an idle host and a
 > busy one — or between a host with tmux and one without — it is
 > **environment-sensitive** and belongs in CI (which controls its
-> environment), not in the local post-builder gate. Keep the gate scoped to
+> environment), not in the local gate. Keep the gate scoped to
 > checks that are deterministic on any host.
 
 ### Per-step toolchain timeout + self-reap (#6192)
@@ -1026,20 +1014,8 @@ Set `cargo.debuginfo: "full"` for such a repo if its profile must win.
 
 ## Failure semantics
 
-A gate failure is **not** the same as a builder failure: the issue is automatically re-queued (`loom:issue`) and a future builder can take a fresh attempt. The `PhaseResult.data` block carries:
+A pre-flight failure is fixed in the same session: the Builder gets the output tail, fixes, commits and re-runs. Only `preflightMaxAttempts` failures in one episode (exit `4`, `preflight_unresolved`) release the claim back to `loom:issue` so a future Builder can try. A timeout (exit `5`) keeps the claim. Each run is a `build_gate.run` span with its outcome.
 
-```python
-{
-  "post_builder_gate_failed": True,
-  "gate_check": "has_commits" | "has_real_changes" | "build_passes",
-  "gate_detail": "<human-readable failure reason>",
-  "reason": "build_failed_post_builder",
-  "claim_released": True,
-}
-```
+## Why a receipt?
 
-These fields are available in sweep logs (`.loom/logs/sweep-issue-N.log`) and sweep checkpoints (`.loom/sweep-checkpoint/issue-N.json`) for postmortem analysis.
-
-## Why orchestrator-side?
-
-The gate intentionally lives in the orchestrator's builder phase (the `/loom:sweep` skill's Builder step), not in the builder *role* prompt. The point is deterministic enforcement independent of agent self-discipline: an agent that crashed, was rate-limited, or simply ignored its prompt should still not produce a PR.
+`create-pr.sh` enforces the receipt deterministically, independent of agent self-discipline: a Builder that skipped or ignored pre-flight cannot open a PR from an un-gated `HEAD`. What the receipt certifies is cheap (a compile); what it does not certify (the tests) CI decides.

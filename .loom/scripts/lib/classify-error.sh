@@ -156,6 +156,20 @@
 # live in `defaults/scripts/tests/test-spawn-codex.sh`. Verbatim CLI messages
 # that contain `|` (which the heredoc tables use as a separator) live in
 # `defaults/scripts/tests/fixtures/classify_error/vectors.tsv`.
+#
+# Native implementation (issue #11208): the engine, both provider tables and
+# the deny-list below now ALSO ship as `loom-daemon classify-error`
+# (loom-daemon/src/classify_error.rs), and the two public functions delegate
+# to it whenever a daemon binary resolves — see `classify_error` below for
+# the exact delegation contract. The shell tables are NOT deleted: they are
+# the fallback a host with no (or an older) loom-daemon still classifies
+# with, byte-identically. That is a deliberate difference from `tokens
+# select`/`mark-bad`, which have no shell fallback: external consumers
+# (miniset's E2B shim) and sourced-library callers must keep working with no
+# daemon at call time, while consumers that pin the daemon stop executing
+# this file's patterns at all. Conformance is enforced, not assumed:
+# `test-classify-error.sh` diffs the shell tables against the subcommand on
+# every row of vectors.tsv, and the Rust suite reads the same fixture.
 
 # shellcheck disable=SC2120  # OK that callers pass the args; we don't default.
 
@@ -601,6 +615,51 @@ _classify_error_generic() {
 
 # --- Shared classification engine ----------------------------------------
 
+# --- Native delegation (issue #11208) -------------------------------------
+#
+# requires-daemon: classify-error optional   #11208 — a missing binary, one predating the subcommand, or any "could not ask" answer (non-0/1 exit, empty stdout) falls back to the in-file tables; never a wrong answer.
+#
+# The resolved `loom-daemon` that IMPLEMENTS classify-error, in
+# $_CLASSIFY_DAEMON_BIN — resolved ONCE, when this file is sourced
+# (classify_error runs in retry loops; a fork per call is fine, a resolution
+# walk — which may itself fork a `--version` probe — per call is not). At
+# source time, not lazily, because callers almost always invoke
+# `classification=$(classify_error …)`: a cache filled inside that command
+# substitution would die with the subshell. Empty means "use the tables".
+#
+# This is `loom_resolve_self_daemon_bin`'s chain — the binary that IMPLEMENTS
+# ported logic, NOT $LOOM_DAEMON_BIN (the install this wrapper DRIVES, which
+# may predate the subcommand — #7977's category error). locate-daemon-bin.sh
+# sits beside this file in every tree that ships the pair, so it is sourced
+# when present; a consumer that vendored ONLY this file (miniset's E2B shim)
+# gets the two-tier inline chain instead: the explicit $LOOM_DAEMON_SELF_BIN
+# seam, then `loom-daemon` on PATH. The variable is assigned straight from
+# the resolver so scripts/check-daemon-subcommand-versions.sh sees the calls
+# below as daemon calls and holds them to the marker above.
+#
+# Then ONE capability probe: RECOVERABLE is retryable, so a binary that
+# implements the subcommand exits 0. An older daemon (clap's exit 2) or
+# anything else that cannot answer is dropped here, once — so it neither
+# costs a doomed fork per call nor has an exit 1 misread as `--transient`'s
+# "terminal" verdict. Nothing here can turn a version skew into a wrong answer.
+_CLASSIFY_ERROR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_CLASSIFY_ERROR_LIB_DIR}/locate-daemon-bin.sh" ]]; then
+    # shellcheck source=lib/locate-daemon-bin.sh
+    # shellcheck disable=SC1091
+    source "${_CLASSIFY_ERROR_LIB_DIR}/locate-daemon-bin.sh"
+fi
+if declare -F loom_resolve_self_daemon_bin >/dev/null 2>&1; then
+    _CLASSIFY_DAEMON_BIN="$(loom_resolve_self_daemon_bin)"
+elif [[ -x "${LOOM_DAEMON_SELF_BIN:-}" ]]; then
+    _CLASSIFY_DAEMON_BIN="${LOOM_DAEMON_SELF_BIN}"
+else
+    _CLASSIFY_DAEMON_BIN="$(command -v loom-daemon 2>/dev/null || true)"
+fi
+if [[ ! -x "${_CLASSIFY_DAEMON_BIN}" ]] \
+    || ! "${_CLASSIFY_DAEMON_BIN}" classify-error --transient RECOVERABLE </dev/null >/dev/null 2>&1; then
+    _CLASSIFY_DAEMON_BIN=""
+fi
+
 classify_error() {
     local output="$1"
     local exit_code="$2"
@@ -611,6 +670,8 @@ classify_error() {
 
     # 1. Timeout from the `timeout(1)` command — productive cycle, not error.
     #    Provider-independent: a timeout is a timeout regardless of runtime.
+    #    Kept in shell (not delegated): no fork needed for an exit-code answer,
+    #    and these two short-circuits are engine-level, not table-level.
     if [[ "$exit_code" -eq 124 || "$exit_code" -eq 137 ]]; then
         echo "TIMEOUT"
         return
@@ -627,7 +688,25 @@ classify_error() {
 
     # --- Below here, exit_code != 0 (genuine failure). Inspect output. ---
 
-    # 3. Provider-specific table first (e.g. the six Claude categories).
+    # 3. Delegate to `loom-daemon classify-error` (#11208; optional — see the
+    #    requires-daemon marker above): a missing or
+    #    older binary, a failed pipe, or any non-0 exit degrades to the
+    #    in-file tables below, never to a wrong answer. stdout must be one
+    #    uppercase category token: classify mode always prints exactly one,
+    #    so anything else (empty included) means "could not ask".
+    if [[ -n "$_CLASSIFY_DAEMON_BIN" ]]; then
+        local native_result=""
+        if native_result="$(printf '%s' "$output" \
+                | "$_CLASSIFY_DAEMON_BIN" classify-error --exit-code "$exit_code" --provider "$provider" 2>/dev/null)" \
+           && [[ "$native_result" =~ ^[A-Z_]+$ ]]; then
+            printf '%s\n' "$native_result"
+            return
+        fi
+        # Fall through: no binary, one predating the subcommand, or a fault.
+    fi
+
+    # 4. The shell tables — the fallback path, byte-identical to pre-#11208.
+    #    Provider-specific table first (e.g. the six Claude categories).
     local provider_result
     provider_result="$(_classify_error_provider "$output" "$provider")"
     if [[ -n "$provider_result" ]]; then
@@ -635,7 +714,7 @@ classify_error() {
         return
     fi
 
-    # 4. Generic, provider-independent transients (always resolves).
+    # 5. Generic, provider-independent transients (always resolves).
     _classify_error_generic "$output"
 }
 
@@ -675,7 +754,21 @@ is_recoverable_error() {
 # matches the documented contract of the catch-all in
 # `_classify_error_generic` ("unknown non-zero exit, treat as recoverable in
 # daemon mode").
+#
+# Delegates to `loom-daemon classify-error --transient` (#11208) when a
+# binary resolves — the SAME deny-list the native classifier enforces, so
+# there is one policy with two pinned renderings, not two policies. The exit
+# code IS the answer (0 transient, 1 terminal); only a binary that passed
+# the capability probe above is asked at all, and any
+# other code (2 = "could not ask") must NOT travel — it falls back to the
+# in-file case below.
 classification_is_transient() {
+    if [[ -n "$_CLASSIFY_DAEMON_BIN" ]]; then
+        # `loom-daemon classify-error --transient`: 0 retry, 1 terminal.
+        local rc=0
+        "$_CLASSIFY_DAEMON_BIN" classify-error --transient "$1" </dev/null 2>/dev/null || rc=$?
+        [[ "$rc" -gt 1 ]] || return "$rc"
+    fi
     case "$1" in
         # Terminal — retrying the same invocation cannot succeed:
         #   SUCCESS       nothing to retry.
@@ -717,8 +810,10 @@ classification_is_transient() {
 # `retry-classify`, and this is the remedy-shaping half of one of them
 # (is_account_exhaustion decides to rotate and mark; model-class decides how
 # much of the account the mark takes out). The classifier it consults --
-# `classify_error` / `classification_is_transient`, above -- deliberately did
-# NOT move, for the reason in #4501: it is the fleet's single source of truth
-# for what a failure IS, and a second copy of it in Rust could disagree with
-# this one. Shell still says what the failure is; the daemon owns what the
-# wrapper does about it.
+# `classify_error` / `classification_is_transient`, above -- kept its shell
+# body as the no-daemon fallback but now also ships natively as
+# `loom-daemon classify-error` (#11208), which was the one half of the #4501
+# boundary still living only in this file. The #4501 invariant survives the
+# move in a stronger form: there is exactly ONE policy, and the shell tables
+# and the native classifier are pinned byte-equal by
+# test-classify-error.sh's parity section on every vector.

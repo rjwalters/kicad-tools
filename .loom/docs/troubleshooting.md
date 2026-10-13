@@ -3089,7 +3089,10 @@ This is a **detect → fix** pair:
   those are reported `skipped`, never overwritten). Loom-internal files declared in
   `defaults/.loom-internal.list` are skipped (never resurrected into a consumer).
   On a successful non-dry-run it also re-stamps `loom_version`, `loom_commit`, and
-  a new `last_resync` date into `.loom/install-metadata.json`. Since that file is a
+  a new `last_resync` date into `.loom/install-metadata.json`, but only when the
+  run changed a surface or the version; a run that changed nothing leaves the file
+  byte-identical, and `loom_source_remote` is stamped in canonical
+  `https://host/owner/repo.git` form whatever the source clone's remote (#11680). Since that file is a
   machine-local stamp every host's resync rewrites, resync also ensures (every
   run, self-healing existing installs) a `merge=ours` attribute for it in a
   Loom-managed `.gitattributes` block plus the required local (never committed)

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # presence-beat.sh — operator presence heartbeat hook (issue #11563).
 #
-# Wired (opt-in, LOOM_OPERATOR_PRESENCE=1 at provision time) for
-# UserPromptSubmit, PostToolUse and Stop through the user-scope hook wrapper.
+# Wired by the installer/resync when `operatorPresence.enabled` (fleet key) or
+# LOOM_OPERATOR_PRESENCE=1 says so (#11713, defaults/docs/operator-presence.md)
+# for UserPromptSubmit, PostToolUse and Stop through the user-scope wrapper.
+# On Stop the binary also flushes the journal to OTLP, daemon-less.
 # A thin entry point: the throttle, state and journal logic is
 # `loom-daemon presence beat`, which reads the hook JSON on stdin for
 # `session_id` and `hook_event_name` only and never stores anything else.

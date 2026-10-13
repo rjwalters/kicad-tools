@@ -493,26 +493,15 @@ gh issue view 339 --json state
 # 4. Close with explanation
 gh issue close 339 --comment "✅ **Closing completed issue**
 
-This issue was completed in PR #344 (merged 2025-10-18) but stayed open because the PR didn't use the magic keyword syntax.
+Completed in PR #344 (merged 2025-10-18), but it used 'Issue #339' instead of 'Closes #339', so GitHub never auto-closed it.
 
-**What happened:**
-- PR #344 used 'Issue #339' instead of 'Closes #339'
-- GitHub only auto-closes with specific keywords (Closes, Fixes, Resolves)
-- Manual closure now to clean up backlog
-
-**Completed work:** Improved issue closure workflow with multi-layered safety net
-
-**To prevent this:** See Builder role docs on PR creation - always use 'Closes #X' syntax."
+**To prevent this:** always use 'Closes #X' syntax (see Builder role docs)."
 ```
 
 ### Frequency
 
 Run verification **every 15-30 minutes** alongside priority assessment:
-- Takes ~2-3 minutes
-- Prevents backlog from becoming stale
-- Catches missed closures early
-
-By verifying issue closure, you keep the backlog clean and prevent confusion about what's actually done.
+- Takes ~2-3 minutes; catches missed closures early
 
 ## Unblocking: Resolve Dependency Blocks
 
@@ -521,11 +510,8 @@ By verifying issue closure, you keep the backlog clean and prevent confusion abo
 ### Problem: Stuck Blocked Issues (and PRs, #8925)
 
 When an issue OR pull request is marked `loom:blocked` due to a dependency, it
-may stay blocked indefinitely even after the dependency resolves. This
-creates:
-- ❌ Ready-to-implement issues (or ready-to-land PRs) stuck in blocked state
-- ❌ Manual intervention required to unblock
-- ❌ Delays in the development pipeline
+may stay blocked indefinitely even after the dependency resolves, leaving
+ready work stuck and needing manual intervention.
 
 `gh issue list` never returns a pull request, so `check_and_unblock` runs a
 second enumeration, `check_and_unblock_prs` (below), rather than folding PRs
@@ -586,8 +572,10 @@ the Builder queue.
 was_previously_approved() {
   local number="$1"
   # True if `loom:issue` appears anywhere in the issue's label event history.
-  gh api "repos/{owner}/{repo}/issues/${number}/events" \
-    --jq 'any(.[]; .event == "labeled" and .label.name == "loom:issue")' 2>/dev/null
+  # Per-issue /events + --paginate (#8742: repo-wide walk = ~300 calls on a
+  # miss, ~6-day horizon); ascending; existence-only, so `head -1` suffices.
+  [ -n "$(gh api --paginate "repos/{owner}/{repo}/issues/${number}/events?per_page=100" \
+    --jq ".[] | select(.event == \"labeled\" and .label.name == \"loom:issue\") | 1" 2>/dev/null | head -1)" ] && echo true || echo false
 }
 ```
 
@@ -682,7 +670,16 @@ a later pass to sort out.
 
 ### Unblocking Logic
 
+Permanent block (#8742): `<!-- loom:permanent-block -->` (own line; quoted prose
+doesn't count) counts from a trusted comment, or the body **only if its author is trusted** (`--with-body`). Champion
+and `check_and_unblock_prs` check the same. Removing `loom:blocked` ⇒ audit comment.
+
 ```bash
+has_permanent_block() {  # unreadable => true
+  local t; t=$(loom-daemon forge trusted-comments --fetch "$1" --with-body 2>/dev/null) || { echo true; return; }
+  jq -e 'any(.[]; (.body // "") | test("(^|\n)[ \t]*<!-- loom:permanent-block -->[ \t\r]*(\n|$)"))' <<<"$t" >/dev/null && echo true || echo false
+}
+
 check_and_unblock() {
   # --limit: gh defaults to 30 (#10553)
   local blocked_limit=1000 blocked_json blocked_count
@@ -695,6 +692,8 @@ check_and_unblock() {
     local number=$(printf '%s\n' "$issue" | jq -r '.number')
     local body=$(printf '%s\n' "$issue" | jq -r '.body')
     local title=$(printf '%s\n' "$issue" | jq -r '.title')
+
+    [ "$(has_permanent_block "$number")" = "true" ] && continue  # #8742
 
     local deps=$(parse_dependencies "$body")
 
@@ -788,13 +787,8 @@ gh issue edit 963 --remove-label "loom:blocked" --add-label "loom:issue"
 # an "Unblocked" comment, no matter how stale the body's Dependencies text
 # looks.
 
-# Counter-example (#7267's exact sequence, issue #6925 against PR #7246): all
-# body-declared dependencies are CLOSED, but has_superseding_block finds
-# linked PR #7246 still OPEN, carrying loom:pr + loom:operator, with
-# mergeable=CONFLICTING / mergeStateStatus=DIRTY → true (both the
-# loom:operator label check AND the merge-state check independently trigger
-# here) → stay blocked, do NOT strip loom:blocked or post an "Unblocked"
-# comment.
+# Counter-example (#7267: #6925 vs PR #7246): deps CLOSED, but #7246 is OPEN
+# with loom:operator and DIRTY → true → stay blocked, same as above.
 
 # A PR-side worked example (#8925's own #8314 shape) is in park-record.md's
 # "The unblock sweep's PR-side functions" section, alongside the three

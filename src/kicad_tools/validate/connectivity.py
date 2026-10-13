@@ -1732,7 +1732,13 @@ class ConnectivityValidator:
     # line) keeps a non-empty eroded overlap.  Verified on boards 00/03/05.
     POUR_PAD_ERODE: float = 0.1
 
-    def _pad_copper_polygon(self, fp: Any, pad: Any, shape_aware: bool = False) -> Any | None:
+    def _pad_copper_polygon(
+        self,
+        fp: Any,
+        pad: Any,
+        shape_aware: bool = False,
+        use_pad_rotation: bool = False,
+    ) -> Any | None:
         """Build a board-frame shapely polygon approximating a pad's copper.
 
         The pad's ``size`` box is rotated by the footprint rotation (KiCad's
@@ -1768,6 +1774,16 @@ class ConnectivityValidator:
         it is always a **subset** of the box geometry: enabling it can only
         make a bond test stricter, never looser.
 
+        ``use_pad_rotation=True`` orients the outline by the pad's own
+        **absolute** angle (``pad.rotation``, the third token of KiCad's
+        ``(at x y ANGLE)``, which already includes the footprint rotation)
+        instead of ``fp.rotation``.  The default keeps the historical
+        footprint-only orientation for existing callers; a pad rotated
+        *relative* to its footprint then has its width and height swapped in
+        the model, which is harmless for pour-bond tests on most pads but
+        wrong for a pad-to-pad overlap test (Issue #6435).  The pad *center*
+        is still placed via the footprint rotation either way.
+
         Returns ``None`` when shapely is unavailable.  Falls back to a
         zero-area point geometry when the pad has no positive size.
         """
@@ -1782,8 +1798,10 @@ class ConnectivityValidator:
         if w <= 0 or h <= 0:
             return _ShapelyPoint((cx, cy))
         # Negated-angle convention (see rotate_pad_offset): the footprint
-        # rotation maps the pad's local box into the board frame.
-        a = math.radians(-fp.rotation)
+        # rotation maps the pad's local box into the board frame.  With
+        # ``use_pad_rotation`` the pad's absolute angle is used instead.
+        angle = (getattr(pad, "rotation", 0.0) or 0.0) if use_pad_rotation else fp.rotation
+        a = math.radians(-angle)
         cos_a, sin_a = math.cos(a), math.sin(a)
 
         def _to_board(ox: float, oy: float) -> tuple[float, float]:

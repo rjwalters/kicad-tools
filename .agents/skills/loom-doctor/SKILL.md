@@ -68,7 +68,7 @@ silently wedges the whole sweep — the harness cannot kill a hung `Task` from
 outside, so the only defense is your own discipline:
 
 - **Never wait indefinitely on a single tool call.** Give long-running commands
-  (`buildGate.command`, `gh pr checks --watch`) an explicit `timeout <secs> …` /
+  (a scoped test run, `gh pr checks --watch`) an explicit `timeout <secs> …` /
   one-shot snapshot rather than an unbounded wait; if a command does not return,
   treat it as inconclusive and move on rather than blocking.
 - **Emit progress as you go.** Print a short line at each step. Continuous output
@@ -709,9 +709,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
    - Fix review comments
    - Resolve merge conflicts
    - Update tests or documentation
-8. **Verify ALL checks pass locally**: Run the project's check command (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command, e.g. `pnpm check:ci`)
-   - Do NOT push until all local checks pass
-   - This prevents multiple fix-push-fail cycles
+8. **Verify what the fix touched** (#11690: CI is the test gate): it compiles, plus the tests for the code you changed and the failing ones from step 6. Never the full suite or `buildGate.command`; remote CI (step 10) is the verdict.
 9. **Commit and push**: Push your fixes to the PR branch
    - **Pre-push head-SHA recheck (MANDATORY)**: before the push, re-compare the PR's `headRefOid` against the `CLAIM_HEAD_SHA` you captured in step 2 — see "Pre-Push Head-SHA Recheck" below. If the head moved, another agent pushed while you were working; re-verify the blocker is still unaddressed and stand down rather than duplicating (or clobbering) their fix.
    - **Then run "Pin the lease" below, top to bottom**: the pre-open update from `origin/main` (MANDATORY, #7668, as `builder-pr.md` § "Pre-Push Rebase"; a merge unless `loom-daemon branch-update strategy` says rebase, #10771) and the push (#9487). Never update before it. On a conflict resolve in place (`git add`, then `git commit --no-edit` or `git rebase --continue`), resume at its version gate, not "PR Has Merge Conflicts". No-op if `main` hasn't moved.
@@ -1107,13 +1105,9 @@ CI Failures Found:
 - All shellcheck warnings together
 - All type errors together
 
-**Verify locally before pushing**:
+**Verify what you touched before pushing** (CI runs the full suite, #11690):
 ```bash
-# Run ALL checks locally
-pnpm check:ci   # your repo's check command — see buildGate.command in .loom/config.json
-
-# Or run specific checks
-pnpm test              # Frontend tests
+pnpm test -- <touched specs>   # the failing / touched tests only
 pnpm lint              # Linting
 pnpm exec tsc --noEmit # TypeScript
 shellcheck scripts/*.sh # Shell scripts (if applicable)
@@ -1142,7 +1136,7 @@ loom-daemon forge wait-checks <PR_NUMBER> --timeout 1200
 
 The "Time budget — do not hang" rule above forbids waiting *too long*. This rule forbids the opposite-looking failure that costs just as much: **pretending to wait** by arming a watcher and ending the turn.
 
-**Every result you are waiting on — remote CI after the push above, a long local check run (`buildGate.command`, `pnpm check:ci`), a slow test suite during conflict resolution — must be resolved inside the same turn that started it. It must NEVER be resolved by starting a background monitor (a `Monitor`/`ScheduleWakeup` timer, a `run_in_background` Bash watcher, a `gh pr checks --watch` you walk away from) and ending your turn narrating *"the monitor will re-invoke me when CI concludes."***
+**Every result you are waiting on — remote CI after the push above, a long local build or targeted test run — must be resolved inside the same turn that started it. It must NEVER be resolved by starting a background monitor (a `Monitor`/`ScheduleWakeup` timer, a `run_in_background` Bash watcher, a `gh pr checks --watch` you walk away from) and ending your turn narrating *"the monitor will re-invoke me when CI concludes."***
 
 This is the Doctor-side counterpart of the orchestrator guardrail in `sweep.md` ("ending your turn IS the kill signal", issue #4257) and of the identical rule in `judge.md`. **One rule, both dispatch surfaces:**
 
@@ -1269,15 +1263,14 @@ Comment on the PR when pushing fixes ("Addressed: formatting, added tests for ed
 
 ### Quality Checks
 ```bash
-# Full CI; Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated.
+# Targeted only (CI is the test gate, #11690); Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated.
 # Production shell changed + CI runs shell-budget --check? After the final commit, before re-review:
 # `loom-daemon shell-budget --check --base <PR base, default origin/main>`; nonzero = this branch's
 # growth (never pre-existing): cut counted shell or move it to the daemon, rerun to exit 0.
 # Comments, follow-up issues or arbitrary trailers are not permission.
-pnpm check:ci   # repo check: buildGate.command in .loom/config.json
 
-# If review mentioned tests / style / types:
-pnpm test
+# If review mentioned tests / style / types (scope to what you touched):
+pnpm test -- <touched specs>
 pnpm lint
 pnpm exec tsc --noEmit
 ```
@@ -1333,8 +1326,7 @@ gh api repos/{owner}/{repo}/pulls/42/comments \
 # Make your changes...
 # (edit files, add tests, fix bugs, resolve conflicts)
 
-# Verify everything works
-pnpm check:ci   # your repo's check command — see buildGate.command in .loom/config.json
+# Verify what you touched (targeted tests; CI runs the suite, #11690)
 
 # Commit and push
 git add .
@@ -1495,15 +1487,12 @@ EOF
 # First: Check ALL CI failures, not just tests
 loom-daemon forge wait-checks <PR_NUMBER> --timeout 20
 
-# Then fix ALL issues locally
-pnpm test              # Run tests
+# Then fix ALL issues locally, verifying only what you touched
+pnpm test -- <touched specs>
 pnpm lint              # Check linting
 pnpm exec tsc --noEmit # Check types
 
-# Verify full CI suite passes
-pnpm check:ci   # your repo's check command — see buildGate.command in .loom/config.json
-
-# Only push when ALL checks pass
+# Push; remote CI is the verdict (#11690)
 git push
 ```
 

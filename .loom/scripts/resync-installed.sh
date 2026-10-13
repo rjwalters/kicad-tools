@@ -77,11 +77,13 @@
 # customized "scripts" block in the stub is preserved. A consumer's OWN
 # package.json (any other "name") is never touched.
 #
-# On a successful non-dry-run it also re-stamps loom_version, loom_commit, and a
-# last_resync date into .loom/install-metadata.json (requires jq or python3;
-# skipped with a warning if neither is present — the file sync still succeeds).
+# On a successful non-dry-run that changed a surface or the version it also
+# re-stamps loom_version, loom_commit, and a last_resync date into
+# .loom/install-metadata.json (requires jq or python3; skipped with a warning
+# if neither is present — the file sync still succeeds). A run that changed
+# nothing leaves the file byte-identical (#11680).
 # It also ensures a `merge=ours` driver is wired up for that same file (#4528)
-# — a machine-local stamp every host re-writes, guaranteeing merge conflicts
+# — a machine-local stamp hosts re-write, guaranteeing merge conflicts
 # between hosts otherwise — via a Loom-managed .gitattributes block plus local
 # git config (never committed; runs every time so a pre-#4528 install
 # self-heals on its next resync).
@@ -1305,13 +1307,14 @@ removed_line_count() {
 # installed, then every byte of it came from a known upstream release and
 # there is no local fix to protect — whatever the last commit's subject says.
 # The installed version comes from .loom/install-metadata.json (loom_commit,
-# re-stamped by restamp_metadata() on every successful resync, else a
+# re-stamped by restamp_metadata() on every resync that changed something, else a
 # v<loom_version> tag) resolved in SOURCE_ROOT, the source checkout
 # resolve_defaults() already located.
 #
 # That exact-version comparison alone is not enough, because the RECORDED
 # version drifts ahead of the installed bytes: restamp_metadata() rewrites
-# loom_commit to the source HEAD on every non-dry run and runs BEFORE the
+# loom_commit to the source HEAD on every non-dry run that updated any other
+# surface (#11680 skips only the runs that changed nothing) and runs BEFORE the
 # blocked-file exit, so the very run that blocks a file also records a version
 # whose content that file no longer matches. So the content proof accepts any
 # revision of that path reachable from the recorded version, not just the
@@ -1457,7 +1460,8 @@ dst_matches_lineage_ref_exactly() {
 #
 #   Needed because the recorded version DRIFTS AHEAD of the installed bytes.
 #   restamp_metadata() rewrites loom_commit to the source HEAD on every non-dry
-#   run, and it runs BEFORE the blocked-file exit — so the very run that blocks
+#   run that updated any other surface (#11680), and it runs BEFORE the
+#   blocked-file exit — so the very run that blocks
 #   a file also records a version whose content that file no longer matches.
 #   One blocked run is therefore enough to make the exact-ref rung above fail
 #   forever after, which is precisely the state #8676's 23 fleet repos are
@@ -2537,6 +2541,58 @@ strip_claude_md_version_header ".loom/CLAUDE.md" "#5559 -> #8147"
 # regenerates the file.
 strip_claude_md_version_header "CLAUDE.md" "#6612 -> #8147"
 
+# normalize_source_remote <url>
+#   Canonical `https://<host>/<owner>/<repo>.git` form of a git remote URL
+#   (#11680). Hosts whose Loom checkout was cloned over SSH stamped
+#   `git@github.com:o/r.git` while the rest stamped `https://github.com/o/r.git`,
+#   so the tracked loom_source_remote flipped whenever consecutive resyncs came
+#   from different hosts -- the same per-host-field churn #9174 removed for
+#   loom_commit. Handles the scp form (`[user@]host:owner/repo[.git]`),
+#   `ssh://[user@]host[:port]/owner/repo[.git]` and `http(s)://` (userinfo is
+#   dropped, so a token embedded in an https remote never reaches the file).
+#   Anything else -- a local path, `file://` -- is returned unchanged, and an
+#   empty remote stays empty.
+normalize_source_remote() {
+    local url="$1" rest hostpart host path
+    case "$url" in
+        "")
+            return 0
+            ;;
+        ssh://*|http://*|https://*)
+            rest="${url#*://}"
+            [[ "$rest" == */* ]] || { printf '%s' "$url"; return 0; }
+            hostpart="${rest%%/*}"
+            path="${rest#*/}"
+            host="${hostpart##*@}"
+            # An ssh:// port is transport detail, not part of the repo identity.
+            [[ "$url" == ssh://* ]] && host="${host%%:*}"
+            ;;
+        *://*)
+            printf '%s' "$url"
+            return 0
+            ;;
+        *:*)
+            hostpart="${url%%:*}"
+            # `./a:b` or `/tmp/x:y` is a path, not scp syntax.
+            [[ "$hostpart" == */* ]] && { printf '%s' "$url"; return 0; }
+            host="${hostpart##*@}"
+            path="${url#*:}"
+            ;;
+        *)
+            printf '%s' "$url"
+            return 0
+            ;;
+    esac
+    path="${path#/}"
+    path="${path%/}"
+    path="${path%.git}"
+    if [[ -z "$host" || -z "$path" ]]; then
+        printf '%s' "$url"
+        return 0
+    fi
+    printf 'https://%s/%s.git' "$host" "$path"
+}
+
 restamp_metadata() {
     local meta="$WRITE_ROOT/.loom/install-metadata.json"
     [[ -f "$meta" ]] || return 0
@@ -2582,7 +2638,7 @@ restamp_metadata() {
     # actually resolved to, so it tracks a repointed sidecar rather than
     # freezing whatever was recorded at install time. Best-effort: empty when
     # SOURCE_ROOT isn't a git checkout or has no `origin` configured.
-    remote="$(git -C "$SOURCE_ROOT" remote get-url origin 2>/dev/null || true)"
+    remote="$(normalize_source_remote "$(git -C "$SOURCE_ROOT" remote get-url origin 2>/dev/null || true)")"
     # #10717: requires_daemon (the compatibility contract, #10716) travels with
     # the files, so it is read from the tree they came from, the same way
     # scripts/install/loom-source-path.sh reads it at install time. A source
@@ -2591,39 +2647,90 @@ restamp_metadata() {
     local req
     req="$(sed -n 's/^pub const REQUIRES_DAEMON: &str = "\([0-9][0-9.]*\)";$/\1/p' \
         "$SOURCE_ROOT/loom-daemon/src/install_compat.rs" 2>/dev/null || true)"
+    # #11680: a run that changed nothing must not touch the stamp. loom_commit
+    # is the source HEAD, and on the dogfood repo (source == destination)
+    # committing the restamp moves HEAD one past the value just stamped -- so
+    # every later run on every host saw a "changed" loom_commit, restamped and
+    # committed again, and every consumer inherited a metadata-only commit per
+    # host per fleet-resync tick. When no surface was written or removed this
+    # run, loom_version is unchanged, and the recorded loom_commit is already a
+    # valid full SHA (a missing/short/"unknown" one is still repaired), the
+    # volatile fields -- loom_commit, last_resync, loom_source_remote -- are
+    # left exactly as they are. loom_commit then names the source commit of
+    # the last sync that actually changed something, which is still an
+    # ancestor of the source HEAD and still matches every installed byte, so
+    # INSTALLED_LINEAGE_REF keeps resolving. This is the shell twin of the
+    # Rust payload path (init/payload.rs apply()), which already writes no
+    # metadata at all when the diff is empty.
+    #
+    # The non-volatile contract edits (legacy loom_source removal,
+    # requires_daemon) still apply; and in every case a result that is
+    # semantically identical to the current file is not written, so a no-op
+    # run leaves the file byte-identical and git sees no diff.
+    local prev_version prev_commit noop=0
+    prev_version="$(sed -n 's/.*"loom_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$meta" 2>/dev/null | head -1)"
+    prev_commit="$(sed -n 's/.*"loom_commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$meta" 2>/dev/null | head -1)"
+    if [[ "$N_UPDATED" -eq 0 && "$N_REMOVED" -eq 0 \
+          && "$prev_version" == "$version" \
+          && "$prev_commit" =~ ^[0-9a-f]{40}$ ]]; then
+        noop=1
+    fi
+
+    local stamped_note="${GREEN}re-stamped${NC} install-metadata.json (loom_version=$version, loom_commit=$commit, last_resync=$today)"
+    local unchanged_note="${GREEN}unchanged${NC} install-metadata.json: nothing to re-stamp (#11680)"
+    if [[ "$noop" -eq 1 ]]; then
+        stamped_note="${GREEN}updated${NC}   install-metadata.json contract fields only (no surface changed, loom_commit kept at $prev_commit, #11680)"
+    fi
+
     tmp="${meta}.tmp.$$"
 
     if command -v jq >/dev/null 2>&1; then
-        if jq --arg v "$version" --arg c "$commit" --arg r "$today" --arg src "$remote" --arg q "$req" \
-              '.loom_version=$v | .loom_commit=$c | .last_resync=$r | .loom_source_remote=$src | del(.loom_source) | if $q == "" then del(.requires_daemon) else .requires_daemon=$q end' \
+        if jq --arg v "$version" --arg c "$commit" --arg r "$today" --arg src "$remote" --arg q "$req" --arg n "$noop" \
+              '(if $n == "1" then . else .loom_version=$v | .loom_commit=$c | .last_resync=$r | .loom_source_remote=$src end) | del(.loom_source) | if $q == "" then del(.requires_daemon) else .requires_daemon=$q end' \
               "$meta" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+            if jq -n -e --slurpfile a "$meta" --slurpfile b "$tmp" '$a == $b' >/dev/null 2>&1; then
+                rm -f "$tmp"
+                note "  $unchanged_note"
+                return 0
+            fi
             mv "$tmp" "$meta"
-            note "  ${GREEN}re-stamped${NC} install-metadata.json (loom_version=$version, loom_commit=$commit, last_resync=$today)"
+            note "  $stamped_note"
             return 0
         fi
         rm -f "$tmp"
     fi
 
     if command -v python3 >/dev/null 2>&1; then
-        if META="$meta" VERSION="$version" COMMIT="$commit" TODAY="$today" REMOTE="$remote" REQ="$req" \
-           python3 - "$tmp" <<'PY' 2>/dev/null && [[ -s "$tmp" ]]; then
+        local py_rc=0
+        META="$meta" VERSION="$version" COMMIT="$commit" TODAY="$today" REMOTE="$remote" REQ="$req" NOOP="$noop" \
+           python3 - "$tmp" <<'PY' 2>/dev/null || py_rc=$?
 import json, os, sys
 with open(os.environ["META"]) as f:
     data = json.load(f)
-data["loom_version"] = os.environ["VERSION"]
-data["loom_commit"] = os.environ["COMMIT"]
-data["last_resync"] = os.environ["TODAY"]
-data["loom_source_remote"] = os.environ["REMOTE"]
+orig = json.loads(json.dumps(data))
+if os.environ["NOOP"] != "1":
+    data["loom_version"] = os.environ["VERSION"]
+    data["loom_commit"] = os.environ["COMMIT"]
+    data["last_resync"] = os.environ["TODAY"]
+    data["loom_source_remote"] = os.environ["REMOTE"]
 data.pop("loom_source", None)
 data.pop("requires_daemon", None)
 if os.environ["REQ"]:
     data["requires_daemon"] = os.environ["REQ"]
+if data == orig:
+    sys.exit(10)
 with open(sys.argv[1], "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PY
+        if [[ "$py_rc" -eq 10 ]]; then
+            rm -f "$tmp"
+            note "  $unchanged_note"
+            return 0
+        fi
+        if [[ "$py_rc" -eq 0 && -s "$tmp" ]]; then
             mv "$tmp" "$meta"
-            note "  ${GREEN}re-stamped${NC} install-metadata.json (loom_version=$version, loom_commit=$commit, last_resync=$today)"
+            note "  $stamped_note"
             return 0
         fi
         rm -f "$tmp"
@@ -2653,7 +2760,8 @@ fi
 # .loom/install-metadata.json is a machine-local install stamp: every host's
 # resync (the restamp_metadata step above) re-writes loom_version,
 # loom_commit, and last_resync (plus loom_source, an absolute host-specific
-# path) on every run. Because the file must stay tracked (it is the
+# path) whenever its surfaces or version change (#11680: a run that changed
+# nothing leaves it byte-identical). Because the file must stay tracked (it is the
 # authoritative ownership manifest consumed by verify-install.sh and
 # uninstall-loom.sh — see is_untracked_runtime_file() in verify-install.sh,
 # which already treats its exact byte content as non-checksum-tracked
@@ -3505,6 +3613,19 @@ if [[ "$N_UPDATED" -gt 0 || "$N_REMOVED" -gt 0 ]]; then
     printf '%b\n' "${GREEN}${BOLD}[resync] ${N_UPDATED} file(s) updated, ${N_REMOVED} removed, ${N_UNCHANGED} unchanged, ${N_SKIPPED} skipped.${NC}${CHECK_NOTE}"
 else
     printf '%b\n' "${GREEN}[resync] Already in sync (${N_UNCHANGED} unchanged, ${N_SKIPPED} skipped).${NC}${CHECK_NOTE}"
+fi
+
+# #11713: operator presence wiring. `operatorPresence.enabled` (fleet key in the
+# machine-level defaults.json), LOOM_OPERATOR_PRESENCE=1|0 or the local
+# ~/.loom/operator-presence.optout file decide whether the user-scope presence
+# hooks are merged into (or stripped from) ~/.claude/settings.json. A no-op when
+# none of them is set, when the machine checkout lacks provision-hooks.sh, and
+# in --dry-run. Best-effort: resync never fails on it.
+_PRESENCE_LIB="${LOOM_HOME:-$HOME/.local/share/loom}/scripts/install/provision-hooks.sh"
+if [[ "${DRY_RUN:-0}" != "1" && -r "$_PRESENCE_LIB" ]]; then
+    # shellcheck source=/dev/null
+    ( source "$_PRESENCE_LIB" && provision_operator_presence ) \
+        || warn "operator presence wiring not fully applied (see messages above); resync itself completed."
 fi
 
 # #9996: forge egress routing check, delegated to the daemon (the shell never
