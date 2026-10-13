@@ -436,7 +436,8 @@ HOLD_BODY=$(jq -r --arg m "<!-- champion:merge-risk-hold -->" \
 # posted after the hold (the instruction must OPEN the comment's leading clause
 # and not be a question — "do not merge anyway" / "is it ok to merge?" do NOT
 # release) | a new head SHA (recorded as `champion:hold-state head=<sha>` in the
-# hold comment) | a new Judge review after the hold.
+# hold comment) | a new Judge review after the hold | a human removing
+# `loom:operator` after the hold (an `unlabeled` event; #11416).
 ```
 
 **Decision**: **Hold stands** — skip the PR for this pass whatever the axes say this tick. A green re-read of an unchanged diff is not a release signal, and Champion's own comments never count as one.
@@ -445,7 +446,7 @@ HOLD_BODY=$(jq -r --arg m "<!-- champion:merge-risk-hold -->" \
 
 **Rationale**: A hold that a later subjective re-read can silently evaporate is not a hold. Because every fleet agent acts under the operator's forge identity, `mergedBy` cannot distinguish a human override from a Champion tick that scored the axes differently — so the comment is the *only* audit trail, and the anti-spam guard that (correctly) suppresses repeat holds was suppressing precisely the comment that would have explained the reversal.
 
-**Action** (single authoritative policy — implemented in `champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment → Sticky holds"): see that section for the precheck, the four outcomes, and the reversal-comment template.
+**Action** (single authoritative policy — implemented in `champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment → Sticky holds"): see that section for the precheck, its outcomes, and the reversal-comment template. Claim/label machinery is not red by itself; only the documented kept set is (#11416).
 
 ---
 

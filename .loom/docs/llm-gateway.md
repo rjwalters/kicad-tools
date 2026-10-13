@@ -7,7 +7,7 @@ provider's own endpoint and key. Budgets, rate limits and per-request telemetry
 then live in the gateway, not in per-host harness config. Claude Code and Codex
 never receive any of it (see [the red line](#who-never-receives-it-the-red-line)).
 
-The deployment shape this was built for is 2AMLogic/2am decision D39: a
+The deployment shape this was built for is a
 self-hosted [Bifrost](https://github.com/maximhq/bifrost) gateway with one
 virtual key per consumer class (`vk-loom-fleet` for Loom workers), rolled out
 one canary worker first, then the fleet. Nothing in Loom is Bifrost-specific
@@ -133,7 +133,7 @@ only a role-tagged (guarded) launch provisions; every daemon dispatch is one.
 
 Claude Code and Codex run on subscription seats: Claude's OAuth token pool and
 Codex's ChatGPT login. Pushing a subscription credential through a gateway is
-the shape Anthropic's terms forbid (D39's red line), so no Claude or Codex
+the shape Anthropic's terms forbid (the red line), so no Claude or Codex
 launch receives the gateway, even with every knob saying "route". It is
 enforced in code at three layers:
 

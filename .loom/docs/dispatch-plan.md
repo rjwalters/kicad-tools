@@ -17,8 +17,7 @@ field-by-field in [`telemetry-schema.md`](telemetry-schema.md) under
 ## Why a merge rule at all
 
 Every host publishes its own plan. A row's `position` is a 1-based index into
-*that host's* shaped pass-2 order, after its repo-slice and per-repo-cap
-shaping — so two hosts' positions are not on one scale. Host A with three
+*that host's* shaped pass-2 order, after its per-repo-cap shaping — so two hosts' positions are not on one scale. Host A with three
 repos and host B with thirty both have a `position: 1`, and they mean
 completely different things.
 
@@ -48,10 +47,12 @@ Among the hosts that list the same issue, in order:
    `blocked`. An `unknown` state (a newer daemon's state this build does not
    know) ranks last, so it never displaces a state that is understood.
 2. **The shard owner** — the host whose `plan.shard.host_shard` equals the
-   row's `owning_shard`. That is the host whose job the issue actually is
-   (see [`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md)). An
-   unsharded host owns nothing, so an unsharded fleet falls straight through
-   to the next key.
+   row's `owning_shard`: the host the role-runner ring (#6374) assigns the
+   repo to. Dispatch no longer prefers that host (the repo slice is retired,
+   see [`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md), #11682),
+   but the ring still gives every repo exactly one owner, so the rule still
+   picks one host deterministically. An unsharded host owns nothing, so an
+   unsharded fleet falls straight through to the next key.
 3. **Lower `position`** — within one state band, the host that has it nearer
    the front of its own plan. A row with no position (outside that host's
    plan this tick) sorts behind every row that has one.

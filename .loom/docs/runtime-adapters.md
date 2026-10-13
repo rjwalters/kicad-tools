@@ -2163,6 +2163,16 @@ PR and sweep come from the launching environment (`LOOM_ROLE`,
 `LOOM_ISSUE_NUMBER` or the `sweep-issue-<N>-` sweep id, `LOOM_PR_NUMBER`,
 `LOOM_SWEEP_ID`).
 
+**Delivery from the launcher process.** A proxied launch runs the proxy inside
+the `loom-daemon worker …` launcher, not the daemon, and that process has no
+ops sink, so the metrics above exist only when the proxy runs in-daemon. In the
+launcher each request's `loom.egress.request` span (which carries every metric
+field) is written as the only entry of its own trace journal,
+`.loom/logs/trace-context/egress-<span-id>.jsonl`; the daemon's backfill pass
+drains it to the OTLP queue and retires the file. Journals are written only
+when the workspace exports traces (an `otlp` exporter is configured);
+otherwise observe records are dropped.
+
 Not in this slice (tracked on #11300): marking the pool from the live 429,
 loopback proxying of uncontained launches, and injecting the OpenCode base URL
 through `XDG_CONFIG_HOME`.

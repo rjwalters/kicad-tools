@@ -64,11 +64,9 @@ set -euo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-BLUE='\033[0;34m'
 NC='\033[0m'
 
 print_error() { echo -e "${RED}ERROR: $1${NC}" >&2; }
-print_info() { echo -e "${BLUE}ℹ $1${NC}" >&2; }
 print_success() { echo -e "${GREEN}✓ $1${NC}" >&2; }
 
 show_help() {
@@ -179,7 +177,7 @@ case "$CMD" in
 
         mkdir -p "$(dirname "$LOG_FILE")"
 
-        jq -nc \
+        LINE="$(jq -nc \
             --arg emitted_at "$EMITTED_AT" \
             --argjson emitted_at_epoch "$EMITTED_AT_EPOCH" \
             --arg host_id "$HOST_ID" \
@@ -199,7 +197,10 @@ case "$CMD" in
                     duration_sec: $duration_sec,
                     files_changed: $files_changed
                 }
-            }' >> "$LOG_FILE"
+            }')"
+        printf '%s\n' "$LINE" >> "$LOG_FILE"
+        # requires-daemon: telemetry optional   J2 shadow only (#11348): an absent or pre-#11348 binary fails the append, which `|| true` discards -- the legacy log line above is already written.
+        printf '%s\n' "$LINE" | "${LOOM_DAEMON_BIN:-loom-daemon}" telemetry append --stream shell --workspace "$REPO_ROOT" >/dev/null 2>&1 || true  # J2 shadow, after legacy (#11348)
 
         print_success "recorded doc-maintenance telemetry for PR #${PR_NUMBER} -> $LOG_FILE"
         exit 0

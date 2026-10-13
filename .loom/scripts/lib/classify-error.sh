@@ -21,7 +21,11 @@
 #                         re-authorization): "organization has disabled
 #                         [Claude subscription access]" and "Failed to
 #                         authenticate ... socket connection was closed
-#                         unexpectedly".
+#                         unexpectedly". Issue #11205 adds Claude Code's own
+#                         "Failed to authenticate. API Error: 401 …" opening
+#                         (any 401 message), "Failed to authenticate: OAuth
+#                         session expired …" and "API Error: 401 Invalid API
+#                         key".
 #       TOKEN_EXHAUSTED — quota/weekly/per-model limit hit (rotate). Covers
 #                         both the "hit your … limit" family (#3738) and the
 #                         per-model "reached your <model> limit" ceiling the
@@ -29,7 +33,10 @@
 #                         over-approximation (the account may still have
 #                         headroom on a cheaper model) chosen over a new
 #                         model-dimensioned category so no downstream consumer
-#                         has to learn a new enum value.
+#                         has to learn a new enum value. Issue #11205 adds
+#                         "You've hit your team's shared budget", "Your org is
+#                         out of usage", the legacy "Claude AI usage limit
+#                         reached|<epoch>".
 #       MODEL_CREDITS_EXHAUSTED
 #                       — per-model-TIER usage credits ran out (issue #5687):
 #                         "You're out of usage credits". Distinct from
@@ -143,9 +150,12 @@
 # current documented order, are carried into the `claude` table below.
 #
 # Test vectors: the `claude` table's live in
-# `defaults/scripts/tests/test-spawn-claude.sh`; the `codex` table's (plus the
+# `defaults/scripts/tests/test-spawn-claude.sh` and
+# `defaults/scripts/tests/test-classify-error.sh`; the `codex` table's (plus the
 # cross-provider isolation checks that prove the claude vectors are unchanged)
-# live in `defaults/scripts/tests/test-spawn-codex.sh`.
+# live in `defaults/scripts/tests/test-spawn-codex.sh`. Verbatim CLI messages
+# that contain `|` (which the heredoc tables use as a separator) live in
+# `defaults/scripts/tests/fixtures/classify_error/vectors.tsv`.
 
 # shellcheck disable=SC2120  # OK that callers pass the args; we don't default.
 
@@ -247,7 +257,34 @@ _classify_error_claude() {
     # remedy is identical in kind — mark this account bad, rotate, never
     # blind-retry — and `claude-wrapper.sh::is_account_auth_dead` already
     # dispatches on exactly this classification.
-    if echo "$output" | grep -qiE "401[^a-z]*authentication_error|\"type\"[[:space:]]*:[[:space:]]*\"?authentication_error|token (has been |was )?revoked|invalid bearer token|OAuth token has expired|token has expired|organization has disabled|failed to authenticate.*socket connection was closed unexpectedly"; then
+    #
+    # Issue #11205: three more messages Claude Code 2.1.295 really prints fell
+    # through to RECOVERABLE, so the dead credential was retried instead of
+    # marked and rotated:
+    #   Failed to authenticate. API Error: 401 OAuth access token is invalid.
+    #   Failed to authenticate: OAuth session expired and could not be refreshed
+    #   API Error: 401 Invalid API key · Please run /login
+    # Each is anchored on the CLI's own opening, not on its free-text tail.
+    # "Failed to authenticate. API Error: " is what Claude Code prints, for a
+    # subscription login, only from its `authentication_failed` branch, which it
+    # takes only on an HTTP 401 or 403 response from the API. So
+    # `failed to authenticate\. api error: 401` matches every 401 message the
+    # server can put after it, today's and the next one. 403 is NOT widened the
+    # same way: a 403 can also be a policy refusal that is not about this
+    # credential, and a false TOKEN_EXPIRED is the expensive direction (see
+    # above).
+    #
+    # The #6424 403 case ("Failed to authenticate. API Error: 403 The socket
+    # connection was closed unexpectedly") was re-checked for #11205 and stays
+    # TOKEN_EXPIRED, i.e. auth, not transport. The 403 is a real HTTP status:
+    # the server refused the credential, and then the connection closed before
+    # the CLI could read the body, so the socket text replaced the message. A
+    # transport fault with no response has no status and does not take the
+    # `authentication_failed` branch, so it never gets this opening; the bare
+    # socket-closed text still falls through to RECOVERABLE. On the #6424 host
+    # these deaths came beside "organization has disabled" deaths of the same
+    # accounts, which is consistent with that reading.
+    if echo "$output" | grep -qiE "401[^a-z]*authentication_error|\"type\"[[:space:]]*:[[:space:]]*\"?authentication_error|token (has been |was )?revoked|invalid bearer token|OAuth token has expired|token has expired|organization has disabled|failed to authenticate.*socket connection was closed unexpectedly|failed to authenticate\. api error: 401|failed to authenticate: oauth session expired|api error: 401 invalid api key"; then
         echo "TOKEN_EXPIRED"
         return
     fi
@@ -304,7 +341,30 @@ _classify_error_claude() {
     # instead of rotated away from. Widened to the same bounded-filler shape
     # already used for "reached your <model> limit" above, so the next
     # "hit your <N-word> limit" variant is caught without another round trip.
-    if echo "$output" | grep -qiE "hit your ([^[:space:]]+[[:space:]]+){0,3}limit|hit\.your\.limit|monthly usage limit|out of extra usage|reached your ([^[:space:]]+[[:space:]]+){0,3}limit"; then
+    #
+    # Issue #11205 adds four more messages Claude Code really prints, each
+    # anchored on the CLI's own opening:
+    #   * "You've hit your team's shared budget. …" — a team's pooled usage is
+    #     spent. Same "hit your …" family, but it ends in "budget", not
+    #     "limit", so the same bounded-filler shape is repeated for "budget".
+    #   * "Your org is out of usage · add funds to continue" (or "· contact
+    #     your admin") — the org's usage money is spent. TOKEN_EXHAUSTED, not
+    #     MODEL_CREDITS_EXHAUSTED: the CLI does not suggest a cheaper model
+    #     here, because a cheaper model spends the same money, so a
+    #     class-scoped mark would keep a dead account in rotation.
+    #   * "Claude AI usage limit reached|<epoch>" — the older CLI's machine-
+    #     readable limit line (the epoch is the reset time).
+    #
+    # Deliberately NOT matched: Claude Code's "API Error: 429 …" prefix. It names
+    # the reporting client, not the cause: a temporary request/token throttle
+    # ("Too many requests. Please retry after 60 seconds.") looks the same as a
+    # spent allocation, and the CLI's own bounded retries can finish before a
+    # throttle resets. Treating it as TOKEN_EXHAUSTED would mark the account
+    # `exhausted` (6h cooldown) and concurrent throttles could pull healthy
+    # accounts out of rotation. Without positive usage-exhaustion evidence a
+    # 429 stays RECOVERABLE through the generic table; a concurrent-session 429
+    # is SESSION_LIMIT, checked first.
+    if echo "$output" | grep -qiE "hit your ([^[:space:]]+[[:space:]]+){0,3}limit|hit\.your\.limit|monthly usage limit|out of extra usage|reached your ([^[:space:]]+[[:space:]]+){0,3}limit|hit your ([^[:space:]]+[[:space:]]+){0,3}budget|your org is out of usage|claude ai usage limit reached"; then
         echo "TOKEN_EXHAUSTED"
         return
     fi

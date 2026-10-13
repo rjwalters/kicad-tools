@@ -264,9 +264,9 @@ When the daemon is running, you coordinate work via MCP tools where available, a
 1. Count `loom:issue` items in the forge
 2. Check active sweeps via `mcp__loom__list_sweeps`
 3. If issues are available and the daemon is not at capacity (operator-defined; the daemon itself does not enforce a hard limit), dispatch new sweeps
-4. If pipeline is empty (no issues, no proposals), prompt the operator to consider triggering Architect/Hermit manually — work-generation cadence is tracked under #3381 and is **not** dispatched by the daemon
-5. Monitor `sweep.issue.*.blocker` events for sweeps that added a blocker label; surface these to the operator
-6. Monitor `sweep.issue.*.crashed` events for non-zero exits; consider re-dispatch (the checkpoint preserves progress)
+4. If the pipeline is empty (no issues, no proposals), suggest the operator trigger Architect/Hermit manually — the daemon does **not** dispatch work generation (#3381)
+5. Surface `sweep.issue.*.blocker` events (a sweep added a blocker label) to the operator
+6. On `sweep.issue.*.crashed` (non-zero exit), consider re-dispatch (the checkpoint preserves progress)
 
 Every dispatched `/loom:sweep` runs the full lifecycle and **merges each
 approved PR on Judge approval** — there is no separate merge-gated mode and
@@ -316,7 +316,9 @@ alive (the 2026-08-03 zombie-agent incident). `.loom/sweep-checkpoint/` files
 still survive a cancel, so a later `dispatch_sweep` / `loom-daemon dispatch` for
 that issue resumes from the last completed phase.
 
-**Stop the daemon process itself** is out of scope for this skill — the daemon is a long-lived service that the operator manages outside Claude Code (via their init system, foreman, or shell-level process management).
+**Stop the daemon process itself** is out of scope for this skill — the operator manages that long-lived service outside Claude Code.
+
+**Fleet hosts**: a destructive or outward change to one (ssh/scp/rsync/SSM) needs an explicit yes to that action; "continue" is not one (CLAUDE.md, #11568).
 
 ---
 
