@@ -48,7 +48,7 @@ from .geometry import (
 
 if TYPE_CHECKING:
     from ..primitives import Pad
-    from .obstacles import CommittedCopper, LatticeObstacleModel
+    from .obstacles import CommittedCopper, LatticeKeepoutMask, LatticeObstacleModel
 
 _EPS = 1e-9
 
@@ -74,6 +74,12 @@ class CoupledConnection:
         net_class: The pair's ``NetClassRouting`` (trace width source).
         pitch: P/N centreline pitch in mm --
             ``trace_width + effective_intra_pair_clearance()``.
+        anchor_a / anchor_b: Optional relocated virtual endpoint of the fat
+            centerline at end A / B (issue #6378).  ``None`` (the default)
+            keeps the P/N pad midpoint.  Set when the midpoint sits inside a
+            foreign pad's keep-out -- e.g. a SOT-23-6 ESD part whose GND pad
+            lies between its D+/D- pads -- so the centerline starts just off
+            the part and ``_pair_attach`` doglegs each pad onto its leg.
     """
 
     key: object
@@ -84,13 +90,19 @@ class CoupledConnection:
     pad_n_b: Pad
     net_class: object
     pitch: float
+    anchor_a: Pt | None = None
+    anchor_b: Pt | None = None
 
     @property
     def mid_a(self) -> Pt:
+        if self.anchor_a is not None:
+            return self.anchor_a
         return ((self.pad_p_a.x + self.pad_n_a.x) / 2.0, (self.pad_p_a.y + self.pad_n_a.y) / 2.0)
 
     @property
     def mid_b(self) -> Pt:
+        if self.anchor_b is not None:
+            return self.anchor_b
         return ((self.pad_p_b.x + self.pad_n_b.x) / 2.0, (self.pad_p_b.y + self.pad_n_b.y) / 2.0)
 
     @property
@@ -441,6 +453,50 @@ def seg_rect_dist(a: Pt, b: Pt, rect: Rect) -> float:
     )
 
 
+Couple = tuple[int, int]
+"""A ``(p_index, n_index)`` P/N pad couple (indices into the input lists)."""
+
+
+def _greedy_couples(pads_p: list[Pad], pads_n: list[Pad]) -> list[Couple]:
+    """Couple each P pad with its nearest unclaimed N pad, nearest first."""
+    cands = sorted(
+        (dist((p.x, p.y), (n.x, n.y)), i, j)
+        for i, p in enumerate(pads_p)
+        for j, n in enumerate(pads_n)
+    )
+    couples: list[Couple] = []
+    used_p: set[int] = set()
+    used_n: set[int] = set()
+    for _d, i, j in cands:
+        if i in used_p or j in used_n:
+            continue
+        couples.append((i, j))
+        used_p.add(i)
+        used_n.add(j)
+    return couples
+
+
+def _couple_mid(pads_p: list[Pad], pads_n: list[Pad], c: Couple) -> Pt:
+    p, n = pads_p[c[0]], pads_n[c[1]]
+    return ((p.x + n.x) / 2.0, (p.y + n.y) / 2.0)
+
+
+def _farthest_couples(
+    pads_p: list[Pad], pads_n: list[Pad], couples: list[Couple]
+) -> tuple[int, int]:
+    """Indices into ``couples`` of the two couples whose midpoints are farthest apart."""
+    best: tuple[float, int, int] | None = None
+    for x in range(len(couples)):
+        for y in range(x + 1, len(couples)):
+            d = dist(
+                _couple_mid(pads_p, pads_n, couples[x]), _couple_mid(pads_p, pads_n, couples[y])
+            )
+            if best is None or d > best[0]:
+                best = (d, x, y)
+    assert best is not None
+    return best[1], best[2]
+
+
 def choose_pair_endpoints(
     pads_p: list[Pad], pads_n: list[Pad]
 ) -> tuple[tuple[int, int], tuple[int, int]] | None:
@@ -451,35 +507,215 @@ def choose_pair_endpoints(
     ``((ip_a, in_a), (ip_b, in_b))`` index tuples into the input lists.
     Returns ``None`` when fewer than two couples exist (degenerate pad
     topology -- the pair cannot form a coupled main run).
+
+    These two couples are also the ENDS of :func:`choose_pair_chain`.
     """
     if not pads_p or not pads_n:
         return None
-    cands = sorted(
-        (dist((p.x, p.y), (n.x, n.y)), i, j)
-        for i, p in enumerate(pads_p)
-        for j, n in enumerate(pads_n)
-    )
-    couples: list[tuple[int, int]] = []
-    used_p: set[int] = set()
-    used_n: set[int] = set()
-    for _d, i, j in cands:
-        if i in used_p or j in used_n:
-            continue
-        couples.append((i, j))
-        used_p.add(i)
-        used_n.add(j)
+    couples = _greedy_couples(pads_p, pads_n)
     if len(couples) < 2:
         return None
+    x, y = _farthest_couples(pads_p, pads_n, couples)
+    return couples[x], couples[y]
 
-    def mid(c: tuple[int, int]) -> Pt:
-        p, n = pads_p[c[0]], pads_n[c[1]]
-        return ((p.x + n.x) / 2.0, (p.y + n.y) / 2.0)
 
-    best: tuple[float, int, int] | None = None
-    for x in range(len(couples)):
-        for y in range(x + 1, len(couples)):
-            d = dist(mid(couples[x]), mid(couples[y]))
-            if best is None or d > best[0]:
-                best = (d, x, y)
-    assert best is not None
-    return couples[best[1]], couples[best[2]]
+@dataclass(frozen=True)
+class PairChain:
+    """A diff pair's signal path as an ordered chain of couples (#6378).
+
+    Attributes:
+        segments: Coupled runs ``(couple_from, couple_to)`` in chain order,
+            end A first.  Exactly one segment (the farthest-apart trunk)
+            when the pair passes through no interior part.
+        hops: ``(entry_couple, exit_couple)`` inside each interior part
+            that has distinct entry and exit couples -- routed as two
+            ordinary single-ended connections (P hop, N hop), never as a
+            coupled attempt.
+    """
+
+    segments: list[tuple[Couple, Couple]]
+    hops: list[tuple[Couple, Couple]]
+
+
+def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
+    """Order a pair's couples along its signal path (issue #6378).
+
+    Couples are formed and the two ENDS chosen exactly as
+    :func:`choose_pair_endpoints` does (greedy nearest P/N, then the
+    farthest-apart couples).  Couples are then grouped by footprint (the
+    ref of both pads; a couple whose P and N sit on different refs is its
+    own group).  An *interior part* is a group holding neither end couple
+    whose couple-midpoint centroid projects strictly between the ends
+    (``0 < t < 1`` along the end-to-end axis).  Interior parts are visited
+    in projection order; each is entered at its couple nearest the previous
+    chain node and left at its couple nearest the next one (the next
+    part's centroid, or the far end).
+
+    Board 03 USB_D: J1.B6/B7 -> U2.3/U2.1 (segment), U2.3/U2.1 ->
+    U2.4/U2.6 (hop through the pass-through ESD part), U2.4/U2.6 ->
+    R4.1/R3.1 (segment) -- instead of a J1 -> R trunk that has to cross
+    U2's own pads.  Couples on an end part other than the end couple (the
+    second row of a USB-C receptacle) and parts outside the end span stay
+    off the chain: the caller routes them as extras, as before.
+
+    With no interior part the result is the single farthest-apart trunk,
+    identical to :func:`choose_pair_endpoints`.  Returns ``None`` when
+    fewer than two couples exist.
+    """
+    if not pads_p or not pads_n:
+        return None
+    couples = _greedy_couples(pads_p, pads_n)
+    if len(couples) < 2:
+        return None
+    ix, iy = _farthest_couples(pads_p, pads_n, couples)
+    end_a, end_b = couples[ix], couples[iy]
+    trunk = PairChain(segments=[(end_a, end_b)], hops=[])
+
+    def group(c: Couple) -> object:
+        ref_p, ref_n = pads_p[c[0]].ref, pads_n[c[1]].ref
+        if ref_p and ref_p == ref_n:
+            return ("ref", ref_p)
+        return ("couple", c)
+
+    g_a, g_b = group(end_a), group(end_b)
+    if g_a == g_b:
+        return trunk
+    groups: dict[object, list[Couple]] = {}
+    for c in couples:
+        g = group(c)
+        if g in (g_a, g_b):
+            continue
+        groups.setdefault(g, []).append(c)
+    if not groups:
+        return trunk
+
+    m_a = _couple_mid(pads_p, pads_n, end_a)
+    m_b = _couple_mid(pads_p, pads_n, end_b)
+    ax, ay = m_b[0] - m_a[0], m_b[1] - m_a[1]
+    len2 = ax * ax + ay * ay
+    if len2 <= _EPS:
+        return trunk
+    interior: list[tuple[float, Pt, list[Couple]]] = []
+    for members in groups.values():
+        mids = [_couple_mid(pads_p, pads_n, c) for c in members]
+        cx = sum(m[0] for m in mids) / len(mids)
+        cy = sum(m[1] for m in mids) / len(mids)
+        t = ((cx - m_a[0]) * ax + (cy - m_a[1]) * ay) / len2
+        if 0.0 < t < 1.0:
+            interior.append((t, (cx, cy), members))
+    if not interior:
+        return trunk
+    interior.sort(key=lambda e: e[0])
+
+    def nearest(members: list[Couple], to: Pt) -> Couple:
+        return min(members, key=lambda c: (dist(_couple_mid(pads_p, pads_n, c), to), c))
+
+    segments: list[tuple[Couple, Couple]] = []
+    hops: list[tuple[Couple, Couple]] = []
+    prev = end_a
+    for k, (_t, _centroid, members) in enumerate(interior):
+        nxt = interior[k + 1][1] if k + 1 < len(interior) else m_b
+        entry = nearest(members, _couple_mid(pads_p, pads_n, prev))
+        exit_ = nearest(members, nxt)
+        segments.append((prev, entry))
+        if exit_ != entry:
+            hops.append((entry, exit_))
+        prev = exit_
+    segments.append((prev, end_b))
+    return PairChain(segments=segments, hops=hops)
+
+
+def relocate_pair_anchor(
+    obstacles: LatticeObstacleModel,
+    pad_p: Pad,
+    pad_n: Pad,
+    toward: Pt,
+    *,
+    half_pitch: float,
+    layers: tuple[int, ...],
+    exempt: frozenset[int],
+    pair_nets: set[int],
+    keepouts: LatticeKeepoutMask | None = None,
+    trace_half: float = 0.0,
+    step: float = 0.05,
+    max_shift: float = 4.0,
+) -> Pt | None:
+    """Relocated fat-centerline endpoint for a blocked couple (issue #6378).
+
+    Returns ``None`` when the P/N midpoint is already a legal fat-agent
+    point on some layer in ``layers`` (the common case -- nothing changes).
+    Otherwise the midpoint lies inside a foreign pad's keep-out grown by
+    ``half_pitch`` (board 03 U2: the GND/VBUS pad between the ESD part's
+    D+/D- pads), so no fat stub can ever leave it (``pair-escape-*``).  The
+    anchor then slides perpendicular to the P-N axis, on the side facing
+    ``toward`` (the segment's other end), in ``step`` increments until, on
+    one layer:
+
+    * the anchor clears every non-``exempt`` pad grown by ``half_pitch``;
+    * each nominal leg end (``anchor +/- half_pitch`` along the P-N axis)
+      is reachable from its own pad by an axis dogleg that clears every
+      foreign pad at single-trace clearance (the static half of the
+      ``_pair_attach`` gate -- the real attach is still re-verified);
+    * with ``keepouts`` (the pathfinder's rule-area mask, which also holds
+      the #6401 pour-pad via reservations), the fat envelope at the anchor
+      (``half_pitch + trace_half``) and both doglegs (``trace_half``) stay
+      out of every track-blocking area.  Board 03 reserves U2.5's VBUS via
+      site straight outward from the part, exactly where the centerline
+      would otherwise start; the emitted legs would then fail
+      ``pair-leg-keepout``.
+
+    The shift distance is therefore computed from the actual pad geometry,
+    never hard-coded.  Returns ``None`` too when nothing clears within
+    ``max_shift`` (the caller keeps the midpoint and the pair declines or
+    falls back exactly as before).
+    """
+    from ..quantize import dogleg_points
+
+    mid = ((pad_p.x + pad_n.x) / 2.0, (pad_p.y + pad_n.y) / 2.0)
+    if any(
+        not pads_block_point_grown(obstacles, mid, layer, pair_nets, half_pitch, exempt=exempt)
+        for layer in layers
+    ):
+        return None
+    ux, uy = pad_p.x - pad_n.x, pad_p.y - pad_n.y
+    axis_len = (ux * ux + uy * uy) ** 0.5
+    if axis_len <= _EPS:
+        return None
+    ux, uy = ux / axis_len, uy / axis_len
+    nx, ny = -uy, ux  # perpendicular to the P-N axis
+    if (toward[0] - mid[0]) * nx + (toward[1] - mid[1]) * ny < 0:
+        nx, ny = -nx, -ny
+
+    def seg_ok(pad: Pad, a: Pt, b: Pt, layer: int) -> bool:
+        if dist(a, b) <= _EPS:
+            return True
+        if pads_block_segment_grown(obstacles, a, b, layer, pair_nets, 0.0):
+            return False
+        return not (keepouts and keepouts.segment_blocked(a, b, layer, pad.net, trace_half))
+
+    def attach_clear(pad: Pad, target: Pt, layer: int) -> bool:
+        for axis_first in (False, True):
+            poly = dogleg_points(pad.x, pad.y, target[0], target[1], axis_first=axis_first)
+            if all(seg_ok(pad, a, b, layer) for a, b in zip(poly, poly[1:], strict=False)):
+                return True
+        return False
+
+    steps = int(max_shift / step + 0.5)
+    for k in range(1, steps + 1):
+        shift = k * step
+        anchor = (mid[0] + nx * shift, mid[1] + ny * shift)
+        end_p = (anchor[0] + ux * half_pitch, anchor[1] + uy * half_pitch)
+        end_n = (anchor[0] - ux * half_pitch, anchor[1] - uy * half_pitch)
+        for layer in layers:
+            if pads_block_point_grown(
+                obstacles, anchor, layer, pair_nets, half_pitch, exempt=exempt
+            ):
+                continue
+            if keepouts and any(
+                keepouts.segment_blocked(anchor, anchor, layer, net, half_pitch + trace_half)
+                for net in pair_nets
+            ):
+                continue
+            if attach_clear(pad_p, end_p, layer) and attach_clear(pad_n, end_n, layer):
+                return anchor
+    return None
