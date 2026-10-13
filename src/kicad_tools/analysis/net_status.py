@@ -559,11 +559,9 @@ class NetStatusAnalyzer:
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
         # Per-analyzer pad copper polygon cache (keyed by physical occurrence); ``None``
-        # until first built lazily in :meth:`_pad_polys`.
+        # until first built lazily in :meth:`_pad_polys`.  Shared by strict
+        # trace-to-pad contact and the pad-to-pad overlap join (Issue #6460).
         self._pad_poly_cache: dict[str, Any] | None = None
-        # Absolute-rotation, shape-aware pad outlines for the pad-to-pad
-        # overlap join (Issue #6435); built lazily in :meth:`_pad_overlap_polys`.
-        self._pad_overlap_poly_cache: dict[str, Any] | None = None
         if self.strict:
             from kicad_tools._shapely import require_shapely
 
@@ -1837,11 +1835,10 @@ class NetStatusAnalyzer:
         Candidate pairs are pruned with an ``STRtree`` so large nets stay
         O(n log n).
 
-        Shapes come from :meth:`_pad_overlap_polys` (each pad's *absolute*
-        rotation, real circle/oval outlines), not :meth:`_pad_polys`: the
-        latter orients every pad by its footprint rotation only, which swaps
-        W/H on a pad rotated relative to its footprint and would falsely bond
-        neighbouring same-net pads whose copper does not touch.
+        Shapes come from :meth:`_pad_polys` (each pad's *absolute* rotation,
+        real circle/oval outlines).  Orienting by the footprint rotation only
+        would swap W/H on a pad rotated relative to its footprint and falsely
+        bond neighbouring same-net pads whose copper does not touch.
         """
         if len(pad_layers) < 2:
             return
@@ -1850,7 +1847,7 @@ class NetStatusAnalyzer:
         except ImportError:  # core-only install: no copper geometry at all
             return
 
-        pad_polys = self._pad_overlap_polys()
+        pad_polys = self._pad_polys()
         ids: list[str] = []
         geoms: list[Any] = []
         for pad_id, layers in pad_layers.items():
@@ -1972,9 +1969,13 @@ class NetStatusAnalyzer:
         """Board-frame copper polygon per physical pad occurrence (strict).
 
         Built once per analyzer over every footprint pad, reusing
-        :meth:`ConnectivityValidator._pad_copper_polygon` for shape/rotation
-        parity with the reference partition extractor.  Pads with unbuildable
-        geometry are stored as ``None`` and simply never match.
+        :meth:`ConnectivityValidator._pad_copper_polygon`.  Each outline is
+        oriented by the pad's *absolute* rotation and uses the real
+        circle/oval shape (``shape_aware=True``, matching the validator's
+        trace-contact step), so strict trace-to-pad contact and the pad-to-pad
+        overlap join both test against the copper KiCad actually draws
+        (Issues #6435, #6460).  Pads with unbuildable geometry are stored as
+        ``None`` and simply never match.
         """
         if self._pad_poly_cache is not None:
             return self._pad_poly_cache
@@ -1987,34 +1988,9 @@ class NetStatusAnalyzer:
                 if pad.number is None or pad.number == "":
                     continue
                 cache[self._pad_node_id(fp_index, pad_index, fp, pad)] = cv._pad_copper_polygon(
-                    fp, pad
+                    fp, pad, shape_aware=True
                 )
         self._pad_poly_cache = cache
-        return cache
-
-    def _pad_overlap_polys(self) -> dict[str, Any]:
-        """Board-frame pad copper for the pad-to-pad overlap join (Issue #6435).
-
-        Like :meth:`_pad_polys` but oriented by each pad's absolute rotation
-        (``use_pad_rotation=True``) with real circle/oval outlines
-        (``shape_aware=True``), so two pads only bond when their true copper
-        overlaps.  Both options can only shrink or correctly re-orient the
-        outline, so this never bonds more than real copper does.
-        """
-        if self._pad_overlap_poly_cache is not None:
-            return self._pad_overlap_poly_cache
-        cache: dict[str, Any] = {}
-        cv = self._connectivity_geometry()
-        for fp_index, fp in enumerate(self.pcb.footprints):
-            if not fp.reference or fp.reference.startswith("#"):
-                continue
-            for pad_index, pad in enumerate(fp.pads):
-                if pad.number is None or pad.number == "":
-                    continue
-                cache[self._pad_node_id(fp_index, pad_index, fp, pad)] = cv._pad_copper_polygon(
-                    fp, pad, shape_aware=True, use_pad_rotation=True
-                )
-        self._pad_overlap_poly_cache = cache
         return cache
 
     def _find_pads_touching_geom(

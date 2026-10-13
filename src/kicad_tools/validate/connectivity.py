@@ -1737,16 +1737,15 @@ class ConnectivityValidator:
         fp: Any,
         pad: Any,
         shape_aware: bool = False,
-        use_pad_rotation: bool = False,
     ) -> Any | None:
         """Build a board-frame shapely polygon approximating a pad's copper.
 
-        The pad's ``size`` box is rotated by the footprint rotation (KiCad's
-        negated-angle convention, matching :meth:`_transform_pad_position`)
-        and translated to the board frame, then eroded inward by
-        :data:`POUR_PAD_ERODE`.  This rectangular approximation is
-        deliberately coarse — it ignores ``roundrect``/``oval`` corner
-        rounding and per-pad rotation — but it is what lets the pour test see
+        The pad's ``size`` box is rotated by the pad's **absolute** angle
+        (KiCad's negated-angle convention, matching
+        :meth:`_transform_pad_position`) and translated to the board frame,
+        then eroded inward by :data:`POUR_PAD_ERODE`.  This rectangular
+        approximation is deliberately coarse — it ignores ``roundrect``
+        corner rounding — but it is what lets the pour test see
         a *thermally-relieved* pad: such a pad's center sits in the antipad
         moat (a hole in the fill), yet its copper edge reaches the thermal
         spokes / surrounding solid pour, so the pad *polygon* intersects the
@@ -1774,15 +1773,14 @@ class ConnectivityValidator:
         it is always a **subset** of the box geometry: enabling it can only
         make a bond test stricter, never looser.
 
-        ``use_pad_rotation=True`` orients the outline by the pad's own
-        **absolute** angle (``pad.rotation``, the third token of KiCad's
-        ``(at x y ANGLE)``, which already includes the footprint rotation)
-        instead of ``fp.rotation``.  The default keeps the historical
-        footprint-only orientation for existing callers; a pad rotated
-        *relative* to its footprint then has its width and height swapped in
-        the model, which is harmless for pour-bond tests on most pads but
-        wrong for a pad-to-pad overlap test (Issue #6435).  The pad *center*
-        is still placed via the footprint rotation either way.
+        The outline is oriented by the pad's own **absolute** angle
+        (``pad.rotation``, the third token of KiCad's ``(at x y ANGLE)``,
+        which already includes the footprint rotation), never by
+        ``fp.rotation`` alone.  Orienting by the footprint only swaps width
+        and height on a pad rotated *relative* to its footprint, which both
+        invents contact next to the real copper and misses contact on it
+        (Issues #6435, #6460).  The pad *center* is still placed via the
+        footprint rotation, since the pad's ``x y`` are footprint-local.
 
         Returns ``None`` when shapely is unavailable.  Falls back to a
         zero-area point geometry when the pad has no positive size.
@@ -1797,10 +1795,9 @@ class ConnectivityValidator:
         w, h = pad.size
         if w <= 0 or h <= 0:
             return _ShapelyPoint((cx, cy))
-        # Negated-angle convention (see rotate_pad_offset): the footprint
-        # rotation maps the pad's local box into the board frame.  With
-        # ``use_pad_rotation`` the pad's absolute angle is used instead.
-        angle = (getattr(pad, "rotation", 0.0) or 0.0) if use_pad_rotation else fp.rotation
+        # Negated-angle convention (see rotate_pad_offset): the pad's absolute
+        # angle maps its local size box into the board frame (Issue #6460).
+        angle = getattr(pad, "rotation", 0.0) or 0.0
         a = math.radians(-angle)
         cos_a, sin_a = math.cos(a), math.sin(a)
 
