@@ -98,7 +98,7 @@ jobs:
       - uses: actions/setup-python@v7
         if: steps.mode.outputs.mode != 'off'
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       # Same setup-uv pin + uv version selector as ci.yml, so the gate's
       # `uv lock --check` runs the uv that main CI runs (no drift between the
