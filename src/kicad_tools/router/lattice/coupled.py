@@ -543,8 +543,10 @@ def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
     Couples are formed and the two ENDS chosen exactly as
     :func:`choose_pair_endpoints` does (greedy nearest P/N, then the
     farthest-apart couples).  Couples are then grouped by footprint (the
-    ref of both pads; a couple whose P and N sit on different refs is its
-    own group).  An *interior part* is a group holding neither end couple
+    ref of both pads).  A couple whose P and N sit on different refs (one
+    test point per net, or the two nets running through two different
+    parts) never forms a part: it stays off the chain and is routed as an
+    extra, as before.  An *interior part* is a same-ref group holding neither end couple
     whose couple-midpoint centroid projects strictly between the ends
     (``0 < t < 1`` along the end-to-end axis).  Interior parts are visited
     in projection order; each is entered at its couple nearest the previous
@@ -583,7 +585,11 @@ def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
     groups: dict[object, list[Couple]] = {}
     for c in couples:
         g = group(c)
-        if g in (g_a, g_b):
+        # Only a same-ref group is a part the pair passes through.  A couple
+        # whose P and N pads sit on different refs (one test point per net,
+        # or D+ and D- running through two different parts) is not a part:
+        # it stays an extra, exactly as before #6378.
+        if g in (g_a, g_b) or g[0] != "ref":  # type: ignore[index]
             continue
         groups.setdefault(g, []).append(c)
     if not groups:

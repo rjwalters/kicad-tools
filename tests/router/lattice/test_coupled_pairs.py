@@ -1005,3 +1005,91 @@ def test_lattice_key_naming_accepts_chain_keys() -> None:
     assert _net_name_for_lattice_key(router, (("pair", 1, 2), "P")) == "D+"
     assert _net_name_for_lattice_key(router, (1, "hop", 0)) == "D+"
     assert _net_name_for_lattice_key(router, (5, 3)) == "SIG"
+
+
+def _trunk_autorouter(extra: list[Pad]) -> object:
+    """J1 -> U1 pair (as on ``_chain_autorouter``) plus ``extra`` pads."""
+    from kicad_tools.router.core import Autorouter
+
+    router = Autorouter(30, 12, strategy="lattice", net_class_map={"D+": _HS, "D-": _HS})
+    base = [
+        _pad(3.0, 5.5, 1, "D+", ref="J1"),
+        _pad(3.0, 6.5, 2, "D-", ref="J1"),
+        _pad(27.0, 5.5, 1, "D+", ref="U1"),
+        _pad(27.0, 6.5, 2, "D-", ref="U1"),
+    ]
+    for pad in base + extra:
+        key = (pad.ref, f"{pad.pin}-{pad.net}-{pad.x}-{pad.y}")
+        router.pads[key] = pad
+        router.nets.setdefault(pad.net, []).append(key)
+        router.net_names[pad.net] = pad.net_name
+    return router
+
+
+@pytest.mark.parametrize(
+    "tp1, tp2",
+    [
+        ((15.0, 2.0), (15.0, 10.0)),  # far apart (8 mm), either side of the trunk
+        ((15.0, 3.5), (16.0, 3.5)),  # adjacent (1 mm)
+    ],
+    ids=["far", "adjacent"],
+)
+def test_one_test_point_per_net_keeps_single_coupled_trunk(tp1, tp2) -> None:
+    """A couple whose P and N sit on different refs (TP1 on D+, TP2 on D-)
+    is not a pass-through part: the pair keeps the single J1 -> U1 trunk
+    and the test points attach as extras, exactly as before #6378."""
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    tps = [_pad(*tp1, 1, "D+", ref="TP1"), _pad(*tp2, 2, "D-", ref="TP2")]
+    router = _trunk_autorouter(tps)
+    coupled, _reserved = router._lattice_coupled_connections()
+    assert [pc.key for pc in coupled] == [("pair", 1, 2)], "legacy single-trunk key"
+    assert coupled[0].anchor_a is None and coupled[0].anchor_b is None
+    assert router._lattice_pair_hops == []
+    assert {coupled[0].pad_p_a.ref, coupled[0].pad_p_b.ref} == {"J1", "U1"}
+
+    ps = [p for p in router.pads.values() if p.net == 1]
+    ns = [p for p in router.pads.values() if p.net == 2]
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+
+    routes_p = router.route_net(1)
+    routes_n = router.route_net(2)
+    assert router._lattice_pair_outcomes == {"D": "coupled"}, router._lattice_pair_outcomes
+    assert _net_connected(routes_p, ps)
+    assert _net_connected(routes_n, ns)
+
+
+def test_nets_through_different_parts_keep_single_trunk() -> None:
+    """D+ runs through U2 (pins 1/6) and D- through U3 (pins 1/6): neither
+    part carries both nets, so neither is a pass-through part of the PAIR.
+    The pair keeps the single trunk (no cross-ref waypoints, no hops)."""
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    def pin(x: float, y: float, net: int, ref: str, p: str) -> Pad:
+        pad = _pad(x, y, net, "D+" if net == 1 else "D-", ref=ref)
+        pad.pin = p
+        return pad
+
+    parts = [
+        pin(13.0, 2.5, 1, "U2", "1"),
+        pin(17.0, 2.5, 1, "U2", "6"),
+        pin(13.0, 9.5, 2, "U3", "1"),
+        pin(17.0, 9.5, 2, "U3", "6"),
+    ]
+    router = _trunk_autorouter(parts)
+    ps = [p for p in router.pads.values() if p.net == 1]
+    ns = [p for p in router.pads.values() if p.net == 2]
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+
+    coupled, _reserved = router._lattice_coupled_connections()
+    assert [pc.key for pc in coupled] == [("pair", 1, 2)]
+    assert router._lattice_pair_hops == []
+    routes_p = router.route_net(1)
+    routes_n = router.route_net(2)
+    assert router._lattice_pair_outcomes == {"D": "coupled"}, router._lattice_pair_outcomes
+    assert _net_connected(routes_p, ps)
+    assert _net_connected(routes_n, ns)
