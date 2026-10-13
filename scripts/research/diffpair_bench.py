@@ -236,7 +236,7 @@ def committed_copper_matches(routed: Path, board: ere.Board, nets: set[str]) -> 
     return None
 
 
-def prepare_input(board: ere.Board, run_dir: Path) -> tuple[Path, dict]:
+def prepare_input(board: ere.Board, run_dir: Path, committed_map: bool = True) -> tuple[Path, dict]:
     """Copy *board*'s input into *run_dir* with pair copper stripped, then guard it.
 
     Returns ``(path, facts)``; raises :class:`PairBenchError` if pair copper survives.
@@ -256,7 +256,7 @@ def prepare_input(board: ere.Board, run_dir: Path) -> tuple[Path, dict]:
         sib = src.with_suffix(suffix)
         if sib.exists():
             shutil.copyfile(sib, dst.with_suffix(suffix))
-    ncm_path = REPO / board.net_class_map if board.net_class_map else None
+    ncm_path = REPO / board.net_class_map if (board.net_class_map and committed_map) else None
     ncm = load_net_class_map(ncm_path, pcb_path=dst)
     nets = assert_zero_pair_copper(dst, ncm)
     return dst, {
@@ -433,6 +433,7 @@ def run_cell(
     rep: int = 0,
     router_src: Path | None = None,
     router_rev: str | None = None,
+    committed_map: bool = True,
 ) -> dict:
     """Route one (board, engine, seed) cell and measure it. Never raises on a bad row."""
     run_dir = work_dir / f"{board.key}-{engine}-s{seed}" / f"r{rep}"
@@ -447,14 +448,14 @@ def run_cell(
     }
     invalid: list[str] = []
     try:
-        inp, facts = prepare_input(board, run_dir)
+        inp, facts = prepare_input(board, run_dir, committed_map)
         row.update(facts)
     except PairBenchError as exc:
         row["error"] = str(exc)
         row["valid"] = False
         row["invalid_reasons"] = ["input has pair-net copper"]
         return row
-    ncm_path = REPO / board.net_class_map if board.net_class_map else None
+    ncm_path = REPO / board.net_class_map if (board.net_class_map and committed_map) else None
     extra = [*board.kct_args, *engine_args(engine, board.layers)]
     if ncm_path is not None:
         extra += ["--net-class-map", str(ncm_path)]
@@ -500,6 +501,8 @@ def run_cell(
     row["artifact"] = kind
     row.update(ere.grade(artifact, board))
     row["manufacturable"] = ere.manufacturable(row)
+    if ncm_path is None:
+        ncm_path = ere.find_net_class_map(artifact)  # the router-written sidecar
     ncm = load_net_class_map(ncm_path, pcb_path=artifact)
     pairs = measure_pairs(artifact, ncm, board.layers, log_text)
     row["pairs"] = pairs
@@ -569,6 +572,7 @@ def _cmd_run(args) -> int:
                             rep,
                             args.router_src,
                             args.router_rev,
+                            not args.inferred_map,
                         )
                     )
                     out_path.write_text(
@@ -588,17 +592,48 @@ def _cmd_run(args) -> int:
     return 0 if all(r.get("valid") for r in rows) else 1
 
 
+def _key(row: dict) -> tuple:
+    return (row["board"], row["engine"], row["seed"], row.get("net_class_map_mode", "committed"))
+
+
+def _label(key: tuple) -> str:
+    board, engine, seed, mode = key
+    return f"{board}/{engine}/s{seed}/{mode}"
+
+
 def compare(a: dict, b: dict) -> list[tuple[str, bool]]:
-    """Per (board, engine, seed): do two result files agree on the pair metrics?"""
+    """Per (board, engine, seed, map mode): do two result files agree on the pair metrics?"""
 
     def index(doc):
-        return {(r["board"], r["engine"], r["seed"]): r.get("pair_digest") for r in doc["rows"]}
+        return {_key(r): r.get("pair_digest") for r in doc["rows"] if r.get("rep", 0) == 0}
 
     ia, ib = index(a), index(b)
     return [
-        (f"{k[0]}/{k[1]}/s{k[2]}", ia[k] is not None and ia[k] == ib[k])
-        for k in sorted(ia.keys() & ib.keys())
+        (_label(k), ia[k] is not None and ia[k] == ib[k]) for k in sorted(ia.keys() & ib.keys())
     ]
+
+
+def determinism(doc: dict) -> list[tuple[str, int, bool]]:
+    """Cells run more than once in one file: ``(cell, runs, all digests identical)``."""
+    digests: dict[tuple, list] = {}
+    for r in doc["rows"]:
+        digests.setdefault(_key(r), []).append(r.get("pair_digest"))
+    return [
+        (_label(k), len(v), None not in v and len(set(v)) == 1)
+        for k, v in sorted(digests.items())
+        if len(v) > 1
+    ]
+
+
+def merge(docs: list[dict]) -> dict:
+    """Rows of several result files in one; a later file replaces an earlier cell."""
+    rows: dict[tuple, dict] = {}
+    for doc in docs:
+        for r in doc["rows"]:
+            rows[(*_key(r), r.get("rep", 0))] = r
+    out = dict(docs[-1])
+    out["rows"] = [rows[k] for k in sorted(rows)]
+    return out
 
 
 def _cmd_compare(args) -> int:
@@ -606,6 +641,20 @@ def _cmd_compare(args) -> int:
     for name, same in results:
         print(f"{name}: {'identical' if same else 'DIFFERENT'}")
     return 0 if results and all(s for _, s in results) else 1
+
+
+def _cmd_determinism(args) -> int:
+    results = determinism(json.loads(args.file.read_text()))
+    for name, runs, same in results:
+        print(f"{name}: {runs} runs {'identical' if same else 'DIFFERENT'}")
+    return 0 if results and all(s for _, _, s in results) else 1
+
+
+def _cmd_merge(args) -> int:
+    merged = merge([json.loads(p.read_text()) for p in args.files])
+    args.out.write_text(json.dumps(merged, indent=2) + "\n")
+    print(f"wrote {args.out} ({len(merged['rows'])} rows)")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -627,14 +676,29 @@ def main(argv: list[str] | None = None) -> int:
         help="a `src/` dir (git archive of the commit under test) to route with",
     )
     run.add_argument("--router-rev", help="commit the --router-src archive was taken from")
+    run.add_argument(
+        "--inferred-map",
+        action="store_true",
+        help="do not pass the committed net_class_map.json to kct route (the classifier's "
+        "map: how the #6440 doctor ran board 06)",
+    )
     run.set_defaults(func=_cmd_run)
+    det = sub.add_parser(
+        "determinism", help="did repeated runs of a cell give identical pair metrics?"
+    )
+    det.add_argument("file", type=Path)
+    det.set_defaults(func=_cmd_determinism)
+    mrg = sub.add_parser("merge", help="combine result files (later files replace earlier cells)")
+    mrg.add_argument("files", type=Path, nargs="+")
+    mrg.add_argument("--out", type=Path, required=True)
+    mrg.set_defaults(func=_cmd_merge)
     cmp_ = sub.add_parser("compare", help="are two result files pair-for-pair identical?")
     cmp_.add_argument("a", type=Path)
     cmp_.add_argument("b", type=Path)
     cmp_.set_defaults(func=_cmd_compare)
     # `pairs` invoked through expand_route_experiment passes bare run options.
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw and raw[0] not in ("run", "compare", "-h", "--help"):
+    if raw and raw[0] not in ("run", "compare", "determinism", "merge", "-h", "--help"):
         raw = ["run", *raw]
     args = ap.parse_args(raw)
     return args.func(args)

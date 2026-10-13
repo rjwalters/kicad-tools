@@ -154,8 +154,8 @@ def test_compare_flags_differing_pair_metrics():
     a = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "aa"}]}
     same = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "aa"}]}
     diff = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "bb"}]}
-    assert bench.compare(a, same) == [("03/grid/s42", True)]
-    assert bench.compare(a, diff) == [("03/grid/s42", False)]
+    assert bench.compare(a, same) == [("03/grid/s42/committed", True)]
+    assert bench.compare(a, diff) == [("03/grid/s42/committed", False)]
 
 
 def test_route_subcommand_refuses_pair_bench_rows(tmp_path):
@@ -268,3 +268,16 @@ def test_resolver_falls_back_to_negative_net_then_defaults():
     assert (got.continuity, got.source_net) == (0.25, "USB_D-")
     bare = resolve_pair_thresholds({}, "X_P", "X_N")
     assert (bare.continuity, bare.skew_mm, bare.source_net) == (0.7, 0.5, None)
+
+
+def test_determinism_and_merge():
+    def row(rep, digest, board="03"):
+        return {"board": board, "engine": "grid", "seed": 42, "rep": rep, "pair_digest": digest}
+
+    doc = {"rows": [row(0, "a"), row(1, "a"), row(0, "x", "06b"), row(1, "y", "06b")]}
+    assert bench.determinism(doc) == [
+        ("03/grid/s42/committed", 2, True),
+        ("06b/grid/s42/committed", 2, False),
+    ]
+    merged = bench.merge([{"rows": [row(0, "a"), row(0, "b", "06b")]}, {"rows": [row(0, "z")]}])
+    assert {(r["board"], r["pair_digest"]) for r in merged["rows"]} == {("03", "z"), ("06b", "b")}
