@@ -12,11 +12,12 @@ invisible to `gh pr list`, the dashboard, or any label-filtered query. See
 prompted this (four Judge-approved PRs sat held-but-invisible for up to 126
 hours).
 
-Story-point estimation is paused. Curators leave existing `points:*` labels
-and `loom:points` body markers as historical data, without assigning or
-refreshing them on curation, re-curation or rescoping. Points do not gate
-`loom:curated`; the complexity routing marker remains required. The retained
-rubric is in `.loom/docs/story-points.md`.
+Story points gate `loom:curated`. The Curator writes one
+`<!-- loom:points=N -->` marker in the issue body or a curation comment, and
+`loom-daemon curation-complete` validates it (the newest trusted comment with
+a marker wins, else a trusted author's body), then applies `points:N` (removing
+any other `points:*` label) and `loom:curated`. A missing or invalid marker
+leaves the issue uncurated. The rubric is in `.loom/docs/story-points.md`.
 
 `loom:operator` moves that state onto the label substrate, where every other
 pipeline state already lives.
@@ -505,9 +506,8 @@ nothing, and (Part 2's concern, not this doc's) a worker's own declared
 holds must be checked against the same closed vocabulary.
 
 **Parser convention.** Anchor to the full `<!-- loom:capability=<value> -->`
-comment form, never a bare substring — the same anchoring
-`require-complexity-marker.sh` uses for `loom:complexity`, and for the same
-reason (#4840): prose that merely *quotes* the marker syntax as literal
+comment form, never a bare substring — the same anchoring the retired
+complexity-marker gate used, and for the same reason (#4840): prose that merely *quotes* the marker syntax as literal
 example text (exactly as this section does above, and as the issue that
 introduced this convention did in its own body) must never be mistaken for a
 live marker. The value grammar is `[a-z0-9][a-z0-9:_-]*` — lowercase
