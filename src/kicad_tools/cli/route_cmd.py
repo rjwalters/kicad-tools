@@ -7635,10 +7635,46 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         )
         for lk in result.final_link_details[:5]:
             print(f"    still unconnected: {lk.describe()}")
+            # Issue #6399: why the closer left it open (last attempt's notes).
+            for reason in _closer_reasons_for(lk, result.closer_notes):
+                print(f"      reason: {reason}")
         # Issue #6374: a link closed below its class clearance is never silent.
         for line in result.relaxed_links:
             print(f"    RELAXED: {line}")
     return result.final_links
+
+
+def _closer_reasons_for(link, notes) -> list[str]:
+    """The closer notes (Issue #6399) that name ``link`` or one of its pads.
+
+    A note matches when it names the link (``describe()``, or its exact
+    withdrawn route key) or one of its pads as a whole ``REF.PAD`` token, so
+    ``U2.3`` does not pick up a note about ``U2.36``.
+    """
+    from kicad_tools.router.oracle_completion import _route_key
+
+    route_prefix = _route_key(link) + ":"
+    pads = [
+        re.compile(rf"(?<![\w.]){re.escape(f'{end.ref}.{end.pad}')}(?![\w.])")
+        for end in (link.a, link.b)
+        if end.ref and end.pad
+    ]
+
+    def names(note: str) -> bool:
+        if link.describe() in note:
+            return True
+        if note.startswith(route_prefix):
+            return True
+        return any(p.search(note) for p in pads)
+
+    hits = [n for n in notes if names(n)]
+    if hits or "pad" in (link.a.kind, link.b.kind):
+        return hits
+    # A pad-less link (KiCad's ``Zone <-> Zone`` for a floating island) names
+    # no pad, while the closer's notes name the pads it rebuilt the link from
+    # (``_cluster_links``): fall back to every note about the link's net.
+    net = re.compile(rf"(?:^|:){re.escape(link.net)}(?:[ :])")
+    return [n for n in notes if net.search(n)]
 
 
 def _print_stranded_pour_failure_banner(args, output_path) -> None:
