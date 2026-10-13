@@ -944,6 +944,19 @@ The `classify_error <output> <exit_code>` function returns one of `SUCCESS`,
 `TIMEOUT`, `CWD_DELETED`, `TOKEN_EXPIRED`, `TOKEN_EXHAUSTED`,
 `MODEL_CREDITS_EXHAUSTED`, `SESSION_LIMIT`, `MODEL_REFUSAL`, `RECOVERABLE`,
 `FATAL`.
+
+Since #11208 the classifier also ships natively as **`loom-daemon
+classify-error`** (`loom-daemon/src/classify_error.rs`): the error text on
+stdin (or `--stdout-tail`/`--stderr-tail` files) plus `--exit-code` and an
+optional `--provider` in, one category line out (`0` classified, `1` terminal
+for `--transient <CATEGORY>`, `2` usage error). The shell library delegates to
+it whenever a daemon binary resolves and keeps its in-file tables as the
+no-daemon fallback, byte-identical; both renderings are pinned equal by
+`test-classify-error.sh` on the shared
+`tests/fixtures/classify_error/vectors.tsv` fixture. Consumers that install
+the signed daemon (rather than vendoring the shell file) get the same
+classification through the binary alone.
+
 Critical fix from #3233: exit code is checked **before** output substring
 matching — clean exits (`exit_code == 0`) always return `SUCCESS` regardless of
 stdout content.

@@ -2110,8 +2110,8 @@ the out-of-band step actually performed, and against which tree"**.
 - **Form**: the full HTML-comment shape with a **hex** SHA of 7–40 characters,
   `<!-- loom:ac-verified sha=<40-char or abbreviated head> -->`. Anchoring to the
   complete comment form is what stops prose that merely quotes the syntax with a
-  `<head>` placeholder from reading as a live marker (the #4840 discipline
-  `require-complexity-marker.sh` and `extract-capability-markers.sh` both use).
+  `<head>` placeholder from reading as a live marker (the #4840 anchoring rule
+  `extract-capability-markers.sh` also follows).
 - **What it must accompany**: prose saying what was run and what was observed —
   the same requirement a verdict comment carries. The marker is the machine-
   readable half, not the whole claim. **Do not stamp it for a step you did not

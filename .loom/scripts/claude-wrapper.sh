@@ -138,7 +138,9 @@ _WRAPPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # defaults/scripts source. If absent (older install), every classifier below
 # takes its DEGRADED path — the same hand-rolled fallback regexes, which since
 # #8037 live in `loom-daemon retry-classify` alongside the library path rather
-# than inline here.
+# than inline here. Since #11208 the library itself delegates to
+# `loom-daemon classify-error` when a binary resolves, so these predicates
+# consume native classifications without any change to this file.
 if [[ -f "${_WRAPPER_DIR}/lib/classify-error.sh" ]]; then
     # shellcheck source=lib/classify-error.sh
     # shellcheck disable=SC1091
@@ -1531,13 +1533,16 @@ check_api_reachable() {
 # defaults/scripts/tests/test-claude-wrapper-retry.sh (#8032), whose assertions
 # were written against the pre-port shell and run unchanged against the port.
 #
-# What deliberately did NOT move: `classify_error` and
+# What deliberately did NOT move INTO THIS FILE'S LOGIC: `classify_error` and
 # `classification_is_transient`. Those belong to lib/classify-error.sh, which
 # every runtime adapter sources and which is, per #4501, the fleet's single
 # source of truth for whether a category is retryable. A second copy of that
-# deny-list in Rust would recreate the exact defect #4501 fixed — two
+# deny-list here would recreate the exact defect #4501 fixed — two
 # independent verdict systems printing contradictory conclusions about one
-# failure. So the shell still answers WHAT this failure is; the port owns WHAT
+# failure. So the classifier still answers WHAT this failure is (and, since
+# #11208, does so natively via `loom-daemon classify-error` whenever a daemon
+# binary resolves — the library delegates and falls back to its in-file
+# tables; from this file's point of view nothing changed); the port owns WHAT
 # THE WRAPPER DOES about it.
 #
 # #8138 moved a seventh across the same boundary, for the same reason: the

@@ -5765,6 +5765,23 @@ row of the "retired" input table above. See also #5269/PR #5283's per-repo
 ranking-staleness surfacing on `loom-daemon health` — a separate, `health`-side
 mechanism this `status`-side headline must not contradict.
 
+**Native classifier subcommand (#11208).** The classifier these paragraphs
+describe — the category engine, the per-provider tables and the
+`classification_is_transient` deny-list — ships in the signed binary as
+`loom-daemon classify-error`: error text on stdin (or `--stdout-tail` /
+`--stderr-tail` files), `--exit-code`, optional `--provider` (explicit arg >
+`$LOOM_RUNTIME` > `claude`, same precedence as the shell), one category line
+out; `--transient <CATEGORY>` answers the deny-list in its exit code (0
+retryable, 1 terminal; 2 is a usage error with empty stdout). It exists so
+consumers stop vendoring `classify-error.sh` (miniset's E2B shim pins the
+daemon instead). The shell library remains the sourced entry point for
+in-repo callers: its public functions delegate to the subcommand when a
+daemon binary resolves and fall back to the in-file tables — byte-identical —
+when none does. The two renderings are pinned equal by
+`defaults/scripts/tests/test-classify-error.sh` (parity on every row of the
+shared `vectors.tsv` fixture) and by the Rust suite that reads the same
+fixture.
+
 **Session-limit fault handling (#3947).** Stacking can occasionally trip a
 **concurrent-session-limit** fault on a token (the account is healthy but cannot
 start another *simultaneous* session right now). This is a **capacity** signal,
@@ -6456,12 +6473,11 @@ At a sweep's terminal **`Success`** transition — never on failure, cancellatio
 or a `loom:blocked` stop, to avoid comment spam on every dead-end attempt — the
 daemon can post ONE Markdown comment onto the sweep's **issue** (not just its
 PR) summarizing the already-assembled `sweep.outcome` telemetry record
-(`loom-daemon/src/telemetry/mod.rs`): the Curator's `loom:complexity` /
-`loom:points` estimate (see "Points estimate marker" in `curator.md`), actual
+(`loom-daemon/src/telemetry/mod.rs`): the issue's story-point estimate (the record's `story_points`, sourced from
+its `points:*` label; `points unmarked` when unsized), actual
 token burn, wall-clock duration (total and per phase), Doctor cycle count, and
-the first-pass Judge verdict. This is the write-back half of #9056; the
-matching estimate-side marker (`<!-- loom:points=<N> -->`) is documented in
-`defaults/roles/curator.md`.
+the first-pass Judge verdict. This is the write-back half of #9056. There is
+no separate body fetch for the estimate: the label is already on the record.
 
 **Off by default.** Flip `autonomous.sweepOutcomeWriteback.enabled` (or
 `LOOM_SWEEP_OUTCOME_WRITEBACK=1`) to turn it on for a workspace.
@@ -6479,12 +6495,12 @@ risking a duplicate — the comment is best-effort telemetry, so a rare missed
 post costs less than a rare duplicate.
 
 **Never blocks or fails the terminal transition.** Every forge call this
-feature makes — the points-marker read, the idempotency check, the comment
+feature makes — the idempotency check, the comment
 post itself — runs only AFTER the durable `sweep.outcome` telemetry append, is
 bounded by `LOOM_REAP_GH_TIMEOUT_SECS`, and is best-effort: a `gh` failure,
 timeout, or missing repo context
-is logged and swallowed, exactly like the neighboring `complexity` marker read
-this rides alongside (`sweep_registry::outcome_journal::complexity_signal`).
+is logged and swallowed, exactly like the single issue read the record's
+`story_points` rides on (`sweep_registry::outcome_journal::complexity_signal`).
 
 **Deliberately excludes CI minutes.** `loom-daemon ci-telemetry`'s `ci.run`/
 `ci.job` records (see [`ci-observability.md`](ci-observability.md)) are keyed
@@ -7169,8 +7185,7 @@ above in one important way: that mechanism is armed only *after* a sweep
 pass observes "no delta," so a tracking issue known **up front** to need
 infrequent polling still gets dispatched at full cadence until enough no-op
 passes accumulate. A tracker issue can instead declare its own minimum
-re-check interval directly in its body, in the spirit of the Curator's
-`<!-- loom:complexity=<tier> -->` marker:
+re-check interval directly in its body:
 
 ```
 <!-- loom:recheck-interval=6h -->
