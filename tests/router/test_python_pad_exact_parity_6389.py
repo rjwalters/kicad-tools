@@ -345,3 +345,56 @@ def test_kelvin_isolation_voids_and_restores_pad_provenance():
         layer, gy, gx = (int(v[0]) for v in np.nonzero(isolated))
         assert not grid.pad_cell_resolvable(gx, gy, layer)
     np.testing.assert_array_equal(grid._pad_provenance, before)
+
+
+# ---------------------------------------------------------------------------
+# Own-pad step gate (Python port of the native #6375 gate)
+# ---------------------------------------------------------------------------
+
+#: U1.2's tip column, one row off the centreline: inside the start pad's
+#: metal box, owned by net 1, but a trace end here sits 0.136 mm from X1.
+OFF_CENTRE_TIP_CELL = (58, 78)
+
+
+def test_own_pad_step_gate_rejects_the_off_centre_tip_exit():
+    """The step leaving U1.2's tip one row off-centre is held to the validator.
+
+    Under #6368's one-cell landing deadband this exit is free, and before the
+    gate the same-net branch admitted it unchecked: the validator then
+    rejected every goal built on it and the search drained (0 routes).
+    """
+    router, grid = _python_router()
+    fx, fy = OFF_CENTRE_TIP_CELL
+    assert router._own_pad_cell(fx, fy, 0, 1)
+    width = router.rules.trace_width
+    refs = {"U1", "U2"}
+    memo: dict = {}
+    assert not router._own_pad_step_clear(fx, fy, fx + 1, fy, 0, 1, width, refs, memo)
+    assert not router._own_pad_step_clear(fx, fy, fx + 1, fy + 1, 0, 1, width, refs, memo)
+    # Two rows off the centreline the same exit is legal.
+    assert router._own_pad_step_clear(fx, fy + 1, fx + 1, fy + 1, 0, 1, width, refs, memo)
+    # The gate asks exactly the validator's pad question.
+    ax, ay = grid.grid_to_world(fx, fy)
+    bx, by = grid.grid_to_world(fx + 1, fy)
+    ok, _clr, _loc = grid.validate_segment_clearance(
+        Segment(ax, ay, bx, by, width, Layer.F_CU, 1), exclude_net=1, exclude_refs=refs
+    )
+    assert not ok
+
+
+def test_python_search_returns_no_validator_rejected_candidate(monkeypatch):
+    """No goal the search reaches is thrown away by the post-route validator."""
+    ar = _autorouter(force_python=True)
+    router = ar.router
+    verdicts: list[bool] = []
+    original = router._validate_route_clearance
+
+    def _spy(*args, **kwargs):
+        ok = original(*args, **kwargs)
+        verdicts.append(ok)
+        return ok
+
+    monkeypatch.setattr(router, "_validate_route_clearance", _spy)
+    ar.route_net(1)
+    assert len(ar.routes) == 1
+    assert verdicts and all(verdicts)

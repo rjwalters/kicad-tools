@@ -1887,6 +1887,67 @@ class Router:
         nc = self.net_class_map.get(pad.net_name) if pad.net_name else None
         return nc.clearance if nc else self.rules.trace_clearance
 
+    def _own_pad_cell(self, gx: int, gy: int, layer: int, net: int) -> bool:
+        """Is this a cell of the routing net's own STATIC pad geometry? (Issue #6389).
+
+        Python twin of the native ``Pathfinder::own_pad_cell`` (#6375): a
+        blocked cell owned by ``net`` that came from a static source -- pad
+        copper / clearance halo (pad provenance recorded, live or voided) or
+        a static obstacle -- never routed copper.
+        """
+        grid = self.grid
+        if not grid._blocked[layer, gy, gx] or grid._net[layer, gy, gx] != net:
+            return False
+        plane = grid._pad_provenance
+        if plane is not None and plane[layer, gy, gx] != 0:
+            return True
+        return bool(grid._is_obstacle[layer, gy, gx])
+
+    def _own_pad_step_clear(
+        self,
+        fx: int,
+        fy: int,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        width: float,
+        exclude_refs: set[str] | None,
+        memo: dict[tuple[int, int, int, int, int], bool],
+    ) -> bool:
+        """The validator's segment-vs-pad verdict on the step ``(fx,fy)->(gx,gy)``.
+
+        Issue #6389: Python port of the native #6375 own-pad step gate
+        (``Pathfinder::own_pad_step_clear``).  Asks
+        :meth:`RoutingGrid.segment_pad_clearance` -- the very pad loop
+        :meth:`RoutingGrid.validate_segment_clearance` runs -- with the
+        validator's own ``component_pitches`` / ``exclude_refs`` carve-outs
+        and the narrowest width reconstruction can emit, so the gate is
+        never stricter than the post-route validator.  ``memo`` is per search
+        (pads do not move inside one).
+        """
+        key = (layer, fx, fy, gx, gy)
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        ax, ay = self.grid.grid_to_world(fx, fy)
+        bx, by = self.grid.grid_to_world(gx, gy)
+        _min, violation = self.grid.segment_pad_clearance(
+            ax,
+            ay,
+            bx,
+            by,
+            layer,
+            width / 2,
+            net,
+            self.rules.trace_clearance,
+            component_pitches=self.component_pitches,
+            exclude_refs=exclude_refs,
+        )
+        hit = violation is None
+        memo[key] = hit
+        return hit
+
     def _pad_step_clear(
         self, layer: int, gx: int, gy: int, net: int, from_cell: tuple[int, int] | None
     ) -> bool:
@@ -4451,6 +4512,31 @@ class Router:
         landing_cost_turn = float(self.rules.cost_turn)
         landing_cost_straight = float(self.rules.cost_straight)
 
+        # Issue #6389: inputs of the own-pad step gate (Python port of the
+        # native #6375 gate, see the neighbour loop).  Same carve-out refs as
+        # ``_reconstruct_route`` hands the validator, and the narrowest width
+        # reconstruction can emit (the #1018 neck-down only narrows).
+        own_gate_refs: set[str] | None = {
+            p.component_key for p in (start, end) if p.component_key
+        } or None
+        own_gate_width = self._get_trace_width_for_net(start.net_name)
+        for _gate_pad in (start, end):
+            _gate_pitch = (
+                self.component_pitches.get(_gate_pad.component_key)
+                if _gate_pad.component_key
+                else None
+            )
+            if self.rules.should_apply_neck_down(_gate_pad.ref, _gate_pitch):
+                own_gate_width = min(
+                    own_gate_width,
+                    self.rules.get_neck_down_width(
+                        0.0, _gate_pitch, base_width=self._get_trace_width_for_net(start.net_name)
+                    ),
+                )
+        own_gate_memo: dict[tuple[int, int, int, int, int], bool] = {}
+        # The validator does not run on relief probes (#3438); neither does the gate.
+        own_gate_active = not self.relief_mode
+
         start_approach_gx1 = start_metal_gx1 - pad_escape_margin
         start_approach_gy1 = start_metal_gy1 - pad_escape_margin
         start_approach_gx2 = start_metal_gx2 + pad_escape_margin
@@ -5018,6 +5104,51 @@ class Router:
                                     f"reason=trace_clearance_envelope_overlap"
                                 )
                             continue
+
+                # Issue #6389: own-pad step gate, the Python port of the native
+                # #6375 gate.  A planar step touching the routing net's own pad
+                # copper/halo outside the seed/goal metal boxes must pass the
+                # validator's own segment-vs-pad verdict.  The same-net blocked
+                # branch above admits such cells unchecked, so without this a
+                # pad exit one cell off the centreline (now free under the
+                # #6368 landing deadband) could leave the start pad's tip
+                # within clearance of a foreign pad; the validator then
+                # rejected every goal built on it and the search drained.
+                if (
+                    own_gate_active
+                    and not (
+                        start_metal_gx1 <= nx <= start_metal_gx2
+                        and start_metal_gy1 <= ny <= start_metal_gy2
+                        and nlayer in start_layers
+                    )
+                    and not (
+                        end_metal_gx1 <= nx <= end_metal_gx2
+                        and end_metal_gy1 <= ny <= end_metal_gy2
+                        and nlayer in end_layers
+                    )
+                    and (
+                        self._own_pad_cell(nx, ny, nlayer, start.net)
+                        or self._own_pad_cell(current.x, current.y, nlayer, start.net)
+                    )
+                    and not self._own_pad_step_clear(
+                        current.x,
+                        current.y,
+                        nx,
+                        ny,
+                        nlayer,
+                        start.net,
+                        own_gate_width,
+                        own_gate_refs,
+                        own_gate_memo,
+                    )
+                ):
+                    if _ASTAR_TRACE_ENABLED:
+                        _astar_trace(
+                            f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                            f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                            f"reason=own_pad_step_foreign_pad_too_close"
+                        )
+                    continue
 
                 # Issue #6008: inside a net-filtered track keepout -- hard reject.
                 if rule_area_core is not None and rule_area_core[nlayer, ny, nx]:

@@ -4635,6 +4635,184 @@ class RoutingGrid:
             return index.via_violation(item, owner)
         return index.segment_violation(item, owner)
 
+    def segment_pad_clearance(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        half_width: float,
+        exclude_net: int,
+        min_clearance: float,
+        component_pitches: dict[str, float] | None = None,
+        exclude_refs: set[str] | None = None,
+        pads: Iterable[Pad] | None = None,
+    ) -> tuple[float, tuple[float, float] | None]:
+        """The pad half of :meth:`validate_segment_clearance` (Issue #6389).
+
+        Returns ``(min_actual_clearance, violation_loc)`` over the pads of
+        other nets for the segment ``(x1,y1)->(x2,y2)`` of ``half_width`` on
+        ``layer_idx``; ``violation_loc`` is ``None`` when no pad is closer
+        than its required clearance.  Factored out so the pure-Python A*'s
+        own-pad step gate (the port of the native #6375
+        ``own_pad_step_clear``) asks exactly the validator's question, with
+        its per-component clearances and same-component carve-outs.  ``pads``
+        narrows the scan to a pre-filtered candidate set; default every pad.
+        """
+        min_actual = float("inf")
+        violation_loc: tuple[float, float] | None = None
+        # Check against all stored pads
+        for pad in self._pads if pads is None else pads:
+            # Skip same-net pads (clearance not required within same net)
+            if pad.net == exclude_net:
+                continue
+
+            # Issue #1764 + #2874 + #2908 + #2933: The same-component-ref
+            # exclusion is intended to permit signal-pin escape routing
+            # through the chip's own perimeter (Issue #1764 reachability fix).
+            # It must NOT permit signal traces to clip plane-net pads on the
+            # same chip, nor to physically overlap pad metal on any pad.
+            #
+            # PR #2873 (C++) / PR #2875 (this file, Python) narrowed the
+            # exclusion to ``pad.net != 0`` so the SKIPPED-net convention
+            # (``skip_nets`` rewriting in ``io.py:2819-2820``) kept plane-net
+            # pads in the validator. That convention only covers boards that
+            # pass ``--skip-nets``; board 04 routes ``+3.3V`` / ``GND`` as
+            # real nets (so the GND zone can stitch up after routing), so
+            # ``U2.1 +3.3V`` retains ``net == 2`` and was being silently
+            # exempted -- producing 44 ``clearance_pad_segment`` violations
+            # against same-component plane pads (Issue #2908, successor to
+            # #2902).
+            #
+            # Issue #2908 broadens the carve-out: a same-component pad is
+            # excluded ONLY when it is a signal net (not a plane net).
+            # Plane-net pads -- whether ``net == 0`` (skipped-pour) or
+            # ``net > 0`` with a power/ground name -- are kept in the
+            # validator. The rect-aware geometry below ensures the disc-bound
+            # over-rejection on the SHORT axis does not regress legitimate
+            # signal-vs-signal corridor traces (the corridor relaxation in
+            # ``_relax_same_component_clearance`` only operates between
+            # signal pads, so this stricter validation for plane pads is
+            # compatible with the existing reachability fix).
+            #
+            # Issue #2933: The same-component signal-pad carve-out is further
+            # narrowed -- it now only suppresses clearance complaints when the
+            # trace stays OUTSIDE the neighbour pad's metal.  On standard-pitch
+            # passives like 0805 resistors (R1 at 2mm pitch on board 02), the
+            # router was emitting traces whose centerline passed THROUGH the
+            # opposite pad's metal because the carve-out silently exempted
+            # them.  This produced 144 ``clearance_pad_segment`` errors on
+            # board 02 with negative actual_clearance (overlapping copper).
+            # The metal-overlap check (clearance < 0) is preserved for all
+            # same-component pads, so the trace-through-pad pathology is now
+            # caught at the validator while the fine-pitch escape exemption
+            # (positive clearance < required_clearance) is unchanged.
+            # Skip pads on different layers (unless PTH)
+            if not pad.through_hole:
+                # Convert layer for comparison
+                pad_layer_idx = self.layer_to_index(pad.layer.value)
+                if pad_layer_idx != layer_idx:
+                    continue
+
+            # Issue #1016: Get per-component clearance if available
+            # When validating against a pad, use the clearance for that component
+            pad_ref = pad.component_key
+            pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
+            required_clearance = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
+
+            # Issue #3545: NET-AWARE tightening of the same-component
+            # carve-out.  Same-net pads are already skipped at the top of
+            # this loop, so every pad reaching this point is on a FOREIGN
+            # net -- the carve-out was silently exempting foreign-net pads
+            # on the route's own components (routing-diagnostic fixture:
+            # NET3 routed 0.127mm from J1 pad 1 / NET1, masked because
+            # NET3 also connects to J1 pad 2).  The legitimate use of the
+            # carve-out is fine-pitch escape routing (Issue #1764), which
+            # is exactly the case where a per-component clearance
+            # relaxation is in effect (``required_clearance <
+            # min_clearance`` via fine-pitch detection or an explicit
+            # component override).  Standard-pitch components get no
+            # relaxation, so their foreign-net pads now stay in the
+            # validator and sub-clearance copper is rejected.
+            #
+            # The carve-out remains active where the component geometry
+            # legitimately forces sub-clearance proximity: explicit /
+            # fine-pitch clearance relaxations (#1764), relaxed
+            # same-component corridors (#2452), and fine-pitch
+            # components routed without ``fine_pitch_clearance``
+            # configured -- see ``_same_component_carveout_active``.
+            #
+            # Issue #5166: the carve-out is now graded rather than
+            # all-or-nothing.  A ref eligible ONLY because a configured
+            # override resolved smaller than ``min_clearance``
+            # ("clamp") enforces that smaller value as a hard floor; a ref
+            # eligible via the #2452 corridor relief (or the opt-in legacy
+            # pitch-only branch) keeps the full skip ("skip").  See
+            # ``_same_component_carveout_mode``.
+            carveout_mode: CarveoutMode = (
+                self._same_component_carveout_mode(
+                    pad.component_key, required_clearance, min_clearance, component_pitches
+                )
+                if (
+                    exclude_refs
+                    and pad.component_key in exclude_refs
+                    and not _is_plane_net_pad(pad)
+                )
+                else "none"
+            )
+
+            # Issue #2908: Rect-aware geometry for rectangular SMD pads. The
+            # previous disc bound (``radius = max(w, h) / 2``) over-rejected
+            # along the pad's SHORT axis (a 1.475 x 0.3 mm LQFP-48 pad became
+            # a 0.7375 mm-radius disc, 0.587 mm of phantom inflation above /
+            # below the pad metal) and under-detected at long-axis corners
+            # (the disc's rounded corner clips inside the rectangle's sharp
+            # corner). Only explicitly circular pads use the disc model;
+            # square rectangles retain their copper corners (#5229).
+            # This mirrors PR #2787's distance calculation at
+            # ``validate/rules/clearance.py::_segment_circle_clearance``.
+            # Rect-aware: signed centerline-to-rect distance.  Negative means
+            # the segment centerline lies inside the pad rectangle (a real DRC
+            # defect; the magnitude is the deepest signed depth).  Issue
+            # #6389: the arithmetic lives in ``pad_segment_edge_clearance`` so
+            # the pure-Python A*'s exact pad-cell test measures identically.
+            clearance = pad_segment_edge_clearance(pad, x1, y1, x2, y2, half_width)
+
+            # Issue #2933: Apply the same-component carve-out only when the
+            # trace clears the neighbour pad's metal (clearance >= 0).
+            # Negative clearance means the trace overlaps pad copper -- a
+            # true defect that no carve-out should silence.
+            #
+            # Issue #3490: EXCEPTION -- a same-component pad on net 0
+            # (an unconnected / NC pad) carries no electrical net, so a
+            # trace endpoint that geometrically overlaps its metal is not
+            # a real short.  When such a pad sits within metal-overlap
+            # distance of the signal pad being routed (e.g. an LED whose
+            # net=0 pin is 0.2mm from its signal pin -- the exact #1764
+            # scenario), reaching the signal pad's center is impossible
+            # without entering the net=0 pad's rectangle.  The footprint
+            # guarantees the physical geometry, so silence the violation
+            # for negative clearance too -- but ONLY for net=0 pads.
+            # Foreign SIGNAL pads (net != 0) keep the strict >= 0 guard so
+            # the trace-through-pad-copper pathology (#2933) stays caught.
+            #
+            # Issue #5166: a "clamp" ref keeps the net=0 exemption but not
+            # the positive-clearance skip -- ``required_clearance`` below is
+            # the authored floor it must actually meet.
+            if carveout_mode != "none" and (
+                pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp")
+            ):
+                continue
+
+            if clearance < min_actual:
+                min_actual = clearance
+
+            # Issue #1016: Check violation against component-specific clearance
+            if clearance < required_clearance:
+                violation_loc = (pad.x, pad.y)
+        return min_actual, violation_loc
+
     def validate_segment_clearance(
         self,
         seg: Segment,
@@ -4720,159 +4898,25 @@ class RoutingGrid:
         violation_loc: tuple[float, float] | None = None
         has_violation = False  # Issue #1016: track if any violation was found
 
-        # Check against all stored pads
-        for pad in self._pads:
-            # Skip same-net pads (clearance not required within same net)
-            if pad.net == exclude_net:
-                continue
-
-            # Issue #1764 + #2874 + #2908 + #2933: The same-component-ref
-            # exclusion is intended to permit signal-pin escape routing
-            # through the chip's own perimeter (Issue #1764 reachability fix).
-            # It must NOT permit signal traces to clip plane-net pads on the
-            # same chip, nor to physically overlap pad metal on any pad.
-            #
-            # PR #2873 (C++) / PR #2875 (this file, Python) narrowed the
-            # exclusion to ``pad.net != 0`` so the SKIPPED-net convention
-            # (``skip_nets`` rewriting in ``io.py:2819-2820``) kept plane-net
-            # pads in the validator. That convention only covers boards that
-            # pass ``--skip-nets``; board 04 routes ``+3.3V`` / ``GND`` as
-            # real nets (so the GND zone can stitch up after routing), so
-            # ``U2.1 +3.3V`` retains ``net == 2`` and was being silently
-            # exempted -- producing 44 ``clearance_pad_segment`` violations
-            # against same-component plane pads (Issue #2908, successor to
-            # #2902).
-            #
-            # Issue #2908 broadens the carve-out: a same-component pad is
-            # excluded ONLY when it is a signal net (not a plane net).
-            # Plane-net pads -- whether ``net == 0`` (skipped-pour) or
-            # ``net > 0`` with a power/ground name -- are kept in the
-            # validator. The rect-aware geometry below ensures the disc-bound
-            # over-rejection on the SHORT axis does not regress legitimate
-            # signal-vs-signal corridor traces (the corridor relaxation in
-            # ``_relax_same_component_clearance`` only operates between
-            # signal pads, so this stricter validation for plane pads is
-            # compatible with the existing reachability fix).
-            #
-            # Issue #2933: The same-component signal-pad carve-out is further
-            # narrowed -- it now only suppresses clearance complaints when the
-            # trace stays OUTSIDE the neighbour pad's metal.  On standard-pitch
-            # passives like 0805 resistors (R1 at 2mm pitch on board 02), the
-            # router was emitting traces whose centerline passed THROUGH the
-            # opposite pad's metal because the carve-out silently exempted
-            # them.  This produced 144 ``clearance_pad_segment`` errors on
-            # board 02 with negative actual_clearance (overlapping copper).
-            # The metal-overlap check (clearance < 0) is preserved for all
-            # same-component pads, so the trace-through-pad pathology is now
-            # caught at the validator while the fine-pitch escape exemption
-            # (positive clearance < required_clearance) is unchanged.
-            # Skip pads on different layers (unless PTH)
-            if not pad.through_hole:
-                # Convert layer for comparison
-                pad_layer_idx = self.layer_to_index(pad.layer.value)
-                seg_layer_idx = self.layer_to_index(seg.layer.value)
-                if pad_layer_idx != seg_layer_idx:
-                    continue
-
-            # Issue #1016: Get per-component clearance if available
-            # When validating against a pad, use the clearance for that component
-            pad_ref = pad.component_key
-            pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
-            required_clearance = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
-
-            # Issue #3545: NET-AWARE tightening of the same-component
-            # carve-out.  Same-net pads are already skipped at the top of
-            # this loop, so every pad reaching this point is on a FOREIGN
-            # net -- the carve-out was silently exempting foreign-net pads
-            # on the route's own components (routing-diagnostic fixture:
-            # NET3 routed 0.127mm from J1 pad 1 / NET1, masked because
-            # NET3 also connects to J1 pad 2).  The legitimate use of the
-            # carve-out is fine-pitch escape routing (Issue #1764), which
-            # is exactly the case where a per-component clearance
-            # relaxation is in effect (``required_clearance <
-            # min_clearance`` via fine-pitch detection or an explicit
-            # component override).  Standard-pitch components get no
-            # relaxation, so their foreign-net pads now stay in the
-            # validator and sub-clearance copper is rejected.
-            #
-            # The carve-out remains active where the component geometry
-            # legitimately forces sub-clearance proximity: explicit /
-            # fine-pitch clearance relaxations (#1764), relaxed
-            # same-component corridors (#2452), and fine-pitch
-            # components routed without ``fine_pitch_clearance``
-            # configured -- see ``_same_component_carveout_active``.
-            #
-            # Issue #5166: the carve-out is now graded rather than
-            # all-or-nothing.  A ref eligible ONLY because a configured
-            # override resolved smaller than ``min_clearance``
-            # ("clamp") enforces that smaller value as a hard floor; a ref
-            # eligible via the #2452 corridor relief (or the opt-in legacy
-            # pitch-only branch) keeps the full skip ("skip").  See
-            # ``_same_component_carveout_mode``.
-            carveout_mode: CarveoutMode = (
-                self._same_component_carveout_mode(
-                    pad.component_key, required_clearance, min_clearance, component_pitches
-                )
-                if (
-                    exclude_refs
-                    and pad.component_key in exclude_refs
-                    and not _is_plane_net_pad(pad)
-                )
-                else "none"
-            )
-
-            # Issue #2908: Rect-aware geometry for rectangular SMD pads. The
-            # previous disc bound (``radius = max(w, h) / 2``) over-rejected
-            # along the pad's SHORT axis (a 1.475 x 0.3 mm LQFP-48 pad became
-            # a 0.7375 mm-radius disc, 0.587 mm of phantom inflation above /
-            # below the pad metal) and under-detected at long-axis corners
-            # (the disc's rounded corner clips inside the rectangle's sharp
-            # corner). Only explicitly circular pads use the disc model;
-            # square rectangles retain their copper corners (#5229).
-            # This mirrors PR #2787's distance calculation at
-            # ``validate/rules/clearance.py::_segment_circle_clearance``.
-            # Rect-aware: signed centerline-to-rect distance.  Negative means
-            # the segment centerline lies inside the pad rectangle (a real DRC
-            # defect; the magnitude is the deepest signed depth).  Issue
-            # #6389: the arithmetic lives in ``pad_segment_edge_clearance`` so
-            # the pure-Python A*'s exact pad-cell test measures identically.
-            clearance = pad_segment_edge_clearance(
-                pad, seg.x1, seg.y1, seg.x2, seg.y2, seg_half_width
-            )
-
-            # Issue #2933: Apply the same-component carve-out only when the
-            # trace clears the neighbour pad's metal (clearance >= 0).
-            # Negative clearance means the trace overlaps pad copper -- a
-            # true defect that no carve-out should silence.
-            #
-            # Issue #3490: EXCEPTION -- a same-component pad on net 0
-            # (an unconnected / NC pad) carries no electrical net, so a
-            # trace endpoint that geometrically overlaps its metal is not
-            # a real short.  When such a pad sits within metal-overlap
-            # distance of the signal pad being routed (e.g. an LED whose
-            # net=0 pin is 0.2mm from its signal pin -- the exact #1764
-            # scenario), reaching the signal pad's center is impossible
-            # without entering the net=0 pad's rectangle.  The footprint
-            # guarantees the physical geometry, so silence the violation
-            # for negative clearance too -- but ONLY for net=0 pads.
-            # Foreign SIGNAL pads (net != 0) keep the strict >= 0 guard so
-            # the trace-through-pad-copper pathology (#2933) stays caught.
-            #
-            # Issue #5166: a "clamp" ref keeps the net=0 exemption but not
-            # the positive-clearance skip -- ``required_clearance`` below is
-            # the authored floor it must actually meet.
-            if carveout_mode != "none" and (
-                pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp")
-            ):
-                continue
-
-            if clearance < min_actual_clearance:
-                min_actual_clearance = clearance
-
-            # Issue #1016: Check violation against component-specific clearance
-            if clearance < required_clearance:
-                has_violation = True
-                violation_loc = (pad.x, pad.y)
+        # Check against all stored pads (Issue #6389: shared with the
+        # pure-Python A*'s own-pad step gate).
+        pad_min, pad_violation_loc = self.segment_pad_clearance(
+            seg.x1,
+            seg.y1,
+            seg.x2,
+            seg.y2,
+            self.layer_to_index(seg.layer.value),
+            seg_half_width,
+            exclude_net,
+            min_clearance,
+            component_pitches=component_pitches,
+            exclude_refs=exclude_refs,
+        )
+        if pad_min < min_actual_clearance:
+            min_actual_clearance = pad_min
+        if pad_violation_loc is not None:
+            has_violation = True
+            violation_loc = pad_violation_loc
 
         # Check against segments from existing routes.
         # Issue #1249: Use R-tree spatial index when available and segment count
