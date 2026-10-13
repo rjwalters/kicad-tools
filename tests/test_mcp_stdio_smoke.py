@@ -83,7 +83,11 @@ def sandbox_home(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(home / "AppData"))
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # Never shell out to a real `claude` (#6418): claude-code takes the
+    # JSON-merge route into $HOME/.claude.json.
+    monkeypatch.setattr(mcp_cmd, "_find_claude_cli", lambda: None)
     return home
 
 

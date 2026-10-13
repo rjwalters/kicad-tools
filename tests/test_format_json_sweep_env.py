@@ -550,6 +550,21 @@ def _run_mcp(argv, capsys):
     return rc, capsys.readouterr().out
 
 
+@pytest.fixture
+def claude_sandbox(tmp_path, monkeypatch):
+    """Keep `mcp setup` away from the real ~/.claude.json and `claude` CLI (#6418)."""
+    from kicad_tools.cli.commands import mcp as mcp_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(mcp_cmd, "_find_claude_cli", lambda: None)
+    return home
+
+
+@pytest.mark.usefixtures("claude_sandbox")
 class TestMcpSetupEmission:
     def test_dry_run_document(self, capsys):
         rc, out = _run_mcp(["mcp", "setup", "--dry-run", "--format", "json"], capsys)
@@ -561,8 +576,10 @@ class TestMcpSetupEmission:
         assert payload["written"] is False
         assert payload["replaced"] is False
         assert payload["success"] is True
+        assert payload["method"] == "json-merge"
+        assert payload["scope"] == "user"
         assert isinstance(payload["config_path"], str)
-        assert set(payload["server"]) == {"command", "args", "env"}
+        assert set(payload["server"]) == {"type", "command", "args", "env"}
 
     def test_dry_run_is_deterministic(self, capsys):
         argv = ["mcp", "setup", "--dry-run", "--format", "json"]
@@ -570,12 +587,9 @@ class TestMcpSetupEmission:
         _, second = _run_mcp(argv, capsys)
         assert first == second
 
-    def test_write_document(self, tmp_path, capsys):
-        target = tmp_path / "mcp.json"
-        with patch(
-            "kicad_tools.cli.commands.mcp._get_claude_code_config_path", return_value=target
-        ):
-            rc, out = _run_mcp(["mcp", "setup", "--format", "json"], capsys)
+    def test_write_document(self, claude_sandbox, capsys):
+        target = claude_sandbox / ".claude.json"
+        rc, out = _run_mcp(["mcp", "setup", "--format", "json"], capsys)
         assert rc == 0
         payload = json.loads(out)
         assert payload["written"] is True
@@ -584,13 +598,10 @@ class TestMcpSetupEmission:
         written = json.loads(target.read_text())
         assert written["mcpServers"]["kicad-tools"] == payload["server"]
 
-    def test_replacing_existing_entry_is_flagged(self, tmp_path, capsys):
-        target = tmp_path / "mcp.json"
+    def test_replacing_existing_entry_is_flagged(self, claude_sandbox, capsys):
+        target = claude_sandbox / ".claude.json"
         target.write_text(json.dumps({"mcpServers": {"kicad-tools": {"command": "old"}}}))
-        with patch(
-            "kicad_tools.cli.commands.mcp._get_claude_code_config_path", return_value=target
-        ):
-            rc, out = _run_mcp(["mcp", "setup", "--format", "json"], capsys)
+        rc, out = _run_mcp(["mcp", "setup", "--format", "json"], capsys)
         assert rc == 0
         assert json.loads(out)["replaced"] is True
 
