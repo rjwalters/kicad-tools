@@ -111,6 +111,14 @@ def pad_lanes_disabled() -> bool:
     return value.strip() not in ("", "0")
 
 
+VIA_DISC_ENV = "KCT_PAD_LANE_VIA_DISC"
+
+
+def via_disc_enabled() -> bool:
+    """False when ``KCT_PAD_LANE_VIA_DISC=0`` (A/B against centre-cell via charging)."""
+    return os.environ.get(VIA_DISC_ENV, "1").strip() != "0"
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -360,6 +368,6 @@ def build_pad_lane_budgets(
         budget.source_net = int(lane.net)
         # Issue #6382 follow-up: a foreign via whose disc overlaps the lane
         # blocks it even when its centre lies just past the lane end.
-        budget.charge_via_disc = True
+        budget.charge_via_disc = via_disc_enabled()
         budgets.append(budget)
     return budgets
