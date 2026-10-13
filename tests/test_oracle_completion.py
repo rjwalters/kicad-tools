@@ -875,7 +875,10 @@ class TestPerNetLinkGate:
         assert attribute_link_regressions(before, after_zone, near) == {}
 
 
-_CUT_PCB = """(kicad_pcb
+def _cut_pcb(*fills: str) -> str:
+    """Board 04's shape: a +3.3V F.Cu strip from U2.36 to U2.48, and a block."""
+    polys = "\n".join(f'    (filled_polygon (layer "F.Cu") (pts {pts}))' for pts in fills)
+    return f"""(kicad_pcb
   (version 20240108)
   (generator "test")
   (general (thickness 1.6))
@@ -891,12 +894,20 @@ _CUT_PCB = """(kicad_pcb
   )
   (zone (net 2) (net_name "+3.3V") (layer "F.Cu") (uuid "z33")
     (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes)
-    (polygon (pts (xy 150 87) (xy 154 87) (xy 154 87.5) (xy 150 87.5)))
-    (filled_polygon (layer "F.Cu") (pts (xy 150 87) (xy 154 87) (xy 154 87.5) (xy 150 87.5)))
-    (filled_polygon (layer "F.Cu") (pts (xy 150 88) (xy 154 88) (xy 154 92) (xy 150 92)))
+    (polygon (pts (xy 150 87) (xy 154 87) (xy 154 92) (xy 150 92)))
+{polys}
   )
 )
 """
+
+
+_STRIP = "(xy 150 87) (xy 154 87) (xy 154 87.5) (xy 150 87.5)"
+_BLOCK = "(xy 150 88) (xy 154 88) (xy 154 92) (xy 150 92)"
+#: The strip cut at x = 151.9 .. 152.9 (by the U2.35 weld) ...
+_STRIP_L = "(xy 150 87) (xy 151.9 87) (xy 151.9 87.5) (xy 150 87.5)"
+_STRIP_R = "(xy 152.9 87) (xy 154 87) (xy 154 87.5) (xy 152.9 87.5)"
+#: ... and the block with a via hole punched through it (a hole is fine).
+_BLOCK_HOLED = "(xy 150 88) (xy 154 88) (xy 154 92) (xy 150 92) (xy 150 88) (xy 151.6 90.6) (xy 152.4 90.6) (xy 152.4 91.4) (xy 151.6 91.4) (xy 151.6 90.6) (xy 150 88)"
 
 
 class TestCutAttribution:
@@ -905,19 +916,31 @@ class TestCutAttribution:
 
         return PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
 
-    def test_only_copper_that_splits_a_foreign_fill_is_blamed(self, tmp_path):
+    def _blame(self, tmp_path, after_fills, footprints):
+        before = tmp_path / "b.kicad_pcb"
+        before.write_text(_cut_pcb(_STRIP, _BLOCK))
+        after = _cut_pcb(*after_fills).encode()
+        return self._closer().cut_culprits(before, after, ["+3.3V"], footprints)
+
+    _FOOTPRINTS = {
+        "pad:GND:U2.35": _U2_35_WELD,  # in the strip's gap
+        "pad:GND:C2.1": [(152.0, 91.0, 152.0, 91.0, 0.3)],  # in the block's hole
+        "pad:GND:C1.1": [(160.0, 87.0, 160.0, 87.0, 0.3)],  # well clear
+        "pad:+3.3V:U2.37": [(152.4, 87.25, 152.4, 87.25, 0.3)],  # its own net
+    }
+
+    def test_only_copper_that_splits_a_fill_is_blamed(self, tmp_path):
         """Exact for a ``Zone <-> Zone`` link, which proximity cannot place."""
-        path = tmp_path / "b.kicad_pcb"
-        path.write_text(_CUT_PCB)
-        footprints = {
-            # Stub + via across the +3.3V strip: U2.36 and U2.48 part ways.
-            "pad:GND:U2.35": _U2_35_WELD,
-            # A via punched through the +3.3V block: a hole, not a split.
-            "pad:GND:C2.1": [(152.0, 91.0, 152.0, 91.0, 0.3)],
-            "pad:GND:C1.1": [(160.0, 87.0, 160.0, 87.0, 0.3)],  # well clear
-            "pad:+3.3V:U2.36": [(152.0, 87.25, 152.0, 87.25, 0.3)],  # its own net
-        }
-        blamed = self._closer().cut_culprits(path, ["+3.3V"], footprints)
+        blamed = self._blame(tmp_path, (_STRIP_L, _STRIP_R, _BLOCK_HOLED), self._FOOTPRINTS)
+        assert blamed == {"pad:GND:U2.35": {"+3.3V"}}
+
+    def test_a_punched_hole_alone_blames_nothing(self, tmp_path):
+        assert self._blame(tmp_path, (_STRIP, _BLOCK_HOLED), self._FOOTPRINTS) == {}
+
+    def test_a_stranded_pad_is_pinned_on_the_nearest_copper(self, tmp_path):
+        # The strip pulled back off U2.48 (x <= 153.5): the pad lost its pour.
+        short = "(xy 150 87) (xy 153.5 87) (xy 153.5 87.5) (xy 150 87.5)"
+        blamed = self._blame(tmp_path, (short, _BLOCK), self._FOOTPRINTS)
         assert blamed == {"pad:GND:U2.35": {"+3.3V"}}
 
     def test_loop_uses_the_cut_attributor_for_a_zone_zone_link(self, tmp_path):
@@ -950,8 +973,9 @@ class TestCutAttribution:
 
         seen: list[tuple[str, ...]] = []
 
-        def cut(path, nets, footprints):
+        def cut(path, after_bytes, nets, footprints):
             assert b.state() == (2, 0)  # called on the restored, pre-attempt board
+            assert after_bytes == b"0,1"  # ... with the attempt's bytes
             seen.append(tuple(nets))
             return {"pad:GND:U2.35": {"+3.3V"}} if "pad:GND:U2.35" in footprints else {}
 
