@@ -327,7 +327,7 @@ class TestCliSurfaces:
 class TestIslandJoinTargetsPlane:
     """Issue #6399: a stranded pad island joins the plane, not the nearest sliver."""
 
-    def _board(self, tmp_path: Path, walled: bool = False) -> Path:
+    def _board(self, tmp_path: Path, walled: bool = False, island: bool = False) -> Path:
         def pad(ref, x, y, w, h):
             return (
                 f'  (footprint "T:{ref}" (layer "F.Cu")\n    (at {x:g} {y:g})\n'
@@ -342,8 +342,13 @@ class TestIslandJoinTargetsPlane:
             '  (net 0 "")\n  (net 1 "GND")\n  (net 2 "SIG")\n'
             + pad("R1", 10, 10, 0.8, 0.8)  # the stranded pad island
             + pad("R9", 22, 10, 4, 8)  # the plane (largest component)
-            # A padless sliver nearer to R1 than the plane is.
-            + '  (segment (start 13 8) (end 13 12) (width 0.2) (layer "F.Cu") (net 1))\n'
+            # Nearer to R1 than the plane is: a padless sliver or (Issue
+            # #6412) a second stranded pad island R2.
+            + (
+                pad("R2", 14, 10, 0.8, 0.8)
+                if island
+                else '  (segment (start 13 8) (end 13 12) (width 0.2) (layer "F.Cu") (net 1))\n'
+            )
             # Optionally ring the plane with other-net copper so it is unreachable.
             + (
                 "".join(
@@ -418,6 +423,153 @@ class TestIslandJoinTargetsPlane:
             "GND R1.1: no clearance-legal route to the plane-owning copper; "
             "joined the nearest island instead"
         ]
+
+
+def _r1_zone_link():
+    from kicad_tools.router.oracle_completion import OracleLink
+
+    pad_end = OracleEndpoint(
+        description="Pad 1 [GND] of R1",
+        kind="pad",
+        net="GND",
+        x=10.0,
+        y=10.0,
+        layer="F.Cu",
+        ref="R1",
+        pad="1",
+    )
+    zone_end = OracleEndpoint(description="Zone [GND]", kind="zone", net="GND", x=10.0, y=10.0)
+    return OracleLink(net="GND", a=pad_end, b=zone_end)
+
+
+def _new_gnd_segments(path: Path) -> list:
+    from kicad_tools.schema.pcb import PCB
+
+    return list(PCB.load(str(path)).segments)
+
+
+def _touches_r2(seg) -> bool:
+    # R2 is a 0.8 mm square pad centred on (14, 10).
+    return any(abs(x - 14.0) <= 0.45 and abs(y - 10.0) <= 0.45 for x, y in (seg.start, seg.end))
+
+
+class TestWithdrawnPlaneJoinFallsBackToIsland:
+    """Issue #6412: a withdrawn ``#plane`` join leaves the ``#island`` join eligible."""
+
+    @staticmethod
+    def _board(tmp_path: Path, **kwargs) -> Path:
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        return TestIslandJoinTargetsPlane()._board(tmp_path, **kwargs)
+
+    def test_route_variants_have_their_own_keys(self, tmp_path):
+        """T1: banning ``#plane`` routes the nearest island under ``#island``."""
+        pytest.importorskip("shapely")
+        from kicad_tools.router.oracle_completion import PourLinkCloser, _route_key
+
+        lk = _r1_zone_link()
+        closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+
+        free = self._board(tmp_path / "free", island=True)
+        attempt = ClosureAttempt()
+        closer._route_links(free, [lk], attempt)
+        assert attempt.applied == 1, attempt.notes
+        assert list(attempt.footprints) == [_route_key(lk, "plane")]
+        assert max(max(s.start[0], s.end[0]) for s in _new_gnd_segments(free)) >= 20.0 - 1e-6
+
+        board = self._board(tmp_path / "banned", island=True)
+        attempt = ClosureAttempt()
+        closer._route_links(board, [lk], attempt, frozenset({_route_key(lk, "plane")}))
+        assert attempt.applied == 1, attempt.notes
+        assert list(attempt.footprints) == [_route_key(lk, "island")]
+        segs = _new_gnd_segments(board)
+        assert segs and all(max(s.start[0], s.end[0]) < 20.0 for s in segs)
+        assert any(_touches_r2(s) for s in segs)
+        assert attempt.notes == [
+            "GND R1.1: plane join withdrawn for KiCad DRC; joined the nearest island instead"
+        ]
+
+    def test_every_variant_banned_says_withdrawn(self, tmp_path):
+        pytest.importorskip("shapely")
+        from kicad_tools.router.oracle_completion import PourLinkCloser, _route_key
+
+        lk = _r1_zone_link()
+        closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+        board = self._board(tmp_path, island=True)
+        attempt = ClosureAttempt()
+        banned = frozenset({_route_key(lk, "plane"), _route_key(lk, "island")})
+        closer._route_links(board, [lk], attempt, banned)
+        assert attempt.applied == 0
+        assert len(attempt.notes) == 1
+        assert "every route withdrawn for KiCad DRC" in attempt.notes[0]
+        assert not any("no clearance-legal route" in n for n in attempt.notes)
+
+    def test_withdrawn_direct_route_still_withdraws_the_link(self, tmp_path):
+        """A banned bare key keeps the pre-#6412 whole-link ban: no join is tried."""
+        pytest.importorskip("shapely")
+        from kicad_tools.router.oracle_completion import PourLinkCloser, _route_key
+
+        lk = _r1_zone_link()
+        closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+        board = self._board(tmp_path, island=True)
+        attempt = ClosureAttempt()
+        closer._route_links(board, [lk], attempt, frozenset({_route_key(lk)}))
+        assert attempt.applied == 0 and attempt.footprints == {}
+        assert attempt.notes == []
+
+    def test_withdrawn_plane_join_retries_nearest_island_same_round(self, tmp_path):
+        """T2: the loop's retry routes ``#island`` instead of dropping the link."""
+        pytest.importorskip("shapely")
+        from kicad_tools.router.oracle_completion import PourLinkCloser, _route_key
+
+        board = self._board(tmp_path, island=True)
+        link_violation = DRCViolation(
+            type=ViolationType.UNCONNECTED_ITEMS,
+            type_str="unconnected_items",
+            severity=Severity.ERROR,
+            message="Missing connection between items",
+            locations=[Location(10.0, 10.0), Location(22.0, 10.0)],
+            items=["Pad 1 [GND] of R1 on F.Cu", "Zone [GND] on F.Cu"],
+        )
+        lk = links_from_violations([link_violation])[0]
+
+        def oracle(path):
+            segs = _new_gnd_segments(path)
+            errors = [
+                DRCViolation(
+                    type=ViolationType.CLEARANCE,
+                    type_str="clearance",
+                    severity=Severity.ERROR,
+                    message="plane join",
+                    locations=[Location((s.start[0] + s.end[0]) / 2, (s.start[1] + s.end[1]) / 2)],
+                    items=["Track on F.Cu"],
+                )
+                for s in segs
+                if max(s.start[0], s.end[0]) >= 20.0
+            ][:1]
+            joined = any(_touches_r2(s) for s in segs) and not errors
+            return GeometricDRCResult(
+                ran=True,
+                error_count=len(errors),
+                error_violations=errors,
+                unconnected_items=[] if joined else [link_violation],
+            )
+
+        class RouteOnlyCloser(PourLinkCloser):
+            # This fixture has no pour for a weld via to land in; leave the
+            # link to the routed joins this issue is about.
+            def _weld_pads(self, pcb_path, pads_by_net, attempt):
+                return set()
+
+        closer = RouteOnlyCloser(
+            via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2, refill=None
+        )
+        res = run_oracle_completion(board, oracle=oracle, closer=closer, nets={"GND"})
+        plane = _route_key(lk, "plane")
+        assert res.rounds[0].attempts == 2, (res.rounds, res.closer_notes)
+        assert res.rounds[0].banned == (plane,)
+        assert res.rounds[0].kept
+        assert res.final_links == 0 and res.stop_reason == STOP_CONVERGED
+        assert f"{plane}: withdrawn -- its copper raised KiCad DRC by 1" in res.closer_notes
 
 
 class TestCloserReasonsPrinted:
@@ -541,6 +693,11 @@ class TestCloserReasonsPrinted:
         note = f"{_route_key(lk)}: withdrawn -- its copper raised KiCad DRC by 3"
         assert _closer_reasons_for(lk, [note]) == [note]
         assert _closer_reasons_for(other, [note]) == []
+        # Issue #6412: each join variant's withdrawn note names its link too.
+        for variant in ("plane", "island"):
+            note = f"{_route_key(lk, variant)}: withdrawn -- its copper raised KiCad DRC by 3"
+            assert _closer_reasons_for(lk, [note]) == [note]
+            assert _closer_reasons_for(other, [note]) == []
 
     def test_route_key_does_not_match_longer_ref(self):
         """``Pad 2 [GND] of C1`` is a substring of ``... of C10``; the key is exact."""
@@ -563,6 +720,13 @@ class TestCloserReasonsPrinted:
         note = f"{_route_key(link('C10'))}: withdrawn -- its copper raised KiCad DRC by 1"
         assert _closer_reasons_for(link("C1"), [note]) == []
         assert _closer_reasons_for(link("C10"), [note]) == [note]
+        # Issue #6412: the variant keys stay exact too.
+        for variant in ("plane", "island"):
+            note = (
+                f"{_route_key(link('C10'), variant)}: withdrawn -- its copper raised KiCad DRC by 1"
+            )
+            assert _closer_reasons_for(link("C1"), [note]) == []
+            assert _closer_reasons_for(link("C10"), [note]) == [note]
 
     def test_padless_link_falls_back_to_its_net(self):
         """Board 04: KiCad names ``Zone <-> Zone``; the closer's notes name U2.36."""
