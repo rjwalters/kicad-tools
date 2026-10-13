@@ -64,8 +64,8 @@ Mechanism. `boards/06-diffpair-test/output/diffpair_test.kicad_pro` is authored 
 authored floor, so the routed `.kicad_pro` and the `Clearance - jlcpcb` floor rule in
 the `.kicad_dru` stay at 0.15 mm. Without `--net-class-map` the classifier's map gives
 the LVDS pairs `intra_pair_clearance = 0.1016`, and the lattice coupled run lays P/N
-at a 0.127 mm edge gap. kicad-cli takes the minimum for the diff-pair gap constraint
-from the board clearance, so each coupled P/N segment pair fails twice: once as
+at a 0.127 mm edge gap. kicad-cli behaves as if the minimum for the diff-pair gap
+constraint is the board clearance (changing only that setting clears the gap errors), so each coupled P/N segment pair fails twice: once as
 `diff_pair_gap_out_of_range` ("netclass 'HighSpeed' (diff pair) minimum gap 0.1500 mm;
 actual 0.1270 mm") and once as `clearance` against the floor rule.
 
@@ -98,7 +98,7 @@ Both were right; they ran different net-class maps.
 
 | Run (6440 head, `06b`, lattice, seed 42) | pairs fully coupled | gap | kicad-cli errors | unconnected |
 |---|---|---|---|---|
-| committed `net_class_map.json` (intra-pair 0.15) | 3/4 | >= 0.15 | 0 | **8** |
+| committed `net_class_map.json` (intra-pair 0.15) | 3/4 | n/a (the `_N` copper was demoted) | 0 | **8** |
 | `--inferred-map` (classifier map, intra-pair 0.1016) | 0/4 (4 partially coupled) | 0.120-0.127 | **48** (9 gap + 39 clearance) | 2 |
 
 The committed-map row is the judge's "3/4 coupled, 0 errors". The `--inferred-map`
@@ -121,7 +121,7 @@ the pair clearance when it is lowered, or emit a `diff_pair_gap` rule for couple
 the `.kicad_dru`).
 
 Not verified: I did not run main with a coupled pair at a sub-0.15 gap (no main baseline
-row has one; main's smallest gap is 0.1749), so "pre-existing" rests on the mechanism and
+row has one; main's smallest measured gap is 0.155 mm), so "pre-existing" rests on the mechanism and
 the control experiments, not on a failing main row. I also did not locate the code that
 writes `min_clearance = 0.1016` when the input has none.
 
@@ -130,7 +130,7 @@ writes `min_clearance = 0.1016` when the input has none.
 Cause of the "router 70 %, `kct check` 25 %" drift: the router's in-route DRC ran without
 the board's `--net-class-map`, so it used the classifier's map (no
 `coupled_continuity_threshold`, default 70 %), while `kct check --net-class-map` read the
-committed 25 % for `USB_D`. Separately, three router sites built their detection input
+committed 25 % for `USB_D`. Separately, two router sites (and the two validate producers) built their detection input
 with `synth_routing.setdefault(cls.name, nc)`, so for a class with per-net variants
 (`HighSpeed`: `USB_D*` carry 0.25, `USB_MCU_D*` carry none) the class-name key held
 whichever net came first.
