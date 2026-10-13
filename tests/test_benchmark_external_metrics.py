@@ -1027,3 +1027,63 @@ def test_disposition_preserves_failure_classifications(routed_board, signal, exp
     assert report.route_outcome.outcome == expected
     assert report.timing.measured_phase == expected
     assert report.placement_disposition.completed_nets == frozenset()
+
+
+class TestAllTrackErrors:
+    """``run_geometric_drc(all_track_errors=...)`` is opt-in (Issue #6420)."""
+
+    @staticmethod
+    def _argv(monkeypatch, tmp_path: Path, **kwargs) -> list[str]:
+        import subprocess as sp
+
+        from kicad_tools.drc import geometric
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **_kw):
+            calls.append(list(cmd))
+            return sp.CompletedProcess(cmd, 0, b"", b"")
+
+        monkeypatch.setattr(geometric.subprocess, "run", fake_run)
+        geometric.run_geometric_drc(
+            tmp_path / "b.kicad_pcb", kicad_cli=Path("/fake/kicad-cli"), **kwargs
+        )
+        assert len(calls) == 1
+        return calls[0]
+
+    def test_default_invocation_is_unchanged(self, monkeypatch, tmp_path: Path) -> None:
+        argv = self._argv(monkeypatch, tmp_path)
+        assert "--all-track-errors" not in argv
+        assert argv[1:4] == ["pcb", "drc", "--refill-zones"]
+
+    def test_opt_in_adds_the_flag(self, monkeypatch, tmp_path: Path) -> None:
+        argv = self._argv(monkeypatch, tmp_path, all_track_errors=True)
+        assert argv.count("--all-track-errors") == 1
+        assert argv[-1] == str(tmp_path / "b.kicad_pcb")
+
+    def test_summary_carries_unconnected_count_and_flag(self, monkeypatch, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        from kicad_tools.drc import geometric
+
+        seen: dict = {}
+
+        def fake(_path, **kw):
+            seen.update(kw)
+            return SimpleNamespace(
+                ran=True, error_count=1, by_type={"x": 1}, note=None, unconnected_count=4
+            )
+
+        monkeypatch.setattr(geometric, "run_geometric_drc", fake)
+        summary = run_kicad_cli_drc(tmp_path / "b.kicad_pcb", all_track_errors=True)
+        assert seen["all_track_errors"] is True
+        assert summary.unconnected_count == 4 and summary.all_track_errors is True
+        assert summary.to_dict()["unconnected_count"] == 4
+
+        monkeypatch.setattr(
+            geometric,
+            "run_geometric_drc",
+            lambda _p, **_kw: SimpleNamespace(ran=False, note="absent"),
+        )
+        missing = run_kicad_cli_drc(tmp_path / "b.kicad_pcb")
+        assert missing.unconnected_count is None and missing.violation_count is None

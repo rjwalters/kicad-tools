@@ -979,3 +979,256 @@ def test_net_matrix_follows_each_unfinished_net_across_rows():
     assert table[0] == "| Net | a uniform 1 | a rigid 1.25 |"
     assert table[2] == "| GND_SENSE | ok (6 v) | congestion_saturated (4 v) |"
     assert table[3] == "| PHASE_A | budget_starved (0 v) | ok (1 v) |"
+
+
+# ---------------------------------------------------------------------------
+# Grading parity with a manual ``kct check`` (Issue #6420)
+# ---------------------------------------------------------------------------
+
+#: Two USB_D nets the diff-pair rules recognise by name, deliberately uncoupled
+#: (different lengths, 5 mm apart) so both diff-pair rules fire once a
+#: net-class map engages them.
+UNCOUPLED_USB_PAIR = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "USB_D+")
+  (net 2 "USB_D-")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+  (segment (start 110 120) (end 140 120) (width 0.2) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000020"))
+  (segment (start 110 125) (end 120 125) (width 0.2) (layer "F.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-000000000021"))
+)
+"""
+
+
+def _usb_net_class_map() -> dict:
+    return {
+        net: {
+            "name": "HighSpeed",
+            "coupled_routing": True,
+            "diffpair_partner": partner,
+            "intra_pair_clearance": 0.075,
+            "skew_tolerance_mm": 3.0,
+        }
+        for net, partner in (("USB_D+", "USB_D-"), ("USB_D-", "USB_D+"))
+    }
+
+
+def _grade_offline(monkeypatch, run_dir: Path, *, sidecar: bool, fab_mfr: str | None = None):
+    """``grade()`` on the uncoupled-pair board with kicad-cli stubbed out."""
+    import json
+    from types import SimpleNamespace
+
+    from kicad_tools.benchmark.external import metrics
+
+    seen: dict = {}
+
+    def fake_drc(_routed, **kw):
+        seen.update(kw)
+        return SimpleNamespace(
+            ran=True, violation_count=0, by_type={}, note=None, unconnected_count=2
+        )
+
+    monkeypatch.setattr(metrics, "run_kicad_cli_drc", fake_drc)
+    run_dir.mkdir(parents=True)
+    routed = run_dir / "usb_routed.kicad_pcb"
+    routed.write_text(UNCOUPLED_USB_PAIR)
+    if sidecar:
+        (run_dir / "net_class_map.json").write_text(json.dumps(_usb_net_class_map()))
+    if fab_mfr is not None:
+        (run_dir / "fab_profile.json").write_text(
+            json.dumps({"mfr": fab_mfr, "source": "kct route --manufacturer"})
+        )
+    row = ere.grade(routed, ere.Board("x", "usb.kicad_pcb", layers=4, manufacturer="jlcpcb"))
+    return row, seen
+
+
+def test_grade_counts_diff_pair_errors_with_the_run_dirs_net_class_map(tmp_path, monkeypatch):
+    row, seen = _grade_offline(monkeypatch, tmp_path / "run", sidecar=True)
+
+    assert row["kct_check_by_rule"]["diffpair_length_skew"] == 1
+    assert row["kct_check_by_rule"]["diffpair_routing_continuity"] == 1
+    assert row["kct_check_errors_total"] == row["kct_check_errors"] >= 2
+    assert row["kct_check_net_class_map"] == str(tmp_path / "run" / "net_class_map.json")
+    assert row["kct_check_inactive_rules"] == []
+    # kicad-cli: every error on a track, and the unconnected count is a column.
+    assert seen.get("all_track_errors") is True
+    assert row["kicad_drc_all_track_errors"] is True
+    assert row["kicad_drc_unconnected"] == 2
+
+
+def test_grade_without_a_sidecar_says_so_instead_of_passing(tmp_path, monkeypatch):
+    row, _ = _grade_offline(monkeypatch, tmp_path / "run", sidecar=False)
+
+    assert row["kct_check_net_class_map"] is None
+    assert not any(rule.startswith("diffpair_") for rule in row["kct_check_by_rule"])
+    assert set(row["kct_check_inactive_rules"]) == {
+        "match_group_length_skew",
+        "diffpair_length_skew",
+        "diffpair_routing_continuity",
+    }
+
+
+def test_grade_uses_the_routes_own_manufacturer_tier(tmp_path, monkeypatch):
+    row, _ = _grade_offline(monkeypatch, tmp_path / "a", sidecar=False, fab_mfr="jlcpcb-tier1")
+    assert row["kct_check_mfr"] == "jlcpcb-tier1"  # not split to "jlcpcb"
+    # No fab_profile.json: the board's declared manufacturer, unsplit.
+    row, _ = _grade_offline(monkeypatch, tmp_path / "b", sidecar=False)
+    assert row["kct_check_mfr"] == "jlcpcb"
+
+
+def test_grade_records_null_unconnected_when_kicad_cli_did_not_run(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from kicad_tools.benchmark.external import metrics
+
+    row, _ = _grade_offline(monkeypatch, tmp_path / "run", sidecar=True)
+    monkeypatch.setattr(
+        metrics,
+        "run_kicad_cli_drc",
+        lambda _r, **_kw: SimpleNamespace(
+            ran=False, violation_count=None, by_type={}, note="absent"
+        ),
+    )
+    routed = tmp_path / "run" / "usb_routed.kicad_pcb"
+    row = ere.grade(routed, ere.Board("x", "usb.kicad_pcb", layers=4))
+    assert row["kicad_drc_errors"] is None and row["kicad_drc_unconnected"] is None
+    assert ere.manufacturable({**row, "exit_code": 0, "artifact": "final"}) is None
+
+
+CLEAN_ROW = {
+    "exit_code": 0,
+    "artifact": "final",
+    "kct_check_errors_total": 0,
+    "kicad_drc_errors": 0,
+    "kicad_drc_unconnected": 0,
+}
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ({}, True),
+        ({"exit_code": 3}, False),
+        ({"kct_check_errors_total": 2}, False),
+        ({"kicad_drc_errors": 1}, False),
+        ({"kicad_drc_unconnected": 4}, False),
+        ({"artifact": "deadline"}, False),
+        ({"kct_check_errors_total": None}, None),
+        ({"kicad_drc_errors": None}, None),
+        ({"kicad_drc_unconnected": None}, None),
+        # A failing route with an engine that did not run is still "not checked".
+        ({"exit_code": 4, "kicad_drc_errors": None}, None),
+    ],
+)
+def test_manufacturable_verdict(change, expected):
+    assert ere.manufacturable({**CLEAN_ROW, **change}) is expected
+
+
+def test_manufacturable_falls_back_to_the_legacy_kct_column():
+    legacy = {k: v for k, v in CLEAN_ROW.items() if k != "kct_check_errors_total"}
+    assert ere.manufacturable({**legacy, "kct_check_errors": 0}) is True
+    assert ere.manufacturable({**legacy, "kct_check_errors": 1}) is False
+
+
+GRID = ["--route-engine", "grid", "--layers", "4", "--deterministic-budget"]
+
+
+@pytest.mark.parametrize(
+    ("extra", "rescued"),
+    [
+        (GRID, True),
+        (["--per-net-iterations", "1000000"], True),  # default engine is grid
+        (["--per-net-iterations=1000000"], True),
+        (["--layers", "4"], False),  # not a deterministic run: nothing to make deterministic
+        (["--route-engine", "lattice", "--deterministic-budget"], False),
+        (["--route-engine=lattice", "--per-net-iterations", "5"], False),
+    ],
+)
+def test_deterministic_grid_routes_get_deterministic_rescue(extra, rescued):
+    out = ere.with_deterministic_rescue(extra)
+    assert ("--deterministic-rescue" in out) is rescued
+    assert out[: len(extra)] == extra  # only ever appended
+    # Already present: never doubled.
+    assert (
+        ere.with_deterministic_rescue([*extra, "--deterministic-rescue"]).count(
+            "--deterministic-rescue"
+        )
+        == 1
+    )
+
+
+def test_run_one_passes_and_records_deterministic_rescue(tmp_path, monkeypatch):
+    _stub_route(monkeypatch)
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text(_board(TWO_PARTS))
+    board = ere.Board("x", "b.kicad_pcb")
+
+    row = ere.run_one(
+        board, src, 1.0, "uniform", tmp_path / "g", 42, 60, "default", extra_args=tuple(GRID)
+    )
+    assert row["deterministic_rescue"] is True
+    assert row["cmd"].endswith("--deterministic-rescue")
+
+    lattice = ("--route-engine", "lattice", "--deterministic-budget")
+    row = ere.run_one(
+        board, src, 1.0, "uniform", tmp_path / "l", 42, 60, "default", extra_args=lattice
+    )
+    assert row["deterministic_rescue"] is False
+    assert "--deterministic-rescue" not in row["cmd"]
+
+
+def test_route_log_records_which_wall_clocks_were_live():
+    loose = (
+        "[deterministic-budget] NOTE: relief-rescue probe / victim re-land sub-searches keep "
+        "their 10s wall clock (Issue #4730), so ...\n"
+        "  Post-negotiation sweep bound: 60.0s whole-sweep / 10.0s per-net wall clock -- x\n"
+    )
+    facts = ere.parse_route_log(loose)
+    assert facts["rescue_wall_clock"] is True and facts["sweep_wall_clock"] is True
+
+    tight = (
+        "  Relief-rescue sub-search cap: iteration-bounded (per-net node-expansion cap; ...)\n"
+        "  Post-negotiation sweep bound: iteration-bounded (per-net node-expansion cap; ...)\n"
+    )
+    facts = ere.parse_route_log(tight)
+    assert facts["rescue_wall_clock"] is False and facts["sweep_wall_clock"] is False
+    # Silent log (e.g. lattice): no claim either way.
+    assert "rescue_wall_clock" not in ere.parse_route_log("Nets routed: 3/3\n")
+
+
+def test_tables_render_unconnected_and_the_verdict():
+    row = {
+        "board": "05",
+        "mode": "uniform",
+        "scale": 1.0,
+        "nets_complete": 33,
+        "nets_total": 37,
+        "connections_routed": 1,
+        "connections_total": 2,
+        "kct_check_errors": 3,
+        "kct_check_errors_total": 3,
+        "kicad_drc_errors": 0,
+        "kicad_drc_unconnected": 4,
+        "via_count": 120,
+        "wirelength_mm": 1068.1,
+        "wall_s": 2040.6,
+        "exit_code": 4,
+        "artifact": "final",
+        "manufacturable": False,
+    }
+    assert ere.render_route([row]).splitlines()[-1].endswith("| 4 | no |")
+    legacy = {k: v for k, v in row.items() if k not in ("manufacturable", "kicad_drc_unconnected")}
+    assert ere.render_route([legacy]).splitlines()[-1].endswith("| None | unknown |")
