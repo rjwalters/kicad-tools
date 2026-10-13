@@ -107,6 +107,11 @@ LINK_ATTRIBUTION_TOLERANCE_MM = WELD_ESCAPE_DISTANCE_MM
 #: share the blame (two welds either side of a cut pin are equally suspect).
 LINK_ATTRIBUTION_SLACK_MM = 0.25
 
+#: Issue #6428: half the narrowest fill neck KiCad keeps (a zone's default
+#: ``min_thickness`` is 0.2 mm); :meth:`PourLinkCloser.cut_culprits` opens a
+#: cut fill by it before counting pieces.
+CUT_NECK_MM = 0.1
+
 #: Why the loop stopped (``OracleCompletionResult.stop_reason``).
 STOP_NOT_RUN = "oracle_not_run"  # kicad-cli absent / timed out on the first call
 STOP_CONVERGED = "converged"  # zero in-scope links left
@@ -1045,48 +1050,81 @@ class PourLinkCloser:
         nets: Sequence[str],
         footprints: Mapping[str, Sequence[tuple[float, float, float, float, float]]],
     ) -> dict[str, set[str]]:
-        """``{closer key: {net, ...}}``: closers whose copper cuts a pour of ``nets``.
+        """``{closer key: {net, ...}}``: closers whose copper SPLITS a pour of ``nets``.
 
-        ``pcb_path`` holds the board BEFORE the attempt.  A closer is blamed
-        for net N when one of its capsules comes within ``clearance`` of N's
-        existing fill: the refill must then pull N's pour back around it,
-        which is the only way new copper can split a pour.  A weld placed
-        without ``foreign_fills_yield`` keeps that clearance and is never
-        blamed; closers serving N itself are skipped.  Capsules carry no
-        layer, so a capsule meets N's fill on every layer (conservative for
-        a stub; exact for a via).
+        ``pcb_path`` holds the board BEFORE the attempt.  Per net N and copper
+        layer, N's existing fill is cut by a closer's capsules (grown by the
+        clearance) and opened by ``CUT_NECK_MM`` (KiCad drops necks thinner
+        than the zone's minimum width); the closer is blamed when that leaves
+        more pad-bearing fill pieces than before -- a pad it stranded.  A via
+        merely punched through N's pour (every GND via crossing a +3.3V F.Cu
+        pour does that) splits nothing and is not blamed.  Closers serving N
+        itself are skipped.  When no single closer splits the fill but all of
+        them together do, nothing is returned and the caller falls back to
+        proximity (:func:`attribute_link_regressions`).
         """
         from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
         from shapely.ops import unary_union  # type: ignore[import-untyped]
 
-        from kicad_tools.cli.stitch_cmd import find_same_net_filled_polygons, get_net_number
+        from kicad_tools.cli.stitch_cmd import (
+            find_pads_on_nets,
+            find_same_net_filled_polygons,
+            get_net_number,
+        )
         from kicad_tools.core.sexp_file import load_pcb
 
         sexp = load_pcb(pcb_path)
+
+        def shapes(caps: Sequence[tuple[float, float, float, float, float]], grow: float) -> Any:
+            return unary_union(
+                [
+                    (
+                        Point(x1, y1) if (x1, y1) == (x2, y2) else LineString([(x1, y1), (x2, y2)])
+                    ).buffer(half + grow)
+                    for x1, y1, x2, y2, half in caps
+                ]
+            )
+
         blamed: dict[str, set[str]] = {}
         for net in nets:
             number = get_net_number(sexp, net)
             if number is None:
                 continue
-            polys = [
-                Polygon(fp.points).buffer(0)
-                for fp in find_same_net_filled_polygons(sexp, {number})
-                if len(fp.points) >= 3
-            ]
-            if not polys:
+            by_layer: dict[str, list[Any]] = {}
+            for fp in find_same_net_filled_polygons(sexp, {number}):
+                if len(fp.points) >= 3:
+                    by_layer.setdefault(fp.layer, []).append(Polygon(fp.points).buffer(0))
+            if not by_layer:
                 continue
-            fill = unary_union(polys)
-            limit = self.clearance - 1e-3
-            for key, caps in footprints.items():
-                if closer_key_net(key) == net:
+            pads = find_pads_on_nets(sexp, {net})
+            candidates = {
+                key: caps for key, caps in footprints.items() if caps and closer_key_net(key) != net
+            }
+            for layer, polys in sorted(by_layer.items()):
+                fill = unary_union(polys)
+                probes = [
+                    Point(p.x, p.y).buffer(max(min(p.width, p.height) / 2, 0.05))
+                    for p in pads
+                    if p.pad_type != "smd" or p.layer == layer
+                ]
+                if not probes:
                     continue
-                for x1, y1, x2, y2, half in caps:
-                    shape = (
-                        Point(x1, y1) if (x1, y1) == (x2, y2) else LineString([(x1, y1), (x2, y2)])
+
+                def pad_pieces(geom: Any) -> int:
+                    parts = getattr(geom, "geoms", [geom])
+                    return sum(
+                        1 for g in parts if not g.is_empty and any(g.intersects(q) for q in probes)
                     )
-                    if shape.distance(fill) - half < limit:
+
+                before = pad_pieces(fill.buffer(-CUT_NECK_MM).buffer(CUT_NECK_MM))
+                for key, caps in candidates.items():
+                    grow = self.pair_clearance(net, closer_key_net(key))
+                    cut = shapes(caps, grow)
+                    if not cut.intersects(fill):
+                        continue
+                    after = fill.difference(cut).buffer(-CUT_NECK_MM).buffer(CUT_NECK_MM)
+                    if pad_pieces(after) > before:
                         blamed.setdefault(key, set()).add(net)
-                        break
         return blamed
 
     # -- pads ---------------------------------------------------------------

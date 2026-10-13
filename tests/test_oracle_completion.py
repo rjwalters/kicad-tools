@@ -873,3 +873,95 @@ class TestPerNetLinkGate:
         )
         after_zone = GeometricDRCResult(ran=True, error_count=0, unconnected_items=[zone_only])
         assert attribute_link_regressions(before, after_zone, near) == {}
+
+
+_CUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "R" (layer "F.Cu") (at 0 0)
+    (fp_text reference "U2" (at 0 0) (layer "F.SilkS"))
+    (pad "36" smd rect (at 150.3 87.25) (size 0.3 0.3) (layers "F.Cu") (net 2 "+3.3V"))
+    (pad "48" smd rect (at 153.8 87.25) (size 0.3 0.3) (layers "F.Cu") (net 2 "+3.3V"))
+    (pad "1" smd rect (at 152.0 90.0) (size 0.3 0.3) (layers "F.Cu") (net 2 "+3.3V"))
+  )
+  (zone (net 2) (net_name "+3.3V") (layer "F.Cu") (uuid "z33")
+    (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes)
+    (polygon (pts (xy 150 87) (xy 154 87) (xy 154 87.5) (xy 150 87.5)))
+    (filled_polygon (layer "F.Cu") (pts (xy 150 87) (xy 154 87) (xy 154 87.5) (xy 150 87.5)))
+    (filled_polygon (layer "F.Cu") (pts (xy 150 88) (xy 154 88) (xy 154 92) (xy 150 92)))
+  )
+)
+"""
+
+
+class TestCutAttribution:
+    def _closer(self):
+        from kicad_tools.router.oracle_completion import PourLinkCloser
+
+        return PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+
+    def test_only_copper_that_splits_a_foreign_fill_is_blamed(self, tmp_path):
+        """Exact for a ``Zone <-> Zone`` link, which proximity cannot place."""
+        path = tmp_path / "b.kicad_pcb"
+        path.write_text(_CUT_PCB)
+        footprints = {
+            # Stub + via across the +3.3V strip: U2.36 and U2.48 part ways.
+            "pad:GND:U2.35": _U2_35_WELD,
+            # A via punched through the +3.3V block: a hole, not a split.
+            "pad:GND:C2.1": [(152.0, 91.0, 152.0, 91.0, 0.3)],
+            "pad:GND:C1.1": [(160.0, 87.0, 160.0, 87.0, 0.3)],  # well clear
+            "pad:+3.3V:U2.36": [(152.0, 87.25, 152.0, 87.25, 0.3)],  # its own net
+        }
+        blamed = self._closer().cut_culprits(path, ["+3.3V"], footprints)
+        assert blamed == {"pad:GND:U2.35": {"+3.3V"}}
+
+    def test_loop_uses_the_cut_attributor_for_a_zone_zone_link(self, tmp_path):
+        b = TwoNetBoard(tmp_path, 2)
+        zone_link = DRCViolation(
+            type=ViolationType.UNCONNECTED_ITEMS,
+            type_str="unconnected_items",
+            severity=Severity.ERROR,
+            message="Missing connection between items",
+            locations=[Location(0.0, 0.0), Location(0.0, 0.0)],
+            items=["Zone [+3.3V] on F.Cu", "Zone [+3.3V] on F.Cu"],
+        )
+
+        def oracle(_path):
+            gnd, v33 = b.state()
+            return GeometricDRCResult(
+                ran=True, error_count=0, unconnected_items=_unconnected(gnd) + [zone_link] * v33
+            )
+
+        def closer(path, links, banned):
+            gnd, _ = b.state()
+            if "pad:GND:U2.35" in banned:
+                b.write(gnd - 1, 0)
+                return ClosureAttempt(applied=1, footprints={"pad:GND:C1.1": [(10, 5, 11, 5, 0.1)]})
+            b.write(0, 1)
+            return ClosureAttempt(
+                applied=2,
+                footprints={"pad:GND:C1.1": [(10, 5, 11, 5, 0.1)], "pad:GND:U2.35": _U2_35_WELD},
+            )
+
+        seen: list[tuple[str, ...]] = []
+
+        def cut(path, nets, footprints):
+            assert b.state() == (2, 0)  # called on the restored, pre-attempt board
+            seen.append(tuple(nets))
+            return {"pad:GND:U2.35": {"+3.3V"}} if "pad:GND:U2.35" in footprints else {}
+
+        res = run_oracle_completion(
+            b.path,
+            oracle=oracle,
+            closer=closer,
+            nets={"GND", "+3.3V"},
+            max_rounds=1,
+            cut_attributor=cut,
+        )
+        assert seen == [("+3.3V",)]
+        assert b.state() == (1, 0) and res.rounds[0].banned == ("pad:GND:U2.35",)
