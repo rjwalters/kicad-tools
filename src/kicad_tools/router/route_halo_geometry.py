@@ -407,10 +407,17 @@ class RouteHaloGeometry:
                 limit = margin + other_radius
                 if gapx * gapx + gapy * gapy >= limit * limit:
                     continue
-            if shape is None:
-                shape = LineString(((cax, cay), (cbx, cby))) if is_trace else Point(cax, cay)
-            distance = shape.distance(other_shape)
             if not is_trace and not other_trace:
+                # Issue #5617: ``distance`` is read ONLY by the via-vs-via
+                # drill-pitch floor below.  It used to be measured with
+                # shapely for every surviving neighbour -- including every
+                # trace-candidate and via-vs-trace pair, where the value was
+                # dead (the trace/via and trace/trace verdicts come from the
+                # clearance kernel).  Same value, same comparison, same
+                # verdict; the shapely call just runs where it is consumed.
+                if shape is None:
+                    shape = Point(cax, cay)
+                distance = shape.distance(other_shape)
                 if (
                     same_net
                     and abs(candidate.x - other.x) < 1e-6
@@ -453,6 +460,10 @@ class RouteHaloGeometry:
             elif table is not None:
                 pair = table.required_clearance(own_name, names.get(other.net, ""))
                 if pair > required:
+                    if shape is None:
+                        shape = (
+                            LineString(((cax, cay), (cbx, cby))) if is_trace else Point(cax, cay)
+                        )
                     a, b = nearest_points(shape, other_shape)
                     shared_layer = layer if is_trace else (other.layer if other_trace else None)
                     if not _attach_zone_exempts(
