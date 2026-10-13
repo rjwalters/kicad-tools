@@ -259,6 +259,9 @@ themselves ([#5985]):
   output carries `pintype` ([#5998]). A buck converter's switch-node pin
   (`SW`, `LX`, `PH`) is typed `power_out`, but `kct detect-mistakes` does not
   treat the switch node as a rail.
+- **Boards 00 and 01** call it right after they write the unrouted PCB, and
+  their committed unrouted and routed outputs carry `pintype` ([#6025]).
+  Every pin on these boards is `passive`, so no new rails appear.
 - **Other boards** are not wired yet, and their committed outputs carry no
   `pintype` ([#6025]). To annotate a board by hand, run this on its unrouted
   and routed PCBs. It edits only the pads' `pinfunction`/`pintype` children
