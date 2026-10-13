@@ -1924,7 +1924,7 @@ esac
 [ "$MERGE_RC" -eq 0 ] && { LOOM_AUTO_MERGE_TIMEOUT=420 \
   ./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto --redate-stale-checks || MERGE_RC=$?; }
 
-if [ "$MERGE_RC" -eq 7 ] || [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ] || [ "$MERGE_RC" -eq 6 ]; then
+if [ "$MERGE_RC" -eq 7 ] || [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ]; then
   # Not failures: nothing merged, PR stays approved. See "exit codes 3-7" below.
   echo "PR #$PR_NUMBER not merged this pass (exit $MERGE_RC) — re-queuing instead of failing"
 elif [ "$MERGE_RC" -ne 0 ]; then
@@ -3174,7 +3174,7 @@ This PR met all safety criteria but the merge operation failed. A human will nee
 *Automated by Champion role*"
 ```
 
-### Exception: exit codes 3-7 — not merged, re-queue, not a failure (#5579, #8508, #8896, #10167, #10256)
+### Exception: exit codes 3-7 — not merged, re-queue, not a failure (#5579, #8508, #8896, #10256)
 
 Never the failure exit **1**; each means "the merge did not happen":
 
@@ -3185,7 +3185,6 @@ Never the failure exit **1**; each means "the merge did not happen":
 - **5** — `--auto`'s bounded settle-wait expired; no required check went red.
   **Do not "fix" a recurring 5 by raising `LOOM_AUTO_MERGE_TIMEOUT`** (pinned
   under Step 3's own timeout, #9096); re-queuing is cheap.
-- **6** — another PR holds the base's chain-head merge lock: a bounded defer.
 - **7** — `merge-pr.sh` ran: a sequencing hold (`LOOM-SEQUENCED-HOLD`,
   #11330), never a stall. Or Step 3's: `merge-queue step` gave no direct
   verdict, so `merge-pr.sh` never ran (#10256). QUEUED / DROPPED / HANDED-OFF /

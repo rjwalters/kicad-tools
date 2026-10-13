@@ -499,21 +499,6 @@ else
     echo -e "  ${RED}FAIL${NC}: champion-pr-merge.md does not wire merge-pr.sh's exit 5 (#8896)"
 fi
 
-# #10167's exit 6 (deferred behind another PR's chain-head merge lock) is the
-# same family: branched on in Step 3, listed in the exception section, and
-# documented in the script header and the exceptions doc.
-TESTS_RUN=$((TESTS_RUN + 1))
-if [[ -f "$CHAMPION_MD" ]] && grep -q '"\$MERGE_RC" -eq 6' "$CHAMPION_MD" \
-   && grep -q '^- \*\*6\*\* — ' "$CHAMPION_MD" \
-   && grep -q '^#   6 = deferred' "$MERGE_PR_SRC" \
-   && [[ -f "$EXIT_CODE_DOC" ]] && grep -q '^| `6` |' "$EXIT_CODE_DOC"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: exit 6 (chain-head merge lock defer) is wired in Champion and documented (#10167)"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: exit 6 (chain-head merge lock defer) is not wired/documented (#10167)"
-fi
-
 # #10628: Champion's exit 7 (merge-queue step withheld the direct merge) is
 # listed next to 3-6 in the exception section AND in the exceptions doc.
 TESTS_RUN=$((TESTS_RUN + 1))

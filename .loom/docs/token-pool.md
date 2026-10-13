@@ -2348,6 +2348,15 @@ CLI: [`runtime-model-trials.md` § "API-key account pool"](runtime-model-trials.
 convergence on an operator-maintained source of truth, so an ephemeral or
 autoscaled host that nobody runs `add` on still boots with the fleet's accounts.
 
+**Live marking from the egress proxy (#11300).** When a launch runs behind the
+credential proxy, the proxy sees a 429 or quota response before the harness's
+retry ladder gives up, and bad-marks that launch's account immediately (same
+model-class scoping and reset-aligned cooldown as the log-based marking above;
+escalate-only, once per level per launch). With observe mode on it also exports
+per-request, per-seat usage telemetry (counts and classified error codes only,
+never bodies or credentials). Details:
+[`runtime-adapters.md` § "Observe mode"](runtime-adapters.md#observe-mode-passive-per-request-telemetry-issue-11300-slice-1).
+
 ### Kimi's Moonshot-platform API-key route (#8563)
 
 Kimi Code CLI has **two** distinct credential shapes, and only one of them is
