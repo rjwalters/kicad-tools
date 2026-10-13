@@ -715,6 +715,78 @@ results, a differential run of both `kct` implementations on our fleet \
 would be a cheap bug-finder in both directions.\
 """
 
+[projects.backplane]
+name = "Backplane"
+slug = "i2cjak/Backplane"
+repo_url = "https://github.com/i2cjak/Backplane"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+# -> "ideas-adopted" once the `kct pcb diff` follow-up (#6417) merges.
+verdict = "complementary"
+# Root LICENSE is MIT. Bundled parts differ: backplane-step2glb embeds
+# OpenCascade via occt-import-js (LGPL-2.1), the Spleen font is BSD-2-Clause,
+# and the companion KiCad fork i2cjak/Backplane_KiCad is GPL-3.0. Only
+# Backplane's own MIT files could move here; we take ideas, not Bend code.
+license = "MIT"
+license_compat = "mit-clean"
+language = "Bend + TypeScript"
+stars = 430
+last_push = "2026-10-13"
+last_verified = "2026-10-12"
+# Commit read for issue #6406; the repo pushes several times a day.
+pinned_commit = "40379b590dc52e00c3ede1b1ebe3133a11e3c4da"
+research_docs = ["docs/research/backplane-kistack-evaluation.md"]
+summary = """
+an agentic KiCad/FreeCAD hub: Claude Code, Codex and others work on a \
+local project while board, schematic and 3D viewers redraw each save in \
+a browser, phone or desktop app. It snapshots the KiCad files after \
+every tool call onto a hidden git ref (private index, never the user's) \
+and compares any two versions as a uuid-keyed removed/changed/added \
+board diff -- geometric only, no DRC or LVS. Agents get the exact \
+`kicad-cli`, the canonical files and the KiStack skills. Its board diff \
+is the idea we lacked for reviewing routing PRs (#6417).\
+"""
+reeval_trigger = """
+When `kct pcb diff` (#6417) lands, move the verdict to `ideas-adopted`. \
+If Backplane adds DRC/LVS-aware diffing or exposes its history as a CLI, \
+re-check whether it can review our routing PRs directly.\
+"""
+
+[projects.kistack]
+name = "KiStack"
+slug = "American-Embedded/KiStack"
+repo_url = "https://github.com/American-Embedded/KiStack"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "evaluated-not-adopted"
+# LICENSE is verbatim MIT (American Embedded, LLC); GitHub cannot classify it.
+# skills/export/references/*.md appear transcribed from KiCad's user docs
+# (GPL-3.0-or-later / CC-BY-3.0) -- copy none of them. The same MIT LICENSE
+# is vendored inside kicadmium (skills/kistack/LICENSE).
+license = "MIT"
+upstream_license_detected = "NOASSERTION"
+license_compat = "mit-clean"
+language = "Markdown (agent skills)"
+stars = 397
+last_push = "2026-09-24"
+last_verified = "2026-10-12"
+pinned_commit = "8494dbde095669df081950cbb6b24d08a21e25b0"
+research_docs = ["docs/research/backplane-kistack-evaluation.md"]
+summary = """
+ten human-written KiCad agent skills (553 lines of prose) for \
+schematics, symbols (KLC), footprints (kicad-library-tools), layout, \
+BOM, exports, Gerber review, panelizing and product renders; Backplane \
+and kicadmium both ship it. Overlaps our `/kct:*` skills, but its layout \
+skill tells agents to route by hand and avoid autorouters -- the \
+opposite of our fully automated bar.\
+"""
+reeval_trigger = """
+A layout skill that drives an autorouter plus DRC/LVS gates, or skills \
+that call `kct`, would make it a candidate to recommend alongside ours.\
+"""
+
 [projects.kicad-happy]
 name = "kicad-happy"
 slug = "aklofas/kicad-happy"
