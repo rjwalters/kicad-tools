@@ -952,7 +952,7 @@ class PourLinkCloser:
                 force_pads=force,
                 foreign_fills_yield=fills_yield,
                 strict_drill_overlap=True,
-                **({"preferred_sites": self.preferred_sites} if self.preferred_sites else {}),
+                preferred_sites=self.preferred_sites,
             )
 
         force: frozenset[str] = frozenset()
