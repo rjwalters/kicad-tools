@@ -1043,9 +1043,11 @@ class PourLinkCloser:
     ) -> None:
         """Route every link in ``links``; commit each under its variant's key.
 
-        ``banned`` holds route keys withdrawn earlier (Issue #6412): each
-        variant -- direct (bare key), ``#plane`` join, ``#island`` join -- is
-        skipped only when its own key is banned.  ``run_oracle_completion``
+        ``banned`` holds route keys withdrawn earlier (Issue #6412).  A banned
+        bare key (the direct route) withdraws the whole link, as before; the
+        ``#plane`` and ``#island`` joins are each skipped only when their own
+        key is banned, so a withdrawn plane join leaves the nearest-island
+        join eligible.  ``run_oracle_completion``
         seeds ``banned`` with the keys of earlier KEPT rounds (``settled``),
         so a kept ``#plane`` route that left its link reported makes the next
         round try the ``#island`` join -- the intended "try something else".
@@ -1131,9 +1133,18 @@ class PourLinkCloser:
                 if net_number is None:
                     continue
                 rules = rules_for(lk.net)
+                route_key = _route_key(lk)
+                if route_key in banned:
+                    # A withdrawn DIRECT route still withdraws the whole link
+                    # (the pre-#6412 behaviour): only a withdrawn ``#plane``
+                    # join unlocks the ``#island`` join.  On board 04 (grid)
+                    # letting the joins of 16 withdrawn direct routes run used
+                    # the last retry on copper that raised DRC again, and the
+                    # round lost the one link it used to close (17 -> 16 on
+                    # main, 17 -> 17 with them).
+                    continue
                 ta, tb = terminal(lk.a, net_number), terminal(lk.b, net_number)
                 route = None
-                route_key = _route_key(lk)
                 #: Variants skipped because their key is banned, and whether
                 #: any unbanned variant was actually tried (Issue #6412).
                 withdrawn: list[str] = []
@@ -1166,14 +1177,11 @@ class PourLinkCloser:
                                 commit(r, f"route:{lk.net}:island{n_isl}", net_number)
                     continue
                 if ta is not None and tb is not None:
-                    if route_key in banned:
-                        withdrawn.append(route_key)
-                    else:
-                        tried = True
-                        # Route from the pad end when there is one (its axis aligns the grid).
-                        if ta.label in ("via", "track") and tb.label not in ("via", "track"):
-                            ta, tb = tb, ta
-                        route = route_link(pcb, net_number, lk.net, ta, tb, rules, model=model)
+                    tried = True
+                    # Route from the pad end when there is one (its axis aligns the grid).
+                    if ta.label in ("via", "track") and tb.label not in ("via", "track"):
+                        ta, tb = tb, ta
+                    route = route_link(pcb, net_number, lk.net, ta, tb, rules, model=model)
                 if route is None and lk.net not in joined_nets:
                     # Island join: KiCad says these two items are apart.  Grow from
                     # the endpoint's island to the nearest other island of the net.

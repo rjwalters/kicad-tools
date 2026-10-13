@@ -503,6 +503,19 @@ class TestWithdrawnPlaneJoinFallsBackToIsland:
         assert "every route withdrawn for KiCad DRC" in attempt.notes[0]
         assert not any("no clearance-legal route" in n for n in attempt.notes)
 
+    def test_withdrawn_direct_route_still_withdraws_the_link(self, tmp_path):
+        """A banned bare key keeps the pre-#6412 whole-link ban: no join is tried."""
+        pytest.importorskip("shapely")
+        from kicad_tools.router.oracle_completion import PourLinkCloser, _route_key
+
+        lk = _r1_zone_link()
+        closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+        board = self._board(tmp_path, island=True)
+        attempt = ClosureAttempt()
+        closer._route_links(board, [lk], attempt, frozenset({_route_key(lk)}))
+        assert attempt.applied == 0 and attempt.footprints == {}
+        assert attempt.notes == []
+
     def test_withdrawn_plane_join_retries_nearest_island_same_round(self, tmp_path):
         """T2: the loop's retry routes ``#island`` instead of dropping the link."""
         pytest.importorskip("shapely")
