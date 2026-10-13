@@ -4318,6 +4318,9 @@ class Autorouter:
         coupled: list[Any] = []
         reserved: dict[int, list[tuple[str, str]]] = {}
         self._lattice_pair_outcomes = {}
+        # Issue #6437: net ids of EVERY detected pair (engaged or not), so the
+        # pad-class repair never moves pair-net copper whatever its key shape.
+        self._lattice_pair_net_ids: frozenset[int] = frozenset()
         if not self.net_names:
             return coupled, reserved
         try:
@@ -4343,6 +4346,12 @@ class Autorouter:
             # Defensive: detection must never break routing.
             return coupled, reserved
 
+        self._lattice_pair_net_ids = frozenset(
+            net_id
+            for d in detected
+            for net_id in (d.pair.positive.net_id, d.pair.negative.net_id)
+            if net_id
+        )
         for d in detected:
             p_name = d.pair.positive.net_name
             n_name = d.pair.negative.net_name
@@ -4602,6 +4611,8 @@ class Autorouter:
             # Issue #6373: a declined coupled pair falls back to two
             # single-ended legs instead of leaving its main run open.
             uncoupled_fallback=True,
+            # Issue #6437: the pad-class repair never moves pair-net copper.
+            frozen_nets=getattr(self, "_lattice_pair_net_ids", frozenset()),
         )
         self._lattice_negotiation_stats = stats
         # Issue #4477 (epic #4465, Phase 4): copy the per-connection decline
@@ -4622,11 +4633,26 @@ class Autorouter:
         )
         # Issue #6395: say what the pad-side class repair did, honestly.
         repair = getattr(pf, "class_pad_repair_stats", None)
-        if repair is not None and repair.found:
+        if repair is not None and repair.skipped == "voltage-map":
+            print(
+                "  Pad class clearance (#6395): skipped -- HV pairwise clearance "
+                "(--voltage-map) is not modelled by the repair"
+            )
+        elif repair is not None and (repair.found or repair.pair_skipped or repair.via_found):
             print(
                 f"  Pad class clearance (#6395): {repair.repaired}/{repair.found} "
                 f"track-pad shortfall(s) moved clear"
                 + (f"; {repair.remaining} remain" if repair.remaining else "")
+                + (
+                    f"; {repair.pair_skipped} on diff-pair nets left in place"
+                    if repair.pair_skipped
+                    else ""
+                )
+                + (
+                    f"; {repair.via_remaining} via-pad shortfall(s) not repaired"
+                    if repair.via_remaining
+                    else ""
+                )
             )
         if pf.failure_reasons:
             by_reason: dict[str, list[str]] = {}

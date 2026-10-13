@@ -32,23 +32,30 @@ as well, which models a round pad as its full square, so that the self-check
 agrees with DRC whenever a move allows it.  A shortfall it cannot clear is left
 in place and counted, and the pre-save clearance check still reports it.
 
-Scope: single-ended connections.  Coupled diff-pair legs and their vertices are
-never moved (a one-sided move would break the pair geometry); they still count
-as foreign copper for everyone else.  A board with an HV pairwise projection
-(``--voltage-map``) is skipped entirely, since its attach-zone waivers are not
-modelled here.
+Scope: single-ended connections on non-pair nets (issue #6437).  Every net of a
+detected diff pair is frozen, whatever key shape its copper has: coupled legs,
+uncoupled-fallback legs (#6373), the single-ended stubs to a pair net's extra
+pads, and a declined pair routed entirely on the ordinary star.  Moving any of
+them changes the pair's skew (board 03 USB_D: 12.170 -> 12.179 mm), so their
+shortfalls are counted as ``pair_skipped`` and left for the pre-save check to
+report; they still count as foreign copper for everyone else.  Via-vs-pad
+shortfalls are reported (``via_found`` / ``via_remaining``) but never repaired:
+moving a via moves copper on every layer plus all its incident segments.  A
+board with an HV pairwise projection (``--voltage-map``) is skipped, since its
+attach-zone waivers are not modelled here; the skip is reported as
+``skipped == "voltage-map"`` so the router can log it.
 """
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..authored_clearance import pad_authored_floor
-from ..clearance_shapes import copper_gap, pad_shape, segment_shape
+from ..clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 from ..primitives import Pad, Route, Segment, pad_half_extents
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -74,6 +81,13 @@ class ClassPadRepairStats:
     found: int = 0
     repaired: int = 0
     remaining: int = 0
+    #: Shortfalls on diff-pair net copper, left in place (issue #6437).
+    pair_skipped: int = 0
+    #: Via-vs-pad shortfalls found / left (vias are never moved, so equal).
+    via_found: int = 0
+    via_remaining: int = 0
+    #: Why the repair did not run at all (``"voltage-map"``), else ``None``.
+    skipped: str | None = None
 
 
 @dataclass
@@ -131,6 +145,7 @@ def repair_class_pad_pairs(
     net_classes: Mapping[object, object | None],
     *,
     repairable: set[object] | None = None,
+    frozen_nets: Collection[int] = frozenset(),
     max_passes: int = 4,
 ) -> ClassPadRepairStats:
     """Clear track-vs-pad shortfalls of the pad's own class (in place).
@@ -144,11 +159,17 @@ def repair_class_pad_pairs(
         net_classes: connection key -> net class (``None`` = board default),
             for every key in ``routes``.
         repairable: keys whose copper may move (default: all of ``routes``).
+        frozen_nets: net ids whose copper never moves, whatever its key (the
+            diff-pair nets, issue #6437); their shortfalls are counted in
+            ``pair_skipped``.
         max_passes: repair sweeps; each re-detects shortfalls on the moved copper.
     """
     stats = ClassPadRepairStats()
     classes = pf.pad_class_clearances
-    if classes is None or not routes or pf._pairwise is not None:
+    if classes is None or not routes:
+        return stats
+    if pf._pairwise is not None:
+        stats.skipped = "voltage-map"
         return stats
     pads: Sequence[Pad] = pf.pads
     floors = pf.rules.net_clearance_floors
@@ -156,7 +177,9 @@ def repair_class_pad_pairs(
     pad_req = [max(classes[i], pad_authored_floor(p, floors), base) for i, p in enumerate(pads)]
     if not any(r > base + _EPS for r in pad_req):
         return stats
+    frozen = frozenset(frozen_nets)
     movable = set(routes) if repairable is None else set(repairable) & set(routes)
+    movable = {key for key in movable if routes[key].net not in frozen}
     pad_layers = [set(pf._pad_layer_indices(p)) for p in pads]
     layer_index: dict[Any, int | None] = {}
 
@@ -229,6 +252,38 @@ def repair_class_pad_pairs(
                     out.append(_Shortfall(key, idx, i, required, gap))
         out.sort(key=lambda s: s.gap - s.required)
         return out
+
+    # Issue #6437: diff-pair net copper stays put, but its shortfalls are
+    # counted, never hidden.
+    stats.pair_skipped = sum(
+        len(pad_shortfalls(key, seg, class_only=True))
+        for key, route in routes.items()
+        if route.net in frozen
+        for seg in route.segments
+    )
+    # Via-vs-pad shortfalls: reported only (a via move drags every layer).
+    n_layers = pf.layer_stack.num_layers
+    for key, route in routes.items():
+        own = own_clr[key]
+        for via in route.vias:
+            la, lb = lidx(via.layers[0]), lidx(via.layers[1])
+            if la is None or lb is None:
+                span = set(range(n_layers))
+            else:
+                span = set(range(min(la, lb), max(la, lb) + 1))
+            shape = via_shape(via)
+            r = via.diameter / 2.0 + reach_max
+            for i, pad in enumerate(pads):
+                if pad.net == route.net or pad_req[i] <= own + _EPS:
+                    continue
+                if not (span & pad_layers[i]):
+                    continue
+                hw, hh = pad_half_extents(pad)
+                if abs(pad.x - via.x) > hw + r or abs(pad.y - via.y) > hh + r:
+                    continue
+                if copper_gap(shape, pad_shape(pad)) < max(own, pad_req[i]) - _EPS:
+                    stats.via_found += 1
+    stats.via_remaining = stats.via_found
 
     stats.found = len(detect(strict=False))
     candidates = detect(strict=True)

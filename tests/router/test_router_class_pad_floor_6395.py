@@ -236,3 +236,138 @@ def test_shortfall_is_judged_by_the_kernel_not_the_pad_rectangle() -> None:
     strict = _pad_gap(seg, shape, pad, strict=True)
     assert kernel == pytest.approx(0.21, abs=1e-3)
     assert strict < POWER < kernel
+
+
+# ---------------------------------------------------------------------------
+# Issue #6437: diff-pair nets are frozen; via shortfalls reported; HV skip logged.
+# ---------------------------------------------------------------------------
+
+
+def _coords(routes: dict) -> list:
+    return [(s.x1, s.y1, s.x2, s.y2) for r in routes.values() for s in r.segments]
+
+
+def test_repair_freezes_a_pair_nets_extra_pad_connection() -> None:
+    """An extra-pad stub of a pair net is keyed ``(net, seq)`` and repairable,
+    yet must not move: its net is frozen (board 03 USB_D skew 12.170 -> 12.179)."""
+    pf, routes = _repair_case()
+    before = _coords(routes)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), frozen_nets=frozenset({1}))
+    assert _coords(routes) == before
+    assert (stats.found, stats.repaired, stats.pair_skipped) == (0, 0, 1)
+
+
+def test_repair_freezes_an_uncoupled_fallback_leg() -> None:
+    """A ``(pc.key, "P")`` fallback leg (#6373) stays put and is counted."""
+    pf, routes = _repair_case()
+    leg = {(("pair", 1, 3), "P"): routes[(1, 0)]}
+    before = _coords(leg)
+    stats = repair_class_pad_pairs(
+        pf, leg, dict.fromkeys(leg), repairable=set(), frozen_nets=frozenset({1, 3})
+    )
+    assert _coords(leg) == before
+    assert (stats.repaired, stats.pair_skipped) == (0, 1)
+
+
+def test_repair_freezes_only_the_pair_net() -> None:
+    """Freezing another net leaves the ordinary single-ended repair intact."""
+    pf, routes = _repair_case()
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), frozen_nets=frozenset({7}))
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 1, 0, 0)
+
+
+def _pair_board() -> Autorouter:
+    """USB_D+ passes the Power-class GND pad at 0.175 mm; USB_D- runs clear.
+
+    ``coupled_routing`` is off, so the detected pair is declined and both
+    nets go entirely through the ordinary single-ended star.
+    """
+    cm = _class_map()
+    cm["USB_D+"] = cm["SIG"]
+    cm["USB_D-"] = cm["SIG"]
+    router = Autorouter(
+        30,
+        20,
+        strategy="lattice",
+        rules=_rules(),
+        net_class_map=cm,
+        layer_stack=LayerStack.two_layer(),
+    )
+    pin = {"width": 0.6, "height": 0.6, "number": "1"}
+    dp = {**pin, "net": 1, "net_name": "USB_D+"}
+    dn = {**pin, "net": 3, "net_name": "USB_D-"}
+    router.add_component("R1", [{**dp, "x": 5.0, "y": 10.0}])
+    router.add_component("R2", [{**dp, "x": 25.0, "y": 10.0}])
+    router.add_component("R3", [{**dn, "x": 5.0, "y": 16.0}])
+    router.add_component("R4", [{**dn, "x": 25.0, "y": 16.0}])
+    gnd = {"width": 0.6, "height": 0.6, "net": 0, "net_name": "GND"}
+    router.add_component(
+        "C1",
+        [
+            {**gnd, "number": "1", "x": 15.0, "y": _TIGHT_GND_Y},
+            {**gnd, "number": "2", "x": 15.0, "y": _TIGHT_GND_Y - 3.0},
+        ],
+    )
+    router.net_names[1] = "USB_D+"
+    router.net_names[3] = "USB_D-"
+    return router
+
+
+def test_declined_pair_routed_single_ended_is_frozen(capsys) -> None:
+    router = _pair_board()
+    routes = router.route_net(1)
+    assert routes and routes[0].segments
+    assert router._lattice_pair_net_ids == frozenset({1, 3})
+    stats = router._lattice_pathfinder.class_pad_repair_stats
+    assert (stats.found, stats.repaired, stats.pair_skipped) == (0, 0, 1)
+    # Left in place: still the 0.175 mm the search produced.
+    assert _min_gap_to_cap(router, routes) < POWER - EPS
+    assert "1 on diff-pair nets left in place" in capsys.readouterr().out
+
+
+def _via(x: float, y: float, net: int = 1):
+    from kicad_tools.router.primitives import Via
+
+    return Via(x=x, y=y, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=net)
+
+
+@pytest.mark.parametrize(("clearance", "expected"), [(0.175, 1), (0.25, 0)])
+def test_via_pad_shortfall_is_reported_not_moved(clearance: float, expected: int) -> None:
+    pf, routes = _repair_case()
+    gnd = pf.pads[2]
+    # Clear of the pad by ``clearance`` (edge to edge), below it.
+    via = _via(gnd.x, gnd.y - 0.3 - clearance - 0.3)
+    routes[(1, 0)].vias.append(via)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert (stats.via_found, stats.via_remaining) == (expected, expected)
+    assert (via.x, via.y) == (gnd.x, gnd.y - 0.3 - clearance - 0.3)
+
+
+def test_voltage_map_board_is_skipped_visibly() -> None:
+    pf, routes = _repair_case()
+    pf._pairwise = object()  # any HV projection disables the repair
+    before = _coords(routes)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert stats.skipped == "voltage-map"
+    assert (stats.found, stats.repaired) == (0, 0)
+    assert _coords(routes) == before
+
+
+def test_router_logs_the_voltage_map_skip(monkeypatch, capsys) -> None:
+    import kicad_tools.router.lattice.class_pad_repair as cpr
+
+    real = cpr.repair_class_pad_pairs
+
+    def with_hv(pf, *args, **kwargs):
+        saved, pf._pairwise = pf._pairwise, object()
+        try:
+            return real(pf, *args, **kwargs)
+        finally:
+            pf._pairwise = saved
+
+    monkeypatch.setattr(cpr, "repair_class_pad_pairs", with_hv)
+    router = _board("lattice")
+    assert router.route_net(1)
+    assert router._lattice_pathfinder.class_pad_repair_stats.skipped == "voltage-map"
+    out = capsys.readouterr().out
+    assert "Pad class clearance (#6395): skipped -- HV pairwise clearance" in out
