@@ -23,6 +23,13 @@ track-to-via/pad gaps fell 0.2–25 µm short. `../repair_class_clearance_6396.p
 is the complete record of the fix. It moves 24 vias by 10–47 µm, re-attaches
 their stubs at 0/45/90°, and moves one GND escape by 7 µm, then re-pins both
 manifests. No class value changed. Run it with `--verify-from-git 810f833f` to
-reproduce both committed PCBs byte for byte from the pre-repair artifacts. The
-files under `evidence/` predate this repair; `build.py` regenerates the current
-evidence on every run.
+reproduce both committed PCBs byte for byte from the pre-repair artifacts.
+
+## Evidence refresh (Issue #6404)
+
+`build.py` fills the planes under the published router net classes, the same
+`.kicad_pro`/`.kicad_dru` that sit beside the routed board. Before this, the
+fills used the fab floor alone, and the saved fills failed native DRC without
+`--refill-zones`. The files under `evidence/` come from that build of the
+repaired copper. `scripts/boards/refresh_bundles_6404.py` regenerates them,
+the routed board's fills and the manufacturing bundle together.

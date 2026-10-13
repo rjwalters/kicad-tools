@@ -306,6 +306,30 @@ def external_load(
     }
 
 
+def router_net_classes(board_path: Path, net_class_map: Path) -> dict:
+    """The router's effective ``{net: NetClassRouting}`` map for this board.
+
+    Built the way ``kct route`` builds it (Issue #6390): the router defaults
+    plus the name classifier over the board's nets, overlaid with the
+    reviewed ``net_class_map.json``.  Declaring these classes in the native
+    project before the refill fills the planes against the same 0.175 mm
+    class clearances the published sidecars enforce (Issue #6404); filling
+    against the fab floor alone leaves saved fills that fail native DRC
+    without ``--refill-zones``.  Kept in step with
+    ``scripts/boards/declare_router_netclasses_6390.py:router_net_class_map``.
+    """
+    from kicad_tools.manufacturers.project_generator import board_net_names
+    from kicad_tools.router.net_class import classify_and_apply_rules
+    from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP, net_class_map_from_dict
+
+    nets = sorted(n for n in (board_net_names(board_path) or ()) if n)
+    effective = dict(DEFAULT_NET_CLASS_MAP)
+    for name, routing in classify_and_apply_rules(dict(enumerate(nets, 1))).items():
+        effective.setdefault(name, routing)
+    effective.update(net_class_map_from_dict(json.loads(net_class_map.read_text())))
+    return effective
+
+
 def kct_design_gate_passes(report: dict, returncode: int, manifest_present: bool) -> bool:
     """Allow only an explicitly absent export after every design gate passes."""
     meta = report.get("meta_checks", {})
@@ -394,6 +418,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         get_profile("jlcpcb").get_design_rules(layers=6),
         manufacturer_id="jlcpcb",
         layers=6,
+        router_net_classes=router_net_classes(board_path, source / "net_class_map.json"),
     )
     subprocess.run(
         [
