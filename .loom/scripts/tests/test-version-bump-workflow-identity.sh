@@ -53,23 +53,32 @@
 #   4. Wiring + ordering: the token is minted BEFORE checkout, checkout
 #      consumes it, the push step gets it via `GH_TOKEN`, and the commit
 #      identity is derived from the App slug the mint step returned.
-#   5. Failure behavior: the bot-identity lookup runs under `set -euo pipefail`
+#   5. Failure behavior: every run: script (gate and bump) starts with
+#      `set -euo pipefail`; the bot-identity lookup runs under it
 #      and BEFORE the first git mutation, so absent/failed credentials abort
 #      the job rather than committing with a wrong identity.
-#   6. The no-self-trigger invariant (#7743): the trigger is exactly
+#   6. The no-self-trigger invariant (#7743): the push trigger is exactly
 #      `push` -> `main` -> `defaults/**`, and the bump commit stages only
 #      version-bearing files -- never anything under `defaults/` -- so the
 #      workflow's own push can never re-trigger it. An App installation token
 #      DOES trigger workflows (unlike GITHUB_TOKEN), which makes this the load-
 #      bearing loop guard rather than a belt-and-braces one.
 #   7. Serialized-not-cancelled concurrency and the bounded retry survive.
+#   9. The release-cadence gate (#11174): hourly `schedule` + `workflow_dispatch`
+#      (`force`/`reason`) triggers exist; checkout has full history (blob:none)
+#      for the last-bump lookup; the gate step runs scripts/version-bump-gate.sh
+#      before the toolchain steps, which are gated on its verdict; the gate is
+#      re-checked inside the retry loop before each bump; `inputs.reason` only
+#      reaches a shell through `env:`; RELEASE_MIN_INTERVAL comes only from
+#      `vars.`; a forced commit records actor + reason; and the workflow still
+#      makes exactly one `gh` call (the bypass ledger, call-bypass-baseline.toml).
 #   8. Mutation controls (durable, not ad-hoc): the suite re-runs itself
 #      against mutated copies of the workflow and requires each one to FAIL on
 #      the specific assertion that guards it -- every positive anchor commented
 #      out, checkout's token line deleted / commented / hidden in a trailing
 #      comment, a GITHUB_TOKEN revert, a widened path filter, a `contents:
-#      write` grant, a staged `defaults/` path, and the identity lookup moved
-#      after the first mutation. The unmodified workflow is the positive
+#      write` grant, a staged `defaults/` path, the identity lookup moved
+#      after the first mutation, and each Case 9 cadence-gate regression. The unmodified workflow is the positive
 #      control. This is what stops the comment-blindness hole from reopening.
 #
 # Any of these that changes deliberately should be updated here in the same
@@ -355,8 +364,16 @@ echo ""
 # ---------------------------------------------------------------------------
 echo "Case 5: failure behavior"
 
-assert_present 'set -euo pipefail' \
-    "Case 5: the bump script runs under set -euo pipefail (a failed lookup aborts)"
+# Every run: script (the gate and the bump), not just one of them: a gate
+# that swallows a failure would read as a verdict.
+RUN_BLOCKS="$(workflow_code | grep -c '^ *run: |$' || true)"
+STRICT_RUNS="$(workflow_code | awk '/^ *run: \|$/{getline; if ($0 ~ /^ +set -euo pipefail$/) n++} END {print n + 0}')"
+if [[ "$RUN_BLOCKS" -gt 0 && "$STRICT_RUNS" -eq "$RUN_BLOCKS" ]]; then
+    pass "Case 5: every run: script starts with set -euo pipefail (a failed lookup aborts)"
+else
+    fail "Case 5: every run: script starts with set -euo pipefail (a failed lookup aborts)" \
+        "$STRICT_RUNS of $RUN_BLOCKS run: blocks start with set -euo pipefail"
+fi
 
 assert_order 'bot_id="$(gh api' 'for attempt in' \
     "Case 5: bot identity is resolved before the first git mutation"
@@ -433,13 +450,127 @@ assert_present 'group: version-bump-on-merge' \
     "Case 7: runs are serialized in one concurrency group"
 
 assert_present 'cancel-in-progress: false' \
-    "Case 7: queued runs are never cancelled (each merge needs its own bump)"
+    "Case 7: queued runs are never cancelled (each re-checks the gate on the current tip)"
 
 assert_present 'attempts=5' \
     "Case 7: the bounded push retry is still 5 attempts"
 
 assert_present 'git checkout -B main origin/main' \
     "Case 7: each retry re-syncs to the current tip before re-bumping"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Case 9: the release-cadence gate (#11174)
+# ---------------------------------------------------------------------------
+echo "Case 9: release-cadence gate"
+
+assert_matches '^  schedule:$' \
+    "Case 9: a schedule trigger exists (daily catch-up for a quiet day)"
+assert_matches '^    - cron: "[0-9]+ \* \* \* \*"$' \
+    "Case 9: the catch-up cron is hourly (worst case = interval + ~1 h)"
+assert_matches '^  workflow_dispatch:$' \
+    "Case 9: a workflow_dispatch trigger exists (operator hotfix path)"
+FORCE_TYPE="$(workflow_code | awk '/^      force:$/{f=1; next} f && /^      [a-z]/{exit} f && /type:/{print $2; exit}')"
+REASON_TYPE="$(workflow_code | awk '/^      reason:$/{f=1; next} f && /^      [a-z]/{exit} f && /type:/{print $2; exit}')"
+if [[ "$FORCE_TYPE" == "boolean" && "$REASON_TYPE" == "string" ]]; then
+    pass "Case 9: dispatch inputs are force (boolean) and reason (string)"
+else
+    fail "Case 9: dispatch inputs are force (boolean) and reason (string)" \
+        "force type='${FORCE_TYPE:-<none>}' reason type='${REASON_TYPE:-<none>}'"
+fi
+
+assert_present 'fetch-depth: 0' \
+    "Case 9: checkout fetches full history (the last bump may be weeks back)"
+assert_present 'filter: blob:none' \
+    "Case 9: the full-history checkout is a blob:none partial clone"
+assert_no_match 'fetch-depth: [1-9]' \
+    "Case 9: no shallow checkout (depth 1 makes the last-bump lookup wrong)"
+
+GATE_STEP="$(workflow_code | awk '/^        id: gate$/{f=1; next} f && /^      - /{exit} f {print}')"
+if grep -qF 'bash scripts/version-bump-gate.sh' <<<"$GATE_STEP"; then
+    pass "Case 9: the gate step runs scripts/version-bump-gate.sh"
+else
+    fail "Case 9: the gate step runs scripts/version-bump-gate.sh" \
+        "the step with id: gate does not invoke the gate script"
+fi
+assert_order 'id: gate' 'uses: dtolnay/rust-toolchain@' \
+    "Case 9: the gate runs before the Rust toolchain setup"
+assert_order 'id: gate' 'uses: actions/setup-node@' \
+    "Case 9: the gate runs before the Node setup"
+for tool in 'uses: dtolnay/rust-toolchain@' 'uses: actions/setup-node@'; do
+    n="$(line_of "$tool")"
+    prev=""
+    [[ -n "$n" ]] && prev="$(workflow_code | sed -n "$((n - 1))p")"
+    if [[ "$prev" == "      - if: steps.gate.outputs.decision == 'bump'" ]]; then
+        pass "Case 9: toolchain step is gated on the gate verdict: $tool"
+    else
+        fail "Case 9: toolchain step is gated on the gate verdict: $tool" \
+            "line before it was: '${prev:-<none>}'"
+    fi
+done
+BUMP_STEP_IF="$(workflow_code | awk '/name: Bump version and push/{f=1; next} f {print; exit}')"
+if [[ "$BUMP_STEP_IF" == "        if: steps.gate.outputs.decision == 'bump'" ]]; then
+    pass "Case 9: the bump step is gated on the gate verdict"
+else
+    fail "Case 9: the bump step is gated on the gate verdict" \
+        "line after the bump step name was: '${BUMP_STEP_IF:-<none>}'"
+fi
+
+LOOP_START="$(line_of 'for attempt in')"
+BUMP_LINE="$(line_of './scripts/version.sh bump')"
+IN_LOOP=""
+if [[ -n "$LOOP_START" && -n "$BUMP_LINE" ]]; then
+    IN_LOOP="$(workflow_code | sed -n "${LOOP_START},${BUMP_LINE}p" | grep -F 'bash scripts/version-bump-gate.sh' || true)"
+fi
+if [[ -n "$IN_LOOP" ]]; then
+    pass "Case 9: the gate is re-checked inside the retry loop, before each bump"
+else
+    fail "Case 9: the gate is re-checked inside the retry loop, before each bump" \
+        "no gate call between 'for attempt in' (line ${LOOP_START:-?}) and the bump (line ${BUMP_LINE:-?})"
+fi
+
+REASON_HITS="$(workflow_code | grep -nF 'inputs.reason' || true)"
+REASON_BAD="$(grep -vE '^[0-9]+: +[A-Z_]+: \$\{\{ inputs\.reason \}\}$' <<<"$REASON_HITS" || true)"
+if [[ -z "$REASON_HITS" ]]; then
+    fail "Case 9: inputs.reason reaches a shell only through env:" "inputs.reason is never passed"
+elif [[ -n "$REASON_BAD" ]]; then
+    fail "Case 9: inputs.reason reaches a shell only through env:" \
+        "template injection: inputs.reason used outside an env: entry" "$REASON_BAD"
+else
+    pass "Case 9: inputs.reason reaches a shell only through env:"
+fi
+
+INTERVAL_HITS="$(workflow_code | grep -nE 'RELEASE_MIN_INTERVAL:' || true)"
+INTERVAL_BAD="$(grep -vE '^[0-9]+: +RELEASE_MIN_INTERVAL: \$\{\{ vars\.RELEASE_MIN_INTERVAL \}\}$' <<<"$INTERVAL_HITS" || true)"
+if [[ -n "$INTERVAL_HITS" && -z "$INTERVAL_BAD" ]]; then
+    pass "Case 9: RELEASE_MIN_INTERVAL comes only from vars.RELEASE_MIN_INTERVAL"
+else
+    fail "Case 9: RELEASE_MIN_INTERVAL comes only from vars.RELEASE_MIN_INTERVAL" \
+        "${INTERVAL_BAD:-RELEASE_MIN_INTERVAL is never passed}"
+fi
+
+assert_present '-m "Forced-by: $ACTOR" -m "Reason: $FORCE_REASON"' \
+    "Case 9: a forced bump commit records the actor and the reason"
+assert_present '>>"$GITHUB_STEP_SUMMARY"' \
+    "Case 9: the gate verdict (deferred / nothing / bump) is written to the job summary"
+# A failing gate prints decision=error/reason=... to stdout; under set -e a
+# bare `out="$(...)"` would end the step before that reason is echoed or
+# summarised, so both gate invocations must capture the exit code instead.
+assert_present '--ref origin/main)" || rc=$?' \
+    "Case 9: a failing gate's reason is surfaced (exit code captured, not set -e)"
+assert_order '} >>"$GITHUB_STEP_SUMMARY"' 'exit "$rc"' \
+    "Case 9: the gate step exits with the gate's code only after writing the summary"
+assert_present '--ref origin/main)" || gate_rc=$?' \
+    "Case 9: a failing in-loop gate re-check surfaces its reason (exit code captured)"
+
+GH_CALLS="$(workflow_code | grep -cE '(^|[^[:alnum:]_.-])gh (api|pr|issue|release|run|workflow|repo|label|search)( |$)' || true)"
+if [[ "$GH_CALLS" -eq 1 ]]; then
+    pass "Case 9: exactly one gh call (the identity lookup; the gate is git-only)"
+else
+    fail "Case 9: exactly one gh call (the identity lookup; the gate is git-only)" \
+        "found $GH_CALLS gh invocations; defaults/forge/call-bypass-baseline.toml pins calls = 1"
+fi
 
 echo ""
 
@@ -539,13 +670,19 @@ GH_TOKEN: ${{ steps.app-token.outputs.token }}|Case 4: the bump/push step gets t
 APP_SLUG: ${{ steps.app-token.outputs.app-slug }}|Case 4: the commit identity is derived from the minted App's slug
 git config user.name "$bot_login"|Case 4: git identity is the App bot login, not a hardcoded name
 uses: actions/checkout@|Case 4: the token is minted before checkout
-set -euo pipefail|Case 5: the bump script runs under set -euo pipefail
+set -euo pipefail|Case 5: every run: script starts with set -euo pipefail
 bot_id="$(gh api|Case 5: bot identity is resolved before the first git mutation
 branches: [main]|Case 6: trigger is restricted to pushes on main
 group: version-bump-on-merge|Case 7: runs are serialized in one concurrency group
 cancel-in-progress: false|Case 7: queued runs are never cancelled
 attempts=5|Case 7: the bounded push retry is still 5 attempts
 git checkout -B main origin/main|Case 7: each retry re-syncs to the current tip before re-bumping
+schedule:|Case 9: a schedule trigger exists
+workflow_dispatch:|Case 9: a workflow_dispatch trigger exists
+fetch-depth: 0|Case 9: checkout fetches full history
+filter: blob:none|Case 9: the full-history checkout is a blob:none partial clone
+id: gate|Case 9: the gate step runs scripts/version-bump-gate.sh
+-m "Forced-by: $ACTOR"|Case 9: a forced bump commit records the actor and the reason
 ANCHORS
 
     # --- 8d: structural regressions (the ad-hoc controls from PR #7891,
@@ -564,7 +701,7 @@ ANCHORS
     # executable line -- proves trailing-comment stripping, not just full-line.
     awk '
         /^ +token: \$\{\{ steps.app-token.outputs.token \}\}$/ { next }
-        /^ +fetch-depth: 1$/ { print $0 " # token: ${{ steps.app-token.outputs.token }}"; next }
+        /^ +fetch-depth: 0$/ { print $0 " # token: ${{ steps.app-token.outputs.token }}"; next }
         { print }
     ' "$WORKFLOW" >"$MUTANT"
     expect_child_fails "Case 4: checkout persists the App token in the remote URL" \
@@ -600,6 +737,74 @@ ANCHORS
     ' "$WORKFLOW" >"$MUTANT"
     expect_child_fails "Case 5: bot identity is resolved before the first git mutation" \
         "Case 8: identity lookup moved after the retry loop starts is rejected"
+
+    # --- 8e: release-cadence gate regressions (#11174) ---
+
+    # inputs.reason interpolated straight into a run: script (template injection).
+    awk '/^ +set -euo pipefail$/ && !done { print; print "          echo \"${{ inputs.reason }}\""; done=1; next } { print }' \
+        "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: inputs.reason reaches a shell only through env:" \
+        "Case 8: \${{ inputs.reason }} inside run: is rejected"
+
+    # The gate step stops running the gate script.
+    awk '/bash scripts\/version-bump-gate.sh/ && !done { done=1; next } { print }' "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: the gate step runs scripts/version-bump-gate.sh" \
+        "Case 8: gate step without the gate call is rejected"
+
+    # The in-loop re-check dropped (a racing bump would be bumped over).
+    awk '/gate="\$\(bash scripts\/version-bump-gate.sh/ { next } { print }' "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: the gate is re-checked inside the retry loop, before each bump" \
+        "Case 8: retry loop without the gate re-check is rejected"
+
+    # The in-loop re-check moved after the commit.
+    awk '
+        /gate="\$\(bash scripts\/version-bump-gate.sh/ { held = $0; next }
+        { print }
+        /git commit -m/ && held != "" { print held; held = "" }
+    ' "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: the gate is re-checked inside the retry loop, before each bump" \
+        "Case 8: gate re-check moved after the commit is rejected"
+
+    # Rust toolchain set up unconditionally (a deferred run pays for it).
+    awk '
+        /^ +- if: steps\.gate\.outputs\.decision == .bump.$/ && !done { pending = $0; next }
+        pending != "" {
+            if ($0 ~ /uses: dtolnay\/rust-toolchain@/) { sub(/^        uses:/, "      - uses:"); done = 1 }
+            else { print pending }
+            pending = ""
+        }
+        { print }
+    ' "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: toolchain step is gated on the gate verdict: uses: dtolnay/rust-toolchain@" \
+        "Case 8: ungated toolchain step is rejected"
+
+    # The bump step loses its gate condition.
+    awk '/name: Bump version and push/ { print; getline; if ($0 ~ /if: steps.gate/) next } { print }' \
+        "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: the bump step is gated on the gate verdict" \
+        "Case 8: ungated bump step is rejected"
+
+    # A hardcoded interval instead of the repo variable.
+    awk '/RELEASE_MIN_INTERVAL: \$\{\{ vars/ && !done { sub(/\$\{\{ vars\.RELEASE_MIN_INTERVAL \}\}/, "\"0\""); done=1 } { print }' \
+        "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: RELEASE_MIN_INTERVAL comes only from vars.RELEASE_MIN_INTERVAL" \
+        "Case 8: hardcoded RELEASE_MIN_INTERVAL is rejected"
+
+    # The gate's exit code no longer captured (set -e swallows the reason).
+    sed 's/--ref origin\/main)" || rc=\$?/--ref origin\/main)"/' "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: a failing gate's reason is surfaced (exit code captured, not set -e)" \
+        "Case 8: bare out=\"\$(gate)\" under set -e is rejected"
+
+    # Back to a shallow checkout.
+    sed 's|fetch-depth: 0|fetch-depth: 1|' "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: no shallow checkout" \
+        "Case 8: fetch-depth: 1 is rejected"
+
+    # A forge call added to the gate (the bypass ledger may only go down).
+    awk '/^ +set -euo pipefail$/ && !done { print; print "          gh release list --limit 1"; done=1; next } { print }' \
+        "$WORKFLOW" >"$MUTANT"
+    expect_child_fails "Case 9: exactly one gh call" \
+        "Case 8: an extra gh call is rejected"
 
     echo ""
 fi

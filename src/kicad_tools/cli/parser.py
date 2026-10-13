@@ -8437,7 +8437,10 @@ def _add_mcp_parser(subparsers) -> None:
         help="Configure MCP client integration",
         description=(
             "Auto-detect the kct binary and register `kct mcp serve` with an MCP "
-            "client: Claude Code (~/.claude/mcp.json), Claude Desktop, Codex CLI "
+            "client: Claude Code (user scope: `claude mcp add-json --scope user`, "
+            "or a direct merge into ~/.claude.json / $CLAUDE_CONFIG_DIR/.claude.json "
+            "when `claude` is not on PATH; ./.mcp.json with --scope project), "
+            "Claude Desktop, Codex CLI "
             "([mcp_servers.kct] in $CODEX_HOME/config.toml, default "
             "~/.codex/config.toml) or opencode (the kct entry in "
             "~/.config/opencode/opencode.json, or ./opencode.json with --project). "
@@ -8460,6 +8463,13 @@ def _add_mcp_parser(subparsers) -> None:
         metavar="DIR",
         help="opencode only: write the project-level opencode.json in DIR "
         "(default: current directory) instead of the user-level config",
+    )
+    setup_parser.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default=None,
+        help="claude-code only: user (default) registers the server in "
+        "~/.claude.json for every project; project writes ./.mcp.json",
     )
     setup_parser.add_argument(
         "--opencode-schema",

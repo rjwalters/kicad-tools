@@ -197,8 +197,10 @@ The findings:
   SHA. Removing that `push` run would be a separate, evidence-gated change and
   is **not** made here: `main` verification stays (rule 2).
 - **Interaction to watch in the pilot:** `version-bump-on-merge.yml` pushes
-  directly to `main` after merges. In a queue-enabled repository, each such
-  push moves the base under every queued entry. The pilot repository must
+  directly to `main`, at most once per `RELEASE_MIN_INTERVAL` (24 h by
+  default, #11174; see [`release-cadence.md`](release-cadence.md)). In a
+  queue-enabled repository, each such push moves the base under every queued
+  entry. The pilot repository must
   either route that bump through the queue or measure the rebuild churn it
   causes.
 

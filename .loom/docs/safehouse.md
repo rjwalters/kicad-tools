@@ -20,8 +20,7 @@ below.
 > operator steering has landed as phase 3b (#7947) — the persona that reads
 > intent and drives the typed surface is the `concierge` role, see
 > [Operator-agent persona: the Concierge](#operator-agent-persona-the-concierge-phase-3b-7947),
-> and the *typed* surface it drives is
-> [Inbound steering: ChatOps](#inbound-steering-chatops-phase-3a-7893);
+> and the typed ChatOps surface it drove has been removed (#11112);
 > carrying the judge verdict value in an event
 > payload (needs a frozen-taxonomy amendment) → follow-up; the **atomic
 > cross-host claim authority** (a real CAS behind the soft claim) → Phase 2 of
@@ -47,7 +46,6 @@ below.
 - [Delivery: session-scoped `--mcp-config` at spawn time](#delivery-session-scoped---mcp-config-at-spawn-time)
 - [Degradation contract (unchanged from phase 1)](#degradation-contract-unchanged-from-phase-1)
 - [Implementation (phase 2)](#implementation-phase-2)
-- [Inbound steering: ChatOps (phase 3a, #7893)](#inbound-steering-chatops-phase-3a-7893)
 - [Operator-agent persona: the Concierge (phase 3b, #7947)](#operator-agent-persona-the-concierge-phase-3b-7947)
 - [The daemon speaking first: digests and watch narrations (phase 4, #8762)](#the-daemon-speaking-first-digests-and-watch-narrations-phase-4-8762)
 <!-- toc:end -->
@@ -1952,207 +1950,6 @@ still resolves the loom entry point.
 > launcher is configurable (`safehouse.mcpCommand`) and a missing command
 > degrades to a logged skip rather than a broken server entry.
 
-## Inbound steering: ChatOps (phase 3a, #7893)
-
-Phase 1 gave the daemon a voice in the room. **Phase 3a gives it an ear** — a
-deliberately tiny one. An allowlisted operator can steer a running
-`loom-daemon` from Element without SSH-ing to the host.
-
-### The boundary (operator ruling, 2026-09-16)
-
-Two layers, not one:
-
-1. **`loom-daemon` keeps a closed, typed command enum.** It never interprets
-   natural language, never builds a shell command from room text, and refuses
-   anything outside the enum with a reply. This layer stays boring and
-   auditable.
-2. **Natural language lives in a separate operator-agent persona** (phase 3b,
-   its own issue) that reads human intent and *uses* this typed surface plus the
-   forge.
-
-### What enabling ChatOps puts in the daemon's TCB
-
-**Read this before turning it on.** Phase 1 was outbound only: safehouse could
-be wrong, absent, or hostile and the worst outcome was a missing room line.
-Inbound steering transfers trust — with `safehouse.chatops` enabled, **your
-homeserver, the room's membership, and `safehoused`'s sender stamping become
-part of the daemon's trusted computing base**:
-
-- **The homeserver** decides which account sent which event. It is the thing
-  that authenticates the operator; the daemon only compares the result against
-  an allowlist.
-- **Room membership** is the perimeter. Anyone who can post to the steering room
-  *as an allowlisted Matrix ID* can steer the daemon — the daemon has no second
-  factor and no separate credential of its own. Room access control is therefore
-  daemon access control.
-- **`safehoused`'s stamping** supplies the identity. The envelope's `from` is
-  stamped by `safehoused` from the local socket identity, never taken from the
-  message body (which is why spoofing is structurally impossible on this side).
-  A `safehoused` that stamps the wrong `from` bypasses the allowlist entirely —
-  the daemon cannot detect it.
-
-What that reach *is*, concretely: the ChatOps path round-trips through the
-daemon's own IPC socket, so an allowlisted sender can do exactly what an
-operator with shell access on that host could already do over IPC, no more —
-but they no longer need the shell access. The mitigations: an explicit allowlist
-(empty ⇒ off), a closed six-verb grammar, and a confirm-nonce on `cancel`. The
-non-mitigations, stated plainly: there is no rate limit, no audit outside the
-daemon's own log and event bus, and no capability the nonce withholds from an
-allowlisted sender.
-
-Treat the steering room as you would an SSH key for the host. A private,
-invite-only room with only operator accounts in it is the intended deployment;
-the signal room (`room`'s default) qualifies only if its membership already
-meets that bar.
-
-### The accepted language, in full
-
-| Command | Maps to | Nonce? |
-|---|---|---|
-| `status` | `Request::DaemonStatus` | no |
-| `dispatch <issue>` | `Request::DispatchSweep` (never `force`) | no |
-| `cancel <sweep-id>` | `Request::CancelSweep` | **yes** |
-| `unblock <issue>` | `Request::ClearQuarantine` | no |
-| `watch <issue>` | `Request::RegisterWatch` | no |
-| `confirm <nonce>` | redeems a pending destructive command | — |
-
-A leading `#` on a number is accepted (`dispatch #7893`). Verbs are
-case-insensitive. Everything else — a sentence, an unknown verb, an extra
-token, a shell metacharacter in an argument — is refused with a reply naming the
-accepted forms. `unblock` deliberately clears the **daemon's insta-crash
-quarantine**, not a forge label: labels remain the coordination substrate.
-
-### The four gates
-
-1. **Addressed to the daemon** — the envelope's `to` equals the persona, or the
-   body opens with an `@loom_daemon` / `loom_daemon:` mention. Anything else in
-   the room is ignored (not refused).
-2. **Sender on the allowlist** — compared against the **`from` safehoused
-   stamps from the socket identity**, never a sender the body claims. A
-   non-allowlisted sender gets a log line and a bus event, and deliberately
-   **no room reply** (replying would make the daemon an echo an unauthorized
-   party can drive).
-3. **Parses to a command** — see above.
-4. **Confirm-nonce for destructive commands** — `cancel` is answered with a
-   single-use nonce; the daemon executes only on `confirm <nonce>` from the
-   **same** sender within the TTL. Expired, replayed, and other-sender
-   confirmations are all refused. The nonce is never logged and never published
-   on the bus.
-
-Every accepted and refused command is logged **and** published on the event bus
-with the stamped sender identity, under `safehouse.chatops.accepted` /
-`.refused` / `.confirm_required`. These ride `Event::Generic`, so the frozen
-event taxonomy is unchanged and the audit trail is never narrated back into the
-room (no feedback loop).
-
-### Why `dispatch` is not nonce-gated (decision, #8021)
-
-`cancel` needs a confirm-nonce and `dispatch` does not, which is the asymmetry
-worth explaining: `dispatch` is the only forge-mutating verb and the only one
-that *spends* — tokens, shared forge API budget, and label churn on a real
-issue. "Gate the money verb too" was reconsidered explicitly and **declined**:
-
-- **The nonce is not a second authentication factor.** It is minted by the
-  daemon and delivered into the same room, to the same sender, over the same
-  channel. Anyone who can send as an allowlisted sender can also read the reply
-  and echo the nonce back. It defends against *accident and replay* — never
-  against a compromised sender — so it cannot be the control that protects
-  spend.
-- **Gating the common verb is what breaks the gate on the dangerous one.**
-  `dispatch` is the routine verb; a confirm round-trip on every one of them
-  trains a reflex, and a reflexive `confirm` is worse than no confirm at all for
-  `cancel`, which is the case the nonce exists for.
-- **A spurious dispatch is bounded and reversible.** It is never `force`, it is
-  subject to the daemon's ordinary concurrency caps / noop cooldown / dispatch
-  backoff, it is narrated into the room, and it can be `cancel`led (with a
-  nonce). A spurious `cancel` destroys in-flight work that re-running cannot
-  restore.
-- **ChatOps grants reach, not capability.** Every verb round-trips the daemon's
-  own IPC socket, where `dispatch` is ungated as well. A second factor at only
-  one of the two surfaces advertises a protection that does not exist.
-
-The accepted cost, stated so it is a choice and not an oversight: **an
-allowlisted sender can make this daemon spend tokens and forge budget with no
-second factor.** The allowlist plus the room's membership is the whole control
-(see the TCB section above).
-
-Revisit this if `dispatch` ever gains `force`, or if a verb arrives whose spend
-is unbounded per message (e.g. a multi-issue dispatch).
-`Command::requires_confirmation` in
-`loom-daemon/src/safehouse_chatops/command.rs` is the single place
-destructiveness is decided — adding a gated verb is one match arm there.
-
-### Configuration — off unless this block is present
-
-```jsonc
-"safehouse": {
-  // …phase 1 keys…
-  "chatops": {
-    "enabled": true,                                  // omit ⇒ on when the block exists
-    "allowedSenders": ["@you:example.org"],           // REQUIRED; empty ⇒ stays off
-    "room": null,                                     // default: the signal room
-    "confirmTtlSecs": 120                             // clamped to [10, 3600]
-  }
-}
-```
-
-| Env var | Overrides |
-|---|---|
-| `LOOM_SAFEHOUSE_CHATOPS_ENABLED` | `enabled` |
-| `LOOM_SAFEHOUSE_CHATOPS_SENDERS` | `allowedSenders`, comma/space separated |
-| `LOOM_SAFEHOUSE_CHATOPS_ROOM` | `room` |
-| `LOOM_SAFEHOUSE_CHATOPS_CONFIRM_TTL_SECS` | `confirmTtlSecs` |
-
-**Fail-closed by construction.** No `safehouse.chatops` block (or
-`safehouse.enabled` false) ⇒ no task, no socket, no subscription — an install
-without safehouse is byte-for-byte unaffected. A block naming no *usable* Matrix
-ID (`@localpart:server`) resolves to off with one `warn`, rather than to an
-enabled-but-accepts-nobody state.
-
-**`enabled` is parsed strictly (#8021).** Omitted ⇒ on (the block's presence is
-the opt-in); the literals `true` / `false` mean what they say; **anything that
-is not a JSON boolean means off, with a `warn`**. `"enabled": "false"` — the
-string, not the literal — is a realistic hand-edit typo, and it must not switch
-an inbound control channel on. `LOOM_SAFEHOUSE_CHATOPS_ENABLED` follows the same
-rule: set but unparseable is `false`, not "unset".
-
-**`room` defaults to the signal room, not `rooms.claims`.** Peer-claim traffic
-may be routed to a dedicated machine-chatter room (#4713) no human is joined to;
-steering must land where the operator actually is.
-
-### Implementation (phase 3a)
-
-- `loom-daemon/src/safehouse_chatops.rs` — config resolution, addressing, the
-  allowlist/parse/nonce router, event publication.
-- `loom-daemon/src/safehouse_chatops/command.rs` — the closed enum + parser.
-- `loom-daemon/src/safehouse_chatops/nonce.rs` — the single-use, TTL-bounded,
-  sender-bound confirmation ledger.
-- `loom-daemon/src/safehouse_chatops/runtime.rs` — the inbound task (one
-  dedicated connection built from phase 1's `SafehouseClient`, same
-  capped-backoff reconnect shape) and the `Command` → `Request` mapping,
-  round-tripped over the daemon's own IPC socket so the ChatOps path can never
-  do more than the operator could already do over IPC.
-- Started from `WorkspacePool::start_peer_coordination`, so inbound steering
-  shares one enablement decision with the rest of the daemon's room presence.
-
-> A sibling module rather than a `safehouse::` submodule because `safehouse.rs`
-> is frozen by the file-size ratchet ([file-size-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/file-size-policy.md)) — new
-> code lands in a new module, which is exactly what the ratchet is for.
-
-**Two structural properties a refactor must not quietly drop** (recorded because
-they are load-bearing and easy to lose, #8021):
-
-1. **Sender spoofing is impossible by construction, not by validation.**
-   `safehouse::Envelope` has no `from` field at all, so a client *cannot* assert
-   an identity; `safehoused` stamps it from the socket identity. Adding a
-   writable `from` to the envelope would turn the allowlist into a
-   self-attestation check.
-2. **The command enum is genuinely closed.** `Command` derives no
-   `Deserialize`, so there is no `#[serde(other)]` arm and no untagged fallback,
-   and `Verb::from_word` returns `Option` with an explicit `_ => None`. Deriving
-   `Deserialize` on it later — for a config file, a test fixture, anything —
-   would reopen it.
-
 ## Operator-agent persona: the Concierge (phase 3b, #7947)
 
 Phase 3a gave the daemon an ear that understands six typed verbs. **Phase 3b is
@@ -2197,8 +1994,7 @@ unrepresentable on **both** out-paths, not just on `relay`.
 
 ### `dispatch` is gated here even though it is not gated at the daemon
 
-3a leaves `dispatch` un-nonced on purpose (see
-[Why `dispatch` is not nonce-gated](#why-dispatch-is-not-nonce-gated-decision-8021)):
+3a leaves `dispatch` un-nonced on purpose (decision #8021):
 gating the routine verb trains a reflexive `confirm` that ruins the gate on the
 dangerous one. **That reasoning is about a human typing `dispatch 42`
 deliberately.** The concierge turns a probabilistic read of prose into the same

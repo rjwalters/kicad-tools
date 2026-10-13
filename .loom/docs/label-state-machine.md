@@ -216,20 +216,22 @@ gh pr edit <N> --remove-label "loom:operator"
   the new head naming the kind, and anything short of a positive proof — including
   a re-added `loom:operator`, which is a human re-asserting the hold — re-arms.
   See `champion-critical-file-hold.md` and `critical-file-hold.md`.
-- **Merge-risk hold** (criterion #2): the release is scoped to the *concern* — the
-  label is not re-asserted while the freshly-derived concern reads byte-identical
-  to the one already on record (#7048). A genuinely new concern re-holds and says
-  what changed.
+- **Merge-risk hold** (criterion #2): your removal (an `unlabeled` event after the
+  hold) **releases** it (#11416, superseding #7048's "respected, still held").
+  Champion re-reads the PR and, unless it finds a concern the hold did not name,
+  merges it itself on its next tick (criteria #3-#6 still apply), posting the
+  reversal comment. A genuinely new concern re-holds with a fresh notice naming
+  it; removing the label again releases that one.
 
-Neither release makes Champion merge the PR itself, and neither weakens the #8112
+Releasing a critical-file hold never makes Champion merge the PR (criterion #3
+still fails), and neither release weakens the #8112
 guard for any other label: a `loom:changes-requested` or `loom:review-requested`
 standing next to `loom:pr` still blocks the merge outright.
 
-Two consequences of a released hold, both intended and both shared with #7048's
-merge-risk case: the PR drops out of the `loom:operator`-keyed **Held-PR Census**
-count (it is a *label* census, and the point is that the label stops tracking your
-decision — the hold's marker comment is never removed, so it stays findable by
-comment search), and it becomes visible again to Doctor's Priority-1
+Two consequences of a released hold, both intended: the PR drops out of the
+`loom:operator`-keyed **Held-PR Census** count, but is listed on the census's
+`Released holds, not yet merged` line until it merges (#11416 — keyed on the
+hold marker, which is never removed), and it becomes visible again to Doctor's Priority-1
 `CONFLICTING` queue, which excludes held PRs (#5978). If Doctor does rebase it,
 the head moves and a critical-file hold re-arms on the new head — which is the
 correct outcome, not a regression: your release was about the diff you read.

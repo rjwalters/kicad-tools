@@ -3471,6 +3471,24 @@ fi
 # future refactor adds another early-return path between the two)
 clear_resync_marker
 
+# #10238: (re)provision the USER-SCOPE skill/agent links + dispatcher from the
+# source checkout this run synced from. Best-effort and NEVER fatal -- it must
+# not change this script's exit status. Skipped under --dry-run, when the
+# source is not a plain git checkout (e.g. a staging worktree), or with
+# LOOM_RESYNC_SKIP_USER_SCOPE=1.
+if [[ "$DRY_RUN" -eq 0 && "${LOOM_RESYNC_SKIP_USER_SCOPE:-0}" != "1" \
+      && -d "$SOURCE_ROOT/.git" && -r "$SOURCE_ROOT/scripts/install/provision-skills.sh" \
+      && -r "$SOURCE_ROOT/scripts/install/provision-dispatcher.sh" ]]; then
+    (
+        # shellcheck source=/dev/null
+        source "$SOURCE_ROOT/scripts/install/provision-dispatcher.sh"
+        # shellcheck source=/dev/null
+        source "$SOURCE_ROOT/scripts/install/provision-skills.sh"
+        provision_loom_dispatcher "$SOURCE_ROOT" >&2 || true
+        provision_loom_skills "${LOOM_HOME:-$HOME/.local/share/loom}" >&2 || true
+    ) || printf '%b\n' "${YELLOW}[resync] user-scope skill provisioning failed (non-fatal).${NC}" >&2
+fi
+
 # A check that did not run is stated in the summary line, not only in a
 # warning that scrolled past 400 lines ago (#7745).
 CHECK_NOTE=""

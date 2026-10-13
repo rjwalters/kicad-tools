@@ -1792,8 +1792,8 @@ _auth_dead_phrase() {
     # JSON-enveloped 401 of #6614 yields a clean phrase for the `.bad_tokens`
     # reason string instead of falling through to the generic default — grep
     # returns the LEFTMOST match, so the quoted `"type":"` wrapper is never
-    # captured with it.
-    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|(OAuth )?(access )?token (has been |was )?revoked|authentication_error|invalid bearer token|OAuth token has expired|token has expired" | head -1)"
+    # captured with it. #11205's Claude Code phrasings name themselves too.
+    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|(OAuth )?(access )?token (has been |was )?revoked|authentication_error|invalid bearer token|OAuth token has expired|token has expired|OAuth access token is invalid|OAuth session expired|401 Invalid API key" | head -1)"
     echo "${m:-401/invalid credential}"
 }
 

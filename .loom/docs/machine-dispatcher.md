@@ -116,6 +116,19 @@ says so explicitly — it does **not** present a `jq`-less host as "no config".
 
 ## `update`: mcp-loom bundle refresh + thin daemon delegate
 
+**Daemonless machines (#10238).** Before the steps below, `loom update` fast-forwards
+the machine checkout when it is a clean `main` (dirty, diverged, ahead, non-`main`
+or detached checkouts are left untouched with a warning naming the reason),
+idempotently re-runs `provision_loom_dispatcher` + `provision_loom_skills` (the
+`~/.claude/commands/loom` link, the `/star` alias and the `loom-*` agent links), and
+skips the daemon delegate with a note (exit 0) when no `loom-daemon` binary exists.
+`--check` / `--dry-run` do none of this. `resync-installed.sh` also (re)provisions the
+links best-effort (never changes its exit status; `LOOM_RESYNC_SKIP_USER_SCOPE=1`
+opts out). Any other verb prints a rate-limited (6h, `LOOM_HEALTH_WARN_INTERVAL`)
+stderr warning when the links are missing or the checkout is more than
+`LOOM_STALE_COMMITS` (50) behind `origin/main`, from local state only; silence with
+`LOOM_NO_HEALTH_WARN=1`. `loom status` always lists the same problems.
+
 `loom update` does two things, in order:
 
 1. **Refreshes the user-scoped mcp-loom bundle** (#4230, epic #3835 Phase 3c).
