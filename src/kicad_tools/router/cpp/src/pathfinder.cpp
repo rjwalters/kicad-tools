@@ -1350,6 +1350,60 @@ static void init_pad_bounds(
     }
 }
 
+// Issue #6368: pad centreline landing cost.  Mirror of
+// ``kicad_tools.router.pad_landing.landing_cost`` -- keep the two in step.
+//
+// Seeding every cell of the start pad's metal box and accepting any cell of
+// the end pad's box make every row of the box an equally legal landing, but
+// not an equally priced one: the off-grid tail ``reconstruct_path`` draws
+// between the pad centre and the first/last grid cell is free, so an
+// off-centre row gets its row change as a free dogleg inside the pad while a
+// centred landing pays two turns to change rows outside it.  This charges
+// that skipped jog -- two turns plus one straight step per cell of offset --
+// when a step that leaves the start pad (or reaches the end pad) has a cell
+// more than one grid cell off the pad centreline.  "Leaves"/"reaches" is
+// either of:
+//   * crossing the pad's copper tip line (the long-axis end of its copper)
+//     inside the pad's lane -- this also catches a diagonal that jogs across
+//     the tip and a run that slips out of the box sideways at the tip column;
+//   * crossing the metal box boundary while moving along the long axis --
+//     this catches a diagonal that crosses the centreline inside the pad.
+// A pure side step out of the box is not charged.  Soft cost only: no seed
+// or goal stops being legal.
+static constexpr float kLandingDeadbandCells = 1.0f + 1e-3f;
+
+static float landing_cost(const PadBounds& pb, int ax, int ay, int bx, int by,
+                          bool outward, const DesignRules& rules) {
+    int a_along, b_along;
+    float a_off, b_off;
+    if (pb.long_axis == 0) {
+        a_along = ax; b_along = bx;
+        a_off = std::fabs(static_cast<float>(ay) - pb.centre_gy);
+        b_off = std::fabs(static_cast<float>(by) - pb.centre_gy);
+    } else if (pb.long_axis == 1) {
+        a_along = ay; b_along = by;
+        a_off = std::fabs(static_cast<float>(ax) - pb.centre_gx);
+        b_off = std::fabs(static_cast<float>(bx) - pb.centre_gx);
+    } else {
+        return 0.0f;
+    }
+    const float off = std::max(a_off, b_off);
+    if (off <= kLandingDeadbandCells) return 0.0f;
+    const bool a_tip = (a_along >= pb.tip_lo && a_along <= pb.tip_hi);
+    const bool b_tip = (b_along >= pb.tip_lo && b_along <= pb.tip_hi);
+    bool crosses = (outward ? (a_tip && !b_tip) : (!a_tip && b_tip)) &&
+                   std::min(a_off, b_off) <= pb.lane_half_cells + kLandingDeadbandCells;
+    if (!crosses && a_along != b_along) {
+        const bool a_box = (ax >= pb.metal_gx1 && ax <= pb.metal_gx2 &&
+                            ay >= pb.metal_gy1 && ay <= pb.metal_gy2);
+        const bool b_box = (bx >= pb.metal_gx1 && bx <= pb.metal_gx2 &&
+                            by >= pb.metal_gy1 && by <= pb.metal_gy2);
+        crosses = outward ? (a_box && !b_box) : (!a_box && b_box);
+    }
+    if (!crosses) return 0.0f;
+    return 2.0f * rules.cost_turn + rules.cost_straight * off;
+}
+
 RouteResult Pathfinder::route(
     float start_x, float start_y, int start_layer,
     float end_x, float end_y, int end_layer,
@@ -1865,7 +1919,17 @@ RouteResult Pathfinder::route(
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
             }
-            float new_g = current.g_score + positive_step_cost;
+            // Issue #6368: centreline landing cost on a step leaving the start
+            // pad or reaching the end pad (after the attractor clamp, so a
+            // reservation cannot cancel it).
+            float landing = 0.0f;
+            if (layer_in_end) {
+                landing += landing_cost(ep, current.x, current.y, nx, ny, false, rules_);
+            }
+            if (layer_in_start) {
+                landing += landing_cost(sp, current.x, current.y, nx, ny, true, rules_);
+            }
+            float new_g = current.g_score + positive_step_cost + landing;
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
@@ -2596,7 +2660,15 @@ RouteResult Pathfinder::run_astar_loop() {
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
             }
-            float new_g = current.g_score + positive_step_cost;
+            // Issue #6368: centreline landing cost (see the one-shot loop).
+            float landing = 0.0f;
+            if (layer_in_end) {
+                landing += landing_cost(ep, current.x, current.y, nx, ny, false, rules_);
+            }
+            if (layer_in_start) {
+                landing += landing_cost(sp, current.x, current.y, nx, ny, true, rules_);
+            }
+            float new_g = current.g_score + positive_step_cost + landing;
 
             // Issue #3309: flat-array g_score relax.  ``g_score_at`` returns
             // +infinity if the cell has not been touched in this generation,
