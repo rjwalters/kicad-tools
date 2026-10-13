@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1151",
-  "loom_commit": "4bba3857a22eb3081c693ff4c5953e9ffb74072b",
+  "loom_version": "0.19.1152",
+  "loom_commit": "2d5fe17958dca799058f16bdd74a12336990bec0",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -432,7 +432,8 @@
     ".loom/scripts/extract-capability-markers.sh",
     ".loom/scripts/tests/test-classify-error.sh",
     ".loom/scripts/tests/test-merge-pr-auto-blocked-settle.sh",
-    ".loom/scripts/tests/test-merge-pr-head-mismatch.sh"
+    ".loom/scripts/tests/test-merge-pr-head-mismatch.sh",
+    ".claude/commands/loom/sweep-arguments.md"
   ],
   "last_resync": "2026-10-13",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
