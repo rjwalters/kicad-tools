@@ -196,7 +196,7 @@ the harness cannot kill a hung `Task` from outside, so the only defense is your
 own discipline:
 
 - **Never wait indefinitely on a single tool call.** Long-running commands
-  (`buildGate.command`, `gh pr checks --watch`) MUST be given an explicit
+  (a scoped `cargo test`, `gh pr checks --watch`) MUST be given an explicit
   timeout — e.g. `forge wait-checks <n> --timeout 20`, not `--watch` with no
   bound; wrap a build in `timeout <secs> …`. If it does not return, treat the
   check as **inconclusive** and proceed to a verdict rather than blocking.
@@ -529,6 +529,7 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
 0. **Sweep stale verdicts first**: run the Stale-Verdict Sweep (see below) over the open `loom:pr` / `loom:changes-requested` PRs. Any PR it re-queues joins step 1's queue on this same pass.
 1. **Find work**: `loom-daemon pr-queue --role judge`. Walk its JSON rows in order; `mode=workflow` uses this workflow, `mode=fallback` uses Fallback Queue below. Follow `.loom/docs/pr-planning.md`; skip non-actionable rows and continue. Never change origin or a priority label.
 2. **Claim PR** (run the "Stale `loom:reviewing` Claim Check" below first): PR lease, then the label — `loom-daemon lease pr claim <number> --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] && gh pr edit <number> --add-label "loom:reviewing"`. Any other exit: stand down, touch no worktree (see "PR Lease")
+2b. **CI pre-check (before any checkout or test, #11690)**: CI is the test gate, so read it first: `first="$(loom-daemon forge wait-checks <number> --timeout 20 2>/dev/null | head -n1)"`. `LOOM-CHECKS-TIMEOUT*` / `-HEAD-MOVED*` (pending, including checks queued behind the CI job cap) → "When CI is Pending": no review, no end-state label. `LOOM-CHECKS-RED*` → no code review; post the "When CI Fails" verdict (`changes-requested` + `loom:ci-failure`) so the Doctor takes it. `GREEN` / `NONE` → continue. Pending is never red.
 3. **Check merge state**: Check for conflicts and attempt automated rebase if DIRTY (see Automated Rebase for DIRTY PRs below)
    ```bash
    # Plain `gh` — merge state is verdict-gating and must be live (see "Cached Forge Reads")
@@ -541,7 +542,7 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
 4b. **Check docs-only fast-path eligibility** (see "Docs-Only Fast Path (WORK_LOG / WORK_PLAN / README, #6134)" below) — if the changed-file list is an exact match against the fast-path allowlist, skip steps 5-7b and the "Evaluation Focus Areas" review entirely; go straight to CI Status Check (step 8), the formal-review reconciliation gate (step 8b — **not** skipped: a docs-only diff can still carry an unresolved formal review, #7647) and the fast-path approval write. Otherwise continue normally.
 5. **Check out code**: Use the existing builder worktree, else `./.loom/scripts/pr-worktree.sh <number>` — never a bare `gh pr checkout` in the main checkout (see "PR Branch Isolation" and Worktree-Aware Code Access below). Capture `REVIEW_HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')` here — step 11's recheck compares against it, and your verdict marker records it.
 6. **Rebase check**: Verify PR is up-to-date with main (see Rebase Check section below)
-7. **Run quality checks**: Tests, lints, type checks, build (use Scoped Test Execution — see section below)
+7. **Targeted checks only**: read the diff and trust the green CI from step 2b. At most run scoped tests for a specific doubt (Scoped Test Execution below); never the full suite or `buildGate.command`
 7b. **Execute test plan**: Parse PR description for "## Test Plan" section.
     If found, classify each step as automatable or observation-only.
     Execute automatable steps and document results in evaluation comment.
@@ -1467,13 +1468,7 @@ The following CI checks are failing:
 
 [LIST THE FAILING CHECKS (RED DETAIL)]
 
-Please fix these issues before the PR can be approved. Common causes:
-- Shellcheck warnings in shell scripts
-- TypeScript type errors
-- Failing unit/integration tests
-- Linting violations
-
-I'll evaluate again once CI passes.
+Please fix these issues before the PR can be approved. I'll evaluate again once CI passes.
 EOF
 )" && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested" --add-label "loom:ci-failure"
@@ -1497,7 +1492,7 @@ If checks are still running, **do not block on them and do not approve on a gues
 first="$(loom-daemon forge wait-checks <PR_NUMBER> --timeout 0 2>/dev/null | head -n1)"
 case "$first" in
   LOOM-CHECKS-TIMEOUT*)   # still pending: release the claim and skip (no end-state label)
-    gh pr comment <number> --body "Code evaluation looks good; CI is still running. Releasing the claim and skipping — a later tick will re-evaluate once CI settles."
+    gh pr comment <number> --body "CI is still running. Releasing the claim and skipping — a later tick will review once CI settles."
     gh pr edit <number> --remove-label "loom:reviewing"   # PR stays loom:review-requested; continue to the next PR
     ;;
   LOOM-CHECKS-RED*) ;;    # failing checks: rerun without 2>/dev/null for <name>\t<url>\t<run_id>
@@ -1510,7 +1505,7 @@ esac
 
 **A CI-gated verdict must be settled in-turn — either via the skip-and-continue path above, or via a foreground poll loop. It must NEVER be settled by starting a background monitor (a `Monitor`/`ScheduleWakeup` timer, a `run_in_background` Bash watcher, or any other "I'll check back once it finishes" narration) and ending your turn while your verdict is still pending on it.**
 
-This mirrors the orchestrator-level guardrail already documented in `sweep.md` ("ending your turn IS the kill signal", issue #4257) — restated here explicitly for Judge because the failure has already recurred in this exact role. **Incident (issue #4883, 2026-07-31, kicad-tools workspace, headless `/loom:sweep all`):** a Judge subagent finished its static review, started a background CI monitor, and ended its turn narrating *"The background monitor will notify me when it completes, at which point I'll issue the verdict. Awaiting that result."* In an interactive session a human can nudge the agent back to life; in a headless `claude -p` sweep there is no such recovery — ending the turn **terminates the process**, the monitor dies with it, no verdict is ever issued, and the PR is left claimed (`loom:reviewing`) with nobody left to release it.
+This mirrors `sweep.md`'s guardrail ("ending your turn IS the kill signal", #4257). In a headless `claude -p` sweep ending the turn **terminates the process**: the monitor dies with it, no verdict is issued, and the PR stays claimed (`loom:reviewing`) with nobody to release it (#4883).
 
 **There are exactly two safe paths when CI is pending and you cannot approve on a guess:**
 
@@ -2202,9 +2197,10 @@ gh pr view <number> --json body --jq '.body'
 
 | Category | Examples | Action |
 |----------|----------|--------|
-| **Automatable** | "run `pnpm test:unit`", "verify output contains X", "check file Z exists", "run `pnpm check:ci`" | Execute and capture output |
+| **Automatable** | "run `pnpm test:unit`", "verify output contains X", "check file Z exists", "run `pnpm test:unit -- path/to/one.test.ts`" | Execute and capture output |
 | **Observation-only** | "watch for N seconds", "start daemon and observe", "verify UI behavior", "manually test in browser" | Flag as not executed — **except** when the diff touches browser-driving / scraper / DOM-parsing code, or the PR's linked issue reports a silent-omission failure (#6883), where "manually test in browser" is not sufficient on its own: see "Live Verification and the Circular-Fixture Smell" below |
 | **Long-running (>2 min)** | "run full integration suite", "stress test for 5 minutes" | Skip with explanation |
+| **Full suite / build gate** | "run `pnpm check:ci`", "run `buildGate.command`", "run `cargo test --workspace`", "run `build-gate.sh`" | Skip: CI already ran it — cite the green CI from step 2b (#11690) |
 | **External dependency** | "test against staging API", "verify email delivery" | Skip with explanation |
 | **Unclear/ambiguous** | Vague steps without concrete commands | Ask for clarification |
 
@@ -2436,7 +2432,7 @@ rationale: ADR-0015 §2 and §4.
 
 ## Scoped Test Execution
 
-In step 7, run only the tests relevant to the changed files (**scoped test execution**). **The cookbook** (changed-file detection, full-suite triggers/fallback, per-language strategies, strategy template, merge-base-tree recipe) **lives in [`judge-reference.md`](../loom-judge-reference/SKILL.md) → "Scoped Test Execution"** — follow it.
+Optional in step 7 (#11690: CI is the test gate): only the tests relevant to the changed files, for a specific doubt. **The cookbook** (changed-file detection, per-language strategies, strategy template, merge-base-tree recipe) **lives in [`judge-reference.md`](../loom-judge-reference/SKILL.md) → "Scoped Test Execution"** — follow it.
 
 **Your environment is not a clean shell (#5388)**: a dispatched sweep/daemon child inherits `LOOM_FORCE_SCOPE=protected` and `LOOM_GUARD_DECISION_LOG=1`, which can flip a guard-hook suite (e.g. `test-guard-destructive*.sh`) away from the *factory-default* behavior it asserts. Before requesting changes on such a failure, re-run with `env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <command>` — see `.loom/docs/guard-hooks.md` → "Known consequence".
 

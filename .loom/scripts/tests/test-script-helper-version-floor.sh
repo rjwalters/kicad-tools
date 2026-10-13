@@ -30,7 +30,7 @@
 #      opt-in, one file at a time, which is the only reason this can land
 #      across a family of eleven stubs at once.
 #   2. EXIT-CODE DISCIPLINE. Several of these subcommands use non-zero codes as
-#      DATA (`resolve-model --tier` exits 3 for "no mapping";
+#      DATA (`resolve-model --task-alias` exits 3 for "no mapping";
 #      `detect-dependency-cycle` exits 1 for "cycle found"), which is why
 #      LOOM_SCRIPT_HELPER_MISSING_RC exists. A version refusal MUST use that
 #      reserved could-not-run code, never a code the caller reads as an answer.

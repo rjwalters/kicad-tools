@@ -17,20 +17,8 @@
 #     "timestamp": "<ISO 8601 UTC>",
 #     "pr_number": <int or null>,
 #     "attempt": <int, optional - omitted when not provided; absent means attempt 1>,
-#     "model": "<string, optional - omitted when not provided; absent means default/unknown>",
-#     "jev_tier": "<mechanical|routine|complex, optional>",
-#     "jev_confidence": <float 0-1, optional - always paired with jev_tier>
+#     "model": "<string, optional - omitted when not provided; absent means default/unknown>"
 #   }
-#
-# The "jev_tier"/"jev_confidence" pair (#8543) is a shadow-mode Jev (TypeSafe)
-# complexity classification, merged onto an ALREADY-EXISTING checkpoint rather
-# than written with the rest of the record: the Tier-2.5 dispatch step that
-# produces it does not know the sweep's current phase/task-id, which a `write`
-# would overwrite. Normally recorded in-process by `loom-daemon resolve-model
-# --tier` (see `jev_tier::shadow_sample_from_env`); `jev <issue> <tier>
-# <confidence>` below is the same merge exposed for a manual/out-of-band
-# sample. Present only when `TYPESAFE_API_KEY` was set for the run; absent
-# otherwise (the common case today). Never fed back into model selection.
 #
 # The "task_id" field (#3768) identifies the sweep RUN that wrote the checkpoint.
 # It must be a STABLE per-sweep-run id (generated once at sweep start — see
@@ -84,7 +72,6 @@
 #   sweep-checkpoint.sh phase <issue>          # Print phase string only (or empty)
 #   sweep-checkpoint.sh attempt <issue>        # Print attempt number (empty if absent = attempt 1)
 #   sweep-checkpoint.sh model <issue>          # Print model string (empty if absent = default/unknown)
-#   sweep-checkpoint.sh jev <issue> <tier> <confidence>  # Patch jev_tier/jev_confidence onto an existing checkpoint (#8543); silent no-op if none exists yet
 #   sweep-checkpoint.sh exists <issue>         # Exit 0 if checkpoint exists, 1 otherwise
 #   sweep-checkpoint.sh list                   # List all checkpoint issue numbers
 #
