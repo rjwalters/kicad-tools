@@ -5474,6 +5474,13 @@ def load_pcb_for_routing(
         net_map,
         components,
     )
+    # Issue #6449: the lattice's static pad masks grow by the designer floors
+    # alone; the router-class pad side is held by #6395's class-pad repair.
+    rules = replace(
+        rules,
+        designer_clearance_floors=dict(authored_floors),
+        designer_clearance_floors_by_name=dict(authored_by_name),
+    )
 
     router = Autorouter(
         width=board_width,
