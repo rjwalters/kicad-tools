@@ -582,7 +582,10 @@ def run_oracle_completion(
         else:
             stop = STOP_DRC_REGRESSED
 
-        result.closer_notes = list(dict.fromkeys(round_notes))
+        if attempts:
+            # A round that stopped before its first attempt (deadline) learned
+            # nothing; keep the previous round's reasons instead of wiping them.
+            result.closer_notes = list(dict.fromkeys(round_notes))
         after_links = in_scope(geo_after) if kept else links
         result.rounds.append(
             OracleRound(

@@ -18,6 +18,7 @@ from kicad_tools.router.completion_verdict import (
 )
 from kicad_tools.router.oracle_completion import (
     STOP_CONVERGED,
+    STOP_DEADLINE,
     STOP_DRC_REGRESSED,
     STOP_MAX_ROUNDS,
     STOP_NO_CLOSER,
@@ -460,6 +461,31 @@ class TestCloserReasonsPrinted:
         res = run_oracle_completion(
             board.path, oracle=board.oracle, closer=closer, nets=["GND"], max_rounds=1
         )
+        assert res.closer_notes == ["GND C1.1: boxed in"]
+
+    def test_deadline_round_keeps_previous_reasons(self, tmp_path):
+        """A round stopped by the deadline before any attempt must not wipe notes."""
+        board = FakeBoard(tmp_path, 3)
+
+        def closer(path, links, banned):
+            n, e = board.state()
+            board.path.write_text(f"{n - 1},{e}")
+            return ClosureAttempt(applied=1, notes=["GND C1.1: boxed in"])
+
+        # Initial DRC and round 1's attempt are affordable; round 2's is not.
+        budget = iter([None, None])
+
+        res = run_oracle_completion(
+            board.path,
+            oracle=board.oracle,
+            closer=closer,
+            nets=["GND"],
+            max_rounds=3,
+            time_left=lambda: next(budget, 0.0),
+            call_cost_estimate=1.0,
+        )
+        assert res.stop_reason == STOP_DEADLINE
+        assert res.rounds[-1].attempts == 0
         assert res.closer_notes == ["GND C1.1: boxed in"]
 
     def test_withdrawn_culprit_explains_a_no_closer_round(self, tmp_path):
