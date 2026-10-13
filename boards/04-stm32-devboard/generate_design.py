@@ -1293,6 +1293,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # made at until the escapes are re-reviewed at the declared rule.
         "--via-clearance",
         "0.2",
+        # Issue #6401: ``kct route`` now reserves a via site per pour-net IC
+        # pin before signal routing, on by default.  That changes this grid
+        # route, so the reviewed escape repair above (fixed via coordinates in
+        # ``manufacturing_process.MOVES``) no longer finds its vias.  Opt out
+        # until the escapes are re-reviewed against the reserved route.  On this
+        # grid recipe the reservation also closed fewer oracle links (#6413).
+        "--no-plane-via-reservation",
         "--placement-feedback",
         "--no-cache",
         # Issue #3039: pin --seed 42 so the routed PCB is byte-identical
