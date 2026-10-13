@@ -125,3 +125,28 @@ def test_dogleg_candidate_ignores_other_layer_tracks():
         calculate_dogleg_via_position(_boxed_pad("thru_hole"), other_net_tracks=blockers_b, **_KW)
         is None
     )
+
+
+# -- run_stitch(avoid_sites=...): a withdrawn weld site is not reused ---------
+
+
+def test_run_stitch_avoids_a_withdrawn_site(tmp_path):
+    from kicad_tools.cli.stitch_cmd import run_stitch
+    from tests.test_stitch_cmd import STITCH_TEST_PCB
+
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(STITCH_TEST_PCB)
+    first = run_stitch(pcb_path=path, net_names=["GND"], dry_run=True)
+    placed = {f"{v.pad.reference}.{v.pad.pad_number}": (v.via_x, v.via_y) for v in first.vias_added}
+    key, (x, y) = sorted(placed.items())[0]
+
+    again = run_stitch(pcb_path=path, net_names=["GND"], dry_run=True, avoid_sites={key: [(x, y)]})
+    moved = {f"{v.pad.reference}.{v.pad.pad_number}": (v.via_x, v.via_y) for v in again.vias_added}
+    assert key in moved
+    assert moved[key] != pytest.approx((x, y))
+    # Every via of this pad keeps a full via pitch from the withdrawn site.
+    assert ((moved[key][0] - x) ** 2 + (moved[key][1] - y) ** 2) ** 0.5 >= 0.45
+    # The other pads are untouched.
+    assert {k: v for k, v in moved.items() if k != key} == {
+        k: v for k, v in placed.items() if k != key
+    }
