@@ -668,6 +668,23 @@ def _round_up_to_cells(value: float, resolution: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _plane_value(plane: object, layer_idx: int, gy: int, gx: int) -> Any:
+    """Value of a dense ``(layers, rows, cols)`` plane, or ``0`` when unreadable.
+
+    Returns ``0`` (falsy, ``int()``-able) when ``plane`` is ``None``, is not
+    3-D, or ``(layer_idx, gy, gx)`` falls outside its shape -- notably the
+    zero-size arrays left behind by ``RoutingGrid.release_arrays`` (#6346).
+    """
+    if plane is None:
+        return 0
+    shape = getattr(plane, "shape", None)
+    if shape is None or len(shape) != 3:
+        return 0
+    if not (0 <= layer_idx < shape[0] and 0 <= gy < shape[1] and 0 <= gx < shape[2]):
+        return 0
+    return plane[layer_idx, gy, gx]  # type: ignore[index]
+
+
 def _marking_at(grid: object, x: float, y: float, layer_idx: int) -> frozenset[str]:
     """Raster markings at a world point -- used to LABEL, never to decide."""
     marks: set[str] = set()
@@ -679,17 +696,18 @@ def _marking_at(grid: object, x: float, y: float, layer_idx: int) -> frozenset[s
     if not (0 <= layer_idx < num_layers):
         return frozenset()
 
-    static = getattr(grid, "_static_blocked", None)
-    if static is not None and bool(static[layer_idx, gy, gx]):
+    # Each dense plane is read through ``_plane_value``, which treats a
+    # missing, released (``RoutingGrid.release_arrays`` leaves zero-size
+    # ``(0, 0, 0)`` arrays) or out-of-range plane as "no label" (issue #6346).
+    # Markings only LABEL closing copper, so an absent raster must never crash
+    # the replay whose legality verdicts do not depend on it.
+    if bool(_plane_value(getattr(grid, "_static_blocked", None), layer_idx, gy, gx)):
         marks.add("static_blocked")
-    pad_blocked = getattr(grid, "_pad_blocked", None)
-    if pad_blocked is not None and bool(pad_blocked[layer_idx, gy, gx]):
+    if bool(_plane_value(getattr(grid, "_pad_blocked", None), layer_idx, gy, gx)):
         marks.add("pad_blocked")
-    is_obstacle = getattr(grid, "_is_obstacle", None)
-    if is_obstacle is not None and bool(is_obstacle[layer_idx, gy, gx]):
+    if bool(_plane_value(getattr(grid, "_is_obstacle", None), layer_idx, gy, gx)):
         marks.add("is_obstacle")
-    usage = getattr(grid, "_usage_count", None)
-    if usage is not None and int(usage[layer_idx, gy, gx]) > 0:
+    if int(_plane_value(getattr(grid, "_usage_count", None), layer_idx, gy, gx)) > 0:
         marks.add("usage_shared")
 
     reserved = getattr(grid, "_reserved_for_nets", None) or {}

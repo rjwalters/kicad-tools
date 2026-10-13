@@ -222,7 +222,7 @@ cat > "$STUB_DIR/issue-103.json" <<'EOF'
 {"state":"closed","pull_request":{"url":"x"},"labels":[{"name":"loom:building"}]}
 EOF
 cat > "$STUB_DIR/issue-104.json" <<'EOF'
-{"state":"closed","labels":[{"name":"loom:building"},{"name":"tier:maintenance"}]}
+{"state":"closed","labels":[{"name":"loom:building"},{"name":"loom:important"}]}
 EOF
 
 reset_log() {
@@ -264,9 +264,9 @@ reset_log
 _strip_one_closed_issue_building_label "104"
 log="$(read_log)"
 assert_contains "$log" "issue edit 104 --repo owner/repo --remove-label loom:building" \
-  "Closed issue #104 (loom:building + tier:maintenance) -> only loom:building removed"
-assert_not_contains "$log" "--remove-label tier:maintenance" \
-  "Closed issue #104 -> tier:maintenance is untouched"
+  "Closed issue #104 (loom:building + loom:important) -> only loom:building removed"
+assert_not_contains "$log" "--remove-label loom:important" \
+  "Closed issue #104 -> loom:important is untouched"
 
 echo ""
 echo "Testing _strip_closed_issue_building_labels behavior..."

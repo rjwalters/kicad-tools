@@ -1016,9 +1016,10 @@ registry; dep_classify's operator-only names stay consts, lockstep-tested
 against `requires_base`/`remove_with` (#5671). Changes go in the registry.
 The `propagate` table (#10012) was removed (#11510) after #11104 removed
 the star-liveness pass that read it. `stale_after_minutes` and `lifecycle`
-are inert; `lifecycle: retired` marks a label the daemon no longer reads
-(the operator-star levels and `tier:*`, #11103), kept until its forge
-migration.
+are inert. A retired label leaves `labels` for the top-level `retired`
+array (#11513): `{name, replaced_by, owned, retired_in}`, the old -> new
+mapping the forge-side migration (#11511) applies. It is never rendered into
+`labels.yml`, so `sync-labels.sh` cannot re-create it.
 
 ## No-op hold (#10156)
 

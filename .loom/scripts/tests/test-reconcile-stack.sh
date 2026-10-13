@@ -578,6 +578,44 @@ teardown_sandbox
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "Scenario L: the child's remote head carries a hand-resolved merge the rebase flattens (#9282)"
+setup_sandbox
+
+# The child merged a side branch and, IN THE MERGE COMMIT, hand-edited
+# child.txt (the shape of a reasoned conflict resolution). `rebase --onto`
+# replays the side branch's commit but flattens the merge, so that hand edit
+# is silently gone: the rebase exits 0 and the tree is clean. Real git and the
+# real `loom-daemon forge rebase-guard` (the binary pinned above), no stub.
+git_q -C "$MAIN" checkout -q -b side-8002 main~1
+echo "side" > "$MAIN/side.txt"
+git_q -C "$MAIN" add side.txt
+git_q -C "$MAIN" commit -q -m "side work"
+git_q -C "$MAIN" checkout -q "$CHILD_BR"
+git_q -C "$MAIN" merge -q --no-ff --no-commit side-8002
+echo "child, moved off the colliding coordinate" > "$MAIN/child.txt"
+git_q -C "$MAIN" add child.txt
+git_q -C "$MAIN" commit -q -m "Merge side-8002: resolve by hand"
+MERGE_SHA_L="$(git_q -C "$MAIN" rev-parse HEAD)"
+git_q -C "$MAIN" push -q origin "$CHILD_BR"
+git_q -C "$MAIN" checkout -q main
+
+REMOTE_CHILD_SHA_BEFORE_L="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
+run_reconcile "$MAIN"
+
+assert_eq "2" "$RUN_RC" "L: a discarded hand resolution aborts with exit 2"
+assert_contains "$RUN_OUT" "RESOLUTION_DISCARDED $MERGE_SHA_L" \
+  "L: the verb names the merge commit whose resolution the rebase dropped"
+assert_contains "$RUN_OUT" "child.txt" "L: the BLOCKER names the path the resolution touched"
+assert_contains "$RUN_OUT" "Not pushing '$CHILD_BR'" "L: reconcile-stack.sh's own abort message names the child"
+assert_not_contains "$RUN_OUT" "Step 2/3" "L: the push step never started"
+assert_eq "$REMOTE_CHILD_SHA_BEFORE_L" "$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")" \
+  "L: origin/$CHILD_BR still holds the hand-resolved merge -- nothing was pushed"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "L: the child PR base was never retargeted"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "Scenario G: parent branch gone everywhere (remote AND local) -- falls back to the pinned ref (#7982)"
 setup_sandbox
 

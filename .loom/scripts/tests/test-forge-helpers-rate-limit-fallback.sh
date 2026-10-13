@@ -341,7 +341,7 @@ else
 fi
 
 # Exhausted-GraphQL path: falls back to ONE REST POST carrying labels inline.
-out=$(_run_stubbed ratelimited forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" "loom:triage" "tier:goal-supporting" 2>/dev/null)
+out=$(_run_stubbed ratelimited forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" "loom:triage" "loom:important" 2>/dev/null)
 assert_eq "https://github.test/o/r/issues/1234" "$out" \
     "forge_gh_create_issue_rl_safe: exhausted GraphQL recovers via REST and returns the URL"
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -358,7 +358,7 @@ assert_eq "A title" "$(jq -r '.title' "$API_STDIN_LOG")" \
     "forge_gh_create_issue_rl_safe REST payload carries the title"
 assert_eq "A body" "$(jq -r '.body' "$API_STDIN_LOG")" \
     "forge_gh_create_issue_rl_safe REST payload carries the body"
-assert_eq "loom:triage,tier:goal-supporting" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
+assert_eq "loom:triage,loom:important" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
     "forge_gh_create_issue_rl_safe REST payload applies ALL labels atomically with creation"
 
 # Exactly one REST call -- never create-then-label (that doubles the request
@@ -504,10 +504,10 @@ A body read from a file.
 BODY
 
 out=$(_run_stubbed ratelimited env LOOM_FORGE_TYPE=github "$CREATE_ISSUE_SH" \
-    --title "From CLI" --body-file "$BODY_TMP" --label "loom:triage,tier:goal-supporting" 2>/dev/null)
+    --title "From CLI" --body-file "$BODY_TMP" --label "loom:triage,loom:important" 2>/dev/null)
 assert_eq "https://github.test/o/r/issues/1234" "$out" \
     "create-issue.sh: exhausted GraphQL still files the issue (REST) and prints the URL"
-assert_eq "loom:triage,tier:goal-supporting" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
+assert_eq "loom:triage,loom:important" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
     "create-issue.sh: comma-separated --label splits like gh, applied atomically"
 TESTS_RUN=$((TESTS_RUN + 1))
 if [[ "$(jq -r '.body' "$API_STDIN_LOG")" == *"A body read from a file."* ]]; then

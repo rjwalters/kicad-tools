@@ -290,15 +290,8 @@ Parent branch \`$parent_branch\` advanced (amended/pushed) after this child bran
         return 0
     fi
 
-    # Version-bearing-file sync gate (#7168): a rebase silently absorbs
-    # whatever version-bearing values origin/$parent_branch already had. A
-    # file the child's own commits never touched (in practice
-    # .loom/install-metadata.json) never raises a git conflict, so it can
-    # end up stale relative to VERSION/the files that WERE part of the
-    # conflict-free merge -- invisible until CI's "Installer Integration
-    # Tests" fails. `git rebase <upstream> <branch>` (used above) checks out
-    # $child_branch first, so the working tree here already reflects the
-    # rebased child -- skipped under --dry-run since no rebase actually ran.
+    # Version-bearing-file sync gate (#7168; why: version-check-gate.sh) on the
+    # rebased child the rebase checked out. Not under --dry-run: nothing ran.
     if [[ "$DRY_RUN" != "true" ]] && [[ -x "$SCRIPT_DIR/version-check-gate.sh" ]]; then
         if ! "$SCRIPT_DIR/version-check-gate.sh" --fix-hint "then push."; then
             err "Version-bearing files are out of sync for '$child_branch' after rebase onto '$parent_branch' (see BLOCKER:/Fix: above)."
@@ -306,6 +299,13 @@ Parent branch \`$parent_branch\` advanced (amended/pushed) after this child bran
             return 0
         fi
     fi
+    # loom-daemon discard guard (#9282): a clean rebase can still empty the child or drop a
+    # hand-made merge resolution. rc 0 = blocked, no push; rc >1 = no answer, warn.
+    # requires-daemon: forge optional   rebase-guard (#9282): with no binary, or one predating the verb, the push proceeds unchecked behind a warning
+    local rg=1
+    [[ "$DRY_RUN" == "true" ]] || { rg=0; "$DAEMON_BIN" forge rebase-guard --base "origin/$parent_branch" --old "origin/$child_branch" --new "$child_branch" || rg=$?; }
+    [[ $rg -ne 0 ]] || { err "Not pushing '$child_branch': its rebase onto '$parent_branch' would discard work (see BLOCKER:/Fix: above)."; RSC_FAILURE=2; return 0; }
+    [[ $rg -eq 1 ]] || warn "rebase-guard gave no answer (rc=$rg) for '$child_branch' — pushing UNCHECKED for a dropped merge resolution or an emptied branch (#9282)."
 
     # Pinned, never bare (#9487) — see the capture above.
     if ! run git push "$child_lease_arg" origin "$child_branch"; then

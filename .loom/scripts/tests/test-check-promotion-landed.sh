@@ -346,7 +346,7 @@ assert_eq "" "$COMMENTS_POSTED" "(a) no comment posted"
 
 # (b) APPROVED comment present AND loom:issue already present -> OK, exit 0.
 reset_state
-issue_json "OPEN" "$(labels_json "loom:issue" "tier:maintenance")" \
+issue_json "OPEN" "$(labels_json "loom:issue" "loom:important")" \
   "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance) - cleanup")]" \
   > "$STUB_DIR/issue-201.json"
 run_sut --issue 201
@@ -599,15 +599,15 @@ assert_eq "OK" "$(get_field "$OUT" DECISION)" "(u) DECISION=OK"
 #     timeline event of its own (confirmed against a real multi-label edit on
 #     this repo, #7299) -- so the Step 2 timeline match must not require the
 #     event to be the ONLY `labeled` event at that timestamp. Two `labeled`
-#     events share the same created_at (loom:issue and the tier label from
+#     events share the same created_at (loom:issue and loom:important from
 #     one multi-label call); the loom:issue-specific one must still be found.
 reset_state
 issue_json "OPEN" "$(labels_json "loom:building")" \
   "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 2 (goal-supporting)")]" \
   > "$STUB_DIR/issue-408.json"
-stage_timeline 408 "[$(labeled_event "2026-08-18T00:05:00Z"), {\"event\":\"labeled\",\"created_at\":\"2026-08-18T00:05:00Z\",\"label\":{\"name\":\"tier:goal-supporting\"}}]"
+stage_timeline 408 "[$(labeled_event "2026-08-18T00:05:00Z"), {\"event\":\"labeled\",\"created_at\":\"2026-08-18T00:05:00Z\",\"label\":{\"name\":\"loom:important\"}}]"
 run_sut --issue 408
-assert_eq "0" "$RC" "(v) multi-label edit's loom:issue timeline event is found alongside a same-timestamp tier event -> exit 0"
+assert_eq "0" "$RC" "(v) multi-label edit's loom:issue timeline event is found alongside a same-timestamp loom:important event -> exit 0"
 assert_eq "OK" "$(get_field "$OUT" DECISION)" "(v) DECISION=OK"
 
 echo

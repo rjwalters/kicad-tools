@@ -21,6 +21,7 @@
 #   .loom/scripts/sync-labels.sh --prune-defaults [--force] [--dry-run] [--] [WORKTREE_PATH]
 #   .loom/scripts/sync-labels.sh --check [--repo OWNER/NAME] [--] [WORKTREE_PATH]
 #   .loom/scripts/sync-labels.sh --prune-undeclared [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
+#   .loom/scripts/sync-labels.sh --migrate-retired [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
 #
 #   WORKTREE_PATH  Directory containing .github/labels.yml and a git remote.
 #                  Defaults to the current directory. `--` ends option parsing,
@@ -77,7 +78,17 @@
 # (#4498) and only points at the flag. GitHub-only; the logic is
 # `loom-daemon labels undeclared` (shell-language policy: this is `contract`
 # shell, so only the call-site lives here).
-# requires-daemon: labels optional  only --prune-undeclared needs `labels undeclared`; an older binary is refused with a clear message there and every other path is unaffected
+#
+# --migrate-retired (#11511) moves OPEN issues/PRs off the labels Loom has
+# retired (defaults/labels.json `retired`, #11513) onto their replacements,
+# then deletes each Loom-owned retired label nothing open still carries. It
+# runs AFTER the additive sync, so the replacement labels exist (the migration
+# never creates one). A label Loom never declared (`owned: false`) is add-only:
+# never removed from an item, never deleted. With --dry-run it is the
+# read-only preview (`labels migrate` without --apply); otherwise it passes
+# --apply. GitHub-only; the logic is `loom-daemon labels migrate`. It does not
+# imply --prune-undeclared (a wider delete); pass both to get both.
+# requires-daemon: labels optional  only --prune-undeclared/--migrate-retired need `labels undeclared`/`labels migrate`; an older binary is refused with a clear message there and every other path is unaffected
 #
 # This is the installed-tree counterpart of the source-only
 # scripts/install/sync-labels.sh. It is self-contained apart from the
@@ -94,6 +105,7 @@ Usage: sync-labels.sh [--] [WORKTREE_PATH]
        sync-labels.sh --prune-defaults [--force] [--dry-run] [--] [WORKTREE_PATH]
        sync-labels.sh --check [--repo OWNER/NAME] [--] [WORKTREE_PATH]
        sync-labels.sh --prune-undeclared [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
+       sync-labels.sh --migrate-retired [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
 
 Sync Loom workflow labels from .github/labels.yml onto the forge (GitHub or
 Gitea). Creates missing labels and updates existing ones to match
@@ -131,6 +143,11 @@ Options:
                     Delete live loom:* labels labels.yml does not declare,
                     keeping any still on an open issue/PR. With --dry-run,
                     only report them. GitHub-only.
+      --migrate-retired
+                    After the sync, move open issues/PRs off Loom's retired
+                    labels onto their replacements and delete the retired
+                    labels nothing open carries (labels Loom never declared
+                    are add-only). With --dry-run, only preview. GitHub-only.
       --dry-run     Print the label operations that would run and exit without
                     calling the forge. Recommended before a --repo run.
       --            End of options: every remaining argument is positional, so
@@ -144,6 +161,7 @@ REPO_OVERRIDE=""
 DRY_RUN=0
 PRUNE_DEFAULTS=0
 PRUNE_UNDECLARED=0
+MIGRATE_RETIRED=0
 FORCE_PRUNE=0
 CHECK_MODE=0
 POSITIONAL_SEEN=0
@@ -193,27 +211,16 @@ while [[ $# -gt 0 ]]; do
       fi
       shift
       ;;
-    --dry-run)
-      DRY_RUN=1
-      shift
-      ;;
-    --prune-defaults)
-      PRUNE_DEFAULTS=1
-      shift
-      ;;
-    --force)
-      FORCE_PRUNE=1
-      shift
-      ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --prune-defaults) PRUNE_DEFAULTS=1; shift ;;
+    --force) FORCE_PRUNE=1; shift ;;
     --prune-undeclared) PRUNE_UNDECLARED=1; shift ;;
+    --migrate-retired) MIGRATE_RETIRED=1; shift ;;
     --check)
       CHECK_MODE=1
       shift
       ;;
-    --)
-      POSITIONAL_ONLY=1
-      shift
-      ;;
+    --) POSITIONAL_ONLY=1; shift ;;
     -*)
       echo "Unknown option: $1" >&2
       usage >&2
@@ -934,18 +941,23 @@ else
   fi
 fi
 
-# --prune-undeclared (#11105): the call-site for `loom-daemon labels undeclared`,
-# which prints one UNDECLARED/PRUNED/KEPT line per undeclared loom:* label and
-# exits 0 (none remain), 3 (some remain) or other (it could not run).
-if [[ "$PRUNE_UNDECLARED" -eq 1 ]]; then
-  [[ "$FORGE_TYPE" == "github" ]] || error "--prune-undeclared is GitHub-only"
-  ud_bin="$(source "${SCRIPT_DIR}/lib/locate-daemon-bin.sh" && loom_resolve_self_daemon_bin)"
-  if [[ -z "$ud_bin" ]] || ! "$ud_bin" labels undeclared --help >/dev/null 2>&1; then error "--prune-undeclared needs a loom-daemon with 'labels undeclared' (#11105)"; fi
-  ud_args=(--repo "$REPO" --labels-file "$LABELS_FILE"); [[ "$DRY_RUN" -eq 1 ]] || ud_args+=(--prune)
-  ud_rc=0; "$ud_bin" labels undeclared "${ud_args[@]}" || ud_rc=$?
-  [[ "$ud_rc" -eq 0 || "$ud_rc" -eq 3 ]] || error "loom-daemon labels undeclared failed (exit $ud_rc)"
-  if [[ "$ud_rc" -eq 0 ]]; then success "No undeclared loom:* labels remain on $REPO"; else warning "Undeclared loom:* labels remain on $REPO (listed above)"; fi
-fi
+# daemon_labels FLAG VERB WRITE_FLAG DONE_MSG LEFT_MSG ARGS...: the call-site
+# for a `loom-daemon labels VERB` (--prune-undeclared: `undeclared`, #11105;
+# --migrate-retired: `migrate`, #11511). The verb prints its own report and
+# exits 0 (nothing remains: DONE_MSG), 3 (something remains: LEFT_MSG) or
+# other (it could not run: fail). WRITE_FLAG is appended unless --dry-run.
+daemon_labels() {
+  local flag="$1" verb="$2" write="$3" done_msg="$4" left_msg="$5"
+  local bin rc=0; shift 5
+  [[ "$FORGE_TYPE" == "github" ]] || error "--$flag is GitHub-only"
+  bin="$(source "${SCRIPT_DIR}/lib/locate-daemon-bin.sh" && loom_resolve_self_daemon_bin)"
+  if [[ -z "$bin" ]] || ! "$bin" labels "$verb" --help >/dev/null 2>&1; then error "--$flag needs a loom-daemon with 'labels $verb'"; fi
+  [[ "$DRY_RUN" -eq 1 ]] || set -- "$@" "$write"
+  "$bin" labels "$verb" "$@" || rc=$?
+  [[ "$rc" -eq 0 || "$rc" -eq 3 ]] || error "loom-daemon labels $verb failed (exit $rc)"
+  if [[ "$rc" -eq 0 ]]; then success "$done_msg"; else warning "$left_msg"; fi
+}
+[[ "$PRUNE_UNDECLARED" -eq 0 ]] || daemon_labels prune-undeclared undeclared --prune "No undeclared loom:* labels remain on $REPO" "Undeclared loom:* labels remain on $REPO (listed above)" --repo "$REPO" --labels-file "$LABELS_FILE"
 
 # Sync Loom workflow labels
 info "Syncing Loom workflow labels..."
@@ -984,3 +996,7 @@ if [ "$label_count" -gt 0 ]; then
 else
   warning "No labels found in $LABELS_FILE"
 fi
+
+# --migrate-retired (#11511): after the additive sync above, so every
+# replacement label exists before `labels migrate` relabels onto it.
+[[ "$MIGRATE_RETIRED" -eq 0 ]] || daemon_labels migrate-retired migrate --apply "No retired labels left to migrate on $REPO" "Retired-label migration not finished on $REPO (listed above)" --repo "$REPO"
