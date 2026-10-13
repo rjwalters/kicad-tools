@@ -144,7 +144,20 @@ Examples:
     # Count clearance violations
     from kicad_tools.drc.violation import ViolationType
 
-    clearance_count = len(report.by_type(ViolationType.CLEARANCE))
+    # Every pair kind the repairer handles (Issue #6434: a report holding only
+    # track/via pairs -- typed CLEARANCE_SEGMENT_VIA -- used to read as
+    # "nothing to repair" and exit 0).
+    clearance_count = sum(
+        len(report.by_type(vtype))
+        for vtype in (
+            ViolationType.CLEARANCE,
+            ViolationType.CLEARANCE_SEGMENT_VIA,
+            ViolationType.CLEARANCE_PAD_SEGMENT,
+            ViolationType.CLEARANCE_PAD_VIA,
+            ViolationType.CLEARANCE_SEGMENT_SEGMENT,
+            ViolationType.CLEARANCE_VIA_VIA,
+        )
+    )
     pad_pad_count = (
         len(report.by_type(ViolationType.CLEARANCE_PAD_PAD)) if args.nudge_footprints else 0
     )
@@ -184,8 +197,9 @@ Examples:
     if not args.quiet:
         _print_results(result, args.format, args.dry_run, args.max_displacement, args.mfr)
 
-    # Save if not dry run and there were repairs
-    if result.repaired > 0 and not args.dry_run:
+    # Save if not dry run and the board changed (every kept move was
+    # re-measured; see Issue #6434)
+    if repairer.modified and not args.dry_run:
         output_path = Path(args.output) if args.output else pcb_path
         try:
             repairer.save(output_path)
@@ -286,7 +300,9 @@ def _print_json(
             "no_delta": result.skipped_no_delta,
             "exceeds_max": result.skipped_exceeds_max,
             "infeasible": result.skipped_infeasible,
+            "not_cleared": result.skipped_not_cleared,
         },
+        "unrepaired": [u.to_dict() for u in result.unrepaired],
         "nudges": [
             {
                 "object_type": n.object_type,
@@ -328,6 +344,8 @@ def _print_summary(result: RepairResult, dry_run: bool) -> None:
     unrepaired = result.total_violations - result.repaired
     if unrepaired > 0:
         print(f"  {unrepaired} violations could not be repaired")
+        for pair in result.unrepaired[:10]:
+            print(f"    {pair}")
 
 
 def _print_text(
@@ -378,6 +396,7 @@ def _print_text(
     skipped_total = (
         result.skipped_exceeds_max
         + result.skipped_infeasible
+        + result.skipped_not_cleared
         + result.skipped_no_location
         + result.skipped_no_delta
         + result.footprint_skipped_locked
@@ -392,6 +411,8 @@ def _print_text(
             print(f"  Exceeds max displacement: {result.skipped_exceeds_max}")
         if result.skipped_infeasible > 0:
             print(f"  Infeasible (no movable object): {result.skipped_infeasible}")
+        if result.skipped_not_cleared > 0:
+            print(f"  Not cleared after re-measuring: {result.skipped_not_cleared}")
         if result.skipped_no_location > 0:
             print(f"  No location info: {result.skipped_no_location}")
         if result.skipped_no_delta > 0:
@@ -412,6 +433,10 @@ def _print_text(
     else:
         unrepaired = result.total_violations - result.repaired
         print(f"{unrepaired} violation(s) require manual repair")
+        for pair in result.unrepaired[:15]:
+            print(f"  - {pair}")
+        if len(result.unrepaired) > 15:
+            print(f"  ... and {len(result.unrepaired) - 15} more")
         if result.skipped_exceeds_max > 0:
             print(f"  Try increasing --max-displacement (currently {max_displacement}mm)")
         if result.skipped_infeasible > 0:

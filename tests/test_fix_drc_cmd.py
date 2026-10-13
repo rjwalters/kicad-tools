@@ -13,6 +13,19 @@ from kicad_tools.drc.repair_drill_clearance import (
 )
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 
+
+@pytest.fixture(autouse=True)
+def _no_kicad_cli_recheck(monkeypatch):
+    """Keep fix-drc's internal DRC runs in-process for these unit tests.
+
+    Issue #6431: fix-drc now re-checks the repaired board (and re-detects
+    between passes) with kicad-cli whenever it is installed.  These tests pin
+    fix-drc's own logic on synthetic boards, so they run the ``kct check``
+    rule set only; the kicad-cli leg has dedicated tests that mock it.
+    """
+    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd._kicad_cli_path", lambda: None)
+
+
 # ── Test PCB fixtures ──────────────────────────────────────────────────
 
 # PCB with clearance violations (trace-to-trace too close)
@@ -127,12 +140,14 @@ PCB_WITH_SEGMENT_VIA_CLEARANCE = """\
   (net 0 "")
   (net 1 "GND")
   (net 2 "+3.3V")
-  (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-sv-1"))
+  (segment (start 100 100.575) (end 110 100.575) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-sv-1"))
   (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-sv-1"))
 )
 """
 
-# PCB with a segment near a <no net> via (net 0)
+# PCB with a segment near a <no net> via (net 0).  Like the fixture above, the
+# 0.25 mm track runs 0.575 mm from the 0.8 mm via's centre: a 0.05 mm edge gap,
+# matching the report (Issue #6434 re-measures every pair it repairs).
 PCB_WITH_NO_NET_VIA = """\
 (kicad_pcb
   (version 20240108)
@@ -148,7 +163,7 @@ PCB_WITH_NO_NET_VIA = """\
   (setup (pad_to_mask_clearance 0))
   (net 0 "")
   (net 1 "GND")
-  (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-nn-1"))
+  (segment (start 100 100.575) (end 110 100.575) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-nn-1"))
   (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 0) (uuid "via-nn-1"))
 )
 """
@@ -223,7 +238,7 @@ DRC_REPORT_SEGMENT_VIA = """\
 ** Found 1 DRC violations **
 [clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
     Rule: netclass 'Default'; error
-    @(105.0000 mm, 100.1000 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.5750 mm): Track [+3.3V] on F.Cu
     @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
 
 ** Found 0 Footprint errors **
@@ -237,7 +252,7 @@ DRC_REPORT_NO_NET_VIA = """\
 ** Found 1 DRC violations **
 [clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
     Rule: netclass 'Default'; error
-    @(105.0000 mm, 100.1000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.5750 mm): Track [GND] on F.Cu
     @(105.0000 mm, 100.0000 mm): Via [] on F.Cu - B.Cu
 
 ** Found 0 Footprint errors **
@@ -256,7 +271,8 @@ DRC_REPORT_EMPTY = """\
 
 # PCB with a segment overlapping an enlarged via (post fix-vias enlargement).
 # Via enlarged from 0.6 to 0.8 mm; the trace that formerly had 0.1 mm clearance
-# now has negative clearance (overlap).  The required nudge exceeds the old
+# now has negative clearance (overlap): its centreline is 0.455 mm from the via
+# centre, so the copper overlaps by 0.07 mm -- the report's "actual -0.07".  The required nudge exceeds the old
 # 0.25 mm default but is well within the new 0.5 mm pipeline default.
 PCB_ENLARGED_VIA = """\
 (kicad_pcb
@@ -274,7 +290,7 @@ PCB_ENLARGED_VIA = """\
   (net 0 "")
   (net 1 "GND")
   (net 2 "+3.3V")
-  (segment (start 100 100.05) (end 110 100.05) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-ev-1"))
+  (segment (start 100 100.455) (end 110 100.455) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-ev-1"))
   (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-ev-1"))
 )
 """
@@ -289,7 +305,7 @@ DRC_REPORT_ENLARGED_VIA = """\
 ** Found 1 DRC violations **
 [clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual -0.0700 mm)
     Rule: netclass 'Default'; error
-    @(105.0000 mm, 100.0500 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.4550 mm): Track [+3.3V] on F.Cu
     @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
 
 ** Found 0 Footprint errors **
@@ -891,7 +907,10 @@ class TestFixDRCCLI:
         def _fake_find_kicad_cli():
             return "/usr/bin/kicad-cli"
 
-        def _fake_run_drc(_path):
+        seen_kwargs: dict = {}
+
+        def _fake_run_drc(_path, **kwargs):
+            seen_kwargs.update(kwargs)
             return _FakeDRCResult()
 
         def _fake_load(_path):
@@ -900,6 +919,10 @@ class TestFixDRCCLI:
             return None
 
         monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", _fake_find_kicad_cli)
+        # Undo the module-level autouse pin: this test is about the kicad-cli leg.
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._kicad_cli_path", lambda: Path(_fake_find_kicad_cli())
+        )
         monkeypatch.setattr("kicad_tools.cli.runner.run_drc", _fake_run_drc)
         monkeypatch.setattr("kicad_tools.drc.report.DRCReport.load", staticmethod(_fake_load))
 
@@ -909,6 +932,9 @@ class TestFixDRCCLI:
             fix_drc_cmd._get_drc_report(None, pcb_file)
 
         assert "Running DRC (kicad-cli) on:" in buf.getvalue()
+        # Issue #6431: the same gate flags the fleet's DRC uses.
+        assert seen_kwargs.get("all_track_errors") is True
+        assert seen_kwargs.get("refill_zones") is True
 
     def test_quiet_mode(self, pcb_clearance: Path, report_clearance: Path, capsys):
         """--quiet should suppress all output."""
@@ -1127,7 +1153,7 @@ DRC_REPORT_KICAD_CLI_SEGMENT_VIA = """\
 ** Found 1 DRC violations **
 [clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
     Rule: netclass 'Default'; error
-    @(105.0000 mm, 100.1000 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.5750 mm): Track [+3.3V] on F.Cu
     @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
 
 ** Found 0 Footprint errors **
@@ -3521,3 +3547,320 @@ class TestTransactionalFlag:
 
         assert run_fix_drc_command(Args()) == 0
         assert "--transactional" in captured["argv"]
+
+
+# ── Issue #6431: fix-drc success is re-checked, never self-reported ──────
+#
+# A 0.2 mm SIG track whose edge is 0.175 mm from a GND pad, with the project
+# putting GND in a 0.2 mm ``Power`` netclass.  ``check_all()`` (the old
+# re-detection and --verify engine) never saw it: the class rule
+# ``netclass_clearance_copper`` reads the sibling ``.kicad_pro`` and only runs
+# through ``kct check``'s own dispatch.
+
+_PWR_BOARD = """(kicad_pcb (version 20240108) (generator "pcbnew") (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal) (31 "B.Cu" signal)
+    (34 "B.Paste" user) (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen") (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user) (39 "F.Mask" user)
+    (44 "Edge.Cuts" user) (46 "B.CrtYd" user "B.Courtyard") (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user) (49 "F.Fab" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (gr_rect (start 95 95) (end 110 106) (stroke (width 0.1) (type default)) (fill none)
+    (layer "Edge.Cuts"))
+  (footprint "test:R1" (layer "F.Cu") (at 102 101)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-r1-1"))
+  )
+  (segment (start 100 100.225) (end 104 100.225) (width 0.2) (layer "F.Cu") (net 2) (uuid "trk-s"))
+)
+"""
+
+
+def _pwr_netclass(name: str, clearance: float, priority: int) -> dict:
+    return {
+        "name": name,
+        "clearance": clearance,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "diff_pair_width": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "wire_width": 6,
+        "bus_width": 12,
+        "line_style": 0,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": priority,
+    }
+
+
+_PWR_PROJECT = {
+    "meta": {"filename": "pwr.kicad_pro", "version": 3},
+    "board": {
+        "design_settings": {
+            "rules": {
+                "min_clearance": 0.1,
+                "min_track_width": 0.1,
+                "min_copper_edge_clearance": 0.2,
+            }
+        }
+    },
+    "net_settings": {
+        "meta": {"version": 4},
+        "classes": [
+            _pwr_netclass("Default", 0.15, 2147483647),
+            _pwr_netclass("Power", 0.2, 0),
+        ],
+        "netclass_assignments": None,
+        "netclass_patterns": [{"netclass": "Power", "pattern": "GND"}],
+    },
+}
+
+
+@pytest.fixture
+def pwr_board(tmp_path: Path) -> Path:
+    """The 0.175 mm track-to-pad gap under a 0.2 mm class, with its project."""
+    pcb = tmp_path / "pwr.kicad_pcb"
+    pcb.write_text(_PWR_BOARD)
+    pcb.with_suffix(".kicad_pro").write_text(json.dumps(_PWR_PROJECT))
+    return pcb
+
+
+def _class_errors(report) -> list:
+    return [
+        v for v in report.violations if v.is_error and v.type_str == "netclass_clearance_copper"
+    ]
+
+
+class TestFixDrcRecheck6431:
+    """``fix-drc`` reports success only when a re-check with kct check's rules is clean."""
+
+    def test_python_detection_sees_the_class_violation(self, pwr_board: Path):
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        report = _run_python_drc(pwr_board)
+        assert report is not None
+        (violation,) = _class_errors(report)
+        assert violation.type == ViolationType.CLEARANCE
+        assert violation.actual_value_mm == pytest.approx(0.175, abs=1e-6)
+        assert violation.required_value_mm == pytest.approx(0.2)
+
+    def test_repairs_and_exits_zero_only_when_clean(self, pwr_board: Path, capsys):
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        code = main([str(pwr_board), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "All violations repaired!" in out
+        assert "kct-check: 0 targeted error(s)" in out
+        after = _run_python_drc(pwr_board)
+        assert after is not None and _class_errors(after) == []
+
+    def test_verify_uses_kct_check_rule_set(self, pwr_board: Path, capsys):
+        code = main([str(pwr_board), "--no-connectivity-check", "--verify"])
+        out = capsys.readouterr().out
+        assert code == 0
+        # The class violation is counted before and gone after.
+        assert "Before repair: 1 violation(s)" in out
+        assert "After repair:  0 violation(s)" in out
+        assert "kct check's rule set" in out
+
+    def test_layers_default_to_board_copper_count(self, pwr_board: Path, monkeypatch):
+        from kicad_tools.cli import fix_drc_cmd
+
+        seen: list = []
+        real = fix_drc_cmd._run_python_drc
+
+        def spy(path, manufacturer="jlcpcb", layers=None, project_pcb_path=None):
+            seen.append(layers)
+            return real(path, manufacturer, layers, project_pcb_path)
+
+        four_layer = pwr_board.read_text().replace(
+            '(0 "F.Cu" signal) (31 "B.Cu" signal)',
+            '(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)',
+        )
+        pwr_board.write_text(four_layer)
+        monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", spy)
+        main([str(pwr_board), "--no-connectivity-check", "--quiet"])
+        assert seen and all(layers == 4 for layers in seen)
+
+    def test_repairer_claims_fixed_but_recheck_fails(self, pwr_board: Path, monkeypatch, capsys):
+        """A self-reported repair is not success: the re-check decides."""
+        from kicad_tools.drc.repair_clearance import ClearanceRepairer
+
+        def lying_repair(self, report, **kwargs):
+            # Touch nothing, claim everything.
+            n = len(report.violations)
+            return RepairResult(total_violations=n, repaired=n)
+
+        monkeypatch.setattr(ClearanceRepairer, "repair_from_report", lying_repair)
+        code = main([str(pwr_board), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert code != 0
+        assert "All violations repaired!" not in out
+        assert "1 violation(s) remain unrepaired" in out
+        assert "R1-1" in out  # the remaining pair is named
+
+    def test_json_recheck_block(self, pwr_board: Path, monkeypatch, capsys):
+        from kicad_tools.drc.repair_clearance import ClearanceRepairer
+
+        monkeypatch.setattr(
+            ClearanceRepairer,
+            "repair_from_report",
+            lambda self, report, **kw: RepairResult(
+                total_violations=len(report.violations), repaired=len(report.violations)
+            ),
+        )
+        code = main([str(pwr_board), "--no-connectivity-check", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert code == 2
+        recheck = data["recheck"]
+        assert recheck["ran"] is True and recheck["clean"] is False
+        assert recheck["errors_before"] == 1 and recheck["errors_after"] == 1
+        assert recheck["engines"][0]["engine"] == "kct-check"
+        assert recheck["remaining"][0]["type"] == "netclass_clearance_copper"
+
+    def test_output_rechecked_with_input_project_rules(
+        self, pwr_board: Path, tmp_path: Path, monkeypatch, capsys
+    ):
+        """``--output`` elsewhere: the re-check keeps the input's .kicad_pro.
+
+        The pass is mocked to copy the board unchanged and claim a repair.
+        Checked without the input's project the copy would look clean (no
+        class); with it, the violation is still there.
+        """
+        import shutil
+
+        from kicad_tools.cli import fix_drc_cmd
+        from kicad_tools.drc.repair_drill_clearance import DrillRepairResult
+
+        out_dir = tmp_path / "elsewhere"
+        out_dir.mkdir()
+        output = out_dir / "fixed.kicad_pcb"
+
+        def copy_and_claim(**kwargs):
+            shutil.copyfile(kwargs["pcb_path"], kwargs["output_path"])
+            return RepairResult(total_violations=1, repaired=1), DrillRepairResult()
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", copy_and_claim)
+
+        # The precondition the test relies on:
+        assert _class_errors(fix_drc_cmd._run_python_drc(pwr_board)) != []
+        shutil.copyfile(pwr_board, output)
+        assert _class_errors(fix_drc_cmd._run_python_drc(output)) == []
+        assert _class_errors(fix_drc_cmd._run_python_drc(output, project_pcb_path=pwr_board)) != []
+        output.unlink()
+
+        code = main([str(pwr_board), "-o", str(output), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert code != 0
+        assert "All violations repaired!" not in out
+        assert not (out_dir / "fixed.kicad_pro").exists()  # nothing written beside it
+
+    def test_real_repair_to_output_is_clean(self, pwr_board: Path, tmp_path: Path, capsys):
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        output = tmp_path / "elsewhere" / "fixed.kicad_pcb"
+        output.parent.mkdir()
+        code = main([str(pwr_board), "-o", str(output), "--no-connectivity-check"])
+        assert code == 0, capsys.readouterr().out
+        after = _run_python_drc(output, project_pcb_path=pwr_board)
+        assert after is not None and _class_errors(after) == []
+
+    def test_kicad_cli_leg_gates_success(self, pwr_board: Path, monkeypatch, capsys):
+        """A kicad-cli report keeps kicad-cli in the gate: its errors block exit 0."""
+        from kicad_tools.cli import fix_drc_cmd
+        from kicad_tools.drc.report import parse_text_report
+
+        report = pwr_board.parent / "kc.rpt"
+        report.write_text(
+            """** Drc report for pwr.kicad_pcb **
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Power' clearance 0.2000 mm; actual 0.1750 mm)
+    Rule: netclass 'Power'; error
+    @(102.0000 mm, 101.0000 mm): Pad 1 [GND] of R1 on F.Cu
+    @(100.0000 mm, 100.2250 mm): Track [SIG] on F.Cu
+** End of Report **
+"""
+        )
+        stale = parse_text_report(report.read_text())  # kicad-cli still disagrees
+        monkeypatch.setattr(fix_drc_cmd, "_kicad_cli_path", lambda: Path("/fake/kicad-cli"))
+        calls: list = []
+
+        def fake_cli(board, project):
+            calls.append((board, project))
+            return stale
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_kicad_cli_drc", fake_cli)
+        code = main([str(pwr_board), "--drc-report", str(report), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert calls and calls[-1][1] == pwr_board
+        assert code != 0
+        assert "kct-check: 0 targeted error(s)" in out  # the repair itself worked...
+        assert "kicad-cli: 1 targeted error(s)" in out  # ...but kicad-cli is in the gate
+        assert "All violations repaired!" not in out
+
+    def test_kicad_cli_unavailable_is_disclosed(self, pwr_board: Path, capsys):
+        report = pwr_board.parent / "kc.rpt"
+        report.write_text(
+            """** Drc report for pwr.kicad_pcb **
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Power' clearance 0.2000 mm; actual 0.1750 mm)
+    Rule: netclass 'Power'; error
+    @(102.0000 mm, 101.0000 mm): Pad 1 [GND] of R1 on F.Cu
+    @(100.0000 mm, 100.2250 mm): Track [SIG] on F.Cu
+** End of Report **
+"""
+        )
+        code = main([str(pwr_board), "--drc-report", str(report), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "kicad-cli: not run (kicad-cli not installed" in out
+
+    def test_project_rules_staging(self, pwr_board: Path, tmp_path: Path):
+        from kicad_tools.cli.fix_drc_cmd import _with_project_rules
+
+        (pwr_board.with_suffix(".kicad_dru")).write_text("(version 1)\n")
+        other = tmp_path / "x" / "copy.kicad_pcb"
+        other.parent.mkdir()
+        other.write_text(_PWR_BOARD)
+        with _with_project_rules(other, pwr_board) as staged:
+            assert staged.name == "pwr.kicad_pcb"
+            assert staged.parent != pwr_board.parent
+            assert staged.with_suffix(".kicad_pro").read_text() == json.dumps(_PWR_PROJECT)
+            assert staged.with_suffix(".kicad_dru").exists()
+        assert not staged.exists()
+        with _with_project_rules(pwr_board, pwr_board) as same:
+            assert same == pwr_board
+
+    @pytest.mark.skipif(
+        __import__("kicad_tools.cli.runner", fromlist=["find_kicad_cli"]).find_kicad_cli() is None,
+        reason="kicad-cli not installed",
+    )
+    def test_real_kicad_cli_end_to_end(self, pwr_board: Path, monkeypatch, capsys):
+        """With kicad-cli: detect, repair, and both engines confirm 0 targeted errors."""
+        from kicad_tools.cli import fix_drc_cmd
+        from kicad_tools.cli.runner import find_kicad_cli
+
+        monkeypatch.setattr(fix_drc_cmd, "_kicad_cli_path", lambda: Path(find_kicad_cli()))
+        before = fix_drc_cmd._run_kicad_cli_drc(pwr_board, pwr_board)
+        assert before is not None
+        assert len(fix_drc_cmd._targeted(before, None)[0]) == 1
+
+        main([str(pwr_board), "--no-connectivity-check", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        engines = {e["engine"]: e for e in data["recheck"]["engines"]}
+        assert engines["kicad-cli"]["ran"] and engines["kicad-cli"]["targeted_errors"] == 0
+        assert engines["kct-check"]["targeted_errors"] == 0

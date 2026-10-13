@@ -216,7 +216,8 @@ class TestEntryPointRegistryParity:
 
     1. ``kct check`` CLI -- ``cli/check_cmd.py::run_selected_checks``.
     2. :meth:`DRCChecker.check_all` library API (drives entry points 3-5).
-    3. ``kct fix-drc`` -- ``cli/fix_drc_cmd.py::_run_python_drc``.
+    3. ``kct fix-drc`` -- ``cli/fix_drc_cmd.py::_run_python_drc`` (since #6431
+       via ``check_cmd.run_check_rule_set``, i.e. the CLI dispatch).
     4. ``kct reason`` -- ``cli/reason_cmd.py::main`` (DRC bootstrap).
     5. ``kct route`` post-pass DRC -- ``cli/route_cmd.py::run_post_route_drc``.
     6. ``ManufacturingAudit`` (used by ``kct audit`` / ``kct export`` /
@@ -252,12 +253,22 @@ class TestEntryPointRegistryParity:
         return Path(mod.__file__).read_text()
 
     def test_fix_drc_resolves_via_check_all(self) -> None:
-        """``kct fix-drc`` must use ``check_all`` -- not its own list."""
+        """``kct fix-drc`` must use ``kct check``'s own dispatch -- not its own list.
+
+        Issue #6431 moved it from ``check_all()`` to the CLI rule set
+        (``build_check_rule_set`` / ``run_check_rule_set``, which run
+        :func:`run_selected_checks`, a superset of ``check_all``), because
+        ``check_all`` lacks the path-dependent ``netclass_clearance_copper``
+        rule that fix-drc's success gate needs.
+        """
         src = self._read_source("kicad_tools.cli.fix_drc_cmd")
-        assert "checker.check_all()" in src, (
-            "kct fix-drc must invoke checker.check_all() so it inherits "
-            "the unified rule registry.  See Issue #3044."
+        assert "run_check_rule_set(" in src and "build_check_rule_set(" in src, (
+            "kct fix-drc must re-check through kct check's rule set so it "
+            "inherits the unified rule registry.  See Issues #3044 and #6431."
         )
+        check_src = self._read_source("kicad_tools.cli.check_cmd")
+        assert "def run_check_rule_set" in check_src
+        assert "run_selected_checks(" in check_src
 
     def test_reason_resolves_via_check_all(self) -> None:
         """``kct reason`` must use ``check_all`` -- not its own list."""

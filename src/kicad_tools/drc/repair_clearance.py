@@ -16,15 +16,33 @@ Usage:
     repairer = ClearanceRepairer("board.kicad_pcb")
     results = repairer.repair_from_report(report, max_displacement=0.1)
     repairer.save("board-fixed.kicad_pcb")
+
+Honest accounting (Issues #6434 / #6431)
+----------------------------------------
+A violation is counted as *repaired* only when the pair it names has been
+**re-measured** after the move and the measured edge-to-edge gap meets the
+rule.  The two items are resolved from what the report says they are (the
+kicad-cli item ``uuid``, the ``kct check`` geometry descriptor, or the item
+type, net and position) -- never "the first track within 1.5 mm", which used
+to resolve a via or pad location to the offending track itself and slide that
+track along its own axis.  The move direction is the gradient of the measured
+gap, i.e. perpendicular to a track and away from the other copper.  A move
+that does not clear the pair, or that pushes the moved copper below the
+clearance to some third item it used to clear, is undone and the pair is
+listed in :attr:`RepairResult.unrepaired`.
 """
 
 from __future__ import annotations
 
+import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from ..core.geometry import rotate_pad_offset
+from ..router.clearance_kernel import KPad, KSegment, KShape, KVia, copper_gap, make_pad
 from ..schema.pcb import (
     _find_all_footprints,
     footprint_node_frame,
@@ -33,10 +51,92 @@ from ..schema.pcb import (
 from ..sexp import SExp, parse_file
 from .net_compat import resolve_net_atom
 from .report import DRCReport
-from .violation import DRCViolation, ViolationType, _extract_component_refs
+from .violation import DRCViolation, Location, ViolationType, _extract_component_refs
 
 if TYPE_CHECKING:
     from .local_rerouter import LocalRerouter
+
+
+# --- Item descriptions -> board copper (Issue #6434) -----------------------
+#
+# kicad-cli names each item of a violation ("Track [SPEED] on B.Cu, length
+# 8.4 mm", "Via [GND] on F.Cu - B.Cu", "PTH pad 2 [+5V] of J4") and, in its
+# JSON report, carries the item's uuid.  ``kct check`` names copper by
+# geometry instead ("Trace@B.Cu:w0.2:171.9/114.8~171.9/123.2", "Via@x/y:...",
+# "J4-2"; see :mod:`kicad_tools.validate.copper_refs`).  Both say exactly which
+# item is meant, so the repairer resolves from them before it ever falls back
+# to a proximity search.
+_KICAD_TRACK = re.compile(r"^\s*(?:track|segment)\b", re.IGNORECASE)
+_KICAD_VIA = re.compile(r"^\s*via\b", re.IGNORECASE)
+_KICAD_PAD = re.compile(
+    r"\bpad\s+(?P<num>[^\s\[]+)\s+(?:\[[^\]]*\]\s+)?of\s+(?P<ref>[^\s,]+)", re.IGNORECASE
+)
+_KICAD_NET = re.compile(r"\[([^\]]*)\]")
+_KICAD_LAYER = re.compile(r"\bon\s+([A-Za-z0-9_.]+\.Cu)\b")
+_KCT_TRACE = re.compile(
+    r"^Trace@(?P<layer>[^:]+):w(?P<w>[-\d.]+):"
+    r"(?P<x1>-?[\d.]+)/(?P<y1>-?[\d.]+)~(?P<x2>-?[\d.]+)/(?P<y2>-?[\d.]+)$"
+)
+_KCT_VIA = re.compile(r"^Via@(?P<x>-?[\d.]+)/(?P<y>-?[\d.]+):")
+_KCT_PAD = re.compile(r"^(?P<ref>[^\s@:]+)-(?P<num>[^\s@:-]+)$")
+
+# ``kct check`` descriptors are quantised to 1 um.
+_DESCRIPTOR_TOLERANCE_MM = 0.0015
+# Search radius for type/net-matched lookups around a reported item position.
+_ITEM_SEARCH_RADIUS_MM = 1.5
+# Measured-gap comparisons: KiCad reports to 0.1 um.
+_GAP_EPSILON_MM = 1e-6
+
+
+@dataclass(eq=False)
+class _Copper:
+    """One piece of board copper the repairer can measure (and maybe move)."""
+
+    node: SExp
+    kind: str  # "segment", "via" or "pad"
+    net: str
+    fp_node: SExp | None = None  # owning footprint (pads only)
+
+    @property
+    def movable(self) -> bool:
+        return self.kind in ("segment", "via") and not _is_locked(self.node)
+
+
+def _is_locked(node: SExp) -> bool:
+    """KiCad's lock flag: ``(locked yes)`` (8+) or a bare ``locked`` atom (6/7)."""
+    if any(str(atom) == "locked" for atom in node.get_atoms()):
+        return True
+    for child in node.children:
+        if child.name == "locked":
+            atoms = child.get_atoms()
+            return not atoms or str(atoms[0]) in ("yes", "true")
+    return False
+
+
+def _bbox_of(shape: KShape) -> tuple[float, float, float, float]:
+    """Axis-aligned bounds of a kernel shape (copper extent included)."""
+    if isinstance(shape, KSegment):
+        r = shape.width / 2
+        return (
+            min(shape.x1, shape.x2) - r,
+            min(shape.y1, shape.y2) - r,
+            max(shape.x1, shape.x2) + r,
+            max(shape.y1, shape.y2) + r,
+        )
+    if isinstance(shape, KVia):
+        r = shape.diameter / 2
+        return (shape.x - r, shape.y - r, shape.x + r, shape.y + r)
+    assert isinstance(shape, KPad)
+    xs = [p[0] for p in shape.core] or [shape.cx]
+    ys = [p[1] for p in shape.core] or [shape.cy]
+    r = shape.corner_radius
+    return (min(xs) - r, min(ys) - r, max(xs) + r, max(ys) + r)
+
+
+def _boxes_overlap(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float], pad: float
+) -> bool:
+    return not (a[2] + pad < b[0] or b[2] + pad < a[0] or a[3] + pad < b[1] or b[3] + pad < a[1])
 
 
 @dataclass
@@ -54,6 +154,11 @@ class NudgeResult:
     old_clearance_mm: float
     new_clearance_mm: float
     uuid: str
+    # Every coordinate this nudge wrote, so it can be undone exactly even when
+    # it dragged connected track ends along (Issue #6434):
+    # ``(object_type, uuid, point, old_x, old_y, new_x, new_y)`` where
+    # ``point`` is ``"start"``, ``"end"`` or ``"at"``.
+    edits: list[tuple[str, str, str, float, float, float, float]] = field(default_factory=list)
 
     def __str__(self) -> str:
         return (
@@ -86,6 +191,41 @@ class FootprintNudgeResult:
 
 
 @dataclass
+class UnrepairedPair:
+    """A violation the repairer could not clear, with the reason (Issue #6434)."""
+
+    items: list[str]
+    nets: list[str]
+    required_mm: float | None
+    reported_mm: float | None
+    measured_mm: float | None
+    reason: str
+    violation_id: int = field(default=0, repr=False, compare=False)
+
+    def __str__(self) -> str:
+        names = " <-> ".join(self.items) if self.items else "(unidentified items)"
+        values = []
+        if self.measured_mm is not None:
+            values.append(f"measured {self.measured_mm:.4f} mm")
+        elif self.reported_mm is not None:
+            values.append(f"reported {self.reported_mm:.4f} mm")
+        if self.required_mm is not None:
+            values.append(f"required {self.required_mm:.4f} mm")
+        value_str = f" ({', '.join(values)})" if values else ""
+        return f"{names}{value_str}: {self.reason}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "items": list(self.items),
+            "nets": list(self.nets),
+            "required_mm": self.required_mm,
+            "reported_mm": self.reported_mm,
+            "measured_mm": None if self.measured_mm is None else round(self.measured_mm, 4),
+            "reason": self.reason,
+        }
+
+
+@dataclass
 class RepairResult:
     """Summary of a clearance repair operation."""
 
@@ -96,6 +236,9 @@ class RepairResult:
     skipped_no_delta: int = 0
     skipped_exceeds_max: int = 0
     skipped_infeasible: int = 0
+    # Moves were tried but none brought the re-measured gap up to the rule
+    # (or every one would have created a new violation) -- Issue #6434.
+    skipped_not_cleared: int = 0
     relocated_vias: int = 0
     endpoint_nudges: int = 0
     local_rerouted: int = 0
@@ -108,6 +251,7 @@ class RepairResult:
     footprint_skipped_exceeds_max: int = 0
     nudges: list[NudgeResult] = field(default_factory=list)
     footprint_nudge_results: list[FootprintNudgeResult] = field(default_factory=list)
+    unrepaired: list[UnrepairedPair] = field(default_factory=list)
 
     @property
     def success_rate(self) -> float:
@@ -143,12 +287,16 @@ class RepairResult:
             lines.append(f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}")
         if self.skipped_infeasible > 0:
             lines.append(f"  Skipped (infeasible): {self.skipped_infeasible}")
+        if self.skipped_not_cleared > 0:
+            lines.append(f"  Not cleared (re-measured): {self.skipped_not_cleared}")
         if self.skipped_no_local_route > 0:
             lines.append(f"  Skipped (no local route): {self.skipped_no_local_route}")
         if self.skipped_no_location > 0:
             lines.append(f"  Skipped (no location): {self.skipped_no_location}")
         if self.skipped_no_delta > 0:
             lines.append(f"  Skipped (no delta info): {self.skipped_no_delta}")
+        for pair in self.unrepaired:
+            lines.append(f"  Unrepaired: {pair}")
         return "\n".join(lines)
 
 
@@ -160,11 +308,15 @@ class ClearanceRepairer:
     any routing.
     """
 
-    def __init__(self, pcb_path: str | Path):
+    def __init__(self, pcb_path: str | Path, project_pcb_path: str | Path | None = None):
         """Load a PCB file for repair.
 
         Args:
             pcb_path: Path to .kicad_pcb file
+            project_pcb_path: The board whose sibling ``.kicad_pro`` carries
+                the netclass clearances (defaults to ``pcb_path``).  Pass the
+                *input* board when repairing a copy written elsewhere, so the
+                collateral-damage check still knows the project's classes.
         """
         self.path = Path(pcb_path)
         self.doc = parse_file(self.path)
@@ -177,6 +329,27 @@ class ClearanceRepairer:
 
         # Nudge history for oscillation detection: maps UUID -> (cumulative_dx, cumulative_dy)
         self._nudge_history: dict[str, tuple[float, float]] = {}
+
+        # Issue #6434: copper index, measurement caches and the edit journal
+        # that lets a trial move be measured and undone exactly.
+        self._project_pcb_path = Path(project_pcb_path) if project_pcb_path else self.path
+        self._index: list[_Copper] | None = None
+        self._by_node: dict[int, _Copper] = {}
+        self._by_uuid: dict[str, _Copper] = {}
+        self._shape_cache: dict[int, tuple[KShape, tuple[float, float, float, float]]] = {}
+        self._journal: list[tuple[SExp, SExp, float, float]] | None = None
+        self._net_clearance: dict[str, float] | None = None
+        self._net_clearance_loaded = False
+        self._report_min_required = 0.0
+        self._report_max_required = 0.2
+        # (violation, target, other, required) for every counted nudge repair,
+        # re-measured once more after the whole report has been processed.
+        self._repaired_pairs: list[tuple[DRCViolation, _Copper, _Copper, float]] = []
+        self._initial_gaps: dict[int, float] = {}
+        # (violation, a, b, required, counter) for every nudge-phase failure
+        # whose items were resolved: re-measured at the end, since a later
+        # move (a shared or dragged track) can clear it after all.
+        self._failed_pairs: list[tuple[DRCViolation, _Copper, _Copper, float, str]] = []
 
     def _parse_nets(self):
         """Parse net definitions from the PCB.
@@ -199,6 +372,26 @@ class ClearanceRepairer:
             net_name = str(atoms[1])
             self.nets[net_num] = net_name
             self.net_names[net_name] = net_num
+
+        if self.nets:
+            return
+        # KiCad 10 boards may carry name-only ``(net "GND")`` atoms and no
+        # top-level net table.  Every net would then resolve to number 0, so
+        # "same net" comparisons (here and in the local rerouter) would see
+        # one net for everything -- or none.  Number the names in file order;
+        # the numbers are never written back (Issue #6434).
+        for node in self.doc.iter_all():
+            if node.name != "net" or node is self.doc:
+                continue
+            atoms = node.get_atoms()
+            if len(atoms) != 1:
+                continue
+            name = str(atoms[0])
+            if not name or name.lstrip("-").isdigit() or name in self.net_names:
+                continue
+            number = len(self.nets) + 1
+            self.nets[number] = name
+            self.net_names[name] = number
 
     def repair_from_report(
         self,
@@ -231,6 +424,8 @@ class ClearanceRepairer:
             RepairResult with details of all repairs
         """
         result = RepairResult()
+        self._repaired_pairs = []
+        self._failed_pairs = []
 
         clearances = [
             v
@@ -252,147 +447,80 @@ class ClearanceRepairer:
             for v in report.by_type(ViolationType.CLEARANCE_PAD_VIA)
             if not self._is_zone_fill_violation(v)
         ]
+        # ``kct check`` names track/track and via/via pairs explicitly where
+        # kicad-cli reports them as plain ``clearance`` (Issue #6431).
+        clearances += [
+            v
+            for vtype in (ViolationType.CLEARANCE_SEGMENT_SEGMENT, ViolationType.CLEARANCE_VIA_VIA)
+            for v in report.by_type(vtype)
+            if not self._is_zone_fill_violation(v)
+        ]
         all_clearances = (
             clearances + segment_via_clearances + pad_segment_clearances + pad_via_clearances
         )
         result.total_violations = len(all_clearances)
 
-        # Track violations where nudge was explicitly skipped as infeasible
-        skipped_violations: list[DRCViolation] = []
+        # Thresholds for the collateral-damage check when the project carries
+        # no netclass table: the report's own requirements bound the rules.
+        required_values = [
+            v.required_value_mm for v in all_clearances if v.required_value_mm is not None
+        ]
+        if required_values:
+            self._report_min_required = min(required_values)
+            self._report_max_required = max(required_values)
 
-        for violation in clearances:
-            before_infeasible = result.skipped_infeasible
-            self._repair_single_violation(
+        # Gap of every resolvable pair before anything moves: a pair that was
+        # in violation and measures clear by the time it is reached was
+        # cleared by an earlier nudge (shared track, dragged neighbour); one
+        # that never measured in violation is a stale report.
+        self._initial_gaps = {}
+        for violation in all_clearances:
+            a, b = self._resolve_pair(violation)
+            if a is not None and b is not None:
+                self._initial_gaps[id(violation)] = self._measure(a, b)
+
+        # Violations that the nudge phase could not clear, with the counter
+        # they were booked under (so a successful reroute can move them over).
+        failed: list[tuple[DRCViolation, str]] = []
+
+        # ``prefer`` orders the candidates; the other movable item is still
+        # tried when the preferred one cannot clear the pair (Issue #6434:
+        # ``--prefer move-via`` used to be overridden for every track/via
+        # pair).  Pads never move.
+        for violation in clearances + segment_via_clearances:
+            outcome = self._repair_single_violation(
                 violation, result, max_displacement, margin, prefer, dry_run
             )
-            if result.skipped_infeasible > before_infeasible:
-                skipped_violations.append(violation)
+            if outcome in ("infeasible", "not_cleared"):
+                failed.append((violation, outcome))
 
-        # For segment-to-via violations, always prefer moving the trace
-        # (never the via, since it was just sized by fix-vias)
-        for violation in segment_via_clearances:
-            before_infeasible = result.skipped_infeasible
-            self._repair_single_violation(
-                violation, result, max_displacement, margin, "move-trace", dry_run
-            )
-            if result.skipped_infeasible > before_infeasible:
-                skipped_violations.append(violation)
-
-        # For pad-segment violations, move the segment (pads are immovable)
         for violation in pad_segment_clearances:
-            before_infeasible = result.skipped_infeasible
-            self._repair_single_violation(
+            outcome = self._repair_single_violation(
                 violation, result, max_displacement, margin, "move-trace", dry_run
             )
-            if result.skipped_infeasible > before_infeasible:
-                skipped_violations.append(violation)
+            if outcome in ("infeasible", "not_cleared"):
+                failed.append((violation, outcome))
 
-        # For pad-via violations, move the via (pads are immovable)
         for violation in pad_via_clearances:
-            before_infeasible = result.skipped_infeasible
-            self._repair_single_violation(
+            outcome = self._repair_single_violation(
                 violation, result, max_displacement, margin, "move-via", dry_run
             )
-            if result.skipped_infeasible > before_infeasible:
-                skipped_violations.append(violation)
+            if outcome in ("infeasible", "not_cleared"):
+                failed.append((violation, outcome))
 
-        # Phase 2: Local rerouting for infeasible violations
-        if local_reroute:
-            # Also find violations where nudge "succeeded" but _apply_nudge
-            # silently did nothing because both endpoints sit at vias.
-            # These are counted as "repaired" by the nudge phase but need rerouting.
-            both_at_vias = self._find_both_endpoints_at_vias_violations(
-                all_clearances, result, max_displacement, margin
-            )
+        # Phase 2: Local rerouting for violations nudging could not clear
+        if local_reroute and failed:
+            self._run_local_reroute_phase(failed, result, margin, dry_run, local_grid_padding)
 
-            all_reroute_candidates = []
-            # Violations explicitly skipped as infeasible: counter adjustments
-            # on success are: skipped_infeasible -= 1, repaired += 1
-            for v in skipped_violations:
-                all_reroute_candidates.append((v, "skipped"))
-            # Violations where nudge was counted as repaired but segment didn't move:
-            # counter adjustments on success are: repaired stays the same (already counted),
-            # only local_rerouted += 1
-            # Deduplicate: exclude any already queued via skipped_violations to avoid
-            # processing the same violation twice.
-            skipped_set = {id(v) for v in skipped_violations}
-            for v in both_at_vias:
-                if id(v) not in skipped_set:
-                    all_reroute_candidates.append((v, "phantom_repair"))
-
-            if all_reroute_candidates:
-                self._run_local_reroute_phase(
-                    all_reroute_candidates, result, margin, dry_run, local_grid_padding
-                )
+        # A later move can push copper back into an earlier pair: re-measure
+        # every counted nudge repair against the final geometry.
+        self._reverify_repaired_pairs(result)
 
         # Phase 3: Footprint nudging for pad-pad violations
         if nudge_footprints:
             self._repair_pad_pad_violations(report, result, max_displacement, margin, dry_run)
 
         return result
-
-    def _find_both_endpoints_at_vias_violations(
-        self,
-        violations: list[DRCViolation],
-        result: RepairResult,
-        max_displacement: float,
-        margin: float,
-    ) -> list[DRCViolation]:
-        """Identify violations where the nudge "repaired" a segment but
-        _apply_nudge silently did nothing because both endpoints are at vias.
-
-        These violations were counted as repaired but the segment wasn't
-        actually moved. We need to reroute them instead.
-        """
-        via_positions = self._find_via_positions()
-        tolerance = 0.001
-        both_at_vias: list[DRCViolation] = []
-
-        for violation in violations:
-            if len(violation.locations) < 2:
-                continue
-            delta = violation.delta_mm
-            if delta is None:
-                continue
-            if delta + margin > max_displacement:
-                continue
-
-            # Find the segment object for this violation
-            loc1 = violation.locations[0]
-            loc2 = violation.locations[1]
-            obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
-            obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
-
-            # Check if either object is a segment with both endpoints at vias
-            for obj in (obj1, obj2):
-                if obj is None or obj[1] != "segment":
-                    continue
-                seg_node = obj[0]
-                start_node = seg_node.find("start")
-                end_node = seg_node.find("end")
-                if not (start_node and end_node):
-                    continue
-                start_atoms = start_node.get_atoms()
-                end_atoms = end_node.get_atoms()
-                sx = float(start_atoms[0]) if start_atoms else 0
-                sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
-                ex = float(end_atoms[0]) if end_atoms else 0
-                ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
-
-                start_at_via = any(
-                    math.sqrt((sx - vx) ** 2 + (sy - vy) ** 2) <= tolerance
-                    for vx, vy in via_positions
-                )
-                end_at_via = any(
-                    math.sqrt((ex - vx) ** 2 + (ey - vy) ** 2) <= tolerance
-                    for vx, vy in via_positions
-                )
-
-                if start_at_via and end_at_via:
-                    both_at_vias.append(violation)
-                    break
-
-        return both_at_vias
 
     def _run_local_reroute_phase(
         self,
@@ -404,9 +532,9 @@ class ClearanceRepairer:
     ) -> None:
         """Attempt local A* rerouting for violations that nudging could not fix.
 
-        Each violation is tagged with its source:
-        - "skipped": explicitly counted as skipped_infeasible by nudge phase
-        - "phantom_repair": counted as repaired but _apply_nudge did nothing
+        Each violation is tagged with the counter the nudge phase booked it
+        under (``"infeasible"`` or ``"not_cleared"``); a reroute that is
+        verified to clear the pair moves it from that counter to ``repaired``.
 
         For each violation, identifies the segment and tries to reroute it
         around the obstacle using a local A* grid.
@@ -564,6 +692,43 @@ class ClearanceRepairer:
                 # Fall back to standard per-violation reroute (without extras)
                 self._attempt_local_reroute(violation, result, rerouter, margin, dry_run, source)
 
+    def _reroute_plan(
+        self, violation: DRCViolation
+    ) -> tuple[_Copper, _Copper, float, float, float] | None:
+        """The segment to reroute and its obstacle ``(x, y, radius)``.
+
+        Resolved through :meth:`_resolve_pair` (Issue #6434), so the obstacle
+        is the *other* item of the violation, never the segment itself.
+        """
+        a, b = self._resolve_pair(violation)
+        if a is None or b is None:
+            return None
+        if a.kind == "segment":
+            seg, obstacle = a, b
+        elif b.kind == "segment":
+            seg, obstacle = b, a
+        else:
+            return None
+        if obstacle.kind == "via":
+            obs_x, obs_y = self._via_xy(obstacle.node)
+            size_node = obstacle.node.find("size")
+            radius = float(size_node.get_first_atom()) / 2 if size_node else 0.3
+        elif obstacle.kind == "pad":
+            shape = self._shape_of(obstacle)
+            assert isinstance(shape, KPad)
+            obs_x, obs_y = shape.cx, shape.cy
+            radius = self._pad_obstacle_radius(obstacle.node)
+        else:
+            # Segment obstacle: the point on it closest to the rerouted track.
+            sx1, sy1, sx2, sy2 = self._segment_xy(seg.node)
+            ox1, oy1, ox2, oy2 = self._segment_xy(obstacle.node)
+            mid_x, mid_y = (sx1 + sx2) / 2, (sy1 + sy2) / 2
+            closest = self._closest_point_on_segment(ox1, oy1, ox2, oy2, mid_x, mid_y)
+            assert closest is not None
+            obs_x, obs_y = closest[0], closest[1]
+            radius = self._get_node_width(obstacle.node) / 2
+        return seg, obstacle, obs_x, obs_y, radius
+
     def _extract_obstacle_info(
         self,
         violation: DRCViolation,
@@ -574,38 +739,11 @@ class ClearanceRepairer:
         Returns the position and radius of the non-segment object in the
         violation, or None if the obstacle cannot be determined.
         """
-        if len(violation.locations) < 2:
+        plan = self._reroute_plan(violation)
+        if plan is None:
             return None
-
-        loc1 = violation.locations[0]
-        loc2 = violation.locations[1]
-
-        obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
-        obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
-
-        # Identify which is the obstacle (non-segment) and its location
-        if obj1 is not None and obj1[1] == "segment":
-            obs_x, obs_y, obs_obj = loc2.x_mm, loc2.y_mm, obj2
-        elif obj2 is not None and obj2[1] == "segment":
-            obs_x, obs_y, obs_obj = loc1.x_mm, loc1.y_mm, obj1
-        else:
-            # Neither is a segment -- use first location as obstacle
-            obs_x, obs_y, obs_obj = loc1.x_mm, loc1.y_mm, obj1
-
-        obstacle_radius = 0.3  # Default fallback
-        if obs_obj is not None and obs_obj[1] == "via":
-            via_node = obs_obj[0]
-            size_node = via_node.find("size")
-            if size_node:
-                obstacle_radius = float(size_node.get_first_atom()) / 2
-        elif obs_obj is not None and obs_obj[1] == "segment":
-            other_seg = obs_obj[0]
-            width_node = other_seg.find("width")
-            obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
-        elif obs_obj is not None and obs_obj[1] == "pad":
-            obstacle_radius = self._pad_obstacle_radius(obs_obj[0])
-
-        return (obs_x, obs_y, obstacle_radius)
+        _seg, _obstacle, obs_x, obs_y, radius = plan
+        return (obs_x, obs_y, radius)
 
     def _pad_obstacle_radius(self, pad_node: SExp) -> float:
         """Estimate the effective radius of a pad for obstacle avoidance.
@@ -639,78 +777,9 @@ class ClearanceRepairer:
         Returns True if rerouting succeeded, False otherwise.  Does **not**
         update ``result`` counters on failure (the caller handles fallback).
         """
-        if len(violation.locations) < 2:
-            return False
-
-        loc1 = violation.locations[0]
-        loc2 = violation.locations[1]
-
-        seg_info = None
-        obstacle_info = None
-
-        obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
-        obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
-
-        if obj1 is not None and obj1[1] == "segment":
-            seg_info = obj1
-            obstacle_info = (loc2.x_mm, loc2.y_mm, obj2)
-        elif obj2 is not None and obj2[1] == "segment":
-            seg_info = obj2
-            obstacle_info = (loc1.x_mm, loc1.y_mm, obj1)
-
-        if seg_info is None:
-            return False
-
-        seg_node = seg_info[0]
-        obs_x, obs_y, obs_obj = obstacle_info
-
-        obstacle_radius = 0.3
-        if obs_obj is not None and obs_obj[1] == "via":
-            via_node = obs_obj[0]
-            size_node = via_node.find("size")
-            if size_node:
-                obstacle_radius = float(size_node.get_first_atom()) / 2
-        elif obs_obj is not None and obs_obj[1] == "segment":
-            other_seg = obs_obj[0]
-            width_node = other_seg.find("width")
-            obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
-        elif obs_obj is not None and obs_obj[1] == "pad":
-            obstacle_radius = self._pad_obstacle_radius(obs_obj[0])
-
-        width_node = seg_node.find("width")
-        trace_width = float(width_node.get_first_atom()) if width_node else 0.25
-
-        required_clearance = violation.required_value_mm or 0.2
-        trace_clearance = required_clearance + margin
-
-        # For seg-seg violations, pass the obstacle segment as a same-net obstacle
-        same_net_obs: list[SExp] | None = None
-        if obs_obj is not None and obs_obj[1] == "segment":
-            same_net_obs = [obs_obj[0]]
-
-        reroute_result = rerouter.reroute_segment(
-            seg_node=seg_node,
-            obstacle_x=obs_x,
-            obstacle_y=obs_y,
-            obstacle_radius=obstacle_radius,
-            trace_width=trace_width,
-            trace_clearance=trace_clearance,
-            dry_run=dry_run,
-            extra_obstacles=extra_obstacles,
-            same_net_obstacle_segs=same_net_obs,
+        return self._reroute_violation(
+            violation, result, rerouter, margin, dry_run, source, extra_obstacles, cluster=True
         )
-
-        if reroute_result.success:
-            result.local_rerouted += 1
-            result.cluster_rerouted += 1
-            if source == "skipped":
-                result.repaired += 1
-                result.skipped_infeasible -= 1
-            if not dry_run:
-                self.modified = True
-            return True
-
-        return False
 
     def _attempt_local_reroute(
         self,
@@ -719,71 +788,60 @@ class ClearanceRepairer:
         rerouter: LocalRerouter,
         margin: float,
         dry_run: bool,
-        source: str = "skipped",
+        source: str = "infeasible",
     ) -> None:
-        """Attempt to locally reroute a single infeasible violation.
+        """Attempt to locally reroute a single violation nudging could not clear.
 
         Args:
-            source: "skipped" if the violation was counted as skipped_infeasible,
-                    "phantom_repair" if it was counted as repaired but the nudge
-                    silently did nothing (both endpoints at vias).
+            source: The counter the nudge phase booked the violation under
+                (``"infeasible"`` or ``"not_cleared"``).
         """
-        if len(violation.locations) < 2:
+        if not self._reroute_violation(
+            violation, result, rerouter, margin, dry_run, source, None, cluster=False
+        ):
             result.skipped_no_local_route += 1
-            return
 
-        loc1 = violation.locations[0]
-        loc2 = violation.locations[1]
+    def _reroute_violation(
+        self,
+        violation: DRCViolation,
+        result: RepairResult,
+        rerouter: LocalRerouter,
+        margin: float,
+        dry_run: bool,
+        source: str,
+        extra_obstacles: list[tuple[float, float, float]] | None,
+        cluster: bool,
+    ) -> bool:
+        """Reroute the violation's segment around its obstacle.
 
-        # Find segment and obstacle objects at the two violation locations
-        seg_info = None
-        obstacle_info = None
+        A reroute counts as a repair only when the obstacle's re-measured gap
+        to every piece of the rerouted net meets the rule (Issue #6434).
+        Returns whether the violation now counts as repaired.
+        """
+        if violation.delta_mm is None:
+            return False
+        plan = self._reroute_plan(violation)
+        if plan is None:
+            return False
+        seg, obstacle, obs_x, obs_y, obstacle_radius = plan
+        seg_node = seg.node
 
-        obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
-        obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
-
-        if obj1 is not None and obj1[1] == "segment":
-            seg_info = obj1
-            obstacle_info = (loc2.x_mm, loc2.y_mm, obj2)
-        elif obj2 is not None and obj2[1] == "segment":
-            seg_info = obj2
-            obstacle_info = (loc1.x_mm, loc1.y_mm, obj1)
-
-        if seg_info is None:
-            result.skipped_no_local_route += 1
-            return
-
-        seg_node = seg_info[0]
-        obs_x, obs_y, obs_obj = obstacle_info
-
-        # Determine obstacle radius
-        obstacle_radius = 0.3  # Default fallback
-        if obs_obj is not None and obs_obj[1] == "via":
-            via_node = obs_obj[0]
-            size_node = via_node.find("size")
-            if size_node:
-                obstacle_radius = float(size_node.get_first_atom()) / 2
-        elif obs_obj is not None and obs_obj[1] == "segment":
-            # Segment-to-segment: use the segment's width as obstacle radius
-            other_seg = obs_obj[0]
-            width_node = other_seg.find("width")
-            obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
-        elif obs_obj is not None and obs_obj[1] == "pad":
-            obstacle_radius = self._pad_obstacle_radius(obs_obj[0])
-
-        # Get trace parameters
         width_node = seg_node.find("width")
         trace_width = float(width_node.get_first_atom()) if width_node else 0.25
 
-        # Required clearance from violation info
         required_clearance = violation.required_value_mm or 0.2
         trace_clearance = required_clearance + margin
 
         # For seg-seg violations, pass the obstacle segment as a same-net obstacle
         same_net_obs: list[SExp] | None = None
-        if obs_obj is not None and obs_obj[1] == "segment":
-            same_net_obs = [obs_obj[0]]
+        if obstacle.kind == "segment":
+            same_net_obs = [obstacle.node]
 
+        kwargs: dict[str, Any] = {}
+        if extra_obstacles is not None:
+            kwargs["extra_obstacles"] = extra_obstacles
+        seg_layer_node = seg_node.find("layer")
+        seg_layer = str(seg_layer_node.get_first_atom()) if seg_layer_node else ""
         reroute_result = rerouter.reroute_segment(
             seg_node=seg_node,
             obstacle_x=obs_x,
@@ -793,26 +851,35 @@ class ClearanceRepairer:
             trace_clearance=trace_clearance,
             dry_run=dry_run,
             same_net_obstacle_segs=same_net_obs,
+            **kwargs,
         )
+        if not reroute_result.success:
+            return False
 
-        if reroute_result.success:
-            result.local_rerouted += 1
-            if source == "skipped":
-                # Violation was counted as skipped_infeasible in nudge phase;
-                # undo that and count as repaired instead.
-                result.repaired += 1
-                result.skipped_infeasible -= 1
-            # For "phantom_repair" source: repaired was already incremented
-            # in the nudge phase, so we only need local_rerouted.
-            if not dry_run:
-                self.modified = True
+        if not dry_run:
+            self.modified = True
+            # The rerouter replaced copper: rebuild the index before measuring.
+            self._invalidate_index()
+            measured = self._measure_net_to_item(seg.net, seg_layer, obstacle)
+            if measured is None or measured + _GAP_EPSILON_MM < required_clearance:
+                reason = (
+                    "local reroute could not be re-measured (no copper of the net found)"
+                    if measured is None
+                    else f"local reroute left {measured:.4f} mm to the obstacle"
+                )
+                self._note_unrepaired(result, violation, measured, reason, replace=True)
+                return True  # geometry changed; do not try a second reroute
+
+        result.local_rerouted += 1
+        if cluster:
+            result.cluster_rerouted += 1
+        result.repaired += 1
+        if source == "not_cleared":
+            result.skipped_not_cleared -= 1
         else:
-            result.skipped_no_local_route += 1
-            if source == "phantom_repair":
-                # The nudge phase already incremented repaired, but the segment
-                # didn't actually move and local reroute also failed.  Undo the
-                # phantom repaired count to avoid double-counting.
-                result.repaired -= 1
+            result.skipped_infeasible -= 1
+        self._drop_unrepaired(result, violation)
+        return True
 
     def _would_oscillate(self, uuid_str: str, dx: float, dy: float) -> bool:
         """Check if a proposed nudge would reverse a previous nudge direction.
@@ -851,6 +918,456 @@ class ClearanceRepairer:
         else:
             self._nudge_history[uuid_str] = (dx, dy)
 
+    # ------------------------------------------------------------------
+    # Copper index, shapes and measurement (Issue #6434)
+    # ------------------------------------------------------------------
+
+    def _invalidate_index(self) -> None:
+        """Forget the copper index (copper was added, removed or re-placed)."""
+        self._index = None
+        self._by_node = {}
+        self._by_uuid = {}
+        self._shape_cache = {}
+
+    def _ensure_index(self) -> list[_Copper]:
+        """Every segment, via and pad on the board, built once and cached."""
+        if self._index is not None:
+            return self._index
+        index: list[_Copper] = []
+        by_uuid: dict[str, _Copper] = {}
+        for child in self.doc.children:
+            if child.name not in ("segment", "via"):
+                continue
+            copper = _Copper(node=child, kind=child.name, net=self._node_net(child))
+            index.append(copper)
+            uuid = self._node_uuid(child)
+            if uuid:
+                by_uuid[uuid] = copper
+        for fp_node in _find_all_footprints(self.doc):
+            for pad_node in fp_node.find_all("pad"):
+                if not pad_node.find("at"):
+                    continue
+                copper = _Copper(
+                    node=pad_node, kind="pad", net=self._node_net(pad_node), fp_node=fp_node
+                )
+                index.append(copper)
+                uuid = self._node_uuid(pad_node)
+                if uuid:
+                    by_uuid[uuid] = copper
+        self._index = index
+        self._by_node = {id(c.node): c for c in index}
+        self._by_uuid = by_uuid
+        self._shape_cache = {}
+        return index
+
+    @staticmethod
+    def _node_uuid(node: SExp) -> str:
+        uuid_node = node.find("uuid")
+        if not uuid_node:
+            return ""
+        atom = uuid_node.get_first_atom()
+        return str(atom).strip('"') if atom is not None else ""
+
+    def _node_net(self, node: SExp) -> str:
+        """Net name of a segment, via or pad (KiCad 8 numeric or 9+ name form)."""
+        net_node = node.find("net")
+        if not net_node:
+            return ""
+        atoms = net_node.get_atoms()
+        _num, name = resolve_net_atom(str(atoms[0]) if atoms else None, self.nets, self.net_names)
+        if not name and len(atoms) > 1:
+            name = str(atoms[1])
+        return "" if name == "<no net>" else name
+
+    @staticmethod
+    def _xy(node: SExp | None) -> tuple[float, float]:
+        if not node:
+            return (0.0, 0.0)
+        atoms = node.get_atoms()
+        x = float(atoms[0]) if atoms else 0.0
+        y = float(atoms[1]) if len(atoms) > 1 else 0.0
+        return (x, y)
+
+    def _segment_xy(self, node: SExp) -> tuple[float, float, float, float]:
+        sx, sy = self._xy(node.find("start"))
+        ex, ey = self._xy(node.find("end"))
+        return (sx, sy, ex, ey)
+
+    def _via_xy(self, node: SExp) -> tuple[float, float]:
+        return self._xy(node.find("at"))
+
+    def _segment_layer(self, node: SExp) -> str:
+        layer_node = node.find("layer")
+        return str(layer_node.get_first_atom()) if layer_node else ""
+
+    def _pad_layers(self, node: SExp) -> list[str]:
+        layers_node = node.find("layers")
+        return [str(a) for a in layers_node.get_atoms()] if layers_node else []
+
+    def _build_shape(self, copper: _Copper) -> KShape:
+        node = copper.node
+        if copper.kind == "segment":
+            sx, sy, ex, ey = self._segment_xy(node)
+            return KSegment(sx, sy, ex, ey, self._get_node_width(node))
+        if copper.kind == "via":
+            vx, vy = self._via_xy(node)
+            size_node = node.find("size")
+            size = float(size_node.get_first_atom()) if size_node else 0.6
+            return KVia(vx, vy, size)
+        # Pad: footprint-local offset rotated by KiCad's forward transform; the
+        # pad's own ``(at x y rot)`` angle is already absolute (issue #3902).
+        assert copper.fp_node is not None
+        fp_atoms = copper.fp_node.find("at").get_atoms()  # type: ignore[union-attr]
+        fx = float(fp_atoms[0]) if fp_atoms else 0.0
+        fy = float(fp_atoms[1]) if len(fp_atoms) > 1 else 0.0
+        frot = float(fp_atoms[2]) if len(fp_atoms) > 2 else 0.0
+        pad_atoms = node.find("at").get_atoms()  # type: ignore[union-attr]
+        lx = float(pad_atoms[0]) if pad_atoms else 0.0
+        ly = float(pad_atoms[1]) if len(pad_atoms) > 1 else 0.0
+        prot = float(pad_atoms[2]) if len(pad_atoms) > 2 else 0.0
+        ox, oy = rotate_pad_offset(lx, ly, frot)
+        head = node.get_atoms()
+        shape_name = str(head[2]) if len(head) > 2 else "rect"
+        size_node = node.find("size")
+        size_atoms = size_node.get_atoms() if size_node else []
+        w = float(size_atoms[0]) if size_atoms else 0.0
+        h = float(size_atoms[1]) if len(size_atoms) > 1 else w
+        rratio_node = node.find("roundrect_rratio")
+        rratio = float(rratio_node.get_first_atom()) if rratio_node else 0.25
+        return make_pad(shape_name, w, h, rratio, prot, fx + ox, fy + oy)
+
+    def _shape_of(self, copper: _Copper) -> KShape:
+        cached = self._shape_cache.get(id(copper.node))
+        if cached is not None:
+            return cached[0]
+        shape = self._build_shape(copper)
+        self._shape_cache[id(copper.node)] = (shape, _bbox_of(shape))
+        return shape
+
+    def _bbox(self, copper: _Copper) -> tuple[float, float, float, float]:
+        cached = self._shape_cache.get(id(copper.node))
+        if cached is None:
+            self._shape_of(copper)
+            cached = self._shape_cache[id(copper.node)]
+        return cached[1]
+
+    def _measure(self, a: _Copper, b: _Copper) -> float:
+        """Exact edge-to-edge copper gap between two items (shared kernel)."""
+        return copper_gap(self._shape_of(a), self._shape_of(b))
+
+    def _copper_layers(self, copper: _Copper) -> set[str] | None:
+        """Copper layers an item occupies; ``None`` means every copper layer."""
+        if copper.kind == "segment":
+            return {self._segment_layer(copper.node)}
+        if copper.kind == "via":
+            return None
+        layers = self._pad_layers(copper.node)
+        if any(layer in ("*.Cu", "F&B.Cu") for layer in layers):
+            return None
+        return {layer for layer in layers if layer.endswith(".Cu")}
+
+    def _interacts(self, a: _Copper, b: _Copper) -> bool:
+        la, lb = self._copper_layers(a), self._copper_layers(b)
+        if la is None or lb is None:
+            return True
+        return bool(la & lb)
+
+    def _load_net_clearances(self) -> dict[str, float] | None:
+        """Per-net clearance from the project's netclasses (``None`` if unknown)."""
+        if self._net_clearance_loaded:
+            return self._net_clearance
+        self._net_clearance_loaded = True
+        pro_path = self._project_pcb_path.with_suffix(".kicad_pro")
+        try:
+            from ..core.project_clearance import resolve_project_clearances
+
+            project = json.loads(pro_path.read_text(encoding="utf-8"))
+            resolved = resolve_project_clearances(project, list(self.net_names))
+        except Exception:  # noqa: BLE001 - no/unsupported project: use report bounds
+            return None
+        self._net_clearance = {name: value.clearance for name, value in resolved.items()}
+        default = None
+        try:
+            for item in project["net_settings"]["classes"]:
+                if item.get("name") == "Default" and "clearance" in item:
+                    default = float(item["clearance"])
+        except Exception:  # noqa: BLE001
+            default = None
+        self._net_clearance[""] = default if default is not None else self._report_min_required
+        return self._net_clearance
+
+    def _pair_requirement(self, net_a: str, net_b: str) -> float:
+        """Clearance two foreign nets need, for the collateral-damage check.
+
+        The project's netclasses when they can be read (``max`` of the two
+        nets' classes, never below the smallest requirement in the report);
+        otherwise the strictest requirement in the report, which errs on the
+        side of declining a move.
+        """
+        table = self._load_net_clearances()
+        if not table:
+            return self._report_max_required
+        default = table.get("", self._report_min_required)
+        return max(table.get(net_a, default), table.get(net_b, default), self._report_min_required)
+
+    # ------------------------------------------------------------------
+    # Resolving a violation's two items (Issue #6434)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _item_locations(violation: DRCViolation) -> list[Location | None]:
+        """Per-item positions: kicad-cli may prepend a violation-level ``pos``."""
+        n = len(violation.items)
+        locs = violation.locations
+        if len(locs) == n:
+            return list(locs)
+        if len(locs) == n + 1:
+            return list(locs[1:])
+        return [locs[i] if i < len(locs) else None for i in range(n)]
+
+    def _nearest(
+        self,
+        candidates: list[_Copper],
+        x: float,
+        y: float,
+    ) -> _Copper | None:
+        best: _Copper | None = None
+        best_d = math.inf
+        probe = KVia(x, y, 0.0)
+        for copper in candidates:
+            d = copper_gap(self._shape_of(copper), probe)
+            if d < best_d:
+                best, best_d = copper, d
+        return best
+
+    def _resolve_item(
+        self,
+        desc: str,
+        uuid: str,
+        loc: Location | None,
+        other: _Copper | None,
+    ) -> _Copper | None:
+        """The board item a report item description names, or ``None``."""
+        index = self._ensure_index()
+        exclude = other.node if other is not None else None
+
+        if uuid:
+            copper = self._by_uuid.get(uuid)
+            if copper is not None and copper.node is not exclude:
+                return copper
+
+        def anchor() -> tuple[float, float] | None:
+            if loc is not None:
+                return (loc.x_mm, loc.y_mm)
+            if other is not None:
+                shape = self._shape_of(other)
+                b = _bbox_of(shape)
+                return ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+            return None
+
+        text = desc.strip()
+        m = _KCT_TRACE.match(text)
+        if m:
+            p1 = (float(m["x1"]), float(m["y1"]))
+            p2 = (float(m["x2"]), float(m["y2"]))
+            tol = _DESCRIPTOR_TOLERANCE_MM
+            for copper in index:
+                if copper.kind != "segment" or copper.node is exclude:
+                    continue
+                if self._segment_layer(copper.node) != m["layer"]:
+                    continue
+                sx, sy, ex, ey = self._segment_xy(copper.node)
+                fwd = (
+                    math.hypot(sx - p1[0], sy - p1[1]) <= tol
+                    and math.hypot(ex - p2[0], ey - p2[1]) <= tol
+                )
+                rev = (
+                    math.hypot(sx - p2[0], sy - p2[1]) <= tol
+                    and math.hypot(ex - p1[0], ey - p1[1]) <= tol
+                )
+                if fwd or rev:
+                    return copper
+            return None
+        m = _KCT_VIA.match(text)
+        if m:
+            vx, vy = float(m["x"]), float(m["y"])
+            for copper in index:
+                if copper.kind != "via" or copper.node is exclude:
+                    continue
+                cx, cy = self._via_xy(copper.node)
+                if math.hypot(cx - vx, cy - vy) <= _DESCRIPTOR_TOLERANCE_MM:
+                    return copper
+            return None
+
+        pad_match = _KICAD_PAD.search(text) or _KCT_PAD.match(text)
+        if pad_match:
+            ref, num = pad_match["ref"], pad_match["num"]
+            pads = [
+                c
+                for c in index
+                if c.kind == "pad"
+                and c.node is not exclude
+                and c.fp_node is not None
+                and self._footprint_ref(c.fp_node) == ref
+                and str(c.node.get_atoms()[0] if c.node.get_atoms() else "") == num
+            ]
+            if len(pads) == 1:
+                return pads[0]
+            if pads:
+                point = anchor()
+                return self._nearest(pads, *point) if point else pads[0]
+            if _KICAD_PAD.search(text):
+                return None
+            # A "REF-NUM" shaped string that names no pad: fall through.
+
+        nets = _KICAD_NET.findall(text)
+        net = nets[0] if nets else None
+        if net == "<no net>":
+            net = ""
+        layer_match = _KICAD_LAYER.search(text)
+        if _KICAD_TRACK.match(text):
+            kind = "segment"
+        elif _KICAD_VIA.match(text):
+            kind = "via"
+        else:
+            return None
+        if loc is None:
+            return None
+        candidates = []
+        for copper in index:
+            if copper.kind != kind or copper.node is exclude:
+                continue
+            if net is not None and copper.net != net:
+                continue
+            if kind == "segment" and layer_match:
+                if self._segment_layer(copper.node) != layer_match.group(1):
+                    continue
+            box = self._bbox(copper)
+            if not _boxes_overlap(
+                box, (loc.x_mm, loc.y_mm, loc.x_mm, loc.y_mm), _ITEM_SEARCH_RADIUS_MM
+            ):
+                continue
+            candidates.append(copper)
+        return self._nearest(candidates, loc.x_mm, loc.y_mm)
+
+    def _footprint_ref(self, fp_node: SExp) -> str:
+        """Reference designator of a footprint node (``property`` or ``fp_text``)."""
+        for child in fp_node.children:
+            if child.name == "property":
+                atoms = child.get_atoms()
+                if len(atoms) >= 2 and str(atoms[0]) == "Reference":
+                    return str(atoms[1])
+            elif child.name == "fp_text":
+                atoms = child.get_atoms()
+                if len(atoms) >= 2 and str(atoms[0]) == "reference":
+                    return str(atoms[1])
+        return ""
+
+    def _nearest_any(
+        self,
+        loc: Location,
+        nets: list[str],
+        exclude: _Copper | None,
+    ) -> _Copper | None:
+        """Legacy fallback: nearest copper of a violation net at a location.
+
+        Every item type is considered and the nearest wins (the old lookup
+        returned the first *segment* within 1.5 mm, which made a via or pad
+        location resolve to the track beside it).  An item on the same net as
+        ``exclude`` is skipped: a clearance violation is between two nets.
+        """
+        index = self._ensure_index()
+        candidates = []
+        for copper in index:
+            if exclude is not None and (
+                copper.node is exclude.node or (exclude.net and copper.net == exclude.net)
+            ):
+                continue
+            if nets and copper.net not in nets and copper.kind != "via":
+                continue
+            if nets and copper.kind == "via" and copper.net and copper.net not in nets:
+                continue
+            if loc.layer and copper.kind == "segment":
+                if self._segment_layer(copper.node) != loc.layer:
+                    continue
+            if loc.layer and copper.kind == "pad":
+                layers = self._copper_layers(copper)
+                if layers is not None and loc.layer not in layers:
+                    continue
+            box = self._bbox(copper)
+            if not _boxes_overlap(
+                box, (loc.x_mm, loc.y_mm, loc.x_mm, loc.y_mm), _ITEM_SEARCH_RADIUS_MM
+            ):
+                continue
+            candidates.append(copper)
+        return self._nearest(candidates, loc.x_mm, loc.y_mm)
+
+    def _resolve_pair(self, violation: DRCViolation) -> tuple[_Copper | None, _Copper | None]:
+        """Resolve the two items of a clearance violation to board copper.
+
+        Exact identifiers first (kicad-cli uuid, ``kct check`` descriptor,
+        ``Pad N of REF``), then a type-, net- and layer-matched nearest search
+        around the item's reported position, then -- for reports that carry
+        no item descriptions -- the nearest copper of the violation's nets.
+        The two sides are never the same item.
+        """
+        a: _Copper | None = None
+        b: _Copper | None = None
+        items = violation.items
+        if len(items) >= 2:
+            uuids = list(getattr(violation, "item_uuids", []) or [])
+            uuids += [""] * (len(items) - len(uuids))
+            locs = self._item_locations(violation)
+            a = self._resolve_item(items[0], uuids[0], locs[0], None)
+            b = self._resolve_item(items[1], uuids[1], locs[1], a)
+            if a is None and b is not None:
+                a = self._resolve_item(items[0], uuids[0], locs[0], b)
+            if a is not None and b is not None:
+                return a, b
+        # Fallback on reported locations (one per item, or a single marker).
+        locations = violation.locations
+        if not locations:
+            return a, b
+        loc_a = locations[0]
+        loc_b = locations[1] if len(locations) > 1 else locations[0]
+        if a is None:
+            a = self._nearest_any(loc_a, violation.nets, b)
+        if b is None:
+            b = self._nearest_any(loc_b, violation.nets, a)
+        if a is not None and b is not None and a.node is b.node:
+            b = None
+        return a, b
+
+    # ------------------------------------------------------------------
+    # Repairing one violation
+    # ------------------------------------------------------------------
+
+    def _note_unrepaired(
+        self,
+        result: RepairResult,
+        violation: DRCViolation,
+        measured: float | None,
+        reason: str,
+        replace: bool = False,
+    ) -> None:
+        if replace:
+            self._drop_unrepaired(result, violation)
+        result.unrepaired.append(
+            UnrepairedPair(
+                items=list(violation.items),
+                nets=list(violation.nets),
+                required_mm=violation.required_value_mm,
+                reported_mm=violation.actual_value_mm,
+                measured_mm=measured,
+                reason=reason,
+                violation_id=id(violation),
+            )
+        )
+
+    @staticmethod
+    def _drop_unrepaired(result: RepairResult, violation: DRCViolation) -> None:
+        result.unrepaired = [u for u in result.unrepaired if u.violation_id != id(violation)]
+
     def _repair_single_violation(
         self,
         violation: DRCViolation,
@@ -859,331 +1376,482 @@ class ClearanceRepairer:
         margin: float,
         prefer: str,
         dry_run: bool,
-    ) -> None:
-        """Attempt to repair a single clearance violation."""
-        # Need at least two locations (the two objects that are too close)
-        if len(violation.locations) < 2:
-            if violation.primary_location is None:
-                result.skipped_no_location += 1
-                return
-            # With only one location, we can still try to find nearby objects
-            loc = violation.primary_location
-            delta = violation.delta_mm
-            if delta is None:
-                result.skipped_no_delta += 1
-                return
-            self._repair_from_single_location(
-                loc.x_mm,
-                loc.y_mm,
-                loc.layer,
-                delta,
-                margin,
-                violation,
-                result,
-                max_displacement,
-                prefer,
-                dry_run,
-            )
-            return
+    ) -> str:
+        """Attempt to repair a single clearance violation.
 
-        loc1 = violation.locations[0]
-        loc2 = violation.locations[1]
+        Returns the outcome: ``"repaired"``, ``"no_location"``,
+        ``"no_delta"``, ``"exceeds_max"``, ``"infeasible"`` or
+        ``"not_cleared"`` -- the counter it was booked under.
+        """
+        if not violation.locations and len(violation.items) < 2:
+            result.skipped_no_location += 1
+            self._note_unrepaired(result, violation, None, "no location in the report")
+            return "no_location"
 
         delta = violation.delta_mm
-        if delta is None:
+        required = violation.required_value_mm
+        if delta is None or required is None:
             result.skipped_no_delta += 1
-            return
+            self._note_unrepaired(result, violation, None, "no required/actual values")
+            return "no_delta"
 
-        # Required displacement is the clearance deficit plus margin
-        required_displacement = delta + margin
-
-        if required_displacement > max_displacement:
+        if delta + margin > max_displacement:
             result.skipped_exceeds_max += 1
-            return
+            self._note_unrepaired(
+                result,
+                violation,
+                None,
+                f"needs {delta + margin:.4f} mm, above --max-displacement {max_displacement}",
+            )
+            return "exceeds_max"
 
-        # Find objects at the two locations
-        obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
-        obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
-
-        if obj1 is None and obj2 is None:
+        a, b = self._resolve_pair(violation)
+        if a is None or b is None:
             result.skipped_infeasible += 1
-            return
+            self._note_unrepaired(
+                result, violation, None, "could not identify both copper items on the board"
+            )
+            return "infeasible"
 
-        # Choose which object to move based on preference and movability
-        target = self._choose_target(obj1, obj2, prefer)
-        if target is None:
-            result.skipped_infeasible += 1
-            return
+        before = self._measure(a, b)
+        if before + _GAP_EPSILON_MM >= required:
+            initial = self._initial_gaps.get(id(violation))
+            if initial is not None and initial + _GAP_EPSILON_MM < required and not dry_run:
+                # Cleared as a side effect of an earlier move in this run.
+                result.repaired += 1
+                self._repaired_pairs.append((violation, a, b, required))
+                return "repaired"
+            # Our measurement says the pair already clears: either the report
+            # is stale or the two engines disagree.  Nothing to move, and no
+            # basis for claiming a repair.
+            result.skipped_not_cleared += 1
+            self._note_unrepaired(
+                result,
+                violation,
+                before,
+                "measured gap already meets the rule (stale report?); nothing moved",
+            )
+            return "not_cleared"
 
-        obj_node, obj_type, obj_x, obj_y, obj_layer, obj_net = target
-
-        # Determine the other object and location (the one we're moving away from)
-        # Issue #1694: Use centerline-to-centerline direction when both objects
-        # are found, so the displacement vector is accurate for traces with
-        # different widths.  Fall back to the DRC violation location when the
-        # other object is not resolved.
-        if obj1 is not None and obj1[0] is obj_node:
-            other_obj = obj2
-            other_x, other_y = loc2.x_mm, loc2.y_mm
-        else:
-            other_obj = obj1
-            other_x, other_y = loc1.x_mm, loc1.y_mm
-
-        if other_obj is not None:
-            other_node, other_type, other_cx, other_cy, _other_layer, _other_net = other_obj
-            # Use centerline positions for direction computation so the
-            # displacement vector points center-to-center rather than
-            # centerline-to-edge (which is skewed for different widths).
-            other_x, other_y = other_cx, other_cy
-
-            # Issue #1694: For segment-to-segment violations where the two
-            # traces have different widths, the DRC-reported deficit (delta)
-            # applied along the center-to-center direction may still leave
-            # insufficient edge-to-edge clearance.  Validate that the
-            # post-nudge center-to-center distance will satisfy
-            # (w_target/2 + w_other/2 + required_clearance) and increase
-            # the displacement if needed.
-            if obj_type == "segment" and other_type == "segment":
-                target_width = self._get_node_width(obj_node)
-                other_width = self._get_node_width(other_node)
-
-                # Only apply width-aware boost when widths actually differ
-                if abs(target_width - other_width) > 1e-6:
-                    req_clearance = violation.required_value_mm or 0.0
-                    required_center_dist = (
-                        target_width / 2 + other_width / 2 + req_clearance + margin
-                    )
-
-                    center_dx = obj_x - other_cx
-                    center_dy = obj_y - other_cy
-                    current_center_dist = math.sqrt(center_dx * center_dx + center_dy * center_dy)
-
-                    width_aware_disp = max(0.0, required_center_dist - current_center_dist)
-                    required_displacement = max(required_displacement, width_aware_disp)
-
-                    # Re-check max_displacement with the adjusted value
-                    if required_displacement > max_displacement:
-                        result.skipped_exceeds_max += 1
-                        return
-
-        # Calculate displacement vector (away from the other object)
-        nudge = self._compute_nudge(obj_x, obj_y, other_x, other_y, required_displacement)
-        if nudge is None:
-            result.skipped_infeasible += 1
-            return
-
-        dx, dy, dist = nudge
-
-        # Get UUID
-        uuid_node = obj_node.find("uuid")
-        uuid_str = uuid_node.get_first_atom() if uuid_node else ""
-
-        # Oscillation detection: skip if this nudge reverses a previous one
-        if self._would_oscillate(uuid_str, dx, dy):
-            result.skipped_infeasible += 1
-            return
-
-        # Get actual clearance values for reporting
-        actual_clearance = violation.actual_value_mm or 0.0
-
-        nudge_result = NudgeResult(
-            object_type=obj_type,
-            x=obj_x,
-            y=obj_y,
-            net_name=obj_net,
-            layer=obj_layer,
-            displacement_x=dx,
-            displacement_y=dy,
-            displacement_mm=dist,
-            old_clearance_mm=actual_clearance,
-            new_clearance_mm=actual_clearance + dist,
-            uuid=uuid_str,
+        # ``prefer`` picks the first item to try; the other movable item is
+        # the fallback.  Pads and locked tracks/vias never move.
+        movable = [c for c in (a, b) if c.movable]
+        primary = self._choose_target(
+            self._legacy_tuple(a) if a.movable else None,
+            self._legacy_tuple(b) if b.movable else None,
+            prefer,
         )
-        result.nudges.append(nudge_result)
+        order: list[tuple[_Copper, _Copper]] = []
+        if primary is not None:
+            first = a if primary[0] is a.node else b
+            order.append((first, b if first is a else a))
+            second = order[0][1]
+            if second in movable:
+                order.append((second, first))
 
+        reasons: list[str] = []
+        exceeded = False
+        for target, other in order:
+            outcome = self._try_nudge(
+                violation, target, other, required, margin, max_displacement, dry_run, result
+            )
+            if isinstance(outcome, NudgeResult):
+                result.nudges.append(outcome)
+                result.repaired += 1
+                if not dry_run:
+                    self._repaired_pairs.append((violation, target, other, required))
+                return "repaired"
+            if outcome.startswith("exceeds"):
+                exceeded = True
+            reasons.append(f"moving the {target.kind}: {outcome}")
+
+        if not order:
+            result.skipped_infeasible += 1
+            self._note_unrepaired(
+                result, violation, before, "neither item can move (pads or locked copper)"
+            )
+            if not dry_run:
+                self._failed_pairs.append((violation, a, b, required, "infeasible"))
+            return "infeasible"
+        if exceeded and all(
+            r.split(": ", 1)[1].startswith(("exceeds", "infeasible")) for r in reasons
+        ):
+            result.skipped_exceeds_max += 1
+            self._note_unrepaired(result, violation, before, "; ".join(reasons))
+            if not dry_run:
+                self._failed_pairs.append((violation, a, b, required, "exceeds_max"))
+            return "exceeds_max"
+        if all(r.split(": ", 1)[1].startswith("infeasible") for r in reasons):
+            result.skipped_infeasible += 1
+            self._note_unrepaired(result, violation, before, "; ".join(reasons))
+            if not dry_run:
+                self._failed_pairs.append((violation, a, b, required, "infeasible"))
+            return "infeasible"
+        result.skipped_not_cleared += 1
+        self._note_unrepaired(result, violation, before, "; ".join(reasons))
         if not dry_run:
-            self._apply_nudge(obj_node, obj_type, dx, dy, result=result)
-            self.modified = True
+            self._failed_pairs.append((violation, a, b, required, "not_cleared"))
+        return "not_cleared"
 
-        # Record the nudge for oscillation detection in subsequent passes
+    def _legacy_tuple(self, copper: _Copper) -> tuple[SExp, str, float, float, str, str]:
+        """``(node, type, x, y, layer, net)`` -- the shape older helpers take."""
+        shape = self._shape_of(copper)
+        box = _bbox_of(shape)
+        layer = self._segment_layer(copper.node) if copper.kind == "segment" else ""
+        return (
+            copper.node,
+            copper.kind,
+            (box[0] + box[2]) / 2,
+            (box[1] + box[3]) / 2,
+            layer,
+            copper.net,
+        )
+
+    def _pin_state(self, node: SExp, via_points: list[tuple[float, float]]) -> tuple[bool, bool]:
+        """Whether each end of a segment is anchored (and so stays put).
+
+        An end is anchored when it sits on a via, or inside a pad of its own
+        net (Issue #6434): sliding a track end off its pad's centre keeps
+        KiCad's connectivity but not the stricter ``kct check`` connectivity
+        model, so the track pivots about the pad instead.
+        """
+        sx, sy, ex, ey = self._segment_xy(node)
+        own = self._by_node.get(id(node))
+        net = own.net if own is not None else self._node_net(node)
+        layer = self._segment_layer(node)
+        return (
+            self._end_anchored(sx, sy, net, layer, via_points),
+            self._end_anchored(ex, ey, net, layer, via_points),
+        )
+
+    def _end_anchored(
+        self, x: float, y: float, net: str, layer: str, via_points: list[tuple[float, float]]
+    ) -> bool:
+        tol = 0.001
+        if any(math.hypot(x - vx, y - vy) <= tol for vx, vy in via_points):
+            return True
+        if not net:
+            return False
+        probe = KVia(x, y, 0.0)
+        point_box = (x, y, x, y)
+        for copper in self._ensure_index():
+            if copper.kind != "pad" or copper.net != net:
+                continue
+            if not _boxes_overlap(self._bbox(copper), point_box, 0.0):
+                continue
+            layers = self._copper_layers(copper)
+            if layers is not None and layer not in layers:
+                continue
+            if copper_gap(self._shape_of(copper), probe) < 0.0:
+                return True
+        return False
+
+    def _moved_shape(
+        self,
+        target: _Copper,
+        dx: float,
+        dy: float,
+        pins: tuple[bool, bool],
+    ) -> KShape:
+        """The target's copper after ``_apply_nudge(dx, dy)``, without moving it."""
+        shape = self._shape_of(target)
+        if isinstance(shape, KVia):
+            return KVia(shape.x + dx, shape.y + dy, shape.diameter)
+        assert isinstance(shape, KSegment)
+        start_pinned, end_pinned = pins
+        if start_pinned and end_pinned:
+            return shape
+        x1, y1, x2, y2 = shape.x1, shape.y1, shape.x2, shape.y2
+        if not start_pinned:
+            x1, y1 = x1 + dx, y1 + dy
+        if not end_pinned:
+            x2, y2 = x2 + dx, y2 + dy
+        return KSegment(x1, y1, x2, y2, shape.width)
+
+    def _plan_displacement(
+        self,
+        target: _Copper,
+        other: _Copper,
+        goal: float,
+        max_displacement: float,
+        pins: tuple[bool, bool],
+    ) -> tuple[float, float] | str:
+        """Smallest move that raises the target/other gap to ``goal``.
+
+        Steps along the gradient of the measured gap -- for a track against a
+        via or pad that is perpendicular to the track, away from the other
+        copper -- and re-solves until the predicted gap reaches the goal, so
+        an end pinned at a via (a rotation, not a translation) is handled too.
+        """
+        other_shape = self._shape_of(other)
+
+        def gap(dx: float, dy: float) -> float:
+            return copper_gap(self._moved_shape(target, dx, dy, pins), other_shape)
+
+        dx = dy = 0.0
+        eps = 1e-3
+        for _ in range(8):
+            g = gap(dx, dy)
+            if g >= goal - _GAP_EPSILON_MM:
+                return (dx, dy)
+            gx = (gap(dx + eps, dy) - gap(dx - eps, dy)) / (2 * eps)
+            gy = (gap(dx, dy + eps) - gap(dx, dy - eps)) / (2 * eps)
+            gain = math.hypot(gx, gy)
+            if gain < 0.05:
+                if target.kind == "segment" and all(pins):
+                    return "infeasible: both track ends are anchored (via or pad)"
+                return "infeasible: no move direction increases the gap"
+            step = (goal - g) / gain
+            dx += gx / gain * step
+            dy += gy / gain * step
+            if math.hypot(dx, dy) > max_displacement + _GAP_EPSILON_MM:
+                return f"exceeds --max-displacement ({math.hypot(dx, dy):.4f} mm needed)"
+        if gap(dx, dy) >= goal - _GAP_EPSILON_MM:
+            return (dx, dy)
+        return "infeasible: the move does not converge"
+
+    def _try_nudge(
+        self,
+        violation: DRCViolation,
+        target: _Copper,
+        other: _Copper,
+        required: float,
+        margin: float,
+        max_displacement: float,
+        dry_run: bool,
+        result: RepairResult,
+    ) -> NudgeResult | str:
+        """Move ``target`` away from ``other``, keep it only if it measures clear.
+
+        Returns the :class:`NudgeResult` of a kept move, or the reason the
+        move was declined (the board is left exactly as it was).
+        """
+        via_points = [self._via_xy(c.node) for c in self._ensure_index() if c.kind == "via"]
+        pins = (
+            self._pin_state(target.node, via_points) if target.kind == "segment" else (False, False)
+        )
+        before = self._measure(target, other)
+        plan = self._plan_displacement(target, other, required + margin, max_displacement, pins)
+        if isinstance(plan, str):
+            return plan
+        dx, dy = plan
+        uuid_str = self._node_uuid(target.node)
+        if self._would_oscillate(uuid_str, dx, dy):
+            return "infeasible: would reverse an earlier nudge of the same item"
+
+        ref_shape = self._shape_of(target)
+        ref_box = _bbox_of(ref_shape)
+        ref_x, ref_y = (ref_box[0] + ref_box[2]) / 2, (ref_box[1] + ref_box[3]) / 2
+
+        self._journal = []
+        try:
+            self._apply_nudge(target.node, target.kind, dx, dy, result=None, drag_connected=True)
+        finally:
+            journal, self._journal = self._journal, None
+        measured = self._measure(target, other)
+        if measured + _GAP_EPSILON_MM < required:
+            self._rollback(journal)
+            return f"not cleared: measured {measured:.4f} mm after the move"
+        collateral = self._collateral_damage(journal)
+        if collateral is not None:
+            self._rollback(journal)
+            return f"not cleared: the move would {collateral}"
+
+        edits = self._journal_edits(journal)
+        if dry_run:
+            self._rollback(journal)
+        else:
+            self.modified = True
+            if target.kind == "via":
+                result.relocated_vias += 1
+            elif any(pins):
+                result.endpoint_nudges += 1
         self._record_nudge(uuid_str, dx, dy)
 
-        result.repaired += 1
-
-    def _repair_from_single_location(
-        self,
-        x: float,
-        y: float,
-        layer: str,
-        delta: float,
-        margin: float,
-        violation: DRCViolation,
-        result: RepairResult,
-        max_displacement: float,
-        prefer: str,
-        dry_run: bool,
-    ) -> None:
-        """Repair a violation with only one reported location.
-
-        Finds both objects near the violation point and nudges the preferred one.
-        """
-        required_displacement = delta + margin
-
-        if required_displacement > max_displacement:
-            result.skipped_exceeds_max += 1
-            return
-
-        # Find objects near the violation location
-        search_radius = 1.0  # mm
-        segments = self._find_segments_near(x, y, search_radius, layer, violation.nets)
-        vias = self._find_vias_near(x, y, search_radius, violation.nets)
-
-        # Need at least two objects to have a clearance issue
-        all_objects = []
-        for seg_info in segments:
-            all_objects.append(seg_info)
-        for via_info in vias:
-            all_objects.append(via_info)
-
-        if len(all_objects) < 2:
-            result.skipped_infeasible += 1
-            return
-
-        # Pick the movable target based on preference
-        target = self._choose_target(all_objects[0], all_objects[1], prefer)
-        if target is None:
-            result.skipped_infeasible += 1
-            return
-
-        obj_node, obj_type, obj_x, obj_y, obj_layer, obj_net = target
-
-        # The other object is the one we're moving away from
-        other = all_objects[1] if all_objects[0][0] is obj_node else all_objects[0]
-        _, _, other_x, other_y, _, _ = other
-
-        nudge = self._compute_nudge(obj_x, obj_y, other_x, other_y, required_displacement)
-        if nudge is None:
-            result.skipped_infeasible += 1
-            return
-
-        dx, dy, dist = nudge
-
-        uuid_node = obj_node.find("uuid")
-        uuid_str = uuid_node.get_first_atom() if uuid_node else ""
-
-        actual_clearance = violation.actual_value_mm or 0.0
-
-        nudge_result = NudgeResult(
-            object_type=obj_type,
-            x=obj_x,
-            y=obj_y,
-            net_name=obj_net,
-            layer=obj_layer,
+        layer = (
+            self._segment_layer(target.node)
+            if target.kind == "segment"
+            else " - ".join(self._pad_layers(target.node))
+        )
+        return NudgeResult(
+            object_type=target.kind,
+            x=round(ref_x, 4),
+            y=round(ref_y, 4),
+            net_name=target.net,
+            layer=layer,
             displacement_x=dx,
             displacement_y=dy,
-            displacement_mm=dist,
-            old_clearance_mm=actual_clearance,
-            new_clearance_mm=actual_clearance + dist,
+            displacement_mm=math.hypot(dx, dy),
+            old_clearance_mm=before,
+            new_clearance_mm=measured,
             uuid=uuid_str,
+            edits=edits,
         )
-        result.nudges.append(nudge_result)
 
-        if not dry_run:
-            self._apply_nudge(obj_node, obj_type, dx, dy, result=result)
-            self.modified = True
+    def _collateral_damage(self, journal: list[tuple[SExp, SExp, float, float]]) -> str | None:
+        """Describe a new clearance violation the journalled move created, if any.
 
-        result.repaired += 1
-
-    def _find_object_at(
-        self,
-        x: float,
-        y: float,
-        layer: str,
-        nets: list[str],
-    ) -> tuple[SExp, str, float, float, str, str] | None:
-        """Find the nearest PCB object at a location.
-
-        Uses a 1.5mm search radius to account for enlarged vias where the
-        violation location (copper edge) can be offset from the via center
-        by up to the via radius (~0.4mm for 0.8mm diameter vias).
-
-        Returns: (node, type, x, y, layer, net_name) or None
+        Every item the move touched (the target plus dragged track ends) is
+        compared with the foreign copper around it: a pair that now measures
+        below its requirement *and* closer than before the move rejects it.
         """
-        search_radius = 1.5  # mm - large enough for enlarged vias
+        if not journal:
+            return None
+        touched: dict[int, _Copper] = {}
+        old_points: dict[int, tuple[float, float]] = {}
+        for item_node, point_node, ox, oy in journal:
+            copper = self._by_node.get(id(item_node))
+            if copper is not None:
+                touched[id(item_node)] = copper
+            old_points.setdefault(id(point_node), (ox, oy))
 
-        # Check segments
-        segments = self._find_segments_near(x, y, search_radius, layer, nets)
-        if segments:
-            return segments[0]
+        def old_shape(copper: _Copper) -> KShape:
+            shape = self._shape_of(copper)
+            if isinstance(shape, KVia):
+                ox, oy = old_points.get(id(copper.node.find("at")), (shape.x, shape.y))
+                return KVia(ox, oy, shape.diameter)
+            if isinstance(shape, KSegment):
+                x1, y1 = old_points.get(id(copper.node.find("start")), (shape.x1, shape.y1))
+                x2, y2 = old_points.get(id(copper.node.find("end")), (shape.x2, shape.y2))
+                return KSegment(x1, y1, x2, y2, shape.width)
+            return shape
 
-        # Check vias (use relaxed net matching for segment-via violations)
-        vias = self._find_vias_near(x, y, search_radius, nets)
-        if vias:
-            return vias[0]
-
-        # Check pads (pads are immovable, but we return them so
-        # _choose_target() can select the *other* object to move)
-        pads = self._find_pads_near(x, y, search_radius, layer, nets)
-        if pads:
-            return pads[0]
-
+        index = self._ensure_index()
+        reach = self._report_max_required + 0.5
+        for moved in touched.values():
+            new = self._shape_of(moved)
+            prev = old_shape(moved)
+            box_new, box_old = _bbox_of(new), _bbox_of(prev)
+            box = (
+                min(box_new[0], box_old[0]),
+                min(box_new[1], box_old[1]),
+                max(box_new[2], box_old[2]),
+                max(box_new[3], box_old[3]),
+            )
+            for neighbour in index:
+                if neighbour.node is moved.node:
+                    continue
+                if moved.net and neighbour.net == moved.net:
+                    continue
+                if not _boxes_overlap(self._bbox(neighbour), box, reach):
+                    continue
+                if not self._interacts(moved, neighbour):
+                    continue
+                need = self._pair_requirement(moved.net, neighbour.net)
+                gap_new = copper_gap(new, self._shape_of(neighbour))
+                if gap_new + _GAP_EPSILON_MM >= need:
+                    continue
+                neighbour_old = (
+                    old_shape(neighbour)
+                    if id(neighbour.node) in touched
+                    else self._shape_of(neighbour)
+                )
+                gap_old = copper_gap(prev, neighbour_old)
+                if gap_new < gap_old - _GAP_EPSILON_MM:
+                    label = neighbour.net or "<no net>"
+                    return (
+                        f"bring {moved.kind} [{moved.net or '<no net>'}] to {gap_new:.4f} mm "
+                        f"of {neighbour.kind} [{label}] (needs {need:.4f} mm)"
+                    )
         return None
 
-    def _find_segments_near(
-        self,
-        x: float,
-        y: float,
-        radius: float,
-        layer: str | None,
-        nets: list[str] | None,
-    ) -> list[tuple[SExp, str, float, float, str, str]]:
-        """Find track segments near a point.
+    def _set_point(self, item_node: SExp, point_node: SExp, x: float, y: float) -> None:
+        """Write a coordinate pair, journalling the old value when a trial is open."""
+        if self._journal is not None:
+            ox, oy = self._xy(point_node)
+            self._journal.append((item_node, point_node, ox, oy))
+        point_node.set_value(0, x)
+        point_node.set_value(1, y)
+        self._shape_cache.pop(id(item_node), None)
 
-        Returns list of (node, "segment", closest_x, closest_y, layer, net_name).
-        """
-        results = []
+    def _rollback(self, journal: list[tuple[SExp, SExp, float, float]]) -> None:
+        for item_node, point_node, ox, oy in reversed(journal):
+            point_node.set_value(0, ox)
+            point_node.set_value(1, oy)
+            self._shape_cache.pop(id(item_node), None)
 
-        for seg_node in self.doc.find_all("segment"):
-            start_node = seg_node.find("start")
-            end_node = seg_node.find("end")
-            if not (start_node and end_node):
-                continue
-
-            start_atoms = start_node.get_atoms()
-            end_atoms = end_node.get_atoms()
-
-            sx = float(start_atoms[0]) if start_atoms else 0
-            sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
-            ex = float(end_atoms[0]) if end_atoms else 0
-            ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
-
-            # Find closest point on segment to the target
-            closest = self._closest_point_on_segment(sx, sy, ex, ey, x, y)
-            if closest is None:
-                continue
-            cx, cy, dist = closest
-
-            if dist > radius:
-                continue
-
-            layer_node = seg_node.find("layer")
-            seg_layer = layer_node.get_first_atom() if layer_node else ""
-            if layer and seg_layer != layer:
-                continue
-
-            net_node = seg_node.find("net")
-            net_num, net_name = resolve_net_atom(
-                net_node.get_first_atom() if net_node else None,
-                self.nets,
-                self.net_names,
+    def _journal_edits(
+        self, journal: list[tuple[SExp, SExp, float, float]]
+    ) -> list[tuple[str, str, str, float, float, float, float]]:
+        """Collapse a journal into ``(type, uuid, point, old_x, old_y, new_x, new_y)``."""
+        first_old: dict[int, tuple[SExp, SExp, float, float]] = {}
+        for item_node, point_node, ox, oy in journal:
+            first_old.setdefault(id(point_node), (item_node, point_node, ox, oy))
+        edits = []
+        for item_node, point_node, ox, oy in first_old.values():
+            nx, ny = self._xy(point_node)
+            edits.append(
+                (
+                    str(item_node.name),
+                    self._node_uuid(item_node),
+                    str(point_node.name),
+                    ox,
+                    oy,
+                    nx,
+                    ny,
+                )
             )
+        return edits
 
-            if nets and net_name not in nets:
+    def _measure_net_to_item(self, net: str, layer: str, other: _Copper) -> float | None:
+        """Smallest gap between ``other`` and any copper of ``net`` it interacts with."""
+        index = self._ensure_index()
+        other_now = self._by_node.get(id(other.node), other)
+        best: float | None = None
+        for copper in index:
+            if copper.kind == "pad" or copper.net != net or copper.node is other_now.node:
                 continue
+            if copper.kind == "segment" and layer and self._segment_layer(copper.node) != layer:
+                continue
+            if not self._interacts(copper, other_now):
+                continue
+            gap = self._measure(copper, other_now)
+            if best is None or gap < best:
+                best = gap
+        return best
 
-            results.append((seg_node, "segment", cx, cy, seg_layer, net_name))
+    def _reverify_repaired_pairs(self, result: RepairResult) -> None:
+        """Re-measure every pair against the final geometry.
 
-        return results
+        A counted repair that a later move undid goes back to unrepaired; a
+        failed pair that a later move cleared (a shared or dragged track) is
+        counted as repaired.  Either way the count matches the board.
+        """
+        counters = {
+            "infeasible": "skipped_infeasible",
+            "exceeds_max": "skipped_exceeds_max",
+            "not_cleared": "skipped_not_cleared",
+        }
+        self._ensure_index()
+        for violation, a, b, required, counter in self._failed_pairs:
+            if id(a.node) not in self._by_node or id(b.node) not in self._by_node:
+                continue  # replaced by a reroute; that path accounts for itself
+            if not any(u.violation_id == id(violation) for u in result.unrepaired):
+                continue  # already moved to repaired (e.g. by a local reroute)
+            if self._measure(a, b) + _GAP_EPSILON_MM >= required:
+                setattr(result, counters[counter], getattr(result, counters[counter]) - 1)
+                result.repaired += 1
+                self._drop_unrepaired(result, violation)
+                self._repaired_pairs.append((violation, a, b, required))
+        self._failed_pairs = []
+        for violation, target, other, required in self._repaired_pairs:
+            if self._by_node.get(id(target.node)) is None:
+                # The target was replaced by a reroute; measure net-to-item.
+                measured = self._measure_net_to_item(
+                    target.net, self._segment_layer(target.node), other
+                )
+            else:
+                measured = self._measure(target, other)
+            if measured is not None and measured + _GAP_EPSILON_MM < required:
+                result.repaired -= 1
+                result.skipped_not_cleared += 1
+                self._note_unrepaired(
+                    result,
+                    violation,
+                    measured,
+                    "cleared, then a later repair moved copper back into violation",
+                )
+        self._repaired_pairs = []
 
     def _find_vias_near(
         self,
@@ -1424,15 +2092,7 @@ class ClearanceRepairer:
 
     def _find_via_positions(self) -> list[tuple[float, float]]:
         """Return a list of (x, y) positions for all vias in the PCB."""
-        positions: list[tuple[float, float]] = []
-        for via_node in self.doc.find_all("via"):
-            at_node = via_node.find("at")
-            if at_node:
-                at_atoms = at_node.get_atoms()
-                vx = float(at_atoms[0]) if at_atoms else 0
-                vy = float(at_atoms[1]) if len(at_atoms) > 1 else 0
-                positions.append((vx, vy))
-        return positions
+        return [self._via_xy(c.node) for c in self._ensure_index() if c.kind == "via"]
 
     def _find_connected_segments(
         self,
@@ -1452,24 +2112,14 @@ class ClearanceRepairer:
         """
         results: list[tuple[SExp, str]] = []
 
-        for seg_node in self.doc.find_all("segment"):
-            start_node = seg_node.find("start")
-            end_node = seg_node.find("end")
-            if not (start_node and end_node):
+        for copper in self._ensure_index():
+            if copper.kind != "segment":
                 continue
-
-            start_atoms = start_node.get_atoms()
-            end_atoms = end_node.get_atoms()
-
-            sx = float(start_atoms[0]) if start_atoms else 0
-            sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
-            ex = float(end_atoms[0]) if end_atoms else 0
-            ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
-
+            sx, sy, ex, ey = self._segment_xy(copper.node)
             if math.sqrt((sx - x) ** 2 + (sy - y) ** 2) <= tolerance:
-                results.append((seg_node, "start"))
+                results.append((copper.node, "start"))
             if math.sqrt((ex - x) ** 2 + (ey - y) ** 2) <= tolerance:
-                results.append((seg_node, "end"))
+                results.append((copper.node, "end"))
 
         return results
 
@@ -1480,13 +2130,16 @@ class ClearanceRepairer:
         dx: float,
         dy: float,
         result: RepairResult | None = None,
+        drag_connected: bool = False,
     ) -> None:
         """Apply a displacement to a PCB object.
 
         For segments: if an endpoint sits at a via position, only the non-via
         endpoint is moved (endpoint-only nudge) to avoid disconnecting the net.
         If both endpoints sit at vias, the segment is skipped as infeasible.
-        Otherwise both endpoints are moved (full-segment nudge).
+        Otherwise both endpoints are moved (full-segment nudge).  With
+        ``drag_connected`` the ends of other tracks that met a moved end move
+        with it, so the net stays connected (Issue #6434).
 
         For vias: moves the via position and also updates the endpoints of all
         connected segments so that net connectivity is preserved.
@@ -1494,23 +2147,17 @@ class ClearanceRepairer:
         if obj_type == "via":
             at_node = node.find("at")
             if at_node:
-                at_atoms = at_node.get_atoms()
-                old_x = float(at_atoms[0]) if at_atoms else 0
-                old_y = float(at_atoms[1]) if len(at_atoms) > 1 else 0
+                old_x, old_y = self._xy(at_node)
                 new_x = round(old_x + dx, 4)
                 new_y = round(old_y + dy, 4)
 
-                # Move the via
-                at_node.set_value(0, new_x)
-                at_node.set_value(1, new_y)
-
-                # Update all segments connected to the old via position
+                # Segments connected to the old via position move with it.
                 connected = self._find_connected_segments(old_x, old_y)
+                self._set_point(node, at_node, new_x, new_y)
                 for seg_node, endpoint in connected:
                     ep_node = seg_node.find(endpoint)
                     if ep_node:
-                        ep_node.set_value(0, new_x)
-                        ep_node.set_value(1, new_y)
+                        self._set_point(seg_node, ep_node, new_x, new_y)
 
                 if result is not None:
                     result.relocated_vias += 1
@@ -1522,46 +2169,61 @@ class ClearanceRepairer:
             if not (start_node and end_node):
                 return
 
-            start_atoms = start_node.get_atoms()
-            end_atoms = end_node.get_atoms()
-            sx = float(start_atoms[0]) if start_atoms else 0
-            sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
-            ex = float(end_atoms[0]) if end_atoms else 0
-            ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
+            sx, sy = self._xy(start_node)
+            ex, ey = self._xy(end_node)
 
-            # Check which endpoints sit at a via position
-            via_positions = self._find_via_positions()
-            tolerance = 0.001
-            start_at_via = any(
-                math.sqrt((sx - vx) ** 2 + (sy - vy) ** 2) <= tolerance for vx, vy in via_positions
-            )
-            end_at_via = any(
-                math.sqrt((ex - vx) ** 2 + (ey - vy) ** 2) <= tolerance for vx, vy in via_positions
-            )
+            # Check which endpoints are anchored (on a via, or inside a pad of
+            # the track's own net -- see ``_pin_state``)
+            start_at_via, end_at_via = self._pin_state(node, self._find_via_positions())
 
             if start_at_via and end_at_via:
                 # Both endpoints at vias -- moving either end disconnects a net.
                 # This is logged as infeasible by the caller; we do nothing here.
                 return
 
-            if start_at_via:
-                # Only move the end (free) endpoint, keep start pinned to via
-                end_node.set_value(0, round(ex + dx, 4))
-                end_node.set_value(1, round(ey + dy, 4))
-                if result is not None:
-                    result.endpoint_nudges += 1
-            elif end_at_via:
-                # Only move the start (free) endpoint, keep end pinned to via
-                start_node.set_value(0, round(sx + dx, 4))
-                start_node.set_value(1, round(sy + dy, 4))
-                if result is not None:
-                    result.endpoint_nudges += 1
-            else:
-                # Neither endpoint at a via -- full-segment nudge (original behavior)
-                start_node.set_value(0, round(sx + dx, 4))
-                start_node.set_value(1, round(sy + dy, 4))
-                end_node.set_value(0, round(ex + dx, 4))
-                end_node.set_value(1, round(ey + dy, 4))
+            moves: list[tuple[SExp, float, float]] = []
+            if not start_at_via:
+                moves.append((start_node, sx, sy))
+            if not end_at_via:
+                moves.append((end_node, ex, ey))
+            for point_node, px, py in moves:
+                nx, ny = round(px + dx, 4), round(py + dy, 4)
+                neighbours = self._joined_ends(node, px, py) if drag_connected else []
+                self._set_point(node, point_node, nx, ny)
+                for seg_node, ep_node, ox, oy in neighbours:
+                    # Shift by the same delta: a coincident end lands exactly
+                    # on the new point, an overlapping one keeps its offset.
+                    self._set_point(seg_node, ep_node, round(ox + dx, 4), round(oy + dy, 4))
+
+            if (start_at_via or end_at_via) and result is not None:
+                result.endpoint_nudges += 1
+
+    def _joined_ends(
+        self, node: SExp, px: float, py: float
+    ) -> list[tuple[SExp, SExp, float, float]]:
+        """Same-net track ends joined to ``node``'s end at ``(px, py)``.
+
+        KiCad joins two tracks when one's end lies inside the other's copper,
+        not only when the ends coincide, so an end within half the narrower
+        track width counts (Issue #6434: dragging only exact matches left a
+        routed joint 0.05 mm apart and broke the net).
+        """
+        own = self._by_node.get(id(node))
+        net = own.net if own is not None else self._node_net(node)
+        width = self._get_node_width(node)
+        joined: list[tuple[SExp, SExp, float, float]] = []
+        for copper in self._ensure_index():
+            if copper.kind != "segment" or copper.node is node or copper.net != net:
+                continue
+            reach = max(0.001, min(width, self._get_node_width(copper.node)) / 2)
+            for name in ("start", "end"):
+                ep_node = copper.node.find(name)
+                if ep_node is None:
+                    continue
+                ox, oy = self._xy(ep_node)
+                if math.hypot(ox - px, oy - py) <= reach:
+                    joined.append((copper.node, ep_node, ox, oy))
+        return joined
 
     def _find_node_by_uuid(
         self,
@@ -1615,6 +2277,21 @@ class ClearanceRepairer:
             should treat ``False`` as a trigger for the bulk-snapshot
             fallback so the file state is never left half-reverted.
         """
+        if nudge.edits:
+            # Issue #6434: restore every coordinate the nudge wrote (it may
+            # have dragged connected track ends along with the target).
+            targets: list[tuple[SExp, SExp, float, float]] = []
+            for obj_type, uuid, point, ox, oy, _nx, _ny in nudge.edits:
+                item = self._find_node_by_uuid(uuid, obj_type)
+                if item is None:
+                    return False
+                point_node = item.find(point)
+                if point_node is None:
+                    return False
+                targets.append((item, point_node, ox, oy))
+            for item, point_node, ox, oy in targets:
+                self._set_point(item, point_node, ox, oy)
+            return True
         if not nudge.uuid:
             return False
         node = self._find_node_by_uuid(nudge.uuid, nudge.object_type)
@@ -1872,7 +2549,38 @@ class ClearanceRepairer:
             result.footprint_nudge_results.append(fp_nudge_result)
 
             if not dry_run:
+                # Issue #6434: re-measure the two pads after the move and keep
+                # it only if the pair now clears the rule.
+                pads = self._resolve_pair(violation)
+                fp_before = self._xy(t_node.find("at"))
                 self._nudge_footprint(t_node, dx, dy)
+                fp_after = self._xy(t_node.find("at"))
+                undo_dx, undo_dy = fp_before[0] - fp_after[0], fp_before[1] - fp_after[1]
+                self._shape_cache = {}
+                required = violation.required_value_mm
+                if pads[0] is None or pads[1] is None or required is None:
+                    self._nudge_footprint(t_node, undo_dx, undo_dy)
+                    self._shape_cache = {}
+                    result.footprint_nudge_results.pop()
+                    result.skipped_infeasible += 1
+                    self._note_unrepaired(
+                        result, violation, None, "could not identify both pads to re-measure"
+                    )
+                    continue
+                measured = self._measure(pads[0], pads[1])
+                if measured + _GAP_EPSILON_MM < required:
+                    self._nudge_footprint(t_node, undo_dx, undo_dy)
+                    self._shape_cache = {}
+                    result.footprint_nudge_results.pop()
+                    result.skipped_not_cleared += 1
+                    self._note_unrepaired(
+                        result,
+                        violation,
+                        measured,
+                        f"moving footprint {t_ref} left the pads {measured:.4f} mm apart",
+                    )
+                    continue
+                fp_nudge_result.new_clearance_mm = measured
                 self.modified = True
 
             result.footprint_nudges += 1

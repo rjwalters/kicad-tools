@@ -456,6 +456,8 @@ def run_drc(
     format: str = "json",
     schematic_parity: bool = True,
     kicad_cli: Path | None = None,
+    all_track_errors: bool = False,
+    refill_zones: bool = False,
 ) -> KiCadCLIResult:
     """Run KiCad DRC on a PCB.
 
@@ -465,6 +467,11 @@ def run_drc(
         format: Output format - "json" or "report"
         schematic_parity: Check schematic parity
         kicad_cli: Path to kicad-cli (auto-detected if not provided)
+        all_track_errors: Pass ``--all-track-errors`` (report every track
+            violation, not just the first per track) -- the gate the fleet's
+            manufacturability check uses (Issue #6431).
+        refill_zones: Pass ``--refill-zones`` (refill before checking; the
+            board file is not saved).
 
     Returns:
         KiCadCLIResult with success status and output path
@@ -501,6 +508,10 @@ def run_drc(
 
     if schematic_parity:
         cmd.append("--schematic-parity")
+    if all_track_errors:
+        cmd.append("--all-track-errors")
+    if refill_zones:
+        cmd.append("--refill-zones")
 
     cmd.append(str(pcb_path))
 

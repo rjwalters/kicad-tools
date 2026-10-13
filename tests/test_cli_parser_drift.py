@@ -552,36 +552,38 @@ def test_fix_drc_mfr_on_inner_and_outer_parser():
 
 
 def test_fix_drc_threads_manufacturer_into_drc_checker():
-    """``--mfr`` must flow into the self-generated DRC report.
+    """``--mfr`` and ``--layers`` must flow into the self-generated DRC report.
 
     In the no-``--drc-report`` path, ``fix-drc`` builds its own report via
-    ``_run_python_drc`` -> ``DRCChecker(pcb, manufacturer=...)``.  Before
-    #3159 the manufacturer was never passed, so clearance targets were
-    silently pinned to jlcpcb.  Assert the selected profile reaches the
-    checker.
+    ``_run_python_drc``.  Before #3159 the manufacturer was never passed, so
+    clearance targets were silently pinned to jlcpcb.  Since #6431 the report
+    comes from ``kct check``'s own rule set
+    (:func:`kicad_tools.cli.check_cmd.build_check_rule_set`), so assert the
+    selected profile and layer count reach it, with the board itself as the
+    project path.
     """
     from unittest.mock import MagicMock
 
     from kicad_tools.cli import fix_drc_cmd
 
-    fake_checker = MagicMock()
-    fake_checker.check_all.return_value = []
+    fake_results = MagicMock()
+    fake_results.violations = []
 
     with (
-        patch("kicad_tools.validate.checker.DRCChecker", return_value=fake_checker) as mk,
+        patch("kicad_tools.cli.check_cmd.build_check_rule_set", return_value=MagicMock()) as mk,
+        patch("kicad_tools.cli.check_cmd.run_check_rule_set", return_value=fake_results),
         patch("kicad_tools.schema.pcb.PCB.load", return_value=MagicMock()),
         patch("kicad_tools.drc.compat.drc_results_to_report", return_value=MagicMock()),
     ):
         fix_drc_cmd._run_python_drc(Path("board.kicad_pcb"), manufacturer="oshpark", layers=4)
 
-    assert mk.call_count == 1, "_run_python_drc should construct exactly one DRCChecker"
-    _, kwargs = mk.call_args
+    assert mk.call_count == 1, "_run_python_drc should build exactly one rule set"
+    args, kwargs = mk.call_args
     assert kwargs.get("manufacturer") == "oshpark", (
-        "_run_python_drc must thread --mfr into DRCChecker(manufacturer=...) (regresses #3159)"
+        "_run_python_drc must thread --mfr into the rule set (regresses #3159)"
     )
-    assert kwargs.get("layers") == 4, (
-        "_run_python_drc must thread --layers into DRCChecker(layers=...)"
-    )
+    assert kwargs.get("layers") == 4, "_run_python_drc must thread --layers into the rule set"
+    assert args[0] == Path("board.kicad_pcb")
 
 
 # ---------------------------------------------------------------------------
