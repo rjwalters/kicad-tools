@@ -246,6 +246,183 @@ else
     fail "(#10717) stale requires_daemon survived: $(cat "$C6/.loom/install-metadata.json")"
 fi
 
+# --- #11680: a run that changed nothing never touches the stamp ---------------
+#
+# loom_commit is the source HEAD. On the dogfood repo, committing the restamp
+# moved HEAD one past the value just stamped, so every later run on every host
+# restamped and committed again, and every consumer inherited a metadata-only
+# commit per host per tick. Separately, loom_source_remote flipped between the
+# ssh and https spelling depending on which host ran last.
+
+TODAY="$(date -u +%Y-%m-%d)"
+
+# meta_status <repo>: porcelain status of the tracked metadata file ("" = clean)
+meta_status() {
+    git -C "$1" status --porcelain -- .loom/install-metadata.json 2>/dev/null
+}
+
+commit_all() {
+    git -C "$1" add -A >/dev/null 2>&1
+    git -C "$1" commit -qm "$2" >/dev/null 2>&1
+}
+
+echo ""
+echo "Test group 7: dogfood -- committing the restamp does not make the next run restamp (#11680)"
+REPO7="$(make_dogfood_fixture repo-self-resync)"
+(cd "$REPO7" && bash "$SCRIPT" >/dev/null 2>&1)
+FIRST7="$(read_field "$REPO7/.loom/install-metadata.json" loom_commit)"
+commit_all "$REPO7" "chore: resync installed Loom surfaces"
+SUM7="$(cksum < "$REPO7/.loom/install-metadata.json")"
+OUT7="$(cd "$REPO7" && bash "$SCRIPT" 2>&1)"
+if [[ "$(cksum < "$REPO7/.loom/install-metadata.json")" == "$SUM7" && -z "$(meta_status "$REPO7")" ]]; then
+    pass "(#11680) second self-resync leaves install-metadata.json byte-identical (no diff to commit)"
+else
+    fail "(#11680) second self-resync rewrote the stamp: $(git -C "$REPO7" diff -- .loom/install-metadata.json)"
+fi
+if [[ "$(read_field "$REPO7/.loom/install-metadata.json" loom_commit)" == "$FIRST7" \
+      && "$FIRST7" != "$(git -C "$REPO7" rev-parse HEAD)" ]]; then
+    pass "(#11680) loom_commit stays at the last sync that changed something, not the new HEAD"
+else
+    fail "(#11680) loom_commit chased HEAD"
+fi
+if grep -q "nothing to re-stamp (#11680)" <<<"$OUT7"; then
+    pass "(#11680) the no-op is reported"
+else
+    fail "(#11680) no-op not reported; out=$OUT7"
+fi
+
+echo ""
+echo "Test group 8: consumer -- metadata-only source commit + ssh/https remote flip -> no diff (#11680)"
+C8="$(make_consumer_fixture consumer-converge yes yes)"
+SRC8="$WORKDIR/consumer-converge-src"
+git -C "$SRC8" remote add origin "git@github.com:o/r.git"
+(cd "$C8" && bash "$SCRIPT" >/dev/null 2>&1)
+if [[ "$(read_field "$C8/.loom/install-metadata.json" loom_source_remote)" == "https://github.com/o/r.git" ]]; then
+    pass "(#11680) an ssh scp-form origin is stamped in canonical https form"
+else
+    fail "(#11680) remote not normalized: $(read_field "$C8/.loom/install-metadata.json" loom_source_remote)"
+fi
+commit_all "$C8" "chore: resync"
+SUM8="$(cksum < "$C8/.loom/install-metadata.json")"
+# A metadata-only commit in the source (the shape of a self-resync commit on
+# Loom itself) moves the source HEAD without touching any installed surface.
+mkdir -p "$SRC8/.loom"
+printf '{"loom_commit": "x"}\n' > "$SRC8/.loom/install-metadata.json"
+commit_all "$SRC8" "chore: resync installed Loom surfaces"
+git -C "$SRC8" remote set-url origin "https://github.com/o/r.git"
+(cd "$C8" && bash "$SCRIPT" >/dev/null 2>&1)
+if [[ "$(cksum < "$C8/.loom/install-metadata.json")" == "$SUM8" && -z "$(meta_status "$C8")" ]]; then
+    pass "(#11680) second resync from a moved, https-remote source produces no diff"
+else
+    fail "(#11680) consumer churned: $(git -C "$C8" diff -- .loom/install-metadata.json)"
+fi
+
+echo ""
+echo "Test group 9: a real surface change or version bump still restamps everything (#11680 control)"
+printf 'C\n' > "$SRC8/defaults/hooks/guard.sh"
+commit_all "$SRC8" "feat: change a hook"
+git -C "$SRC8" remote set-url origin "ssh://git@github.com:22/o/r.git"
+printf '{\n  "loom_version": "1.2.3",\n  "loom_commit": "%s",\n  "last_resync": "2000-01-01",\n  "loom_source_remote": "stale",\n  "installed_files": []\n}\n' \
+    "$(read_field "$C8/.loom/install-metadata.json" loom_commit)" > "$C8/.loom/install-metadata.json"
+(cd "$C8" && bash "$SCRIPT" >/dev/null 2>&1)
+if [[ "$(read_field "$C8/.loom/install-metadata.json" loom_commit)" == "$(git -C "$SRC8" rev-parse HEAD)" \
+      && "$(read_field "$C8/.loom/install-metadata.json" last_resync)" == "$TODAY" \
+      && "$(read_field "$C8/.loom/install-metadata.json" loom_source_remote)" == "https://github.com/o/r.git" ]]; then
+    pass "(#11680) a surface change restamps loom_commit (new HEAD), last_resync and the normalized remote"
+else
+    fail "(#11680) a surface change did not restamp: $(cat "$C8/.loom/install-metadata.json")"
+fi
+printf '{\n  "version": "1.2.4"\n}\n' > "$SRC8/package.json"
+commit_all "$SRC8" "chore: bump version to 1.2.4"
+(cd "$C8" && bash "$SCRIPT" >/dev/null 2>&1)
+if [[ "$(read_field "$C8/.loom/install-metadata.json" loom_version)" == "1.2.4" \
+      && "$(read_field "$C8/.loom/install-metadata.json" loom_commit)" == "$(git -C "$SRC8" rev-parse HEAD)" ]]; then
+    pass "(#11680) a version bump with no surface change still restamps loom_version + loom_commit"
+else
+    fail "(#11680) a version bump was skipped as a no-op: $(cat "$C8/.loom/install-metadata.json")"
+fi
+
+echo ""
+echo "Test group 10: an unusable recorded loom_commit is repaired even when nothing changed (#11680)"
+for BAD in old 1234567 unknown; do
+    sed -i.bak "s/\"loom_commit\": *\"[^\"]*\"/\"loom_commit\": \"$BAD\"/" "$C8/.loom/install-metadata.json"
+    (cd "$C8" && bash "$SCRIPT" >/dev/null 2>&1)
+    if [[ "$(read_field "$C8/.loom/install-metadata.json" loom_commit)" == "$(git -C "$SRC8" rev-parse HEAD)" ]]; then
+        pass "(#11680) loom_commit '$BAD' is repaired to the full source HEAD"
+    else
+        fail "(#11680) loom_commit '$BAD' was not repaired: $(cat "$C8/.loom/install-metadata.json")"
+    fi
+done
+
+echo ""
+echo "Test group 11: a no-op run still applies the legacy loom_source removal (#11680)"
+SUM11_COMMIT="$(read_field "$C8/.loom/install-metadata.json" loom_commit)"
+python3 -I - "$C8/.loom/install-metadata.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["loom_source"] = "/abs/host/path"
+json.dump(d, open(p, "w"), indent=2)
+open(p, "a").write("\n")
+PY
+git -C "$SRC8" commit -q --allow-empty -m "chore: unrelated" >/dev/null 2>&1
+(cd "$C8" && bash "$SCRIPT" >/dev/null 2>&1)
+if ! grep -q '"loom_source"' "$C8/.loom/install-metadata.json" \
+    && [[ "$(read_field "$C8/.loom/install-metadata.json" loom_commit)" == "$SUM11_COMMIT" ]]; then
+    pass "(#11680) loom_source dropped while loom_commit is kept"
+else
+    fail "(#11680) legacy edit not applied on a no-op: $(cat "$C8/.loom/install-metadata.json")"
+fi
+
+echo ""
+echo "Test group 12: the python3 fallback behaves like jq (#11680)"
+SHIM="$WORKDIR/nojq-bin"
+mkdir -p "$SHIM"
+printf '#!/bin/sh\nexit 1\n' > "$SHIM/jq"
+chmod +x "$SHIM/jq"
+git -C "$SRC8" commit -q --allow-empty -m "chore: unrelated 2" >/dev/null 2>&1
+SUM12="$(cksum < "$C8/.loom/install-metadata.json")"
+(cd "$C8" && PATH="$SHIM:$PATH" bash "$SCRIPT" >/dev/null 2>&1)
+if [[ "$(cksum < "$C8/.loom/install-metadata.json")" == "$SUM12" ]]; then
+    pass "(#11680) python3 path: a no-op run leaves the file byte-identical"
+else
+    fail "(#11680) python3 path rewrote a no-op: $(cat "$C8/.loom/install-metadata.json")"
+fi
+sed -i.bak "s/\"loom_commit\": *\"[^\"]*\"/\"loom_commit\": \"old\"/" "$C8/.loom/install-metadata.json"
+(cd "$C8" && PATH="$SHIM:$PATH" bash "$SCRIPT" >/dev/null 2>&1)
+if [[ "$(read_field "$C8/.loom/install-metadata.json" loom_commit)" == "$(git -C "$SRC8" rev-parse HEAD)" ]]; then
+    pass "(#11680) python3 path: a bad loom_commit is still repaired"
+else
+    fail "(#11680) python3 path did not repair: $(cat "$C8/.loom/install-metadata.json")"
+fi
+
+echo ""
+echo "Test group 13: normalize_source_remote canonical forms (#11680)"
+eval "$(sed -n '/^normalize_source_remote() {/,/^}/p' "$SCRIPT")"
+while IFS='|' read -r IN WANT; do
+    GOT="$(normalize_source_remote "$IN")"
+    if [[ "$GOT" == "$WANT" ]]; then
+        pass "(#11680) '$IN' -> '$WANT'"
+    else
+        fail "(#11680) '$IN' -> '$GOT' (want '$WANT')"
+    fi
+done <<'EOF'
+git@github.com:rjwalters/loom.git|https://github.com/rjwalters/loom.git
+git@github.com:rjwalters/loom|https://github.com/rjwalters/loom.git
+ssh://git@github.com/rjwalters/loom.git|https://github.com/rjwalters/loom.git
+ssh://git@gitea.example:2222/o/r|https://gitea.example/o/r.git
+https://github.com/rjwalters/loom.git|https://github.com/rjwalters/loom.git
+https://github.com/rjwalters/loom|https://github.com/rjwalters/loom.git
+https://x-access-token:SECRET@github.com/o/r.git|https://github.com/o/r.git
+/Users/someone/GitHub/loom|/Users/someone/GitHub/loom
+file:///srv/loom.git|file:///srv/loom.git
+EOF
+if [[ -z "$(normalize_source_remote "")" ]]; then
+    pass "(#11680) an empty remote stays empty"
+else
+    fail "(#11680) an empty remote was rewritten"
+fi
+
 # --- summary -----------------------------------------------------------------
 echo ""
 echo "========================================"

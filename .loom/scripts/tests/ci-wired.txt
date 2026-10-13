@@ -28,6 +28,7 @@
 
 test-agent-destroy.sh
 test-app-permission-fallback.sh
+test-approval-history-per-issue-events.sh
 test-archive-transcripts.sh
 test-blame-issue.sh
 test-branch-landed.sh
@@ -153,7 +154,6 @@ test-merge-admission-telemetry.sh
 test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-queued-stacked-children.sh
-test-merge-pr-chain-lock.sh
 test-merge-pr-pr-state.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-daemon-version-floor.sh
@@ -176,7 +176,6 @@ test-recover-orphaned-shepherds-diagnostics.sh
 test-repo-mismatch-fallback.sh
 test-require-daemon-bin.sh
 test-require-daemon-bin-provenance.sh
-test-resolve-tier-model.sh
 test-resync-installed-agent-skills-guard.sh
 test-resync-installed-gh-config-guard.sh
 test-resync-installed-guard-check.sh

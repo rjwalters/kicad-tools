@@ -77,6 +77,10 @@ auto-dispatches sweeps, and the [epic supervisor](#epic-supervisor-3842)
 drives `loom:epic` fork-joins. See [Operability](#operability--config-startstop-e2e-phase-d-3813)
 for enabling and tuning them.
 
+Every listener and every outbound client whose response can change daemon
+behavior, classified as config, forge, wake-only webhook or removed, is
+audited in [`network-inputs.md`](network-inputs.md) (#11711).
+
 ## The `LOOM_ROLE` env-var contract (#6507)
 
 `LOOM_ROLE` is a **public, stable session-identity contract**: repo-level
@@ -2732,6 +2736,12 @@ enabling the gate for a genuine multi-repo deployment is done with the machine-
 global `LOOM_MAIN_HEALTH_GATE=1` env var (each repo's own `buildGate` block then
 decides whether it actually gates).
 
+Since #11690 CI is the test gate and Builders compile only, so this loop is
+the **one remaining host-side full-suite runner**, and only where an operator
+enables it. With it off, the red-main-fix lane reads CI on `main` instead.
+Each run emits a `build_gate.run` span (`stage=main_health`). See
+[`build-gate.md` → Where the gate runs](build-gate.md#where-the-gate-runs-11690).
+
 ## Gate verdicts: VERIFIED_RED vs UNEVALUATED (#3974)
 
 A safety gate that fails closed on **its own** infrastructure failures converts
@@ -3058,7 +3068,11 @@ ordering (superseded by the weighted draw in [`priority-model.md`](priority-mode
   candidate across all workspaces and orders them by **weighted workspace
   draws** (#11103, [`priority-model.md`](priority-model.md)): each draw picks a
   workspace weighted by its priority and places its next issue (level, oldest,
-  number). It fills the single shared concurrency budget in that order. The
+  number). Since #11684 the weight is a softmax over `fleet_priority`,
+  `max(1, round(1e6 * exp(-(p - p_min) / T)))` with `p_min` the pool's top
+  priority and `T` the hyperparameter `dispatch.drawTemperature` (default 80,
+  re-read every tick); `pick.decision` records `temperature` and each draw's
+  `p_min`. It fills the single shared concurrency budget in that order. The
   cap/budget mechanics (#3811/#3930) are unchanged; this only orders the queue.
   `candidate_cmp` (below) now only ranks the published ready-queue rows.
 
@@ -3099,7 +3113,10 @@ follows the workspace draw, and the single-workspace tick uses the same four
 keys (passed the repo's real verified-red state). The workspace draw's pool is
 three-tier: workspaces whose next candidate is a verified red-main fix if any
 (`pool: "red-main-fix"`), else those with very-important work
-(`"very-important"`), else all (`"all"`). #11508 removed the legacy keys: the star, its
+(`"very-important"`), else all (`"all"`). Within the pool the draw weighs each
+workspace by a softmax over `fleet_priority` at temperature
+`dispatch.drawTemperature` (#11684; `p_min` is taken over the pool, so its top
+workspace always weighs the full 1,000,000). #11508 removed the legacy keys: the star, its
 levels and inherited levels, the starred-at time and its restart store
 (`starred-<sha16>.json`, no longer read or written; `LOOM_STARRED_AT_PERSIST` is
 ignored), and `workspace_priority` as a rank key (it weights the workspace
@@ -3136,9 +3153,10 @@ verified red still admits its `<!-- loom:main-red-fix -->` candidates, and only
 those; every other ready issue in it, priority or not, keeps `workspace_halted`.
 `report.halted` is unchanged. A hold that is not a verified-red `main` (a gate
 run in flight, a drain, the host-distress breaker, a pre-flight or token-pool
-hold) admits nothing, fixes included. With the main-health gate disabled for a
-repo (no enabled `buildGate`), there is no verified-red signal, so the latest
-`main` CI conclusion stands in for it: one cached `gh run list` per repo per
+hold) admits nothing, fixes included. With the main-health gate loop off for a
+repo (no enabled `buildGate`, or `autonomous.mainHealthGate` off, #11690),
+there is no verified-red signal, so the latest `main` CI conclusion stands in
+for it: one cached `gh run list` per repo per
 tick, made only when the repo has a marker-bearing candidate.
 
 **Unpromoted red-main fixes (#10118).** A fix is usually filed in `loom:triage`,
@@ -4117,9 +4135,7 @@ its re-dates on its own branch. Everything is read from local git: nothing is
 fetched and no forge call is made. A PR is therefore seen as of the clone's last
 fetch. A remote branch whose PR closed unmerged reads as not landed until it is
 pruned, and the window bounds that error. Landing lookups are capped at 64 PRs
-per pass, most re-dated first. Telemetry only observes the livelock. The
-daemon-enforced chain-head merge lock that would prevent it is a separate
-follow-up.
+per pass, most re-dated first. Telemetry only observes the livelock.
 
 #### Anchoring an unmarked verdict (#6319)
 
@@ -5758,6 +5774,23 @@ row of the "retired" input table above. See also #5269/PR #5283's per-repo
 ranking-staleness surfacing on `loom-daemon health` — a separate, `health`-side
 mechanism this `status`-side headline must not contradict.
 
+**Native classifier subcommand (#11208).** The classifier these paragraphs
+describe — the category engine, the per-provider tables and the
+`classification_is_transient` deny-list — ships in the signed binary as
+`loom-daemon classify-error`: error text on stdin (or `--stdout-tail` /
+`--stderr-tail` files), `--exit-code`, optional `--provider` (explicit arg >
+`$LOOM_RUNTIME` > `claude`, same precedence as the shell), one category line
+out; `--transient <CATEGORY>` answers the deny-list in its exit code (0
+retryable, 1 terminal; 2 is a usage error with empty stdout). It exists so
+consumers stop vendoring `classify-error.sh` (miniset's E2B shim pins the
+daemon instead). The shell library remains the sourced entry point for
+in-repo callers: its public functions delegate to the subcommand when a
+daemon binary resolves and fall back to the in-file tables — byte-identical —
+when none does. The two renderings are pinned equal by
+`defaults/scripts/tests/test-classify-error.sh` (parity on every row of the
+shared `vectors.tsv` fixture) and by the Rust suite that reads the same
+fixture.
+
 **Session-limit fault handling (#3947).** Stacking can occasionally trip a
 **concurrent-session-limit** fault on a token (the account is healthy but cannot
 start another *simultaneous* session right now). This is a **capacity** signal,
@@ -6449,12 +6482,11 @@ At a sweep's terminal **`Success`** transition — never on failure, cancellatio
 or a `loom:blocked` stop, to avoid comment spam on every dead-end attempt — the
 daemon can post ONE Markdown comment onto the sweep's **issue** (not just its
 PR) summarizing the already-assembled `sweep.outcome` telemetry record
-(`loom-daemon/src/telemetry/mod.rs`): the Curator's `loom:complexity` /
-`loom:points` estimate (see "Points estimate marker" in `curator.md`), actual
+(`loom-daemon/src/telemetry/mod.rs`): the issue's story-point estimate (the record's `story_points`, sourced from
+its `points:*` label; `points unmarked` when unsized), actual
 token burn, wall-clock duration (total and per phase), Doctor cycle count, and
-the first-pass Judge verdict. This is the write-back half of #9056; the
-matching estimate-side marker (`<!-- loom:points=<N> -->`) is documented in
-`defaults/roles/curator.md`.
+the first-pass Judge verdict. This is the write-back half of #9056. There is
+no separate body fetch for the estimate: the label is already on the record.
 
 **Off by default.** Flip `autonomous.sweepOutcomeWriteback.enabled` (or
 `LOOM_SWEEP_OUTCOME_WRITEBACK=1`) to turn it on for a workspace.
@@ -6472,12 +6504,12 @@ risking a duplicate — the comment is best-effort telemetry, so a rare missed
 post costs less than a rare duplicate.
 
 **Never blocks or fails the terminal transition.** Every forge call this
-feature makes — the points-marker read, the idempotency check, the comment
+feature makes — the idempotency check, the comment
 post itself — runs only AFTER the durable `sweep.outcome` telemetry append, is
 bounded by `LOOM_REAP_GH_TIMEOUT_SECS`, and is best-effort: a `gh` failure,
 timeout, or missing repo context
-is logged and swallowed, exactly like the neighboring `complexity` marker read
-this rides alongside (`sweep_registry::outcome_journal::complexity_signal`).
+is logged and swallowed, exactly like the single issue read the record's
+`story_points` rides on (`sweep_registry::outcome_journal::complexity_signal`).
 
 **Deliberately excludes CI minutes.** `loom-daemon ci-telemetry`'s `ci.run`/
 `ci.job` records (see [`ci-observability.md`](ci-observability.md)) are keyed
@@ -7162,8 +7194,7 @@ above in one important way: that mechanism is armed only *after* a sweep
 pass observes "no delta," so a tracking issue known **up front** to need
 infrequent polling still gets dispatched at full cadence until enough no-op
 passes accumulate. A tracker issue can instead declare its own minimum
-re-check interval directly in its body, in the spirit of the Curator's
-`<!-- loom:complexity=<tier> -->` marker:
+re-check interval directly in its body:
 
 ```
 <!-- loom:recheck-interval=6h -->
