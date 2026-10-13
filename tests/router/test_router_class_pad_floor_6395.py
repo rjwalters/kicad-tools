@@ -23,7 +23,10 @@ import pytest
 
 from kicad_tools.router.clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.lattice.class_pad_repair import repair_class_pad_pairs
+from kicad_tools.router.lattice.class_pad_repair import (
+    PAIR_LENGTH_TOLERANCE_MM,
+    repair_class_pad_pairs,
+)
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad, Route, Segment
@@ -239,7 +242,8 @@ def test_shortfall_is_judged_by_the_kernel_not_the_pad_rectangle() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Issue #6437: diff-pair nets are frozen; via shortfalls reported; HV skip logged.
+# Issue #6437: pair nets move only within P5's length budget; via shortfalls
+# reported; HV skip logged.
 # ---------------------------------------------------------------------------
 
 
@@ -247,33 +251,74 @@ def _coords(routes: dict) -> list:
     return [(s.x1, s.y1, s.x2, s.y2) for r in routes.values() for s in r.segments]
 
 
-def test_repair_freezes_a_pair_nets_extra_pad_connection() -> None:
-    """An extra-pad stub of a pair net is keyed ``(net, seq)`` and repairable,
-    yet must not move: its net is frozen (board 03 USB_D skew 12.170 -> 12.179)."""
+def _net_length(routes: dict, net: int) -> float:
+    return sum(
+        ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
+        for r in routes.values()
+        if r.net == net
+        for s in r.segments
+    )
+
+
+def test_pair_net_move_within_the_length_budget_is_kept() -> None:
+    """An extra-pad stub of a pair net (keyed ``(net, seq)``, repairable) may
+    move: the straight-run shift changes its length by ~0.0002 mm, far inside
+    P5's 0.01 mm skew threshold (board 03 USB_D-: +0.009 mm)."""
     pf, routes = _repair_case()
+    before = _net_length(routes, 1)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), pair_nets=frozenset({1}))
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 1, 0, 0)
+    assert abs(_net_length(routes, 1) - before) <= PAIR_LENGTH_TOLERANCE_MM
+    mid = routes[(1, 0)].segments[1]
+    assert copper_gap(segment_shape(mid), pad_shape(pf.pads[2])) >= POWER - EPS
+
+
+def _diagonal_case() -> tuple[LatticePathfinder, dict]:
+    """The middle leg sits between two 45-degree legs, so shifting it off the
+    GND pad by ~0.027 mm stretches the net by ~0.038 mm."""
+    outline = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
+    term_a = Pad(x=5.0, y=9.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R1", pin="1")
+    term_b = Pad(x=15.0, y=9.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R2", pin="1")
+    gnd_y = 10.0 - TRACE_W / 2 - 0.175 - 0.3
+    gnd = Pad(x=10.0, y=gnd_y, width=0.6, height=0.6, net=0, net_name="GND", ref="C1", pin="1")
+    pf = LatticePathfinder(outline, [term_a, term_b, gnd], _rules())
+    pf.set_pad_class_clearances([BASE, BASE, POWER])
+    run = [_seg(5.0, 9.0, 6.0, 10.0), _seg(6.0, 10.0, 14.0, 10.0), _seg(14.0, 10.0, 15.0, 9.0)]
+    return pf, {(1, 0): Route(1, "SIG", segments=run)}
+
+
+def test_diagonal_case_is_repaired_for_an_ordinary_net() -> None:
+    pf, routes = _diagonal_case()
+    before = _net_length(routes, 1)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert (stats.found, stats.repaired, stats.remaining) == (1, 1, 0)
+    assert _net_length(routes, 1) - before > PAIR_LENGTH_TOLERANCE_MM
+
+
+def test_pair_net_move_beyond_the_length_budget_is_refused() -> None:
+    """The same move on a pair net would shift its skew past 0.01 mm."""
+    pf, routes = _diagonal_case()
     before = _coords(routes)
-    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), frozen_nets=frozenset({1}))
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), pair_nets=frozenset({1}))
     assert _coords(routes) == before
-    assert (stats.found, stats.repaired, stats.pair_skipped) == (0, 0, 1)
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 0, 1, 1)
 
 
-def test_repair_freezes_an_uncoupled_fallback_leg() -> None:
-    """A ``(pc.key, "P")`` fallback leg (#6373) stays put and is counted."""
+def test_pair_leg_never_moves() -> None:
+    """A ``(pc.key, "P")`` leg (coupled or #6373 fallback) is not repairable:
+    it stays put and its shortfall is counted, not hidden."""
     pf, routes = _repair_case()
     leg = {(("pair", 1, 3), "P"): routes[(1, 0)]}
     before = _coords(leg)
     stats = repair_class_pad_pairs(
-        pf, leg, dict.fromkeys(leg), repairable=set(), frozen_nets=frozenset({1, 3})
+        pf, leg, dict.fromkeys(leg), repairable=set(), pair_nets=frozenset({1, 3})
     )
     assert _coords(leg) == before
     assert (stats.repaired, stats.pair_skipped) == (0, 1)
 
 
-def test_repair_freezes_only_the_pair_net() -> None:
-    """Freezing another net leaves the ordinary single-ended repair intact."""
-    pf, routes = _repair_case()
-    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), frozen_nets=frozenset({7}))
-    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 1, 0, 0)
+def test_pair_tolerance_cites_p5() -> None:
+    assert PAIR_LENGTH_TOLERANCE_MM == 0.01
 
 
 def _pair_board() -> Autorouter:
@@ -313,16 +358,20 @@ def _pair_board() -> Autorouter:
     return router
 
 
-def test_declined_pair_routed_single_ended_is_frozen(capsys) -> None:
+def test_declined_pair_routed_single_ended_is_held_to_the_budget(capsys) -> None:
+    """A detected-but-declined pair goes entirely through the ordinary star, so
+    its copper is repairable -- but under the pair length budget.  Here the run
+    meets 45-degree legs at both ends: the ~0.027 mm shift would shorten the
+    net by ~0.038 mm, so the move is refused, left in place and reported."""
     router = _pair_board()
     routes = router.route_net(1)
     assert routes and routes[0].segments
     assert router._lattice_pair_net_ids == frozenset({1, 3})
     stats = router._lattice_pathfinder.class_pad_repair_stats
-    assert (stats.found, stats.repaired, stats.pair_skipped) == (0, 0, 1)
-    # Left in place: still the 0.175 mm the search produced.
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 0, 1, 1)
     assert _min_gap_to_cap(router, routes) < POWER - EPS
-    assert "1 on diff-pair nets left in place" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1 on diff-pair nets left in place (length budget 0.01 mm)" in out
 
 
 def _via(x: float, y: float, net: int = 1):

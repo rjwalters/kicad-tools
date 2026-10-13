@@ -2654,7 +2654,7 @@ class LatticePathfinder:
         history_increment_factor: float = 1.0,
         deadline: float | None = None,
         uncoupled_fallback: bool = False,
-        frozen_nets: frozenset[int] = frozenset(),
+        pair_nets: frozenset[int] = frozenset(),
     ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
         """PathFinder/VPR-style negotiation over capacity-1 lattice resources.
 
@@ -2705,10 +2705,11 @@ class LatticePathfinder:
         :attr:`failure_reasons` carries the per-connection decline diagnosis
         for that pass.
 
-        Issue #6437: ``frozen_nets`` names the net ids whose copper the
-        post-negotiation pad-class repair (#6395) must never move -- every
-        detected diff-pair net, engaged or not.  The nets of every ``coupled``
-        entry are always added, so a direct caller stays safe.
+        Issue #6437: ``pair_nets`` names every detected diff-pair net id,
+        engaged or not.  The post-negotiation pad-class repair (#6395) may move
+        their single-ended copper only within a 0.01 mm total-length budget per
+        net (P5's skew threshold).  The nets of every ``coupled`` entry are
+        always added, so a direct caller stays safe.
 
         Issue #4355: ``fixed_copper`` is the preserved copper of NON-listed
         nets (``router.existing_routes`` minus the routable set).  It is
@@ -3011,8 +3012,9 @@ class LatticePathfinder:
         # Issue #6395: hold the best pass's single-ended copper to each pad's
         # own net class (``max(own, pad)``).  Pair legs (coupled and
         # uncoupled-fallback) stay put and count as foreign copper.  Issue
-        # #6437: so does every connection of a diff-pair NET (extra-pad stubs,
-        # a declined pair routed on the ordinary star) -- frozen by net id.
+        # #6437: the rest of a diff-pair NET's copper (extra-pad stubs, a
+        # declined pair routed on the ordinary star) moves only within a
+        # per-net length budget, so the pair's skew cannot drift.
         self.class_pad_repair_stats = None
         if self.pad_class_clearances is not None and best_routes:
             from .class_pad_repair import repair_class_pad_pairs
@@ -3021,15 +3023,15 @@ class LatticePathfinder:
             for pc in pairs:
                 for pol in ("P", "N"):
                     net_classes[(pc.key, pol)] = pc.net_class
-            pair_nets = set(frozen_nets)
+            pair_ids = set(pair_nets)
             for pc in pairs:
-                pair_nets.update((pc.pad_p_a.net, pc.pad_n_a.net))
+                pair_ids.update((pc.pad_p_a.net, pc.pad_n_a.net))
             self.class_pad_repair_stats = repair_class_pad_pairs(
                 self,
                 best_routes,
                 {key: net_classes.get(key) for key in best_routes},
                 repairable={c[0] for c in connections} & set(best_routes),
-                frozen_nets=frozenset(pair_nets),
+                pair_nets=frozenset(pair_ids),
             )
         # Issue #4477: the budget the CALLER granted for this call is the
         # remaining time between the deadline and this call's start -- an
