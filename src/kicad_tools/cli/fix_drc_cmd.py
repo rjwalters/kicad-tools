@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -436,13 +437,38 @@ def _with_project_rules(board: Path, project_pcb_path: Path) -> Iterator[Path]:
         yield staged
 
 
+# kicad-cli reports keyed by the bytes of the board and its project rules: a
+# board the last pass left untouched is not checked a second time by the final
+# re-check (each run refills zones and costs seconds on a real board).
+_KICAD_CLI_REPORTS: dict[str, DRCReport] = {}
+
+
+def _kicad_cli_cache_key(board: Path, project_pcb_path: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        digest.update(board.read_bytes())
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            sidecar = project_pcb_path.with_suffix(suffix)
+            digest.update(sidecar.read_bytes() if sidecar.is_file() else b"-")
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def _run_kicad_cli_drc(board: Path, project_pcb_path: Path) -> DRCReport | None:
-    """kicad-cli DRC with the fleet's gate flags, under the project's rules."""
+    """kicad-cli DRC with the fleet's gate flags, under the project's rules.
+
+    An identical board under identical rules reuses the previous report of
+    this run instead of invoking kicad-cli again.
+    """
     from kicad_tools.cli.runner import run_drc
 
     kicad_cli = _kicad_cli_path()
     if kicad_cli is None:
         return None
+    key = _kicad_cli_cache_key(board, project_pcb_path)
+    if key is not None and key in _KICAD_CLI_REPORTS:
+        return _KICAD_CLI_REPORTS[key]
     with _with_project_rules(board, project_pcb_path) as staged:
         drc_result = run_drc(
             staged,
@@ -454,9 +480,12 @@ def _run_kicad_cli_drc(board: Path, project_pcb_path: Path) -> DRCReport | None:
             print(f"Error running DRC: {drc_result.stderr}", file=sys.stderr)
             return None
         try:
-            return DRCReport.load(drc_result.output_path)
+            loaded = DRCReport.load(drc_result.output_path)
         finally:
             drc_result.output_path.unlink(missing_ok=True)
+    if key is not None:
+        _KICAD_CLI_REPORTS[key] = loaded
+    return loaded
 
 
 def _detect(board: Path, project_pcb_path: Path, args: argparse.Namespace) -> DRCReport | None:
@@ -529,6 +558,7 @@ def _execute_repair(
     mutation in a :func:`kicad_tools.transaction.board_transaction`
     (issue #4541) without duplicating the pass logic.
     """
+    _KICAD_CLI_REPORTS.clear()
     if not hasattr(args, "engine"):
         args.engine = _detection_engine(getattr(args, "drc_report", None))
     if getattr(args, "layers", None) is None:
@@ -1316,6 +1346,7 @@ def _print_json(
             "repaired": effective_clearance_repaired,
             "relocated_vias": clearance_result.relocated_vias,
             "endpoint_nudges": clearance_result.endpoint_nudges,
+            "removed_zero_length": clearance_result.removed_zero_length,
             "local_rerouted": clearance_result.local_rerouted,
             "cluster_rerouted": clearance_result.cluster_rerouted,
             "skipped": {

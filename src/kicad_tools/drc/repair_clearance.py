@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -111,6 +112,25 @@ def _is_locked(node: SExp) -> bool:
             atoms = child.get_atoms()
             return not atoms or str(atoms[0]) in ("yes", "true")
     return False
+
+
+def _format_mm(value: float) -> str:
+    """A coordinate as KiCad writes it: up to 6 decimals, no trailing zeros."""
+    text = f"{round(value, 6):.6f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def _write_xy(point_node: SExp, x: float, y: float) -> None:
+    """Set a ``(start|end|at x y ...)`` pair so it serialises at full precision.
+
+    The generic float formatter keeps six significant digits, which rounds a
+    coordinate above 100 mm to the micron (149.1876 -> 149.188): the saved
+    board would differ from the geometry the repairer measured, and a dragged
+    0.3 um stub would collapse to a point (Issue #6434).
+    """
+    for index, value in ((0, x), (1, y)):
+        point_node.set_value(index, value)
+        point_node.children[index]._original_str = _format_mm(value)
 
 
 def _bbox_of(shape: KShape) -> tuple[float, float, float, float]:
@@ -249,6 +269,8 @@ class RepairResult:
     footprint_skipped_connector: int = 0
     footprint_skipped_same_component: int = 0
     footprint_skipped_exceeds_max: int = 0
+    # Dragged track pieces collapsed to a point and deleted (Issue #6434).
+    removed_zero_length: int = 0
     nudges: list[NudgeResult] = field(default_factory=list)
     footprint_nudge_results: list[FootprintNudgeResult] = field(default_factory=list)
     unrepaired: list[UnrepairedPair] = field(default_factory=list)
@@ -295,6 +317,8 @@ class RepairResult:
             lines.append(f"  Skipped (no location): {self.skipped_no_location}")
         if self.skipped_no_delta > 0:
             lines.append(f"  Skipped (no delta info): {self.skipped_no_delta}")
+        if self.removed_zero_length > 0:
+            lines.append(f"  Collapsed zero-length tracks removed: {self.removed_zero_length}")
         for pair in self.unrepaired:
             lines.append(f"  Unrepaired: {pair}")
         return "\n".join(lines)
@@ -346,6 +370,8 @@ class ClearanceRepairer:
         # re-measured once more after the whole report has been processed.
         self._repaired_pairs: list[tuple[DRCViolation, _Copper, _Copper, float]] = []
         self._initial_gaps: dict[int, float] = {}
+        # Segments a kept move edited: candidates for zero-length cleanup.
+        self._edited_segments: dict[int, SExp] = {}
         # (violation, a, b, required, counter) for every nudge-phase failure
         # whose items were resolved: re-measured at the end, since a later
         # move (a shared or dragged track) can clear it after all.
@@ -515,6 +541,8 @@ class ClearanceRepairer:
         # A later move can push copper back into an earlier pair: re-measure
         # every counted nudge repair against the final geometry.
         self._reverify_repaired_pairs(result)
+        if not dry_run:
+            self._drop_collapsed_segments(result)
 
         # Phase 3: Footprint nudging for pad-pad violations
         if nudge_footprints:
@@ -1520,8 +1548,20 @@ class ClearanceRepairer:
         net = own.net if own is not None else self._node_net(node)
         layer = self._segment_layer(node)
         return (
-            self._end_anchored(sx, sy, net, layer, via_points),
-            self._end_anchored(ex, ey, net, layer, via_points),
+            self._end_anchored(sx, sy, net, layer, via_points)
+            or self._joined_to_locked(node, sx, sy),
+            self._end_anchored(ex, ey, net, layer, via_points)
+            or self._joined_to_locked(node, ex, ey),
+        )
+
+    def _joined_to_locked(self, node: SExp, x: float, y: float) -> bool:
+        """Whether a locked same-net track end is joined to ``node``'s end at ``(x, y)``.
+
+        Dragging that end would move the locked track, so the end is held in
+        place instead -- the track pivots about it (Issue #6434).
+        """
+        return any(
+            _is_locked(seg_node) for seg_node, _ep, _ox, _oy in self._joined_ends(node, x, y)
         )
 
     def _end_anchored(
@@ -1648,6 +1688,17 @@ class ClearanceRepairer:
             self._apply_nudge(target.node, target.kind, dx, dy, result=None, drag_connected=True)
         finally:
             journal, self._journal = self._journal, None
+        locked = next((n for n, _p, _x, _y in journal if _is_locked(n)), None)
+        if locked is not None:
+            self._rollback(journal)
+            return (
+                f"infeasible: the move would drag locked {locked.name} "
+                f"{self._node_uuid(locked) or '<no uuid>'}"
+            )
+        lost = self._lost_contact(journal)
+        if lost is not None:
+            self._rollback(journal)
+            return f"infeasible: the move would {lost}"
         measured = self._measure(target, other)
         if measured + _GAP_EPSILON_MM < required:
             self._rollback(journal)
@@ -1662,6 +1713,9 @@ class ClearanceRepairer:
             self._rollback(journal)
         else:
             self.modified = True
+            for item_node, _point, _ox, _oy in journal:
+                if item_node.name == "segment":
+                    self._edited_segments[id(item_node)] = item_node
             if target.kind == "via":
                 result.relocated_vias += 1
             elif any(pins):
@@ -1688,15 +1742,10 @@ class ClearanceRepairer:
             edits=edits,
         )
 
-    def _collateral_damage(self, journal: list[tuple[SExp, SExp, float, float]]) -> str | None:
-        """Describe a new clearance violation the journalled move created, if any.
-
-        Every item the move touched (the target plus dragged track ends) is
-        compared with the foreign copper around it: a pair that now measures
-        below its requirement *and* closer than before the move rejects it.
-        """
-        if not journal:
-            return None
+    def _journal_view(
+        self, journal: list[tuple[SExp, SExp, float, float]]
+    ) -> tuple[dict[int, _Copper], Callable[[_Copper], KShape]]:
+        """Items a journalled move touched, and a function giving pre-move shapes."""
         touched: dict[int, _Copper] = {}
         old_points: dict[int, tuple[float, float]] = {}
         for item_node, point_node, ox, oy in journal:
@@ -1715,6 +1764,90 @@ class ClearanceRepairer:
                 x2, y2 = old_points.get(id(copper.node.find("end")), (shape.x2, shape.y2))
                 return KSegment(x1, y1, x2, y2, shape.width)
             return shape
+
+        return touched, old_shape
+
+    def _lost_contact(self, journal: list[tuple[SExp, SExp, float, float]]) -> str | None:
+        """Describe a same-net joint the journalled move broke, if any.
+
+        The items the move touched and the same-net copper (tracks, vias,
+        pads) they overlap before or after the move form a small graph.  Every
+        pair joined before the move must still be connected afterwards,
+        directly or through another item of the graph, so a T-junction stub
+        or a track end resting on a via cannot be left behind (Issue #6434).
+        A contact that merely moves to a dragged neighbour is not a break.
+        """
+        if not journal:
+            return None
+        touched, old_shape = self._journal_view(journal)
+        index = self._ensure_index()
+        members: dict[int, _Copper] = dict(touched)
+        for moved in touched.values():
+            if not moved.net:
+                continue
+            new, prev = self._shape_of(moved), old_shape(moved)
+            box_new, box_old = _bbox_of(new), _bbox_of(prev)
+            box = (
+                min(box_new[0], box_old[0]),
+                min(box_new[1], box_old[1]),
+                max(box_new[2], box_old[2]),
+                max(box_new[3], box_old[3]),
+            )
+            for neighbour in index:
+                if neighbour.node is moved.node or neighbour.net != moved.net:
+                    continue
+                if id(neighbour.node) in members:
+                    continue
+                if _boxes_overlap(self._bbox(neighbour), box, 0.01) and self._interacts(
+                    moved, neighbour
+                ):
+                    members[id(neighbour.node)] = neighbour
+
+        items = list(members.values())
+
+        def edges(shape_of: Callable[[_Copper], KShape]) -> list[tuple[int, int]]:
+            found = []
+            for i, a in enumerate(items):
+                for j in range(i + 1, len(items)):
+                    b = items[j]
+                    if a.net != b.net or not a.net or not self._interacts(a, b):
+                        continue
+                    if copper_gap(shape_of(a), shape_of(b)) <= _GAP_EPSILON_MM:
+                        found.append((i, j))
+            return found
+
+        def before_shape(copper: _Copper) -> KShape:
+            return old_shape(copper) if id(copper.node) in touched else self._shape_of(copper)
+
+        parent = list(range(len(items)))
+
+        def find(k: int) -> int:
+            while parent[k] != k:
+                parent[k] = parent[parent[k]]
+                k = parent[k]
+            return k
+
+        for i, j in edges(self._shape_of):
+            parent[find(i)] = find(j)
+        for i, j in edges(before_shape):
+            if find(i) != find(j):
+                a, b = items[i], items[j]
+                return (
+                    f"disconnect {a.kind} {self._node_uuid(a.node) or '<no uuid>'} "
+                    f"from {b.kind} {self._node_uuid(b.node) or '<no uuid>'} [{a.net}]"
+                )
+        return None
+
+    def _collateral_damage(self, journal: list[tuple[SExp, SExp, float, float]]) -> str | None:
+        """Describe a new clearance violation the journalled move created, if any.
+
+        Every item the move touched (the target plus dragged track ends) is
+        compared with the foreign copper around it: a pair that now measures
+        below its requirement *and* closer than before the move rejects it.
+        """
+        if not journal:
+            return None
+        touched, old_shape = self._journal_view(journal)
 
         index = self._ensure_index()
         reach = self._report_max_required + 0.5
@@ -1755,19 +1888,59 @@ class ClearanceRepairer:
                     )
         return None
 
+    def _drop_collapsed_segments(self, result: RepairResult) -> None:
+        """Delete edited tracks a drag collapsed to a single point.
+
+        Dragging both ends of a sub-micron stub can round them onto the same
+        coordinate, which ``kct check`` flags as ``zero_length_segment``.  The
+        dot is removed only when every same-net item it touches also covers
+        its centre, so the removal cannot split a joint.
+        """
+        if not self._edited_segments:
+            return
+        self._ensure_index()
+        removed = 0
+        for node in self._edited_segments.values():
+            dot = self._by_node.get(id(node))
+            if dot is None:
+                continue
+            sx, sy, ex, ey = self._segment_xy(node)
+            if math.hypot(ex - sx, ey - sy) > _GAP_EPSILON_MM:
+                continue
+            shape = self._shape_of(dot)
+            centre = KVia(sx, sy, 0.0)
+            box = self._bbox(dot)
+            contacts = [
+                c
+                for c in self._ensure_index()
+                if c.node is not node
+                and c.net == dot.net
+                and _boxes_overlap(self._bbox(c), box, 0.0)
+                and self._interacts(dot, c)
+                and copper_gap(shape, self._shape_of(c)) <= _GAP_EPSILON_MM
+            ]
+            if not contacts or any(
+                copper_gap(self._shape_of(c), centre) > _GAP_EPSILON_MM for c in contacts
+            ):
+                continue
+            if self.doc.remove(node):
+                removed += 1
+                self._invalidate_index()
+                self._ensure_index()
+        self._edited_segments = {}
+        result.removed_zero_length += removed
+
     def _set_point(self, item_node: SExp, point_node: SExp, x: float, y: float) -> None:
         """Write a coordinate pair, journalling the old value when a trial is open."""
         if self._journal is not None:
             ox, oy = self._xy(point_node)
             self._journal.append((item_node, point_node, ox, oy))
-        point_node.set_value(0, x)
-        point_node.set_value(1, y)
+        _write_xy(point_node, x, y)
         self._shape_cache.pop(id(item_node), None)
 
     def _rollback(self, journal: list[tuple[SExp, SExp, float, float]]) -> None:
         for item_node, point_node, ox, oy in reversed(journal):
-            point_node.set_value(0, ox)
-            point_node.set_value(1, oy)
+            _write_xy(point_node, ox, oy)
             self._shape_cache.pop(id(item_node), None)
 
     def _journal_edits(
@@ -2186,14 +2359,30 @@ class ClearanceRepairer:
                 moves.append((start_node, sx, sy))
             if not end_at_via:
                 moves.append((end_node, ex, ey))
+            # Gather every dragged end before anything moves, so a stub is
+            # found against the track's original position.
+            dragged: dict[int, tuple[SExp, SExp, float, float, float, float]] = {}
+            if drag_connected:
+                for _point_node, px, py in moves:
+                    for seg_node, ep_node, ox, oy in self._joined_ends(node, px, py):
+                        # Shift by the same delta: a coincident end lands
+                        # exactly on the new point, an overlapping one keeps
+                        # its offset.
+                        dragged.setdefault(id(ep_node), (seg_node, ep_node, ox, oy, dx, dy))
+                start_d = (0.0, 0.0) if start_at_via else (dx, dy)
+                end_d = (0.0, 0.0) if end_at_via else (dx, dy)
+                for seg_node, ep_node, ox, oy, t in self._mid_span_stubs(node):
+                    if id(ep_node) in dragged:
+                        continue
+                    # A T-junction: the stub end follows the track at the
+                    # point it meets it (Issue #6434).
+                    ddx = (1 - t) * start_d[0] + t * end_d[0]
+                    ddy = (1 - t) * start_d[1] + t * end_d[1]
+                    dragged[id(ep_node)] = (seg_node, ep_node, ox, oy, ddx, ddy)
             for point_node, px, py in moves:
-                nx, ny = round(px + dx, 4), round(py + dy, 4)
-                neighbours = self._joined_ends(node, px, py) if drag_connected else []
-                self._set_point(node, point_node, nx, ny)
-                for seg_node, ep_node, ox, oy in neighbours:
-                    # Shift by the same delta: a coincident end lands exactly
-                    # on the new point, an overlapping one keeps its offset.
-                    self._set_point(seg_node, ep_node, round(ox + dx, 4), round(oy + dy, 4))
+                self._set_point(node, point_node, round(px + dx, 4), round(py + dy, 4))
+            for seg_node, ep_node, ox, oy, ddx, ddy in dragged.values():
+                self._set_point(seg_node, ep_node, round(ox + ddx, 4), round(oy + ddy, 4))
 
             if (start_at_via or end_at_via) and result is not None:
                 result.endpoint_nudges += 1
@@ -2211,9 +2400,12 @@ class ClearanceRepairer:
         own = self._by_node.get(id(node))
         net = own.net if own is not None else self._node_net(node)
         width = self._get_node_width(node)
+        layer = self._segment_layer(node)
         joined: list[tuple[SExp, SExp, float, float]] = []
         for copper in self._ensure_index():
             if copper.kind != "segment" or copper.node is node or copper.net != net:
+                continue
+            if self._segment_layer(copper.node) != layer:
                 continue
             reach = max(0.001, min(width, self._get_node_width(copper.node)) / 2)
             for name in ("start", "end"):
@@ -2224,6 +2416,49 @@ class ClearanceRepairer:
                 if math.hypot(ox - px, oy - py) <= reach:
                     joined.append((copper.node, ep_node, ox, oy))
         return joined
+
+    def _mid_span_stubs(self, node: SExp) -> list[tuple[SExp, SExp, float, float, float]]:
+        """Same-net track ends that meet ``node`` part-way along it (T-junctions).
+
+        Returns ``(segment, end_node, x, y, t)`` where ``t`` in ``[0, 1]`` is
+        where the end projects onto ``node``'s centreline.  Ends joined at
+        ``node``'s own ends are left to :meth:`_joined_ends`.
+        """
+        sx, sy, ex, ey = self._segment_xy(node)
+        own = self._by_node.get(id(node))
+        net = own.net if own is not None else self._node_net(node)
+        if not net:
+            return []
+        layer = self._segment_layer(node)
+        width = self._get_node_width(node)
+        lx, ly = ex - sx, ey - sy
+        length_sq = lx * lx + ly * ly
+        if length_sq <= 0.0:
+            return []
+        stubs: list[tuple[SExp, SExp, float, float, float]] = []
+        for copper in self._ensure_index():
+            if copper.kind != "segment" or copper.node is node or copper.net != net:
+                continue
+            if self._segment_layer(copper.node) != layer:
+                continue
+            reach_end = max(0.001, min(width, self._get_node_width(copper.node)) / 2)
+            for name in ("start", "end"):
+                ep_node = copper.node.find(name)
+                if ep_node is None:
+                    continue
+                ox, oy = self._xy(ep_node)
+                if (
+                    math.hypot(ox - sx, oy - sy) <= reach_end
+                    or math.hypot(ox - ex, oy - ey) <= reach_end
+                ):
+                    continue
+                t = ((ox - sx) * lx + (oy - sy) * ly) / length_sq
+                if not 0.0 <= t <= 1.0:
+                    continue
+                px, py = sx + t * lx, sy + t * ly
+                if math.hypot(ox - px, oy - py) <= width / 2 + 1e-6:
+                    stubs.append((copper.node, ep_node, ox, oy, t))
+        return stubs
 
     def _find_node_by_uuid(
         self,

@@ -3191,6 +3191,178 @@ class TestHonestRepair6434:
         assert (b.kind, b.net) == ("pad", "GND")
 
 
+def _points(pcb: Path, uuid: str) -> list[tuple[float, float]]:
+    """The ``start``/``end`` (or via ``at``) points of one item in a saved board."""
+    repairer = ClearanceRepairer(pcb)
+    repairer._ensure_index()
+    node = repairer._by_uuid[uuid].node
+    return [repairer._xy(node.find(name)) for name in ("start", "end", "at") if node.find(name)]
+
+
+def _report_at(via_y: float, actual: float):
+    from kicad_tools.drc.report import parse_json_report
+
+    items = [dict(_TRACK_VIA_ITEMS[0]), dict(_TRACK_VIA_ITEMS[1])]
+    items[1]["pos"] = {"x": 102.0, "y": via_y}
+    return parse_json_report(_kicad_cli_report(0.175, actual, items))
+
+
+class TestNoSilentCopperDamage6434:
+    """Judge probes on PR #6459: locked copper never moves, joints never break."""
+
+    def test_locked_joined_track_is_not_dragged(self, tmp_path: Path):
+        """A locked track joined at the moved track's end holds that end."""
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (segment (locked yes) (start 104 100) (end 106 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-locked"))
+  (via (locked yes) (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        locked_before = _points(pcb, "trk-locked")
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.5, 0.16), max_displacement=0.5)
+        repairer.save()
+
+        assert _points(pcb, "trk-locked") == locked_before
+        # The track pivots about the joint instead: still joined, and clear.
+        assert (104.0, 100.0) in _points(pcb, "trk-a")
+        assert result.repaired == 1
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+
+    def test_locked_track_on_a_moved_via_is_not_dragged(self, tmp_path: Path):
+        """``--prefer move-via``: a via carrying a locked track does not move."""
+        copper = """  (segment (locked yes) (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+  (segment (locked yes) (start 102 100.5) (end 102 103) (width 0.18) (layer "B.Cu") (net 2) (uuid "trk-locked"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        before = pcb.read_text()
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(
+            _report_at(100.5, 0.16), max_displacement=0.5, prefer="move-via"
+        )
+
+        assert result.repaired == 0
+        assert result.nudges == []
+        (pair,) = result.unrepaired
+        assert "locked segment trk-locked" in pair.reason
+        assert not repairer.modified
+        repairer.save()
+        assert _points(pcb, "trk-locked") == [(102.0, 100.5), (102.0, 103.0)]
+        assert _points(pcb, "via-a") == [(102.0, 100.5)]
+        assert "100.5" in before
+
+    def test_via_with_locked_track_falls_back_to_the_free_track(self, tmp_path: Path):
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+  (segment (locked yes) (start 102 100.5) (end 102 103) (width 0.18) (layer "B.Cu") (net 2) (uuid "trk-locked"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(
+            _report_at(100.5, 0.16), max_displacement=0.5, prefer="move-via"
+        )
+        repairer.save()
+
+        assert result.repaired == 1
+        assert result.nudges[0].object_type == "segment"
+        assert _points(pcb, "trk-locked") == [(102.0, 100.5), (102.0, 103.0)]
+        assert _points(pcb, "via-a") == [(102.0, 100.5)]
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+
+    def test_t_junction_stub_is_dragged_and_stays_joined(self, tmp_path: Path):
+        """A stub ending mid-span on the moved track follows it."""
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (segment (start 103 98) (end 103 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-t"))
+  (segment (start 96 100) (end 100 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-host"))
+  (via (locked yes) (at 102 100.4) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        assert _measure_pair(pcb, "trk-a", "trk-t") < 0  # joined before
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.4, 0.06), max_displacement=0.5)
+        repairer.save()
+
+        assert result.repaired == 1
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+        # The stub's end is still on the track's centreline, not 0.125 mm off it.
+        (_, ay), _ = _points(pcb, "trk-a")
+        assert _points(pcb, "trk-t")[1] == (103.0, pytest.approx(ay, abs=1e-9))
+        assert _measure_pair(pcb, "trk-a", "trk-t") < 0
+        assert _measure_pair(pcb, "trk-a", "trk-host") < 0
+
+    def test_locked_t_junction_stub_blocks_the_move(self, tmp_path: Path):
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (segment (locked yes) (start 103 98) (end 103 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-t"))
+  (via (locked yes) (at 102 100.4) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        before = pcb.read_text()
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.4, 0.06), max_displacement=0.5)
+
+        assert result.repaired == 0
+        assert "locked segment trk-t" in result.unrepaired[0].reason
+        assert not repairer.modified
+        assert pcb.read_text() == before
+
+    def test_move_that_breaks_a_same_net_contact_is_reverted(self, tmp_path: Path):
+        """A same-net via sitting mid-span on the track cannot be left behind.
+
+        The 0.175 mm move takes the 0.18 mm track clear of the 0.15 mm via.
+        """
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 103 100) (size 0.15) (drill 0.1) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-gnd"))
+  (via (locked yes) (at 102 100.35) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        before = pcb.read_text()
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.35, 0.01), max_displacement=0.5)
+
+        assert result.repaired == 0
+        (pair,) = result.unrepaired
+        assert "disconnect segment trk-a from via via-gnd" in pair.reason
+        assert not repairer.modified
+        assert pcb.read_text() == before
+
+    def test_track_piece_collapsed_by_a_via_move_is_removed(self, tmp_path: Path):
+        """A sub-micron stub whose both ends follow a via becomes a dot: drop it."""
+        copper = """  (segment (locked yes) (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+  (segment (start 102 100.5) (end 102.0005 100.5) (width 0.18) (layer "F.Cu") (net 2) (uuid "stub"))
+  (segment (start 102.0005 100.5) (end 102 103) (width 0.18) (layer "B.Cu") (net 2) (uuid "trk-b"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(
+            _report_at(100.5, 0.16), max_displacement=0.5, prefer="move-via"
+        )
+        repairer.save()
+
+        assert result.repaired == 1
+        assert result.removed_zero_length == 1
+        assert '"stub"' not in pcb.read_text()
+        (via_at,) = _points(pcb, "via-a")
+        assert _points(pcb, "trk-b")[0] == via_at
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+
+    def test_saved_coordinates_keep_four_decimals(self, tmp_path: Path):
+        """Coordinates above 100 mm are not rounded to the micron on save."""
+        copper = """  (segment (start 100.0001 100) (end 104.0001 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (locked yes) (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.5, 0.16), max_displacement=0.5)
+        repairer.save()
+        assert result.repaired == 1
+        (sx, _), (ex, _) = _points(pcb, "trk-a")
+        assert (sx, ex) == (100.0001, 104.0001)
+        assert _measure_pair(pcb, "trk-a", "via-a") == pytest.approx(
+            result.nudges[0].new_clearance_mm, abs=1e-9
+        )
+
+
 class TestRepairClearanceCliHonest6434:
     """CLI end to end: exit 0 only when the output really is clear."""
 

@@ -3845,6 +3845,37 @@ class TestFixDrcRecheck6431:
         with _with_project_rules(pwr_board, pwr_board) as same:
             assert same == pwr_board
 
+    def test_unchanged_board_is_not_rechecked_by_kicad_cli_twice(
+        self, pwr_board: Path, monkeypatch
+    ):
+        """Same board bytes and rules: the second kicad-cli run is reused."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli import fix_drc_cmd, runner
+
+        monkeypatch.setattr(fix_drc_cmd, "_kicad_cli_path", lambda: Path("/fake/kicad-cli"))
+        fix_drc_cmd._KICAD_CLI_REPORTS.clear()
+        calls: list[Path] = []
+
+        def fake_run_drc(board, **_kwargs):
+            calls.append(Path(board))
+            out = pwr_board.parent / f"drc-{len(calls)}.json"
+            out.write_text(
+                json.dumps({"source": "pwr.kicad_pcb", "violations": [], "unconnected_items": []})
+            )
+            return SimpleNamespace(success=True, output_path=out, stderr="")
+
+        monkeypatch.setattr(runner, "run_drc", fake_run_drc)
+        first = fix_drc_cmd._run_kicad_cli_drc(pwr_board, pwr_board)
+        again = fix_drc_cmd._run_kicad_cli_drc(pwr_board, pwr_board)
+        assert first is not None and again is first
+        assert len(calls) == 1
+
+        pwr_board.write_text(pwr_board.read_text() + "\n")  # any edit re-runs it
+        assert fix_drc_cmd._run_kicad_cli_drc(pwr_board, pwr_board) is not first
+        assert len(calls) == 2
+        fix_drc_cmd._KICAD_CLI_REPORTS.clear()
+
     @pytest.mark.skipif(
         __import__("kicad_tools.cli.runner", fromlist=["find_kicad_cli"]).find_kicad_cli() is None,
         reason="kicad-cli not installed",

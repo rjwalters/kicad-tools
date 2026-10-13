@@ -303,6 +303,7 @@ def _print_json(
             "not_cleared": result.skipped_not_cleared,
         },
         "unrepaired": [u.to_dict() for u in result.unrepaired],
+        "removed_zero_length": result.removed_zero_length,
         "nudges": [
             {
                 "object_type": n.object_type,
@@ -364,6 +365,10 @@ def _print_text(
     print(f"Max displacement: {max_displacement}mm")
     print(f"Mode: {'DRY RUN' if dry_run else 'APPLY'}")
     print(f"\n{action} {result.repaired}/{result.total_violations} clearance violations")
+    if result.removed_zero_length:
+        print(
+            f"Removed {result.removed_zero_length} dragged track piece(s) collapsed to zero length"
+        )
 
     if result.nudges:
         print(f"\n{'-' * 60}")
