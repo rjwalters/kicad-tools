@@ -98,7 +98,11 @@ For Claude Code, user scope (the default) registers the server through
 which writes the top-level `mcpServers` of `~/.claude.json`
 (`$CLAUDE_CONFIG_DIR/.claude.json` when that variable is set). Without the
 `claude` CLI, or if the CLI call fails, kct merges the same entry into that
-file directly, atomically and without touching any other key. `--scope
+file directly without touching any other key (a symlinked file is followed,
+so the link's target is updated). That write is atomic -- the file is never
+left half-written -- but not locked: if Claude Code rewrites `~/.claude.json`
+in the same instant, one of the two updates is lost, so quit Claude Code
+before running setup when `claude` is not on PATH. `--scope
 project` merges into `./.mcp.json` instead; Claude Code asks once for approval
 before it starts a project-scope server. `--dry-run` prints the file and the
 method (`claude-cli` or `json-merge`) it would use.

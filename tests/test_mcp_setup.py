@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -465,3 +466,82 @@ class TestClaudeDesktopNoClobber:
         assert data["globalShortcut"] == "x"
         assert set(data["mcpServers"]) == {"o", "kicad-tools"}
         assert "type" not in data["mcpServers"]["kicad-tools"]
+
+
+class TestSymlinkedConfigs:
+    """A symlinked config is updated through the link, not replaced by a file."""
+
+    def _link(self, home: Path, name: str, initial: dict) -> tuple[Path, Path]:
+        dot = home / "dotfiles"
+        dot.mkdir()
+        target = dot / name.lstrip(".")
+        target.write_text(json.dumps(initial))
+        target.chmod(0o600)
+        link = home / name
+        link.symlink_to(target)
+        return link, target
+
+    def test_claude_code_json_merge_follows_symlink(self, claude_home, capsys):
+        link, target = self._link(
+            claude_home, ".claude.json", {"numStartups": 3, "mcpServers": {"x": {}}}
+        )
+        rc, payload, _ = _setup_json([], capsys)
+        assert rc == 0
+        assert payload["method"] == "json-merge"
+        assert link.is_symlink()
+        assert link.resolve() == target.resolve()
+        data = json.loads(target.read_text())
+        assert data == {"numStartups": 3, "mcpServers": {"x": {}, "kicad-tools": ENTRY}}
+        assert target.stat().st_mode & 0o777 == 0o600
+        # No stray temp files beside the link or the target.
+        assert sorted(p.name for p in target.parent.iterdir()) == [target.name]
+
+    def test_claude_desktop_follows_symlink(self, claude_home, monkeypatch, capsys):
+        link, target = self._link(
+            claude_home, "claude_desktop_config.json", {"globalShortcut": "x"}
+        )
+        monkeypatch.setattr(mcp_cmd, "_get_claude_desktop_config_path", lambda: link)
+        rc, _, _ = _setup(["--client", "claude-desktop"], capsys)
+        assert rc == 0
+        assert link.is_symlink()
+        assert link.resolve() == target.resolve()
+        data = json.loads(target.read_text())
+        assert data["globalShortcut"] == "x"
+        assert "kicad-tools" in data["mcpServers"]
+
+
+class TestClaudeCodeRemovedThenFailed:
+    """``remove`` succeeded, ``add-json`` and the fallback merge both failed."""
+
+    def test_error_says_entry_was_removed_and_how_to_restore(
+        self, claude_home, monkeypatch, capsys
+    ):
+        old = {"command": "old", "args": ["it's"]}
+        path = claude_home / ".claude.json"
+        path.write_text(json.dumps({"mcpServers": {"kicad-tools": old}}))
+        FakeClaude(monkeypatch, fail_on="add-json")
+
+        def broken_merge(*a):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(mcp_cmd, "_merge_mcp_server", broken_merge)
+        rc, payload, _ = _setup_json([], capsys)
+        assert rc == 1
+        assert "disk full" in payload["error"]
+        assert "already removed by `claude mcp remove`" in payload["error"]
+        restore = payload["error"].split("restore it with: ", 1)[1]
+        argv = shlex.split(restore)
+        assert argv[:5] == ["claude", "mcp", "add-json", "--scope", "user"]
+        assert argv[5] == "kicad-tools"
+        assert json.loads(argv[6]) == old
+
+    def test_no_removed_note_when_remove_failed(self, claude_home, monkeypatch, capsys):
+        path = claude_home / ".claude.json"
+        path.write_text(json.dumps({"mcpServers": {"kicad-tools": {"command": "o"}}}))
+        FakeClaude(monkeypatch, fail_on="remove")
+        monkeypatch.setattr(
+            mcp_cmd, "_merge_mcp_server", lambda *a: (_ for _ in ()).throw(OSError("nope"))
+        )
+        rc, payload, _ = _setup_json([], capsys)
+        assert rc == 1
+        assert "claude mcp remove" not in payload["error"]

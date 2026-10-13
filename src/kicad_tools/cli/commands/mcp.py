@@ -10,6 +10,7 @@ server whose machine contract *is* the MCP protocol.  See
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -208,7 +209,15 @@ def _merge_mcp_server(path: Path, name: str, entry: dict) -> None:
     """Set ``mcpServers[name]`` in ``path``, keeping every other key verbatim.
 
     Re-reads the file (it may have changed since the caller looked) and
-    writes atomically, preserving the file mode.
+    swaps the new content in with a single ``os.replace``, so a reader never
+    sees a half-written file, and preserves the file mode.
+
+    Atomic is not race-free: this is an unlocked read-modify-write.  If
+    another process -- typically a running Claude Code, which rewrites
+    ``~/.claude.json`` itself -- writes the file between the re-read and the
+    ``os.replace``, its update is lost.  The window is milliseconds and only
+    exists on the fallback route (no ``claude`` CLI, or the CLI failed);
+    ``docs/mcp/setup.md`` suggests quitting Claude Code first in that case.
     """
     data = _read_json_object(path) or {}
     data.setdefault("mcpServers", {})[name] = entry
@@ -234,13 +243,15 @@ def _legacy_claude_code_config() -> Path | None:
     return path if _server_entry(data, CLAUDE_SERVER_NAME) is not None else None
 
 
-def _register_via_claude_cli(exe: str, entry: dict, replace: bool) -> str | None:
+def _register_via_claude_cli(exe: str, entry: dict, replace: bool) -> tuple[str | None, bool]:
     """Register the user-scope server with ``claude mcp add-json``.
 
     ``claude mcp add`` fails on an existing name, so a differing entry is
-    removed first.  Returns ``None`` on success, otherwise an error message
-    (the caller then falls back to the JSON merge, which also restores an
-    entry the ``remove`` already dropped).
+    removed first.  Returns ``(error, removed)``: ``error`` is ``None`` on
+    success, otherwise a message (the caller then falls back to the JSON
+    merge, which also restores an entry the ``remove`` already dropped);
+    ``removed`` says whether ``claude mcp remove`` succeeded, so the caller
+    can tell the user the old entry is gone if the fallback fails too.
     """
 
     def run(argv: list[str]) -> str | None:
@@ -261,11 +272,14 @@ def _register_via_claude_cli(exe: str, entry: dict, replace: bool) -> str | None
             return f"`{label}` exited {proc.returncode}" + (f": {detail}" if detail else "")
         return None
 
+    removed = False
     if replace:
         error = run(["mcp", "remove", "--scope", "user", CLAUDE_SERVER_NAME])
         if error:
-            return error
-    return run(["mcp", "add-json", "--scope", "user", CLAUDE_SERVER_NAME, json.dumps(entry)])
+            return error, removed
+        removed = True
+    error = run(["mcp", "add-json", "--scope", "user", CLAUDE_SERVER_NAME, json.dumps(entry)])
+    return error, removed
 
 
 def _run_setup_claude_code(args, dry_run: bool, as_json: bool) -> int:
@@ -322,10 +336,11 @@ def _run_setup_claude_code(args, dry_run: bool, as_json: bool) -> int:
     replaced = current is not None and not unchanged
     written = False
     cli_error = None
+    removed = False
 
     if not dry_run and not unchanged:
         if exe:
-            cli_error = _register_via_claude_cli(exe, entry, replace=current is not None)
+            cli_error, removed = _register_via_claude_cli(exe, entry, replace=current is not None)
             if cli_error is None:
                 try:
                     after = _server_entry(_read_json_object(config_path), CLAUDE_SERVER_NAME)
@@ -336,12 +351,21 @@ def _run_setup_claude_code(args, dry_run: bool, as_json: bool) -> int:
             if cli_error is not None:
                 method = METHOD_JSON_MERGE
         if method == METHOD_JSON_MERGE:
+            # If ``claude mcp remove`` already dropped the old entry, a failed
+            # merge leaves the user with none -- say so, and how to restore it.
+            lost = (
+                f" Note: the previous {CLAUDE_SERVER_NAME!r} entry was already removed by"
+                f" `claude mcp remove`; restore it with: claude mcp add-json --scope user"
+                f" {CLAUDE_SERVER_NAME} {shlex.quote(json.dumps(current))}"
+                if removed
+                else ""
+            )
             try:
                 _merge_mcp_server(config_path, CLAUDE_SERVER_NAME, entry)
             except ClientConfigError as exc:
-                return fail(str(exc))
+                return fail(f"{exc}{lost}")
             except OSError as exc:
-                return fail(f"cannot write {config_path}: {exc}")
+                return fail(f"cannot write {config_path}: {exc}{lost}")
         written = True
 
     if as_json:
@@ -603,6 +627,13 @@ def _detect_opencode_schema(config_text: str | None) -> tuple[str, str]:
 
 
 def _write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a temp file and ``os.replace``.
+
+    A symlinked config (e.g. ``~/.claude.json`` managed from a dotfiles repo)
+    is resolved first, so the temp file lands next to the real target and the
+    replace updates the target -- the link itself survives.
+    """
+    path = Path(os.path.realpath(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
