@@ -120,5 +120,25 @@ retirements (`loom:urgent`, `loom:heavy`, `loom:operator-objective`). It is
 never rendered into `labels.yml`, so the additive `sync-labels.sh` cannot
 re-create a retired label. `owned: false` (`priority:high`, never declared by
 Loom) means the migration adds the replacement but never removes or deletes
-the old label. Relabeling live issues is the forge-side migration (#11511),
-which reads this array; the registry change itself mutates no forge.
+the old label. The registry change itself mutates no forge.
+
+### Running the forge-side migration (#11511)
+
+`loom-daemon labels migrate` reads this array and relabels each repo's **open**
+issues and PRs (closed items are never touched). It is a dry run unless
+`--apply` is passed:
+
+```bash
+loom-daemon labels migrate --all-workspaces          # preview every managed repo
+loom-daemon labels migrate --all-workspaces --apply  # then migrate
+loom-daemon labels migrate --repo OWNER/NAME [--apply]   # or one repo
+.loom/scripts/sync-labels.sh --migrate-retired [--dry-run]  # sync first, then migrate
+```
+
+Per open item it adds `replaced_by` before removing the old label. It then
+re-reads the label's open usage and deletes the label only when nothing open
+still carries it; a failed read keeps it (`KEPT`). An `owned: false` label is
+add-only: never removed from an item, never deleted. A replacement missing on
+the forge is `SKIPPED`, never created; run `sync-labels.sh` first. A second
+`--apply` makes no writes. `resync-installed.sh` only ever runs the dry run and
+prints the apply command when anything is pending.
