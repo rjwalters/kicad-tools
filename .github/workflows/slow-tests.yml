@@ -8,6 +8,10 @@ on:
     # never as a PR check, so it stays non-blocking for merges.
     - cron: "0 3 * * *"
     - cron: "0 15 * * *"
+    # Issue #6463: weekly (Sunday) run that also enables the opt-in board-05
+    # lattice manufacturable guard (KCT_LATTICE_BOARD_GUARD, ~25 min). The
+    # `Run slow tests` step keys the env var off this exact cron string.
+    - cron: "0 9 * * 0"
   # Also on main pushes that touch code the benchmarks exercise. Docs-only
   # merges do not trigger it. Runs are serialised (see `concurrency`) so a
   # burst of merges collapses to one running + one pending run.
@@ -156,4 +160,15 @@ jobs:
         # could run on up to 4 workers.  Tests marked
         # @pytest.mark.xdist_group(...) stay on one worker; ungrouped tests
         # load-balance exactly as under --dist load.
+        #
+        # KCT_LATTICE_BOARD_GUARD (Issue #6463): set to 1 only on the weekly
+        # Sunday cron, which enables the ~25-min board-05 case of
+        # tests/test_lattice_boards_manufacturable_6449.py (its own
+        # pytest.mark.timeout(3000) overrides --timeout=1200 for that test).
+        # Board 04's case runs on every slow run. Both share one xdist group,
+        # so board 05 occupies one worker while the rest load-balance on the
+        # other three; against the ~41-min median that stays under 90 min.
+        # Twice-daily, push and workflow_dispatch runs leave it unset.
+        env:
+          KCT_LATTICE_BOARD_GUARD: ${{ github.event.schedule == '0 9 * * 0' && '1' || '' }}
         run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 -m slow

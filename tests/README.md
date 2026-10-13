@@ -26,6 +26,28 @@ Declared in `pyproject.toml`:
 | `integration` | Requires real board fixtures. |
 | `benchmark` | A/B benchmarks — run with `-m benchmark`, skipped by default. |
 
+### Opt-in board guards
+
+`KCT_LATTICE_BOARD_GUARD=1` enables the board-05 case of
+`test_lattice_boards_manufacturable_6449.py` (Issues #6449, #6463): a fresh
+4-layer lattice route of board 05 that must reach 33/33 nets, 0 kicad-cli
+errors and unconnected items, 0 `kct check` errors and exit 0. It takes
+about 15-25 minutes, so it is skipped unless the variable is set. The
+board-04 (`--layers 2`, about 40 s) case of the same test needs no variable;
+it runs on every `-m slow` run, including the twice-daily `slow-tests.yml`
+job. That workflow sets the variable only on its weekly (Sunday) schedule.
+
+Both cases need kicad-cli on `PATH` and the native router backend
+(`uv run kct build-native`; see below). Run it before merging changes to
+lattice search geometry, pad keep-outs, clearance floors or plane-via
+reservation:
+
+```bash
+uv run kct build-native
+KCT_LATTICE_BOARD_GUARD=1 uv run pytest \
+    tests/test_lattice_boards_manufacturable_6449.py -m slow --no-cov -s
+```
+
 ## Layout
 
 Most of the suite is a flat set of ~880 `test_*.py` modules at the root of
