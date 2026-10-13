@@ -12,7 +12,10 @@ interior arc contact and must not substitute a chord for the curved copper.
 
 Strict graphs retain each physical pad occurrence, including duplicate pad
 numbers. Reports keep logical ``REF.PAD`` names and board positions. Duplicate
-numbers never imply an internal component jumper in this copper model.
+numbers never imply an internal component jumper in this copper model: pads
+bond only through copper. Pads whose copper overlaps on a shared copper layer
+(an exposed-pad rect over its thermal-via pads) are one conductor; disjoint
+same-number pads are not (Issue #6435).
 
 Example:
     >>> from kicad_tools.schema.pcb import PCB
@@ -1037,6 +1040,13 @@ class NetStatusAnalyzer:
             zone_boundaries,
         )
 
+        # Issue #6435: pads whose own copper overlaps on a shared copper layer
+        # are one conductor (an exposed-pad rect over its thermal-via PTH
+        # pads).  Strict only -- legacy mode keys nodes by REF.PAD and already
+        # merges same-number occurrences.
+        if self.strict:
+            self._connect_overlapping_pads(graph, pad_layers)
+
         # Connect pads that share a piece of copper (segments and vias only).
         # Zone polygon vertices are NOT sampled here because the pad-to-zone
         # and via-to-zone polygon containment checks above already handle zone
@@ -1774,6 +1784,86 @@ class NetStatusAnalyzer:
             components.append(component)
 
         return components
+
+    @staticmethod
+    def _pad_copper_layers(layers: list[str]) -> tuple[bool, set[str]]:
+        """Return ``(all_copper, explicit_copper_layers)`` for a pad's layers.
+
+        ``*.Cu`` (through-hole) means every copper layer; ``F&B.Cu`` (legacy
+        KiCad syntax) means both outer layers.
+        """
+        all_copper = False
+        explicit: set[str] = set()
+        for layer in layers:
+            if layer == "*.Cu":
+                all_copper = True
+            elif layer == "F&B.Cu":
+                explicit.update(("F.Cu", "B.Cu"))
+            elif layer.endswith(".Cu"):
+                explicit.add(layer)
+        return all_copper, explicit
+
+    def _pads_share_copper_layer(self, a: list[str], b: list[str]) -> bool:
+        """``True`` when two pads exist on at least one common copper layer."""
+        a_all, a_layers = self._pad_copper_layers(a)
+        b_all, b_layers = self._pad_copper_layers(b)
+        if a_all:
+            return b_all or bool(b_layers)
+        if b_all:
+            return bool(a_layers)
+        return bool(a_layers & b_layers)
+
+    def _connect_overlapping_pads(
+        self,
+        graph: dict[str, set[str]],
+        pad_layers: dict[str, list[str]],
+    ) -> None:
+        """Bond pads on this net whose copper directly overlaps (Issue #6435).
+
+        KiCad treats overlapping same-net copper as one conductor, so an
+        exposed-pad rectangle on F.Cu (or B.Cu) is bonded to the ``*.Cu``
+        thermal-via pads lying inside it.  Before #5151 strict mode got this
+        for free by keying every occurrence of a pad number to one node; once
+        each physical occurrence got its own node, nothing replaced that
+        implicit bond with a geometric one.
+
+        The bond is purely geometric -- polygons must intersect *and* the pads
+        must share a copper layer (``*.Cu`` aware).  Pad numbers are never
+        consulted, so disjoint same-number pads still stay separate (#5151)
+        and an F.Cu-only pad overlapping a B.Cu-only pad in XY does not bond.
+        Candidate pairs are pruned with an ``STRtree`` so large nets stay
+        O(n log n).
+        """
+        if len(pad_layers) < 2:
+            return
+        try:
+            from shapely.strtree import STRtree
+        except ImportError:  # core-only install: no copper geometry at all
+            return
+
+        pad_polys = self._pad_polys()
+        ids: list[str] = []
+        geoms: list[Any] = []
+        for pad_id, layers in pad_layers.items():
+            poly = pad_polys.get(pad_id)
+            if poly is None:
+                continue
+            all_copper, explicit = self._pad_copper_layers(layers)
+            if not (all_copper or explicit):
+                continue  # no copper (e.g. NPTH / mask-only pad)
+            ids.append(pad_id)
+            geoms.append(poly)
+        if len(geoms) < 2:
+            return
+
+        left, right = STRtree(geoms).query(geoms, predicate="intersects")
+        for a, b in zip(left.tolist(), right.tolist(), strict=True):
+            if a >= b:
+                continue
+            id_a, id_b = ids[a], ids[b]
+            if self._pads_share_copper_layer(pad_layers[id_a], pad_layers[id_b]):
+                graph[id_a].add(id_b)
+                graph[id_b].add(id_a)
 
     def _find_pads_at_point(
         self,
