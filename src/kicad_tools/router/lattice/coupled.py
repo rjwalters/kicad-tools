@@ -551,7 +551,9 @@ def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
     (``0 < t < 1`` along the end-to-end axis).  Interior parts are visited
     in projection order; each is entered at its couple nearest the previous
     chain node and left at its couple nearest the next one (the next
-    part's centroid, or the far end).
+    part's centroid, or the far end).  A part with a single couple (a
+    termination resistor tapping the pair, board 06 LVDS) or whose entry
+    and exit coincide is not a pass-through and stays on the trunk.
 
     Board 03 USB_D: J1.B6/B7 -> U2.3/U2.1 (segment), U2.3/U2.1 ->
     U2.4/U2.6 (hop through the pass-through ESD part), U2.4/U2.6 ->
@@ -592,6 +594,11 @@ def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
         if g in (g_a, g_b) or g[0] != "ref":  # type: ignore[index]
             continue
         groups.setdefault(g, []).append(c)
+    # A tap (one couple on the part: a termination resistor straddling P and N)
+    # has no distinct entry and exit -- the trunk passes it on a clear axis, so
+    # it stays on the trunk.  Only a part with two or more couples is a
+    # pass-through the signal enters on one side and leaves on the other.
+    groups = {g: m for g, m in groups.items() if len(m) >= 2}
     if not groups:
         return trunk
 
@@ -623,10 +630,13 @@ def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
         nxt = interior[k + 1][1] if k + 1 < len(interior) else m_b
         entry = nearest(members, _couple_mid(pads_p, pads_n, prev))
         exit_ = nearest(members, nxt)
+        if exit_ == entry:
+            continue  # no distinct exit: a tap, not a pass-through
         segments.append((prev, entry))
-        if exit_ != entry:
-            hops.append((entry, exit_))
+        hops.append((entry, exit_))
         prev = exit_
+    if not hops:
+        return trunk
     segments.append((prev, end_b))
     return PairChain(segments=segments, hops=hops)
 

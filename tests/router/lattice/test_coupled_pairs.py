@@ -1093,3 +1093,42 @@ def test_nets_through_different_parts_keep_single_trunk() -> None:
     assert router._lattice_pair_outcomes == {"D": "coupled"}, router._lattice_pair_outcomes
     assert _net_connected(routes_p, ps)
     assert _net_connected(routes_n, ns)
+
+
+def test_termination_tap_stays_on_the_trunk() -> None:
+    """A termination resistor straddling P and N (one couple, entry == exit)
+    is a tap, not a pass-through part: the pair keeps the single trunk
+    (board 06 LVDS regression, #6378)."""
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    ps = [_pad(3.0, 5.5, 1, "D+", ref="U1"), _pad(27.0, 5.5, 1, "D+", ref="U2")]
+    ns = [_pad(3.0, 6.5, 2, "D-", ref="U1"), _pad(27.0, 6.5, 2, "D-", ref="U2")]
+    ps.append(_pad(15.0, 5.5, 1, "D+", ref="R1"))
+    ns.append(_pad(15.0, 6.5, 2, "D-", ref="R1"))
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+
+
+def test_board06_lvds_pairs_keep_single_trunk() -> None:
+    """The CURRENT board 06 LVDS design (terminations R1-R4) must keep every
+    pair on one coupled trunk, as on main (3/4 coupled there)."""
+    from pathlib import Path
+
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    board = (
+        Path(__file__).resolve().parents[3]
+        / "boards/06-diffpair-test/output/diffpair_test.kicad_pcb"
+    )
+    router, _ = load_pcb_for_routing(
+        str(board),
+        skip_nets=["GND", "+3V3", "+1V8", "+1V2", "VBUS_USB"],
+        strategy="lattice",
+        force_python=True,
+    )
+    coupled, _reserved = router._lattice_coupled_connections()
+    lvds = [pc for pc in coupled if pc.pair_name.startswith("LVDS")]
+    assert len(lvds) == 4, [pc.pair_name for pc in coupled]
+    assert all(len(pc.key) == 3 for pc in lvds), "no chain segments for taps"
+    assert router._lattice_pair_hops == []
