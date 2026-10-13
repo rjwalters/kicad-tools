@@ -1851,7 +1851,9 @@ def _point_on_same_net_fill(
     centre) sits on copper rather than overhanging a void or the fill
     boundary.  The even-odd :func:`point_in_polygon` already treats keepout
     voids (holed fill rings KiCad emits as keyholed ``pts`` lists) as
-    outside, so a candidate inside a void hole is correctly rejected.
+    outside, so a candidate inside a void hole is correctly rejected.  The
+    zero-width bridge edges joining such a hole to the outer ring are not
+    a boundary and are ignored by the margin test (Issue #6409).
 
     Layer filtering: only polygons whose ``.layer`` matches ``layer`` are
     considered (``layer=None`` skips the filter).
@@ -3628,7 +3630,7 @@ class _PolygonIndex:
     ring the linear predicates walk.
     """
 
-    __slots__ = ("points", "cell", "_cells", "_big", "_rows", "_big_rows")
+    __slots__ = ("points", "cell", "_cells", "_big", "_rows", "_big_rows", "_bridges")
 
     def __init__(self, points: list[tuple[float, float]]) -> None:
         self.points = points
@@ -3677,6 +3679,14 @@ class _PolygonIndex:
         self._big = big
         self._rows = rows
         self._big_rows = big_rows
+        # Issue #6409: computed lazily -- only the fill-margin query needs it.
+        self._bridges: frozenset[int] | None = None
+
+    def bridge_edges(self) -> frozenset[int]:
+        """Indices of zero-width fracture-bridge edges (see :func:`_bridge_edge_indices`)."""
+        if self._bridges is None:
+            self._bridges = _bridge_edge_indices(self.points)
+        return self._bridges
 
     def edges_in_box(self, min_x: float, min_y: float, max_x: float, max_y: float) -> list[int]:
         """Edge indices whose bounding box may intersect the query box.
@@ -3727,11 +3737,21 @@ class _PolygonIndex:
                     inside = not inside
         return inside
 
-    def has_edge_within_point(self, x: float, y: float, threshold: float) -> bool:
-        """True if some edge is strictly closer than ``threshold`` to ``(x, y)``."""
+    def has_edge_within_point(
+        self, x: float, y: float, threshold: float, *, ignore_bridges: bool = False
+    ) -> bool:
+        """True if some edge is strictly closer than ``threshold`` to ``(x, y)``.
+
+        ``ignore_bridges`` (Issue #6409) skips fracture-bridge edges -- the
+        coincident, opposite-direction pairs KiCad uses to join a fill hole
+        to its outer ring -- which have copper on both sides.
+        """
         points = self.points
         n = len(points)
+        skip = self.bridge_edges() if ignore_bridges else frozenset()
         for i in self.edges_in_box(x - threshold, y - threshold, x + threshold, y + threshold):
+            if i in skip:
+                continue
             xi, yi = points[i]
             xj, yj = points[(i + 1) % n]
             if point_to_segment_distance(x, y, xi, yi, xj, yj) < threshold:
@@ -3755,6 +3775,36 @@ class _PolygonIndex:
             if segment_to_segment_distance(sx, sy, ex, ey, xi, yi, xj, yj) < threshold:
                 return True
         return False
+
+
+def _bridge_edge_indices(points: list[tuple[float, float]]) -> frozenset[int]:
+    """Indices of the fracture-bridge edges in a closed vertex ring.
+
+    Issue #6409: KiCad writes a holed ``filled_polygon`` as one fractured
+    ring -- every hole is joined to the outer outline by a pair of
+    coincident, opposite-direction edges (``a -> b`` and later ``b -> a``).
+    Even-odd parity ignores the pair, but it is *not* a copper boundary:
+    there is fill on both sides.  An edge ``i`` (``points[i] ->
+    points[i+1]``) is a bridge edge when its exact reverse also appears in
+    the ring.  KiCad emits the twins bit-identical, so exact coordinate
+    comparison is used; zero-length edges are never bridges.  Zone outlines
+    have no twins, so this returns an empty set for them.
+    """
+    n = len(points)
+    if n < 2:
+        return frozenset()
+    edges: dict[tuple[tuple[float, float], tuple[float, float]], list[int]] = {}
+    for i in range(n):
+        a = points[i]
+        b = points[(i + 1) % n]
+        if a == b:
+            continue
+        edges.setdefault((a, b), []).append(i)
+    out: set[int] = set()
+    for (a, b), idxs in edges.items():
+        if (b, a) in edges:
+            out.update(idxs)
+    return frozenset(out)
 
 
 def _polygon_index(points: list[tuple[float, float]]) -> "_PolygonIndex | None":
@@ -4128,23 +4178,31 @@ def _point_has_edge_margin(
 ) -> bool:
     """Check if a point has at least `margin` distance from all polygon edges.
 
+    Fracture-bridge edges (Issue #6409, see :func:`_bridge_edge_indices`)
+    are ignored: they join a fill hole to the outer ring with copper on
+    both sides, so they are not a boundary the via pad could overhang.  The
+    hole's and outline's real edges still enforce the margin.
+
     Args:
         x, y: Point to check
         polygon: Polygon vertices
         margin: Required minimum distance from edges
 
     Returns:
-        True if the point is at least `margin` from all edges
+        True if the point is at least `margin` from all non-bridge edges
     """
     # Issue #5617: an existential over the ring -- the index returns a strict
     # superset of the edges that could be within ``margin``, so the negation
     # below is identical to the linear scan's.
     index = _polygon_index(polygon)
     if index is not None:
-        return not index.has_edge_within_point(x, y, margin)
+        return not index.has_edge_within_point(x, y, margin, ignore_bridges=True)
 
+    bridges = _bridge_edge_indices(polygon)
     n = len(polygon)
     for i in range(n):
+        if i in bridges:
+            continue
         j = (i + 1) % n
         dist = point_to_segment_distance(
             x, y, polygon[i][0], polygon[i][1], polygon[j][0], polygon[j][1]
