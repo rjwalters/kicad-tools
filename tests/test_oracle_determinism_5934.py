@@ -236,7 +236,7 @@ def _closer_inputs(tmp_path: Path, links, monkeypatch) -> tuple[dict, list[str],
     """What the closer would weld and route for ``links`` (welds all fail)."""
     record: dict = {}
 
-    def weld(self, _path, pads_by_net, _attempt):
+    def weld(self, _path, pads_by_net, _attempt, _avoid=None):
         record["weld"] = {net: sorted(keys) for net, keys in pads_by_net.items()}
         return set()
 
@@ -291,7 +291,7 @@ class TestClusterLinks:
             monkeypatch.setattr(
                 PourLinkCloser,
                 "_weld_pads",
-                lambda self, _p, pbn, _a: (
+                lambda self, _p, pbn, _a, _avoid=None: (
                     record.update(w={n: sorted(k) for n, k in pbn.items()}) or set()
                 ),
             )

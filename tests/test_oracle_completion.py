@@ -557,7 +557,7 @@ class TestWithdrawnPlaneJoinFallsBackToIsland:
         class RouteOnlyCloser(PourLinkCloser):
             # This fixture has no pour for a weld via to land in; leave the
             # link to the routed joins this issue is about.
-            def _weld_pads(self, pcb_path, pads_by_net, attempt):
+            def _weld_pads(self, pcb_path, pads_by_net, attempt, avoid=None):
                 return set()
 
         closer = RouteOnlyCloser(
