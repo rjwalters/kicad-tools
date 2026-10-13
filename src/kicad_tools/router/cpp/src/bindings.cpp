@@ -156,7 +156,9 @@ NB_MODULE(router_cpp, m) {
         // Issue #3143: ``source_net`` (origin net of the escape pad) lets
         // the Python adapter filter out the current net's own budget
         // entries before forwarding to the C++ pathfinder.
-        .def_rw("source_net", &PadChannelBudget::source_net);
+        .def_rw("source_net", &PadChannelBudget::source_net)
+        // Issue #6382: charge via landings over the full via disc.
+        .def_rw("charge_via_disc", &PadChannelBudget::charge_via_disc);
 
     // Segment struct
     nb::class_<Segment>(m, "Segment")

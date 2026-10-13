@@ -485,3 +485,67 @@ def test_escape_hatch_clears_lanes(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_python_backend_installs_nothing() -> None:
     router = Autorouter(width=20, height=20, force_python=True)
     assert router._install_pad_lane_budgets() == 0
+
+
+# ---------------------------------------------------------------------------
+# Via-disc charging (Issue #6382 follow-up, BUILD_VERSION 53)
+# ---------------------------------------------------------------------------
+
+
+def _via_xs(disc: bool, *, band_penalty: float = 50.0) -> list[float]:
+    """Route layer 0 -> layer 1 past a layer-1 band; return the via x(s).
+
+    The band covers one grid column on layer 1 only, spanning the whole
+    board height, so the route can only dodge it by switching layers on the
+    near side (centre outside the band) or crossing on layer 0 and dropping
+    after it.  A via dropped on the cell right after the band has its centre
+    outside the band but its disc inside it.
+    """
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import LayerStack
+
+    rules = DesignRules(
+        trace_width=0.15,
+        trace_clearance=0.1,
+        via_diameter=0.6,
+        via_clearance=0.15,
+        grid_resolution=0.1,
+    )
+    grid = RoutingGrid(width=10.0, height=10.0, rules=rules, layer_stack=LayerStack.two_layer())
+    from kicad_tools.router.cpp_backend import CppGrid
+
+    cgrid = CppGrid.from_routing_grid(grid)
+    pf = CppPathfinder(cgrid, rules, diagonal_routing=True)
+    pf.set_routable_layers(cgrid.get_routable_indices())
+
+    bx, _ = grid.world_to_grid(5.0, 5.0)
+    budget = router_cpp.PadChannelBudget()
+    budget.gx1, budget.gx2 = bx, bx
+    budget.gy1, budget.gy2 = 0, grid.rows - 1
+    budget.layer = 1
+    budget.overflow_penalty = band_penalty
+    budget.source_net = 99
+    budget.charge_via_disc = disc
+
+    result = pf._impl.route_resumable(2.0, 5.0, 0, 8.0, 5.0, 1, 1, pad_channel_budgets=[budget])
+    pf._impl.clear_search_state()
+    assert result.success
+    return [v.x for v in result.vias]
+
+
+@requires_cpp
+def test_via_disc_overlapping_lane_is_charged() -> None:
+    """A via centred just outside a band, with its disc inside, pays for it."""
+    centre_only = _via_xs(False)
+    disc = _via_xs(True)
+    assert len(centre_only) == 1 and len(disc) == 1
+    # The disc-aware cost must keep the via's disc off the band.
+    for x in disc:
+        assert abs(x - 5.0) > 0.3 + 0.05 - 1e-6
+    assert centre_only != disc, "via-disc charging must change the via site"
+
+
+@requires_cpp
+def test_via_disc_never_stricter_when_band_is_unavoidable() -> None:
+    """The cost is soft: a huge penalty on every layer-1 cell still routes."""
+    assert _via_xs(True, band_penalty=1000.0)

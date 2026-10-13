@@ -312,7 +312,10 @@ namespace router {
 // ``long_axis`` / ``lane_half_cells`` / ``tip_lo`` / ``tip_hi`` and both A*
 // loops charge an off-centreline pad landing.  The Python side sets the new fields on every
 // pad bound, so a v51 .so (which lacks them) must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 52;
+// v53 (Issue #6382): ``PadChannelBudget`` gained ``charge_via_disc`` and via
+// landings are charged over the full via disc for flagged budgets.  A v52 .so
+// lacks the field, so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 53;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -678,6 +681,10 @@ struct PadChannelBudget {
     // the struct for diagnostics and so the Python side can round-trip
     // the field without losing it.
     int source_net = 0;
+    // Issue #6382: when true, a via landing is charged if its disc (radius
+    // ``via_diameter / 2``) overlaps the rectangle, not only when the via
+    // centre cell is inside it.  Trace steps are unaffected.
+    bool charge_via_disc = false;
 };
 
 // Design rules (simplified for C++ core)

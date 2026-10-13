@@ -1255,6 +1255,21 @@ float Pathfinder::get_pad_channel_cost(int x, int y, int layer) const {
     return it->second;
 }
 
+float Pathfinder::get_pad_channel_via_cost(int x, int y, int layer) const {
+    // Issue #6382: via landings are charged over the full via disc for
+    // budgets flagged ``charge_via_disc``.  The disc-aware table is only
+    // populated when at least one such budget exists; otherwise fall back
+    // to the centre-cell table so pre-#6382 behaviour is unchanged.
+    if (search_pad_via_cost_lookup_.empty()) {
+        return get_pad_channel_cost(x, y, layer);
+    }
+    auto it = search_pad_via_cost_lookup_.find(std::make_tuple(x, y, layer));
+    if (it == search_pad_via_cost_lookup_.end()) {
+        return 0.0f;
+    }
+    return it->second;
+}
+
 // Issue #3143: Helper that materialises a per-cell pad-channel cost lookup
 // from the list of ``PadChannelBudget`` rectangles supplied by the caller.
 // Each cell inside a budget's bbox (intersected with the routing-grid
@@ -1311,6 +1326,69 @@ static void build_pad_channel_cost_lookup(
                     auto key = std::make_tuple(gx, gy, l);
                     // Sum penalties for overlapping budgets.
                     out[key] += b.overflow_penalty;
+                }
+            }
+        }
+    }
+}
+
+// Issue #6382: build the via-landing cost table.  A via whose centre is
+// outside a lane but whose disc overlaps it blocks the lane just as well,
+// so budgets flagged ``charge_via_disc`` are dilated by the via radius
+// (Euclidean distance from the cell centre to the rectangle, in cells).
+// Other budgets keep their exact rectangle.  Left empty when no budget is
+// flagged, so the caller falls back to the centre-cell table.
+static void build_pad_via_cost_lookup(
+    const std::vector<PadChannelBudget>& budgets,
+    const Grid3D& grid,
+    float via_radius_mm,
+    std::unordered_map<std::tuple<int, int, int>, float, GridPosHash>& out
+) {
+    out.clear();
+    bool any_disc = false;
+    for (const auto& b : budgets) {
+        if (b.charge_via_disc && b.overflow_penalty != 0.0f) {
+            any_disc = true;
+            break;
+        }
+    }
+    if (!any_disc) {
+        return;
+    }
+    const int cols = grid.cols();
+    const int rows = grid.rows();
+    const int layers = grid.layers();
+    const float res = grid.resolution();
+    const float r_cells = (res > 0.0f) ? via_radius_mm / res : 0.0f;
+    const int r_ceil = static_cast<int>(std::ceil(r_cells));
+    for (const auto& b : budgets) {
+        if (b.overflow_penalty == 0.0f) continue;
+        const int dil = b.charge_via_disc ? r_ceil : 0;
+        int gx1 = std::max(0, b.gx1 - dil);
+        int gy1 = std::max(0, b.gy1 - dil);
+        int gx2 = std::min(cols - 1, b.gx2 + dil);
+        int gy2 = std::min(rows - 1, b.gy2 + dil);
+        if (gx1 > gx2 || gy1 > gy2) continue;
+        std::vector<int> target_layers;
+        if (b.layer == -1) {
+            for (int l = 0; l < layers; ++l) target_layers.push_back(l);
+        } else if (b.layer >= 0 && b.layer < layers) {
+            target_layers.push_back(b.layer);
+        } else {
+            continue;
+        }
+        for (int gx = gx1; gx <= gx2; ++gx) {
+            for (int gy = gy1; gy <= gy2; ++gy) {
+                if (b.charge_via_disc) {
+                    float dx = 0.0f, dy = 0.0f;
+                    if (gx < b.gx1) dx = float(b.gx1 - gx);
+                    else if (gx > b.gx2) dx = float(gx - b.gx2);
+                    if (gy < b.gy1) dy = float(b.gy1 - gy);
+                    else if (gy > b.gy2) dy = float(gy - b.gy2);
+                    if (dx * dx + dy * dy > r_cells * r_cells) continue;
+                }
+                for (int l : target_layers) {
+                    out[std::make_tuple(gx, gy, l)] += b.overflow_penalty;
                 }
             }
         }
@@ -1536,6 +1614,9 @@ RouteResult Pathfinder::route(
     // empty; the per-cell helper short-circuits at the empty() check.
     build_pad_channel_cost_lookup(pad_channel_budgets, grid_,
                                   search_pad_budget_cost_lookup_);
+    build_pad_via_cost_lookup(pad_channel_budgets, grid_,
+                              rules_.via_diameter * 0.5f,
+                              search_pad_via_cost_lookup_);
 
     // Inline A* loop (uses local variables, no rejected goals check)
     while (!open_set.empty() && last_iterations_ < max_iterations) {
@@ -1987,7 +2068,7 @@ RouteResult Pathfinder::route(
             // also redirects layer-change attempts that land in a
             // contested channel.
             float pad_channel_cost =
-                get_pad_channel_cost(current.x, current.y, new_layer);
+                get_pad_channel_via_cost(current.x, current.y, new_layer);
 
             // Issue #4071: corridor attractor on the via-drop destination
             // cell -- the reservation is what makes the router prefer to
@@ -2196,6 +2277,9 @@ RouteResult Pathfinder::route_resumable(
     // identically.
     build_pad_channel_cost_lookup(pad_channel_budgets, grid_,
                                   search_pad_budget_cost_lookup_);
+    build_pad_via_cost_lookup(pad_channel_budgets, grid_,
+                              rules_.via_diameter * 0.5f,
+                              search_pad_via_cost_lookup_);
 
     // Issue #2610: Compute the per-net wall-clock deadline ONCE here and
     // share it with subsequent resume() calls.  This way a single per-net
@@ -2731,7 +2815,7 @@ RouteResult Pathfinder::run_astar_loop() {
             // Charged on the destination layer of the via -- mirrors the
             // one-shot route() via path.
             float pad_channel_cost =
-                get_pad_channel_cost(current.x, current.y, new_layer);
+                get_pad_channel_via_cost(current.x, current.y, new_layer);
 
             // Issue #4071: corridor attractor on the via-drop destination
             // (resumable / negotiated path), mirroring the one-shot via
@@ -2831,6 +2915,7 @@ void Pathfinder::clear_search_state() {
     // Issue #3143: drop the per-cell pad-channel cost lookup so a stale
     // budget from the previous net does not leak into the next route().
     search_pad_budget_cost_lookup_.clear();
+    search_pad_via_cost_lookup_.clear();
 }
 
 RouteResult Pathfinder::reconstruct_path(

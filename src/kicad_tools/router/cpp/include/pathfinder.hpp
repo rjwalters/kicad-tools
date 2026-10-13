@@ -432,6 +432,9 @@ private:
     // A* g_score, so its scale is comparable to ``rules_.cost_straight``
     // (typically 1.0) -- a penalty of 5.0 is roughly 5 cells of detour.
     float get_pad_channel_cost(int x, int y, int layer) const;
+    // Issue #6382: via-landing variant, charges the full via disc for
+    // budgets flagged ``charge_via_disc``.
+    float get_pad_channel_via_cost(int x, int y, int layer) const;
 
     // Core A* loop shared by route(), route_resumable(), and resume().
     // Returns RouteResult with success=true if goal reached, or success=false
@@ -796,6 +799,10 @@ private:
     // hundred cells per active dense package).
     std::unordered_map<std::tuple<int, int, int>, float, GridPosHash>
         search_pad_budget_cost_lookup_;
+    // Issue #6382: disc-aware via-landing table (empty unless a budget has
+    // ``charge_via_disc``).
+    std::unordered_map<std::tuple<int, int, int>, float, GridPosHash>
+        search_pad_via_cost_lookup_;
 };
 
 }  // namespace router

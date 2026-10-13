@@ -358,5 +358,8 @@ def build_pad_lane_budgets(
         budget.overflow_penalty = penalty
         budget.origin_pad_ref_hash = 0
         budget.source_net = int(lane.net)
+        # Issue #6382 follow-up: a foreign via whose disc overlaps the lane
+        # blocks it even when its centre lies just past the lane end.
+        budget.charge_via_disc = True
         budgets.append(budget)
     return budgets
