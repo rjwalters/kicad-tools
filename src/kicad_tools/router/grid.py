@@ -6665,6 +6665,51 @@ class RoutingGrid:
         self._cpp_unmark_deferred = False
         return routes
 
+    def pending_cpp_unmark_count(self) -> int:
+        """How many C++ unmarks the open window has queued (0 when closed)."""
+        if not getattr(self, "_cpp_unmark_deferred", False):
+            return 0
+        return len(getattr(self, "_deferred_cpp_unmarks", []))
+
+    def flush_discarded_cpp_unmarks(self, start: int) -> list[Route]:
+        """Apply queued C++ unmarks from index ``start`` on for discarded copper.
+
+        Issue #6363.  A transaction that rolled back inside an open
+        corridor-reservation window leaves two kinds of queued unmark behind:
+
+        * copper it ripped and then *restored* -- still committed (it is back
+          in :attr:`routes`).  That is the deliberate corridor reservation
+          (#3438) and stays queued for :meth:`flush_cpp_unmark_deferral`;
+        * copper it placed and then *discarded* -- its own attempt's partial
+          routes.  They are gone from the Python grid and from
+          :attr:`routes` but still sit on the C++ grid, where every other net
+          sees them as foreign-hard.
+
+        This applies the entries queued at or after ``start`` whose route is
+        no longer committed, drops them from the queue, and (the flush
+        contract: an unmark clears same-net C++ cells indiscriminately)
+        re-marks the committed routes of the affected nets on the C++ grid.
+        Returns the flushed routes.  No-op (``[]``) with no open window.
+        """
+        if not getattr(self, "_cpp_unmark_deferred", False):
+            return []
+        queued = getattr(self, "_deferred_cpp_unmarks", [])
+        committed = {id(route) for route in self.routes}
+        kept = list(queued[:start])
+        flushed: list[Route] = []
+        for route, mtw in queued[start:]:
+            if id(route) in committed:
+                kept.append((route, mtw))
+                continue
+            self._unmark_route_on_cpp_cells(route, max_trace_width=mtw)
+            flushed.append(route)
+        self._deferred_cpp_unmarks = kept
+        nets = {route.net for route in flushed}
+        for route in self.routes:
+            if route.net in nets:
+                self._mark_route_on_cpp_cells(route)
+        return flushed
+
     @contextmanager
     def cpp_unmark_immediate(self) -> Iterator[None]:
         """Temporarily mirror rip-ups to the C++ grid immediately (Issue #6342).
