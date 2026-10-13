@@ -127,7 +127,13 @@ NB_MODULE(router_cpp, m) {
         .def_rw("approach_gx1", &PadBounds::approach_gx1)
         .def_rw("approach_gy1", &PadBounds::approach_gy1)
         .def_rw("approach_gx2", &PadBounds::approach_gx2)
-        .def_rw("approach_gy2", &PadBounds::approach_gy2);
+        .def_rw("approach_gy2", &PadBounds::approach_gy2)
+        .def_rw("centre_gx", &PadBounds::centre_gx)
+        .def_rw("centre_gy", &PadBounds::centre_gy)
+        .def_rw("long_axis", &PadBounds::long_axis)
+        .def_rw("lane_half_cells", &PadBounds::lane_half_cells)
+        .def_rw("tip_lo", &PadBounds::tip_lo)
+        .def_rw("tip_hi", &PadBounds::tip_hi);
 
     // PadChannelBudget struct (Issue #3143)
     //
