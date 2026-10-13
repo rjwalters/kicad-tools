@@ -34,7 +34,8 @@ from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP, NetClassRouting
 RULES = get_profile("jlcpcb").get_design_rules(layers=2)
 POWER_RULE = (
     "(condition \"(A.NetClass == 'Power' || B.NetClass == 'Power') && "
-    "!(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)\")"
+    "!(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && "
+    '!A.isCoupledDiffPair()")'
 )
 
 
@@ -714,3 +715,164 @@ def test_kicad_cli_router_class_skips_same_footprint_pads(tmp_path, authored):
     ]
     assert {"U2", "U3"} in owners
     assert ({"U1"} in owners) is authored, owners
+
+
+# ------------------------ router classes skip a coupled diff pair's own P/N gap
+
+
+def _pair_board(tmp_path: Path, net_a: str, net_b: str, gap_mm: float) -> Path:
+    """Two parallel 0.2 mm F.Cu tracks on ``net_a`` / ``net_b``, ``gap_mm`` apart."""
+    y2 = round(5 + 0.2 + gap_mm, 4)
+    pcb = tmp_path / "pair.kicad_pcb"
+    pcb.write_text(
+        f"""(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "{net_a}") (net 2 "{net_b}")
+  (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default))
+    (fill none) (layer "Edge.Cuts"))
+  (segment (start 5 5) (end 10 5) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 5 {y2}) (end 10 {y2}) (width 0.2) (layer "F.Cu") (net 2)))
+"""
+    )
+    return pcb
+
+
+def _write_pair_sidecars(pcb: Path, net_a: str, net_b: str, *, authored: bool, mode) -> None:
+    if authored:
+        pcb.with_suffix(".kicad_pro").write_text(
+            json.dumps(
+                {
+                    "net_settings": {
+                        "meta": {"version": 3},
+                        "classes": [
+                            {"name": "Default", "clearance": 0.1},
+                            {"name": "HighSpeed", "clearance": 0.15},
+                        ],
+                        "netclass_assignments": {net_a: "HighSpeed", net_b: "HighSpeed"},
+                    }
+                }
+            )
+        )
+        write_drc_constraints(pcb, RULES, manufacturer_id="jlcpcb", preserve_board_rules=mode)
+        return
+    from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED
+
+    assert NET_CLASS_HIGH_SPEED.clearance == pytest.approx(0.15)
+    assert NET_CLASS_HIGH_SPEED.intra_pair_clearance < 0.127
+    write_drc_constraints(
+        pcb,
+        RULES,
+        manufacturer_id="jlcpcb",
+        router_net_classes={net_a: NET_CLASS_HIGH_SPEED, net_b: NET_CLASS_HIGH_SPEED},
+        preserve_board_rules=mode,
+    )
+
+
+#: (net_a, net_b, flagged under a router class).  Only KiCad's complementary
+#: P/N names are a coupled pair; ``USB_X-`` is not ``USB_D+``'s partner.
+_PAIR_CASES = [
+    ("USB_D+", "USB_D-", False),
+    ("TX_P", "TX_N", False),
+    ("USB_D+", "USB_X-", True),
+    ("USB_D+", "SIG", True),
+]
+
+
+@pytest.mark.parametrize(
+    "name, complement",
+    [
+        ("USB_D+", "USB_D-"),
+        ("USB_D-", "USB_D+"),
+        ("TX_P", "TX_N"),
+        ("CLK_P_1", "CLK_N_1"),
+        ("LANE0_N2", "LANE0_P2"),
+        ("VBUS", None),
+        ("tx_p", None),  # KiCad's MatchDpSuffix is case-sensitive
+        ("Net-(U1-Pad3)", None),
+    ],
+)
+def test_kicad_coupled_complement_mirrors_match_dp_suffix(name, complement):
+    from kicad_tools.manufacturers.netclass_dru import kicad_coupled_complement
+
+    assert kicad_coupled_complement(name) == complement
+
+
+@pytest.mark.parametrize("mode", [None, "0"])
+@pytest.mark.parametrize("net_a, net_b, flagged", _PAIR_CASES)
+def test_kct_router_class_skips_coupled_pair_gap(tmp_path, capsys, mode, net_a, net_b, flagged):
+    pcb = _pair_board(tmp_path, net_a, net_b, 0.127)
+    _write_pair_sidecars(pcb, net_a, net_b, authored=False, mode=mode)
+    errors = _kct_errors(pcb, tmp_path)
+    capsys.readouterr()
+    assert bool(errors) is flagged, errors
+    if flagged:
+        assert all(e["required_value"] == pytest.approx(0.15) for e in errors)
+
+
+def test_kct_authored_class_still_holds_the_coupled_pair(tmp_path, capsys):
+    """The pair exemption is router-class only: an authored class is KiCad's."""
+    pcb = _pair_board(tmp_path, "USB_D+", "USB_D-", 0.127)
+    _write_pair_sidecars(pcb, "USB_D+", "USB_D-", authored=True, mode=None)
+    errors = _kct_errors(pcb, tmp_path)
+    capsys.readouterr()
+    assert errors
+
+
+@pytest.mark.skipif(not _has_kicad_cli(), reason="kicad-cli not installed")
+@pytest.mark.parametrize("mode", [None, "0"])
+@pytest.mark.parametrize("net_a, net_b, flagged", _PAIR_CASES)
+def test_kicad_cli_router_class_skips_coupled_pair_gap(tmp_path, mode, net_a, net_b, flagged):
+    pcb = _pair_board(tmp_path, net_a, net_b, 0.127)
+    _write_pair_sidecars(pcb, net_a, net_b, authored=False, mode=mode)
+    findings = _kicad_cli_clearance(pcb)
+    assert bool(findings) is flagged, findings
+
+
+# ----------- a router track between two pads of one footprint is still checked
+
+
+_TRACK_THROUGH_FOOTPRINT = """(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "GND") (net 2 "SIG") (net 3 "SIG2")
+  (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default))
+    (fill none) (layer "Edge.Cuts"))
+  (footprint "T:Two" (layer "F.Cu") (at 5 5)
+    (property "Reference" "U1" (at 0 -2) (layer "F.SilkS")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at 0 0) (size 0.3 1) (layers "F.Cu") (net 2 "SIG"))
+    (pad "2" smd rect (at 0.8 0) (size 0.3 1) (layers "F.Cu") (net 3 "SIG2")))
+  (segment (start 5.4 3) (end 5.4 7) (width 0.2) (layer "F.Cu") (net 1)))
+"""
+
+
+def _track_through_footprint(tmp_path: Path) -> Path:
+    """A 0.2 mm GND track between U1's two pads, 0.15 mm from each."""
+    pcb = tmp_path / "through.kicad_pcb"
+    pcb.write_text(_TRACK_THROUGH_FOOTPRINT)
+    write_drc_constraints(pcb, RULES, manufacturer_id="jlcpcb", router_net_classes=_router_map())
+    return pcb
+
+
+def test_kct_router_class_checks_track_between_same_footprint_pads(tmp_path, capsys):
+    pcb = _track_through_footprint(tmp_path)
+    errors = _kct_errors(pcb, tmp_path)
+    capsys.readouterr()
+    # Both pads are flagged against the track at the full Power clearance.
+    assert len(errors) == 2, errors
+    assert all(e["required_value"] == pytest.approx(0.2) for e in errors)
+    assert all(e["actual_value"] == pytest.approx(0.15, abs=1e-3) for e in errors)
+
+
+@pytest.mark.skipif(not _has_kicad_cli(), reason="kicad-cli not installed")
+def test_kicad_cli_router_class_checks_track_between_same_footprint_pads(tmp_path):
+    pcb = _track_through_footprint(tmp_path)
+    findings = _kicad_cli_clearance(pcb)
+    # kicad-cli may collapse the two track/pad findings into one marker; what
+    # matters is that the same-footprint exemption did not swallow the track.
+    assert findings, findings
+    for v in findings:
+        assert "Power" in v["description"] and "actual 0.1500 mm" in v["description"]
+        kinds = " ".join(item["description"] for item in v["items"])
+        assert "Track" in kinds and "of U1" in kinds, v

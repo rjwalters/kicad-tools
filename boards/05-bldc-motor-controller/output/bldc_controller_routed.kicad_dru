@@ -44,31 +44,31 @@
   (constraint text_height (min 1.0mm)))
 
 (rule "Reviewed clearance - Audio"
-  (condition "(A.NetClass == 'Audio' || B.NetClass == 'Audio') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (condition "(A.NetClass == 'Audio' || B.NetClass == 'Audio') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.15mm)))
 
 (rule "Reviewed clearance - Debug"
-  (condition "(A.NetClass == 'Debug' || B.NetClass == 'Debug') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (condition "(A.NetClass == 'Debug' || B.NetClass == 'Debug') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.15mm)))
 
 (rule "Reviewed clearance - Differential"
-  (condition "(A.NetClass == 'Differential' || B.NetClass == 'Differential') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (condition "(A.NetClass == 'Differential' || B.NetClass == 'Differential') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.15mm)))
 
 (rule "Reviewed clearance - Digital"
-  (condition "(A.NetClass == 'Digital' || B.NetClass == 'Digital') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (condition "(A.NetClass == 'Digital' || B.NetClass == 'Digital') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.15mm)))
 
 (rule "Reviewed clearance - Clock"
-  (condition "(A.NetClass == 'Clock' || B.NetClass == 'Clock') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (condition "(A.NetClass == 'Clock' || B.NetClass == 'Clock') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.2mm)))
 
 (rule "Reviewed clearance - HighCurrentSignal"
-  (condition "(A.NetClass == 'HighCurrentSignal' || B.NetClass == 'HighCurrentSignal') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (condition "(A.NetClass == 'HighCurrentSignal' || B.NetClass == 'HighCurrentSignal') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.2mm)))
 
 (rule "Reviewed clearance - Power"
-  (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference)")
+  (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.2mm)))
 # END kct fab floors
 

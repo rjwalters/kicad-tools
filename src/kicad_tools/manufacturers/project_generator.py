@@ -801,6 +801,15 @@ def stamp_kct_project(project_data: dict) -> dict:
     floors since.  A hand edit anywhere else (a netclass, a pattern, a
     severity of your own) breaks the digest and the conflict check refuses
     the overwrite exactly as before.
+
+    Behaviour change: an edit confined to the excluded keys -- the
+    ``rules.min_*`` keys of ``_PROJECT_RULE_KEYS``, the ``defaults`` keys of
+    ``_PROJECT_DEFAULT_KEYS``, the two non-blocking ``rule_severities`` and
+    ``Default``'s clearance/track/via signature (``_NETCLASS_SIGNATURE_KEYS``)
+    -- on a renamed output no longer conflicts: it is silently overwritten
+    from the source on the next route, *even when the edit tightened a
+    floor*.  Make such a change in the source project (or the reviewed rules
+    the source carries), not in the renamed output.
     """
     meta = project_data.setdefault("meta", {})
     # Re-insert last so the key order (and so the bytes) never depends on

@@ -1705,7 +1705,40 @@ def test_route_demo_run_drc_never_reports_zero_errors_on_failure() -> None:
     # the router Power-class violations #6390 exposed (#6394), which
     # test_committed_routed_board_is_geometrically_clean_with_refill pins.
     if errors == BOARD03_KNOWN_POWER_CLASS_VIOLATIONS:
-        pytest.xfail(f"#6394: {errors} known Power-class copper violations (#6390)")
+        # run_drc() reports counts only; key the xfail on the findings'
+        # identity too (the same kct check invocation, as JSON), so 13 errors
+        # of any other kind still fail here.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "drc.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "kicad_tools.cli",
+                    "check",
+                    str(ROUTED_PCB_FILE),
+                    "--mfr",
+                    "jlcpcb-tier1",
+                    "--drc-only",
+                    "--net-class-map",
+                    str(ROUTED_PCB_FILE.parent / "net_class_map.json"),
+                    "--format",
+                    "json",
+                    "--output",
+                    str(report),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            found = [
+                v for v in json.loads(report.read_text())["violations"] if v["severity"] == "error"
+            ]
+        if len(found) == errors and all(
+            v["rule_id"] == "netclass_clearance_copper" and "'Power'" in v["message"] for v in found
+        ):
+            pytest.xfail(f"#6394: {errors} known Power-class copper violations (#6390)")
     assert passed is True and errors == 0, (
         f"committed board-03 expected DRC-clean, got passed={passed}, errors={errors}"
     )
