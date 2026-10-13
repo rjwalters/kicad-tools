@@ -317,6 +317,58 @@ def test_pair_leg_never_moves() -> None:
     assert (stats.repaired, stats.pair_skipped) == (0, 1)
 
 
+def _opposite_sign_pair_case() -> tuple[LatticePathfinder, dict]:
+    """Two nets of one pair, each needing a move that is inside the budget alone.
+
+    Net 1's end legs rise toward the middle leg (shifting it up LENGTHENS the
+    net by ~0.0097 mm); net 3's fall toward it (the same shift SHORTENS it by
+    ~0.0083 mm).  Both moves together would change the pair's skew by ~0.018 mm.
+    """
+    outline = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
+    pads = []
+    run_ends = {1: (9.83, 10.0), 3: (15.17, 15.0)}
+    for net, (end_y, _mid_y) in run_ends.items():
+        for x, ref in ((5.0, "R1"), (15.0, "R2")):
+            pads.append(
+                Pad(x=x, y=end_y, width=0.6, height=0.6, net=net, net_name="P", ref=ref, pin="1")
+            )
+    for mid_y, ref in ((10.0, "C1"), (15.0, "C2")):
+        gnd_y = mid_y - TRACE_W / 2 - 0.175 - 0.3
+        pads.append(
+            Pad(x=10.0, y=gnd_y, width=0.6, height=0.6, net=0, net_name="GND", ref=ref, pin="1")
+        )
+    pf = LatticePathfinder(outline, pads, _rules())
+    pf.set_pad_class_clearances([BASE] * 4 + [POWER, POWER])
+    routes = {}
+    for net, (end_y, mid_y) in run_ends.items():
+        run = [
+            _seg(5.0, end_y, 6.0, mid_y, net=net),
+            _seg(6.0, mid_y, 14.0, mid_y, net=net),
+            _seg(14.0, mid_y, 15.0, end_y, net=net),
+        ]
+        routes[(net, 0)] = Route(net, "P" if net == 1 else "N", segments=run)
+    return pf, routes
+
+
+def test_opposite_sign_moves_on_both_pair_nets_are_budgeted_as_skew() -> None:
+    """Each net's move is within 0.01 mm alone, but they pull in opposite
+    directions: the second is refused so the pair's skew stays in budget."""
+    pf, routes = _opposite_sign_pair_case()
+    before = {n: _net_length(routes, n) for n in (1, 3)}
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), pair_nets={1: 3, 3: 1})
+    skew = abs((_net_length(routes, 1) - before[1]) - (_net_length(routes, 3) - before[3]))
+    assert skew <= PAIR_LENGTH_TOLERANCE_MM
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (2, 1, 1, 1)
+
+
+def test_opposite_sign_moves_are_both_kept_for_unpaired_nets() -> None:
+    """Control: the same two moves are fine for ordinary nets, so the refusal
+    above comes from the pair's skew budget, not from the geometry."""
+    pf, routes = _opposite_sign_pair_case()
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (2, 2, 0, 0)
+
+
 def test_pair_tolerance_cites_p5() -> None:
     assert PAIR_LENGTH_TOLERANCE_MM == 0.01
 
@@ -366,12 +418,12 @@ def test_declined_pair_routed_single_ended_is_held_to_the_budget(capsys) -> None
     router = _pair_board()
     routes = router.route_net(1)
     assert routes and routes[0].segments
-    assert router._lattice_pair_net_ids == frozenset({1, 3})
+    assert router._lattice_pair_net_ids == {1: 3, 3: 1}
     stats = router._lattice_pathfinder.class_pad_repair_stats
     assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 0, 1, 1)
     assert _min_gap_to_cap(router, routes) < POWER - EPS
     out = capsys.readouterr().out
-    assert "1 on diff-pair nets left in place (length budget 0.01 mm)" in out
+    assert "1 on diff-pair nets left in place (skew budget 0.01 mm)" in out
 
 
 def _via(x: float, y: float, net: int = 1):

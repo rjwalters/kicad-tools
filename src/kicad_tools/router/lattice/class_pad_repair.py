@@ -36,9 +36,10 @@ Scope: single-ended connections (``repairable``; coupled and uncoupled-fallback
 pair legs are not passed in, so they never move).  Copper of a diff-pair NET
 that is repairable -- the single-ended stubs to a pair net's extra pads, or a
 declined pair routed entirely on the ordinary star -- is held to a length
-budget (issue #6437): a move is kept only while that net's total routed length
-stays within :data:`PAIR_LENGTH_TOLERANCE_MM` of its negotiated length, so the
-pair's skew cannot change by more than that (board 03 USB_D: +0.009 mm).  Not
+budget (issue #6437): a move is kept only while the PAIR's skew -- the
+difference of the two nets' accumulated length changes -- stays within
+:data:`PAIR_LENGTH_TOLERANCE_MM` (board 03 USB_D: +0.009 mm).  Budgeting each
+net alone would let opposite-sign moves on both nets add up to twice that.  Not
 moving it is worse: the router's post-route backstop then demotes the whole net
 for the shortfall.  Pair-net shortfalls left in place (over budget, or on a
 non-repairable leg) are counted as ``pair_skipped``.  Via-vs-pad
@@ -78,8 +79,9 @@ _Vertex = tuple[int, float, float]  # (layer index, x, y), rounded
 
 #: Largest total routed-length change a repair may make to one diff-pair net,
 #: mm (issue #6437).  This is epic #6441 P5's skew-regression threshold
-#: (#6447: "cannot change the skew of a pair net by more than 0.01 mm"); a
-#: net's length change bounds the change in its pair's skew.
+#: (#6447: "cannot change the skew of a pair net by more than 0.01 mm").  It
+#: bounds the pair's skew change (``|drift[P] - drift[N]|``), not each net's
+#: own drift: opposite-sign moves on the two nets would otherwise double it.
 PAIR_LENGTH_TOLERANCE_MM = 0.01
 
 
@@ -160,7 +162,7 @@ def repair_class_pad_pairs(
     net_classes: Mapping[object, object | None],
     *,
     repairable: set[object] | None = None,
-    pair_nets: Collection[int] = frozenset(),
+    pair_nets: Collection[int] | Mapping[int, int] = frozenset(),
     pair_length_tolerance: float = PAIR_LENGTH_TOLERANCE_MM,
     max_passes: int = 4,
 ) -> ClassPadRepairStats:
@@ -175,11 +177,12 @@ def repair_class_pad_pairs(
         net_classes: connection key -> net class (``None`` = board default),
             for every key in ``routes``.
         repairable: keys whose copper may move (default: all of ``routes``).
-        pair_nets: diff-pair net ids (issue #6437).  Their repairable copper
-            may move only while the net's total routed length stays within
-            ``pair_length_tolerance`` of its negotiated length; shortfalls left
-            on them are counted in ``pair_skipped``.
-        pair_length_tolerance: the per-net length budget, mm.
+        pair_nets: diff-pair nets (issue #6437), as a mapping of net id to its
+            partner's net id (a bare collection of ids budgets each net alone).
+            Their repairable copper may move only while the pair's skew change
+            stays within ``pair_length_tolerance``; shortfalls left on them are
+            counted in ``pair_skipped``.
+        pair_length_tolerance: the per-pair skew budget, mm.
         max_passes: repair sweeps; each re-detects shortfalls on the moved copper.
     """
     stats = ClassPadRepairStats()
@@ -196,8 +199,10 @@ def repair_class_pad_pairs(
     if not any(r > base + _EPS for r in pad_req):
         return stats
     pair_set = frozenset(pair_nets)
+    partners: Mapping[int, int] = pair_nets if isinstance(pair_nets, Mapping) else {}
     movable = set(routes) if repairable is None else set(repairable) & set(routes)
-    # Issue #6437: running length change of each pair net, against the budget.
+    # Issue #6437: running length change of each pair net; the budget bounds
+    # the difference between a net's drift and its partner's.
     pair_drift: dict[int, float] = defaultdict(float)
     pad_layers = [set(pf._pad_layer_indices(p)) for p in pads]
     layer_index: dict[Any, int | None] = {}
@@ -335,7 +340,9 @@ def repair_class_pad_pairs(
                     return not pad_shortfalls(key, new, class_only=False, strict=strict)
 
                 budget = (
-                    (pair_drift, pair_length_tolerance) if routes[sf.key].net in pair_set else None
+                    (pair_drift, partners, pair_length_tolerance)
+                    if routes[sf.key].net in pair_set
+                    else None
                 )
                 if _try_move(
                     pf, routes, movable, sf, still[0], own_clr, pads_ok, committed, lidx, budget
@@ -362,13 +369,14 @@ def _try_move(
     pads_ok: Any,
     committed: Any,
     lidx: Any,
-    budget: tuple[dict[int, float], float] | None = None,
+    budget: tuple[dict[int, float], Mapping[int, int], float] | None = None,
 ) -> bool:
     """Translate (or swing) the offending segment off the pad; keep if clean.
 
-    ``budget`` (diff-pair nets, issue #6437) is ``(drift, tolerance)``: the
-    move is refused when it would take the net's running length change
-    ``drift[net]`` beyond ``tolerance``; a kept move updates ``drift``.
+    ``budget`` (diff-pair nets, issue #6437) is ``(drift, partners, tolerance)``:
+    the move is refused when it would take the pair's skew change
+    ``|drift[net] - drift[partner]|`` beyond ``tolerance`` (a net with no known
+    partner is held to ``|drift[net]|``); a kept move updates ``drift``.
     """
     route = routes[sf.key]
     seg = route.segments[sf.seg_index]
@@ -470,13 +478,14 @@ def _try_move(
         if not ok:
             continue
         if budget is not None:
-            drift, tolerance = budget
+            drift, partners, tolerance = budget
             delta = sum(
                 _seg_len(new) - _seg_len(routes[key].segments[idx])
                 for (key, idx), new in touched.items()
             )
-            if abs(drift[net] + delta) > tolerance + _EPS:
-                continue  # would stretch the pair's skew beyond P5's threshold
+            partner_drift = drift[partners[net]] if net in partners else 0.0
+            if abs(drift[net] + delta - partner_drift) > tolerance + _EPS:
+                continue  # would move the pair's skew beyond P5's threshold
             drift[net] += delta
         for (key, idx), new in touched.items():
             old = routes[key].segments[idx]

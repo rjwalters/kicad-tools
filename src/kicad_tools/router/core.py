@@ -4318,10 +4318,10 @@ class Autorouter:
         coupled: list[Any] = []
         reserved: dict[int, list[tuple[str, str]]] = {}
         self._lattice_pair_outcomes = {}
-        # Issue #6437: net ids of EVERY detected pair (engaged or not), so the
-        # pad-class repair holds all pair-net copper to a length budget,
-        # whatever its key shape.
-        self._lattice_pair_net_ids: frozenset[int] = frozenset()
+        # Issue #6437: net id -> partner net id for EVERY detected pair (engaged
+        # or not), so the pad-class repair holds all pair-net copper to a skew
+        # budget, whatever its key shape.
+        self._lattice_pair_net_ids: dict[int, int] = {}
         if not self.net_names:
             return coupled, reserved
         try:
@@ -4347,12 +4347,11 @@ class Autorouter:
             # Defensive: detection must never break routing.
             return coupled, reserved
 
-        self._lattice_pair_net_ids = frozenset(
-            net_id
-            for d in detected
-            for net_id in (d.pair.positive.net_id, d.pair.negative.net_id)
-            if net_id
-        )
+        for d in detected:
+            p_id, n_id = d.pair.positive.net_id, d.pair.negative.net_id
+            if p_id and n_id:
+                self._lattice_pair_net_ids[p_id] = n_id
+                self._lattice_pair_net_ids[n_id] = p_id
         for d in detected:
             p_name = d.pair.positive.net_name
             n_name = d.pair.negative.net_name
@@ -4612,8 +4611,8 @@ class Autorouter:
             # Issue #6373: a declined coupled pair falls back to two
             # single-ended legs instead of leaving its main run open.
             uncoupled_fallback=True,
-            # Issue #6437: pair-net copper moves only within a length budget.
-            pair_nets=getattr(self, "_lattice_pair_net_ids", frozenset()),
+            # Issue #6437: pair-net copper moves only within a skew budget.
+            pair_nets=getattr(self, "_lattice_pair_net_ids", None),
         )
         self._lattice_negotiation_stats = stats
         # Issue #4477 (epic #4465, Phase 4): copy the per-connection decline
@@ -4648,7 +4647,7 @@ class Autorouter:
                 + (f"; {repair.remaining} remain" if repair.remaining else "")
                 + (
                     f"; {repair.pair_skipped} on diff-pair nets left in place "
-                    f"(length budget {PAIR_LENGTH_TOLERANCE_MM:g} mm)"
+                    f"(skew budget {PAIR_LENGTH_TOLERANCE_MM:g} mm)"
                     if repair.pair_skipped
                     else ""
                 )
