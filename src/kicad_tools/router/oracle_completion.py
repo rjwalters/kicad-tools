@@ -627,8 +627,24 @@ def _same_comp(a: dict, b: dict) -> bool:
     return a.keys() == b.keys() and all(a[k].equals(b[k]) for k in a)
 
 
-def _route_key(link: OracleLink) -> str:
-    return f"route:{link.net}:{link.a.description}|{link.b.description}"
+#: Issue #6412: the join variants of a routed link, each with its own
+#: footprint / withdrawal key (see :func:`_route_key`).
+ROUTE_VARIANT_PLANE = "plane"
+ROUTE_VARIANT_ISLAND = "island"
+ROUTE_VARIANTS: tuple[str | None, ...] = (None, ROUTE_VARIANT_PLANE, ROUTE_VARIANT_ISLAND)
+
+
+def _route_key(link: OracleLink, variant: str | None = None) -> str:
+    """The footprint / withdrawal key of the route that closed ``link``.
+
+    ``variant`` names which route (Issue #6412): ``None`` (the bare key) for
+    the direct endpoint-to-endpoint route, ``"plane"`` for the island join to
+    the plane-owning copper, ``"island"`` for the join to the nearest other
+    island.  Separate keys let a DRC regression withdraw one join without
+    banning the others for the rest of the round.
+    """
+    bare = f"route:{link.net}:{link.a.description}|{link.b.description}"
+    return bare if variant is None else f"{bare}#{variant}"
 
 
 def _pad_size(pcb: Any, ref: str, number: str) -> tuple[float, float] | None:
@@ -753,13 +769,12 @@ class PourLinkCloser:
         welded: set[str] = set()
         if pads_by_net:
             welded = self._weld_pads(pcb_path, pads_by_net, attempt)
-        pending = [
-            lk
-            for lk in links
-            if not ({lk.a.pad_key, lk.b.pad_key} & welded) and _route_key(lk) not in banned
-        ]
+        # Issue #6412: banned routes are skipped per variant inside
+        # ``_route_links`` -- a withdrawn plane join must leave the link's
+        # nearest-island join eligible -- so only welded links drop out here.
+        pending = [lk for lk in links if not ({lk.a.pad_key, lk.b.pad_key} & welded)]
         if pending and self.route_links:
-            self._route_links(pcb_path, pending, attempt)
+            self._route_links(pcb_path, pending, attempt, banned)
 
         if attempt.applied and self.refill is not None:
             self.refill(pcb_path)
@@ -1020,8 +1035,21 @@ class PourLinkCloser:
     # -- routed links -----------------------------------------------------------
 
     def _route_links(
-        self, pcb_path: Path, links: Sequence[OracleLink], attempt: ClosureAttempt
+        self,
+        pcb_path: Path,
+        links: Sequence[OracleLink],
+        attempt: ClosureAttempt,
+        banned: frozenset[str] = frozenset(),
     ) -> None:
+        """Route every link in ``links``; commit each under its variant's key.
+
+        ``banned`` holds route keys withdrawn earlier (Issue #6412): each
+        variant -- direct (bare key), ``#plane`` join, ``#island`` join -- is
+        skipped only when its own key is banned.  ``run_oracle_completion``
+        seeds ``banned`` with the keys of earlier KEPT rounds (``settled``),
+        so a kept ``#plane`` route that left its link reported makes the next
+        round try the ``#island`` join -- the intended "try something else".
+        """
         from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
         from kicad_tools.router.link_router import (
@@ -1105,6 +1133,11 @@ class PourLinkCloser:
                 rules = rules_for(lk.net)
                 ta, tb = terminal(lk.a, net_number), terminal(lk.b, net_number)
                 route = None
+                route_key = _route_key(lk)
+                #: Variants skipped because their key is banned, and whether
+                #: any unbanned variant was actually tried (Issue #6412).
+                withdrawn: list[str] = []
+                tried = False
                 if lk.a.kind == "zone" and lk.b.kind == "zone":
                     # KiCad's zone anchor is just the outline corner, so it does not
                     # say WHICH fill island floats.  Our copper model cannot be
@@ -1133,10 +1166,14 @@ class PourLinkCloser:
                                 commit(r, f"route:{lk.net}:island{n_isl}", net_number)
                     continue
                 if ta is not None and tb is not None:
-                    # Route from the pad end when there is one (its axis aligns the grid).
-                    if ta.label in ("via", "track") and tb.label not in ("via", "track"):
-                        ta, tb = tb, ta
-                    route = route_link(pcb, net_number, lk.net, ta, tb, rules, model=model)
+                    if route_key in banned:
+                        withdrawn.append(route_key)
+                    else:
+                        tried = True
+                        # Route from the pad end when there is one (its axis aligns the grid).
+                        if ta.label in ("via", "track") and tb.label not in ("via", "track"):
+                            ta, tb = tb, ta
+                        route = route_link(pcb, net_number, lk.net, ta, tb, rules, model=model)
                 if route is None and lk.net not in joined_nets:
                     # Island join: KiCad says these two items are apart.  Grow from
                     # the endpoint's island to the nearest other island of the net.
@@ -1156,34 +1193,55 @@ class PourLinkCloser:
                         # the PLANE, so join to ``comps[0]`` -- the plane-owning
                         # component -- first; the nearest island (often a
                         # padless sliver) is only the fallback.
-                        targets: list[list[dict]] = []
+                        targets: list[tuple[str, list[dict]]] = []
                         to_plane = chosen != 0 and "zone" in (lk.a.kind, lk.b.kind)
                         if to_plane:
-                            targets.append([comps[0]])
-                        targets.append(others)
-                        for n_target, target in enumerate(targets):
+                            targets.append((ROUTE_VARIANT_PLANE, [comps[0]]))
+                        targets.append((ROUTE_VARIANT_ISLAND, others))
+                        plane_withdrawn = False
+                        for variant, target in targets:
+                            key = _route_key(lk, variant)
+                            if key in banned:
+                                # Issue #6412: only THIS join was withdrawn.
+                                withdrawn.append(key)
+                                plane_withdrawn |= variant == ROUTE_VARIANT_PLANE
+                                continue
                             pair = component_terminals(comps[chosen], target, lk.net)
                             if pair is None:
                                 continue
+                            tried = True
                             route = route_link(
                                 pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
                             )
                             if route is not None:
-                                if to_plane and n_target > 0:
+                                route_key = key
+                                if to_plane and variant == ROUTE_VARIANT_ISLAND:
                                     who = lk.a.pad_key or lk.b.pad_key
                                     head = f"{lk.net} {who}" if who else lk.describe()
+                                    why = (
+                                        "plane join withdrawn for KiCad DRC"
+                                        if plane_withdrawn
+                                        else "no clearance-legal route to the plane-owning copper"
+                                    )
                                     attempt.notes.append(
-                                        f"{head}: no clearance-legal route to the plane-owning "
-                                        "copper; joined the nearest island instead"
+                                        f"{head}: {why}; joined the nearest island instead"
                                     )
                                 break
+                if route is None and withdrawn and not tried:
+                    # Every route this link could take was withdrawn: say so
+                    # instead of claiming no clearance-legal route exists.
+                    attempt.notes.append(
+                        f"{lk.describe()}: every route withdrawn for KiCad DRC "
+                        f"({', '.join(withdrawn)})"
+                    )
+                    continue
                 if route is None:
                     note = f"{lk.describe()}: no clearance-legal route"
                     if rules is not base_rules:
                         note += f" at class clearance >= {rules.clearance:g} mm"
                     attempt.notes.append(note)
                     continue
-                commit(route, _route_key(lk), net_number)
+                commit(route, route_key, net_number)
         except BaseException:
             # Routes committed before the failure are still written (their
             # copper is already counted in ``attempt``).  A failure of that

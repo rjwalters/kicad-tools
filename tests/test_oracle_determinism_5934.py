@@ -240,7 +240,7 @@ def _closer_inputs(tmp_path: Path, links, monkeypatch) -> tuple[dict, list[str],
         record["weld"] = {net: sorted(keys) for net, keys in pads_by_net.items()}
         return set()
 
-    def route(self, _path, pending, _attempt):
+    def route(self, _path, pending, _attempt, _banned=frozenset()):
         record["route"] = [lk.describe() for lk in pending]
 
     monkeypatch.setattr(PourLinkCloser, "_weld_pads", weld)

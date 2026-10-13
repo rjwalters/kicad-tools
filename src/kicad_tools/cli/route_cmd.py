@@ -7662,9 +7662,12 @@ def _closer_reasons_for(link, notes) -> list[str]:
     withdrawn route key) or one of its pads as a whole ``REF.PAD`` token, so
     ``U2.3`` does not pick up a note about ``U2.36``.
     """
-    from kicad_tools.router.oracle_completion import _route_key
+    from kicad_tools.router.oracle_completion import ROUTE_VARIANTS, _route_key
 
-    route_prefix = _route_key(link) + ":"
+    # Issue #6412: one exact prefix per route variant (direct, ``#plane``,
+    # ``#island``).  Never a looser ``startswith(bare key)``: C1's key is a
+    # prefix of C10's, which is the bug #6403 fixed.
+    route_prefixes = tuple(_route_key(link, v) + ":" for v in ROUTE_VARIANTS)
     pads = [
         re.compile(rf"(?<![\w.]){re.escape(f'{end.ref}.{end.pad}')}(?![\w.])")
         for end in (link.a, link.b)
@@ -7674,7 +7677,7 @@ def _closer_reasons_for(link, notes) -> list[str]:
     def names(note: str) -> bool:
         if link.describe() in note:
             return True
-        if note.startswith(route_prefix):
+        if note.startswith(route_prefixes):
             return True
         return any(p.search(note) for p in pads)
 
