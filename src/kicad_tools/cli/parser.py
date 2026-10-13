@@ -5950,11 +5950,10 @@ def _add_fix_drc_parser(subparsers) -> None:
         "--layers",
         "-l",
         type=int,
-        default=2,
+        default=None,
         help=(
             "Number of PCB layers used to derive clearance rules "
-            "(default: 2). Only used when generating a DRC report "
-            "internally; ignored when --drc-report is supplied."
+            "(default: the board's copper-layer count, as in kct check)."
         ),
     )
     fix_drc_parser.add_argument(
@@ -6016,7 +6015,8 @@ def _add_fix_drc_parser(subparsers) -> None:
         "--verify",
         action="store_true",
         help=(
-            "Run pure-Python DRC before and after repair and report a before/after violation delta."
+            "Run kct check's rule set before and after repair and report a "
+            "before/after violation delta."
         ),
     )
     fix_drc_parser.add_argument(

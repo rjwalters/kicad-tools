@@ -10,7 +10,11 @@ from kicad_tools.drc.repair_clearance import ClearanceRepairer, FootprintNudgeRe
 from kicad_tools.drc.report import DRCReport, parse_text_report
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 
-# PCB with two traces that are too close together
+# PCB with two traces that are too close together.  The geometry matches the
+# report below exactly (Issue #6434: the repairer re-measures every pair, so a
+# fixture whose copper contradicts its report is no longer silently "fixed"):
+# 0.25 mm tracks 0.40 mm apart centre-to-centre -> 0.15 mm edge gap; 0.6 mm
+# vias 0.65 mm apart -> 0.05 mm.
 PCB_WITH_CLEARANCE_VIOLATION = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -27,9 +31,9 @@ PCB_WITH_CLEARANCE_VIOLATION = """(kicad_pcb
   (net 1 "GND")
   (net 2 "+3.3V")
   (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-1"))
-  (segment (start 100 100.15) (end 110 100.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-2"))
+  (segment (start 100 100.4) (end 110 100.4) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-2"))
   (via (at 115 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
-  (via (at 115 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-2"))
+  (via (at 115 100.65) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-2"))
 )
 """
 
@@ -42,12 +46,12 @@ DRC_REPORT_CLEARANCE = """\
 [clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
     Rule: netclass 'Default'; error
     @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
-    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.4000 mm): Track [+3.3V] on F.Cu
 
 [clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
     Rule: netclass 'Default'; error
     @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
-    @(115.0000 mm, 100.3500 mm): Via [+3.3V] on F.Cu - B.Cu
+    @(115.0000 mm, 100.6500 mm): Via [+3.3V] on F.Cu - B.Cu
 
 ** Found 0 Footprint errors **
 ** End of Report **
@@ -198,7 +202,9 @@ class TestClearanceRepairer:
         assert empty.success_rate == 1.0
 
 
-# PCB with a segment too close to an enlarged via
+# PCB with a segment too close to an enlarged via: a 0.25 mm track whose
+# centreline passes 0.575 mm from the centre of a 0.8 mm via -> 0.05 mm gap,
+# the value the reports below state.
 PCB_WITH_SEGMENT_VIA = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -214,7 +220,7 @@ PCB_WITH_SEGMENT_VIA = """(kicad_pcb
   (net 0 "")
   (net 1 "GND")
   (net 2 "+3.3V")
-  (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-sv-1"))
+  (segment (start 100 100.575) (end 110 100.575) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-sv-1"))
   (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-sv-1"))
 )
 """
@@ -234,7 +240,7 @@ PCB_WITH_NO_NET_VIA = """(kicad_pcb
   (setup (pad_to_mask_clearance 0))
   (net 0 "")
   (net 1 "GND")
-  (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-nn-1"))
+  (segment (start 100 100.575) (end 110 100.575) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-nn-1"))
   (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 0) (uuid "via-nn-1"))
 )
 """
@@ -244,7 +250,7 @@ class TestSegmentViaClearanceRepair:
     """Tests for segment-to-via clearance repair."""
 
     def test_repair_segment_via_moves_segment(self, tmp_path: Path):
-        """Segment-to-via repair should move the segment, not the via."""
+        """Segment-to-via repair moves the segment by default (``move-trace``)."""
         pcb_file = tmp_path / "seg_via.kicad_pcb"
         pcb_file.write_text(PCB_WITH_SEGMENT_VIA)
 
@@ -261,7 +267,7 @@ class TestSegmentViaClearanceRepair:
                     severity=Severity.ERROR,
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
-                        Location(x_mm=105.0, y_mm=100.1, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.575, layer="F.Cu"),
                         Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
                     ],
                     nets=["+3.3V", "GND"],
@@ -271,17 +277,16 @@ class TestSegmentViaClearanceRepair:
             ],
         )
 
-        result = repairer.repair_from_report(
-            report,
-            max_displacement=0.5,
-            prefer="move-via",  # Even with move-via preference, segment-via should move trace
-            dry_run=True,
-        )
+        result = repairer.repair_from_report(report, max_displacement=0.5, dry_run=True)
 
         assert result.total_violations == 1
         assert result.repaired == 1
         # Must have moved a segment, not the via
         assert result.nudges[0].object_type == "segment"
+        # Perpendicular to the horizontal track, away from the via below it.
+        assert abs(result.nudges[0].displacement_x) < 1e-9
+        assert result.nudges[0].displacement_y > 0
+        assert result.nudges[0].new_clearance_mm >= 0.2
 
     def test_repair_segment_via_dry_run_no_modify(self, tmp_path: Path):
         """Dry run of segment-to-via repair should not modify PCB."""
@@ -301,7 +306,7 @@ class TestSegmentViaClearanceRepair:
                     severity=Severity.ERROR,
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
-                        Location(x_mm=105.0, y_mm=100.1, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.575, layer="F.Cu"),
                         Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
                     ],
                     nets=["+3.3V", "GND"],
@@ -333,7 +338,7 @@ class TestSegmentViaClearanceRepair:
                     severity=Severity.ERROR,
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
-                        Location(x_mm=105.0, y_mm=100.1, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.575, layer="F.Cu"),
                         Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
                     ],
                     nets=["GND"],
@@ -658,7 +663,9 @@ PCB_VIA_WITH_TWO_STUBS = """(kicad_pcb
 
 # PCB with a segment whose *start* endpoint sits at a via.
 # Via at (100, 100), segment (100, 100) -> (110, 100.1).
-# Nudging this segment should only move the *end* (free) endpoint.
+# Nudging this segment should only move the *end* (free) endpoint.  The
+# foreign via sits 0.575 mm from the free end, a 0.05 mm edge gap (the value
+# the reports below state).
 PCB_SEGMENT_WITH_VIA_ENDPOINT = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -676,7 +683,7 @@ PCB_SEGMENT_WITH_VIA_ENDPOINT = """(kicad_pcb
   (net 2 "+3.3V")
   (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-ep"))
   (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-ep-1"))
-  (via (at 115 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-other"))
+  (via (at 110 100.675) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-other"))
 )
 """
 
@@ -800,7 +807,7 @@ class TestViaAwareNudge:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=110.0, y_mm=100.1, layer="F.Cu"),
-                        Location(x_mm=115.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=110.0, y_mm=100.675, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -959,7 +966,7 @@ class TestViaAwareNudge:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=110.0, y_mm=100.1, layer="F.Cu"),
-                        Location(x_mm=115.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=110.0, y_mm=100.675, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1116,7 +1123,10 @@ class TestLocalRerouteIntegration:
 
     def test_local_reroute_of_both_endpoints_at_vias(self, tmp_path: Path):
         """local_reroute=True should reroute a segment with both endpoints at vias."""
-        # PCB with segment (100,100)->(102,100) net=1 and obstacle via at (101,100.3) net=2
+        # PCB with segment (100,100)->(102,100) net=1 and a locked obstacle via
+        # at (101,100.575) net=2 (0.05 mm edge gap, as reported).  The segment
+        # cannot be nudged (both ends on vias) and the via is locked, so only a
+        # local reroute can clear the pair.
         pcb_content = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -1135,7 +1145,7 @@ class TestLocalRerouteIntegration:
   (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-lr1"))
   (via (at 102 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-lr2"))
   (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-lr"))
-  (via (at 101 100.3) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-lr-obs"))
+  (via (locked yes) (at 101 100.575) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-lr-obs"))
 )
 """
         pcb_file = tmp_path / "lr_test.kicad_pcb"
@@ -1155,7 +1165,7 @@ class TestLocalRerouteIntegration:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=101.0, y_mm=100.3, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.575, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1194,7 +1204,7 @@ class TestLocalRerouteIntegration:
   (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-dr1"))
   (via (at 102 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-dr2"))
   (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-dr"))
-  (via (at 101 100.3) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-dr-obs"))
+  (via (locked yes) (at 101 100.575) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-dr-obs"))
 )
 """
         pcb_file = tmp_path / "lr_dry_test.kicad_pcb"
@@ -1214,7 +1224,7 @@ class TestLocalRerouteIntegration:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=101.0, y_mm=100.3, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.575, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1275,7 +1285,7 @@ class TestLocalRerouteIntegration:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=101.0, y_mm=100.3, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.575, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1317,8 +1327,10 @@ class TestLocalRerouteIntegration:
 # Layout (2mm segments for routing room):
 #   via-cl-1 (100,100) net=1 --- seg-cl-a --- via-cl-mid (102,100) net=1
 #       --- seg-cl-b --- via-cl-2 (104,100) net=1
-#   via-cl-obs1 (101, 100.35) net=2 (obstacle near segment-A)
-#   via-cl-obs2 (103, 100.35) net=2 (obstacle near segment-B)
+#   via-cl-obs1 (101, 100.475) net=2 (obstacle near segment-A)
+#   via-cl-obs2 (103, 100.475) net=2 (obstacle near segment-B)
+# Both obstacles are locked and sit 0.05 mm (edge to edge) from the track,
+# the value the reports state, so only rerouting can clear them.
 PCB_WITH_CLUSTERED_VIOLATIONS = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -1339,8 +1351,8 @@ PCB_WITH_CLUSTERED_VIOLATIONS = """(kicad_pcb
   (via (at 104 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-cl-2"))
   (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-cl-a"))
   (segment (start 102 100) (end 104 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-cl-b"))
-  (via (at 101 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-cl-obs1"))
-  (via (at 103 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-cl-obs2"))
+  (via (locked yes) (at 101 100.475) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-cl-obs1"))
+  (via (locked yes) (at 103 100.475) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-cl-obs2"))
 )
 """
 
@@ -1372,7 +1384,7 @@ class TestClusterRerouteIntegration:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=101.0, y_mm=100.35, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.475, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1385,7 +1397,7 @@ class TestClusterRerouteIntegration:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=103.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=103.0, y_mm=100.35, layer="F.Cu"),
+                        Location(x_mm=103.0, y_mm=100.475, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1425,7 +1437,7 @@ class TestClusterRerouteIntegration:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=101.0, y_mm=100.35, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.475, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1438,7 +1450,7 @@ class TestClusterRerouteIntegration:
                     message="Clearance violation (0.05mm < 0.2mm)",
                     locations=[
                         Location(x_mm=103.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=103.0, y_mm=100.35, layer="F.Cu"),
+                        Location(x_mm=103.0, y_mm=100.475, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1649,8 +1661,9 @@ class TestClusterRerouteIntegration:
 # PCB with a footprint containing a pad (pad "1" at footprint-local (0, 0))
 # and a segment that runs too close to it.
 # Footprint at (105, 100) with 0 rotation, so pad absolute position is (105, 100).
-# Segment runs from (100, 100.12) to (110, 100.12) on F.Cu, net "+3.3V".
-# The pad is on net "GND".
+# Segment runs from (100, 100.495) to (110, 100.495) on F.Cu, net "+3.3V": its
+# lower edge is 0.12 mm from the pad's top edge (y = 100.25), the value the
+# reports below state.  The pad is on net "GND".
 PCB_WITH_PAD_SEGMENT_VIOLATION = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -1672,15 +1685,17 @@ PCB_WITH_PAD_SEGMENT_VIOLATION = """(kicad_pcb
     (pad "1" smd roundrect (at 0 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-1"))
     (pad "2" smd roundrect (at 1.0 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V") (uuid "pad-2"))
   )
-  (segment (start 100 100.12) (end 110 100.12) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-pad-1"))
+  (segment (start 100 100.495) (end 110 100.495) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-pad-1"))
 )
 """
 
 # PCB with a footprint at (105, 100) rotated 90 degrees.
-# Pad "1" local offset is (0.5, 0), so after 90deg rotation:
-#   abs_x = 105 + 0.5*cos(90) - 0*sin(90) = 105 + 0 - 0 = 105
-#   abs_y = 100 + 0.5*sin(90) + 0*cos(90) = 100 + 0.5 + 0 = 100.5
-# A via at (105, 100.35) is too close to the pad.
+# Pad "1" local offset is (0.5, 0); KiCad rotates footprint-local offsets by the
+# negated angle (``core.geometry.rotate_pad_offset``, pcbnew-verified #3739):
+#   abs_x = 105 + 0.5*cos(90) + 0*sin(90) = 105
+#   abs_y = 100 - 0.5*sin(90) + 0*cos(90) = 99.5
+# The pad's own (absolute) angle is 0, so it spans y 99.25..99.75.  The via
+# at (105, 100.15) has its edge at 99.85 -- 0.10 mm away, as reported.
 PCB_WITH_ROTATED_PAD_VIA_VIOLATION = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -1701,7 +1716,7 @@ PCB_WITH_ROTATED_PAD_VIA_VIOLATION = """(kicad_pcb
     (at 105 100 90)
     (pad "1" smd roundrect (at 0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-rot-1"))
   )
-  (via (at 105 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-pad-1"))
+  (via (at 105 100.15) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-pad-1"))
 )
 """
 
@@ -1785,7 +1800,7 @@ class TestPadClearanceRepair:
                     message="Clearance violation (0.12mm < 0.20mm)",
                     locations=[
                         Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=105.0, y_mm=100.12, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.495, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1825,7 +1840,7 @@ class TestPadClearanceRepair:
                     message="Clearance violation (0.12mm < 0.20mm)",
                     locations=[
                         Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
-                        Location(x_mm=105.0, y_mm=100.12, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.495, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -1863,8 +1878,8 @@ class TestPadClearanceRepair:
                     severity=Severity.ERROR,
                     message="Clearance violation (0.10mm < 0.20mm)",
                     locations=[
-                        Location(x_mm=105.0, y_mm=100.5, layer="F.Cu"),
-                        Location(x_mm=105.0, y_mm=100.35, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=99.5, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.15, layer="F.Cu"),
                     ],
                     nets=["GND", "+3.3V"],
                     required_value_mm=0.2,
@@ -2299,14 +2314,22 @@ class TestOscillationDetection:
             # Set history to the opposite direction so same violation = oscillation
             repairer._nudge_history[uuid_str] = (-dx * 2, -dy * 2)
 
+        flipped = set(repairer._nudge_history)
+
         # Second pass with same violations -- should detect oscillation
         result2 = repairer.repair_from_report(
             drc_report,
             max_displacement=0.5,
             dry_run=True,
         )
-        # At least some violations should be skipped due to oscillation
-        assert result2.skipped_infeasible > 0
+        # An item whose nudge would reverse its history is never moved again.
+        # Issue #6434: the pair may still be cleared by moving its *other*
+        # item instead (the fallback), or it is reported unrepaired.
+        assert flipped
+        assert not ({n.uuid for n in result2.nudges} & flipped)
+        assert any("reverse an earlier nudge" in u.reason for u in result2.unrepaired) or (
+            result2.repaired == result2.total_violations
+        )
 
 
 class TestWidthAwareDisplacement:
@@ -2425,7 +2448,9 @@ class TestWidthAwareDisplacement:
 class TestFootprintNudge:
     """Tests for Phase 3: footprint nudge for pad-pad violations."""
 
-    # PCB with two small footprints whose pads violate clearance
+    # PCB with two small footprints whose pads violate clearance: R1 pad 2
+    # spans x 100.25..100.75 and R2 pad 1 spans 100.85..101.35, a 0.10 mm gap
+    # (the value the report states; Issue #6434 re-measures it after the nudge).
     PCB_PAD_PAD_VIOLATION = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -2452,7 +2477,7 @@ class TestFootprintNudge:
   )
   (footprint "Resistor_SMD:R_0402"
     (layer "F.Cu")
-    (at 101.1 100)
+    (at 101.6 100)
     (attr smd)
     (property "Reference" "R2")
     (property "Value" "10k")
@@ -2472,7 +2497,7 @@ class TestFootprintNudge:
 [clearance_pad_pad]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1000 mm)
     Rule: netclass 'Default'; error
     @(100.5000 mm, 100.0000 mm): Pad 2 of R1 on F.Cu
-    @(100.6000 mm, 100.0000 mm): Pad 1 of R2 on F.Cu
+    @(101.1000 mm, 100.0000 mm): Pad 1 of R2 on F.Cu
 
 ** Found 0 Footprint errors **
 ** End of Report **
@@ -2842,3 +2867,628 @@ class TestFootprintNudge:
         assert "R1" in s
         assert "R2" in s
         assert "0.0500" in s
+
+
+# ── Issue #6434: honest repair accounting ─────────────────────────────────
+#
+# The repairer used to resolve both items of a kicad-cli violation to the same
+# track (KiCad reports a track at its *start* point, and the via sat within the
+# 1.5 mm search radius of that track), slide the track along its own axis, and
+# count the violation as repaired without re-measuring.  These tests pin the
+# fixed behaviour on the exact case from the issue: a horizontal 0.18 mm track
+# whose centreline is 0.5 mm from the centre of a 0.5 mm via (a 0.16 mm gap)
+# under a 0.175 mm rule, plus the pad variant from #6431.
+
+_HONEST_HEADER = """(kicad_pcb (version 20240108) (generator "pcbnew") (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal) (31 "B.Cu" signal)
+    (34 "B.Paste" user) (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen") (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user) (39 "F.Mask" user)
+    (44 "Edge.Cuts" user) (46 "B.CrtYd" user "B.Courtyard") (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user) (49 "F.Fab" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "P3V3")
+  (gr_rect (start 95 95) (end 110 106) (stroke (width 0.1) (type default)) (fill none)
+    (layer "Edge.Cuts"))
+"""
+
+# Track 100..104 at y=100 (0.18 mm), via P3V3 0.5 mm at (102, 100.5).
+_TRACK_VIA_COPPER = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+
+
+def _netclass(name: str, clearance: float, priority: int) -> dict:
+    return {
+        "name": name,
+        "clearance": clearance,
+        "track_width": 0.18,
+        "via_diameter": 0.5,
+        "via_drill": 0.3,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "diff_pair_width": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "wire_width": 6,
+        "bus_width": 12,
+        "line_style": 0,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": priority,
+    }
+
+
+def _honest_project(name: str, cls: str, clearance: float, nets: list[str]) -> dict:
+    """KiCad-loadable project: ``Default`` 0.1 mm, ``cls`` for ``nets``."""
+    return {
+        "meta": {"filename": f"{name}.kicad_pro", "version": 3},
+        "board": {
+            "design_settings": {
+                "rules": {
+                    "min_clearance": 0.1,
+                    "min_track_width": 0.1,
+                    "min_copper_edge_clearance": 0.2,
+                }
+            }
+        },
+        "net_settings": {
+            "meta": {"version": 4},
+            "classes": [_netclass("Default", 0.1, 2147483647), _netclass(cls, clearance, 0)],
+            "netclass_assignments": None,
+            "netclass_patterns": [{"netclass": cls, "pattern": n} for n in nets],
+        },
+    }
+
+
+def _write_honest_board(directory: Path, copper: str, project: dict | None = None) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    pcb = directory / "honest.kicad_pcb"
+    pcb.write_text(_HONEST_HEADER + copper + ")\n")
+    pcb.with_suffix(".kicad_pro").write_text(
+        json.dumps(project or _honest_project("honest", "AUX", 0.175, ["GND", "P3V3"]))
+    )
+    return pcb
+
+
+def _kicad_cli_report(required: float, actual: float, items: list[dict]) -> str:
+    """A kicad-cli 10 JSON report with one clearance violation."""
+    return json.dumps(
+        {
+            "source": "honest.kicad_pcb",
+            "violations": [
+                {
+                    "description": (
+                        f"Clearance violation (netclass 'AUX' clearance {required:.4f} mm; "
+                        f"actual {actual:.4f} mm)"
+                    ),
+                    "items": items,
+                    "severity": "error",
+                    "type": "clearance",
+                }
+            ],
+            "unconnected_items": [],
+        }
+    )
+
+
+# KiCad reports a track at its START point (100, 100), 2 mm from the via; the
+# via's own position is within 1.5 mm of the track.
+_TRACK_VIA_ITEMS = [
+    {
+        "description": "Track [GND] on F.Cu, length 4.0000 mm",
+        "pos": {"x": 100.0, "y": 100.0},
+        "uuid": "trk-a",
+    },
+    {
+        "description": "Via [P3V3] on F.Cu - B.Cu",
+        "pos": {"x": 102.0, "y": 100.5},
+        "uuid": "via-a",
+    },
+]
+
+
+def _measure_pair(pcb: Path, uuid_a: str, uuid_b: str) -> float:
+    """Independent re-measurement of two items in a saved board."""
+    repairer = ClearanceRepairer(pcb)
+    repairer._ensure_index()
+    return repairer._measure(repairer._by_uuid[uuid_a], repairer._by_uuid[uuid_b])
+
+
+class TestHonestRepair6434:
+    """Issue #6434: resolve the right items, move perpendicular, re-measure."""
+
+    def _report(self, items: list[dict] = _TRACK_VIA_ITEMS) -> DRCReport:
+        from kicad_tools.drc.report import parse_json_report
+
+        return parse_json_report(_kicad_cli_report(0.175, 0.16, items))
+
+    def test_fixture_gap_is_016(self, tmp_path: Path):
+        pcb = _write_honest_board(tmp_path, _TRACK_VIA_COPPER)
+        assert _measure_pair(pcb, "trk-a", "via-a") == pytest.approx(0.16, abs=1e-6)
+
+    def test_via_location_resolves_to_the_via_not_the_track(self, tmp_path: Path):
+        """Without uuids the via's position must still resolve to the via."""
+        pcb = _write_honest_board(tmp_path, _TRACK_VIA_COPPER)
+        no_uuid = [{k: v for k, v in item.items() if k != "uuid"} for item in _TRACK_VIA_ITEMS]
+        violation = self._report(no_uuid).violations[0]
+        assert violation.item_uuids == ["", ""]
+
+        a, b = ClearanceRepairer(pcb)._resolve_pair(violation)
+        assert a is not None and b is not None
+        assert (a.kind, a.net) == ("segment", "GND")
+        assert (b.kind, b.net) == ("via", "P3V3")
+        assert a.node is not b.node
+
+    def test_uuids_are_parsed_and_used(self, tmp_path: Path):
+        pcb = _write_honest_board(tmp_path, _TRACK_VIA_COPPER)
+        violation = self._report().violations[0]
+        assert violation.item_uuids == ["trk-a", "via-a"]
+        a, b = ClearanceRepairer(pcb)._resolve_pair(violation)
+        assert a is not None and b is not None
+        assert (a.kind, b.kind) == ("segment", "via")
+
+    def test_same_item_on_both_sides_is_never_nudged(self, tmp_path: Path):
+        pcb = _write_honest_board(tmp_path, _TRACK_VIA_COPPER)
+        original = pcb.read_text()
+        both_track = [_TRACK_VIA_ITEMS[0], dict(_TRACK_VIA_ITEMS[0])]
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(self._report(both_track), max_displacement=0.5)
+        assert result.repaired == 0
+        assert result.nudges == []
+        assert len(result.unrepaired) == 1
+        repairer.save()
+        assert _measure_pair(pcb, "trk-a", "via-a") == pytest.approx(0.16, abs=1e-6)
+        assert "100.5" in original  # board text unchanged in substance
+
+    def test_track_moves_perpendicular_and_clears(self, tmp_path: Path):
+        pcb = _write_honest_board(tmp_path, _TRACK_VIA_COPPER)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(self._report(), max_displacement=0.5, margin=0.01)
+
+        assert result.repaired == 1
+        assert result.unrepaired == []
+        (nudge,) = result.nudges
+        assert nudge.object_type == "segment"
+        # Horizontal track: the move is purely vertical, away from the via
+        # below it (KiCad y grows downwards).
+        assert nudge.displacement_x == pytest.approx(0.0, abs=1e-9)
+        assert nudge.displacement_y < 0
+        assert nudge.old_clearance_mm == pytest.approx(0.16, abs=1e-6)
+        assert nudge.new_clearance_mm >= 0.175
+
+        repairer.save()
+        measured = _measure_pair(pcb, "trk-a", "via-a")
+        assert measured >= 0.175
+        # The reported "new clearance" is the measurement, not old + distance.
+        assert nudge.new_clearance_mm == pytest.approx(measured, abs=1e-6)
+
+    def test_prefer_move_via_moves_the_via(self, tmp_path: Path):
+        pcb = _write_honest_board(tmp_path, _TRACK_VIA_COPPER)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(
+            self._report(), max_displacement=0.5, margin=0.01, prefer="move-via"
+        )
+        assert result.repaired == 1
+        assert result.relocated_vias == 1
+        assert result.nudges[0].object_type == "via"
+        assert result.nudges[0].displacement_x == pytest.approx(0.0, abs=1e-9)
+        assert result.nudges[0].displacement_y > 0
+        repairer.save()
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+
+    def test_unclearable_pair_is_reported_and_board_unchanged(self, tmp_path: Path):
+        """Both track ends on vias and the foreign via locked: nothing can move."""
+        copper = """  (via (at 100 100) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "end-1"))
+  (via (at 104 100) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "end-2"))
+  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (locked yes) (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        before = pcb.read_text()
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(self._report(), max_displacement=0.5, margin=0.01)
+
+        assert result.repaired == 0
+        assert result.nudges == []
+        assert result.skipped_infeasible == 1
+        (pair,) = result.unrepaired
+        assert pair.measured_mm == pytest.approx(0.16, abs=1e-6)
+        assert "both track ends are anchored" in pair.reason
+        assert not repairer.modified
+        assert pcb.read_text() == before
+
+    def test_move_that_creates_a_new_violation_is_undone(self, tmp_path: Path):
+        """A move into a third item's clearance is declined, not counted."""
+        # A second P3V3 track just above GND's track: moving GND up clears the
+        # via but violates this track; the via itself is locked.
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (locked yes) (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+  (segment (start 100 99.635) (end 104 99.635) (width 0.18) (layer "F.Cu") (net 2) (uuid "trk-b"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        assert _measure_pair(pcb, "trk-a", "trk-b") == pytest.approx(0.185, abs=1e-6)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(self._report(), max_displacement=0.5, margin=0.01)
+        assert result.repaired == 0
+        assert result.skipped_not_cleared == 1
+        assert "would bring" in result.unrepaired[0].reason
+        repairer.save()
+        assert _measure_pair(pcb, "trk-a", "via-a") == pytest.approx(0.16, abs=1e-6)
+        assert _measure_pair(pcb, "trk-a", "trk-b") == pytest.approx(0.185, abs=1e-6)
+
+    def test_pad_variant_0175_under_02_class(self, tmp_path: Path):
+        """A 0.18 mm track 0.175 mm from a pad under a 0.2 mm class (#6431)."""
+        copper = """  (footprint "test:R1" (layer "F.Cu") (at 102 101)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 0.8 0.8) (thickness 0.12))))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-r1-1"))
+  )
+  (segment (start 100 100.235) (end 104 100.235) (width 0.18) (layer "F.Cu") (net 2) (uuid "trk-s"))
+"""
+        pcb = _write_honest_board(
+            tmp_path, copper, _honest_project("honest", "Power", 0.2, ["GND"])
+        )
+        assert _measure_pair(pcb, "trk-s", "pad-r1-1") == pytest.approx(0.175, abs=1e-6)
+        from kicad_tools.drc.report import parse_json_report
+
+        report = parse_json_report(
+            _kicad_cli_report(
+                0.2,
+                0.175,
+                [
+                    {
+                        "description": "Pad 1 [GND] of R1 on F.Cu",
+                        "pos": {"x": 102.0, "y": 101.0},
+                        "uuid": "pad-r1-1",
+                    },
+                    {
+                        "description": "Track [P3V3] on F.Cu, length 4.0000 mm",
+                        "pos": {"x": 100.0, "y": 100.235},
+                        "uuid": "trk-s",
+                    },
+                ],
+            )
+        )
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(report, max_displacement=0.5, margin=0.01)
+        assert result.repaired == 1
+        assert result.nudges[0].object_type == "segment"
+        assert result.nudges[0].displacement_y < 0
+        repairer.save()
+        assert _measure_pair(pcb, "trk-s", "pad-r1-1") >= 0.2
+
+    def test_pad_located_by_kct_check_descriptor(self, tmp_path: Path):
+        """``kct check`` items ("Trace@...", "R1-1") resolve without positions."""
+        copper = """  (footprint "test:R1" (layer "F.Cu") (at 102 101)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 0.8 0.8) (thickness 0.12))))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-r1-1"))
+  )
+  (segment (start 100 100.235) (end 104 100.235) (width 0.18) (layer "F.Cu") (net 2) (uuid "trk-s"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        violation = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="netclass_clearance_copper",
+            severity=Severity.ERROR,
+            message="Segment to pad clearance 0.175mm < netclass 'Power' minimum 0.200mm",
+            # kct check reports a board-relative marker: deliberately useless here.
+            locations=[Location(x_mm=7.0, y_mm=5.0, layer="F.Cu")],
+            items=["Trace@F.Cu:w0.18:100/100.235~104/100.235", "R1-1"],
+            nets=["P3V3", "GND"],
+            required_value_mm=0.2,
+            actual_value_mm=0.175,
+        )
+        a, b = ClearanceRepairer(pcb)._resolve_pair(violation)
+        assert a is not None and b is not None
+        assert (a.kind, a.net) == ("segment", "P3V3")
+        assert (b.kind, b.net) == ("pad", "GND")
+
+
+def _points(pcb: Path, uuid: str) -> list[tuple[float, float]]:
+    """The ``start``/``end`` (or via ``at``) points of one item in a saved board."""
+    repairer = ClearanceRepairer(pcb)
+    repairer._ensure_index()
+    node = repairer._by_uuid[uuid].node
+    return [repairer._xy(node.find(name)) for name in ("start", "end", "at") if node.find(name)]
+
+
+def _report_at(via_y: float, actual: float):
+    from kicad_tools.drc.report import parse_json_report
+
+    items = [dict(_TRACK_VIA_ITEMS[0]), dict(_TRACK_VIA_ITEMS[1])]
+    items[1]["pos"] = {"x": 102.0, "y": via_y}
+    return parse_json_report(_kicad_cli_report(0.175, actual, items))
+
+
+class TestNoSilentCopperDamage6434:
+    """Judge probes on PR #6459: locked copper never moves, joints never break."""
+
+    def test_locked_joined_track_is_not_dragged(self, tmp_path: Path):
+        """A locked track joined at the moved track's end holds that end."""
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (segment (locked yes) (start 104 100) (end 106 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-locked"))
+  (via (locked yes) (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        locked_before = _points(pcb, "trk-locked")
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.5, 0.16), max_displacement=0.5)
+        repairer.save()
+
+        assert _points(pcb, "trk-locked") == locked_before
+        # The track pivots about the joint instead: still joined, and clear.
+        assert (104.0, 100.0) in _points(pcb, "trk-a")
+        assert result.repaired == 1
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+
+    def test_locked_track_on_a_moved_via_is_not_dragged(self, tmp_path: Path):
+        """``--prefer move-via``: a via carrying a locked track does not move."""
+        copper = """  (segment (locked yes) (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+  (segment (locked yes) (start 102 100.5) (end 102 103) (width 0.18) (layer "B.Cu") (net 2) (uuid "trk-locked"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        before = pcb.read_text()
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(
+            _report_at(100.5, 0.16), max_displacement=0.5, prefer="move-via"
+        )
+
+        assert result.repaired == 0
+        assert result.nudges == []
+        (pair,) = result.unrepaired
+        assert "locked segment trk-locked" in pair.reason
+        assert not repairer.modified
+        repairer.save()
+        assert _points(pcb, "trk-locked") == [(102.0, 100.5), (102.0, 103.0)]
+        assert _points(pcb, "via-a") == [(102.0, 100.5)]
+        assert "100.5" in before
+
+    def test_via_with_locked_track_falls_back_to_the_free_track(self, tmp_path: Path):
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+  (segment (locked yes) (start 102 100.5) (end 102 103) (width 0.18) (layer "B.Cu") (net 2) (uuid "trk-locked"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(
+            _report_at(100.5, 0.16), max_displacement=0.5, prefer="move-via"
+        )
+        repairer.save()
+
+        assert result.repaired == 1
+        assert result.nudges[0].object_type == "segment"
+        assert _points(pcb, "trk-locked") == [(102.0, 100.5), (102.0, 103.0)]
+        assert _points(pcb, "via-a") == [(102.0, 100.5)]
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+
+    def test_t_junction_stub_is_dragged_and_stays_joined(self, tmp_path: Path):
+        """A stub ending mid-span on the moved track follows it."""
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (segment (start 103 98) (end 103 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-t"))
+  (segment (start 96 100) (end 100 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-host"))
+  (via (locked yes) (at 102 100.4) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        assert _measure_pair(pcb, "trk-a", "trk-t") < 0  # joined before
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.4, 0.06), max_displacement=0.5)
+        repairer.save()
+
+        assert result.repaired == 1
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+        # The stub's end is still on the track's centreline, not 0.125 mm off it.
+        (_, ay), _ = _points(pcb, "trk-a")
+        assert _points(pcb, "trk-t")[1] == (103.0, pytest.approx(ay, abs=1e-9))
+        assert _measure_pair(pcb, "trk-a", "trk-t") < 0
+        assert _measure_pair(pcb, "trk-a", "trk-host") < 0
+
+    def test_locked_t_junction_stub_blocks_the_move(self, tmp_path: Path):
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (segment (locked yes) (start 103 98) (end 103 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-t"))
+  (via (locked yes) (at 102 100.4) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        before = pcb.read_text()
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.4, 0.06), max_displacement=0.5)
+
+        assert result.repaired == 0
+        assert "locked segment trk-t" in result.unrepaired[0].reason
+        assert not repairer.modified
+        assert pcb.read_text() == before
+
+    def test_move_that_breaks_a_same_net_contact_is_reverted(self, tmp_path: Path):
+        """A same-net via sitting mid-span on the track cannot be left behind.
+
+        The 0.175 mm move takes the 0.18 mm track clear of the 0.15 mm via.
+        """
+        copper = """  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 103 100) (size 0.15) (drill 0.1) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-gnd"))
+  (via (locked yes) (at 102 100.35) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        before = pcb.read_text()
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.35, 0.01), max_displacement=0.5)
+
+        assert result.repaired == 0
+        (pair,) = result.unrepaired
+        assert "disconnect segment trk-a from via via-gnd" in pair.reason
+        assert not repairer.modified
+        assert pcb.read_text() == before
+
+    def test_track_piece_collapsed_by_a_via_move_is_removed(self, tmp_path: Path):
+        """A sub-micron stub whose both ends follow a via becomes a dot: drop it."""
+        copper = """  (segment (locked yes) (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+  (segment (start 102 100.5) (end 102.0005 100.5) (width 0.18) (layer "F.Cu") (net 2) (uuid "stub"))
+  (segment (start 102.0005 100.5) (end 102 103) (width 0.18) (layer "B.Cu") (net 2) (uuid "trk-b"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(
+            _report_at(100.5, 0.16), max_displacement=0.5, prefer="move-via"
+        )
+        repairer.save()
+
+        assert result.repaired == 1
+        assert result.removed_zero_length == 1
+        assert '"stub"' not in pcb.read_text()
+        (via_at,) = _points(pcb, "via-a")
+        assert _points(pcb, "trk-b")[0] == via_at
+        assert _measure_pair(pcb, "trk-a", "via-a") >= 0.175
+
+    def test_saved_coordinates_keep_four_decimals(self, tmp_path: Path):
+        """Coordinates above 100 mm are not rounded to the micron on save."""
+        copper = """  (segment (start 100.0001 100) (end 104.0001 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (locked yes) (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        repairer = ClearanceRepairer(pcb)
+        result = repairer.repair_from_report(_report_at(100.5, 0.16), max_displacement=0.5)
+        repairer.save()
+        assert result.repaired == 1
+        (sx, _), (ex, _) = _points(pcb, "trk-a")
+        assert (sx, ex) == (100.0001, 104.0001)
+        assert _measure_pair(pcb, "trk-a", "via-a") == pytest.approx(
+            result.nudges[0].new_clearance_mm, abs=1e-9
+        )
+
+
+class TestRepairClearanceCliHonest6434:
+    """CLI end to end: exit 0 only when the output really is clear."""
+
+    def _run(self, tmp_path: Path, copper: str, *extra: str) -> tuple[int, Path]:
+        pcb = _write_honest_board(tmp_path, copper)
+        report = tmp_path / "kc.json"
+        report.write_text(_kicad_cli_report(0.175, 0.16, _TRACK_VIA_ITEMS))
+        out = tmp_path / "out" / "honest.kicad_pcb"
+        out.parent.mkdir()
+        code = main([str(pcb), "--drc-report", str(report), "-o", str(out), "--quiet", *extra])
+        return code, out
+
+    def _kct_check_errors(self, board: Path, project: Path) -> list:
+        from kicad_tools.cli.check_cmd import build_check_rule_set, run_check_rule_set
+        from kicad_tools.schema.pcb import PCB
+
+        rule_set = build_check_rule_set(project, manufacturer="jlcpcb", pcb=PCB.load(board))
+        results = run_check_rule_set(rule_set)
+        return [
+            v
+            for v in results.violations
+            if v.severity == "error"
+            and (v.rule_id.startswith("clearance") or v.rule_id == "netclass_clearance_copper")
+        ]
+
+    def test_exit_zero_and_kct_check_agrees(self, tmp_path: Path):
+        code, out = self._run(tmp_path, _TRACK_VIA_COPPER)
+        assert code == 0
+        project = tmp_path / "honest.kicad_pcb"
+        # Before: kct check sees the class violation; after: nothing.
+        assert self._kct_check_errors(project, project)
+        assert self._kct_check_errors(out, project) == []
+
+    def test_unrepairable_pair_exits_nonzero(self, tmp_path: Path, capsys):
+        copper = """  (via (at 100 100) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "end-1"))
+  (via (at 104 100) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "end-2"))
+  (segment (start 100 100) (end 104 100) (width 0.18) (layer "F.Cu") (net 1) (uuid "trk-a"))
+  (via (locked yes) (at 102 100.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-a"))
+"""
+        pcb = _write_honest_board(tmp_path, copper)
+        report = tmp_path / "kc.json"
+        report.write_text(_kicad_cli_report(0.175, 0.16, _TRACK_VIA_ITEMS))
+        code = main([str(pcb), "--drc-report", str(report), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert code == 1
+        assert data["repaired"] == 0
+        assert len(data["unrepaired"]) == 1
+        assert data["unrepaired"][0]["items"][1].startswith("Via [P3V3]")
+
+    @pytest.mark.skipif(
+        __import__("kicad_tools.cli.runner", fromlist=["find_kicad_cli"]).find_kicad_cli() is None,
+        reason="kicad-cli not installed",
+    )
+    def test_kicad_cli_agrees(self, tmp_path: Path):
+        from kicad_tools.cli.runner import run_drc
+
+        code, out = self._run(tmp_path, _TRACK_VIA_COPPER)
+        assert code == 0
+        for suffix in (".kicad_pro",):
+            (out.parent / f"honest{suffix}").write_text((tmp_path / f"honest{suffix}").read_text())
+
+        def clearance_errors(board: Path) -> int:
+            result = run_drc(board, schematic_parity=False, all_track_errors=True)
+            assert result.success and result.output_path is not None
+            data = json.loads(result.output_path.read_text())
+            result.output_path.unlink()
+            return sum(
+                1
+                for v in data["violations"]
+                if v["type"] == "clearance" and v["severity"] == "error"
+            )
+
+        assert clearance_errors(tmp_path / "honest.kicad_pcb") == 1
+        assert clearance_errors(out) == 0
+
+
+def test_local_reroute_keeps_name_only_net(tmp_path: Path):
+    """KiCad 10 boards without a net table: rerouted copper keeps its net (#6434).
+
+    The rerouter resolved ``(net "GND")`` to net 0 (no table to look it up in)
+    and wrote ``(net 0)`` -- copper with no net, shorting whatever it touched,
+    which the old accounting counted as a repair.
+    """
+    pcb_file = tmp_path / "kicad10.kicad_pcb"
+    pcb_file.write_text(
+        """(kicad_pcb (version 20260206) (generator "pcbnew") (generator_version "10.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "GND") (uuid "v1"))
+  (via (at 102 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "GND") (uuid "v2"))
+  (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg"))
+  (via (locked yes) (at 101 100.575) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "VCC") (uuid "obs"))
+)
+"""
+    )
+    report = DRCReport(
+        source_file="test",
+        created_at=None,
+        pcb_name="test",
+        violations=[
+            DRCViolation(
+                type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                type_str="clearance",
+                severity=Severity.ERROR,
+                message="Clearance violation (clearance 0.2000 mm; actual 0.0500 mm)",
+                locations=[
+                    Location(x_mm=100.0, y_mm=100.0, layer="F.Cu"),
+                    Location(x_mm=101.0, y_mm=100.575, layer="F.Cu"),
+                ],
+                items=["Track [GND] on F.Cu, length 2.0000 mm", "Via [VCC] on F.Cu - B.Cu"],
+                nets=["GND", "VCC"],
+                required_value_mm=0.2,
+                actual_value_mm=0.05,
+                item_uuids=["seg", "obs"],
+            )
+        ],
+    )
+    repairer = ClearanceRepairer(pcb_file)
+    result = repairer.repair_from_report(report, max_displacement=0.5, local_reroute=True)
+    assert result.local_rerouted == 1
+    assert result.repaired == 1
+    repairer.save()
+    text = pcb_file.read_text()
+    assert "(net 0)" not in text
+    segments = ClearanceRepairer(pcb_file).doc.find_all("segment")
+    assert len(segments) > 1
+    assert {str(s.find("net").get_first_atom()) for s in segments} == {"GND"}

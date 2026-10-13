@@ -510,6 +510,16 @@ class RipupCycleGuard:
       plain commit (every blocker re-landed) protects nothing -- if a blocker
       later fails for some other reason it may still rip the victim, bounded
       by the repeat guard.
+
+    Issue #6363 adds the relief rescue (``Autorouter._relief_rescue``), which
+    picks its blockers by probe, so the set it rips changes on every call and
+    a set-keyed count never repeats.  Relief is counted per *member* instead:
+    each rolled-back relief for ``victim`` charges every blocker it ripped,
+    and a later relief whose probe needs a blocker charged
+    :attr:`max_repeats` times is refused.  Only a rescue that ripped
+    something and rolled back is charged.  The per-net relief cap
+    (:meth:`admit_relief`) counts nested depth-1 rescues too.  The pair
+    counter, likewise, is charged only when the rip-up ripped something.
     """
 
     max_repeats: int = MAX_PAIR_RIPUPS
@@ -521,6 +531,61 @@ class RipupCycleGuard:
     trades: list[tuple[int, tuple[int, ...]]] = field(default_factory=list)
     outcomes: list[Any] = field(default_factory=list)
 
+    # -- Relief rescue (issue #6363) ----------------------------------------
+    relief_attempts: dict[int, int] = field(default_factory=dict)
+    """``net -> relief rescues started for it``, nested depth-1 rescues
+    included.  The negotiated loop's per-net relief cap reads this dict."""
+
+    max_relief_attempts: int | None = None
+    """Per-net relief cap (``None``: unbounded).  Set by the negotiated loop."""
+
+    relief_member_counts: dict[tuple[int, int], int] = field(default_factory=dict)
+    """``(victim, blocker) -> relief rescues for victim that ripped blocker and
+    then rolled back``.  Keyed per *member*, not per set: relief picks its
+    blockers by probe, so its set differs from call to call (board 05's EN_C
+    ripped three different sets that all held DRIVER_SLEEP, PWM_C, RUN and
+    STATUS_LED)."""
+
+    relief_refusals: list[tuple[int, frozenset[int]]] = field(default_factory=list)
+    relief_capped: list[int] = field(default_factory=list)
+    """Nets whose (nested) relief rescue was skipped by the per-net cap."""
+
+    def admit_relief(self, net: int) -> bool:
+        """Charge one relief attempt for ``net``; ``False`` once the cap is hit.
+
+        Both the top-level relief sites and the depth-1 nested rescues go
+        through here, so a cycle cannot escape the cap through nesting.
+        """
+        count = self.relief_attempts.get(net, 0)
+        if self.max_relief_attempts is not None and count >= self.max_relief_attempts:
+            return False
+        self.relief_attempts[net] = count + 1
+        return True
+
+    def relief_exhausted(self, victim: int, blockers: Collection[int]) -> frozenset[int]:
+        """``blockers`` that rolled-back reliefs for ``victim`` already ripped
+        :attr:`max_repeats` times.  A relief round that needs any of them is
+        refused: the probe treats their copper as soft again, so ripping
+        the rest cannot route around them."""
+        return frozenset(
+            int(b)
+            for b in blockers
+            if self.relief_member_counts.get((int(victim), int(b)), 0) >= self.max_repeats
+        )
+
+    def refuse_relief(self, victim: int, blockers: Collection[int]) -> None:
+        self.relief_refusals.append((int(victim), frozenset(int(b) for b in blockers)))
+
+    def charge_relief_rollback(self, victim: int, ripped: Collection[int]) -> None:
+        """Count a relief for ``victim`` that ripped ``ripped`` and rolled back.
+
+        A relief that ripped nothing (no relief path, blocked only by
+        non-rippable copper) charges nothing; neither does a committed one.
+        """
+        for blocker in ripped:
+            key = (int(victim), int(blocker))
+            self.relief_member_counts[key] = self.relief_member_counts.get(key, 0) + 1
+
     def protected_from(self, failed_net: int) -> set[int]:
         """Victims ``failed_net`` may not rip (it was displaced for them)."""
         return {victim for victim, by in self.protected.items() if failed_net in by}
@@ -528,7 +593,8 @@ class RipupCycleGuard:
     def plan(self, failed_net: int, blockers: Collection[int]) -> RipupPlan:
         """Decide what to do for ``failed_net`` and its named ``blockers``.
 
-        Does not charge the pair; call :meth:`charge` once the rip happens.
+        Does not charge the pair; call :meth:`charge` once a rip actually
+        happened (issue #6363: a ``budget_exhausted`` no-op is not charged).
         """
         named = {int(b) for b in blockers if int(b) != int(failed_net)}
         held_back = dict.fromkeys(named & self.protected_from(failed_net), "protected victim")
@@ -563,8 +629,13 @@ class RipupCycleGuard:
         return max(self.pair_counts.values(), default=0)
 
     def summary_line(self) -> str:
+        relief_max = max(self.relief_member_counts.values(), default=0)
         return (
             f"Rip-up cycle guard: {len(self.pair_counts)} (victim, blocker set) pair(s), "
             f"max {self.max_pair_count()} rip(s) per pair, {len(self.trades)} trade(s), "
-            f"{len(self.refusals)} repeat(s) refused"
+            f"{len(self.refusals)} repeat(s) refused; relief: "
+            f"{sum(self.relief_attempts.values())} rescue(s), "
+            f"{len(self.relief_member_counts)} (victim, blocker) member(s) rolled back, "
+            f"max {relief_max} per member, {len(self.relief_refusals)} refused, "
+            f"{len(self.relief_capped)} nested capped"
         )

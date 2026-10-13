@@ -322,36 +322,6 @@ OpenAI-side mapping is precisely the reconciliation flagged below. Reasoning
 effort maps to a config override (`-c model_reasoning_effort=<v>`) because
 `codex exec` has no `--effort` flag. Full tier resolution for Codex is Phase 4.
 
-**Complexity tier map (`sweep.tierModels`, issue #4238).** The higher-level
-`sweep.tierModels[<runtime>][<tier>]` map (Curator marker → logical tier →
-model, `mechanical`/`routine`/`complex`) is exactly this per-runtime table. It is
-resolved **entirely orchestrator-side** — the `/loom:sweep` skill runs
-`./.loom/scripts/resolve-tier-model.sh <issue> <runtime>`, which delegates the
-config lookup to `loom-daemon resolve-model --tier` (`resolve_tier_model` in
-`loom-daemon/src/script_helpers/model_tiers.rs`) and then the alias→ID step to
-`resolve-model.sh`. **The Rust daemon does not
-participate**: it never reads the complexity marker — it dispatches with an
-explicit/inherited `--model` and forwards nothing else — so there is no daemon
-counterpart to keep in lockstep for the tier map, and its `sweep.modelAliases`
-resolution (`read_model_aliases` / `resolve_dispatch_model`) is untouched by
-#4238. The two-language divergence flagged below is therefore **not widened** by
-the tier map; when the adapter contract unifies the alias resolvers, the tier
-map layers cleanly on top of whichever single-source resolver wins.
-
-**Optimization profile (`sweep.optimization`, issue #4238 Phase B).** The
-`cost`/`speed`/`balanced` policy switch that selects a preset over the tier map
-above (see `model-selection.md` "Optimization profile switch") is, for the same
-reason, **also orchestrator-side only**: `resolve_optimization_profile` /
-`optimization_preset` live in `loom-daemon/src/script_helpers/model_tiers.rs`
-alongside `resolve_tier_model`, reached through the same `resolve-tier-model.sh`
-call —
-there is no separate dispatch path to keep in lockstep. It does not touch
-`sweep_registry.rs` for the same reason the tier map does not: the Rust daemon's
-`resolve_dispatch_model` only ever resolves `sweep.modelAliases` for its own
-`--model` forwarding and has no participation in the Builder-only tier-2.5
-resolution chain the profile extends. Verified against `loom-daemon/src/sweep_registry.rs` —
-no `tierModels`/`optimization` schema validation exists there to keep in lockstep.
-
 > **Open reconciliation item — do not resolve here.** `sweep.modelAliases` has a
 > known **Rust/Python divergence**: the Rust dispatch resolver and the Python
 > `model_tiers` resolver do not treat the alias map identically (the Rust side is
@@ -370,7 +340,11 @@ refusal/rejection handling.
 
 **Reference implementation:** `defaults/scripts/lib/classify-error.sh`. It is
 **exit-code-first** (a clean `exit 0` is `SUCCESS` regardless of output content,
-the #3233 fix) and only inspects output on a genuine non-zero exit. Its category
+the #3233 fix) and only inspects output on a genuine non-zero exit. Since
+#11208 the same classifier also ships natively as `loom-daemon classify-error`;
+the shell library delegates when a daemon binary resolves and keeps its tables
+as the no-daemon fallback, with the two renderings pinned equal by
+`test-classify-error.sh`. Its category
 set:
 
 | Category | Meaning | Dispatcher action |
@@ -1568,8 +1542,7 @@ what the resolver is supposed to do.
     "preference": ["claude", "codex", {"runtime": "opencode", "modelProfile": "zai-metered"}],
     "backstopCeiling": {
       "maxConcurrent": 2,       // most concurrent metered dispatches this HOST may hold
-      "appliesFrom": 2,         // first tier the ceiling governs (default 1)
-      "minComplexity": "complex" // optional: least complexity tier allowed onto the metered tap
+      "appliesFrom": 2          // first tier the ceiling governs (default 1)
     }
   }
 }
@@ -1579,7 +1552,6 @@ what the resolver is supposed to do.
 |---|---|
 | `maxConcurrent` | Most concurrent governed dispatches this host may hold. Absent ⇒ unbounded (no state is read or written). `0` switches the metered tier off without editing the preference list. Overridden by `LOOM_BACKSTOP_MAX_CONCURRENT` (`env > config > default`). |
 | `appliesFrom` | 0-based index of the first tier the ceiling governs; default `1`, i.e. every tap the walk *falls through* to. A fleet whose tier 1 is another flat-rate subscription raises this so the bound starts at the tier that actually costs per token. `0` is rejected — tier 0 is the subscription the fleet already pays for, and bounding it inverts the feature's purpose. |
-| `minComplexity` | `mechanical` \| `routine` \| `complex`. Work below this stratum never reaches a governed tap. An unmarked issue counts as `routine`, the daemon's existing default for a missing `<!-- loom:complexity= -->` marker. Absent ⇒ every tier is eligible. |
 
 | Guarantee | Meaning |
 |---|---|
@@ -1588,7 +1560,7 @@ what the resolver is supposed to do.
 | **A higher tap that recovers still wins** | The ceiling governs only the tiers it is configured for. While tier 0 can serve the work it is chosen without the ceiling being consulted at all, so a pinned backstop never throttles subscription capacity. |
 | **A spend ceiling, not a cooldown** | Deliberately *not* modelled as a bad-mark/cooldown (the shape the token pools use): a cooldown says "temporarily unusable, will heal", which is false of a metered endpoint. This says "this host may hold at most N metered dispatches at once", which is true of one. |
 | **Fails closed on an unknown count** | Unlike `api_keys_pool::inflight`'s degrade-open politeness throttle, an unreadable/unwritable lease store yields `ceiling-unknown` and a skip. An unknown metered-concurrency count must never read as "there is room" — guessing wrong costs real money, while the fallback costs only throughput. |
-| **Malformed config fails closed** | An unknown key, a wrong type, a bad tier name, or `appliesFrom: 0` is an error surfaced by `loom-daemon validate` and by the launch itself — never a silently dropped bound. |
+| **Malformed config fails closed** | An unknown key (including the retired complexity-tier filter key, which no longer exists: delete it), a wrong type, or `appliesFrom: 0` is an error surfaced by `loom-daemon validate` and by the launch itself — never a silently dropped bound. |
 
 **Per-host, so the state is machine-wide.** Leases live at
 `~/.loom/leases/backstop/` (override: `LOOM_BACKSTOP_LEASE_DIR`), not under a
@@ -1948,9 +1920,42 @@ stays env-passthrough even with the flag on.
 - `header` — `authorization-bearer` (Claude Code's `ANTHROPIC_AUTH_TOKEN`
   shape, and most OpenAI-compatible endpoints) or `x-api-key` (Anthropic's
   native API-key header).
-- `baseUrlEnv` — the environment variables set inside the container to the
-  proxy's own base URL. A harness that reads its base URL from injected
-  *configuration* rather than the environment cannot be proxied yet.
+- `baseUrlEnv` — the environment variables set to the proxy's own base URL.
+  Use this when the harness reads its base URL from the environment
+  (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, …).
+- `baseUrlConfig` — for a harness that reads its base URL from injected
+  *configuration* instead: the provider-config option key that receives the
+  proxy's base URL (OpenCode's `provider.<id>.options.baseURL`, so
+  `"baseUrlConfig": "baseURL"`). The launcher patches that one option into
+  the `OPENCODE_CONFIG_CONTENT` it provisions for the launch. OpenCode is
+  the only harness with a config contract this writes, so the field is
+  **inert on any other runtime** — dropped from the selection at resolution,
+  so a profile may declare it for its OpenCode binding while its other
+  bindings keep launching. It is also refused on an armed **contained**
+  launch: that config is provisioned inside the container, where the
+  host-side launcher cannot patch it, so a contained OpenCode launch is
+  re-pointed with `baseUrlEnv`.
+
+The bundled `zai-flash` profile proxies Z.ai's coding-plan endpoint through
+the OpenCode harness this way (`upstream: https://api.z.ai/api/coding/paas/v4`,
+`authorization-bearer`, `baseUrlConfig: baseURL`), default off until an
+operator turns `credentialProxy` on (issue #11300). That profile also binds
+`pi`, which is intentionally **unproxied** in this slice: its block declares
+no `baseUrlEnv`, so with the flag on a `pi` launch of it fails closed —
+arming a proxy the harness would not follow would send the placeholder to
+the real upstream — and with the flag off it launches unchanged.
+
+**Uncontained native launches.** The same substitution is available without
+containment, on the same switch and the same per-profile opt-in: a native
+(pi/opencode/kimi) launch on the host arms the listener bound to
+**loopback only** — reachable by the harness, and no other address is ever
+needed — and the launcher stays alive as the harness's parent for exactly
+the launch's lifetime (the native path's one no-`exec` shape, mirroring the
+container path below). The credential ladder runs once, and the credential
+the proxy holds is the one handed to the harness command, so pool selection
+cannot land on a different account between the two. A profile routed
+through the LLM gateway and a proxy-declaring profile are refused together:
+both rewrite where the provider is reached, so only one may be active.
 
 **What the proxy enforces.**
 
@@ -1991,7 +1996,9 @@ proxied dispatch masks it with an empty, read-only tmpfs. A shared pool
 listener has to outlive the `docker run`, so the dispatcher stays alive as its
 parent and the placeholder's lifetime is exactly the container's. The child
 keeps the dispatcher's process group, so existing process-group teardown reaps
-both and `--rm` still removes the container.
+both and `--rm` still removes the container. (The uncontained native path
+above shares this shape; it is the native launch path's one no-`exec`
+dispatch.)
 
 **Fails closed, never falls back.** Every error in the substitution path is an
 error. A proxy that quietly degraded to env-passthrough would be
@@ -2173,9 +2180,21 @@ drains it to the OTLP queue and retires the file. Journals are written only
 when the workspace exports traces (an `otlp` exporter is configured);
 otherwise observe records are dropped.
 
-Not in this slice (tracked on #11300): marking the pool from the live 429,
-loopback proxying of uncontained launches, and injecting the OpenCode base URL
-through `XDG_CONFIG_HOME`.
+**Live seat marking.** A 429 or quota-exhaustion response is classified at the
+proxy and bad-marks the launch's pool account at once (`bad_mark_at_proxy`),
+before the harness's own retry ladder runs out. The mark is model-class-scoped,
+its cooldown comes from the response's reset text or the account's configured
+window, and a per-launch guard only ever escalates (a bare 429, then a quota
+exhaustion), so one launch writes each level once. A launch with no pool
+account (an explicit env credential) is never marked. See
+[`token-pool.md` § "API-key account pool"](token-pool.md#api-key-account-pool-for-native-harnesses-zaiopencode-pi-kimi--84018563).
+
+**Uncontained native launches and OpenCode.** Slice 3 shipped the loopback-only
+proxy for uncontained native launches and the `credentialProxy.baseUrlConfig`
+injection of the proxy URL into the launch's provisioned OpenCode config (see
+the sections above). The remaining #11300 item is operator-run: a 48 h canary on
+one seat, checking the Z.ai Plan Overview page for a risk notice, before any
+fleet rollout.
 
 ### Containerized dispatch mode for Claude sweeps (issue #7429, epic #6896 Phase 3)
 

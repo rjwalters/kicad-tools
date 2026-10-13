@@ -96,7 +96,7 @@ the siblings below. Resolve a citation here, in one hop:
 |---|---|
 | "Arguments", "Mode A/B/C", "Optional flags", "Validation rules", "Build-everything sentinel (`all`)", "Aggressive candidate taxonomy", "GraphQL-exhaustion fallback", "Resolve the repository locally", "Forge write failure diagnosis" | `sweep-arguments.md` |
 | "Examples" | `sweep-examples.md` |
-| "Execution Model", "Only Builders parallelize", "Subagent dispatch is async-only", "ending your turn IS the kill signal", "One level deep", "Model selection for subagent dispatch", "Model escalation on Judge rejection", "Tier 2.5 — complexity marker", "Credit-exhaustion fallback", "Spend-limit fallback", "Doctor-cycle cap" (incl. "Distinct-defect exception"), "Model-cost experiment mode", "Cached forge reads (`gh-cached`)" | `sweep-execution-model.md` |
+| "Execution Model", "Only Builders parallelize", "Subagent dispatch is async-only", "ending your turn IS the kill signal", "One level deep", "Model selection for subagent dispatch", "Model escalation on Judge rejection", "Credit-exhaustion fallback", "Spend-limit fallback", "Doctor-cycle cap" (incl. "Distinct-defect exception"), "Model-cost experiment mode", "Cached forge reads (`gh-cached`)" | `sweep-execution-model.md` |
 | "Sweep Run Identity + Peer-`/loom:sweep` Detection", "Step 0a", "Step 0b", "Stage -1: Backend detection", "Resolve auto wave size", "The daemon-dispatch path" | `sweep-backend-detection.md` |
 | "Overlap-aware wave partitioning", "Capability-aware `loom:operator-mechanical` lane", "Operator-gate advisory scan" | `sweep-scheduling-signals.md` |
 | "0. Dry-run gate" | `sweep-dry-run.md` |

@@ -991,6 +991,17 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # and kicad-cli agree on pad shapes.  A new audit of kept copper only:
         # the routed-copper quadrants of ``validate_routes`` are unchanged.
         "router/io.py",
+        # Issue #6434 (with #6431): ``kct fix-drc``'s clearance repairer.
+        # ``drc/repair_clearance.py`` builds ``KSegment`` / ``KVia`` / ``KPad``
+        # (``make_pad``) shapes for board copper and asks ``copper_gap`` to
+        # re-measure every pair before and after a nudge -- whether the move
+        # cleared the target, broke clearance to a third item, or severed a
+        # same-net joint -- so the repairer judges a gap with the same kernel
+        # ``kct check``'s clearance family reports it with, and cannot call a
+        # pair fixed that the checker still flags.  A new consumer, not a
+        # numbered epic group, so no ``MIGRATED_GROUPS`` row (same as
+        # ``router/foreign_copper.py`` and ``panel/vscore.py``).
+        "drc/repair_clearance.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.

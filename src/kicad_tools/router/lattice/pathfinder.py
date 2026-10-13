@@ -527,14 +527,38 @@ class LatticePathfinder:
         edge masks, free-segment and via checks, the coupled fat agent --
         keeps that pad's own side of the pair.  ``None`` (no floors) leaves
         the model byte-identical.
+
+        Issue #6449: only DESIGNER-authored minima grow a pad mask.  The
+        router's own class clearances also live in ``net_clearance_floors``
+        since #6427, but the pad side of a router-class pair is enforced on
+        the negotiated copper by :mod:`.class_pad_repair` (#6395): growing the
+        masks by it moves tracks by whole lattice rows and stranded board 05's
+        ``GND_SENSE`` at ``U2.6`` (32/33).  The loader records the designer
+        subset as ``rules.designer_clearance_floors``; rules built elsewhere
+        (``None``) treat every floor as designer-authored, as before.
         """
-        floors = self.rules.net_clearance_floors
-        if not floors and not any(p.authored_clearance > 0.0 for p in self.pads):
-            return None
         from ..authored_clearance import pad_authored_floor
 
         base = self.rules.trace_clearance
-        return [max(0.0, pad_authored_floor(p, floors) - base) for p in self.pads]
+        designer = self.rules.designer_clearance_floors
+        if designer is None:
+            floors = self.rules.net_clearance_floors
+            if not floors and not any(p.authored_clearance > 0.0 for p in self.pads):
+                return None
+            return [max(0.0, pad_authored_floor(p, floors) - base) for p in self.pads]
+        by_name = self.rules.designer_clearance_floors_by_name
+        values = [
+            max(
+                designer.get(p.net, 0.0),
+                # A neutralised pad (net 0) keeps its designer minimum by name,
+                # exactly what the #6243 loader stored as ``authored_clearance``.
+                by_name.get(p.net_name or "", 0.0) if p.net == 0 else 0.0,
+            )
+            for p in self.pads
+        ]
+        if not any(v > 0.0 for v in values):
+            return None
+        return [max(0.0, v - base) for v in values]
 
     def _fixed_clearance_for(
         self, net: int, clearances: dict[int, float] | None, item_floor: float = 0.0

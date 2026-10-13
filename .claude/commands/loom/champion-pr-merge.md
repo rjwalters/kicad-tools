@@ -1924,7 +1924,7 @@ esac
 [ "$MERGE_RC" -eq 0 ] && { LOOM_AUTO_MERGE_TIMEOUT=420 \
   ./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto --redate-stale-checks || MERGE_RC=$?; }
 
-if [ "$MERGE_RC" -eq 7 ] || [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ] || [ "$MERGE_RC" -eq 6 ]; then
+if [ "$MERGE_RC" -eq 7 ] || [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ]; then
   # Not failures: nothing merged, PR stays approved. See "exit codes 3-7" below.
   echo "PR #$PR_NUMBER not merged this pass (exit $MERGE_RC) — re-queuing instead of failing"
 elif [ "$MERGE_RC" -ne 0 ]; then
@@ -2110,8 +2110,8 @@ the out-of-band step actually performed, and against which tree"**.
 - **Form**: the full HTML-comment shape with a **hex** SHA of 7–40 characters,
   `<!-- loom:ac-verified sha=<40-char or abbreviated head> -->`. Anchoring to the
   complete comment form is what stops prose that merely quotes the syntax with a
-  `<head>` placeholder from reading as a live marker (the #4840 discipline
-  `require-complexity-marker.sh` and `extract-capability-markers.sh` both use).
+  `<head>` placeholder from reading as a live marker (the #4840 anchoring rule
+  `extract-capability-markers.sh` also follows).
 - **What it must accompany**: prose saying what was run and what was observed —
   the same requirement a verdict comment carries. The marker is the machine-
   readable half, not the whole claim. **Do not stamp it for a step you did not
@@ -2260,6 +2260,13 @@ fi
 for blocked in $BLOCKED_ISSUES; do
   echo "Checking if #$blocked can be unblocked..."
 
+  # Permanent block (#8742), before the cycle walk: guide.md's
+  # has_permanent_block sources (trusted comments + trusted-author body).
+  PB=$(loom-daemon forge trusted-comments --fetch "$blocked" --with-body 2>/dev/null) || continue
+  if jq -e 'any(.[]; (.body // "") | test("(^|\n)[ \t]*<!-- loom:permanent-block -->[ \t\r]*(\n|$)"))' <<<"$PB" >/dev/null; then
+    echo "  #$blocked: permanent block, skipped"; continue
+  fi
+
   # Get the issue body to check ALL dependencies
   BLOCKED_BODY=$("$GH_READ" issue view "$blocked" --json body --jq '.body')
 
@@ -2357,10 +2364,8 @@ done
 the issue named in `Blocked by: #N` closed yet?". That question has no reachable
 answer when the declared dependencies form a **cycle** — A waits on B, B waits on
 A — so the loop above re-derives `Still blocked` on every pass, forever, and
-nothing in either issue's text makes the cycle visible. The incident that motivated
-this ran for weeks across two repos (an epic in one repo blocking a dependent in
-another, whose own output the epic's last remaining phase needed) and was only
-found by an operator walking 15 child issues by hand.
+nothing in either issue's text makes the cycle visible. The motivating incident
+ran for weeks across two repos before an operator found it by hand.
 
 **`./.loom/scripts/detect-dependency-cycle.sh --issue <N> [--repo <owner/repo>]`**
 closes that gap. It walks the same `(Blocked by|Depends on|Requires)` vocabulary
@@ -2373,10 +2378,10 @@ than re-deriving anything yourself.
 
 | Property | How the script guarantees it |
 |---|---|
-| **Bounded cost** | Hard caps on hops (`--max-depth`, default 4), distinct issues fetched (`--max-nodes`, default 25) and edges examined (`--max-steps`, default 500); each issue is fetched at most once per run; reads go through `gh-cached`. A bound that fires prints `SEARCH_TRUNCATED:` so `NO_CYCLE` is never mistaken for proof. |
-| **Not on every pass** | Two gates precede it. (1) It is invoked **only** on the `ALL_RESOLVED=false` branch above — i.e. only once the cheap single-hop check has already concluded "still blocked", so an issue that unblocks normally never pays for a walk. (2) An issue already carrying `loom:operator-only` is skipped outright — the cycle was surfaced on an earlier pass and a human owns it, so one cached label read replaces the whole walk from then on. |
+| **Bounded cost** | Hard caps on hops (`--max-depth`, default 4), distinct issues fetched (`--max-nodes`, default 25) and edges examined (`--max-steps`, default 500); each issue is fetched at most once per run; reads go through `gh-cached`. A fired bound prints `SEARCH_TRUNCATED:`. |
+| **Not on every pass** | Two gates precede it. (1) It is invoked **only** on the `ALL_RESOLVED=false` branch above — i.e. only once the cheap single-hop check has already concluded "still blocked",. (2) An issue already carrying `loom:operator-only` is skipped outright — a human already owns it. |
 | **Surfaced, not silent** | `--report` posts **one** comment naming every node in the cycle and adds `loom:operator-only`. Breaking a cycle means deciding which declared edge is wrong or which side ships a partial first — a human decision Champion is not entitled to make. |
-| **Idempotent** | The comment carries `<!-- champion:dep-cycle:<fingerprint> -->`, fingerprinted on the cycle's **node set** (sorted), so the same cycle discovered from either side collapses to one identity and is commented once; a genuinely different cycle still gets its own comment. Same marker-and-skip shape as `champion-issue-promo.md`'s body-hash idempotency. |
+| **Idempotent** | The comment carries `<!-- champion:dep-cycle:<fingerprint> -->`, fingerprinted on the cycle's **node set** (sorted), so the same cycle discovered from either side collapses to one identity and is commented once; a genuinely different cycle still gets its own comment. |
 | **Fail-safe** | A `CLOSED` node ends that branch of the walk (a resolved edge cannot deadlock anyone), an unreadable cross-repo issue is reported as `UNREADABLE:` rather than crashing, and without `--report` the script is strictly read-only. |
 
 Do **not** remove `loom:blocked` when a cycle is found — the issue genuinely is
@@ -3174,7 +3179,7 @@ This PR met all safety criteria but the merge operation failed. A human will nee
 *Automated by Champion role*"
 ```
 
-### Exception: exit codes 3-7 — not merged, re-queue, not a failure (#5579, #8508, #8896, #10167, #10256)
+### Exception: exit codes 3-7 — not merged, re-queue, not a failure (#5579, #8508, #8896, #10256)
 
 Never the failure exit **1**; each means "the merge did not happen":
 
@@ -3185,7 +3190,6 @@ Never the failure exit **1**; each means "the merge did not happen":
 - **5** — `--auto`'s bounded settle-wait expired; no required check went red.
   **Do not "fix" a recurring 5 by raising `LOOM_AUTO_MERGE_TIMEOUT`** (pinned
   under Step 3's own timeout, #9096); re-queuing is cheap.
-- **6** — another PR holds the base's chain-head merge lock: a bounded defer.
 - **7** — `merge-pr.sh` ran: a sequencing hold (`LOOM-SEQUENCED-HOLD`,
   #11330), never a stall. Or Step 3's: `merge-queue step` gave no direct
   verdict, so `merge-pr.sh` never ran (#10256). QUEUED / DROPPED / HANDED-OFF /

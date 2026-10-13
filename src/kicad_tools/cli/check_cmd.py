@@ -2125,18 +2125,11 @@ def main(argv: list[str] | None = None) -> int:
     declared_ampacity_targets: dict[str, float] = {}
     ampacity_resolution = None
     if net_class_map is not None:
-        from kicad_tools.router.net_names import resolve_net_class_map_keys
-
         for key, nc in net_class_map.items():
             target = getattr(nc, "target_ampacity", None)
             if target is not None:
                 declared_ampacity_targets[key] = float(target)
-        board_net_names = [net.name for net in pcb.nets.values() if net.name]
-        ampacity_resolution = resolve_net_class_map_keys(net_class_map.keys(), board_net_names)
-        net_class_map = {
-            board_net: net_class_map[user_key]
-            for board_net, user_key in ampacity_resolution.resolved.items()
-        }
+        net_class_map, ampacity_resolution = resolve_net_class_map_for_board(net_class_map, pcb)
 
     # Issue #4326: resolve the ampacity gate's copper weights (outer / inner
     # oz).  Precedence, per layer class: an EXPLICIT ``--copper`` (keyed >
@@ -2163,16 +2156,7 @@ def main(argv: list[str] | None = None) -> int:
     preset_copper_oz = cli_copper_outer if cli_copper_outer is not None else 1.0
 
     # Tier 1: derive copper weights from the board's declared stackup.
-    stackup_outer: float | None = None
-    stackup_inner: float | None = None
-    try:
-        from kicad_tools.physics.stackup import Stackup
-
-        _derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
-        if _derived is not None:
-            stackup_outer, stackup_inner = _derived
-    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
-        stackup_outer = stackup_inner = None
+    stackup_outer, stackup_inner = stackup_copper_oz(pcb)
 
     # Per-class resolution: explicit --copper wins, else the declared
     # stackup, else None (leave the profile default in place).
@@ -2774,6 +2758,199 @@ def _emit_drc_sidecars(
 
     joined = ", ".join(str(p) for p in written)
     print(f"DRC-constraint sidecars updated: {joined}", file=sys.stderr)
+
+
+def resolve_net_class_map_for_board(net_class_map: dict, pcb: PCB) -> tuple[dict, object]:
+    """Rekey a loaded net-class map onto the board's actual net names.
+
+    Issue #4321: a hand-authored map's bare keys (no hierarchical ``/``
+    prefix) must land on the board's segment net names before
+    :class:`DRCChecker` sees them.  Shared by ``kct check`` and every
+    in-process caller of its rule set (Issue #6431).
+
+    Returns:
+        ``(rekeyed_map, resolution)`` -- the resolution records which user
+        keys matched, for the unevaluated-ampacity warning.
+    """
+    from kicad_tools.router.net_names import resolve_net_class_map_keys
+
+    board_net_names = [net.name for net in pcb.nets.values() if net.name]
+    resolution = resolve_net_class_map_keys(net_class_map.keys(), board_net_names)
+    rekeyed = {
+        board_net: net_class_map[user_key] for board_net, user_key in resolution.resolved.items()
+    }
+    return rekeyed, resolution
+
+
+def stackup_copper_oz(pcb: PCB) -> tuple[float | None, float | None]:
+    """Outer/inner copper weight (oz) from the board's declared stackup, if any."""
+    try:
+        from kicad_tools.physics.stackup import Stackup
+
+        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
+        return (None, None)
+    if derived is None:
+        return (None, None)
+    return derived
+
+
+@dataclass
+class CheckRuleSet:
+    """The rule set ``kct check --mfr <mfr>`` applies to a board (Issue #6431).
+
+    Built by :func:`build_check_rule_set` without going through the CLI, so
+    another command (``kct fix-drc``) can re-check a board with exactly the
+    rules ``kct check`` would use: the resolved manufacturer and layer count,
+    the auto-discovered net-class map, current-path and waiver sidecars, the
+    stackup copper weights, the reviewed fabrication-floor override, and the
+    path-dependent rules (``netclass_clearance_copper``, ``netclass_floor``)
+    that read the project file next to ``project_pcb_path``.
+    """
+
+    checker: DRCChecker
+    project_pcb_path: Path
+    manufacturer: str
+    layers: int
+    net_class_map_path: Path | None = None
+    general_waivers: object | None = None
+    notes: list[str] = field(default_factory=list)
+
+
+def build_check_rule_set(
+    project_pcb_path: Path,
+    *,
+    manufacturer: str | None = None,
+    layers: int | None = None,
+    pcb: PCB | None = None,
+) -> CheckRuleSet:
+    """Build ``kct check``'s default rule set for a board.
+
+    Args:
+        project_pcb_path: The board whose sidecars (``.kicad_pro``,
+            ``.kicad_dru``, ``net_class_map.json``, waivers, ...) define the
+            rules.  Every sidecar is discovered from this path.
+        manufacturer: ``--mfr``; ``None`` resolves it exactly like ``kct
+            check`` (``fab_profile.json`` > ``project.kct`` > ``jlcpcb``).
+        layers: ``--layers``; ``None`` uses the board's copper-layer count.
+        pcb: The geometry to check.  Defaults to loading
+            ``project_pcb_path``; pass another board (e.g. a repaired copy
+            written elsewhere) to check *its* copper under the project's
+            rules.
+
+    A sidecar that fails to load is skipped (with a note), as ``kct check``
+    does for auto-discovered sidecars.
+    """
+    from kicad_tools.manufacturers import resolve_pcb_fabrication_overrides
+
+    project_pcb_path = Path(project_pcb_path)
+    if pcb is None:
+        pcb = PCB.load(project_pcb_path)
+    notes: list[str] = []
+    effective_mfr, _mfr_notices, _mfr_source = _resolve_effective_check_mfr(
+        manufacturer, project_pcb_path
+    )
+    if layers is None:
+        detected = len(pcb.copper_layers)
+        layers = detected if detected > 0 else 2
+
+    net_class_map = None
+    ncm_path = _discover_net_class_map_sidecar(project_pcb_path)
+    if ncm_path is not None:
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        try:
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=project_pcb_path)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            notes.append(f"ignoring malformed net-class-map sidecar {ncm_path}: {exc}")
+            net_class_map = None
+            ncm_path = None
+    if net_class_map is not None:
+        net_class_map, _resolution = resolve_net_class_map_for_board(net_class_map, pcb)
+
+    from kicad_tools.validate.rules.courtyard_waivers import (
+        discover_courtyard_waivers_sidecar,
+        load_courtyard_waivers,
+    )
+
+    courtyard_waivers = None
+    cw_path = discover_courtyard_waivers_sidecar(project_pcb_path)
+    if cw_path is not None:
+        try:
+            courtyard_waivers = load_courtyard_waivers(cw_path)
+        except ValueError as exc:
+            notes.append(f"ignoring malformed courtyard-waivers sidecar {cw_path}: {exc}")
+
+    current_path_specs: list[CurrentPathSpec] = []
+    cp_path = discover_current_paths_sidecar(project_pcb_path)
+    if cp_path is not None:
+        try:
+            current_path_specs = load_current_path_specs(cp_path)
+        except (OSError, ValueError) as exc:
+            notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
+
+    copper_outer, copper_inner = stackup_copper_oz(pcb)
+    checker = DRCChecker(
+        pcb,
+        manufacturer=effective_mfr,
+        layers=layers,
+        copper_oz=1.0,
+        copper_oz_outer=copper_outer,
+        copper_oz_inner=copper_inner,
+        net_class_map=net_class_map,
+        warn_on_inactive_skew_rules=False,
+        courtyard_waivers=courtyard_waivers,
+        strict_connectivity=True,
+        current_path_specs=current_path_specs,
+    )
+    checker.design_rules, override_msg = resolve_pcb_fabrication_overrides(
+        project_pcb_path, checker.design_rules, manufacturer_id=effective_mfr
+    )
+    if override_msg is not None:
+        notes.append(override_msg)
+
+    from kicad_tools.validate.rules.waivers import discover_waivers_sidecar, load_waivers
+
+    general_waivers = None
+    gw_path = discover_waivers_sidecar(project_pcb_path)
+    if gw_path is not None:
+        try:
+            general_waivers = load_waivers(gw_path)
+        except ValueError as exc:
+            notes.append(f"ignoring malformed waivers sidecar {gw_path}: {exc}")
+
+    return CheckRuleSet(
+        checker=checker,
+        project_pcb_path=project_pcb_path,
+        manufacturer=effective_mfr,
+        layers=layers,
+        net_class_map_path=ncm_path,
+        general_waivers=general_waivers,
+        notes=notes,
+    )
+
+
+def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
+    """Run every default ``kct check`` category under ``rule_set``.
+
+    Same dispatch as the CLI (:func:`run_selected_checks`, so the
+    path-dependent rules run), with the board's waivers applied afterwards.
+    """
+    sch_path = _resolve_check_schematic(None, rule_set.project_pcb_path)
+    results = run_selected_checks(
+        rule_set.checker,
+        None,
+        set(),
+        pad_grid_auto_derive=True,
+        sch_path=sch_path,
+        pcb_path=rule_set.project_pcb_path,
+        layers=rule_set.layers,
+    )
+    if rule_set.general_waivers is not None:
+        from kicad_tools.validate.rules.waivers import apply_waivers
+
+        apply_waivers(results, rule_set.general_waivers.for_check())  # type: ignore[attr-defined]
+    return results
 
 
 def run_selected_checks(

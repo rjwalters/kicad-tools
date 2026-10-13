@@ -2657,7 +2657,6 @@ class Autorouter:
                     f"pair already ripped {plan.attempt}x this run (issue #6342)"
                 )
             return False
-        guard.charge(plan)
 
         success = neg_router.targeted_ripup(
             failed_net=failed_net,
@@ -2673,6 +2672,13 @@ class Autorouter:
             allow_trade=plan.mode == PLAN_TRADE,
         )
         outcome = getattr(neg_router, "last_ripup_outcome", None)
+        # Issue #6363: charge the pair only when the rip-up actually ripped
+        # something.  A ``budget_exhausted`` attempt (every blocker filtered
+        # by the per-net rip-up budget) touched no copper, so it must not burn
+        # one of the pair's ``MAX_PAIR_RIPUPS`` slots.  An outcome-less router
+        # (a stub) is charged, as before.
+        if outcome is None or bool(getattr(outcome, "ripped", None)):
+            guard.charge(plan)
         guard.record(outcome)
         if log is not None and outcome is not None:
             trade = ", trade allowed" if plan.mode == PLAN_TRADE else ""
@@ -11072,12 +11078,16 @@ class Autorouter:
         # costs up to one per-net A* (and a targeted rip-up on success);
         # cap attempts so a geometrically-infeasible net cannot burn the
         # wall budget re-probing the same sealed corridor every iteration.
-        relief_probe_attempts: dict[int, int] = {}
+        # Issue #6363: the dict lives on the cycle guard so the depth-1 nested
+        # rescues inside ``_relief_rescue_txn`` are charged against the same
+        # per-net cap as the top-level sites below.
+        relief_probe_attempts: dict[int, int] = ripup_guard.relief_attempts
         # ``KCT_DISABLE_RELIEF=1`` turns the #3438 relief machinery off
         # entirely (zero-overflow probe gating + last-resort rescues) --
         # a diagnostic / emergency escape hatch.
         relief_disabled = bool(os.environ.get("KCT_DISABLE_RELIEF"))
         max_relief_probes_per_net = 0 if relief_disabled else 3
+        ripup_guard.max_relief_attempts = max_relief_probes_per_net
         # Issue #3864 (M2): ``KCT_JOINT_REGION_RESOLVE=1`` switches
         # neighborhood rip-up from the legacy sequential reroute of the
         # displaced pocket nets to a JOINTLY-negotiated inner re-solve
@@ -13512,6 +13522,7 @@ class Autorouter:
                                     elapsed_str,
                                     deadline=relief_deadline,
                                     deterministic_rescue=deterministic_rescue,
+                                    guard=ripup_guard,
                                 ):
                                     relief_resolved += 1
                             if relief_attempted > 0:
@@ -13627,6 +13638,7 @@ class Autorouter:
                                         elapsed_str,
                                         deadline=relief_deadline,
                                         deterministic_rescue=deterministic_rescue,
+                                        guard=ripup_guard,
                                     ):
                                         silent_resolved += 1
                                 if silent_resolved > 0:
@@ -14013,6 +14025,8 @@ class Autorouter:
         print(f"  Successful: {successful_nets}")
         print(f"  Final overflow: {overflow}")
         print(f"  Total time: {total_elapsed:.1f}s")
+        # Issue #6363: make the #6342 guard's activity visible in the log.
+        print(f"  {ripup_guard.summary_line()}")
         if timed_out:
             print("  ⚠ Stopped due to timeout - returning best partial result")
 
@@ -14826,6 +14840,7 @@ class Autorouter:
         deadline: float | None = None,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
         txn_deadline: float | None = None,
+        guard: RipupCycleGuard | None = None,
     ) -> bool:
         """Journal-tagged entry point for :meth:`_relief_rescue_txn` (#5517).
 
@@ -14851,6 +14866,7 @@ class Autorouter:
                 deadline=deadline,
                 deterministic_rescue=deterministic_rescue,
                 txn_deadline=txn_deadline,
+                guard=guard,
             )
 
     def _relief_rescue_txn(
@@ -14867,6 +14883,7 @@ class Autorouter:
         deadline: float | None = None,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
         txn_deadline: float | None = None,
+        guard: RipupCycleGuard | None = None,
     ) -> bool:
         """Transactional relief rescue for a zero-overflow hard failure.
 
@@ -14929,6 +14946,16 @@ class Autorouter:
                 unbounded product this bound removes).  Evaluated only
                 at the existing ``_past_deadline()`` check sites; see
                 :data:`RELIEF_RESCUE_TXN_FRACTION` for the calibration.
+            guard: Issue #6363: the negotiated run's
+                :class:`~kicad_tools.router.access_ripup.RipupCycleGuard`.
+                Every rollback charges each ripped blocker against
+                ``(failed_net, blocker)``; a probe round that needs a
+                blocker rolled-back reliefs for this victim already ripped
+                ``MAX_PAIR_RIPUPS`` times is refused before anything is
+                ripped in that round.  Depth-1 nested rescues inherit the
+                guard and are charged against its per-net relief cap
+                (:meth:`RipupCycleGuard.admit_relief`).  ``None`` (the
+                two-phase stall-relief hook) keeps the unguarded behaviour.
 
         Returns:
             True when the failed net is now routed and no sibling was
@@ -15022,6 +15049,12 @@ class Autorouter:
             pair_partner = None
 
         def _rollback() -> None:
+            # Issue #6363: a rolled-back relief charges every blocker it
+            # ripped for this victim (the folded-in diff-pair partner is
+            # part of the victim, not a blocker).  Nothing ripped, nothing
+            # charged.
+            if guard is not None:
+                guard.charge_relief_rollback(failed_net, [v for v in ripped if v != pair_partner])
             for net in snapshot_nets:
                 for route in list(net_routes.get(net, [])):
                     self.grid.unmark_route_usage(route)
@@ -15132,6 +15165,29 @@ class Autorouter:
                     f"  Relief rescue: {failed_name} blocked only by "
                     f"non-rippable copper of {', '.join(blocker_names)} "
                     f"-- rolling back ({elapsed_fn()})"
+                )
+                _rollback()
+                return False
+
+            # Issue #6363: the relief rescue's own rip-up cycle.  On board 05
+            # EN_C's relief ripped DRIVER_SLEEP / PWM_C / RUN / STATUS_LED in
+            # three successive iterations, rolling back every time (~1050 s).
+            # The sets differed, so the guard counts per (victim, blocker)
+            # member.  A blocker already ripped MAX_PAIR_RIPUPS times by
+            # rolled-back reliefs for this victim stops the rescue here:
+            # the probe treats its copper as soft again, so ripping the
+            # others cannot route around it.
+            exhausted = (
+                guard.relief_exhausted(failed_net, rippable) if guard is not None else frozenset()
+            )
+            if guard is not None and exhausted:
+                guard.refuse_relief(failed_net, exhausted)
+                exhausted_names = sorted(self.net_names.get(v, f"Net_{v}") for v in exhausted)
+                flush_print_fn(
+                    f"  = relief rip of {', '.join(exhausted_names)} for {failed_name} "
+                    f"refused (round {round_idx + 1}): rolled-back relief rescues "
+                    f"already ripped it {guard.max_repeats}x for this net "
+                    f"(issue #6363, #6342) -- rolling back ({elapsed_fn()})"
                 )
                 _rollback()
                 return False
@@ -15278,6 +15334,18 @@ class Autorouter:
                 if _past_deadline():
                     still_pending.append(rn)
                     continue
+                # Issue #6363: a nested rescue is a relief attempt for ``rn``
+                # like any other -- charge it against the same per-net cap,
+                # or a cycle escapes the cap through nesting.
+                if guard is not None and not guard.admit_relief(rn):
+                    guard.relief_capped.append(rn)
+                    flush_print_fn(
+                        f"  Relief rescue: nested rescue of "
+                        f"{self.net_names.get(rn, f'Net_{rn}')} skipped -- per-net "
+                        f"relief cap reached (issue #6363)"
+                    )
+                    still_pending.append(rn)
+                    continue
                 if self._relief_rescue(
                     rn,
                     neg_router,
@@ -15295,6 +15363,7 @@ class Autorouter:
                     # part of the parent's commit gate, so a fresh
                     # allowance here would rebuild the unbounded product.
                     txn_deadline=txn_deadline,
+                    guard=guard,
                 ):
                     relanded += 1
                 else:

@@ -731,16 +731,15 @@ def _load_net_class_map(
     against the board, then :func:`resolve_net_class_map_keys` maps the
     user's keys onto the board's actual (possibly hierarchical) net names.
     """
-    from kicad_tools.router.net_names import resolve_net_class_map_keys
+    from kicad_tools.cli.check_cmd import resolve_net_class_map_for_board
     from kicad_tools.router.rules import net_class_map_from_path
 
     if isinstance(net_class_map, (str, Path)):
         loaded = net_class_map_from_path(net_class_map, pcb_path=pcb_path)
     else:
         loaded = dict(net_class_map)
-    board_net_names = [net.name for net in pcb.nets.values() if net.name]
-    resolution = resolve_net_class_map_keys(loaded.keys(), board_net_names)
-    return {board_net: loaded[user_key] for board_net, user_key in resolution.resolved.items()}
+    rekeyed, _resolution = resolve_net_class_map_for_board(loaded, pcb)
+    return rekeyed
 
 
 def _run_cli_rule_set(

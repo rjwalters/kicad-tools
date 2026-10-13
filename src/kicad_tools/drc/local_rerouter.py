@@ -235,8 +235,18 @@ class LocalRerouter:
             total_length += math.sqrt(dx * dx + dy * dy)
 
         if not dry_run:
-            # Replace the old segment with new segments
-            self._replace_segment(seg_node, world_path, str(seg_layer), seg_net, seg_width)
+            # Replace the old segment with new segments.  Issue #6434: write the
+            # net exactly as the original segment did -- a KiCad 10 board with
+            # name-only ``(net "A5")`` atoms and no net table resolves to net 0
+            # here, which used to give the rerouted copper no net at all.
+            net_value: int | str = seg_net
+            net_atom = net_node.get_first_atom() if net_node else None
+            if net_atom is not None and str(net_atom) != "":
+                try:
+                    net_value = int(net_atom)
+                except (TypeError, ValueError):
+                    net_value = str(net_atom)
+            self._replace_segment(seg_node, world_path, str(seg_layer), net_value, seg_width)
 
         return RerouteResult(
             success=True,
@@ -584,7 +594,7 @@ class LocalRerouter:
         old_seg: SExp,
         path: list[tuple[float, float]],
         layer: str,
-        net: int,
+        net: int | str,
         width: float,
     ) -> None:
         """Replace a segment node with new segments along the given path.
@@ -628,7 +638,7 @@ class LocalRerouter:
         y2: float,
         width: float,
         layer: str,
-        net: int,
+        net: int | str,
     ) -> SExp:
         """Create a KiCad segment S-expression node."""
         seg = SExp(name="segment")
