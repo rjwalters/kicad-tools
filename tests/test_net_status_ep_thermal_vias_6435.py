@@ -138,3 +138,54 @@ def test_legacy_mode_unchanged(tmp_path):
     """Legacy mode keys by REF.PAD and already merged the EP pieces."""
     status = _gnd(tmp_path, _ep_board(), strict=False)
     assert status.island_count == 1
+
+
+def _pair_board(fp_rot: float, pad_rot: float, p2: tuple[float, float]) -> str:
+    """Two F.Cu 0.85x0.25 GND pads; ``pad_rot`` is KiCad's *absolute* pad angle."""
+    return (
+        _HEADER
+        + f"""
+  (footprint "Test:Pair" (layer "F.Cu") (uuid "fpA") (at 10 10 {fp_rot})
+    (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS") (uuid "refA"))
+    (pad "1" smd rect (at 0 0 {pad_rot}) (size 0.85 0.25) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at {p2[0]} {p2[1]} {pad_rot}) (size 0.85 0.25)
+      (layers "F.Cu") (net 1 "GND")))
+)
+"""
+    )
+
+
+@pytest.mark.parametrize(
+    ("fp_rot", "pad_rot"),
+    [(0, 90), (90, 180)],
+    ids=["fp0-pad90", "fp90-pad180"],
+)
+def test_pads_rotated_relative_to_footprint_do_not_falsely_bond(tmp_path, fp_rot, pad_rot):
+    """Pad angles are absolute: rotating by ``fp.rotation`` alone swaps W/H.
+
+    The pads sit 0.5 mm apart along the footprint's x axis; their real copper
+    is 0.25 mm wide along that axis, so 0.25 mm of gap separates them.
+    """
+    text = _pair_board(fp_rot, pad_rot, (0.5, 0))
+    assert _gnd(tmp_path, text).island_count == 2
+
+
+def test_rotated_pads_that_really_overlap_bond(tmp_path):
+    """Same pads stacked along their long (rotated) axis do overlap."""
+    text = _pair_board(0, 90, (0, 0.5))
+    assert _gnd(tmp_path, text).island_count == 1
+
+
+def test_round_pads_bond_on_true_outline_not_box(tmp_path):
+    """Diagonal circle pads whose boxes overlap but whose disks do not."""
+    text = (
+        _HEADER
+        + """
+  (footprint "Test:Round" (layer "F.Cu") (uuid "fpA") (at 10 10)
+    (property "Reference" "J1" (at 0 -3 0) (layer "F.SilkS") (uuid "refA"))
+    (pad "1" smd circle (at 0 0) (size 2 2) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd circle (at 1.6 1.6) (size 2 2) (layers "F.Cu") (net 1 "GND")))
+)
+"""
+    )
+    assert _gnd(tmp_path, text).island_count == 2
