@@ -85,7 +85,34 @@ logger = logging.getLogger(__name__)
 # v52 (Issue #6368): ``PadBounds.centre_gx`` / ``centre_gy`` / ``long_axis``
 # -- both A* loops charge an off-centreline pad landing.  A v51 .so lacks the
 # fields.
-_REQUIRED_CPP_BUILD_VERSION = 52
+# v53 (Issue #6415): opt-in via-footprint ``PadChannelBudget`` charge --
+# ``DesignRules.pad_budget_via_scale`` and ``Pathfinder.pad_budget_via_cost_at``
+# are bound.  A v52 .so lacks both.
+_REQUIRED_CPP_BUILD_VERSION = 53
+
+# Issue #6415: opt-in multiplier on the via-footprint pad-budget charge (the
+# #3143 channel budgets and #6382 pad lanes).  When > 0 a via pays, per budget
+# its disc touches, ``overflow_penalty * min(covered cells, long side) *
+# scale``.  The default 0 keeps the pre-#6415 centre-cell charge: on board 05
+# the footprint charge moves PHASE_C's via onto U2.10's tip, which the
+# pad-access guard refuses (see the PR for #6415).  Invalid / negative values
+# fall back to the default.
+PAD_BUDGET_VIA_SCALE_ENV = "KCT_PAD_BUDGET_VIA_SCALE"
+PAD_BUDGET_VIA_SCALE_DEFAULT = 0.0
+
+
+def pad_budget_via_scale() -> float:
+    """Effective via-footprint budget scale (honours ``KCT_PAD_BUDGET_VIA_SCALE``)."""
+    raw = os.environ.get(PAD_BUDGET_VIA_SCALE_ENV)
+    if raw is None or raw.strip() == "":
+        return PAD_BUDGET_VIA_SCALE_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return PAD_BUDGET_VIA_SCALE_DEFAULT
+    if not math.isfinite(value) or value < 0.0:
+        return PAD_BUDGET_VIA_SCALE_DEFAULT
+    return value
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1383,6 +1410,8 @@ class CppPathfinder:
         cpp_rules.congestion_threshold = rules.congestion_threshold
         # Issue #4071: soft corridor-attractor bonus (default 3.0).
         cpp_rules.cost_corridor_attractor = rules.cost_corridor_attractor
+        # Issue #6415: multiplier on the via-footprint pad-budget charge.
+        cpp_rules.pad_budget_via_scale = pad_budget_via_scale()
 
         self._impl = router_cpp.Pathfinder(grid._impl, cpp_rules, diagonal_routing)
         self._grid = grid

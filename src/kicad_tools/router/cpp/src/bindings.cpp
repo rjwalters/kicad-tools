@@ -87,7 +87,9 @@ NB_MODULE(router_cpp, m) {
         .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
         .def_rw("min_hole_to_hole", &DesignRules::min_hole_to_hole)
         // Issue #4071: soft corridor-attractor bonus (Python default 3.0).
-        .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor);
+        .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor)
+        // Issue #6415: via-footprint pad-budget charge multiplier.
+        .def_rw("pad_budget_via_scale", &DesignRules::pad_budget_via_scale);
 
     // ValidationResult struct (Issue #2439)
     nb::class_<ValidationResult>(m, "ValidationResult")
@@ -651,6 +653,10 @@ NB_MODULE(router_cpp, m) {
         .def("set_search_pad_clearance_floor", &Pathfinder::set_search_pad_clearance_floor)
         // Issue #6375: the own-pad step gate -- validator carve-out sets
         // and the narrowest emittable width for this search.
+        .def("pad_budget_via_cost_at", &Pathfinder::pad_budget_via_cost_at,
+             "budgets"_a, "via_radius_cells"_a, "x"_a, "y"_a,
+             "Issue #6415 test hook: per-pad budget cost a via of "
+             "via_radius_cells centred at grid (x, y) would pay.")
         .def("set_search_own_pad_gate", &Pathfinder::set_search_own_pad_gate,
              "exclude_ref_hashes"_a, "clamp_ref_hashes"_a, "trace_width"_a)
         .def("own_pad_step_clear", &Pathfinder::own_pad_step_clear,

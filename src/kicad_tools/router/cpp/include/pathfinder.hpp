@@ -297,6 +297,13 @@ public:
     // pushes the largest net-class clearance on the board.  0 = unset.
     void set_search_pad_clearance_floor(float floor) { search_pad_clearance_floor_ = floor; }
 
+    // Issue #6415 test hook: the via-footprint pad-budget cost a via of
+    // ``via_radius_cells`` centred at (x, y) would pay against ``budgets``
+    // (built exactly as a route call builds it, honouring
+    // ``DesignRules::pad_budget_via_scale``).  Does not touch search state.
+    float pad_budget_via_cost_at(const std::vector<PadChannelBudget>& budgets,
+                                 int via_radius_cells, int x, int y) const;
+
     // Issue #6375: the own-pad step gate.  A planar step onto (or off) a
     // cell of the routing net's OWN static pad copper/halo (``cell.net ==
     // net`` and ``pad_cell`` or ``static_blocked``) outside the seed/goal
@@ -432,6 +439,11 @@ private:
     // A* g_score, so its scale is comparable to ``rules_.cost_straight``
     // (typically 1.0) -- a penalty of 5.0 is roughly 5 cells of detour.
     float get_pad_channel_cost(int x, int y, int layer) const;
+
+    // Issue #6415: per-pad budget cost of dropping a via centred at (x, y).
+    // Single hash lookup against ``search_pad_budget_via_cost_lookup_``;
+    // 0.0 when no budget is configured or the via disc touches none.
+    float get_pad_budget_via_cost(int x, int y) const;
 
     // Core A* loop shared by route(), route_resumable(), and resume().
     // Returns RouteResult with success=true if goal reached, or success=false
@@ -796,6 +808,16 @@ private:
     // hundred cells per active dense package).
     std::unordered_map<std::tuple<int, int, int>, float, GridPosHash>
         search_pad_budget_cost_lookup_;
+
+    // Issue #6415: via-footprint pad-budget cost, keyed by ``via_footprint_key``
+    // (x, y) -- a through via spans every layer, so the key carries no layer.
+    // Built in the same per-call pass as ``search_pad_budget_cost_lookup_``
+    // (see ``build_pad_budget_via_cost_lookup``) for the call's single via
+    // radius, and consulted at both via-expansion sites in place of the
+    // centre-cell ``get_pad_channel_cost``.  Each budget whose bbox the via
+    // disc (radius incl. clearance) touches charges once, scaled by the bbox
+    // cells under the disc and capped at the bbox's long side in cells.
+    std::unordered_map<int64_t, float> search_pad_budget_via_cost_lookup_;
 };
 
 }  // namespace router

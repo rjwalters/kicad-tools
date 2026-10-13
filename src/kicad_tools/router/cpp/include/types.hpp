@@ -312,7 +312,13 @@ namespace router {
 // ``long_axis`` / ``lane_half_cells`` / ``tip_lo`` / ``tip_hi`` and both A*
 // loops charge an off-centreline pad landing.  The Python side sets the new fields on every
 // pad bound, so a v51 .so (which lacks them) must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 52;
+// v53 (Issue #6415): ``DesignRules`` gained ``pad_budget_via_scale``; when
+// > 0 (opt-in, default 0) via expansions charge ``PadChannelBudget`` over the
+// via footprint (disc of radius ``via_radius_cells``) on every layer the
+// through via spans instead of the centre cell.  ``Pathfinder::
+// pad_budget_via_cost_at`` is bound.  The Python side sets the new rules
+// field, so a v52 .so must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 53;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -702,6 +708,11 @@ struct DesignRules {
     // querying net, clamped at 0 so g_scores stay non-negative (A*
     // admissibility preserved).  ``0.0`` disables the attractor.
     float cost_corridor_attractor = 3.0f;
+    // Issue #6415: multiplier on the via-footprint pad-budget charge (Python
+    // ``KCT_PAD_BUDGET_VIA_SCALE``).  ``0.0`` (the default) keeps the
+    // pre-#6415 centre-cell charge on the destination layer; ``> 0`` charges
+    // each budget the via disc touches, scaled by the covered cells.
+    float pad_budget_via_scale = 0.0f;
 };
 
 // Issue #6272: the trace-vs-via copper floor, ``max(trace, via)``.  Native

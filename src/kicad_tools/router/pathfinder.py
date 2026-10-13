@@ -4133,6 +4133,9 @@ class Router:
 
         # Issue #6368: centreline landing cost inputs (see ``pad_landing``;
         # mirrors the native ``PadBounds`` landing fields).
+        # Issue #6415: this fallback does not consume ``PadChannelBudget``
+        # (#3143 channels / #6382 lanes) at all, so the native via-footprint
+        # budget charge has no Python counterpart -- by design, not drift.
         start_landing = pad_landing_geometry(start, self.grid)
         end_landing = pad_landing_geometry(end, self.grid)
         start_landing_box = (start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2)

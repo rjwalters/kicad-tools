@@ -1317,6 +1317,131 @@ static void build_pad_channel_cost_lookup(
     }
 }
 
+// Issue #6415: key for ``search_pad_budget_via_cost_lookup_``.  A through
+// via spans every layer, so the footprint lookup is keyed by (x, y) only.
+static inline int64_t via_footprint_key(int x, int y) {
+    return (static_cast<int64_t>(x) << 32) ^ static_cast<int64_t>(static_cast<uint32_t>(y));
+}
+
+// Issue #6415: via-footprint pad-budget cost lookup.  The #3143 / #6382
+// budgets used to be charged at a via's CENTRE cell only, so a via whose
+// copper (disc of radius ``via_radius_cells``, which already includes the
+// via clearance) sealed a foreign pad's lane while its centre sat just past
+// the lane end paid nothing (board 05: PHASE_C's 0.8 mm via 0.06 mm past
+// U2.11's lane end).
+//
+// For every via centre (cx, cy) whose disc touches a budget bbox -- the
+// Euclidean distance from the centre to the rect is <= R, equivalently at
+// least one bbox lattice cell lies inside the disc -- the budget charges
+// ONCE:
+//
+//     overflow_penalty * min(cells of the bbox under the disc, long side) * scale
+//
+// so a grazing via pays a few cells and a sealing via pays about what a
+// trace running the lane's full length would.  Every budget layer counts:
+// lane budgets (``layer == -1``) always, and layer-specific #3143 budgets
+// because every via is a through via that blocks the channel on all the
+// layers it spans (deliberately wider than the old destination-layer-only
+// charge).  The overlap count is computed analytically one disc row at a
+// time (chord half-widths precomputed), O(2R+1) per candidate centre.
+//
+// Built once per route call (the radius is fixed within a call), so the A*
+// via expansion stays a single hash lookup.  ``scale <= 0`` (the default)
+// leaves the map empty and the via sites fall back to the pre-#6415
+// centre-cell ``get_pad_channel_cost`` -- the footprint charge is opt-in
+// because on board 05 it moves PHASE_C's via from U2.11's lane end onto
+// U2.10's tip (one sealed lane is cheaper than three clipped ones under the
+// per-budget cap), which the pad-access guard then refuses.
+static void build_pad_budget_via_cost_lookup(
+    const std::vector<PadChannelBudget>& budgets,
+    const Grid3D& grid,
+    int via_radius_cells,
+    float scale,
+    std::unordered_map<int64_t, float>& out
+) {
+    out.clear();
+    if (budgets.empty() || !(scale > 0.0f)) {
+        return;
+    }
+    const int cols = grid.cols();
+    const int rows = grid.rows();
+    const int layers = grid.layers();
+    const int R = std::max(0, via_radius_cells);
+    // Chord half-width of the disc for each row offset dy in [-R, R].
+    std::vector<int> half(2 * R + 1);
+    for (int dy = -R; dy <= R; ++dy) {
+        const long long rem = static_cast<long long>(R) * R
+                            - static_cast<long long>(dy) * dy;
+        int h = static_cast<int>(std::floor(std::sqrt(static_cast<double>(rem))));
+        // Guard floating error so h*h <= rem < (h+1)^2.
+        while (static_cast<long long>(h + 1) * (h + 1) <= rem) ++h;
+        while (h > 0 && static_cast<long long>(h) * h > rem) --h;
+        half[dy + R] = h;
+    }
+    for (const auto& b : budgets) {
+        if (b.overflow_penalty == 0.0f) {
+            continue;
+        }
+        if (b.layer != -1 && (b.layer < 0 || b.layer >= layers)) {
+            continue;  // Out-of-range layer index -- ignore (matches trace map).
+        }
+        const int gx1 = std::max(0, b.gx1);
+        const int gy1 = std::max(0, b.gy1);
+        const int gx2 = std::min(cols - 1, b.gx2);
+        const int gy2 = std::min(rows - 1, b.gy2);
+        if (gx1 > gx2 || gy1 > gy2) {
+            continue;
+        }
+        const int long_side = std::max(gx2 - gx1 + 1, gy2 - gy1 + 1);
+        const float unit = b.overflow_penalty * scale;
+        const int cx_lo = std::max(0, gx1 - R);
+        const int cx_hi = std::min(cols - 1, gx2 + R);
+        const int cy_lo = std::max(0, gy1 - R);
+        const int cy_hi = std::min(rows - 1, gy2 + R);
+        for (int cx = cx_lo; cx <= cx_hi; ++cx) {
+            for (int cy = cy_lo; cy <= cy_hi; ++cy) {
+                const int dy_lo = std::max(-R, gy1 - cy);
+                const int dy_hi = std::min(R, gy2 - cy);
+                int count = 0;
+                for (int dy = dy_lo; dy <= dy_hi; ++dy) {
+                    const int h = half[dy + R];
+                    const int x_lo = std::max(gx1, cx - h);
+                    const int x_hi = std::min(gx2, cx + h);
+                    if (x_hi >= x_lo) count += x_hi - x_lo + 1;
+                    if (count >= long_side) break;
+                }
+                if (count <= 0) continue;
+                out[via_footprint_key(cx, cy)] +=
+                    unit * static_cast<float>(std::min(count, long_side));
+            }
+        }
+    }
+}
+
+float Pathfinder::get_pad_budget_via_cost(int x, int y) const {
+    // Issue #6415: single hash lookup, empty-map short-circuit like
+    // ``get_pad_channel_cost``.
+    if (search_pad_budget_via_cost_lookup_.empty()) {
+        return 0.0f;
+    }
+    auto it = search_pad_budget_via_cost_lookup_.find(via_footprint_key(x, y));
+    if (it == search_pad_budget_via_cost_lookup_.end()) {
+        return 0.0f;
+    }
+    return it->second;
+}
+
+float Pathfinder::pad_budget_via_cost_at(
+    const std::vector<PadChannelBudget>& budgets,
+    int via_radius_cells, int x, int y
+) const {
+    std::unordered_map<int64_t, float> lookup;
+    build_pad_budget_via_cost_lookup(budgets, grid_, via_radius_cells,
+                                     rules_.pad_budget_via_scale, lookup);
+    auto it = lookup.find(via_footprint_key(x, y));
+    return it == lookup.end() ? 0.0f : it->second;
+}
+
 // Helper: Initialize pad bounds from arguments, applying default single-cell
 // fallback when no explicit bounds are provided (Issue #2427).
 static void init_pad_bounds(
@@ -1536,6 +1661,11 @@ RouteResult Pathfinder::route(
     // empty; the per-cell helper short-circuits at the empty() check.
     build_pad_channel_cost_lookup(pad_channel_budgets, grid_,
                                   search_pad_budget_cost_lookup_);
+    // Issue #6415: via-footprint companion map for this call's via radius.
+    build_pad_budget_via_cost_lookup(pad_channel_budgets, grid_,
+                                     via_radius_cells,
+                                     rules_.pad_budget_via_scale,
+                                     search_pad_budget_via_cost_lookup_);
 
     // Inline A* loop (uses local variables, no rejected goals check)
     while (!open_set.empty() && last_iterations_ < max_iterations) {
@@ -1982,12 +2112,15 @@ RouteResult Pathfinder::route(
 
             float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
 
-            // Issue #3143: per-pad channel budget cost (via expansion).
-            // Charged on the destination layer of the via so the search
-            // also redirects layer-change attempts that land in a
-            // contested channel.
+            // Issue #3143 / #6415: per-pad channel budget cost (via
+            // expansion).  With ``pad_budget_via_scale > 0`` it is charged
+            // over the via's footprint (disc of ``via_radius_cells``) on
+            // every layer the through via spans; at the default 0 it stays
+            // the pre-#6415 centre-cell charge on the destination layer.
             float pad_channel_cost =
-                get_pad_channel_cost(current.x, current.y, new_layer);
+                rules_.pad_budget_via_scale > 0.0f
+                    ? get_pad_budget_via_cost(current.x, current.y)
+                    : get_pad_channel_cost(current.x, current.y, new_layer);
 
             // Issue #4071: corridor attractor on the via-drop destination
             // cell -- the reservation is what makes the router prefer to
@@ -2196,6 +2329,12 @@ RouteResult Pathfinder::route_resumable(
     // identically.
     build_pad_channel_cost_lookup(pad_channel_budgets, grid_,
                                   search_pad_budget_cost_lookup_);
+    // Issue #6415: via-footprint companion map, built for this search's
+    // via radius and held across resume() like the per-cell map.
+    build_pad_budget_via_cost_lookup(pad_channel_budgets, grid_,
+                                     search_via_radius_cells_,
+                                     rules_.pad_budget_via_scale,
+                                     search_pad_budget_via_cost_lookup_);
 
     // Issue #2610: Compute the per-net wall-clock deadline ONCE here and
     // share it with subsequent resume() calls.  This way a single per-net
@@ -2727,11 +2866,14 @@ RouteResult Pathfinder::run_astar_loop() {
 
             float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
 
-            // Issue #3143: per-pad channel budget cost on via expansion.
-            // Charged on the destination layer of the via -- mirrors the
-            // one-shot route() via path.
+            // Issue #3143 / #6415: per-pad channel budget cost on via
+            // expansion -- footprint charge (``search_via_radius_cells_``)
+            // when ``pad_budget_via_scale > 0``, else the pre-#6415
+            // centre-cell charge; mirrors the one-shot route() via path.
             float pad_channel_cost =
-                get_pad_channel_cost(current.x, current.y, new_layer);
+                rules_.pad_budget_via_scale > 0.0f
+                    ? get_pad_budget_via_cost(current.x, current.y)
+                    : get_pad_channel_cost(current.x, current.y, new_layer);
 
             // Issue #4071: corridor attractor on the via-drop destination
             // (resumable / negotiated path), mirroring the one-shot via
@@ -2831,6 +2973,7 @@ void Pathfinder::clear_search_state() {
     // Issue #3143: drop the per-cell pad-channel cost lookup so a stale
     // budget from the previous net does not leak into the next route().
     search_pad_budget_cost_lookup_.clear();
+    search_pad_budget_via_cost_lookup_.clear();
 }
 
 RouteResult Pathfinder::reconstruct_path(
