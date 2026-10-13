@@ -76,13 +76,22 @@ person would get by hand, so the harness does not under-count:
   ``net_class_map.json`` (diff-pair and match-group skew rules engage,
   net-class clearances apply) and the manufacturer ``kct route`` recorded in
   ``fab_profile.json`` -- the same numbers as ``kct check --mfr <tier>
-  --allow-incomplete`` on the routed file. With no sidecar the row says so
+  --allow-incomplete`` on the routed file, including the CLI-level rules
+  that read the sibling ``.kicad_pro`` (``netclass_clearance_copper``,
+  ``netclass_floor``): ``run_kct_check`` shares the CLI's rule dispatch
+  rather than calling ``DRCChecker.check_all()``. With no sidecar the row says so
   (``kct_check_net_class_map: null``) and lists ``kct_check_inactive_rules``.
 * ``kicad_drc_*`` runs ``kicad-cli pcb drc --refill-zones --all-track-errors``
   and records ``kicad_drc_unconnected``.
 * ``manufacturable`` is ``true`` only when ``kct route`` exited 0, both
   engines report 0 errors, kicad-cli reports 0 unconnected items and the
   graded board is the finished output; ``null`` when either engine did not run.
+  For connectivity the verdict trusts kicad-cli's unconnected count, not the
+  ``Nets`` / ``Connections`` columns. Those come from the in-process
+  ``NetStatusAnalyzer`` and can disagree with KiCad on exposed-pad
+  thermal-via footprints: board 05 lattice reads 36/37 (GND split at U2/U3
+  EPs) where kicad-cli and ``kct check`` both report 0 unconnected
+  (issue #6435).
 * A grid-engine route under ``--deterministic-budget`` or
   ``--per-net-iterations`` also gets ``--deterministic-rescue``, so the
   relief-rescue sub-searches are iteration-bounded and a row does not depend

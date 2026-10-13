@@ -743,6 +743,43 @@ def _load_net_class_map(
     return {board_net: loaded[user_key] for board_net, user_key in resolution.resolved.items()}
 
 
+def _run_cli_rule_set(
+    checker: Any, pcb_path: Path | None, *, manufacturer: str, layers: int
+) -> Any:
+    """Run the rule set ``kct check`` runs by default, via its own dispatch.
+
+    Shares :func:`kicad_tools.cli.check_cmd.run_selected_checks` with the CLI
+    instead of calling ``DRCChecker.check_all()``: the CLI-level rules that
+    need the board *path* (``netclass_clearance_copper``, ``netclass_floor``,
+    ``doc_drift``, ``sch_fields``) are not in ``CHECK_ALL_METHODS``, and a
+    copy of the list here would drift the next time the CLI gains one
+    (issue #6420: board 05 lattice graded 0 errors here and 6
+    ``netclass_clearance_copper`` errors under ``kct check``).
+    """
+    from kicad_tools.cli.check_cmd import _resolve_check_schematic, run_selected_checks
+
+    sch_path: Path | None = None
+    if pcb_path is not None:
+        from kicad_tools.manufacturers import resolve_pcb_fabrication_overrides
+
+        # Same order as the CLI: the reviewed per-board floor override lands
+        # on ``design_rules`` before any rule (``netclass_floor`` included)
+        # reads it.
+        checker.design_rules, _ = resolve_pcb_fabrication_overrides(
+            pcb_path, checker.design_rules, manufacturer_id=manufacturer
+        )
+        sch_path = _resolve_check_schematic(None, pcb_path)
+    return run_selected_checks(
+        checker,
+        None,
+        set(),
+        pad_grid_auto_derive=True,
+        sch_path=sch_path,
+        pcb_path=pcb_path,
+        layers=layers,
+    )
+
+
 def run_kct_check(
     board: str | Path | PCB,
     *,
@@ -752,9 +789,22 @@ def run_kct_check(
 ) -> KctCheckSummary:
     """Run the ``kct check`` DRC engine in-process and summarize it.
 
-    Uses :class:`kicad_tools.validate.DRCChecker` -- the exact engine
-    behind the ``kct check`` CLI -- rather than shelling out, so the
-    benchmark harness does not depend on an installed console script.
+    Uses :class:`kicad_tools.validate.DRCChecker` and the CLI's own rule
+    dispatch, :func:`kicad_tools.cli.check_cmd.run_selected_checks` --
+    the exact engine behind the ``kct check`` CLI -- rather than shelling
+    out, so the benchmark harness does not depend on an installed console
+    script.
+
+    When *board* is a path, the path-dependent rules ``kct check`` runs
+    outside ``DRCChecker.check_all()`` run too: ``netclass_clearance_copper``
+    and ``netclass_floor`` (which read the sibling ``.kicad_pro``),
+    ``doc_drift`` and ``sch_fields`` (sibling schematic), and the board's
+    reviewed fabrication-floor override sidecar is applied first. The
+    totals and per-rule error counts then equal
+    ``kct check --mfr <manufacturer> --allow-incomplete`` on the same file
+    (issue #6420). Waiver sidecars are not applied: the harness grades raw
+    copper. Given an in-memory :class:`PCB` there is no project file to
+    read, so those rules are silent, exactly as in the CLI without a path.
 
     Args:
         board: Routed board (path or loaded :class:`PCB`).
@@ -780,7 +830,7 @@ def run_kct_check(
         from kicad_tools.schema.pcb import PCB as PCBClass
         from kicad_tools.validate import DRCChecker
 
-        pcb_path = Path(board) if isinstance(board, (str, Path)) else None
+        pcb_path = Path(board).resolve() if isinstance(board, (str, Path)) else None
         pcb = PCBClass.load(str(board)) if isinstance(board, (str, Path)) else board
         if layers is None:
             detected = len(pcb.copper_layers)
@@ -798,21 +848,7 @@ def run_kct_check(
             if derived is not None:
                 extra["copper_oz_outer"], extra["copper_oz_inner"] = derived
         checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers, **extra)
-        # Share ``kct check``'s dispatch rather than ``check_all()``: the CLI
-        # also runs path-based rules (``netclass_clearance_copper``,
-        # ``netclass_floor``, ...) that are not in ``CHECK_ALL_METHODS``, so
-        # ``check_all()`` alone under-counts errors (issue #6420). With no
-        # path (an in-memory ``PCB``) those rules are a silent no-op.
-        from kicad_tools.cli.check_cmd import run_selected_checks
-
-        results = run_selected_checks(
-            checker,
-            None,
-            set(),
-            pad_grid_auto_derive=True,
-            pcb_path=pcb_path,
-            layers=layers,
-        )
+        results = _run_cli_rule_set(checker, pcb_path, manufacturer=manufacturer, layers=layers)
     except Exception as exc:  # pragma: no cover - defensive
         return KctCheckSummary(
             ran=False,
