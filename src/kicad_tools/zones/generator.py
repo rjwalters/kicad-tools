@@ -1959,91 +1959,186 @@ def _compute_pour_outlines(
             outline = outlines.get(net_name)
             if not incumbents or outline is None:
                 continue
-            incumbent_pads: list[tuple[float, float]] = []
+            incumbent_pads: list[tuple[float, float, float]] = []
             for inc in sorted(incumbents - {net_name}):
-                incumbent_pads.extend(_net_pad_positions_absolute(pcb, inc))
+                incumbent_pads.extend(_net_pad_extents_absolute(pcb, inc))
             own_pads = _net_pad_positions_absolute(pcb, net_name)
             outlines[net_name] = _carve_incumbent_pads(outline, own_pads, incumbent_pads)
 
     return outlines
 
 
+def _net_pad_extents_absolute(
+    pcb: PCB,
+    net_name: str,
+) -> list[tuple[float, float, float]]:
+    """Return ``(x, y, half_extent)`` for every pad on ``net_name`` (Issue #6402).
+
+    Positions are sheet-absolute, matching :func:`_net_pad_positions_absolute`
+    (same footprint/pad iteration order).  ``half_extent`` is half the pad's
+    larger dimension: a rotation-agnostic, conservative radius for the pad
+    body, so a square of that half-size centred on the pad always covers it.
+    """
+    positions = _net_pad_positions_absolute(pcb, net_name)
+    halves: list[float] = []
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+        for pad in fp.pads:
+            if pad.net_name != net_name or not pad.net_name:
+                continue
+            size = getattr(pad, "size", None) or (0.0, 0.0)
+            halves.append(max(float(size[0]), float(size[1])) / 2.0)
+    if len(halves) != len(positions):  # defensive: never misalign
+        halves = [0.0] * len(positions)
+    return [(x, y, h) for (x, y), h in zip(positions, halves, strict=True)]
+
+
+# Issue #6402: copper keep-out beyond an incumbent pour's pad body when
+# carving a newly auto-poured island off it.  The incumbent's fill must reach
+# the pad neighbourhood with room for a stitch via: the higher-priority
+# island's zone clearance (~0.3 mm) plus a via (~0.6 mm) plus a little fill.
+# A carve narrower than ``2 * clearance + min_thickness`` admits no fill at
+# all, which is how a 0.6 mm notch stranded board 03's F1.2 via on a sliver.
+INCUMBENT_PAD_KEEPOUT_MM = 1.0
+
+# Minimum neck width the carved island must keep so its own fill still joins
+# every own pad (2 x the auto-pour zone's 0.25 mm min_thickness, rounded up).
+CARVE_MIN_NECK_MM = 0.6
+
+
 def _carve_incumbent_pads(
     outline: list[tuple[float, float]],
-    own_pads: list[tuple[float, float]],
-    incumbent_pads: list[tuple[float, float]],
-    margin_mm: float = PAD_SAFE_MARGIN_MM,
+    own_pads: list[tuple[float, float]] | list[tuple[float, float, float]],
+    incumbent_pads: list[tuple[float, float]] | list[tuple[float, float, float]],
+    keepout_mm: float = INCUMBENT_PAD_KEEPOUT_MM,
 ) -> list[tuple[float, float]]:
     """Carve *outline* so it does not cover *incumbent_pads* (Issue #6402).
 
-    Subtracts a ``margin_mm`` box around every incumbent pad lying inside
-    the outline.  KiCad outlines cannot carry holes, so when the plain
-    difference is not a single hole-free polygon that still covers every
-    own pad, the outline is shrunk to the own pads' tight neighbourhood
-    (pad-safe bbox) and carved again.  If neither yields a valid polygon
-    the outline is returned unchanged (never worse than before).
+    Each incumbent pad (``(x, y)`` or ``(x, y, half_extent)``) inside the
+    outline becomes a square blocker covering its body plus ``keepout_mm``.
+    KiCad outlines cannot carry holes, so an interior blocker is opened to
+    the outline edge by a straight channel of the blocker's own width --
+    wide enough for the incumbent pour's fill to flow through it to the pad.
+    Each pad's channel takes the shortest direction that keeps every own pad
+    covered.  If no carve is valid, the outline is shrunk to the own pads'
+    tight neighbourhood and carved again; failing that it is returned
+    unchanged (never worse than before).
+
+    A result is valid when it is one hole-free polygon that still contains
+    every own pad and does not split into pieces when eroded by half of
+    :data:`CARVE_MIN_NECK_MM` (so its own fill still joins the own pads).
     """
     try:
-        from shapely.geometry import Point, Polygon
+        from shapely.geometry import MultiPolygon, Point, Polygon, box
+        from shapely.ops import unary_union
     except ImportError:
         return outline
 
+    def _xyh(p) -> tuple[float, float, float]:
+        return (float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 0.0)
+
+    own = [_xyh(p) for p in own_pads]
     base = Polygon(outline)
-    inside = [p for p in incumbent_pads if base.buffer(margin_mm).contains(Point(p))]
-    if not inside:
+    if not base.is_valid or base.is_empty:
         return outline
-    blockers = None
-    for x, y in inside:
-        box = [
-            (x - margin_mm, y - margin_mm),
-            (x + margin_mm, y - margin_mm),
-            (x + margin_mm, y + margin_mm),
-            (x - margin_mm, y + margin_mm),
-        ]
-        blockers = _union_polygons(blockers, box)
 
-    def _valid(poly: list[tuple[float, float]] | None) -> bool:
-        if poly is None:
+    blockers = []
+    for p in incumbent_pads:
+        x, y, h = _xyh(p)
+        r = h + keepout_mm
+        # Stop short of the island's own pads (Chebyshev distance: the
+        # blocker is a square), but always clear the pad body itself.
+        for ox, oy, _ in own:
+            gap = max(abs(ox - x), abs(oy - y)) - PAD_SAFE_MARGIN_MM
+            r = min(r, max(h + PAD_SAFE_MARGIN_MM, gap))
+        blk = box(x - r, y - r, x + r, y + r)
+        if blk.intersects(base):
+            blockers.append((x, y, r, blk))
+    if not blockers:
+        return outline
+
+    def _parts(geom) -> list:
+        if geom is None or geom.is_empty:
+            return []
+        if isinstance(geom, MultiPolygon):
+            return [g for g in geom.geoms if g.area > 1e-9]
+        return [geom] if isinstance(geom, Polygon) else []
+
+    def _own_piece(geom):
+        """The single piece of *geom* holding every own pad, else ``None``.
+
+        Pieces without own pads are orphan copper and are dropped.
+        """
+        for piece in _parts(geom):
+            grown = piece.buffer(1e-6)
+            if all(grown.contains(Point(x, y)) for x, y, _ in own):
+                return piece
+        return None
+
+    def _necks_ok(piece) -> bool:
+        """Own pads stay joined after eroding away necks < CARVE_MIN_NECK_MM."""
+        cores = _parts(piece.buffer(-CARVE_MIN_NECK_MM / 2.0))
+        if not cores:
             return False
-        shape = Polygon(poly)
-        if not shape.is_valid:
-            return False
-        return all(shape.buffer(1e-6).contains(Point(p)) for p in own_pads)
+        homes = set()
+        for x, y, _ in own:
+            pt = Point(x, y)
+            best = min(range(len(cores)), key=lambda i: cores[i].distance(pt))
+            if cores[best].distance(pt) > CARVE_MIN_NECK_MM:
+                return False
+            homes.add(best)
+        return len(homes) <= 1
 
-    carved = _subtract_polygon(outline, blockers)
-    if _valid(carved):
-        return carved  # type: ignore[return-value]
+    def _usable(geom):
+        piece = _own_piece(geom)
+        if piece is None or not piece.is_valid or not _necks_ok(piece):
+            return None
+        return piece
 
-    # Interior pads would leave a hole: open each blocker toward an outline
-    # edge with a straight notch (same width as the blocker) so the result
-    # stays a single hole-free polygon.
-    minx, miny, maxx, maxy = base.bounds
-    for direction in ("up", "down", "left", "right"):
-        notched = None
-        for x, y in inside:
-            lo_x, hi_x, lo_y, hi_y = x - margin_mm, x + margin_mm, y - margin_mm, y + margin_mm
-            if direction == "up":
-                lo_y = miny - 1.0
-            elif direction == "down":
-                hi_y = maxy + 1.0
-            elif direction == "left":
-                lo_x = minx - 1.0
+    def _carve(region):
+        cut = unary_union([blk for *_, blk in blockers])
+        minx, miny, maxx, maxy = region.bounds
+        over = 1.0
+        # Open every enclosed blocker to the edge, nearest feasible side first.
+        for _ in range(len(blockers)):
+            piece = _usable(region.difference(cut))
+            if piece is None:
+                return None
+            if not piece.interiors:
+                return piece
+            holes = [Polygon(ring) for ring in piece.interiors]
+            enclosed = [b for b in blockers if any(h.contains(Point(b[0], b[1])) for h in holes)]
+            if not enclosed:
+                return None
+            x, y, r, _blk = enclosed[0]
+            options = [
+                (y - miny, box(x - r, miny - over, x + r, y)),  # toward min y
+                (maxy - y, box(x - r, y, x + r, maxy + over)),  # toward max y
+                (x - minx, box(minx - over, y - r, x, y + r)),  # toward min x
+                (maxx - x, box(x, y - r, maxx + over, y + r)),  # toward max x
+            ]
+            for _dist, channel in sorted(options, key=lambda o: o[0]):
+                trial = unary_union([cut, channel])
+                if _usable(region.difference(trial)) is not None:
+                    cut = trial
+                    break
             else:
-                hi_x = maxx + 1.0
-            notched = _union_polygons(
-                notched, [(lo_x, lo_y), (hi_x, lo_y), (hi_x, hi_y), (lo_x, hi_y)]
-            )
-        candidate = _subtract_polygon(outline, notched)
-        if _valid(candidate):
-            return candidate  # type: ignore[return-value]
+                return None
+        piece = _usable(region.difference(cut))
+        return piece if piece is not None and not piece.interiors else None
 
-    own_box = _bbox_polygon(own_pads, margin_mm)
-    if own_box is not None:
-        own_box = list(Polygon(own_box).intersection(base).exterior.coords)[:-1]
-        shrunk = _subtract_polygon(own_box, blockers) if len(own_box) >= 3 else None
-        if _valid(shrunk):
-            return shrunk  # type: ignore[return-value]
-    return outline
+    result = _carve(base)
+    if result is None:
+        own_box = _bbox_polygon([(x, y) for x, y, _ in own], PAD_SAFE_MARGIN_MM)
+        if own_box is not None:
+            shrunk = Polygon(own_box).intersection(base)
+            if isinstance(shrunk, Polygon) and not shrunk.is_empty:
+                result = _carve(shrunk)
+    if result is None:
+        return outline
+    coords = [(float(cx), float(cy)) for cx, cy in result.exterior.coords[:-1]]
+    return coords if len(coords) >= 3 else outline
 
 
 def _polygon_area_simple(polygon: list[tuple[float, float]] | None) -> float:
