@@ -19,8 +19,18 @@ uv run kct mcp setup
 kct mcp setup
 ```
 
-This writes the correct command to `~/.claude/mcp.json` (Claude Code) or
-the Claude Desktop config file.
+This writes the correct command to `~/.claude.json` (Claude Code, via
+`claude mcp add-json` when the CLI is on PATH) or the Claude Desktop config
+file.
+
+### Claude Code does not list `kicad-tools` at all
+
+**Cause:** kct releases before issue #6418 wrote the server to
+`~/.claude/mcp.json`, which Claude Code never reads.
+
+**Solution:** Re-run `kct mcp setup --client claude-code`, then confirm with
+`claude mcp list`. Setup prints a note while the stale `~/.claude/mcp.json`
+entry exists; the file is left untouched and can be deleted.
 
 ### "No module named 'kicad_tools'"
 

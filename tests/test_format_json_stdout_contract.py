@@ -472,6 +472,8 @@ def _expand(argv: list[str], scratch: Path) -> list[str]:
 
 def _hermetic_env(scratch: Path) -> dict[str, str]:
     env = dict(os.environ)
+    # `mcp setup` reads $CLAUDE_CONFIG_DIR/.claude.json when it is set (#6418).
+    env.pop("CLAUDE_CONFIG_DIR", None)
     home = scratch / "_home"
     home.mkdir(exist_ok=True)
     env.update(

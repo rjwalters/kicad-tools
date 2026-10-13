@@ -178,7 +178,7 @@ servers, and is a no-op when re-run (`--dry-run` previews, `--format json` for
 scripts):
 
 ```bash
-kct mcp setup --client claude-code      # ~/.claude/mcp.json (default)
+kct mcp setup --client claude-code      # ~/.claude.json via `claude mcp add-json` (default; --scope project for ./.mcp.json)
 kct mcp setup --client claude-desktop   # Claude Desktop config
 kct mcp setup --client codex            # [mcp_servers.kct] in $CODEX_HOME/config.toml
 kct mcp setup --client opencode         # ~/.config/opencode/opencode.json (--project for ./opencode.json)
