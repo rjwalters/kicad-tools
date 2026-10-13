@@ -338,11 +338,14 @@ def measure_pairs(routed: Path, net_class_map, layers: int, log_text: str = "") 
     pcb = PCB.load(str(routed))
     log = parse_pair_log(log_text)
     engaged, _ = derive_engagement_state(pcb, net_class_map)
+    # The board thickness ``kct check`` measures vias with: its own checker's value.
     thickness = None
     with contextlib.suppress(Exception):
-        from kicad_tools.manufacturers import get_manufacturer
+        from kicad_tools.validate import DRCChecker
 
-        thickness = get_manufacturer("jlcpcb").get_design_rules(layers, 1.0).board_thickness_mm
+        thickness = DRCChecker(
+            pcb, manufacturer="jlcpcb", layers=layers
+        ).design_rules.board_thickness_mm
     skew_data, _ = derive_skew_data(
         pcb, net_class_map, board_thickness_mm=thickness, num_copper_layers=layers
     )
@@ -445,6 +448,10 @@ def run_cell(
         "seed": seed,
         "rep": rep,
         "git_sha": git_sha(),
+        # ``committed``: kct route gets the board's committed net_class_map.json (the
+        # documented protocol). ``inferred``: no --net-class-map, the classifier's map --
+        # how the #6440 doctor ran board 06.
+        "net_class_map_mode": "committed" if committed_map else "inferred",
     }
     invalid: list[str] = []
     try:
@@ -523,16 +530,17 @@ def run_cell(
 
 def render(rows: list[dict]) -> str:
     head = (
-        "| Board | Engine | Seed | Valid | Pairs coupled | Nets | kct err (by rule) | "
+        "| Board | Engine | Seed | Map | Valid | Pairs coupled | Nets | kct err (by rule) | "
         "kicad-cli err (by type) | unconn | Manufacturable | Wall s |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|"
     )
     out = [head]
     for r in rows:
         pairs = r.get("pairs") or []
         coupled = sum(1 for p in pairs if (p.get("outcome") or "").startswith("coupled"))
         out.append(
-            f"| {r['board']} | {r['engine']} | {r['seed']} | {r.get('valid')} | "
+            f"| {r['board']} | {r['engine']} | {r['seed']} | "
+            f"{r.get('net_class_map_mode', 'committed')} | {r.get('valid')} | "
             f"{coupled}/{len(pairs)} | {r.get('nets_routed', '-')} | "
             f"{r.get('kct_errors_by_rule') or '-'} | {r.get('kicad_cli_errors_by_type') or '-'} | "
             f"{r.get('kicad_drc_unconnected', '-')} | {r.get('manufacturable')} | {r.get('wall_s', '-')} |"
@@ -560,7 +568,7 @@ def _cmd_run(args) -> int:
         board = ere.BOARDS[key]
         for engine in engines:
             for seed in seeds:
-                for rep in range(args.repeat):
+                for rep in range(args.rep_start, args.rep_start + args.repeat):
                     print(f"==> {key} {engine} seed {seed} rep {rep}", flush=True)
                     rows.append(
                         run_cell(
@@ -650,6 +658,41 @@ def _cmd_determinism(args) -> int:
     return 0 if results and all(s for _, _, s in results) else 1
 
 
+def remeasure(doc: dict) -> dict:
+    """Recompute ``pairs`` / ``pair_digest`` of every row from its routed board and log."""
+    for row in doc["rows"]:
+        routed = Path(row.get("routed", ""))
+        if not routed.is_file():
+            continue
+        board = ere.BOARDS[row["board"]]
+        committed = row.get("net_class_map_mode", "committed") == "committed"
+        ncm_path = REPO / board.net_class_map if (board.net_class_map and committed) else None
+        if ncm_path is None:
+            ncm_path = ere.find_net_class_map(routed)
+        ncm = load_net_class_map(ncm_path, pcb_path=routed)
+        log = routed.parent / "route.log"
+        text = log.read_text(errors="replace") if log.is_file() else ""
+        row["pairs"] = measure_pairs(routed, ncm, board.layers, text)
+        row["pair_digest"] = pair_digest(row["pairs"])
+    return doc
+
+
+def _cmd_remeasure(args) -> int:
+    doc = remeasure(json.loads(args.file.read_text()))
+    args.file.write_text(json.dumps(doc, indent=2) + "\n")
+    print(f"remeasured {len(doc['rows'])} rows in {args.file}")
+    return 0
+
+
+def _cmd_summary(args) -> int:
+    for path in args.files:
+        doc = json.loads(path.read_text())
+        print(f"### {path.name}\n")
+        print(render([r for r in doc["rows"] if r.get("rep", 0) == 0]))
+        print()
+    return 0
+
+
 def _cmd_merge(args) -> int:
     merged = merge([json.loads(p.read_text()) for p in args.files])
     args.out.write_text(json.dumps(merged, indent=2) + "\n")
@@ -666,6 +709,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--seeds", default=",".join(str(s) for s in SEEDS))
     run.add_argument("--timeout", type=float, default=600.0)
     run.add_argument("--repeat", type=int, default=1, help="runs per cell (determinism check: 2)")
+    run.add_argument("--rep-start", type=int, default=0, help="first rep index (resume a repeat)")
     run.add_argument("--label", required=True, help="e.g. baseline-main")
     run.add_argument("--work-dir", type=Path, required=True)
     run.add_argument("--out-dir", type=Path, default=REPO / "data" / "research" / "diffpair_bench")
@@ -688,6 +732,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     det.add_argument("file", type=Path)
     det.set_defaults(func=_cmd_determinism)
+    rem = sub.add_parser("remeasure", help="recompute pair metrics from the routed boards")
+    rem.add_argument("file", type=Path)
+    rem.set_defaults(func=_cmd_remeasure)
+    summ = sub.add_parser("summary", help="markdown table of one or more result files")
+    summ.add_argument("files", type=Path, nargs="+")
+    summ.set_defaults(func=_cmd_summary)
     mrg = sub.add_parser("merge", help="combine result files (later files replace earlier cells)")
     mrg.add_argument("files", type=Path, nargs="+")
     mrg.add_argument("--out", type=Path, required=True)
@@ -698,7 +748,16 @@ def main(argv: list[str] | None = None) -> int:
     cmp_.set_defaults(func=_cmd_compare)
     # `pairs` invoked through expand_route_experiment passes bare run options.
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw and raw[0] not in ("run", "compare", "determinism", "merge", "-h", "--help"):
+    if raw and raw[0] not in (
+        "run",
+        "compare",
+        "determinism",
+        "merge",
+        "remeasure",
+        "summary",
+        "-h",
+        "--help",
+    ):
         raw = ["run", *raw]
     args = ap.parse_args(raw)
     return args.func(args)

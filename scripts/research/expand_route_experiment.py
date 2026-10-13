@@ -185,7 +185,14 @@ BOARDS: dict[str, Board] = {
     "00": Board("00", "boards/00-simple-led/output/simple_led.kicad_pcb", note="control"),
     "01": Board("01", "boards/01-voltage-divider/output/voltage_divider.kicad_pcb", note="control"),
     "02": Board("02", "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"),
-    "03": Board("03", "boards/03-usb-joystick/output/usb_joystick.kicad_pcb", layers=4),
+    "03": Board(
+        "03",
+        "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+        layers=4,
+        # Used by ``pairs`` only (``route`` ignores it): USB_D carries a 25 %
+        # continuity threshold here that the classifier's own map does not.
+        net_class_map="boards/03-usb-joystick/output/net_class_map.json",
+    ),
     # Diff-pair benchmark rows (Issue #6442; ``pairs`` subcommand only).
     # 06b: the committed LVDS board with every ``LVDS<n>_[PN]`` track and via
     # ripped (ported from ``krt_compare.BOARDS["06b"]``); GND/+3V3 plane vias
