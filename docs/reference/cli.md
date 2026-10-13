@@ -189,6 +189,7 @@ kct pcb <subcommand> <pcb_file> [options]
 | `modify` | Modify PCB elements |
 | `add-zone` | Add a copper pour zone |
 | `add-3d-models` | Patch missing `(model ...)` refs; `--refresh` rewrites existing refs through the current tier chain (see [LCSC 3D models guide](../guides/lcsc-3d-models.md)) |
+| `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
 
 **`add-zone` output-path behavior:** `-o`/`--output` is optional and
 **defaults to overwriting the input in place** — consistent with `zones add`,
@@ -209,6 +210,52 @@ kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu     # modifies board.kic
 kct pcb add-zone board.kicad_pcb --net +3.3V --layer In2.Cu # accumulates onto the GND zone
 kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu -o with_zones.kicad_pcb  # side file
 ```
+
+#### `kct pcb diff OLD NEW`
+
+Compares two boards item by item: segments, arcs, vias, footprints, pads
+(keyed `<ref>/<pad>`), zone outlines, zone fills (one item per zone) and
+board graphics. It answers "which nets and layers did this route change?".
+
+```bash
+kct pcb diff origin/main:boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb \
+    boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb
+kct pcb diff old.kicad_pcb new.kicad_pcb --net GND --layer B.Cu --format json
+kct pcb diff old.kicad_pcb new.kicad_pcb --svg diff.svg
+```
+
+Matching runs in three passes:
+
+1. **Content.** Items with identical normalised content are `unchanged`,
+   whatever their uuids. Nets are compared by name and coordinates are
+   rounded to 1 nm, so regenerated uuids, re-indentation and float
+   reformatting report nothing.
+2. **Identity.** Leftovers with the same uuid, kind and net (or the same
+   reference for footprints and pads) are `changed`. The net guard matters
+   because seeded routes number uuids by position.
+3. **Remainder.** The rest is `removed` or `added`. An item that both moved
+   and got a new uuid reports as one removed plus one added.
+
+A moved pad marks only that pad as changed, not its footprint.
+
+| Option | Description |
+|--------|-------------|
+| `OLD`, `NEW` | A `.kicad_pcb` path, or `REV:path` (same loader as `kct check --diff`) |
+| `--format text\|json` | Text summary (default) or key-sorted JSON on stdout |
+| `--net NAME` | Report only this net (repeatable) |
+| `--layer LAYER` | Report only items touching this layer (repeatable; a via matches every layer in its span) |
+| `--svg OUT.svg` | Write an overlay: removed red (old geometry of a changed item dashed), added green, changed amber, everything else dimmed |
+
+Filters apply after matching, so they never change how items pair; `--net`
+and `--layer` combine with AND. The JSON document has `old`, `new`,
+`filters`, `summary`, `by_kind`, `by_net`, `by_layer` (each a
+`{removed, added, changed, unchanged}` count) and `items`: the non-unchanged
+entries with `status`, `kind`, `key`, `net`, `layer`, `before` and `after`
+(`before` is null for added items, `after` for removed ones).
+
+Exit codes: `0` nothing differs (after filters), `2` something does, `1` a side
+could not be resolved or loaded. A CI step can therefore assert "this PR must
+not touch board X's copper".
 
 ---
 
