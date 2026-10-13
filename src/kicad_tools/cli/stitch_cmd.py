@@ -1948,6 +1948,27 @@ def max_via_reach_mm(
     return max(escape_distance, pad_radius + 2 * offset + DOGLEG_MAX_AXIAL_MM)
 
 
+def _reserved_stub_layer(pad: PadInfo) -> str | None:
+    """Layer a stub to a RESERVED site is track-checked on (Issue #6413).
+
+    Every stitch stub is emitted on ``pad.layer``, so only other-net tracks
+    on that layer can short it; ``None`` (every layer) for a through-hole pad,
+    whose copper spans the stack.  Vias, pads and fills are never filtered.
+
+    Applied to ``preferred_positions`` only.  The historical offset search
+    keeps its all-layer track test on purpose: measured on board 04 under the
+    #6388 lattice protocol, filtering it too let a straight weld for U2.35
+    land under U2's body ahead of the outward dog-leg the search finds today.
+    That weld severed U2.36's +3.3V pour, and the oracle kept the round,
+    because its gate counts links summed over nets (17 GND -> 1 +3.3V).  A
+    reserved site was planned before routing and held free, so the stale
+    cross-layer conservatism only ever costs it.
+    """
+    if pad.pad_type != "smd" or not pad.layer:
+        return None
+    return pad.layer
+
+
 def calculate_via_position(
     pad: PadInfo,
     offset: float,
@@ -2030,6 +2051,12 @@ def calculate_via_position(
             (The circle radius of a 1.5 x 0.3 mm QFP pin is 0.76 mm, so the
             circle test refuses any site beside a fine-pitch pin row.)
             Empty (default) leaves the search exactly as before.
+            Issue #6413: the stub to a reserved site is also checked only
+            against other-net TRACKS on the pad's own layer (the layer it is
+            emitted on), as the planner checked it -- a B.Cu track cannot
+            short an F.Cu stub, and on board 04 one (NRST) refused U2.23's
+            reserved site.  The historical offsets keep the all-layer track
+            test: see :func:`_reserved_stub_layer`.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -2046,6 +2073,7 @@ def calculate_via_position(
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
+    reserved_stub_layer = _reserved_stub_layer(pad)
 
     # Issue #4432: same-net fill containment gate, active only when pour
     # geometry exists on the target layer (empty -> no-op / outline fallback).
@@ -2213,6 +2241,14 @@ def calculate_via_position(
                         pad.x, pad.y, via_x, via_y, trace_half_width + clearance
                     )
                 for seg in path_track_candidates:
+                    # Issue #6413: a reserved site's stub meets only tracks
+                    # on its own layer (``box_pads`` marks reserved sites).
+                    if (
+                        box_pads
+                        and reserved_stub_layer is not None
+                        and seg.layer != reserved_stub_layer
+                    ):
+                        continue
                     dist = segment_to_segment_distance(
                         pad.x,
                         pad.y,
