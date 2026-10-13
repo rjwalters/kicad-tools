@@ -517,19 +517,28 @@ def trim_single_layer_welds(pcb_path):
         }
         if len(bonded) != 1 or not bonded <= pours:
             raise ValueError(f"Single-layer weld {ref} does not end inside its own pour")
-        remove.add(via.uuid)
+        remove.add(at)
     if not remove:
         return 0
-    doc = parse_file(pcb_path)
-    doc.children = [
-        node
-        for node in doc.children
-        if not (
-            node.name == "via"
-            and node.find_child("uuid")
-            and node.find_child("uuid").get_string(0) in remove
+    ox, oy = pcb.board_origin
+    net_names = {num: net.name for num, net in pcb.nets.items()}
+
+    def listed(node) -> bool:
+        if node.name != "via":
+            return False
+        at = node.find_child("at")
+        net = node.find_child("net")
+        name = net.get_string(0) if net is not None else None
+        if net is not None and name is not None and name.lstrip("-").isdigit():
+            name = net_names.get(int(name), name)
+        return any(
+            math.dist((at.get_float(0) - ox, at.get_float(1) - oy), pos) < 0.001 and name == wnet
+            for _, wnet, pos in SINGLE_LAYER_WELDS
+            if pos in remove
         )
-    ]
+
+    doc = parse_file(pcb_path)
+    doc.children = [node for node in doc.children if not listed(node)]
     pcb_path.write_text(serialize_sexp(doc))
     return len(remove)
 
