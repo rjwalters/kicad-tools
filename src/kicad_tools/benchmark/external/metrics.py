@@ -797,8 +797,21 @@ def run_kct_check(
                 derived = None
             if derived is not None:
                 extra["copper_oz_outer"], extra["copper_oz_inner"] = derived
-        results = DRCChecker(pcb, manufacturer=manufacturer, layers=layers, **extra).check_all(
-            pad_grid_auto_derive=True
+        checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers, **extra)
+        # Share ``kct check``'s dispatch rather than ``check_all()``: the CLI
+        # also runs path-based rules (``netclass_clearance_copper``,
+        # ``netclass_floor``, ...) that are not in ``CHECK_ALL_METHODS``, so
+        # ``check_all()`` alone under-counts errors (issue #6420). With no
+        # path (an in-memory ``PCB``) those rules are a silent no-op.
+        from kicad_tools.cli.check_cmd import run_selected_checks
+
+        results = run_selected_checks(
+            checker,
+            None,
+            set(),
+            pad_grid_auto_derive=True,
+            pcb_path=pcb_path,
+            layers=layers,
         )
     except Exception as exc:  # pragma: no cover - defensive
         return KctCheckSummary(

@@ -1059,6 +1059,10 @@ def manufacturable(row: dict) -> bool | None:
     finished output, not a deadline best-so-far. ``None`` -- never ``False``
     -- when either DRC engine did not run: "not checked" is not a verdict
     (Issue #6420).
+
+    kicad-cli is trusted over the in-process ``Nets`` count: that count comes
+    from ``NetStatusAnalyzer`` and can disagree with kicad-cli on exposed-pad
+    / thermal-via footprints, so it is deliberately not a gate here.
     """
     kct = row.get("kct_check_errors_total", row.get("kct_check_errors"))
     cli = row.get("kicad_drc_errors")
