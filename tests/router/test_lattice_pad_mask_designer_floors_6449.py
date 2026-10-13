@@ -1,4 +1,4 @@
-"""Router-class floors must not grow the lattice's static pad masks (Issue #6449).
+"""Router-class floors must not grow the lattice's static pad masks (Issues #6449, #6451).
 
 #6427 merged the router's own net-class clearances into
 ``DesignRules.net_clearance_floors`` so every pair gate holds foreign copper to
@@ -8,7 +8,9 @@ map (``LatticePathfinder._authored_pad_extra``, #6243), so every pad of a
 is exactly the change #6395 measured and rejected: it moves tracks by whole
 lattice rows in a fine-pitch pin field.  On board 05 it walled ``GND_SENSE``
 out of ``U2.6`` between the ``PHASE_A`` / ``PHASE_B`` pins (33/33 -> 32/33,
-``decline[no-path-keepout-constrained]``).  The pad side of a router-class pair
+``decline[no-path-keepout-constrained]``), and on board 04 (``--layers 2``) it
+closed the escapes of ``OSC_IN`` / ``OSC_OUT`` / ``SWDIO`` past the LQFP's
+power pins (9/9 -> 6/9, Issue #6451).  The pad side of a router-class pair
 is held by ``lattice/class_pad_repair.py`` instead.
 
 These tests pin the split: the loader records the designer-authored subset as
