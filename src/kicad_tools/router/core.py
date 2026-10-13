@@ -3831,12 +3831,53 @@ class Autorouter:
                 self.rules,
                 layer_stack=self.layer_stack,
             )
+        # Issue #6395: the pad side of every track-vs-pad class pair, held on
+        # the negotiated copper (``lattice/class_pad_repair.py``).  Re-resolved
+        # on every call (cheap) so a class map replaced after the first build
+        # (impedance-driven sizing) is the one the repair sees.
+        if hasattr(self._lattice_pathfinder, "set_pad_class_clearances"):
+            self._lattice_pathfinder.set_pad_class_clearances(
+                self._pad_class_clearances(
+                    self._lattice_pathfinder.pads,
+                    self._lattice_pathfinder.rules.trace_clearance,
+                )
+            )
         self._lattice_pathfinder.fixed_fills = self.grid.fixed_fills
         if hasattr(self._lattice_pathfinder, "set_escape_boundary"):
             self._lattice_pathfinder.set_escape_boundary(
                 self._edge_segments, self._edge_clearance or 0.0
             )
         return self._lattice_pathfinder
+
+    def _pad_class_clearances(self, pads: list[Pad], base: float) -> list[float] | None:
+        """Each pad's own router net-class clearance, aligned with ``pads`` (#6395).
+
+        KiCad holds foreign copper to ``max(class(a), class(b))``.  The router
+        already applies a connection's own class to its copper, and routed
+        copper keeps the stored side symmetrically, but a PAD's side came only
+        from authored ``.kicad_pro`` floors -- so a 0.15 mm Digital track could
+        pass a 0.2 mm Power pad at 0.15 mm.  The pad's class is resolved by
+        its routing net name, or by its retained ``net_name`` when the loader
+        neutralised it to net 0 (a skipped pour net such as GND or +5V keeps
+        its Power class this way).  A pad with no class contributes ``0.0``
+        (the board-global clearance governs).  ``None`` when no pad's class
+        exceeds the board-global trace clearance, so a board whose classes
+        only change widths keeps its pre-#6395 routed output byte-for-byte.
+        """
+        class_map = getattr(self, "net_class_map", None) or {}
+        net_names = getattr(self, "net_names", None) or {}
+        if not pads or not class_map:
+            return None
+        out: list[float] = []
+        any_above = False
+        for pad in pads:
+            name = (net_names.get(pad.net, "") if pad.net else "") or (pad.net_name or "")
+            net_class = class_map.get(name) if name else None
+            value = float(getattr(net_class, "clearance", 0.0) or 0.0) if net_class else 0.0
+            if value > base + 1e-9:
+                any_above = True
+            out.append(value)
+        return out if any_above else None
 
     def _lattice_pairwise_projection(self) -> Any:
         """Net-id-space HV pairwise projection for the lattice engine (#4602).
@@ -4565,6 +4606,14 @@ class Autorouter:
             f"(iterations={stats.iterations}, converged={stats.converged}, "
             f"lattice_builds={stats.lattice_builds})"
         )
+        # Issue #6395: say what the pad-side class repair did, honestly.
+        repair = getattr(pf, "class_pad_repair_stats", None)
+        if repair is not None and repair.found:
+            print(
+                f"  Pad class clearance (#6395): {repair.repaired}/{repair.found} "
+                f"track-pad shortfall(s) moved clear"
+                + (f"; {repair.remaining} remain" if repair.remaining else "")
+            )
         if pf.failure_reasons:
             by_reason: dict[str, list[str]] = {}
             for key, reason in pf.failure_reasons.items():
