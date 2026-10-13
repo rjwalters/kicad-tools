@@ -23,7 +23,8 @@ seedable, unit-tested). Rollout status is tracked on #11103.
 candidates by repeated draws (`work_finder/workspace_draw.rs`): each draw
 picks a workspace as below and places that workspace's next issue; the
 shared concurrency budget is filled in that order. The RNG is seeded once
-per tick, and the seed plus every draw are exported as
+per tick from the minute and the host id (#11683), and the seed, its inputs
+and every draw are exported as
 `pick.decision.workspace_draw` (and the published plan's `position` is the
 draw order). The single-workspace tick uses the in-workspace order alone.
 Since #11508 the level comes only from the two labels: there is no legacy
@@ -63,7 +64,14 @@ no priority side listing), and no priority exempts a candidate from any gate
    - **Reproducibility.** The draw uses a seedable RNG (`PickRng`, SplitMix64).
      A fixed seed reproduces the exact pick sequence. The draw (pool,
      candidates with weights, total weight, temperature, `p_min`, roll, pick)
-     is `WorkspaceDraw`, the record `pick.decision` carries.
+     is `WorkspaceDraw`, the record `pick.decision` carries. The dispatch
+     tick's seed is derived
+     from the wall-clock minute and the host id (scheme `loom-draw/v1`, #11683:
+     first 8 bytes, big-endian, of
+     `sha256("loom-draw/v1:" + floor(unix_utc_secs/60) + ":" + host)`), and
+     the record carries both inputs, so a logged `(minute, host)` replays the
+     order. See [`daemon-reference.md`](daemon-reference.md) §"Dispatch order
+     and the red-main-fix lane".
 2. **Pick the issue within that workspace** by, in order: verified
    red-main fix first; level (`loom:very-important`, then `loom:important`,
    then none); oldest `createdAt` first; issue number ascending. The

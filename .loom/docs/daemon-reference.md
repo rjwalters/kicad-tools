@@ -3142,6 +3142,25 @@ draw instead); #11547 restored the red-main-fix key above, live only while
 replacing the always-`false` `operator_priority` and the informational
 `tier`); `main_red_fix` still marks a verified red-main fix.
 
+**Draw seed (#11683).** Each tick's draw RNG is seeded by
+`workspace_draw::minute_seed(minute, host)`: the first 8 bytes, read
+big-endian, of `sha256("loom-draw/v1:" + minute + ":" + host)`, where
+`minute = floor(unix_utc_secs / 60)` in plain decimal and `host` is the
+daemon's host id (`host_identity()`: `fleet.hostId`, `$LOOM_HOST_ID`, the
+persisted `~/.loom/host-id`, else `unknown-host`). The host is in the hash so
+hosts ticking in the same minute draw different orders and do not all reach
+for the same issue first; ticks on one host within one minute draw the same
+order, which is harmless. Hosts that resolve no id share `unknown-host` and
+so share orders; leases and in-flight checks still dedupe them.
+`pick.decision.workspace_draw` records `seed_scheme` (`loom-draw/v1`),
+`seed_minute` and `seed_host` beside `seed`, so the logged pair alone
+recomputes the seed and replays the order. Known-answer vector:
+`minute_seed(29000000, "host-a") = 18365900956060715395`
+(`0xfee0c99ce2018983`; check with
+`printf 'loom-draw/v1:%s:%s' 29000000 host-a | shasum -a 256`). Tests pin the
+seed instead (`with_seed`, else `TEST_DEFAULT_SEED`); a pinned tick records
+no seed inputs.
+
 **The red-main-fix lane reorders; it is not a level.** A candidate carrying
 `<!-- loom:main-red-fix -->` whose repo's `main` is verified red leads the
 dispatch order (every slot spent elsewhere while `main` is red is wasted) and

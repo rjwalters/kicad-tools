@@ -2483,6 +2483,8 @@ and `decisions_observed` say what was seen. Empty ticks still
 emit, so per-host service cadence is measurable. Work-finder ticks also carry
 the `workspace_draw` (seed, softmax `temperature` and each draw's `p_min` since
 #11684; draw `weight`s are relative, read them only as `weight / total_weight`).
+Its seed's inputs (`seed_scheme`, `seed_minute`, `seed_host`, #11683) were added
+as optional fields under the stability promise above.
 Full field reference, the SigNoz rank-at-instant query and the rows/day volume:
 [`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).
 
