@@ -1116,7 +1116,7 @@ spans from nextest JUnit output (`[profile.ci.junit]`), which would give the
 ### Story stitching (#9088)
 
 A completed run that belongs to exactly one issue N is **also** emitted into
-N's story trace (harness-ops D32 v1, see [tracing](tracing.md)): an extra
+N's story trace (story key v1, see [tracing](tracing.md)): an extra
 `loom.ci.run` span with trace ID `story_context(repo_id, N).trace_id`,
 parented to the story root span, and an extra `loom.ci.job` span per job
 under it. Code: `loom-daemon/src/ci_telemetry/story.rs`.

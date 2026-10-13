@@ -36,10 +36,223 @@
         "track_width": 0.1016,
         "via_diameter": 0.45,
         "via_drill": 0.2
+      },
+      {
+        "name": "Audio",
+        "clearance": 0.15,
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2
+      },
+      {
+        "name": "Clock",
+        "clearance": 0.2,
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2
+      },
+      {
+        "name": "Debug",
+        "clearance": 0.15,
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2
+      },
+      {
+        "name": "Differential",
+        "clearance": 0.15,
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2
+      },
+      {
+        "name": "Digital",
+        "clearance": 0.15,
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2
+      },
+      {
+        "name": "HighCurrentSignal",
+        "clearance": 0.2,
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2
+      },
+      {
+        "name": "Power",
+        "clearance": 0.2,
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2
       }
-    ]
+    ],
+    "netclass_assignments": {
+      "+5V": [
+        "Power"
+      ],
+      "AREF": [
+        "Digital"
+      ],
+      "CPH": [
+        "Digital"
+      ],
+      "CPL": [
+        "Digital"
+      ],
+      "DRIVER_SLEEP": [
+        "Differential"
+      ],
+      "EN_A": [
+        "Digital"
+      ],
+      "EN_B": [
+        "Digital"
+      ],
+      "EN_C": [
+        "Digital"
+      ],
+      "FUSED": [
+        "Digital"
+      ],
+      "GND": [
+        "Power"
+      ],
+      "GND_SENSE": [
+        "Audio"
+      ],
+      "HALL_A": [
+        "Digital"
+      ],
+      "HALL_B": [
+        "Digital"
+      ],
+      "HALL_C": [
+        "Digital"
+      ],
+      "IREF": [
+        "Digital"
+      ],
+      "LED_A": [
+        "Digital"
+      ],
+      "MISO": [
+        "Digital"
+      ],
+      "MOSI": [
+        "Digital"
+      ],
+      "PG_DELAY": [
+        "Digital"
+      ],
+      "PHASE_A": [
+        "HighCurrentSignal"
+      ],
+      "PHASE_B": [
+        "HighCurrentSignal"
+      ],
+      "PHASE_C": [
+        "HighCurrentSignal"
+      ],
+      "PWM_A": [
+        "Digital"
+      ],
+      "PWM_B": [
+        "Digital"
+      ],
+      "PWM_C": [
+        "Digital"
+      ],
+      "RESET": [
+        "Debug"
+      ],
+      "RUN": [
+        "Differential"
+      ],
+      "SCK": [
+        "Clock"
+      ],
+      "SENSE_IN": [
+        "Audio"
+      ],
+      "SPEED": [
+        "Digital"
+      ],
+      "STATUS_LED": [
+        "Digital"
+      ],
+      "V3P3": [
+        "Power"
+      ],
+      "VCP": [
+        "Differential"
+      ],
+      "VIN": [
+        "Power"
+      ],
+      "VM": [
+        "Digital"
+      ],
+      "nFAULT": [
+        "Digital"
+      ],
+      "nTRIP": [
+        "Differential"
+      ]
+    }
   },
   "meta": {
-    "manufacturer": "jlcpcb"
+    "manufacturer": "jlcpcb",
+    "kct_router_netclasses": {
+      "classes": [
+        "Audio",
+        "Clock",
+        "Debug",
+        "Differential",
+        "Digital",
+        "HighCurrentSignal",
+        "Power"
+      ],
+      "assignments": [
+        "+5V",
+        "AREF",
+        "CPH",
+        "CPL",
+        "DRIVER_SLEEP",
+        "EN_A",
+        "EN_B",
+        "EN_C",
+        "FUSED",
+        "GND",
+        "GND_SENSE",
+        "HALL_A",
+        "HALL_B",
+        "HALL_C",
+        "IREF",
+        "LED_A",
+        "MISO",
+        "MOSI",
+        "PG_DELAY",
+        "PHASE_A",
+        "PHASE_B",
+        "PHASE_C",
+        "PWM_A",
+        "PWM_B",
+        "PWM_C",
+        "RESET",
+        "RUN",
+        "SCK",
+        "SENSE_IN",
+        "SPEED",
+        "STATUS_LED",
+        "V3P3",
+        "VCP",
+        "VIN",
+        "VM",
+        "nFAULT",
+        "nTRIP"
+      ]
+    },
+    "kct_sidecar_sha256": "b1e9e886ef7a4417b04eaaeb6c4ed254abaa361833c49f80bea0597fc94b9ff9"
   }
 }

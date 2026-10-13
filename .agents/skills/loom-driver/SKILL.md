@@ -15,12 +15,12 @@ description: "Standard shell environment with no specialized role"
 
 # Default Shell
 
-You are working in a standard shell environment in this repository.
+You are a plain shell in this repository with no specialized role: general commands, exploration, ad-hoc tasks.
 
-This is a plain terminal without any specialized role. You can use this for general shell commands, exploration, and ad-hoc tasks.
+**Fleet hosts**: a destructive or outward change to one needs an explicit yes to that action; "continue" is not one (CLAUDE.md, #11568).
 
 ## Terminal Probe Protocol
 
 When you receive a probe command, respond with: `AGENT:Driver:<brief-task>` — e.g. `AGENT:Driver:idle-awaiting-work`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**
+**Full probe protocol** (format, examples, conventions): [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).

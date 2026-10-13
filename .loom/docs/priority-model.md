@@ -45,17 +45,25 @@ no priority side listing), and no priority exempts a candidate from any gate
      (`"very-important"`); if several qualify at a tier, the draw is among
      just those. Otherwise it is over every workspace with dispatchable work
      (`"all"`).
-   - **Weight mapping.** A workspace's `fleet_priority` (the `priority`
-     integer in `workspaces.json`; lower = higher priority, default `100`) is
-     reinterpreted as a weight: `weight = max(1, 1000 / (1 + priority))`,
-     integer division. Priority `0` weighs 1000, `10` weighs 90, the default
-     `100` weighs 9. A tool repo pinned to `0` is therefore drawn about 110
-     times as often as a default-priority repo, but no workspace is ever
-     starved. `priority_pick::weight_for_priority` is the one implementation.
+   - **Weight mapping (softmax, #11684).** A workspace's `fleet_priority`
+     (the `priority` integer in `workspaces.json`; lower = higher priority,
+     default `100`) is read as a negative logit with one temperature `T`:
+     `weight = max(1, round(1_000_000 * exp(-(priority - p_min) / T)))`.
+     `p_min` is the smallest priority **in the pool being drawn over** (after
+     the tier selection above), so the pool's top workspace always weighs
+     1,000,000 and only priority *differences* matter. `T` is the
+     hyperparameter `dispatch.drawTemperature` (integer, 1–100000, default
+     `80`; see [`hyperparameters.md`](hyperparameters.md)), re-read every
+     tick: small `T` is nearly strict priority order, large `T` nearly
+     uniform. At `T = 80` the weight falls by `e` every 80 priority units:
+     priority 20 outweighs 200 about 9.5x, and a gap of 100 is about 3.5x.
+     The weight never reaches 0, so no workspace is ever starved.
+     `priority_pick::softmax_weight` is the one implementation. (Before
+     #11684 the weight was `max(1, 1000 / (1 + priority))`, a fixed curve.)
    - **Reproducibility.** The draw uses a seedable RNG (`PickRng`, SplitMix64).
      A fixed seed reproduces the exact pick sequence. The draw (pool,
-     candidates with weights, total weight, roll, pick) is `WorkspaceDraw`,
-     the record `pick.decision` carries.
+     candidates with weights, total weight, temperature, `p_min`, roll, pick)
+     is `WorkspaceDraw`, the record `pick.decision` carries.
 2. **Pick the issue within that workspace** by, in order: verified
    red-main fix first; level (`loom:very-important`, then `loom:important`,
    then none); oldest `createdAt` first; issue number ascending. The

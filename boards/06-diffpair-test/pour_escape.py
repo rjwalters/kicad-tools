@@ -40,6 +40,11 @@ _FOLDED_FLOOR_FAMILIES = {
     "PTH Hole to Track": ("hole_clearance", "hole_copper"),
     "Inner PTH Hole to Copper": ("hole_clearance", "hole_copper"),
     "Solder Mask Dam": ("physical_hole_clearance", "hole_copper"),
+    # Issue #6390: the routed project now declares the router's net classes,
+    # and the managed block carries one ``NetClass``-conditioned clearance
+    # rule per class.  Folding each board-wide is conservative, like the
+    # layer-scoped floors above.
+    "Reviewed clearance": ("clearance", "clearance"),
 }
 # Families the generator can also emit that can never constrain the copper
 # this search adds (an F.Cu track and/or a through via, away from the board

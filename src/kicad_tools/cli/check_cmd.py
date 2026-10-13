@@ -2758,6 +2758,10 @@ def _emit_drc_sidecars(
             # Issue #6039: per-rule-area keepout rules (kicad-cli 10.0.1 does
             # not enforce rule areas without them).
             merged_dru = apply_keepout_rules(merged_dru, pcb_path) or merged_dru
+            # Issue #6390: router net classes under KCT_PRESERVE_BOARD_RULES=0.
+            from kicad_tools.manufacturers.project_generator import apply_netclass_dru_rules
+
+            merged_dru = apply_netclass_dru_rules(merged_dru, checker.design_rules, project_data)
             dru_path.write_text(merged_dru, encoding="utf-8")
             written = [dru_path]
     except (OSError, json.JSONDecodeError) as e:

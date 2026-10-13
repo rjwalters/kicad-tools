@@ -596,7 +596,7 @@ labels are listed in
 `loom.queue.*` from the same per-issue ready-queue rows that `loom-daemon queue`
 shows (#8852). A row is *waiting* in one of two states. `ready` means only
 capacity is holding it: the concurrency cap, the admission ramp, the saturation
-brake, or the repo slice. `blocked` means an automatic hold: a halted repo,
+brake, or the per-repo cap. `blocked` means an automatic hold: a halted repo,
 missing sweep command, quarantine, dispatch backoff, no-op cooldown, PR-less
 retry, or a dispatch error. Running rows are not waiting. Neither are rows held
 deliberately or elsewhere: a park or hard-exclusion label, a decline, another
@@ -608,9 +608,7 @@ over-reports. The clock is dropped when the issue leaves the listing, is
 dispatched, or stops waiting. It is kept across a failed listing, and it
 re-seeds after a daemon restart. A re-seed reads `updatedAt` again, so it can
 include time the issue spent in a non-waiting hold that did not touch it (for
-example a peer claim). On a sharded fleet, `out_of_slice` rows count as `ready`
-on every host that lists them, so `starved{state="ready"}` can fire on a host
-that is not the slice owner. Read the host label with that in mind. The
+example a peer claim). The
 signals are `loom.queue.oldest_wait{state}`, `loom.queue.starved{state}` (waiting longer than `LOOM_QUEUE_STARVATION_SECS`,
 default 21600 = 6 h), `loom.queue.starved.by_reason{reason}`, and the
 dispatch-wait delta pair `loom.queue.dispatch_wait` / `.samples`. Queue
@@ -699,7 +697,7 @@ vocabulary (`loom.queue.disposition`'s wire values):
 | "admission brake" | `deferred_saturation` (decisions reason `saturation`, tick result `saturation_held`) |
 | "build back-off" / "WIP limit" (PR debt high) | `deferred_build_backoff` (decisions reason `build_backoff`, tick result `build_backoff_held`, #9410) |
 | "dependency blocked" | Loom has no issue-dependency gate. Nearest: `parked` (a `PARK_LABELS`/`SKIP_LABELS` entry, e.g. `loom:blocked`, alongside `loom:issue`) or `labelled_blocked` (`loom:blocked` without `loom:issue` — forge-side only, from `queue.snapshot`, never a tick outcome so it never appears on a `loom.dispatch.disposition` span) |
-| "lower tier" (ranked behind others) | `deferred_capacity` (machine concurrency cap full), `deferred_ramp_cap` (per-tick admission cap), `deferred_repo_cap` (per-repo cap), or `deferred_out_of_slice` (repo sharding) — `tier:*` labels do not affect dispatch order, only `loom.queue.rank` does |
+| "lower tier" (ranked behind others) | `deferred_capacity` (machine concurrency cap full), `deferred_ramp_cap` (per-tick admission cap), or `deferred_repo_cap` (per-repo cap); `deferred_out_of_slice` (repo sharding) is retired, #11682 — `tier:*` labels do not affect dispatch order, only `loom.queue.rank` does |
 | "waiting on overlapping work" (same files) | `deferred_file_overlap` (#9781): its `## Affected Files` share a path with same-repo work admitted earlier this tick or already in flight; the row's `detail` (and the `pick.decision` skip's `detail`) names the shared paths. A one-tick scheduling deferral, never a label or hold — see `daemon-reference.md` §"Same-repo file-overlap deferral" |
 | "repo locked by an open PR" | `open_pr` (the #4123 guard's `pr-open-skip`). Since #9674 the repo's `open_pr` rows carry the repo-level `lockout.frozen_candidates_count` / `lockout.frozen_points_sum` / `lockout.duration_seconds` attributes, so rank which repo's lockout is starving the most ready work by grouping those spans on `loom.repo` |
 

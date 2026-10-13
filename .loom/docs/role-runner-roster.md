@@ -24,7 +24,7 @@ specific than this record — are collected in
 - [The fencing rule](#the-fencing-rule)
 - [The windows this leaves (AC1, AC2)](#the-windows-this-leaves-ac1-ac2)
 - [Escape hatches and precedence (AC3)](#escape-hatches-and-precedence-ac3)
-- [Blast radius: the dispatcher also reads this ring](#blast-radius-the-dispatcher-also-reads-this-ring)
+- [Blast radius: none on dispatch (since #11682)](#blast-radius-none-on-dispatch-since-11682)
 - [Config surface (proposed)](#config-surface-proposed)
 - [Status rendering (AC4)](#status-rendering-ac4)
 - [Phasing: two implementation phases](#phasing-two-implementation-phases)
@@ -76,8 +76,8 @@ briefly" is a regression against #6374's entire point.
 
 Rank and ring size derived from the roster feed the **existing**
 `ShardPosture::Sharded { index, count }`. The hashing (`fnv1a64`), the
-`owns(key)` arithmetic, the shard-key resolution, the `status` rendering, and
-#6243's dispatcher consumer are all unchanged — only the *source* of
+`owns(key)` arithmetic, the shard-key resolution and the `status` rendering
+are all unchanged — only the *source* of
 `(index, count)` becomes dynamic.
 
 ## Why forge-backed
@@ -134,7 +134,8 @@ heard advertisements from over the safehouse room.
    as the roster is converged, and the roster converges by observing peer
    traffic — precisely the eventually-consistent channel whose races this issue
    exists to reduce." Building the opposite answer here would leave the two
-   sharding consumers on contradictory foundations.
+   sharding consumers on contradictory foundations. (That dispatcher consumer
+   was retired in #11682; the quoted reasoning is in the doc's git history.)
 2. **Its liveness signal was removed from load-bearing use on purpose.**
    Epic #6165 Phase 4 (#6317) deleted the peer-coordination-DEGRADED gate
    (#6157) from the reclamation decision path and replaced it with the lease
@@ -382,24 +383,17 @@ The two existing regression tests in `role_runner.rs` —
 `an_unsharded_host_still_ticks_every_workspace` — pin rungs 1 and 4 and must
 pass unmodified.
 
-## Blast radius: the dispatcher also reads this ring
+## Blast radius: none on dispatch (since #11682)
 
-`role_shard::decide(root).owned` has a second consumer:
-`work_finder::tick_multi_with_sharding` uses it as the dispatcher's **preferred
-repo slice** ([`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md),
-#6243). Making the ring dynamic therefore changes dispatcher slice preference
-too.
-
-That is **safe by construction and in scope**: the dispatcher's use is a
-*preference* with a work-conserving fallback (a host reaches outside its slice
-when its own slice has no eligible work), not a hard filter. A ring that
-resizes mid-tick can only shuffle which host *prefers* a repo; coverage is
-guaranteed by the fallback, and same-issue races remain guarded by the
-lease-order dedup (#6287). The implementation must not, however, let a
-roster-mode *yield* (condition 1) reach the dispatcher as "owns nothing" — for
-the dispatcher, yield must degrade to the work-conserving fallback, i.e. the
-`ShardDecision` handed to `work_finder` keeps the pre-roster semantics. Phase B
-must carry an explicit test for this.
+`role_shard::decide(root).owned` used to have a second consumer:
+`work_finder` used it as the dispatcher's **preferred repo slice** (#6243).
+That slice was retired from dispatch on 2026-10-13
+([`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md), #11682), so
+the ring now shapes role runners only. A roster-mode *yield* (condition 1)
+still keeps `owned` at the pre-roster verdict and flips only
+`admits_role_tick()`. The dispatch plan reads the ring's `owning_shard` for
+the fleet merge's primary-host rule ([`dispatch-plan.md`](dispatch-plan.md)),
+which a resize can move but never leave without an owner.
 
 ## Config surface (proposed)
 
@@ -471,7 +465,8 @@ measurement is the one item that cannot be a unit test.
   a new test pins that a set `LOOM_ROLE_RUNNER_SHARD_INDEX` beats an enabled
   roster.
 - **Dispatcher non-regression.** A roster-mode yield must not starve
-  `work_finder`'s preferred-slice fallback.
+  dispatch (`work_finder/tests/roster_fence.rs`; since #11682 dispatch reads
+  no shard verdict at all).
 - **Production measurement.** `role_collision.rs` (#4623) is the field
   instrument: if the fence holds, enabling roster mode must not raise the
   cross-host role-tick collision counter above its static-ring baseline.
@@ -577,6 +572,6 @@ healthy host that simply owns no slice.
 ## See also
 
 - [`daemon-reference.md` → Role-runner host sharding (#6374)](daemon-reference.md#role-runner-host-sharding-6374) — the static ring this extends
-- [`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md) (#6243) — the second consumer of the same ring, and the precedent for rejecting a mesh-derived rank
+- [`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md) (#6243) — the former second consumer of the same ring (retired from dispatch, #11682), and the precedent for rejecting a mesh-derived rank
 - [`lease-record.md`](lease-record.md) / [`lease-renewal.md`](lease-renewal.md) — the marker-comment + `updated_at` liveness idiom this reuses
 - `loom-daemon/src/role_shard.rs`, `loom-daemon/src/role_runner.rs`, `loom-daemon/src/role_collision.rs`

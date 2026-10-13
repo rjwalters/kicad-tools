@@ -43,3 +43,20 @@
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_height (min 1.0mm)))
 # END kct fab floors
+
+# BEGIN kct router net-class clearances (Issue #6390) -- managed, do not edit
+# The router's net classes, declared in the routed .kicad_pro. Without
+# these the unconditional fab-floor clearance above outranks them.
+(rule "kct net class clearance - Debug"
+  (condition "(A.NetClass == 'Debug' || B.NetClass == 'Debug') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+(rule "kct net class clearance - Digital"
+  (condition "(A.NetClass == 'Digital' || B.NetClass == 'Digital') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+(rule "kct net class clearance - Clock"
+  (condition "(A.NetClass == 'Clock' || B.NetClass == 'Clock') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
+(rule "kct net class clearance - Power"
+  (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
+# END kct router net-class clearances

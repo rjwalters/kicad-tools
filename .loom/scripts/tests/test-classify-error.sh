@@ -215,5 +215,25 @@ for _category in TOKEN_EXHAUSTED MODEL_CREDITS_EXHAUSTED; do
 done
 
 echo
+echo "--- classify_error: verbatim Claude Code messages (#11205), from fixtures/classify_error/vectors.tsv ---"
+
+# A TSV file, not a heredoc table: several of these strings contain `|`.
+VECTORS="$TEST_DIR/fixtures/classify_error/vectors.tsv"
+vectors_run=0
+while IFS=$'\t' read -r expected exit_code provider desc output; do
+    [[ -z "$expected" || "$expected" == \#* ]] && continue
+    vectors_run=$((vectors_run + 1))
+    assert_eq "$expected" "$(classify_error "$output" "$exit_code" "$provider")" "$desc"
+done < "$VECTORS"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$vectors_run" -gt 0 ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: read $vectors_run vectors from $VECTORS"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: no vectors read from $VECTORS"
+fi
+
+echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 [[ $TESTS_FAILED -eq 0 ]] || exit 1

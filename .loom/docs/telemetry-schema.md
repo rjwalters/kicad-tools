@@ -1657,7 +1657,8 @@ Each name fixes its OTLP kind. `loom.dispatch.decisions` is a monotonic
 `already_closed` (#11429: the issue is closed as not planned),
 `recheck_interval`, `host_constraint`, `capacity`, `ramp_cap`, `saturation`,
 `build_backoff` (#9410: the build back-off held an unstarred issue build),
-`out_of_slice`, `repo_cap` (#9090: the candidate's own repo was at
+`out_of_slice` (retired 2026-10-13 with the dispatch slice, #11682; never
+emitted), `repo_cap` (#9090: the candidate's own repo was at
 `maxConcurrentPerRepo`), `error`, plus the typed dispatch refusals (#8907):
 `lease_order_lost` (lost the lease-order tie-break), `token_selection_failed`
 (empty or fully bad-marked token pool), `claim_collision` (cross-host collision
@@ -1754,7 +1755,7 @@ resource `host.id`), never labelled by issue or repo:
 |---|---|---|---|---|
 | `loom.dispatch.slot_turnaround`, `.samples` | delta `Sum` | `s`, `{slot}` | — | seconds from an issue sweep finishing (`sweep.global.completed`) to the next issue-sweep dispatch refilling the slot, FIFO; mean = ratio. Includes time with no work; the first dispatches after a restart have no freed slot to pair with and are not sampled |
 | `loom.dispatch.idle_slots` | `Gauge` | `{slot}` | — | `max_concurrent − occupancy` at the end of a tick |
-| `loom.dispatch.idle_slot_seconds` | delta `Sum` | `s` | — | `min(idle, waiting) × interval` for a tick that left ready work waiting (ramp cap, saturation brake, repo slice) with slots idle, held until the next tick and capped at 15 min |
+| `loom.dispatch.idle_slot_seconds` | delta `Sum` | `s` | — | `min(idle, waiting) × interval` for a tick that left ready work waiting (ramp cap, saturation brake, per-repo cap) with slots idle, held until the next tick and capped at 15 min |
 | `loom.forge.stage_dwell`, `.samples` | delta `Sum` | `s`, `{item}` | `state` ∈ `created_to_curated`, `curated_to_issue`, `building_to_review_requested`, `review_requested_to_merged` | time spent in a forge label stage the work finder never lists; mean = ratio |
 | `loom.forge.stage_items` | `Gauge` | `{item}` | `state` (the stage label) | open items under each stage label, over this host's repos |
 
@@ -1957,7 +1958,8 @@ against the tick's whole ready queue.
 [`observability.md` §3c](observability.md#3c-operational-signals-from-daemon-loops-issue-8860)'s
 table (`admission_brake` → `deferred_saturation`, `dependency_blocked` →
 `parked`/`labelled_blocked`, `lower_tier` → `deferred_capacity` /
-`deferred_ramp_cap` / `deferred_repo_cap` / `deferred_out_of_slice`).
+`deferred_ramp_cap` / `deferred_repo_cap`; `deferred_out_of_slice` is retired,
+#11682).
 
 Tokens, providers and pools (Issues #8908, #8931):
 
@@ -2121,7 +2123,7 @@ Each row:
 | `urgent` | bool | **deprecated (#9244): always `false`**. Its label was deleted (#11105); the field stays on the wire only for compatibility |
 | `level` | string | the issue's priority level (#11510): `default`, `important` (`loom:important`) or `very-important` (`loom:very-important`), after the very-important cap (#11509); a `labelled_blocked` row reads its own labels. Absent (an older daemon) or unknown decodes to `default`. It replaces `operator_priority` (always `false` since #11508) and `tier`, which a current daemon no longer sends; older daemons may still send both (and `operator_priority_at`) |
 | `created_at` | RFC 3339, optional | issue creation time (the age ordering key) |
-| `disposition` | string | `dispatched`, `in_flight`, `deferred_capacity`, `deferred_ramp_cap`, `deferred_saturation`, `deferred_build_backoff`, `deferred_out_of_slice`, `deferred_repo_cap`, `deferred_file_overlap`, `workspace_halted`, `workspace_commands_missing`, `host_constraint`, `parked`, `hard_exclusion`, `recheck_interval`, `quarantined`, `dispatch_backoff`, `open_pr_backoff`, `noop_cooldown`, `declined`, `prless_retry`, `peer_claim`, `open_pr`, `dispatch_error`, `already_landed`, `already_closed`, `labelled_blocked` (unknown values are forward-compatible) |
+| `disposition` | string | `dispatched`, `in_flight`, `deferred_capacity`, `deferred_ramp_cap`, `deferred_saturation`, `deferred_build_backoff`, `deferred_out_of_slice` (retired 2026-10-13, #11682, never emitted), `deferred_repo_cap`, `deferred_file_overlap`, `workspace_halted`, `workspace_commands_missing`, `host_constraint`, `parked`, `hard_exclusion`, `recheck_interval`, `quarantined`, `dispatch_backoff`, `open_pr_backoff`, `noop_cooldown`, `declined`, `prless_retry`, `peer_claim`, `open_pr`, `dispatch_error`, `already_landed`, `already_closed`, `labelled_blocked` (unknown values are forward-compatible) |
 | `state` | string | `running` / `ready` / `blocked`, derived by the daemon so clients never keep a copy of the mapping |
 | `reason` | string | human-readable reason, also daemon-derived |
 | `detail` | string, optional | only for `parked` (the park label), `open_pr` (`open PR #N`), `deferred_file_overlap` (`file overlap: <paths>`, the shared `## Affected Files` paths, #9781), `already_landed` (`forge_closed` or `journal_landed`, #11429) and `labelled_blocked` (the hold labels it also carries, from `loom:operator`, `loom:operator-only`, `loom:operator-mechanical`, `loom:needs-capability`). Free-form dispatch-error and comment text is never exported |
@@ -2129,25 +2131,25 @@ Each row:
 | `position` | integer, optional | 1-based place in the host's **shaped** dispatch order (#9288, below). `null` when the row is not dispatchable on this host this tick |
 | `plan_state` | string | `running` / `next` / `queued` / `blocked` (#9288); `unknown` when absent |
 | `keys` | array, optional | `{name, value}` comparator keys that placed the row, in comparator order |
-| `gate` | string, optional | the admission gate holding a deferred row: `capacity`, `ramp`, `saturation`, `build_backoff` (#9410), `repo_cap`, `out_of_slice`, `file_overlap` (#9781) |
-| `in_slice` | bool, optional | the row's workspace is in this host's preferred repo slice (#6243); `true` on every row when unsharded |
+| `gate` | string, optional | the admission gate holding a deferred row: `capacity`, `ramp`, `saturation`, `build_backoff` (#9410), `repo_cap`, `out_of_slice` (retired 2026-10-13, #11682, never emitted), `file_overlap` (#9781) |
+| `in_slice` | bool, optional | retired; absent since #11682 (2026-10-13). It said whether the row's workspace was in this host's preferred repo slice (#6243), which no longer exists |
 | `hot` | bool, optional | the workspace had a live sweep at the top of the tick (the #9090 track-affinity input) |
 | `owning_shard` | integer, optional | the shard that owns the workspace when sharding is configured. A host can only name the shard; mapping it to a host is the fleet merge's job |
 | `repo_cap` | object, optional | `{cap, occupancy}`: the workspace's `maxConcurrentPerRepo` (`null` when uncapped) and its top-of-tick live sweeps |
 
 **Dispatch plan (Issue #9288).** `rank` is the bare comparator rank over every
 row, so it is also where a blocked row re-enters. It is not the order pass 2
-offers candidates in when a repo slice or per-repo cap reshapes the list.
+offers candidates in when the per-repo cap reshapes the list.
 `position` is: the tick records the shaped candidate order it iterated
 (`TickReport::plan_order`), and the plan is a pure projection of it, never a
-second ranking. Out-of-slice rows follow the shaped order, in comparator order.
+second ranking. (Before #11682, out-of-slice rows followed the shaped order.)
 `plan_state` is:
 
 - `running`: `dispatched` / `in_flight`;
 - `next`: the first `slots.max_admissions_per_tick` rows, in `position` order,
   among rows deferred by the concurrency or ramp cap. These are what the next
-  tick admits once slots free. Saturation-held, repo-capped and out-of-slice
-  rows are never `next`, so a saturated host has no `next` rows;
+  tick admits once slots free. Saturation-held and repo-capped rows are never
+  `next`, so a saturated host has no `next` rows;
 - `queued`: every other deferred row;
 - `blocked`: everything else, with `position: null`.
 
@@ -2465,8 +2467,10 @@ acted on, and a closed-set reason code per skipped candidate. Role ticks record
 the queue the agent actually consumed (`pr-queue`, or Curator's listings) and
 the writes it issued, via a per-tick pick journal (#10432); `candidate_source`
 and `decisions_observed` say what was seen. Empty ticks still
-emit, so per-host service cadence is measurable. Full field reference, the
-SigNoz rank-at-instant query and the rows/day volume:
+emit, so per-host service cadence is measurable. Work-finder ticks also carry
+the `workspace_draw` (seed, softmax `temperature` and each draw's `p_min` since
+#11684; draw `weight`s are relative, read them only as `weight / total_weight`).
+Full field reference, the SigNoz rank-at-instant query and the rows/day volume:
 [`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).
 
 ### `pass.summary` and `pass.verdict`
