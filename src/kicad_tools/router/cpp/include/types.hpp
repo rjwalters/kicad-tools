@@ -308,7 +308,11 @@ namespace router {
 // the A* holds steps on the routing net's own pad cells to the validator's
 // seg-vs-pad verdict.  The Python side calls the new setter on every search,
 // so a v50 .so must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 51;
+// v52 (Issue #6368): ``PadBounds`` gained ``centre_gx`` / ``centre_gy`` /
+// ``long_axis`` / ``lane_half_cells`` / ``tip_lo`` / ``tip_hi`` and both A*
+// loops charge an off-centreline pad landing.  The Python side sets the new fields on every
+// pad bound, so a v51 .so (which lacks them) must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 52;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -595,6 +599,20 @@ struct PadBounds {
     int approach_gy1 = 0;
     int approach_gx2 = 0;
     int approach_gy2 = 0;
+    // Issue #6368: pad centre in fractional grid units, the board axis the
+    // pad is long along (0 = x, 1 = y, -1 = none: square, rotated off a
+    // cardinal angle, virtual, or not in a fine-pitch row -- the scope is
+    // decided by ``pad_landing.pad_landing_geometry``), the half-width in cells of the lane a run
+    // off the pad tip occupies (one pad short side) and the cell range along
+    // the long axis whose centres lie on the pad copper (its tip lines are
+    // the range ends).  ``long_axis = -1`` (the default) disables the centreline
+    // landing cost, so callers that never set the fields are unchanged.
+    float centre_gx = 0.0f;
+    float centre_gy = 0.0f;
+    int long_axis = -1;
+    float lane_half_cells = 0.0f;
+    int tip_lo = 0;
+    int tip_hi = 0;
 };
 
 // Per-pad lateral-channel budget (Issue #3143).

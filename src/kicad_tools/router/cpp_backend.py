@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from . import wall_deadline as _wall_deadline
+from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
 
 if TYPE_CHECKING:
@@ -81,7 +82,10 @@ logger = logging.getLogger(__name__)
 # ``own_pad_step_clear`` and ``Grid3D.segment_pads_clear`` -- the A* holds
 # steps on the routing net's own pad cells to the validator's seg-vs-pad
 # verdict.  ``route()`` calls the setter on every search; a v50 .so lacks it.
-_REQUIRED_CPP_BUILD_VERSION = 51
+# v52 (Issue #6368): ``PadBounds.centre_gx`` / ``centre_gy`` / ``long_axis``
+# -- both A* loops charge an off-centreline pad landing.  A v51 .so lacks the
+# fields.
+_REQUIRED_CPP_BUILD_VERSION = 52
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -2106,6 +2110,14 @@ class CppPathfinder:
         bounds.approach_gy1 = int(gy1) - pad_escape_margin
         bounds.approach_gx2 = int(gx2) + pad_escape_margin
         bounds.approach_gy2 = int(gy2) + pad_escape_margin
+        # Issue #6368: centreline landing cost inputs (see ``pad_landing``).
+        landing = pad_landing_geometry(pad, self._grid)
+        bounds.long_axis = int(landing.long_axis)
+        bounds.centre_gx = float(landing.centre_gx)
+        bounds.centre_gy = float(landing.centre_gy)
+        bounds.lane_half_cells = float(landing.lane_half_cells)
+        bounds.tip_lo = int(landing.tip_lo)
+        bounds.tip_hi = int(landing.tip_hi)
         return bounds
 
     def route(
