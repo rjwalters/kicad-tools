@@ -217,3 +217,37 @@ def test_kicad_cli_enforces_an_unversioned_net_settings_block(tmp_path: Path, ca
         if v.get("severity") == "error" and "clearance" in v.get("type", "")
     ]
     assert errors
+
+
+def test_harness_kct_check_matches_cli_error_counts(tmp_path: Path, capsys) -> None:
+    """``run_kct_check(path)`` must grade a board like a manual ``kct check`` (#6420).
+
+    ``check_all()`` alone misses the path-based CLI rules, so the harness
+    reported 0 errors where the CLI reported the netclass violations.
+    """
+    from kicad_tools.benchmark.external.metrics import run_kct_check
+
+    pcb = _board(tmp_path, STRAIGHT)
+    out = tmp_path / "full.json"
+    main(
+        [
+            str(pcb),
+            "--mfr",
+            "jlcpcb",
+            "--allow-incomplete",
+            "--format",
+            "json",
+            "--output",
+            str(out),
+        ]
+    )
+    capsys.readouterr()
+    cli_errors: dict[str, int] = {}
+    for v in json.loads(out.read_text())["violations"]:
+        if v["severity"] == "error":
+            cli_errors[v["rule_id"]] = cli_errors.get(v["rule_id"], 0) + 1
+    assert cli_errors.get("netclass_clearance_copper"), "fixture must violate the class"
+
+    summary = run_kct_check(pcb, manufacturer="jlcpcb", layers=None)
+    assert summary.ran, summary.note
+    assert summary.errors_by_rule == cli_errors
