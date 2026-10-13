@@ -163,6 +163,10 @@ def test_board_07_gates_with_sidecar(tmp_path: Path) -> None:
     )
 
 
+#: Router-class violations in the committed board-07 copper (#6390, #6396).
+BOARD_07_KNOWN_NETCLASS_VIOLATIONS = 42
+
+
 @pytest.mark.slow
 def test_board_07_no_op_without_sidecar(tmp_path: Path) -> None:
     """Without a sidecar, board 07 keeps the graceful no-op (today's behavior).
@@ -176,8 +180,16 @@ def test_board_07_no_op_without_sidecar(tmp_path: Path) -> None:
 
     drc = _collect_drc(BOARD_07_PCB, None, tmp_path)
 
-    assert drc["passed"] is True
-    assert drc["blocking_count"] == 0
+    # Issue #6390: the routed sidecars now declare the router's net classes,
+    # and the committed copper violates them (#6396: 42 by kct, 40 by
+    # kicad-cli --all-track-errors; plain kicad-cli reports one error per
+    # track, so its count varies run to run).  Before #6390 neither engine
+    # reported any clearance error here.  Those findings are not
+    # sidecar-gated; tolerate exactly them so the no-op contract stays pinned.
+    by_type = drc.get("violations_by_type", {})
+    netclass = by_type.get("netclass_clearance_copper", 0) + by_type.get("kicad-cli:clearance", 0)
+    assert netclass <= BOARD_07_KNOWN_NETCLASS_VIOLATIONS
+    assert drc["blocking_count"] - netclass == 0
     # None of the sidecar-gated families may appear when no map is supplied.
     assert not (set(drc.get("violations_by_type", {})) & GATED_RULE_FAMILIES)
 
