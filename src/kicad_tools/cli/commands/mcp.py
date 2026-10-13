@@ -132,9 +132,273 @@ def _find_project_root() -> Path | None:
     return None
 
 
-def _get_claude_code_config_path() -> Path:
-    """Get the Claude Code MCP config file path."""
+#: Name the Claude clients register the server under.  Codex and opencode use
+#: ``SERVER_NAME`` ("kct"); Claude keeps "kicad-tools" so existing configs and
+#: docs stay valid.
+CLAUDE_SERVER_NAME = "kicad-tools"
+
+#: Upper bound on one ``claude mcp ...`` call.
+CLAUDE_CLI_TIMEOUT_S = 30
+
+METHOD_CLAUDE_CLI = "claude-cli"
+METHOD_JSON_MERGE = "json-merge"
+
+
+def _get_claude_code_user_config_path() -> Path:
+    """Claude Code's user-scope config: ``$CLAUDE_CONFIG_DIR/.claude.json``.
+
+    Defaults to ``~/.claude.json``.  Claude Code reads user-scope MCP servers
+    from the top-level ``mcpServers`` of this file (issue #6418).
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(config_dir).expanduser() if config_dir else Path.home()
+    return base / ".claude.json"
+
+
+def _get_claude_code_project_config_path() -> Path:
+    """Claude Code's project-scope config: ``./.mcp.json``."""
+    return Path.cwd() / ".mcp.json"
+
+
+def _get_legacy_claude_code_config_path() -> Path:
+    """``~/.claude/mcp.json``: where kct wrote before #6418.  Claude Code ignores it."""
     return Path.home() / ".claude" / "mcp.json"
+
+
+def _find_claude_cli() -> str | None:
+    """The ``claude`` executable on PATH, if any."""
+    return shutil.which("claude")
+
+
+def _read_json_object(path: Path) -> dict | None:
+    """Parse ``path`` as a JSON object; ``None`` when the file does not exist.
+
+    Raises :class:`ClientConfigError` when the file exists but cannot be read,
+    is not valid JSON, is not an object, or has a non-object ``mcpServers``.
+    Callers must then refuse to write: ``~/.claude.json`` holds all of Claude
+    Code's state, so replacing an unparseable file with ``{}`` would erase it.
+    """
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise ClientConfigError(f"cannot read {path}: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ClientConfigError(
+            f"{path} is not valid JSON ({exc}); refusing to overwrite it"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ClientConfigError(f"{path} does not hold a JSON object; refusing to overwrite it")
+    servers = data.get("mcpServers")
+    if servers is not None and not isinstance(servers, dict):
+        raise ClientConfigError(f"{path}: 'mcpServers' is not an object; refusing to overwrite it")
+    return data
+
+
+def _server_entry(data: dict | None, name: str):
+    """``data["mcpServers"][name]``, or ``None``."""
+    servers = (data or {}).get("mcpServers")
+    return servers.get(name) if isinstance(servers, dict) else None
+
+
+def _merge_mcp_server(path: Path, name: str, entry: dict) -> None:
+    """Set ``mcpServers[name]`` in ``path``, keeping every other key verbatim.
+
+    Re-reads the file (it may have changed since the caller looked) and
+    writes atomically, preserving the file mode.
+    """
+    data = _read_json_object(path) or {}
+    data.setdefault("mcpServers", {})[name] = entry
+    _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def _describe_entry(entry) -> str:
+    """``command args...`` of a server entry, for the "was:" line."""
+    if not isinstance(entry, dict):
+        return json.dumps(entry)
+    args = entry.get("args")
+    args = args if isinstance(args, list) else []
+    return f"{entry.get('command', '')} {' '.join(map(str, args))}"
+
+
+def _legacy_claude_code_config() -> Path | None:
+    """The stale ``~/.claude/mcp.json`` if it still has a kicad-tools entry."""
+    path = _get_legacy_claude_code_config_path()
+    try:
+        data = _read_json_object(path)
+    except ClientConfigError:
+        return None
+    return path if _server_entry(data, CLAUDE_SERVER_NAME) is not None else None
+
+
+def _register_via_claude_cli(exe: str, entry: dict, replace: bool) -> str | None:
+    """Register the user-scope server with ``claude mcp add-json``.
+
+    ``claude mcp add`` fails on an existing name, so a differing entry is
+    removed first.  Returns ``None`` on success, otherwise an error message
+    (the caller then falls back to the JSON merge, which also restores an
+    entry the ``remove`` already dropped).
+    """
+
+    def run(argv: list[str]) -> str | None:
+        label = "claude " + " ".join(argv[:2])
+        try:
+            proc = subprocess.run(
+                [exe, *argv],
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_CLI_TIMEOUT_S,
+                env=dict(os.environ),
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"`{label}` failed: {exc}"
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            return f"`{label}` exited {proc.returncode}" + (f": {detail}" if detail else "")
+        return None
+
+    if replace:
+        error = run(["mcp", "remove", "--scope", "user", CLAUDE_SERVER_NAME])
+        if error:
+            return error
+    return run(["mcp", "add-json", "--scope", "user", CLAUDE_SERVER_NAME, json.dumps(entry)])
+
+
+def _run_setup_claude_code(args, dry_run: bool, as_json: bool) -> int:
+    """Register ``kct mcp serve`` with Claude Code (issue #6418).
+
+    User scope (default) targets ``~/.claude.json`` (``$CLAUDE_CONFIG_DIR``
+    honoured): through ``claude mcp add-json --scope user`` when ``claude`` is
+    on PATH, otherwise -- or when the CLI fails -- by merging the top-level
+    ``mcpServers`` entry in place.  Project scope merges ``./.mcp.json``.
+    """
+    scope = getattr(args, "scope", None) or "user"
+    command, cmd_args = _find_kct_command()
+    entry = {"type": "stdio", "command": command, "args": cmd_args, "env": {}}
+    config_path = (
+        _get_claude_code_project_config_path()
+        if scope == "project"
+        else _get_claude_code_user_config_path()
+    )
+    legacy = _legacy_claude_code_config()
+    exe = _find_claude_cli() if scope == "user" else None
+    method = METHOD_CLAUDE_CLI if exe else METHOD_JSON_MERGE
+
+    def payload(**fields) -> dict:
+        doc = {
+            "command": "setup",
+            "client": "claude-code",
+            "scope": scope,
+            "config_path": str(config_path),
+            "method": method,
+            "dry_run": dry_run,
+            "server_name": CLAUDE_SERVER_NAME,
+            "legacy_config": str(legacy) if legacy else None,
+        }
+        doc.update(fields)
+        return doc
+
+    def fail(message: str) -> int:
+        if as_json:
+            emit_json(
+                payload(
+                    written=False, replaced=False, unchanged=False, success=False, error=message
+                )
+            )
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+        return 1
+
+    try:
+        current = _server_entry(_read_json_object(config_path), CLAUDE_SERVER_NAME)
+    except ClientConfigError as exc:
+        return fail(str(exc))
+
+    unchanged = current == entry
+    replaced = current is not None and not unchanged
+    written = False
+    cli_error = None
+
+    if not dry_run and not unchanged:
+        if exe:
+            cli_error = _register_via_claude_cli(exe, entry, replace=current is not None)
+            if cli_error is None:
+                try:
+                    after = _server_entry(_read_json_object(config_path), CLAUDE_SERVER_NAME)
+                except ClientConfigError:
+                    after = None
+                if after != entry:
+                    cli_error = f"`claude mcp add-json` exited 0 but {config_path} lacks the entry"
+            if cli_error is not None:
+                method = METHOD_JSON_MERGE
+        if method == METHOD_JSON_MERGE:
+            try:
+                _merge_mcp_server(config_path, CLAUDE_SERVER_NAME, entry)
+            except ClientConfigError as exc:
+                return fail(str(exc))
+            except OSError as exc:
+                return fail(f"cannot write {config_path}: {exc}")
+        written = True
+
+    if as_json:
+        emit_json(
+            payload(
+                written=written,
+                replaced=replaced,
+                unchanged=unchanged,
+                server=entry,
+                cli_error=cli_error,
+                success=True,
+            )
+        )
+        return 0
+
+    print("MCP client: claude-code")
+    print(f"Scope: {scope}")
+    print(f"Config file: {config_path}")
+    how = "claude mcp add-json" if method == METHOD_CLAUDE_CLI else "direct JSON merge"
+    print(f"Method: {method} ({how})")
+    print(f"Command: {command} {' '.join(cmd_args)}")
+    print()
+    snippet = json.dumps({"mcpServers": {CLAUDE_SERVER_NAME: entry}}, indent=2)
+
+    if unchanged:
+        print(f"Already configured: the {CLAUDE_SERVER_NAME!r} server entry is up to date.")
+    elif dry_run:
+        action = "replace the existing" if replaced else "add the"
+        print(f"Dry run - no changes made. Would {action} {CLAUDE_SERVER_NAME!r} server entry:")
+        print()
+        print(snippet)
+    else:
+        if cli_error:
+            print(f"Warning: {cli_error}")
+            print(f"Fell back to editing {config_path} directly.")
+            print()
+        if replaced:
+            old_cmd = _describe_entry(current)
+            print(f"Replaced the existing {CLAUDE_SERVER_NAME!r} server entry:")
+            print(f"  was: {old_cmd}")
+            print(f"  now: {command} {' '.join(cmd_args)}")
+        else:
+            print(f"Added the {CLAUDE_SERVER_NAME!r} server entry:")
+        print()
+        print(snippet)
+        print()
+        print(f"Wrote {config_path}")
+        print("Restart Claude Code to pick up the new MCP server.")
+
+    if legacy:
+        print()
+        print(
+            f"Note: {legacy} also has a {CLAUDE_SERVER_NAME!r} entry, but Claude Code "
+            "never reads that file (older kct versions wrote it). It was left "
+            "unchanged; you can delete it."
+        )
+    return 0
 
 
 def _get_claude_desktop_config_path() -> Path:
@@ -170,11 +434,16 @@ def _run_setup(args) -> int:
     dry_run = getattr(args, "dry_run", False)
     as_json = getattr(args, "format", "text") == FORMAT_JSON
 
+    if getattr(args, "scope", None) is not None and client != "claude-code":
+        print("Error: --scope only applies to --client claude-code", file=sys.stderr)
+        return 2
     if client in ("codex", "opencode"):
         return _run_setup_harness(args, client, dry_run, as_json)
     if getattr(args, "project", None) is not None:
         print("Error: --project only applies to --client opencode", file=sys.stderr)
         return 2
+    if client == "claude-code":
+        return _run_setup_claude_code(args, dry_run, as_json)
 
     command, cmd_args = _find_kct_command()
 
@@ -184,10 +453,7 @@ def _run_setup(args) -> int:
         "env": {},
     }
 
-    if client == "claude-code":
-        config_path = _get_claude_code_config_path()
-    else:
-        config_path = _get_claude_desktop_config_path()
+    config_path = _get_claude_desktop_config_path()
 
     # Show what we'll do
     if not as_json:
@@ -217,33 +483,38 @@ def _run_setup(args) -> int:
         print(json.dumps({"mcpServers": {"kicad-tools": server_config}}, indent=2))
         return 0
 
-    # Read existing config or create new
-    existing: dict = {}
-    if config_path.exists():
-        try:
-            existing = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            existing = {}
+    # An unreadable config is reported, never replaced with {} (#6418).
+    try:
+        existing = _read_json_object(config_path)
+    except ClientConfigError as exc:
+        if as_json:
+            emit_json(
+                {
+                    "command": "setup",
+                    "client": client,
+                    "config_path": str(config_path),
+                    "dry_run": False,
+                    "written": False,
+                    "replaced": False,
+                    "success": False,
+                    "error": str(exc),
+                }
+            )
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
-    # Merge in the kicad-tools server
-    if "mcpServers" not in existing:
-        existing["mcpServers"] = {}
-
-    replaced = "kicad-tools" in existing["mcpServers"]
+    old = _server_entry(existing, "kicad-tools")
+    replaced = old is not None
     if replaced and not as_json:
-        old = existing["mcpServers"]["kicad-tools"]
-        old_cmd = f"{old.get('command', '')} {' '.join(old.get('args', []))}"
+        old_cmd = _describe_entry(old)
         print("Replacing existing kicad-tools config:")
         print(f"  was: {old_cmd}")
         print(f"  now: {command} {' '.join(cmd_args)}")
     elif not replaced and not as_json:
         print("Adding kicad-tools MCP server config.")
 
-    existing["mcpServers"]["kicad-tools"] = server_config
-
-    # Write config
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(existing, indent=2) + "\n")
+    _merge_mcp_server(config_path, "kicad-tools", server_config)
 
     if as_json:
         emit_json(
@@ -262,13 +533,8 @@ def _run_setup(args) -> int:
 
     print()
     print(f"Wrote {config_path}")
-
-    if client == "claude-code":
-        print()
-        print("Restart Claude Code to pick up the new MCP server.")
-    else:
-        print()
-        print("Restart Claude Desktop to pick up the new MCP server.")
+    print()
+    print("Restart Claude Desktop to pick up the new MCP server.")
 
     return 0
 

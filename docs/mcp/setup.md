@@ -58,8 +58,10 @@ pipx install "kicad-tools[mcp]"
 The easiest way to configure MCP is with the built-in setup command:
 
 ```bash
-# For Claude Code (default)
+# For Claude Code (default; user scope, ~/.claude.json)
 kct mcp setup
+# ...or the project's ./.mcp.json, shared with everyone who opens the repo
+kct mcp setup --scope project
 
 # For Claude Desktop
 kct mcp setup --client claude-desktop
@@ -91,17 +93,43 @@ the file are kept, and re-running when the entry is already current is a
 no-op. An existing file that cannot be parsed is left alone and reported as
 an error (exit 1). Add `--format json` for a machine-readable result.
 
+For Claude Code, user scope (the default) registers the server through
+`claude mcp add-json --scope user kicad-tools ...` when `claude` is on PATH,
+which writes the top-level `mcpServers` of `~/.claude.json`
+(`$CLAUDE_CONFIG_DIR/.claude.json` when that variable is set). Without the
+`claude` CLI, or if the CLI call fails, kct merges the same entry into that
+file directly, atomically and without touching any other key. `--scope
+project` merges into `./.mcp.json` instead; Claude Code asks once for approval
+before it starts a project-scope server. `--dry-run` prints the file and the
+method (`claude-cli` or `json-merge`) it would use.
+
+> **Upgrading from an older kct?** Before issue #6418, `kct mcp setup` wrote
+> `~/.claude/mcp.json`, a file Claude Code never reads, so the server never
+> appeared. Re-run `kct mcp setup --client claude-code`. The old file is left
+> alone (setup prints a note when it still holds a `kicad-tools` entry); you
+> can delete it.
+
 ## Manual Client Configuration
 
 ### Claude Code
 
-1. **Config file**: `~/.claude/mcp.json`
+1. **Config file**: the top-level `mcpServers` object of `~/.claude.json`
+   (user scope; `$CLAUDE_CONFIG_DIR/.claude.json` if set), or `.mcp.json` in
+   the project root (project scope). Prefer the CLI, which edits
+   `~/.claude.json` for you:
+   ```bash
+   claude mcp add-json --scope user kicad-tools \
+     '{"type":"stdio","command":"kct","args":["mcp","serve"],"env":{}}'
+   ```
+   `~/.claude.json` also holds the rest of Claude Code's state, so if you edit
+   it by hand, change only the `mcpServers.kicad-tools` entry.
 
 2. **For development installs** (using uv from the repo):
    ```json
    {
      "mcpServers": {
        "kicad-tools": {
+         "type": "stdio",
          "command": "uv",
          "args": ["run", "--project", "/path/to/kicad-tools", "kct", "mcp", "serve"],
          "env": {}
@@ -115,6 +143,7 @@ an error (exit 1). Add `--format json` for a machine-readable result.
    {
      "mcpServers": {
        "kicad-tools": {
+         "type": "stdio",
          "command": "kct",
          "args": ["mcp", "serve"],
          "env": {}
@@ -123,7 +152,8 @@ an error (exit 1). Add `--format json` for a machine-readable result.
    }
    ```
 
-4. **Restart Claude Code** to pick up the new MCP server.
+4. **Restart Claude Code** to pick up the new MCP server, then check with
+   `claude mcp list`.
 
 ### Claude Desktop (macOS)
 
