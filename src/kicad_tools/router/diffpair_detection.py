@@ -217,6 +217,65 @@ def detect_diff_pairs(
     return out
 
 
+def coupled_engaged_pairs(
+    net_names: dict[int, str] | list[str] | set[str],
+    net_class_map: dict[str, NetClassRouting] | None,
+    kicad_groups: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """``(P, N)`` net names of every pair the router engages coupled routing on.
+
+    The router's own decision (Issue #6429): :func:`detect_diff_pairs` with
+    the class map and KiCad groups, filtered by
+    :func:`~kicad_tools.router.diffpair.should_engage_coupled` -- the same
+    ``synth_routing`` / ``net_to_class`` wiring every engagement site uses
+    (``core.py``'s lattice and grid pre-passes).  A pair listed here is routed
+    P against N at its class's ``intra_pair_clearance``, so both DRC engines
+    must exempt its own P/N gap from the router class's full clearance.
+
+    Args:
+        net_names: ``{net_id: net_name}`` (the autorouter's ``net_names``) or
+            a plain collection of net names.
+        net_class_map: The router's ``{net_name: NetClassRouting}`` map.
+            ``None`` / empty engages nothing.
+        kicad_groups: Optional ``(P, N)`` KiCad-group declarations.
+
+    Returns:
+        Sorted, de-duplicated ``(P, N)`` tuples.  Never raises: detection
+        failing must not break the sidecar write.
+    """
+    if not net_class_map:
+        return []
+    from .diffpair import should_engage_coupled
+
+    if isinstance(net_names, dict):
+        ids = {nid: name for nid, name in net_names.items() if name}
+    else:
+        ids = dict(enumerate(sorted(n for n in net_names if n), start=1))
+    net_to_class: dict[str, str] = {}
+    synth_routing: dict = dict(net_class_map)
+    for net_name, net_class in net_class_map.items():
+        class_name = getattr(net_class, "name", None)
+        if not class_name:
+            continue
+        net_to_class[net_name] = class_name
+        synth_routing.setdefault(class_name, net_class)
+    try:
+        detected = detect_diff_pairs(
+            ids,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            kicad_groups=kicad_groups,
+        )
+    except Exception:  # pragma: no cover - defensive, mirrors the router sites
+        return []
+    pairs: set[tuple[str, str]] = set()
+    for d in detected:
+        engaged, _reason = should_engage_coupled(d.pair, synth_routing, net_to_class)
+        if engaged:
+            pairs.add((d.pair.positive.net_name, d.pair.negative.net_name))
+    return sorted(pairs)
+
+
 # =============================================================================
 # Internals
 # =============================================================================

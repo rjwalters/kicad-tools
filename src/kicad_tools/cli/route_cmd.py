@@ -3951,6 +3951,60 @@ class DRCConstraintPropagationError(ValueError):
     """Authored source constraints could not safely reach the routed output."""
 
 
+def _router_coupled_pairs(
+    output_path: Path, net_class_map: dict | None, router: object | None = None
+) -> list[tuple[str, str]] | None:
+    """The ``(P, N)`` pairs the router coupled-routes (Issue #6429).
+
+    :func:`~kicad_tools.router.diffpair_detection.coupled_engaged_pairs` over
+    the router's nets (or, without a router, the routed board's) and its
+    effective class map.  ``None`` when there is no class map, so the sidecar
+    writer keeps whatever an earlier route recorded -- the same contract as
+    ``net_class_map=None``.
+    """
+    if net_class_map is None:
+        return None
+    from kicad_tools.router.diffpair_detection import coupled_engaged_pairs
+
+    net_names = getattr(router, "net_names", None)
+    if not isinstance(net_names, dict) or not net_names:
+        from kicad_tools.manufacturers.project_generator import board_net_names
+
+        net_names = board_net_names(output_path) if Path(output_path).exists() else None
+    if not net_names:
+        return []
+    return coupled_engaged_pairs(
+        net_names, net_class_map, getattr(router, "kicad_diff_pair_groups", None)
+    )
+
+
+def _warn_unrecognised_coupled_pairs(pairs: list[tuple[str, str]] | None, quiet: bool) -> None:
+    """One warning per coupled pair KiCad does not recognise by name (#6429).
+
+    The router couples ``X_POS``/``X_NEG``, ``x_p``/``x_n`` and declared
+    pairs whatever their names; KiCad pairs nets only by its
+    ``MatchDpSuffix`` rule.  Their clearance exemption is carried explicitly
+    (``meta.kct_router_diff_pairs``), but KiCad's native diff-pair checks
+    (``diff_pair_gap`` / ``diff_pair_uncoupled``) will not see them.  A
+    warning, never a refusal: coupling stays on.
+    """
+    if quiet or not pairs:
+        return
+    from kicad_tools.manufacturers.netclass_dru import is_coupled_diff_pair
+
+    for p, n in pairs:
+        if is_coupled_diff_pair(p, n) or is_coupled_diff_pair(n, p):
+            continue
+        print(
+            f"  Warning: diff pair {p}/{n} is coupled-routed but KiCad does not "
+            "recognise it as a pair (KiCad pairs nets only by a trailing '+'/'-' "
+            "or uppercase 'P'/'N', ignoring trailing digits and '_'); its "
+            "intra-pair clearance exemption is recorded explicitly, but KiCad's "
+            "native diff_pair_gap / diff_pair_uncoupled checks will not see it. "
+            "A KiCad-recognised name (e.g. X_P/X_N) avoids this (issue #6429)."
+        )
+
+
 def _write_drc_constraint_sidecars(
     output_path: Path,
     manufacturer: str,
@@ -3959,6 +4013,7 @@ def _write_drc_constraint_sidecars(
     quiet: bool = False,
     source_pcb_path: Path | None = None,
     net_class_map: dict | None = None,
+    coupled_pairs: list[tuple[str, str]] | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -4006,6 +4061,11 @@ def _write_drc_constraint_sidecars(
             and matching ``.kicad_dru`` rules, so ``kicad-cli`` and
             ``kct check`` enforce the clearances the router routed to.
             ``None`` keeps whatever an earlier route declared.
+        coupled_pairs: The ``(P, N)`` pairs the router coupled-routes
+            (:func:`_router_coupled_pairs`, Issue #6429).  Those KiCad does
+            not recognise by name are recorded in the ``.kicad_pro`` and
+            exempted from the router class's clearance in both engines.
+            ``None`` keeps whatever an earlier route recorded.
     """
     try:
         from kicad_tools.manufacturers import (
@@ -4048,6 +4108,7 @@ def _write_drc_constraint_sidecars(
             copper_oz=copper_oz,
             source_pcb_path=source_pcb_path,
             router_net_classes=net_class_map,
+            router_coupled_pairs=coupled_pairs,
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -4251,6 +4312,10 @@ def run_post_route_drc(
     # sidecars a prior run may have left behind.
     _effective_class_map = dict(net_class_map or {})
     _effective_class_map.update(loaded_net_class_map or {})
+    # Issue #6429: the pairs the router coupled, so both engines exempt their
+    # intra-pair gap even when KiCad does not recognise the names.
+    _coupled_pairs = _router_coupled_pairs(output_path, _effective_class_map or None, router)
+    _warn_unrecognised_coupled_pairs(_coupled_pairs, quiet)
     _write_drc_constraint_sidecars(
         output_path,
         manufacturer,
@@ -4259,6 +4324,7 @@ def run_post_route_drc(
         quiet=quiet,
         source_pcb_path=source_pcb_path,
         net_class_map=_effective_class_map or None,
+        coupled_pairs=_coupled_pairs,
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -5549,6 +5615,9 @@ def _fill_zones_after_route(
                 quiet=quiet,
                 source_pcb_path=Path(args.pcb),
                 net_class_map=_pour_closer_net_class_map(router, args),
+                coupled_pairs=_router_coupled_pairs(
+                    output_path, _pour_closer_net_class_map(router, args), router
+                ),
             )
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
@@ -5623,6 +5692,9 @@ def _fill_zones_after_route(
             quiet=True,
             source_pcb_path=Path(args.pcb),
             net_class_map=_pour_closer_net_class_map(router, args),
+            coupled_pairs=_router_coupled_pairs(
+                output_path, _pour_closer_net_class_map(router, args), router
+            ),
         )
 
     _fill_started = time.monotonic()
