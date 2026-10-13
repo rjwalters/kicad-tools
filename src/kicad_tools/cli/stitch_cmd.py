@@ -5757,13 +5757,12 @@ def run_stitch(
         ]
         cross_net_stitch_vias = [v for v in placed_stitch_vias if v[3] != pad.net_number]
         eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
-        eff_other_net_vias = other_net_vias + cross_net_stitch_vias
-        # Issue #6428: a site this pad's earlier weld cut a foreign pour at.
+        # Issue #6428: a site this pad's earlier weld cut a foreign pour at
+        # is held as a foreign via for this pad -- in every placement pass,
+        # the pre-existing-copper fallbacks below included.
         avoided = (avoid_sites or {}).get(f"{pad.reference}.{pad.pad_number}", ())
-        if avoided:
-            eff_other_net_vias = eff_other_net_vias + [
-                (float(x), float(y), via_size, -1) for x, y in avoided
-            ]
+        pad_base_vias = other_net_vias + [(float(x), float(y), via_size, -1) for x, y in avoided]
+        eff_other_net_vias = pad_base_vias + cross_net_stitch_vias
         # Issue #5240: index the foreign-net track pool once per pad and
         # share it across every placement strategy this pad tries.  When no
         # cross-net stitch geometry has been placed yet the pool's contents
@@ -5832,7 +5831,7 @@ def run_stitch(
             # before the co-check tightened, accepting the marginal cross-net
             # band intrusion rather than leaving the pad disconnected.
             fallback_result = _attempt_placement(
-                pad, other_net_tracks, other_net_vias, eff_track_index=base_track_index
+                pad, other_net_tracks, pad_base_vias, eff_track_index=base_track_index
             )
             if fallback_result is None:
                 # Issue #4432: distinguish an OFF-FILL failure from a genuine
@@ -5847,7 +5846,7 @@ def run_stitch(
                     _attempt_placement(
                         pad,
                         other_net_tracks,
-                        other_net_vias,
+                        pad_base_vias,
                         enforce_fill_gate=False,
                         eff_track_index=base_track_index,
                     )
