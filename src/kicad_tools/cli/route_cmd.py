@@ -7557,11 +7557,13 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
 def _closer_reasons_for(link, notes) -> list[str]:
     """The closer notes (Issue #6399) that name ``link`` or one of its pads.
 
-    A note matches when it names the link (``describe()``, or both endpoint
-    descriptions, as a withdrawn route key does) or one of its pads as a
-    whole ``REF.PAD`` token, so ``U2.3`` does not pick up a note about
-    ``U2.36``.
+    A note matches when it names the link (``describe()``, or its exact
+    withdrawn route key) or one of its pads as a whole ``REF.PAD`` token, so
+    ``U2.3`` does not pick up a note about ``U2.36``.
     """
+    from kicad_tools.router.oracle_completion import _route_key
+
+    route_prefix = _route_key(link) + ":"
     pads = [
         re.compile(rf"(?<![\w.]){re.escape(f'{end.ref}.{end.pad}')}(?![\w.])")
         for end in (link.a, link.b)
@@ -7571,7 +7573,7 @@ def _closer_reasons_for(link, notes) -> list[str]:
     def names(note: str) -> bool:
         if link.describe() in note:
             return True
-        if link.a.description in note and link.b.description in note:
+        if note.startswith(route_prefix):
             return True
         return any(p.search(note) for p in pads)
 

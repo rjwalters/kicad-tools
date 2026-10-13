@@ -516,6 +516,28 @@ class TestCloserReasonsPrinted:
         assert _closer_reasons_for(lk, [note]) == [note]
         assert _closer_reasons_for(other, [note]) == []
 
+    def test_route_key_does_not_match_longer_ref(self):
+        """``Pad 2 [GND] of C1`` is a substring of ``... of C10``; the key is exact."""
+        from kicad_tools.cli.route_cmd import _closer_reasons_for
+        from kicad_tools.router.oracle_completion import OracleLink, _route_key
+
+        def link(ref):
+            p = OracleEndpoint(
+                description=f"Pad 2 [GND] of {ref}",
+                kind="pad",
+                net="GND",
+                x=0,
+                y=0,
+                ref=ref,
+                pad="2",
+            )
+            z = OracleEndpoint(description="Zone [GND]", kind="zone", net="GND", x=0, y=0)
+            return OracleLink(net="GND", a=p, b=z)
+
+        note = f"{_route_key(link('C10'))}: withdrawn -- its copper raised KiCad DRC by 1"
+        assert _closer_reasons_for(link("C1"), [note]) == []
+        assert _closer_reasons_for(link("C10"), [note]) == [note]
+
     def test_padless_link_falls_back_to_its_net(self):
         """Board 04: KiCad names ``Zone <-> Zone``; the closer's notes name U2.36."""
         from kicad_tools.cli.route_cmd import _closer_reasons_for
