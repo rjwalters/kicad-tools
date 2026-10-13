@@ -1034,9 +1034,12 @@ def parse_route_log(text: str) -> dict:
     # relief-rescue probe / victim re-land sub-searches kept their wall clock
     # (no --deterministic-rescue). ``sweep_wall_clock``: the post-negotiation
     # sweep ran under a wall clock rather than the iteration cap (#4159) --
-    # recorded, not fixed; it binds only on a slow enough host. A key is
-    # omitted when the log says nothing either way (e.g. a lattice route).
-    if re.search(r"keep their [\d.]+s wall clock|Relief-rescue sub-search cap: [\d.]+s wall", text):
+    # recorded, not fixed; it binds only on a slow enough host. Both are read
+    # from the router's own bound lines, which it prints only when the stage
+    # runs; the CLI's up-front "[deterministic-budget] NOTE: ... keep their
+    # 10s wall clock" is printed for every engine, lattice included, so it is
+    # not evidence. A key is omitted when the log says nothing either way.
+    if re.search(r"Relief-rescue sub-search cap: [\d.]+s wall clock", text):
         out["rescue_wall_clock"] = True
     elif "Relief-rescue sub-search cap: iteration-bounded" in text:
         out["rescue_wall_clock"] = False

@@ -1192,8 +1192,7 @@ def test_run_one_passes_and_records_deterministic_rescue(tmp_path, monkeypatch):
 
 def test_route_log_records_which_wall_clocks_were_live():
     loose = (
-        "[deterministic-budget] NOTE: relief-rescue probe / victim re-land sub-searches keep "
-        "their 10s wall clock (Issue #4730), so ...\n"
+        "  Relief-rescue sub-search cap: 10.0s wall clock -- deterministic rescue is off\n"
         "  Post-negotiation sweep bound: 60.0s whole-sweep / 10.0s per-net wall clock -- x\n"
     )
     facts = ere.parse_route_log(loose)
@@ -1205,8 +1204,13 @@ def test_route_log_records_which_wall_clocks_were_live():
     )
     facts = ere.parse_route_log(tight)
     assert facts["rescue_wall_clock"] is False and facts["sweep_wall_clock"] is False
-    # Silent log (e.g. lattice): no claim either way.
-    assert "rescue_wall_clock" not in ere.parse_route_log("Nets routed: 3/3\n")
+    # Silent log (e.g. lattice): no claim either way -- and the CLI's
+    # engine-agnostic up-front NOTE is not evidence of a live rescue clock.
+    note = (
+        "[deterministic-budget] NOTE: relief-rescue probe / victim re-land sub-searches keep "
+        "their 10s wall clock (Issue #4730), so ...\nNets routed: 3/3\n"
+    )
+    assert "rescue_wall_clock" not in ere.parse_route_log(note)
 
 
 def test_tables_render_unconnected_and_the_verdict():
