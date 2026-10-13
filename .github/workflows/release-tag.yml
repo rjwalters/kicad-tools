@@ -90,7 +90,7 @@ jobs:
       - uses: actions/setup-python@v7
         if: steps.mode.outputs.mode != 'off'
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Configure git identity (App bot)
         if: steps.mode.outputs.mode == 'on'
