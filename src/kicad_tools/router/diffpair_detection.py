@@ -63,6 +63,50 @@ class DetectedPair:
 
 
 # =============================================================================
+# Shared synth-routing construction (Issue #6442)
+# =============================================================================
+
+
+def build_synth_routing(
+    net_class_map: dict[str, NetClassRouting],
+) -> tuple[dict, dict[str, str]]:
+    """Return ``(synth_routing, net_to_class)`` for :func:`detect_diff_pairs`.
+
+    ``synth_routing`` is the net-name-keyed ``net_class_map`` plus a
+    class-name-keyed alias for every class whose member nets all carry
+    the *same* :class:`NetClassRouting` (so the alias cannot misreport
+    any member).
+
+    The previous idiom was ``synth_routing.setdefault(cls.name, cls)``,
+    which let the first net seen win the class-name key.  Board 03's
+    ``HighSpeed`` class has per-net variants (``USB_D+``/``USB_D-`` carry
+    ``coupled_continuity_threshold=0.25``; ``USB_MCU_D*`` do not), so any
+    lookup that fell through to the class-name key returned an arbitrary
+    variant -- the router and ``kct check`` could then print different
+    thresholds for the same pair.  A class whose variants differ gets no
+    class-name alias: the net-name key is authoritative for each of its
+    members (and ``detect_diff_pairs`` always tries it first).
+    """
+    net_to_class: dict[str, str] = {}
+    first: dict[str, NetClassRouting] = {}
+    ambiguous: set[str] = set()
+    for net_name, nc in net_class_map.items():
+        cls_name = getattr(nc, "name", None)
+        if cls_name is None:
+            continue
+        net_to_class[net_name] = cls_name
+        if cls_name not in first:
+            first[cls_name] = nc
+        elif first[cls_name] != nc:
+            ambiguous.add(cls_name)
+    synth_routing: dict = dict(net_class_map)
+    for cls_name, nc in first.items():
+        if cls_name not in ambiguous:
+            synth_routing.setdefault(cls_name, nc)
+    return synth_routing, net_to_class
+
+
+# =============================================================================
 # Public entry point
 # =============================================================================
 

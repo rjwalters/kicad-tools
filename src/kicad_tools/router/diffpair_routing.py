@@ -14007,6 +14007,11 @@ class DiffPairRouter:
 
         print("\n=== Differential Pair Routing Complete ===")
         print(f"  Total routes: {len(all_routes)}")
+        # Issue #6442: quote the thresholds ``kct check`` will apply, from the
+        # validator's own resolver, so the two reports cannot disagree.
+        report_thresholds = getattr(self.autorouter, "_print_pair_threshold_report", None)
+        if callable(report_thresholds):
+            report_thresholds()
         print(f"  Differential pair nets: {len(diff_net_ids)}")
         print(f"  Other nets: {len(non_diff_nets)}")
         if warnings:
