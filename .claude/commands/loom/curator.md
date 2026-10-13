@@ -769,7 +769,7 @@ them into the one you are curating. Never absorb a sibling that has:
 > re-count against the current tree before relying on this number."
 > ```
 >
-> This applies to: raw counts ("18 verbs"), version numbers ("schema_version is 1"), file/line citations ("see parser.py:142"), and negative claims ("no schema_version bump is needed"). The incident this convention guards against: example-org/tool-repo#203 curated "18 verbs / 13 net-new" and "no schema_version bump needed" as bare facts; both were correct when written and both had gone stale two days later — after `eval` and `lef-abstract` landed and `schema_version` bumped 1 -> 2 — ahead of an irrevocable PyPI publish that could not be re-uploaded for that version. Neither was a curation error; the facts weren't marked as snapshots. See "Complexity routing marker" below for when skipping the stamp on an irrevocable-output issue is itself a curation defect.
+> This applies to: raw counts ("18 verbs"), version numbers ("schema_version is 1"), file/line citations ("see parser.py:142"), and negative claims ("no schema_version bump is needed"). The incident this convention guards against: example-org/tool-repo#203 curated "18 verbs / 13 net-new" and "no schema_version bump needed" as bare facts; both were correct when written and both had gone stale two days later — after `eval` and `lef-abstract` landed and `schema_version` bumped 1 -> 2 — ahead of an irrevocable PyPI publish that could not be re-uploaded for that version. Neither was a curation error; the facts weren't marked as snapshots. When an issue's output is irrevocable (a version/tag push, a package publish, an external API write), every volatile fact in its acceptance criteria **must** carry this stamp.
 
 ### Measurable claims need their measurement (or a marker, #6380)
 
@@ -1094,44 +1094,14 @@ PR #90: Implement alternate approach (open PR, cross-references #42)
 
 A `RELATED_OPEN_WORK` hit is **not** grounds for closing or auto-rescoping on its own — it is a signal to actively reconcile the spec (or explicitly reject the reconciliation) before marking `loom:curated`, since the whole point is preventing a Builder from shipping against a spec another open issue has already argued is wrong. GitHub-specific: on a non-GitHub forge (or an API failure) the probe degrades gracefully (stderr warning, empty result) rather than failing the duplicate check.
 
-### Complexity routing marker (`<!-- loom:complexity=<tier> -->`, issues #3702, #4238, #4448)
+### Story points marker (`<!-- loom:points=N -->`, #11659)
 
-Emit a machine-readable marker into the curated issue body so the sweep orchestrator routes the Builder to the right model. Classify by **how expensive it is to be wrong**, not how much work it looks like — the question is *would a mistake be caught?*
+Put exactly one `<!-- loom:points=N -->` on its own line, in the issue body or your curation comment, with N one of 1, 2, 3, 5, 8, 13. Size with the rubric in `.loom/docs/story-points.md`.
 
-```html
-<!-- loom:complexity=mechanical -->
-```
-
-There are **three, and only three**, cost-of-being-wrong strata (issue #4238 added `mechanical` beneath `routine`). The value **MUST** be exactly one of `mechanical`, `routine`, or `complex` — no synonyms and no paraphrasing. Values like `trivial`, `large`, `moderate`, or `hard` are **not** valid; they fall through to `routine` at resolution time (see `resolve-tier-model.sh`) but corrupt the stratification signal, so treat an out-of-vocabulary value as a curation defect, not a style choice (issue #4448).
-
-| Value | Emit when |
-|---|---|
-| `mechanical` | A mistake is obvious just reading the change — file splits, dead-code deletion, renames, hardcoded constants, ARIA attributes, mock fixes. |
-| `routine` | The approach is clear once you've read the relevant code, and a mistake would surface in tests or review. Most bug fixes and small features. **Default stratum** — take this one when genuinely torn between it and `mechanical`. |
-| `complex` | Deciding the approach takes judgement, and a mistake could pass tests and review unnoticed — architecture, cross-cutting change, subtle logic. Money, security, and destructive migrations are common cases, not the whole list. |
-
-- Put exactly one HTML comment in the enhancement section, including `routine`; omission fails validation.
-- **What it does**: at Builder dispatch the sweep skill reads it as precedence **tier 2.5** (between tiers 2 and 3) and resolves the Builder's model from `sweep.tierModels[<runtime>][<tier>]` — `mechanical` routes cheaper, `complex` routes more capable. **Never name a model here; the tier is runtime-neutral.** See `sweep.md` → "Tier 2.5 — complexity marker".
-- **Hard bounds**: **never resolves to `fable`, never a label** — the frontier model is reserved for the objective Judge-rejection escalation ladder or an explicit operator param; a `roleConfig.model` pin or explicit dispatch param (tiers 1–2) still overrides the marker.
-- **Cheap when the tier map is unconfigured.** With no `sweep.tierModels` (or `sweep.optimization` unset/`balanced`), the marker is inert and dispatch falls through to the role default — adding markers is safe before a workspace opts into cost/speed routing (`model-selection.md` "Optimization profile switch").
-- **Use sparingly / take the higher tier when torn.** Marking everything `complex` defeats the cheap-first default; marking real judgement calls `mechanical` risks a cheap model on expensive-to-be-wrong work. When genuinely torn, take the higher tier.
-- **`complex` + irrevocable output ⇒ date-stamp any volatile fact in the acceptance criteria.** When a `complex` issue's cost-of-being-wrong comes from an action that cannot be undone (a version/tag push, a package publish, an external API write), and its acceptance criteria embed a volatile fact (a count, a version number, a "no X is needed" claim), that fact **must** carry the "as of `<sha>`, `<date>`" stamp from "Date-stamp volatile facts" above — not a bare assertion. A Builder who trusts a stale bare count on a `complex`/irrevocable issue ships the wrong permanent artifact with no error signal to catch it (see example-org/tool-repo#203, the incident that motivated both this rule and the stamping convention).
-
-**Required before applying `loom:curated`**: run the validator below and confirm exit 0. This is not optional — do not apply `loom:curated` if it fails:
-
-```bash
-./.loom/scripts/require-complexity-marker.sh <issue>   # 0 = complexity valid; 1 = missing/invalid
-                                                    # 2 = could not evaluate (NOT a curation defect)
-```
-
-Exit 2 means repo resolution or the body fetch failed (usually quota; retry later), not an absent marker. Don't edit the body.
+`loom-daemon curation-complete` (run per `curator-estimate.md`) is the gate. It reads the body and trusted comments; the newest trusted comment with a marker wins, else the body if a trusted author filed the issue. It refuses a missing, malformed, out-of-vocabulary or conflicting marker, or a retired tier marker in the winning source (if the body still carries one, put your points marker in a comment). On success it applies `points:N` and `loom:curated`. On refusal, fix the marker and rerun it.
 
 **Every curation:** follow `curator-estimate.md` before applying `loom:curated`.
-Estimate expected work independently of the error-cost routing tier above;
-estimates never change approval, consolidation, dependencies or readiness.
-
-Story points remain paused: leave historical `points:*` labels and
-`loom:points` markers alone. They never block curation.
+Estimates never change approval, consolidation, dependencies or readiness.
 
 **Related but distinct**: `<!-- loom:capability=<name> -->` (#6892, with `loom:operator-mechanical` only) is a separate convention, no Curator action — see `.loom/docs/label-state-machine.md` → "Capability-declaration convention" (#6885/#6893).
 

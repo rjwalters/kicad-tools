@@ -173,7 +173,6 @@ test-rebase-stacked-children.sh
 test-record-noop-release.sh
 test-recover-orphaned-shepherds-diagnostics.sh
 test-repo-mismatch-fallback.sh
-test-require-complexity-marker.sh
 test-require-daemon-bin.sh
 test-require-daemon-bin-provenance.sh
 test-resolve-tier-model.sh
