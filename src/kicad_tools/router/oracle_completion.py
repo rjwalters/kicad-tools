@@ -368,6 +368,13 @@ class OracleCompletionResult:
     #: (``ClosureAttempt.relaxed`` of the kept attempts).  Empty unless a
     #: closer deliberately relaxed a link.
     relaxed_links: list[str] = field(default_factory=list)
+    #: Issue #6399: the per-pad / per-link reasons a link stayed open, so
+    #: ``kct route`` can print why each ``still unconnected`` link was not
+    #: closed: every ``ClosureAttempt.notes`` line of the LAST round's attempts,
+    #: plus one line per item that round withdrew because its copper raised
+    #: KiCad's DRC count (a round that ends ``no_closer`` after such retries
+    #: has an empty final attempt, so its notes alone would explain nothing).
+    closer_notes: list[str] = field(default_factory=list)
 
     @property
     def closed(self) -> int:
@@ -529,6 +536,7 @@ def run_oracle_completion(
         attempt = None
         attempts = 0
         geo_after = geo
+        round_notes: list[str] = []
         for _ in range(1 + max_retries):
             if not affordable(attempt=True):
                 # The board holds the last kept round's bytes here: the first
@@ -538,6 +546,7 @@ def run_oracle_completion(
             attempts += 1
             started = time.monotonic()
             attempt = closer(pcb_path, links, frozenset(banned))
+            round_notes.extend(attempt.notes)
             if attempt.applied == 0:
                 pcb_path.write_bytes(backup)
                 stop = STOP_NO_CLOSER
@@ -557,6 +566,11 @@ def run_oracle_completion(
                 say(
                     f"    DRC +{geo_after.error_count - errors}; retrying without {', '.join(sorted(culprits))}"
                 )
+                round_notes.extend(
+                    f"{c}: withdrawn -- its copper raised KiCad DRC by "
+                    f"{geo_after.error_count - errors}"
+                    for c in sorted(culprits)
+                )
                 banned |= culprits
                 continue
             if len(in_scope(geo_after)) >= count:
@@ -568,6 +582,10 @@ def run_oracle_completion(
         else:
             stop = STOP_DRC_REGRESSED
 
+        if attempts:
+            # A round that stopped before its first attempt (deadline) learned
+            # nothing; keep the previous round's reasons instead of wiping them.
+            result.closer_notes = list(dict.fromkeys(round_notes))
         after_links = in_scope(geo_after) if kept else links
         result.rounds.append(
             OracleRound(
@@ -1132,13 +1150,33 @@ class PourLinkCloser:
                                 break
                         if chosen is None:
                             chosen = len(comps) - 1
-                        pair = component_terminals(
-                            comps[chosen], [c for k, c in enumerate(comps) if k != chosen], lk.net
-                        )
-                        if pair is not None:
+                        others = [c for k, c in enumerate(comps) if k != chosen]
+                        # Issue #6399: a link with a Zone end (every link
+                        # ``_cluster_links`` builds has one) is stranded from
+                        # the PLANE, so join to ``comps[0]`` -- the plane-owning
+                        # component -- first; the nearest island (often a
+                        # padless sliver) is only the fallback.
+                        targets: list[list[dict]] = []
+                        to_plane = chosen != 0 and "zone" in (lk.a.kind, lk.b.kind)
+                        if to_plane:
+                            targets.append([comps[0]])
+                        targets.append(others)
+                        for n_target, target in enumerate(targets):
+                            pair = component_terminals(comps[chosen], target, lk.net)
+                            if pair is None:
+                                continue
                             route = route_link(
                                 pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
                             )
+                            if route is not None:
+                                if to_plane and n_target > 0:
+                                    who = lk.a.pad_key or lk.b.pad_key
+                                    head = f"{lk.net} {who}" if who else lk.describe()
+                                    attempt.notes.append(
+                                        f"{head}: no clearance-legal route to the plane-owning "
+                                        "copper; joined the nearest island instead"
+                                    )
+                                break
                 if route is None:
                     note = f"{lk.describe()}: no clearance-legal route"
                     if rules is not base_rules:
