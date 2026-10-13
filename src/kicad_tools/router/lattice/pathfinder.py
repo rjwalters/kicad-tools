@@ -64,6 +64,7 @@ from .obstacles import (
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice, RefineRegion
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .class_pad_repair import ClassPadRepairStats
     from .pairwise import LatticePairwise
 
 # A negotiation connection: (opaque hashable key, start pad, end pad, net_class)
@@ -230,6 +231,15 @@ class LatticePathfinder:
         self.outline = outline
         self.pads = pads
         self.rules = rules or DesignRules()
+        # Issue #6395: each pad's own net-class clearance, aligned with
+        # ``pads`` and installed by the CALLER from its net-class map through
+        # :meth:`set_pad_class_clearances` (the pathfinder stays geometry-only,
+        # #4597).  It is the PAD side of every track-vs-pad pair,
+        # ``max(class(track), class(pad))``, enforced on the negotiated copper
+        # by :mod:`.class_pad_repair`.  ``None`` (the default) leaves the
+        # routed output byte-identical.
+        self.pad_class_clearances: list[float] | None = None
+        self.class_pad_repair_stats: ClassPadRepairStats | None = None
         # Real copper stack (issue #4278 acceptance 6): the lattice is
         # replicated across the board's actual routing-layer count -- never
         # hardcoded to 2.
@@ -330,6 +340,17 @@ class LatticePathfinder:
         pathfinder so it cannot carry a stale projection across runs.
         """
         self._pairwise = pairwise
+
+    def set_pad_class_clearances(self, values: list[float] | None) -> None:
+        """Install (or clear) the per-pad net-class clearances (#6395).
+
+        ``values`` aligns with :attr:`pads`.  The search model does not read
+        them -- see :mod:`.class_pad_repair` for why the pair is enforced on
+        the negotiated copper instead -- so this never rebuilds the lattice.
+        """
+        if values is not None and len(values) != len(self.pads):
+            raise ValueError("pad_class_clearances must align with pads")
+        self.pad_class_clearances = list(values) if values is not None else None
 
     def set_keepouts(self, keepouts: LatticeKeepoutMask | None) -> None:
         """Install (or clear) the keepout rule-area mask (#4605).
@@ -2957,6 +2978,23 @@ class LatticePathfinder:
 
         self.failure_reasons = best_reasons
         self.pair_outcomes = best_pair_outcomes
+        # Issue #6395: hold the best pass's single-ended copper to each pad's
+        # own net class (``max(own, pad)``).  Pair legs (coupled and
+        # uncoupled-fallback) stay put and count as foreign copper.
+        self.class_pad_repair_stats = None
+        if self.pad_class_clearances is not None and best_routes:
+            from .class_pad_repair import repair_class_pad_pairs
+
+            net_classes: dict[object, object | None] = {c[0]: c[3] for c in connections}
+            for pc in pairs:
+                for pol in ("P", "N"):
+                    net_classes[(pc.key, pol)] = pc.net_class
+            self.class_pad_repair_stats = repair_class_pad_pairs(
+                self,
+                best_routes,
+                {key: net_classes.get(key) for key in best_routes},
+                repairable={c[0] for c in connections} & set(best_routes),
+            )
         # Issue #4477: the budget the CALLER granted for this call is the
         # remaining time between the deadline and this call's start -- an
         # honest "elapsed of a Ys budget" figure even when the deadline was
