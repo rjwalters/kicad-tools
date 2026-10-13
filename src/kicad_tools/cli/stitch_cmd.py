@@ -1812,6 +1812,35 @@ def identify_nearest_obstacle(
     return best
 
 
+def _split_fill_pools(
+    net_number: int,
+    same_net_filled_polys: list[FilledPolygon],
+    other_net_filled_polys: list[FilledPolygon],
+    foreign_fills_yield: bool = False,
+) -> tuple[list[FilledPolygon], list[FilledPolygon]]:
+    """Split the fill pools of a multi-net stitch call for one net.
+
+    Issue #6400 / #6410: every stitch entry point builds
+    ``other_net_filled_polys`` excluding ALL stitch-target nets and
+    ``same_net_filled_polys`` holding the fill of EVERY target net.  Used
+    as-is in a multi-net call, a via for net N could pass the same-net fill
+    gate by landing on sibling target net M's fill, and M's fill was not a
+    clearance obstacle either.
+
+    Returns ``(own_fill, other_fill)`` for ``net_number``: ``own_fill`` is
+    the net's own fill (the gate / grid seed), ``other_fill`` is the
+    other-net obstacle pool plus every sibling target net's fill -- unless
+    ``foreign_fills_yield`` is set, in which case sibling fills are left
+    out (they will yield on refill).  Each net is therefore gated exactly as
+    a single-net call for that net would gate it.
+    """
+    own_fill = [fp for fp in same_net_filled_polys if fp.net_number == net_number]
+    if foreign_fills_yield:
+        return own_fill, other_net_filled_polys
+    sibling_fill = [fp for fp in same_net_filled_polys if fp.net_number != net_number]
+    return own_fill, other_net_filled_polys + sibling_fill
+
+
 def _same_net_fill_on_layer(
     same_net_filled_polygons: list[FilledPolygon] | None,
     layer: str | None,
@@ -4820,6 +4849,13 @@ def run_thermal_stitch(
             d for d in target_pad_drills if d[3] != pad_net
         ]
 
+        # Issue #6410: per-candidate fill pools -- the gate uses only this
+        # pad's OWN net's fill, and sibling target nets' fills become
+        # clearance obstacles (the #6400 fix, applied to thermal stitch).
+        own_fill, other_fill = _split_fill_pools(
+            pad_net, same_net_filled_polys, other_net_filled_polys
+        )
+
         placed_for_pad = 0
         for vx, vy in positions:
             # Clearance against other-net copper and same-net stacking,
@@ -4834,7 +4870,7 @@ def run_thermal_stitch(
                 other_net_vias_with_placed,
                 other_net_pads_with_siblings,
                 same_net_vias_for_pad,
-                other_net_filled_polys,
+                other_fill,
                 via_drill=drill,
                 other_net_drills=other_net_drills_with_siblings,
                 hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
@@ -4854,7 +4890,7 @@ def run_thermal_stitch(
             # layer (zones unfilled), fall back to the zone OUTLINE gate so
             # the stitcher stays usable pre-refill.
             _, thermal_terminus = get_via_layers(surface_layer, target_layer_by_net.get(net_name))
-            fill_gate = _same_net_fill_on_layer(same_net_filled_polys, thermal_terminus)
+            fill_gate = _same_net_fill_on_layer(own_fill, thermal_terminus)
             if fill_gate:
                 if not _point_on_same_net_fill(vx, vy, zone_margin, fill_gate, thermal_terminus):
                     continue
@@ -5041,10 +5077,13 @@ def run_blanket_stitch(
         # both the even-odd containment and the edge-margin check reject them).
         # Empty-fill no-op: when no same-net fill exists on the target layer
         # (zones unfilled), fall back to seeding from the zone outline.
-        net_fill_polys = _same_net_fill_on_layer(
-            [fp for fp in same_net_filled_polys if fp.net_number == net_number],
-            net_target_layer,
+        # Issue #6410: per-net fill pools -- own fill seeds the grid, and
+        # sibling target nets' fills (on ANY layer the via crosses) become
+        # clearance obstacles (the #6400 fix, applied to blanket stitch).
+        own_fill, other_fill = _split_fill_pools(
+            net_number, same_net_filled_polys, other_net_filled_polys
         )
+        net_fill_polys = _same_net_fill_on_layer(own_fill, net_target_layer)
         if net_fill_polys:
             seed_polygons = [fp.points for fp in net_fill_polys]
         else:
@@ -5072,7 +5111,7 @@ def run_blanket_stitch(
                     other_net_vias,
                     other_net_pads_with_siblings,
                     same_net_via_positions,
-                    other_net_filled_polys,
+                    other_fill,
                     via_drill=drill,
                     other_net_drills=other_net_drills_with_siblings,
                     hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
@@ -5406,11 +5445,12 @@ def run_stitch(
     # exactly as a single-net call for that net would gate it.
     def _fill_pools(pad: PadInfo) -> tuple[list[FilledPolygon], list[FilledPolygon]]:
         """Per-pad ``(own_net_fill, other_net_fill)`` polygon pools."""
-        own_fill = [fp for fp in same_net_filled_polys if fp.net_number == pad.net_number]
-        if foreign_fills_yield:
-            return own_fill, other_net_filled_polys
-        sibling_fill = [fp for fp in same_net_filled_polys if fp.net_number != pad.net_number]
-        return own_fill, other_net_filled_polys + sibling_fill
+        return _split_fill_pools(
+            pad.net_number,
+            same_net_filled_polys,
+            other_net_filled_polys,
+            foreign_fills_yield=foreign_fills_yield,
+        )
 
     # Net-number -> net-name lookup so skip diagnostics can name the
     # offending signal (e.g. ``net 8 'SWO'``) instead of just a number.
