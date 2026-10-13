@@ -435,6 +435,24 @@ def attribute_regressions(
     return culprits
 
 
+def closer_key_net(key: str) -> str | None:
+    """The pour net a closer key (``pad:NET:REF.PAD`` / ``route:NET:...``) serves."""
+    kind, _, rest = key.partition(":")
+    if kind not in ("pad", "route") or ":" not in rest:
+        return None
+    return rest.rsplit(":", 1)[0] if kind == "pad" else rest.split(":", 1)[0]
+
+
+#: ``cut_attributor(pcb_path, nets, footprints) -> {closer key: {net, ...}}``
+#: (Issue #6428).  Called with ``pcb_path`` holding the board as it was BEFORE
+#: the attempt; names the closers whose new copper would force a pour of one
+#: of ``nets`` to retreat (see :meth:`PourLinkCloser.cut_culprits`).
+CutAttributor = Callable[
+    [Path, Sequence[str], Mapping[str, Sequence[tuple[float, float, float, float, float]]]],
+    dict[str, set[str]],
+]
+
+
 def net_link_counts(geo: GeometricDRCResult) -> dict[str, int]:
     """Unconnected links KiCad reports per net, over EVERY net (Issue #6428).
 
@@ -512,6 +530,7 @@ def run_oracle_completion(
     log: Callable[[str], None] | None = None,
     time_left: Callable[[], float | None] | None = None,
     call_cost_estimate: float = 0.0,
+    cut_attributor: CutAttributor | None = None,
 ) -> OracleCompletionResult:
     """Close the KiCad-reported unconnected links on ``nets``, round by round.
 
@@ -554,6 +573,11 @@ def run_oracle_completion(
             expected to take before any has been measured (the caller passes
             its zone-fill time, the same KiCad load + fill).  Measured calls
             replace it.
+        cut_attributor: Issue #6428.  Names the closers whose copper cut a
+            pour of a net whose link count rose -- exact even when KiCad
+            reports the new link as ``Zone <-> Zone`` (anchored at outline
+            corners, so :func:`attribute_link_regressions` cannot place it).
+            When it blames nothing, the proximity attribution is used.
     """
     scope = set(nets)
     say = log or (lambda _msg: None)
@@ -666,9 +690,16 @@ def run_oracle_completion(
             # net (in scope or not), however many it closes elsewhere.
             risen = risen_link_counts(geo, geo_after)
             if risen:
-                blamed = attribute_link_regressions(geo, geo_after, attempt.footprints)
-                culprits = set(blamed) - banned
                 pcb_path.write_bytes(backup)
+                blamed: dict[str, set[str]] = {}
+                if cut_attributor is not None:
+                    try:
+                        blamed = cut_attributor(pcb_path, sorted(risen), attempt.footprints)
+                    except Exception as exc:  # attribution must never fail the loop
+                        logger.warning("Oracle cut attribution failed: %s", exc)
+                if not set(blamed) - banned:
+                    blamed = attribute_link_regressions(geo, geo_after, attempt.footprints)
+                culprits = set(blamed) - banned
                 rise = ", ".join(f"{net} +{n}" for net, n in risen.items())
                 if not culprits:
                     say(f"    links opened ({rise}) by no attributable copper; round restored")
@@ -1005,6 +1036,58 @@ class PourLinkCloser:
             return list(links)
         kept = [lk for lk in links if lk.net not in rebuilt]
         return canonical_links(kept + [lk for net in sorted(rebuilt) for lk in rebuilt[net]])
+
+    # -- cut attribution (Issue #6428) ------------------------------------------
+
+    def cut_culprits(
+        self,
+        pcb_path: Path,
+        nets: Sequence[str],
+        footprints: Mapping[str, Sequence[tuple[float, float, float, float, float]]],
+    ) -> dict[str, set[str]]:
+        """``{closer key: {net, ...}}``: closers whose copper cuts a pour of ``nets``.
+
+        ``pcb_path`` holds the board BEFORE the attempt.  A closer is blamed
+        for net N when one of its capsules comes within ``clearance`` of N's
+        existing fill: the refill must then pull N's pour back around it,
+        which is the only way new copper can split a pour.  A weld placed
+        without ``foreign_fills_yield`` keeps that clearance and is never
+        blamed; closers serving N itself are skipped.  Capsules carry no
+        layer, so a capsule meets N's fill on every layer (conservative for
+        a stub; exact for a via).
+        """
+        from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+        from kicad_tools.cli.stitch_cmd import find_same_net_filled_polygons, get_net_number
+        from kicad_tools.core.sexp_file import load_pcb
+
+        sexp = load_pcb(pcb_path)
+        blamed: dict[str, set[str]] = {}
+        for net in nets:
+            number = get_net_number(sexp, net)
+            if number is None:
+                continue
+            polys = [
+                Polygon(fp.points).buffer(0)
+                for fp in find_same_net_filled_polygons(sexp, {number})
+                if len(fp.points) >= 3
+            ]
+            if not polys:
+                continue
+            fill = unary_union(polys)
+            limit = self.clearance - 1e-3
+            for key, caps in footprints.items():
+                if closer_key_net(key) == net:
+                    continue
+                for x1, y1, x2, y2, half in caps:
+                    shape = (
+                        Point(x1, y1) if (x1, y1) == (x2, y2) else LineString([(x1, y1), (x2, y2)])
+                    )
+                    if shape.distance(fill) - half < limit:
+                        blamed.setdefault(key, set()).add(net)
+                        break
+        return blamed
 
     # -- pads ---------------------------------------------------------------
 
