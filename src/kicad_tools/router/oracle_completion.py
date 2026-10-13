@@ -25,10 +25,12 @@ This module makes KiCad itself the authority.  The loop is:
      welded with one via placed inside both fills.
 
 3. Refill the zones and ask KiCad again.  A round is kept only when the
-   unconnected count fell **and** the error-severity DRC count did not rise;
-   otherwise the board is restored byte-for-byte.  A DRC regression is first
-   attributed to the closers whose new copper sits at the violation, those
-   closers are banned, and the round is retried without them.
+   unconnected count fell, **no net's** link count rose (Issue #6428: a weld
+   that closes GND links by cutting the +3.3V pour is a trade, not
+   progress), and the error-severity DRC count did not rise; otherwise the
+   board is restored byte-for-byte.  A DRC or link regression is first
+   attributed to the closers whose new copper sits at the violation / the new
+   link, those closers are banned, and the round is retried without them.
 4. Repeat up to ``max_rounds``, stopping early at zero links or when the
    count stops falling.
 
@@ -92,6 +94,18 @@ MAX_ISLAND_JOINS = 16
 #: reach it checks and the geometry stitch searches cannot drift apart.
 WELD_OFFSET_MM = 0.5
 WELD_ESCAPE_DISTANCE_MM = 4.0
+
+#: Issue #6428: how far (mm) from a NEW link's endpoint a closer's copper may
+#: sit and still be blamed for opening it.  A weld cuts a pour within its own
+#: reach of the welded pad, and the link KiCad then reports is anchored at
+#: pads of the cut pour, not at the weld: on board 04 the U2.35 weld that cut
+#: +3.3V left ``U2.36 <-> U2.48``, ~2.5 mm from the weld.  So this is the weld
+#: reach bound (``escape_distance``, see ``stitch_cmd.max_via_reach_mm``), not
+#: the 0.5 mm DRC-error tolerance.
+LINK_ATTRIBUTION_TOLERANCE_MM = WELD_ESCAPE_DISTANCE_MM
+#: Closers within this much (mm) of the NEAREST one to a new link's endpoint
+#: share the blame (two welds either side of a cut pin are equally suspect).
+LINK_ATTRIBUTION_SLACK_MM = 0.25
 
 #: Why the loop stopped (``OracleCompletionResult.stop_reason``).
 STOP_NOT_RUN = "oracle_not_run"  # kicad-cli absent / timed out on the first call
@@ -325,6 +339,30 @@ class ClosureAttempt:
     #: deliberate, opt-in relaxation (e.g. a declared-rule retry).  Every such
     #: link must be listed here (and in ``notes``) -- never closed silently.
     relaxed: list[str] = field(default_factory=list)
+    #: Issue #6428: the via sites each pad-weld key placed.  When a weld's
+    #: copper opens a link on another net the loop bans just those sites
+    #: (:func:`site_key`) so the retry welds the pad somewhere else.
+    sites: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+
+
+def site_key(key: str, x: float, y: float) -> str:
+    """Banned-key form of one via site of closer ``key`` (Issue #6428)."""
+    return f"site:{key}@{x:.4f},{y:.4f}"
+
+
+def avoided_sites(banned: Iterable[str]) -> dict[str, list[tuple[float, float]]]:
+    """``{"REF.PAD": [(x, y), ...]}`` from the :func:`site_key` entries of ``banned``."""
+    out: dict[str, list[tuple[float, float]]] = {}
+    for entry in sorted(banned):
+        if not entry.startswith("site:pad:"):
+            continue
+        key, _, pos = entry[len("site:") :].rpartition("@")
+        try:
+            x, y = (float(v) for v in pos.split(","))
+        except ValueError:
+            continue
+        out.setdefault(key.rsplit(":", 1)[-1], []).append((x, y))
+    return out
 
 
 #: ``closer(pcb_path, links, banned_keys) -> ClosureAttempt``; edits the board.
@@ -421,6 +459,96 @@ def attribute_regressions(
     return culprits
 
 
+def closer_key_net(key: str) -> str | None:
+    """The pour net a closer key (``pad:NET:REF.PAD`` / ``route:NET:...``) serves."""
+    kind, _, rest = key.partition(":")
+    if kind not in ("pad", "route") or ":" not in rest:
+        return None
+    return rest.rsplit(":", 1)[0] if kind == "pad" else rest.split(":", 1)[0]
+
+
+#: ``cut_attributor(before_path, after_bytes, nets, footprints) -> {closer
+#: key: {net, ...}}`` (Issue #6428).  ``before_path`` holds the board as it was
+#: BEFORE the attempt, ``after_bytes`` the attempt's refilled board; names the
+#: closers whose new copper split a pour of one of ``nets`` (see
+#: :meth:`PourLinkCloser.cut_culprits`).
+CutAttributor = Callable[
+    [
+        Path,
+        bytes,
+        Sequence[str],
+        Mapping[str, Sequence[tuple[float, float, float, float, float]]],
+    ],
+    dict[str, set[str]],
+]
+
+
+def net_link_counts(geo: GeometricDRCResult) -> dict[str, int]:
+    """Unconnected links KiCad reports per net, over EVERY net (Issue #6428).
+
+    Per-net counts, never link signatures: KiCad names an arbitrary spanning
+    tree over a net's clusters (#5934), but the number of links per net is
+    reproducible.
+    """
+    counts: dict[str, int] = {}
+    for lk in links_from_violations(geo.unconnected_items):
+        counts[lk.net] = counts.get(lk.net, 0) + 1
+    return counts
+
+
+def risen_link_counts(before: GeometricDRCResult, after: GeometricDRCResult) -> dict[str, int]:
+    """``{net: increase}`` for every net whose link count ``after`` is higher."""
+    old, new = net_link_counts(before), net_link_counts(after)
+    return {net: n - old.get(net, 0) for net, n in sorted(new.items()) if n > old.get(net, 0)}
+
+
+def attribute_link_regressions(
+    before: GeometricDRCResult,
+    after: GeometricDRCResult,
+    footprints: dict[str, list[tuple[float, float, float, float, float]]],
+    tolerance: float = LINK_ATTRIBUTION_TOLERANCE_MM,
+    slack: float = LINK_ATTRIBUTION_SLACK_MM,
+) -> dict[str, set[str]]:
+    """``{closer key: {net, ...}}``: the closers blamed for links ``after`` opened.
+
+    Issue #6428.  Only nets whose link count rose are examined.  Their new
+    links are the ones absent from ``before`` (by endpoint positions); when
+    KiCad renamed the whole net's tree (#5934) and none is new by that
+    test, every link of the net is examined instead.  For each endpoint
+    that names a located item (a zone end's position is just the zone
+    outline's first corner and is skipped), the closer whose copper is
+    nearest is blamed if it lies within ``tolerance``, together with every
+    closer within ``slack`` of that nearest distance.
+    """
+    risen = risen_link_counts(before, after)
+    if not risen or not footprints:
+        return {}
+    old_keys = {lk.key for lk in links_from_violations(before.unconnected_items)}
+    after_links = links_from_violations(after.unconnected_items)
+    blamed: dict[str, set[str]] = {}
+    for net in risen:
+        on_net = [lk for lk in after_links if lk.net == net]
+        fresh = [lk for lk in on_net if lk.key not in old_keys] or on_net
+        for lk in fresh:
+            for end in (lk.a, lk.b):
+                if end.kind == "zone":
+                    continue
+                dists = {
+                    key: min(_capsule_distance(end.x, end.y, c) for c in caps)
+                    for key, caps in footprints.items()
+                    if caps
+                }
+                if not dists:
+                    continue
+                nearest = min(dists.values())
+                if nearest > tolerance:
+                    continue
+                for key, d in dists.items():
+                    if d <= min(nearest + slack, tolerance):
+                        blamed.setdefault(key, set()).add(net)
+    return blamed
+
+
 def run_oracle_completion(
     pcb_path: Path,
     *,
@@ -432,6 +560,7 @@ def run_oracle_completion(
     log: Callable[[str], None] | None = None,
     time_left: Callable[[], float | None] | None = None,
     call_cost_estimate: float = 0.0,
+    cut_attributor: CutAttributor | None = None,
 ) -> OracleCompletionResult:
     """Close the KiCad-reported unconnected links on ``nets``, round by round.
 
@@ -441,6 +570,10 @@ def run_oracle_completion(
     * the in-scope link count reaches zero (``converged``),
     * the closer places nothing (``no_closer``),
     * a round does not lower the count (``no_progress``),
+    * a round raises the link count of ANY net -- in scope or not -- and no
+      closer can be blamed for it (``no_progress``, Issue #6428; a summed
+      count would keep a round that closes 17 GND links by opening one on
+      +3.3V),
     * a round raises the error-severity DRC count and no closer can be
       blamed for it (``drc_regressed``), or
     * kicad-cli fails mid-loop (``oracle_failed``).
@@ -457,7 +590,8 @@ def run_oracle_completion(
         nets: The pour nets in scope.  Links on other nets are reported by
             KiCad but neither counted nor closed here.
         max_rounds: Round budget (``0`` disables the loop).
-        max_retries: Attribution retries per round after a DRC regression.
+        max_retries: Attribution retries per round after a DRC or per-net
+            link regression (one shared budget).
         log: Optional progress sink.
         time_left: Issue #6273.  Seconds the caller can still spend (``None``
             = unbounded).  ``kct route --timeout`` is a hard total enforced by
@@ -469,6 +603,12 @@ def run_oracle_completion(
             expected to take before any has been measured (the caller passes
             its zone-fill time, the same KiCad load + fill).  Measured calls
             replace it.
+        cut_attributor: Issue #6428.  Names the closers whose copper split a
+            pour of a net whose link count rose, from the before / after
+            fills -- exact even when KiCad reports the new link as ``Zone <->
+            Zone`` (anchored at outline corners, so
+            :func:`attribute_link_regressions` cannot place it).  When it
+            blames nothing, the proximity attribution is used.
     """
     scope = set(nets)
     say = log or (lambda _msg: None)
@@ -524,12 +664,15 @@ def run_oracle_completion(
     #: re-applying the same copper cannot help (the first one did not connect
     #: it), so later rounds try something else for that link.
     settled: set[str] = set()
+    #: Issue #6428: via sites whose copper opened a link on another net.  A
+    #: site is a fixed place on the board, so it stays banned in later rounds.
+    withdrawn_sites: set[str] = set()
     for rnd in range(max_rounds):
         count, errors = len(links), geo.error_count
         say(
             f"  Oracle round {rnd + 1}: {count} unconnected link(s) on {', '.join(sorted({lk.net for lk in links}))}"
         )
-        banned: set[str] = set(settled)
+        banned: set[str] = settled | withdrawn_sites
         backup = pcb_path.read_bytes()
         kept = False
         stop: str | None = None
@@ -537,6 +680,9 @@ def run_oracle_completion(
         attempts = 0
         geo_after = geo
         round_notes: list[str] = []
+        #: The stop reason when the retry budget runs out: the kind of the
+        #: last regression the round retried after.
+        last_regression = STOP_DRC_REGRESSED
         for _ in range(1 + max_retries):
             if not affordable(attempt=True):
                 # The board holds the last kept round's bytes here: the first
@@ -572,6 +718,45 @@ def run_oracle_completion(
                     for c in sorted(culprits)
                 )
                 banned |= culprits
+                last_regression = STOP_DRC_REGRESSED
+                continue
+            # Issue #6428: per-net gate.  A round may not open a link on any
+            # net (in scope or not), however many it closes elsewhere.
+            risen = risen_link_counts(geo, geo_after)
+            if risen:
+                after_bytes = pcb_path.read_bytes()
+                pcb_path.write_bytes(backup)
+                blamed: dict[str, set[str]] = {}
+                if cut_attributor is not None:
+                    try:
+                        blamed = cut_attributor(
+                            pcb_path, after_bytes, sorted(risen), attempt.footprints
+                        )
+                    except Exception as exc:  # attribution must never fail the loop
+                        logger.warning("Oracle cut attribution failed: %s", exc)
+                if not set(blamed) - banned:
+                    blamed = attribute_link_regressions(geo, geo_after, attempt.footprints)
+                # A weld is withdrawn by SITE: the retry may weld the pad
+                # elsewhere.  Other copper (routed links) is banned whole.
+                bans: dict[str, set[str]] = {}
+                for key in blamed:
+                    sites = attempt.sites.get(key)
+                    bans[key] = {site_key(key, x, y) for x, y in sites} if sites else {key}
+                culprits = {k for k, b in bans.items() if b - banned}
+                rise = ", ".join(f"{net} +{n}" for net, n in risen.items())
+                if not culprits:
+                    say(f"    links opened ({rise}) by no attributable copper; round restored")
+                    stop = STOP_NO_PROGRESS
+                    break
+                say(f"    links opened ({rise}); retrying without {', '.join(sorted(culprits))}")
+                round_notes.extend(
+                    f"{c}: withdrawn -- its copper opened a link on {', '.join(sorted(blamed[c]))}"
+                    for c in sorted(culprits)
+                )
+                for c in culprits:
+                    banned |= bans[c]
+                    withdrawn_sites |= {b for b in bans[c] if b.startswith("site:")}
+                last_regression = STOP_NO_PROGRESS
                 continue
             if len(in_scope(geo_after)) >= count:
                 pcb_path.write_bytes(backup)
@@ -580,7 +765,7 @@ def run_oracle_completion(
             kept = True
             break
         else:
-            stop = STOP_DRC_REGRESSED
+            stop = last_regression
 
         if attempts:
             # A round that stopped before its first attempt (deadline) learned
@@ -768,7 +953,7 @@ class PourLinkCloser:
 
         welded: set[str] = set()
         if pads_by_net:
-            welded = self._weld_pads(pcb_path, pads_by_net, attempt)
+            welded = self._weld_pads(pcb_path, pads_by_net, attempt, avoided_sites(banned))
         # Issue #6412: banned routes are skipped per variant inside
         # ``_route_links`` -- a withdrawn plane join must leave the link's
         # nearest-island join eligible -- so only welded links drop out here.
@@ -897,6 +1082,120 @@ class PourLinkCloser:
         kept = [lk for lk in links if lk.net not in rebuilt]
         return canonical_links(kept + [lk for net in sorted(rebuilt) for lk in rebuilt[net]])
 
+    # -- cut attribution (Issue #6428) ------------------------------------------
+
+    def cut_culprits(
+        self,
+        before_path: Path,
+        after_bytes: bytes,
+        nets: Sequence[str],
+        footprints: Mapping[str, Sequence[tuple[float, float, float, float, float]]],
+        tolerance: float = LINK_ATTRIBUTION_TOLERANCE_MM,
+        slack: float = LINK_ATTRIBUTION_SLACK_MM,
+    ) -> dict[str, set[str]]:
+        """``{closer key: {net, ...}}``: the closers that split a pour of ``nets``.
+
+        Compares net N's zone fill on the board before the attempt with the
+        attempt's refilled board (KiCad's own fill, which the closer wrote):
+
+        * a before-fill piece that now overlaps two or more after-fill pieces
+          was split, and every after piece but its largest is split off (on
+          board 04 the U2.35 weld cut a 0.16 mm^2 sliver off the +3.3V F.Cu
+          pour, which KiCad reports as ``Zone <-> Zone``);
+        * an after piece overlapping no before piece is new;
+        * a pad of N touching N's fill before and not after was stranded.
+
+        Each such split-off piece or stranded pad is pinned on the closer
+        whose copper is nearest to it (within ``tolerance``), with every
+        closer within ``slack`` of that distance.  Closers serving N itself
+        are skipped.  A via merely punched through N's pour (every GND via in
+        a +3.3V F.Cu pour) splits nothing and is never blamed.
+        """
+        import tempfile
+
+        from shapely import LineString, Point, Polygon, box  # type: ignore[import-untyped]
+
+        from kicad_tools.cli.stitch_cmd import (
+            find_pads_on_nets,
+            find_same_net_filled_polygons,
+            get_net_number,
+        )
+        from kicad_tools.core.sexp_file import load_pcb
+
+        before = load_pcb(before_path)
+        with tempfile.TemporaryDirectory(prefix="kct-oracle-cut-") as tmp:
+            after_path = Path(tmp) / before_path.name
+            after_path.write_bytes(after_bytes)
+            after = load_pcb(after_path)
+
+        def pieces(sexp: Any, number: int) -> list[tuple[str, Any]]:
+            out: list[tuple[str, Any]] = []
+            for fp in find_same_net_filled_polygons(sexp, {number}):
+                if len(fp.points) < 3:
+                    continue
+                geom = Polygon(fp.points).buffer(0)
+                for part in getattr(geom, "geoms", [geom]):
+                    if not part.is_empty:
+                        out.append((fp.layer, part))
+            return out
+
+        def pad_box(p: Any) -> Any:
+            return box(
+                p.x - p.width / 2 - 0.01,
+                p.y - p.height / 2 - 0.01,
+                p.x + p.width / 2 + 0.01,
+                p.y + p.height / 2 + 0.01,
+            )
+
+        def touches(fill: list[tuple[str, Any]], p: Any, shape: Any) -> bool:
+            return any(
+                (p.pad_type != "smd" or layer == p.layer) and g.intersects(shape)
+                for layer, g in fill
+            )
+
+        cap_shapes = {
+            key: [
+                (Point(x1, y1) if (x1, y1) == (x2, y2) else LineString([(x1, y1), (x2, y2)]), half)
+                for x1, y1, x2, y2, half in caps
+            ]
+            for key, caps in footprints.items()
+            if caps
+        }
+        blamed: dict[str, set[str]] = {}
+        for net in nets:
+            number = get_net_number(before, net)
+            after_number = get_net_number(after, net)
+            if number is None or after_number is None:
+                continue
+            old, new = pieces(before, number), pieces(after, after_number)
+            targets: list[Any] = []
+            for layer, piece in old:
+                hit = [g for lay, g in new if lay == layer and g.intersects(piece)]
+                if len(hit) >= 2:
+                    targets.extend(sorted(hit, key=lambda g: g.area)[:-1])
+            targets.extend(
+                g for lay, g in new if not any(lay == lo and g.intersects(o) for lo, o in old)
+            )
+            for p in find_pads_on_nets(before, {net}):
+                shape = pad_box(p)
+                if touches(old, p, shape) and not touches(new, p, shape):
+                    targets.append(shape)
+            suspects = {k: v for k, v in cap_shapes.items() if closer_key_net(k) != net}
+            for target in targets:
+                dists = {
+                    key: min(geom.distance(target) - half for geom, half in shapes)
+                    for key, shapes in suspects.items()
+                }
+                if not dists:
+                    continue
+                nearest = min(dists.values())
+                if nearest > tolerance:
+                    continue
+                for key, d in dists.items():
+                    if d <= min(nearest + slack, tolerance):
+                        blamed.setdefault(key, set()).add(net)
+        return blamed
+
     # -- pads ---------------------------------------------------------------
 
     def weld_clearance(self, pcb_path: Path, pads_by_net: dict[str, set[str]]) -> float:
@@ -962,7 +1261,11 @@ class PourLinkCloser:
         return best
 
     def _weld_pads(
-        self, pcb_path: Path, pads_by_net: dict[str, set[str]], attempt: ClosureAttempt
+        self,
+        pcb_path: Path,
+        pads_by_net: dict[str, set[str]],
+        attempt: ClosureAttempt,
+        avoid: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     ) -> set[str]:
         from kicad_tools.cli.stitch_cmd import run_stitch, trace_to_track_segments
 
@@ -986,6 +1289,7 @@ class PourLinkCloser:
                 foreign_fills_yield=fills_yield,
                 strict_drill_overlap=True,
                 preferred_sites=self.preferred_sites,
+                avoid_sites=avoid or None,
             )
 
         force: frozenset[str] = frozenset()
@@ -1010,6 +1314,7 @@ class PourLinkCloser:
                 pad = placement.pad
                 key = f"pad:{pad.net_name}:{pad.reference}.{pad.pad_number}"
                 caps = attempt.footprints.setdefault(key, [])
+                attempt.sites.setdefault(key, []).append((placement.via_x, placement.via_y))
                 caps.append(
                     (
                         placement.via_x,

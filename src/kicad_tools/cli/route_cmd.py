@@ -7622,6 +7622,9 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             # cannot finish (a killed run loses its saved board).
             time_left=lambda: _finishing_time_left(args),
             call_cost_estimate=float(getattr(args, "_zone_fill_seconds", 0.0) or 0.0),
+            # Issue #6428: a round may not open a link on any net; blame the
+            # closer copper that cut the pour whose link count rose.
+            cut_attributor=closer.cut_culprits,
         )
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
