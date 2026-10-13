@@ -146,7 +146,7 @@ the human view of `CLASSIFICATION` in `loom-daemon/src/fleet_policy.rs`, which
 
 | Class | Top-level keys | Lives in |
 |-------|----------------|----------|
-| **Fleet** | `autonomous`, `runtimes`, `safehouse`, `observability`, `offlineMode`, `guide`, `sweep`, `daemon`, `fleet` | fleet-gitops only |
+| **Fleet** | `autonomous`, `runtimes`, `safehouse`, `observability`, `offlineMode`, `guide`, `sweep`, `daemon`, `fleet`, `repos` | fleet-gitops only |
 | **Repo** | `terminals`, `buildGate`, `branchProtection`, `guards`, `labels`, `forge`, `reflection`, `version` | tracked `.loom/config.json` / `.loom-project/project.json` |
 | **Host** | `worktree`, `health_monitoring` (and per-host paths, see below) | `.loom-local/local.json` |
 

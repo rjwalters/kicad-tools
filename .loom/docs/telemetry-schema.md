@@ -2681,9 +2681,12 @@ Each row:
 #### Champion dispatch metadata (`fleet.state.repos[].champion`)
 
 Additive on `fleet-state/v1`; missing means an older emitter, not human approval.
-`approval` and `merge` are explicitly null (unknown): Champion authority is
-prompt-defined, and no effective auto/human policy configuration exists to read.
-Scheduling, role absence and elapsed approval waits never imply human authority.
+`approval` and `merge` read the per-repo policy contract (#11674): the Fleet key
+`repos[]` = `{repo, policy: {approval, merge}}` (each `auto` | `human`; defined
+once in `loom-daemon/src/merge_policy.rs`, the exporter only reads it). A repo
+with no entry, or a value outside `auto`/`human`, is null (unknown), never
+guessed. ETA join: `champion.merge` (`auto`/`human`/null) keyed by the repo's
+`fleet.state` row is the `merge_wait` predictor feature. Scheduling, role absence and elapsed approval waits never imply human authority.
 `prompt_source` is the actual runner command (`/loom:champion`); `prompt_hash`
 is SHA-256 of the installed command and promotion/merge companions, or null
 when any file is unavailable. A custom prompt changes provenance without
@@ -3448,12 +3451,14 @@ records, not one per picked commit.
 
 One OTLP log per completed curation, produced by `loom-daemon curation-complete`
 for both attended Curators and daemon-mediated role sessions. The command
-fetches the current issue body's standalone `loom:estimate` marker and durably
-journals the envelope before the role applies `loom:curated`. No historical
-backfill or inference from Builder outcomes is performed.
+fetches the current issue body's standalone `loom:estimate` marker, resolves
+the story points (#11663), and durably journals the envelope before it applies
+`points:N` and `loom:curated`. No historical backfill or inference from
+Builder outcomes is performed.
 
-The JSON body contains `repo` (owner/repo), `issue`, `difficulty` (integer 1–5),
-`lines` and `files` (nonnegative integers), `doctor_risk` (finite [0,1]), actual
+The JSON body contains `repo` (owner/repo), `issue`, `points` (the story points
+the gate resolved: 1, 2, 3, 5, 8 or 13; absent on records journaled before
+#11663), `lines` and `files` (nonnegative integers), `doctor_risk` (finite [0,1]), actual
 Curator `model` and `runtime` (null when unknown, never inferred), `estimated_at` (UTC completion time),
 `completion_id` (UUID), and standard `loom` build provenance. `loom.repo`,
 `loom.issue`, `loom.model`, `loom.runtime` and `loom.fact_id` are log attributes.
@@ -3467,12 +3472,104 @@ select the latest estimate known at their as-of instant. Files under the main
 workspace's `.loom/logs/issue-estimates/` are the local queue of record; normal
 observability backfill offers each to the configured durable export queue.
 
-Difficulty estimates expected work. The retained `loom:complexity` marker
-independently measures the cost of an unnoticed error and keeps its existing
-routing definition; there is no mapping between them. Estimates never alter
-curation decisions. Missing historical estimates stay absent. Markdown examples
+`lines`, `files` and `doctor_risk` are an observational forecast: no consumer
+may route, gate or order on them. Story points are the only decision-bearing
+size. Records journaled before #11664 may also carry a `difficulty` field
+(integer 1–5); readers ignore it. A legacy `difficulty=` field in the marker is
+accepted and ignored. Estimates never alter curation decisions. Missing
+historical estimates stay absent. Markdown examples
 in backticks or code fences, duplicates, invalid counts and nonfinite/out-of-range
 risk are rejected or excluded before export.
+
+### `stage.work_started`
+
+A role agent began working an item in a stage (Issue #11641). One record per
+agent start, so a stage stay (`eta.stage_outcome`, `entered_at` → `left_at`)
+splits into **queue wait** (`entered_at` → `started_at`) and **work time**
+(`started_at` → `left_at`). Envelopes carry `schema_version: 12`. **OTLP-only**
+(native: `false`). Payload: `telemetry/kinds/work_started.rs`.
+
+```json
+{
+  "kind": "stage.work_started",
+  "repo": "rjwalters/loom",
+  "issue": 11641,
+  "pr_number": 11700,
+  "stage": "doctor",
+  "role": "doctor",
+  "sweep_id": "sweep-issue-11641-1791819641",
+  "attempt_index": 1,
+  "stage_attempt": 1,
+  "dispatch_origin": "work_finder",
+  "started_at": "2026-10-12T16:10:00Z",
+  "source": "sweep_checkpoint",
+  "observed_at": "2026-10-12T16:10:21Z",
+  "loom": { "version": "0.19.1130", "revision": "…", "tree_state": "clean", "complete": true }
+}
+```
+
+**Producers.** No forge calls; both read state the daemon already holds.
+
+- **A sweep this host runs.** Its Curator at dispatch (`source:
+  sweep_dispatch`, `started_at` = the sweep's start), then each role its
+  checkpoint marker hands the item to, observed on the reaper's phase sample
+  (the same tick that publishes `sweep.phase`):
+
+  | Marker | `stage` | `role` |
+  |---|---|---|
+  | (none, at dispatch) | `sweep.curator` | `curator` |
+  | `curator-done` | `sweep.builder` | `builder` |
+  | `builder-done`, `doctor-done` | `review_wait` | `judge` |
+  | `judge-rejected` | `doctor` | `doctor` |
+  | `judge-done` | `merge_wait` | `merge` (the sweep's own merge phase) |
+
+  `merge-done` and an unknown marker start nothing. `started_at` is the
+  marker's own `timestamp` (`source: sweep_checkpoint`), the same instant
+  `fleet.state` dates that stay's `entered_at` with: a sweep dispatches the
+  next phase as soon as it writes the marker, so a sweep-held stay has no
+  queue wait. A marker without a timestamp is dated when observed (`source:
+  sweep_observed`, an upper bound). A daemon restart re-observes the current
+  marker of an adopted sweep and can emit its start again (same `started_at`).
+- **A role-runner tick** (`source: role_act`). The first forge write a Judge
+  (`claimed`, `approved`, `changes_requested`), Doctor (`claimed`, `labeled`)
+  or Champion (`merged` only: its issue promotions are not PR work) agent
+  issued on each PR, read from the tick's pick journal (see
+  [`pick.decision`](telemetry-kind-pick-decision.md#the-pick-journal)).
+  `started_at` is when the agent issued that write, normally its claim label.
+  Recorded only when the journal exists (an OTLP exporter runs) and the
+  agent's `gh` reaches the agent `gh` front.
+
+| Field | Type | Notes |
+|---|---|---|
+| `repo` | string | `owner/repo`, lowercased (as `fleet.state` / `eta.stage_outcome`) |
+| `issue` | integer? | the issue; always set for a sweep, absent for a role tick (it works a PR) |
+| `pr_number` | integer? | the PR, when known (a sweep's checkpoint `pr_number`, or the PR a role tick wrote to) |
+| `stage` | string | `sweep.curator`, `sweep.builder`, `review_wait`, `doctor`, `merge_wait` |
+| `role` | string | `curator`, `builder`, `judge`, `doctor`, `merge` (sweep), `champion` (role tick) |
+| `sweep_id` | string | the sweep's id, or the role tick's id (`role-<role>-<instant>`, the `pick.decision` `tick_id`) |
+| `attempt_index` | integer? | the sweep's attempt ordinal for the issue, as [`sweep.started`](#sweepstarted) reports it. Absent for a role tick and for a sweep this daemon did not dispatch (adopted after a restart) |
+| `stage_attempt` | integer | 1-based count of this `stage`'s starts within this `sweep_id` (a Doctor loop re-enters `review_wait`); `1` for a role tick |
+| `dispatch_origin` | string? | a sweep's [`dispatch_origin`](#sweepstarted), or `role_runner`. Absent for a sweep this daemon did not dispatch |
+| `started_at` | RFC 3339 | when the agent began (the log record's time) |
+| `source` | string | `sweep_dispatch`, `sweep_checkpoint`, `sweep_observed`, `role_act` |
+| `observed_at` | RFC 3339 | when this daemon emitted it (knowable-at; the log's observed time) |
+| `loom` | object | the emitting build's provenance (required; a record with invalid provenance is not exported) |
+
+**Joining to the stay.** A sweep-held stay: `(repo, issue, stage, sweep_id)`,
+and `started_at` equals the stay's checkpoint-dated `entered_at` (the key of
+`eta.stage_outcome`'s sweep fallback `loom.fact_id`); `stage_attempt` picks the
+re-entry. A role-runner stay: `(repo, pr_number, stage)` with `started_at`
+inside `[entered_at, left_at]`. Several role ticks (or hosts) can start the same
+stay; the earliest `started_at` is the pickup.
+
+**OTLP.** The body is the record's JSON. Attributes: `loom.repo`, `loom.issue`,
+`loom.pr_number`, `loom.role`, `loom.sweep_id`, `loom.attempt_index`,
+`loom.dispatch_origin` (all shared keys) and `loom.work_started.stage` /
+`started_at` / `source` / `stage_attempt` (`WORK_STARTED_LOG_ATTRIBUTE_KEYS`,
+kept by the collector's `transform/privacy` `keep_keys`, contract-tested).
+`loom.fact_id = derived_hex(["loom.fact", "stage.work_started", repo, issue,
+pr_number, stage, role, sweep_id, stage_attempt, started_at], 16)` (absent parts
+empty), so a replayed record dedupes.
 
 
 ## Persistence & read surface (`sweep.outcome`, Issue #4704)
