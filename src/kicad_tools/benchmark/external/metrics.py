@@ -677,9 +677,26 @@ def build_timing(
 # ---------------------------------------------------------------------------
 
 
+#: ``kct check`` rules that are silent no-ops without a net-class map. The CLI
+#: prints them as INACTIVE; :func:`run_kct_check` records them in
+#: :attr:`KctCheckSummary.inactive_rules` instead (issue #6420).
+SIDECAR_GATED_RULES: tuple[str, ...] = (
+    "match_group_length_skew",
+    "diffpair_length_skew",
+    "diffpair_routing_continuity",
+)
+
+
 @dataclass(frozen=True)
 class KctCheckSummary:
-    """Summary of the internal ``kct check`` engine's verdict."""
+    """Summary of the internal ``kct check`` engine's verdict.
+
+    ``net_class_map_path`` names the sidecar that engaged the net-class
+    rules (``None`` when no map was supplied, or a map was passed as a
+    dict). ``inactive_rules`` lists the rules that could not engage
+    because no map was supplied -- they report nothing, which is not the
+    same as passing.
+    """
 
     ran: bool
     passed: bool | None = None
@@ -687,6 +704,9 @@ class KctCheckSummary:
     warning_count: int | None = None
     errors_by_rule: dict[str, int] = field(default_factory=dict)
     note: str | None = None
+    manufacturer: str | None = None
+    net_class_map_path: str | None = None
+    inactive_rules: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -696,14 +716,39 @@ class KctCheckSummary:
             "warning_count": self.warning_count,
             "errors_by_rule": dict(sorted(self.errors_by_rule.items())),
             "note": self.note,
+            "manufacturer": self.manufacturer,
+            "net_class_map_path": self.net_class_map_path,
+            "inactive_rules": list(self.inactive_rules),
         }
+
+
+def _load_net_class_map(
+    net_class_map: str | Path | dict[str, Any], pcb: PCB, pcb_path: Path | None
+) -> dict[str, Any]:
+    """Load (if a path) and rekey a net-class map onto *pcb*'s net names.
+
+    Mirrors ``kct check``: the canonical loader resolves layer tokens
+    against the board, then :func:`resolve_net_class_map_keys` maps the
+    user's keys onto the board's actual (possibly hierarchical) net names.
+    """
+    from kicad_tools.router.net_names import resolve_net_class_map_keys
+    from kicad_tools.router.rules import net_class_map_from_path
+
+    if isinstance(net_class_map, (str, Path)):
+        loaded = net_class_map_from_path(net_class_map, pcb_path=pcb_path)
+    else:
+        loaded = dict(net_class_map)
+    board_net_names = [net.name for net in pcb.nets.values() if net.name]
+    resolution = resolve_net_class_map_keys(loaded.keys(), board_net_names)
+    return {board_net: loaded[user_key] for board_net, user_key in resolution.resolved.items()}
 
 
 def run_kct_check(
     board: str | Path | PCB,
     *,
     manufacturer: str = "jlcpcb",
-    layers: int = 4,
+    layers: int | None = 4,
+    net_class_map: str | Path | dict[str, Any] | None = None,
 ) -> KctCheckSummary:
     """Run the ``kct check`` DRC engine in-process and summarize it.
 
@@ -711,20 +756,57 @@ def run_kct_check(
     behind the ``kct check`` CLI -- rather than shelling out, so the
     benchmark harness does not depend on an installed console script.
 
+    Args:
+        board: Routed board (path or loaded :class:`PCB`).
+        manufacturer: Manufacturer profile id, tier included
+            (``jlcpcb-tier1`` is not ``jlcpcb``).
+        layers: Copper-layer count for the design rules; ``None`` detects
+            it from the board, as ``kct check`` does without ``--layers``.
+        net_class_map: Net-class map sidecar (path, or an already-loaded
+            ``{net: NetClassRouting}`` dict). Without it the diff-pair and
+            match-group skew rules cannot engage and net-class clearances
+            are not applied; they are then listed in ``inactive_rules``.
+            With it, the map is rekeyed onto the board's net names and the
+            ampacity copper weights follow the board's declared stackup,
+            matching ``kct check``'s auto-discovered-sidecar path
+            (issue #6420).
+
     Never raises: an engine failure is reported as ``ran=False`` with the
     real error text, so a benchmark run can never silently overstate
     cleanliness.
     """
+    ncm_path = str(net_class_map) if isinstance(net_class_map, (str, Path)) else None
     try:
         from kicad_tools.schema.pcb import PCB as PCBClass
         from kicad_tools.validate import DRCChecker
 
-        pcb = PCBClass.load(str(board)) if isinstance(board, (str, Path)) else board
-        results = DRCChecker(pcb, manufacturer=manufacturer, layers=layers).check_all(
+        pcb_path = Path(board) if isinstance(board, (str, Path)) else None
+        pcb = PCBClass.load(str(board)) if pcb_path is not None else board
+        if layers is None:
+            detected = len(pcb.copper_layers)
+            layers = detected if detected > 0 else 2
+        extra: dict[str, Any] = {}
+        if net_class_map is not None:
+            extra["net_class_map"] = _load_net_class_map(net_class_map, pcb, pcb_path)
+            extra["warn_on_inactive_skew_rules"] = False
+            try:
+                from kicad_tools.physics.stackup import Stackup
+
+                derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+            except Exception:  # noqa: BLE001 - same tolerance as ``kct check``
+                derived = None
+            if derived is not None:
+                extra["copper_oz_outer"], extra["copper_oz_inner"] = derived
+        results = DRCChecker(pcb, manufacturer=manufacturer, layers=layers, **extra).check_all(
             pad_grid_auto_derive=True
         )
     except Exception as exc:  # pragma: no cover - defensive
-        return KctCheckSummary(ran=False, note=f"kct check failed: {type(exc).__name__}: {exc}")
+        return KctCheckSummary(
+            ran=False,
+            note=f"kct check failed: {type(exc).__name__}: {exc}",
+            manufacturer=manufacturer,
+            net_class_map_path=ncm_path,
+        )
 
     errors_by_rule: dict[str, int] = {}
     for violation in results.errors:
@@ -737,6 +819,9 @@ def run_kct_check(
         error_count=results.error_count,
         warning_count=results.warning_count,
         errors_by_rule=errors_by_rule,
+        manufacturer=manufacturer,
+        net_class_map_path=ncm_path,
+        inactive_rules=() if net_class_map is not None else SIDECAR_GATED_RULES,
     )
 
 
@@ -749,14 +834,18 @@ class KicadCliDrcSummary:
     are re-filled from scratch, so a benchmark report that omits it is not
     evidence of a clean board.
 
-    ``violation_count`` is ``None`` (not ``0``) when kicad-cli could not
-    run -- "we did not check" must never render as "clean".
+    ``violation_count`` and ``unconnected_count`` are ``None`` (not ``0``)
+    when kicad-cli could not run -- "we did not check" must never render
+    as "clean". ``all_track_errors`` records whether every violation on a
+    track was reported or only the first (issue #6420).
     """
 
     ran: bool
     violation_count: int | None = None
     by_type: dict[str, int] = field(default_factory=dict)
     note: str | None = None
+    unconnected_count: int | None = None
+    all_track_errors: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -764,26 +853,33 @@ class KicadCliDrcSummary:
             "violation_count": self.violation_count,
             "by_type": dict(sorted(self.by_type.items())),
             "note": self.note,
+            "unconnected_count": self.unconnected_count,
+            "all_track_errors": self.all_track_errors,
         }
 
 
-def run_kicad_cli_drc(pcb_path: str | Path, *, timeout: int = 300) -> KicadCliDrcSummary:
+def run_kicad_cli_drc(
+    pcb_path: str | Path, *, timeout: int = 300, all_track_errors: bool = False
+) -> KicadCliDrcSummary:
     """Run the ``kicad-cli pcb drc --refill-zones`` cross-gate.
 
     Delegates to :func:`kicad_tools.drc.geometric.run_geometric_drc`, the
     single in-repo implementation of that invocation, so the benchmark and
     the board-recipe pipeline gate reason over identical geometry.
+    ``all_track_errors`` adds ``--all-track-errors`` (off by default).
     """
     from kicad_tools.drc.geometric import run_geometric_drc
 
-    result = run_geometric_drc(pcb_path, timeout=timeout)
+    result = run_geometric_drc(pcb_path, timeout=timeout, all_track_errors=all_track_errors)
     if not result.ran:
-        return KicadCliDrcSummary(ran=False, note=result.note)
+        return KicadCliDrcSummary(ran=False, note=result.note, all_track_errors=all_track_errors)
     return KicadCliDrcSummary(
         ran=True,
         violation_count=result.error_count,
         by_type=dict(result.by_type),
         note=result.note,
+        unconnected_count=getattr(result, "unconnected_count", None),
+        all_track_errors=all_track_errors,
     )
 
 

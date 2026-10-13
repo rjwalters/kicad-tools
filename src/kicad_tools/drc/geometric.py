@@ -122,6 +122,7 @@ def run_geometric_drc(
     timeout: int = 120,
     kicad_cli: Path | None = None,
     refill_zones: bool = True,
+    all_track_errors: bool = False,
 ) -> GeometricDRCResult:
     """Run ``kicad-cli pcb drc`` and summarize findings by severity.
 
@@ -155,6 +156,11 @@ def run_geometric_drc(
         refill_zones: Recompute zones before checking by default. False checks
             the saved copper exactly, for deliberately preserved fixed fills.
             This does not attest to what a later full refill would produce.
+        all_track_errors: Pass ``--all-track-errors`` so kicad-cli reports
+            every violation on a track instead of only the first one per
+            track (issue #6420).  Off by default: the production gates that
+            call this keep their existing invocation; research harnesses
+            that count violations opt in.
 
     Returns:
         A :class:`GeometricDRCResult` summarizing the run.
@@ -185,6 +191,7 @@ def run_geometric_drc(
             "pcb",
             "drc",
             *(["--refill-zones"] if refill_zones else []),
+            *(["--all-track-errors"] if all_track_errors else []),
             "--format",
             "json",
             # Request all severities so warning-only native checks such as

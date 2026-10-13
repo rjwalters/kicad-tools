@@ -69,6 +69,27 @@ cheap checks to run before spending route time on a new comparison:
 ``route`` always passes ``--no-cache``: without it a repeated row replays the
 first run's copper instead of routing.
 
+Grading (Issue #6420). Each row's DRC columns are meant to equal what a
+person would get by hand, so the harness does not under-count:
+
+* ``kct_check_*`` runs the ``kct check`` engine with the run dir's
+  ``net_class_map.json`` (diff-pair and match-group skew rules engage,
+  net-class clearances apply) and the manufacturer ``kct route`` recorded in
+  ``fab_profile.json`` -- the same numbers as ``kct check --mfr <tier>
+  --allow-incomplete`` on the routed file. With no sidecar the row says so
+  (``kct_check_net_class_map: null``) and lists ``kct_check_inactive_rules``.
+* ``kicad_drc_*`` runs ``kicad-cli pcb drc --refill-zones --all-track-errors``
+  and records ``kicad_drc_unconnected``.
+* ``manufacturable`` is ``true`` only when ``kct route`` exited 0, both
+  engines report 0 errors, kicad-cli reports 0 unconnected items and the
+  graded board is the finished output; ``null`` when either engine did not run.
+* A grid-engine route under ``--deterministic-budget`` or
+  ``--per-net-iterations`` also gets ``--deterministic-rescue``, so the
+  relief-rescue sub-searches are iteration-bounded and a row does not depend
+  on host load; every row records ``deterministic_rescue``, and
+  ``rescue_wall_clock`` / ``sweep_wall_clock`` say which wall clocks the
+  route log reports as live.
+
 Usage::
 
     uv run kct build-native --check
@@ -1007,7 +1028,78 @@ def parse_route_log(text: str) -> dict:
     # a row is not a second sample. The harness passes --no-cache; this records
     # the fact per row so a hit can never pass silently (Issue #6312).
     out["cache_hit"] = bool(re.search(r"^\s*Cache HIT", text, re.M))
+    # Wall-clock bounds that were live in this route. Either one makes the
+    # copper load-dependent, so two rows that differ only in host load can
+    # land different boards (Issue #6420). ``rescue_wall_clock``: the
+    # relief-rescue probe / victim re-land sub-searches kept their wall clock
+    # (no --deterministic-rescue). ``sweep_wall_clock``: the post-negotiation
+    # sweep ran under a wall clock rather than the iteration cap (#4159) --
+    # recorded, not fixed; it binds only on a slow enough host. A key is
+    # omitted when the log says nothing either way (e.g. a lattice route).
+    if re.search(r"keep their [\d.]+s wall clock|Relief-rescue sub-search cap: [\d.]+s wall", text):
+        out["rescue_wall_clock"] = True
+    elif "Relief-rescue sub-search cap: iteration-bounded" in text:
+        out["rescue_wall_clock"] = False
+    if re.search(r"Post-negotiation sweep bound: [\d.]+s whole-sweep", text):
+        out["sweep_wall_clock"] = True
+    elif "Post-negotiation sweep bound: iteration-bounded" in text:
+        out["sweep_wall_clock"] = False
     return out
+
+
+def manufacturable(row: dict) -> bool | None:
+    """The one-word verdict: is this routed board fit to send to fab?
+
+    ``True`` only when every gate agrees: ``kct route`` exited 0, ``kct
+    check`` (every error-severity rule) and kicad-cli both report 0 errors,
+    kicad-cli reports 0 unconnected items, and the graded board is the
+    finished output, not a deadline best-so-far. ``None`` -- never ``False``
+    -- when either DRC engine did not run: "not checked" is not a verdict
+    (Issue #6420).
+    """
+    kct = row.get("kct_check_errors_total", row.get("kct_check_errors"))
+    cli = row.get("kicad_drc_errors")
+    unconnected = row.get("kicad_drc_unconnected")
+    if kct is None or cli is None or unconnected is None:
+        return None
+    return (
+        row.get("exit_code") == 0
+        and kct == 0
+        and cli == 0
+        and unconnected == 0
+        and row.get("artifact") == "final"
+    )
+
+
+def _flag_value(args: list[str], flag: str) -> str | None:
+    """The value of ``flag`` in an argv list (``--flag v`` or ``--flag=v``), else ``None``."""
+    for i, arg in enumerate(args):
+        if arg == flag and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith(f"{flag}="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def with_deterministic_rescue(extra: list[str]) -> list[str]:
+    """Add ``--deterministic-rescue`` to a deterministic grid-engine route.
+
+    Under ``--deterministic-budget`` / ``--per-net-iterations`` the A* loop is
+    iteration-bounded, but the relief-rescue probe and victim re-land
+    sub-searches keep a 10 s wall clock unless ``--deterministic-rescue`` is
+    passed (#5870), so the #6342 protocol's grid rows depended on host load:
+    board 05 measured 32/33 in one run and 29-30/33 in another. With it, two
+    runs at a 4x different load were byte-identical (Issue #6420). Lattice
+    rows are left untouched.
+    """
+    if "--deterministic-rescue" in extra:
+        return list(extra)
+    if _flag_value(extra, "--route-engine") == "lattice":
+        return list(extra)
+    deterministic = (
+        "--deterministic-budget" in extra or _flag_value(extra, "--per-net-iterations") is not None
+    )
+    return [*extra, "--deterministic-rescue"] if deterministic else list(extra)
 
 
 #: The classifier's label for a pour net whose zone fill does not join its pads.
@@ -1065,8 +1157,39 @@ def vias_by_net(pcb) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def fab_profile_mfr(routed: Path) -> str | None:
+    """The manufacturer ``kct route`` used, from ``fab_profile.json`` beside *routed*.
+
+    ``kct route`` writes the sidecar next to ``-o``; ``kct check`` resolves
+    it ahead of ``project.kct``. Grading against it is what makes the
+    harness's ``kct check`` columns match a manual ``kct check`` on the same
+    file (Issue #6420). ``None`` when there is no readable sidecar.
+    """
+    try:
+        data = json.loads((routed.parent / "fab_profile.json").read_text())
+    except (OSError, ValueError):
+        return None
+    mfr = data.get("mfr") if isinstance(data, dict) else None
+    return mfr if isinstance(mfr, str) and mfr else None
+
+
+def find_net_class_map(routed: Path) -> Path | None:
+    """The net-class map ``kct check`` would auto-discover for *routed*, or ``None``."""
+    from kicad_tools.sidecars import net_class_map_sidecar_candidates
+
+    return next((c for c in net_class_map_sidecar_candidates(routed) if c.is_file()), None)
+
+
 def grade(routed: Path, board: Board) -> dict:
-    """Completion, both DRC engines, copper, and the stuck-class breakdown."""
+    """Completion, both DRC engines, copper, and the stuck-class breakdown.
+
+    The ``kct check`` columns are graded the way ``kct check --mfr <tier>
+    --allow-incomplete`` grades the same file: with the run dir's
+    ``net_class_map.json`` (so the diff-pair and match-group rules engage and
+    net-class clearances apply) and the manufacturer ``kct route`` recorded
+    in ``fab_profile.json``. kicad-cli runs with ``--all-track-errors`` and
+    its unconnected-item count is recorded (Issue #6420).
+    """
     from kicad_tools.benchmark.external.metrics import (
         measure_completion,
         measure_copper,
@@ -1077,10 +1200,14 @@ def grade(routed: Path, board: Board) -> dict:
 
     comp = measure_completion(routed).to_dict()
     cop = measure_copper(routed).to_dict()
-    check = run_kct_check(
-        routed, manufacturer=board.manufacturer.split("-")[0], layers=board.layers
-    )
-    drc = run_kicad_cli_drc(routed, timeout=600)
+    mfr = fab_profile_mfr(routed) or board.manufacturer
+    ncm = find_net_class_map(routed)
+    # ``layers=None``: detect from the routed board, as ``kct check`` does.
+    check = run_kct_check(routed, manufacturer=mfr, layers=None, net_class_map=ncm)
+    drc = run_kicad_cli_drc(routed, timeout=600, all_track_errors=True)
+    check_ran = bool(getattr(check, "ran", False))
+    drc_ran = bool(getattr(drc, "ran", False))
+    kct_errors = check.error_count if check_ran else None
     row = {
         "nets_complete": comp["nets_complete"],
         "nets_total": comp["nets_total"],
@@ -1096,9 +1223,20 @@ def grade(routed: Path, board: Board) -> dict:
             else None
         ),
         "wirelength_mm": round(cop["wirelength_mm"], 1),
-        "kct_check_errors": check.error_count if check.ran else None,
+        # ``kct_check_errors`` is kept for old readers; it is now the same
+        # number as ``kct_check_errors_total``: every error-severity rule,
+        # the sidecar-gated diff-pair / match-group rules included.
+        "kct_check_errors": kct_errors,
+        "kct_check_errors_total": kct_errors,
         "kct_check_by_rule": dict(sorted(check.errors_by_rule.items())),
-        "kicad_drc_errors": drc.violation_count if drc.ran else None,
+        "kct_check_mfr": mfr,
+        "kct_check_net_class_map": str(ncm) if ncm is not None else None,
+        # The rules that could not engage (no sidecar): they report nothing,
+        # which is not the same as passing.
+        "kct_check_inactive_rules": list(getattr(check, "inactive_rules", ()) or ()),
+        "kicad_drc_errors": drc.violation_count if drc_ran else None,
+        "kicad_drc_unconnected": getattr(drc, "unconnected_count", None) if drc_ran else None,
+        "kicad_drc_all_track_errors": True,
         "kicad_drc_by_type": dict(sorted(drc.by_type.items())),
         "kicad_drc_note": drc.note,
     }
@@ -1242,6 +1380,8 @@ def run_one(
         # save / zone fill / DRC instead of dying at the deadline mid-stage.
         extra += ["--search-timeout", str(int(search_timeout))]
         row["search_timeout_s"] = search_timeout
+    extra = with_deterministic_rescue(extra)
+    row["deterministic_rescue"] = "--deterministic-rescue" in extra
     row.update(run_route(inp, routed, extra, timeout, log))
     row.update(parse_route_log(log.read_text(errors="replace")))
     if grid_policy == "pinned":
@@ -1252,6 +1392,7 @@ def run_one(
         row["routed"] = str(artifact)
         row["artifact"] = kind
         row.update(grade(artifact, board))
+        row["manufacturable"] = manufacturable(row)
     else:
         row["error"] = f"no routed output (exit_code={row['exit_code']})"
     with contextlib.suppress(OSError):
@@ -1277,12 +1418,23 @@ def _timeout_cell(row: dict) -> str:
     return "yes" if row.get("hit_timeout") or row.get("killed_by_harness") else "no"
 
 
+def _kct_errors(row: dict):
+    """Every error-severity ``kct check`` rule; old rows only have ``kct_check_errors``."""
+    return row.get("kct_check_errors_total", row.get("kct_check_errors"))
+
+
+def _manufacturable_cell(row: dict) -> str:
+    verdict = row["manufacturable"] if "manufacturable" in row else manufacturable(row)
+    return "unknown" if verdict is None else ("yes" if verdict else "no")
+
+
 def render_route(rows: list[dict]) -> str:
     out = [
         "| Board | Mode | Scale | Outline mm | Nets | Signal nets unfinished | Router's own tally "
         "| Connections | kct check err "
-        "| kicad-cli DRC err | Vias | Wire mm | Grid mm | Timed out | Wall s | Stuck classes |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| kicad-cli DRC err | Vias | Wire mm | Grid mm | Timed out | Wall s | Stuck classes "
+        "| kicad-cli unconnected | Manufacturable |",
+        "|" + "---|" * 18,
     ]
     for r in rows:
         size = r.get("scale_report", {}).get("outline_mm")
@@ -1291,7 +1443,7 @@ def render_route(rows: list[dict]) -> str:
             out.append(
                 f"| {r['board']} | {r['mode']} | {r['scale']:g} | {outline} | ERROR: "
                 f"{r.get('error', '?')} | -- | -- | -- | -- | -- | -- | -- | -- | -- "
-                f"| {r.get('wall_s', '--')} | -- |"
+                f"| {r.get('wall_s', '--')} | -- | -- | -- |"
             )
             continue
         grid = r.get("pinned_grid_mm") or r.get("coarse_grid_mm", "--")
@@ -1302,10 +1454,11 @@ def render_route(rows: list[dict]) -> str:
             f"| {r['nets_complete']}/{r['nets_total']} "
             f"| {r.get('signal_nets_unfinished', '--')} | {r.get('router_nets', '--')} "
             f"| {r['connections_routed']}/{r['connections_total']} "
-            f"| {r['kct_check_errors']} | {r['kicad_drc_errors']} "
+            f"| {_kct_errors(r)} | {r['kicad_drc_errors']} "
             f"| {r['via_count']} | {r['wirelength_mm']} | {grid} "
             f"| {_timeout_cell(r)} "
-            f"| {r['wall_s']} | {_fmt_counts(r.get('stuck_counts'))} |"
+            f"| {r['wall_s']} | {_fmt_counts(r.get('stuck_counts'))} "
+            f"| {r.get('kicad_drc_unconnected')} | {_manufacturable_cell(r)} |"
         )
     return "\n".join(out)
 
@@ -1412,8 +1565,8 @@ def render_summary(
         f"| ...{less} | Routed nets unfinished (zone-checked) | ...{less} "
         "| kct check err | kicad-cli DRC err | Vias | Vias / routed connection "
         "| Grid mm | Cell estimate | rc | Timed out | Cache hit | Wall s "
-        "| Load 1 min, start -> end | Snapshot state |",
-        "|" + "---|" * 21,
+        "| Load 1 min, start -> end | Snapshot state | kicad-cli unconnected | Manufacturable |",
+        "|" + "---|" * 23,
     ]
 
     def count(nets: list[str] | None) -> str:
@@ -1422,7 +1575,7 @@ def render_summary(
     for label, r in labelled:
         head = f"| {label} | {r['scale']:g} | {r['mode']} "
         if "nets_complete" not in r:
-            out.append(f"{head}| ERROR: {r.get('error', '?')} |" + " -- |" * 17)
+            out.append(f"{head}| ERROR: {r.get('error', '?')} |" + " -- |" * 19)
             continue
         feedback = "off" if "--no-placement-delta-feedback" in r.get("cmd", "") else "default"
         zones = row_zone_nets(r, zone_nets)
@@ -1439,11 +1592,12 @@ def render_summary(
             f"{head}| {feedback} | {r.get('seed', '--')} "
             f"| {count(unfinished_signal_nets(r))} | {count(unfinished_signal_nets(r, exclude))} "
             f"| {count(checked[0])} | {count(checked[1])} "
-            f"| {r['kct_check_errors']} | {r['kicad_drc_errors']} | {r['via_count']} "
+            f"| {_kct_errors(r)} | {r['kicad_drc_errors']} | {r['via_count']} "
             f"| {r.get('vias_per_connection', '--')} | {r.get('coarse_grid_mm', '--')} "
             f"| {'--' if cells is None else f'{cells:,}'} "
             f"| {r['exit_code']} | {_timeout_cell(r)} | {'yes' if r.get('cache_hit') else 'no'} "
-            f"| {r['wall_s']} | {load} | {r.get('snapshot_state', '--')} |"
+            f"| {r['wall_s']} | {load} | {r.get('snapshot_state', '--')} "
+            f"| {r.get('kicad_drc_unconnected', '--')} | {_manufacturable_cell(r)} |"
         )
     return "\n".join(out)
 
