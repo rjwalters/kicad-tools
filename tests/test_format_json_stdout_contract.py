@@ -175,6 +175,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb snap-rotation": ["{pcb}", "--dry-run"],
     "pcb edit-outline": ["{pcb}", "--list"],
     "pcb net-audit": ["{pcb}"],
+    "pcb diff": ["{pcb}", "{pcb}"],
     "pcb export-dsn": ["{pcb}"],
     "pcb import-ses": ["{pcb}", "{dir}/missing.ses"],
     # -- lib ----------------------------------------------------------------
