@@ -6483,6 +6483,11 @@ def _apply_plane_via_reservation(
     )
     if reservation.unreserved:
         print(f"    no legal pre-route site: {', '.join(reservation.unreserved)}")
+    # Issue #6413: one-sided escape blocks the planner took as a last resort.
+    blocked = getattr(reservation, "blocked_escapes", None) or []
+    if blocked:
+        pairs = ", ".join(f"{pin} (by {pad})" for pin, pad in blocked)
+        print(f"    signal escape blocked on one side: {pairs}")
 
 
 def _reserved_plane_via_sites(args) -> "dict[str, list[tuple[float, float]]] | None":
