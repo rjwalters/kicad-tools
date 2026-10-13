@@ -131,6 +131,47 @@ def test_identity_requires_same_kind():
     assert diff_items(old, new).counts()["changed"] == 0
 
 
+def test_reference_kinds_pair_by_identity_before_content():
+    # R1 and R2 (same content shape) trade places: content-first matching
+    # would pair them with each other as unchanged.
+    a, b = ("R_0805", "F.Cu", (0.0, 0.0), 0.0, "10k"), ("R_0805", "F.Cu", (0.0, 9.0), 0.0, "10k")
+    old = [
+        _item(kind="footprint", identity="R1", content=a),
+        _item(kind="footprint", identity="R2", content=b),
+    ]
+    new = [
+        _item(kind="footprint", identity="R1", content=b),
+        _item(kind="footprint", identity="R2", content=a),
+    ]
+    result = diff_items(old, new)
+    assert result.counts() == {"removed": 0, "added": 0, "changed": 2, "unchanged": 0}
+    assert {e.key for e in result.changes()} == {"R1", "R2"}
+
+
+def test_renamed_reference_is_removed_plus_added():
+    c = ("R_0805", "F.Cu", (0.0, 0.0), 0.0, "10k")
+    old = [_item(kind="footprint", identity="R1", content=c)]
+    new = [_item(kind="footprint", identity="R9", content=c)]
+    assert diff_items(old, new).counts() == {"removed": 1, "added": 1, "changed": 0, "unchanged": 0}
+
+
+def test_duplicate_content_reports_the_uuid_that_disappeared():
+    old = [_item(identity="a", content=("x",)), _item(identity="b", content=("x",))]
+    new = [_item(identity="b", content=("x",))]
+    result = diff_items(old, new)
+    [removed] = result.changes()
+    assert (removed.status, removed.key) == ("removed", "a")
+
+
+def test_zone_ring_ignores_start_vertex_and_winding():
+    from kicad_tools.pcb.diff import _canonical_ring
+
+    ring = [(0, 0), (10, 0), (10, 5), (0, 5)]
+    assert _canonical_ring(ring) == _canonical_ring(ring[2:] + ring[:2])
+    assert _canonical_ring(ring) == _canonical_ring(ring[::-1])
+    assert _canonical_ring(ring) != _canonical_ring([(0, 0), (10, 0), (10, 6), (0, 5)])
+
+
 # ---------------------------------------------------------------------------
 # self-diff and normalisation
 # ---------------------------------------------------------------------------
@@ -312,6 +353,47 @@ def test_moved_pad_changes_pad_not_footprint(tmp_path: Path):
     changes = _changes(_diff(_copy(tmp_path), _write(tmp_path, new_text)))
     assert [(e.status, e.kind) for e in changes] == [("changed", "pad")]
     assert changes[0].key.endswith("/1")
+
+
+def _swap_refs(text: str, a: str = "R1", b: str = "R2") -> str:
+    """Swap two footprints' Reference properties (so the parts trade places)."""
+    ta, tb = f'"Reference" "{a}"', f'"Reference" "{b}"'
+    assert ta in text and tb in text
+    return text.replace(ta, "\0").replace(tb, ta).replace("\0", tb)
+
+
+def test_footprint_swap_reports_both_parts_moved(tmp_path: Path):
+    # R1 (148.5, 83) and R2 (148.5, 92) are both R_0805 / 10k.
+    changes = _changes(_diff(_copy(tmp_path), _write(tmp_path, _swap_refs(BOARD01.read_text()))))
+    fps = {e.key: e for e in changes if e.kind == "footprint"}
+    assert set(fps) == {"R1", "R2"}
+    assert all(e.status == "changed" for e in fps.values())
+    assert fps["R1"].before.geometry["position"] == fps["R2"].after.geometry["position"]
+    assert fps["R1"].after.geometry["position"] == fps["R2"].before.geometry["position"]
+    pads = {e.key for e in changes if e.kind == "pad"}
+    assert pads == {"R1/1", "R1/2", "R2/1", "R2/2"}
+    assert {e.status for e in changes} == {"changed"}
+
+
+def test_same_net_identical_part_swap_is_not_silent(tmp_path: Path, capsys):
+    # Put R2 on R1's nets, so the two parts are fully interchangeable: equal
+    # footprint, value and pad nets.  Swapping them must still be reported.
+    text = BOARD01.read_text()
+    r2 = text.index('"Reference" "R2"')
+    end = text.index("\n\t)\n", r2)
+    r2_block = text[r2:end].replace('(net 3 "GND")', '(net 2 "VOUT")', 1)
+    r2_block = r2_block.replace('(net 2 "VOUT")', '(net 1 "VIN")', 1)
+    base = text[:r2] + r2_block + text[end:]
+    old = _write(tmp_path, base, name="old.kicad_pcb")
+    new = _write(tmp_path, _swap_refs(base))
+    changes = _changes(_diff(old, new))
+    assert {(e.kind, e.key) for e in changes if e.kind == "footprint"} == {
+        ("footprint", "R1"),
+        ("footprint", "R2"),
+    }
+    assert {e.status for e in changes} == {"changed"}
+    assert run_pcb_diff(str(old), str(new)) == 2
+    capsys.readouterr()
 
 
 # ---------------------------------------------------------------------------

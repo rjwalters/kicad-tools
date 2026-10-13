@@ -8,17 +8,29 @@ items themselves.  Every drawable item becomes a :class:`DiffItem` carrying
 * an **identity key** -- the KiCad ``uuid`` for copper/graphics, the
   reference for footprints and ``<ref>/<pad>`` for pads.
 
-:func:`diff_items` then matches the two item lists in three passes:
+How :func:`diff_items` pairs OLD and NEW items depends on the kind of
+identity:
 
-1. **Content pass.**  Items with equal ``(kind, content)`` pair one-to-one as
-   multisets and are ``unchanged``, whatever their uuids.  Regenerated uuids,
-   re-indentation and float reformatting therefore report nothing.
-2. **Identity pass** on the leftovers.  Items with equal identity are
-   ``changed``.  For uuid-keyed kinds the pair also needs equal ``kind`` *and*
-   ``net``: a seeded router numbers uuids positionally, so one extra segment
-   early in a run shifts every later uuid, and without the guard a GND
-   segment would pair with a VBUS one.
-3. **Remainder.**  OLD leftovers are ``removed``, NEW leftovers ``added``.
+* **Reference-keyed kinds** (footprints and pads) pair **by identity first**.
+  A reference is stable and meaningful, so content never overrides it: when
+  R1 and R2 (same footprint, same value) trade places, both are ``changed``
+  rather than paired with each other as ``unchanged``.  A part whose
+  reference disappeared is ``removed``, and a new reference is ``added``.
+  Only items with no reference at all fall back to the content passes.
+* **Uuid-keyed kinds** (copper, zones and graphics) match in three passes:
+
+  1. **Content pass.**  Items with equal ``(kind, content)`` pair one-to-one
+     as multisets and are ``unchanged``, whatever their uuids.  Regenerated
+     uuids, re-indentation and float reformatting therefore report nothing.
+     Within a bucket of identical items, a candidate with the same uuid is
+     preferred, so deleting one of two duplicate segments reports the uuid
+     that actually disappeared.
+  2. **Identity pass** on the leftovers.  Items with equal identity are
+     ``changed``.  The pair also needs equal ``kind`` *and* ``net``: a seeded
+     router numbers uuids positionally, so one extra segment early in a run
+     shifts every later uuid, and without the guard a GND segment would pair
+     with a VBUS one.
+  3. **Remainder.**  OLD leftovers are ``removed``, NEW leftovers ``added``.
 
 An item that both moved *and* got a new uuid reports as one removed plus one
 added; there is deliberately no nearest-geometry heuristic.
@@ -229,33 +241,73 @@ def _identity_key(item: DiffItem) -> tuple[str, str, str] | None:
     return (item.kind, item.identity, net)
 
 
-def diff_items(old: Sequence[DiffItem], new: Sequence[DiffItem]) -> DiffResult:
-    """Match two item lists: content pass, guarded identity pass, remainder."""
-    entries: list[DiffEntry] = []
+def _ref_keyed(item: DiffItem) -> bool:
+    """Whether ``item`` pairs by identity before content (footprints, pads)."""
+    return item.kind not in _UUID_KINDS and bool(item.identity)
 
-    # Pass 1: content, as multisets.
-    new_by_content: dict[tuple[Any, ...], list[int]] = defaultdict(list)
-    for j, item in enumerate(new):
-        new_by_content[(item.kind, item.content)].append(j)
+
+def diff_items(old: Sequence[DiffItem], new: Sequence[DiffItem]) -> DiffResult:
+    """Match two item lists (see the module docstring for the passes)."""
+    entries: list[DiffEntry] = []
     new_used = [False] * len(new)
-    old_left: list[int] = []
+
+    # Pass 0: reference-keyed kinds pair by identity only.
+    new_by_ref: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for j, item in enumerate(new):
+        if _ref_keyed(item):
+            new_by_ref[(item.kind, item.identity)].append(j)
+    old_rest: list[int] = []
+    removed: list[int] = []
     for i, item in enumerate(old):
-        bucket = new_by_content.get((item.kind, item.content))
+        if not _ref_keyed(item):
+            old_rest.append(i)
+            continue
+        bucket = new_by_ref.get((item.kind, item.identity))
         if bucket:
             j = bucket.pop(0)
             new_used[j] = True
-            entries.append(DiffEntry("unchanged", item, new[j]))
+            status = "unchanged" if item.content == new[j].content else "changed"
+            entries.append(DiffEntry(status, item, new[j]))
         else:
+            removed.append(i)
+
+    # Pass 1: content, as multisets; prefer a same-identity candidate.
+    new_by_content: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+    for j, item in enumerate(new):
+        if not new_used[j] and not _ref_keyed(item):
+            new_by_content[(item.kind, item.content)].append(j)
+    old_left: list[int] = []
+    pending: list[int] = []
+    for i in old_rest:
+        item = old[i]
+        bucket = new_by_content.get((item.kind, item.content))
+        if not bucket:
             old_left.append(i)
+            continue
+        same = next((j for j in bucket if item.identity and new[j].identity == item.identity), None)
+        if same is None:
+            pending.append(i)
+            continue
+        bucket.remove(same)
+        new_used[same] = True
+        entries.append(DiffEntry("unchanged", item, new[same]))
+    for i in pending:
+        item = old[i]
+        bucket = new_by_content.get((item.kind, item.content))
+        if not bucket:
+            old_left.append(i)
+            continue
+        j = bucket.pop(0)
+        new_used[j] = True
+        entries.append(DiffEntry("unchanged", item, new[j]))
 
     # Pass 2: identity on the leftovers (kind + net guarded for uuid kinds).
     new_by_identity: dict[tuple[str, str, str], list[int]] = defaultdict(list)
     for j, item in enumerate(new):
-        if not new_used[j]:
+        if not new_used[j] and not _ref_keyed(item):
             ident = _identity_key(item)
             if ident is not None:
                 new_by_identity[ident].append(j)
-    removed: list[int] = []
     for i in old_left:
         ident = _identity_key(old[i])
         bucket = new_by_identity.get(ident) if ident is not None else None
@@ -267,7 +319,7 @@ def diff_items(old: Sequence[DiffItem], new: Sequence[DiffItem]) -> DiffResult:
             removed.append(i)
 
     # Pass 3: remainder.
-    entries.extend(DiffEntry("removed", old[i], None) for i in removed)
+    entries.extend(DiffEntry("removed", old[i], None) for i in sorted(removed))
     entries.extend(DiffEntry("added", None, new[j]) for j, used in enumerate(new_used) if not used)
     return DiffResult(entries)
 
@@ -278,14 +330,24 @@ def diff_items(old: Sequence[DiffItem], new: Sequence[DiffItem]) -> DiffResult:
 
 
 def _canonical_ring(points: Sequence[Sequence[float]]) -> tuple[tuple[float, float], ...]:
-    """Quantise a closed polygon and rotate it to start at its minimum point."""
+    """Quantise a closed polygon into a start- and winding-independent form.
+
+    The ring is rotated to start at its minimum vertex, in whichever winding
+    direction gives the smaller tuple, so the same outline traced from a
+    different vertex or in reverse compares equal.  KiCad fills a zone the
+    same way regardless of winding, so direction carries no meaning here.
+    """
     pts = [_qp(p) for p in points]
     if len(pts) > 1 and pts[0] == pts[-1]:
         pts = pts[:-1]
     if not pts:
         return ()
-    start = min(range(len(pts)), key=lambda k: pts[k])
-    return tuple(pts[start:] + pts[:start])
+
+    def rotated(ring: list[tuple[float, float]]) -> tuple[tuple[float, float], ...]:
+        start = min(range(len(ring)), key=lambda k: ring[k])
+        return tuple(ring[start:] + ring[:start])
+
+    return min(rotated(pts), rotated(pts[::-1]))
 
 
 def _expand_layers(spec: Iterable[str], copper: Sequence[str]) -> tuple[str, ...]:

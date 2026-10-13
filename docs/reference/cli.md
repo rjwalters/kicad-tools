@@ -224,15 +224,22 @@ kct pcb diff old.kicad_pcb new.kicad_pcb --net GND --layer B.Cu --format json
 kct pcb diff old.kicad_pcb new.kicad_pcb --svg diff.svg
 ```
 
-Matching runs in three passes:
+Footprints and pads pair **by reference** (`R1`, `R1/2`): a reference is
+stable and meaningful, so same-reference items are `changed` when anything
+about them differs, a vanished reference is `removed` and a new one `added`.
+Two identical parts that trade places therefore report both as `changed`
+rather than pairing with each other. Copper, zones and graphics carry only
+uuids, and those match in three passes:
 
 1. **Content.** Items with identical normalised content are `unchanged`,
-   whatever their uuids. Nets are compared by name and coordinates are
-   rounded to 1 nm, so regenerated uuids, re-indentation and float
-   reformatting report nothing.
-2. **Identity.** Leftovers with the same uuid, kind and net (or the same
-   reference for footprints and pads) are `changed`. The net guard matters
-   because seeded routes number uuids by position.
+   whatever their uuids. Nets are compared by name, coordinates are
+   rounded to 1 nm and zone outlines ignore their start vertex and winding
+   direction, so regenerated uuids, re-indentation and float reformatting
+   report nothing. Among identical duplicates, a same-uuid partner is
+   preferred, so deleting one of two duplicate segments names the uuid that
+   actually disappeared.
+2. **Identity.** Leftovers with the same uuid, kind and net are `changed`.
+   The net guard matters because seeded routes number uuids by position.
 3. **Remainder.** The rest is `removed` or `added`. An item that both moved
    and got a new uuid reports as one removed plus one added.
 
