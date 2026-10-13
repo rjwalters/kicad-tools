@@ -781,7 +781,7 @@ def run_kct_check(
         from kicad_tools.validate import DRCChecker
 
         pcb_path = Path(board) if isinstance(board, (str, Path)) else None
-        pcb = PCBClass.load(str(board)) if pcb_path is not None else board
+        pcb = PCBClass.load(str(board)) if isinstance(board, (str, Path)) else board
         if layers is None:
             detected = len(pcb.copper_layers)
             layers = detected if detected > 0 else 2
