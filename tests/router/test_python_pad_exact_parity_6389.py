@@ -300,3 +300,48 @@ def test_exact_pad_test_never_accepts_what_the_validator_rejects():
         seg = Segment(ax, ay, bx, by, 0.15, Layer.F_CU, 1, "SIG")
         assert grid.validate_segment_clearance(seg, exclude_net=1)[0], (ax, ay, bx, by)
     assert accepted > 100  # the sample does exercise the accepting branch
+
+
+def test_kelvin_isolation_voids_and_restores_pad_provenance():
+    """Kelvin branch isolation must hide its cells from the exact pad test.
+
+    ``isolate_kelvin_branch`` repaints a same-net terminal's metal as a
+    no-net obstacle for one search.  The exact pad test skips own-net pads, so
+    a cell that kept its ``PAD`` provenance would be measured against no pad
+    and resolved as clear -- letting a sense branch onto the force terminal.
+    The native ``pad_cell`` bit is reset for the search; the Python plane must
+    be too, and both must come back afterwards.
+    """
+    import numpy as np
+
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
+    from kicad_tools.router.primitives import Pad
+
+    grid = RoutingGrid(6, 6, DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.2))
+    pads = [
+        Pad(
+            x=x,
+            y=3,
+            width=0.6,
+            height=0.6,
+            net=1,
+            net_name="K",
+            layer=Layer.F_CU,
+            ref="R1",
+            pin=str(i + 1),
+        )
+        for i, x in enumerate((1.5, 3.0, 4.5))
+    ]
+    for pad in pads:
+        grid.add_pad(pad)
+    before = grid._pad_provenance.copy()
+    net_before = np.asarray(grid._net).copy()
+    with isolate_kelvin_branch(grid, pads, pads[0], pads[2]):
+        # Cells repainted from the Kelvin net to a no-net obstacle.
+        isolated = (net_before == 1) & (np.asarray(grid._net) == 0)
+        assert isolated.any()  # the middle terminal's metal is isolated
+        assert not (grid._pad_provenance[isolated] == RoutingGrid.PAD_PROVENANCE_PAD).any()
+        layer, gy, gx = (int(v[0]) for v in np.nonzero(isolated))
+        assert not grid.pad_cell_resolvable(gx, gy, layer)
+    np.testing.assert_array_equal(grid._pad_provenance, before)
