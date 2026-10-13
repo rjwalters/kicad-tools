@@ -6413,6 +6413,80 @@ def _apply_pad_access_invariant(router: "Autorouter", args) -> None:
         router.enable_pad_access_invariant = False
 
 
+def _apply_plane_via_reservation(
+    router: "Autorouter", args, pcb_path: "Path | str", *, quiet: bool = False
+) -> None:
+    """Hold a via site open for each pour-net SMD pad before routing (#6401).
+
+    The nets ``kct route`` auto-skips as pours are connected only after
+    routing, by the zone fill and the KiCad-oracle stitch/link pass.  Nothing
+    reserved room for that connection, so on boards 03/04/05 (issue #6388)
+    signal copper took every legal via site around a fine-pitch IC's pour
+    pin and the oracle could only fail.  This reserves one legal site plus
+    its stub per eligible pad on the pre-route board, for both engines (see
+    :func:`kicad_tools.router.plane_via_sites.reserve_router_plane_via_sites`).
+
+    The served nets are the auto-skipped nets that carry a zone (the same
+    ``find_all_plane_nets`` set the oracle stage closes); ``route_via=
+    "manual"`` nets are not pours and are left alone.  Off with
+    ``--no-plane-via-reservation``, and skipped when a placement disposition
+    preserves copper (the oracle stage does not run there either).  Never
+    raises: a failure is a warning and routing proceeds unreserved.
+    """
+    if getattr(args, "no_plane_via_reservation", False):
+        return
+    names = set(getattr(args, "_auto_skipped_net_names", None) or ())
+    if not names:
+        return
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None and getattr(disposition, "preserve_copper_nets", None):
+        return
+    try:
+        from kicad_tools.cli.stitch_cmd import find_all_plane_nets
+        from kicad_tools.core.sexp_file import load_pcb
+        from kicad_tools.router.plane_via_sites import reserve_router_plane_via_sites
+
+        nets = sorted(names & set(find_all_plane_nets(load_pcb(Path(pcb_path)))))
+        if not nets:
+            return
+        reservation = reserve_router_plane_via_sites(
+            router,
+            nets,
+            via_diameter=getattr(args, "via_diameter", None),
+            via_drill=getattr(args, "via_drill", None),
+            clearance=getattr(args, "clearance", None),
+        )
+    except Exception as exc:  # advisory: never fail a route over a reservation
+        logger.warning("Plane-via reservation skipped: %s", exc)
+        return
+    args._plane_via_reservation = reservation
+    if quiet or not (reservation.sites or reservation.unreserved):
+        return
+    served = sum(len(site.pads) for site in reservation.sites)
+    print(
+        f"  Plane-via reservation (#6401): {len(reservation.sites)} site(s) for "
+        f"{served} pour pad(s) on {', '.join(nets)}"
+    )
+    if reservation.unreserved:
+        print(f"    no legal pre-route site: {', '.join(reservation.unreserved)}")
+
+
+def _reserved_plane_via_sites(args) -> "dict[str, list[tuple[float, float]]] | None":
+    """``REF.PAD`` -> reserved via sites from :func:`_apply_plane_via_reservation`.
+
+    Handed to the pour oracle's weld (Issue #6401), which tries these sites
+    before its own offsets.  ``None`` when nothing was reserved.
+    """
+    reservation = getattr(args, "_plane_via_reservation", None)
+    if reservation is None or not getattr(reservation, "sites", None):
+        return None
+    out: dict[str, list[tuple[float, float]]] = {}
+    for site in reservation.sites:
+        for pad in site.pads:
+            out.setdefault(pad, []).append((float(site.x), float(site.y)))
+    return out
+
+
 def _targeted_ripup_budget(args) -> int:
     """Resolve ``--max-ripups-per-net`` for the negotiated targeted path.
 
@@ -7507,6 +7581,8 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             refill=refill,
             # Issue #6374: new pour copper keeps each net's class clearance.
             net_class_map=_pour_closer_net_class_map(router, args),
+            # Issue #6401: weld at the via sites reserved before routing.
+            preferred_sites=_reserved_plane_via_sites(args),
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
@@ -10024,6 +10100,8 @@ def route_with_layer_escalation(
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
+        # Issue #6401: reserve pour-pad via sites before signal routing.
+        _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (the single-attempt tail's
         # _apply_order_method is unreachable under the default --auto-layers).
         _apply_crossing_order_escalation(router, args, quiet=quiet)
@@ -11265,6 +11343,8 @@ def route_with_rule_relaxation(
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
+        # Issue #6401: reserve pour-pad via sites before signal routing.
+        _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (see the layer-escalation path).
         _apply_crossing_order_escalation(router, args, quiet=quiet)
 
@@ -13797,6 +13877,8 @@ def route_with_combined_escalation(
             _apply_escape_corridor_reservation(router, args)
             _apply_pad_access_invariant(router, args)
             _apply_ripup_strategy(router, args)
+            # Issue #6401: reserve pour-pad via sites before signal routing.
+            _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
             # Issue #5787: --order-method crossing (see layer-escalation path).
             _apply_crossing_order_escalation(router, args, quiet=quiet)
 
@@ -16900,6 +16982,19 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-plane-via-reservation",
+        action="store_true",
+        help=(
+            "Disable the pre-route pour-pad via-site reservation (Issue "
+            "#6401).  ON by default for the grid and lattice engines: before "
+            "signal routing, each SMD pad of an auto-skipped pour net on the "
+            "perimeter of a multi-pad footprint gets one legal via site plus "
+            "its stub held free, so the post-route stitch/oracle pass can "
+            "still connect it to its plane.  Pass this flag to restore "
+            "pre-#6401 behaviour."
+        ),
+    )
+    parser.add_argument(
         "--no-pad-access-invariant",
         action="store_true",
         help=(
@@ -19851,6 +19946,8 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_escape_corridor_reservation(router, args)
     _apply_pad_access_invariant(router, args)
     _apply_ripup_strategy(router, args)
+    # Issue #6401: reserve pour-pad via sites before signal routing.
+    _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
 
     # Issue #3171: inject boosted analog routing class for --analog-nets /
     # --auto-analog selected nets (pour/ground nets are left untouched).

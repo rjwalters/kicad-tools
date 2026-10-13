@@ -3945,6 +3945,20 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--no-plane-via-reservation",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the pre-route pour-pad via-site reservation (Issue "
+            "#6401).  ON by default for the grid and lattice engines: before "
+            "signal routing, each SMD pad of an auto-skipped pour net on the "
+            "perimeter of a multi-pad footprint gets one legal via site plus "
+            "its stub held free, so the post-route stitch/oracle pass can "
+            "still connect it to its plane.  Pass this flag to restore "
+            "pre-#6401 behaviour."
+        ),
+    )
+    route_parser.add_argument(
         "--no-pad-access-invariant",
         action="store_true",
         default=False,

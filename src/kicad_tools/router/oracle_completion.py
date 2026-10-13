@@ -690,6 +690,10 @@ class PourLinkCloser:
     #: welds; also the inputs of the weld neighbourhood (``weld_clearance``).
     weld_offset: float = WELD_OFFSET_MM
     weld_escape_distance: float = WELD_ESCAPE_DISTANCE_MM
+    #: Issue #6401: ``{"REF.PAD": [(x, y), ...]}`` -- the via sites ``kct
+    #: route`` reserved for pour pads before signal routing.  The weld tries
+    #: them first; ``None`` leaves it unchanged.
+    preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None
 
     # -- net-class clearance (Issue #6374) ----------------------------------------
 
@@ -966,6 +970,7 @@ class PourLinkCloser:
                 force_pads=force,
                 foreign_fills_yield=fills_yield,
                 strict_drill_overlap=True,
+                preferred_sites=self.preferred_sites,
             )
 
         force: frozenset[str] = frozenset()

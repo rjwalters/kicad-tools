@@ -4131,6 +4131,27 @@ class Autorouter:
         self._lattice_keepouts_cache = mask if mask else None
         return self._lattice_keepouts_cache
 
+    def _lattice_keepouts_with_plane_via_sites(self) -> Any:
+        """The lattice keepout mask plus reserved pour-pad via sites (#6401).
+
+        :func:`~.plane_via_sites.reserve_router_plane_via_sites` stores the
+        reserved sites and stubs as ``KeepoutArea`` instances on
+        ``_plane_via_keepout_areas``.  They join the board's rule areas
+        here, for the lattice search only: the grid engine already holds
+        the same reservation as static grid cells, so they are deliberately
+        kept out of :meth:`_rule_area_keepout_areas` (which the grid reads).
+        With no reservation this returns :meth:`_lattice_keepout_projection`
+        unchanged.
+        """
+        mask = self._lattice_keepout_projection()
+        extra = tuple(getattr(self, "_plane_via_keepout_areas", None) or ())
+        if not extra:
+            return mask
+        from .lattice.obstacles import LatticeKeepoutMask
+
+        base = tuple(mask.areas) if mask else ()
+        return LatticeKeepoutMask(base + extra)
+
     def _rule_area_keepout_areas(self) -> tuple[Any, ...]:
         """Resolved keepout rule areas, with ``spatial_keepouts`` filters.
 
@@ -4380,7 +4401,7 @@ class Autorouter:
         # guaranteed result on boards with no track/via-blocking rule areas
         # (byte-identical no-constraint path).
         if hasattr(pf, "set_keepouts"):
-            pf.set_keepouts(self._lattice_keepout_projection())
+            pf.set_keepouts(self._lattice_keepouts_with_plane_via_sites())
 
         coupled, reserved = self._lattice_coupled_connections()
 
