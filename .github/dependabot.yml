@@ -13,7 +13,7 @@ updates:
       timezone: "America/Los_Angeles"
     cooldown:
       default-days: 14
-    labels: ["dependencies", "loom:review-requested", "tier:maintenance"]
+    labels: ["dependencies", "loom:review-requested"]
     groups:
       github-actions:
         patterns: ["*"]
@@ -28,7 +28,7 @@ updates:
       timezone: "America/Los_Angeles"
     cooldown:
       default-days: 14
-    labels: ["dependencies", "loom:review-requested", "tier:maintenance"]
+    labels: ["dependencies", "loom:review-requested"]
     groups:
       # Build-coupled (nanobind, cmake) or ABI-coupled (numpy): each gets its own PR, as under Renovate.
       uv-minor-patch:
@@ -45,7 +45,7 @@ updates:
       timezone: "America/Los_Angeles"
     cooldown:
       default-days: 14
-    labels: ["dependencies", "loom:review-requested", "tier:maintenance"]
+    labels: ["dependencies", "loom:review-requested"]
     groups:
       # The Astro framework moves as its own PR, as under Renovate.
       npm-minor-patch:
