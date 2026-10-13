@@ -1812,6 +1812,35 @@ def identify_nearest_obstacle(
     return best
 
 
+def _split_fill_pools(
+    net_number: int,
+    same_net_filled_polys: list[FilledPolygon],
+    other_net_filled_polys: list[FilledPolygon],
+    foreign_fills_yield: bool = False,
+) -> tuple[list[FilledPolygon], list[FilledPolygon]]:
+    """Split the fill pools of a multi-net stitch call for one net.
+
+    Issue #6400 / #6410: every stitch entry point builds
+    ``other_net_filled_polys`` excluding ALL stitch-target nets and
+    ``same_net_filled_polys`` holding the fill of EVERY target net.  Used
+    as-is in a multi-net call, a via for net N could pass the same-net fill
+    gate by landing on sibling target net M's fill, and M's fill was not a
+    clearance obstacle either.
+
+    Returns ``(own_fill, other_fill)`` for ``net_number``: ``own_fill`` is
+    the net's own fill (the gate / grid seed), ``other_fill`` is the
+    other-net obstacle pool plus every sibling target net's fill -- unless
+    ``foreign_fills_yield`` is set, in which case sibling fills are left
+    out (they will yield on refill).  Each net is therefore gated exactly as
+    a single-net call for that net would gate it.
+    """
+    own_fill = [fp for fp in same_net_filled_polys if fp.net_number == net_number]
+    if foreign_fills_yield:
+        return own_fill, other_net_filled_polys
+    sibling_fill = [fp for fp in same_net_filled_polys if fp.net_number != net_number]
+    return own_fill, other_net_filled_polys + sibling_fill
+
+
 def _same_net_fill_on_layer(
     same_net_filled_polygons: list[FilledPolygon] | None,
     layer: str | None,
@@ -1851,7 +1880,9 @@ def _point_on_same_net_fill(
     centre) sits on copper rather than overhanging a void or the fill
     boundary.  The even-odd :func:`point_in_polygon` already treats keepout
     voids (holed fill rings KiCad emits as keyholed ``pts`` lists) as
-    outside, so a candidate inside a void hole is correctly rejected.
+    outside, so a candidate inside a void hole is correctly rejected.  The
+    zero-width bridge edges joining such a hole to the outer ring are not
+    a boundary and are ignored by the margin test (Issue #6409).
 
     Layer filtering: only polygons whose ``.layer`` matches ``layer`` are
     considered (``layer=None`` skips the filter).
@@ -3628,7 +3659,7 @@ class _PolygonIndex:
     ring the linear predicates walk.
     """
 
-    __slots__ = ("points", "cell", "_cells", "_big", "_rows", "_big_rows")
+    __slots__ = ("points", "cell", "_cells", "_big", "_rows", "_big_rows", "_bridges")
 
     def __init__(self, points: list[tuple[float, float]]) -> None:
         self.points = points
@@ -3677,6 +3708,14 @@ class _PolygonIndex:
         self._big = big
         self._rows = rows
         self._big_rows = big_rows
+        # Issue #6409: computed lazily -- only the fill-margin query needs it.
+        self._bridges: frozenset[int] | None = None
+
+    def bridge_edges(self) -> frozenset[int]:
+        """Indices of zero-width fracture-bridge edges (see :func:`_bridge_edge_indices`)."""
+        if self._bridges is None:
+            self._bridges = _bridge_edge_indices(self.points)
+        return self._bridges
 
     def edges_in_box(self, min_x: float, min_y: float, max_x: float, max_y: float) -> list[int]:
         """Edge indices whose bounding box may intersect the query box.
@@ -3727,11 +3766,21 @@ class _PolygonIndex:
                     inside = not inside
         return inside
 
-    def has_edge_within_point(self, x: float, y: float, threshold: float) -> bool:
-        """True if some edge is strictly closer than ``threshold`` to ``(x, y)``."""
+    def has_edge_within_point(
+        self, x: float, y: float, threshold: float, *, ignore_bridges: bool = False
+    ) -> bool:
+        """True if some edge is strictly closer than ``threshold`` to ``(x, y)``.
+
+        ``ignore_bridges`` (Issue #6409) skips fracture-bridge edges -- the
+        coincident, opposite-direction pairs KiCad uses to join a fill hole
+        to its outer ring -- which have copper on both sides.
+        """
         points = self.points
         n = len(points)
+        skip = self.bridge_edges() if ignore_bridges else frozenset()
         for i in self.edges_in_box(x - threshold, y - threshold, x + threshold, y + threshold):
+            if i in skip:
+                continue
             xi, yi = points[i]
             xj, yj = points[(i + 1) % n]
             if point_to_segment_distance(x, y, xi, yi, xj, yj) < threshold:
@@ -3755,6 +3804,36 @@ class _PolygonIndex:
             if segment_to_segment_distance(sx, sy, ex, ey, xi, yi, xj, yj) < threshold:
                 return True
         return False
+
+
+def _bridge_edge_indices(points: list[tuple[float, float]]) -> frozenset[int]:
+    """Indices of the fracture-bridge edges in a closed vertex ring.
+
+    Issue #6409: KiCad writes a holed ``filled_polygon`` as one fractured
+    ring -- every hole is joined to the outer outline by a pair of
+    coincident, opposite-direction edges (``a -> b`` and later ``b -> a``).
+    Even-odd parity ignores the pair, but it is *not* a copper boundary:
+    there is fill on both sides.  An edge ``i`` (``points[i] ->
+    points[i+1]``) is a bridge edge when its exact reverse also appears in
+    the ring.  KiCad emits the twins bit-identical, so exact coordinate
+    comparison is used; zero-length edges are never bridges.  Zone outlines
+    have no twins, so this returns an empty set for them.
+    """
+    n = len(points)
+    if n < 2:
+        return frozenset()
+    edges: dict[tuple[tuple[float, float], tuple[float, float]], list[int]] = {}
+    for i in range(n):
+        a = points[i]
+        b = points[(i + 1) % n]
+        if a == b:
+            continue
+        edges.setdefault((a, b), []).append(i)
+    out: set[int] = set()
+    for (a, b), idxs in edges.items():
+        if (b, a) in edges:
+            out.update(idxs)
+    return frozenset(out)
 
 
 def _polygon_index(points: list[tuple[float, float]]) -> "_PolygonIndex | None":
@@ -4128,23 +4207,31 @@ def _point_has_edge_margin(
 ) -> bool:
     """Check if a point has at least `margin` distance from all polygon edges.
 
+    Fracture-bridge edges (Issue #6409, see :func:`_bridge_edge_indices`)
+    are ignored: they join a fill hole to the outer ring with copper on
+    both sides, so they are not a boundary the via pad could overhang.  The
+    hole's and outline's real edges still enforce the margin.
+
     Args:
         x, y: Point to check
         polygon: Polygon vertices
         margin: Required minimum distance from edges
 
     Returns:
-        True if the point is at least `margin` from all edges
+        True if the point is at least `margin` from all non-bridge edges
     """
     # Issue #5617: an existential over the ring -- the index returns a strict
     # superset of the edges that could be within ``margin``, so the negation
     # below is identical to the linear scan's.
     index = _polygon_index(polygon)
     if index is not None:
-        return not index.has_edge_within_point(x, y, margin)
+        return not index.has_edge_within_point(x, y, margin, ignore_bridges=True)
 
+    bridges = _bridge_edge_indices(polygon)
     n = len(polygon)
     for i in range(n):
+        if i in bridges:
+            continue
         j = (i + 1) % n
         dist = point_to_segment_distance(
             x, y, polygon[i][0], polygon[i][1], polygon[j][0], polygon[j][1]
@@ -4762,6 +4849,13 @@ def run_thermal_stitch(
             d for d in target_pad_drills if d[3] != pad_net
         ]
 
+        # Issue #6410: per-candidate fill pools -- the gate uses only this
+        # pad's OWN net's fill, and sibling target nets' fills become
+        # clearance obstacles (the #6400 fix, applied to thermal stitch).
+        own_fill, other_fill = _split_fill_pools(
+            pad_net, same_net_filled_polys, other_net_filled_polys
+        )
+
         placed_for_pad = 0
         for vx, vy in positions:
             # Clearance against other-net copper and same-net stacking,
@@ -4776,7 +4870,7 @@ def run_thermal_stitch(
                 other_net_vias_with_placed,
                 other_net_pads_with_siblings,
                 same_net_vias_for_pad,
-                other_net_filled_polys,
+                other_fill,
                 via_drill=drill,
                 other_net_drills=other_net_drills_with_siblings,
                 hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
@@ -4796,7 +4890,7 @@ def run_thermal_stitch(
             # layer (zones unfilled), fall back to the zone OUTLINE gate so
             # the stitcher stays usable pre-refill.
             _, thermal_terminus = get_via_layers(surface_layer, target_layer_by_net.get(net_name))
-            fill_gate = _same_net_fill_on_layer(same_net_filled_polys, thermal_terminus)
+            fill_gate = _same_net_fill_on_layer(own_fill, thermal_terminus)
             if fill_gate:
                 if not _point_on_same_net_fill(vx, vy, zone_margin, fill_gate, thermal_terminus):
                     continue
@@ -4983,10 +5077,13 @@ def run_blanket_stitch(
         # both the even-odd containment and the edge-margin check reject them).
         # Empty-fill no-op: when no same-net fill exists on the target layer
         # (zones unfilled), fall back to seeding from the zone outline.
-        net_fill_polys = _same_net_fill_on_layer(
-            [fp for fp in same_net_filled_polys if fp.net_number == net_number],
-            net_target_layer,
+        # Issue #6410: per-net fill pools -- own fill seeds the grid, and
+        # sibling target nets' fills (on ANY layer the via crosses) become
+        # clearance obstacles (the #6400 fix, applied to blanket stitch).
+        own_fill, other_fill = _split_fill_pools(
+            net_number, same_net_filled_polys, other_net_filled_polys
         )
+        net_fill_polys = _same_net_fill_on_layer(own_fill, net_target_layer)
         if net_fill_polys:
             seed_polygons = [fp.points for fp in net_fill_polys]
         else:
@@ -5014,7 +5111,7 @@ def run_blanket_stitch(
                     other_net_vias,
                     other_net_pads_with_siblings,
                     same_net_via_positions,
-                    other_net_filled_polys,
+                    other_fill,
                     via_drill=drill,
                     other_net_drills=other_net_drills_with_siblings,
                     hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
@@ -5348,11 +5445,12 @@ def run_stitch(
     # exactly as a single-net call for that net would gate it.
     def _fill_pools(pad: PadInfo) -> tuple[list[FilledPolygon], list[FilledPolygon]]:
         """Per-pad ``(own_net_fill, other_net_fill)`` polygon pools."""
-        own_fill = [fp for fp in same_net_filled_polys if fp.net_number == pad.net_number]
-        if foreign_fills_yield:
-            return own_fill, other_net_filled_polys
-        sibling_fill = [fp for fp in same_net_filled_polys if fp.net_number != pad.net_number]
-        return own_fill, other_net_filled_polys + sibling_fill
+        return _split_fill_pools(
+            pad.net_number,
+            same_net_filled_polys,
+            other_net_filled_polys,
+            foreign_fills_yield=foreign_fills_yield,
+        )
 
     # Net-number -> net-name lookup so skip diagnostics can name the
     # offending signal (e.g. ``net 8 'SWO'``) instead of just a number.
