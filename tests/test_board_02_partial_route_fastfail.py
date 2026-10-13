@@ -125,3 +125,66 @@ class TestBoard02PartialRouteFastFail:
             "#4066 fast-fail gate must not fire on a complete route"
         )
         assert rc == 0
+
+
+class TestBoard02RouteExitGate:
+    """Issue #6427: exit 0 is the only route success; finalize never repairs exit 3.
+
+    ``kct route`` exits 3 when either DRC engine flags the router's own copper.
+    Before #6427 the recipe printed "PARTIAL" and handed that board to
+    ``finalize_routing``, whose report-driven via repair moved the offending
+    via until DRC passed -- hiding the router defect.
+    """
+
+    def _fake_route(self, module, monkeypatch, returncode: int, finalize_calls: list):
+        import types
+
+        def _run(cmd, *a, **k):
+            output = Path(cmd[cmd.index("--output") + 1])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("(kicad_pcb)")
+            return types.SimpleNamespace(returncode=returncode)
+
+        monkeypatch.setattr(module, "subprocess", types.SimpleNamespace(run=_run))
+        fake_finalize = types.ModuleType("finalize_routing")
+
+        def _finalize(*a, **k):
+            finalize_calls.append(a)
+            return True
+
+        fake_finalize.finalize_routing = _finalize
+        monkeypatch.setitem(sys.modules, "finalize_routing", fake_finalize)
+
+    def test_drc_exit_fails_route_before_finalize(self, monkeypatch, capsys, tmp_path: Path):
+        module = _load_board02_module()
+        finalize_calls: list = []
+        self._fake_route(module, monkeypatch, 3, finalize_calls)
+
+        ok = module.route_pcb(tmp_path / "in.kicad_pcb", tmp_path / "out_routed.kicad_pcb")
+
+        assert ok is False
+        assert finalize_calls == [], "exit 3 must never reach finalize's via repair"
+        err = capsys.readouterr().err
+        assert "exited with code 3" in err
+
+    def test_clean_route_still_finalizes(self, monkeypatch, tmp_path: Path):
+        module = _load_board02_module()
+        finalize_calls: list = []
+        self._fake_route(module, monkeypatch, 0, finalize_calls)
+
+        assert module.route_pcb(tmp_path / "in.kicad_pcb", tmp_path / "out_routed.kicad_pcb")
+        assert len(finalize_calls) == 1
+
+    def test_main_exits_nonzero_when_route_exits_3(self, monkeypatch, capsys, tmp_path: Path):
+        module = _load_board02_module()
+        TestBoard02PartialRouteFastFail()._stub_pipeline_prefix(module, monkeypatch, tmp_path)
+        TestBoard02PartialRouteFastFail()._forbid_downstream(module, monkeypatch)
+        finalize_calls: list = []
+        self._fake_route(module, monkeypatch, 3, finalize_calls)
+        monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(tmp_path / "out")])
+
+        rc = module.main()
+
+        assert rc != 0
+        assert finalize_calls == []
+        assert "routing/finalization failed" in capsys.readouterr().err.lower()

@@ -183,6 +183,10 @@ class AuthoredCopperIndex:
                     _pad_bbox(pad),
                 )
             )
+        self.add_routes(routes)
+
+    def add_routes(self, routes: Iterable[Route]) -> None:
+        """Index more committed routes (Issue #6427: append without a rebuild)."""
         for route in routes:
             floor = max(
                 self.floors.get(route.net, 0.0),
@@ -443,6 +447,24 @@ def grid_authored_index(grid: Any) -> AuthoredCopperIndex | None:
     if cached is not None and cached[0] == key:
         hit: AuthoredCopperIndex | None = cached[1]
         return hit
+    # Issue #6427: committing a route only APPENDS to ``grid.routes``.  With
+    # router net classes feeding the floors, the gate is live on most boards
+    # and a full rebuild per commit dominated its cost, so extend the cached
+    # index when everything else in the key is unchanged and the previous
+    # last route is still where it was (no removal before it).
+    if cached is not None and cached[1] is not None:
+        old = cached[0]
+        old_len = old[3]
+        if (
+            old[:3] == key[:3]
+            and old[5:] == key[5:]
+            and 0 < old_len < len(routes)
+            and id(routes[old_len - 1]) == old[4]
+        ):
+            grown: AuthoredCopperIndex = cached[1]
+            grown.add_routes(routes[old_len:])
+            grid._authored_index_cache = (key, grown)
+            return grown
     index = AuthoredCopperIndex(floors, pads, routes)
     result = index if index.active else None
     grid._authored_index_cache = (key, result)

@@ -6680,6 +6680,12 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
         # ``self.net_class_map.get(net_name)`` finds them at routing time.
         for board_net, user_key in resolution.resolved.items():
             router.net_class_map[board_net] = loaded[user_key]
+        # Issue #6427: a loaded class is declared in the routed sidecars too,
+        # so it must bind foreign copper (max of both classes), not just the
+        # net's own copper.
+        from kicad_tools.router.class_clearance_floors import refresh_router_class_floors
+
+        refresh_router_class_floors(router)
 
         if getattr(router, "placement_disposition", None) is not None:
             from dataclasses import replace
@@ -9119,6 +9125,12 @@ def _apply_analog_net_class(router: "Autorouter", args, quiet: bool = False) -> 
             continue
         router.net_class_map[name] = NET_CLASS_ANALOG
         applied.append(name)
+    if applied:
+        # Issue #6427: keep the per-net foreign-pair floors in step with the
+        # class map the routed sidecars declare.
+        from kicad_tools.router.class_clearance_floors import refresh_router_class_floors
+
+        refresh_router_class_floors(router)
 
     if not quiet and (applied or skipped_pour):
         from kicad_tools.cli.progress import flush_print
