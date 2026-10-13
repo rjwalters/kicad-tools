@@ -17,6 +17,13 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 SRC="$SCRIPTS_DIR/lib/classify-error.sh"
 
+# The suite's heredoc tables assert the DEFAULT provider chain (2-arg
+# `classify_error` calls, explicit provider only where noted). A host that
+# exports LOOM_RUNTIME for its own dispatch (every Loom worker does) would
+# otherwise select that provider for every 2-arg call and fail the whole
+# table — the env var is the caller's knob, not the suite's.
+unset LOOM_RUNTIME
+
 # shellcheck source=../lib/classify-error.sh
 source "$SRC"
 
@@ -233,6 +240,173 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: no vectors read from $VECTORS"
 fi
+
+echo
+echo '--- conformance: the native `loom-daemon classify-error` (#11208) ---'
+
+# The suite runs in whichever mode the environment gives it, exactly like
+# production: when a daemon binary resolves, the assertions above already ran
+# through classify-error.sh's native delegation; with none, they ran the
+# in-file fallback tables. This section ADDS the differential check —
+# shell tables vs the native subcommand on the same inputs — whenever a
+# binary is available, and says so (never silently skips) when it is not.
+#
+# Resolution mirrors the library's own chain softly: the suite must still
+# pass, as pure fallback evidence, in a shell job with no build at all.
+parity_bin=""
+if declare -F loom_resolve_self_daemon_bin >/dev/null 2>&1; then
+    parity_bin="$(loom_resolve_self_daemon_bin)"
+fi
+if [[ -z "$parity_bin" ]] && [[ -n "${LOOM_DAEMON_SELF_BIN:-}" && -x "${LOOM_DAEMON_SELF_BIN}" ]]; then
+    parity_bin="${LOOM_DAEMON_SELF_BIN}"
+fi
+if [[ -z "$parity_bin" ]]; then
+    parity_bin="$(command -v loom-daemon 2>/dev/null || true)"
+fi
+# A resolved binary that cannot answer classify-error (an older release) is
+# not a parity partner — that is the version-skew case the fallback exists
+# for, and it degrades this section to the same counted skip.
+if [[ -n "$parity_bin" ]]; then
+    "$parity_bin" classify-error --transient RECOVERABLE >/dev/null 2>&1 \
+        || parity_bin=""
+fi
+
+shell_fallback_classify() {
+    # The FALLBACK path only: the engine's exit-code short-circuits (shared
+    # by both paths — that is why the native side asserts them directly
+    # below), then the provider tables + generic table, driven directly so
+    # the comparison cannot be skewed by the delegation under test.
+    local output="$1" exit_code="$2" provider="$3" pr
+    if [[ "$exit_code" -eq 124 || "$exit_code" -eq 137 ]]; then
+        printf '%s\n' "TIMEOUT"
+        return
+    fi
+    if [[ "$exit_code" -eq 0 ]]; then
+        printf '%s\n' "SUCCESS"
+        return
+    fi
+    pr="$(_classify_error_provider "$output" "$provider")"
+    if [[ -n "$pr" ]]; then
+        printf '%s\n' "$pr"
+    else
+        _classify_error_generic "$output"
+    fi
+}
+
+if [[ -z "$parity_bin" ]]; then
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: ran in shell-FALLBACK mode (no loom-daemon with classify-error resolved; native parity not exercisable here)"
+    echo "mode: fallback"
+else
+    echo "mode: native delegation via $parity_bin"
+    native_classify() {
+        printf '%s' "$1" | "$parity_bin" classify-error --exit-code "$2" --provider "$3" 2>/dev/null
+    }
+
+    # Parity on every row of the shared vectors file: shell tables, native
+    # subcommand and the recorded expectation must all agree.
+    parity_rows=0
+    parity_bad=0
+    while IFS=$'\t' read -r expected exit_code provider desc output; do
+        [[ -z "$expected" || "$expected" == \#* ]] && continue
+        parity_rows=$((parity_rows + 1))
+        shell_ans="$(shell_fallback_classify "$output" "$exit_code" "$provider")"
+        native_ans="$(native_classify "$output" "$exit_code" "$provider")"
+        if [[ "$shell_ans" == "$expected" && "$native_ans" == "$expected" ]]; then
+            :
+        else
+            parity_bad=$((parity_bad + 1))
+            echo -e "  ${RED}FAIL${NC}: parity: $desc"
+            echo "    expected: '$expected'  shell: '$shell_ans'  native: '$native_ans'"
+        fi
+    done < "$VECTORS"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$parity_bad" -eq 0 && "$parity_rows" -gt 0 ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: shell tables and native classifier agree on all $parity_rows vectors"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: $parity_bad/$parity_rows vectors disagree between shell and native"
+    fi
+
+    # Engine short-circuits, straight through the subcommand.
+    assert_eq "TIMEOUT" "$(native_classify "hit your weekly limit" 124 claude)" \
+        "native: exit 124 is TIMEOUT before any pattern (#3233 engine)"
+    assert_eq "TIMEOUT" "$(native_classify "" 137 codex)" "native: exit 137 is TIMEOUT"
+    assert_eq "SUCCESS" "$(native_classify "API Error: 429 rate limit exceeded" 0 claude)" \
+        "native: a clean exit quoting a 429 stays SUCCESS (#3233)"
+
+    # The --transient deny-list travels in the exit code.
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if "$parity_bin" classify-error --transient TOKEN_EXPIRED >/dev/null 2>&1; then
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: native --transient TOKEN_EXPIRED must be terminal (exit 1)"
+    else
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: native --transient TOKEN_EXPIRED is terminal (exit 1)"
+    fi
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if "$parity_bin" classify-error --transient RECOVERABLE >/dev/null 2>&1 \
+        && "$parity_bin" classify-error --transient TOKEN_EXHAUSTED >/dev/null 2>&1 \
+        && "$parity_bin" classify-error --transient MODEL_CREDITS_EXHAUSTED >/dev/null 2>&1 \
+        && "$parity_bin" classify-error --transient SESSION_LIMIT >/dev/null 2>&1 \
+        && "$parity_bin" classify-error --transient ANYTHING_ELSE >/dev/null 2>&1; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: native --transient retries RECOVERABLE/exhaustion/session-limit/unknown (exit 0)"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: native --transient deny-list is not retry-by-default"
+    fi
+
+    # The $LOOM_RUNTIME default chain, native side (explicit --provider was
+    # already exercised by every call above).
+    rt_ans="$(printf '%s' 'Youve hit your usage limit.' | LOOM_RUNTIME=codex "$parity_bin" classify-error --exit-code 1 2>/dev/null)"
+    assert_eq "TOKEN_EXHAUSTED" "$rt_ans" "native: provider defaults to \$LOOM_RUNTIME then claude"
+
+    # File-input mode: the same text as a --stdout-tail file classifies
+    # identically to stdin.
+    tail_file="$(mktemp "${TMPDIR:-/tmp}/classify-parity.XXXXXX")"
+    printf '%s' 'Failed to authenticate. API Error: 401 OAuth access token is invalid.' > "$tail_file"
+    tail_ans="$("$parity_bin" classify-error --exit-code 1 --provider claude --stdout-tail "$tail_file" 2>/dev/null)"
+    assert_eq "TOKEN_EXPIRED" "$tail_ans" "native: --stdout-tail file input classifies like stdin"
+    rm -f "$tail_file"
+
+    # Usage errors keep stdout EMPTY (the shell delegation reads that as
+    # "could not ask" and falls back) and exit 2.
+    TESTS_RUN=$((TESTS_RUN + 1))
+    usage_out="$(printf '%s' 'x' | "$parity_bin" classify-error --provider claude 2>/dev/null)"
+    usage_rc=0
+    "$parity_bin" classify-error --provider claude </dev/null >/dev/null 2>&1 || usage_rc=$?
+    if [[ "$usage_rc" -eq 2 && -z "$usage_out" ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: native: missing --exit-code is a usage error (exit 2, empty stdout)"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: native: missing --exit-code: rc=$usage_rc stdout='$usage_out' (want rc 2, empty stdout)"
+    fi
+fi
+
+echo
+echo "--- delegation safety: a binary that cannot answer is never asked ---"
+
+# A resolved binary that fails the library's one-time capability probe (here
+# /bin/false: exit 1 to everything, the same code `--transient` uses for
+# "terminal") must be dropped at source time. Were it asked, every retryable
+# category would read as terminal. Runs in a subshell so the re-source does
+# not disturb the mode the rest of this suite ran in.
+skew_out="$(
+    LOOM_DAEMON_SELF_BIN=/bin/false
+    export LOOM_DAEMON_SELF_BIN
+    # shellcheck source=../lib/classify-error.sh
+    source "$SRC"
+    printf 'bin=%s ' "${_CLASSIFY_DAEMON_BIN:-none}"
+    classification_is_transient TOKEN_EXHAUSTED && printf 'exhausted=retry ' || printf 'exhausted=terminal '
+    classification_is_transient TOKEN_EXPIRED && printf 'expired=retry ' || printf 'expired=terminal '
+    printf 'class=%s' "$(classify_error "You've hit your weekly limit" 1 claude)"
+)"
+assert_eq "bin=none exhausted=retry expired=terminal class=TOKEN_EXHAUSTED" "$skew_out" \
+    "a binary failing the capability probe is dropped; fallback answers stay correct"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

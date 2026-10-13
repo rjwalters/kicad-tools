@@ -28,6 +28,7 @@ inside a key use RFC 3339 UTC with nanosecond precision.
 | Rate-limit trip (`loom.ratelimit.trip`) | the tripping job (`loom.ratelimit.source`) and the trip instant (#10022) |
 | Reader withdrawal (`forge.reader.withdrawn`) | the reader App (`forge.reader.app`), the owner and resource withdrawn (`forge.reader.owner`, `forge.reader.resource`) and the withdrawal instant (W4-A) |
 | Read-pool spill-latch transition (`forge.reader.spill`) | the repo (`forge.spill.owner_repo`), resource, home reader, mode and the transition instant (W4-B) |
+| Host-side build-gate run (`build_gate.run`) | the stage (`loom.build_gate.stage`), the start instant and the process id; a child of the ambient execution span when pre-flight runs inside a traced sweep, else its own root (#11690) |
 | `gh` invocation with no parent (`loom.github.invoke`, span `invoke github`) | `github.operation`, start instant, and `github.invocation` (`<pid>.<seq>`, so two calls in one clock tick differ); with a parent it is that span's child, keyed by the same facts (#9985) |
 | CI run/job (`loom.ci.*`) | repo, run id, attempt (job: job id) — [`ci-observability.md`](ci-observability.md) |
 

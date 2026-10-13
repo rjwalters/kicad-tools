@@ -327,10 +327,10 @@ fi
 # Section 3: the installer suite is droppable by pre-flight path scoping (#10860)
 # ---------------------------------------------------------------------------
 #
-# `loom-daemon preflight` exports LOOM_BUILD_GATE_INSTALLER_SUITE empty when the
-# diff touches no installer input (`buildGate.preflightPathScopes`). Exported
-# empty, the gate skips scripts/test-installer.sh and still runs the other four
-# suites; unset (every other caller), all five run, in order, exactly as before.
+# A caller may export LOOM_BUILD_GATE_INSTALLER_SUITE empty to drop the installer
+# suite (pre-flight did so until #11690 moved it to the fast tier, which runs no
+# bash suites). Exported empty, the gate skips scripts/test-installer.sh and
+# still runs the other four suites; unset, all five run, in order.
 SUITES_REPO="$STUB_DIR/suites-repo"
 mkdir -p "$SUITES_REPO/scripts" && git -C "$SUITES_REPO" init -q
 all_suites="test-installer test-changelog test-daemon-liveness test-install-local-mode test-migrate-consumer"

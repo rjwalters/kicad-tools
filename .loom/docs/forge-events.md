@@ -375,4 +375,5 @@ What it must do to satisfy this consumer:
 - [`observability.md`](observability.md) — the sibling operator-deployed
   backend, same shape
 - [`credential-storage.md`](credential-storage.md) — where keys may live
+- [`network-inputs.md`](network-inputs.md) — where this feed sits among every network input to the daemon (rows 6-7)
 - Source: `loom-daemon/src/forge_events.rs`

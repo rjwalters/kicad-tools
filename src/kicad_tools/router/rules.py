@@ -173,6 +173,22 @@ class DesignRules:
     # consumer byte-identical.
     net_clearance_floors: dict[int, float] = field(default_factory=dict)
 
+    # Issue #6449: the DESIGNER-authored subset of ``net_clearance_floors``.
+    # Since #6427 the router's own net-class clearances are merged into
+    # ``net_clearance_floors`` too, so every pair gate (committed copper, the
+    # native validator, the optimizer, the census) holds foreign copper to
+    # ``max(class(a), class(b))``.  The lattice search's STATIC pad masks are
+    # the one consumer that must not grow by a router class: #6395 measured
+    # that growing them reshuffles fine-pitch pin fields (board 05's U2 west
+    # field stranded a net), and enforces the pad side of the class pair on
+    # the negotiated copper instead (``lattice/class_pad_repair.py``).  The
+    # loader records the designer-only floors here -- keyed by net id, plus
+    # by net name for pads it neutralised to net 0 -- so the pad masks keep
+    # exactly their pre-#6427 (#6243) growth.  ``None`` (rules built outside
+    # the loader) means every floor is designer-authored.
+    designer_clearance_floors: dict[int, float] | None = None
+    designer_clearance_floors_by_name: dict[str, float] = field(default_factory=dict)
+
     # Pairwise (net-pair) HV-isolation clearance table (Issue #4431, Phase 1).
     # Scalar clearance cannot express "far from LV copper, near from own
     # cluster".  When a ``--voltage-map`` is supplied, the route CLI builds a
