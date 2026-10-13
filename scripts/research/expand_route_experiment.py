@@ -144,6 +144,16 @@ class Board:
     layers: int = 2  # copper layers, for the ``kct check`` gate
     manufacturer: str = "jlcpcb"
     note: str = ""
+    #: Regex of nets whose copper is ripped from the input before routing
+    #: (``06b``: ``LVDS\\d_[PN]``). Only the ``pairs`` subcommand honours it.
+    strip_nets: str | None = None
+    #: Repo-relative committed ``net_class_map.json`` handed to ``kct route
+    #: --net-class-map`` by the ``pairs`` subcommand, so the router and
+    #: ``kct check`` resolve the same per-pair thresholds (Issue #6442).
+    net_class_map: str | None = None
+    #: ``True`` for rows that only make sense under ``pairs`` (they carry
+    #: copper the ``route`` scaler would tear off its pads, or need a strip).
+    pair_bench_only: bool = False
 
 
 # The chorus fixture lives in a sibling repository. ``boards/external`` is a
@@ -175,7 +185,38 @@ BOARDS: dict[str, Board] = {
     "00": Board("00", "boards/00-simple-led/output/simple_led.kicad_pcb", note="control"),
     "01": Board("01", "boards/01-voltage-divider/output/voltage_divider.kicad_pcb", note="control"),
     "02": Board("02", "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"),
-    "03": Board("03", "boards/03-usb-joystick/output/usb_joystick.kicad_pcb", layers=4),
+    "03": Board(
+        "03",
+        "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+        layers=4,
+        # Used by ``pairs`` only (``route`` ignores it): USB_D carries a 25 %
+        # continuity threshold here that the classifier's own map does not.
+        net_class_map="boards/03-usb-joystick/output/net_class_map.json",
+    ),
+    # Diff-pair benchmark rows (Issue #6442; ``pairs`` subcommand only).
+    # 06b: the committed LVDS board with every ``LVDS<n>_[PN]`` track and via
+    # ripped (ported from ``krt_compare.BOARDS["06b"]``); GND/+3V3 plane vias
+    # stay, hence ``--preserve-existing``.
+    "06b": Board(
+        "06b",
+        "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+        kct_args=("--preserve-existing",),
+        layers=4,
+        note="LVDS copper ripped; 4 pairs + 8 LVTTL nets",
+        strip_nets=r"LVDS\d_[PN]",
+        net_class_map="boards/06-diffpair-test/output/net_class_map.json",
+        pair_bench_only=True,
+    ),
+    # 06rf: the historical synthetic USB / PCIe / MIPI regression fixture
+    # (9 pairs, no copper on any of them).
+    "06rf": Board(
+        "06rf",
+        "boards/06-diffpair-test/regression-fixture/diffpair_test.kicad_pcb",
+        layers=4,
+        note="regression fixture: 9 USB/PCIe/MIPI pairs",
+        net_class_map="boards/06-diffpair-test/regression-fixture/net_class_map.json",
+        pair_bench_only=True,
+    ),
     "04": Board("04", "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb"),
     "05": Board("05", "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb", layers=4),
     "chorus": Board(
@@ -1670,6 +1711,10 @@ def _cmd_route(args) -> int:
     for key in keys:
         if key not in BOARDS:
             raise SystemExit(f"unknown board {key!r}; known: {','.join(BOARDS)}")
+        if BOARDS[key].pair_bench_only:
+            raise SystemExit(
+                f"board {key!r} is a diff-pair benchmark row; use the `pairs` subcommand"
+            )
     args.work_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
     if args.json and args.append and args.json.exists():
@@ -1899,7 +1944,20 @@ def _cmd_gaps(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "pairs":
+        # Issue #6442: the diff-pair benchmark mode lives in its own module
+        # (it needs the strip / guard / pair-metric machinery) but is invoked
+        # from here so there is one entry point for the experiment harness.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import diffpair_bench
+
+        return diffpair_bench.main(raw[1:])
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        epilog="Also: `pairs ...` runs the router-produced diff-pair benchmark "
+        "(Issue #6442); see `pairs --help`.",
+    )
     sub = ap.add_subparsers(dest="command", required=True)
 
     route = sub.add_parser("route", help="Phase 1: route each board at each placement scale")

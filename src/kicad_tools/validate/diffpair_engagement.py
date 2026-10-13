@@ -41,6 +41,7 @@ test in ``tests/test_validate_diffpair_routing_continuity.py``
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -49,6 +50,97 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PairThresholds:
+    """The thresholds ``kct check`` applies to one diff pair (Issue #6442).
+
+    ``continuity`` is a fraction (0.25 == 25 %); ``skew_mm`` is in mm.
+    ``source_net`` names the net whose class supplied them (``None`` when
+    neither net has a class and the module defaults apply).
+    """
+
+    continuity: float
+    skew_mm: float
+    source_net: str | None
+
+
+def resolve_pair_thresholds(
+    net_class_map: dict[str, NetClassRouting] | None,
+    p_name: str,
+    n_name: str,
+) -> PairThresholds:
+    """Resolve a pair's continuity and skew thresholds -- the single source.
+
+    The positive net's class wins, then the negative net's, then the rule
+    defaults (one-sided-declaration policy, #2558/#2638).  Lookup is by
+    NET NAME only: a class-name key is shared by every net of the class
+    and, when the class has per-net variants (board 03's ``HighSpeed``),
+    would report an arbitrary one of them.
+
+    Used by :func:`derive_engagement_state`, ``derive_skew_data`` and the
+    router's pair report, so the three can never print different numbers
+    for the same pair (Issue #6442).
+    """
+    from kicad_tools.validate.rules.diffpair_length_skew import DEFAULT_SKEW_TOLERANCE_MM
+    from kicad_tools.validate.rules.diffpair_routing_continuity import (
+        DEFAULT_COUPLED_CONTINUITY_THRESHOLD,
+    )
+
+    ncm = net_class_map or {}
+    nc_p = ncm.get(p_name)
+    nc_n = ncm.get(n_name)
+    nc = nc_p if nc_p is not None else nc_n
+    source = p_name if nc_p is not None else (n_name if nc_n is not None else None)
+    continuity = DEFAULT_COUPLED_CONTINUITY_THRESHOLD
+    skew = DEFAULT_SKEW_TOLERANCE_MM
+    if nc is not None and hasattr(nc, "effective_coupled_continuity_threshold"):
+        continuity = nc.effective_coupled_continuity_threshold(
+            default=DEFAULT_COUPLED_CONTINUITY_THRESHOLD
+        )
+    if nc is not None and hasattr(nc, "effective_skew_tolerance"):
+        skew = nc.effective_skew_tolerance(default=DEFAULT_SKEW_TOLERANCE_MM)
+    return PairThresholds(continuity=continuity, skew_mm=skew, source_net=source)
+
+
+def pair_threshold_report(
+    net_names: dict[int, str] | None,
+    net_class_map: dict[str, NetClassRouting] | None,
+) -> list[str]:
+    """Report lines naming the thresholds ``kct check`` will apply to each pair.
+
+    Printed by the router after its pair phase so the router log and a
+    later ``kct check`` quote the same continuity and skew thresholds for
+    every engaged pair (Issue #6442).  Engagement, detection and the
+    numbers all come from the validator's own code path
+    (:func:`resolve_pair_thresholds`), never a router-local copy.
+    """
+    if not net_names or not net_class_map:
+        return []
+    from kicad_tools.router.diffpair import should_engage_coupled
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    try:
+        detected = detect_diff_pairs(
+            net_names, net_class_routing=synth_routing, net_to_class=net_to_class
+        )
+    except Exception:  # reporting must never break routing
+        return []
+    lines: list[str] = []
+    for d in detected:
+        p_name = d.pair.positive.net_name
+        n_name = d.pair.negative.net_name
+        engaged, _ = should_engage_coupled(d.pair, synth_routing, net_to_class)
+        if not engaged:
+            continue
+        t = resolve_pair_thresholds(net_class_map, p_name, n_name)
+        lines.append(
+            f"    {p_name}/{n_name}: continuity threshold {t.continuity * 100:.1f}%, "
+            f"skew tolerance {t.skew_mm:.3f} mm"
+        )
+    return sorted(lines)
 
 
 def derive_engagement_state(
@@ -101,9 +193,6 @@ def derive_engagement_state(
     # primitives.  See module docstring.
     from kicad_tools.router.diffpair import should_engage_coupled
     from kicad_tools.router.diffpair_detection import detect_diff_pairs
-    from kicad_tools.validate.rules.diffpair_routing_continuity import (
-        DEFAULT_COUPLED_CONTINUITY_THRESHOLD,
-    )
 
     # Build the {net_id: net_name} map the detector expects.
     net_names: dict[int, str] = {}
@@ -120,14 +209,9 @@ def derive_engagement_state(
     # can consult ``NetClassRouting.diffpair_partner`` explicit
     # declarations.  Mirrors the autorouter convention -- see
     # ``DiffPairRouter._resolve_detection_inputs`` (router-side).
-    net_to_class: dict[str, str] = {}
-    synth_routing: dict = dict(net_class_map)
-    for net_name, nc in net_class_map.items():
-        cls_name = getattr(nc, "name", None)
-        if cls_name is None:
-            continue
-        net_to_class[net_name] = cls_name
-        synth_routing.setdefault(cls_name, nc)
+    from kicad_tools.router.diffpair_detection import build_synth_routing
+
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
 
     # KiCad-group templates declared in the PCB itself (parsed by the
     # schema layer when the file was loaded).  Optional -- absent on
@@ -172,19 +256,11 @@ def derive_engagement_state(
         key = (a, b) if a <= b else (b, a)
         engaged_pairs.add(key)
 
-        # Per-pair threshold: prefer the positive side's net class, fall
-        # back to the negative side's, then to the default.  Mirrors the
-        # one-sided-declaration policy already in use throughout the
-        # diff-pair pipeline (#2558 / #2638).
-        nc_p = net_class_map.get(pair.positive.net_name)
-        nc_n = net_class_map.get(pair.negative.net_name)
-        nc = nc_p if nc_p is not None else nc_n
-        if nc is not None and hasattr(nc, "effective_coupled_continuity_threshold"):
-            threshold_map[key] = nc.effective_coupled_continuity_threshold(
-                default=DEFAULT_COUPLED_CONTINUITY_THRESHOLD,
-            )
-        else:
-            threshold_map[key] = DEFAULT_COUPLED_CONTINUITY_THRESHOLD
+        # Per-pair threshold: shared resolver (Issue #6442) -- the same one
+        # the skew derivation and the router's pair report use.
+        threshold_map[key] = resolve_pair_thresholds(
+            net_class_map, pair.positive.net_name, pair.negative.net_name
+        ).continuity
 
         logger.info(
             "[diffpair-engagement] %s <-> %s engaged (threshold=%.2f)",

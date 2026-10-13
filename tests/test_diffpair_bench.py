@@ -1,0 +1,283 @@
+"""Diff-pair benchmark harness and router/checker threshold parity (Issue #6442).
+
+Two things are pinned here, neither of which routes anything:
+
+* ``scripts/research/diffpair_bench.py`` refuses inputs that already carry copper
+  on a pair net and refuses saved-plan replay, so a pair result is always
+  router-produced;
+* the thresholds the router prints for a pair are the ones ``kct check``
+  applies -- including on board 03, whose ``HighSpeed`` class has per-net
+  variants (USB_D carries a 25 % continuity threshold, USB_MCU_D the default).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import importlib.util
+import io
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / "scripts" / "research" / "diffpair_bench.py"
+B03 = REPO_ROOT / "boards" / "03-usb-joystick" / "output"
+B06 = REPO_ROOT / "boards" / "06-diffpair-test" / "output"
+
+
+def _load():
+    sys.path.insert(0, str(SCRIPT.parent))
+    spec = importlib.util.spec_from_file_location("diffpair_bench_under_test", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+bench = _load()
+ere = bench.ere
+
+
+# ---------------------------------------------------------------------------
+# Router-produced guard
+# ---------------------------------------------------------------------------
+
+
+def test_committed_board_06_has_pair_copper_and_is_refused():
+    ncm = bench.load_net_class_map(B06 / "net_class_map.json")
+    with pytest.raises(bench.PairBenchError, match="LVDS1_P"):
+        bench.assert_zero_pair_copper(B06 / "diffpair_test.kicad_pcb", ncm)
+
+
+def test_06b_is_stripped_to_zero_pair_copper(tmp_path):
+    inp, facts = bench.prepare_input(ere.BOARDS["06b"], tmp_path)
+    assert facts["stripped_items"] > 0
+    assert facts["pair_nets"] == sorted(f"LVDS{i}_{s}" for i in range(1, 5) for s in "NP")
+    assert len(facts["input_sha256"]) == 64
+    assert inp.is_file()
+    # What survives is the plane copper, never a pair net.
+    ncm = bench.load_net_class_map(B06 / "net_class_map.json")
+    assert bench.assert_zero_pair_copper(inp, ncm)
+
+
+def test_unstripped_06_row_is_refused_before_routing(tmp_path):
+    unstripped = ere.Board(
+        "06x",
+        "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+        layers=4,
+        net_class_map="boards/06-diffpair-test/output/net_class_map.json",
+    )
+    with pytest.raises(bench.PairBenchError, match="already has copper on pair nets"):
+        bench.prepare_input(unstripped, tmp_path)
+    row = bench.run_cell(unstripped, "lattice", 42, 1, tmp_path)
+    assert row["valid"] is False
+    assert "input has pair-net copper" in row["invalid_reasons"]
+    assert "routed" not in row  # nothing was routed
+
+
+def test_boards_03_and_06rf_inputs_are_clean(tmp_path):
+    for key in ("03", "06rf"):
+        _inp, facts = bench.prepare_input(ere.BOARDS[key], tmp_path / key)
+        assert facts["pair_nets"], key
+
+
+@pytest.mark.parametrize("flag", bench.REPLAY_FLAGS)
+def test_saved_plan_replay_flags_are_refused(flag):
+    with pytest.raises(bench.PairBenchError, match="replayed routing plan"):
+        bench.check_no_replay(["--seed", "42", flag, "plan.json"])
+    with pytest.raises(bench.PairBenchError):
+        bench.check_no_replay([f"{flag}=plan.json"])
+
+
+def test_engine_commands_carry_no_replay_flag():
+    for engine in bench.ENGINES:
+        bench.check_no_replay(bench.engine_args(engine, 4))
+    assert "--deterministic-rescue" in bench.engine_args("grid", 4)
+    assert bench.engine_args("lattice", 4)[:4] == [
+        "--route-engine",
+        "lattice",
+        "--strategy",
+        "basic",
+    ]
+
+
+def test_cli_extra_replay_flag_is_refused(tmp_path):
+    with pytest.raises(bench.PairBenchError):
+        bench.main(
+            ["run", "--label", "x", "--work-dir", str(tmp_path), "--extra", "--apply-plan p.json"]
+        )
+
+
+def test_replayed_committed_copper_is_detected():
+    """A 'routed' file whose pair copper is the committed copper is not router-produced."""
+    board = ere.BOARDS["06b"]
+    ncm = bench.load_net_class_map(B06 / "net_class_map.json")
+    nets = bench.pair_net_names(
+        __import__("kicad_tools.schema.pcb", fromlist=["PCB"]).PCB.load(
+            str(B06 / "diffpair_test.kicad_pcb")
+        ),
+        ncm,
+    )
+    match = bench.committed_copper_matches(B06 / "diffpair_test_routed.kicad_pcb", board, nets)
+    assert match is not None and match.endswith("diffpair_test.kicad_pcb")
+
+
+def test_replay_log_markers_are_recognised():
+    assert bench._REPLAY_LOG.search("Applying saved routing plan from x.json")
+    assert bench._REPLAY_LOG.search("routing_plan.apply_plan(...)")
+    assert not bench._REPLAY_LOG.search("Diff pairs (lattice): 1/2 coupled")
+
+
+def test_parse_pair_log_handles_chained_and_plain_logs():
+    chained = (
+        "  Diff pairs (lattice): 3/4 coupled\n"
+        "    LVDS1: partially-coupled:1/2\n"
+        "      LVDS1[0] U1.7->R1.1: uncoupled-fallback:pair-partner-pad\n"
+        "      LVDS1[1] R1.1->U2.2: coupled\n"
+        "    LVDS2: coupled\n"
+        "      LVDS2[0] U3.7->R2.1: coupled\n"
+        "  Diff-pair thresholds (as applied by kct check):\n"
+        "    LVDS1_P/LVDS1_N: continuity threshold 80.0%, skew tolerance 0.100 mm\n"
+    )
+    parsed = bench.parse_pair_log(chained)
+    assert parsed["outcomes"] == {"LVDS1": "partially-coupled:1/2", "LVDS2": "coupled"}
+    assert parsed["segments"]["LVDS1"][0]["outcome"] == "uncoupled-fallback:pair-partner-pad"
+    assert parsed["log_thresholds"]["LVDS1_P/LVDS1_N"] == {"continuity_pct": 80.0, "skew_mm": 0.1}
+    plain = "  Diff pairs (lattice): 1/2 coupled\n    USB_D: uncoupled-fallback:pair-no-path\n    USB_MCU_D: coupled\n"
+    assert bench.parse_pair_log(plain)["outcomes"]["USB_MCU_D"] == "coupled"
+
+
+def test_compare_flags_differing_pair_metrics():
+    a = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "aa"}]}
+    same = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "aa"}]}
+    diff = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "bb"}]}
+    assert bench.compare(a, same) == [("03/grid/s42/committed", True)]
+    assert bench.compare(a, diff) == [("03/grid/s42/committed", False)]
+
+
+def test_route_subcommand_refuses_pair_bench_rows(tmp_path):
+    with pytest.raises(SystemExit, match="pairs"):
+        ere.main(["route", "--boards", "06b", "--work-dir", str(tmp_path)])
+
+
+# ---------------------------------------------------------------------------
+# Router <-> checker threshold parity (board 03 USB_D)
+# ---------------------------------------------------------------------------
+
+
+def _board03():
+    from kicad_tools.router.rules import net_class_map_from_path
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(B03 / "usb_joystick_routed.kicad_pcb"))
+    ncm = net_class_map_from_path(
+        B03 / "net_class_map.json", pcb_path=B03 / "usb_joystick_routed.kicad_pcb"
+    )
+    return pcb, ncm
+
+
+def test_board03_class_has_per_net_variants():
+    """The precondition: same class name, different thresholds."""
+    _pcb, ncm = _board03()
+    assert ncm["USB_D+"].name == ncm["USB_MCU_D+"].name == "HighSpeed"
+    assert ncm["USB_D+"].coupled_continuity_threshold == 0.25
+    assert ncm["USB_MCU_D+"].coupled_continuity_threshold is None
+
+
+def test_build_synth_routing_does_not_collapse_variants():
+    from kicad_tools.router.diffpair_detection import build_synth_routing
+
+    _pcb, ncm = _board03()
+    synth, net_to_class = build_synth_routing(ncm)
+    assert net_to_class["USB_D+"] == "HighSpeed"
+    # The old ``setdefault`` idiom left an arbitrary variant under "HighSpeed".
+    assert "HighSpeed" not in synth
+    # ``Power`` is ambiguous too (VCC is a pour net, VBUS is not).
+    assert "Power" not in synth
+    assert synth["USB_D+"] is ncm["USB_D+"]
+
+
+def test_build_synth_routing_keeps_alias_for_identical_members():
+    from kicad_tools.router.diffpair_detection import build_synth_routing
+
+    _pcb, ncm = _board03()
+    same = {"A": ncm["USB_D+"], "B": ncm["USB_D+"]}
+    synth, _ = build_synth_routing(same)
+    assert synth["HighSpeed"] is ncm["USB_D+"]
+
+
+def test_router_report_and_kct_check_agree_on_board03_thresholds():
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.validate.diffpair_engagement import (
+        derive_engagement_state,
+        resolve_pair_thresholds,
+    )
+    from kicad_tools.validate.diffpair_skew import derive_skew_data
+
+    pcb, ncm = _board03()
+    names = {n.number: n.name for n in pcb.nets.values() if n.name}
+
+    # What the router prints.
+    stub = SimpleNamespace(net_names=names, net_class_map=ncm)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        Autorouter._print_pair_threshold_report(stub)
+    report = buf.getvalue()
+
+    # What kct check applies, per pair.
+    engaged, continuity = derive_engagement_state(pcb, ncm)
+    _skew, skew_tol = derive_skew_data(pcb, ncm, board_thickness_mm=1.6, num_copper_layers=4)
+    ids = {n.name: n.number for n in pcb.nets.values()}
+    assert engaged  # both USB pairs engage
+
+    usb_d = (ids["USB_D+"], ids["USB_D-"])
+    mcu = (ids["USB_MCU_D+"], ids["USB_MCU_D-"])
+    assert continuity[tuple(sorted(usb_d))] == 0.25
+    assert continuity[tuple(sorted(mcu))] == 0.7
+
+    for (p, n), key in (
+        (("USB_D+", "USB_D-"), tuple(sorted(usb_d))),
+        (("USB_MCU_D+", "USB_MCU_D-"), tuple(sorted(mcu))),
+    ):
+        line = next(ln for ln in report.splitlines() if ln.strip().startswith(f"{p}/{n}:"))
+        assert f"continuity threshold {continuity[key] * 100:.1f}%" in line
+        assert f"skew tolerance {skew_tol[key]:.3f} mm" in line
+        assert resolve_pair_thresholds(ncm, p, n).continuity == continuity[key]
+    assert "USB_D+/USB_D-: continuity threshold 25.0%" in report
+
+
+def test_resolver_ignores_a_collapsed_class_key():
+    """Even with a poisoned class-name key, the net-name key decides."""
+    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
+    _pcb, ncm = _board03()
+    poisoned = dict(ncm)
+    poisoned["HighSpeed"] = ncm["USB_MCU_D+"]  # the 70 % variant under the class name
+    assert resolve_pair_thresholds(poisoned, "USB_D+", "USB_D-").continuity == 0.25
+
+
+def test_resolver_falls_back_to_negative_net_then_defaults():
+    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
+    _pcb, ncm = _board03()
+    only_n = {"USB_D-": ncm["USB_D-"]}
+    got = resolve_pair_thresholds(only_n, "USB_D+", "USB_D-")
+    assert (got.continuity, got.source_net) == (0.25, "USB_D-")
+    bare = resolve_pair_thresholds({}, "X_P", "X_N")
+    assert (bare.continuity, bare.skew_mm, bare.source_net) == (0.7, 0.5, None)
+
+
+def test_determinism_and_merge():
+    def row(rep, digest, board="03"):
+        return {"board": board, "engine": "grid", "seed": 42, "rep": rep, "pair_digest": digest}
+
+    doc = {"rows": [row(0, "a"), row(1, "a"), row(0, "x", "06b"), row(1, "y", "06b")]}
+    assert bench.determinism(doc) == [
+        ("03/grid/s42/committed", 2, True),
+        ("06b/grid/s42/committed", 2, False),
+    ]
+    merged = bench.merge([{"rows": [row(0, "a"), row(0, "b", "06b")]}, {"rows": [row(0, "z")]}])
+    assert {(r["board"], r["pair_digest"]) for r in merged["rows"]} == {("03", "z"), ("06b", "b")}

@@ -4283,6 +4283,16 @@ class Autorouter:
             hi_y = min(by1, lo_y + coarse)
         return (lo_x, lo_y, hi_x, hi_y)
 
+    def _print_pair_threshold_report(self) -> None:
+        """Print the continuity / skew thresholds ``kct check`` applies per pair (#6442)."""
+        from kicad_tools.validate.diffpair_engagement import pair_threshold_report
+
+        lines = pair_threshold_report(self.net_names, self.net_class_map)
+        if lines:
+            print("  Diff-pair thresholds (as applied by kct check):")
+            for line in lines:
+                print(line)
+
     def _lattice_coupled_connections(
         self,
     ) -> tuple[list[Any], dict[int, list[tuple[str, str]]]]:
@@ -4318,11 +4328,9 @@ class Autorouter:
 
         # Both net-name and class-name keyed views (the synth_routing idiom
         # -- see get_diff_pair_map / Issue #3098).
-        net_to_class: dict[str, str] = {}
-        synth_routing: dict = dict(self.net_class_map)
-        for net_name, net_class in self.net_class_map.items():
-            net_to_class[net_name] = net_class.name
-            synth_routing.setdefault(net_class.name, net_class)
+        from .diffpair_detection import build_synth_routing
+
+        synth_routing, net_to_class = build_synth_routing(self.net_class_map)
 
         try:
             detected = detect_diff_pairs(
@@ -4657,6 +4665,7 @@ class Autorouter:
             print(f"  Diff pairs (lattice): {n_coupled}/{len(self._lattice_pair_outcomes)} coupled")
             for name, outcome in sorted(self._lattice_pair_outcomes.items()):
                 print(f"    {name}: {outcome}")
+            self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open
             # net -- connectivity is judged on the legs like any other net.
@@ -6741,11 +6750,9 @@ class Autorouter:
             # Build net_to_class map + class-name-keyed synth routing
             # (Issue #3098 -- the detector looks up by class name in
             # _gather_explicit_groups, but net_class_map is net-name keyed).
-            net_to_class: dict[str, str] = {}
-            synth_routing: dict = dict(self.net_class_map)
-            for net_name, net_class in self.net_class_map.items():
-                net_to_class[net_name] = net_class.name
-                synth_routing.setdefault(net_class.name, net_class)
+            from .diffpair_detection import build_synth_routing
+
+            synth_routing, net_to_class = build_synth_routing(self.net_class_map)
 
             try:
                 pairs = detect_diff_pairs(
