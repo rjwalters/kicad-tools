@@ -1293,15 +1293,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # made at until the escapes are re-reviewed at the declared rule.
         "--via-clearance",
         "0.2",
-        # Issue #6401: ``kct route`` now reserves a via site per pour-net IC
-        # pin before signal routing, on by default.  That changes this grid
-        # route, so the reviewed escape repair above (fixed via coordinates in
-        # ``manufacturing_process.MOVES``) no longer finds its vias.  Opt out
-        # until the escapes are re-reviewed against the reserved route.  The pin
-        # also stays until #6425 lands: the oracle's DRC gate bans every 0.30/0.15
-        # weld on this recipe (three via-dimension rules each), with or without
-        # the reservation, so only via-free links can close (#6413).
-        "--no-plane-via-reservation",
+        # Issue #6401 / #6425: ``kct route`` reserves a via site per pour-net
+        # IC pin before signal routing (on by default; this recipe used to opt
+        # out with ``--no-plane-via-reservation``).  Since #6425 the oracle's
+        # DRC gate no longer bans this recipe's 0.30/0.15 welds for being
+        # below the stock via floors, so the pour welds land at the reserved
+        # sites and the escape repair (``manufacturing_process.MOVES``) was
+        # re-reviewed against that route.
         "--placement-feedback",
         "--no-cache",
         # Issue #3039: pin --seed 42 so the routed PCB is byte-identical
@@ -1745,6 +1743,51 @@ _TIE_CONNECT_CLEARANCE = 0.1  # mm (was 0.3) — same-net pad/via thermal tie
 _TIE_THERMAL_GAP = 0.1  # mm (was 0.3)
 
 
+def _pad_has_offpad_bond(pcb, x: float, y: float, net: str) -> str | None:
+    """The pad under ``(x, y)`` when a same-net via OUTSIDE it already bonds it.
+
+    Issue #6425: with the plane-via reservation on, the oracle welds each LQFP
+    VSS pad at its reserved site -- a through via beside the pad plus a track
+    from the pad to it.  Such a pad needs no in-pad tie via (and the tie would
+    sit on whatever the reserved route now runs under the pad: on the
+    reserved route U2.23's tie shorts the NRST B.Cu track).  Returns the pad's
+    ``REF.PAD`` when it is bonded that way, else ``None``.
+    """
+    import math
+
+    from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
+
+    def inside(point, box) -> bool:
+        return (
+            box[0] - 1e-6 <= point[0] <= box[2] + 1e-6
+            and box[1] - 1e-6 <= point[1] <= box[3] + 1e-6
+        )
+
+    numbers = {num for num, n in pcb.nets.items() if n.name == net}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name != net:
+                continue
+            box = pad_absolute_bbox(pad, fp)
+            if not inside((x, y), box):
+                continue
+            for via in pcb.vias:
+                if (
+                    via.net_number not in numbers
+                    or via.via_type == "micro"
+                    or inside(via.position, box)
+                ):
+                    continue
+                for seg in pcb.segments:
+                    if seg.net_number not in numbers:
+                        continue
+                    for a, b in ((seg.start, seg.end), (seg.end, seg.start)):
+                        if inside(a, box) and math.dist(b, via.position) < 1e-3:
+                            return f"{fp.reference}.{pad.number}"
+            return None
+    return None
+
+
 def tie_power_pads(routed_path: Path) -> bool:
     """
     Tie the isolated LQFP-48 power pads into their pours (issue #3794, Leg B).
@@ -1772,7 +1815,16 @@ def tie_power_pads(routed_path: Path) -> bool:
     pcb = PCB.load(str(routed_path))
     ox, oy = pcb._board_origin
     gnd_net = pcb.add_net("GND").number
+    added = 0
     for x, y in _GND_TIE_VIAS:
+        # Issue #6425: a pad the oracle already welded at its reserved site
+        # keeps that off-pad bond; an in-pad tie would only add a via-in-pad
+        # (unsupported by the selected process) under the reserved route.
+        bonded = _pad_has_offpad_bond(pcb, x, y, "GND")
+        if bonded is not None:
+            print(f"   {bonded}: already bonded by an off-pad weld; no tie via")
+            continue
+        added += 1
         via_sexp = SExp.list("via", "micro")
         via_sexp.append(SExp.list("at", x + ox, y + oy))
         via_sexp.append(SExp.list("size", 0.3))
@@ -1783,7 +1835,7 @@ def tie_power_pads(routed_path: Path) -> bool:
         via_sexp.append(SExp.list("uuid", pcb.mint_uuid("tie-via", x, y)))
         pcb._sexp.append(via_sexp)
     pcb.save(str(routed_path))
-    print(f"   Added {len(_GND_TIE_VIAS)} GND micro-via-in-pads")
+    print(f"   Added {added} GND micro-via-in-pads")
 
     # 2. Tighten the GND / +3.3V zone connect-pad clearance + thermal gap so
     #    the re-pour reaches its own moated-out pads/vias.
