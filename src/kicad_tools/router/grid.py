@@ -34,7 +34,7 @@ import base64
 import logging
 import math
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
@@ -5284,6 +5284,7 @@ class RoutingGrid:
         via: Via,
         same_net: int,
         min_drill_clearance: float | None = None,
+        route_vias: Sequence[Via] = (),
     ) -> tuple[bool, float, tuple[float, float] | None]:
         """Validate drill-to-drill spacing between same-net vias.
 
@@ -5296,11 +5297,23 @@ class RoutingGrid:
         specified net (opposite logic to validate_via_to_via_clearance which
         *excludes* the same net).
 
+        Issue #6464: the default floor is the fab hole-to-hole minimum,
+        ``max(rules.min_drill_clearance, rules.min_hole_to_hole)``.  KiCad's
+        ``hole_to_hole`` rule does not exempt a same-net pair (#5673), so the
+        0.102 mm same-net via-MERGE threshold on its own let two same-net
+        drills sit below the fab minimum.  ``route_vias`` carries the vias of
+        the route being validated: they are not committed to ``self.routes``
+        yet, so without it a route never saw its OWN vias (board 05 EN_A put
+        two vias of one route 0.461 mm apart against a 0.5 mm floor).
+
         Args:
             via: The via to validate
             same_net: Net ID to check against (only same-net vias are checked)
             min_drill_clearance: Minimum required drill-to-drill spacing
-                (default: rules.min_drill_clearance)
+                (default: ``max(rules.min_drill_clearance,
+                rules.min_hole_to_hole)``)
+            route_vias: Other vias of the not-yet-committed route ``via``
+                belongs to.  ``via`` itself and coincident entries are skipped.
 
         Returns:
             Tuple of (is_valid, actual_clearance, violation_location)
@@ -5311,31 +5324,33 @@ class RoutingGrid:
         import math
 
         if min_drill_clearance is None:
-            min_drill_clearance = self.rules.min_drill_clearance
+            min_drill_clearance = max(
+                self.rules.min_drill_clearance,
+                getattr(self.rules, "min_hole_to_hole", 0.0),
+            )
 
         drill_radius = via.drill / 2
         min_actual_clearance = float("inf")
         violation_loc: tuple[float, float] | None = None
         has_violation = False
 
-        for route in self.routes:
-            if route.net != same_net:
+        same_net_vias = [v for route in self.routes if route.net == same_net for v in route.vias]
+        same_net_vias.extend(v for v in route_vias if v is not via)
+
+        for existing_via in same_net_vias:
+            # Skip checking against self (exact same position and drill)
+            if abs(via.x - existing_via.x) < 1e-6 and abs(via.y - existing_via.y) < 1e-6:
                 continue
 
-            for existing_via in route.vias:
-                # Skip checking against self (exact same position and drill)
-                if abs(via.x - existing_via.x) < 1e-6 and abs(via.y - existing_via.y) < 1e-6:
-                    continue
+            distance = math.sqrt((via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2)
+            existing_drill_radius = existing_via.drill / 2
+            clearance = distance - drill_radius - existing_drill_radius
 
-                distance = math.sqrt((via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2)
-                existing_drill_radius = existing_via.drill / 2
-                clearance = distance - drill_radius - existing_drill_radius
-
-                if clearance < min_actual_clearance:
-                    min_actual_clearance = clearance
-                if clearance < min_drill_clearance:
-                    has_violation = True
-                    violation_loc = (via.x, via.y)
+            if clearance < min_actual_clearance:
+                min_actual_clearance = clearance
+            if clearance < min_drill_clearance:
+                has_violation = True
+                violation_loc = (via.x, via.y)
 
         is_valid = not has_violation
         return is_valid, min_actual_clearance, violation_loc
