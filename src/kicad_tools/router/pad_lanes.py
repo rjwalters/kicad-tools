@@ -115,8 +115,15 @@ VIA_DISC_ENV = "KCT_PAD_LANE_VIA_DISC"
 
 
 def via_disc_enabled() -> bool:
-    """False when ``KCT_PAD_LANE_VIA_DISC=0`` (A/B against centre-cell via charging)."""
-    return os.environ.get(VIA_DISC_ENV, "1").strip() != "0"
+    """True only when ``KCT_PAD_LANE_VIA_DISC`` is set to a non-empty, non-zero value.
+
+    Default-off (opt-in): unset or ``0`` keeps centre-cell via charging,
+    identical to the behaviour before the via-disc mechanism landed.  The
+    default will only flip once board evidence (boards 03/04/05) shows it
+    helps without regressions (Issue #6382).
+    """
+    value = os.environ.get(VIA_DISC_ENV, "")
+    return value.strip() not in ("", "0")
 
 
 def _env_float(name: str, default: float) -> float:
@@ -368,6 +375,7 @@ def build_pad_lane_budgets(
         budget.source_net = int(lane.net)
         # Issue #6382 follow-up: a foreign via whose disc overlaps the lane
         # blocks it even when its centre lies just past the lane end.
+        # Opt-in via ``KCT_PAD_LANE_VIA_DISC=1``; off by default.
         budget.charge_via_disc = via_disc_enabled()
         budgets.append(budget)
     return budgets

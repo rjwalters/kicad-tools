@@ -21,12 +21,14 @@ from kicad_tools.router.pad_lanes import (
     LANE_LENGTH_MM,
     LANE_MAX_GAP_FILL_MM,
     LANE_PENALTY_FACTOR,
+    VIA_DISC_ENV,
     build_pad_lane_budgets,
     compute_pad_lanes,
     lane_grid_rect,
     lane_half_across,
     pad_lane,
     pad_lanes_disabled,
+    via_disc_enabled,
 )
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
@@ -45,7 +47,7 @@ LEFT_TIP = LEFT_X - PAD_LONG / 2
 
 @pytest.fixture(autouse=True)
 def _clear_lane_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (DISABLE_ENV, "KCT_PAD_LANE_LENGTH_MM", "KCT_PAD_LANE_PENALTY"):
+    for name in (DISABLE_ENV, VIA_DISC_ENV, "KCT_PAD_LANE_LENGTH_MM", "KCT_PAD_LANE_PENALTY"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -492,7 +494,12 @@ def test_python_backend_installs_nothing() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _via_xs(disc: bool, *, band_penalty: float = 50.0) -> list[float]:
+ENTRY_POINTS = ("route", "route_resumable")
+
+
+def _via_xs(
+    disc: bool, *, band_penalty: float = 50.0, entry: str = "route_resumable"
+) -> list[float]:
     """Route layer 0 -> layer 1 past a layer-1 band; return the via x(s).
 
     The band covers one grid column on layer 1 only, spanning the whole
@@ -527,17 +534,45 @@ def _via_xs(disc: bool, *, band_penalty: float = 50.0) -> list[float]:
     budget.source_net = 99
     budget.charge_via_disc = disc
 
-    result = pf._impl.route_resumable(2.0, 5.0, 0, 8.0, 5.0, 1, 1, pad_channel_budgets=[budget])
+    # ``entry`` selects the one-shot ``route()`` or the resumable twin; each
+    # has its own via-landing site that must use the disc-aware table.
+    result = getattr(pf._impl, entry)(2.0, 5.0, 0, 8.0, 5.0, 1, 1, pad_channel_budgets=[budget])
     pf._impl.clear_search_state()
     assert result.success
     return [v.x for v in result.vias]
 
 
+def test_via_disc_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default-off: unset or ``0`` keeps centre-cell charging (main behaviour)."""
+    assert via_disc_enabled() is False
+    monkeypatch.setenv(VIA_DISC_ENV, "0")
+    assert via_disc_enabled() is False
+    monkeypatch.setenv(VIA_DISC_ENV, "1")
+    assert via_disc_enabled() is True
+
+
 @requires_cpp
-def test_via_disc_overlapping_lane_is_charged() -> None:
+def test_lane_budgets_flag_via_disc_only_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    pads = _column_pads()
+    regions = _region_for(pads)
+    budgets = build_pad_lane_budgets(_Grid(0.065), pads, regions, cost_straight=1.0)
+    assert budgets and not any(b.charge_via_disc for b in budgets)
+    monkeypatch.setenv(VIA_DISC_ENV, "1")
+    budgets = build_pad_lane_budgets(_Grid(0.065), pads, regions, cost_straight=1.0)
+    assert budgets and all(b.charge_via_disc for b in budgets)
+
+
+@requires_cpp
+def test_default_budget_does_not_charge_via_disc() -> None:
+    assert router_cpp.PadChannelBudget().charge_via_disc is False
+
+
+@requires_cpp
+@pytest.mark.parametrize("entry", ENTRY_POINTS)
+def test_via_disc_overlapping_lane_is_charged(entry: str) -> None:
     """A via centred just outside a band, with its disc inside, pays for it."""
-    centre_only = _via_xs(False)
-    disc = _via_xs(True)
+    centre_only = _via_xs(False, entry=entry)
+    disc = _via_xs(True, entry=entry)
     assert len(centre_only) == 1 and len(disc) == 1
     # The disc-aware cost must keep the via's disc off the band.
     for x in disc:
@@ -546,6 +581,7 @@ def test_via_disc_overlapping_lane_is_charged() -> None:
 
 
 @requires_cpp
-def test_via_disc_never_stricter_when_band_is_unavoidable() -> None:
+@pytest.mark.parametrize("entry", ENTRY_POINTS)
+def test_via_disc_never_stricter_when_band_is_unavoidable(entry: str) -> None:
     """The cost is soft: a huge penalty on every layer-1 cell still routes."""
-    assert _via_xs(True, band_penalty=1000.0)
+    assert _via_xs(True, band_penalty=1000.0, entry=entry)
