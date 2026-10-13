@@ -16,6 +16,11 @@ identity:
   R1 and R2 (same footprint, same value) trade places, both are ``changed``
   rather than paired with each other as ``unchanged``.  A part whose
   reference disappeared is ``removed``, and a new reference is ``added``.
+  When a reference repeats (shield pads ``J1/SH``, NPTH pads ``J1/``,
+  footprints sharing ``REF**``) content breaks the tie inside that bucket:
+  equal-content items pair first as ``unchanged``, the rest pair in file
+  order as ``changed``, and the surplus is ``removed``/``added``.  Reordering
+  duplicates therefore reports nothing, and deleting one reports that one.
   Only items with no reference at all fall back to the content passes.
 * **Uuid-keyed kinds** (copper, zones and graphics) match in three passes:
 
@@ -251,25 +256,42 @@ def diff_items(old: Sequence[DiffItem], new: Sequence[DiffItem]) -> DiffResult:
     entries: list[DiffEntry] = []
     new_used = [False] * len(new)
 
-    # Pass 0: reference-keyed kinds pair by identity only.
+    # Pass 0: reference-keyed kinds pair by identity only.  A key can repeat
+    # (shield pads ``J1/SH`` x4, NPTH pads ``J1/``, footprints sharing
+    # ``REF**``); within such a bucket content breaks the tie -- equal content
+    # pairs first as unchanged, the rest pair in file order as changed -- so
+    # a reorder reports nothing and a deletion blames the item that vanished.
+    # A unique key pairs exactly as a plain identity match.
     new_by_ref: dict[tuple[str, str], list[int]] = defaultdict(list)
+    old_by_ref: dict[tuple[str, str], list[int]] = defaultdict(list)
     for j, item in enumerate(new):
         if _ref_keyed(item):
             new_by_ref[(item.kind, item.identity)].append(j)
     old_rest: list[int] = []
     removed: list[int] = []
     for i, item in enumerate(old):
-        if not _ref_keyed(item):
-            old_rest.append(i)
-            continue
-        bucket = new_by_ref.get((item.kind, item.identity))
-        if bucket:
-            j = bucket.pop(0)
-            new_used[j] = True
-            status = "unchanged" if item.content == new[j].content else "changed"
-            entries.append(DiffEntry(status, item, new[j]))
+        if _ref_keyed(item):
+            old_by_ref[(item.kind, item.identity)].append(i)
         else:
-            removed.append(i)
+            old_rest.append(i)
+    for ref_key, olds in old_by_ref.items():
+        candidates = new_by_ref.get(ref_key, [])
+        unmatched: list[int] = []
+        for i in olds:
+            same = next((j for j in candidates if new[j].content == old[i].content), None)
+            if same is None:
+                unmatched.append(i)
+                continue
+            candidates.remove(same)
+            new_used[same] = True
+            entries.append(DiffEntry("unchanged", old[i], new[same]))
+        for i in unmatched:
+            if candidates:
+                j = candidates.pop(0)
+                new_used[j] = True
+                entries.append(DiffEntry("changed", old[i], new[j]))
+            else:
+                removed.append(i)
 
     # Pass 1: content, as multisets; prefer a same-identity candidate.
     new_by_content: dict[tuple[Any, ...], list[int]] = defaultdict(list)

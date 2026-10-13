@@ -25,6 +25,7 @@ from kicad_tools.schema.pcb import PCB
 REPO = Path(__file__).resolve().parents[1]
 BOARD01 = REPO / "boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb"
 BOARD05 = REPO / "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+BOARD03 = REPO / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
 ARC = REPO / "tests/fixtures/copper_arc_routed.kicad_pcb"
 
 _BLOCK = re.compile(r"^\t\((segment|via)\n.*?^\t\)\n", re.M | re.S)
@@ -394,6 +395,75 @@ def test_same_net_identical_part_swap_is_not_silent(tmp_path: Path, capsys):
     assert {e.status for e in changes} == {"changed"}
     assert run_pcb_diff(str(old), str(new)) == 2
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
+# duplicate reference keys (J1/SH x4, REF**): content breaks the tie
+# ---------------------------------------------------------------------------
+
+_SH_PAD = re.compile(r'^\t\t\(pad "SH" .*?^\t\t\)\n', re.M | re.S)
+
+
+def _sh_pads(text: str) -> list[re.Match[str]]:
+    pads = list(_SH_PAD.finditer(text))
+    assert len(pads) == 4, "board 03's J1 (USB-C) has four SH shield pads"
+    return pads
+
+
+def test_reordered_duplicate_pads_report_nothing(tmp_path: Path):
+    text = BOARD03.read_text()
+    first, *_, last = _sh_pads(text)
+    assert first.group(0) != last.group(0)
+    reordered = (
+        text[: first.start()]
+        + last.group(0)
+        + text[first.end() : last.start()]
+        + first.group(0)
+        + text[last.end() :]
+    )
+    assert reordered != text
+    result = _diff(_copy(tmp_path, BOARD03), _write(tmp_path, reordered))
+    assert _changes(result) == []
+
+
+def test_deleting_one_duplicate_pad_removes_exactly_that_pad(tmp_path: Path):
+    text = BOARD03.read_text()
+    first = _sh_pads(text)[0]
+    old = _copy(tmp_path, BOARD03)
+    old_pads = [e.before for e in _diff(old, old).entries if e.kind == "pad" and e.key == "J1/SH"]
+    changes = _changes(_diff(old, _write(tmp_path, text[: first.start()] + text[first.end() :])))
+    assert [(e.status, e.kind, e.key) for e in changes] == [("removed", "pad", "J1/SH")]
+    # J1 sits at (149.475, 63.3) rotated 180, so the first SH pad, local
+    # (-1.35, 0.98), lands at (150.825, 62.32); it is listed first in OLD.
+    assert changes[0].before.content == old_pads[0].content
+    assert changes[0].before.geometry["position"] == pytest.approx((150.825, 62.32))
+
+
+def _ref_fp(x: float, ref: str = "REF**"):
+    return _item(kind="footprint", identity=ref, content=("MountingHole", (x, 0.0)), net="")
+
+
+def test_deleting_first_of_duplicate_references_removes_that_one():
+    old = [_ref_fp(0.0), _ref_fp(10.0), _ref_fp(20.0)]
+    changes = diff_items(old, old[1:]).changes()
+    assert [(e.status, e.key) for e in changes] == [("removed", "REF**")]
+    assert changes[0].before.content == ("MountingHole", (0.0, 0.0))
+
+
+def test_reordered_duplicate_references_report_nothing():
+    old = [_ref_fp(0.0), _ref_fp(10.0), _ref_fp(20.0)]
+    assert not diff_items(old, old[::-1]).has_changes
+
+
+def test_duplicate_references_pair_leftovers_in_order_as_changed():
+    # One of three REF** holes moved: the two exact matches stay unchanged
+    # and only the moved one is changed, not a cascade along file order.
+    old = [_ref_fp(0.0), _ref_fp(10.0), _ref_fp(20.0)]
+    new = [_ref_fp(0.0), _ref_fp(15.0), _ref_fp(20.0)]
+    changes = diff_items(old, new).changes()
+    assert [(e.status, e.before.content[1], e.after.content[1]) for e in changes] == [
+        ("changed", (10.0, 0.0), (15.0, 0.0))
+    ]
 
 
 # ---------------------------------------------------------------------------

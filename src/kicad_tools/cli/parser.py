@@ -3014,10 +3014,13 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_diff = pcb_subparsers.add_parser(
         "diff",
         help="Geometric diff of two boards (copper, pads, zones, outline)",
-        description="Compare two boards item by item. Items with identical "
-        "normalised content are unchanged whatever their uuids; leftovers pair "
-        "by uuid (same kind and net) or by reference as 'changed', and the rest "
-        "are removed/added. OLD and NEW accept a path or a REV:path git spec. "
+        description="Compare two boards item by item. Footprints and pads pair "
+        "by reference first (R1, R1/2): same-reference items are 'changed' when "
+        "anything differs, and duplicate references (J1/SH, REF**) pair by "
+        "equal content before file order. Copper, zones and graphics with "
+        "identical normalised content are unchanged whatever their uuids; "
+        "leftovers pair by uuid (same kind and net) as 'changed'. The rest are "
+        "removed/added. OLD and NEW accept a path or a REV:path git spec. "
         "Exit codes: 0 no differences, 2 differences, 1 a side failed to load.",
     )
     pcb_diff.add_argument("old", help="OLD board: .kicad_pcb path or REV:path")

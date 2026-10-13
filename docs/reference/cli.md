@@ -228,7 +228,12 @@ Footprints and pads pair **by reference** (`R1`, `R1/2`): a reference is
 stable and meaningful, so same-reference items are `changed` when anything
 about them differs, a vanished reference is `removed` and a new one `added`.
 Two identical parts that trade places therefore report both as `changed`
-rather than pairing with each other. Copper, zones and graphics carry only
+rather than pairing with each other. A reference that repeats (shield pads
+`J1/SH`, NPTH pads `J1/`, footprints sharing `REF**`) carries no more than
+"one of these", so inside that group equal-content items pair first as
+`unchanged`, the rest pair in file order as `changed`, and the surplus is
+`removed`/`added`: reordering duplicates reports nothing, and deleting one
+reports exactly that one. Copper, zones and graphics carry only
 uuids, and those match in three passes:
 
 1. **Content.** Items with identical normalised content are `unchanged`,
