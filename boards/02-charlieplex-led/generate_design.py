@@ -198,23 +198,25 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     result = subprocess.run(cmd, capture_output=False, text=True, env=env)
 
-    # ``kct route`` returns 0 on full success and a non-zero code on
-    # partial / failed routing.  Either way it writes a routed PCB to
-    # ``output_path``; downstream DRC + manufacturing checks decide if
-    # the partial output is acceptable.
-    success = result.returncode == 0
-
     if not output_path.exists():
         print(f"\n   ERROR: ``kct route`` did not produce {output_path}", file=sys.stderr)
         return False
 
-    if success:
-        print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
-    else:
+    # Issue #6427: exit 0 is the only success.  ``kct route`` exits 3 when
+    # either DRC engine finds a violation in its own copper; finalize's
+    # report-driven via repair used to quietly move that copper until DRC
+    # passed, hiding a router defect behind a board-local edit.  A non-zero
+    # exit now stops the recipe before finalize ever sees the board.
+    if result.returncode != 0:
         print(
-            f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
-            "(partial routing; downstream DRC will continue)"
+            f"\n   ERROR: ``kct route`` exited with code {result.returncode}; "
+            "board 02 requires a clean route (exit 0) and does not repair "
+            "router DRC violations after the fact",
+            file=sys.stderr,
         )
+        return False
+
+    print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
 
     from finalize_routing import finalize_routing
 

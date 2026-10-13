@@ -55,6 +55,12 @@ if TYPE_CHECKING:
     from .primitives import Pad, Route, Segment
     from .stub_terminals import StubTerminal
 
+from .class_clearance_floors import (
+    class_clearances_by_name,
+    clearance_base,
+    merge_named_floors,
+    remember_authored_floors,
+)
 from .core import Autorouter
 from .fixed_copper import FixedPadCopper, custom_pad_copper, degraded_pad_copper
 from .geometry import (
@@ -5317,18 +5323,10 @@ def load_pcb_for_routing(
         for name, value in _authored_net_clearances(pcb_path, project_path, net_map).items()
         if value > base_floor + 1e-9
     }
-    if authored_by_name:
-        floors = dict(rules.net_clearance_floors)
-        for name, value in authored_by_name.items():
-            net_id = net_map.get(name, 0)
-            if net_id:
-                floors[net_id] = max(floors.get(net_id, 0.0), value)
-        for comp in components:
-            for pad in comp["pads"]:
-                pad_floor = authored_by_name.get(pad.get("net_name", ""))
-                if pad_floor is not None and pad["net"] == 0:
-                    pad["authored_clearance"] = pad_floor
-        rules = replace(rules, net_clearance_floors=floors)
+    rules = merge_named_floors(rules, authored_by_name, net_map, components)
+    # Issue #6427: snapshot of the designer-authored floors alone, so a later
+    # class-map edit can re-derive "authored + router class" floors.
+    authored_floors = dict(rules.net_clearance_floors)
 
     # Auto-adjust grid resolution if enabled
     if auto_adjust_grid:
@@ -5464,6 +5462,19 @@ def load_pcb_for_routing(
                     _width_floor,
                 )
 
+    # Issue #6427: the router's own net classes are declared in the routed
+    # sidecars (#6390), so KiCad holds every foreign pair to
+    # max(class(a), class(b)).  Feed each class stricter than the base into
+    # the #6243 per-net floors so the search, the native validator's stored
+    # copper and the trace optimizer enforce the same pair rule -- not just
+    # the routing net's own clearance.
+    rules = merge_named_floors(
+        rules,
+        class_clearances_by_name(net_class_map, clearance_base(rules)),
+        net_map,
+        components,
+    )
+
     router = Autorouter(
         width=board_width,
         height=board_height,
@@ -5483,6 +5494,7 @@ def load_pcb_for_routing(
     )
 
     router.placement_disposition = placement_disposition
+    remember_authored_floors(router, authored_floors)
     # Issue #5863: what this board lost to pad geometry the router cannot
     # represent, for reports and callers that need to say so out loud.
     router.unsupported_geometry_nets = frozenset(unsupported_geometry_nets)

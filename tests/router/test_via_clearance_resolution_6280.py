@@ -421,7 +421,14 @@ _TRACE_WIDTH = 0.2
 
 
 def _via_board(tmp_path: Path, via_rule_mm: float | None) -> Path:
-    """SIG runs west-east past a lone GND via ``_VIA_OFFSET_MM`` off its line."""
+    """SIG runs west-east past a lone AUX via ``_VIA_OFFSET_MM`` off its line.
+
+    Issue #6427: the foreign net is deliberately named so the router's own
+    classifier leaves it in a 0.15mm class.  A ``GND`` net is classified
+    ``Ground``/``Power`` (0.20mm); the routed sidecars declare that class
+    (#6390), so KiCad -- and now the router -- hold SIG 0.20mm from it, which
+    is correct but is not what this via-*rule* resolution test measures.
+    """
 
     def pad(ref: str, uid: int, x: float, y: float, net: int, name: str) -> str:
         return f"""  (footprint "TestPoint:TP"
@@ -449,10 +456,10 @@ def _via_board(tmp_path: Path, via_rule_mm: float | None) -> Path:
   (setup (pad_to_mask_clearance 0))
   (net 0 "")
   (net 1 "SIG")
-  (net 2 "GND")
+  (net 2 "AUX")
   (gr_rect (start 100 100) (end 130 110)
     (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
-{pad("TP1", 10, 104.0, 105, 1, "SIG")}{pad("TP2", 11, 126.0, 105, 1, "SIG")}{pad("TP3", 12, 115.0, 108.5, 2, "GND")}  (via (at 115 {105 + _VIA_OFFSET_MM}) (size {_VIA_DIAMETER}) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000099"))
+{pad("TP1", 10, 104.0, 105, 1, "SIG")}{pad("TP2", 11, 126.0, 105, 1, "SIG")}{pad("TP3", 12, 115.0, 108.5, 2, "AUX")}  (via (at 115 {105 + _VIA_OFFSET_MM}) (size {_VIA_DIAMETER}) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000099"))
 )
 """
     )
@@ -463,7 +470,7 @@ def _via_board(tmp_path: Path, via_rule_mm: float | None) -> Path:
 
 
 def _sig_gap_to_foreign_via(routed: Path) -> float:
-    """Smallest edge-to-edge gap between SIG copper and the GND via."""
+    """Smallest edge-to-edge gap between SIG copper and the AUX via."""
     from kicad_tools.sexp import parse_file
 
     tree = parse_file(routed)
