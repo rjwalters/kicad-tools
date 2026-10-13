@@ -42,4 +42,16 @@
 (rule "Silkscreen Height - jlcpcb"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_height (min 1.0mm)))
+
+(rule "Reviewed clearance - LVDS"
+  (condition "(A.NetClass == 'LVDS' || B.NetClass == 'LVDS') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - LVTTL"
+  (condition "(A.NetClass == 'LVTTL' || B.NetClass == 'LVTTL') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Power"
+  (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
 # END kct fab floors

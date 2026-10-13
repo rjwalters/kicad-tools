@@ -57,6 +57,20 @@ def _schema_version(settings: dict[str, Any]) -> object:
     return CURRENT_NET_SETTINGS_SCHEMA if version is None else version
 
 
+def netclass_assignment_value(settings: dict[str, Any], class_name: str) -> str | list[str]:
+    """One ``netclass_assignments`` value in the shape ``settings``' schema reads.
+
+    Issue #6390: schema 3 (``meta.version == 3``, what
+    :func:`~kicad_tools.manufacturers.project_generator.build_project_data`
+    writes) stores a single class name as a string; schema 4/5 -- and an
+    unversioned block, which KiCad reads as current (#6262) -- store a list of
+    class names.  Writing the wrong shape makes both KiCad and
+    :func:`resolve_project_clearances` reject the assignment, so every writer
+    must ask the block it is writing into.
+    """
+    return class_name if _schema_version(settings) == 3 else [class_name]
+
+
 def resolve_project_clearances(
     project: dict[str, Any], net_names: Iterable[str]
 ) -> dict[str, NetclassClearance]:
