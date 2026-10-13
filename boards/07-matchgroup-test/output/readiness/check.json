@@ -1,5 +1,5 @@
 {
-  "file": "/private/tmp/loom-5044-board07-final-build/validation/checked.kicad_pcb",
+  "file": "/private/tmp/claude-501/b6404/build1/validation/checked.kicad_pcb",
   "manufacturer": "jlcpcb",
   "layers": 6,
   "summary": {
@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 4,
     "waived": 0,
-    "rules_checked": 55,
+    "rules_checked": 68,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -17,27 +17,41 @@
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
       "match_group_length_skew": 4,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1
     },
-    "passed": true
+    "passed": true,
+    "stale_waivers": 0,
+    "coverage_checked": 31,
+    "coverage_skipped": 5,
+    "coverage_unknown": [],
+    "coverage_blocking_unknown": []
   },
   "violations": [
     {
       "rule_id": "match_group_length_skew",
       "type": "match_group_length_skew",
       "severity": "info",
-      "message": "Match group 'SDRAM_ADDRESS' (14 members) length-skew 4.278 mm within tolerance 5.000 mm",
+      "message": "Match group 'SDRAM_ADDRESS' (14 members) length-skew 4.370 mm within tolerance 5.000 mm",
       "location": null,
       "layer": null,
-      "actual_value": 4.2783,
+      "actual_value": 4.3699,
       "required_value": 5.0,
       "items": [
         "SDRAM_ADDRESS"
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "match_group_length_skew|SDRAM_ADDRESS||",
+      "evidence_hash": "ev2:9aa98f994de9b3ba"
     },
     {
       "rule_id": "match_group_length_skew",
@@ -53,45 +67,52 @@
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "match_group_length_skew|SDRAM_BYTE0||",
+      "evidence_hash": "ev2:7c828e12d39d0cc9"
     },
     {
       "rule_id": "match_group_length_skew",
       "type": "match_group_length_skew",
       "severity": "info",
-      "message": "Match group 'SDRAM_BYTE1' (9 members) length-skew 2.874 mm within tolerance 5.000 mm",
+      "message": "Match group 'SDRAM_BYTE1' (9 members) length-skew 2.817 mm within tolerance 5.000 mm",
       "location": null,
       "layer": null,
-      "actual_value": 2.874,
+      "actual_value": 2.8165,
       "required_value": 5.0,
       "items": [
         "SDRAM_BYTE1"
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "match_group_length_skew|SDRAM_BYTE1||",
+      "evidence_hash": "ev2:629e72ef7d59a0c7"
     },
     {
       "rule_id": "match_group_length_skew",
       "type": "match_group_length_skew",
       "severity": "info",
-      "message": "Match group 'SDRAM_COMMAND' (6 members) length-skew 3.211 mm within tolerance 5.000 mm",
+      "message": "Match group 'SDRAM_COMMAND' (6 members) length-skew 3.273 mm within tolerance 5.000 mm",
       "location": null,
       "layer": null,
-      "actual_value": 3.2114,
+      "actual_value": 3.2734,
       "required_value": 5.0,
       "items": [
         "SDRAM_COMMAND"
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "match_group_length_skew|SDRAM_COMMAND||",
+      "evidence_hash": "ev2:8ef9d930ad7013fa"
     }
   ],
+  "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "55 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "68 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -114,17 +135,235 @@
     "schematic_missing": false
   },
   "routing_quality": {
-    "total_segments": 8739,
+    "total_segments": 8771,
     "nets_with_copper": 55,
-    "segments_per_net": 158.8909090909091,
+    "segments_per_net": 159.47272727272727,
     "zero_length_count": 0,
     "median_length_mm": 0.07071067811865073,
-    "fragment_count": 7314,
-    "fragment_fraction": 0.8369378647442499,
-    "orthogonal_count": 4478,
-    "diagonal_45_count": 4261,
+    "fragment_count": 7346,
+    "fragment_fraction": 0.8375327784745183,
+    "orthogonal_count": 4494,
+    "diagonal_45_count": 4277,
     "off_axis_count": 0,
-    "staircase_step_count": 0,
-    "staircase_fraction": 0.0
+    "staircase_step_count": 12,
+    "staircase_fraction": 0.0013681450233724774
+  },
+  "coverage": {
+    "ampacity": {
+      "status": "skipped:no_declared_targets",
+      "state": "skipped",
+      "reason": "no_declared_targets",
+      "blocking": true
+    },
+    "clearance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connectivity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connector_access": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "copper_sliver": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "courtyard_overlap": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dangling_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "diffpair_clearance_intra": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_routing_continuity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dimensions": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "doc_drift": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "edge": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "impedance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "isolated_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "mask_to_copper": {
+      "status": "skipped:opt_in:--mask-copper-config",
+      "state": "skipped",
+      "reason": "opt_in:--mask-copper-config",
+      "blocking": true
+    },
+    "match_group_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netclass_clearance_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netclass_floor": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netlist": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "pad_grid": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "path_ampacity": {
+      "status": "skipped:no_declared_current_paths",
+      "state": "skipped",
+      "reason": "no_declared_current_paths",
+      "blocking": true
+    },
+    "physical_copper_gap": {
+      "status": "skipped:opt_in:--physical-copper-gap",
+      "state": "skipped",
+      "reason": "opt_in:--physical-copper-gap",
+      "blocking": true
+    },
+    "pin1_marker": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "sch_fields": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "segment_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "silkscreen": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "single_pad_net": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "solder_mask": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_under_body": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "width_consistency": {
+      "status": "skipped:opt_in:--only",
+      "state": "skipped",
+      "reason": "opt_in:--only",
+      "blocking": false
+    },
+    "zero_length_segment": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "zones": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    }
   }
 }
