@@ -456,3 +456,203 @@ def test_reserved_sites_reach_the_oracle_weld(tmp_path) -> None:
     with patch("kicad_tools.cli.stitch_cmd.run_stitch", fake_run_stitch):
         closer._weld_pads(tmp_path / "b.kicad_pcb", {PLANE: {"U1.3"}}, SimpleNamespace(notes=[]))
     assert seen["preferred_sites"] == sites
+
+
+# ---------------------------------------------------------------------------
+# 7. Issue #6413: a reserved site must not strand a signal pin's escape.
+# ---------------------------------------------------------------------------
+
+_TRACE_W = _ROUTER_RULES.trace_width
+
+
+def _escape_blockers(result, pin: Pad, *, outward: float, clearance: float = 0.2) -> set[int]:
+    """Sides (-1 / +1 of the centreline) from which reserved copper blocks
+    ``pin``'s straight outward F.Cu escape along +/-x.  Measured independently
+    of the planner: the centreline runs ``escape_len`` from the pin tip, and
+    copper blocks it when a ``_TRACE_W`` trace on it would breach ``clearance``.
+    """
+    rules = result.rules
+    escape_len = rules.via_diameter + rules.clearance
+    ax = pin.x + outward * pin.width / 2
+    a, b = (ax, pin.y), (ax + outward * escape_len, pin.y)
+    sides: set[int] = set()
+    for site in result.sites:
+        gap = seg_pt_dist(a, b, (site.x, site.y)) - rules.via_diameter / 2 - _TRACE_W / 2
+        if gap < clearance - 1e-9:
+            sides |= {-1, 1} if abs(site.y - pin.y) < 1e-9 else {1 if site.y > pin.y else -1}
+    for stub in result.stubs:
+        ends = ((stub.pad_x, stub.pad_y), (stub.site_x, stub.site_y))
+        gap = (
+            min(
+                min(seg_pt_dist(a, b, e) for e in ends),
+                min(seg_pt_dist(*ends, p) for p in (a, b)),
+            )
+            - (rules.stub_width + _TRACE_W) / 2
+        )
+        if gap < clearance - 1e-9:
+            ys = [e[1] - pin.y for e in ends]
+            sides |= {-1, 1} if min(ys) <= 0 <= max(ys) else {1 if ys[0] > 0 else -1}
+    return sides
+
+
+def _flanked_pin_grid(max_pins: int = 9) -> RoutingGrid:
+    """The #6411 judge's fixture: LQFP row with pins 4 and 6 on GND, pin 5
+    a signal between them."""
+    grid = RoutingGrid(width=20, height=20, rules=_ROUTER_RULES, layer_stack=LayerStack.two_layer())
+    for i in range(max_pins):
+        y = 8.0 + 0.5 * i
+        pin = str(i + 1)
+        net, name = (0, PLANE) if pin in ("4", "6") else (i + 1, f"S{pin}")
+        grid.add_pad(_pad("U2", pin, 10.0, y, net, name, width=1.475, height=0.3))
+        grid.add_pad(_pad("U2", f"L{pin}", 4.0, y, 20 + i, f"L{pin}", width=1.475, height=0.3))
+    return grid
+
+
+def _pin(grid: RoutingGrid, ref: str, pin: str) -> Pad:
+    return next(p for p in grid._pads if p.ref == ref and p.pin == pin)
+
+
+def test_sites_beside_a_flanked_signal_pin_leave_its_escape_open() -> None:
+    from kicad_tools.router.plane_via_sites import _SitePlanner
+
+    rules = PlaneViaSiteRules(clearance=0.2, exact_pads=True)
+    # Premise (the #6411 judge's finding): without the guard both GND sites
+    # sit outward beside pin 5 and block its escape from both sides.
+    with patch.object(_SitePlanner, "_build_corridors", return_value=[]):
+        unguarded = reserve_plane_via_sites(_flanked_pin_grid(), [PLANE], rules)
+    pin5 = _pin(_flanked_pin_grid(), "U2", "5")
+    assert _escape_blockers(unguarded, pin5, outward=1.0) == {-1, 1}
+
+    grid = _flanked_pin_grid()
+    result = reserve_plane_via_sites(grid, [PLANE], rules)
+    served = {name for site in result.sites for name in site.pads}
+    assert served | set(result.unreserved) == {"U2.4", "U2.6"}
+    if served == {"U2.4", "U2.6"}:
+        assert _escape_blockers(result, pin5, outward=1.0) == set()
+    for name in ("3", "5", "7"):
+        assert len(_escape_blockers(result, _pin(grid, "U2", name), outward=1.0)) < 2, name
+    # Every site is still outward of the row, never under the body.
+    assert all(site.x > 10.0 + 1.475 / 2 for site in result.sites)
+
+
+def test_a_two_sided_block_leaves_the_pad_unreserved_instead() -> None:
+    """With only room beside the pin row, the second GND pad cannot be served
+    without flanking pin 5: it falls back to the post-route ladders."""
+    rules = PlaneViaSiteRules(clearance=0.2, exact_pads=True, max_reach=1.4)
+    grid = _flanked_pin_grid()
+    # Close the inward side (under the body) with a foreign single-pad part.
+    grid.add_pad(_pad("K1", "1", 8.6, 10.0, 50, "K", width=1.0, height=5.0))
+    result = reserve_plane_via_sites(grid, [PLANE], rules)
+    pin5 = _pin(grid, "U2", "5")
+    assert len(_escape_blockers(result, pin5, outward=1.0)) == 1
+    # The first GND pad takes its one-sided last resort; the second could
+    # only flank pin 5 (own site or a stub to the shared one), so it waits
+    # for the post-route ladders.
+    assert [site.pads for site in result.sites] == [("U2.4",)]
+    assert result.unreserved == ["U2.6"]
+    # The one-sided blocks the last resort costs are recorded.
+    assert sorted(result.blocked_escapes) == [("U2.3", "U2.4"), ("U2.5", "U2.4")]
+    for name in ("3", "5"):
+        assert _escape_blockers(result, _pin(grid, "U2", name), outward=1.0), name
+
+
+def _crystal_beside_ic_grid() -> RoutingGrid:
+    """Board 03's shape: a 4-pad crystal whose GND pad Y1.2 sits just past
+    the tips of an IC's signal pin row (U1.19 / Y1.2)."""
+    grid = RoutingGrid(width=20, height=20, rules=_ROUTER_RULES, layer_stack=LayerStack.two_layer())
+    for i in range(9):
+        y = 8.0 + 0.5 * i
+        grid.add_pad(_pad("U1", str(i + 1), 10.0, y, i + 1, f"S{i + 1}", width=1.475, height=0.3))
+        grid.add_pad(_pad("U1", f"L{i + 1}", 4.0, y, 20 + i, f"L{i + 1}", width=1.475, height=0.3))
+    for pin, x, y, net, name in (
+        ("1", 12.3, 11.0, 30, "XIN"),
+        ("2", 12.3, 9.4, 0, PLANE),
+        ("3", 14.3, 9.4, 31, "XOUT"),
+        ("4", 14.3, 11.0, 0, PLANE),
+    ):
+        grid.add_pad(_pad("Y1", pin, x, y, net, name, width=1.0, height=0.9))
+    return grid
+
+
+def test_guard_covers_a_neighbouring_footprints_site() -> None:
+    from kicad_tools.router.plane_via_sites import _SitePlanner
+
+    rules = PlaneViaSiteRules(clearance=0.2, exact_pads=True)
+    ic_pins = [p for p in _crystal_beside_ic_grid()._pads if p.ref == "U1" and p.x > 7]
+    # Premise: unguarded, Y1.2's site and stub land in front of U1's pin tips
+    # and flank one of them (U1.3) from both sides.
+    with patch.object(_SitePlanner, "_build_corridors", return_value=[]):
+        unguarded = reserve_plane_via_sites(_crystal_beside_ic_grid(), [PLANE], rules)
+    assert {"U1.2", "U1.3"} <= {
+        f"U1.{p.pin}" for p in ic_pins if _escape_blockers(unguarded, p, outward=1.0)
+    }
+    assert any(_escape_blockers(unguarded, p, outward=1.0) == {-1, 1} for p in ic_pins)
+
+    result = reserve_plane_via_sites(_crystal_beside_ic_grid(), [PLANE], rules)
+    assert result.unreserved == []
+    assert {name for site in result.sites for name in site.pads} == {"Y1.2", "Y1.4"}
+    for p in ic_pins:
+        assert len(_escape_blockers(result, p, outward=1.0)) < 2, p.pin
+    # Here the guard finds a site clear of every IC pin; any one-sided block
+    # it had to keep would be listed in ``blocked_escapes``.
+    blocked = {f"U1.{p.pin}" for p in ic_pins if _escape_blockers(result, p, outward=1.0)}
+    assert blocked == {pin for pin, _by in result.blocked_escapes if pin.startswith("U1.")}
+
+
+# ---------------------------------------------------------------------------
+# 8. Issue #6413: the stitcher's pad-to-via stub checks are layer-aware.
+# ---------------------------------------------------------------------------
+
+
+def _u2_23_case(track_layer: str):
+    """Board 04's U2.23: the reserved site past the pin tip, with NRST running
+    along the pin row at y = 93.3 (0.16 mm edge gap to the stub)."""
+    from kicad_tools.cli.stitch_cmd import PadInfo, TrackSegment
+
+    pad = PadInfo("U2", "23", 3, PLANE, 151.75, 93.66, "F.Cu", 0.3, 1.475)
+    nrst = TrackSegment(147.15, 93.3, 154.5, 93.3, 0.2, track_layer, 9)
+    return pad, nrst
+
+
+def test_stub_check_ignores_tracks_on_another_layer() -> None:
+    from kicad_tools.cli.stitch_cmd import calculate_via_position
+
+    site = (151.75, 94.55)
+    kwargs: dict = {
+        "offset": 0.5,
+        "via_size": 0.3,
+        "existing_vias": [],
+        "clearance": 0.2,
+        "trace_width": 0.2,
+        "preferred_positions": [site],
+    }
+    pad, nrst_bcu = _u2_23_case("B.Cu")
+    assert calculate_via_position(pad, other_net_tracks=[nrst_bcu], **kwargs) == site
+    # The same track on the stub's own layer still refuses the site.
+    pad, nrst_fcu = _u2_23_case("F.Cu")
+    assert calculate_via_position(pad, other_net_tracks=[nrst_fcu], **kwargs) != site
+
+
+def test_offset_search_keeps_its_all_layer_track_test() -> None:
+    """Only the reserved site's stub is layer-filtered: the historical offset
+    search still treats a track on any layer as a stub obstacle (#6413: on
+    board 04, filtering it too put a U2.35 weld under U2's body that severed
+    U2.36's +3.3V pour)."""
+    from kicad_tools.cli.stitch_cmd import _reserved_stub_layer, calculate_via_position
+
+    kwargs: dict = {
+        "offset": 0.5,
+        "via_size": 0.3,
+        "existing_vias": [],
+        "clearance": 0.2,
+        "trace_width": 0.2,
+    }
+    pad, nrst_bcu = _u2_23_case("B.Cu")
+    _pad_f, nrst_fcu = _u2_23_case("F.Cu")
+    assert calculate_via_position(pad, other_net_tracks=[nrst_bcu], **kwargs) == (
+        calculate_via_position(pad, other_net_tracks=[nrst_fcu], **kwargs)
+    )
+    assert _reserved_stub_layer(pad) == "F.Cu"
+    # A through-hole pad's copper spans the stack: every layer still counts.
+    pad.pad_type = "thru_hole"
+    assert _reserved_stub_layer(pad) is None
