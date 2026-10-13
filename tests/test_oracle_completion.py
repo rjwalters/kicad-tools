@@ -989,3 +989,41 @@ class TestCutAttribution:
         )
         assert seen == [("+3.3V",)]
         assert b.state() == (1, 0) and res.rounds[0].banned == ("pad:GND:U2.35",)
+
+
+class TestSiteWithdrawal:
+    def test_a_weld_is_withdrawn_by_site_and_stays_withdrawn(self, tmp_path):
+        """The pad itself stays weldable: only the site that cut +3.3V is
+        banned, in this round's retry and in every later round."""
+        from kicad_tools.router.oracle_completion import avoided_sites
+
+        b = TwoNetBoard(tmp_path, 2)
+        seen: list[dict] = []
+
+        def closer(path, links, banned):
+            avoid = avoided_sites(banned)
+            seen.append(avoid)
+            gnd, _ = b.state()
+            if "U2.35" in avoid:
+                # Welded at the outward site instead: closes one link, no cut.
+                b.write(gnd - 1, 0)
+                return ClosureAttempt(
+                    applied=1,
+                    footprints={"pad:GND:U2.35": [(154.78, 87.25, 154.78, 87.25, 0.3)]},
+                    sites={"pad:GND:U2.35": [(154.78, 87.25)]},
+                )
+            b.write(gnd - 1, 1)
+            return ClosureAttempt(
+                applied=1,
+                footprints={"pad:GND:U2.35": _U2_35_WELD},
+                sites={"pad:GND:U2.35": [(152.425, 87.25)]},
+            )
+
+        res = run_oracle_completion(
+            b.path, oracle=b.oracle, closer=closer, nets={"GND", "+3.3V"}, max_rounds=2
+        )
+        assert b.state() == (0, 0) and res.stop_reason == STOP_CONVERGED
+        assert seen[0] == {}
+        assert all(s == {"U2.35": [(152.425, 87.25)]} for s in seen[1:])
+        assert res.rounds[0].banned == ("site:pad:GND:U2.35@152.4250,87.2500",)
+        assert "site:pad:GND:U2.35@152.4250,87.2500" in res.rounds[1].banned

@@ -5305,6 +5305,7 @@ def run_stitch(
     foreign_fills_yield: bool = False,
     strict_drill_overlap: bool = False,
     preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
+    avoid_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -5341,6 +5342,11 @@ def run_stitch(
             route`` reserved for that pad before signal routing.  Each pad's
             sites are tried first (see ``calculate_via_position``'s
             ``preferred_positions``); ``None`` keeps the search unchanged.
+        avoid_sites: Issue #6428 -- ``"REF.PAD"`` -> via sites a previous
+            weld of that pad used and that cut a foreign pour.  Each is held
+            as a foreign via of ``via_size`` while that pad is placed, so
+            neither its via nor its stub lands there again and the cascade
+            moves on to another candidate.  ``None`` changes nothing.
         only_pads: Issue #5785 -- when given, restrict the work list to these
             ``"REF.PAD"`` keys (the pads a KiCad ``unconnected_items`` report
             named), so the oracle completion loop welds exactly the links
@@ -5752,6 +5758,12 @@ def run_stitch(
         cross_net_stitch_vias = [v for v in placed_stitch_vias if v[3] != pad.net_number]
         eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
         eff_other_net_vias = other_net_vias + cross_net_stitch_vias
+        # Issue #6428: a site this pad's earlier weld cut a foreign pour at.
+        avoided = (avoid_sites or {}).get(f"{pad.reference}.{pad.pad_number}", ())
+        if avoided:
+            eff_other_net_vias = eff_other_net_vias + [
+                (float(x), float(y), via_size, -1) for x, y in avoided
+            ]
         # Issue #5240: index the foreign-net track pool once per pad and
         # share it across every placement strategy this pad tries.  When no
         # cross-net stitch geometry has been placed yet the pool's contents

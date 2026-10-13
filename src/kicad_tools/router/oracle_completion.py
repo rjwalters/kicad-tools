@@ -339,6 +339,30 @@ class ClosureAttempt:
     #: deliberate, opt-in relaxation (e.g. a declared-rule retry).  Every such
     #: link must be listed here (and in ``notes``) -- never closed silently.
     relaxed: list[str] = field(default_factory=list)
+    #: Issue #6428: the via sites each pad-weld key placed.  When a weld's
+    #: copper opens a link on another net the loop bans just those sites
+    #: (:func:`site_key`) so the retry welds the pad somewhere else.
+    sites: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+
+
+def site_key(key: str, x: float, y: float) -> str:
+    """Banned-key form of one via site of closer ``key`` (Issue #6428)."""
+    return f"site:{key}@{x:.4f},{y:.4f}"
+
+
+def avoided_sites(banned: Iterable[str]) -> dict[str, list[tuple[float, float]]]:
+    """``{"REF.PAD": [(x, y), ...]}`` from the :func:`site_key` entries of ``banned``."""
+    out: dict[str, list[tuple[float, float]]] = {}
+    for entry in sorted(banned):
+        if not entry.startswith("site:pad:"):
+            continue
+        key, _, pos = entry[len("site:") :].rpartition("@")
+        try:
+            x, y = (float(v) for v in pos.split(","))
+        except ValueError:
+            continue
+        out.setdefault(key.rsplit(":", 1)[-1], []).append((x, y))
+    return out
 
 
 #: ``closer(pcb_path, links, banned_keys) -> ClosureAttempt``; edits the board.
@@ -640,12 +664,15 @@ def run_oracle_completion(
     #: re-applying the same copper cannot help (the first one did not connect
     #: it), so later rounds try something else for that link.
     settled: set[str] = set()
+    #: Issue #6428: via sites whose copper opened a link on another net.  A
+    #: site is a fixed place on the board, so it stays banned in later rounds.
+    withdrawn_sites: set[str] = set()
     for rnd in range(max_rounds):
         count, errors = len(links), geo.error_count
         say(
             f"  Oracle round {rnd + 1}: {count} unconnected link(s) on {', '.join(sorted({lk.net for lk in links}))}"
         )
-        banned: set[str] = set(settled)
+        banned: set[str] = settled | withdrawn_sites
         backup = pcb_path.read_bytes()
         kept = False
         stop: str | None = None
@@ -709,7 +736,13 @@ def run_oracle_completion(
                         logger.warning("Oracle cut attribution failed: %s", exc)
                 if not set(blamed) - banned:
                     blamed = attribute_link_regressions(geo, geo_after, attempt.footprints)
-                culprits = set(blamed) - banned
+                # A weld is withdrawn by SITE: the retry may weld the pad
+                # elsewhere.  Other copper (routed links) is banned whole.
+                bans: dict[str, set[str]] = {}
+                for key in blamed:
+                    sites = attempt.sites.get(key)
+                    bans[key] = {site_key(key, x, y) for x, y in sites} if sites else {key}
+                culprits = {k for k, b in bans.items() if b - banned}
                 rise = ", ".join(f"{net} +{n}" for net, n in risen.items())
                 if not culprits:
                     say(f"    links opened ({rise}) by no attributable copper; round restored")
@@ -720,7 +753,9 @@ def run_oracle_completion(
                     f"{c}: withdrawn -- its copper opened a link on {', '.join(sorted(blamed[c]))}"
                     for c in sorted(culprits)
                 )
-                banned |= culprits
+                for c in culprits:
+                    banned |= bans[c]
+                    withdrawn_sites |= {b for b in bans[c] if b.startswith("site:")}
                 last_regression = STOP_NO_PROGRESS
                 continue
             if len(in_scope(geo_after)) >= count:
@@ -918,7 +953,7 @@ class PourLinkCloser:
 
         welded: set[str] = set()
         if pads_by_net:
-            welded = self._weld_pads(pcb_path, pads_by_net, attempt)
+            welded = self._weld_pads(pcb_path, pads_by_net, attempt, avoided_sites(banned))
         # Issue #6412: banned routes are skipped per variant inside
         # ``_route_links`` -- a withdrawn plane join must leave the link's
         # nearest-island join eligible -- so only welded links drop out here.
@@ -1226,7 +1261,11 @@ class PourLinkCloser:
         return best
 
     def _weld_pads(
-        self, pcb_path: Path, pads_by_net: dict[str, set[str]], attempt: ClosureAttempt
+        self,
+        pcb_path: Path,
+        pads_by_net: dict[str, set[str]],
+        attempt: ClosureAttempt,
+        avoid: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     ) -> set[str]:
         from kicad_tools.cli.stitch_cmd import run_stitch, trace_to_track_segments
 
@@ -1250,6 +1289,7 @@ class PourLinkCloser:
                 foreign_fills_yield=fills_yield,
                 strict_drill_overlap=True,
                 preferred_sites=self.preferred_sites,
+                avoid_sites=avoid or None,
             )
 
         force: frozenset[str] = frozenset()
@@ -1274,6 +1314,7 @@ class PourLinkCloser:
                 pad = placement.pad
                 key = f"pad:{pad.net_name}:{pad.reference}.{pad.pad_number}"
                 caps = attempt.footprints.setdefault(key, [])
+                attempt.sites.setdefault(key, []).append((placement.via_x, placement.via_y))
                 caps.append(
                     (
                         placement.via_x,
