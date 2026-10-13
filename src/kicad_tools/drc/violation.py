@@ -570,6 +570,10 @@ class DRCViolation:
     locations: list[Location] = field(default_factory=list)
     items: list[str] = field(default_factory=list)
     nets: list[str] = field(default_factory=list)
+    # kicad-cli JSON item uuids, parallel to ``items`` ("" when absent).  The
+    # clearance repairer resolves each side of a violation by uuid first
+    # (Issue #6434).
+    item_uuids: list[str] = field(default_factory=list)
 
     # Extracted numeric values (when available)
     required_value_mm: float | None = None
@@ -802,8 +806,9 @@ def extract_item_refs(items: list[str]) -> set[str]:
     """Normalize kicad-cli DRC item descriptions to a set of component refs.
 
     The kicad-cli JSON report stores each involved item as a free-text
-    description rather than a structured reference (the item ``uuid`` is not
-    retained by the parser), so waiver matching normalizes those strings to
+    description (plus a uuid, which the parser keeps in
+    :attr:`DRCViolation.item_uuids` but which is not stable across routes),
+    so waiver matching normalizes those strings to
     reference designators first (Issue #4691).  Both shapes KiCad emits are
     covered::
 

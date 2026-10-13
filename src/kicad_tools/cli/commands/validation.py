@@ -138,7 +138,7 @@ def run_place_silk_refs_command(args) -> int:
     sub_argv = [args.pcb]
     if getattr(args, "mfr", None):
         sub_argv.extend(["--mfr", args.mfr])
-    if getattr(args, "layers", 2) != 2:
+    if getattr(args, "layers", None) is not None:
         sub_argv.extend(["--layers", str(args.layers)])
     if getattr(args, "copper", 1.0) != 1.0:
         sub_argv.extend(["--copper", str(args.copper)])
@@ -203,7 +203,7 @@ def run_fix_drc_command(args) -> int:
     if getattr(args, "drc_report", None):
         sub_argv.extend(["--drc-report", args.drc_report])
     sub_argv.extend(["--mfr", _resolve_mfr(getattr(args, "mfr", None), args.pcb)])
-    if getattr(args, "layers", 2) != 2:
+    if getattr(args, "layers", None) is not None:
         sub_argv.extend(["--layers", str(args.layers)])
     if args.max_displacement != 0.5:
         sub_argv.extend(["--max-displacement", str(args.max_displacement)])

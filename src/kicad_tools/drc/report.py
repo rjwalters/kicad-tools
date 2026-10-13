@@ -450,6 +450,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
 
         locations: list[Location] = []
         items: list[str] = []
+        item_uuids: list[str] = []
         nets: list[str] = []
 
         # Parse position
@@ -466,6 +467,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
         for item_data in item.get("items", []):
             desc = item_data.get("description", "")
             items.append(desc)
+            item_uuids.append(str(item_data.get("uuid") or ""))
 
             if "pos" in item_data:
                 pos = item_data["pos"]
@@ -504,6 +506,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
             locations=locations,
             items=items,
             nets=nets,
+            item_uuids=item_uuids,
         )
         _extract_values(violation.__dict__, message)
         # Generate fix suggestions
