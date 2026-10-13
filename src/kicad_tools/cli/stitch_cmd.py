@@ -1948,21 +1948,22 @@ def max_via_reach_mm(
     return max(escape_distance, pad_radius + 2 * offset + DOGLEG_MAX_AXIAL_MM)
 
 
-def _reserved_stub_layer(pad: PadInfo) -> str | None:
-    """Layer a stub to a RESERVED site is track-checked on (Issue #6413).
+def _stub_layer(pad: PadInfo) -> str | None:
+    """Layer a stitch stub is track-checked on (Issues #6413, #6428).
 
-    Every stitch stub is emitted on ``pad.layer``, so only other-net tracks
-    on that layer can short it; ``None`` (every layer) for a through-hole pad,
-    whose copper spans the stack.  Vias, pads and fills are never filtered.
+    Every stitch stub (straight, dog-leg or multi-leg) is emitted on
+    ``pad.layer``, so only other-net tracks on that layer can short it;
+    ``None`` (every layer) for a through-hole pad, whose copper spans the
+    stack.  Vias, pads, drills and fills are never filtered, and neither is
+    the via-vs-track test (a via spans every layer).
 
-    Applied to ``preferred_positions`` only.  The historical offset search
-    keeps its all-layer track test on purpose: measured on board 04 under the
-    #6388 lattice protocol, filtering it too let a straight weld for U2.35
-    land under U2's body ahead of the outward dog-leg the search finds today.
-    That weld severed U2.36's +3.3V pour, and the oracle kept the round,
-    because its gate counts links summed over nets (17 GND -> 1 +3.3V).  A
-    reserved site was planned before routing and held free, so the stale
-    cross-layer conservatism only ever costs it.
+    #6413 applied this to reserved sites only and left the historical offset
+    search all-layer, because on board 04 the stale cross-layer conservatism
+    happened to keep U2.35's GND weld out from under U2's body, where it cut
+    U2.36's +3.3V pour while the oracle's summed-over-nets link gate kept
+    the round (17 GND -> 1 +3.3V).  Issue #6428 made that gate per-net (a
+    round may not raise any net's link count), so the layer-aware test is
+    now applied to every candidate.
     """
     if pad.pad_type != "smd" or not pad.layer:
         return None
@@ -2055,8 +2056,8 @@ def calculate_via_position(
             against other-net TRACKS on the pad's own layer (the layer it is
             emitted on), as the planner checked it -- a B.Cu track cannot
             short an F.Cu stub, and on board 04 one (NRST) refused U2.23's
-            reserved site.  The historical offsets keep the all-layer track
-            test: see :func:`_reserved_stub_layer`.
+            reserved site.  Issue #6428 extends that layer filter to the
+            historical offsets too: see :func:`_stub_layer`.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -2073,7 +2074,7 @@ def calculate_via_position(
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
-    reserved_stub_layer = _reserved_stub_layer(pad)
+    stub_layer = _stub_layer(pad)
 
     # Issue #4432: same-net fill containment gate, active only when pour
     # geometry exists on the target layer (empty -> no-op / outline fallback).
@@ -2241,13 +2242,9 @@ def calculate_via_position(
                         pad.x, pad.y, via_x, via_y, trace_half_width + clearance
                     )
                 for seg in path_track_candidates:
-                    # Issue #6413: a reserved site's stub meets only tracks
-                    # on its own layer (``box_pads`` marks reserved sites).
-                    if (
-                        box_pads
-                        and reserved_stub_layer is not None
-                        and seg.layer != reserved_stub_layer
-                    ):
+                    # Issues #6413/#6428: the stub meets only tracks on its
+                    # own layer (the layer it is emitted on).
+                    if stub_layer is not None and seg.layer != stub_layer:
                         continue
                     dist = segment_to_segment_distance(
                         pad.x,
@@ -2369,6 +2366,8 @@ def _check_dogleg_path_clearance(
     clearance: float,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    *,
+    stub_layer: str | None = None,
 ) -> bool:
     """Check if a dog-leg (L-shaped) trace path has adequate clearance.
 
@@ -2380,6 +2379,11 @@ def _check_dogleg_path_clearance(
     :class:`~kicad_tools.router.track_index.TrackSpatialIndex` over
     ``other_net_tracks``; it only narrows which segments reach the exact
     distance test below, so the verdict is unchanged.
+
+    ``stub_layer`` (Issue #6428, see :func:`_stub_layer`): the layer the
+    stub is emitted on.  When set, only other-net tracks on that layer are
+    tested; ``None`` tests tracks on every layer.  Vias, pads and fills are
+    never filtered.
 
     Returns True if path is clear, False if there's a conflict.
     """
@@ -2401,6 +2405,8 @@ def _check_dogleg_path_clearance(
                 leg_sx, leg_sy, leg_ex, leg_ey, trace_half_width + clearance
             )
         for seg in leg_track_candidates:
+            if stub_layer is not None and seg.layer != stub_layer:
+                continue
             dist = segment_to_segment_distance(
                 leg_sx,
                 leg_sy,
@@ -2721,6 +2727,7 @@ def calculate_dogleg_via_position(
                             clearance,
                             other_net_filled_polygons,
                             other_net_track_index,
+                            stub_layer=_stub_layer(pad),
                         ):
                             continue
 
@@ -2737,6 +2744,8 @@ def _check_multileg_path_clearance(
     other_net_pads: list[tuple[float, float, float, int]],
     clearance: float,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    *,
+    stub_layer: str | None = None,
 ) -> bool:
     """Check if a multi-segment trace path has adequate clearance.
 
@@ -2746,6 +2755,11 @@ def _check_multileg_path_clearance(
     :class:`~kicad_tools.router.track_index.TrackSpatialIndex` over
     ``other_net_tracks``; it only narrows which segments reach the exact
     distance test below, so the verdict is unchanged.
+
+    ``stub_layer`` (Issue #6428, see :func:`_stub_layer`): the layer the
+    stub is emitted on.  When set, only other-net tracks on that layer are
+    tested; ``None`` tests tracks on every layer.  Vias and pads are never
+    filtered.
 
     Returns True if path is clear, False if there's a conflict.
     """
@@ -2761,6 +2775,8 @@ def _check_multileg_path_clearance(
                 leg_sx, leg_sy, leg_ex, leg_ey, trace_half_width + clearance
             )
         for seg in leg_track_candidates:
+            if stub_layer is not None and seg.layer != stub_layer:
+                continue
             dist = segment_to_segment_distance(
                 leg_sx,
                 leg_sy,
@@ -3030,6 +3046,7 @@ def calculate_extended_escape_position(
                             other_net_pads,
                             clearance,
                             other_net_track_index,
+                            stub_layer=_stub_layer(pad),
                         ):
                             continue
 
@@ -3074,6 +3091,7 @@ def calculate_extended_escape_position(
                             other_net_pads,
                             clearance,
                             other_net_track_index,
+                            stub_layer=_stub_layer(pad),
                         ):
                             continue
 
@@ -3127,6 +3145,7 @@ def calculate_extended_escape_position(
                                 other_net_pads,
                                 clearance,
                                 other_net_track_index,
+                                stub_layer=_stub_layer(pad),
                             ):
                                 continue
 

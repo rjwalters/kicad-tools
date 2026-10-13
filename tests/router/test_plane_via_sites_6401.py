@@ -25,6 +25,8 @@ from argparse import Namespace
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.lattice.geometry import seg_near_polygon, seg_pt_dist
 from kicad_tools.router.lattice.obstacles import KeepoutArea, LatticeKeepoutMask
@@ -633,12 +635,13 @@ def test_stub_check_ignores_tracks_on_another_layer() -> None:
     assert calculate_via_position(pad, other_net_tracks=[nrst_fcu], **kwargs) != site
 
 
-def test_offset_search_keeps_its_all_layer_track_test() -> None:
-    """Only the reserved site's stub is layer-filtered: the historical offset
-    search still treats a track on any layer as a stub obstacle (#6413: on
-    board 04, filtering it too put a U2.35 weld under U2's body that severed
-    U2.36's +3.3V pour)."""
-    from kicad_tools.cli.stitch_cmd import _reserved_stub_layer, calculate_via_position
+def test_offset_search_track_test_is_layer_aware() -> None:
+    """Issue #6428: the historical offset search is layer-aware too.  A B.Cu
+    track cannot short the F.Cu stub, so it changes nothing; the same track
+    on F.Cu still moves the weld.  (#6413 kept this search all-layer only
+    because the oracle's summed link gate let a U2.35 weld cut U2.36's
+    +3.3V pour; the per-net gate now refuses that trade.)"""
+    from kicad_tools.cli.stitch_cmd import _stub_layer, calculate_via_position
 
     kwargs: dict = {
         "offset": 0.5,
@@ -649,10 +652,92 @@ def test_offset_search_keeps_its_all_layer_track_test() -> None:
     }
     pad, nrst_bcu = _u2_23_case("B.Cu")
     _pad_f, nrst_fcu = _u2_23_case("F.Cu")
+    on_bcu = calculate_via_position(pad, other_net_tracks=[nrst_bcu], **kwargs)
+    on_fcu = calculate_via_position(pad, other_net_tracks=[nrst_fcu], **kwargs)
+    # The B.Cu track only refuses VIA candidates (a via spans the stack); the
+    # straight stub to the site past the pin tip runs 0.16 mm from it.
+    assert on_bcu == pytest.approx((151.75, 94.8975))
+    assert on_fcu != on_bcu
+    assert _stub_layer(pad) == "F.Cu"
+    # A through-hole pad's copper spans the stack: every layer still counts.
+    pad.pad_type = "thru_hole"
+    assert _stub_layer(pad) is None
     assert calculate_via_position(pad, other_net_tracks=[nrst_bcu], **kwargs) == (
         calculate_via_position(pad, other_net_tracks=[nrst_fcu], **kwargs)
     )
-    assert _reserved_stub_layer(pad) == "F.Cu"
-    # A through-hole pad's copper spans the stack: every layer still counts.
-    pad.pad_type = "thru_hole"
-    assert _reserved_stub_layer(pad) is None
+
+
+# ---------------------------------------------------------------------------
+# 9. Issue #6428: the corridor guard counts FIXED obstacles as a flank side.
+# ---------------------------------------------------------------------------
+
+
+def _row_with_gnd_pin4(*extra: Pad, y0: float = 8.0) -> RoutingGrid:
+    """An LQFP row where only pin 4 is GND; pin 5 is the signal beside it."""
+    grid = RoutingGrid(width=20, height=20, rules=_ROUTER_RULES, layer_stack=LayerStack.two_layer())
+    for i in range(9):
+        y = y0 + 0.5 * i
+        pin = str(i + 1)
+        net, name = (0, PLANE) if pin == "4" else (i + 1, f"S{pin}")
+        grid.add_pad(_pad("U2", pin, 10.0, y, net, name, width=1.475, height=0.3))
+        grid.add_pad(_pad("U2", f"L{pin}", 4.0, y, 20 + i, f"L{pin}", width=1.475, height=0.3))
+    for pad in extra:
+        grid.add_pad(pad)
+    return grid
+
+
+def _static_sides(grid: RoutingGrid) -> dict[str, frozenset[int]]:
+    from kicad_tools.router.plane_via_sites import _SitePlanner
+
+    planner = _SitePlanner(grid, PlaneViaSiteRules(clearance=0.2, exact_pads=True), [PLANE], [])
+    return {planner.corridors[i].pad: s for i, s in planner.static_sides.items()}
+
+
+#: A foreign part's pad just past U2.5's tip, on its +y side.
+_FOREIGN = _pad("K2", "1", 11.45, 10.6, 60, "K", width=0.4, height=0.4)
+
+
+def test_pin_row_neighbours_never_count_as_a_fixed_flank() -> None:
+    """Non-regression: a pin whose only neighbours are its own row's pins
+    (signal and plane alike) has no static side, so #6401's verdicts stand."""
+    assert _static_sides(_row_with_gnd_pin4()) == {}
+    assert _static_sides(_lqfp_row_grid()) == {}
+    assert _static_sides(_flanked_pin_grid()) == {}
+
+
+def test_a_foreign_pad_on_one_side_makes_a_site_on_the_other_a_flank() -> None:
+    from kicad_tools.router.plane_via_sites import _SitePlanner
+
+    rules = PlaneViaSiteRules(clearance=0.2, exact_pads=True)
+    pin5 = _pin(_row_with_gnd_pin4(_FOREIGN), "U2", "5")
+    assert _static_sides(_row_with_gnd_pin4(_FOREIGN))["U2.5"] == frozenset({1})
+    # Premise: blind to the foreign pad, U2.4's site blocks U2.5 from -y,
+    # leaving the pin boxed between the site and K2.1.
+    with patch.object(_SitePlanner, "_static_sides", return_value=frozenset()):
+        blind = reserve_plane_via_sites(_row_with_gnd_pin4(_FOREIGN), [PLANE], rules)
+    assert _escape_blockers(blind, pin5, outward=1.0) == {-1}
+
+    result = reserve_plane_via_sites(_row_with_gnd_pin4(_FOREIGN), [PLANE], rules)
+    assert -1 not in _escape_blockers(result, pin5, outward=1.0)
+    assert {name for site in result.sites for name in site.pads} | set(result.unreserved) == {
+        "U2.4"
+    }
+
+
+def test_a_keepout_counts_as_a_fixed_flank() -> None:
+    grid = _row_with_gnd_pin4()
+    # The same spot as ``_FOREIGN``, as net-0 keep-out cells on F.Cu.
+    cells = []
+    for gx in range(int(11.2 / 0.05), int(11.7 / 0.05) + 1):
+        for gy in range(int(10.4 / 0.05), int(10.8 / 0.05) + 1):
+            cells.append((0, gx, gy))
+    grid.mark_static_keepout_cells(cells)
+    assert _static_sides(grid)["U2.5"] == frozenset({1})
+
+
+def test_the_board_edge_counts_as_a_fixed_flank() -> None:
+    """U2.1's (and U2.L1's) centreline runs 0.45 mm above the grid's lower
+    edge: the off-grid cells within reach block its -y side -- the right of
+    U2.1's +x escape, the left of U2.L1's -x one."""
+    sides = _static_sides(_row_with_gnd_pin4(y0=0.45))
+    assert sides == {"U2.1": frozenset({-1}), "U2.L1": frozenset({1})}

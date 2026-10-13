@@ -289,6 +289,8 @@ class _EscapeCorridor:
     by: float
     ux: float
     uy: float
+    #: Grid net id of the pin (Issue #6428: its own copper never flanks it).
+    net: int = 0
 
     def sides(self, points: Sequence[tuple[float, float]]) -> frozenset[int]:
         """Which side(s) of the centreline reserved copper at ``points`` is on.
@@ -399,6 +401,16 @@ class _SitePlanner:
         self.corridors: list[_EscapeCorridor] = self._build_corridors() if rules.exact_pads else []
         self.at_risk = self._corridors_at_risk(targets)
         self.corridor_sides: dict[int, frozenset[int]] = {}
+        # Issue #6428: sides FIXED obstacles (foreign pads, keep-outs, the
+        # board edge) already block, so a site on the other side flanks the
+        # pin too.  The tip margin keeps the pin's own row neighbours --
+        # whose halos reach ``grid_halo`` past the tip line -- out.
+        tip_margin = grid_halo + grid.resolution
+        self.static_sides: dict[int, frozenset[int]] = {
+            idx: sides
+            for idx, c in enumerate(self.corridors)
+            if (sides := self._static_sides(c, tip_margin))
+        }
         self.blocked_escapes: list[tuple[str, str]] = []
         self._near_cache: dict[str, list[int]] = {}
 
@@ -440,9 +452,51 @@ class _SitePlanner:
                         by=ay + uy * self.escape_len,
                         ux=ux,
                         uy=uy,
+                        net=int(p.net),
                     )
                 )
         return corridors
+
+    def _static_sides(self, c: _EscapeCorridor, margin: float) -> frozenset[int]:
+        """Sides of ``c`` a FIXED obstacle already blocks (Issue #6428).
+
+        Probes the pre-route grid on the corridor's layer within
+        ``site_reach`` of its centreline: a cell that is off the grid (the
+        board edge), or blocked and not owned by the pin's own net (a
+        foreign pad's halo, a plane pad -- rewritten to net 0 --, a
+        keep-out, edge clearance), blocks the side it lies on.
+
+        Only cells whose projection on the corridor axis lies more than
+        ``margin`` past the pin tip count: a fine-pitch pin's own row
+        neighbours sit beside the tip, within ``site_reach``, and counting
+        their halos would mark every row pin as blocked on both sides.
+        Cells on the centreline block neither side (the pin must jog
+        anyway), and a corridor fixed obstacles block on BOTH sides gets no
+        static side: its straight escape is already gone, so the guard's
+        model does not describe it.
+        """
+        grid = self.grid
+        try:
+            layer = grid.layer_to_index(c.layer.value)  # type: ignore[attr-defined]
+        except Exception:
+            return frozenset()
+        sides: set[int] = set()
+        for gx, gy in _capsule_cells(grid, c.ax, c.ay, c.bx, c.by, self.site_reach):
+            wx = grid.origin_x + gx * grid.resolution
+            wy = grid.origin_y + gy * grid.resolution
+            t = c.ux * (wx - c.ax) + c.uy * (wy - c.ay)
+            if t <= margin:
+                continue
+            if 0 <= gx < grid.cols and 0 <= gy < grid.rows:
+                if not self.blocked[layer, gy, gx] or int(self.net[layer, gy, gx]) == c.net:
+                    continue
+            offset = c.ux * (wy - c.ay) - c.uy * (wx - c.ax)
+            if abs(offset) <= 1e-9:
+                continue
+            sides.add(1 if offset > 0 else -1)
+            if len(sides) == 2:
+                return frozenset()
+        return frozenset(sides)
 
     def _corridors_at_risk(self, targets: Sequence[Pad]) -> frozenset[int]:
         """Corridors a served pad could reach from BOTH sides.
@@ -505,9 +559,19 @@ class _SitePlanner:
         return hits
 
     def _flanks(self, hits: dict[int, frozenset[int]]) -> bool:
-        """Would these hits leave some signal pin blocked from both sides?"""
+        """Would these hits leave some signal pin blocked from both sides?
+
+        A side counts as blocked by reserved copper already committed
+        (``corridor_sides``) or, Issue #6428, by a fixed obstacle
+        (``static_sides``).
+        """
         return any(
-            len(self.corridor_sides.get(idx, frozenset()) | sides) == 2
+            len(
+                self.corridor_sides.get(idx, frozenset())
+                | self.static_sides.get(idx, frozenset())
+                | sides
+            )
+            == 2
             for idx, sides in hits.items()
         )
 

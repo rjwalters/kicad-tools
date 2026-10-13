@@ -25,10 +25,12 @@ This module makes KiCad itself the authority.  The loop is:
      welded with one via placed inside both fills.
 
 3. Refill the zones and ask KiCad again.  A round is kept only when the
-   unconnected count fell **and** the error-severity DRC count did not rise;
-   otherwise the board is restored byte-for-byte.  A DRC regression is first
-   attributed to the closers whose new copper sits at the violation, those
-   closers are banned, and the round is retried without them.
+   unconnected count fell, **no net's** link count rose (Issue #6428: a weld
+   that closes GND links by cutting the +3.3V pour is a trade, not
+   progress), and the error-severity DRC count did not rise; otherwise the
+   board is restored byte-for-byte.  A DRC or link regression is first
+   attributed to the closers whose new copper sits at the violation / the new
+   link, those closers are banned, and the round is retried without them.
 4. Repeat up to ``max_rounds``, stopping early at zero links or when the
    count stops falling.
 
@@ -92,6 +94,18 @@ MAX_ISLAND_JOINS = 16
 #: reach it checks and the geometry stitch searches cannot drift apart.
 WELD_OFFSET_MM = 0.5
 WELD_ESCAPE_DISTANCE_MM = 4.0
+
+#: Issue #6428: how far (mm) from a NEW link's endpoint a closer's copper may
+#: sit and still be blamed for opening it.  A weld cuts a pour within its own
+#: reach of the welded pad, and the link KiCad then reports is anchored at
+#: pads of the cut pour, not at the weld: on board 04 the U2.35 weld that cut
+#: +3.3V left ``U2.36 <-> U2.48``, ~2.5 mm from the weld.  So this is the weld
+#: reach bound (``escape_distance``, see ``stitch_cmd.max_via_reach_mm``), not
+#: the 0.5 mm DRC-error tolerance.
+LINK_ATTRIBUTION_TOLERANCE_MM = WELD_ESCAPE_DISTANCE_MM
+#: Closers within this much (mm) of the NEAREST one to a new link's endpoint
+#: share the blame (two welds either side of a cut pin are equally suspect).
+LINK_ATTRIBUTION_SLACK_MM = 0.25
 
 #: Why the loop stopped (``OracleCompletionResult.stop_reason``).
 STOP_NOT_RUN = "oracle_not_run"  # kicad-cli absent / timed out on the first call
@@ -421,6 +435,72 @@ def attribute_regressions(
     return culprits
 
 
+def net_link_counts(geo: GeometricDRCResult) -> dict[str, int]:
+    """Unconnected links KiCad reports per net, over EVERY net (Issue #6428).
+
+    Per-net counts, never link signatures: KiCad names an arbitrary spanning
+    tree over a net's clusters (#5934), but the number of links per net is
+    reproducible.
+    """
+    counts: dict[str, int] = {}
+    for lk in links_from_violations(geo.unconnected_items):
+        counts[lk.net] = counts.get(lk.net, 0) + 1
+    return counts
+
+
+def risen_link_counts(before: GeometricDRCResult, after: GeometricDRCResult) -> dict[str, int]:
+    """``{net: increase}`` for every net whose link count ``after`` is higher."""
+    old, new = net_link_counts(before), net_link_counts(after)
+    return {net: n - old.get(net, 0) for net, n in sorted(new.items()) if n > old.get(net, 0)}
+
+
+def attribute_link_regressions(
+    before: GeometricDRCResult,
+    after: GeometricDRCResult,
+    footprints: dict[str, list[tuple[float, float, float, float, float]]],
+    tolerance: float = LINK_ATTRIBUTION_TOLERANCE_MM,
+    slack: float = LINK_ATTRIBUTION_SLACK_MM,
+) -> dict[str, set[str]]:
+    """``{closer key: {net, ...}}``: the closers blamed for links ``after`` opened.
+
+    Issue #6428.  Only nets whose link count rose are examined.  Their new
+    links are the ones absent from ``before`` (by endpoint positions); when
+    KiCad renamed the whole net's tree (#5934) and none is new by that
+    test, every link of the net is examined instead.  For each endpoint
+    that names a located item (a zone end's position is just the zone
+    outline's first corner and is skipped), the closer whose copper is
+    nearest is blamed if it lies within ``tolerance``, together with every
+    closer within ``slack`` of that nearest distance.
+    """
+    risen = risen_link_counts(before, after)
+    if not risen or not footprints:
+        return {}
+    old_keys = {lk.key for lk in links_from_violations(before.unconnected_items)}
+    after_links = links_from_violations(after.unconnected_items)
+    blamed: dict[str, set[str]] = {}
+    for net in risen:
+        on_net = [lk for lk in after_links if lk.net == net]
+        fresh = [lk for lk in on_net if lk.key not in old_keys] or on_net
+        for lk in fresh:
+            for end in (lk.a, lk.b):
+                if end.kind == "zone":
+                    continue
+                dists = {
+                    key: min(_capsule_distance(end.x, end.y, c) for c in caps)
+                    for key, caps in footprints.items()
+                    if caps
+                }
+                if not dists:
+                    continue
+                nearest = min(dists.values())
+                if nearest > tolerance:
+                    continue
+                for key, d in dists.items():
+                    if d <= min(nearest + slack, tolerance):
+                        blamed.setdefault(key, set()).add(net)
+    return blamed
+
+
 def run_oracle_completion(
     pcb_path: Path,
     *,
@@ -441,6 +521,10 @@ def run_oracle_completion(
     * the in-scope link count reaches zero (``converged``),
     * the closer places nothing (``no_closer``),
     * a round does not lower the count (``no_progress``),
+    * a round raises the link count of ANY net -- in scope or not -- and no
+      closer can be blamed for it (``no_progress``, Issue #6428; a summed
+      count would keep a round that closes 17 GND links by opening one on
+      +3.3V),
     * a round raises the error-severity DRC count and no closer can be
       blamed for it (``drc_regressed``), or
     * kicad-cli fails mid-loop (``oracle_failed``).
@@ -457,7 +541,8 @@ def run_oracle_completion(
         nets: The pour nets in scope.  Links on other nets are reported by
             KiCad but neither counted nor closed here.
         max_rounds: Round budget (``0`` disables the loop).
-        max_retries: Attribution retries per round after a DRC regression.
+        max_retries: Attribution retries per round after a DRC or per-net
+            link regression (one shared budget).
         log: Optional progress sink.
         time_left: Issue #6273.  Seconds the caller can still spend (``None``
             = unbounded).  ``kct route --timeout`` is a hard total enforced by
@@ -537,6 +622,9 @@ def run_oracle_completion(
         attempts = 0
         geo_after = geo
         round_notes: list[str] = []
+        #: The stop reason when the retry budget runs out: the kind of the
+        #: last regression the round retried after.
+        last_regression = STOP_DRC_REGRESSED
         for _ in range(1 + max_retries):
             if not affordable(attempt=True):
                 # The board holds the last kept round's bytes here: the first
@@ -572,6 +660,27 @@ def run_oracle_completion(
                     for c in sorted(culprits)
                 )
                 banned |= culprits
+                last_regression = STOP_DRC_REGRESSED
+                continue
+            # Issue #6428: per-net gate.  A round may not open a link on any
+            # net (in scope or not), however many it closes elsewhere.
+            risen = risen_link_counts(geo, geo_after)
+            if risen:
+                blamed = attribute_link_regressions(geo, geo_after, attempt.footprints)
+                culprits = set(blamed) - banned
+                pcb_path.write_bytes(backup)
+                rise = ", ".join(f"{net} +{n}" for net, n in risen.items())
+                if not culprits:
+                    say(f"    links opened ({rise}) by no attributable copper; round restored")
+                    stop = STOP_NO_PROGRESS
+                    break
+                say(f"    links opened ({rise}); retrying without {', '.join(sorted(culprits))}")
+                round_notes.extend(
+                    f"{c}: withdrawn -- its copper opened a link on {', '.join(sorted(blamed[c]))}"
+                    for c in sorted(culprits)
+                )
+                banned |= culprits
+                last_regression = STOP_NO_PROGRESS
                 continue
             if len(in_scope(geo_after)) >= count:
                 pcb_path.write_bytes(backup)
@@ -580,7 +689,7 @@ def run_oracle_completion(
             kept = True
             break
         else:
-            stop = STOP_DRC_REGRESSED
+            stop = last_regression
 
         if attempts:
             # A round that stopped before its first attempt (deadline) learned
