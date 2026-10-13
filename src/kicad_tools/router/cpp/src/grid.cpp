@@ -2042,8 +2042,37 @@ ValidationResult Grid3D::validate_route(
         // ---------------------------------------------------------------
         // 4. Same-net drill spacing (port of grid.py:1253-1317)
         //    Candidate via vs stored vias from SAME net
+        //
+        //    Issue #6464: the floor is the fab hole-to-hole minimum, not the
+        //    0.102 mm same-net via-MERGE threshold -- KiCad's
+        //    ``hole_to_hole`` rule does not exempt a same-net pair (#5673,
+        //    the search-side twin in ``route_via_geometry_clear``).  Raw
+        //    callers that pass no ``min_hole_clearance`` keep the old floor.
         // ---------------------------------------------------------------
+        const float same_net_drill_floor = min_hole_clearance >= 0
+            ? std::max(min_drill_clearance, min_hole_clearance) : min_drill_clearance;
         float drill_radius = via.drill / 2.0f;
+        // Issue #6464: the route's OWN earlier vias are not stored copper
+        // yet, so the loop below never compared a route against itself (two
+        // EN_A vias of one route 0.461 mm apart on board 05).  Coincident
+        // entries are one via projected onto several layer spans.
+        for (const auto& other : vias) {
+            if (&other == &via) break;
+            float odx = via.x - other.x;
+            float ody = via.y - other.y;
+            if (std::abs(odx) < 1e-6f && std::abs(ody) < 1e-6f) continue;
+            float clearance = std::sqrt(odx * odx + ody * ody) - drill_radius - other.drill / 2.0f;
+            if (clearance < result.min_clearance) {
+                result.min_clearance = clearance;
+            }
+            if (clearance < same_net_drill_floor - CLEARANCE_EPSILON_MM) {
+                result.valid = false;
+                result.violation_x = via.x;
+                result.violation_y = via.y;
+                result.violation_type = 6;  // drill spacing
+                return result;
+            }
+        }
         for (const auto& sv : stored_vias_) {
             if (sv.net != exclude_net) continue;
 
@@ -2060,7 +2089,7 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < min_drill_clearance - CLEARANCE_EPSILON_MM) {
+            if (clearance < same_net_drill_floor - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = via.x;
                 result.violation_y = via.y;

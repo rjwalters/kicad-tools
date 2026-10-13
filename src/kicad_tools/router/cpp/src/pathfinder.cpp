@@ -300,6 +300,35 @@ bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
                                           trace_clearance);
 }
 
+bool Pathfinder::own_path_vias_clear(const std::vector<AStarNode>& closed, int via_anc,
+                                     int x, int y) const {
+    // Issue #6464: KiCad's ``hole_to_hole`` rule does not exempt two vias of
+    // the same net (see #5673), nor two vias of the same ROUTE.  The stored-
+    // via check in ``Grid3D::route_via_geometry_clear`` only sees committed
+    // copper, so a route could drop a second via 0.461 mm drill-to-drill from
+    // its own first one (board 05, EN_A).  The floor is the same one the
+    // stored-via branch applies: ``max(min_drill_clearance, min_hole_to_hole)``.
+    if (via_anc < 0) return true;
+    const float drill = search_emit_via_drill_ > 0 ? search_emit_via_drill_ : rules_.via_drill;
+    const float floor_mm = std::max(rules_.min_drill_clearance, rules_.min_hole_to_hole);
+    const auto [wx, wy] = grid_.grid_to_world(x, y);
+    const int n = static_cast<int>(closed.size());
+    int idx = via_anc;
+    while (idx >= 0 && idx < n) {
+        const AStarNode& node = closed[idx];
+        // A via stack at the same cell (F -> In1 -> B) is one drill.
+        if (node.x != x || node.y != y) {
+            const auto [vx, vy] = grid_.grid_to_world(node.x, node.y);
+            const float gap = std::hypot(wx - vx, wy - vy) - drill;
+            if (gap < floor_mm - 1e-4f) return false;  // grid.cpp CLEARANCE_EPSILON_MM
+        }
+        const int parent = node.parent_idx;
+        if (parent < 0 || parent >= n) break;
+        idx = closed[parent].via_anc;
+    }
+    return true;
+}
+
 bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                                   bool allow_sharing, int radius_override,
                                   int partner_net, int partner_radius, int from_x, int from_y) const {
@@ -1564,6 +1593,9 @@ RouteResult Pathfinder::route(
         closed_set.insert(current_key);
 
         int current_idx = static_cast<int>(closed_list.size());
+        // Issue #6464: nearest via on this node's path (self if it is one).
+        current.via_anc = current.via_from_parent ? current_idx
+            : (current.parent_idx >= 0 ? closed_list[current.parent_idx].via_anc : -1);
         closed_list.push_back(current);
         last_nodes_explored_++;
 
@@ -1944,6 +1976,7 @@ RouteResult Pathfinder::route(
         }
 
         // Try layer change (via)
+        int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
@@ -1963,6 +1996,11 @@ RouteResult Pathfinder::route(
                 }
                 continue;
             }
+            // Issue #6464: hole-to-hole against this path's own earlier vias.
+            if (own_vias_clear < 0)
+                own_vias_clear = own_path_vias_clear(closed_list, current.via_anc,
+                                                     current.x, current.y) ? 1 : 0;
+            if (!own_vias_clear) continue;
 
             auto neighbor_key = std::make_tuple(current.x, current.y, new_layer);
             if (closed_set.count(neighbor_key)) continue;
@@ -2270,6 +2308,9 @@ RouteResult Pathfinder::run_astar_loop() {
         mark_closed(cur_idx);
 
         int current_idx = static_cast<int>(search_closed_list_.size());
+        // Issue #6464: nearest via on this node's path (self if it is one).
+        current.via_anc = current.via_from_parent ? current_idx
+            : (current.parent_idx >= 0 ? search_closed_list_[current.parent_idx].via_anc : -1);
         search_closed_list_.push_back(current);
         last_nodes_explored_++;
 
@@ -2687,6 +2728,7 @@ RouteResult Pathfinder::run_astar_loop() {
         }
 
         // Try layer change (via)
+        int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
@@ -2706,6 +2748,11 @@ RouteResult Pathfinder::run_astar_loop() {
                 }
                 continue;
             }
+            // Issue #6464: hole-to-hole against this path's own earlier vias.
+            if (own_vias_clear < 0)
+                own_vias_clear = own_path_vias_clear(search_closed_list_, current.via_anc,
+                                                     current.x, current.y) ? 1 : 0;
+            if (!own_vias_clear) continue;
 
             // Issue #3309: flat-array closed-set check on via expansion.
             const size_t via_idx = flat_index(current.x, current.y, new_layer);

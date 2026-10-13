@@ -6043,10 +6043,12 @@ class Router:
             if not is_valid:
                 return False
 
-        # Issue #1782: Validate same-net drill-to-drill spacing
+        # Issue #1782: Validate same-net drill-to-drill spacing.  Issue #6464:
+        # including this route's OWN vias, which are not in grid.routes yet,
+        # at the fab hole-to-hole floor (the validator's default).
         for via in route.vias:
             is_valid, _clearance, _location = self.grid.validate_same_net_drill_spacing(
-                via, same_net=exclude_net
+                via, same_net=exclude_net, route_vias=route.vias
             )
             if not is_valid:
                 return False

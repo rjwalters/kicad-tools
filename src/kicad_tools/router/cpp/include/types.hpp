@@ -312,7 +312,12 @@ namespace router {
 // ``long_axis`` / ``lane_half_cells`` / ``tip_lo`` / ``tip_hi`` and both A*
 // loops charge an off-centreline pad landing.  The Python side sets the new fields on every
 // pad bound, so a v51 .so (which lacks them) must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 52;
+// v53 (Issue #6464): ``AStarNode`` gained ``via_anc``; both A* loops hold a
+// via to the fab hole-to-hole floor against the route's OWN earlier vias, and
+// ``Grid3D::validate_route`` checks the route's vias pairwise and holds the
+// same-net stored-via drill check to ``min_hole_clearance``.  A v52 .so would
+// commit two same-route vias below the fab floor, so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 53;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -402,6 +407,17 @@ struct AStarNode {
     // ``int`` compare per heap operation; negligible vs the
     // surrounding heap reshuffle.
     uint64_t seq = 0;
+
+    // Issue #6464: closed-list index of the nearest ancestor-or-self node
+    // reached by a layer change (i.e. the most recent via on this node's
+    // path), or -1 when the path holds no via yet.  Assigned when the node
+    // is moved to the closed list, so walking ``via_anc`` ->
+    // ``closed[closed[via_anc].parent_idx].via_anc`` visits exactly the
+    // path's earlier vias (a handful) instead of every path node.  Lets the
+    // via expansion hold a new via to the fab hole-to-hole floor against
+    // the vias the SAME route already placed -- those are not stored copper
+    // yet, so ``Grid3D::route_via_geometry_clear`` never sees them.
+    int via_anc = -1;
 
     // Comparison for min-heap.  Issue #3144 / #3199:
     //   Primary:   lower f_score first.

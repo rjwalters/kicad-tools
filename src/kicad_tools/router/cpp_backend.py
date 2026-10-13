@@ -85,7 +85,10 @@ logger = logging.getLogger(__name__)
 # v52 (Issue #6368): ``PadBounds.centre_gx`` / ``centre_gy`` / ``long_axis``
 # -- both A* loops charge an off-centreline pad landing.  A v51 .so lacks the
 # fields.
-_REQUIRED_CPP_BUILD_VERSION = 52
+# v53 (Issue #6464): both A* loops and ``Grid3D.validate_route`` hold a via to
+# the fab hole-to-hole floor against the route's OWN earlier vias.  A v52 .so
+# commits same-route via pairs below the floor.
+_REQUIRED_CPP_BUILD_VERSION = 53
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
