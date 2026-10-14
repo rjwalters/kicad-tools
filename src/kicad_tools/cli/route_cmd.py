@@ -330,7 +330,10 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
             "[deterministic-budget] Iteration-budgeted routing enabled "
             "(Issue #3538): per-net wall-clock cutoff DISABLED, C++ A* "
             f"iteration backstop pinned to {args.max_search_iterations:,} "
-            "node expansions.  Routed output is reproducible across machines."
+            "node expansions.  Routed output is reproducible across machines "
+            "unless a later '[deterministic-budget] per-net wall clock bound' "
+            "or 'stage deadline fired' line says a wall clock bound first "
+            "(Issue #6329)."
         )
         print(
             "[deterministic-budget] Per-net iteration cap "
