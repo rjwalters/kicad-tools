@@ -7745,6 +7745,23 @@ def _add_net_status_parser(subparsers) -> None:
             "(issue #3863)."
         ),
     )
+    net_status_parser.add_argument(
+        "--crossings",
+        dest="net_status_crossings",
+        action="store_true",
+        help=(
+            "Pre-route bundle crossing report (issue #6339): bundle pin "
+            "orders, inversions per entry side, over-sized conflict sets and "
+            "interleaved hub pin columns. Read-only; honours --format json."
+        ),
+    )
+    net_status_parser.add_argument(
+        "--signal-layers",
+        dest="net_status_signal_layers",
+        type=int,
+        default=None,
+        help="Signal-layer count for the --crossings verdict (default: from board)",
+    )
     model_group = net_status_parser.add_mutually_exclusive_group()
     model_group.add_argument(
         "--strict",
