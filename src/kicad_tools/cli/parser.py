@@ -4290,7 +4290,9 @@ def _add_route_parser(subparsers) -> None:
             "Bound the stall-relief rescue's probe and victim re-land "
             "sub-searches by the per-net node-expansion cap instead of their "
             "10 s wall clock (Issue #5870). Needs an active cap "
-            "(--deterministic-budget or --per-net-iterations). Off by default "
+            "(--deterministic-budget or --per-net-iterations). Also switches "
+            "off the 60 s oscillation-escape budget and the remaining-budget "
+            "per-iteration per-net cap (Issue #6475). Off by default "
             "(#4730); use it when the route must not depend on machine load."
         ),
     )
