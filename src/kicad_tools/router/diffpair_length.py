@@ -248,6 +248,14 @@ class DiffPairLengthTracker:
         Micro vias (``is_micro``) are laser-drilled HDI features that KiCad
         does **not** promote, so they keep their actual partial span even
         when ``blind_buried_supported`` is ``False``.
+
+        Issue #6502: when ``blind_buried_supported`` is ``True`` the span is
+        the via's drilled span (``Via.drilled_layers`` when the object has
+        one), not its logical layer pair.  The router has no blind/buried
+        process and writes every non-micro via on ``F.Cu``/``B.Cu``, so a
+        router via with a partial logical pair still measures the full
+        thickness; only micro vias (and duck-typed vias without
+        ``drilled_layers``) measure a partial span.
         """
         # Issue #4007: a standard (non-micro) via on a board that does not
         # support blind/buried vias drills the full stack -- KiCad promotes
@@ -256,7 +264,9 @@ class DiffPairLengthTracker:
         if not blind_buried_supported and not getattr(via, "is_micro", False):
             return board_thickness_mm
 
-        layer_start, layer_end = via.layers
+        # Issue #6502: the drilled span -- a non-micro router via is a through
+        # barrel whatever logical transition ``layers`` records.
+        layer_start, layer_end = getattr(via, "drilled_layers", via.layers)
         idx_start = DiffPairLengthTracker._stack_position(layer_start, num_copper_layers)
         idx_end = DiffPairLengthTracker._stack_position(layer_end, num_copper_layers)
         delta = abs(idx_start - idx_end)

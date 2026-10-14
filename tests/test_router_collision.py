@@ -562,6 +562,7 @@ class TestVectorCollisionCheckerForeignVia:
             drill=0.3,
             diameter=0.6,
             layers=(Layer.F_CU, Layer.F_CU),  # F.Cu-only "blind" via
+            is_micro=True,  # Issue #6502: only a micro via keeps a partial barrel
             net=2,
         )
         route = _make_route_with_via(net=2, via=via)

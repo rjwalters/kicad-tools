@@ -189,7 +189,13 @@ def test_tree_via_goals_respect_physical_layer_span(span):
     cells = set()
     negotiated._collect_route_cells(
         Route(
-            net=1, net_name="N", vias=[Via(x=2, y=2, diameter=0.6, drill=0.3, layers=span, net=1)]
+            net=1,
+            net_name="N",
+            vias=[
+                # Issue #6502: a partial span is a (micro) blind barrel; a
+                # standard via is drilled through whatever ``layers`` says.
+                Via(x=2, y=2, diameter=0.6, drill=0.3, layers=span, net=1, is_micro=True)
+            ],
         ),
         cells,
     )

@@ -929,7 +929,8 @@ def _via_stack_span(via: Via, num_copper_layers: int) -> int:
     ``diffpair_length_skew`` checker itself uses, so the constructor and the
     checker can never drift apart on what a via's drilled span is.
     """
-    layer_start, layer_end = via.layers
+    # Issue #6502: the drilled span, not the logical layer transition.
+    layer_start, layer_end = via.drilled_layers
     return abs(
         DiffPairLengthTracker._stack_position(layer_start, num_copper_layers)
         - DiffPairLengthTracker._stack_position(layer_end, num_copper_layers)

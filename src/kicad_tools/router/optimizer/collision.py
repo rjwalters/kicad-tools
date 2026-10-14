@@ -219,9 +219,12 @@ def _via_spans_layer(grid: RoutingGrid, via: Any, layer_idx: int) -> bool:
     now delegates here) so the grid checker's own exact pass applies the same
     layer-span rule rather than a second transcription of it.
     """
+    # Issue #6502: the drilled barrel.  A non-micro via is a through via
+    # whatever logical transition ``via.layers`` records.
     try:
-        start_idx = grid.layer_to_index(via.layers[0].value)
-        end_idx = grid.layer_to_index(via.layers[1].value)
+        drilled_start, drilled_end = via.drilled_layers
+        start_idx = grid.layer_to_index(drilled_start.value)
+        end_idx = grid.layer_to_index(drilled_end.value)
     except Exception:
         return True
     lo, hi = (start_idx, end_idx) if start_idx <= end_idx else (end_idx, start_idx)

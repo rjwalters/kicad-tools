@@ -292,6 +292,7 @@ class TestViaLengthPolicy:
                     drill=0.2,
                     diameter=0.45,
                     layers=(CopperLayer.F_CU, CopperLayer.IN1_CU),
+                    is_micro=True,  # Issue #6502: only micro vias are blind
                     net=1,
                     net_name="USB_D+",
                 )
