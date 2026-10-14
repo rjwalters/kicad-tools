@@ -86,3 +86,54 @@ def test_declines_without_real_planes() -> None:
 
     checker = GridCollisionChecker(_Double())  # type: ignore[arg-type]
     assert checker._active_blocked_cells([(0, 0)], 0, 1) is None
+
+
+def _raster_only_grid(rng: random.Random):
+    """``_grid()`` plus cells painted straight into the planes.
+
+    The painted cells carry a foreign net with ``usage_count`` 1 or 2 but no
+    backing route, so ``_soft_cell_is_accountable_route_copper`` cannot
+    vouch for them and the ``ignore_overflow`` / ``usage > 1`` branch alone
+    decides the verdict.  Obstacle / pad flags are mixed in as well.
+    """
+    grid = _grid()
+    layer_idx = grid.layer_to_index(Layer.F_CU.value)
+    _, rows, cols = grid._blocked.shape
+    for _ in range(rng.randint(20, 60)):
+        y, x = rng.randrange(rows), rng.randrange(cols)
+        grid._blocked[layer_idx, y, x] = True
+        grid._net[layer_idx, y, x] = rng.choice((1, 2, 3, 7))
+        grid._usage_count[layer_idx, y, x] = rng.choice((1, 2))
+        grid._is_obstacle[layer_idx, y, x] = rng.random() < 0.15
+        grid._pad_blocked[layer_idx, y, x] = rng.random() < 0.15
+    grid.bump_occupancy_generation()
+    return grid
+
+
+@pytest.mark.parametrize("ignore_overflow", [False, True])
+def test_verdicts_match_on_raster_only_overflow_cells(
+    ignore_overflow: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raster-only foreign cells with usage 1/2 exercise the overflow branch.
+
+    Under ``ignore_overflow=True`` a usage-1 cell must block and a usage-2
+    cell must not; a fast path that mis-thresholds ``usage`` diverges here.
+    """
+    rng = random.Random(56170 + int(ignore_overflow))
+    verdicts = {True: 0, False: 0}
+    for _ in range(12):
+        grid = _raster_only_grid(rng)
+        fast = GridCollisionChecker(grid, ignore_overflow=ignore_overflow)
+        slow = GridCollisionChecker(grid, ignore_overflow=ignore_overflow)
+        _legacy(slow, monkeypatch)
+        for _ in range(150):
+            x1, y1, x2, y2 = (rng.uniform(-0.5, 12.5) for _ in range(4))
+            if rng.random() < 0.2:
+                x2, y2 = x1, y1
+            width = rng.choice((0.1, 0.2, 0.4))
+            net = rng.choice((0, 1, 2, 3, 7, 99))
+            expected = slow.path_is_clear(x1, y1, x2, y2, Layer.F_CU, width, net)
+            got = fast.path_is_clear(x1, y1, x2, y2, Layer.F_CU, width, net)
+            assert got is expected, (ignore_overflow, x1, y1, x2, y2, width, net)
+            verdicts[expected] += 1
+    assert verdicts[True] and verdicts[False], verdicts
