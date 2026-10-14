@@ -241,7 +241,9 @@ public:
         const std::vector<int>& routable_layers,
         const std::vector<uint8_t>& corridor_bitset,
         int max_iterations_budget,
-        double timeout_seconds);
+        double timeout_seconds,
+        bool p_goal_any_layer,
+        bool n_goal_any_layer);
 
     // Issue #5410: public probes over the two blocked predicates the dynamic-
     // halo refinement changed.  The joint-state search is a single opaque

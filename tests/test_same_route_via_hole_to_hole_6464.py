@@ -25,6 +25,7 @@ from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_availa
 from kicad_tools.router.diffpair_routing import CoupledPathfinder, CoupledState, GridPos
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
+from kicad_tools.router.observability import validate_net_connectivity
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
@@ -313,6 +314,7 @@ def _coupled_fixture(pitch: float, height: float, use_cpp: bool, b_wall: float |
         grid=grid, rules=rules, target_spacing_cells=cells, min_spacing_cells=cells
     )
     pf._use_cpp_coupled = use_cpp
+    pf.fixture_pads = pads  # Issue #6499: the connectivity oracle needs them
     result = pf.route_coupled(*pads, max_iterations_budget=200000)
     assert pf.last_coupled_backend == ("cpp" if use_cpp else "python")
     return pf, result
@@ -358,8 +360,19 @@ def test_coupled_search_tight_pair_has_no_via_pair_below_the_floor(use_cpp):
     assert all(g >= FLOOR - 1e-4 for g in cross), cross
     # What the search does find: the rails stagger inside the departure zone
     # so the two drills sit on a diagonal.
-    assert _via_cells(result[0]) == [(1.3, 1.2)]
-    assert _via_cells(result[1]) == [(1.7, 1.8)]
+    # Issue #6499: the pair comes back up to the F.Cu SMD goal pads.  It used
+    # to stop on B.Cu under them with one via per rail (P [(1.3, 1.2)],
+    # N [(1.7, 1.8)]), an open on both nets.
+    assert _via_cells(result[0]) == [(1.7, 1.2), (5.0, 1.2)]
+    assert _via_cells(result[1]) == [(1.3, 1.8), (4.6, 1.8)]
+    p_start, p_end, n_start, n_end = (
+        pf.fixture_pads[0],
+        pf.fixture_pads[1],
+        pf.fixture_pads[2],
+        pf.fixture_pads[3],
+    )
+    conn = validate_net_connectivity(list(result), {1: [p_start, p_end], 2: [n_start, n_end]})
+    assert conn[1]["connected"] and conn[2]["connected"], conn
 
 
 @pytest.mark.parametrize("use_cpp", COUPLED_BACKENDS)
