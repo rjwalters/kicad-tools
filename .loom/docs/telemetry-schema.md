@@ -840,7 +840,7 @@ by `sweep_id`, or could not be answered at all.
 
 | Field | Type | Source | Notes |
 |---|---|---|---|
-| `failure_class` | string | The paired `sweep_outcomes::OutcomeRecord`'s own classification for the same terminal transition: `death_class` when the pre-flight classifier derived one (`preflight-token-selection-failed`, `preflight-no-cli-start`, …), otherwise `crash_classification` (`account-exhausted:model-credits-exhausted`, `no-usable-account`, …). | Copied at emit time in the same function that writes the sibling record — never a post-hoc joiner. Lets a consumer separate real build failures from sub-60s spawn deaths from this journal alone. The sibling record still carries both classifier fields separately; this is the single most canonical label, not a replacement. Omitted entirely when nothing classified the transition — including on every success. |
+| `failure_class` | string | The paired `sweep_outcomes::OutcomeRecord`'s own classification for the same terminal transition: `death_class` when the pre-flight classifier derived one (`preflight-token-selection-failed`, `preflight-no-cli-start`, …), otherwise `crash_classification` (`account-exhausted:model-credits-exhausted`, `no-usable-account`, …). | Copied at emit time in the same function that writes the sibling record — never a post-hoc joiner. Lets a consumer separate real build failures from sub-60s spawn deaths from this journal alone. The sibling record still carries both classifier fields separately; this is the single most canonical label, not a replacement. When nothing classified the transition it is omitted on a success, and on a reported `failure` it is `unclassified:no-class` (#11854) — a `failure` never goes out without one. |
 | `no_phase_cause` | object `{ "exit": string, "last_step": string, "reason": string }` | Issue #10642. Present **only** when `failure_class` is the synthesized `unclassified:no-phase-signal`. `exit` is the orchestrator's exit code as a decimal string, or `none_observed`; `last_step` is the last checkpoint phase (`curator`…`merge`, else `other`), or — with none — `cli_started` / `pre_cli` from this dispatch's log, or `none` when the log could not be read; `reason` is one of `killed_or_exit_unobserved`, `clean_exit_without_checkpoint`, `nonzero_exit_without_checkpoint`, `died_before_cli_start`, `log_unreadable`. | Closed vocabularies, so each field can be grouped on. Also emitted as `loom.no_phase.exit` / `loom.no_phase.last_step` / `loom.no_phase.reason` on the `loom.sweep` span and the `sweep.outcome` OTLP log record. Additive; no `schema_version` bump. The same class is counted toward the PR-less retry hold from this journal (see `daemon-reference.md`, "Phaseless deaths have a durable floor"). |
 | `models_used` | string array | The distinct `model` ids in `tokens_by_model`, sorted and deduped. | The top-level "did this sweep run more than one model?" signal. Since #9465 `model` names the **dominant** model that actually ran (the largest input+output row in `tokens_by_model`, dispatched model as fallback), so a sweep that escalated to `claude-opus-5` through the Doctor ladder reports `model: "claude-opus-5"` with `config["arm"]` still carrying the dispatch-time arm — `models_used` is what shows that the *earlier* phases ran something else. Inherits `tokens_by_model`'s contract exactly: omitted (never `[]`) when no attributable transcript was found. |
 | `doctor_cycles` | integer | **The forge label timeline** of the PR named by this record's own `pr_number` (Issue #8222 — re-sourced; the #8056 shipment counted sampled checkpoint markers instead): one cycle per `loom:changes-requested` arrival that a later `loom:review-requested` arrival closed the loop on. | A rejection nobody handed back (the sweep hit the Doctor-cycle cap, or died) is **not** a cycle. Because the label events are durable forge state rather than a ~30s sample, a cycle that opens and closes between two reaper ticks is still counted: this is a certified count, **not** the lower-bound proxy it was under #8056. `0` means "the timeline was read and no Doctor cycle completed"; an **absent** key means the timeline was not read at all. |
@@ -983,7 +983,9 @@ the signal space) and on assembled records in
    overwritten by a synthesized one, and the `unclassified:` prefix is what
    keeps the two tellable apart. Phase names in a synthesized label are folded
    to the closed `curator|builder|judge|doctor|merge|other` vocabulary, so the
-   cardinality stays bounded.
+   cardinality stays bounded. Since #11854 every reported `failure` carries a
+   class whatever its disposition (`landed`, `curator_closed`, …): one no
+   classifier labelled gets `unclassified:no-class`.
 
 **Derived, not newly instrumented.** The classifier is a pure function of
 signals this record already carries — `result`, `pr_number`, `phase_durations`,
@@ -1696,6 +1698,10 @@ other three into `error`. The exported `backoff` and `error` are net of them,
 so each candidate is counted under exactly one reason. There is no
 `worktree_locked` reason: the registry's dispatch path has no worktree lock
 (the sweep child creates its worktree).
+`loom.dispatch.pr_open_prefiltered` (#11858) is also a delta `Sum`: the
+subset of `decisions{reason=pr_open}` the open-PR pre-filter skipped from its
+listing with no `dispatch()` attempt (and so no admission span). The rest of
+`pr_open` are refusals `dispatch()` made itself. Emitted only when non-zero.
 `loom.dispatch.slot_turnaround` (seconds) and `.samples`,
 `loom.dispatch.idle_slot_seconds` (slot-seconds), and
 `loom.forge.stage_dwell` (seconds) and `.samples` are also delta `Sum`s; see
@@ -1708,6 +1714,7 @@ Every other name is a **`Gauge`**:
 | Metric | Unit | Cadence |
 |---|---|---|
 | `loom.dispatch.candidates`, `loom.dispatch.max_concurrent` | count | every work-finder tick |
+| `loom.dispatch.cap_term` (`kind` = `configured`/`disk`/`ram`, #11858) | count | every multi-workspace tick; a headroom term that was not measured is absent |
 | `loom.queue.oldest_wait` (`state` = `ready`/`blocked`) | seconds | every multi-workspace work-finder tick, only for a state with a waiting issue |
 | `loom.queue.starved` (`state` = `ready`/`blocked`) | count | every multi-workspace tick, both states, `0` included |
 | `loom.queue.starved.by_reason` (`reason` = queue disposition) | count | every multi-workspace tick, non-zero reasons only |
@@ -1718,6 +1725,7 @@ Every other name is a **`Gauge`**:
 | `loom.queue.issues` | count | every work-finder tick |
 | `loom.queue.listing_failed_repos` | count | every work-finder tick |
 | `loom.queue.listing_incomplete_repos` | count | every work-finder tick |
+| `loom.queue.already_landed` (`reason` = `forge_closed`/`forge_closed_not_planned`/`journal_landed`/`unknown`, #11858) | count | every work-finder tick, `0` included |
 | `loom.dispatch.idle_slots` | count | every work-finder tick with an occupancy reading |
 | `loom.dispatch.busy_slots` (`role`), `loom.dispatch.role_max_concurrent`, `loom.dispatch.role_idle_slots` | count | every work-finder tick |
 | `loom.forge.stage_items` (`state`, `repo`; see below for the states) | count | `host.health` interval |
@@ -1733,8 +1741,15 @@ listing failed on that tick; when it is non-zero, the depth is incomplete, not
 low. `loom.queue.listing_incomplete_repos` (#11139) counts the repos whose
 listing came back partial (a later page failed, the page cap, a mid-walk
 change): their rows are counted, but not all of them. The depth is whole only
-when both are `0`. Issue numbers and repos are never labels. The per-issue rows travel in
+when both are `0`. `loom.queue.already_landed` (#11858) splits the
+`already_landed` rows by the landed guard's evidence (the row's `detail`), so
+the `forge_closed` / `journal_landed` split is measurable in SigNoz. Issue numbers and repos are never labels. The per-issue rows travel in
 `queue.snapshot`.
+
+`loom.dispatch.cap_term` (#11858) carries the terms `loom.dispatch.max_concurrent`
+is the minimum of; the tick span names the binding one
+(`loom.dispatch.cap_limiter`), so a drop in the cap says whether disk, RAM or
+the configured value did it.
 
 Quota burn and pool state (Issues #8857, #8930, `observability/ops/quota.rs`), all on
 the 5-minute snapshot cadence:
@@ -1934,8 +1949,10 @@ id and the tick span as its parent. Its attributes are `loom.issue`,
 `loom.dispatch.admission_result` (`dispatched`, `in_flight`, `refused`,
 `error`) and `loom.dispatch.reason` (the `loom.dispatch.decisions` reason it
 was counted under), plus `loom.repo`/`loom.repo.visibility` (Issue #9222) when
-the admitting workspace's forge slug has already been resolved by the
-collector — omitted, never a local path, on a cache miss — and the candidate's
+the admitting workspace's forge slug is known: the collector's resolution, or
+before its first pass the checkout's `origin` remote (#11858, `private` until
+the visibility is cached) — omitted, never a local path, when neither names a
+GitHub repo — and the candidate's
 queue position (Issue #9669): `loom.queue.candidate_rank` (1-indexed position
 in the tick's shaped pass-2 candidate order) and `loom.queue.total_candidates`
 (that order's length), present only when the tick recorded a plan order naming
@@ -1944,6 +1961,16 @@ made inside `dispatch()` (since #8865 only when the open-PR listing could not
 be read, or on a non-finder route) in a locked repo also carries that repo's
 `lockout.*` weight (Issue #9674; see the disposition span's table below). Its status is
 `error` only for `error`.
+
+The tick span also carries (#11858, `observability/ops/dispatch_facts.rs`):
+`loom.dispatch.halted_repos`, each repo the work finder holds with its cause
+(`owner/repo=main_red,owner/b=maintain_only`, sorted, cut at a whole entry
+within 256 characters; absent when nothing is held), so a hold names its repo;
+`loom.dispatch.cap_limiter` (`configured`, `disk` or `ram`: the term that binds
+`loom.dispatch.max_concurrent`) with the terms `loom.dispatch.cap_configured`,
+`loom.dispatch.cap_disk` and `loom.dispatch.cap_ram` (each absent when not
+measured); and `loom.dispatch.pr_open_prefiltered`, the open-PR skips the
+pre-filter made with no admission span.
 
 #### `loom.dispatch.disposition` (Issue #9222): per-issue "why is it waiting"
 
@@ -2704,7 +2731,7 @@ Each `repos[]` entry:
 | `repo` | string | forge `owner/repo`, lowercased, never a local path |
 | `visibility` | `public` / `private` | missing or unknown decodes to `private` |
 | `census` | object, optional | `{open, by_stage?}`: distinct open PRs under a Loom review label, with `by_stage` keys `review_wait` / `doctor` / `merge_wait` / `merge_hold` / `held` (labels that name no single stage). **Absent means unknown** (listing incomplete or not read), never zero. Open PRs with no review label are not counted |
-| `main_ci` | `green` / `red` / `unknown`, optional | this repo's `main` CI status from the host's main-health gate: `red` = a verified-red run halted dispatch, `green` = the gate completed a green run for this repo, `unknown` = the gate holds no verdict for it: the gate is not enabled for the repo (`autonomous.mainHealthGate.enabled` is off by default, or the repo has no usable `buildGate` block), it has not completed a run since the daemon started, or its last tick could not evaluate. `unknown` is therefore not a statement about CI; a host that does not run the gate reports `unknown` for every repo (#11565). Per repo, never per host. Additive on `fleet-state/v1`; absent from older emitters. A change is a delta naming the repo |
+| `main_ci` | `green` / `red` / `unknown`, optional | this repo's `main` CI status from the host's main-health gate: `red` = a verified-red run halted dispatch, `green` = the gate completed a green run for this repo, `unknown` = the gate holds no verdict for it: the gate is not enabled for the repo (`autonomous.mainHealthGate.enabled` is off by default, or the repo has no usable `buildGate` block), it has not completed a run since the daemon started, or its last tick could not evaluate. `unknown` is therefore not a statement about CI; a host that does not run the gate reports `unknown` for every repo (#11565). A repo the work finder's last tick holds `main_red` (or `ci_billing`) reads `red` whatever the gate state of the collector's root said: the collector keeps one root per repo, which need not be the root the gate halted (#11858). Per repo, never per host. Additive on `fleet-state/v1`; absent from older emitters. A change is a delta naming the repo |
 | `halt` | object, optional | this host's work finder holds the **whole repo** (#11564): `{reason, since, since_lower_bound?}`, present **exactly** when its last tick held the repo, whether or not the repo has ready rows. See [Repo halts and eligible-at](#repo-halts-and-eligible-at). Additive on `fleet-state/v1`; absent from older emitters and on every repo before the host's first work-finder tick |
 | `in_flight`, `cap`, `deferred_repo_cap` | integer, integer or `null`, integer; optional | this host's per-repo dispatch limits from the work finder's last tick (#11606); see [Repo dispatch limits](#repo-dispatch-limits). All three are present together or all absent. Additive on `fleet-state/v1`; absent from older emitters and for a repo the tick did not cover |
 | `queue_depth` | integer, optional | `ready_wait` items of this repo waiting in the dispatch queue now — the depth of the queue the work finder read this tick, the same source `ready_wait` rows come from (#11645); see [Repo queue flow](#repo-queue-flow). Set only when the repo's ready listing was read whole this tick (`ready_complete: true`); **absent = unknown** (partial/failed listing, no tick, older emitter), never zero. Additive on `fleet-state/v1` |
@@ -3759,7 +3786,10 @@ Doctor fixed, keeps `failure`, so `landed` + `failure` still names the PRs
 that needed rework or did not make it. The collector's live path reads no
 Judge verdicts, so its `landed` failures stay `failure`. `failure_class` keeps
 what the classifier saw, the paired `sweep.completed` keeps the process
-result, and the opt-in issue write-back still keys on the process result.
+result, and the opt-in issue write-back still keys on the process result. A
+`landed` failure no classifier labelled carries `unclassified:no-class`
+(#11854); it is added after this decision, so it never turns a clean landing
+into a `failure`.
 
 An *unobservable* exit status (a reconstructed entry reaped via `kill(pid, 0)`,
 which yields no code) is deliberately a `failure`, not a `success`: absence of
@@ -3795,12 +3825,15 @@ tick's existing blocking task, costs one local `git remote get-url origin`, the
 transcripts (folding token usage and forge actions together rather than reading
 each file twice).
 
-**Not exported.** This journal is local-durability only today: the
-observability backfill path (`observability::backfill`) reads the
-`sweep.outcome` journal, so no `role_tick.outcome` record reaches the Phase-2
-backend or the dashboard yet. The OTLP mapping does carry an arm for the kind
-(as a log record, `Info` for every skip class) so an operator running that
-exporter is not silently missing it.
+**Exported over OTLP (#11858).** Every record is also offered to the OTLP
+exporters, joined to the tick's `loom.role_attempt` trace when the tick
+launched, so a tick that never spawned an agent (pool exhausted, runtime
+rejected, queue empty) is visible in SigNoz, not only the Judge/Doctor
+`skipped_queue_empty` rows. The exported copy carries `loom.repo` only as a
+forge `owner/repo` (`repo_unresolved` otherwise, never the journal's local-path
+fallback), and never `detail`. The journal stays the local copy; the native
+backfill path (`observability::backfill`) still reads only the
+`sweep.outcome` journal.
 
 ### Local inspection: `loom-daemon sweep-outcomes`
 

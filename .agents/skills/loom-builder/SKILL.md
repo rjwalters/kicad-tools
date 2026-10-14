@@ -243,10 +243,11 @@ Check for an argument passed via the slash command:
 **Arguments**: `$ARGUMENTS`
 
 If a number is provided (e.g., `/builder 42`):
-1. Treat that number as the target **issue** to work on
-2. **Skip** the "Finding Work" section entirely
-3. Claim the issue: `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"`
+1. Treat that number as the target **issue** to work on; **skip** "Finding Work"
+2. **Guard before any write** (#11863): `loom-daemon forge check-claim <number>`. Exit `1`: claim. Exit `0` prints a token: `TARGET_IS_PR` (Builder is an issue role, #9929), `CLOSED`, `FROZEN` or `OPEN_PR` → refuse, writing nothing. `BUILDING` / `LEASE_ALREADY_HELD` / `BRANCH_EXISTS` → refuse unless your invoker holds this claim (`LOOM_SWEEP_CLAIM_OWNED` names the number, or your brief says `This /loom:sweep pre-flighted #<number>`) or the operator explicitly told you to resume or force this claim (e.g. their own crashed run): that overrides these three, as `--force-claim` does, never the four above. Any other exit is not an all-clear: stop. A hard-excluded label (Label Workflow) refuses too
+3. Claim the issue: `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"` (`worktree.sh` leases it)
 4. Proceed directly to implementation
+5. End with the outcome line from `.loom/docs/targeted-role-invocation.md`: `LOOM_STEP_OUTCOME role=builder target=<n> class=<verdict|noop|refused|failed> reason=<token>`
 
 If no argument is provided, use the normal "Finding Work" workflow below.
 
@@ -360,50 +361,13 @@ workflow) that require maintainer approval before being worked on.
 
 ## Exception: Explicit User Instructions
 
-**User commands override the label-based state machine.**
+**User commands override the label-based state machine.** When the user names an issue ("work on issue 592 as builder", "implement issue 342", "fix bug 234"):
 
-When the user explicitly instructs you to work on a specific issue or PR by number:
+1. **Proceed immediately**: skip the label checks (e.g. `loom:curated` without `loom:issue`); the instruction is the approval
+2. **Claim**: add `loom:building` and comment "Starting work on this issue per user request"
+3. **Work and finish normally**: `./.loom/scripts/worktree.sh 592`, implement, then a PR with `loom:review-requested` (builder-pr.md § "Creating the PR")
 
-```bash
-# Examples of explicit user instructions
-"work on issue 592 as builder"
-"take up issue 592 as a builder"
-"implement issue 342"
-"fix bug 234"
-```
-
-**Behavior**:
-1. **Proceed immediately** — skip label checks
-2. **Interpret as approval** — user instruction = implicit approval
-3. **Apply working label** — add `loom:building`
-4. **Document override** — comment: "Working on this per user request"
-5. **Follow normal completion** — apply end-state labels
-
-**Example**:
-```bash
-# User says: "work on issue 592 as builder"
-# Issue has: loom:curated (not loom:issue)
-
-# Proceed immediately
-gh issue edit 592 --add-label "loom:building"
-./.loom/scripts/post-comment.sh 592 --body "Starting work on this issue per user request"
-
-# Create worktree and implement
-./.loom/scripts/worktree.sh 592
-# ... do the work ...
-
-# Complete normally with a PR — the canonical structured body template
-# (builder-pr.md § "Creating the PR") with loom:review-requested at creation.
-```
-
-**Why This Matters**: users may prioritize work outside the normal flow, test
-workflows on specific issues, or override Curator/Guide triage decisions —
-flexibility matters in manual orchestration mode.
-
-**When NOT to Override**:
-- When user says "find work" or "look for issues" -> Use label-based workflow
-- When running autonomously -> Always use label-based workflow
-- When user doesn't specify an issue/PR number -> Use label-based workflow
+Not an override: "find work" / "look for issues", no issue number, or an autonomous run. Use the label-based workflow.
 
 ## Worktree Management
 

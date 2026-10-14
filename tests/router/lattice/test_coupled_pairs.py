@@ -1271,3 +1271,204 @@ def test_tap_chain_retry_pairs_selection() -> None:
     }
     got = _lattice_tap_chain_retry_pairs(coupled, outcomes, {"A", "B", "C", "E"})
     assert got == frozenset({"A"})
+
+
+# ---------------------------------------------------------------------------
+# Issue #6550: the retry's keep rule scores every pair, and the discard path
+# restores the first negotiation exactly
+# ---------------------------------------------------------------------------
+
+
+def _retry_stub(after_b: str, failed_after: int = 0):
+    """Duck-typed ``self``/``pf``/``negotiate`` around ``_lattice_tap_chain_retry``.
+
+    Pair A's trunk declined ``pair-no-path`` and is retried as a two-segment
+    tap chain that couples on both segments; pair B (not retried, same
+    single-segment chain in both runs) was ``coupled`` first and comes back
+    as ``after_b``.  The unrouted count is 0 before and ``failed_after`` after.
+    """
+    from types import SimpleNamespace
+
+    def pc(key, name):
+        return SimpleNamespace(key=key, pair_name=name)
+
+    first_coupled = [pc(("pair", 1, 2), "A"), pc(("pair", 3, 4), "B")]
+    retry_coupled = [
+        pc(("pair", 1, 2, 0), "A"),
+        pc(("pair", 1, 2, 1), "A"),
+        pc(("pair", 3, 4), "B"),
+    ]
+    first_outcomes = {
+        ("pair", 1, 2): "uncoupled-fallback:pair-no-path",
+        ("pair", 3, 4): "coupled",
+    }
+    first_failures: dict = {}
+    first_stats = SimpleNamespace(deadline_hit=False, name="first")
+    pf = SimpleNamespace(
+        failure_reasons=first_failures,
+        pair_outcomes=first_outcomes,
+        class_pad_repair_stats="first-repair",
+        _class_pad_growth={},
+        _lattice="first-lattice",
+        _obstacles="first-obstacles",
+    )
+    router = SimpleNamespace(
+        _lattice_pair_outcomes={"A": "uncoupled-fallback:pair-no-path", "B": "coupled"},
+        _lattice_pair_hops="first-hops",
+        _lattice_tap_chain_pairs={"A"},
+        _lattice_connection_endpoints="first-endpoints",
+    )
+    router._lattice_netset_connections = lambda retry: (retry_coupled, ["conns"])
+
+    def negotiate(connections, coupled):
+        # ``route_netset`` reassigns (never mutates) these two.
+        pf.pair_outcomes = {
+            ("pair", 1, 2, 0): "coupled",
+            ("pair", 1, 2, 1): "coupled",
+            ("pair", 3, 4): after_b,
+        }
+        pf.failure_reasons = dict.fromkeys(range(failed_after), "x")
+        pf.class_pad_repair_stats = "retry-repair"
+        pf._lattice = "retry-lattice"
+        router._lattice_pair_outcomes = {"A": "coupled", "B": "?"}
+        router._lattice_pair_hops = "retry-hops"
+        router._lattice_connection_endpoints = "retry-endpoints"
+        return {"retry": 1}, SimpleNamespace(deadline_hit=False, name="retry")
+
+    first = ({"first": 1}, first_stats, first_coupled)
+    return router, pf, negotiate, first
+
+
+def test_tap_chain_retry_discarded_when_another_pair_loses_coupling(capsys) -> None:
+    """Gap 1 of the #6542 review: the retried pair improves (0/1 -> 2/2) and
+    the unrouted count holds, but pair B falls from coupled to the uncoupled
+    fallback (still "routed", #6373) -- the retry must be discarded."""
+    from kicad_tools.router.core import Autorouter
+
+    router, pf, negotiate, first = _retry_stub("uncoupled-fallback:pair-no-path")
+    got = Autorouter._lattice_tap_chain_retry(router, pf, negotiate, frozenset({"A"}), first)
+    out = capsys.readouterr().out
+    assert got == first
+    assert got[1].name == "first"
+    assert (
+        "(A): discarded (coupled segments 0 -> 1, unrouted connections 0 -> 0, "
+        "regressed: B 1/1 -> 0/1; issue #6535)" in out
+    ), out
+    # Every piece of saved state is back.
+    assert router._lattice_pair_outcomes == {"A": "uncoupled-fallback:pair-no-path", "B": "coupled"}
+    assert router._lattice_pair_hops == "first-hops"
+    assert router._lattice_connection_endpoints == "first-endpoints"
+    assert pf.pair_outcomes[("pair", 3, 4)] == "coupled"
+    assert pf.class_pad_repair_stats == "first-repair"
+    assert pf._lattice == "first-lattice"
+
+
+def test_tap_chain_retry_kept_when_no_other_pair_regresses(capsys) -> None:
+    """Control for the test above: same setup, pair B stays coupled -> kept,
+    and the log line is the pre-#6550 one (no ``regressed:`` suffix)."""
+    from kicad_tools.router.core import Autorouter
+
+    router, pf, negotiate, first = _retry_stub("coupled")
+    got = Autorouter._lattice_tap_chain_retry(router, pf, negotiate, frozenset({"A"}), first)
+    out = capsys.readouterr().out
+    assert got[1].name == "retry"
+    assert "(A): kept (coupled segments 0 -> 1, unrouted connections 0 -> 0; issue #6535)" in out, (
+        out
+    )
+    assert pf._lattice == "retry-lattice"
+
+
+def test_tap_chain_retry_discarded_when_unrouted_count_rises(capsys) -> None:
+    from kicad_tools.router.core import Autorouter
+
+    router, pf, negotiate, first = _retry_stub("coupled", failed_after=1)
+    got = Autorouter._lattice_tap_chain_retry(router, pf, negotiate, frozenset({"A"}), first)
+    out = capsys.readouterr().out
+    assert got[1].name == "first"
+    # Discarded for another reason: the line carries no ``regressed:`` suffix.
+    assert (
+        "(A): discarded (coupled segments 0 -> 1, unrouted connections 0 -> 1; issue #6535)" in out
+    ), out
+
+
+def test_tap_chain_retry_keeps_rule() -> None:
+    from kicad_tools.router.core import _lattice_pair_coupling, _lattice_tap_chain_retry_keeps
+
+    retry = frozenset({"A"})
+    first = {"A": (0, 1), "B": (1, 1), "C": (1, 2)}
+    # A one-total-score rule (0+1+0.5 -> 1+0+1) would keep this; B regressed.
+    after = {"A": (2, 2), "B": (0, 1), "C": (2, 2)}
+    assert _lattice_tap_chain_retry_keeps(first, after, retry, 0, 0, False) == (
+        False,
+        ["B 1/1 -> 0/1"],
+    )
+    ok = {"A": (1, 2), "B": (1, 1), "C": (1, 2)}
+    assert _lattice_tap_chain_retry_keeps(first, ok, retry, 0, 0, False) == (True, [])
+    # Retried pairs must strictly improve (exact fractions: 1/2 == 2/4).
+    assert _lattice_tap_chain_retry_keeps({"A": (1, 2)}, {"A": (2, 4)}, retry, 0, 0, False) == (
+        False,
+        [],
+    )
+    assert _lattice_tap_chain_retry_keeps(first, ok, retry, 0, 1, False) == (False, [])
+    assert _lattice_tap_chain_retry_keeps(first, ok, retry, 0, 0, True) == (False, [])
+
+    from types import SimpleNamespace
+
+    coupled = [
+        SimpleNamespace(key=("pair", 1, 2, 0), pair_name="A"),
+        SimpleNamespace(key=("pair", 1, 2, 1), pair_name="A"),
+        SimpleNamespace(key=("pair", 3, 4), pair_name="B"),
+    ]
+    outcomes = {("pair", 1, 2, 0): "coupled", ("pair", 3, 4): "uncoupled-fallback:pair-no-path"}
+    assert _lattice_pair_coupling(coupled, outcomes) == {"A": (1, 2), "B": (0, 1)}
+
+
+def _route_geometry(routes: list) -> list:
+    return [
+        (
+            [(s.x1, s.y1, s.x2, s.y2, s.layer, s.width) for s in r.segments],
+            [(v.x, v.y, v.layers, v.drill, v.diameter) for v in r.vias],
+        )
+        for r in routes
+    ]
+
+
+def test_discarded_tap_chain_retry_equals_a_run_without_retry(capsys, monkeypatch) -> None:
+    """Gap 2 of the #6542 review: forcing the retry's discard on the tap
+    fixture leaves exactly the state a run with no retry at all leaves."""
+    import dataclasses
+
+    import kicad_tools.router.core as core
+
+    pads = _tap_pads() + _tap_walls()
+
+    def run():
+        router = _trunk_autorouter(pads)
+        routes = {net: _route_geometry(router.route_net(net)) for net in (1, 2)}
+        return router, routes
+
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    base, base_routes = run()
+    assert "tap-chain retry" not in capsys.readouterr().out
+    monkeypatch.undo()
+
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_keeps", lambda *a: (False, []))
+    forced, forced_routes = run()
+    out = capsys.readouterr().out
+    assert "tap-chain retry for 1 pair(s) whose trunk declined pair-no-path (D): discarded (" in out
+
+    assert forced_routes == base_routes
+    for attr in (
+        "_lattice_pair_outcomes",
+        "_lattice_pair_segment_outcomes",
+        "_lattice_failure_reasons",
+        "_lattice_connection_endpoints",
+        "_lattice_pair_hops",
+        "_lattice_tap_chain_pairs",
+    ):
+        assert getattr(forced, attr) == getattr(base, attr), attr
+    # Every stats field but the wall clock (two separate runs never time alike).
+    a, b = forced._lattice_negotiation_stats, base._lattice_negotiation_stats
+    for f in dataclasses.fields(a):
+        if f.name != "elapsed_s":
+            assert getattr(a, f.name) == getattr(b, f.name), f.name

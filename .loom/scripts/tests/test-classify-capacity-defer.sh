@@ -20,9 +20,8 @@
 #   2. The decision (SKIP_COMMENT vs POST_COMMENT) and its exit codes are
 #      exercised black-box by stubbing `gh` on PATH and running the real
 #      script.
-#   3. The Champion prose call sites are pinned with literal
-#      assert_doc_contains checks, so wiring the gate out of the role files
-#      fails here.
+#   3. The Champion prose no longer calls it (#11860 retired Step 3c); the
+#      doc pins check that it stays out.
 #
 # Hermetic: no network, no live forge, no tokens. Every read goes to the stub.
 #
@@ -545,27 +544,22 @@ assert_eq "0" "$RC" "exit 0 - the trusted marker still dedupes"
 assert_eq "PATCH 1" "$(patches_log)" "only the trusted comment (id 1) is PATCHed; the outsider's (id 2) is left alone"
 
 echo
-echo "--- Doc pins: the Champion prose actually calls the gate ---"
+echo "--- Doc pins: the promotion flow no longer calls the gate (#11860) ---"
 
+# #11860 made every promotion verdict terminal: a level cap now stops
+# evaluation before the claim, so no passing proposal is ever held back with no
+# verdict, and Step 3c (this classifier's only caller) is gone. The script and
+# the black-box checks above stay until it is retired outright.
 {
-    assert_doc_contains "$CHAMPION_PROMO_MD" "classify-capacity-defer.sh" \
-        "champion-issue-promo.md invokes the capacity-deferral classifier"
-    assert_doc_contains "$CHAMPION_PROMO_MD" "Step 3c: Capacity Deferral" \
-        "the capacity-deferral gate has its own named step, alongside Step 3a/3b"
-    assert_doc_contains "$CHAMPION_PROMO_MD" "SKIP_COMMENT" \
-        "the role prose reads the SKIP_COMMENT outcome"
-    assert_doc_contains "$CHAMPION_PROMO_MD" "POST_COMMENT" \
-        "the role prose reads the POST_COMMENT outcome"
-    assert_doc_contains "$CHAMPION_PROMO_MD" 'champion:capacity-defer-seen' \
-        "the seeded seen-counter marker is documented in the posted-comment template"
-    assert_doc_contains "$CHAMPION_REF_MD" "classify-capacity-defer.sh" \
-        "champion-reference.md's edge case documents the capacity-deferral gate"
-    assert_doc_contains "$CHAMPION_REF_MD" "Edge Case 5d" \
-        "the capacity-deferral gate has its own named edge case"
-    assert_doc_contains "$CHAMPION_PROMO_MD" '--level "default"' \
-        "Step 3c passes the priority level, not a retired tier label (#11512)"
-    assert_doc_contains "$CHAMPION_PROMO_MD" '--occupants ""' \
-        "Step 3c passes no occupants for the per-pass no-level cap (#11512)"
+    if grep -qF 'classify-capacity-defer.sh --issue' "$CHAMPION_PROMO_MD"; then
+        fail "champion-issue-promo.md still invokes the capacity-deferral classifier"
+    else
+        pass "champion-issue-promo.md no longer invokes the capacity-deferral classifier"
+    fi
+    assert_doc_contains "$CHAMPION_PROMO_MD" "No Step 3c (#11860)" \
+        "champion-issue-promo.md records why Step 3c is gone"
+    assert_doc_contains "$CHAMPION_REF_MD" "Edge Case 5d: Capacity Deferral (#6729) — retired (#11860)" \
+        "champion-reference.md's edge case records the retirement"
 }
 
 echo
