@@ -1456,3 +1456,19 @@ Ordered by how directly the measurements support them.
 | #6307 | Router: board 04 loses net `SWO` when its placement is spread to 2x. |
 | #6306 | `kct route` refuses a 120 x 80 mm board with one LQFP-48; the auto-grid error omits `--max-cells` and advises enlarging the board. |
 | #6308 | `kct route --timeout`: the sidecar's `unverified_output` names a copper-less board when the deadline lands in the routing stage. |
+
+## Update (#6307): board 04 at uniform 2x
+
+The 8/9 result (net `SWO` demoted after a via-vs-foreign-segment collision
+with `NRST`) no longer reproduces. On current main, the harness command from
+#6307 (`--grid-policy pinned --grid-mm 0.05 --scales 2.0 --modes uniform`,
+seed 42, `--no-cache`) routes 9/9, 43/43 connections, 31 vias, 384.6 mm, with
+0 `kct check` and 0 kicad-cli DRC errors, and the log contains no
+via-vs-foreign-segment recovery or demotion. Intervening router changes
+(lattice/pad-mask and recovery fixes since #6304) removed the collision; no
+code change was made under #6307, so the specific mechanism that kept
+recovery from separating `SWO` and `NRST` was not isolated. The row is now
+guarded by `tests/test_board04_uniform_2x_6307.py` (slow). The fragility the
+issue noted (a one-capacitor placement change flipping the result) is still
+a property of this router; the monotonicity assumption in `auto_pcb_size`
+remains unproven in general.
