@@ -3463,6 +3463,72 @@ class TestStripTraces:
         assert len(pcb.vias) == 0
 
     # ------------------------------------------------------------------
+    # Issue #6614: raw-node via passes read the span KiCad reads
+    # ------------------------------------------------------------------
+
+    _FOUR_LAYER_STRIP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (net 1 "SIG_A")
+  {items}
+)
+"""
+
+    def _load_strip_pcb(self, tmp_path: Path, items: str) -> PCB:
+        path = tmp_path / "strip.kicad_pcb"
+        path.write_text(self._FOUR_LAYER_STRIP_PCB.format(items=items))
+        return PCB.load(path)
+
+    @pytest.mark.parametrize("via_kw,removed", [("", 0), ("blind ", 1)])
+    def test_strip_keywordless_partial_via_is_through(self, tmp_path, via_kw, removed):
+        """A keyword-less In1.Cu/B.Cu via also reaches F.Cu, so it survives."""
+        pcb = self._load_strip_pcb(
+            tmp_path,
+            f'(via {via_kw}(at 50 10) (size 0.6) (drill 0.3) (layers "In1.Cu" "B.Cu") '
+            '(net 1) (uuid "v1"))',
+        )
+        stats = pcb.strip_traces(layers=["In1.Cu", "In2.Cu", "B.Cu"])
+        assert stats["vias"] == removed
+        assert len(pcb._sexp.find_all("via")) == 1 - removed
+
+    @pytest.mark.parametrize("via_kw,removed", [("", 0), ("buried ", 1)])
+    def test_strip_orphan_keywordless_inner_via_reaches_outer_layer(
+        self, tmp_path, via_kw, removed
+    ):
+        """A keyword-less In1.Cu/In2.Cu via is a through via: an F.Cu trace
+        ending on it keeps it connected; the buried via it names is orphaned."""
+        pcb = self._load_strip_pcb(
+            tmp_path,
+            '(segment (start 10 10) (end 50 10) (width 0.25) (layer "In1.Cu") (net 1) '
+            '(uuid "s1"))\n'
+            '  (segment (start 50 10) (end 90 10) (width 0.25) (layer "F.Cu") (net 1) '
+            '(uuid "s2"))\n'
+            f'  (via {via_kw}(at 50 10) (size 0.6) (drill 0.3) (layers "In1.Cu" "In2.Cu") '
+            '(net 1) (uuid "v1"))',
+        )
+        stats = pcb.strip_traces(layers=["In1.Cu"], remove_orphan_vias=True)
+        assert stats["segments"] == 1
+        assert stats["vias"] == removed
+        assert len(pcb._sexp.find_all("via")) == 1 - removed
+
+    def test_strip_orphan_through_via_kept_by_inner_layer_trace(self, tmp_path):
+        """A through via's barrel is on In2.Cu too, so an In2.Cu trace ending
+        on it keeps it connected (not just traces on the two named layers)."""
+        pcb = self._load_strip_pcb(
+            tmp_path,
+            '(segment (start 10 10) (end 50 10) (width 0.25) (layer "In1.Cu") (net 1) '
+            '(uuid "s1"))\n'
+            '  (segment (start 50 10) (end 90 10) (width 0.25) (layer "In2.Cu") (net 1) '
+            '(uuid "s2"))\n'
+            '  (via (at 50 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))',
+        )
+        stats = pcb.strip_traces(layers=["In1.Cu"], remove_orphan_vias=True)
+        assert stats["segments"] == 1
+        assert stats["vias"] == 0
+
+    # ------------------------------------------------------------------
     # Orphan via removal
     # ------------------------------------------------------------------
 

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from kicad_tools._shapely import require_shapely
-from kicad_tools.core.layers import via_spans_layer
+from kicad_tools.core.layers import kicad_read_via_layers, via_node_type, via_spans_layer
 from kicad_tools.schema.pcb import _find_all_footprints
 from kicad_tools.sexp import SExp
 
@@ -234,6 +234,10 @@ def _collect_obstacles(
             if layers_node is not None
             else ["F.Cu", "B.Cu"]
         )
+        # Issue #6614: KiCad reads a keyword-less via as a through via
+        # whatever its pair says, so a keyword-less ``In1.Cu``/``B.Cu`` via
+        # is barrel copper on F.Cu too -- the F.Cu fill must clear it.
+        via_layers = list(kicad_read_via_layers(via_layers, via_node_type(via))[0])
         shape = Point(cx, cy).buffer(diameter / 2.0)
         obstacles.append(_Obstacle(net_key=net_key, layers=tuple(via_layers), shape=shape))
 

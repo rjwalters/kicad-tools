@@ -4376,7 +4376,7 @@ class PCB:
                     )
                 )
 
-        from ..core.layers import kicad_read_via_layers
+        from ..core.layers import kicad_read_via_layers, via_node_type
 
         # Remove from S-expression tree
         removed_count = 0
@@ -4406,14 +4406,7 @@ class PCB:
                 # (keyword-less partial pairs widen to F.Cu/B.Cu), so key
                 # the raw node on the same normalised span or a uuid-less
                 # keyword-less partial via would never match here.
-                raw_type = (
-                    child.values[0]
-                    if child.values
-                    and isinstance(child.values[0], str)
-                    and child.values[0] in ("micro", "blind", "buried")
-                    else None
-                )
-                layers, _ = kicad_read_via_layers(raw_layers, raw_type)
+                layers, _ = kicad_read_via_layers(raw_layers, via_node_type(child))
                 layers = tuple(layers)
                 key = (
                     round(at_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
@@ -7419,6 +7412,8 @@ class PCB:
             # Strip only inner-layer signal traces (power excluded by default)
             >>> stats = pcb.strip_traces(layers=["In1.Cu", "In2.Cu"])
         """
+        from ..core.layers import kicad_read_via_layers, via_node_type, via_spans_layer
+
         # Build set of net numbers to strip (if filtering by net name)
         net_numbers_to_strip: set[int] | None = None
         if nets is not None:
@@ -7618,11 +7613,19 @@ class PCB:
                         # Remove via only if ALL its layers are in the strip set
                         layers_node = child.find("layers")
                         if layers_node:
-                            via_layers = [
-                                layers_node.get_string(i) or ""
-                                for i in range(len(layers_node.values))
-                                if isinstance(layers_node.values[i], str)
-                            ]
+                            # Issue #6614: judge the span KiCad reads -- a
+                            # keyword-less partial pair is a through via, so
+                            # it also reaches F.Cu/B.Cu.
+                            via_layers = list(
+                                kicad_read_via_layers(
+                                    [
+                                        layers_node.get_string(i) or ""
+                                        for i in range(len(layers_node.values))
+                                        if isinstance(layers_node.values[i], str)
+                                    ],
+                                    via_node_type(child),
+                                )[0]
+                            )
                             if via_layers and all(vl in layer_set for vl in via_layers):
                                 should_remove = True
                     elif net_numbers_to_strip is not None:
@@ -7691,8 +7694,8 @@ class PCB:
         # connect to any remaining segment on either of their layers.
         removed_orphan_vias = 0
         if remove_orphan_vias and layer_set is not None:
-            # Build a set of (position, layer) pairs from remaining segments
-            remaining_endpoints: set[tuple[float, float, str]] = set()
+            # Build a map position -> layers of remaining segment endpoints
+            remaining_endpoints: dict[tuple[float, float], set[str]] = {}
             for child in self._sexp.children:
                 if child.name == "segment":
                     layer_node = child.find("layer")
@@ -7702,11 +7705,15 @@ class PCB:
                     if start_node:
                         sx = start_node.get_float(0) or 0.0
                         sy = start_node.get_float(1) or 0.0
-                        remaining_endpoints.add((round(sx, 4), round(sy, 4), seg_layer))
+                        remaining_endpoints.setdefault((round(sx, 4), round(sy, 4)), set()).add(
+                            seg_layer
+                        )
                     if end_node:
                         ex = end_node.get_float(0) or 0.0
                         ey = end_node.get_float(1) or 0.0
-                        remaining_endpoints.add((round(ex, 4), round(ey, 4), seg_layer))
+                        remaining_endpoints.setdefault((round(ex, 4), round(ey, 4)), set()).add(
+                            seg_layer
+                        )
 
             new_children2 = []
             for child in self._sexp.children:
@@ -7716,13 +7723,24 @@ class PCB:
                     if at_node and layers_node:
                         vx = round(at_node.get_float(0) or 0.0, 4)
                         vy = round(at_node.get_float(1) or 0.0, 4)
-                        via_layers = [
-                            layers_node.get_string(i) or ""
-                            for i in range(len(layers_node.values))
-                            if isinstance(layers_node.values[i], str)
-                        ]
-                        # Via is orphan if NONE of its layers have a segment endpoint at its position
-                        connected = any((vx, vy, vl) in remaining_endpoints for vl in via_layers)
+                        # Issue #6614: read the span KiCad reads (a
+                        # keyword-less partial pair is a through via) and
+                        # count an endpoint on ANY layer the barrel passes
+                        # through, not just the two named in the pair.
+                        read_span, _ = kicad_read_via_layers(
+                            [
+                                layers_node.get_string(i) or ""
+                                for i in range(len(layers_node.values))
+                                if isinstance(layers_node.values[i], str)
+                            ],
+                            via_node_type(child),
+                        )
+                        # Via is orphan if NO layer it spans has a segment
+                        # endpoint at its position.
+                        connected = any(
+                            via_spans_layer(read_span, seg_layer)
+                            for seg_layer in remaining_endpoints.get((vx, vy), ())
+                        )
                         if not connected:
                             removed_orphan_vias += 1
                             removed_vias += 1

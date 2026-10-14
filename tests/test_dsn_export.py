@@ -245,3 +245,28 @@ class TestDSNRoundTrip:
         assert structure_match
         layer_count = len(re.findall(r"\(layer\s", structure_match.group(1)))
         assert layer_count == len(exporter.layers)
+
+
+class TestDSNViaLayerSpan:
+    """Issue #6614: pre-existing vias export the span KiCad reads."""
+
+    @pytest.mark.parametrize(
+        "via_kw,pair,expected",
+        [
+            # A keyword-less partial pair is a through via to KiCad.
+            ("", '"In1.Cu" "F.Cu"', ("F.Cu", "B.Cu")),
+            ("", '"In1.Cu" "B.Cu"', ("F.Cu", "B.Cu")),
+            # A keyworded blind via keeps its declared span.
+            ("blind ", '"F.Cu" "In1.Cu"', ("F.Cu", "In1.Cu")),
+            ("", '"F.Cu" "B.Cu"', ("F.Cu", "B.Cu")),
+        ],
+    )
+    def test_parse_via_reads_kicad_span(self, via_kw, pair, expected):
+        from kicad_tools.sexp import parse_string
+
+        node = parse_string(
+            f"(via {via_kw}(at 1 2) (size 0.6) (drill 0.3) (layers {pair}) (net 1))"
+        )
+        via = KiCadToDSNExporter("unused.kicad_pcb")._parse_via(node)
+        assert via is not None
+        assert via.layers == expected
