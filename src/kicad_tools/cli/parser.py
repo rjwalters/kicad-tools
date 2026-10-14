@@ -4278,7 +4278,15 @@ def _add_route_parser(subparsers) -> None:
             "node-expansion count. --timeout is kept only as a safety "
             "backstop. Combine with --seed for byte-stable re-routes. "
             "Relief-rescue sub-searches keep a 10 s wall clock unless "
-            "--deterministic-rescue is also passed."
+            "--deterministic-rescue is also passed. Still wall-clock-bound "
+            "even with both flags (Issue #6329): each negotiated rip-up "
+            "iteration gives every per-net search a budget of 10%% of the "
+            "remaining stage time, and the pure-Python A* fallback usually "
+            "hits it before the iteration cap (logged as "
+            "'[deterministic-budget] per-net wall clock bound net ...'); the "
+            "relief-rescue transaction bound; the post-negotiation sweep "
+            "(60 s, 10 s per net); and the trace optimizer / DRC nudge, which "
+            "are skipped when little --timeout is left."
         ),
     )
     # Issue #5870: per-run opt-in for the iteration-bounded relief rescue

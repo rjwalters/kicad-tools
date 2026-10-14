@@ -17767,7 +17767,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "Bound routing work by an ITERATION budget instead of wall-clock "
             "time so the routed output (and its DRC count) is reproducible "
             "across machines regardless of runner speed or load (Issue #3538). "
-            "The per-net A* search is the only wall-clock-coupled stage that "
+            "The per-net A* search is the main wall-clock-coupled stage that "
             "lands different amounts of copper on a slow vs fast machine; this "
             "flag disables the per-net wall-clock cutoff (--per-net-timeout 0) "
             "and pins the C++ A* iteration backstop (--max-search-iterations) "
@@ -17783,8 +17783,17 @@ def _route_parser() -> argparse.ArgumentParser:
             "iteration backstop value can be overridden by passing an explicit "
             "--max-search-iterations N alongside this flag (N is then used "
             "verbatim); see DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS for the "
-            "default. Relief-rescue sub-searches keep a 10 s wall clock unless "
-            "--deterministic-rescue is also passed."
+            "default. "
+            "Relief-rescue sub-searches keep a 10 s wall clock unless "
+            "--deterministic-rescue is also passed. Still wall-clock-bound "
+            "even with both flags (Issue #6329): each negotiated rip-up "
+            "iteration gives every per-net search a budget of 10%% of the "
+            "remaining stage time, and the pure-Python A* fallback usually "
+            "hits it before the iteration cap (logged as "
+            "'[deterministic-budget] per-net wall clock bound net ...'); the "
+            "relief-rescue transaction bound; the post-negotiation sweep "
+            "(60 s, 10 s per net); and the trace optimizer / DRC nudge, which "
+            "are skipped when little --timeout is left."
         ),
     )
     parser.add_argument(

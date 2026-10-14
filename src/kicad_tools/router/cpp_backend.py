@@ -1499,6 +1499,11 @@ class CppPathfinder:
         self._python_unreachable: dict[tuple, tuple[tuple, float]] = {}
         self._python_fallback_proven_skips: int = 0
         self._python_fallback_seconds_saved: float = 0.0
+        # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
+        # deadline while the tuned per-net iteration cap was active (i.e.
+        # under ``--deterministic-budget``).  Net name -> what bound.  Each
+        # entry is a point where the routed result depends on machine load.
+        self._wall_bound_under_cap: dict[str, str] = {}
 
         # Issue #3545: lazy cache for ``compute_component_pitches`` used
         # by the net-aware same-component carve-out gate in
@@ -4016,6 +4021,7 @@ class CppPathfinder:
             and router_cpp is not None
             and int(cpp_failure_reason) == int(router_cpp.FAILURE_TIMEOUT)
         ):
+            self._note_wall_bound_under_cap(net_name, "C++ A* hit the per-net wall-clock deadline")
             logger.debug(
                 "Net %s: C++ search hit the per-net wall-clock deadline "
                 "(FAILURE_TIMEOUT); skipping Python fallback so the budget is "
@@ -4278,6 +4284,18 @@ class CppPathfinder:
         )
         dt = time.monotonic() - t0
 
+        # Issue #6329: the fallback is iteration-bounded under a tuned cap,
+        # but ``per_net_timeout`` still bounds it by wall clock.  When the
+        # wall clock fires first, the expansions reached (and so whether the
+        # net lands) depend on machine load.
+        if route is None and getattr(self._py_router, "last_route_deadline_hit", False) is True:
+            self._note_wall_bound_under_cap(
+                net_name,
+                "Python fallback A* stopped by the per-net wall-clock deadline after "
+                f"{self._py_router.last_route_deadline_iterations:,} of "
+                f"{self._effective_search_iterations:,} expansions",
+            )
+
         # Issue #5617: aggregate this fallback's wall time by WHY it ran --
         # ``_resume_exhausted`` (computed above) is the exact "case 1"
         # substring test the #3923 short-circuit already uses, so the
@@ -4315,6 +4333,34 @@ class CppPathfinder:
             )
 
         return route
+
+    def _note_wall_bound_under_cap(self, net_name: str, detail: str) -> None:
+        """Record a per-net wall-clock bind under the tuned iteration cap.
+
+        Issue #6329: ``--deterministic-budget`` pins every per-net search to
+        a node-expansion cap, but the negotiated loop still hands each
+        search a WALL-CLOCK budget (``derive_iter_per_net_cap``: 10% of the
+        remaining stage budget, issue #3989; the relief rescue's 10 s
+        sub-search clock).  The pure-Python fallback runs ~10-100x slower
+        than the C++ search, so on board 05 that wall clock fires long
+        before the expansion cap (measured: 106,496 of 1,000,000 expansions
+        in a 57 s budget).  Whether such a search lands its net then depends
+        on machine load, which is how two same-seed runs diverge.  This is
+        a no-op without an active tuned cap (the wall clock is then the
+        intended bound, not a determinism loss).  Logged once per net.
+        """
+        if not self._per_net_iteration_cap_active:
+            return
+        if net_name in self._wall_bound_under_cap:
+            return
+        self._wall_bound_under_cap[net_name] = detail
+        logger.warning(
+            "[deterministic-budget] per-net wall clock bound net %s before the "
+            "iteration cap (%s) -- this net's result depends on machine load "
+            "(issue #6329)",
+            net_name,
+            detail,
+        )
 
     def _python_unreachable_key(
         self,
@@ -4555,6 +4601,11 @@ class CppPathfinder:
                 - python_fallback_seconds_saved: Issue #6098.  Summed run time
                   of the proving searches those skips did not repeat -- an
                   estimate of the wall time saved.
+                - wall_bound_under_cap: Issue #6329.  Mapping of net name ->
+                  description of a search that a per-net WALL-CLOCK deadline
+                  ended while the tuned per-net iteration cap was active
+                  (``--deterministic-budget``).  Non-empty means the run's
+                  copper can depend on machine load.
         """
         return {
             "fallback_count": self._fallback_count,
@@ -4571,6 +4622,7 @@ class CppPathfinder:
             "python_fallback_seconds_by_reason": dict(self._python_fallback_seconds_by_reason),
             "python_fallback_proven_skips": self._python_fallback_proven_skips,
             "python_fallback_seconds_saved": self._python_fallback_seconds_saved,
+            "wall_bound_under_cap": dict(self._wall_bound_under_cap),
         }
 
     @property

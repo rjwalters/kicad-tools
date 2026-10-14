@@ -362,6 +362,16 @@ RELIEF_RESCUE_TXN_FLOOR_S = 90.0
 # stage budget and roll back (issue #4781) -- not another A/B of this flag.
 DETERMINISTIC_RESCUE_DEFAULT = False
 
+# Issue #6329: the line the negotiated loop prints when its stage deadline
+# stops an iteration-budgeted (``--deterministic-budget``) run.  Must match
+# ``TwoPhaseRouter._note_stage_deadline_determinism_loss`` word for word and
+# start with ``placement.route_check.DEADLINE_FIRED_MARKER``.
+DETERMINISTIC_BUDGET_STAGE_DEADLINE_LINE = (
+    "[deterministic-budget] stage deadline fired -- run is not "
+    "reproducible (outer --timeout / per-attempt slice bound "
+    "before the iteration backstop did; see Issue #5765)"
+)
+
 # Issue #5545: congestion-mark parameters for the stagnation-recovery cohort
 # reroute.  When the negotiated loop's rip-up cohort has stagnated (same
 # cohort, overflow stuck in a narrow band), the recovery sweep needs a
@@ -14549,6 +14559,16 @@ class Autorouter:
         print(f"  {ripup_guard.summary_line()}")
         if timed_out:
             print("  ⚠ Stopped due to timeout - returning best partial result")
+            # Issue #6329: the `--deterministic-budget` banner promises this
+            # marker whenever a stage deadline cuts an iteration-budgeted run,
+            # but only ``TwoPhaseRouter`` printed it.  On board 05 the
+            # negotiated loop stopped on this wall clock mid-iteration 5 with
+            # no marker, so the run looked reproducible when it was not.
+            # Same wording / gate as
+            # ``TwoPhaseRouter._note_stage_deadline_determinism_loss`` so
+            # ``placement.route_check.deadline_fired`` matches it.
+            if getattr(self, "_max_search_iterations", 0):
+                print(DETERMINISTIC_BUDGET_STAGE_DEADLINE_LINE)
 
         # Print failed nets summary if any routes failed
         if self.routing_failures:
