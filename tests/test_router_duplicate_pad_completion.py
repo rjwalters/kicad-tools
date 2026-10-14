@@ -34,8 +34,8 @@ def segment(x1, y1, x2, y2, layer=Layer.F_CU, width=0.2):
     return Segment(x1, y1, x2, y2, width, layer, 1)
 
 
-def via(layers=(Layer.F_CU, Layer.B_CU)):
-    return Via(10, 10, 0.3, 0.6, layers, 1)
+def via(layers=(Layer.F_CU, Layer.B_CU), span_type=None):
+    return Via(10, 10, 0.3, 0.6, layers, 1, span_type=span_type)
 
 
 def test_disconnected_lands_without_routes_keep_authored_report_names():
@@ -58,9 +58,14 @@ def test_coincident_opposite_layer_lands_need_a_barrel(bridge):
 
 def test_blind_via_does_not_bridge_to_the_back_layer():
     pads = [pad(), pad(terminal="land2", layer=Layer.B_CU)]
-    assert not status(pads, vias=[via((Layer.F_CU, Layer.IN1_CU))])["connected"]
+    assert not status(pads, vias=[via((Layer.F_CU, Layer.IN1_CU), "blind")])["connected"]
     pads[1] = replace(pads[1], layer=Layer.IN1_CU)
-    assert status(pads, vias=[via((Layer.F_CU, Layer.IN2_CU))])["connected"]
+    assert status(pads, vias=[via((Layer.F_CU, Layer.IN2_CU), "blind")])["connected"]
+
+
+def test_keywordless_via_is_a_through_barrel_and_reaches_the_back_layer():
+    pads = [pad(), pad(terminal="land2", layer=Layer.B_CU)]
+    assert status(pads, vias=[via((Layer.F_CU, Layer.IN1_CU))])["connected"]
 
 
 @pytest.mark.parametrize("layer", [Layer.F_CU, Layer.B_CU])

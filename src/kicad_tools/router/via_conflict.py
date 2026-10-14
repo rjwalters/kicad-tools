@@ -761,6 +761,7 @@ class ViaConflictManager:
             # and must not silently disappear during a rip-up.
             in_pad=via.in_pad,
             is_micro=via.is_micro,
+            span_type=via.span_type,
         )
 
         # Update the route's via and connected segments

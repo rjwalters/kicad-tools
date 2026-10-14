@@ -143,7 +143,12 @@ def test_negotiated_kelvin_branches_remain_physically_separate(layer):
     assert all(len(terminals) <= 1 for terminals in components), components
 
 
-def test_preserved_buried_via_keeps_actual_diameter_and_span():
+# Issue #6662: since #6485/#6630 a via's barrel is ``Via.drilled_layers``.
+# KiCad drills a ``(via buried ...)`` only through its span, so the fixture
+# declares the keyword (``span_type``); a keyword-less partial pair is a
+# through via to KiCad and must block every layer.
+@pytest.mark.parametrize("span_type", ["buried", None])
+def test_preserved_buried_via_keeps_actual_diameter_and_span(span_type):
     from kicad_tools.router.lattice.kelvin import KelvinBranchGuard
     from kicad_tools.router.lattice.pathfinder import LatticePathfinder
     from kicad_tools.router.layers import LayerStack
@@ -160,21 +165,26 @@ def test_preserved_buried_via_keeps_actual_diameter_and_span():
         drill=0.3,
         net=1,
         layers=(stack.layers[2].layer_enum, stack.layers[1].layer_enum),
+        span_type=span_type,
     )
     preserved = Route(net=1, net_name="ISENSE_A+", vias=[via])
     pf._set_fixed_copper([preserved])
     for _ in range(2):  # Every negotiation pass receives the same immutable bodies.
         committed = pf._fresh_committed()
         guard = KelvinBranchGuard(committed, [root, target], root, target, pf._pad_layer_indices)
-        assert guard.clear((12.7, 3), (12.7, 3), 0, 0.1)
-        assert guard.clear((12.7, 3), (12.7, 3), 3, 0.1)
+        buried = span_type is not None
+        assert guard.clear((12.7, 3), (12.7, 3), 0, 0.1) is buried
+        assert guard.clear((12.7, 3), (12.7, 3), 3, 0.1) is buried
         for layer in (1, 2):
             assert not guard.clear((12.7, 3), (12.7, 3), layer, 0.1)
     assert preserved.vias == [via]
 
 
-@pytest.mark.parametrize("through", [False, True])
-def test_imported_via_span_is_projected_onto_selected_routing_layers(through):
+@pytest.mark.parametrize(
+    ("through", "span_type"),
+    [(False, "blind"), (True, None), (False, None)],
+)
+def test_imported_via_span_is_projected_onto_selected_routing_layers(through, span_type):
     from kicad_tools.router.lattice.kelvin import KelvinBranchGuard
     from kicad_tools.router.lattice.pathfinder import LatticePathfinder
     from kicad_tools.router.layers import LayerDefinition, LayerStack, LayerType
@@ -191,8 +201,11 @@ def test_imported_via_span_is_projected_onto_selected_routing_layers(through):
         drill=0.3,
         net=1,
         layers=(Layer.F_CU if through else Layer.IN1_CU, Layer.B_CU),
+        span_type=span_type,
     )
     pf._set_fixed_copper([Route(net=1, net_name="ISENSE_A+", vias=[via])])
     committed = pf._fresh_committed()
     guard = KelvinBranchGuard(committed, [root, target], root, target, pf._pad_layer_indices)
-    assert guard.clear((12.7, 3), (12.7, 3), 0, 0.1) is (not through)
+    # Only a declared blind In1..B.Cu via misses F.Cu; a keyword-less
+    # In1/B.Cu pair is drilled F.Cu..B.Cu by KiCad (#6485/#6662).
+    assert guard.clear((12.7, 3), (12.7, 3), 0, 0.1) is (span_type == "blind")

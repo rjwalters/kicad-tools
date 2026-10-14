@@ -711,6 +711,7 @@ def _copy_vias(vias: Sequence[Via]) -> list[Via]:
             net_name=v.net_name,
             in_pad=v.in_pad,
             is_micro=v.is_micro,
+            span_type=v.span_type,
         )
         for v in vias
     ]
