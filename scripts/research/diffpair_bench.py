@@ -63,18 +63,10 @@ import expand_route_experiment as ere  # noqa: E402
 REPO = ere.REPO
 
 #: ``kct route`` flags that replay saved copper instead of routing. Any of them
-#: in a benchmark command line is refused outright.
-REPLAY_FLAGS = (
-    "--apply-plan",
-    "--routing-plan",
-    "--from-plan",
-    "--saved-plan",
-    "--replay",
-    "--replay-plan",
-    "--load-plan",
-    "--plan-file",
-    "--use-cache",
-)
+#: in a benchmark command line is refused outright. ``--resume PATH`` is the one
+#: real flag that seeds routing from saved copper; the plan-replay names this
+#: tuple used to list do not exist on ``kct route`` (issue #6475).
+REPLAY_FLAGS = ("--resume",)
 
 #: Log text that shows a saved plan or cached copper was replayed.
 _REPLAY_LOG = re.compile(
@@ -84,6 +76,9 @@ _REPLAY_LOG = re.compile(
 )
 
 SEEDS = (42, 43)
+
+#: ``kct route`` exits whose ``-o`` file (if any) is not a finished route.
+CRASHED_EXIT_CODES = ere.CRASHED_EXIT_CODES
 
 _DET_FLAGS = ("--deterministic-budget", "--per-net-iterations", "1000000")
 
@@ -121,7 +116,11 @@ def check_no_replay(args: Sequence[str]) -> None:
     """Refuse any ``kct route`` argument that replays saved copper or a saved plan."""
     for arg in args:
         flag = arg.split("=", 1)[0]
-        if flag in REPLAY_FLAGS:
+        # argparse accepts any unambiguous prefix (``--resu``), so refuse those too.
+        if any(
+            len(flag) > 2 and flag.startswith("--") and replay.startswith(flag)
+            for replay in REPLAY_FLAGS
+        ):
             raise PairBenchError(
                 f"refusing {flag}: the benchmark measures what the router produces, "
                 "not a replayed routing plan or cached copper"
@@ -470,6 +469,7 @@ def run_cell(
     router_src: Path | None = None,
     router_rev: str | None = None,
     committed_map: bool = True,
+    extra_args: Sequence[str] = (),
 ) -> dict:
     """Route one (board, engine, seed) cell and measure it. Never raises on a bad row."""
     run_dir = work_dir / f"{board.key}-{engine}-s{seed}" / f"r{rep}"
@@ -500,6 +500,8 @@ def run_cell(
     if ncm_path is not None:
         extra += ["--net-class-map", str(ncm_path)]
     extra += ["--seed", str(seed)]
+    # Issue #6475: ``run --extra`` was checked but never passed to ``kct route``.
+    extra += list(extra_args)
     try:
         check_no_replay(extra)
     except PairBenchError as exc:
@@ -531,7 +533,7 @@ def run_cell(
     log_text = log.read_text(errors="replace")
     row.update(ere.parse_route_log(log_text))
     row.update(ere.timeout_sidecar_facts(routed))
-    artifact, kind = ere.pick_artifact(routed)
+    artifact, kind = ere.pick_artifact(routed, row.get("exit_code"))
     if artifact is None:
         row["error"] = f"no routed output (exit_code={row['exit_code']})"
         row["valid"] = False
@@ -539,6 +541,12 @@ def run_cell(
         return row
     row["routed"] = str(artifact)
     row["artifact"] = kind
+    # Issue #6475: exit 1 (e.g. a refused save, #6351) and 5 leave the last
+    # periodic checkpoint at ``-o``; grading it is not grading a finished route.
+    if row.get("exit_code") in CRASHED_EXIT_CODES:
+        invalid.append(
+            f"route exited {row['exit_code']}; the output is a leftover checkpoint, not a result"
+        )
     row.update(ere.grade(artifact, board))
     row["manufacturable"] = ere.manufacturable(row)
     if ncm_path is None:
@@ -645,6 +653,7 @@ def _cmd_run(args) -> int:
                             args.router_src,
                             args.router_rev,
                             not args.inferred_map,
+                            args.extra.split(),
                         )
                     )
                     out_path.write_text(

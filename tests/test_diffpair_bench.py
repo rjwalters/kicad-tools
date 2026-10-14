@@ -107,7 +107,7 @@ def test_engine_commands_carry_no_replay_flag():
 def test_cli_extra_replay_flag_is_refused(tmp_path):
     with pytest.raises(bench.PairBenchError):
         bench.main(
-            ["run", "--label", "x", "--work-dir", str(tmp_path), "--extra", "--apply-plan p.json"]
+            ["run", "--label", "x", "--work-dir", str(tmp_path), "--extra", "--resume p.kicad_pcb"]
         )
 
 
@@ -392,3 +392,95 @@ def test_06b_lattice_route_couples_with_copper_on_both_nets(tmp_path):
     assert "Post-optimize backstop demoted" not in log
     assert "routed by both the lattice and an earlier pass" not in log
     assert len(_coupled_pairs_with_copper(row["pairs"])) >= 1  # target (and today): 3
+
+
+# ---------------------------------------------------------------------------
+# Issue #6475: harness fixes
+# ---------------------------------------------------------------------------
+
+
+def test_replay_flags_are_real_kct_route_flags():
+    from kicad_tools.cli.route_cmd import _route_parser
+
+    known = set(_route_parser()._option_string_actions)
+    assert bench.REPLAY_FLAGS
+    assert "--resume" in bench.REPLAY_FLAGS
+    for flag in bench.REPLAY_FLAGS:
+        assert flag in known, f"{flag} is not a kct route flag"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--resume", "x.kicad_pcb"],
+        ["--resume=x.kicad_pcb"],
+        ["--resu", "x.kicad_pcb"],
+        ["--resu=x.kicad_pcb"],
+    ],
+)
+def test_resume_and_its_abbreviation_are_refused(args):
+    with pytest.raises(bench.PairBenchError):
+        bench.check_no_replay(args)
+
+
+def test_unrelated_flags_are_not_refused():
+    bench.check_no_replay(["--seed", "42", "--route-engine", "grid", "--rescue-x"])
+
+
+def test_extra_reaches_kct_route_and_the_row_cmd(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run_route(inp, out, extra, timeout, log):
+        seen["extra"] = list(extra)
+        log.write_text("")
+        return {"exit_code": 0, "cmd": ["kct", "route", *extra]}
+
+    monkeypatch.setattr(ere, "run_route", fake_run_route)
+    monkeypatch.setattr(ere, "pick_artifact", lambda *a, **k: (None, None))
+    row = bench.run_cell(
+        ere.BOARDS["06b"],
+        "grid",
+        42,
+        10.0,
+        tmp_path,
+        extra_args=["--checkpoint-interval", "0"],
+    )
+    assert seen["extra"][-2:] == ["--checkpoint-interval", "0"]
+    assert "--checkpoint-interval" in row["cmd"]
+
+
+def test_extra_resume_is_refused_in_run_cell(tmp_path):
+    row = bench.run_cell(
+        ere.BOARDS["06b"], "grid", 42, 10.0, tmp_path, extra_args=["--resu", "x.kicad_pcb"]
+    )
+    assert row["valid"] is False
+    assert row["invalid_reasons"] == ["replay flag"]
+
+
+@pytest.mark.parametrize("code", [1, 5])
+def test_crashed_route_row_is_invalid_and_not_final(tmp_path, monkeypatch, code):
+    def fake_run_route(inp, out, extra, timeout, log):
+        out.write_text("(kicad_pcb)")
+        log.write_text("")
+        return {"exit_code": code, "cmd": []}
+
+    monkeypatch.setattr(ere, "run_route", fake_run_route)
+    monkeypatch.setattr(ere, "grade", lambda *a, **k: {})
+    monkeypatch.setattr(ere, "manufacturable", lambda *a, **k: False)
+    monkeypatch.setattr(ere, "find_net_class_map", lambda *a, **k: None)
+    monkeypatch.setattr(bench, "load_net_class_map", lambda *a, **k: {})
+    monkeypatch.setattr(bench, "measure_pairs", lambda *a, **k: [])
+    monkeypatch.setattr(bench, "committed_copper_matches", lambda *a, **k: None)
+    row = bench.run_cell(ere.BOARDS["06b"], "grid", 42, 10.0, tmp_path)
+    assert row["artifact"] == "checkpoint"
+    assert row["valid"] is False
+    assert any(f"exited {code}" in r for r in row["invalid_reasons"])
+
+
+def test_pick_artifact_labels_by_exit_code(tmp_path):
+    out = tmp_path / "o.kicad_pcb"
+    out.write_text("x")
+    assert ere.pick_artifact(out, 0)[1] == "final"
+    assert ere.pick_artifact(out, 3)[1] == "final"
+    assert ere.pick_artifact(out, 1)[1] == "checkpoint"
+    assert ere.pick_artifact(out)[1] == "final"

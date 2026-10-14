@@ -11198,6 +11198,9 @@ class Autorouter:
         # is running under, so an opt-in run is distinguishable in the log from
         # the default (#4730).
         flush_print(self._relief_subsearch_bound_line(per_net_timeout, deterministic_rescue))
+        # Issue #6475: the escape budget and per-iteration per-net cap are the
+        # other wall clocks that decide reach; say which arm they are on.
+        flush_print(self._wall_clock_arm_line(deterministic_rescue))
 
         # Issue #4781: record the relief-rescue TRANSACTION bound too -- it
         # decides how much of the stage one rescue can burn before rolling
@@ -12352,7 +12355,13 @@ class Autorouter:
                     iter_remaining = (
                         None if timeout is None else (start_time + timeout) - time.time()
                     )
-                    iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
+                    # Issue #6475: under the deterministic arm the cap derived
+                    # from the remaining stage budget is a wall clock that
+                    # feeds the C++ search, so pass per_net_timeout through.
+                    if self._wall_clock_free_arm(deterministic_rescue):
+                        iter_per_net_cap = per_net_timeout
+                    else:
+                        iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
 
                     # Issue #2540 + #2803: Snapshot state at top of each iteration
                     # BEFORE any destructive ``rip_up_nets`` call.  If a
@@ -13640,12 +13649,9 @@ class Autorouter:
                                 self._mark_route(route)
 
                             # Issue #2415: Compute escape budget from remaining time
-                            escape_budget = None
-                            if timeout is not None:
-                                remaining = timeout - (time.time() - start_time)
-                                escape_budget = min(60.0, remaining * 0.25)
-                                if escape_budget <= 0:
-                                    escape_budget = 0.0
+                            escape_budget = self._escape_budget(
+                                timeout, start_time, deterministic_rescue
+                            )
 
                             success, new_overflow, tried = neg_router.escape_local_minimum(
                                 overflow_history=overflow_history,
@@ -14354,12 +14360,9 @@ class Autorouter:
                             self._mark_route(route)
 
                         # Issue #2415: Compute escape budget from remaining time
-                        escape_budget = None
-                        if timeout is not None:
-                            remaining = timeout - (time.time() - start_time)
-                            escape_budget = min(60.0, remaining * 0.25)
-                            if escape_budget <= 0:
-                                escape_budget = 0.0
+                        escape_budget = self._escape_budget(
+                            timeout, start_time, deterministic_rescue
+                        )
 
                         success, new_overflow, tried = neg_router.escape_local_minimum(
                             overflow_history=overflow_history,
@@ -15094,6 +15097,46 @@ class Autorouter:
                 if cap
             ),
             default=0,
+        )
+
+    def _wall_clock_free_arm(self, deterministic_rescue: bool) -> bool:
+        """True when the negotiated loop must not read a wall clock for reach.
+
+        Issue #6475.  ``deterministic_rescue`` with an active expansion cap
+        means the caller asked for a route that does not depend on machine
+        load.  The oscillation-escape budget (#2415) and the per-iteration
+        per-net cap derived from the remaining stage budget (#3989) are both
+        wall clocks that decide reach, so both switch off here.  The stage
+        deadline (``check_timeout``) is left alone.
+        """
+        return bool(deterministic_rescue and self._active_expansion_cap())
+
+    def _escape_budget(
+        self, timeout: float | None, start_time: float, deterministic_rescue: bool
+    ) -> float | None:
+        """Wall-clock budget for ``escape_local_minimum`` (Issue #2415 / #6475).
+
+        ``None`` (unbounded; each strategy is still bounded by the per-net
+        expansion cap) on the deterministic arm or when there is no stage
+        timeout; otherwise ``min(60, 25% of the remaining stage budget)``.
+        """
+        if timeout is None or self._wall_clock_free_arm(deterministic_rescue):
+            return None
+        remaining = timeout - (time.time() - start_time)
+        return max(0.0, min(60.0, remaining * 0.25))
+
+    def _wall_clock_arm_line(self, deterministic_rescue: bool) -> str:
+        """Routing-log line naming the escape-budget / per-iteration-cap arm (#6475)."""
+        if self._wall_clock_free_arm(deterministic_rescue):
+            return (
+                "  Escape budget / per-iteration per-net cap: iteration-bounded "
+                "(deterministic rescue; issue #6475) -- oscillation escape and "
+                "per-net searches do not read a wall clock"
+            )
+        return (
+            "  Escape budget / per-iteration per-net cap: wall clock "
+            "(60s escape budget, remaining-budget per-net cap; deterministic "
+            "rescue is off or no expansion cap is active; issue #6475)"
         )
 
     def _relief_subsearch_budget(

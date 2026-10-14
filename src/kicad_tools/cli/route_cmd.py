@@ -348,7 +348,9 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
                 f"{RELIEF_SUBSEARCH_BUDGET_S:g}s wall clock (Issue #4730), so "
                 "a loaded or slow machine can still land different copper.  "
                 "Pass --deterministic-rescue to bound them by the per-net "
-                "iteration cap instead (Issue #5870)."
+                "iteration cap instead (Issue #5870).  It also switches off "
+                "the 60s oscillation-escape budget and the remaining-budget "
+                "per-iteration per-net cap (Issue #6475)."
             )
         if timeout and timeout > 0:
             print(
@@ -2193,6 +2195,16 @@ def _make_checkpoint_callback(
             )
 
     def _checkpoint(best_routes, best_metrics) -> None:
+        # Issue #6475: serialising routes draws UUIDs from the global RNG when
+        # deterministic UUIDs are on.  A checkpoint is an observer, so keep the
+        # stream the router sees independent of how many writes happened.
+        rng_state = random.getstate()
+        try:
+            _checkpoint_inner(best_routes, best_metrics)
+        finally:
+            random.setstate(rng_state)
+
+    def _checkpoint_inner(best_routes, best_metrics) -> None:
         from kicad_tools.cli.progress import flush_print
 
         if best_checkpoint is not None:
@@ -2275,6 +2287,13 @@ def _make_checkpoint_callback(
 
     def _checkpoint_completed(routes, metrics) -> None:
         """Retain a completed attempt separately from periodic checkpoints."""
+        rng_state = random.getstate()  # Issue #6475: observer, see _checkpoint
+        try:
+            _checkpoint_completed_inner(routes, metrics)
+        finally:
+            random.setstate(rng_state)
+
+    def _checkpoint_completed_inner(routes, metrics) -> None:
         import tempfile
 
         if best_checkpoint is not None:
@@ -17813,7 +17832,10 @@ def _route_parser() -> argparse.ArgumentParser:
             "sub-searches by the per-net node-expansion cap instead of their "
             "10 s wall clock (Issue #5870, mechanism #4536). Only takes effect "
             "with an active cap (--deterministic-budget or "
-            "--per-net-iterations). Off by default because it costs board 07 "
+            "--per-net-iterations). Also switches off the 60 s "
+            "oscillation-escape budget and the remaining-budget per-iteration "
+            "per-net cap (Issue #6475), so --timeout no longer changes reach. "
+            "Off by default because it costs board 07 "
             "routed nets (#4730/#4770); use it when the route must be "
             "independent of machine load."
         ),
