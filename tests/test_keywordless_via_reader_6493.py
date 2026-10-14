@@ -272,6 +272,25 @@ def test_pcb_loader_does_not_rewrite_the_source_node(tmp_path: Path):
 
 
 @pytest.mark.parametrize("via_kw", ["", "blind "])
+def test_remove_vias_uuidless_fallback_removes_the_source_node(tmp_path: Path, via_kw: str):
+    """The uuid-less (x, y, layers) fallback keys both sides on the read span.
+
+    ``Via.layers`` is widened to F.Cu/B.Cu for a keyword-less partial via,
+    while the raw node still says ``In1.Cu``/``B.Cu``; the node must still
+    be removed so the via does not come back on save.
+    """
+    text = board1(via_kw).replace(' (uuid "v1")', "").replace(' (uuid "v2")', "")
+    pcb = PCB.load(_write(tmp_path, "uuidless", text))
+    assert all(not v.uuid for v in pcb.vias)
+    assert pcb.remove_vias(pcb.vias[:]) == 2
+    assert pcb.vias == []
+    out = tmp_path / "saved.kicad_pcb"
+    pcb.save(out)
+    assert "(via " not in out.read_text()
+    assert PCB.load(out).vias == []
+
+
+@pytest.mark.parametrize("via_kw", ["", "blind "])
 def test_no_warning_for_through_or_typed_vias(tmp_path: Path, caplog, via_kw: str):
     text = board1(via_kw)
     if not via_kw:

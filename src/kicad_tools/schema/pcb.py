@@ -4376,6 +4376,8 @@ class PCB:
                     )
                 )
 
+        from ..core.layers import kicad_read_via_layers
+
         # Remove from S-expression tree
         removed_count = 0
         sexp_to_remove = []
@@ -4395,11 +4397,24 @@ class PCB:
             at_node = child.find("at")
             layers_node = child.find("layers")
             if at_node and layers_node:
-                layers = tuple(
+                raw_layers = tuple(
                     layers_node.get_string(i) or ""
                     for i in range(len(layers_node.values))
                     if isinstance(layers_node.values[i], str)
                 )
+                # Issue #6493: Via.layers holds the span KiCad *reads*
+                # (keyword-less partial pairs widen to F.Cu/B.Cu), so key
+                # the raw node on the same normalised span or a uuid-less
+                # keyword-less partial via would never match here.
+                raw_type = (
+                    child.values[0]
+                    if child.values
+                    and isinstance(child.values[0], str)
+                    and child.values[0] in ("micro", "blind", "buried")
+                    else None
+                )
+                layers, _ = kicad_read_via_layers(raw_layers, raw_type)
+                layers = tuple(layers)
                 key = (
                     round(at_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
                     round(at_node.get_float(1) or 0.0, _COORD_MATCH_QUANT),
