@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.net_status_cmd import main
+from kicad_tools.cli.route_lint_gate import _is_kicad_lock
 
 REPO = Path(__file__).resolve().parent.parent
 BOARD05 = REPO / "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb"
@@ -69,14 +70,26 @@ def test_default_output_has_no_crossing_content(capsys):
 
 
 def test_analysis_is_read_only():
+    """net-status --crossings writes nothing into board 05's directory.
+
+    The porcelain check is scoped to board 05's directory (the only board the
+    analysis reads) and ignores ``~*.lck`` KiCad lock markers, which any
+    in-place ``kicad-cli`` reader -- another xdist worker, or a developer with
+    KiCad open -- creates and deletes transiently (issues #6338, #6609).
+    """
     before = BOARD05.read_bytes()
     main([str(BOARD05), "--crossings"])
     assert BOARD05.read_bytes() == before
     status = subprocess.run(
-        ["git", "status", "--porcelain", "boards/"],
+        ["git", "status", "--porcelain", "--untracked-files=all", "--", str(BOARD05.parent)],
         cwd=REPO,
         capture_output=True,
         text=True,
         check=True,
     )
-    assert status.stdout == ""
+    changes = [
+        line
+        for line in status.stdout.splitlines()
+        if not _is_kicad_lock(Path(line[3:].strip('"')).name)
+    ]
+    assert changes == []
