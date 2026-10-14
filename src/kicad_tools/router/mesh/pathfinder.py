@@ -304,6 +304,14 @@ class MeshPathfinder:
         if not navmesh.triangles:
             return None
 
+        # Issue #6360: a single-layer route runs on the start pad's layer; it
+        # is declined when that layer is reserved / hard-avoided for this net
+        # (the layered via-injection fallback then handles the net).
+        if (start_li := self._layer_index(start.layer)) is not None and (
+            start_li in self._blocked_layers(net_class)
+        ):
+            return None
+
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
         # Issue #6243: the net's authored netclass minimum is its own side.
@@ -631,6 +639,26 @@ class MeshPathfinder:
         except Exception:
             return False
 
+    def _blocked_layers(self, net_class: object | None) -> frozenset[int]:
+        """Routing-graph layer indices no copper may be laid on (issue #6360).
+
+        Union of layers outside ``DesignRules.allowed_layers`` (plane-layer
+        reservation) and the net class's hard-avoided layers (auto-hard with
+        ``target_ampacity`` or ``strict_layers``, as the grid engine does).
+        Empty when neither applies, so unreserved boards are unchanged.
+        """
+        blocked: set[int] = set()
+        allowed = self.rules.allowed_layers
+        if allowed is not None:
+            allowed_names = set(allowed)
+            blocked.update(
+                ld.index for ld in self.layer_stack.layers if ld.name not in allowed_names
+            )
+        hard = getattr(net_class, "hard_avoided_layer_indices", None)
+        if callable(hard):
+            blocked.update(hard(self.rules.strict_layers))
+        return frozenset(blocked)
+
     def _layer_index(self, layer: object) -> int | None:
         """Routing-graph layer index for a KiCad layer enum (None if off-stack)."""
         try:
@@ -807,6 +835,7 @@ class MeshPathfinder:
             present_cost_factor=pcf,
             cost_congestion=self.rules.cost_congestion if pcf else 0.0,
             congestion_threshold=self.rules.congestion_threshold,
+            blocked_layers=self._blocked_layers(net_class),
         )
         if corridor is None:
             return None

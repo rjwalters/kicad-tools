@@ -290,3 +290,57 @@ def test_single_net_route_is_inert_no_vias() -> None:
             if r is not None and r.segments:
                 assert not r.vias, "single-net route must not inject vias"
                 break
+
+
+# ---------------------------------------------------------------------------
+# Plane-layer reservation / hard avoid_layers (issue #6360).
+# ---------------------------------------------------------------------------
+
+
+def test_through_via_f_to_b_with_inner_layers_reserved() -> None:
+    rules = DesignRules(allowed_layers=["F.Cu", "B.Cu"])
+    stack = LayerStack.four_layer_all_signal()
+    outline = [(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)]
+    start = _pad(5.0, 15.0, 1, "A1", layer=Layer.F_CU)
+    end = _pad(35.0, 15.0, 1, "A2", layer=Layer.B_CU)
+    pf = MeshPathfinder(outline, [start, end], rules, layer_stack=stack)
+    res = pf._route_via_injection(start, end, None, {}, present_cost_factor=0.0)
+    assert res is not None
+    route, _ = res
+    assert route.vias and route.vias[0].layers == (Layer.F_CU, Layer.B_CU)
+    assert {s.layer for s in route.segments} == {Layer.F_CU, Layer.B_CU}
+
+
+def _f_to_b_board(rules):
+    stack = LayerStack.four_layer_all_signal()
+    outline = [(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)]
+    start = _pad(5.0, 15.0, 1, "A1", layer=Layer.F_CU)
+    end = _pad(35.0, 15.0, 1, "A2", layer=Layer.B_CU)
+    return MeshPathfinder(outline, [start, end], rules, layer_stack=stack), start, end
+
+
+def test_reserved_inner_layers_carry_no_signal_copper() -> None:
+    pf, start, end = _f_to_b_board(DesignRules(allowed_layers=["F.Cu", "B.Cu"]))
+    route, _ = pf._route_via_injection(start, end, None, {}, present_cost_factor=0.0)
+    assert {s.layer for s in route.segments} <= {Layer.F_CU, Layer.B_CU}
+
+
+def test_hard_avoid_layers_honoured() -> None:
+    from kicad_tools.router.rules import NetClassRouting
+
+    nc = NetClassRouting(name="HV", priority=1, avoid_layers=[1, 2], target_ampacity=1.0)
+    pf, start, end = _f_to_b_board(DesignRules())
+    assert pf._blocked_layers(nc) == frozenset({1, 2})
+    res = pf._route_via_injection(start, end, nc, {}, present_cost_factor=0.0)
+    assert res is not None
+    assert {s.layer for s in res[0].segments} <= {Layer.F_CU, Layer.B_CU}
+    assert res[0].vias
+
+    # A goal ON a hard-avoided layer is unreachable.
+    inner = _pad(35.0, 15.0, 1, "A3", layer=Layer.IN1_CU)
+    assert pf._route_via_injection(start, inner, nc, {}, present_cost_factor=0.0) is None
+
+
+def test_no_reservation_blocks_nothing() -> None:
+    pf, _s, _e = _f_to_b_board(DesignRules())
+    assert pf._blocked_layers(None) == frozenset()

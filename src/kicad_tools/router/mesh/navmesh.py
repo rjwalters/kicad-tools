@@ -307,6 +307,7 @@ class NavMesh:
         present_cost_factor: float = 0.0,
         cost_congestion: float = 0.0,
         congestion_threshold: float = 0.0,
+        blocked_layers: frozenset[int] = frozenset(),
     ) -> list[LayeredStep] | None:
         """A* over the ``(triangle, layer)`` graph -- the 2.5D via-injection core.
 
@@ -329,6 +330,13 @@ class NavMesh:
         from ``start`` to ``goal``, or ``None`` if disconnected.  With a single
         layer (``num_layers == 1``) no via edge is ever generated and the result
         reduces to a same-layer corridor.
+
+        ``blocked_layers`` (issue #6360) lists layers no copper may be laid on
+        (plane-layer reservation / hard ``avoid_layers``).  In-layer moves on
+        them are skipped and a via hop *spans* them: from layer ``L`` the via
+        lands on the nearest non-blocked layer in each direction, so an
+        F.Cu -> B.Cu through-via is still possible with the inner layers
+        reserved.  An empty set reproduces the adjacent-layer behaviour exactly.
         """
         start_tris = self.locate(start)
         goal_tris = set(self.locate(goal))
@@ -368,7 +376,7 @@ class NavMesh:
 
             # In-layer triangle adjacency (masked per layer by committed copper).
             for nbr, edge in self._adj[tri]:
-                if portal_blocked(edge, layer):
+                if layer in blocked_layers or portal_blocked(edge, layer):
                     continue
                 mid = edge_mid(edge)
                 step = math.hypot(mid[0] - entry[0], mid[1] - entry[1])
@@ -387,7 +395,11 @@ class NavMesh:
 
             # Via hops: only at a genuine portal-midpoint site (never the pad).
             if at_portal and num_layers > 1:
-                for target in (layer - 1, layer + 1):
+                for direction in (-1, 1):
+                    target = layer + direction
+                    # Issue #6360: span blocked (reserved) layers.
+                    while 0 <= target < num_layers and target in blocked_layers:
+                        target += direction
                     if target < 0 or target >= num_layers:
                         continue
                     if not via_allowed(entry, layer, target):
