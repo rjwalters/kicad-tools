@@ -70,6 +70,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "solder_mask",
         "mask_to_copper",
         "via_in_pad",
+        "via_type",
         "zones",
     }
 )

@@ -350,6 +350,7 @@ class DRCChecker:
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_via_in_pad",
+        "check_via_type_capability",
         "check_via_under_body",
         "check_width_consistency",
         "check_zero_length_segments",
@@ -518,6 +519,8 @@ class DRCChecker:
         # fab-blocking manufacturing defects.
         "via_in_pad_process_missing": CATEGORY_MANUFACTURING,
         "via_in_pad_process_ineligible": CATEGORY_MANUFACTURING,
+        # Issue #6518: blind/buried/micro via on a profile that cannot build it.
+        "via_type_unsupported": CATEGORY_MANUFACTURING,
         "min_pad_size": CATEGORY_MANUFACTURING,
         "pth_annular_ring": CATEGORY_MANUFACTURING,
         "pad_grid": CATEGORY_MANUFACTURING,
@@ -1552,6 +1555,23 @@ class DRCChecker:
 
         merged = {**(self.width_consistency_options or {}), **options}
         rule = WidthConsistencyRule(**merged)  # type: ignore[arg-type]
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_via_type_capability(self) -> DRCResults:
+        """Check blind, buried and micro vias against the profile's capabilities.
+
+        Issue #6518: errors (rule_id ``via_type_unsupported``, manufacturing
+        category) on every ``(via blind|buried ...)`` when the profile's
+        ``blind_buried_vias_supported`` is ``False`` and every
+        ``(via micro ...)`` when ``micro_vias_supported`` is ``False``.
+        Through vias never trigger it.
+
+        Returns:
+            DRCResults with one ``via_type_unsupported`` violation per via.
+        """
+        from .rules.via_type_capability import ViaTypeCapabilityRule
+
+        rule = ViaTypeCapabilityRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_via_under_body(self) -> DRCResults:
