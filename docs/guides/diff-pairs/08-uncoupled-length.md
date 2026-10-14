@@ -31,48 +31,36 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 
 ### How pairs are formed
 
-Issue #6554. KiCad pairs primitives; it does not couple every parallel
-overlap. kct reproduces its figure (to 1 µm on every committed pair, and on
-the probe set pinned in the test file) with a rule inferred from black-box
-kicad-cli probes:
+Issue #6554. KiCad pairs primitives; kct matches it (to 1 µm on every
+committed pair and pinned probe) with a rule inferred from black-box probes:
 
-* Each parallel same-layer P/N segment pair couples over its overlap. The
-  coupled lengths of all pairs are **summed**, not unioned: two partners beside
-  the same stretch both count, so a net can read negative (kct clamps at 0).
-* A pair does **not** couple (not even partly) when other copper stands between
-  the two traces at the **start of their overlap**. The probe is the straight
-  line across the gap there. A track of either net or of a third net, a via or
-  a pad blocks it, at any distance; copper that overlaps either trace of the
-  pair is the same conductor and does not. Copper that starts later on the
-  overlap does not block: an N stub 3 to 8 mm along a 0 to 16 mm run leaves the
-  run coupled, while a stub 0 to 5 mm leaves it entirely uncoupled.
-* "Start" follows the **P trace's stored direction** (the end it was written
-  from); N's and the intervening copper's direction are irrelevant. A P trace
-  stored 20 → 0 anchors at its x = 20 end.
-* A trace that lies wholly inside a pad of its own net (a stub from the pad
-  centre that ends within the pad) is not paired.
-
-On real boards this is what makes short stubs at the pads uncouple: board 06's
-two stubs (0.125 mm and 0.2 mm) are buried in their pads, which is the whole of
-KiCad's extra 0.325 mm over the old projection model.
+* Each parallel same-layer P/N segment pair couples over its overlap, and the
+  pairs are **summed**, not unioned (a net can read negative; kct clamps at 0).
+* A pair does **not** couple at all when other copper (a track of any net, a
+  via or a pad, at any distance) crosses the straight line between the traces
+  at the **start of their overlap**; copper overlapping either trace does not
+  block, nor does copper starting later (an N stub at 3 to 8 mm on a 0 to 16 mm
+  run leaves it coupled; one at 0 to 5 mm uncouples it all).
+* "Start" follows the **P trace's stored direction**: P stored 20 → 0 anchors
+  at x = 20. N's and the blocker's direction are irrelevant.
+* A trace lying wholly inside a pad of its own net is not paired; board 06's
+  two buried stubs (0.125 and 0.2 mm) are KiCad's whole extra 0.325 mm.
 
 ### Known divergences
 
-* **Third-net copper overlapping one trace of the pair** (a short) and a
-  third-net pad lying over a trace are paired by KiCad in ways kct does not
-  model. Neither occurs on a routed pair.
+* **Third-net copper overlapping a pair trace** (a short) and a **third-net pad
+  over a trace** are paired by KiCad in ways kct does not model; neither occurs
+  on a routed pair. kct models every pad as its (rotated) rectangle.
 * **Arcs** are not measured by kct.
-* **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them. No
-  committed board has one; the first fixture belongs to the length-tuning phase
-  (#6447).
+* **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them; the
+  first fixture belongs to the length-tuning phase (#6447).
 
 ### The per-terminal figure (kct-only)
 
 Issue #6615. The rule also holds every **terminal** (a footprint with a pad on
 the net) to `max_uncoupled_per_terminal_mm`, counting only uncoupled copper
-**outside every terminal's gather-ignore region**. KiCad has no equivalent: no
-`.kicad_dru` rule is written and the finding says `kct-only`. The total is
-unchanged.
+**outside every terminal's gather-ignore region**. KiCad has no equivalent (no
+`.kicad_dru` rule; the finding says `kct-only`). The total is unchanged.
 
 * **Region**: the courtyard (`F.CrtYd` + `B.CrtYd`, every copper layer). Class
   field `gather_ignore`: `"courtyard"` (default, radius 0 mm), a number `r`
@@ -92,15 +80,11 @@ unchanged.
 ### Pairs KiCad does not recognise by name
 
 KiCad pairs nets only by its `MatchDpSuffix` rule (`+`/`-` or `P`/`N`). For
-`X_POS`/`X_NEG` the `.kicad_dru` carries the net-name-scoped `skew` rule
-(without `within_diff_pairs`; it still reports `|L_p - L_n|`) and `via_count`
-rule, so both engines check them. `diff_pair_gap` and `diff_pair_uncoupled`
-are ignored by KiCad for such pairs whatever their condition says, so no rule
-is written and `kct check` reports one `info` line per pair saying the limit
-is kct-only.
-
-A pair KiCad recognises but the router did not couple gets no pair rules, so
-kicad-cli never checks a pair kct does not.
+`X_POS`/`X_NEG` the `.kicad_dru` carries net-name-scoped `skew` (without
+`within_diff_pairs`; it still reports `|L_p - L_n|`) and `via_count` rules.
+KiCad ignores `diff_pair_gap` and `diff_pair_uncoupled` for such pairs, so none
+is written and `kct check` reports one `info` line per pair: kct-only. A pair
+the router left uncoupled gets no pair rules (kicad-cli checks none kct skips).
 
 ## Native rules in the `.kicad_dru`
 
@@ -111,6 +95,6 @@ recognises by name into a managed `.kicad_dru` block, at the gap it routed
 The same block carries, per pair and at the limits `kct check` resolves
 (same resolver, same severity): `diff_pair_uncoupled (max ..)`,
 `skew (max ..) (within_diff_pairs)` and `via_count (max ..)`, scoped by
-`A.inDiffPair('<base>')`. A limit that is an `uncited` protocol value is
-written with `(severity warning)`; KiCad accepts only `error`, `warning`,
-`ignore` and `exclusion`, so continuity has no native rule.
+`A.inDiffPair('<base>')`. An `uncited` protocol limit gets `(severity
+warning)`; KiCad accepts only `error`, `warning`, `ignore` and `exclusion`;
+continuity has no native rule.
