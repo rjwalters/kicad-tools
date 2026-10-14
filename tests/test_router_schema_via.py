@@ -127,6 +127,24 @@ class TestSchemaViaMicroEmit:
         serialized = _serialize(sexp)
         assert "micro" in serialized
 
+    @pytest.mark.parametrize("via_type", ["micro", "blind", "buried"])
+    def test_constructed_via_type_is_a_bare_atom(self, via_type: str):
+        """Issue #6485: ``buried`` was missing from the bare-atom allowlist.
+
+        A constructed ``Via(via_type="buried")`` serialised as the quoted
+        string ``(via "buried" ...)``, which KiCad 10 refuses to load.
+        """
+        via = Via(
+            position=(10.0, 20.0),
+            size=0.6,
+            drill=0.3,
+            layers=["In1.Cu", "In2.Cu"],
+            net_number=2,
+            uuid="zz",
+            via_type=via_type,
+        )
+        assert via.to_sexp().to_string().split()[:2] == ["(via", via_type]
+
     def test_emits_no_token_for_standard(self):
         via = Via(
             position=(10.0, 20.0),

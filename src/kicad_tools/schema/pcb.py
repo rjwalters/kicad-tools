@@ -6724,12 +6724,21 @@ class PCB:
         layers: tuple[str, str] = ("F.Cu", "B.Cu"),
         net: str | None = None,
         dedupe: bool = True,
+        via_type: str | None = None,
     ) -> Via | None:
         """
         Add a via at the specified position.
 
         Vias connect traces between copper layers. Default parameters create
         a standard through-hole via suitable for most designs.
+
+        Issue #6485: KiCad reads a via with no type keyword as a THROUGH via
+        whatever its ``layers`` pair says, so a partial span is never written
+        keyword-less.  With ``via_type=None`` the type follows ``layers``: the
+        outer ``F.Cu``/``B.Cu`` pair is a through via, any other copper pair
+        becomes ``blind`` (one outer end) or ``buried`` (two inner ends) --
+        both need a fab process that offers them.  Pass ``via_type="through"``
+        to drill the full stack regardless of the pair given.
 
         Args:
             x: X position in mm
@@ -6741,6 +6750,11 @@ class PCB:
             dedupe: When True (default, issue #4175), skip appending a via
                 whose (net, rounded position, unordered layers) key already
                 exists on the board.
+            via_type: ``"micro"``, ``"blind"``, ``"buried"``, ``"through"``,
+                or ``None`` (default) to derive it from ``layers`` as above.
+
+        Raises:
+            ValueError: If ``via_type`` is not a via type KiCad knows.
 
         Returns:
             The Via object that was created, or None if an identical via was
@@ -6751,6 +6765,25 @@ class PCB:
             >>> pcb.add_via(50, 30, net="GND")
             >>> pcb.save("board.kicad_pcb")
         """
+        # Issue #6485: resolve the type before anything is recorded, so the
+        # dedup key, the stored ``Via`` and the written node all describe the
+        # barrel KiCad will actually build.
+        from ..core.layers import resolve_via_type
+
+        resolved_type, resolved_layers = resolve_via_type(layers, via_type)
+        if via_type is None and resolved_type is not None:
+            logger.warning(
+                "add_via: layers %s are a partial span, so the via at (%s, %s) is "
+                "written as (via %s ...). It needs a fab process with %s vias; "
+                "pass via_type='through' for an ordinary through via.",
+                tuple(layers),
+                x,
+                y,
+                resolved_type,
+                resolved_type,
+            )
+        layers = cast("tuple[str, str]", resolved_layers)
+
         net_number = 0
         if net:
             net_obj = self.add_net(net)
@@ -6771,6 +6804,7 @@ class PCB:
             layers=list(layers),
             net_number=net_number,
             net_name=net or "",
+            via_type=resolved_type,
             # Issue #4416: match the board's net-reference dialect (see add_trace).
             net_name_only=self._net_name_only_dialect and bool(net),
             uuid=self.mint_uuid("via", net_number, x, y, size, drill, *layers),

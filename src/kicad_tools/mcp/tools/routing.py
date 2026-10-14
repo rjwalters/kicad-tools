@@ -1005,6 +1005,12 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
                 )
             else:
                 layer_pair = ("F.Cu", "B.Cu")
+            # Issue #6485: the router has two via kinds.  A micro via keeps
+            # its span and its ``micro`` keyword (previously dropped here, so
+            # it was written -- and drilled -- as a through via).  Every
+            # other router via is drilled through the whole stack, whatever
+            # logical layer pair it carries in memory.
+            is_micro = bool(getattr(via, "is_micro", False))
             added_via = pcb.add_via(
                 x=float(via.x),
                 y=float(via.y),
@@ -1012,6 +1018,7 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
                 drill=float(getattr(via, "drill", 0.3)),
                 layers=layer_pair,
                 net=net_name,
+                via_type="micro" if is_micro else "through",
             )
             if added_via is not None:
                 vias_written += 1

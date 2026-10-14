@@ -189,8 +189,14 @@ class KiCadPCBExporter:
     ) -> str:
         """Generate a via."""
         via_uuid = self._uuid()
+        # Issue #6485: a partial span is never written keyword-less -- KiCad
+        # would drill it as a through via.
+        from kicad_tools.core.layers import resolve_via_type
+
+        type_token, layers = resolve_via_type(layers)
         layer_str = f'"{layers[0]}" "{layers[1]}"'
-        return f'''	(via
+        via_head = f"(via {type_token}" if type_token else "(via"
+        return f'''	{via_head}
 		(at {self._format_coord(x)} {self._format_coord(y)})
 		(size {size})
 		(drill {drill})

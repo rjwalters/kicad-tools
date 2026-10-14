@@ -243,6 +243,23 @@ class Via:
     # producer of micro vias from inside the routing pipeline.
     is_micro: bool = False
 
+    @property
+    def drilled_layers(self) -> tuple[Layer, Layer]:
+        """The layer pair this via is physically drilled between (issue #6485).
+
+        The router has exactly two via kinds.  A micro via (:attr:`is_micro`)
+        is laser-drilled over the span it carries.  Every other via is an
+        ordinary mechanically drilled *through* via: the router has no blind
+        or buried process, so its barrel runs from ``F.Cu`` to ``B.Cu``
+        whatever logical layer transition :attr:`layers` happens to record.
+
+        :attr:`layers` already given as the outer pair is returned as held
+        (either order), so a through via serialises byte-for-byte as before.
+        """
+        if self.is_micro or {self.layers[0], self.layers[1]} == {Layer.F_CU, Layer.B_CU}:
+            return self.layers
+        return (Layer.F_CU, Layer.B_CU)
+
     def to_sexp(self, name_only: bool = False) -> str:
         """Generate KiCad S-expression.
 
@@ -250,13 +267,25 @@ class Via:
         micro-via token survives the route -> finalize -> file
         round-trip (issue #3124).  Otherwise emits a plain ``(via ...)``.
 
+        Issue #6485: a plain ``(via ...)`` is ALWAYS written on the outer
+        ``F.Cu``/``B.Cu`` pair (see :attr:`drilled_layers`).  KiCad reads a
+        via with no type keyword as a through via whatever its ``layers``
+        say -- it rewrites the pair to ``F.Cu``/``B.Cu`` on save and drills
+        the hole in the through-hole file -- so a keyword-less
+        ``(layers "F.Cu" "In1.Cu")`` told every reader of the file that the
+        barrel stopped at In1 while the fabricated board shorted In2 and
+        B.Cu to it.  This is the single serialisation point for router
+        vias, which makes that node unwritable from the router whatever a
+        producer put in :attr:`layers`.
+
         Issue #4416: when ``name_only`` is True and :attr:`net_name` is
         known, the net reference is emitted as ``(net "name")`` to match a
         KiCad-10 name-based board's dialect; otherwise the numeric
         ``(net N)`` form is used (preserving behavior for numeric boards).
         """
-        layer_start = self.layers[0].kicad_name
-        layer_end = self.layers[1].kicad_name
+        drilled_start, drilled_end = self.drilled_layers
+        layer_start = drilled_start.kicad_name
+        layer_end = drilled_end.kicad_name
         type_token = " micro" if self.is_micro else ""
         net_ref = f'"{self.net_name}"' if name_only and self.net_name else str(self.net)
         # Issue #3925: field order matches KiCad's canonical writer

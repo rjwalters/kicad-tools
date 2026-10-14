@@ -410,9 +410,16 @@ def via_node(
         layers: Tuple of layer names (e.g., ("F.Cu", "B.Cu"))
         net: Net number
         uuid_str: Unique identifier
-        via_type: Optional via type. Use ``"micro"`` for micro-vias
-            (KiCad emits ``(via micro ...)``). When *None* (the default),
-            a standard through-hole via is produced.
+        via_type: Optional via type: ``"micro"``, ``"blind"`` or
+            ``"buried"`` (KiCad emits ``(via micro ...)`` etc.), or
+            ``"through"`` for an explicit through via.  When *None* (the
+            default) the type follows the layer pair (issue #6485): the
+            outer ``F.Cu``/``B.Cu`` pair is a through via and carries no
+            token, any other copper pair is written ``blind`` (one outer
+            end) or ``buried`` (two inner ends).  KiCad reads a
+            keyword-less via as a THROUGH via whatever its ``layers`` say,
+            so a partial span must never be written without its keyword --
+            see :func:`kicad_tools.core.layers.resolve_via_type`.
         net_name: Optional net name (issue #4416).  When supplied (and
             non-empty) the net reference is emitted in name-only
             ``(net "name")`` dialect.  Defaults to ``None`` (numeric).
@@ -437,12 +444,18 @@ def via_node(
             (uuid "...")
         )
     """
-    layers_node = SExp.list("layers", *layers)
+    # Issue #6485: one write-time rule for every new via node -- a partial
+    # span always carries its keyword, an explicit ``blind`` / ``buried`` is
+    # emitted rather than dropped.
+    from kicad_tools.core.layers import resolve_via_type
+
+    type_token, written_layers = resolve_via_type(layers, via_type)
+    layers_node = SExp.list("layers", *written_layers)
     net_node = _net_node(net, net_name)
-    if via_type == "micro":
+    if type_token is not None:
         return SExp.list(
             "via",
-            SExp.atom("micro"),
+            SExp.atom(type_token),
             SExp.list("at", fmt(x), fmt(y)),
             SExp.list("size", fmt(size)),
             SExp.list("drill", fmt(drill)),

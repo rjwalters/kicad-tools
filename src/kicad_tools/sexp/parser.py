@@ -738,6 +738,10 @@ class SExp:
             "edge",
             # Via types
             "blind",
+            # Issue #6485: without this a constructed ``via_type="buried"``
+            # serialised as the quoted string ``(via "buried" ...)``, which
+            # KiCad 10 refuses to load.
+            "buried",
             "micro",
             "through",
             # Arc/curve modes

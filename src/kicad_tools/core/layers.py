@@ -114,3 +114,68 @@ def via_spans_layer(via_layers: list[str] | tuple[str, ...], target_layer: str) 
 
     # Via spans from min to max index; any layer in between is connected.
     return min(indices) <= target_idx <= max(indices)
+
+
+# Issue #6485: the via-type tokens KiCad writes immediately after ``via``.
+# A through via carries NO token; ``through`` is accepted from callers as an
+# explicit spelling of that and never written.
+VIA_TYPE_KEYWORDS: frozenset[str] = frozenset({"micro", "blind", "buried"})
+
+_OUTER_COPPER_LAYERS: frozenset[str] = frozenset({"F.Cu", "B.Cu"})
+
+
+def resolve_via_type(
+    layers: tuple[str, ...] | list[str],
+    via_type: str | None = None,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Return the ``(keyword, layers)`` a new via node must be written with.
+
+    Issue #6485.  KiCad (measured on kicad-cli 10.0.6) decides a via's drilled
+    span from its type keyword, **not** from its ``(layers ...)`` pair: a
+    ``(via ...)`` node with no ``micro`` / ``blind`` / ``buried`` token is a
+    *through* via whatever the pair says.  KiCad rewrites such a node to
+    ``(layers "F.Cu" "B.Cu")`` on save and puts its hole in the through-hole
+    drill file.  A keyword-less partial-span via therefore says one thing to a
+    reader of ``layers`` and builds another -- the barrel shorts whatever sits
+    on the layers the file claimed it never reached.
+
+    This is the single write-time rule that makes that node unwritable:
+
+    * ``via_type`` of ``"micro"`` / ``"blind"`` / ``"buried"`` is kept, with
+      the layers as given.
+    * ``via_type="through"`` is an explicit through via: no keyword, and the
+      layers are widened to the outer pair so the file states what is drilled.
+    * ``via_type=None`` on the outer ``F.Cu``/``B.Cu`` pair is a through via.
+    * ``via_type=None`` on any *other* pair of copper layers is a caller asking
+      for a partial span, so the keyword is derived: ``blind`` when one end is
+      an outer layer, ``buried`` when neither is.
+
+    Layer pairs that are not two recognised copper layers are returned
+    unchanged (nothing can be inferred from them).
+
+    Args:
+        layers: The via's layer pair, in the order the caller wants written.
+        via_type: The requested via type, or ``None`` to derive it.
+
+    Returns:
+        ``(keyword, layers)`` -- ``keyword`` is ``None`` for a through via.
+
+    Raises:
+        ValueError: If ``via_type`` is not a via type KiCad knows.
+    """
+    layer_pair = tuple(layers)
+    if via_type in VIA_TYPE_KEYWORDS:
+        return via_type, layer_pair
+    if via_type == "through":
+        return None, ("F.Cu", "B.Cu")
+    if via_type is not None:
+        raise ValueError(
+            f"Unknown via type {via_type!r}. Use 'micro', 'blind', 'buried', "
+            f"'through', or None to derive it from the layer pair."
+        )
+    if len(layer_pair) != 2 or any(name not in _COPPER_LAYER_INDEX for name in layer_pair):
+        return None, layer_pair
+    outer_ends = sum(1 for name in layer_pair if name in _OUTER_COPPER_LAYERS)
+    if outer_ends == 2 and layer_pair[0] != layer_pair[1]:
+        return None, layer_pair
+    return ("blind" if outer_ends else "buried"), layer_pair
