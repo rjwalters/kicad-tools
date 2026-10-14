@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -163,6 +164,35 @@ def _set_text_at(ref_node: SExp, x: float, y: float, angle: float) -> None:
         at_node.add(round(angle, 6))
 
 
+def _visible_reference(footprint: Footprint):
+    """Return ``(ref_text, side, ref_node, center, geom)`` for a visible reference.
+
+    ``None`` when the footprint has no reference text, it is hidden, it is not
+    on a silk layer, or its geometry cannot be built -- the references
+    :class:`SilkRefPlacer` never moves.
+    """
+    ref_text = next((t for t in footprint.texts if t.text_type == "reference"), None)
+    if ref_text is None or ref_text.hidden:
+        return None
+    side = _silk_side(ref_text.layer)
+    if side is None:
+        return None
+    ref_node = _find_reference_node(footprint)
+    if ref_node is None:
+        return None
+    center = _fp_transform(footprint)(ref_text.position)
+    geom = _oriented_text_geometry(
+        ref_text.text,
+        ref_text.font_size,
+        ref_text.font_thickness,
+        center,
+        _read_text_angle(ref_node),
+    )
+    if geom is None:
+        return None
+    return ref_text, side, ref_node, center, geom
+
+
 def _inverse_fp_transform(footprint: Footprint):
     """Return a ``(X, Y) -> (x, y)`` board->local transform for a footprint.
 
@@ -190,6 +220,16 @@ def _iter_static_silk_obstacles(pcb: PCB):
     this module places, tracked separately as "dynamic" obstacles by the
     caller so each already-decided reference still blocks the next one.
     """
+    for side, geom, label, _owner in _iter_owned_static_silk(pcb):
+        yield side, geom, label
+
+
+def _iter_owned_static_silk(pcb: PCB):
+    """:func:`_iter_static_silk_obstacles` plus the owning footprint reference.
+
+    Yields ``(side, geom, label, owner)``; ``owner`` is ``None`` for
+    board-level silk (``gr_text`` / ``gr_*`` graphics).
+    """
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
 
@@ -205,7 +245,7 @@ def _iter_static_silk_obstacles(pcb: PCB):
             )
             if geom is None:
                 continue
-            yield side, geom, f"{footprint.reference} ({fp_text.text_type})"
+            yield side, geom, f"{footprint.reference} ({fp_text.text_type})", footprint.reference
 
         for graphic in footprint.graphics:
             side = _silk_side(graphic.layer)
@@ -214,7 +254,12 @@ def _iter_static_silk_obstacles(pcb: PCB):
             geom = _stroke_geometry(graphic, transform)
             if geom is None:
                 continue
-            yield side, geom, f"{footprint.reference} (fp_{graphic.graphic_type})"
+            yield (
+                side,
+                geom,
+                f"{footprint.reference} (fp_{graphic.graphic_type})",
+                footprint.reference,
+            )
 
     for text in pcb.texts:
         side = _silk_side(text.layer)
@@ -225,7 +270,7 @@ def _iter_static_silk_obstacles(pcb: PCB):
         )
         if geom is None:
             continue
-        yield side, geom, (text.text[:20] if text.text else "gr_text")
+        yield side, geom, (text.text[:20] if text.text else "gr_text"), None
 
     for board_graphic in pcb.graphics:
         side = _silk_side(board_graphic.layer)
@@ -234,7 +279,7 @@ def _iter_static_silk_obstacles(pcb: PCB):
         geom = _stroke_geometry(board_graphic, None)
         if geom is None:
             continue
-        yield side, geom, f"gr_{board_graphic.graphic_type}"
+        yield side, geom, f"gr_{board_graphic.graphic_type}", None
 
 
 def _component_bbox(
@@ -720,6 +765,7 @@ class SilkRefPlacer:
         max_offset_mm: float = DEFAULT_MAX_OFFSET_MM,
         step_mm: float = DEFAULT_STEP_MM,
         allow_rotate: bool = False,
+        only: Collection[str] | None = None,
     ) -> PlaceSilkRefsResult:
         """Compute a per-reference move plan without mutating the tree.
 
@@ -734,10 +780,14 @@ class SilkRefPlacer:
             allow_rotate: If True, also try each candidate with the text
                 rotated 90 degrees about its anchor when the
                 original orientation does not fit.
+            only: If given, plan only the references of these footprints
+                (issue #6256). Every other visible reference is left out of
+                the result -- never moved -- but still blocks the planned
+                ones at its current position.
 
         Returns:
             A :class:`PlaceSilkRefsResult` with one :class:`RefPlacement`
-            per visible reference designator.  Nothing is written to the
+            per visible reference designator (restricted to *only*).  Nothing is written to the
             S-expression tree -- call :meth:`apply` to do that.
         """
         values = {
@@ -812,27 +862,10 @@ class SilkRefPlacer:
         entries = []
         dynamic: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
         for footprint in pcb.footprints:
-            ref_text = next((t for t in footprint.texts if t.text_type == "reference"), None)
-            if ref_text is None or ref_text.hidden:
+            visible = _visible_reference(footprint)
+            if visible is None:
                 continue
-            side = _silk_side(ref_text.layer)
-            if side is None:
-                continue
-            ref_node = _find_reference_node(footprint)
-            if ref_node is None:
-                continue
-
-            transform = _fp_transform(footprint)
-            original_center = transform(ref_text.position)
-            geom0 = _oriented_text_geometry(
-                ref_text.text,
-                ref_text.font_size,
-                ref_text.font_thickness,
-                original_center,
-                _read_text_angle(ref_node),
-            )
-            if geom0 is None:
-                continue
+            ref_text, side, ref_node, original_center, geom0 = visible
 
             self._ref_nodes[footprint.reference] = ref_node
             entries.append(
@@ -859,6 +892,10 @@ class SilkRefPlacer:
             geom0 = entry["geom0"]
             original_center = entry["original_center"]
             old_rotation = entry["old_rotation"]
+            if only is not None and ref not in only:
+                # Outside the requested set: never planned or moved, but its
+                # text stays in the pool as an obstacle for the others.
+                continue
 
             pool = dynamic[side]
             with contextlib.suppress(ValueError):
@@ -975,6 +1012,64 @@ class SilkRefPlacer:
                 )
 
         return result
+
+    def refs_blocked_by(
+        self,
+        owners: Collection[str],
+        *,
+        clearance_mm: float = DEFAULT_CLEARANCE_MM,
+        mask_clearance_mm: float = 0.05,
+    ) -> set[str]:
+        """Return footprints whose visible reference collides with *owners*.
+
+        A reference is blocked by an owner when its current text box, grown
+        by ``clearance_mm``, meets one of the owner's pad apertures, silk
+        elements or visible reference, or when the bare text box lies on the
+        owner's courtyard -- the same tests :meth:`plan` applies, restricted
+        to the owners' geometry. The owners' own references are not
+        reported. Read-only: nothing in the tree changes.
+
+        Used after the decoupling snap (issue #6256) to find the neighbours
+        whose otherwise-untouched reference text a moved cap now sits under.
+        """
+        require_shapely("silk reference placement")
+        from shapely.geometry import Polygon
+
+        owner_set = set(owners)
+        if not owner_set:
+            return set()
+        pcb = self.pcb
+        copper: dict[str, list[Any]] = {"F": [], "B": []}
+        for side, geom, label in _iter_pad_apertures(pcb, mask_clearance_mm):
+            ref, sep, _ = label.rpartition(" pad ")
+            if sep and ref in owner_set:
+                copper[side].append(geom)
+        for side, geom, _label, owner in _iter_owned_static_silk(pcb):
+            if owner in owner_set:
+                copper[side].append(geom)
+        bodies: dict[str, list[Any]] = {"F": [], "B": []}
+        texts: list[tuple[str, str, Any]] = []
+        for footprint in pcb.footprints:
+            visible = _visible_reference(footprint)
+            if footprint.reference in owner_set:
+                if visible is not None:
+                    copper[visible[1]].append(visible[4])
+                for side in ("F", "B"):
+                    if _side_has_geometry(footprint, side):
+                        poly = _courtyard_polygon(footprint, side, Polygon)
+                        if poly is not None:
+                            bodies[side].append(poly)
+            elif visible is not None:
+                texts.append((footprint.reference, visible[1], visible[4]))
+
+        blocked: set[str] = set()
+        for ref, side, geom in texts:
+            expanded = geom.buffer(clearance_mm) if clearance_mm > 0 else geom
+            if any(expanded.intersects(g) for g in copper[side]) or any(
+                geom.intersects(b) for b in bodies[side]
+            ):
+                blocked.add(ref)
+        return blocked
 
     def apply(self, result: PlaceSilkRefsResult) -> int:
         """Write every ``moved`` placement's new ``(x, y, [angle])``.
