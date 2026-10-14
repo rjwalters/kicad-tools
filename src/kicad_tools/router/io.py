@@ -2851,7 +2851,10 @@ def validate_routes(
                 for i, seg in enumerate(route.segments)
             ]
             for via in route.vias:
-                lo, hi = sorted(router.grid.layer_to_index(layer.value) for layer in via.layers)
+                lo, hi = sorted(
+                    router.grid.layer_to_index(layer.value)
+                    for layer in getattr(via, "drilled_layers", via.layers)
+                )
                 candidates.append(
                     (
                         -1,

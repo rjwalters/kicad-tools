@@ -1025,6 +1025,11 @@ def run_route_command(args) -> int:
     # when the user set it (byte-identical when absent).
     if getattr(args, "escape_corridor_reservation", False):
         sub_argv.append("--escape-corridor-reservation")
+    # Issue #6352 (EXPERIMENTAL): forward the hidden flow-assignment selector
+    # only when it differs from the "greedy" default (argv byte-identical
+    # otherwise).
+    if getattr(args, "escape_corridor_assignment", "greedy") != "greedy":
+        sub_argv.extend(["--escape-corridor-assignment", args.escape_corridor_assignment])
     # Issue #5891 (epic #5508 Phase 2): forward --no-pad-access-invariant.  Both
     # parsers declare it as store_true defaulting to False (the invariant itself
     # is ON by default), so only forward the OPT-OUT when the user set it --

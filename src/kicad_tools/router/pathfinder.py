@@ -4619,8 +4619,10 @@ class Router:
         end_layer = self.grid.layer_to_index(end.layer.value)
 
         # Get all valid start/end layers for this pad type
-        start_layers = routable_layers if start.through_hole else [start_layer]
-        end_layers = routable_layers if end.through_hole else [end_layer]
+        start_layers = (
+            routable_layers if (start.through_hole or start.layer_agnostic) else [start_layer]
+        )
+        end_layers = routable_layers if (end.through_hole or end.layer_agnostic) else [end_layer]
 
         # Issue #956/#977: Calculate pad metal area bounds for expanded start/goal regions
         # When pads don't align with the routing grid, we accept reaching any cell
@@ -6472,8 +6474,10 @@ class Router:
         routable_layers = self.grid.get_routable_indices()
         start_layer = self.grid.layer_to_index(start.layer.value)
         end_layer = self.grid.layer_to_index(end.layer.value)
-        start_layers = routable_layers if start.through_hole else [start_layer]
-        end_layers = routable_layers if end.through_hole else [end_layer]
+        start_layers = (
+            routable_layers if (start.through_hole or start.layer_agnostic) else [start_layer]
+        )
+        end_layers = routable_layers if (end.through_hole or end.layer_agnostic) else [end_layer]
 
         # Apply layer constraints
         if self.rules.allowed_layers is not None:

@@ -26,11 +26,12 @@ from kicad_tools.router.core import Autorouter
 
 _PARTS = {"R1": (10.0, 10.0), "R2": (30.0, 10.0)}
 _NET_OF = {("R1", "1"): 1, ("R2", "1"): 1, ("R1", "2"): 2, ("R2", "2"): 2}
-_NETS = {1: "A", 2: "B"}
+_NETS = {1: "A", 2: "B", 3: "C"}
 
-# Preserved input copper, away from the pads so it does not block routing.
-_FIXED_SEGMENT = '  (segment (start 2 2) (end 4 2) (width 0.2) (layer "B.Cu") (net 1))\n'
-_FIXED_VIA = '  (via (at 3 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
+# Preserved input copper, on a pad-less net the router never re-routes (a
+# re-routed net's preserved copper is deduped away, #6626), away from the pads.
+_FIXED_SEGMENT = '  (segment (start 2 2) (end 4 2) (width 0.2) (layer "B.Cu") (net 3))\n'
+_FIXED_VIA = '  (via (at 3 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 3))\n'
 
 
 def _board_text() -> str:
@@ -73,11 +74,9 @@ def _copper(text: str) -> tuple[int, int]:
 class _CheckpointThenDeadline:
     """Route for real and checkpoint onto ``<output>``; then hit the deadline.
 
-    The adaptive and combined flows only hand the partial save a router once
-    an attempt has finished, so for them the first attempt is left one net
-    short (``drop_net``) to keep the ladder going, and the deadline lands
-    during the second.  Every call checkpoints first, so by the time the
-    deadline fires ``<output>`` holds routed-only copper.
+    The deadline lands in the ``deadline_on_call``-th routing call.  Every
+    call checkpoints first, so by the time the deadline fires ``<output>``
+    holds routed-only copper.
     """
 
     def __init__(self, monkeypatch, *, deadline_on_call: int):
@@ -89,14 +88,12 @@ class _CheckpointThenDeadline:
         def route(router, *args, **kwargs):
             self.calls += 1
             result = original(router, *args, **kwargs)
-            if self.calls < deadline_on_call:
-                router.routes = [r for r in router.routes if r.net != 2]
             callback = kwargs.get("checkpoint_callback")
             if callback is not None:
                 metrics = SimpleNamespace(iteration=0, routed_count=1, overflow=0)
                 callback(list(router.routes), metrics)
                 self.checkpoints += 1
-            if self.calls < deadline_on_call:
+            if self.calls < deadline_on_call:  # pragma: no cover - 1 in all flows
                 return result
             saved_router = route_cmd._interrupt_state["router"]
             assert saved_router is not None, "the flow bound no router for the partial save"
@@ -108,8 +105,8 @@ class _CheckpointThenDeadline:
 
 # flow -> (argv selecting it, the routing call the deadline lands in)
 _FLOWS = {
-    "adaptive": (("--no-auto-layers", "--adaptive-rules"), 2),
-    "combined": (("--auto-layers", "--adaptive-rules"), 2),
+    "adaptive": (("--no-auto-layers", "--adaptive-rules"), 1),
+    "combined": (("--auto-layers", "--adaptive-rules"), 1),
     "main": (("--no-auto-layers",), 1),
     "layer-escalation": (("--auto-layers",), 1),
 }

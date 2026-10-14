@@ -75,6 +75,9 @@
 #                             at startup; the real one steers the operator CLI)
 #   LOOM_SESSION_RECONCILE -> 0 (#10661: a test daemon never reconciles the
 #                             host's real Codex session containers)
+#   LOOM_CONFIG_DEFAULTS_FILE -> <dir>/machine-config-defaults.json (absent)
+#                             (#11934: the machine config tier; on a fleet
+#                             dispatcher it enables the work finder)
 #   LOOM_DAEMON_BIN        -> UNSET  (#4902: the ambient value names the REAL binary)
 #   LOOM_WORKSPACE         -> UNSET  (pid-file tier 3; each sub-invocation must
 #                             resolve its OWN fixture repo root instead)
@@ -569,6 +572,13 @@ live_state_sandbox_init() {
     # fallback root (written under the real ~/.loom otherwise), and the loop.
     export LOOM_SESSION_FALLBACK_ROOT_FILE="$dir/session-reconcile-fallback-root.json"
     export LOOM_SESSION_RECONCILE=0
+    # #11934: the machine config tier (~/.local/share/loom/config/defaults.json)
+    # is live host state too. daemon-start now reads the resolved config's
+    # autonomous.workFinder.enabled, and on a fleet dispatcher that tier
+    # enables it, which would turn a suite's plain-start cases into refusals
+    # on that host only. An absent file is an empty tier; a case that needs a
+    # config-enabled host writes one into its own repo root.
+    export LOOM_CONFIG_DEFAULTS_FILE="$dir/machine-config-defaults.json"
 
     # #8077 AC2: a sandboxed suite never gets to drive the LIVE `systemctl
     # --user` manager implicitly. Blocks stay opt-in even here; an operator who
@@ -617,6 +627,7 @@ live_state_sandbox_describe() {
     printf 'LOOM_WATCHES_PATH=%s\n' "${LOOM_WATCHES_PATH:-}"
     printf 'LOOM_WATCH_RESULTS_LOG=%s\n' "${LOOM_WATCH_RESULTS_LOG:-}"
     printf 'LOOM_SESSION_FALLBACK_ROOT_FILE=%s\n' "${LOOM_SESSION_FALLBACK_ROOT_FILE:-}"
+    printf 'LOOM_CONFIG_DEFAULTS_FILE=%s\n' "${LOOM_CONFIG_DEFAULTS_FILE:-}"
     printf 'LOOM_TEST_ALLOW_SYSTEMD=%s\n' "${LOOM_TEST_ALLOW_SYSTEMD:-<unset>}"
     printf 'LOOM_WORKSPACE=%s\n' "${LOOM_WORKSPACE:-<unset>}"
     printf 'LOOM_MACHINE_CHECKOUT=%s\n' "${LOOM_MACHINE_CHECKOUT:-<unset>}"
