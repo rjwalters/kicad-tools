@@ -1,10 +1,10 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6076-regen-b/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "file": "/work/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
-    "errors": 0,
-    "warnings": 2,
+    "errors": 13,
+    "warnings": 0,
     "infos": 6,
     "waived": 0,
     "rules_checked": 62,
@@ -27,7 +27,7 @@
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1
     },
-    "passed": true,
+    "passed": false,
     "stale_waivers": 0,
     "coverage_checked": 30,
     "coverage_skipped": 6,
@@ -154,48 +154,329 @@
       "evidence_hash": "ev2:663b5622fb7835dd"
     },
     {
-      "rule_id": "silk_edge_clearance",
-      "type": "silk_edge_clearance",
-      "severity": "warning",
-      "message": "Silkscreen J1 (fp_line) to board edge 0.125mm < minimum 0.20mm",
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm",
       "location": [
-        149.475,
-        63.3
+        38.65,
+        13.25
       ],
-      "layer": "F.SilkS",
-      "actual_value": 0.12500000000000375,
+      "layer": "In2.Cu",
+      "actual_value": 0.175,
       "required_value": 0.2,
       "items": [
-        "J1 (fp_line@7.57/6~7.57/8.73)",
-        "Edge.Cuts"
+        "Trace@In2.Cu:w0.2:146.475/70.5~146.475/71.728",
+        "Via@147.15/70.75:F.Cu-B.Cu:d0.3/s0.8"
       ],
-      "nets": [],
-      "status": "warning",
+      "nets": [
+        "USB_D-",
+        "VBUS"
+      ],
+      "status": "error",
       "waived": false,
-      "key": "silk_edge_clearance|Edge.Cuts,J1 (fp_line@7.57/6~7.57/8.73)||F.SilkS",
-      "evidence_hash": "ev2:399603662746ef85"
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:146.475/70.5~146.475/71.728,Via@147.15/70.75:F.Cu-B.Cu:d0.3/s0.8|USB_D-,VBUS|In2.Cu",
+      "evidence_hash": "ev2:1b04ae510ebb2f2a"
     },
     {
-      "rule_id": "silk_edge_clearance",
-      "type": "silk_edge_clearance",
-      "severity": "warning",
-      "message": "Silkscreen J1 (fp_line) to board edge 0.125mm < minimum 0.20mm",
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm",
       "location": [
-        149.475,
-        63.3
+        55.5,
+        43.9
       ],
-      "layer": "F.SilkS",
-      "actual_value": 0.12500000000000283,
+      "layer": "In2.Cu",
+      "actual_value": 0.175,
       "required_value": 0.2,
       "items": [
-        "J1 (fp_line@-1.62/6~-1.62/8.73)",
-        "Edge.Cuts"
+        "Trace@In2.Cu:w0.2:163.5/99.4~163.5/102.8",
+        "Via@164/101.4:F.Cu-B.Cu:d0.2/s0.45"
       ],
-      "nets": [],
-      "status": "warning",
+      "nets": [
+        "JOY_BTN",
+        "GND"
+      ],
+      "status": "error",
       "waived": false,
-      "key": "silk_edge_clearance|Edge.Cuts,J1 (fp_line@-1.62/6~-1.62/8.73)||F.SilkS",
-      "evidence_hash": "ev2:f64c1251b2e2dd45"
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:163.5/99.4~163.5/102.8,Via@164/101.4:F.Cu-B.Cu:d0.2/s0.45|GND,JOY_BTN|In2.Cu",
+      "evidence_hash": "ev2:1956703cceccd646"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.194mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        47.78,
+        20.03
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.1939,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:156.5/78~156.6/78",
+        "Via@156.28/77.53:F.Cu-B.Cu:d0.2/s0.45"
+      ],
+      "nets": [
+        "ISP_MOSI",
+        "GND"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:156.5/78~156.6/78,Via@156.28/77.53:F.Cu-B.Cu:d0.2/s0.45|GND,ISP_MOSI|In2.Cu",
+      "evidence_hash": "ev2:a8aea20b48e480c9"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.195mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        40.22,
+        37.6
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.195,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:149.2/94.7~149.2/94.9",
+        "Via@148.72/95.1:F.Cu-B.Cu:d0.2/s0.45"
+      ],
+      "nets": [
+        "BTN3",
+        "GND"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:149.2/94.7~149.2/94.9,Via@148.72/95.1:F.Cu-B.Cu:d0.2/s0.45|BTN3,GND|In2.Cu",
+      "evidence_hash": "ev2:652a49759d1fbcee"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.154mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        38.65,
+        13.25
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.1541,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:146.475/70.5~147.45/69.525",
+        "Via@147.15/70.75:F.Cu-B.Cu:d0.3/s0.8"
+      ],
+      "nets": [
+        "USB_D-",
+        "VBUS"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:146.475/70.5~147.45/69.525,Via@147.15/70.75:F.Cu-B.Cu:d0.3/s0.8|USB_D-,VBUS|In2.Cu",
+      "evidence_hash": "ev2:1f4e9f647538e828"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        44.25,
+        22.0
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.175,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:146.9/79~154.7/79",
+        "Via@152.75/79.5:F.Cu-B.Cu:d0.2/s0.45"
+      ],
+      "nets": [
+        "ISP_MOSI",
+        "VCC"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:146.9/79~154.7/79,Via@152.75/79.5:F.Cu-B.Cu:d0.2/s0.45|ISP_MOSI,VCC|In2.Cu",
+      "evidence_hash": "ev2:0e32a3c414347fcc"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        34.8,
+        33.662
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.175,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:142.8/90.3~142.8/91.5",
+        "Via@143.3/91.163:F.Cu-B.Cu:d0.2/s0.45"
+      ],
+      "nets": [
+        "BTN2",
+        "VCC"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:142.8/90.3~142.8/91.5,Via@143.3/91.163:F.Cu-B.Cu:d0.2/s0.45|BTN2,VCC|In2.Cu",
+      "evidence_hash": "ev2:948bb17d939528b0"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.195mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        40.22,
+        37.6
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.195,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:149.2/94.9~153.1/98.8",
+        "Via@148.72/95.1:F.Cu-B.Cu:d0.2/s0.45"
+      ],
+      "nets": [
+        "BTN3",
+        "GND"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:149.2/94.9~153.1/98.8,Via@148.72/95.1:F.Cu-B.Cu:d0.2/s0.45|BTN3,GND|In2.Cu",
+      "evidence_hash": "ev2:7ade5dc4409665d5"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        38.8,
+        20.1
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.175,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:146.2/78.1~147.6/78.1",
+        "Via@147.3/77.6:F.Cu-B.Cu:d0.2/s0.45"
+      ],
+      "nets": [
+        "ISP_MISO",
+        "GND"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:146.2/78.1~147.6/78.1,Via@147.3/77.6:F.Cu-B.Cu:d0.2/s0.45|GND,ISP_MISO|In2.Cu",
+      "evidence_hash": "ev2:33077c8fcc3c8a76"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.194mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        47.78,
+        20.03
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.1939,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:156.4/78.1~156.5/78",
+        "Via@156.28/77.53:F.Cu-B.Cu:d0.2/s0.45"
+      ],
+      "nets": [
+        "ISP_MOSI",
+        "GND"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:156.4/78.1~156.5/78,Via@156.28/77.53:F.Cu-B.Cu:d0.2/s0.45|GND,ISP_MOSI|In2.Cu",
+      "evidence_hash": "ev2:db84e68574069283"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        34.0,
+        31.42
+      ],
+      "layer": "In2.Cu",
+      "actual_value": 0.175,
+      "required_value": 0.2,
+      "items": [
+        "Trace@In2.Cu:w0.2:142/88.6~142/89.2",
+        "Via@142.5/88.92:F.Cu-B.Cu:d0.2/s0.45"
+      ],
+      "nets": [
+        "BTN2",
+        "GND"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|Trace@In2.Cu:w0.2:142/88.6~142/89.2,Via@142.5/88.92:F.Cu-B.Cu:d0.2/s0.45|BTN2,GND|In2.Cu",
+      "evidence_hash": "ev2:c927214be17a2de4"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to pad clearance 0.179mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        40.975,
+        5.8
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.1786,
+      "required_value": 0.2,
+      "items": [
+        "Trace@B.Cu:w0.5:148.7/63.375~148.7/64",
+        "J1-A1"
+      ],
+      "nets": [
+        "VBUS",
+        "GND"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|J1-A1,Trace@B.Cu:w0.5:148.7/63.375~148.7/64|GND,VBUS|B.Cu",
+      "evidence_hash": "ev2:a32f0991d306095c"
+    },
+    {
+      "rule_id": "netclass_clearance_copper",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Segment to pad clearance 0.179mm < netclass 'Power' minimum 0.200mm",
+      "location": [
+        40.975,
+        5.8
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.1786,
+      "required_value": 0.2,
+      "items": [
+        "Trace@B.Cu:w0.5:148.625/63.3~148.7/63.375",
+        "J1-A1"
+      ],
+      "nets": [
+        "VBUS",
+        "GND"
+      ],
+      "status": "error",
+      "waived": false,
+      "key": "netclass_clearance_copper|J1-A1,Trace@B.Cu:w0.5:148.625/63.3~148.7/63.375|GND,VBUS|B.Cu",
+      "evidence_hash": "ev2:9794ab0e58aa5003"
     }
   ],
   "mask_copper_assessments": [],

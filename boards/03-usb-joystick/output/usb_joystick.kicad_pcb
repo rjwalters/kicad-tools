@@ -789,7 +789,7 @@
 			(uuid "fa34ecf1-6f68-5c9b-ac4e-3143fb5e8bc3")
 		)
 		(fp_line
-			(start -1.62 6)
+			(start -1.62 6.085)
 			(end -1.62 8.73)
 			(stroke
 				(width 0.15)
@@ -829,7 +829,7 @@
 			(uuid "e811bca9-d326-54f2-9dd5-be34978759e7")
 		)
 		(fp_line
-			(start 7.57 6)
+			(start 7.57 6.085)
 			(end 7.57 8.73)
 			(stroke
 				(width 0.15)
