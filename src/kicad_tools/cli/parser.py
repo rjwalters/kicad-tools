@@ -9705,6 +9705,30 @@ def _add_bench_parser(subparsers) -> None:
         help="Run only this board slug (repeatable); default: every board in the manifest",
     )
     bench_external.add_argument(
+        "--suite",
+        choices=["deeppcb", "pcbworld"],
+        default=None,
+        help=(
+            "Benchmark suite (default: deeppcb, the boards.toml boards). 'pcbworld' "
+            "fetches the pinned PCBWorld/PCBench inputs, prepares the D3 'guide' "
+            "boards with PCBWorld's own (external) prep and scores them with BOTH "
+            "the local gates and PCBWorld's Clean Pass, kept separate. Needs "
+            "PCBWORLD_PYTHON, KICAD_CLI (KiCad 9) and PCBNEW_PYTHON; see "
+            "benchmarks/external/README.md."
+        ),
+    )
+    bench_external.add_argument(
+        "--split",
+        default=None,
+        help="--suite pcbworld: D3 split alias from pcbworld.toml (d3a or d3b; default: d3a)",
+    )
+    bench_external.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="--suite pcbworld: number of boards in the deterministic smoke subset (default: 3)",
+    )
+    bench_external.add_argument(
         "--tuned",
         action="store_true",
         help=(
@@ -9722,7 +9746,10 @@ def _add_bench_parser(subparsers) -> None:
     bench_external.add_argument(
         "--manifest",
         default=None,
-        help="Path to boards.toml (default: benchmarks/external/boards.toml)",
+        help=(
+            "Path to boards.toml (default: benchmarks/external/boards.toml); with "
+            "--suite pcbworld, the corpus manifest (default: benchmarks/external/pcbworld.toml)"
+        ),
     )
     bench_external.add_argument(
         "--cache-dir",

@@ -1283,3 +1283,141 @@ def test_unavailable_placement_preserves_permissive_success(tmp_path):
     assert data["status"] == "unavailable"
     assert data["completed_nets"] == ["SIG1"]
     assert data["clean_success"] is False  # Unknown assurance, not a new route failure.
+
+
+# ---------------------------------------------------------------------------
+# --suite pcbworld (issue #6331): PCBWorld, KiCad and the network are all mocked
+# ---------------------------------------------------------------------------
+
+
+class TestPCBWorldSuiteCli:
+    @pytest.fixture
+    def env(self, tmp_path, monkeypatch):
+        from tests.test_benchmark_pcbworld import _fake_cli
+
+        monkeypatch.setenv("PCBWORLD_PYTHON", "/opt/pcbworld/bin/python")
+        monkeypatch.setenv("KICAD_CLI", _fake_cli(tmp_path))
+        monkeypatch.setenv("PCBNEW_PYTHON", "/usr/bin/python3-kicad")
+
+    def _args(self, tmp_path, *extra):
+        return create_parser().parse_args(
+            [
+                "bench", "external", "--suite", "pcbworld", "--split", "d3a", "--limit", "2",
+                "--cache-dir", str(tmp_path / "cache"), "--output-dir", str(tmp_path / "out"),
+                "--skip-kicad-cli-drc", *extra,
+            ]
+        )  # fmt: skip
+
+    def _stub_guide_route(self, monkeypatch, captured):
+        from kicad_tools.cli import route_cmd
+
+        def route(argv):
+            captured.append(list(argv))
+            out = Path(argv[argv.index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(Path(argv[0]).read_text(encoding="utf-8"), encoding="utf-8")
+            return 0
+
+        monkeypatch.setattr(route_cmd, "main_with_result", route)
+
+    def test_parser_flags_default_to_existing_behaviour(self):
+        args = create_parser().parse_args(["bench", "external"])
+        assert args.suite is None and args.split is None and args.limit is None
+
+    def test_end_to_end_keeps_pcbworld_cp_distinct_from_local_gates(
+        self, tmp_path, monkeypatch, env, capsys
+    ):
+        from tests.test_benchmark_pcbworld import NAMES, FakeOpener, make_runner
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        monkeypatch.setattr("kicad_tools.benchmark.external.probe_backend", lambda: _cpp_backend())
+        # normalize must never run on guide boards.
+        normalize_calls: list = []
+        _, normalize = bench_cmd._load_external_modules()
+        monkeypatch.setattr(normalize, "normalize_board", lambda *a, **k: normalize_calls.append(a))
+
+        def rows(boards):
+            return [
+                {"board_id": b.stem.rsplit("_kct_s", 1)[0], "rollout_idx": 0, "seed": 42,
+                 "eval_status": "ok", "eval_error": "", "clean_pass": "True",
+                 "routability": 1.0, "drv_errors_only_count": 0, "potential_gain": 1.5,
+                 "final_potential": 2.0}
+                for b in boards
+            ]  # fmt: skip
+
+        pcbworld = bench_cmd._load_pcbworld()
+        corpus = pcbworld.load_corpus()
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path),
+            runner=make_runner(eval_rows=rows),
+            opener=FakeOpener(corpus),
+        )
+        assert rc == 0
+        assert normalize_calls == []
+        assert len(captured) == 2  # --limit 2 -> two boards routed
+
+        out = tmp_path / "out"
+        slug = f"pcbworld_d3a_{NAMES[0]}"
+        payload = json.loads((out / f"{slug}.zero-touch.json").read_text())
+        assert payload["schema_version"] == 1
+        assert payload["board_id"] == f"pcbworld/d3a/{NAMES[0]}"
+        pw = payload["external_scores"]["pcbworld"]
+        assert pw["clean_pass"] is True and pw["potential_gain"] == 1.5
+        assert pw["kicad_version"] == "9.0.3"
+        assert pw["pcbworld_commit"] == corpus.pcbworld_commit
+        assert pw["pcbench_commit"] == corpus.pcbench_commit
+        # Local gates are reported separately, not folded into PCBWorld's verdict.
+        assert payload["kicad_cli_drc"]["ran"] is False
+        assert "kct_check" in payload
+        md = (out / "report.pcbworld.d3a.md").read_text()
+        assert "PCBWorld CP" in md and "kicad-cli DRC" in md
+
+    def test_missing_tool_env_fails_actionably(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("PCBWORLD_PYTHON", raising=False)
+        rc = bench_cmd.run_bench_command(self._args(tmp_path))
+        assert rc == 1
+        assert "PCBWORLD_PYTHON" in capsys.readouterr().err
+
+    def test_kicad_10_fails_instead_of_scoring(self, tmp_path, monkeypatch, env, capsys):
+        from tests.test_benchmark_pcbworld import make_runner
+
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path), runner=make_runner(kicad_version="10.0.1")
+        )
+        assert rc == 1
+        assert "requires KiCad 9" in capsys.readouterr().err
+
+    def test_unscorable_board_is_null_not_zero(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import FakeOpener, make_runner
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        pcbworld = bench_cmd._load_pcbworld()
+        # The scorer produces no per_rollout rows at all.
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path, "--format", "json"),
+            runner=make_runner(eval_rows=lambda boards: []),
+            opener=FakeOpener(pcbworld.load_corpus()),
+        )
+        assert rc == 0
+        payload = json.loads(
+            (next((tmp_path / "out").glob("pcbworld_d3a_*.zero-touch.json"))).read_text()
+        )
+        pw = payload["external_scores"]["pcbworld"]
+        assert pw["available"] is False
+        assert pw["clean_pass"] is None and pw["routability"] is None
+        assert pw["unavailable_reason"]
+
+    def test_suite_rejects_board_and_tuned(self, tmp_path, env, capsys):
+        rc = bench_cmd.run_bench_command(self._args(tmp_path, "--tuned"))
+        assert rc == 1
+        assert "does not support" in capsys.readouterr().err
+
+    def test_default_suite_unchanged_by_suite_flag(self, tmp_path, capsys):
+        """`--suite deeppcb` is the existing path (unknown slug error proves it ran)."""
+        args = create_parser().parse_args(
+            ["bench", "external", "--suite", "deeppcb", "--board", "nope"]
+        )
+        assert bench_cmd.run_bench_command(args) == 1
+        assert "unknown board slug" in capsys.readouterr().err

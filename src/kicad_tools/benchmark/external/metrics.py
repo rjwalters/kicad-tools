@@ -58,7 +58,7 @@ from __future__ import annotations
 import math
 import subprocess
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,6 +72,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "SCHEMA_URL",
     "SCHEMA_VERSION",
+    "ExternalScores",
+    "PCBWorldScore",
     "ARTIFACT_SOURCE_FALLBACK_INPUT",
     "ARTIFACT_SOURCE_ROUTER_OUTPUT",
     "ARTIFACT_SOURCE_UNKNOWN",
@@ -1037,6 +1039,77 @@ def measure_diff_pairs(
 
 
 @dataclass(frozen=True)
+class PCBWorldScore:
+    """PCBWorld's own Clean Pass verdict for one board (issue #6331).
+
+    Produced by running PCBWorld's scorer as an external subprocess and
+    normalizing its ``per_rollout.csv``; never recomputed locally and never
+    merged with the local gates (``kct_check`` / ``kicad_cli_drc``).
+
+    ``available=False`` means the PCBWorld scorer produced no verdict; every
+    score field is then ``None`` -- an unavailable score is never ``0`` and
+    never a pass. ``comparable=False`` (with ``comparable_reason``) marks a
+    row that must not be read against PCBWorld's published numbers.
+    ``rollouts`` keeps one entry per scored rollout including its
+    ``potential_gain`` so PCBWorld's @5 selection rule (largest potential
+    gain, not "any rollout clean") can be reproduced later.
+    """
+
+    available: bool
+    comparable: bool
+    clean_pass: bool | None = None
+    routability: float | None = None
+    drv_errors_only_count: int | None = None
+    potential_gain: float | None = None
+    rollouts: tuple[dict[str, Any], ...] = ()
+    unavailable_reason: str | None = None
+    comparable_reason: str | None = None
+    pcbworld_commit: str | None = None
+    pcbench_commit: str | None = None
+    kicad_version: str | None = None
+    pcbnew_python: str | None = None
+    input_sha256: str | None = None
+    pcbworld_board_id: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> PCBWorldScore:
+        names = {f.name for f in fields(cls)}
+        kwargs = {k: v for k, v in payload.items() if k in names}
+        kwargs["rollouts"] = tuple(kwargs.get("rollouts") or ())
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        available = self.available
+        return {
+            "available": available,
+            "comparable": self.comparable,
+            "comparable_reason": self.comparable_reason,
+            "unavailable_reason": self.unavailable_reason,
+            "clean_pass": self.clean_pass if available else None,
+            "routability": self.routability if available else None,
+            "drv_errors_only_count": self.drv_errors_only_count if available else None,
+            "potential_gain": self.potential_gain if available else None,
+            "rollouts": [dict(r) for r in self.rollouts],
+            "pcbworld_commit": self.pcbworld_commit,
+            "pcbench_commit": self.pcbench_commit,
+            "kicad_version": self.kicad_version,
+            "pcbnew_python": self.pcbnew_python,
+            "input_sha256": self.input_sha256,
+            "pcbworld_board_id": self.pcbworld_board_id,
+        }
+
+
+@dataclass(frozen=True)
+class ExternalScores:
+    """Additive block of third-party scorer verdicts (schema stays v1)."""
+
+    pcbworld: PCBWorldScore | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pcbworld": self.pcbworld.to_dict() if self.pcbworld else None}
+
+
+@dataclass(frozen=True)
 class BenchmarkReport:
     """One board's benchmark result, in the schema v1 contract.
 
@@ -1091,6 +1164,7 @@ class BenchmarkReport:
     pre_route_completion: CompletionMetrics | None = None
     notes: list[str] = field(default_factory=list)
     placement_disposition: RoutingPlacementReport | None = None
+    external_scores: ExternalScores | None = None
 
     @property
     def newly_routed_connections(self) -> int | None:
@@ -1106,7 +1180,7 @@ class BenchmarkReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the stable schema-v1 JSON contract."""
-        return {
+        data: dict[str, Any] = {
             "$schema": SCHEMA_URL,
             "schema_version": SCHEMA_VERSION,
             "generated_at": self.generated_at,
@@ -1133,6 +1207,11 @@ class BenchmarkReport:
             "diff_pairs": (self.diff_pairs.to_dict() if self.diff_pairs else None),
             "notes": list(self.notes),
         }
+        if self.external_scores is not None:
+            # Additive (issue #6331): only present for third-party-scored
+            # suites, so DeepPCB / SRJ18 reports stay byte-identical.
+            data["external_scores"] = self.external_scores.to_dict()
+        return data
 
     def to_json(self, indent: int = 2) -> str:
         """Render the report as JSON text."""
