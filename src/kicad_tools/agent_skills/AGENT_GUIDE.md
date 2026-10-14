@@ -87,4 +87,6 @@ locations are sheet-absolute, which `--absolute` selects.
   compute them; a picture only suggests them.
 
 What you read off an image is a hypothesis. Confirm it with those tools
-before acting on it. Zone pours are not drawn.
+before acting on it. Zone pours are not drawn unless you pass `--zones`;
+`--drc-report`, `--net-classes` and `--compare <after.kicad_pcb>` add DRC
+markers, net-class colours and a before/after pair.
