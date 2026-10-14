@@ -9,8 +9,9 @@ the byte-identical route.  Three defects:
 2. Negotiated trials called ``route_all_negotiated()`` with no order at all,
    and the CLI never asked for negotiated trials, so each trial was a single
    basic pass (8 trials finished worse than one default negotiated run).
-3. The evolutionary ``astar_weights`` / ``preferred_layers`` /
-   ``strategy_flags`` genes never reach the router (documented as inert).
+3. The evolutionary ``astar_weights`` / ``preferred_layers`` genes never
+   reached the router (plumbed in #6366; see
+   ``test_evolutionary_genes_reach_router_6366.py``).
 
 These tests observe the per-net routing order with a spy on ``route_net``
 (not just the returned routes) on every trial path: the Monte Carlo worker,

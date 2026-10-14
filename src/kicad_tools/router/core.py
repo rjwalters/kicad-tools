@@ -1587,6 +1587,12 @@ class Autorouter:
         # preferences); aliasing the module-level singleton leaked those
         # writes into every later Autorouter in the same process.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
+
+        # Issue #6366: per-net A* heuristic-weight overrides (net id ->
+        # weight).  Empty = every net searches at the default weight 1.0.
+        # The same dict object is installed on each pathfinder (see
+        # ``_create_grid_and_routers``) so it survives ``_reset_for_new_trial``.
+        self._net_astar_weights: dict[int, float] = {}
         # Issue #6443: classes whose floored pair-gap notice was printed.
         self._pair_gap_notified: set[str] = set()
         self.layer_stack = layer_stack
@@ -2384,6 +2390,8 @@ class Autorouter:
             # Issue #3881: thread the tuned per-net iteration cap through.
             per_net_iterations=getattr(self, "_per_net_iterations", 0),
         )
+        # Issue #6366: share the per-net A* weight map with the pathfinder.
+        router.net_astar_weights = self._net_astar_weights
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager
 
@@ -7767,6 +7775,43 @@ class Autorouter:
                 f"  Matrix conflict: assigned layer preferences for "
                 f"{len(injected)} net(s): {injected}"
             )
+
+    @contextlib.contextmanager
+    def trial_gene_overrides(
+        self,
+        astar_weights: dict[int, float] | None = None,
+        preferred_layers: dict[int, int] | None = None,
+    ):
+        """Apply per-net evolutionary genes for one trial, then restore.
+
+        Issue #6366.  ``astar_weights`` (net id -> heuristic weight) is
+        installed on the pathfinders' ``net_astar_weights`` map; a weight of
+        exactly 1.0 is the default and is not stored.  ``preferred_layers``
+        (net id -> grid layer index) is injected through
+        :meth:`_inject_matrix_layer_preferences` (so hard-avoided layers are
+        never preferred).  Both are rolled back in place on exit so the next
+        trial on this router sees neither.
+        """
+        saved_class_map = dict(self.net_class_map)
+        saved_weights = dict(self._net_astar_weights)
+        try:
+            for net_id, w in (astar_weights or {}).items():
+                if w != 1.0:
+                    self._net_astar_weights[net_id] = float(w)
+            if preferred_layers:
+                import io
+                from contextlib import redirect_stdout
+
+                with redirect_stdout(io.StringIO()):
+                    self._inject_matrix_layer_preferences(
+                        {n: [layer] for n, layer in preferred_layers.items()}
+                    )
+            yield
+        finally:
+            self.net_class_map.clear()
+            self.net_class_map.update(saved_class_map)
+            self._net_astar_weights.clear()
+            self._net_astar_weights.update(saved_weights)
 
     # Cache of net IDs detected as matrix-conflicting (Issue #2432).
     # Populated by _detect_and_apply_matrix_preferences() so that
