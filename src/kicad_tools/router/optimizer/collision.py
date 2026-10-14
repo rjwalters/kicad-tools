@@ -860,7 +860,40 @@ class GridCollisionChecker:
         needs_exact_pad_check = False
         candidate = _candidate_shape(x1, y1, x2, y2, width)
 
-        for gx, gy in self._blocked_cells_in_bounds(cells_to_check, layer_idx):
+        # Issue #5617: on a real ``RoutingGrid`` the walk below is served by
+        # :meth:`_active_blocked_cells`, which pre-reads the four planes the
+        # branches consult for every blocked cell in one array op and drops
+        # the cells that fall through every branch untouched.  The per-cell
+        # ``_CellView`` walk stays for a grid without real planes.
+        active = self._active_blocked_cells(cells_to_check, layer_idx, exclude_net)
+        if active is not None:
+            usage_plane = getattr(self.grid, "_usage_count", None)
+            for gx, gy, is_obstacle, pad_blocked, net in active:
+                # Same branches, same order, as the ``_CellView`` walk below;
+                # ``net != exclude_net`` holds for every ``active`` cell.
+                if is_obstacle or pad_blocked:
+                    # Branches 1 (``is_obstacle``) and 2 (``pad_blocked``)
+                    # share an identical body; the first one entered decides.
+                    if _obstacle_cell_is_accountable_pad_copper(self.grid, gx, gy, layer_idx):
+                        needs_exact_pad_check = True
+                        continue
+                    return False
+                # Branch 3: ``net != 0`` holds (else the cell is not active).
+                if self.ignore_overflow:
+                    if isinstance(usage_plane, np.ndarray):
+                        usage = int(usage_plane[layer_idx, gy, gx])
+                    else:
+                        usage = self.grid.cell_at(layer_idx, gy, gx).usage_count
+                    if usage > 1:
+                        continue
+                if _soft_cell_is_accountable_route_copper(self.grid, gx, gy, layer_idx):
+                    continue
+                return False
+            cells_to_walk: list[tuple[int, int]] = []
+        else:
+            cells_to_walk = self._blocked_cells_in_bounds(cells_to_check, layer_idx)
+
+        for gx, gy in cells_to_walk:
             # Issue #5240: ``cell_at`` is a documented drop-in for the
             # legacy ``grid.grid[layer][y][x]`` chain (see
             # ``RoutingGrid.cell_at``'s docstring) -- one allocation
@@ -1002,6 +1035,68 @@ class GridCollisionChecker:
         ys = ys[in_bounds]
         hits = blocked[layer_idx, ys, xs].astype(bool)
         return list(zip(xs[hits].tolist(), ys[hits].tolist(), strict=True))
+
+    def _active_blocked_cells(
+        self, cells: list[tuple[int, int]], layer_idx: int, exclude_net: int
+    ) -> list[tuple[int, int, bool, bool, int]] | None:
+        """Blocked cells some branch of the walk acts on, with their planes.
+
+        Issue #5617: a fresh profile of the Board 06 diff-pair re-route (after
+        the #5617 blocked-cell prefilter) still put ~40 s in
+        ``path_is_clear``, roughly half of it ``cell_at`` allocations and the
+        ``blocked`` / ``is_obstacle`` / ``pad_blocked`` / ``net`` property
+        reads on *blocked* cells -- overwhelmingly the optimised route's own
+        copper, which every branch of the walk falls through.  A blocked cell
+        is acted on only when ``net != exclude_net`` and at least one of
+        ``is_obstacle``, ``pad_blocked`` or ``net != 0`` holds (each branch is
+        gated on exactly those); every other blocked cell reaches the end of
+        the loop body untouched.  This reads the four planes for the whole
+        window in one array op and returns ``(gx, gy, is_obstacle,
+        pad_blocked, net)`` for just the acted-on cells, in ``cells`` order,
+        so the walk visits the same cells in the same order with the same
+        values and reaches the same verdict.
+
+        Returns ``None`` when the grid does not expose those planes as real
+        ndarrays (a test double); the caller then keeps the per-cell walk.
+        """
+        grid = self.grid
+        blocked = getattr(grid, "_blocked", None)
+        is_obstacle = getattr(grid, "_is_obstacle", None)
+        pad_blocked = getattr(grid, "_pad_blocked", None)
+        net_plane = getattr(grid, "_net", None)
+        planes = (blocked, is_obstacle, pad_blocked, net_plane)
+        if not all(isinstance(p, np.ndarray) and p.ndim == 3 for p in planes):
+            return None
+        if not cells:
+            return []
+        assert blocked is not None and is_obstacle is not None
+        assert pad_blocked is not None and net_plane is not None
+        cols, rows = grid.cols, grid.rows
+        coords = np.asarray(cells, dtype=np.int64)
+        xs = coords[:, 0]
+        ys = coords[:, 1]
+        in_bounds = (xs >= 0) & (xs < cols) & (ys >= 0) & (ys < rows)
+        xs = xs[in_bounds]
+        ys = ys[in_bounds]
+        hits = blocked[layer_idx, ys, xs].astype(bool)
+        xs = xs[hits]
+        ys = ys[hits]
+        obs = is_obstacle[layer_idx, ys, xs].astype(bool)
+        pad = pad_blocked[layer_idx, ys, xs].astype(bool)
+        nets = net_plane[layer_idx, ys, xs].astype(np.int64)
+        acted = (nets != exclude_net) & (obs | pad | (nets != 0))
+        if not acted.any():
+            return []
+        return list(
+            zip(
+                xs[acted].tolist(),
+                ys[acted].tolist(),
+                obs[acted].tolist(),
+                pad[acted].tolist(),
+                nets[acted].tolist(),
+                strict=True,
+            )
+        )
 
     def _get_path_cells(
         self, gx1: int, gy1: int, gx2: int, gy2: int, clearance: int
