@@ -59,7 +59,11 @@ class RoutingChromosome:
     routing sequence, ``astar_weights`` is installed as a per-net A*
     heuristic weight (``Autorouter.trial_gene_overrides``) and
     ``preferred_layers`` is injected through the ``net_class_map`` layer
-    preference hook (hard-avoided layers are never preferred).  A net that is
+    preference hook (hard-avoided layers are never preferred).  The layer
+    gene is only evolved on a backend that honours layer preferences (the
+    pure-Python ``Router``); the native C++ pathfinder has no layer-preference
+    cost, so on that (default) backend ``preferred_layers`` stays empty and
+    only ``net_order`` and ``astar_weights`` are evolved.  A net that is
     absent from ``astar_weights`` searches at weight 1.0 and a net absent from
     ``preferred_layers`` has no layer preference, so the seed chromosome
     (all weights 1.0, no preferences) routes exactly like the default.
@@ -326,7 +330,7 @@ class EvolutionaryRoutingOptimizer:
         base_order: list[int],
         get_priority: callable,
         seed: int,
-        num_layers: int = 2,
+        num_layers: int | None = None,
     ) -> list[RoutingChromosome]:
         """Create initial population.
 
@@ -334,9 +338,13 @@ class EvolutionaryRoutingOptimizer:
         are random shuffles within priority tiers.  The seed has weight 1.0
         everywhere and no layer preferences (issue #6366).  ``num_layers`` is
         the board's routable grid-layer count; preferences are drawn from
-        ``range(num_layers)`` plus "none".
+        ``range(num_layers)`` plus "none"; ``None`` (default) uses the
+        optimizer's own :attr:`num_layers` gene domain.
         """
         from ..algorithms.monte_carlo import MonteCarloRouter
+
+        if num_layers is None:
+            num_layers = self.num_layers
 
         total_nets = len(base_order)
         mc = MonteCarloRouter(total_nets)
@@ -482,10 +490,19 @@ def _run_evolutionary(
         num_workers = min(pop_size, os.cpu_count() or 4)
     num_workers = min(num_workers, pop_size)
 
+    # Issue #6366: the preferred-layer gene only exists on a backend whose
+    # pathfinder honours layer preferences (the pure-Python ``Router``).  The
+    # native C++ backend has no layer-preference cost, so there the gene
+    # domain is empty (``num_layers=0``) and no chromosome carries one.
+    layer_gene_domain = (
+        int(autorouter.grid.num_layers)
+        if getattr(autorouter, "supports_layer_preferences", False)
+        else 0
+    )
     optimizer = EvolutionaryRoutingOptimizer(
         pop_size=pop_size,
         generations=generations,
-        num_layers=int(autorouter.grid.num_layers),
+        num_layers=layer_gene_domain,
     )
 
     if verbose:
@@ -498,6 +515,11 @@ def _run_evolutionary(
             print(f"  Parallel workers: {num_workers}", flush=True)
         if timeout is not None:
             print(f"  Timeout: {timeout:.1f}s", flush=True)
+        if layer_gene_domain == 0:
+            print(
+                "  Preferred-layer gene: off (pathfinder has no layer-preference cost)",
+                flush=True,
+            )
 
     # Prepare base net order (same as Monte Carlo; issue #6345: honours a
     # user ``--order-method`` order)

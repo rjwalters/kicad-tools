@@ -7762,9 +7762,20 @@ class Autorouter:
                 # Copy existing net class and add layer preference
                 override = replace(existing, preferred_layers=allowed)
             else:
-                # Create a new net class entry with default values + layer pref
+                # Issue #6366: a net with no class routes on the board's
+                # DesignRules (width/clearance/via) and the classless priority
+                # 10 (``_get_net_priority``).  A bare ``NetClassRouting`` would
+                # carry the dataclass literals (0.2/0.2/0.6, priority 5) and
+                # silently override the board's rules -- on a 0.3 mm
+                # clearance board that routes DRC-violating copper.  Build the
+                # injected class from the board's effective values so the
+                # ONLY change is the layer preference.
                 override = NetClassRouting(
                     name=f"matrix_{net_name}",
+                    priority=10,
+                    trace_width=self.rules.trace_width,
+                    clearance=self.rules.trace_clearance,
+                    via_size=self.rules.via_diameter,
                     preferred_layers=layers,
                 )
             self.net_class_map[net_name] = override
@@ -7775,6 +7786,17 @@ class Autorouter:
                 f"  Matrix conflict: assigned layer preferences for "
                 f"{len(injected)} net(s): {injected}"
             )
+
+    @property
+    def supports_layer_preferences(self) -> bool:
+        """Whether the active pathfinder honours per-net layer preferences.
+
+        Issue #6366: only the pure-Python ``Router`` applies
+        ``NetClassRouting.preferred_layers`` as an A* layer cost; the native
+        ``CppPathfinder`` (the default backend) ignores it.  Pathfinders that
+        do not declare the capability are treated as unsupported.
+        """
+        return bool(getattr(self.router, "supports_layer_preferences", False))
 
     @contextlib.contextmanager
     def trial_gene_overrides(
@@ -7789,8 +7811,11 @@ class Autorouter:
         exactly 1.0 is the default and is not stored.  ``preferred_layers``
         (net id -> grid layer index) is injected through
         :meth:`_inject_matrix_layer_preferences` (so hard-avoided layers are
-        never preferred).  Both are rolled back in place on exit so the next
-        trial on this router sees neither.
+        never preferred) -- but only when the active pathfinder honours layer
+        preferences (:attr:`supports_layer_preferences`); the native C++
+        backend does not, so there the preferences are ignored instead of
+        rewriting ``net_class_map`` for no search effect.  Both are rolled
+        back in place on exit so the next trial on this router sees neither.
         """
         saved_class_map = dict(self.net_class_map)
         saved_weights = dict(self._net_astar_weights)
@@ -7798,7 +7823,7 @@ class Autorouter:
             for net_id, w in (astar_weights or {}).items():
                 if w != 1.0:
                     self._net_astar_weights[net_id] = float(w)
-            if preferred_layers:
+            if preferred_layers and self.supports_layer_preferences:
                 import io
                 from contextlib import redirect_stdout
 

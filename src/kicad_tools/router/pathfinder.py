@@ -228,6 +228,11 @@ class Router:
     # never mutated.
     net_astar_weights: dict[int, float] = {}
 
+    # Issue #6366: this pathfinder honours ``NetClassRouting.preferred_layers``
+    # (``_get_layer_preference_cost``), so the evolutionary ``preferred_layers``
+    # gene is live on this backend.  ``CppPathfinder`` sets this False.
+    supports_layer_preferences: bool = True
+
     # Issue #3441: the pure-Python pathfinder implements waypoint injection
     # (#2330) -- off-grid pad positions are injected directly into the A*
     # search graph (see ``_create_waypoint`` / ``_waypoint_grid_edges``).

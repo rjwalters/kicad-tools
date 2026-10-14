@@ -1,7 +1,9 @@
 """Issue #6366: the evolutionary genes reach the router (or are gone).
 
 ``astar_weights`` becomes a per-net A* weight on the pathfinder's ``route()``,
-``preferred_layers`` becomes a ``net_class_map`` layer preference, and
+``preferred_layers`` becomes a ``net_class_map`` layer preference (only on a
+backend that honours layer preferences -- the pure-Python ``Router``; the
+native C++ pathfinder has no layer cost, so the gene is off there), and
 ``strategy_flags`` was removed.  The seed chromosome must stay byte-identical
 to the default route, per-trial state must not leak, and the time budget must
 be split across the remaining generations.
@@ -22,7 +24,7 @@ from kicad_tools.router.algorithms.evolutionary import (
     order_crossover,
 )
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.rules import NetClassRouting
+from kicad_tools.router.rules import DesignRules, NetClassRouting
 
 NUM_NETS = 4
 
@@ -272,3 +274,186 @@ def test_budget_accounts_for_remaining_generations(monkeypatch):
     gen1 = mc_mod.trial_timeout(d, 4 * 3, 2)
     today = mc_mod.trial_timeout(d, 4, 2)
     assert gen1 == pytest.approx(today / 3, rel=0.05)
+
+
+# --- review follow-ups (changes requested on 52a57b8e) -----------------------
+
+
+class _Abort(Exception):
+    pass
+
+
+def _cpp_router():
+    cpp = pytest.importorskip("kicad_tools.router.cpp_backend")
+    if not cpp.is_cpp_available():
+        pytest.skip("C++ backend not built")
+    router = Autorouter(width=40, height=40)
+    if type(router.router).__name__ != "CppPathfinder":
+        pytest.skip("C++ pathfinder not in use")
+    return router
+
+
+def _obstacle_board() -> Autorouter:
+    """Two THT pads on SIG_A with a small F.Cu-only obstacle between them.
+
+    Without a preference the search mixes layers; the layer gene must steer
+    it onto the preferred layer.  0.3/0.3 board rules (not the 0.2/0.2
+    ``NetClassRouting`` literals) so a width/clearance leak would show.
+    """
+    router = Autorouter(
+        width=40,
+        height=40,
+        force_python=True,
+        rules=DesignRules(trace_width=0.3, trace_clearance=0.3),
+    )
+    th = {"through_hole": True, "drill": 0.8, "width": 1.6, "height": 1.6}
+    router.add_component(
+        "R1",
+        [
+            {"number": "1", "x": 5.0, "y": 20.0, "net": 1, "net_name": "SIG_A", **th},
+            {"number": "2", "x": 25.0, "y": 20.0, "net": 1, "net_name": "SIG_A", **th},
+        ],
+    )
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": "1",
+                "x": 15.0,
+                "y": 20.0,
+                "net": 2,
+                "net_name": "OBST",
+                "width": 2.0,
+                "height": 1.0,
+            }
+        ],
+    )
+    return router
+
+
+def _route_with_pref(pref):
+    router = _obstacle_board()
+    with router.trial_gene_overrides(None, pref):
+        routes = router.route_all(suppress_no_timeout_warning=True)
+    segs = [s for r in routes if r.net == 1 for s in r.segments]
+    vias = [v for r in routes if r.net == 1 for v in r.vias]
+    assert segs, "SIG_A must route"
+    return router, segs, vias
+
+
+def test_preferred_layer_changes_python_search():
+    """The gene changes where the Python pathfinder routes the net."""
+    router, segs0, vias0 = _route_with_pref({1: 0})
+    layer0 = router.grid.index_to_layer(0)
+    assert {s.layer.value for s in segs0} == {layer0}
+    assert not vias0
+
+    router, segs1, vias1 = _route_with_pref({1: 1})
+    layer1 = router.grid.index_to_layer(1)
+    assert {s.layer.value for s in segs1} == {layer1}
+    assert not vias1
+
+    # And neither equals the unpreferred route (which mixes layers via a via).
+    _router_none, segs_none, _vias_none = _route_with_pref(None)
+    assert {s.layer.value for s in segs_none} == {layer0, layer1}
+
+
+def test_classless_net_keeps_board_rules_under_injection():
+    """A preference must not swap a classless net onto 0.2/0.2/0.6 literals."""
+    router = Autorouter(
+        width=40,
+        height=40,
+        force_python=True,
+        rules=DesignRules(trace_width=0.3, trace_clearance=0.3, via_diameter=0.8),
+    )
+    router.add_component(
+        "R1",
+        [
+            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "SIG_A"},
+            {"number": "2", "x": 9.0, "y": 5.0, "net": 1, "net_name": "SIG_A"},
+        ],
+    )
+    assert "SIG_A" not in router.net_class_map
+    with router.trial_gene_overrides(None, {1: 1}):
+        nc = router.net_class_map["SIG_A"]
+        assert nc.preferred_layers == [1]
+        assert nc.trace_width == pytest.approx(0.3)
+        assert nc.clearance == pytest.approx(0.3)
+        assert nc.via_size == pytest.approx(0.8)
+        # Classless priority is 10 (``_get_net_priority``), not the class 5.
+        assert nc.priority == 10
+    assert "SIG_A" not in router.net_class_map
+
+
+def test_routed_width_unchanged_for_classless_net_with_preference():
+    _router, segs, vias = _route_with_pref({1: 1})
+    assert all(s.width == pytest.approx(0.3) for s in segs)
+    _router, segs_none, _ = _route_with_pref(None)
+    assert all(s.width == pytest.approx(0.3) for s in segs_none)
+
+
+def test_python_router_advertises_layer_preferences():
+    assert _router().supports_layer_preferences is True
+
+
+def test_cpp_backend_has_no_layer_gene():
+    """C++ ignores preferred_layers, so the gene is off and inert there."""
+    router = _cpp_router()
+    assert router.supports_layer_preferences is False
+    router.add_component(
+        "R1",
+        [
+            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "SIG_A"},
+            {"number": "2", "x": 9.0, "y": 5.0, "net": 1, "net_name": "SIG_A"},
+        ],
+    )
+    before = dict(router.net_class_map)
+    with router.trial_gene_overrides({1: 2.0}, {1: 1}):
+        # No net_class_map rewrite (it would have no search effect) ...
+        assert router.net_class_map == before
+        # ... while the A* weight gene still applies.
+        assert router._net_astar_weights == {1: 2.0}
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+def test_run_evolutionary_gene_domain_follows_backend(monkeypatch, backend):
+    router = _router() if backend == "python" else _cpp_router()
+    if backend == "cpp":
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "N1"},
+                {"number": "2", "x": 9.0, "y": 5.0, "net": 1, "net_name": "N1"},
+            ],
+        )
+    seen = {}
+    orig_init = EvolutionaryRoutingOptimizer._init_population
+
+    def spy(self, *a, **k):
+        pop = orig_init(self, *a, **k)
+        seen["domain"] = self.num_layers
+        seen["prefs"] = [c.preferred_layers for c in pop]
+        raise _Abort
+
+    monkeypatch.setattr(EvolutionaryRoutingOptimizer, "_init_population", spy)
+    with pytest.raises(_Abort):
+        evo_mod.run_evolutionary(router, pop_size=6, generations=1, seed=1, verbose=False)
+    if backend == "python":
+        assert seen["domain"] == router.grid.num_layers
+    else:
+        assert seen["domain"] == 0
+        assert all(p == {} for p in seen["prefs"])
+
+
+def test_init_population_defaults_to_optimizer_domain():
+    import random
+
+    random.seed(5)
+    pop = EvolutionaryRoutingOptimizer(pop_size=6, num_layers=0)._init_population(
+        [1, 2, 3], lambda n: (0, 0, 0, n, 0, 0), 1
+    )
+    assert all(c.preferred_layers == {} for c in pop)
+    pop = EvolutionaryRoutingOptimizer(pop_size=6, num_layers=4)._init_population(
+        [1, 2, 3, 4, 5, 6], lambda n: (0, 0, 0, n, 0, 0), 1
+    )
+    assert any(c.preferred_layers for c in pop)
