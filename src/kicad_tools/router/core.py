@@ -1532,6 +1532,9 @@ def _emit_route_checkpoint(
         flush_print(f"  checkpoint: write failed ({exc!r}); continuing")
 
 
+_NOGOOD_ENV_IGNORE_PF = "KCT_NOGOOD_CACHE_IGNORE_PF"
+
+
 class Autorouter:
     """High-level autorouter for complete PCBs with net class awareness.
 
@@ -16241,6 +16244,61 @@ class Autorouter:
             # dropping copper.
             return self._mark_route(route, enforce_pad_access=True)
 
+        # Issue #6353 (experiment, default OFF): validity-aware nogood cache.
+        # Everything below is skipped when the cache is disabled, so the
+        # default path makes exactly the pre-#6353 call.
+        nogood = self._get_nogood_cache()
+        ng_key = ng_win = ng_extra = None
+        failed_pairs: list[tuple[Pad, Pad]] = []
+        ng_definitive: list[bool] = []  # one entry per recorded failure
+        ng_reason: list[int] = []  # last #6369 failure code, for replay
+        if nogood is not None:
+            from .nogood_cache import (
+                reset_search_exhausted,
+                search_budget_context,
+                search_failure_is_definitive,
+            )
+
+            search_router = self.router
+            ng_key = nogood.make_key(
+                net,
+                [(p.x, p.y, str(p.layer), p.net) for p in pad_objs],
+                reverse_search,
+                None if os.environ.get(_NOGOOD_ENV_IGNORE_PF) else present_cost_factor,
+                search_budget_context(search_router, per_net_timeout),
+            )
+            ng_win = nogood.window(self.grid, [(p.x, p.y) for p in pad_objs])
+            ng_extra = self._nogood_extra_state
+            cached = nogood.lookup(ng_key, self.grid, ng_win, ng_extra)
+            if cached is not None:
+                cached_pairs, cached_reason = cached
+                # Replay the one persistent side effect of a failed search
+                # (#6369 per-net failure code) so ``net-status --why`` agrees.
+                store = getattr(search_router, "search_failures_by_net", None)
+                if isinstance(store, dict) and cached_reason:
+                    store[int(net)] = int(cached_reason)
+                if failure_callback is not None:
+                    for src, tgt in cached_pairs:
+                        failure_callback(src, tgt)
+                return routes
+
+            reset_search_exhausted(search_router)
+            downstream_callback = failure_callback
+
+            def record_nogood_failure(src: Pad, tgt: Pad) -> None:
+                failed_pairs.append((src, tgt))
+                ng_definitive.append(search_failure_is_definitive(search_router))
+                get_info = getattr(search_router, "get_last_failure_info", None)
+                info = get_info() if get_info is not None else None
+                if info and info.get("failure_reason"):
+                    ng_reason[:] = [int(info["failure_reason"])]
+                reset_search_exhausted(search_router)
+                if downstream_callback is not None:
+                    downstream_callback(src, tgt)
+
+            failure_callback = record_nogood_failure
+
+        ng_start = time.monotonic() if nogood is not None else 0.0
         new_routes = neg_router.route_net_negotiated(
             pad_objs,
             present_cost_factor,
@@ -16248,8 +16306,50 @@ class Autorouter:
             per_net_timeout=per_net_timeout,
             failure_callback=failure_callback,
         )
+        if (
+            nogood is not None
+            and not new_routes
+            and failed_pairs
+            and all(ng_definitive)
+            and not neg_router._last_timeout_failures
+        ):
+            from .nogood_cache import attempt_may_have_timed_out
+
+            # Belt and braces next to the drained-search gate above: a failure
+            # that used (most of) its wall-clock budget is never cached.  It
+            # can only suppress an insertion.
+            if not attempt_may_have_timed_out(time.monotonic() - ng_start, per_net_timeout):
+                nogood.insert(
+                    ng_key,
+                    self.grid,
+                    ng_win,
+                    (tuple(failed_pairs), ng_reason[0] if ng_reason else None),
+                    ng_extra,
+                )
         routes.extend(new_routes)
         return routes
+
+    def _nogood_extra_state(self) -> object:
+        """Non-array search state for the nogood fingerprint (Issue #6353).
+
+        The C++ wrapper's #6098 grid stamp covers corridor reservations,
+        fixed fills, keepout rule areas and the router-side net maps, which
+        live outside the grid's numpy planes.  ``None`` on the pure-Python
+        router (those inputs are then grid arrays already hashed).
+        """
+        stamp = getattr(self.router, "_py_grid_state_stamp", None)
+        py_grid = getattr(self.router, "_py_grid", None)
+        if stamp is None or py_grid is None:
+            return None
+        return stamp(py_grid)
+
+    def _get_nogood_cache(self):
+        """Lazily build the opt-in nogood cache from env (None = disabled)."""
+        if not hasattr(self, "_nogood_cache"):
+            from .nogood_cache import nogood_cache_from_env
+
+            self._nogood_cache = nogood_cache_from_env()
+        return self._nogood_cache
 
     def _demote_seg_seg_overlap_nets(
         self,

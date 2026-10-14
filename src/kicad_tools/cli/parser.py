@@ -4227,6 +4227,29 @@ def _add_route_parser(subparsers) -> None:
         action="store_true",
         help="With --lint-gate, new warning findings also roll the route back.",
     )
+    route_parser.add_argument(
+        "--nogood-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "EXPERIMENTAL (Issue #6353, default off): answer a repeated, "
+            "completely-failed negotiated net attempt from a bounded cache. "
+            "Only failures whose search drained its open set are cached "
+            "(never timeouts or iteration-cap give-ups), and a hit requires "
+            "the grid state the search reads to be unchanged."
+        ),
+    )
+    route_parser.add_argument(
+        "--nogood-cache-margin-cells",
+        default="full",
+        help=(
+            "Failure-window margin in grid cells around the net's terminals, "
+            "or 'full' (default) to fingerprint every grid plane (occupancy, "
+            "usage, history/present cost, obstacle, zone). A numeric margin is "
+            "a heuristic that can serve a stale failure when state outside "
+            "the window changes."
+        ),
+    )
     # Issue #2610: --max-search-iterations override for the C++ A* memory
     # backstop (default 0 = use the historical ``cols * rows * 4`` heuristic).
     # Documented as an escape hatch for dense boards where the cap fires
