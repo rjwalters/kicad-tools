@@ -2189,8 +2189,9 @@ class CppPathfinder:
         # Identity when no deadline is installed.
         per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
         # Issue #6366: per-net A* weight override (evolutionary gene).
-        if weight == 1.0 and self.net_astar_weights:
-            weight = self.net_astar_weights.get(start.net, weight)
+        net_weights = getattr(self, "net_astar_weights", None)
+        if weight == 1.0 and net_weights:
+            weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
             try:
                 return self._route_impl(
