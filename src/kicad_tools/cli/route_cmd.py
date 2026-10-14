@@ -18295,10 +18295,12 @@ def _route_parser() -> argparse.ArgumentParser:
             "and exit without loading the router, routing, or writing any "
             "file (including with --complete).  On the escalation flows (--auto-layers, the default; "
             "--auto-pcb-size; --auto-mfr-tier; --adaptive-rules) the plan is "
-            "printed once per layer count the ladder would try.  Exception: "
-            "--analyze --dry-run on those flows still routes in memory "
-            "(no analysis report, no files written or deleted, no cache "
-            "entry); use --layers N for the analysis-only path."
+            "printed once per layer count the ladder would try.  With "
+            "--analyze, --dry-run instead prints the complexity and "
+            "routability analysis for the board as loaded (--layers, default "
+            "auto-detect; no escalation ladder) and exits without routing or "
+            "writing any file; it never routes, and exits non-zero if the "
+            "analysis itself fails."
         ),
     )
     parser.add_argument(
@@ -20688,7 +20690,10 @@ def _run_main_impl(args, parser, argv) -> int:
     # --auto-layers flow (and --auto-pcb-size, --auto-mfr-tier,
     # --adaptive-rules) routed for real and wrote checkpoint/partial/final
     # files, and even --layers N staged a copy of the board at --output.
-    # ``--analyze --dry-run`` keeps its downstream analysis path.
+    # ``--analyze --dry-run`` keeps its downstream analysis path: it skips
+    # every escalation dispatch below (``_analyze_dry_run``, issue #6648) and
+    # runs the single-attempt complexity + routability analysis, which
+    # returns before routing.
     if args.dry_run and not args.analyze:
         return _print_dry_run_plan(
             pcb_path,
@@ -20704,7 +20709,8 @@ def _run_main_impl(args, parser, argv) -> int:
     # layers-first ladder is meaningless when layers can't escalate).
     # Per Q4: auto-load project.kct EscalationPolicy + envelope_hard +
     # mounting_hole_group when a project.kct sits next to the PCB.
-    if getattr(args, "auto_pcb_size", False):
+    _analyze_dry_run = bool(args.dry_run and args.analyze)
+    if getattr(args, "auto_pcb_size", False) and not _analyze_dry_run:
         # Q5 enforcement: --auto-pcb-size implies --auto-layers unless
         # the user explicitly passed --no-auto-layers.
         _argv_for_q5 = argv if argv is not None else sys.argv
@@ -20734,7 +20740,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # iterating over registered manufacturer tiers from cheapest -> tightest.
     # Inside each tier the routing dispatches to the existing layer-escalation
     # path (or the single-layer path when --no-auto-layers is set).
-    if getattr(args, "auto_mfr_tier", False):
+    if getattr(args, "auto_mfr_tier", False) and not _analyze_dry_run:
         return route_with_mfr_tier_escalation(
             pcb_path=pcb_path,
             output_path=output_path,
@@ -20743,7 +20749,13 @@ def _run_main_impl(args, parser, argv) -> int:
         )
 
     # Handle auto-layers mode (separate code path)
-    if args.auto_layers and args.adaptive_rules:
+    if _analyze_dry_run:
+        # Issue #6648: ``--analyze --dry-run`` analyses the board as loaded
+        # (``--layers``, default auto-detect) on the single-attempt path and
+        # exits without routing; the escalation ladders would route for real
+        # and never consult ``--analyze``.
+        pass
+    elif args.auto_layers and args.adaptive_rules:
         # Combined 2D search: layers + rules
         return route_with_combined_escalation(
             pcb_path=pcb_path,
@@ -21311,6 +21323,9 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Analyze routability if requested
     if args.analyze:
+        # Issue #6648: under --dry-run an analysis failure must not fall
+        # through to a real route; record it and exit non-zero below.
+        _analysis_failed = False
         # Run pre-routing complexity analysis first
         if not quiet:
             print("\n--- Pre-Routing Complexity Analysis ---")
@@ -21355,6 +21370,7 @@ def _run_main_impl(args, parser, argv) -> int:
 
             print(f"{'=' * 60}")
         except Exception as e:
+            _analysis_failed = True
             print(f"Warning: Complexity analysis failed: {e}", file=sys.stderr)
 
         if not quiet:
@@ -21407,16 +21423,24 @@ def _run_main_impl(args, parser, argv) -> int:
 
             print(f"{'=' * 60}")
 
-            # If just analyzing, exit here
-            if args.dry_run:
-                return 0
-
         except Exception as e:
+            _analysis_failed = True
             print(f"Warning: Analysis failed: {e}", file=sys.stderr)
             if args.verbose:
                 import traceback
 
                 traceback.print_exc()
+
+        # If just analyzing, exit here -- never route under --dry-run, even
+        # when the analysis raised (issue #6648).
+        if args.dry_run:
+            if _analysis_failed:
+                print(
+                    "Error: --analyze --dry-run: analysis failed; not routing.",
+                    file=sys.stderr,
+                )
+                return 1
+            return 0
 
     # Configure bus routing if enabled
     bus_config = None
