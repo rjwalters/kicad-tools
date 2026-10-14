@@ -6368,11 +6368,12 @@ def verify_output_connectivity(
         if at_m is None or net_id is None:
             continue
         ls_m = layers_re.search(block)
+        block_type = via_block_type(block)
         if ls_m:
             # Issue #6493: a keyword-less partial pair is a through via to
             # KiCad, so read it as one (one rule shared with the schema).
             (first_name, last_name), normalised = kicad_read_via_layers(
-                (ls_m.group(1), ls_m.group(2)), via_block_type(block)
+                (ls_m.group(1), ls_m.group(2)), block_type
             )
             if normalised:
                 vias_read_as_through += 1
@@ -6392,6 +6393,9 @@ def verify_output_connectivity(
                 diameter=float(sz_m.group(1)) if sz_m else 0.0,
                 layers=(first, last),
                 net=net_id,
+                # Issue #6662: micro/blind/buried vias keep their drilled span.
+                is_micro=block_type == "micro",
+                span_type=block_type if block_type in ("blind", "buried") else None,
             )
         )
     warn_normalised_vias(logger, "verify_output_connectivity", vias_read_as_through)
