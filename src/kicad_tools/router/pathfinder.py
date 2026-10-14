@@ -35,6 +35,7 @@ import numpy as np
 from kicad_tools.core.types import copper_span
 
 from . import wall_deadline as _wall_deadline
+from .clearance_kernel import CLEARANCE_EPSILON_MM
 from .clearance_resolver import trace_via_clearance_mm
 from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
@@ -1991,6 +1992,10 @@ class Router:
         the vias :meth:`_convert_path_to_route` emits at these cell centres.
         A via stack at one cell (F -> In1 -> B) is one drill.
 
+        The floor carries the shared ``CLEARANCE_EPSILON_MM`` slack (issue
+        #6528), like the validator and the native twin: a pair exactly on the
+        floor whose float gap rounds to ``0.4999999999999998`` is legal.
+
         Walks ``current`` itself when it was reached through a via, then each
         ``via_anc`` (nearest via strictly above, issue #6526) up to the root.
         """
@@ -1998,7 +2003,10 @@ class Router:
         if node is None:
             return True
         rules = self.rules
-        floor = max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+        floor = (
+            max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+            - CLEARANCE_EPSILON_MM
+        )
         radius = rules.via_drill / 2
         wx, wy = self.grid.grid_to_world(current.x, current.y)
         while node is not None:
