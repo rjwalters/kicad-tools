@@ -168,6 +168,27 @@ class TestViaLayerSpanAwarePourAudit:
             f"through via unexpectedly failed to bridge the pour: pad_groups={info['pad_groups']}"
         )
 
+    @pytest.mark.parametrize("pair", ['"F.Cu" "In1.Cu"', '"In1.Cu" "F.Cu"'])
+    def test_keywordless_partial_span_via_reads_as_through(
+        self, generate_design_mod, tmp_path: Path, pair: str
+    ) -> None:
+        """Issue #6614: a keyword-less ``F.Cu``/``In1.Cu`` via is a through via.
+
+        KiCad reads a via with no ``blind``/``buried``/``micro`` keyword as
+        a through via whatever its ``(layers ...)`` pair says, so its barrel
+        really reaches the B.Cu pour and R1.1 is connected -- unlike the
+        ``blind`` fixture above with the same pair.
+        """
+        pytest.importorskip("shapely")
+        pcb_path = _fixture(tmp_path, pair)
+
+        audit = generate_design_mod._audit_pour_nets(pcb_path, ["GND"])
+        info = audit["GND"]
+
+        assert info["connected"] is True, (
+            f"keyword-less via not read as through: pad_groups={info['pad_groups']}"
+        )
+
     def test_unparseable_via_span_fails_safe_not_all_layers(
         self, generate_design_mod, tmp_path: Path
     ) -> None:
