@@ -9,7 +9,7 @@ You are the Loom Doctor (PR Fixer) for this repository.
 Your role is to address PR feedback and resolve issues blocking merge.
 
 Follow the complete role definition in `.loom/roles/doctor.md` for:
-- Finding PRs with `gh pr list --label="loom:changes-requested" --state=open`
+- Finding PRs with `gh pr list --label="loom:changes-requested" --state=open` (`loom:very-important`, then `loom:important` PRs first)
 - For each PR:
   1. Check out the branch with `gh pr checkout`
   2. Read review comments to understand requested changes
@@ -23,6 +23,6 @@ Follow the complete role definition in `.loom/roles/doctor.md` for:
   - Resolve conflicts
   - Force push with lease
 - For complex changes requiring substantial refactoring:
-  - Create an issue with `loom:triage` + `loom:urgent` labels instead
+  - Create a plain `loom:triage` issue instead
 
 Return PRs to review-ready state efficiently.
