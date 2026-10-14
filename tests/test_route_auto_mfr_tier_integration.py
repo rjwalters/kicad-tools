@@ -163,7 +163,7 @@ def _split_by_tier(stdout: str) -> dict[str, str]:
 # Per-net A* node-expansion caps for the deterministic runs.  4L: the
 # smallest measured cap with a jlcpcb-tier1 > jlcpcb margin (6/9 vs 7/9).
 # 2L: the run only needs the base tier to fail, so a small cap keeps it short.
-_ESCALATION_4L_PER_NET_ITERATIONS = 50_000
+_ESCALATION_4L_PER_NET_ITERATIONS = 10_000
 _NO_ESCALATION_2L_PER_NET_ITERATIONS = 50_000
 # Subprocess wall-clock safety nets (seconds).  No ``--timeout`` is passed --
 # a firing wall-clock deadline would make the result machine-dependent again.
@@ -184,7 +184,8 @@ _SUMMARY_LINE_RE = re.compile(
 def _emit_route_summary(
     request: pytest.FixtureRequest,
     label: str,
-    proc: subprocess.CompletedProcess[str],
+    stdout: str,
+    outcome: str,
     elapsed_s: float,
 ) -> None:
     """Write the route's wall time and its count / escalation lines to the CI log.
@@ -200,11 +201,11 @@ def _emit_route_summary(
     A gap of ~120 s between two consecutive lines is one probe ending at the
     python backend's wall-clock backstop (see the module docstring).
     """
-    lines = [ln.rstrip() for ln in proc.stdout.splitlines() if _SUMMARY_LINE_RE.search(ln)]
+    lines = [ln.rstrip() for ln in stdout.splitlines() if _SUMMARY_LINE_RE.search(ln)]
     text = "\n".join(
         [
             "",
-            f"[mfr-tier-route] {label}: exit {proc.returncode}, {elapsed_s:.0f}s wall clock",
+            f"[mfr-tier-route] {label}: {outcome}, {elapsed_s:.0f}s wall clock",
             *(f"[mfr-tier-route] {label} | {ln}" for ln in lines),
             "",
         ]
@@ -219,6 +220,7 @@ def _emit_route_summary(
 
 
 def _run_route_auto_mfr_tier(
+    request: pytest.FixtureRequest,
     unrouted_pcb_path: Path,
     *,
     max_layers: int,
@@ -229,6 +231,7 @@ def _run_route_auto_mfr_tier(
     """Run ``kct route --auto-mfr-tier`` on a copy of the board-04 PCB.
 
     Args:
+        request: The calling fixture's request, for the CI-log summary.
         unrouted_pcb_path: Source unrouted PCB (board-04 committed artifact).
         max_layers: ``--max-layers``.  The reachable layer counts decide
             whether ``jlcpcb-tier1`` offers via-in-pad (Issue #6217).
@@ -238,8 +241,12 @@ def _run_route_auto_mfr_tier(
         wall_clock_seconds: Subprocess safety-net limit.
 
     Returns the completed subprocess so callers can inspect both the
-    return code and the captured stdout/stderr.
+    return code and the captured stdout/stderr.  The route's wall time and
+    summary lines go to the CI log either way; on a wall-clock expiry the
+    partial output is summarised before ``TimeoutExpired`` propagates, so
+    the log shows how far the route got.
     """
+    label = f"{max_layers}L @ {per_net_iterations} expansions/net"
     with tempfile.TemporaryDirectory() as td:
         pcb_copy = Path(td) / "stm32_devboard.kicad_pcb"
         shutil.copy2(unrouted_pcb_path, pcb_copy)
@@ -265,13 +272,31 @@ def _run_route_auto_mfr_tier(
             "python",
             "--auto-mfr-tier",
         ]
-        return subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=wall_clock_seconds,
-            check=False,
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=wall_clock_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            partial = exc.stdout or ""
+            if isinstance(partial, bytes):
+                partial = partial.decode("utf-8", errors="replace")
+            _emit_route_summary(
+                request,
+                label,
+                partial,
+                f"TIMED OUT at the {wall_clock_seconds}s subprocess limit",
+                time.monotonic() - started,
+            )
+            raise
+        _emit_route_summary(
+            request, label, proc.stdout, f"exit {proc.returncode}", time.monotonic() - started
         )
+        return proc
 
 
 def _assert_deterministic(proc: subprocess.CompletedProcess[str]) -> None:
@@ -316,15 +341,14 @@ class TestAutoMfrTierIntegration:
         self, request: pytest.FixtureRequest, unrouted_pcb_path: Path
     ) -> subprocess.CompletedProcess[str]:
         """Run with ``--auto-mfr-tier`` at 4L only and capture output."""
-        started = time.monotonic()
         proc = _run_route_auto_mfr_tier(
+            request,
             unrouted_pcb_path,
             max_layers=4,
             starting_layers=4,
             per_net_iterations=_ESCALATION_4L_PER_NET_ITERATIONS,
             wall_clock_seconds=_ESCALATION_4L_WALL_CLOCK_S,
         )
-        _emit_route_summary(request, "4L", proc, time.monotonic() - started)
         _fail_on_fatal_exit(proc)
         _assert_deterministic(proc)
         return proc
@@ -559,15 +583,14 @@ class TestAutoMfrTierNoEscalationAt2L:
     def two_layer_result(
         self, request: pytest.FixtureRequest, unrouted_pcb_path: Path
     ) -> subprocess.CompletedProcess[str]:
-        started = time.monotonic()
         proc = _run_route_auto_mfr_tier(
+            request,
             unrouted_pcb_path,
             max_layers=2,
             starting_layers=2,
             per_net_iterations=_NO_ESCALATION_2L_PER_NET_ITERATIONS,
             wall_clock_seconds=_NO_ESCALATION_2L_WALL_CLOCK_S,
         )
-        _emit_route_summary(request, "2L", proc, time.monotonic() - started)
         _fail_on_fatal_exit(proc)
         _assert_deterministic(proc)
         return proc
@@ -602,3 +625,27 @@ class TestAutoMfrTierNoEscalationAt2L:
         )
         assert int(line.group(1)) > 0
         assert "raise --max-layers to 4" in stdout
+
+
+# TEMPORARY measurement scaffolding for issue #6478 -- removed before review.
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "cap",
+    [
+        pytest.param(5_000, marks=pytest.mark.xdist_group("mfr_tier_probe_5k")),
+        pytest.param(20_000, marks=pytest.mark.xdist_group("mfr_tier_probe_20k")),
+        pytest.param(30_000, marks=pytest.mark.xdist_group("mfr_tier_probe_30k")),
+    ],
+)
+def test_measure_4l_cap(request: pytest.FixtureRequest, unrouted_pcb_path: Path, cap: int) -> None:
+    try:  # noqa: SIM105
+        _run_route_auto_mfr_tier(
+            request,
+            unrouted_pcb_path,
+            max_layers=4,
+            starting_layers=4,
+            per_net_iterations=cap,
+            wall_clock_seconds=_ESCALATION_4L_WALL_CLOCK_S,
+        )
+    except subprocess.TimeoutExpired:
+        pass
