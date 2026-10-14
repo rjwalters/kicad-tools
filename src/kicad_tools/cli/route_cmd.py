@@ -2489,6 +2489,71 @@ def _stash_unrouted_diagnosis(router: "Autorouter", args) -> None:
         print(diagnosis.summary_line(), file=sys.stderr)
 
 
+def _prime_access_witness_deadline(args) -> tuple[bool, float | None]:
+    """Whether -- and until when -- the pre-release witness prime may run (#6391).
+
+    Returns ``(run, deadline)``.  Without ``--timeout`` the prime is the same
+    unbounded replay the post-release sidecar writer used to do, only earlier:
+    ``(True, None)``.  Under ``--timeout`` it may spend only what is left
+    beyond the post-route finishing reserve (:func:`_post_route_reserve`),
+    i.e. ``_finishing_time_left(args) - args._post_route_reserve``; when that
+    is not in the future the prime is skipped (``(False, None)``) and the
+    sidecars fall back to today's post-release behaviour (#6273).
+    """
+    time_left = _finishing_time_left(args)
+    if time_left is None:
+        return True, None
+    reserve = float(getattr(args, "_post_route_reserve", 0.0) or 0.0)
+    budget = time_left - reserve
+    if budget <= 0.0:
+        return False, None
+    return True, time.monotonic() + budget
+
+
+def _prime_access_witness(router: "Autorouter", args) -> None:
+    """Replay the commit journal while the routing grid is still live (#6391).
+
+    :func:`_release_routing_engine_state` drops the grid's occupancy planes,
+    and the access-witness sidecars are written after it.  A replay run then
+    still returns the right verdicts and attribution (#6346), but
+    ``pad_access._marking_at`` reads every plane as "no label", so each
+    stranded pad's ``closing_markings`` came out empty.  Running the replay
+    here, immediately before the release, memoizes the complete witness on
+    ``router._access_witness_cache`` (:func:`witness_for_router`); the later
+    sidecar writes reuse it because the journal length is unchanged.
+
+    Segment clearance during the replay is judged against the replayed copper
+    whether or not the R-tree is populated: ``access_witness.replay`` suspends
+    the segment index for its whole run (#6303), so priming before the release
+    changes no verdict.
+
+    Bounded by :func:`_prime_access_witness_deadline` under ``--timeout``.  A
+    skipped or deadline-truncated prime caches nothing, so the post-release
+    path behaves exactly as before.  Skipped after an interrupt (the normal
+    save will not follow) and for a router with no or an empty journal.
+    Never raises a regular exception: a diagnostic must not fail a route.
+    """
+    journal = getattr(router, "commit_journal", None)
+    if journal is None or not len(journal):
+        return
+    if _interrupt_state.get("interrupted"):
+        return
+    run, deadline = _prime_access_witness_deadline(args)
+    if not run:
+        return
+    from kicad_tools.router.access_witness import witness_for_router
+
+    with restore_stage():
+        record_stage("access-witness-prime")
+        try:
+            if deadline is None:
+                witness_for_router(router)
+            else:
+                witness_for_router(router, deadline=deadline)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Warning: access-witness prime failed: {exc}", file=sys.stderr)
+
+
 def _release_routing_engine_state(router: "Autorouter") -> None:
     """Free the routing-engine negotiation structures before the CLI tail (#4292).
 
@@ -11307,6 +11372,9 @@ def route_with_layer_escalation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -12355,6 +12423,9 @@ def route_with_rule_relaxation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -14974,6 +15045,9 @@ def route_with_combined_escalation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -22144,6 +22218,9 @@ def _run_main_impl(args, parser, argv) -> int:
     # ``kicad-cli`` DRC/zone-fill child spawned below.
     # Issue #5944: diagnose unrouted connections while the grid is still live.
     _stash_unrouted_diagnosis(router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(router, args)
     _release_routing_engine_state(router)
 
     _rss.mark("post-finalize")

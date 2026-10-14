@@ -81,3 +81,194 @@ def test_replay_after_release_matches_live_replay() -> None:
     ):
         assert getattr(released_u3, field) == getattr(live_u3, field), field
     assert _without_markings(released) == _without_markings(live)
+
+
+# ---------------------------------------------------------------------------
+# Issue #6391: prime the witness BEFORE the release, so the sidecars written
+# after it keep ``closing_markings``.
+# ---------------------------------------------------------------------------
+
+
+def _populated_rtree_router():
+    """COMP's closing track as 40 indexed segments: the segment R-tree is live.
+
+    40 >= ``RTREE_SEGMENT_THRESHOLD``, so ``validate_segment_clearance`` would
+    answer from the R-tree were the replay not to suspend it (#6303) -- the
+    case where priming before the release could have changed a verdict.
+    """
+    from kicad_tools.router.grid import RTREE_AVAILABLE, RTREE_SEGMENT_THRESHOLD
+    from tests.router.test_access_witness_replay_5508 import _comp_as_n_segments
+
+    router = _comp_as_n_segments(40)
+    if RTREE_AVAILABLE:
+        assert router.grid._seg_rtree_count >= RTREE_SEGMENT_THRESHOLD
+    return router
+
+
+def _no_timeout_args():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(_wall_clock_deadline=None, _post_route_reserve=0.0)
+
+
+def test_primed_witness_keeps_closing_markings_in_post_release_sidecars(tmp_path) -> None:
+    from kicad_tools.cli.route_cmd import (
+        _prime_access_witness,
+        _release_routing_engine_state,
+        _write_access_witness_sidecar,
+    )
+    from kicad_tools.router.access_witness import load_access_witness_sidecar
+    from tests.router.test_access_witness_replay_5508 import U3
+
+    live = replay(_populated_rtree_router().commit_journal, _populated_rtree_router())
+    live_u3 = live.for_pad(*U3)
+    assert live_u3 is not None and live_u3.closing_markings
+
+    router = _populated_rtree_router()
+    _prime_access_witness(router, _no_timeout_args())
+    _release_routing_engine_state(router)
+    assert router.grid._blocked.size == 0  # the planes really are gone
+
+    # Both post-release writers: the normal save and the partial save.
+    for stem, journal_first in (("board_routed", False), ("board_routed_partial", True)):
+        pcb = tmp_path / f"{stem}.kicad_pcb"
+        sidecar = _write_access_witness_sidecar(
+            pcb, router, quiet=True, journal_first=journal_first
+        )
+        assert sidecar is not None
+        written = load_access_witness_sidecar(sidecar)
+        assert written is not None
+        u3 = written.for_pad(*U3)
+        assert u3 is not None
+        assert u3.closing_markings, stem
+        assert u3.closing_markings == live_u3.closing_markings
+        assert written.to_dict() == live.to_dict()
+
+
+def test_primed_and_post_release_witness_agree_on_verdicts() -> None:
+    """Priming on a populated R-tree changes labels only, never a verdict."""
+    from kicad_tools.cli.route_cmd import _prime_access_witness, _release_routing_engine_state
+    from kicad_tools.router.access_witness import witness_for_router
+    from tests.router.test_access_witness_replay_5508 import U3
+
+    primed_router = _populated_rtree_router()
+    _prime_access_witness(primed_router, _no_timeout_args())
+    _release_routing_engine_state(primed_router)
+    primed = witness_for_router(primed_router)
+
+    released_router = _populated_rtree_router()
+    _release_routing_engine_state(released_router)
+    released = witness_for_router(released_router)
+
+    assert primed is not None and released is not None
+    primed_u3, released_u3 = primed.for_pad(*U3), released.for_pad(*U3)
+    assert primed_u3 is not None and released_u3 is not None
+    assert primed_u3.first_closed_at == ("initial", 0)
+    assert primed_u3.closing_markings and released_u3.closing_markings == ()
+    for field in (
+        "final_access",
+        "access_at_escape_end",
+        "first_closed_at",
+        "first_closed_index",
+        "first_closed_kind",
+        "closing_nets",
+        "closing_refs",
+        "closing_copper_class",
+        "reopened",
+    ):
+        assert getattr(primed_u3, field) == getattr(released_u3, field), field
+    assert _without_markings(primed) == _without_markings(released)
+
+
+def _fake_clock(monkeypatch, now: float) -> None:
+    from types import SimpleNamespace
+
+    import kicad_tools.cli.route_cmd as route_cmd
+
+    monkeypatch.setattr(route_cmd, "time", SimpleNamespace(monotonic=lambda: now))
+
+
+def test_prime_deadline_stays_inside_the_finishing_reserve(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import kicad_tools.router.access_witness as access_witness
+    from kicad_tools.cli.route_cmd import (
+        _FINISHING_EXIT_MARGIN_SEC,
+        _prime_access_witness,
+    )
+
+    _fake_clock(monkeypatch, 1000.0)
+    seen: list = []
+    monkeypatch.setattr(
+        access_witness,
+        "witness_for_router",
+        lambda router, deadline=None: seen.append(deadline),
+    )
+    args = SimpleNamespace(_wall_clock_deadline=1000.0 + 300.0, _post_route_reserve=60.0)
+    _prime_access_witness(_populated_rtree_router(), args)
+    # 300 s left, minus the exit margin, minus the save/zone-fill/DRC reserve.
+    assert seen == [1000.0 + 300.0 - _FINISHING_EXIT_MARGIN_SEC - 60.0]
+
+
+def test_prime_is_skipped_when_the_reserve_has_eaten_the_budget(monkeypatch, tmp_path) -> None:
+    """Budget gone: no prime, no cache, and the sidecar is still journal-only (#6273)."""
+    from types import SimpleNamespace
+
+    import kicad_tools.router.access_witness as access_witness
+    from kicad_tools.cli.route_cmd import (
+        _prime_access_witness,
+        _release_routing_engine_state,
+        _write_access_witness_sidecar,
+    )
+
+    _fake_clock(monkeypatch, 1000.0)
+    called: list = []
+    real = access_witness.witness_for_router
+    monkeypatch.setattr(
+        access_witness,
+        "witness_for_router",
+        lambda router, deadline=None: called.append(deadline) or real(router, deadline=deadline),
+    )
+    router = _populated_rtree_router()
+    # 50 s left; the reserve alone wants 60 s.
+    args = SimpleNamespace(_wall_clock_deadline=1000.0 + 50.0, _post_route_reserve=60.0)
+    _prime_access_witness(router, args)
+    assert called == []
+    assert getattr(router, "_access_witness_cache", None) is None
+
+    _release_routing_engine_state(router)
+    import json
+
+    sidecar = _write_access_witness_sidecar(
+        tmp_path / "board_routed.kicad_pcb", router, quiet=True, replay=False
+    )
+    assert sidecar is not None
+    payload = json.loads(sidecar.read_text())
+    assert "journal" in payload and "witness" not in payload
+
+
+def test_prime_is_skipped_after_an_interrupt_and_without_a_journal(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import kicad_tools.cli.route_cmd as route_cmd
+
+    router = _populated_rtree_router()
+    monkeypatch.setitem(route_cmd._interrupt_state, "interrupted", True)
+    route_cmd._prime_access_witness(router, _no_timeout_args())
+    assert getattr(router, "_access_witness_cache", None) is None
+
+    monkeypatch.setitem(route_cmd._interrupt_state, "interrupted", False)
+    # A non-grid engine / stub: no journal at all is a silent no-op.
+    route_cmd._prime_access_witness(SimpleNamespace(), _no_timeout_args())
+
+
+def test_journal_truncation_after_a_prime_drops_the_cache() -> None:
+    """#6320: a cut journal must not be answered from the primed witness."""
+    from kicad_tools.cli.route_cmd import _prime_access_witness
+    from kicad_tools.router.placement_feedback import _truncate_journal_to
+
+    router = _populated_rtree_router()
+    _prime_access_witness(router, _no_timeout_args())
+    assert router._access_witness_cache is not None
+    _truncate_journal_to(router, (0, False))
+    assert getattr(router, "_access_witness_cache", None) is None
