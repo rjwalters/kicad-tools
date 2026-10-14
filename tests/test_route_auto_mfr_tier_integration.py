@@ -94,6 +94,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -162,12 +163,59 @@ def _split_by_tier(stdout: str) -> dict[str, str]:
 # Per-net A* node-expansion caps for the deterministic runs.  4L: the
 # smallest measured cap with a jlcpcb-tier1 > jlcpcb margin (6/9 vs 7/9).
 # 2L: the run only needs the base tier to fail, so a small cap keeps it short.
-_ESCALATION_4L_PER_NET_ITERATIONS = 200_000
+_ESCALATION_4L_PER_NET_ITERATIONS = 50_000
 _NO_ESCALATION_2L_PER_NET_ITERATIONS = 50_000
 # Subprocess wall-clock safety nets (seconds).  No ``--timeout`` is passed --
 # a firing wall-clock deadline would make the result machine-dependent again.
-_ESCALATION_4L_WALL_CLOCK_S = 4200
+# Issue #6478: the 4L limit sits below the Slow Tests job's ``--timeout=1200``
+# so a runaway route fails as a readable ``TimeoutExpired`` at fixture setup,
+# and the class carries no ``pytest.mark.timeout`` above the job's.
+_ESCALATION_4L_WALL_CLOCK_S = 1100
 _NO_ESCALATION_2L_WALL_CLOCK_S = 1500
+
+# Route-log lines worth keeping in the CI log of a PASSING run (Issue #6478).
+_SUMMARY_LINE_RE = re.compile(
+    r"Tier\s+\d+/\d+:|Routed:\s+\d+/\d+|Nets routed:\s+\d+/\d+|Escape routes: U2 "
+    r"|Escalating to |No via-in-pad gain|Relief rescue: |Stall relief rescue "
+    r"|stage deadline fired"
+)
+
+
+def _emit_route_summary(
+    request: pytest.FixtureRequest,
+    label: str,
+    proc: subprocess.CompletedProcess[str],
+    elapsed_s: float,
+) -> None:
+    """Write the route's wall time and its count / escalation lines to the CI log.
+
+    Issue #6478.  pytest shows captured output only for failing tests, so a
+    green Slow Tests run used to say nothing about what this route measured:
+    not its runtime, not the per-tier counts.  Re-measuring the per-net cap
+    then needed a local run on whatever machine was at hand.  Capture is
+    suspended for the write, which goes to stderr; an xdist worker inherits
+    the controller's stderr, so the lines reach the job log.
+
+    The ``Relief rescue`` lines carry the rescue stage's cumulative seconds.
+    A gap of ~120 s between two consecutive lines is one probe ending at the
+    python backend's wall-clock backstop (see the module docstring).
+    """
+    lines = [ln.rstrip() for ln in proc.stdout.splitlines() if _SUMMARY_LINE_RE.search(ln)]
+    text = "\n".join(
+        [
+            "",
+            f"[mfr-tier-route] {label}: exit {proc.returncode}, {elapsed_s:.0f}s wall clock",
+            *(f"[mfr-tier-route] {label} | {ln}" for ln in lines),
+            "",
+        ]
+    )
+    capman = request.config.pluginmanager.getplugin("capturemanager")
+    if capman is None:
+        sys.stderr.write(text)
+        return
+    with capman.global_and_fixture_disabled():
+        sys.stderr.write(text)
+        sys.stderr.flush()
 
 
 def _run_route_auto_mfr_tier(
@@ -247,7 +295,6 @@ def _fail_on_fatal_exit(proc: subprocess.CompletedProcess[str]) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(4500)
 # The class-scoped route runs once per xdist worker that receives one of its
 # tests; pin the class to one worker so the ~25 CPU-min route runs once
 # (Slow Tests uses ``--dist loadgroup``; PR #6228 review).
@@ -265,8 +312,11 @@ class TestAutoMfrTierIntegration:
     """
 
     @pytest.fixture(scope="class")
-    def auto_mfr_tier_result(self, unrouted_pcb_path: Path) -> subprocess.CompletedProcess[str]:
+    def auto_mfr_tier_result(
+        self, request: pytest.FixtureRequest, unrouted_pcb_path: Path
+    ) -> subprocess.CompletedProcess[str]:
         """Run with ``--auto-mfr-tier`` at 4L only and capture output."""
+        started = time.monotonic()
         proc = _run_route_auto_mfr_tier(
             unrouted_pcb_path,
             max_layers=4,
@@ -274,6 +324,7 @@ class TestAutoMfrTierIntegration:
             per_net_iterations=_ESCALATION_4L_PER_NET_ITERATIONS,
             wall_clock_seconds=_ESCALATION_4L_WALL_CLOCK_S,
         )
+        _emit_route_summary(request, "4L", proc, time.monotonic() - started)
         _fail_on_fatal_exit(proc)
         _assert_deterministic(proc)
         return proc
@@ -505,7 +556,10 @@ class TestAutoMfrTierNoEscalationAt2L:
     """
 
     @pytest.fixture(scope="class")
-    def two_layer_result(self, unrouted_pcb_path: Path) -> subprocess.CompletedProcess[str]:
+    def two_layer_result(
+        self, request: pytest.FixtureRequest, unrouted_pcb_path: Path
+    ) -> subprocess.CompletedProcess[str]:
+        started = time.monotonic()
         proc = _run_route_auto_mfr_tier(
             unrouted_pcb_path,
             max_layers=2,
@@ -513,6 +567,7 @@ class TestAutoMfrTierNoEscalationAt2L:
             per_net_iterations=_NO_ESCALATION_2L_PER_NET_ITERATIONS,
             wall_clock_seconds=_NO_ESCALATION_2L_WALL_CLOCK_S,
         )
+        _emit_route_summary(request, "2L", proc, time.monotonic() - started)
         _fail_on_fatal_exit(proc)
         _assert_deterministic(proc)
         return proc

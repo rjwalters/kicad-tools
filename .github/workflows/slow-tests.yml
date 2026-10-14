@@ -171,4 +171,4 @@ jobs:
         # Twice-daily, push and workflow_dispatch runs leave it unset.
         env:
           KCT_LATTICE_BOARD_GUARD: ${{ github.event.schedule == '0 9 * * 0' && '1' || '' }}
-        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 -m slow
+        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 --durations=25 -m slow
