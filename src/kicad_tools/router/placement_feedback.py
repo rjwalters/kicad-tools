@@ -129,8 +129,8 @@ class _CosmeticSnapshot:
         )
 
     def restore(self) -> None:
-        for obj, state in self.objects:
-            vars(obj).update(copy.deepcopy(state))
+        for obj, attrs in self.objects:
+            vars(obj).update(copy.deepcopy(attrs))
         if self.nodes:
             from kicad_tools.sexp import SExp
 
