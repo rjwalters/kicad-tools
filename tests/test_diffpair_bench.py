@@ -333,3 +333,62 @@ def test_determinism_and_merge():
     ]
     merged = bench.merge([{"rows": [row(0, "a"), row(0, "b", "06b")]}, {"rows": [row(0, "z")]}])
     assert {(r["board"], r["pair_digest"]) for r in merged["rows"]} == {("03", "z"), ("06b", "b")}
+
+
+# ---------------------------------------------------------------------------
+# Issue #6535: 06b lattice keeps coupled copper on BOTH nets of its pairs
+# ---------------------------------------------------------------------------
+
+#: The committed fix-branch baseline this guard pins (``diffpair_bench run --boards
+#: 03,06b --engines lattice --seeds 42 --label fix-6535``, committed net-class map).
+BASELINES_6535 = sorted(
+    (REPO_ROOT / "data" / "research" / "diffpair_bench").glob("fix-6535-*.json")
+)
+COUPLED = ("coupled", "partially-coupled")
+
+
+def _coupled_pairs_with_copper(pairs: list[dict]) -> list[str]:
+    """Pairs counted as coupled whose BOTH nets carry copper and a coupled run."""
+    good = []
+    for p in pairs:
+        if not str(p.get("outcome") or "").startswith(COUPLED):
+            continue
+        routed = p.get("routed_mm") or [0, 0]
+        assert min(routed) > 0, f"{p['pair']} is '{p['outcome']}' with no copper on a net: {routed}"
+        assert (p.get("coupled_trunk_mm") or 0) > 0, f"{p['pair']} has no coupled run"
+        good.append(p["pair"])
+    return good
+
+
+def test_committed_06b_lattice_row_couples_with_copper_on_both_nets():
+    """The committed baseline: >= 3 of 4 LVDS pairs coupled, each with copper on
+    both nets (the #6440 baseline's "3 coupled" had 0 mm on every N net)."""
+    import json
+
+    assert len(BASELINES_6535) == 1, BASELINES_6535
+    doc = json.loads(BASELINES_6535[0].read_text())
+    rows = [
+        r
+        for r in doc["rows"]
+        if (r["board"], r["engine"], r["seed"]) == ("06b", "lattice", 42)
+        and r.get("net_class_map_mode", "committed") == "committed"
+    ]
+    assert rows, "no 06b lattice committed-map row"
+    for row in rows:
+        assert row["valid"] is True
+        assert len(_coupled_pairs_with_copper(row["pairs"])) >= 3
+        assert row["kicad_drc_unconnected"] <= 4  # main before #6535: 4
+        assert (row.get("kct_check_by_rule") or {}).get("connectivity", 0) <= 2
+
+
+@pytest.mark.slow
+def test_06b_lattice_route_couples_with_copper_on_both_nets(tmp_path):
+    """Live guard: route 06b with the lattice exactly as the bench does and fail if
+    no pair couples, a coupled pair lacks copper on one net, or the post-route
+    short check removes an LVDS net (the double-copper signature of #6535)."""
+    row = bench.run_cell(ere.BOARDS["06b"], "lattice", 42, 2400, tmp_path)
+    assert row["valid"] is True, row.get("invalid_reasons")
+    log = next(tmp_path.rglob("route.log")).read_text()
+    assert "Post-optimize backstop demoted" not in log
+    assert "routed by both the lattice and an earlier pass" not in log
+    assert len(_coupled_pairs_with_copper(row["pairs"])) >= 1  # target (and today): 3

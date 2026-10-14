@@ -1132,3 +1132,142 @@ def test_board06_lvds_pairs_keep_single_trunk() -> None:
     assert len(lvds) == 4, [pc.pair_name for pc in coupled]
     assert all(len(pc.key) == 3 for pc in lvds), "no chain segments for taps"
     assert router._lattice_pair_hops == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #6535: tap chain as the fallback for a declined single trunk
+# ---------------------------------------------------------------------------
+
+
+def _tap_pads(x: float = 15.0) -> list[Pad]:
+    """A board-06-style termination resistor straddling the pair at ``x``
+    (0603 rotated 90 deg: P/N pads 1.65 mm apart, centred on the pair)."""
+    return [
+        _pad(x, 5.175, 1, "D+", ref="R1", width=0.95, height=0.8),
+        _pad(x, 6.825, 2, "D-", ref="R1", width=0.95, height=0.8),
+    ]
+
+
+def _tap_walls(x: float = 15.0, gap: float = 0.65) -> list[Pad]:
+    """Foreign walls above and below the tap: a single trace still passes
+    (``gap`` > trace + 2 x clearance), but the fat pair cannot get around
+    the tap, and the tap's own pads close the corridor between them."""
+    top = 5.175 - 0.4 - gap
+    bot = 6.825 + 0.4 + gap
+    return [
+        Pad(
+            x=x,
+            y=y,
+            width=0.5,
+            height=h,
+            net=20 + i,
+            net_name=f"WALL{i}",
+            layer=Layer.F_CU,
+            ref=f"W{i}",
+            pin="1",
+        )
+        for i, (y, h) in enumerate(((top / 2, top), ((bot + 12.0) / 2, 12.0 - bot)))
+    ]
+
+
+def test_choose_pair_tap_chain_splits_at_the_tap() -> None:
+    from kicad_tools.router.lattice.coupled import choose_pair_chain, choose_pair_tap_chain
+
+    ps = [_pad(3.0, 5.5, 1, "D+", ref="U1"), _pad(27.0, 5.5, 1, "D+", ref="U2")]
+    ns = [_pad(3.0, 6.5, 2, "D-", ref="U1"), _pad(27.0, 6.5, 2, "D-", ref="U2")]
+    # No tap: there is no alternative to retry.
+    assert choose_pair_tap_chain(ps, ns) is None
+    ps.append(_pad(15.0, 5.5, 1, "D+", ref="R1"))
+    ns.append(_pad(15.0, 6.5, 2, "D-", ref="R1"))
+    trunk = choose_pair_chain(ps, ns)
+    assert trunk is not None and len(trunk.segments) == 1  # the default is unchanged
+    chain = choose_pair_tap_chain(ps, ns)
+    assert chain is not None
+    a, b = trunk.segments[0]
+    # end A -> tap couple -> end B; a tap has no hop (entry == exit).
+    assert chain.segments == [(a, (2, 2)), ((2, 2), b)]
+    assert chain.hops == []
+
+
+def test_choose_pair_tap_chain_is_none_for_a_pass_through_only_pair() -> None:
+    from kicad_tools.router.lattice.coupled import choose_pair_tap_chain
+
+    pads = _chain_pads()
+    ps = [pads["J1.P"], pads["U2.3"], pads["U2.4"], pads["U1.P"]]
+    ns = [pads["J1.N"], pads["U2.1"], pads["U2.6"], pads["U1.N"]]
+    # The pass-through chain already IS the default chain: nothing to retry.
+    assert choose_pair_tap_chain(ps, ns) is None
+
+
+def test_declined_trunk_is_retried_as_a_tap_chain(capsys, monkeypatch) -> None:
+    """The trunk cannot pass the tap (its pads close the corridor, walls stop
+    a detour) and declines ``pair-no-path``; the IC -> tap -> IC retry
+    couples copper on BOTH nets and every pad stays connected."""
+    import kicad_tools.router.core as core
+
+    pads = _tap_pads() + _tap_walls()
+
+    # Control: with the retry removed the trunk falls back uncoupled.
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    router = _trunk_autorouter(pads)
+    router.route_net(1)
+    assert router._lattice_pair_outcomes == {"D": "uncoupled-fallback:pair-no-path"}
+    monkeypatch.undo()
+    capsys.readouterr()
+
+    router = _trunk_autorouter(pads)
+    routes_p = router.route_net(1)
+    routes_n = router.route_net(2)
+    out = capsys.readouterr().out
+    assert "tap-chain retry for 1 pair(s) whose trunk declined pair-no-path (D): kept" in out
+    outcome = router._lattice_pair_outcomes["D"]
+    assert outcome == "coupled" or outcome.startswith("partially-coupled:"), outcome
+    segs = router._lattice_pair_segment_outcomes
+    assert [label for _n, label, _o in segs] == ["J1.1->R1.1", "R1.1->U1.1"]
+    assert any(o == "coupled" for _n, _l, o in segs)
+    # Both legs present: copper on both nets, each net joined through the tap.
+    ps = [p for p in router.pads.values() if p.net == 1]
+    ns = [p for p in router.pads.values() if p.net == 2]
+    assert len(ps) == len(ns) == 3
+    assert _net_connected(routes_p, ps)
+    assert _net_connected(routes_n, ns)
+    stats = router._lattice_negotiation_stats
+    assert stats.routed == stats.total, stats
+
+
+def test_trunk_that_couples_is_not_retried(capsys) -> None:
+    """A tap that does not block the corridor: the trunk couples, keeps its
+    3-tuple key, and no retry runs (byte-identical to before #6535)."""
+    router = _trunk_autorouter(_tap_pads(x=24.0))
+    router.route_net(1)
+    assert router._lattice_pair_outcomes == {"D": "coupled"}
+    assert router._lattice_tap_chain_pairs == {"D"}  # an alternative exists ...
+    assert "tap-chain retry" not in capsys.readouterr().out  # ... but is not used
+    coupled, _reserved = router._lattice_coupled_connections()
+    assert [pc.key for pc in coupled] == [("pair", 1, 2)]
+
+
+def test_tap_chain_retry_pairs_selection() -> None:
+    from types import SimpleNamespace
+
+    from kicad_tools.router.core import _lattice_tap_chain_retry_pairs
+
+    def pc(key, name):
+        return SimpleNamespace(key=key, pair_name=name)
+
+    coupled = [
+        pc(("pair", 1, 2), "A"),  # trunk, pair-no-path, alternative -> retried
+        pc(("pair", 3, 4), "B"),  # trunk, other decline reason
+        pc(("pair", 5, 6), "C"),  # trunk coupled
+        pc(("pair", 7, 8), "D"),  # trunk, pair-no-path, no alternative
+        pc(("pair", 9, 10, 0), "E"),  # a #6378 chain segment: never retried
+    ]
+    outcomes = {
+        ("pair", 1, 2): "uncoupled-fallback:pair-no-path",
+        ("pair", 3, 4): "uncoupled-fallback:pair-partner-pad",
+        ("pair", 5, 6): "coupled",
+        ("pair", 7, 8): "uncoupled-fallback:pair-no-path",
+        ("pair", 9, 10, 0): "uncoupled-fallback:pair-no-path",
+    }
+    got = _lattice_tap_chain_retry_pairs(coupled, outcomes, {"A", "B", "C", "E"})
+    assert got == frozenset({"A"})

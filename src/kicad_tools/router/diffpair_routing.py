@@ -20,7 +20,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -803,6 +803,23 @@ COUPLED_OUTCOME_SHADOW_OVERLAP = "shadow-declined-overlap"
 COUPLED_OUTCOME_SHADOW_BLOCKAGE = "shadow-declined-blockage"
 COUPLED_OUTCOME_JOINT_PLATEAU = "joint-A*-plateau"
 COUPLED_OUTCOME_LANDING_STALL = "landing-stall"
+
+
+def _floored_pair_gap(autorouter: Any, net_class: Any) -> float:
+    """A pair class's intra-pair gap, floored as the router lays it (Issue #6443).
+
+    :meth:`Autorouter._pair_gap_mm` (class value, manufacturer minimum,
+    authored board minimum, with its one-line notice) when the router has it;
+    otherwise :meth:`DesignRules.pair_gap`, or the bare class value for a
+    duck-typed stand-in router without rules.
+    """
+    resolve = getattr(autorouter, "_pair_gap_mm", None)
+    if callable(resolve):
+        return float(resolve(net_class))
+    rules = getattr(autorouter, "rules", None)
+    if rules is not None and hasattr(rules, "pair_gap"):
+        return float(rules.pair_gap(net_class).gap_mm)
+    return float(net_class.effective_intra_pair_clearance())
 
 
 def dominant_rejection(rejections: Mapping[str, int] | None) -> str | None:
@@ -9897,7 +9914,8 @@ class DiffPairRouter:
         pair_nc = (getattr(self.autorouter, "net_class_map", None) or {}).get(spec.p_start.net_name)
         if pair_nc is not None:
             nc_trace_width = float(pair_nc.trace_width)
-            intra_floor = float(pair_nc.effective_intra_pair_clearance())
+            # Issue #6443: the floored pair gap (class / fab / authored).
+            intra_floor = _floored_pair_gap(self.autorouter, pair_nc)
             tol_frac = min(
                 _SHADOW_GAP_MAX_TOL_FRAC,
                 max(0.0, float(pair_nc.impedance_tolerance_percent) / 100.0),
@@ -10935,7 +10953,8 @@ class DiffPairRouter:
         pair_net_class = net_class_map.get(pair.positive.net_name)
         if pair_net_class is not None:
             pair_trace_width = float(pair_net_class.trace_width)
-            pair_intra_clearance = float(pair_net_class.effective_intra_pair_clearance())
+            # Issue #6443: the floored pair gap (class / fab / authored).
+            pair_intra_clearance = _floored_pair_gap(self.autorouter, pair_net_class)
         else:
             pair_trace_width = float(self.autorouter.rules.trace_width)
             # Without a per-pair class, fall back to the legacy edge-to-
@@ -12437,7 +12456,8 @@ class DiffPairRouter:
         pair_net_class = net_class_map.get(pair.positive.net_name)
         if pair_net_class is not None:
             pair_trace_width = float(pair_net_class.trace_width)
-            pair_intra_clearance = float(pair_net_class.effective_intra_pair_clearance())
+            # Issue #6443: same floored gap as the main coupled path.
+            pair_intra_clearance = _floored_pair_gap(self.autorouter, pair_net_class)
         else:
             pair_trace_width = float(self.autorouter.rules.trace_width)
             pair_intra_clearance = float(spacing)
@@ -13698,6 +13718,16 @@ class DiffPairRouter:
         pose_committed_pair_ids: set[int] = set()
 
         refused_diff_nets: set[int] = set()
+        # Issue #6535: under ``--route-engine lattice`` the lattice routes every
+        # engaged pair itself (coupled, in its whole-netset negotiation), and it
+        # never sees copper committed here.  A grid coupled pre-pass for those
+        # pairs would leave TWO copper sets per pair net in ``routes``; the
+        # post-route short check then demoted whole N nets (board 06b: the
+        # baseline's "coupled" LVDS pairs carried 0 mm of N copper).  So the
+        # grid pre-pass is skipped for them and their nets go to the main
+        # strategy (the lattice) like an engagement-refused pair's.
+        lattice_owned_diff_nets: set[int] = set()
+        lattice_owns_pairs = getattr(self.autorouter, "_strategy", "grid") == "lattice"
         # Issue #3089: track diff-pair nets whose coupled search hit the
         # ``per_pair_timeout`` budget.  Same handling as refused-engagement
         # nets: drop them from ``diff_net_ids`` so the main strategy picks
@@ -13730,6 +13760,16 @@ class DiffPairRouter:
                 logger.info(msg)
                 refused_diff_nets.add(p_id)
                 refused_diff_nets.add(n_id)
+                continue
+            if lattice_owns_pairs:
+                msg = (
+                    f"[diffpair-engage] {pair}: routed by the lattice engine; grid "
+                    f"coupled pre-pass skipped (issue #6535)"
+                )
+                print(f"  {msg}")
+                logger.info(msg)
+                lattice_owned_diff_nets.add(p_id)
+                lattice_owned_diff_nets.add(n_id)
                 continue
             # Issue #3439: aggregate budget check + per-pair clamp.
             pair_timeout = effective_per_pair_timeout
@@ -13850,6 +13890,9 @@ class DiffPairRouter:
                 # routes here; drop their nets from ``diff_net_ids`` so the
                 # main strategy routes them normally.
                 diff_net_ids = diff_net_ids - refused_diff_nets
+            if lattice_owned_diff_nets:
+                # Issue #6535: the lattice (main strategy) routes these.
+                diff_net_ids = diff_net_ids - lattice_owned_diff_nets
             if budget_exit_diff_nets:
                 # Issue #3089: coupled-routing-budget-exit pairs also
                 # produced no routes; drop their nets from

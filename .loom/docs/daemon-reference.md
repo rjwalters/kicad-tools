@@ -7496,9 +7496,9 @@ sustain counter, because a rate-limit rejection is unambiguous:
   the failing response win when captured, and otherwise the probe runs with
   the failing call's workspace root / `gh` program / `GH_CONFIG_DIR`. A probe
   reading *healthy* during a primary-limit failure (ambient user token, or a
-  new installation's false-full `/rate_limit`) or carrying an expired reset
-  is distrusted: the trip takes `fallbackCooldownSecs` and the reading is not
-  shown as the budget.
+  new installation's false-full `/rate_limit`) is distrusted and takes the 60s
+  minimum (#10375; a dry bucket just re-trips); one carrying an expired reset
+  takes `fallbackCooldownSecs`. Neither reading is shown as the budget.
 - The dispatch path's `loom:building` label flip and lease comment, and
   safehouse's forge lookups, report rate-limited failures too (#8997), so the
   first authoritative failure trips the breaker; their probe runs off-thread.

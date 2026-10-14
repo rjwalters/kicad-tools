@@ -710,6 +710,41 @@ def _aggregate_pair_outcome(segment_outcomes: list[str]) -> str:
     return next(o for o in segment_outcomes if not o.startswith("uncoupled-fallback:"))
 
 
+def _lattice_tap_chain_retry_pairs(
+    coupled: list[Any], outcomes: dict[object, str], available: set[str]
+) -> frozenset[str]:
+    """Single-trunk pairs to retry as tap chains (issue #6535).
+
+    A pair qualifies when its connection is the single trunk (the 3-tuple
+    ``("pair", p, n)`` key -- a #6378 chained pair is not retried), the trunk
+    declined with exactly ``pair-no-path`` (and was therefore routed by the
+    #6373 uncoupled fallback), and :func:`choose_pair_tap_chain` offered a
+    different chain for it (``available``).
+    """
+    return frozenset(
+        pc.pair_name
+        for pc in coupled
+        if len(pc.key) == 3
+        and pc.pair_name in available
+        and outcomes.get(pc.key) == "uncoupled-fallback:pair-no-path"
+    )
+
+
+def _lattice_pair_coupling_score(
+    coupled: list[Any], outcomes: dict[object, str], pair_names: frozenset[str]
+) -> float:
+    """Coupled fraction summed over ``pair_names`` (issue #6535).
+
+    Each pair contributes the share of its chain segments that coupled: 1 for
+    a fully coupled pair, ``k/n`` for a partially coupled one, 0 otherwise.
+    """
+    per_pair: dict[str, list[bool]] = {}
+    for pc in coupled:
+        if pc.pair_name in pair_names:
+            per_pair.setdefault(pc.pair_name, []).append(outcomes.get(pc.key) == "coupled")
+    return sum(sum(flags) / len(flags) for flags in per_pair.values() if flags)
+
+
 def _star_topology_pads(pads: list[Pad]) -> tuple[Pad, list[Pad]]:
     """Pick the star hub + terminal order for a net's lattice/mesh connections.
 
@@ -1506,6 +1541,8 @@ class Autorouter:
         # preferences); aliasing the module-level singleton leaked those
         # writes into every later Autorouter in the same process.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
+        # Issue #6443: classes whose floored pair-gap notice was printed.
+        self._pair_gap_notified: set[str] = set()
         self.layer_stack = layer_stack
         self._force_python = force_python
         # Populated by the PCB loader and consumed only when pairwise voltage
@@ -4349,6 +4386,7 @@ class Autorouter:
 
     def _lattice_coupled_connections(
         self,
+        tap_chain_pairs: frozenset[str] = frozenset(),
     ) -> tuple[list[Any], dict[int, list[tuple[str, str]]]]:
         """Engaged diff pairs as lattice coupled connections (issue #4270).
 
@@ -4377,13 +4415,20 @@ class Autorouter:
         trunk and its ``("pair", p, n)`` key, byte for byte.  A segment end
         whose P/N midpoint lies inside a foreign pad's keep-out gets a
         relocated virtual endpoint (:func:`relocate_pair_anchor`).
+
+        Issue #6535: a pair named in ``tap_chain_pairs`` is split at its tap
+        parts too (:func:`choose_pair_tap_chain`: IC -> termination resistor
+        -> IC), the retry :meth:`_negotiate_lattice_netset` makes for a single
+        trunk that declined ``pair-no-path``.  Every engaged pair that HAS such
+        an alternative is recorded in :attr:`_lattice_tap_chain_pairs`.
         """
-        from .lattice.coupled import CoupledConnection, choose_pair_chain
+        from .lattice.coupled import CoupledConnection, choose_pair_chain, choose_pair_tap_chain
 
         coupled: list[Any] = []
         reserved: dict[int, list[tuple[str, str]]] = {}
         self._lattice_pair_outcomes = {}
         self._lattice_pair_hops = []
+        self._lattice_tap_chain_pairs: set[str] = set()
         # Issue #6437: net id -> partner net id for EVERY detected pair (engaged
         # or not), so the pad-class repair holds all pair-net copper to a skew
         # budget, whatever its key shape.
@@ -4429,7 +4474,14 @@ class Autorouter:
             n_id = d.pair.negative.net_id
             keyed_p = [(k, self.pads[k]) for k in self.nets.get(p_id, []) if k in self.pads]
             keyed_n = [(k, self.pads[k]) for k in self.nets.get(n_id, []) if k in self.pads]
-            chain = choose_pair_chain([p for _, p in keyed_p], [p for _, p in keyed_n])
+            pads_p = [p for _, p in keyed_p]
+            pads_n = [p for _, p in keyed_n]
+            chain = choose_pair_chain(pads_p, pads_n)
+            tap_chain = choose_pair_tap_chain(pads_p, pads_n)
+            if tap_chain is not None:
+                self._lattice_tap_chain_pairs.add(pair_name)
+                if pair_name in tap_chain_pairs:
+                    chain = tap_chain
             if chain is None:
                 # Degenerate pad topology: no coupled main run is possible,
                 # so the nets stay on the ordinary single-ended star.
@@ -4442,21 +4494,14 @@ class Autorouter:
                 self._lattice_pair_outcomes[pair_name] = "no-net-class"
                 continue
             trace_w = nc.trace_width or self.rules.trace_width
-            intra = nc.effective_intra_pair_clearance()
-            # Fab floor (issue #4270): an intra-pair air gap below the
-            # configured manufacturer's minimum copper clearance is
-            # unmanufacturable and would fail the exact kicad-cli DRC gate
-            # the committed board-06 output passes (its grid-quantized
-            # gaps sit above the floor).  Clamp the emitted gap up to the
-            # floor; the class value is honored when it already clears it.
-            mfr = self.rules.manufacturer
-            if mfr:
-                try:
-                    from .mfr_limits import get_mfr_limits
-
-                    intra = max(intra, get_mfr_limits(mfr).min_clearance)
-                except Exception:
-                    pass
+            # Fab floor (issue #4270) and authored board floor (issue #6443):
+            # an intra-pair air gap below the manufacturer's minimum copper
+            # clearance is unmanufacturable, and one below the board's
+            # authored ``min_clearance`` fails kicad-cli twice per coupled
+            # segment pair (``diff_pair_gap_out_of_range`` and
+            # ``clearance``).  Clamp the emitted gap up to both; the class
+            # value is honored when it already clears them.
+            intra = self._pair_gap_mm(nc)
             pitch = trace_w + intra
             multi = len(chain.segments) > 1
             res_p: list[tuple[str, str]] = []
@@ -4490,6 +4535,32 @@ class Autorouter:
             reserved[p_id] = res_p
             reserved[n_id] = res_n
         return coupled, reserved
+
+    def _pair_gap_mm(self, net_class: Any) -> float:
+        """The coupled gap of ``net_class``'s pairs, floored (Issue #6443).
+
+        :meth:`DesignRules.pair_gap` -- ``max(class value, manufacturer
+        minimum, authored board minimum)`` -- plus one notice per class the
+        first time a floor raises its gap, naming the class and both values.
+        Every routing-time reader of a pair's intra-pair gap (the lattice
+        coupled pitch and the grid pair sites) goes through here, so they
+        agree with each other and with the emitted ``diff_pair_gap`` rule.
+        """
+        resolved = self.rules.pair_gap(net_class)
+        if resolved.raised:
+            # ``getattr``: tests build partial routers via ``__new__``.
+            notified = getattr(self, "_pair_gap_notified", None)
+            if notified is None:
+                notified = self._pair_gap_notified = set()
+            name = str(getattr(net_class, "name", "?"))
+            if name not in notified:
+                notified.add(name)
+                print(
+                    f"  Diff-pair gap: class {name} intra-pair gap "
+                    f"{resolved.class_mm:.4g}mm raised to {resolved.gap_mm:.4g}mm "
+                    f"({resolved.source}; issue #6443)"
+                )
+        return resolved.gap_mm
 
     def _lattice_relocate_pair_anchors(self, pc: Any) -> Any:
         """Move a blocked coupled endpoint off its part (issue #6378).
@@ -4613,76 +4684,7 @@ class Autorouter:
         if hasattr(pf, "set_keepouts"):
             pf.set_keepouts(self._lattice_keepouts_with_plane_via_sites())
 
-        coupled, reserved = self._lattice_coupled_connections()
-
-        connections: list[tuple[object, Pad, Pad, object]] = []
-        for net, pad_keys in self.nets.items():
-            if net == 0:
-                continue
-            # ``dict.fromkeys``: nets whose footprint repeats a pad number
-            # (thermal-via arrays) append the same (ref, pin) key once per
-            # copy -- without dedup the star topology would route the same
-            # pad pair repeatedly (issue #4271).
-            keyed = [(k, self.pads[k]) for k in dict.fromkeys(pad_keys) if k in self.pads]
-            if len(keyed) < 2:
-                continue
-            # Issue #4271: thread the net's class (name-pattern classified +
-            # --net-class-map sidecar overrides) into every connection so the
-            # lattice emits AND spaces its copper at the class width/clearance
-            # (a 2.6 mm HV_HICUR net must be 2.6 mm copper, spaced as such).
-            net_name = self.net_names.get(net) or keyed[0][1].net_name
-            net_class = self.net_class_map.get(net_name) if net_name else None
-            res_keys = reserved.get(net)
-            if res_keys:
-                # Main run handled by the coupled connection; each extra pad
-                # attaches single-ended to its nearest reserved endpoint.
-                res_pads = [p for k, p in keyed if k in res_keys]
-                extras = [p for k, p in keyed if k not in res_keys]
-                for seq, other in enumerate(extras):
-                    anchor = min(
-                        res_pads,
-                        key=lambda rp: math.hypot(rp.x - other.x, rp.y - other.y),
-                    )
-                    connections.append(((net, seq), anchor, other, net_class))
-                continue
-            pads = [p for _k, p in keyed]
-            # Issue #4476: Kelvin sense nets root the star at the shunt pad so
-            # ``--complete`` (which drives THIS engine) preserves the Phase-3
-            # (#4473/#4499) guarantee the negotiated grid pass already has.
-            # Only the non-coupled branch: the diff-pair ``reserved`` branch
-            # above keeps its nearest-endpoint anchor selection untouched.
-            anchor, terminals = _star_topology_pads(pads)
-            for seq, other in enumerate(terminals):
-                connections.append(((net, seq), anchor, other, net_class))
-
-        # Issue #6378: a chained pair's hop through an interior part (U2.3 ->
-        # U2.4 on board 03) is an ordinary single-ended connection, not a
-        # coupled attempt -- the part's own pads sit between P and N there.
-        for hop_key, hop_net, hop_a, hop_b in self._lattice_pair_hops:
-            hop_name = self.net_names.get(hop_net) or hop_a.net_name
-            hop_class = self.net_class_map.get(hop_name) if hop_name else None
-            connections.append((hop_key, hop_a, hop_b, hop_class))
-
-        # Issue #4477: remember each connection's pad endpoints keyed exactly
-        # as ``pf.failure_reasons`` keys them, so an unroutable-link report
-        # can name the pads a failed connection joins without re-deriving pad
-        # topology from the bare key.
-        endpoints: dict[object, tuple[str, str]] = {
-            key: (f"{anchor.ref}.{anchor.pin}", f"{other.ref}.{other.pin}")
-            for key, anchor, other, _net_class in connections
-        }
-        for pc in coupled:
-            endpoints[pc.key] = (
-                f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}",
-                f"{pc.pad_p_b.ref}.{pc.pad_p_b.pin}",
-            )
-            # Issue #6373: the uncoupled-fallback legs carry their own keys.
-            endpoints[(pc.key, "P")] = endpoints[pc.key]
-            endpoints[(pc.key, "N")] = (
-                f"{pc.pad_n_a.ref}.{pc.pad_n_a.pin}",
-                f"{pc.pad_n_b.ref}.{pc.pad_n_b.pin}",
-            )
-        self._lattice_connection_endpoints = endpoints
+        coupled, connections = self._lattice_netset_connections()
 
         if not connections and not coupled:
             return {}
@@ -4758,20 +4760,39 @@ class Autorouter:
                 if deadline is None
                 else min(deadline, self._lattice_deadline)
             )
-        routes_by_key, stats = pf.route_netset(
-            connections,
-            coupled=coupled,
-            fixed_copper=fixed_copper,
-            fixed_clearance=fixed_clearance,
-            max_iterations=max_iterations,
-            deadline=deadline,
-            # Issue #6373: a declined coupled pair falls back to two
-            # single-ended legs instead of leaving its main run open.
-            uncoupled_fallback=True,
-            # Issue #6437: pair-net copper moves only within a skew budget.
-            pair_nets=getattr(self, "_lattice_pair_net_ids", None),
+
+        def _negotiate(conns: list[Any], pairs: list[Any]) -> Any:
+            return pf.route_netset(
+                conns,
+                coupled=pairs,
+                fixed_copper=fixed_copper,
+                fixed_clearance=fixed_clearance,
+                max_iterations=max_iterations,
+                deadline=deadline,
+                # Issue #6373: a declined coupled pair falls back to two
+                # single-ended legs instead of leaving its main run open.
+                uncoupled_fallback=True,
+                # Issue #6437: pair-net copper moves only within a skew budget.
+                pair_nets=getattr(self, "_lattice_pair_net_ids", None),
+            )
+
+        routes_by_key, stats = _negotiate(connections, coupled)
+        # Issue #6535: a single trunk that declined ``pair-no-path`` because a
+        # tap part (board 06 LVDS termination resistor) straddles its corridor
+        # gets one retry as an IC -> tap -> IC chain.  Pairs whose trunk
+        # coupled -- and boards with no such pair -- never reach this.
+        # ``getattr``: duck-typed pathfinder stand-ins in tests predate pairs.
+        retry_pairs = _lattice_tap_chain_retry_pairs(
+            coupled,
+            getattr(pf, "pair_outcomes", {}),
+            getattr(self, "_lattice_tap_chain_pairs", set()),
         )
+        if retry_pairs and not stats.deadline_hit:
+            routes_by_key, stats, coupled = self._lattice_tap_chain_retry(
+                pf, _negotiate, retry_pairs, (routes_by_key, stats, coupled)
+            )
         self._lattice_negotiation_stats = stats
+        self._warn_lattice_pair_nets_routed_twice()
         # Issue #4477 (epic #4465, Phase 4): copy the per-connection decline
         # diagnosis onto the ROUTER (not just the pathfinder) because
         # ``_release_routing_engine_state`` (#4292) nulls
@@ -4915,6 +4936,186 @@ class Autorouter:
             if route.segments:
                 by_net.setdefault(route.net, []).append(route)
         return by_net
+
+    def _lattice_netset_connections(
+        self, tap_chain_pairs: frozenset[str] = frozenset()
+    ) -> tuple[list[Any], list[tuple[object, Pad, Pad, object]]]:
+        """The lattice negotiation's coupled + single-ended connections.
+
+        Split out of :meth:`_negotiate_lattice_netset` (issue #6535) so the
+        tap-chain retry can rebuild them with some pairs split at their tap
+        parts; ``tap_chain_pairs`` is forwarded to
+        :meth:`_lattice_coupled_connections`.  Also (re)sets
+        :attr:`_lattice_connection_endpoints`.
+        """
+        # The no-argument call is the first (and usually only) negotiation's:
+        # it keeps ``_lattice_coupled_connections`` overridable as before.
+        coupled, reserved = (
+            self._lattice_coupled_connections(tap_chain_pairs)
+            if tap_chain_pairs
+            else self._lattice_coupled_connections()
+        )
+
+        connections: list[tuple[object, Pad, Pad, object]] = []
+        for net, pad_keys in self.nets.items():
+            if net == 0:
+                continue
+            # ``dict.fromkeys``: nets whose footprint repeats a pad number
+            # (thermal-via arrays) append the same (ref, pin) key once per
+            # copy -- without dedup the star topology would route the same
+            # pad pair repeatedly (issue #4271).
+            keyed = [(k, self.pads[k]) for k in dict.fromkeys(pad_keys) if k in self.pads]
+            if len(keyed) < 2:
+                continue
+            # Issue #4271: thread the net's class (name-pattern classified +
+            # --net-class-map sidecar overrides) into every connection so the
+            # lattice emits AND spaces its copper at the class width/clearance
+            # (a 2.6 mm HV_HICUR net must be 2.6 mm copper, spaced as such).
+            net_name = self.net_names.get(net) or keyed[0][1].net_name
+            net_class = self.net_class_map.get(net_name) if net_name else None
+            res_keys = reserved.get(net)
+            if res_keys:
+                # Main run handled by the coupled connection; each extra pad
+                # attaches single-ended to its nearest reserved endpoint.
+                res_pads = [p for k, p in keyed if k in res_keys]
+                extras = [p for k, p in keyed if k not in res_keys]
+                for seq, other in enumerate(extras):
+                    anchor = min(
+                        res_pads,
+                        key=lambda rp: math.hypot(rp.x - other.x, rp.y - other.y),
+                    )
+                    connections.append(((net, seq), anchor, other, net_class))
+                continue
+            pads = [p for _k, p in keyed]
+            # Issue #4476: Kelvin sense nets root the star at the shunt pad so
+            # ``--complete`` (which drives THIS engine) preserves the Phase-3
+            # (#4473/#4499) guarantee the negotiated grid pass already has.
+            # Only the non-coupled branch: the diff-pair ``reserved`` branch
+            # above keeps its nearest-endpoint anchor selection untouched.
+            anchor, terminals = _star_topology_pads(pads)
+            for seq, other in enumerate(terminals):
+                connections.append(((net, seq), anchor, other, net_class))
+
+        # Issue #6378: a chained pair's hop through an interior part (U2.3 ->
+        # U2.4 on board 03) is an ordinary single-ended connection, not a
+        # coupled attempt -- the part's own pads sit between P and N there.
+        for hop_key, hop_net, hop_a, hop_b in self._lattice_pair_hops:
+            hop_name = self.net_names.get(hop_net) or hop_a.net_name
+            hop_class = self.net_class_map.get(hop_name) if hop_name else None
+            connections.append((hop_key, hop_a, hop_b, hop_class))
+
+        # Issue #4477: remember each connection's pad endpoints keyed exactly
+        # as ``pf.failure_reasons`` keys them, so an unroutable-link report
+        # can name the pads a failed connection joins without re-deriving pad
+        # topology from the bare key.
+        endpoints: dict[object, tuple[str, str]] = {
+            key: (f"{anchor.ref}.{anchor.pin}", f"{other.ref}.{other.pin}")
+            for key, anchor, other, _net_class in connections
+        }
+        for pc in coupled:
+            endpoints[pc.key] = (
+                f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}",
+                f"{pc.pad_p_b.ref}.{pc.pad_p_b.pin}",
+            )
+            # Issue #6373: the uncoupled-fallback legs carry their own keys.
+            endpoints[(pc.key, "P")] = endpoints[pc.key]
+            endpoints[(pc.key, "N")] = (
+                f"{pc.pad_n_a.ref}.{pc.pad_n_a.pin}",
+                f"{pc.pad_n_b.ref}.{pc.pad_n_b.pin}",
+            )
+        self._lattice_connection_endpoints = endpoints
+        return coupled, connections
+
+    def _lattice_tap_chain_retry(
+        self,
+        pf: Any,
+        negotiate: Any,
+        retry_pairs: frozenset[str],
+        first: tuple[dict[object, Route], Any, list[Any]],
+    ) -> tuple[dict[object, Route], Any, list[Any]]:
+        """Re-negotiate with ``retry_pairs`` split at their taps (issue #6535).
+
+        The whole netset is negotiated again (the pair's corridor competes
+        with every other net, so a lone pair search would not be honest) with
+        each named pair as its :func:`choose_pair_tap_chain` segments; its
+        tap pads become chain endpoints rather than extras.  The retry is kept
+        only when it couples strictly more of the retried pairs' segments
+        without leaving more connections unrouted and without hitting the
+        deadline; otherwise every piece of state the first negotiation left
+        (router and pathfinder) is restored and ``first`` is returned.
+        """
+        first_routes, first_stats, first_coupled = first
+        saved = (
+            self._lattice_pair_outcomes,
+            self._lattice_pair_hops,
+            self._lattice_tap_chain_pairs,
+            self._lattice_connection_endpoints,
+            pf.failure_reasons,
+            pf.pair_outcomes,
+            pf.class_pad_repair_stats,
+            dict(pf._class_pad_growth),
+            pf._lattice,
+            pf._obstacles,
+        )
+        first_failed = len(pf.failure_reasons)
+        first_score = _lattice_pair_coupling_score(first_coupled, pf.pair_outcomes, retry_pairs)
+        if pf._class_pad_growth:
+            # The first negotiation left grown pad keep-outs (#6489) baked into
+            # the lattice; ``route_netset`` starts from ungrown pads, so the
+            # retry must start from an ungrown substrate too.
+            pf._lattice = None
+            pf._obstacles = None
+        coupled, connections = self._lattice_netset_connections(retry_pairs)
+        routes_by_key, stats = negotiate(connections, coupled)
+        score = _lattice_pair_coupling_score(coupled, pf.pair_outcomes, retry_pairs)
+        failed = len(pf.failure_reasons)
+        kept = not stats.deadline_hit and score > first_score and failed <= first_failed
+        print(
+            f"  Diff pairs (lattice): tap-chain retry for {len(retry_pairs)} pair(s) whose "
+            f"trunk declined pair-no-path ({', '.join(sorted(retry_pairs))}): "
+            f"{'kept' if kept else 'discarded'} (coupled segments {first_score:g} -> "
+            f"{score:g}, unrouted connections {first_failed} -> {failed}"
+            f"{', deadline hit' if stats.deadline_hit else ''}; issue #6535)"
+        )
+        if kept:
+            return routes_by_key, stats, coupled
+        (
+            self._lattice_pair_outcomes,
+            self._lattice_pair_hops,
+            self._lattice_tap_chain_pairs,
+            self._lattice_connection_endpoints,
+            pf.failure_reasons,
+            pf.pair_outcomes,
+            pf.class_pad_repair_stats,
+            pf._class_pad_growth,
+            pf._lattice,
+            pf._obstacles,
+        ) = saved
+        return first_routes, first_stats, first_coupled
+
+    def _warn_lattice_pair_nets_routed_twice(self) -> None:
+        """Name any diff-pair net that already carries another engine's copper.
+
+        Issue #6535: the lattice negotiates every routable net and never sees
+        copper in ``self.routes`` (only ``existing_routes`` of non-listed nets
+        are fixed obstacles).  A pair net that some earlier pass -- the grid
+        coupled pre-pass of ``--differential-pairs`` -- already committed would
+        therefore end up with two copper sets, and the post-route short check
+        demotes the whole net.  ``route_all_with_diffpairs`` no longer runs that
+        pre-pass under this engine; this is the tripwire if anything else does.
+        """
+        pair_nets = getattr(self, "_lattice_pair_net_ids", None) or {}
+        twice = sorted(
+            {r.net for r in self.routes if r.net in pair_nets and r.net in self.nets and r.segments}
+        )
+        if twice:
+            names = ", ".join(self.net_names.get(n, str(n)) for n in twice)
+            msg = (
+                f"diff-pair net(s) routed by both the lattice and an earlier pass: {names} "
+                "(issue #6535)"
+            )
+            print(f"  WARNING: {msg}")
+            logger.warning(msg)
 
     def route_net(
         self,
@@ -18904,7 +19105,9 @@ class Autorouter:
             net_class = self._resolve_net_class_for_pair(dp)
             if net_class is not None:
                 tolerance_mm = net_class.effective_skew_tolerance(0.5)
-                intra_pair_clearance_mm = net_class.effective_intra_pair_clearance()
+                # Issue #6443: floored like the routed gap, so a meander
+                # never re-closes a pair below the board's own minimum.
+                intra_pair_clearance_mm = self._pair_gap_mm(net_class)
                 length_critical = net_class.length_critical
 
             p_route, n_route, result = tune_diff_pair_skew(
@@ -19146,7 +19349,8 @@ class Autorouter:
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
-                intra_pair_clearance_mm = net_class.effective_intra_pair_clearance()
+                # Issue #6443: floored like the routed gap.
+                intra_pair_clearance_mm = self._pair_gap_mm(net_class)
                 length_critical = net_class.length_critical
 
             # Issue #3440: the impedance resolver can overwrite a class's

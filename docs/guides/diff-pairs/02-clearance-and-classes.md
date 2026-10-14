@@ -29,6 +29,22 @@ The `None` sentinel encodes "fall back to `clearance`" — it is NOT a literal
 zero clearance. This preserves backward compatibility with pre-#2557 configs
 that only set `clearance`.
 
+## The gap the router lays
+
+The class value is a request. The router lays a coupled pair at
+`DesignRules.pair_gap(net_class)` (Issue #6443): the largest of the class
+intra-pair gap, the manufacturer minimum clearance and the input project's
+authored `rules.min_clearance`. KiCad holds a pair's own P and N to that
+minimum too, so a gap below it fails as `diff_pair_gap_out_of_range` and
+`clearance`. `kct route` prints one `Diff-pair gap:` line per class a floor
+raised; the board minimum is never lowered to fit the pair.
+
+The routed `.kicad_dru` then carries one `diff_pair_gap (min <gap>)` rule per
+coupled pair, in a managed block, conditioned on the two net names. Only pairs
+KiCad pairs by name (trailing `+`/`-` or `P`/`N`) get one: kicad-cli 10.0.6
+ignores the rule for `X_POS`/`X_NEG` whatever its condition, so those gaps are
+checked by kct alone.
+
 ## Opt-in coupled routing
 
 A pair is detected (guide 01) but is **not** routed as a coupled pair unless

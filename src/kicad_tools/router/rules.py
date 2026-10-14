@@ -71,6 +71,27 @@ class ZoneRules:
     island_min_area: float = 0.5  # Minimum island area (mm²)
 
 
+@dataclass(frozen=True)
+class PairGap:
+    """A coupled pair's resolved gap (Issue #6443): see :meth:`DesignRules.pair_gap`.
+
+    Attributes:
+        gap_mm: The gap the pair is laid at and checked against.
+        class_mm: The class's own ``effective_intra_pair_clearance()``.
+        source: What raised the gap above the class value, or ``None`` when
+            the class value stands.
+    """
+
+    gap_mm: float
+    class_mm: float
+    source: str | None = None
+
+    @property
+    def raised(self) -> bool:
+        """Whether a floor raised the gap above the class value."""
+        return self.source is not None
+
+
 @dataclass
 class DesignRules:
     """Design rules for routing."""
@@ -107,6 +128,16 @@ class DesignRules:
     # router behaves as if the manufacturer does NOT support via-in-pad,
     # preserving pre-#2605 deferred-pin behavior on fine-pitch SSOP/TSSOP.
     manufacturer: str | None = None
+
+    # The board's AUTHORED minimum clearance (Issue #6443, piece (c)):
+    # ``board.design_settings.rules.min_clearance`` of the input ``.kicad_pro``
+    # (falling back to ``defaults.clearance_min``), as
+    # :func:`~kicad_tools.router.clearance_resolver._read_project_clearances`
+    # parses it.  KiCad holds EVERY copper pair to it -- including a diff
+    # pair's own P and N, as ``clearance`` and as ``diff_pair_gap`` -- so it
+    # floors the coupled gap (:meth:`pair_gap`).  ``None`` (default): the
+    # board declares none, and the pair gap is the class / fab value alone.
+    authored_min_clearance: float | None = None
 
     # Fab minimum trace width for the effective layers/copper key (Issue #4700)
     # The SAME ``get_design_rules(layers, copper_oz).min_trace_width_mm`` that
@@ -477,6 +508,37 @@ class DesignRules:
             except ValueError:
                 # Unknown manufacturer: keep the conservative 0.5 default.
                 pass
+
+    def pair_gap(self, net_class: "NetClassRouting") -> "PairGap":
+        """The edge-to-edge gap a coupled pair of ``net_class`` is laid at.
+
+        Issue #6443 (piece (c)): ``max(class value, manufacturer minimum,
+        authored board minimum)``.  The class value is
+        :meth:`NetClassRouting.effective_intra_pair_clearance`; the
+        manufacturer minimum is ``MfrLimits.min_clearance`` of
+        :attr:`manufacturer` (the #4270 lattice clamp); the authored minimum
+        is :attr:`authored_min_clearance`.  A gap below either floor is
+        copper KiCad fails twice per coupled segment pair
+        (``diff_pair_gap_out_of_range`` and ``clearance``), so the class value
+        is honoured only when it already clears both.  The one function every
+        reader of the pair gap goes through, so the router and the emitted
+        ``.kicad_dru`` ``diff_pair_gap`` rule agree by construction.
+        """
+        class_mm = float(net_class.effective_intra_pair_clearance())
+        gap, source = class_mm, None
+        if self.manufacturer:
+            try:
+                from .mfr_limits import get_mfr_limits
+
+                mfr_mm = float(get_mfr_limits(self.manufacturer).min_clearance)
+            except Exception:
+                mfr_mm = None
+            if mfr_mm is not None and mfr_mm > gap:
+                gap, source = mfr_mm, f"{self.manufacturer} minimum clearance"
+        authored = self.authored_min_clearance
+        if authored is not None and authored > gap:
+            gap, source = float(authored), "authored board min_clearance"
+        return PairGap(gap_mm=gap, class_mm=class_mm, source=source)
 
     def authored_floor(self, net: int) -> float:
         """The authored electrical minimum of ``net`` (0.0 when it has none)."""

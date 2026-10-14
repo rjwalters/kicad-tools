@@ -55,6 +55,7 @@ Layer Stack Configuration:
 
 import argparse
 import contextlib
+import functools
 import logging
 import math
 import os
@@ -1577,6 +1578,16 @@ def _output_verification_exit(verification: _OutputVerification, args) -> int | 
     return None
 
 
+# Issue #6351: copper (segments, vias) carried by the user's input board,
+# recorded by ``_stage_input_for_auto_pour`` before it is copied onto the
+# output path (where checkpoints later overwrite it), keyed by output path.
+_INPUT_COPPER_BASELINE: dict[str, tuple[int, int]] = {}
+
+
+def _baseline_key(path: Path) -> str:
+    return str(path.resolve())
+
+
 def _write_routed_pcb(
     pcb_path: Path,
     output_path: Path,
@@ -1668,7 +1679,15 @@ def _write_routed_pcb(
     # touching the output file so silent data loss becomes a loud, safe
     # failure independent of any future parser dialect regression.
     if guard_copper_loss:
-        _, in_segs, in_vias = _strip_route_blocks(original_content)
+        # Issue #6351: when the input was staged onto output_path, the
+        # content read above may include a best-so-far checkpoint written by
+        # this very run.  Prefer the copper count captured from the user's
+        # input before staging.
+        baseline = _INPUT_COPPER_BASELINE.get(_baseline_key(output_path))
+        if baseline is not None:
+            in_segs, in_vias = baseline
+        else:
+            _, in_segs, in_vias = _strip_route_blocks(original_content)
         _, out_segs, out_vias = _strip_route_blocks(output_content)
         in_total = in_segs + in_vias
         out_total = out_segs + out_vias
@@ -2810,6 +2829,14 @@ _interrupt_state: dict[str, Any] = {
     # ``partial_save_info``: what the last partial save wrote (which state,
     # which placement), for the ``.timeout.json`` receipt.
     "partial_save_info": None,
+    # Issue #6322: fixed input copper (``--preserve-existing``) the partial
+    # save must re-insert beside the router's.  The insertion strips every
+    # top-level segment/via from the placement text (#2976 -- which is also
+    # why a checkpoint already sitting on the staged ``<output>`` is never
+    # doubled), and ``router.to_sexp()`` does not emit preserved copper.  The
+    # layer-escalation flow captures it once before any checkpoint can
+    # overwrite it.  ``None`` (the other flows) adds nothing.
+    "source_copper": None,
     # Issue #6324: the exit code ``_handle_interrupt`` decided on (5 = partial
     # saved, 130 = nothing saved), recorded BEFORE it raises ``SystemExit``.
     # That raise is discarded when the signal lands inside a ``__del__``, so
@@ -2830,6 +2857,7 @@ def _reset_partial_save_state() -> None:
     _interrupt_state["pre_save_hook"] = None
     _interrupt_state["placement_text"] = None
     _interrupt_state["partial_save_info"] = None
+    _interrupt_state["source_copper"] = None
 
 
 def _pcb_text(pcb: Any) -> str:
@@ -3118,6 +3146,13 @@ def _save_partial_results() -> bool:
         # numeric.  Detect from the content already in hand (avoid re-reading).
         name_only = bool(_NAME_ONLY_NET_RE.search(original_content))
         route_sexp = router.to_sexp(name_only=name_only)
+
+        # Issue #6322: ``_insert_sexp_before_closing`` below drops every
+        # segment/via already in the placement text (a checkpoint's copper,
+        # but also preserved input copper), so put the latter back.
+        source_copper = _interrupt_state.get("source_copper")
+        if source_copper and route_sexp:
+            route_sexp = f"{route_sexp}\n\t{source_copper}"
 
         if route_sexp:
             # When the interrupt state holds a best *completed* attempt from
@@ -3661,6 +3696,26 @@ def _write_routing_plan_sidecar(
         print(f"  {routing_plan.summary_line()}")
 
 
+def _write_search_failures_sidecar(output_path: Path, router: object | None) -> Path | None:
+    """Persist each net's last C++ search-failure reason (issue #6369).
+
+    ``net-status --why`` reads this so a geometric give-up (``no_path``,
+    ``via_via_blocked``, ``pairwise_blocked``) is not mislabelled
+    ``budget_starved``.  Without recorded failures any stale sidecar a
+    previous route left at the same path is removed (the writer unlinks on
+    ``{}``), so the sidecar only ever describes the run that wrote it.
+    """
+    from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
+
+    pathfinder = getattr(router, "router", None)
+    by_id = getattr(pathfinder, "search_failures_by_net", None)
+    if not isinstance(by_id, dict) or not by_id:
+        return write_search_failures_sidecar(output_path, {})
+    names = getattr(router, "net_names", None) or {}
+    named = {names[nid]: code for nid, code in by_id.items() if names.get(nid)}
+    return write_search_failures_sidecar(output_path, named)
+
+
 def _write_access_witness_sidecar(
     output_path: Path,
     router: object | None,
@@ -3731,6 +3786,8 @@ def _write_access_witness_sidecar(
         witness_for_router,
     )
     from kicad_tools.router.pad_access_invariant import format_veto_report
+
+    _write_search_failures_sidecar(output_path, router)
 
     journal = getattr(router, "commit_journal", None)
     if journal is None or not len(journal):
@@ -4073,6 +4130,40 @@ def _router_coupled_pairs(
     )
 
 
+def _router_pair_gaps(
+    pairs: list[tuple[str, str]] | None,
+    net_class_map: dict | None,
+    router: object | None = None,
+) -> list[tuple[str, str, float]] | None:
+    """``(P, N, gap_mm)`` for each coupled pair, as the router laid it (Issue #6443).
+
+    The gap is the router's own :meth:`~kicad_tools.router.core.Autorouter._pair_gap_mm`
+    -- ``max(class intra-pair gap, manufacturer minimum, authored board
+    min_clearance)`` -- so the emitted ``diff_pair_gap`` rule and the routed
+    copper agree by construction.  ``None`` (no pair list) keeps whatever an
+    earlier route wrote.  The class is found by net name, then through the
+    class-name keyed view (:func:`~kicad_tools.router.diffpair_detection.build_synth_routing`),
+    the lookup the lattice uses.
+    """
+    if pairs is None or net_class_map is None:
+        return None
+    from kicad_tools.router.diffpair_detection import build_synth_routing
+    from kicad_tools.router.diffpair_routing import _floored_pair_gap
+
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    gaps: list[tuple[str, str, float]] = []
+    for p, n in pairs:
+        nc = net_class_map.get(p) or net_class_map.get(n)
+        if nc is None:
+            nc = synth_routing.get(net_to_class.get(p, "")) or synth_routing.get(
+                net_to_class.get(n, "")
+            )
+        if nc is None or not hasattr(nc, "effective_intra_pair_clearance"):
+            continue
+        gaps.append((p, n, _floored_pair_gap(router, nc)))
+    return gaps
+
+
 def _warn_unrecognised_coupled_pairs(pairs: list[tuple[str, str]] | None, quiet: bool) -> None:
     """One warning per coupled pair KiCad does not recognise by name (#6429).
 
@@ -4109,6 +4200,7 @@ def _write_drc_constraint_sidecars(
     source_pcb_path: Path | None = None,
     net_class_map: dict | None = None,
     coupled_pairs: list[tuple[str, str]] | None = None,
+    pair_gaps: list[tuple[str, str, float]] | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -4161,6 +4253,10 @@ def _write_drc_constraint_sidecars(
             not recognise by name are recorded in the ``.kicad_pro`` and
             exempted from the router class's clearance in both engines.
             ``None`` keeps whatever an earlier route recorded.
+        pair_gaps: ``(P, N, gap_mm)`` per coupled pair, as the router laid
+            it (:func:`_router_pair_gaps`, Issue #6443).  Each pair KiCad
+            recognises by name gets a native ``diff_pair_gap`` rule.
+            ``None`` keeps whatever an earlier route wrote.
     """
     try:
         from kicad_tools.manufacturers import (
@@ -4204,6 +4300,7 @@ def _write_drc_constraint_sidecars(
             source_pcb_path=source_pcb_path,
             router_net_classes=net_class_map,
             router_coupled_pairs=coupled_pairs,
+            router_pair_gaps=pair_gaps,
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -4470,6 +4567,7 @@ def run_post_route_drc(
         source_pcb_path=source_pcb_path,
         net_class_map=_effective_class_map or None,
         coupled_pairs=_coupled_pairs,
+        pair_gaps=_router_pair_gaps(_coupled_pairs, _effective_class_map or None, router),
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -5764,6 +5862,7 @@ def _fill_zones_after_route(
             # Use the same propagated source/fabrication constraints as DRC,
             # before native filling can bake a weaker default into the output.
             class_map = _pour_closer_net_class_map(router, args)
+            coupled_pairs = _router_coupled_pairs(output_path, class_map, router)
             _write_drc_constraint_sidecars(
                 output_path,
                 args.manufacturer,
@@ -5772,7 +5871,8 @@ def _fill_zones_after_route(
                 quiet=quiet,
                 source_pcb_path=Path(args.pcb),
                 net_class_map=class_map,
-                coupled_pairs=_router_coupled_pairs(output_path, class_map, router),
+                coupled_pairs=coupled_pairs,
+                pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
             )
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
@@ -5840,6 +5940,7 @@ def _fill_zones_after_route(
         and getattr(args, "manufacturer", None)
     ):
         class_map = _pour_closer_net_class_map(router, args)
+        coupled_pairs = _router_coupled_pairs(output_path, class_map, router)
         _write_drc_constraint_sidecars(
             output_path,
             args.manufacturer,
@@ -5848,7 +5949,8 @@ def _fill_zones_after_route(
             quiet=True,
             source_pcb_path=Path(args.pcb),
             net_class_map=class_map,
-            coupled_pairs=_router_coupled_pairs(output_path, class_map, router),
+            coupled_pairs=coupled_pairs,
+            pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
         )
 
     _fill_started = time.monotonic()
@@ -6136,6 +6238,11 @@ def _stage_input_for_auto_pour(pcb_path: Path, output_path: Path) -> Path:
     """
     if pcb_path.resolve() == output_path.resolve():
         return pcb_path
+    try:
+        _, in_segs, in_vias = _strip_route_blocks(pcb_path.read_text())
+        _INPUT_COPPER_BASELINE[_baseline_key(output_path)] = (in_segs, in_vias)
+    except (OSError, UnicodeDecodeError):
+        _INPUT_COPPER_BASELINE.pop(_baseline_key(output_path), None)
     shutil.copy2(pcb_path, output_path)
     return output_path
 
@@ -8985,6 +9092,9 @@ def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) 
 
     args.clearance = value
     args._clearance_rule_source = source
+    # Issue #6443: the authored board minimum floors the coupled pair gap
+    # (``DesignRules.authored_min_clearance`` / ``DesignRules.pair_gap``).
+    args._authored_min_clearance = declared.project_min_clearance_mm
     if warning is not None:
         print(warning, file=sys.stderr)
     if banner is not None and not quiet:
@@ -9897,6 +10007,34 @@ def _rung_dedup_fingerprint(
     )
 
 
+def _restores_interrupt_handlers(func: "Callable[..., int]") -> "Callable[..., int]":
+    """Put SIGINT/SIGTERM back as they were when ``func`` returns or raises.
+
+    Issue #6322: :func:`route_with_layer_escalation` installs
+    ``_handle_interrupt`` once its partial-save state is bound, and has dozens
+    of exits.  ``_process_state_guard`` would restore a leaked handler at the
+    outermost boundary, but the flow should not rely on that.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> int:
+        saved: dict[signal.Signals, Any] = {}
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(ValueError):  # not on the main thread
+                saved[signum] = signal.getsignal(signum)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            for signum, handler in saved.items():
+                if handler is None:
+                    continue  # installed from C; cannot be reinstalled
+                with contextlib.suppress(ValueError):
+                    signal.signal(signum, handler)
+
+    return wrapper
+
+
+@_restores_interrupt_handlers
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -9906,6 +10044,12 @@ def route_with_layer_escalation(
     """Route a PCB with automatic layer escalation.
 
     Tries routing at 2, 4, and 6 layers until success or max is reached.
+
+    Issue #6322: this is the default ``kct route`` flow (``--auto-layers``), so
+    it binds the partial-save state the way the other escalation flows do --
+    a deadline or Ctrl+C saves ``<stem>_partial.kicad_pcb`` with the copper
+    routed so far.  The SIGINT/SIGTERM handlers it installs are restored on
+    every exit, including a raise (``_restores_interrupt_handlers``).
 
     Args:
         pcb_path: Path to input PCB file
@@ -9955,6 +10099,8 @@ def route_with_layer_escalation(
         # the routing cache so a --copper 2 run is never served a --copper 1
         # route.
         min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+        # Issue #6443: the authored board minimum floors the pair gap.
+        authored_min_clearance=getattr(args, "_authored_min_clearance", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -10032,6 +10178,27 @@ def route_with_layer_escalation(
     # original copper.  Capturing here keeps it stable across all attempts.
     _preserve = bool(getattr(args, "preserve_existing", False))
     _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
+
+    # Issue #6322: bind the partial-save state so a deadline or Ctrl+C on this
+    # (default) path saves ``<stem>_partial`` instead of nothing.  ``pcb_path``
+    # is final here (staged).  It is also what checkpoints overwrite with
+    # routed copper, so the save takes the preserved input copper from
+    # ``_preserved_sexp`` (captured above) rather than from disk.  The router is
+    # pinned per attempt below; ``best_completed_attempt`` stays False so the
+    # save always goes to ``_partial`` and never promotes an unverified
+    # attempt to ``<output>``.  The interrupt outcome is deliberately NOT
+    # reset: a nested call (``--auto-mfr-tier`` / size escalation) must still
+    # see an interrupt whose exit an earlier call swallowed (#6324).
+    _interrupt_state["output_path"] = output_path
+    _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
+    _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["quiet"] = quiet
+    _interrupt_state["router"] = None
+    _interrupt_state["best_completed_attempt"] = False
+    for _signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(ValueError):  # not on the main thread
+            signal.signal(_signum, _handle_interrupt)
 
     # Layer stacks to try (in escalation order)
     layer_configs = _layer_escalation_base_configs()
@@ -10350,6 +10517,11 @@ def route_with_layer_escalation(
                 print(f"  Error loading PCB: {e}")
             continue
 
+        # Issue #6322: until an attempt completes, the in-flight attempt's
+        # copper is the "routed so far" a partial save should carry.
+        if best_result is None:
+            _interrupt_state["router"] = router
+
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
@@ -10577,6 +10749,9 @@ def route_with_layer_escalation(
         # Track best result (Issue #2396: absolute nets_routed comparison)
         if best_result is None or _is_better_result(result, best_result):
             best_result = result
+            # Issue #6322: from now on a partial save carries the best
+            # completed attempt (not a later, possibly worse, in-flight one).
+            _interrupt_state["router"] = best_result.router
             if not quiet:
                 flush_print(
                     f"  Best result so far: {best_result.layer_count}L with "
@@ -10878,6 +11053,12 @@ def route_with_layer_escalation(
     #   * only when there are still failed nets to address.
     # The loop mutates ``final_result.router.routes`` in place, so we
     # refresh ``final_result``'s stats afterwards before optimize/save.
+    #
+    # Issue #6322: pin the chosen router for every later stage's partial save.
+    # It also makes ``_run_placement_delta_feedback`` own the save
+    # (``owns_partial_save``), so a kept delta's moved placement reaches it.
+    _interrupt_state["router"] = final_result.router
+
     _stop_rc = _interrupt_requested_exit()  # issue #6324
     if _stop_rc is not None:
         return _stop_rc
@@ -11548,6 +11729,8 @@ def route_with_rule_relaxation(
             # the routing cache so a --copper 2 run is never served a --copper 1
             # route.
             min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+            # Issue #6443: the authored board minimum floors the pair gap.
+            authored_min_clearance=getattr(args, "_authored_min_clearance", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -14122,6 +14305,8 @@ def route_with_combined_escalation(
                 # the routing cache so a --copper 2 run is never served a --copper 1
                 # route.
                 min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+                # Issue #6443: the authored board minimum floors the pair gap.
+                authored_min_clearance=getattr(args, "_authored_min_clearance", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -20183,6 +20368,8 @@ def _run_main_impl(args, parser, argv) -> int:
         # the routing cache so a --copper 2 run is never served a --copper 1
         # route.
         min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+        # Issue #6443: the authored board minimum floors the pair gap.
+        authored_min_clearance=getattr(args, "_authored_min_clearance", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.

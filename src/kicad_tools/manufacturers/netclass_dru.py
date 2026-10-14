@@ -25,6 +25,11 @@ win in KiCad.  The conditions test ``NetClass`` only, never ``Type``, so the
 router's via-scoped DRU recognizer
 (:func:`kicad_tools.router.clearance_resolver._is_via_scoped_condition`)
 ignores them.
+
+A second managed block (Issue #6443) carries one native ``diff_pair_gap``
+rule per router-coupled pair KiCad recognises by name, at the gap the router
+laid it at (:meth:`kicad_tools.router.rules.DesignRules.pair_gap`); see
+:func:`pair_gap_block_rules`.
 """
 
 from __future__ import annotations
@@ -252,6 +257,125 @@ def merge_netclass_block(
         *(render_netclass_rule(name, clearance, pairs) for name, clearance in rules),
     ]
     block = f"{DRU_NETCLASS_BLOCK_BEGIN}\n" + "\n".join(body) + f"\n{DRU_NETCLASS_BLOCK_END}"
+    if base is None or not base.strip():
+        return f"{_DRU_VERSION_HEADER}\n\n{block}\n"
+    prefix = base.rstrip("\n") + "\n"
+    if not re.search(r"^\s*\(version\b", base, re.MULTILINE):
+        prefix = f"{_DRU_VERSION_HEADER}\n" + prefix
+    return f"{prefix}\n{block}\n"
+
+
+# ---------------------------------------------------------------------------
+# Router diff-pair gap rules (Issue #6443, P1 piece (c))
+# ---------------------------------------------------------------------------
+
+#: Sentinel markers of the kct-owned router diff-pair gap block.  Sits next to
+#: the router net-class block; distinct from every other managed block.
+DRU_PAIR_GAP_BLOCK_BEGIN = "# BEGIN kct router diff-pair gaps (Issue #6443) -- managed, do not edit"
+DRU_PAIR_GAP_BLOCK_END = "# END kct router diff-pair gaps"
+
+#: Rule-name prefix of every generated pair-gap rule.
+PAIR_GAP_RULE_PREFIX = "kct diff pair gap - "
+
+
+def pair_gap_condition(p: str, n: str) -> str:
+    """The DRC condition selecting the copper of the pair ``p``/``n``.
+
+    KiCad evaluates ``diff_pair_gap`` with the item as ``A`` and no ``B``, so
+    the condition names the two nets on ``A`` alone (exact, case-sensitive,
+    escaped as :func:`coupled_pair_exemption` escapes them).  Measured on
+    kicad-cli 10.0.6: ``A.NetName == 'LVDS1_P' || A.NetName == 'LVDS1_N'``,
+    ``A.inDiffPair('LVDS1_')`` and ``A.inDiffPair('LVDS1')`` select the same
+    coupled segments; the net-name form is used because it is exact, where
+    ``inDiffPair`` wildcard-matches its argument.
+    """
+    ep, en = _dru_string(p), _dru_string(n)
+    return f"A.NetName == '{ep}' || A.NetName == '{en}'"
+
+
+def render_pair_gap_rule(p: str, n: str, gap: float) -> str:
+    """One ``diff_pair_gap (min ..)`` rule for the pair ``p``/``n``."""
+    return (
+        f"(rule {json.dumps(f'{PAIR_GAP_RULE_PREFIX}{p}/{n}')}\n"
+        f"  (condition {json.dumps(pair_gap_condition(p, n))})\n"
+        f"  (constraint diff_pair_gap (min {gap}mm)))"
+    )
+
+
+def pair_gap_block_rules(
+    pairs: Iterable[tuple[str, str, float]],
+    net_names: Iterable[str] | None = None,
+) -> list[tuple[str, str, float]]:
+    """``(P, N, gap)`` rules the diff-pair gap block must carry.
+
+    Only pairs KiCad recognises by name (:func:`is_coupled_diff_pair`, the
+    predicate the #6429 exemption shares) get a native rule: KiCad's
+    ``diff_pair_gap`` test only visits nets ``MatchDpSuffix`` pairs, so a
+    rule for ``X_POS``/``X_NEG`` is inert whatever its condition says
+    (measured on kicad-cli 10.0.6 with both the ``A``-only and the #6429
+    two-sided net-name forms).  Those pairs stay kct-only and
+    ``kct route`` already warns about them
+    (``_warn_unrecognised_coupled_pairs``).
+
+    With ``net_names``, pairs whose nets are not both on the board are
+    dropped.  Pairs are oriented ``(P, N)`` by KiCad's own suffix rule,
+    de-duplicated (the stricter gap wins) and sorted, and gaps are rounded to
+    1 nm, so the block is byte-stable across re-routes.
+    """
+    present = None if net_names is None else set(net_names)
+    best: dict[tuple[str, str], float] = {}
+    for a, b, gap in pairs:
+        if not a or not b or a == b or not is_coupled_diff_pair(a, b):
+            continue
+        if present is not None and (a not in present or b not in present):
+            continue
+        try:
+            value = float(gap)
+        except (TypeError, ValueError):
+            continue
+        if not value > 0:
+            continue
+        # ``MatchDpSuffix`` orientation: '+' / 'P' is the positive net.
+        p, n = (a, b) if _positive_suffix(a) else (b, a)
+        value = round(value, 6)
+        best[(p, n)] = max(value, best.get((p, n), 0.0))
+    return sorted((p, n, gap) for (p, n), gap in best.items())
+
+
+def _positive_suffix(net_name: str) -> bool:
+    """Whether ``net_name``'s ``MatchDpSuffix`` polarity character is ``+``/``P``."""
+    for ch in reversed(net_name):
+        if (ch.isascii() and ch.isdigit()) or ch == "_":
+            continue
+        return ch in "+P"
+    return False
+
+
+def merge_pair_gap_block(existing: str | None, rules: list[tuple[str, str, float]]) -> str | None:
+    """Merge the router diff-pair gap block into ``.kicad_dru`` content.
+
+    Same contract as :func:`merge_netclass_block`: rules present -> replace
+    any existing block with a fresh one appended at the end; no rules ->
+    remove a stale block, otherwise return ``existing`` unchanged.
+    Idempotent.
+    """
+    pattern = re.compile(
+        r"\n*" + re.escape(DRU_PAIR_GAP_BLOCK_BEGIN) + r".*?" + re.escape(DRU_PAIR_GAP_BLOCK_END),
+        re.DOTALL,
+    )
+    had_block = existing is not None and pattern.search(existing) is not None
+    base = pattern.sub("", existing).lstrip("\n") if had_block and existing else existing
+    if not rules:
+        if not had_block or base is None:
+            return existing
+        return base.rstrip("\n") + "\n" if base.strip() else ""
+
+    body = [
+        "# The gap the router laid each coupled pair at: max(class intra-pair",
+        "# gap, manufacturer minimum, authored board min_clearance).",
+        *(render_pair_gap_rule(p, n, gap) for p, n, gap in rules),
+    ]
+    block = f"{DRU_PAIR_GAP_BLOCK_BEGIN}\n" + "\n".join(body) + f"\n{DRU_PAIR_GAP_BLOCK_END}"
     if base is None or not base.strip():
         return f"{_DRU_VERSION_HEADER}\n\n{block}\n"
     prefix = base.rstrip("\n") + "\n"
