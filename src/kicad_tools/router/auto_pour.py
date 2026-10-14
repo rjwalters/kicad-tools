@@ -64,12 +64,33 @@ auto-poured zone on that layer gets a staggered priority and a carved
 pad-bbox outline instead of colliding with the incumbent at equal
 priority -- the shape that let KiCad's zone-UUID tie-break starve one of
 the two pours on board 03.
+
+Net-class map precedence (#6599)
+--------------------------------
+
+When ``kct route --net-class-map`` supplies a sidecar, a net whose map
+entry declares it routed -- ``is_pour_net=False`` **and**
+``route_via != "pour"`` (i.e. ``"pathfinder"`` or ``"manual"``) -- is
+removed from the auto-pour candidates even when the name heuristic
+classifies it as POWER/GROUND, and the skip is logged.  The map is the
+designer's explicit statement; it mirrors ``route_via``'s documented
+precedence in the pathfinder skip predicate.  Nets absent from the map
+keep the name-heuristic behaviour, and a net the caller explicitly
+forces (``force_pour_nets``, i.e. ``--skip-nets``) is still poured.
+The reverse direction (a map ``route_via="pour"`` net the heuristic
+misses) is not added: auto-pour still only creates zones for
+heuristically POWER/GROUND nets.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kicad_tools.router.rules import NetClassRouting
 
 # ERC-only marker nets that must never be poured.  These are synthetic
 # net names emitted by KiCad's netlister for symbols whose sole purpose
@@ -99,8 +120,30 @@ def _is_erc_marker_net(name: str) -> bool:
     return any(re.match(p, name) for p in ERC_MARKER_NET_PATTERNS)
 
 
+def map_declares_routed(routing: Any) -> bool:
+    """Return True when a net-class map entry declares its net *routed*.
+
+    Issue #6599: the precedence rule auto-pour applies to a
+    ``--net-class-map`` entry.  A net is declared routed when its class has
+    ``is_pour_net=False`` **and** ``route_via`` is not ``"pour"`` (so
+    ``"pathfinder"`` or ``"manual"``).  Such a net must not be auto-poured,
+    whatever its name looks like.  An entry with ``is_pour_net=True`` or
+    ``route_via="pour"`` is a pour declaration and is left to the name
+    heuristic as before.
+    """
+    if routing is None:
+        return False
+    return (
+        not getattr(routing, "is_pour_net", False)
+        and getattr(routing, "route_via", "pathfinder") != "pour"
+    )
+
+
 def classify_pour_candidates(
     net_names: dict[int, str],
+    *,
+    net_class_map: Mapping[str, NetClassRouting] | None = None,
+    map_routed_out: list[str] | None = None,
 ):
     """Classify a board's nets into pour candidates and signal nets.
 
@@ -113,6 +156,14 @@ def classify_pour_candidates(
 
     Args:
         net_names: Mapping of net id -> net name from the PCB file.
+        net_class_map: Optional ``--net-class-map`` sidecar
+            (``{net_name: NetClassRouting}``).  A POWER/GROUND-classified
+            net whose entry declares it routed (see
+            :func:`map_declares_routed`, issue #6599) is not a pour
+            candidate; it counts as a signal net for the all-power guard,
+            because the router will route it.
+        map_routed_out: Optional list; the names of nets dropped by
+            ``net_class_map`` are appended to it so the caller can log them.
 
     Returns:
         A 3-tuple ``(pour_nets, signal_net_count, is_all_power_board)``:
@@ -144,6 +195,12 @@ def classify_pour_candidates(
         if _is_erc_marker_net(net_name):
             continue
         if classification.net_class in (NetClass.POWER, NetClass.GROUND):
+            if net_class_map is not None and map_declares_routed(net_class_map.get(net_name)):
+                # Issue #6599: the map declares this net routed -- honour it.
+                signal_net_count += 1
+                if map_routed_out is not None:
+                    map_routed_out.append(net_name)
+                continue
             pour_nets.append((net_name, classification.net_class))
         else:
             signal_net_count += 1
@@ -470,6 +527,7 @@ def auto_pour_if_missing(
     edge_clearance: float | None = None,
     force_pour_nets: list[str] | tuple[str, ...] | set[str] | None = None,
     protected_nets: frozenset[str] = frozenset(),
+    net_class_map: Mapping[str, NetClassRouting] | None = None,
 ) -> tuple[int, list[str]]:
     """Auto-create copper pours for power-classified nets that lack zones.
 
@@ -496,6 +554,14 @@ def auto_pour_if_missing(
             a 3-net board (VIN/VOUT/GND) used to fall through with zero
             zones AND zero GND traces, leaving 2 of 3 GND pads stranded
             in manufacturing DRC.
+        net_class_map: Optional ``--net-class-map`` sidecar
+            (``{net_name: NetClassRouting}``, issue #6599).  A net the map
+            declares routed (``is_pour_net=False`` and ``route_via`` not
+            ``"pour"``) gets no zone, and the skip is logged as
+            ``Auto-pour: skipping <nets> (net-class map declares it
+            routed)``.  Nets absent from the map keep the name-heuristic
+            behaviour; nets in ``force_pour_nets`` are poured regardless.
+            ``None`` (the default) leaves behaviour unchanged.
 
     Returns:
         Tuple of ``(zones_created, pour_net_names)`` where
@@ -536,7 +602,21 @@ def auto_pour_if_missing(
     # all-power), the auto-skip step then skipped every net as a pour
     # net, ``nets_to_route`` became 0, the router reported 100%
     # completion trivially, and the build silently shipped an empty PCB.
-    pour_nets, _signal_net_count, is_all_power_board = classify_pour_candidates(net_names)
+    #
+    # Issue #6599: honour the ``--net-class-map``.  A net the caller forces
+    # (``--skip-nets``) is an explicit CLI pour request and outranks the map,
+    # so forced names are withheld from the map before classification.
+    forced = {n for n in (force_pour_nets or ()) if n}
+    effective_map: Mapping[str, NetClassRouting] | None = None
+    if net_class_map:
+        effective_map = {k: v for k, v in net_class_map.items() if k not in forced}
+    map_routed: list[str] = []
+    pour_nets, _signal_net_count, is_all_power_board = classify_pour_candidates(
+        net_names, net_class_map=effective_map, map_routed_out=map_routed
+    )
+    if map_routed and not quiet:
+        verb = "declares it" if len(map_routed) == 1 else "declares them"
+        print(f"Auto-pour: skipping {', '.join(sorted(map_routed))} (net-class map {verb} routed)")
     pour_nets = [(name, cls) for name, cls in pour_nets if name not in protected_nets]
 
     if not pour_nets:
@@ -553,7 +633,6 @@ def auto_pour_if_missing(
     # Restrict pour creation to the forced subset and let the remaining
     # power nets fall through to the router as signals, which is the
     # original intent of the guard (issue #2740).
-    forced = {n for n in (force_pour_nets or ()) if n}
     if is_all_power_board:
         forced_pour_nets = [(name, cls) for name, cls in pour_nets if name in forced]
         if not forced_pour_nets:
@@ -590,7 +669,12 @@ def auto_pour_if_missing(
     # If so, remove those zones so they are regenerated with inset.
     nets_needing_reinset: set[str] = set()
     if edge_clearance and edge_clearance > 0 and nets_with_zones:
-        nets_needing_reinset = _detect_uninset_zones(pcb_path, edge_clearance) - protected_nets
+        # Issue #6599: a map-routed net's existing zone is left alone -- it
+        # would be removed here but never re-created below (it is no longer
+        # a pour candidate), silently deleting designer-authored copper.
+        nets_needing_reinset = (
+            _detect_uninset_zones(pcb_path, edge_clearance) - protected_nets - set(map_routed)
+        )
         if nets_needing_reinset:
             _remove_zones_for_nets(pcb_path, nets_needing_reinset)
             # Re-read the file after removal

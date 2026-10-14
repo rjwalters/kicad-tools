@@ -133,6 +133,31 @@ touch -t 202001010000 "$PIN_FILE"
 run_step3
 check "a pin file over 60 minutes old (a crashed step) no longer blocks the batch merge" \
   eval '[[ "$MARGV" == "42 --auto --redate-stale-checks" ]] && hasnt CHAMPION-PIN-MISSING'
+# #11902: the pin records its step's agent process ($PPID); while that runs, a
+# step longer than 60 minutes keeps its backstop (up to 24h).
+sleep 600 & LIVE_PID=$!
+( exit 0 ) & DEAD_PID=$!; wait "$DEAD_PID"
+two_hours_ago() { touch -t "$(date -r $(( $(date +%s) - 7200 )) +%Y%m%d%H%M 2>/dev/null || date -d @$(( $(date +%s) - 7200 )) +%Y%m%d%H%M)" "$PIN_FILE"; }
+printf '%s %s\n' "$EVAL_SHA" "$LIVE_PID" > "$PIN_FILE"; two_hours_ago
+run_step3
+check "a 2h-old pin whose step process still runs (a long --pr step) still refuses an unpinned merge" \
+  eval '[[ ! -e "$TMP/merge-argv" ]] && has "CHAMPION-PIN-MISSING pr=42: set EXPECTED_HEAD=$EVAL_SHA"'
+run_step3 "$EVAL_SHA"
+check "the long step's literal pin still merges pinned" \
+  eval '[[ "$MARGV" == "42 --auto --redate-stale-checks --expected-head $EVAL_SHA" ]]'
+printf '%s %s\n' "$EVAL_SHA" "$DEAD_PID" > "$PIN_FILE"; two_hours_ago
+run_step3
+check "a 2h-old pin whose step process is gone (a crashed step) does not block the batch merge" \
+  eval '[[ "$MARGV" == "42 --auto --redate-stale-checks" ]] && hasnt CHAMPION-PIN-MISSING'
+printf '%s %s\n' "$EVAL_SHA" "$LIVE_PID" > "$PIN_FILE"; touch -t 202001010000 "$PIN_FILE"
+run_step3
+check "a live process cannot hold a pin past 24h (pid reuse)" \
+  eval '[[ "$MARGV" == "42 --auto --redate-stale-checks" ]] && hasnt CHAMPION-PIN-MISSING'
+printf '%s %s\n' "$EVAL_SHA" "$LIVE_PID" > "$PIN_FILE"
+run_step3
+check "a fresh pin with a recorded pid reads the SHA alone" \
+  eval 'has "CHAMPION-PIN-MISSING pr=42: set EXPECTED_HEAD=$EVAL_SHA in this block"'
+kill "$LIVE_PID" 2>/dev/null; wait "$LIVE_PID" 2>/dev/null
 rm -f "$PIN_FILE"
 
 # ---------------------------------------------------------------------------
@@ -156,6 +181,7 @@ check "an unknown or doubled argument refuses and touches nothing" \
   doc_has "$TARGETED_MD" 'Error: /loom:champion takes --pr N, --issue N or --non-item'
 # --pr N
 check "--pr: writes the pin file only for an eligible PR" doc_has "$TARGETED_MD" '[ -n "$EVALUATED_SHA" ] && printf'
+check "--pr: the pin records the step's agent process (#11902)" doc_has "$TARGETED_MD" '"$EVALUATED_SHA" "$PPID" > "$PIN_FILE"'
 check "--pr: Step 3 must carry the SHA literally (env does not survive tool calls)" \
   doc_has "$TARGETED_MD" 'first line must be `EXPECTED_HEAD=<that SHA, written out literally>`'
 check "--pr: a lost pin is outcome requeued, never merged" doc_has "$TARGETED_MD" '9 (`CHAMPION-PIN-MISSING`): not merged, still approved, no "Merge Failed"'

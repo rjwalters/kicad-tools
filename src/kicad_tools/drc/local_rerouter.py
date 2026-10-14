@@ -23,6 +23,7 @@ import heapq
 import math
 from dataclasses import dataclass, field
 
+from ..core.layers import kicad_read_via_layers, via_node_type, via_spans_layer
 from ..router.primitives import _make_uuid
 from ..sexp import SExp
 from .net_compat import resolve_net_atom
@@ -415,12 +416,17 @@ class LocalRerouter:
             if vy + via_radius < min_y or vy - via_radius > max_y:
                 continue
 
-            # Check if via is on a relevant layer
+            # Check if via is on a relevant layer.  Issue #6614: read the span
+            # KiCad reads (a keyword-less via is a through via whatever its
+            # pair says) and test barrel membership across the whole stack,
+            # so a through via blocks the inner layers it passes through too.
             layers_node = via_node.find("layers")
             if layers_node:
                 layer_atoms = layers_node.get_atoms()
-                via_layers = [str(a) for a in layer_atoms]
-                if layer_str not in via_layers:
+                via_layers, _ = kicad_read_via_layers(
+                    [str(a) for a in layer_atoms], via_node_type(via_node)
+                )
+                if not via_spans_layer(via_layers, layer_str):
                     continue
 
             # Same-net vias: don't block (our trace can touch our own via)

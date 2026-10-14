@@ -114,6 +114,7 @@ PUBLIC_EXPORTS = {
         "SinglePadNetRule": ".single_pad_net",
         "SolderMaskPadRules": ".solder_mask",
         "ViaInPadRule": ".via_in_pad",
+        "ViaTypeCapabilityRule": ".via_type_capability",
         "ViaUnderBodyRule": ".via_under_body",
         "WidthConsistencyRule": ".width_consistency",
         "IsolatedCopperRule": ".zone_fill",

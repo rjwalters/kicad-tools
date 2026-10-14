@@ -488,6 +488,91 @@ def _dru_rules(text: str) -> list[dict[str, Any]]:
     return rules
 
 
+def _dsn_unit_mm(dsn: str) -> float:
+    """Millimetres per DSN coordinate unit (``(unit ...)``, else ``(resolution ...)``)."""
+    m = re.search(r"\(unit\s+(\w+)\)", dsn) or re.search(r"\(resolution\s+(\w+)", dsn)
+    return {"um": 0.001, "mm": 1.0, "mil": 0.0254, "inch": 25.4, "cm": 10.0}.get(
+        m.group(1) if m else "um", 0.001
+    )
+
+
+def _dsn_atoms(form: str) -> list[str]:
+    """The bare (non-list) tokens directly inside ``form``, quotes stripped."""
+    atoms: list[str] = []
+    depth = 0
+    for m in re.finditer(r'"((?:[^"\\]|\\.)*)"|([()])|([^\s()"]+)', form):
+        if m.group(2) == "(":
+            depth += 1
+        elif m.group(2) == ")":
+            depth -= 1
+        elif depth == 1:
+            atoms.append(m.group(1) if m.group(1) is not None else m.group(3))
+    return atoms
+
+
+def _dsn_classes(dsn: str) -> dict[str, dict[str, Any]]:
+    """Each emitted ``(class ...)``: member nets, rule width/clearance (mm), via."""
+    scale = _dsn_unit_mm(dsn)
+    # The header's ``(string_quote ")`` is a bare quote character, not the
+    # start of a string; neutralise it so the form scanner stays balanced.
+    dsn = re.sub(r'\(string_quote\s+"\s*\)', "(string_quote _)", dsn)
+    out: dict[str, dict[str, Any]] = {}
+    for head, s, e in iter_forms(dsn, level=2):
+        if head != "class":
+            continue
+        blk = dsn[s:e]
+        atoms = _dsn_atoms(blk)[1:]  # drop the "class" keyword
+        if not atoms:
+            continue
+        rule = re.search(r"\(rule\b(.*)", blk, re.S)
+        rule_txt = rule.group(1) if rule else ""
+        width = re.search(r"\(width\s+([-\d.]+)\)", rule_txt)
+        clear = re.search(r"\(clearance\s+([-\d.]+)\)", rule_txt)
+        via = re.search(r'\(use_via\s+(?:"([^"]*)"|([^\s()]+))', blk)
+        out[atoms[0]] = {
+            "nets": set(atoms[1:]),
+            "width": float(width.group(1)) * scale if width else None,
+            "clearance": float(clear.group(1)) * scale if clear else None,
+            "via": (via.group(1) or via.group(2)) if via else None,
+        }
+    return out
+
+
+def _dsn_padstack_diameter(dsn: str, name: str | None) -> float | None:
+    """The circle diameter (mm) of padstack ``name``, if it is defined."""
+    if not name:
+        return None
+    m = re.search(
+        r'\(padstack\s+"?' + re.escape(name) + r'"?\s+\(shape\s+\(circle\s+\S+\s+([-\d.]+)',
+        dsn,
+    )
+    return float(m.group(1)) * _dsn_unit_mm(dsn) if m else None
+
+
+def _dsn_layer_shapes(dsn: str, heads: tuple[str, ...]) -> Counter[tuple[str, str, str]]:
+    """``(head, name, layer)`` counts for planes/keepouts in the DSN structure."""
+    pat = r"\((" + "|".join(heads) + r')\s+(?:"([^"]*)"|([^\s()]+))\s*\(polygon\s+"?([^\s"()]+)'
+    return Counter(
+        (m.group(1), m.group(2) if m.group(2) is not None else m.group(3), m.group(4))
+        for m in re.finditer(pat, dsn)
+    )
+
+
+def _zone_copper_layers(zone: Any, board_layers: list[str]) -> list[str]:
+    """The board copper layers a zone/rule area covers (wildcards expanded)."""
+    specs = list(zone.layers or ([zone.layer] if zone.layer else []))
+    out: list[str] = []
+    for spec in specs:
+        if spec == "*.Cu":
+            matched = list(board_layers)
+        elif spec == "F&B.Cu":
+            matched = [lay for lay in ("F.Cu", "B.Cu") if lay in board_layers]
+        else:
+            matched = [spec] if spec in board_layers else []
+        out.extend(lay for lay in matched if lay not in out)
+    return out
+
+
 def dsn_audit(
     pcb: Path, project: Path | None, dru: Path | None, dsn_path: Path
 ) -> list[dict[str, str]]:
@@ -515,32 +600,65 @@ def dsn_audit(
     dsn_width = exp._default_trace_width
     dsn_via = exp._default_via_size
     dsn_drill = exp._default_via_drill
-    emitted_classes = set(re.findall(r"\(class\s+\"?([^\s\")]+)", dsn))
+    dsn_classes = _dsn_classes(dsn)
+    board = PCB.load(str(pcb))
+    pad_nets = {p.net_name for fp in board.footprints for p in fp.pads if p.net_name}
 
     if project is not None and project.exists():
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
         pro = json.loads(project.read_text())
         ns = pro.get("net_settings", {})
+        # Issue #6642: compare each class against ITS OWN emitted (class ...)
+        # block, not the DSN's global defaults -- since #6594 the exporter
+        # writes per-class rules and membership.
+        resolver = BoardClearanceRules.from_board(pcb)
+        members: dict[str, set[str]] = {}
+        for net in pad_nets:
+            for c in resolver.netclasses_of(net) or ("Default",):
+                members.setdefault(c, set()).add(net)
         for cls in ns.get("classes", []):
             name = cls.get("name", "?")
-            if name != "Default" and name not in emitted_classes:
-                loss("netclass", f"net class {name!r} not exported (DSN has only kicad_default)")
+            dsn_name = "kicad_default" if name == "Default" else name
+            got = dsn_classes.get(dsn_name)
+            if got is None:
+                if name == "Default" or members.get(name):
+                    loss("netclass", f"net class {name!r} not exported")
                 continue
             for field_, dsn_val in (
-                ("clearance", dsn_clear),
-                ("track_width", dsn_width),
-                ("via_diameter", dsn_via),
+                ("clearance", got["clearance"]),
+                ("track_width", got["width"]),
+                ("via_diameter", _dsn_padstack_diameter(dsn, got["via"])),
+                # Specctra padstacks carry no drill; only the global default
+                # is implied, so a class drill that differs from it is lost.
                 ("via_drill", dsn_drill),
             ):
                 want = cls.get(field_)
-                if want is None or abs(float(want) - dsn_val) < 1e-6:
+                if want is None:
+                    continue
+                if dsn_val is None:
+                    loss("netclass_rule", f"{name}.{field_} {want} mm not exported")
+                    continue
+                if abs(float(want) - dsn_val) < 1e-6:
                     continue
                 direction = "relaxed" if dsn_val < float(want) else "tightened"
                 loss(
                     "netclass_rule",
-                    f"{name}.{field_} {want} mm exported as {dsn_val} mm ({direction})",
+                    f"{name}.{field_} {want} mm exported as {dsn_val:g} mm ({direction})",
                 )
-        if ns.get("netclass_patterns") or ns.get("netclass_assignments"):
-            loss("netclass_assignment", "net-to-class assignments are not exported")
+        for net in sorted(pad_nets):
+            declared = sorted(c for c, nets in members.items() if net in nets)
+            exported_in = sorted(
+                ("Default" if c == "kicad_default" else c)
+                for c, info in dsn_classes.items()
+                if net in info["nets"]
+            )
+            if exported_in != declared:
+                loss(
+                    "netclass_assignment",
+                    f"net {net!r} is in class(es) {', '.join(declared)} but exported in "
+                    f"{', '.join(exported_in) or 'none'}",
+                )
         rules = pro.get("board", {}).get("design_settings", {}).get("rules", {})
         edge = rules.get("min_copper_edge_clearance") or 0.0
         if float(edge) > 0:
@@ -571,15 +689,54 @@ def dsn_audit(
                     continue  # the DSN's global value is at least as strict
                 loss("dru", f"rule {rule['name']!r}: {c['type']} min {c['min_mm']} mm not in DSN")
 
-    board = PCB.load(str(pcb))
-    keepouts = len(board.rule_areas) + len(board.footprint_rule_areas)
-    keepouts += sum(1 for z in board.zones if getattr(z, "keepout", None))
-    if keepouts and "(keepout" not in dsn:
-        loss("keepout", f"{keepouts} rule area(s)/keepout(s) not exported")
-    copper_zones = [z for z in board.zones if not getattr(z, "keepout", None)]
-    if copper_zones and "(plane" not in dsn:
-        for z in copper_zones:
-            loss("zone", f"zone {z.net_name}@{z.layer or '/'.join(z.layers or [])} not exported")
+    # Issue #6642: since #6594 the exporter writes planes and keepouts, so a
+    # mere "(keepout" / "(plane" substring no longer means nothing is lost.
+    # Match each rule area / copper zone, per copper layer, against an
+    # emitted DSN shape so a single exported item cannot mask an omitted one.
+    board_layers = [layer.name for layer in board.copper_layers]
+    shapes = _dsn_layer_shapes(dsn, ("plane", "keepout", "wire_keepout", "via_keepout"))
+
+    def take(head: str, name: str | None, layer: str) -> bool:
+        for key in shapes:
+            if key[0] == head and key[2] == layer and (name is None or key[1] == name):
+                if shapes[key] > 0:
+                    shapes[key] -= 1
+                    return True
+        return False
+
+    for area in [*board.rule_areas, *board.footprint_rule_areas]:
+        ko = area.keepout
+        if ko.tracks_allowed and ko.vias_allowed:
+            continue  # no routing restriction for a router to honour
+        need = (
+            "keepout"
+            if not ko.tracks_allowed and not ko.vias_allowed
+            else ("wire_keepout" if not ko.tracks_allowed else "via_keepout")
+        )
+        label = area.name or area.uuid or "unnamed"
+        owner = getattr(area, "parent_reference", None)
+        where = f" in footprint {owner}" if owner else ""
+        missing = [
+            layer
+            for layer in _zone_copper_layers(area, board_layers)
+            if not (take(need, None, layer) or (need != "keepout" and take("keepout", None, layer)))
+        ]
+        if missing:
+            loss(
+                "keepout",
+                f"rule area {label!r}{where} ({need}) not exported on {', '.join(missing)}",
+            )
+    for z in board.zones:
+        if getattr(z, "keepout", None):
+            continue
+        missing = [
+            layer
+            for layer in _zone_copper_layers(z, board_layers)
+            if not (z.net_name and take("plane", z.net_name, layer))
+        ]
+        if missing:
+            net = z.net_name or "<no net>"
+            loss("zone", f"zone {net}@{'/'.join(missing)} not exported")
     text = pcb.read_text()
     copper_text = 0
     for head, s, e in iter_forms(text, level=1):

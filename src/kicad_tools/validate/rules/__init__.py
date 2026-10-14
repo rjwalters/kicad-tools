@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .single_pad_net import SinglePadNetRule
     from .solder_mask import SolderMaskPadRules
     from .via_in_pad import ViaInPadRule
+    from .via_type_capability import ViaTypeCapabilityRule
     from .via_under_body import ViaUnderBodyRule
     from .width_consistency import WidthConsistencyRule
     from .zone_fill import IsolatedCopperRule, ZoneFillRule
@@ -69,6 +70,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "SinglePadNetRule": ".single_pad_net",
     "SolderMaskPadRules": ".solder_mask",
     "ViaInPadRule": ".via_in_pad",
+    "ViaTypeCapabilityRule": ".via_type_capability",
     "ViaUnderBodyRule": ".via_under_body",
     "WidthConsistencyRule": ".width_consistency",
     "IsolatedCopperRule": ".zone_fill",
@@ -97,6 +99,7 @@ __all__ = [
     "SinglePadNetRule",
     "SolderMaskPadRules",
     "ViaInPadRule",
+    "ViaTypeCapabilityRule",
     "ViaUnderBodyRule",
     "WidthConsistencyRule",
     "check_all_silkscreen",

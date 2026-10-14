@@ -140,6 +140,16 @@ class DesignRules:
     # board declares none, and the pair gap is the class / fab value alone.
     authored_min_clearance: float | None = None
 
+    # The manufacturer clearance floor for the board's actual stackup (Issue
+    # #6561): :func:`~kicad_tools.router.mfr_limits.resolve_clearance` with the
+    # effective copper layer count and copper weight -- the same
+    # ``get_design_rules(layers, copper_oz).min_clearance_mm`` that ``kct check
+    # --mfr`` enforces and the emitted ``.kicad_dru`` ``Clearance`` rule
+    # carries.  :meth:`pair_gap` floors the coupled gap at it.  ``None``
+    # (default): the stackup is unknown, so :meth:`pair_gap` falls back to the
+    # layer-agnostic ``MfrLimits.min_clearance`` of :attr:`manufacturer`.
+    mfr_clearance_floor: float | None = None
+
     # Fab minimum trace width for the effective layers/copper key (Issue #4700)
     # The SAME ``get_design_rules(layers, copper_oz).min_trace_width_mm`` that
     # ``kct check --mfr`` enforces -- NOT the layer/copper-agnostic
@@ -516,8 +526,12 @@ class DesignRules:
         Issue #6443 (piece (c)): ``max(class value, manufacturer minimum,
         authored board minimum)``.  The class value is
         :meth:`NetClassRouting.effective_intra_pair_clearance`; the
-        manufacturer minimum is ``MfrLimits.min_clearance`` of
-        :attr:`manufacturer` (the #4270 lattice clamp); the authored minimum
+        manufacturer minimum is :attr:`mfr_clearance_floor` when the caller
+        resolved it for the board's stackup, else
+        :func:`~kicad_tools.router.mfr_limits.resolve_clearance` of
+        :attr:`manufacturer` with no layer count (the flat
+        ``MfrLimits.min_clearance``; the #4270 lattice clamp, made
+        stackup-aware by #6561); the authored minimum
         is :attr:`authored_min_clearance`.  A gap below either floor is
         copper KiCad fails twice per coupled segment pair
         (``diff_pair_gap_out_of_range`` and ``clearance``), so the class value
@@ -528,12 +542,16 @@ class DesignRules:
         class_mm = float(net_class.effective_intra_pair_clearance())
         gap, source = class_mm, None
         if self.manufacturer:
-            try:
-                from .mfr_limits import get_mfr_limits
+            mfr_mm: float | None
+            if self.mfr_clearance_floor is not None:
+                mfr_mm = float(self.mfr_clearance_floor)
+            else:
+                try:
+                    from .mfr_limits import resolve_clearance
 
-                mfr_mm = float(get_mfr_limits(self.manufacturer).min_clearance)
-            except Exception:
-                mfr_mm = None
+                    mfr_mm = resolve_clearance(self.manufacturer)
+                except Exception:
+                    mfr_mm = None
             if mfr_mm is not None and mfr_mm > gap:
                 gap, source = mfr_mm, f"{self.manufacturer} minimum clearance"
         authored = self.authored_min_clearance

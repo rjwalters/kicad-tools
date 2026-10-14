@@ -29,7 +29,12 @@ class MfrLimits:
     Attributes:
         name: Manufacturer name (e.g., "jlcpcb")
         min_trace: Minimum trace width
-        min_clearance: Minimum trace-to-trace clearance
+        min_clearance: Minimum trace-to-trace clearance.  Layer- and
+            copper-agnostic **fallback** only: the per-stackup floor that
+            ``kct check --mfr`` and the emitted ``.kicad_dru`` enforce comes
+            from the manufacturer profile via :func:`resolve_clearance`
+            (Issue #6561), which differs on e.g. jlcpcb 4-layer (0.1016mm),
+            6-layer (0.0889mm) and 2-layer 2oz (0.1524mm).
         min_via_drill: Minimum via drill diameter
         min_via_annular: Minimum via annular ring width
         min_via_diameter: Computed minimum via diameter (drill + 2*annular)
@@ -595,7 +600,11 @@ def resolve_edge_clearance(manufacturer: str | None) -> float | None:
     return None
 
 
-def resolve_clearance(manufacturer: str | None) -> float | None:
+def resolve_clearance(
+    manufacturer: str | None,
+    layers: int | None = None,
+    copper_oz: float | None = None,
+) -> float | None:
     """Resolve the trace-to-trace clearance floor for a manufacturer.
 
     Shared resolution helper (Issue #4875), the clearance analogue of
@@ -604,25 +613,50 @@ def resolve_clearance(manufacturer: str | None) -> float | None:
     as the value an explicit ``--manufacturer`` resolves to when it
     overrides board-declared rules.
 
-    Note this reads :attr:`MfrLimits.min_clearance` (the fab's absolute
-    copper-to-copper capability minimum), which is deliberately *not* the
-    same thing as the routing clearance a design should target -- ``kct
-    route``'s own default (0.15mm) is looser than every current profile's
-    ``min_clearance`` on purpose.  Callers must therefore treat the result
-    as a lower bound, never as a recommended value.
+    **Layer/copper aware (Issue #6561).**  When ``layers`` is known this
+    resolves ``get_profile(mfr).get_design_rules(layers, copper_oz)
+    .min_clearance_mm`` -- the same per-``<layers>layer_<oz>oz`` value that
+    ``kct check --mfr`` enforces and that the shipped / generated
+    ``.kicad_dru`` ``Clearance`` rule emits -- exactly as
+    :func:`resolve_min_trace_width` (#4700) does for trace width.  The flat
+    :attr:`MfrLimits.min_clearance` is layer- and copper-agnostic (jlcpcb
+    0.127mm everywhere), which was stricter than the fab on 4-/6-layer
+    boards (0.1016 / 0.0889mm) and, worse, *looser* than it on 2-layer 2oz
+    (0.1524mm).  The profile is the single source of truth; the flat value
+    is only the fallback.
+
+    With ``layers=None`` (the caller does not know the stackup) the result
+    is the flat :attr:`MfrLimits.min_clearance`, byte-identical to the
+    pre-#6561 behaviour, rather than guessing a layer count and silently
+    loosening the floor.  The flat value is also the fallback whenever the
+    profile lookup fails.
+
+    Note the result is the fab's absolute copper-to-copper capability
+    minimum, which is deliberately *not* the same thing as the routing
+    clearance a design should target -- ``kct route``'s own default
+    (0.15mm) is looser than most profiles' minimum on purpose.  Callers
+    must therefore treat the result as a lower bound, never as a
+    recommended value.
 
     Args:
         manufacturer: Manufacturer name (case-insensitive, aliases OK),
             or ``None``/empty when no manufacturer is configured.
+        layers: Copper layer count for the profile lookup, or ``None`` to
+            use the flat layer-agnostic :attr:`MfrLimits.min_clearance`.
+        copper_oz: Outer-layer copper weight in oz for the profile lookup.
+            ``None`` uses the profile default (1.0).
 
     Returns:
-        The manufacturer's ``min_clearance`` in mm, or ``None`` when
-        ``manufacturer`` is falsy, unknown (no raise -- manufacturer
-        validation belongs to the CLI layer), or its clearance floor is
-        not positive.
+        The clearance floor in mm, or ``None`` when ``manufacturer`` is
+        falsy, unknown (no raise -- manufacturer validation belongs to the
+        CLI layer), or no positive floor resolves.
     """
     if not manufacturer:
         return None
+    if layers:
+        floor = _profile_min_clearance(manufacturer, layers, copper_oz)
+        if floor is not None:
+            return floor
     try:
         limits = get_mfr_limits(manufacturer)
     except ValueError:
@@ -630,6 +664,35 @@ def resolve_clearance(manufacturer: str | None) -> float | None:
     if limits.min_clearance > 0:
         return limits.min_clearance
     return None
+
+
+def _profile_min_clearance(manufacturer: str, layers: int, copper_oz: float | None) -> float | None:
+    """``get_design_rules(layers, copper_oz).min_clearance_mm`` or ``None``.
+
+    The per-stackup lookup behind :func:`resolve_clearance` (Issue #6561).
+    Returns ``None`` on any lookup failure so the caller can fall back to
+    the flat :attr:`MfrLimits.min_clearance`.
+    """
+    try:
+        # Lazy import, as in :func:`resolve_min_trace_width`.
+        from kicad_tools.manufacturers import get_profile
+
+        rules = get_profile(manufacturer).get_design_rules(
+            layers=int(layers),
+            copper_oz=float(copper_oz) if copper_oz else 1.0,
+        )
+        floor = float(rules.min_clearance_mm)
+    except (
+        ImportError,
+        ValueError,
+        KeyError,
+        TypeError,
+        IndexError,
+        OSError,
+        AttributeError,
+    ):
+        return None
+    return floor if floor > 0 else None
 
 
 def resolve_min_trace_width(

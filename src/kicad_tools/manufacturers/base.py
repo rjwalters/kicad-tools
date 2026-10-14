@@ -222,6 +222,18 @@ class DesignRules:
     # no attached process must not suppress a via-in-pad finding.
     via_in_pad_process_id: str | None = None
 
+    # Issue #6518: via-type capabilities.  ``blind_buried_vias_supported``
+    # covers ``(via blind ...)`` and ``(via buried ...)`` (sequential
+    # lamination / controlled-depth drilling); ``micro_vias_supported``
+    # covers ``(via micro ...)`` (laser-drilled HDI microvias).  The
+    # ``via_type_unsupported`` DRC rule
+    # (:mod:`kicad_tools.validate.rules.via_type_capability`) errors on every
+    # via whose type the profile lacks.  Default ``False`` fails closed: set
+    # ``true`` in a profile YAML only with a cited, dated source from the
+    # fab's published capability page.
+    blind_buried_vias_supported: bool = False
+    micro_vias_supported: bool = False
+
     # Plated component pads can require wider rings than vias. None keeps
     # existing profiles' shared annular-ring behavior.
     min_pth_annular_ring_mm: float | None = None
@@ -266,6 +278,8 @@ class DesignRules:
             "max_board_height_mm": self.max_board_height_mm,
             "via_in_pad_supported": self.via_in_pad_supported,
             "via_in_pad_process_id": self.via_in_pad_process_id,
+            "blind_buried_vias_supported": self.blind_buried_vias_supported,
+            "micro_vias_supported": self.micro_vias_supported,
         }
 
 

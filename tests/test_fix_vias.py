@@ -2785,6 +2785,38 @@ def test_stub_obstacles_are_physical_and_layer_aware(tmp_path, kind, net, layer,
     assert (reason is not None) == (blocked or kind == "via")
 
 
+@pytest.mark.parametrize(
+    "via_kw,pair,blocked",
+    [
+        # Keyworded blind/buried vias keep their declared span: only one
+        # reaching B.Cu blocks the B.Cu stub.
+        ("blind ", '"F.Cu" "In1.Cu"', False),
+        ("buried ", '"In1.Cu" "In2.Cu"', False),
+        ("blind ", '"In2.Cu" "B.Cu"', True),
+        # Issue #6614: a keyword-less partial pair is a through via to KiCad,
+        # so its barrel is on B.Cu even though the pair never names it.
+        ("", '"F.Cu" "In1.Cu"', True),
+        ("", '"In1.Cu" "In2.Cu"', True),
+    ],
+)
+def test_stub_via_obstacles_respect_four_layer_span(tmp_path, via_kw, pair, blocked):
+    """Via obstacles are layer-aware on a 4-layer board (#6614 restores the
+    blind-via coverage the 2-layer ``F.Cu``/``F.Cu`` case lost in #6493)."""
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    text = (
+        _STUB_CROSSING_BOARD[: _STUB_CROSSING_BOARD.rfind(" (segment (start 11 8)")]
+        + f"(via {via_kw}(at 11 10) (size .6) (drill .3) (layers {pair}) (net 2)))"
+    ).replace(
+        '(layers (0 "F.Cu" signal) (31 "B.Cu" signal)',
+        '(layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)',
+    )
+    assert '"In1.Cu" signal' in text
+    pcb = PCB.load(_write(tmp_path, text))
+    reason = _check_stub_clearance(pcb, pcb.vias[0], (12.427, 10), ["B.Cu"], 0.2, 0.127)
+    assert (reason is not None) == blocked
+
+
 @pytest.mark.parametrize("gap,blocked", [(0.126, True), (0.128, False)])
 def test_stub_full_width_and_clearance_near_miss(tmp_path, gap, blocked):
     from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance

@@ -544,6 +544,10 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", via)
         sz = re.search(r"\(size ([\d.]+)\)", via)
         radius = (float(sz.group(1)) if sz else 0.6) / 2.0
+        # Issue #6614: no ``kicad_read_via_layers`` here -- this audit never
+        # reads the ``(layers ...)`` pair; board 07 only emits through vias
+        # and every via is modelled on ``all_layers``, which is already how
+        # KiCad reads a keyword-less via.
         vias[name].append(
             (Point(float(at.group(1)), float(at.group(2))).buffer(radius), all_layers)
         )

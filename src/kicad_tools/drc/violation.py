@@ -96,6 +96,8 @@ def _init_type_category_map() -> None:
             # plated-over via processing) -- categorize with the other
             # via/fab capabilities.
             ViolationType.VIA_IN_PAD: ViolationCategory.MANUFACTURING,
+            # Issue #6518: blind/buried/micro via the profile cannot build.
+            ViolationType.VIA_TYPE_UNSUPPORTED: ViolationCategory.MANUFACTURING,
             ViolationType.DRILL_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
             ViolationType.DRILL_CLEARANCE: ViolationCategory.MANUFACTURING,
             ViolationType.NPTH_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
@@ -227,6 +229,10 @@ class ViolationType(Enum):
     # support via-in-pad processing.  See issue #2635 and
     # ``validate/rules/via_in_pad.py``.
     VIA_IN_PAD = "via_in_pad"
+    # Blind, buried or micro via on a manufacturer profile that does not
+    # offer the drilling process.  See issue #6518 and
+    # ``validate/rules/via_type_capability.py``.
+    VIA_TYPE_UNSUPPORTED = "via_type_unsupported"
 
     # Track/trace dimension issues
     TRACK_WIDTH = "track_width"
@@ -448,6 +454,8 @@ class ViolationType(Enum):
             # MUST be aliased explicitly -- the fuzzy fallback below would
             # otherwise match "via" and miscategorize this rule_id.
             "via_in_pad": cls.VIA_IN_PAD,
+            # Issue #6518 -- explicit for the same reason as via_in_pad.
+            "via_type_unsupported": cls.VIA_TYPE_UNSUPPORTED,
             # Copper sliver rule from validate copper_sliver checker
             # (Issue #3843).  MUST be aliased explicitly -- the fuzzy
             # fallback below has no branch for "copper_sliver" (no

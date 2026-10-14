@@ -154,7 +154,7 @@ has_unpark_check() {
     grep -qE 'issues/\$ISSUE_NUMBER/timeline' <<<"$block" \
         && grep -qE '\.event == "unlabeled"' <<<"$block" \
         && grep -qE '\.label\.name \| IN\(\$o\[\]\)' <<<"$block" \
-        && grep -qE 'VERDICT_CREATED_AT=.*created_at' <<<"$block" \
+        && grep -qE 'VERDICT_CREATED_AT=.*(created_at|createdAt)' <<<"$block" \
         && grep -qE 'UNPARKED_AT.*>.*VERDICT_CREATED_AT' <<<"$block" \
         && grep -qE '^ *OPERATOR_RULED=yes' <<<"$block"
 }
@@ -537,14 +537,15 @@ else
         fail "4c: expected OPERATOR_RULED=no / UNREVISED=yes, got:"$'\n'"$OUT"
     fi
 
-    # --- 4d. A failed verdict re-read (no created_at) fails OPEN, not closed.
-    REST_NO_TS="$(jq -nc --arg b "$(printf '%b' "$VBODY")" '[{id:99, body:$b}]')"
+    # --- 4d. An unknown verdict time (no createdAt on the held trusted comment,
+    # #11902: there is no second read any more) fails OPEN, not closed.
+    VIEW_NO_TS="$(jq -nc --arg b "$(printf '%b' "$VBODY")" '[{body:$b}]')"
     F="$RUN_DIR/fix/no-verdict-ts"
-    make_fixture "$F" '[]' "$VIEW_COMMENTS" "$TL_UNPARK" "$REST_NO_TS" 1
+    make_fixture "$F" '[]' "$VIEW_NO_TS" "$TL_UNPARK" "$REST_COMMENTS" 1
     OUT="$(run_guard "$F")"
     if [[ "$(result_of "$OUT" OPERATOR_RULED)" == "no" \
        && "$(result_of "$OUT" UNREVISED)" == "yes" ]]; then
-        pass "4d: an empty VERDICT_CREATED_AT (failed REST re-read) fails open — the ladder is not stood down on an API hiccup"
+        pass "4d: an empty VERDICT_CREATED_AT (unknown verdict time) fails open — the ladder is not stood down on it"
     else
         fail "4d: expected OPERATOR_RULED=no / UNREVISED=yes, got:"$'\n'"$OUT"
     fi

@@ -1356,12 +1356,17 @@ class RoutingClearances:
             (``.kicad_pro`` ``rules.min_clearance``), or ``None`` when it
             declares none -- the coupled pair-gap floor (Issue #6443,
             :attr:`~kicad_tools.router.rules.DesignRules.authored_min_clearance`).
+        fab_floor_mm: The stackup-aware fab clearance floor that was applied
+            (Issue #6561), or ``None`` without a manufacturer -- the value
+            :attr:`~kicad_tools.router.rules.DesignRules.mfr_clearance_floor`
+            takes so the coupled pair gap uses the same floor.
     """
 
     trace: ResolvedClearance
     via: ResolvedClearance
     manufacturer: str | None = None
     authored_min_clearance_mm: float | None = None
+    fab_floor_mm: float | None = None
 
     @property
     def trace_mm(self) -> float:
@@ -1387,6 +1392,8 @@ def resolve_routing_clearances(
     target_mm: float,
     manufacturer: str | None = None,
     discover_manufacturer: bool = True,
+    layers: int | None = None,
+    copper_oz: float | None = None,
 ) -> RoutingClearances:
     """Resolve ``trace_clearance`` / ``via_clearance`` for a routing tool (#6283).
 
@@ -1415,6 +1422,11 @@ def resolve_routing_clearances(
         manufacturer: An explicit fab profile, if the caller has one.
         discover_manufacturer: Look up the board's declared ``target_fab``
             when ``manufacturer`` is ``None``.
+        layers: Copper layer count for the stackup-aware fab floor (Issue
+            #6561).  ``None`` detects it from the board when a manufacturer
+            applies.
+        copper_oz: Outer copper weight in oz for the same lookup.  ``None``
+            reads the board's declared stackup, else the profile default.
 
     Returns:
         Both resolved values with provenance and any warnings.  Never raises
@@ -1430,7 +1442,12 @@ def resolve_routing_clearances(
         except Exception:  # pragma: no cover - discovery is best-effort
             manufacturer = None
 
-    fab_floor = resolve_clearance(manufacturer)
+    if manufacturer:
+        if layers is None or copper_oz is None:
+            board_layers, board_oz = _board_layers_and_copper_oz(pcb_path)
+            layers = layers if layers is not None else board_layers
+            copper_oz = copper_oz if copper_oz is not None else board_oz
+    fab_floor = resolve_clearance(manufacturer, layers, copper_oz)
     declared = read_declared_clearance_rules(pcb_path)
 
     trace = resolve_base_clearance(
@@ -1451,4 +1468,33 @@ def resolve_routing_clearances(
         via=via,
         manufacturer=manufacturer,
         authored_min_clearance_mm=declared.project_min_clearance_mm,
+        fab_floor_mm=fab_floor,
     )
+
+
+def _board_layers_and_copper_oz(pcb_path: str | Path) -> tuple[int | None, float | None]:
+    """Best-effort ``(copper layer count, outer copper oz)`` of a board (#6561).
+
+    Feeds :func:`~kicad_tools.router.mfr_limits.resolve_clearance` the stackup
+    key ``kct check --mfr`` resolves.  Either element is ``None`` when it
+    cannot be read, which leaves the flat floor (no layers) or the profile's
+    1oz default (no copper weight) in place.  Never raises.
+    """
+    layers: int | None = None
+    copper_oz: float | None = None
+    try:
+        from .io import detect_layer_stack
+
+        layers = int(detect_layer_stack(Path(pcb_path).read_text()).num_layers)
+    except Exception:  # noqa: BLE001 - discovery is best-effort
+        layers = None
+    try:
+        from kicad_tools.physics.stackup import Stackup
+        from kicad_tools.schema.pcb import PCB
+
+        derived = Stackup.from_pcb(PCB.load(str(pcb_path))).outer_inner_copper_oz()
+        if derived is not None:
+            copper_oz = derived[0]
+    except Exception:  # noqa: BLE001 - never crash a routing tool on a stackup quirk
+        copper_oz = None
+    return layers, copper_oz

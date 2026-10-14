@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..core.layers import kicad_read_via_layers, via_node_type
 from ..schema.pcb import Zone, _is_footprint_tag
 from ..sexp.parser import SExp, parse_file, parse_string
 
@@ -777,7 +778,10 @@ class KiCadToDSNExporter:
         if layers_node and len(layers_node.children) >= 2:
             l1 = _get_str(layers_node.children[0]) or "F.Cu"
             l2 = _get_str(layers_node.children[1]) or "B.Cu"
-            layers = (l1, l2)
+            # Issue #6614: a keyword-less via is a through via to KiCad,
+            # whatever its pair says -- export the span KiCad reads.
+            read, _ = kicad_read_via_layers((l1, l2), via_node_type(node))
+            layers = (read[0], read[-1])
 
         return ViaInfo(
             x=_get_float(at_node.children[0]) or 0.0,
