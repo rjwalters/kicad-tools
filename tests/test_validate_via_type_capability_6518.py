@@ -144,9 +144,7 @@ def test_default_is_fail_closed():
 _SOURCED_CAPABILITIES = {
     # pcbway.yaml: https://www.pcbway.com/hdi-pcb.html, verified 2026-10-14
     ("pcbway", "4layer_1oz", "blind_buried_vias_supported"),
-    ("pcbway", "4layer_1oz", "micro_vias_supported"),
     ("pcbway", "6layer_1oz", "blind_buried_vias_supported"),
-    ("pcbway", "6layer_1oz", "micro_vias_supported"),
 }
 
 _CAPABILITY_FLAGS = ("blind_buried_vias_supported", "micro_vias_supported")
@@ -181,7 +179,7 @@ def test_sourced_capability_yaml_carries_dated_citation():
         for line in text.splitlines()
         if re.match(r"\s+(blind_buried_vias_supported|micro_vias_supported):", line)
     ]
-    assert len(flag_lines) == 4
+    assert len(flag_lines) == 2
     for line in flag_lines:
         assert ": true" in line
         assert "pcbway.com" in line or "hdi-pcb.html" in line, line
@@ -194,6 +192,13 @@ def test_pcbway_two_layer_stays_fail_closed():
     rules = profile.get_design_rules(layers=2)
     assert rules.blind_buried_vias_supported is False
     assert rules.micro_vias_supported is False
+
+
+def test_pcbway_micro_vias_stay_fail_closed():
+    """Micro vias are unchecked by dimensions.py, so no pcbway config enables them."""
+    profile = get_profile("pcbway")
+    for rules in profile.design_rules.values():
+        assert rules.micro_vias_supported is False
 
 
 class TestCheckerWiring:
@@ -242,7 +247,7 @@ def test_cli_through_via_is_clean(tmp_path, capsys):
     assert all(v["rule_id"] != RULE_ID for v in data["violations"])
 
 
-@pytest.mark.parametrize("via_type", ["blind", "buried", "micro"])
+@pytest.mark.parametrize("via_type", ["blind", "buried"])
 def test_cli_pcbway_four_layer_is_clean_on_supported_typed_via(tmp_path, capsys, via_type):
     """Issue #6640: a shipped profile that sources the capability clears the via."""
     path = tmp_path / "board.kicad_pcb"
@@ -253,6 +258,18 @@ def test_cli_pcbway_four_layer_is_clean_on_supported_typed_via(tmp_path, capsys,
     data = json.loads(capsys.readouterr().out)
     assert all(v["rule_id"] != RULE_ID for v in data["violations"])
     assert rc == 0
+
+
+def test_cli_pcbway_micro_via_still_errors(tmp_path, capsys):
+    """Micro vias stay rejected on pcbway: dimensions.py skips them (#3118)."""
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(_board_text("micro"))
+    rc = check_cmd.main(
+        [str(path), "--mfr", "pcbway", "--only", "via_type", "--drc-only", "--format", "json"]
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert [v["rule_id"] for v in data["violations"]].count(RULE_ID) == 1
+    assert rc != 0
 
 
 @pytest.mark.parametrize("via_type", ["blind", "buried", "micro"])
