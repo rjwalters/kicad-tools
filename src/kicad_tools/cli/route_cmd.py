@@ -1811,11 +1811,21 @@ def _finalize_committed_copper_or_demote(
     """
     demoted = router.revalidate_committed_copper_or_demote()
     if demoted and not quiet:
-        print(
-            f"  ⚠ Post-optimize backstop demoted {len(demoted)} net(s) whose "
-            f"copper became a cross-net short after optimize/nudge: "
-            f"{sorted(demoted)}"
-        )
+        # Issue #6489: an authored/class-floor demotion is not a cross-net short.
+        floor = set(getattr(router, "last_floor_demoted_nets", None) or [])
+        shorts = sorted(set(demoted) - floor)
+        if floor:
+            print(
+                f"  ⚠ Post-optimize backstop demoted {len(floor)} net(s) whose "
+                f"copper is below the authored/class clearance minimum: "
+                f"{sorted(floor)}"
+            )
+        if shorts:
+            print(
+                f"  ⚠ Post-optimize backstop demoted {len(shorts)} net(s) whose "
+                f"copper became a cross-net short after optimize/nudge: "
+                f"{shorts}"
+            )
 
 
 def _make_stage_quality_recorder(args: argparse.Namespace) -> Any:
