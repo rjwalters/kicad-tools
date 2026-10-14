@@ -1287,6 +1287,14 @@ def replay(
     trackers = {key: _IncrementalAccess(pads[key], grid, resolved_rules) for key in keys}
 
     saved_routes = getattr(grid, "routes", [])
+    # Issue #6303: the grid's segment R-tree indexes the *finished* board's
+    # copper and is not rebound with ``grid.routes``.  Suspend it so segment
+    # clearance answers from the replayed copper, as the via checks already do.
+    # Restored in the ``finally`` below together with ``grid.routes``.
+    index_suspension = contextlib.ExitStack()
+    suspend_index = getattr(grid, "segment_index_suspended", None)
+    if callable(suspend_index):
+        index_suspension.enter_context(suspend_index())
     try:
         grid.routes = copper.routes
 
@@ -1362,6 +1370,7 @@ def replay(
             baseline = {k: _state_label(a) for k, a in state.items()}
     finally:
         grid.routes = saved_routes
+        index_suspension.close()
 
     witnesses: list[PadWitness] = []
     for key in keys:
