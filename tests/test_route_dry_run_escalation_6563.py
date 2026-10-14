@@ -179,3 +179,23 @@ def test_save_partial_results_writes_nothing_under_dry_run(tmp_path, monkeypatch
     monkeypatch.setattr(route_cmd, "_interrupt_state", state)
     assert route_cmd._save_partial_results() is False
     assert _snapshot(tmp_path) == before
+
+
+def test_complete_noop_dry_run_does_not_write_output(tmp_path, capsys):
+    """``--complete --dry-run`` on a fully connected board must not write --output."""
+    pcb = _write_board(tmp_path / "board.kicad_pcb")
+    out_path = tmp_path / "out.kicad_pcb"
+    before = _snapshot(tmp_path)
+    rc = route_cmd.main([str(pcb), "--dry-run", "--complete", "--grid", "0.1", "-o", str(out_path)])
+    assert rc == 0
+    assert not out_path.exists()
+    assert _snapshot(tmp_path) == before
+    assert "Would write" in capsys.readouterr().out
+
+
+def test_analyze_dry_run_does_not_stage_input_at_output(tmp_path):
+    """``--analyze --dry-run`` keeps its analysis path but stages no auto-pour copy."""
+    pcb = _write_board(tmp_path / "board.kicad_pcb")
+    out_path = tmp_path / "out.kicad_pcb"
+    route_cmd.main([str(pcb), "--dry-run", "--analyze", "--grid", "0.1", "-o", str(out_path)])
+    assert not out_path.exists()

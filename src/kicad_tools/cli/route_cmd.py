@@ -10360,7 +10360,8 @@ def route_with_layer_escalation(
     # Issue #4689: capture the user-supplied path for the banner BEFORE the
     # staging rebind below re-points ``pcb_path`` at the staged output copy.
     display_input_path = pcb_path
-    if getattr(args, "auto_pour", True):
+    # Issue #6563: --dry-run (reachable here via --analyze) must not stage a copy.
+    if getattr(args, "auto_pour", True) and not getattr(args, "dry_run", False):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
         pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
@@ -11799,7 +11800,8 @@ def route_with_rule_relaxation(
     # Issue #4689: capture the user-supplied path for the banner BEFORE the
     # staging rebind below re-points ``pcb_path`` at the staged output copy.
     display_input_path = pcb_path
-    if getattr(args, "auto_pour", True):
+    # Issue #6563: --dry-run (reachable here via --analyze) must not stage a copy.
+    if getattr(args, "auto_pour", True) and not getattr(args, "dry_run", False):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
         pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
@@ -14329,7 +14331,8 @@ def route_with_combined_escalation(
     # Issue #4689: capture the user-supplied path for the banner BEFORE the
     # staging rebind below re-points ``pcb_path`` at the staged output copy.
     display_input_path = pcb_path
-    if getattr(args, "auto_pour", True):
+    # Issue #6563: --dry-run (reachable here via --analyze) must not stage a copy.
+    if getattr(args, "auto_pour", True) and not getattr(args, "dry_run", False):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
         pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
@@ -18160,7 +18163,7 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Print the analytical routing plan (grid, cells, memory budget) "
             "and exit without loading the router, routing, or writing any "
-            "file.  On the escalation flows (--auto-layers, the default; "
+            "file (including with --complete).  On the escalation flows (--auto-layers, the default; "
             "--auto-pcb-size; --auto-mfr-tier; --adaptive-rules) the plan is "
             "printed once per layer count the ladder would try."
         ),
@@ -20026,6 +20029,11 @@ def _run_main_impl(args, parser, argv) -> int:
         output_path = (
             Path(args.output) if args.output else pcb_path.with_stem(pcb_path.stem + "_routed")
         )
+        # Issue #6563: --dry-run writes no files, even for the no-op rewrite.
+        if getattr(args, "dry_run", False):
+            if not getattr(args, "quiet", False):
+                print(f"  Would write {output_path} (unchanged)")
+            return 0
         _write_routed_pcb(pcb_path, output_path, "", guard_copper_loss=True)
         if not getattr(args, "quiet", False):
             print(f"  Wrote {output_path} (unchanged)")
@@ -20633,7 +20641,8 @@ def _run_main_impl(args, parser, argv) -> int:
     # Issue #4689: capture the user-supplied path for the banner BEFORE the
     # staging rebind below re-points ``pcb_path`` at the staged output copy.
     display_input_path = pcb_path
-    if getattr(args, "auto_pour", True):
+    # Issue #6563: --dry-run (reachable here via --analyze) must not stage a copy.
+    if getattr(args, "auto_pour", True) and not getattr(args, "dry_run", False):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
         pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
