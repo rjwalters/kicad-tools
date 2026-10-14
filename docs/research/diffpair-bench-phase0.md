@@ -214,6 +214,101 @@ identical; all four rows are `valid: true`, route exit 3, artifact `final`, 18/1
 (both reps), seed 43 `39d3fcff...` (both reps). A run on a deliberately loaded host was
 not made.
 
+### #6443 piece (b) gap rows
+
+`data/research/diffpair_bench/gap-6567-d6d09a6c.json` (9 rows; issue #6567). These are the
+cells PR #6556 left unrun: `03` lattice + grid @43, `06b` lattice @43, `06b` grid @42 + @43,
+and `06rf` lattice + grid @42 + @43. They were taken on main `d6d09a6c`, which includes #6556
+(`diffpair_uncoupled_length`, native pair rules) and #6603 (floored intra-pair gap). Each
+cell is one targeted `diffpair_bench.py run --boards B --engines E --seeds S --timeout 2400`.
+They ran sequentially, never as a grid, and the per-cell files were joined with
+`diffpair_bench.py merge`. Every row is `valid: true` with artifact `final`. No deadline
+was hit and the harness killed nothing.
+
+Route exit codes: 3 everywhere except `06rf` lattice, which exited 4. kicad-cli was the
+local 10.0.6 (the CI version). The Docker `kicad/kicad:10.0` daemon did not respond on
+this host.
+
+Host load is the 1-min average before → after each cell. Every row uses the
+deterministic budget, so load moves only the wall time:
+
+| Board | Engine | Seed | Pairs coupled | Nets | kct err (by rule) | kicad-cli err (by type) | Wall s | Load |
+|---|---|---|---|---|---|---|---|---|
+| 03 | lattice | 43 | 1/2 | 26/27 | uncoupled 1 | uncoupled 1 | 102.8 | 6.0 → 6.8 (5-min 9.9) |
+| 03 | grid | 43 | 0/2 | 27/27 | skew 1, uncoupled 1 | skew 1, uncoupled 1 | 323.6 | 6.8 → 7.2 (5-min 9.0) |
+| 06b | lattice | 43 | 3/4 | 18/18 | skew 4 | skew 4 | 77.6 | 7.2 → 7.1 |
+| 06b | grid | 42 | 0/4 | 18/18 | skew 2 | skew 2 | 120.3 | 7.1 → 4.8 |
+| 06b | grid | 43 | 0/4 | 18/18 | skew 2 | skew 2 | 119.0 | 4.5 → 3.2 |
+| 06rf | lattice | 42 | 2/9 | 15/26 | connectivity 8, skew 4, uncoupled 2 | skew 7, uncoupled 1, vias 1 | 382.0 | 3.2 → 3.3 |
+| 06rf | lattice | 43 | 2/9 | 15/26 | connectivity 8, skew 4, uncoupled 2 | skew 7, uncoupled 1, vias 1 | 382.8 | 3.1 → 1.9 |
+| 06rf | grid | 42 | 0/9 | 22/26 | connectivity 1, skew 8 | skew 8 | 68.7 | 1.9 → 2.7 |
+| 06rf | grid | 43 | 0/9 | 22/26 | connectivity 1, skew 8 | skew 8 | 68.5 | 2.8 → 2.2 |
+
+Seed sensitivity: the `pair_digest`s of `06b` grid, `06rf` lattice and `06rf` grid are
+identical at 42 and 43. So the per-pair table below lists those cells once, as `42/43`.
+Three other rows match earlier files. `06b` grid @42/@43 matches
+`determinism-06b-grid-b9041b37.json`, `06rf` lattice @42 matches `fix-6550-68db9374.json`,
+and `06b` lattice @43 has the same digest as `fix-6535`'s seed-42 row (`26c276ae7da77a54`).
+
+Per pair, in PR #6556's format. The verdict columns are kct/kicad-cli. `-` means the rule
+has no limit on that pair, or the pair is `unrouted` (one or both nets are not
+connected, so the harness gives it no number):
+
+| Board | Engine | Seed | Pair | Skew mm (limit) | Uncoupled P/N mm (limit) | Vias P/N | Skew | Uncoupled | Vias |
+|---|---|---|---|---|---|---|---|---|---|
+| 03 | lattice | 43 | USB_D | 0.0 (2.5) | 23.03/27.12 (19.05) | 0/0 | pass/pass | FAIL/FAIL | pass/pass |
+| 03 | lattice | 43 | USB_MCU_D | 0.0 (2.5) | 0.5/0.5 (12.7) | 0/0 | pass/pass | pass/pass | pass/pass |
+| 03 | grid | 43 | USB_D | 3.711 (2.5) | 23.38/25.65 (19.05) | 2/3 | FAIL/FAIL | FAIL/FAIL | pass/pass |
+| 03 | grid | 43 | USB_MCU_D | 0.041 (2.5) | 0.87/0.91 (12.7) | 0/0 | pass/pass | pass/pass | pass/pass |
+| 06b | lattice | 43 | LVDS1-4 | 0.128-0.236 (0.1) | 3.0-5.1 (no limit) | 0/0 | FAIL/FAIL x4 | - | - |
+| 06b | grid | 42/43 | LVDS1, LVDS3 | 0.088, 0.053 (0.1) | 0.8-1.1 (no limit) | 0/0 | pass/pass | - | - |
+| 06b | grid | 42/43 | LVDS2, LVDS4 | 0.453, 0.446 (0.1) | 0.7-2.1 (no limit) | 0/0 | FAIL/FAIL | - | - |
+| 06rf | lattice | 42/43 | MIPI_CLK | 0.704 (0.3) | 1.51/0.58 (no limit) | 0/0 | FAIL/FAIL | - | - |
+| 06rf | lattice | 42/43 | MIPI_D0 | 0.583 (0.3) | 1.46/1.03 (no limit) | 0/0 | FAIL/FAIL | - | - |
+| 06rf | lattice | 42/43 | USB2_D | 7.311 (1.27) | 14.22/18.81 (12.7) | 4/6 (max 4) | FAIL/FAIL | FAIL/FAIL | FAIL/FAIL |
+| 06rf | lattice | 42/43 | USB3_TX2 | 4.417 (0.5) | 14.11/18.52 (no limit) | 2/2 | FAIL/FAIL | - | - |
+| 06rf | lattice | 42/43 | PCIE_RX, PCIE_TX, USB3_RX1, USB3_RX2, USB3_TX1 | unrouted | unrouted | - | - | - | - |
+| 06rf | grid | 42/43 | MIPI_CLK | 0.663 (0.3) | 1.56/0.90 (no limit) | 0/0 | FAIL/FAIL | - | - |
+| 06rf | grid | 42/43 | MIPI_D0 | 0.663 (0.3) | 1.56/0.90 (no limit) | 0/0 | FAIL/FAIL | - | - |
+| 06rf | grid | 42/43 | PCIE_RX | 4.213 (0.5) | 2.71/6.64 (no limit) | 2/2 | FAIL/FAIL | - | - |
+| 06rf | grid | 42/43 | PCIE_TX | 3.697 (0.5) | 6.00/5.50 (no limit) | 2/0 | FAIL/FAIL | - | - |
+| 06rf | grid | 42/43 | USB2_D | 3.378 (1.27) | 3.76/3.32 (12.7) | 0/2 | FAIL/FAIL | pass/pass | pass/pass |
+| 06rf | grid | 42/43 | USB3_RX1 | 0.42 (0.5) | 8.18/8.60 (no limit) | 2/2 | pass/pass | - | - |
+| 06rf | grid | 42/43 | USB3_RX2 | 3.546 (0.5) | 1.89/5.44 (no limit) | 0/0 | FAIL/FAIL | - | - |
+| 06rf | grid | 42/43 | USB3_TX1 | 3.26 (0.5) | 22.95/23.01 (no limit) | 0/2 | FAIL/FAIL | - | - |
+| 06rf | grid | 42/43 | USB3_TX2 | 3.01 (0.5) | 0.95/3.96 (no limit) | 0/0 | FAIL/FAIL | - | - |
+
+**Agreement.** kct and kicad-cli agree on skew, uncoupled length and via count for every
+pair that both engines judge. There is no kct-pass / kicad-cli-fail uncoupled case, so
+nothing needs citing against #6554. `06rf` names its pairs `X+`/`X-`, which KiCad
+recognises, so no row is kct-only.
+
+The per-board error counts differ in `06rf` lattice, but per pair the engines do not
+disagree. There are two reasons:
+
+- kct files the per-net via-count error under the `diffpair_uncoupled_length` rule id
+  ("net USB2_D- has 6 vias, limit 4"). So kct's `uncoupled 2` is the same two findings as
+  kicad-cli's `uncoupled 1` + `too_many_vias 1`.
+- kicad-cli's `skew_out_of_range` 7 includes the three half-routed pairs (`PCIE_TX`,
+  `USB3_RX2`, `USB3_TX1`), where one net has copper and its partner has none. kct reports
+  those nets as `connectivity` and does not compute skew. The harness marks such pairs
+  `unrouted` and gives no verdict, as #6556 specified. Both engines fail the board.
+
+**Against `baseline-main-db58570c.json`** (`diffpair_bench.py compare`): every shared cell
+is DIFFERENT, and the copper itself changed, not only the limits. Both rule effects and
+routing effects show up:
+
+- Rule effects (#6556). `diffpair_routing_continuity` errors are gone everywhere because
+  continuity is now info only. `diffpair_uncoupled_length` errors are new on 03 USB_D and
+  06rf USB2_D.
+- Routing effects (#6475, #6535, #6550). The 06b grid @42/@43 baseline rows were exit-1
+  checkpoint grades (16/18). They are now finished routes at 18/18. 03 lattice @43 went
+  from 24/27 to 26/27. 06b lattice @43 went from 16/18 to 18/18. 06rf lattice @42 went from
+  16/26 to 15/26, and 06rf grid @42 from 23/26 to 22/26.
+- 06rf stays far from routed on both engines: lattice reaches 2/9 pairs coupled with 5 pairs
+  unrouted, and grid reaches 0/9 coupled. These are router gaps for the later phases of
+  #6441, not checker findings.
+
 ## Other findings
 
 - **Coupled outcome without copper.** `coupled` in the lattice log does not mean the
