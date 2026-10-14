@@ -23,7 +23,10 @@ import pytest
 
 from kicad_tools.router.clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.lattice.class_pad_repair import repair_class_pad_pairs
+from kicad_tools.router.lattice.class_pad_repair import (
+    PAIR_LENGTH_TOLERANCE_MM,
+    repair_class_pad_pairs,
+)
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad, Route, Segment
@@ -236,3 +239,236 @@ def test_shortfall_is_judged_by_the_kernel_not_the_pad_rectangle() -> None:
     strict = _pad_gap(seg, shape, pad, strict=True)
     assert kernel == pytest.approx(0.21, abs=1e-3)
     assert strict < POWER < kernel
+
+
+# ---------------------------------------------------------------------------
+# Issue #6437: pair nets move only within P5's length budget; via shortfalls
+# reported; HV skip logged.
+# ---------------------------------------------------------------------------
+
+
+def _coords(routes: dict) -> list:
+    return [(s.x1, s.y1, s.x2, s.y2) for r in routes.values() for s in r.segments]
+
+
+def _net_length(routes: dict, net: int) -> float:
+    return sum(
+        ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
+        for r in routes.values()
+        if r.net == net
+        for s in r.segments
+    )
+
+
+def test_pair_net_move_within_the_length_budget_is_kept() -> None:
+    """An extra-pad stub of a pair net (keyed ``(net, seq)``, repairable) may
+    move: the straight-run shift changes its length by ~0.0002 mm, far inside
+    P5's 0.01 mm skew threshold (board 03 USB_D-: +0.009 mm)."""
+    pf, routes = _repair_case()
+    before = _net_length(routes, 1)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), pair_nets=frozenset({1}))
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 1, 0, 0)
+    assert abs(_net_length(routes, 1) - before) <= PAIR_LENGTH_TOLERANCE_MM
+    mid = routes[(1, 0)].segments[1]
+    assert copper_gap(segment_shape(mid), pad_shape(pf.pads[2])) >= POWER - EPS
+
+
+def _diagonal_case() -> tuple[LatticePathfinder, dict]:
+    """The middle leg sits between two 45-degree legs, so shifting it off the
+    GND pad by ~0.027 mm stretches the net by ~0.038 mm."""
+    outline = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
+    term_a = Pad(x=5.0, y=9.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R1", pin="1")
+    term_b = Pad(x=15.0, y=9.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R2", pin="1")
+    gnd_y = 10.0 - TRACE_W / 2 - 0.175 - 0.3
+    gnd = Pad(x=10.0, y=gnd_y, width=0.6, height=0.6, net=0, net_name="GND", ref="C1", pin="1")
+    pf = LatticePathfinder(outline, [term_a, term_b, gnd], _rules())
+    pf.set_pad_class_clearances([BASE, BASE, POWER])
+    run = [_seg(5.0, 9.0, 6.0, 10.0), _seg(6.0, 10.0, 14.0, 10.0), _seg(14.0, 10.0, 15.0, 9.0)]
+    return pf, {(1, 0): Route(1, "SIG", segments=run)}
+
+
+def test_diagonal_case_is_repaired_for_an_ordinary_net() -> None:
+    pf, routes = _diagonal_case()
+    before = _net_length(routes, 1)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert (stats.found, stats.repaired, stats.remaining) == (1, 1, 0)
+    assert _net_length(routes, 1) - before > PAIR_LENGTH_TOLERANCE_MM
+
+
+def test_pair_net_move_beyond_the_length_budget_is_refused() -> None:
+    """The same move on a pair net would shift its skew past 0.01 mm."""
+    pf, routes = _diagonal_case()
+    before = _coords(routes)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), pair_nets=frozenset({1}))
+    assert _coords(routes) == before
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 0, 1, 1)
+
+
+def test_pair_leg_never_moves() -> None:
+    """A ``(pc.key, "P")`` leg (coupled or #6373 fallback) is not repairable:
+    it stays put and its shortfall is counted, not hidden."""
+    pf, routes = _repair_case()
+    leg = {(("pair", 1, 3), "P"): routes[(1, 0)]}
+    before = _coords(leg)
+    stats = repair_class_pad_pairs(
+        pf, leg, dict.fromkeys(leg), repairable=set(), pair_nets=frozenset({1, 3})
+    )
+    assert _coords(leg) == before
+    assert (stats.repaired, stats.pair_skipped) == (0, 1)
+
+
+def _opposite_sign_pair_case() -> tuple[LatticePathfinder, dict]:
+    """Two nets of one pair, each needing a move that is inside the budget alone.
+
+    Net 1's end legs rise toward the middle leg (shifting it up LENGTHENS the
+    net by ~0.0097 mm); net 3's fall toward it (the same shift SHORTENS it by
+    ~0.0083 mm).  Both moves together would change the pair's skew by ~0.018 mm.
+    """
+    outline = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
+    pads = []
+    run_ends = {1: (9.83, 10.0), 3: (15.17, 15.0)}
+    for net, (end_y, _mid_y) in run_ends.items():
+        for x, ref in ((5.0, "R1"), (15.0, "R2")):
+            pads.append(
+                Pad(x=x, y=end_y, width=0.6, height=0.6, net=net, net_name="P", ref=ref, pin="1")
+            )
+    for mid_y, ref in ((10.0, "C1"), (15.0, "C2")):
+        gnd_y = mid_y - TRACE_W / 2 - 0.175 - 0.3
+        pads.append(
+            Pad(x=10.0, y=gnd_y, width=0.6, height=0.6, net=0, net_name="GND", ref=ref, pin="1")
+        )
+    pf = LatticePathfinder(outline, pads, _rules())
+    pf.set_pad_class_clearances([BASE] * 4 + [POWER, POWER])
+    routes = {}
+    for net, (end_y, mid_y) in run_ends.items():
+        run = [
+            _seg(5.0, end_y, 6.0, mid_y, net=net),
+            _seg(6.0, mid_y, 14.0, mid_y, net=net),
+            _seg(14.0, mid_y, 15.0, end_y, net=net),
+        ]
+        routes[(net, 0)] = Route(net, "P" if net == 1 else "N", segments=run)
+    return pf, routes
+
+
+def test_opposite_sign_moves_on_both_pair_nets_are_budgeted_as_skew() -> None:
+    """Each net's move is within 0.01 mm alone, but they pull in opposite
+    directions: the second is refused so the pair's skew stays in budget."""
+    pf, routes = _opposite_sign_pair_case()
+    before = {n: _net_length(routes, n) for n in (1, 3)}
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes), pair_nets={1: 3, 3: 1})
+    skew = abs((_net_length(routes, 1) - before[1]) - (_net_length(routes, 3) - before[3]))
+    assert skew <= PAIR_LENGTH_TOLERANCE_MM
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (2, 1, 1, 1)
+
+
+def test_opposite_sign_moves_are_both_kept_for_unpaired_nets() -> None:
+    """Control: the same two moves are fine for ordinary nets, so the refusal
+    above comes from the pair's skew budget, not from the geometry."""
+    pf, routes = _opposite_sign_pair_case()
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (2, 2, 0, 0)
+
+
+def test_pair_tolerance_cites_p5() -> None:
+    assert PAIR_LENGTH_TOLERANCE_MM == 0.01
+
+
+def _pair_board() -> Autorouter:
+    """USB_D+ passes the Power-class GND pad at 0.175 mm; USB_D- runs clear.
+
+    ``coupled_routing`` is off, so the detected pair is declined and both
+    nets go entirely through the ordinary single-ended star.
+    """
+    cm = _class_map()
+    cm["USB_D+"] = cm["SIG"]
+    cm["USB_D-"] = cm["SIG"]
+    router = Autorouter(
+        30,
+        20,
+        strategy="lattice",
+        rules=_rules(),
+        net_class_map=cm,
+        layer_stack=LayerStack.two_layer(),
+    )
+    pin = {"width": 0.6, "height": 0.6, "number": "1"}
+    dp = {**pin, "net": 1, "net_name": "USB_D+"}
+    dn = {**pin, "net": 3, "net_name": "USB_D-"}
+    router.add_component("R1", [{**dp, "x": 5.0, "y": 10.0}])
+    router.add_component("R2", [{**dp, "x": 25.0, "y": 10.0}])
+    router.add_component("R3", [{**dn, "x": 5.0, "y": 16.0}])
+    router.add_component("R4", [{**dn, "x": 25.0, "y": 16.0}])
+    gnd = {"width": 0.6, "height": 0.6, "net": 0, "net_name": "GND"}
+    router.add_component(
+        "C1",
+        [
+            {**gnd, "number": "1", "x": 15.0, "y": _TIGHT_GND_Y},
+            {**gnd, "number": "2", "x": 15.0, "y": _TIGHT_GND_Y - 3.0},
+        ],
+    )
+    router.net_names[1] = "USB_D+"
+    router.net_names[3] = "USB_D-"
+    return router
+
+
+def test_declined_pair_routed_single_ended_is_held_to_the_budget(capsys) -> None:
+    """A detected-but-declined pair goes entirely through the ordinary star, so
+    its copper is repairable -- but under the pair length budget.  Here the run
+    meets 45-degree legs at both ends: the ~0.027 mm shift would shorten the
+    net by ~0.038 mm, so the move is refused, left in place and reported."""
+    router = _pair_board()
+    routes = router.route_net(1)
+    assert routes and routes[0].segments
+    assert router._lattice_pair_net_ids == {1: 3, 3: 1}
+    stats = router._lattice_pathfinder.class_pad_repair_stats
+    assert (stats.found, stats.repaired, stats.remaining, stats.pair_skipped) == (1, 0, 1, 1)
+    assert _min_gap_to_cap(router, routes) < POWER - EPS
+    out = capsys.readouterr().out
+    assert "1 on diff-pair nets left in place (skew budget 0.01 mm)" in out
+
+
+def _via(x: float, y: float, net: int = 1):
+    from kicad_tools.router.primitives import Via
+
+    return Via(x=x, y=y, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=net)
+
+
+@pytest.mark.parametrize(("clearance", "expected"), [(0.175, 1), (0.25, 0)])
+def test_via_pad_shortfall_is_reported_not_moved(clearance: float, expected: int) -> None:
+    pf, routes = _repair_case()
+    gnd = pf.pads[2]
+    # Clear of the pad by ``clearance`` (edge to edge), below it.
+    via = _via(gnd.x, gnd.y - 0.3 - clearance - 0.3)
+    routes[(1, 0)].vias.append(via)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert (stats.via_found, stats.via_remaining) == (expected, expected)
+    assert (via.x, via.y) == (gnd.x, gnd.y - 0.3 - clearance - 0.3)
+
+
+def test_voltage_map_board_is_skipped_visibly() -> None:
+    pf, routes = _repair_case()
+    pf._pairwise = object()  # any HV projection disables the repair
+    before = _coords(routes)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert stats.skipped == "voltage-map"
+    assert (stats.found, stats.repaired) == (0, 0)
+    assert _coords(routes) == before
+
+
+def test_router_logs_the_voltage_map_skip(monkeypatch, capsys) -> None:
+    import kicad_tools.router.lattice.class_pad_repair as cpr
+
+    real = cpr.repair_class_pad_pairs
+
+    def with_hv(pf, *args, **kwargs):
+        saved, pf._pairwise = pf._pairwise, object()
+        try:
+            return real(pf, *args, **kwargs)
+        finally:
+            pf._pairwise = saved
+
+    monkeypatch.setattr(cpr, "repair_class_pad_pairs", with_hv)
+    router = _board("lattice")
+    assert router.route_net(1)
+    assert router._lattice_pathfinder.class_pad_repair_stats.skipped == "voltage-map"
+    out = capsys.readouterr().out
+    assert "Pad class clearance (#6395): skipped -- HV pairwise clearance" in out

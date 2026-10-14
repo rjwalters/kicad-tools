@@ -4066,6 +4066,56 @@ def _write_drc_constraint_sidecars(
         print(f"  DRC-constraint sidecars: {', '.join(str(p) for p in written)}")
 
 
+#: Issue #6425: internal ``DRCChecker`` rule id -> the kicad-cli violation
+#: type describing the same defect.  Only checks whose two reports locate the
+#: same item at the same point (a via's centre) are listed; clearance checks
+#: place their marker differently in each engine and are left alone.
+CROSS_ENGINE_TYPE_MAP: dict[str, str] = {
+    "dimension_via_drill": "drill_out_of_range",
+    "dimension_via_diameter": "via_diameter",
+    "dimension_annular_ring": "annular_width",
+}
+
+#: Issue #6425: how far apart (mm) the two engines' positions of one
+#: duplicated violation may be.
+CROSS_ENGINE_MATCH_TOLERANCE_MM = 0.01
+
+
+def count_cross_engine_duplicates(
+    internal_errors: "Sequence[Any]",
+    native_errors: "Sequence[Any]",
+    tolerance: float = CROSS_ENGINE_MATCH_TOLERANCE_MM,
+) -> int:
+    """How many violations the internal engine and kicad-cli BOTH report (Issue #6425).
+
+    An internal error (``rule_id``, ``location``) and a kicad-cli error
+    (``type_str``, located items) are one defect when
+    :data:`CROSS_ENGINE_TYPE_MAP` pairs their types and one of the kicad-cli
+    positions is within ``tolerance`` mm of the internal location.  Matching
+    is one-to-one, so each duplicated pair is subtracted once and every
+    unmatched violation of either engine still counts.
+    """
+    unmatched = list(native_errors)
+    duplicates = 0
+    for v in internal_errors:
+        want = CROSS_ENGINE_TYPE_MAP.get(getattr(v, "rule_id", ""))
+        loc = getattr(v, "location", None)
+        if want is None or loc is None:
+            continue
+        lx, ly = loc
+        for i, n in enumerate(unmatched):
+            if n.type_str != want:
+                continue
+            if any(
+                math.hypot(p.x_mm - lx, p.y_mm - ly) <= tolerance
+                for p in getattr(n, "locations", ())
+            ):
+                del unmatched[i]
+                duplicates += 1
+                break
+    return duplicates
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
@@ -4312,10 +4362,14 @@ def run_post_route_drc(
         else:
             geo = run_geometric_drc(output_path)
 
+        duplicates = 0
         if geo.ran and geo.error_count > 0:
             # Native DRC found blocking geometric violations -- fold them into
-            # the verdict so PASS requires BOTH engines clean.
-            error_count += geo.error_count
+            # the verdict so PASS requires BOTH engines clean.  Issue #6425:
+            # a violation BOTH engines report (the same undersized via seen as
+            # ``dimension_via_drill`` and ``drill_out_of_range``) counts once.
+            duplicates = count_cross_engine_duplicates(results.errors, geo.error_violations)
+            error_count += geo.error_count - duplicates
 
         # Issue #4178: under --strict-drc, "kicad-cli DRC did not actually
         # run" is a HARD FAILURE, not a soft NOTE.  A clean internal verdict
@@ -4369,6 +4423,11 @@ def run_post_route_drc(
                     print("           PASS withheld -- native KiCad DRC is authoritative.")
                 if error_count > 0:
                     print(f"  Errors:   {error_count}")
+                    if duplicates:
+                        print(
+                            f"    ({duplicates} reported by both the internal engine and "
+                            "kicad-cli, counted once)"
+                        )
                 if warning_count > 0:
                     print(f"  Warnings: {warning_count}")
 
@@ -7625,6 +7684,9 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             # Issue #6428: a round may not open a link on any net; blame the
             # closer copper that cut the pour whose link count rose.
             cut_attributor=closer.cut_culprits,
+            # Issue #6425: a closer via at the declared size is not a DRC
+            # regression merely for being below the project's via floors.
+            declared_via=(closer.via_size, closer.via_drill),
         )
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)

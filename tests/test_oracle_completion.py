@@ -1027,3 +1027,113 @@ class TestSiteWithdrawal:
         assert all(s == {"U2.35": [(152.425, 87.25)]} for s in seen[1:])
         assert res.rounds[0].banned == ("site:pad:GND:U2.35@152.4250,87.2500",)
         assert "site:pad:GND:U2.35@152.4250,87.2500" in res.rounds[1].banned
+
+
+# ---------------------------------------------------------------------------
+# Issue #6425: declared-size closer vias below the project via floors
+# ---------------------------------------------------------------------------
+
+WELD_AT = (20.0, 5.0)
+DECLARED = (0.30, 0.15)
+
+
+def _via_error(type_str: str, at: tuple[float, float] = WELD_AT) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.UNKNOWN,
+        type_str=type_str,
+        severity=Severity.ERROR,
+        message=type_str,
+        locations=[Location(*at)],
+        items=["Via [GND] on F.Cu - B.Cu"],
+    )
+
+
+def _dimension_errors(at: tuple[float, float] = WELD_AT) -> list[DRCViolation]:
+    return [_via_error(t, at) for t in ("drill_out_of_range", "via_diameter", "annular_width")]
+
+
+class TestDeclaredViaExemption:
+    """The gate waives ONLY the closer's own declared-size via dimensions."""
+
+    def _run(
+        self,
+        tmp_path: Path,
+        new_errors: list[DRCViolation],
+        *,
+        via_geometry: tuple[float, float] = DECLARED,
+        declared: tuple[float, float] | None = DECLARED,
+    ):
+        b = FakeBoard(tmp_path, 1)
+        calls = {"n": 0}
+
+        def oracle(path):
+            links, errors = b.state()
+            geo = _geo(links, errors)
+            geo.error_violations = list(new_errors) if errors else []
+            return geo
+
+        def closer(path, links, banned):
+            calls["n"] += 1
+            if "pad:GND:C1.1" in banned:
+                return ClosureAttempt()  # nothing else to try
+            path.write_text(f"0,{len(new_errors)}")
+            x, y = WELD_AT
+            return ClosureAttempt(
+                applied=1,
+                footprints={"pad:GND:C1.1": [(x, y, x, y, via_geometry[0] / 2)]},
+                vias=[(x, y, *via_geometry)],
+            )
+
+        res = run_oracle_completion(
+            b.path, oracle=oracle, closer=closer, nets={"GND"}, declared_via=declared
+        )
+        return res, b, calls["n"]
+
+    def test_only_declared_via_dimension_errors_are_kept(self, tmp_path):
+        res, b, calls = self._run(tmp_path, _dimension_errors())
+        assert res.stop_reason == STOP_CONVERGED
+        assert calls == 1 and res.rounds[0].banned == ()
+        # The board keeps the weld; the dimension errors stay on it for the
+        # route-time verdict to report.
+        assert b.state() == (0, 3) and res.rounds[0].errors_after == 3
+
+    def test_an_added_clearance_error_still_bans_the_weld(self, tmp_path):
+        errors = [*_dimension_errors(), _via_error("clearance")]
+        res, b, calls = self._run(tmp_path, errors)
+        assert res.stop_reason == STOP_NO_CLOSER
+        assert "pad:GND:C1.1" in res.rounds[0].banned and calls == 2
+        assert b.state() == (1, 0)  # restored byte-for-byte
+
+    def test_dimension_errors_on_a_non_declared_via_are_banned(self, tmp_path):
+        res, b, _ = self._run(tmp_path, _dimension_errors(), via_geometry=(0.25, 0.10))
+        assert "pad:GND:C1.1" in res.rounds[0].banned and b.state() == (1, 0)
+
+    def test_dimension_errors_away_from_the_attempts_vias_are_banned(self, tmp_path):
+        # Same types, but on copper this attempt did not place at that spot.
+        res, b, _ = self._run(tmp_path, _dimension_errors(at=(20.3, 5.0)))
+        assert "pad:GND:C1.1" in res.rounds[0].banned and b.state() == (1, 0)
+
+    def test_no_declared_via_exempts_nothing(self, tmp_path):
+        res, b, _ = self._run(tmp_path, _dimension_errors(), declared=None)
+        assert "pad:GND:C1.1" in res.rounds[0].banned and b.state() == (1, 0)
+
+    def test_predicate_and_gated_count(self):
+        from kicad_tools.router.oracle_completion import (
+            declared_via_exemption,
+            gated_error_count,
+        )
+
+        attempt = ClosureAttempt(vias=[(*WELD_AT, *DECLARED)])
+        exempt = declared_via_exemption(attempt, DECLARED)
+        assert all(exempt(v) for v in _dimension_errors())
+        assert not exempt(_via_error("clearance"))
+        assert not exempt(_via_error("hole_clearance"))
+        assert not declared_via_exemption(attempt, (0.6, 0.3))(_dimension_errors()[0])
+
+        # An exempt-looking error already in ``before`` is never waived again:
+        # it is part of the baseline the gate compares against.
+        old = _dimension_errors()[:1]
+        before = GeometricDRCResult(ran=True, error_count=1, error_violations=old)
+        after = GeometricDRCResult(ran=True, error_count=3, error_violations=_dimension_errors())
+        assert gated_error_count(before, after, exempt) == 1
+        assert gated_error_count(before, after, None) == 3

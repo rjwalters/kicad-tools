@@ -35,7 +35,7 @@ def test_opt_in_and_resources_and_artifact_retention():
     # The fork-routing predicate and its split 45/90 budget (#5747) are gone
     # with the self-hosted branch they selected.
     assert JOB["runs-on"] == "ubuntu-latest"
-    assert JOB["timeout-minutes"] == 60
+    assert JOB["timeout-minutes"] == 75
     # #5682: the KiCad image is pinned by digest at the workflow level.
     # container.image cannot reference the env context (GitHub allows only
     # github/inputs/matrix/needs/strategy/vars there), so the kicad_pin

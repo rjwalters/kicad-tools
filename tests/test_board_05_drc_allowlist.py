@@ -89,10 +89,10 @@ def routed_pcb_path() -> Path:
 #
 # Issue #6390 declared the router's own net classes in the routed sidecars,
 # exposing 27 ``netclass_clearance_copper`` violations of those classes in the
-# committed copper (Power / HighCurrentSignal 0.2 mm, Digital 0.15 mm).  They
-# are tracked -- with nets, locations and gaps -- in #6395.  Restore ``None``
-# (strict zero) when that lands.
-BOARD_05_EXPECTED_TOLERANCE: int | None = 27
+# committed copper.  Issue #6395 repaired that copper (smaller fan-out vias,
+# shifted stitch vias, a VM run moved off the C8-1 pad), so the entry is gone
+# and the strict-zero ``None`` is restored.
+BOARD_05_EXPECTED_TOLERANCE: int | None = None
 
 
 @pytest.fixture(scope="module")
