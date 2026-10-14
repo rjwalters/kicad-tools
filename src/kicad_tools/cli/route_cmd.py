@@ -6496,7 +6496,7 @@ def _print_power_stall_suggestions(
     print("Suggestions:")
     print(f'  1. Add copper zones for power nets:  --power-nets "{pour_arg}"')
     print("  2. Increase layer count:              --layers 4 (or --max-layers 6)")
-    print(f"  3. Manual routing in KiCad for the {len(stalled_nets)} remaining net(s)")
+    print(f"  3. Diagnose the {len(stalled_nets)} remaining net(s):       kct net-status --why")
     print()
 
 
@@ -19625,7 +19625,7 @@ def _route_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "Export failed nets (fully-unrouted and partial) to a file for "
-            "triage or manual completion in KiCad. A '.json' path emits "
+            "triage and automation (e.g. feed to kct net-status --why). A '.json' path emits "
             "structured per-net detail (status, connected/total pads, and the "
             "stranded pad names for partial nets); any other extension emits "
             "one net name per line. The file is always written when routing "
@@ -23345,7 +23345,7 @@ def _run_main_impl(args, parser, argv) -> int:
             # source board (see _save_partial_results), not a frozen pre-pass
             # snapshot. Emit exactly one canonical-output line.
             print(f"  Canonical output: {output_path} (full route + optimize + DRC)")
-            print("  Open in KiCad to complete remaining nets manually")
+            print("  Next: kct net-status --why (diagnose stuck nets), then re-run with --timeout / --layers")
 
     # Export failed nets to file if requested
     if getattr(args, "export_failed_nets", None) and not all_nets_routed:

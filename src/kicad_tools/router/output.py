@@ -520,7 +520,7 @@ def show_routing_summary(
             print(f"  kct route{pcb_arg} --strategy monte-carlo --mc-trials 20")
 
         # Export failed nets suggestion
-        print("\nTip: Export failed net names for manual routing in KiCad:")
+        print("\nTip: Export failed net names for triage, then diagnose why each is stuck (kct net-status --why):")
         print(f"  kct route{pcb_arg} --export-failed-nets failed_nets.txt")
 
     print(f"\n{'=' * 60}")
@@ -846,7 +846,7 @@ def get_routing_diagnostics_json(
         suggestions.append(
             {
                 "category": "EXPORT",
-                "description": "Export failed net names for manual routing in KiCad",
+                "description": "Export failed net names for triage, then diagnose with kct net-status --why",
                 "fix": "--export-failed-nets failed_nets.txt",
             }
         )

@@ -4917,7 +4917,7 @@ def _add_route_parser(subparsers) -> None:
         metavar="PATH",
         help=(
             "Export failed nets (fully-unrouted and partial) to a file for "
-            "triage or manual completion in KiCad. A '.json' path emits "
+            "triage and automation (e.g. feed to kct net-status --why). A '.json' path emits "
             "structured per-net detail (status, connected/total pads, and the "
             "stranded pad names for partial nets); any other extension emits "
             "one net name per line. The file is always written when routing "
