@@ -74,7 +74,8 @@ probe is also capped at ``RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S`` (120 s,
 ``router/core.py``).  At high caps a probe can reach it -- locally, under
 heavy load, probes ran to 120 s at 200k after #6439 -- and then the counts
 depend on runner speed again.  At the 4L cap below no probe gets near it:
-on CI the whole rescue stage of any one attempt took at most 75 s.
+in three CI runs the whole rescue stage of any one attempt took at most
+82 s, and no single probe more than 42 s.
 
 Runtime and cap (issue #6478; Slow Tests on a 4-vCPU hosted runner, other
 slow tests on the remaining xdist workers).  The run forces the
@@ -83,16 +84,17 @@ attempts.  PR #6439 added the authored-clearance gate to every python A*
 step, and the 4L run at 200k expansions per net -- already 35-55 min
 before that -- then went past its own 4200 s limit on every run.  Measured
 on CI, 4L ``--auto-mfr-tier`` wall time by cap: 5k 593 s, 10k 776 s, 20k
-913 s, 30k 977 s; 50k timed out at 1100 s.  The chain (escalation on the
+913 s, 30k 977 s; 50k timed out at 1100 s.  Two more runs at 5k took
+623 s and 342 s, with identical counts.  The chain (escalation on the
 missed-rescue trigger, tier1's escape pass placing 1 in-pad via on U2,
 jlcpcb's placing none) held at every cap from 5k to 30k, so the cap is
 the smallest measured one, 5k, which leaves the most headroom under the
 1100 s limit.  The 2L class needs only the base tier to fail; at 50k it
-takes ~385 s for its single attempt.
+took 203-387 s for its single attempt.
 
 Count assertion (issue #6478).  At every cap measured on CI after #6439
 the best jlcpcb-tier1 attempt routed the same number of nets as the best
-jlcpcb attempt: 3 vs 3 at 5k, 4 vs 4 at 10k, 20k and 30k.  The four CI
+jlcpcb attempt: 3 vs 3 at 5k (three runs), 4 vs 4 at 10k, 20k and 30k.  The four CI
 runs that finished at 200k between #6398 and #6439 were 7 vs 7.  The
 strict margin (6/9 vs 7/9 at 200k, measured for PR #6228) is gone, so the
 test asserts ``tier1 >= jlcpcb``: tier1 falling below jlcpcb still fails,
@@ -184,7 +186,7 @@ def _split_by_tier(stdout: str) -> dict[str, str]:
 
 
 # Per-net A* node-expansion caps for the deterministic runs.  4L: the
-# smallest cap measured on CI that keeps the escalation chain (593 s; issue
+# smallest cap measured on CI that keeps the escalation chain (342-623 s; issue
 # #6478, see the module docstring).  2L: the run only needs the base tier to
 # fail.
 _ESCALATION_4L_PER_NET_ITERATIONS = 5_000

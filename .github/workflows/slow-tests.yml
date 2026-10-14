@@ -173,7 +173,7 @@ jobs:
         # --durations=25 (Issue #6478): a class-scoped fixture's cost shows
         # as the "setup" line of its first test, so the next fixture that
         # creeps toward --timeout=1200 is visible in a green run's log.  The
-        # board-04 4L --auto-mfr-tier fixture took 593 s at its 5k cap (it
+        # board-04 4L --auto-mfr-tier fixture took 342-623 s at its 5k cap (it
         # was past 4200 s at 200k after #6439), well clear of the Sunday
         # board-05 case on another worker.
         env:
