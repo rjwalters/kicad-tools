@@ -50,6 +50,7 @@ from kicad_tools.cli.route_cmd import (
     _capture_preserved_routes,
     _finalize_routes,
     _serialize_preserved_routes,
+    _stage_input_for_auto_pour,
     _write_routed_pcb,
 )
 from kicad_tools.cli.route_cmd import main as route_main
@@ -555,6 +556,24 @@ class TestCatastrophicCopperLossGuard:
         )
         _write_routed_pcb(in_path, out_path, route_sexp, guard_copper_loss=True)
         assert out_path.read_text().count("(segment") == 151
+
+    def test_guard_compares_against_input_not_own_checkpoint(self, tmp_path):
+        """Issue #6351: a checkpoint this run staged onto output_path is not
+        'existing copper' -- the guard uses the input's copper count."""
+        in_path = tmp_path / "in.kicad_pcb"
+        in_path.write_text(self._board_with_segments(0))
+        out_path = tmp_path / "out.kicad_pcb"
+
+        staged = _stage_input_for_auto_pour(in_path, out_path)
+        seg = '(segment (start 0 0) (end 1 1) (width 0.2) (layer "F.Cu") (net 1))'
+        checkpoint = "\n  ".join(seg for _ in range(231))
+        _write_routed_pcb(staged, out_path, checkpoint, is_checkpoint=True)
+        assert out_path.read_text().count("(segment") == 231
+
+        # Terminal optimised save: 231 -> 6 must not trip the guard.
+        final = "\n  ".join(seg for _ in range(6))
+        _write_routed_pcb(staged, out_path, final, guard_copper_loss=True)
+        assert out_path.exists()
 
     def test_guard_ignores_trivial_input(self, tmp_path):
         """A trivial input (<=100 segments) never trips the guard."""
