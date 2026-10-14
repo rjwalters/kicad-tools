@@ -120,3 +120,112 @@ def physical_copper_components(
     for i, j in zip(left[keep].tolist(), right[keep].tolist(), strict=True):
         uf.union(i, j)
     return [uf.find(i) for i in range(len(pads))]
+
+
+def _via_span_mask(via: Via) -> int:
+    """Bitmask of every copper layer a via's barrel physically reaches.
+
+    Uses :attr:`Via.drilled_layers` (issue #6485) when present: an ordinary
+    via is drilled ``F.Cu``-``B.Cu`` whatever logical pair it records, so its
+    annular ring exists on every layer in between.  Reading the wider span
+    can only find *more* bonded layers, never fewer.
+    """
+    first, last = getattr(via, "drilled_layers", via.layers)
+    mask = 0
+    for layer in copper_layers_in_span(first, last):
+        mask |= 1 << layer.value
+    return mask
+
+
+def _net_copper_shapes(
+    pads: list[Pad], segments: list[Segment], vias: list[Via]
+) -> tuple[list, list[int]]:
+    """Contact shapes and layer masks for pads, then segments, then vias."""
+    all_layers_mask = 0
+    for layer in Layer:
+        all_layers_mask |= 1 << layer.value
+    shapes: list = [_contact_outline(pad) for pad in pads]
+    masks = [all_layers_mask if pad.through_hole else 1 << pad.layer.value for pad in pads]
+    for seg in segments:
+        shapes.append(
+            LineString([(seg.x1, seg.y1), (seg.x2, seg.y2)]).buffer(max(seg.width, 1e-6) / 2)
+        )
+        masks.append(1 << seg.layer.value)
+    for via in vias:
+        shapes.append(Point(via.x, via.y).buffer(max(via.diameter, 1e-6) / 2))
+        masks.append(_via_span_mask(via))
+    return shapes, masks
+
+
+def copper_component_count(pads: list[Pad], segments: list[Segment], vias: list[Via]) -> int:
+    """Number of layer-aware copper components over one net's copper (#6596).
+
+    Every pad, segment and via is a node; two nodes join when their copper
+    intersects on a shared layer (the :func:`physical_copper_components`
+    contact model).  Unlike that function this counts *all* components,
+    including islands without a pad, so a cleanup step can prove that
+    deleting a via split nothing: the count after must not exceed the count
+    before.
+    """
+    shapes, masks = _net_copper_shapes(pads, segments, vias)
+    if not shapes:
+        return 0
+    uf = _UnionFind()
+    terminal_nodes: dict[tuple[str, str], int] = {}
+    for i, pad in enumerate(pads):
+        if pad.component_key and pad.pin:
+            previous = terminal_nodes.setdefault(pad.key, i)
+            uf.union(previous, i)
+    geoms = np.array(shapes, dtype=object)
+    left, right = STRtree(geoms).query(geoms, predicate="intersects")
+    mask_arr = np.array(masks, dtype=np.int64)
+    keep = (left < right) & ((mask_arr[left] & mask_arr[right]) != 0)
+    for i, j in zip(left[keep].tolist(), right[keep].tolist(), strict=True):
+        uf.union(i, j)
+    return len({uf.find(i) for i in range(len(shapes))})
+
+
+def single_layer_via_indices(
+    pads: list[Pad], segments: list[Segment], vias: list[Via]
+) -> list[int]:
+    """Indices into ``vias`` whose same-net copper lies on fewer than two layers.
+
+    Issue #6596: such a via is a redundant junction -- KiCad reports it as
+    ``via_dangling`` ("connected on only one layer").  A layer counts as
+    bonded when a same-net segment or another via overlaps the via's pad on
+    a layer both span.  A via overlapping any same-net pad is never returned:
+    the pad test uses the pad's circumscribed circle (an upper bound on its
+    copper), so an in-pad or pad-adjacent via is always left alone.
+
+    The caller supplies one net's copper only and must still prove removal
+    keeps the net connected (:func:`copper_component_count`); this function
+    only nominates candidates.
+    """
+    if not vias:
+        return []
+    masks = [1 << s.layer.value for s in segments] + [_via_span_mask(v) for v in vias]
+    shapes: list = [
+        LineString([(s.x1, s.y1), (s.x2, s.y2)]).buffer(max(s.width, 1e-6) / 2) for s in segments
+    ]
+    via_shapes = [Point(v.x, v.y).buffer(max(v.diameter, 1e-6) / 2) for v in vias]
+    shapes.extend(via_shapes)
+    first_via = len(segments)
+    pad_bounds = [
+        Point(p.x, p.y).buffer(max(float(np.hypot(p.width, p.height)) / 2, 1e-6)) for p in pads
+    ]
+    pad_tree = STRtree(np.array(pad_bounds, dtype=object)) if pad_bounds else None
+    tree = STRtree(np.array(shapes, dtype=object))
+
+    result: list[int] = []
+    for k, via_shape in enumerate(via_shapes):
+        if pad_tree is not None and len(pad_tree.query(via_shape, predicate="intersects")):
+            continue
+        own = first_via + k
+        own_mask = masks[own]
+        bonded = 0
+        for j in tree.query(via_shape, predicate="intersects").tolist():
+            if j != own:
+                bonded |= masks[j] & own_mask
+        if bonded.bit_count() < 2:
+            result.append(k)
+    return result

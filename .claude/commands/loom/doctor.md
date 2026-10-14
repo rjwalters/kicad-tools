@@ -67,23 +67,31 @@ outside, so the only defense is your own discipline:
 
 **Never run `gh pr checkout <N>` in the orchestrator's main worktree.** Doing so switches the orchestrator's `HEAD` to the PR branch and can leave behind untracked files from the PR when you switch back — see issue #3358 for a concrete incident.
 
-Pick the right worktree path before any `gh pr checkout` mutation:
+### Occupied worktree: yield, never reset (#9401)
 
-- **Loom-issue PRs** — branch matches the strict pattern `^feature/issue-([0-9]+)$`:
-  ```bash
-  ./.loom/scripts/worktree.sh <ISSUE_NUMBER>
-  cd .loom/worktrees/issue-<ISSUE_NUMBER>
-  gh pr checkout <PR_NUMBER>   # safe: already inside the issue worktree
-  ```
+After `lease pr claim` succeeds and **before** `worktree.sh`/`pr-worktree.sh`,
+`gh pr checkout`, a snapshot or any reset: if the PR's worktree already exists,
+look for a live process whose cwd is inside it and is not your own session (an
+in-session Doctor may hold it with no lease). Any line printed = occupied:
 
-- **External-fork or ad-hoc PRs** — any other branch shape (e.g., `fix/foo-bar`, `release-1`, `jperla:fix/claude-code-2.1-compat`):
-  ```bash
-  ./.loom/scripts/pr-worktree.sh <PR_NUMBER>
-  cd .loom/worktrees/pr-<PR_NUMBER>
-  # pr-worktree.sh already ran `gh pr checkout` inside the worktree
-  ```
+```bash
+WT="$(cd .loom/worktrees/<issue-N|pr-N> 2>/dev/null && pwd -P)"; S="${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"
+for p in $([ -n "$WT" ] && pgrep -u "$(id -u)"); do
+  c=$(readlink "/proc/$p/cwd" 2>/dev/null || lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
+  case "$c" in "$WT"|"$WT"/*) q=$p; while [ "${q:-1}" -gt 1 ] && [ "$q" != "$S" ]; do q=$(ps -o ppid= -p "$q" | tr -d ' '); done
+    [ "$q" = "$S" ] || ps -o pid=,command= -p "$p";; esac
+done
+```
 
-The branch-name heuristic to choose between them:
+**Occupied → yield**: `lease pr release`, drop any `loom:treating` you added,
+post `Doctor yielding: live process in <WT> (pid <pid>: <command>) with no PR
+lease; worktree left untouched.` and stop — no snapshot, reset or checkout.
+**Cannot probe** (no `pgrep`, or neither `/proc` nor `lsof`): treat a dirty
+worktree as occupied; a clean one may proceed.
+
+Pick the worktree by branch shape before any `gh pr checkout` mutation: strict
+`^feature/issue-([0-9]+)$` gets the issue worktree; any other shape (external
+fork, `fix/foo-bar`, `release-1`) gets `pr-worktree.sh`, which runs `gh pr checkout` itself:
 
 ```bash
 PR_BRANCH=$(gh pr view <PR_NUMBER> --json headRefName --jq '.headRefName')
@@ -131,13 +139,9 @@ worktree from an earlier phase of the same sweep (no fresh `worktree.sh` call in
 between) does not get that warning re-run. Verify explicitly, immediately before
 making any edits — **pin the worktree path once into `WORKTREE_ABS` and use
 `git -C "$WORKTREE_ABS" ...` for every check, never a bare `git status`/`git
-rev-parse` that relies on a `cd` still being in effect.** A `cd` earlier in the
-same shell session persists for every later command in that session, including
-a command you intended for a *different* directory (e.g. the main checkout) —
-that silent redirection is exactly what made a prior Judge falsely report both
-a worktree and the main checkout clean from a single `cd`'d `git status`
-(#6373). `-C` makes the target directory explicit in the command itself, so it
-can't be hijacked by a stale `cd`:
+rev-parse` relying on an earlier `cd`**, which silently redirects later commands
+meant for another directory (#6373: a Judge reported a worktree and the main
+checkout clean from one `cd`'d `git status`):
 
 ```bash
 WORKTREE_ABS="$(cd .loom/worktrees/issue-<ISSUE_NUM> && pwd)"
@@ -168,21 +172,17 @@ the same session.
 ### Never use bare `git stash` for ad-hoc WIP (#4821)
 
 `refs/stash` is **one stack shared across every linked worktree of the
-repo** — not per-worktree. If you `git stash` / `git stash pop` /
-`git stash drop` to temporarily shelve WIP while fixing a PR, a concurrent
-Builder or Doctor in a *different* worktree doing the same thing can pop or
-drop **your** stash entry (or you can pop theirs), silently swapping or
-discarding uncommitted work. This happened in production (kicad-tools PRs
-#4524/#4526).
+repo**, so a concurrent Builder or Doctor in another worktree can pop or drop
+**your** stash entry (or you theirs), silently swapping or discarding
+uncommitted work (kicad-tools PRs #4524/#4526).
 
 **Use `./.loom/scripts/worktree.sh snapshot <issue-number>` instead** — it
 writes your WIP as a patch file under
 `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch`, scoped to your own
 worktree, so there is no shared stack to collide on.
 
-**For a "clean baseline vs. my diff" comparison** — temporarily clearing your
-fix to re-run a lint/test baseline, then restoring it — `snapshot` is *not*
-enough (it captures a patch but does not reset the working tree). Use
+**For a "clean baseline vs. my diff" comparison** `snapshot` is *not* enough
+(it does not reset the working tree). Use
 `./.loom/scripts/worktree.sh stash-push <issue-number>`, run the baseline
 check, then `./.loom/scripts/worktree.sh stash-pop <issue-number>` (#5217).
 It anchors your WIP to a **per-issue** ref (`refs/loom/stash-baseline/issue-<N>`),
@@ -190,12 +190,9 @@ never `refs/stash`, so no concurrent builder's stash can land between your
 push and pop — and, unlike raw `git stash pop`, it does not trip the
 `stash-scope` ask that would stall a headless sweep.
 
-**This is enforced, not merely advised (#5754).** Inside a managed worktree,
-while a second managed worktree is active, a raw stash *create* — `git stash`,
-`git stash push`, `git stash save` — is **denied** by the guard, with the exact
-`snapshot` / `stash-push` / `stash-pop` command (issue number already filled
-in) in the deny message. The deny is lossless: nothing ran and your working
-tree is untouched, so just rerun with the command it hands you.
+**Enforced (#5754):** with a second managed worktree active, a raw stash
+*create* (`git stash`, `push`, `save`) is **denied** by the guard; the deny is
+lossless and names the exact replacement command, so rerun with it.
 `git stash pop` / `drop` / `clear` stay an *ask*, not a deny, on purpose —
 once WIP is on `refs/stash`, popping it is the only way to get it back.
 
@@ -643,7 +640,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
    ```
 3. **Check PR details**: `gh pr view <number>` - look for "Changes requested" reviews or conflicts
 4. **Read feedback**: Understand what the reviewer is asking for
-5. **Check out PR branch in a dedicated worktree** (see "PR Branch Isolation" above): use `./.loom/scripts/worktree.sh <ISSUE_NUM>` for `feature/issue-<N>` branches or `./.loom/scripts/pr-worktree.sh <PR_NUMBER>` for external/ad-hoc branches, then `cd` into the worktree before running `gh pr checkout`. Then "Verify the pin" (below), before any edit.
+5. **Check out PR branch in a dedicated worktree** ("PR Branch Isolation" above; its "Occupied worktree" check first): use `./.loom/scripts/worktree.sh <ISSUE_NUM>` for `feature/issue-<N>` branches or `./.loom/scripts/pr-worktree.sh <PR_NUMBER>` for external/ad-hoc branches, then `cd` into the worktree before running `gh pr checkout`. Then "Verify the pin" (below), before any edit.
 6. **CRITICAL: Assess ALL CI failures FIRST** (see "CI Assessment" section below):
    - Run `forge wait-checks <number> --timeout 20` to identify ALL failing checks
    - Fetch logs for each failing check

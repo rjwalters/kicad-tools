@@ -210,6 +210,8 @@ one tick are not counted as multiple ticks.
 
 ## Record volume
 
+> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, item roles leave the fixed role-runner cadences, so this table no longer holds for them. Work-finder rows gain the step, the item-draw weight terms and `age_source`. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+
 Derived from the shipped default cadences, **not measured on a live fleet**:
 
 | Source | Default cadence | Records/day per workspace root |
