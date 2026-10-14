@@ -32,7 +32,7 @@ Design notes:
 from __future__ import annotations
 
 import math
-from typing import Protocol
+from typing import Any, Protocol
 
 from kicad_tools.core.geometry import point_to_segment_distance
 
@@ -523,8 +523,14 @@ def segment_via_deficit(
         seg.width/2 (+ trace_clearance)``.
     """
     # Issue #6099: physical stack order, not enum value.
-    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+    # Issue #6502: the DRILLED span.  A router ``Via`` that is not micro is a
+    # through barrel whatever logical pair its ``layers`` records; duck-typed
+    # vias without ``drilled_layers`` keep their ``layers`` as the barrel.
+    drilled: Any = getattr(via, "drilled_layers", None)
+    if drilled is None:
+        drilled = via.layers
+    v_lo = min(drilled[0].stack_order, drilled[1].stack_order)
+    v_hi = max(drilled[0].stack_order, drilled[1].stack_order)
     if not (v_lo <= seg.layer.stack_order <= v_hi):
         return -math.inf  # Via doesn't reach the segment's layer.
     dist = point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
@@ -554,8 +560,9 @@ def segment_clears_foreign_via(
     predicate without importing :mod:`escape`.
 
     Layer-awareness: the segment occupies one copper layer; the via
-    spans a contiguous layer range ``via.layers[0]..[1]``.  A segment
-    must clear a via only when the via spans the segment's layer.
+    spans a contiguous layer range, its drilled span
+    (``via.drilled_layers``, issue #6502).  A segment must clear a via only
+    when the via spans the segment's layer.
 
     Same-net filtering is the CALLER's responsibility (mirrors the
     ``point_clear_of_copper`` boundary convention; the caller has more
@@ -647,8 +654,9 @@ def via_clears_foreign_segment(
     fix MUST be on the via side -- the VIA's net is the one returned
     to the rip-up loop, NOT the segment's net.
 
-    Layer-awareness: the via spans a contiguous layer range
-    ``via.layers[0]..[1]``; the segment occupies one copper layer.  A
+    Layer-awareness: the via spans a contiguous layer range, its drilled
+    span (``via.drilled_layers``, issue #6502); the segment occupies one
+    copper layer.  A
     via must clear a segment only when the via spans the segment's
     layer.
 

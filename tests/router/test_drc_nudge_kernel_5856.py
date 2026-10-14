@@ -75,7 +75,11 @@ def _via(
     layers: tuple[Layer, Layer] = (Layer.F_CU, Layer.B_CU),
     net: int = 20,
 ) -> Via:
-    return Via(x=x, y=y, drill=0.3, diameter=0.6, layers=layers, net=net)
+    # Issue #6502: only a micro via keeps a partial barrel; a standard via is
+    # drilled through whatever ``layers`` records.  A partial pair here is a
+    # blind barrel, so model it as one.
+    is_micro = {layers[0], layers[1]} != {Layer.F_CU, Layer.B_CU}
+    return Via(x=x, y=y, drill=0.3, diameter=0.6, layers=layers, net=net, is_micro=is_micro)
 
 
 def _router_with_via(via: Via) -> _StubRouter:

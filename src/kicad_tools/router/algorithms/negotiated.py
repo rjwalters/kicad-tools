@@ -1615,7 +1615,10 @@ class NegotiatedRouter:
         routable = self.grid.get_routable_indices()
         for via in route.vias:
             gx, gy = self.grid.world_to_grid(via.x, via.y)
-            first, last = sorted(self.grid.layer_to_index(layer.value) for layer in via.layers)
+            # Issue #6502: the drilled barrel, not the logical transition.
+            first, last = sorted(
+                self.grid.layer_to_index(layer.value) for layer in via.drilled_layers
+            )
             for li in routable:
                 if first <= li <= last:
                     cell_set.add((gx, gy, li))
@@ -1953,8 +1956,10 @@ class NegotiatedRouter:
             for route in routes:
                 for via in route.vias:
                     total_vias += 1
-                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
                     for layer_val in range(v_lo, v_hi + 1):
                         vias_on_layer.setdefault(layer_val, []).append((net_id, via))
 
@@ -1970,8 +1975,10 @@ class NegotiatedRouter:
             for route in extra_routes:
                 for via in route.vias:
                     total_vias += 1
-                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
                     for layer_val in range(v_lo, v_hi + 1):
                         vias_on_layer.setdefault(layer_val, []).append((route.net, via))
 
@@ -2204,8 +2211,10 @@ class NegotiatedRouter:
                     # Iterate every layer the via spans -- a through-hole
                     # via on a 4-layer board can clip segments on any of
                     # the four layers it crosses.
-                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
                     via_radius = via.diameter / 2
 
                     for layer_val in range(v_lo, v_hi + 1):

@@ -364,7 +364,9 @@ def _via_spans_segment_layer(via: Via, seg: Segment) -> bool:
     and the same gate ``Grid3D::trace_stored_vias_clear`` and the coupled
     search's ``rail_clear`` apply).
     """
-    return copper_span_contains(via.layers[0], via.layers[1], seg.layer)
+    # Issue #6502: the drilled barrel, not the logical layer transition.
+    drilled_start, drilled_end = via.drilled_layers
+    return copper_span_contains(drilled_start, drilled_end, seg.layer)
 
 
 def _post_nudge_introduces_foreign_via_violation(
@@ -1997,7 +1999,8 @@ def _via_pad_copper(via: Via, router: Autorouter) -> list[tuple[int, set[Layer],
             line = LineString([(seg.x1, seg.y1), (seg.x2, seg.y2)])
             copper.append((id(seg), {seg.layer}, line, seg.width / 2))
         for other in route.vias:
-            layers = copper_layers_in_span(other.layers[0], other.layers[1])
+            # Issue #6502: the drilled barrel is copper on every layer it spans.
+            layers = copper_layers_in_span(*other.drilled_layers)
             copper.append((id(other), layers, Point(other.x, other.y), other.diameter / 2))
     for pad in (getattr(router, "pads", None) or {}).values():
         if pad.net != via.net:
