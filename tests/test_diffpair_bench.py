@@ -304,6 +304,15 @@ def test_limit_descriptors_do_not_change_the_pair_digest():
     assert bench.pair_digest([pair]) == bench.pair_digest([described])
 
 
+def test_differing_continuity_and_skew_limits_hash_equal():
+    """Issue #6638: same copper, different continuity/skew limits -> same digest."""
+    base = {"pair": "X", "skew_mm": 0.1, "coupled_mm": 12.0}
+    a = dict(base, continuity_threshold_pct=25, skew_tolerance_mm=0.5)
+    b = dict(base, continuity_threshold_pct=70, skew_tolerance_mm=2.5)
+    assert bench.pair_digest([a]) == bench.pair_digest([b])
+    assert bench.pair_digest([a]) != bench.pair_digest([dict(a, skew_mm=0.2)])
+
+
 def test_resolver_ignores_a_collapsed_class_key():
     """Even with a poisoned class-name key, the net-name key decides."""
     from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
