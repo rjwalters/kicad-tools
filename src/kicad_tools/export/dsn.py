@@ -17,17 +17,31 @@ Usage::
 
     exporter = KiCadToDSNExporter("board.kicad_pcb")
     exporter.export("board.dsn")
+    for line in exporter.omissions:
+        print("not exported:", line)
+
+Rules come from the board's own files (issue #6594): net classes and their
+assignments from the sibling ``.kicad_pro`` (through
+:class:`~kicad_tools.router.board_clearance_rules.BoardClearanceRules`),
+board minima from its ``design_settings.rules``, and the unconditional
+clearance / track-width / via-diameter floors of the sibling ``.kicad_dru``.
+Copper pours become ``(plane ...)`` and rule areas ``(keepout ...)``,
+``(wire_keepout ...)`` or ``(via_keepout ...)``.  Anything Specctra cannot
+express is listed in :attr:`KiCadToDSNExporter.omissions` rather than
+silently dropped or approximated.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from ..schema.pcb import _is_footprint_tag
-from ..sexp.parser import SExp, parse_file
+from ..schema.pcb import Zone, _is_footprint_tag
+from ..sexp.parser import SExp, parse_file, parse_string
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +114,7 @@ class SegmentInfo:
     width: float
     layer: str
     net: int
+    net_name: str = ""
 
 
 @dataclass
@@ -112,6 +127,48 @@ class ViaInfo:
     drill: float
     net: int
     layers: tuple[str, str] = ("F.Cu", "B.Cu")
+    net_name: str = ""
+
+
+#: The DSN name of KiCad's ``Default`` net class.  External routers (and
+#: ``tests/test_dsn_export.py``) expect this spelling.
+DSN_DEFAULT_CLASS = "kicad_default"
+
+#: ``.kicad_dru`` constraints that become DSN width / clearance / via floors.
+_DRU_FLOOR_CONSTRAINTS = ("clearance", "track_width", "via_diameter")
+
+#: Conditions that hold for *every* item a floor constraint applies to (a
+#: DSN has no microvias), so the rule is as good as unconditional for it.
+#: Compared after removing whitespace and case-folding.
+_TRIVIAL_CONDITIONS: dict[str, frozenset[str]] = {
+    "track_width": frozenset({"a.type=='track'"}),
+    "via_diameter": frozenset(
+        {"a.type=='via'", "a.type=='via'&&a.via_type!='micro'", "a.via_type!='micro'"}
+    ),
+}
+
+#: ``.kicad_pro`` ``design_settings.rules`` minima Specctra cannot express.
+_INEXPRESSIBLE_PROJECT_MINIMA = (
+    "min_copper_edge_clearance",
+    "min_hole_clearance",
+    "min_hole_to_hole",
+    "min_through_hole_diameter",
+    "min_via_annular_width",
+    "min_microvia_diameter",
+    "min_microvia_drill",
+)
+
+
+@dataclass
+class NetClassInfo:
+    """One net class as exported to the DSN (all values in mm)."""
+
+    name: str  # DSN class name (``kicad_default`` for KiCad's ``Default``)
+    track_width: float
+    clearance: float
+    via_diameter: float
+    via_drill: float
+    nets: list[str] = field(default_factory=list)
 
 
 class KiCadToDSNExporter:
@@ -135,6 +192,13 @@ class KiCadToDSNExporter:
         self._default_trace_width: float = 0.25  # mm
         self._default_via_size: float = 0.8  # mm
         self._default_via_drill: float = 0.4  # mm
+        self._net_map: dict[str, int] = {}  # net name -> (possibly synthetic) id
+        self._classes: dict[str, NetClassInfo] = {}  # KiCad class name -> info
+        self._net_class: dict[str, str] = {}  # net name -> KiCad class name
+        self._planes: list[tuple[str, str, list[tuple[float, float]]]] = []
+        self._keepouts: list[tuple[str, str, list[tuple[float, float]]]] = []
+        self._omissions: list[str] = []
+        self._via_padstack_name: str = ""
 
     def _load(self) -> None:
         """Load and parse the PCB file."""
@@ -147,6 +211,12 @@ class KiCadToDSNExporter:
         self._extract_board_outline()
         self._extract_footprints()
         self._extract_existing_routes()
+        self._extract_net_classes()
+        self._extract_zones()
+
+    def _omit(self, message: str) -> None:
+        if message not in self._omissions:
+            self._omissions.append(message)
 
     def _extract_layers(self) -> None:
         """Extract copper layer names from the PCB."""
@@ -168,8 +238,25 @@ class KiCadToDSNExporter:
                         self._layers.append(layer_name)
 
     def _extract_nets(self) -> None:
-        """Extract net definitions."""
+        """Extract net definitions for both KiCad net-reference dialects.
+
+        KiCad 7/8 boards carry a top-level ``(net N "name")`` table; KiCad
+        9/10 boards may reference nets by name only (``(net "+3V3")``) and
+        have no table at all.  The router's resolver (#4983) handles both:
+        authored ids are kept and name-only nets get a stable synthetic id.
+        """
+        from ..router.io import _build_net_number_map
+
         assert self._pcb is not None
+        try:
+            text = self.pcb_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        self._net_map = _build_net_number_map(text) if text else {}
+        for name, number in self._net_map.items():
+            self._nets.setdefault(number, name)
+        # Keep any top-level declaration the map did not reach (e.g. a
+        # numeric-only table entry); it can only add names, never rename.
         for child in self._pcb.children:
             if not hasattr(child, "name") or child.name != "net":
                 continue
@@ -177,7 +264,15 @@ class KiCadToDSNExporter:
                 net_num = _get_int(child.children[0])
                 net_name = _get_str(child.children[1])
                 if net_num is not None and net_name is not None:
-                    self._nets[net_num] = net_name
+                    self._nets.setdefault(net_num, net_name)
+
+    def _resolve_net(self, net_node: SExp | None) -> tuple[int, str]:
+        """``(number, name)`` of an inline ``(net ...)`` reference, any dialect."""
+        from ..router.io import _resolve_pad_net
+
+        if net_node is None:
+            return 0, ""
+        return _resolve_pad_net(net_node.to_string(compact=True), self._net_map)
 
     def _extract_design_rules(self) -> None:
         """Extract design rules from the setup section."""
@@ -265,13 +360,7 @@ class KiCadToDSNExporter:
             # First child is the library footprint name
             fp_lib = _get_str(child.children[0]) if child.children else "unknown"
 
-            # Get reference
-            ref = "?"
-            for sub in child.children:
-                if hasattr(sub, "name") and sub.name == "fp_text":
-                    if sub.children and _get_str(sub.children[0]) == "reference":
-                        if len(sub.children) >= 2:
-                            ref = _get_str(sub.children[1]) or "?"
+            ref = _footprint_reference(child)
 
             # Get position
             at_node = child.find("at")
@@ -351,13 +440,8 @@ class KiCadToDSNExporter:
                 if ln:
                     pad_layers.append(ln)
 
-        # Net
-        net_node = pad_node.find("net")
-        net_num = 0
-        net_name = ""
-        if net_node and len(net_node.children) >= 2:
-            net_num = _get_int(net_node.children[0]) or 0
-            net_name = _get_str(net_node.children[1]) or ""
+        # Net (numeric+name, name-only or numeric-only)
+        net_num, net_name = self._resolve_net(pad_node.find("net"))
 
         # Roundrect ratio
         rratio = 0.0
@@ -397,6 +481,263 @@ class KiCadToDSNExporter:
                 if via:
                     self._vias.append(via)
 
+    # -- net classes and rules (issue #6594) ---------------------------------
+
+    def _extract_net_classes(self) -> None:
+        """Build the DSN net classes from the board's ``.kicad_pro``/``.kicad_dru``.
+
+        Class membership uses :class:`BoardClearanceRules` (schema 3-5
+        assignments and patterns); per-class width and via sizes come from
+        :func:`~kicad_tools.core.project_file.get_netclass_definitions`.
+        Board minima and unconditional DRU floors raise every class value.
+        """
+        from ..core.project_file import get_netclass_definitions
+        from ..router.board_clearance_rules import BoardClearanceRules
+
+        rules = BoardClearanceRules.from_board(self.pcb_path)
+        project = rules._project
+        net_names = sorted(
+            {pad.net_name for fp in self._footprints for pad in fp.pads if pad.net_name}
+            | {seg.net_name for seg in self._segments if seg.net_name}
+            | {via.net_name for via in self._vias if via.net_name}
+        )
+
+        default = NetClassInfo(
+            name=DSN_DEFAULT_CLASS,
+            track_width=self._default_trace_width,
+            clearance=self._default_clearance,
+            via_diameter=self._default_via_size,
+            via_drill=self._default_via_drill,
+        )
+        self._classes = {"Default": default}
+
+        if project is None:
+            self._omit(
+                f"no {self.pcb_path.with_suffix('.kicad_pro').name} beside the PCB: "
+                f"net classes use exporter defaults (width {default.track_width} mm, "
+                f"clearance {default.clearance} mm, via "
+                f"{default.via_diameter}/{default.via_drill} mm)"
+            )
+        else:
+            # get_netclass_definitions fills in a missing Default; keep that
+            # write off the project BoardClearanceRules holds.
+            definitions = [
+                d
+                for d in get_netclass_definitions(copy.deepcopy(project))
+                if isinstance(d, dict) and isinstance(d.get("name"), str) and d.get("name")
+            ]
+            by_name = {d["name"]: d for d in definitions}
+            default_def = by_name.get("Default", {})
+            default.track_width = _mm(default_def.get("track_width"), default.track_width)
+            default.via_diameter = _mm(default_def.get("via_diameter"), default.via_diameter)
+            default.via_drill = _mm(default_def.get("via_drill"), default.via_drill)
+            default.clearance = rules.default_class_clearance()
+            for name, entry in by_name.items():
+                if name == "Default":
+                    continue
+                self._classes[name] = NetClassInfo(
+                    name=name,
+                    track_width=_mm(entry.get("track_width"), default.track_width),
+                    clearance=rules.class_clearance.get(name, default.clearance),
+                    via_diameter=_mm(entry.get("via_diameter"), default.via_diameter),
+                    via_drill=_mm(entry.get("via_drill"), default.via_drill),
+                )
+
+        for net in net_names:
+            self._net_class[net] = self._class_of(net, rules, project)
+
+        self._apply_board_minima(rules, project)
+        self._apply_dru_floors(rules)
+
+        for net in net_names:
+            self._classes[self._net_class[net]].nets.append(net)
+
+        # Default keeps feeding the global (rule ...) and the legacy accessors.
+        self._default_trace_width = default.track_width
+        self._default_clearance = default.clearance
+        self._default_via_size = default.via_diameter
+        self._default_via_drill = default.via_drill
+
+    def _class_of(self, net: str, rules: Any, project: dict[str, Any] | None) -> str:
+        """The single DSN class a net is exported in (KiCad class name)."""
+        classes = [c for c in (rules.netclasses_of(net) or ("Default",)) if c in self._classes]
+        if not classes:
+            return "Default"
+        if len(classes) == 1:
+            return classes[0]
+        chosen = classes[0]
+        if project is not None:
+            from ..core.project_clearance import (
+                ProjectClearanceError,
+                resolve_project_clearances,
+            )
+
+            try:
+                source = resolve_project_clearances(project, [net])[net].source_class
+            except (ProjectClearanceError, KeyError):
+                source = None
+            if source in self._classes:
+                chosen = source
+        self._omit(
+            f"net {net!r} is in several net classes ({', '.join(classes)}); "
+            f"a DSN net has one class, exported in {chosen!r}"
+        )
+        return chosen
+
+    def _apply_board_minima(self, rules: Any, project: dict[str, Any] | None) -> None:
+        """Raise every class to the ``.kicad_pro`` board minima Specctra can express."""
+        section: dict[str, Any] = {}
+        if project is not None:
+            board = project.get("board")
+            settings = board.get("design_settings") if isinstance(board, dict) else None
+            raw = settings.get("rules") if isinstance(settings, dict) else None
+            if isinstance(raw, dict):
+                section = raw
+        floors = {
+            "clearance": rules.min_clearance,
+            "track_width": _mm(section.get("min_track_width"), 0.0) or None,
+            "via_diameter": _mm(section.get("min_via_diameter"), 0.0) or None,
+            "via_drill": _mm(section.get("min_via_hole"), 0.0) or None,
+        }
+        for attr, floor in floors.items():
+            if floor is None:
+                continue
+            for info in self._classes.values():
+                setattr(info, attr, max(getattr(info, attr), floor))
+        for key in _INEXPRESSIBLE_PROJECT_MINIMA:
+            value = _mm(section.get(key), 0.0)
+            if value > 0:
+                self._omit(f".kicad_pro rule {key} {value:g} mm: no Specctra equivalent")
+
+    def _apply_dru_floors(self, rules: Any) -> None:
+        """Apply unconditional ``.kicad_dru`` floors; list every other rule."""
+        dru_path = self.pcb_path.with_suffix(".kicad_dru")
+        if rules.dru_error is not None:
+            self._omit(f"{dru_path.name} not applied: {rules.dru_error}")
+            return
+        for name, condition, layer, constraints, severity in _read_dru(dru_path):
+            if severity == "ignore":
+                self._omit(f".kicad_dru rule {name!r}: (severity ignore) has no DSN form")
+                continue
+            dropped: list[str] = []
+            for keyword, minimum in constraints:
+                if keyword in _DRU_FLOOR_CONSTRAINTS and minimum is not None:
+                    trivial = condition is not None and (
+                        re.sub(r"\s+", "", condition).casefold()
+                        in _TRIVIAL_CONDITIONS.get(keyword, frozenset())
+                    )
+                    if layer is None and (condition is None or trivial):
+                        for info in self._classes.values():
+                            current = getattr(info, keyword)
+                            setattr(info, keyword, max(current, minimum))
+                        continue
+                dropped.append(keyword)
+            if dropped:
+                why = []
+                if condition is not None:
+                    why.append("conditional")
+                if layer is not None:
+                    why.append(f"layer {layer}")
+                reason = f" ({', '.join(why)})" if why else ""
+                self._omit(
+                    f".kicad_dru rule {name!r}{reason}: {', '.join(dropped)} not expressible in DSN"
+                )
+
+    # -- zones and rule areas (issue #6594) -----------------------------------
+
+    def _expand_zone_layers(self, zone: Zone) -> list[str]:
+        """The board copper layers a zone covers (wildcards expanded)."""
+        specs = zone.layers or ([zone.layer] if zone.layer else [])
+        out: list[str] = []
+        for spec in specs:
+            if spec == "*.Cu":
+                matched = list(self._layers)
+            elif spec == "F&B.Cu":
+                matched = [lay for lay in ("F.Cu", "B.Cu") if lay in self._layers]
+            else:
+                matched = [spec] if spec in self._layers else []
+            out.extend(lay for lay in matched if lay not in out)
+        return out
+
+    def _extract_zones(self) -> None:
+        """Copper pours -> planes; rule areas -> keepouts; report the rest."""
+        assert self._pcb is not None
+        for child in self._pcb.children:
+            if not hasattr(child, "name"):
+                continue
+            if child.name == "zone":
+                self._add_zone(child)
+            elif _is_footprint_tag(child.name):
+                for sub in child.children:
+                    if hasattr(sub, "name") and sub.name == "zone":
+                        self._omit(
+                            f"zone in footprint {_footprint_reference(child)}: "
+                            "footprint-embedded zones are not exported"
+                        )
+
+    def _add_zone(self, node: SExp) -> None:
+        zone = Zone.from_sexp(node)
+        label = zone.name or zone.net_name or zone.uuid or "unnamed"
+        kind = "rule area" if zone.keepout is not None else "zone"
+        layers = self._expand_zone_layers(zone)
+        if not layers:
+            return  # no copper layer of this board: nothing a router sees
+        outlines = [p for p in node.children if hasattr(p, "name") and p.name == "polygon"]
+        if not outlines:
+            self._omit(f"{kind} {label!r}: no outline polygon")
+            return
+        if len(outlines) > 1:
+            self._omit(
+                f"{kind} {label!r}: {len(outlines) - 1} extra outline(s)/hole(s) not exported"
+            )
+        pts_node = outlines[0].find("pts")
+        if pts_node is not None and any(
+            hasattr(c, "name") and c.name == "arc" for c in pts_node.children
+        ):
+            self._omit(f"{kind} {label!r}: outline contains arcs; not approximated, not exported")
+            return
+        polygon = zone.polygon
+        if len(polygon) < 3:
+            self._omit(f"{kind} {label!r}: outline has fewer than 3 points")
+            return
+
+        if zone.keepout is None:
+            net = zone.net_name or (self._nets.get(zone.net_number, "") if zone.net_number else "")
+            if not net:
+                self._omit(f"zone {label!r}: copper zone without a net has no DSN plane form")
+                return
+            for layer in layers:
+                self._planes.append((net, layer, polygon))
+            return
+
+        ko = zone.keepout
+        if not ko.tracks_allowed and not ko.vias_allowed:
+            tag = "keepout"
+        elif not ko.tracks_allowed:
+            tag = "wire_keepout"
+        elif not ko.vias_allowed:
+            tag = "via_keepout"
+        else:
+            tag = ""
+        restricted = [
+            name
+            for name, allowed in (
+                ("pads", ko.pads_allowed),
+                ("copperpour", ko.copperpour_allowed),
+                ("footprints", ko.footprints_allowed),
+            )
+            if not allowed
+        ]
+        if restricted:
+            self._omit(
+                f"rule area {label!r}: {', '.join(restricted)} restriction(s) "
+                "have no DSN routing form"
+            )
+        if not tag:
+            return
+        for layer in layers:
+            self._keepouts.append((tag, layer, polygon))
+
     def _parse_segment(self, node: SExp) -> SegmentInfo | None:
         """Parse a segment S-expression."""
         start = node.find("start")
@@ -407,6 +748,7 @@ class KiCadToDSNExporter:
 
         if not all([start, end, width_node, layer_node, net_node]):
             return None
+        net_num, net_name = self._resolve_net(net_node)
 
         return SegmentInfo(
             x1=_get_float(start.children[0]) or 0.0,
@@ -415,7 +757,8 @@ class KiCadToDSNExporter:
             y2=_get_float(end.children[1]) or 0.0,
             width=_get_float(width_node.children[0]) or 0.25,
             layer=_get_str(layer_node.children[0]) or "F.Cu",
-            net=_get_int(net_node.children[0]) or 0,
+            net=net_num,
+            net_name=net_name,
         )
 
     def _parse_via(self, node: SExp) -> ViaInfo | None:
@@ -429,6 +772,7 @@ class KiCadToDSNExporter:
         if not all([at_node, size_node, net_node]):
             return None
 
+        net_num, net_name = self._resolve_net(net_node)
         layers = ("F.Cu", "B.Cu")
         if layers_node and len(layers_node.children) >= 2:
             l1 = _get_str(layers_node.children[0]) or "F.Cu"
@@ -440,8 +784,9 @@ class KiCadToDSNExporter:
             y=_get_float(at_node.children[1]) or 0.0,
             size=_get_float(size_node.children[0]) or 0.8,
             drill=_get_float(drill_node.children[0]) if drill_node and drill_node.children else 0.4,
-            net=_get_int(net_node.children[0]) or 0,
+            net=net_num,
             layers=layers,
+            net_name=net_name,
         )
 
     def _make_padstack_name(self, pad: PadInfo) -> str:
@@ -502,10 +847,16 @@ class KiCadToDSNExporter:
         lines.append("    )")
         return "\n".join(lines)
 
-    def _build_via_padstack(self) -> str:
-        """Build the default via padstack."""
-        size = mm_to_um(self._default_via_size)
-        name = f"Via[0-{len(self._layers) - 1}]_Pad{size:.0f}_um"
+    def _via_padstack_name_for(self, diameter_mm: float) -> str:
+        size = mm_to_um(diameter_mm)
+        return f"Via[0-{len(self._layers) - 1}]_Pad{size:.0f}_um"
+
+    def _build_via_padstack(self, diameter_mm: float | None = None) -> str:
+        """Build a via padstack (the Default class's when no diameter is given)."""
+        if diameter_mm is None:
+            diameter_mm = self._default_via_size
+        size = mm_to_um(diameter_mm)
+        name = self._via_padstack_name_for(diameter_mm)
 
         lines: list[str] = []
         lines.append(f"    (padstack {_dsn_quote(name)}")
@@ -516,7 +867,8 @@ class KiCadToDSNExporter:
         lines.append("      (attach off)")
         lines.append("    )")
 
-        self._via_padstack_name = name
+        if diameter_mm == self._default_via_size:
+            self._via_padstack_name = name
         return "\n".join(lines)
 
     def export(self, output_path: str | Path | None = None) -> str:
@@ -615,6 +967,18 @@ class KiCadToDSNExporter:
         lines.append(f"      (clearance {clearance_um:.1f} (type smd_smd))")
         lines.append("    )")
 
+        # Copper pours and rule areas (issue #6594)
+        for net, layer, polygon in self._planes:
+            dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
+            lines.append(f"    (plane {_dsn_quote(net)}")
+            lines.append(_dsn_polygon(dsn_layer, polygon))
+            lines.append("    )")
+        for tag, layer, polygon in self._keepouts:
+            dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
+            lines.append(f'    ({tag} ""')
+            lines.append(_dsn_polygon(dsn_layer, polygon))
+            lines.append("    )")
+
         lines.append("  )")
         return "\n".join(lines)
 
@@ -669,9 +1033,17 @@ class KiCadToDSNExporter:
 
             lines.append("    )")
 
-        # Via padstack
-        via_def = self._build_via_padstack()
-        padstack_defs[self._via_padstack_name] = via_def
+        # Via padstacks: the Default class's, one per other class via
+        # diameter, and one per pre-existing via size (issue #6594).
+        padstack_defs[self._via_padstack_name_for(self._default_via_size)] = (
+            self._build_via_padstack()
+        )
+        diameters = [info.via_diameter for info in self._classes.values()]
+        diameters += [via.size for via in self._vias]
+        for diameter in diameters:
+            name = self._via_padstack_name_for(diameter)
+            if name not in padstack_defs:
+                padstack_defs[name] = self._build_via_padstack(diameter)
 
         # Padstack definitions
         for ps_def in padstack_defs.values():
@@ -689,7 +1061,9 @@ class KiCadToDSNExporter:
         net_pins: dict[str, list[str]] = {}
         for fp in self._footprints:
             for pad in fp.pads:
-                if pad.net_name and pad.net_number != 0:
+                # Keyed on the net *name*: a name-only (KiCad 9/10) net is
+                # still a net; only an empty name means "no net" (#6594).
+                if pad.net_name:
                     net_pins.setdefault(pad.net_name, []).append(f"{fp.reference}-{pad.number}")
 
         # Generate net definitions
@@ -701,20 +1075,26 @@ class KiCadToDSNExporter:
             lines.append("      )")
             lines.append("    )")
 
-        # Net class
-        lines.append("    (class kicad_default")
-        for net_name in sorted(net_pins.keys()):
-            lines.append(f"      {_dsn_quote(net_name)}")
-        trace_um = mm_to_um(self._default_trace_width)
-        clearance_um = mm_to_um(self._default_clearance)
-        lines.append("      (circuit")
-        lines.append(f"        (use_via {_dsn_quote(self._via_padstack_name)})")
-        lines.append("      )")
-        lines.append("      (rule")
-        lines.append(f"        (width {trace_um:.1f})")
-        lines.append(f"        (clearance {clearance_um:.1f})")
-        lines.append("      )")
-        lines.append("    )")
+        # Net classes: Default (as kicad_default) always, others when they
+        # hold a net of this network.
+        exported = set(net_pins)
+        for kicad_name, info in self._classes.items():
+            members = sorted(n for n in info.nets if n in exported)
+            if kicad_name != "Default" and not members:
+                continue
+            dsn_name = DSN_DEFAULT_CLASS if kicad_name == "Default" else info.name
+            lines.append(f"    (class {_dsn_quote(dsn_name)}")
+            for net_name in members:
+                lines.append(f"      {_dsn_quote(net_name)}")
+            via_name = self._via_padstack_name_for(info.via_diameter)
+            lines.append("      (circuit")
+            lines.append(f"        (use_via {_dsn_quote(via_name)})")
+            lines.append("      )")
+            lines.append("      (rule")
+            lines.append(f"        (width {mm_to_um(info.track_width):.1f})")
+            lines.append(f"        (clearance {mm_to_um(info.clearance):.1f})")
+            lines.append("      )")
+            lines.append("    )")
 
         lines.append("  )")
         return "\n".join(lines)
@@ -728,7 +1108,7 @@ class KiCadToDSNExporter:
         lines.append("  (wiring")
 
         for seg in self._segments:
-            net_name = self._nets.get(seg.net, "")
+            net_name = seg.net_name or self._nets.get(seg.net, "")
             if not net_name:
                 continue
             dsn_layer = KICAD_TO_DSN_LAYER.get(seg.layer, seg.layer)
@@ -748,13 +1128,14 @@ class KiCadToDSNExporter:
             lines.append("    )")
 
         for via in self._vias:
-            net_name = self._nets.get(via.net, "")
+            net_name = via.net_name or self._nets.get(via.net, "")
             if not net_name:
                 continue
             x = mm_to_um(via.x)
             y = mm_to_um(via.y)
+            via_name = self._via_padstack_name_for(via.size)
             lines.append("    (via")
-            lines.append(f"      {_dsn_quote(self._via_padstack_name)} {x:.1f} {y:.1f}")
+            lines.append(f"      {_dsn_quote(via_name)} {x:.1f} {y:.1f}")
             lines.append(f"      (net {_dsn_quote(net_name)})")
             lines.append("      (type protect)")
             lines.append("    )")
@@ -779,6 +1160,24 @@ class KiCadToDSNExporter:
         """Return the list of footprints."""
         self._load()
         return list(self._footprints)
+
+    @property
+    def net_classes(self) -> dict[str, NetClassInfo]:
+        """The exported net classes, keyed by KiCad class name (``Default``...)."""
+        self._load()
+        return dict(self._classes)
+
+    @property
+    def omissions(self) -> list[str]:
+        """Board constraints the DSN does not carry, one human-readable line each.
+
+        Informational: the DSN is still written.  Covers a missing
+        ``.kicad_pro``, ``.kicad_dru`` rules and project minima Specctra
+        cannot express, and zones/rule areas (or parts of them) not
+        exported (issue #6594).
+        """
+        self._load()
+        return list(self._omissions)
 
 
 # -- Helpers --
@@ -837,6 +1236,89 @@ def _dsn_quote(s: str) -> str:
     if not s or re.search(r'[\s()"\']', s):
         return f'"{s}"'
     return s
+
+
+def _dsn_polygon(dsn_layer: str, polygon: list[tuple[float, float]]) -> str:
+    """``(polygon <layer> 0 x y ...)`` for a closed outline, in um."""
+    coords = " ".join(f"{mm_to_um(x):.1f} {mm_to_um(y):.1f}" for x, y in polygon)
+    x0, y0 = polygon[0]
+    if polygon[-1] != polygon[0]:
+        coords += f" {mm_to_um(x0):.1f} {mm_to_um(y0):.1f}"
+    return f"      (polygon {_dsn_quote(dsn_layer)} 0 {coords})"
+
+
+def _footprint_reference(node: SExp) -> str:
+    """A footprint's reference: KiCad 8+ ``(property "Reference" ..)`` first,
+    then the legacy ``(fp_text reference ..)``; ``"?"`` when neither exists."""
+    legacy = ""
+    for sub in node.children:
+        if not hasattr(sub, "name") or len(sub.children) < 2:
+            continue
+        if sub.name == "property" and _get_str(sub.children[0]) == "Reference":
+            return _get_str(sub.children[1]) or "?"
+        if sub.name == "fp_text" and _get_str(sub.children[0]) == "reference" and not legacy:
+            legacy = _get_str(sub.children[1]) or ""
+    return legacy or "?"
+
+
+def _mm(raw: object, fallback: float) -> float:
+    """A ``.kicad_pro`` length (number or ``"0.2mm"``-style) in mm, else ``fallback``."""
+    from ..router.board_clearance_rules import _parse_length_mm
+
+    if isinstance(raw, bool):
+        return fallback
+    value = _parse_length_mm(raw)
+    return value if value is not None and value >= 0 else fallback
+
+
+def _read_dru(
+    dru_path: Path,
+) -> list[tuple[str, str | None, str | None, list[tuple[str, float | None]], str | None]]:
+    """Every rule of a ``.kicad_dru`` with all of its constraint keywords.
+
+    ``(name, condition, layer, [(constraint, min_mm | None)], severity)`` in
+    file order.  Unlike :func:`~kicad_tools.router.board_clearance_rules.parse_dru`,
+    which keeps only the clearance-type constraints its gate evaluates, this
+    keeps every keyword so the exporter can list what it cannot express.
+    Validity (a file ``kicad-cli`` would discard) is judged by ``parse_dru``
+    through :attr:`BoardClearanceRules.dru_error`; a missing or unparsable
+    file gives ``[]``.
+    """
+    from ..router.board_clearance_rules import _parse_length_mm
+
+    try:
+        text = dru_path.read_text(encoding="utf-8", errors="replace")
+        tree = parse_string("(rules " + text + ")")
+    except Exception:  # missing file, or parse_dru already reported it
+        return []
+    out = []
+    for rule in tree.find_all("rule"):
+        atoms = rule.get_atoms()
+        name = str(atoms[0]) if atoms else ""
+        cond_node = rule.find_child("condition")
+        condition = cond_node.get_first_atom() if cond_node is not None else None
+        layer_node = rule.find_child("layer")
+        layer = layer_node.get_first_atom() if layer_node is not None else None
+        sev_node = rule.find_child("severity")
+        severity = sev_node.get_first_atom() if sev_node is not None else None
+        constraints: list[tuple[str, float | None]] = []
+        for constraint in rule.find_all("constraint"):
+            c_atoms = constraint.get_atoms()
+            if not c_atoms:
+                continue
+            minimum = constraint.find_child("min")
+            value = _parse_length_mm(minimum.get_first_atom()) if minimum is not None else None
+            constraints.append((str(c_atoms[0]), value))
+        out.append(
+            (
+                name,
+                None if condition is None else str(condition),
+                None if layer is None else str(layer),
+                constraints,
+                None if severity is None else str(severity).casefold(),
+            )
+        )
+    return out
 
 
 def _sanitize_name(name: str) -> str:
