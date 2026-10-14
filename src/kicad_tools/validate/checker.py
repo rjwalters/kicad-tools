@@ -136,6 +136,7 @@ class DRCChecker:
         current_path_specs: Sequence[CurrentPathSpec] | None = None,
         mask_copper_request: MaskCopperRequest | None = None,
         physical_copper_gap_mm: float | None = None,
+        authored_min_clearance_mm: float | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -225,9 +226,16 @@ class DRCChecker:
                 degrades to a clean no-op, matching every other
                 sidecar-optional rule in this class.
 
+            authored_min_clearance_mm: The board's own authored minimum
+                clearance (``.kicad_pro`` ``rules.min_clearance``), or
+                ``None``.  Floors the within-pair gap that
+                ``diffpair_clearance_intra`` enforces, matching
+                ``DesignRules.pair_gap()`` in the router (Issue #6575).
+
         Raises:
             ValueError: If manufacturer ID is not recognized
         """
+        self.authored_min_clearance_mm = authored_min_clearance_mm
         self.mask_copper_request = mask_copper_request
         # Opt-in heuristic width-consistency audit: ``None`` keeps it out of
         # check_all(); set to a (possibly empty) dict of
@@ -869,18 +877,45 @@ class DRCChecker:
         Single-ended refusal patterns (``USB_CC1``/``USB_CC2``,
         ``SBU1``/``SBU2``) are correctly excluded per #2558.
 
-        See Issue #2560 / Epic #2556 Phase 1D.  When the upstream router
-        gains the per-pair clearance map (#2559), this method may be
-        extended to accept it via constructor injection on
-        :class:`DRCChecker`; today the rule falls back to the manufacturer's
-        ``min_clearance_mm``, which makes it a no-op duplicate of the
-        generic clearance rule for any pair without an explicit threshold.
+        The threshold per pair is the gap the router lays (Issue #6575):
+        ``DesignRules.pair_gap(nc).gap_mm`` =
+        ``max(class intra_pair_clearance, manufacturer min, authored board
+        min)`` when the pair's class is in ``net_class_map``, otherwise
+        ``max(manufacturer min_clearance_mm, authored_min_clearance_mm)``.
+        With neither a class nor an authored minimum this is the
+        manufacturer ``min_clearance_mm``.
+
+        See Issue #2560 / Epic #2556 Phase 1D.
 
         Returns:
             DRCResults containing intra-pair clearance violations.
         """
 
-        rule = DiffPairClearanceIntraRule()
+        probe = DiffPairClearanceIntraRule()
+        authored = self.authored_min_clearance_mm
+        fallback = max(self.design_rules.min_clearance_mm, authored or 0.0)
+        router_rules = None
+        if self.net_class_map:
+            from kicad_tools.router.rules import DesignRules as RouterDesignRules
+
+            router_rules = RouterDesignRules(
+                manufacturer=self.manufacturer, authored_min_clearance=authored
+            )
+        names = {net.number: net.name for net in self.pcb.nets.values()}
+        threshold_map: dict[tuple[int, int], float] = {}
+        for key in probe._build_diff_pair_set(self.pcb):
+            nc = None
+            if router_rules is not None:
+                for nid in key:
+                    nc = self.net_class_map.get(names.get(nid, ""))
+                    if nc is not None:
+                        break
+            if nc is not None:
+                threshold_map[key] = router_rules.pair_gap(nc).gap_mm
+            else:
+                threshold_map[key] = fallback
+
+        rule = DiffPairClearanceIntraRule(intra_pair_clearance_map=threshold_map)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def _warn_inactive_skew_rule(self, rule_name: str) -> None:

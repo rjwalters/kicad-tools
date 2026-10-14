@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.geometry import rotate_pad_offset
@@ -36,6 +37,7 @@ __all__ = [
     "FRAME_SHEET",
     "BoardGeometry",
     "LinkEnd",
+    "ZoneFill",
     "LinkReport",
     "MissingLink",
     "PadGeo",
@@ -43,7 +45,9 @@ __all__ = [
     "ViaGeo",
     "arc_points",
     "collect_geometry",
+    "drc_marker_points",
     "missing_links",
+    "net_class_map",
 ]
 
 FRAME_BOARD = "board-relative"
@@ -135,6 +139,15 @@ class ViaGeo:
     net: str
 
 
+@dataclass(frozen=True)
+class ZoneFill:
+    """One filled pour polygon on one copper layer, in the drawing frame."""
+
+    layer: str
+    net: str
+    points: tuple[Point, ...]
+
+
 @dataclass
 class BoardGeometry:
     """Everything the renderer draws, in one named coordinate frame."""
@@ -145,6 +158,7 @@ class BoardGeometry:
     pads: list[PadGeo] = field(default_factory=list)
     tracks: list[Track] = field(default_factory=list)
     vias: list[ViaGeo] = field(default_factory=list)
+    zones: list[ZoneFill] = field(default_factory=list)
     outline: list[list[Point]] = field(default_factory=list)
     bounds: Box | None = None  # None: no outline and no copper
     outline_error: str = ""
@@ -370,6 +384,21 @@ def collect_geometry(pcb: PCB, *, absolute: bool = False) -> BoardGeometry:
             ViaGeo(vx, vy, via.size, via.drill, _via_span(via.layers, copper), via.net_name or "")
         )
 
+    # Zone fills are board-relative like the copper (issue #6317).  Rule
+    # areas carry no copper, so they are skipped.
+    for zone in pcb.zones:
+        if zone.keepout is not None:
+            continue
+        for index, poly in enumerate(zone.filled_polygons):
+            if len(poly) >= 3:
+                geo.zones.append(
+                    ZoneFill(
+                        zone.filled_polygon_layer(index),
+                        zone.net_name or "",
+                        tuple(mv(p) for p in poly),
+                    )
+                )
+
     # Top-level graphics are sheet-absolute, unlike everything above.
     geo.outline = _outline_polylines(pcb, (dx - ox, dy - oy))
     geo.bounds = _bounds(pcb, geo, (dx, dy))
@@ -479,3 +508,58 @@ def _spanning_links(net: str, islands: list[list[LinkEnd]]) -> list[MissingLink]
         links.append(MissingLink(net, best[1], best[2]))
         joined.extend(todo.pop(best[3]))
     return links
+
+
+def drc_marker_points(
+    locations: list[Point], origin: Point, *, absolute: bool = False
+) -> list[Point]:
+    """DRC violation locations in the drawing frame (issue #6317).
+
+    ``kct check`` and ``kicad-cli`` report **sheet-absolute** locations, so in
+    the default board-relative frame the board origin is subtracted; with
+    ``absolute=True`` they are already in the drawing frame.  Duplicates
+    (several violations at one spot) collapse to one marker.
+    """
+    ox, oy = (0.0, 0.0) if absolute else origin
+    seen: dict[Point, None] = {}
+    for x, y in locations:
+        seen[(round(x - ox, 4), round(y - oy, 4))] = None
+    return list(seen)
+
+
+def net_class_map(pcb: PCB, pcb_path: Path | str | None, nets: set[str]) -> dict[str, str]:
+    """Net class of every net in *nets* (issue #6317).
+
+    Sources, in order: the board's own legacy ``(net_class ...)`` blocks
+    (``add_net``), then the sibling ``.kicad_pro`` ``netclass_patterns``
+    (glob patterns, the first match wins).  Anything unassigned is in
+    ``Default``, as in KiCad.
+    """
+    import fnmatch
+    import json
+
+    assigned: dict[str, str] = {}
+    for name, net_class in pcb.net_classes.items():
+        for net in net_class.nets:
+            assigned.setdefault(net, name)
+
+    patterns: list[tuple[str, str]] = []
+    if pcb_path is not None:
+        pro = Path(pcb_path).with_suffix(".kicad_pro")
+        try:
+            data = json.loads(pro.read_text(encoding="utf-8")) if pro.is_file() else {}
+        except (OSError, UnicodeDecodeError, ValueError):
+            data = {}
+        settings = data.get("net_settings") if isinstance(data, dict) else None
+        raw = settings.get("netclass_patterns") if isinstance(settings, dict) else None
+        for entry in raw if isinstance(raw, list) else []:
+            if isinstance(entry, dict) and entry.get("netclass") and entry.get("pattern"):
+                patterns.append((str(entry["pattern"]), str(entry["netclass"])))
+
+    out: dict[str, str] = {}
+    for net in nets:
+        cls = assigned.get(net)
+        if cls is None:
+            cls = next((c for pat, c in patterns if fnmatch.fnmatchcase(net, pat)), "Default")
+        out[net] = cls
+    return out

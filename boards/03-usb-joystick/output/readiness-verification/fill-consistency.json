@@ -5,7 +5,7 @@
     "fp-lib-table": "d5eea395214efa8406e88c8e54435a0cbf9cf83b69ee3ed4d2519e109ce76c02",
     "usb_joystick.kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
     "usb_joystick_routed.kicad_dru": "ec7cc2667b09044fe99abbf83f2afe5abdd9c2a3115af899eb5512e02349f8a3",
-    "usb_joystick_routed.kicad_pcb": "79cabf2723f3b8c1c3292465b2c4fbd983e6c18b776cabeb8e9b2e898ed82808",
+    "usb_joystick_routed.kicad_pcb": "c91ea8525d235ccdf371f2e2417bec62985f0530dc8a20f4b790de03b3b2b189",
     "usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00"
   },
   "deltas_mm2": {
@@ -23,7 +23,7 @@
     "In2.Cu": 4328.39927
   },
   "refilled_pcb": "output/readiness-verification/fill-refilled/usb_joystick_routed.kicad_pcb",
-  "refilled_sha256": "fcaecb87c896a8e78a80afdf31bea4833631edd6a4751104cf7dd23766220a08",
+  "refilled_sha256": "9e9852161b4512b4a7bfbcffc98b7cf0620f97bada6fb2f9959e6ea530c41a59",
   "saved_areas_mm2": {
     "B.Cu": 4348.531238,
     "F.Cu": 4022.841849,
@@ -31,6 +31,6 @@
     "In2.Cu": 4328.39927
   },
   "saved_pcb": "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb",
-  "saved_sha256": "79cabf2723f3b8c1c3292465b2c4fbd983e6c18b776cabeb8e9b2e898ed82808",
+  "saved_sha256": "c91ea8525d235ccdf371f2e2417bec62985f0530dc8a20f4b790de03b3b2b189",
   "tolerance_mm2": 0.01
 }

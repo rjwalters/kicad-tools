@@ -330,7 +330,10 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
             "[deterministic-budget] Iteration-budgeted routing enabled "
             "(Issue #3538): per-net wall-clock cutoff DISABLED, C++ A* "
             f"iteration backstop pinned to {args.max_search_iterations:,} "
-            "node expansions.  Routed output is reproducible across machines."
+            "node expansions.  Routed output is reproducible across machines "
+            "unless a later '[deterministic-budget] per-net wall clock bound' "
+            "or 'stage deadline fired' line says a wall clock bound first "
+            "(Issue #6329)."
         )
         print(
             "[deterministic-budget] Per-net iteration cap "
@@ -348,7 +351,9 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
                 f"{RELIEF_SUBSEARCH_BUDGET_S:g}s wall clock (Issue #4730), so "
                 "a loaded or slow machine can still land different copper.  "
                 "Pass --deterministic-rescue to bound them by the per-net "
-                "iteration cap instead (Issue #5870)."
+                "iteration cap instead (Issue #5870).  It also switches off "
+                "the 60s oscillation-escape budget and the remaining-budget "
+                "per-iteration per-net cap (Issue #6475)."
             )
         if timeout and timeout > 0:
             print(
@@ -2193,6 +2198,16 @@ def _make_checkpoint_callback(
             )
 
     def _checkpoint(best_routes, best_metrics) -> None:
+        # Issue #6475: serialising routes draws UUIDs from the global RNG when
+        # deterministic UUIDs are on.  A checkpoint is an observer, so keep the
+        # stream the router sees independent of how many writes happened.
+        rng_state = random.getstate()
+        try:
+            _checkpoint_inner(best_routes, best_metrics)
+        finally:
+            random.setstate(rng_state)
+
+    def _checkpoint_inner(best_routes, best_metrics) -> None:
         from kicad_tools.cli.progress import flush_print
 
         if best_checkpoint is not None:
@@ -2275,6 +2290,13 @@ def _make_checkpoint_callback(
 
     def _checkpoint_completed(routes, metrics) -> None:
         """Retain a completed attempt separately from periodic checkpoints."""
+        rng_state = random.getstate()  # Issue #6475: observer, see _checkpoint
+        try:
+            _checkpoint_completed_inner(routes, metrics)
+        finally:
+            random.setstate(rng_state)
+
+    def _checkpoint_completed_inner(routes, metrics) -> None:
         import tempfile
 
         if best_checkpoint is not None:
@@ -2487,6 +2509,76 @@ def _stash_unrouted_diagnosis(router: "Autorouter", args) -> None:
     if diagnosis is not None:
         router.unrouted_diagnosis = diagnosis
         print(diagnosis.summary_line(), file=sys.stderr)
+
+
+def _prime_access_witness_deadline(args) -> tuple[bool, float | None]:
+    """Whether -- and until when -- the pre-release witness prime may run (#6391).
+
+    Returns ``(run, deadline)``.  Without ``--timeout`` the prime is the same
+    unbounded replay the post-release sidecar writer used to do, only earlier:
+    ``(True, None)``.  Under ``--timeout`` it may spend only what is left
+    beyond BOTH reserves carved out of the routing deadline: the post-route
+    finishing reserve (:func:`_post_route_reserve`, #6273) and the
+    ``--auto-fix`` reserve (:func:`_auto_fix_budget`, #3238) -- auto-fix runs
+    after the release, so time the prime took from it would be gone.  That is
+    ``_finishing_time_left(args) - _post_route_reserve - _auto_fix_reserve``;
+    when that is not in the future the prime is skipped (``(False, None)``) and
+    the sidecars fall back to today's post-release behaviour.
+    """
+    time_left = _finishing_time_left(args)
+    if time_left is None:
+        return True, None
+    reserve = float(getattr(args, "_post_route_reserve", 0.0) or 0.0) + float(
+        getattr(args, "_auto_fix_reserve", 0.0) or 0.0
+    )
+    budget = time_left - reserve
+    if budget <= 0.0:
+        return False, None
+    return True, time.monotonic() + budget
+
+
+def _prime_access_witness(router: "Autorouter", args) -> None:
+    """Replay the commit journal while the routing grid is still live (#6391).
+
+    :func:`_release_routing_engine_state` drops the grid's occupancy planes,
+    and the access-witness sidecars are written after it.  A replay run then
+    still returns the right verdicts and attribution (#6346), but
+    ``pad_access._marking_at`` reads every plane as "no label", so each
+    stranded pad's ``closing_markings`` came out empty.  Running the replay
+    here, immediately before the release, memoizes the complete witness on
+    ``router._access_witness_cache`` (:func:`witness_for_router`); the later
+    sidecar writes reuse it because the journal length is unchanged.
+
+    Segment clearance during the replay is judged against the replayed copper
+    whether or not the R-tree is populated: ``access_witness.replay`` suspends
+    the segment index for its whole run (#6303), so priming before the release
+    changes no verdict.
+
+    Bounded by :func:`_prime_access_witness_deadline` under ``--timeout``.  A
+    skipped or deadline-truncated prime caches nothing, so the post-release
+    path behaves exactly as before.  Skipped after an interrupt (the normal
+    save will not follow) and for a router with no or an empty journal.
+    Never raises a regular exception: a diagnostic must not fail a route.
+    """
+    journal = getattr(router, "commit_journal", None)
+    if journal is None or not len(journal):
+        return
+    if _interrupt_state.get("interrupted"):
+        return
+    run, deadline = _prime_access_witness_deadline(args)
+    if not run:
+        return
+    from kicad_tools.router.access_witness import witness_for_router
+
+    with restore_stage():
+        record_stage("access-witness-prime")
+        try:
+            if deadline is None:
+                witness_for_router(router)
+            else:
+                witness_for_router(router, deadline=deadline)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Warning: access-witness prime failed: {exc}", file=sys.stderr)
 
 
 def _release_routing_engine_state(router: "Autorouter") -> None:
@@ -11366,6 +11458,9 @@ def route_with_layer_escalation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -12414,6 +12509,9 @@ def route_with_rule_relaxation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -15033,6 +15131,9 @@ def route_with_combined_escalation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -17898,7 +17999,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "Bound routing work by an ITERATION budget instead of wall-clock "
             "time so the routed output (and its DRC count) is reproducible "
             "across machines regardless of runner speed or load (Issue #3538). "
-            "The per-net A* search is the only wall-clock-coupled stage that "
+            "The per-net A* search is the main wall-clock-coupled stage that "
             "lands different amounts of copper on a slow vs fast machine; this "
             "flag disables the per-net wall-clock cutoff (--per-net-timeout 0) "
             "and pins the C++ A* iteration backstop (--max-search-iterations) "
@@ -17914,8 +18015,20 @@ def _route_parser() -> argparse.ArgumentParser:
             "iteration backstop value can be overridden by passing an explicit "
             "--max-search-iterations N alongside this flag (N is then used "
             "verbatim); see DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS for the "
-            "default. Relief-rescue sub-searches keep a 10 s wall clock unless "
-            "--deterministic-rescue is also passed."
+            "default. "
+            "Relief-rescue sub-searches keep a 10 s wall clock unless "
+            "--deterministic-rescue is also passed. With --deterministic-budget "
+            "alone, each negotiated rip-up iteration also gives every per-net "
+            "search a budget of 10%% of the remaining stage time, and the "
+            "pure-Python A* fallback usually hits it before the iteration cap "
+            "(Issue #6329; logged as '[deterministic-budget] per-net wall clock "
+            "bound net ...'); --deterministic-rescue removes that budget and the "
+            "60 s oscillation-escape budget (Issue #6475). Still wall-clock-bound "
+            "even with both flags: the relief-rescue transaction bound; the "
+            "post-negotiation sweep (60 s, 10 s per net); the trace optimizer / "
+            "DRC nudge, which are skipped when little --timeout is left; and the "
+            "outer --timeout stage deadline (logged as '[deterministic-budget] "
+            "stage deadline fired')."
         ),
     )
     parser.add_argument(
@@ -17926,7 +18039,10 @@ def _route_parser() -> argparse.ArgumentParser:
             "sub-searches by the per-net node-expansion cap instead of their "
             "10 s wall clock (Issue #5870, mechanism #4536). Only takes effect "
             "with an active cap (--deterministic-budget or "
-            "--per-net-iterations). Off by default because it costs board 07 "
+            "--per-net-iterations). Also switches off the 60 s "
+            "oscillation-escape budget and the remaining-budget per-iteration "
+            "per-net cap (Issue #6475), so --timeout no longer changes reach. "
+            "Off by default because it costs board 07 "
             "routed nets (#4730/#4770); use it when the route must be "
             "independent of machine load."
         ),
@@ -22203,6 +22319,9 @@ def _run_main_impl(args, parser, argv) -> int:
     # ``kicad-cli`` DRC/zone-fill child spawned below.
     # Issue #5944: diagnose unrouted connections while the grid is still live.
     _stash_unrouted_diagnosis(router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(router, args)
     _release_routing_engine_state(router)
 
     _rss.mark("post-finalize")

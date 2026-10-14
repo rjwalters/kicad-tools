@@ -362,6 +362,16 @@ RELIEF_RESCUE_TXN_FLOOR_S = 90.0
 # stage budget and roll back (issue #4781) -- not another A/B of this flag.
 DETERMINISTIC_RESCUE_DEFAULT = False
 
+# Issue #6329: the line the negotiated loop prints when its stage deadline
+# stops an iteration-budgeted (``--deterministic-budget``) run.  Must match
+# ``TwoPhaseRouter._note_stage_deadline_determinism_loss`` word for word and
+# start with ``placement.route_check.DEADLINE_FIRED_MARKER``.
+DETERMINISTIC_BUDGET_STAGE_DEADLINE_LINE = (
+    "[deterministic-budget] stage deadline fired -- run is not "
+    "reproducible (outer --timeout / per-attempt slice bound "
+    "before the iteration backstop did; see Issue #5765)"
+)
+
 # Issue #5545: congestion-mark parameters for the stagnation-recovery cohort
 # reroute.  When the negotiated loop's rip-up cohort has stagnated (same
 # cohort, overflow stuck in a narrow band), the recovery sweep needs a
@@ -1587,6 +1597,12 @@ class Autorouter:
         # preferences); aliasing the module-level singleton leaked those
         # writes into every later Autorouter in the same process.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
+
+        # Issue #6366: per-net A* heuristic-weight overrides (net id ->
+        # weight).  Empty = every net searches at the default weight 1.0.
+        # The same dict object is installed on each pathfinder (see
+        # ``_create_grid_and_routers``) so it survives ``_reset_for_new_trial``.
+        self._net_astar_weights: dict[int, float] = {}
         # Issue #6443: classes whose floored pair-gap notice was printed.
         self._pair_gap_notified: set[str] = set()
         self.layer_stack = layer_stack
@@ -2384,6 +2400,8 @@ class Autorouter:
             # Issue #3881: thread the tuned per-net iteration cap through.
             per_net_iterations=getattr(self, "_per_net_iterations", 0),
         )
+        # Issue #6366: share the per-net A* weight map with the pathfinder.
+        router.net_astar_weights = self._net_astar_weights
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager
 
@@ -7754,9 +7772,20 @@ class Autorouter:
                 # Copy existing net class and add layer preference
                 override = replace(existing, preferred_layers=allowed)
             else:
-                # Create a new net class entry with default values + layer pref
+                # Issue #6366: a net with no class routes on the board's
+                # DesignRules (width/clearance/via) and the classless priority
+                # 10 (``_get_net_priority``).  A bare ``NetClassRouting`` would
+                # carry the dataclass literals (0.2/0.2/0.6, priority 5) and
+                # silently override the board's rules -- on a 0.3 mm
+                # clearance board that routes DRC-violating copper.  Build the
+                # injected class from the board's effective values so the
+                # ONLY change is the layer preference.
                 override = NetClassRouting(
                     name=f"matrix_{net_name}",
+                    priority=10,
+                    trace_width=self.rules.trace_width,
+                    clearance=self.rules.trace_clearance,
+                    via_size=self.rules.via_diameter,
                     preferred_layers=layers,
                 )
             self.net_class_map[net_name] = override
@@ -7767,6 +7796,57 @@ class Autorouter:
                 f"  Matrix conflict: assigned layer preferences for "
                 f"{len(injected)} net(s): {injected}"
             )
+
+    @property
+    def supports_layer_preferences(self) -> bool:
+        """Whether the active pathfinder honours per-net layer preferences.
+
+        Issue #6366: only the pure-Python ``Router`` applies
+        ``NetClassRouting.preferred_layers`` as an A* layer cost; the native
+        ``CppPathfinder`` (the default backend) ignores it.  Pathfinders that
+        do not declare the capability are treated as unsupported.
+        """
+        return bool(getattr(self.router, "supports_layer_preferences", False))
+
+    @contextlib.contextmanager
+    def trial_gene_overrides(
+        self,
+        astar_weights: dict[int, float] | None = None,
+        preferred_layers: dict[int, int] | None = None,
+    ):
+        """Apply per-net evolutionary genes for one trial, then restore.
+
+        Issue #6366.  ``astar_weights`` (net id -> heuristic weight) is
+        installed on the pathfinders' ``net_astar_weights`` map; a weight of
+        exactly 1.0 is the default and is not stored.  ``preferred_layers``
+        (net id -> grid layer index) is injected through
+        :meth:`_inject_matrix_layer_preferences` (so hard-avoided layers are
+        never preferred) -- but only when the active pathfinder honours layer
+        preferences (:attr:`supports_layer_preferences`); the native C++
+        backend does not, so there the preferences are ignored instead of
+        rewriting ``net_class_map`` for no search effect.  Both are rolled
+        back in place on exit so the next trial on this router sees neither.
+        """
+        saved_class_map = dict(self.net_class_map)
+        saved_weights = dict(self._net_astar_weights)
+        try:
+            for net_id, w in (astar_weights or {}).items():
+                if w != 1.0:
+                    self._net_astar_weights[net_id] = float(w)
+            if preferred_layers and self.supports_layer_preferences:
+                import io
+                from contextlib import redirect_stdout
+
+                with redirect_stdout(io.StringIO()):
+                    self._inject_matrix_layer_preferences(
+                        {n: [layer] for n, layer in preferred_layers.items()}
+                    )
+            yield
+        finally:
+            self.net_class_map.clear()
+            self.net_class_map.update(saved_class_map)
+            self._net_astar_weights.clear()
+            self._net_astar_weights.update(saved_weights)
 
     # Cache of net IDs detected as matrix-conflicting (Issue #2432).
     # Populated by _detect_and_apply_matrix_preferences() so that
@@ -11198,6 +11278,9 @@ class Autorouter:
         # is running under, so an opt-in run is distinguishable in the log from
         # the default (#4730).
         flush_print(self._relief_subsearch_bound_line(per_net_timeout, deterministic_rescue))
+        # Issue #6475: the escape budget and per-iteration per-net cap are the
+        # other wall clocks that decide reach; say which arm they are on.
+        flush_print(self._wall_clock_arm_line(deterministic_rescue))
 
         # Issue #4781: record the relief-rescue TRANSACTION bound too -- it
         # decides how much of the stage one rescue can burn before rolling
@@ -12352,7 +12435,13 @@ class Autorouter:
                     iter_remaining = (
                         None if timeout is None else (start_time + timeout) - time.time()
                     )
-                    iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
+                    # Issue #6475: under the deterministic arm the cap derived
+                    # from the remaining stage budget is a wall clock that
+                    # feeds the C++ search, so pass per_net_timeout through.
+                    if self._wall_clock_free_arm(deterministic_rescue):
+                        iter_per_net_cap = per_net_timeout
+                    else:
+                        iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
 
                     # Issue #2540 + #2803: Snapshot state at top of each iteration
                     # BEFORE any destructive ``rip_up_nets`` call.  If a
@@ -13640,12 +13729,9 @@ class Autorouter:
                                 self._mark_route(route)
 
                             # Issue #2415: Compute escape budget from remaining time
-                            escape_budget = None
-                            if timeout is not None:
-                                remaining = timeout - (time.time() - start_time)
-                                escape_budget = min(60.0, remaining * 0.25)
-                                if escape_budget <= 0:
-                                    escape_budget = 0.0
+                            escape_budget = self._escape_budget(
+                                timeout, start_time, deterministic_rescue
+                            )
 
                             success, new_overflow, tried = neg_router.escape_local_minimum(
                                 overflow_history=overflow_history,
@@ -14354,12 +14440,9 @@ class Autorouter:
                             self._mark_route(route)
 
                         # Issue #2415: Compute escape budget from remaining time
-                        escape_budget = None
-                        if timeout is not None:
-                            remaining = timeout - (time.time() - start_time)
-                            escape_budget = min(60.0, remaining * 0.25)
-                            if escape_budget <= 0:
-                                escape_budget = 0.0
+                        escape_budget = self._escape_budget(
+                            timeout, start_time, deterministic_rescue
+                        )
 
                         success, new_overflow, tried = neg_router.escape_local_minimum(
                             overflow_history=overflow_history,
@@ -14549,6 +14632,16 @@ class Autorouter:
         print(f"  {ripup_guard.summary_line()}")
         if timed_out:
             print("  ⚠ Stopped due to timeout - returning best partial result")
+            # Issue #6329: the `--deterministic-budget` banner promises this
+            # marker whenever a stage deadline cuts an iteration-budgeted run,
+            # but only ``TwoPhaseRouter`` printed it.  On board 05 the
+            # negotiated loop stopped on this wall clock mid-iteration 5 with
+            # no marker, so the run looked reproducible when it was not.
+            # Same wording / gate as
+            # ``TwoPhaseRouter._note_stage_deadline_determinism_loss`` so
+            # ``placement.route_check.deadline_fired`` matches it.
+            if getattr(self, "_max_search_iterations", 0):
+                print(DETERMINISTIC_BUDGET_STAGE_DEADLINE_LINE)
 
         # Print failed nets summary if any routes failed
         if self.routing_failures:
@@ -15094,6 +15187,46 @@ class Autorouter:
                 if cap
             ),
             default=0,
+        )
+
+    def _wall_clock_free_arm(self, deterministic_rescue: bool) -> bool:
+        """True when the negotiated loop must not read a wall clock for reach.
+
+        Issue #6475.  ``deterministic_rescue`` with an active expansion cap
+        means the caller asked for a route that does not depend on machine
+        load.  The oscillation-escape budget (#2415) and the per-iteration
+        per-net cap derived from the remaining stage budget (#3989) are both
+        wall clocks that decide reach, so both switch off here.  The stage
+        deadline (``check_timeout``) is left alone.
+        """
+        return bool(deterministic_rescue and self._active_expansion_cap())
+
+    def _escape_budget(
+        self, timeout: float | None, start_time: float, deterministic_rescue: bool
+    ) -> float | None:
+        """Wall-clock budget for ``escape_local_minimum`` (Issue #2415 / #6475).
+
+        ``None`` (unbounded; each strategy is still bounded by the per-net
+        expansion cap) on the deterministic arm or when there is no stage
+        timeout; otherwise ``min(60, 25% of the remaining stage budget)``.
+        """
+        if timeout is None or self._wall_clock_free_arm(deterministic_rescue):
+            return None
+        remaining = timeout - (time.time() - start_time)
+        return max(0.0, min(60.0, remaining * 0.25))
+
+    def _wall_clock_arm_line(self, deterministic_rescue: bool) -> str:
+        """Routing-log line naming the escape-budget / per-iteration-cap arm (#6475)."""
+        if self._wall_clock_free_arm(deterministic_rescue):
+            return (
+                "  Escape budget / per-iteration per-net cap: iteration-bounded "
+                "(deterministic rescue; issue #6475) -- oscillation escape and "
+                "per-net searches do not read a wall clock"
+            )
+        return (
+            "  Escape budget / per-iteration per-net cap: wall clock "
+            "(60s escape budget, remaining-budget per-net cap; deterministic "
+            "rescue is off or no expansion cap is active; issue #6475)"
         )
 
     def _relief_subsearch_budget(

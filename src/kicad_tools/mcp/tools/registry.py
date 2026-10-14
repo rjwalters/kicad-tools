@@ -2138,6 +2138,11 @@ def _handler_board_view(params: dict[str, Any]) -> dict[str, Any]:
         margin_mm=params.get("margin_mm", 4.0),
         max_size_px=params.get("max_size_px", 1568),
         output_path=params.get("output_path"),
+        zones=params.get("zones", False),
+        drc_report=params.get("drc_report"),
+        net_classes=params.get("net_classes", False),
+        compare_to=params.get("compare_to"),
+        compare_drc_report=params.get("compare_drc_report"),
     )
 
     if result.get("success") and result.get("image_base64"):
@@ -2174,7 +2179,8 @@ register_tool(
         "'absolute' selects. The result names the frame and gives board_origin_mm. "
         "Missing links come from the same connectivity model as the connectivity "
         "check, so the two cannot disagree; pour nets whose fill misses a pad are "
-        "listed under pour_advisory with no link. Zone pours are not drawn. Needs "
+        "listed under pour_advisory with no link. Zone pours are drawn only when 'zones' is "
+        "set. Optional overlays: 'drc_report', 'net_classes', 'compare_to'. Needs "
         "matplotlib, not kicad-cli."
     ),
     parameters=_make_params(
@@ -2227,6 +2233,35 @@ register_tool(
             "output_path": {
                 "type": "string",
                 "description": "Optional file path to save the PNG image to disk.",
+            },
+            "zones": {
+                "type": "boolean",
+                "description": "Draw filled zone pours, translucent, in their layer's colour.",
+                "default": False,
+            },
+            "drc_report": {
+                "type": "string",
+                "description": (
+                    "Path to a DRC report (JSON or text); violation locations are marked "
+                    "(sheet-absolute in the report, shifted by the board origin when drawn "
+                    "board-relative)."
+                ),
+            },
+            "net_classes": {
+                "type": "boolean",
+                "description": "Colour copper by net class instead of by layer.",
+                "default": False,
+            },
+            "compare_to": {
+                "type": "string",
+                "description": (
+                    "Second .kicad_pcb: pcb_path is drawn as 'before' (left) and this as "
+                    "'after' (right), over one shared window. Not for 'layers'."
+                ),
+            },
+            "compare_drc_report": {
+                "type": "string",
+                "description": "DRC report for the compare_to board.",
             },
         },
         required=["pcb_path"],

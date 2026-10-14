@@ -411,3 +411,16 @@ class TestCiGateCountsGatedFamilies:
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
         assert blocking == 5 + sum(BOARD_07_EXPECTED_FAMILY_DELTA.values())
         assert advisory.get("connectivity", 0) == 4
+
+
+def test_authored_min_clearance_reaches_drc_checker(tmp_path):
+    """A ``.kicad_pro`` ``rules.min_clearance`` is read for DRCChecker (#6575)."""
+    from kicad_tools.cli.check_cmd import _authored_min_clearance_mm
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb (version 20240108))\n")
+    assert _authored_min_clearance_mm(pcb) is None
+    (tmp_path / "b.kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.15}}}})
+    )
+    assert _authored_min_clearance_mm(pcb) == 0.15

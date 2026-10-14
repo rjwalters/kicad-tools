@@ -115,7 +115,9 @@ coupling. Pair traces are 0.20mm wide with 0.15mm minimum edge gap.
 
 The circuit-specific replay gate independently requires a connected common
 run of at least 4mm, at most 16mm total copper per connector/ESD net, and at
-most 0.5mm skew. MCU launches must remain at most 4mm. The branched-net
+most 2.5mm skew (the full-speed USB limit in the Renesas full-speed board
+guide, Table 2; 0.5mm stays the stretch target). MCU launches must remain at
+most 4mm. The branched-net
 continuity threshold is 25% (4mm/16mm), while the MCU pair retains 70%.
 These are design-review bounds, not USB standard limits; adding long meanders
 to raise a percentage would defeat the short-link intent. No verified 90-ohm
