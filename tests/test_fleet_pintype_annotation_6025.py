@@ -33,6 +33,11 @@ ANNOTATED_BOARDS = [
         ("voltage_divider.kicad_pcb", "voltage_divider_routed.kicad_pcb"),
     ),
     (
+        "02-charlieplex-led",
+        "charlieplex_3x3.kicad_sch",
+        ("charlieplex_3x3.kicad_pcb", "charlieplex_3x3_routed.kicad_pcb"),
+    ),
+    (
         "09-usbc-pd-power",
         "usbc_pd_power.kicad_sch",
         ("usbc_pd_power.kicad_pcb",),

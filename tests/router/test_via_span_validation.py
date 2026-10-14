@@ -4,6 +4,13 @@ Ported from the #5502 reference branch (65ac81b7).  Before the fix,
 ``RoutingGrid.validate_via_clearance`` only judged foreign segments on the
 barrel's two endpoint layers, so an inner-layer trace through a through
 via's annulus was accepted.
+
+Issue #6485: the span a barrel occupies is ``Via.drilled_layers``.  The
+router has no blind/buried process, so the only via that stops short of the
+outer pair is a micro via; any other via is drilled F.Cu..B.Cu whatever pair
+``layers`` records (KiCad builds a keyword-less via that way).  The partial
+spans are therefore exercised on micro vias, and the same pairs on a
+non-micro via must be judged as a through barrel.
 """
 
 import math
@@ -30,15 +37,24 @@ def rules():
     return DesignRules(trace_width=0.2, trace_clearance=0.2, via_clearance=0.2, grid_resolution=0.2)
 
 
+@pytest.mark.parametrize("is_micro", [True, False])
 @pytest.mark.parametrize("span", SPANS)
 @pytest.mark.parametrize("layer", LAYERS)
-def test_through_blind_buried_span_against_foreign_trace(span, layer):
+def test_through_blind_buried_span_against_foreign_trace(span, layer, is_micro):
     grid = RoutingGrid(20, 20, rules(), layer_stack=LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig())
     trace = Route(net=1, net_name="TRACE", segments=[Segment(5, 10, 15, 10, 0.2, layer, 1)])
     grid.mark_route(trace)
-    via = Via(x=10, y=10, diameter=0.6, drill=0.3, layers=span, net=2)
-    indices = sorted(LAYERS.index(endpoint) for endpoint in span)
-    overlaps = indices[0] <= LAYERS.index(layer) <= indices[1]
+    via = Via(x=10, y=10, diameter=0.6, drill=0.3, layers=span, net=2, is_micro=is_micro)
+    if is_micro:
+        # A micro via keeps the span it carries: copper only between its ends.
+        indices = sorted(LAYERS.index(endpoint) for endpoint in span)
+        overlaps = indices[0] <= LAYERS.index(layer) <= indices[1]
+    else:
+        # Issue #6485: every other via is drilled through the whole stack, so
+        # a trace on ANY layer runs into its barrel -- including the layers
+        # outside the logical pair, which the pre-#6485 gate skipped.
+        assert set(via.drilled_layers) == {Layer.F_CU, Layer.B_CU}
+        overlaps = True
     valid, clearance, location = grid.validate_via_clearance(via, exclude_net=2)
     assert valid is not overlaps
     assert clearance == pytest.approx(-0.4) if overlaps else math.isinf(clearance)

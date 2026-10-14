@@ -1080,11 +1080,14 @@ def create_stm32_pcb(output_dir: Path) -> Path:
         )
         silk_block = "\n".join(silk_lines)
 
+        # Reference at y=-6.0 (issue #6269): the top pad row's outer edge is
+        # at y=-4.9, and at the old y=-5.5 the 1 mm text sat 0.07-0.145 mm from
+        # pads 41-44 (KiCad silk_over_copper, 0.15 mm jlcpcb-tier1 floor).
         return f"""  (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -5.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -6.0) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "{value}" (at 0 5.5) (layer "F.Fab") (uuid "{generate_uuid()}")

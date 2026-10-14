@@ -160,9 +160,13 @@ def write_pcb(target, *, verbose=True):
     # Board-local sibling module: import by path-insert so this works whatever
     # the caller's cwd is and whether or not the caller already did so.
     sys.path.insert(0, str(Path(__file__).parent))
-    from silk_repair import repair_board_silk_pad_clearance
+    from silk_repair import repair_board_silk_edge_clearance, repair_board_silk_pad_clearance
 
     repair_board_silk_pad_clearance(target, verbose=verbose)
+    # Issue #6494: J1 overhangs the board edge by design; clip its body
+    # outline back to the ``silk_edge_clearance`` floor.  After the pad pass,
+    # so the clip sees the final (widened) stroke width.
+    repair_board_silk_edge_clearance(target, verbose=verbose)
     return target
 
 

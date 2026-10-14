@@ -157,7 +157,10 @@ def usb2_net_class() -> NetClassRouting:
         coupled_continuity_threshold=0.7,  # Phase 2G: relax for short pair
         target_diff_impedance=90.0,  # Phase 3K: USB 2.0 90 Ohm diff
         impedance_tolerance_percent=15.0,
-        skew_tolerance_mm=3.0,  # Phase 3H: USB 2.0 HS budget
+        # Issue #6443: no explicit skew.  The class declares high-speed USB2
+        # and takes the protocol default, 1.27 mm (TI SPRAAR7J App. A).  The
+        # 3.0 mm it used to set had no source.
+        pair_protocol="USB2_HS",
         length_critical=True,
     )
 
@@ -180,6 +183,7 @@ def usb3_net_class() -> NetClassRouting:
         target_diff_impedance=90.0,  # Phase 3K
         impedance_tolerance_percent=10.0,
         skew_tolerance_mm=0.5,  # Phase 3H: USB 3.0 budget
+        pair_protocol="USB3_SS",  # Issue #6443 (explicit 0.5 mm above wins)
         length_critical=True,
     )
 
@@ -201,6 +205,7 @@ def pcie_net_class() -> NetClassRouting:
         target_diff_impedance=100.0,  # Phase 3K: PCIe 100 Ohm
         impedance_tolerance_percent=10.0,
         skew_tolerance_mm=0.5,  # Phase 3H: PCIe Gen1 budget
+        pair_protocol="PCIE_G1",  # Issue #6443 (explicit 0.5 mm above wins)
         length_critical=True,
     )
 
@@ -223,6 +228,7 @@ def mipi_net_class() -> NetClassRouting:
         target_diff_impedance=100.0,  # Phase 3K: MIPI 100 Ohm
         impedance_tolerance_percent=10.0,
         skew_tolerance_mm=0.3,  # Phase 3H: tight MIPI lane budget
+        pair_protocol="MIPI_DPHY",  # Issue #6443 (explicit 0.3 mm above wins)
         length_critical=True,
     )
 

@@ -400,15 +400,27 @@ def test_mixed_zone_layers_and_four_layer_via_span(tmp_path, native):
             x=x, y=107, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=nets["GOOD"]
         )
         assert not router.grid.validate_via_clearance(through, nets["GOOD"])[0]
-        # F->In1 does not span the first fill on In2.
+        # F->In1 does not span the first fill on In2.  Issue #6485: the via
+        # that stops at In1 is a micro via; the same pair on a non-micro via
+        # is drilled through the stack and so lands in the In2 fill as well.
         blind = Via(
-            x=x, y=107, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.IN1_CU), net=nets["GOOD"]
+            x=x,
+            y=107,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.IN1_CU),
+            net=nets["GOOD"],
+            is_micro=True,
         )
         assert router.grid.validate_via_clearance(blind, nets["GOOD"])[0] == (x == 108)
+        drilled = Via(
+            x=x, y=107, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.IN1_CU), net=nets["GOOD"]
+        )
+        assert not router.grid.validate_via_clearance(drilled, nets["GOOD"])[0]
         if native:
             assert isinstance(router.router, CppPathfinder)
             start, end = router.pads[("R1", "1")], router.pads[("R2", "1")]
-            for via, valid in ((through, False), (blind, x == 108)):
+            for via, valid in ((through, False), (blind, x == 108), (drilled, False)):
                 route = Route(net=nets["GOOD"], net_name="GOOD", vias=[via])
                 assert (
                     router.router._validate_route_clearance(route, start, end, 3) is None

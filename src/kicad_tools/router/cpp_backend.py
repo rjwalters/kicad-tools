@@ -88,7 +88,10 @@ logger = logging.getLogger(__name__)
 # v53 (Issue #6464): both A* loops and ``Grid3D.validate_route`` hold a via to
 # the fab hole-to-hole floor against the route's OWN earlier vias.  A v52 .so
 # commits same-route via pairs below the floor.
-_REQUIRED_CPP_BUILD_VERSION = 53
+# v54 (Issue #6473): ``CoupledPathfinder.route`` holds a layer change to the
+# fab hole-to-hole floor against the pair's own earlier vias and between the
+# P and N via of the move.  A v53 .so returns coupled via pairs below it.
+_REQUIRED_CPP_BUILD_VERSION = 54
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -3688,7 +3691,12 @@ class CppPathfinder:
 
         cpp_vias: list[router_cpp.Via] = []
         for via in route.vias:
-            for layer_from, layer_to in self._project_via_spans(via.layers):
+            # Issue #6485: the DRILLED span.  A non-micro via is a through
+            # barrel whatever logical pair ``via.layers`` records, so the
+            # native validator must judge it on every layer -- the same
+            # span ``RoutingGrid.worst_via_pad_deficit`` /
+            # ``validate_via_clearance`` use and ``Via.to_sexp`` writes.
+            for layer_from, layer_to in self._project_via_spans(via.drilled_layers):
                 cv = router_cpp.Via()
                 cv.x, cv.y = via.x, via.y
                 cv.drill = via.drill
@@ -5110,7 +5118,10 @@ def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) ->
                 **extra,
             )
         for via in route.vias:
-            for span in project(via.layers):
+            # Issue #6485: store the DRILLED span (see ``validate_route``'s
+            # via projection) so later candidates are judged against the
+            # barrel that is fabricated, not the logical layer pair.
+            for span in project(via.drilled_layers):
                 cpp_grid._impl.add_stored_via(
                     via.x,
                     via.y,

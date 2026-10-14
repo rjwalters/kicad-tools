@@ -2752,7 +2752,7 @@ def test_close_shadow_chain_refuses_a_connector_through_a_pad_halo():
 # than the checker and could never fire on the finding it exists to close.
 
 
-def _via_gate_via(x, y, net, name, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU)):
+def _via_gate_via(x, y, net, name, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), is_micro=False):
     from kicad_tools.router.primitives import Via
 
     return Via(
@@ -2763,6 +2763,7 @@ def _via_gate_via(x, y, net, name, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU)
         layers=layers,
         net=net,
         net_name=name,
+        is_micro=is_micro,
     )
 
 
@@ -2915,7 +2916,12 @@ def test_segment_endpoint_colocated_with_a_foreign_via_is_not_flagged():
 
 
 def test_blind_via_that_does_not_span_the_segments_layer_is_not_flagged():
-    """Layer-span awareness: a barrel is only copper where it actually runs."""
+    """Layer-span awareness: a barrel is only copper where it actually runs.
+
+    Issue #6485: the router's only partial-span via is a MICRO via.  A
+    non-micro via is drilled through whatever pair it carries (KiCad builds it
+    that way), so the same pair without ``is_micro`` does reach F.Cu.
+    """
     dpr = _pad_gate_router()
 
     shadow = Route(net=7, net_name="USB3_TX1+")
@@ -2925,10 +2931,20 @@ def test_blind_via_that_does_not_span_the_segments_layer_is_not_flagged():
 
     blind = Route(net=99, net_name="OTHER")
     blind.vias.append(
-        _via_gate_via(5.0, 5.0, net=99, name="OTHER", layers=(Layer.B_CU, Layer.B_CU))
+        _via_gate_via(
+            5.0, 5.0, net=99, name="OTHER", layers=(Layer.B_CU, Layer.B_CU), is_micro=True
+        )
     )
     with dpr._shadow_foreign_copper(blind):
         assert dpr._route_via_violation(shadow)[0] == 0.0
+
+    # The same pair on a NON-micro via is a through barrel (#6485).
+    drilled_through = Route(net=99, net_name="OTHER")
+    drilled_through.vias.append(
+        _via_gate_via(5.0, 5.0, net=99, name="OTHER", layers=(Layer.B_CU, Layer.B_CU))
+    )
+    with dpr._shadow_foreign_copper(drilled_through):
+        assert dpr._route_via_violation(shadow)[0] == pytest.approx(_BARREL_DEFICIT, abs=1e-9)
 
     # Positive control: the SAME site as a through via does span F.Cu.
     through = Route(net=99, net_name="OTHER")
@@ -4357,8 +4373,9 @@ def test_via_pad_deficit_ignores_foreign_pad_outside_the_via_layer_span_5676():
         width=20.0, height=10.0, rules=rules, layer_stack=LayerStack.four_layer_all_signal()
     )
     dpr = router._diffpair
-    # Blind via F.Cu <-> In1.Cu: its barrel never reaches B.Cu.
-    blind_via = _via((Layer.F_CU, Layer.IN1_CU), x=5.0, y=5.0, net=1)
+    # Micro via F.Cu <-> In1.Cu: its barrel never reaches B.Cu.  (Issue #6485:
+    # micro is the router's only partial-span via; see the through case below.)
+    blind_via = _via((Layer.F_CU, Layer.IN1_CU), x=5.0, y=5.0, net=1, is_micro=True)
     # Foreign SMD pad co-located with the via, but on B.Cu -- outside the span.
     dpr.autorouter.grid.add_pad(
         Pad(
@@ -4378,6 +4395,12 @@ def test_via_pad_deficit_ignores_foreign_pad_outside_the_via_layer_span_5676():
     assert dpr.autorouter.grid.worst_via_pad_deficit(blind_via, exclude_net=1)[0] <= 1e-9, (
         "kernel and legacy grid readings must agree on the same via/pad pair"
     )
+
+    # Issue #6485: the same pair on a NON-micro via is drilled through the
+    # whole stack, so the B.Cu pad is under its barrel -- in both readings.
+    through_via = _via((Layer.F_CU, Layer.IN1_CU), x=5.0, y=5.0, net=1)
+    assert dpr._via_pad_deficit(through_via) > 1e-9
+    assert dpr.autorouter.grid.worst_via_pad_deficit(through_via, exclude_net=1)[0] > 1e-9
 
 
 def test_mirrored_z_jog_is_refused_when_the_partner_occupies_the_jog_layer():

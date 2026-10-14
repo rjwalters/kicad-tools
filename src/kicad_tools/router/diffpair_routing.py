@@ -40,6 +40,7 @@ from kicad_tools.core.geometry import (
 )
 
 from . import wall_deadline as _wall_deadline
+from .clearance_kernel import CLEARANCE_EPSILON_MM as _KERNEL_EPSILON_MM
 from .clearance_resolver import trace_via_clearance_mm
 from .clearance_shapes import (
     KShape,
@@ -513,9 +514,21 @@ def _via_spans_layer(via: Via, layer: Layer) -> bool:
     cannot drift.
     """
     # Issue #6099: physical stack order, not enum value.
-    lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-    hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+    # Issue #6485: the DRILLED span, not the logical ``via.layers`` pair.  A
+    # non-micro via is a through barrel whatever layer transition its producer
+    # recorded, so a gate that skipped the layers outside ``via.layers`` waved
+    # through copper the fabricated barrel shorts.
+    lo, hi = _via_drilled_stack_span(via)
     return lo <= layer.stack_order <= hi
+
+
+def _via_drilled_stack_span(via: Via) -> tuple[int, int]:
+    """``(lowest, highest)`` stack order the via's barrel occupies (#6485)."""
+    first, second = via.drilled_layers
+    return (
+        min(first.stack_order, second.stack_order),
+        max(first.stack_order, second.stack_order),
+    )
 
 
 # Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
@@ -2210,6 +2223,41 @@ class CoupledPathfinder:
             return False
         return pos.x == goal.x and pos.y == goal.y
 
+    def _coupled_own_vias_clear(
+        self, state: CoupledState, own_vias: list[tuple[int, int]] | None
+    ) -> bool:
+        """May both rails drop a via where they stand? (Issue #6473).
+
+        KiCad's ``hole_to_hole`` rule exempts neither two vias of one net
+        (#5673) nor the two rails of a differential pair, and the stored-via
+        checks behind ``_is_via_blocked`` only see committed copper.  So the
+        new P and N drills must keep ``max(min_drill_clearance,
+        min_hole_to_hole)`` edge to edge from each other and from every via
+        already on the joint path (``own_vias``, both rails).  A candidate on
+        the cell of an earlier via is that same drill (a via stack).  Same
+        predicate and kernel epsilon as the native
+        ``Pathfinder::own_path_vias_clear`` and the coupled C++ loop.
+        """
+        rules = self.rules
+        floor = max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+        limit = floor - _KERNEL_EPSILON_MM
+        drill = rules.via_drill
+        res = self.grid.resolution
+        px, py = state.p_pos.x, state.p_pos.y
+        nx, ny = state.n_pos.x, state.n_pos.y
+
+        def under(ax: int, ay: int, bx: int, by: int) -> bool:
+            if ax == bx and ay == by:
+                return False
+            return math.hypot(ax - bx, ay - by) * res - drill < limit
+
+        if under(px, py, nx, ny):
+            return False
+        for vx, vy in own_vias or ():
+            if under(px, py, vx, vy) or under(nx, ny, vx, vy):
+                return False
+        return True
+
     def _get_coupled_neighbors(
         self,
         state: CoupledState,
@@ -2226,6 +2274,7 @@ class CoupledPathfinder:
         n_visited: frozenset[tuple[int, int, int]] | None = None,
         p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
         n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
+        own_vias: list[tuple[int, int]] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -2276,6 +2325,12 @@ class CoupledPathfinder:
                 permissive behaviour).
             n_visited: Issue #3078: companion to ``p_visited`` for the
                 negative trace.  Same encoding and semantics.
+            own_vias: Issue #6473: ``(x, y)`` cells of the vias already on
+                the current A* parent chain, both rails.  A layer change is
+                rejected when either new drill would sit under the fab
+                hole-to-hole floor from one of them (see
+                :meth:`_coupled_own_vias_clear`).  The P-vs-N check of the
+                move itself runs with or without it.
 
         Returns list of (new_state, cost, is_via) tuples.
         """
@@ -2749,10 +2804,22 @@ class CoupledPathfinder:
             state.n_pos, n_start
         )
 
+        # Issue #6473: hole-to-hole floor among the pair's OWN vias.  It is
+        # layer-independent, so it is evaluated once, lazily, and shared with
+        # the swap-via move below (which drills the same two cells).  NOT
+        # waived at endpoint pads: that exemption is about pad metal.
+        own_h2h_clear: bool | None = None
+
         # Try layer change (via) - both traces must change layer together
         routable_layers = self.grid.get_routable_indices()
         for new_layer in routable_layers:
             if new_layer == state.p_pos.layer:
+                continue
+
+            if own_h2h_clear is None:
+                own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
+            if not own_h2h_clear:
+                self.last_rejections["via_own_h2h"] += 1
                 continue
 
             # Check if vias can be placed at both positions.  Skip the
@@ -2798,6 +2865,14 @@ class CoupledPathfinder:
         if self.allow_swap_via:
             for new_layer in routable_layers:
                 if new_layer == state.p_pos.layer:
+                    continue
+
+                # Issue #6473: the swap drills the same two cells as the
+                # plain layer change, so it takes the same own-via floor.
+                if own_h2h_clear is None:
+                    own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
+                if not own_h2h_clear:
+                    self.last_rejections["via_own_h2h"] += 1
                     continue
 
                 # Both pads must be able to host a via at their current
@@ -3659,10 +3734,15 @@ class CoupledPathfinder:
             p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
             n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
             bucket = max(1, prox_radius)
+            # Issue #6473: via cells already on this joint path (both rails).
+            own_vias: list[tuple[int, int]] = []
             walker: CoupledNode | None = current
             while walker is not None:
                 p_cell = (walker.state.p_pos.x, walker.state.p_pos.y, walker.state.p_pos.layer)
                 n_cell = (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
+                if walker.via_from_parent:
+                    own_vias.append(p_cell[:2])
+                    own_vias.append(n_cell[:2])
                 p_visited_cells.add(p_cell)
                 n_visited_cells.add(n_cell)
                 if prox_radius > 1:
@@ -3708,6 +3788,7 @@ class CoupledPathfinder:
                 n_visited=n_visited_frozen,
                 p_trail_buckets=p_trail_buckets,
                 n_trail_buckets=n_trail_buckets,
+                own_vias=own_vias,
             ):
                 # Issue #6243: authored netclass minima on both rails, through
                 # the grid's kernel-backed gate.  Dormant without floors.
@@ -3876,18 +3957,31 @@ class CoupledPathfinder:
         current_x, current_y = start_pad.x, start_pad.y
         current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
 
+        # Issue #6485: ``(current_layer_idx, layer_idx)`` is the path's
+        # LOGICAL layer transition (e.g. F.Cu -> In1.Cu), not the drilled
+        # span.  The coupled search has no blind/buried process: both backends
+        # admit a layer change only where the barrel is clear on EVERY layer
+        # (``_is_via_blocked`` sweeps ``0..num_layers``; C++
+        # ``CoupledPathfinder::via_route_geometry_clear`` sets
+        # ``layer_from = 0`` / ``layer_to = layers - 1``), and
+        # ``RoutingGrid._mark_via`` blocks every layer once it is placed.
+        # Reporting the logical pair verbatim wrote a keyword-less
+        # ``(via ... (layers "F.Cu" "In1.Cu"))`` that KiCad drills as a
+        # through via while every reader of ``via.layers`` missed the barrel
+        # on the remaining layers.  Same normalization as the single-ended
+        # builders (``pathfinder.py`` / ``cpp_backend.py``, Issue #5013/#5174).
+        physical_top_layer = Layer(self.grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self.grid.index_to_layer(self.grid.num_layers - 1))
+
         for wx, wy, layer_idx, is_via in path:
             if is_via:
-                # Add via
+                # Add via - a through barrel over the full stack (see above).
                 via = Via(
                     x=current_x,
                     y=current_y,
                     drill=self.rules.via_drill,
                     diameter=self.rules.via_diameter,
-                    layers=(
-                        Layer(self.grid.index_to_layer(current_layer_idx)),
-                        Layer(self.grid.index_to_layer(layer_idx)),
-                    ),
+                    layers=(physical_top_layer, physical_bottom_layer),
                     net=start_pad.net,
                     net_name=start_pad.net_name,
                 )
@@ -6083,13 +6177,12 @@ class DiffPairRouter:
             deficit = gap_deficit(shape, segment_shape(seg), trace_floor)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
-        v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-        v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+        # Issue #6485: drilled spans (see ``_via_spans_layer``).
+        v_lo, v_hi = _via_drilled_stack_span(via)
         for other in universe.vias:
             if other.net == via.net:
                 continue
-            o_lo = min(other.layers[0].stack_order, other.layers[1].stack_order)
-            o_hi = max(other.layers[0].stack_order, other.layers[1].stack_order)
+            o_lo, o_hi = _via_drilled_stack_span(other)
             if o_hi < v_lo or o_lo > v_hi:
                 continue  # barrels never share a layer
             deficit = gap_deficit(shape, via_shape(other), clearance)

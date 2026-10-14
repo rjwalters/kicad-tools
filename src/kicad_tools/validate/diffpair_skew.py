@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.diffpair_engagement import PairThresholds
 
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,25 @@ def derive_skew_data(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 2,
 ) -> tuple[dict[tuple[str, str], float], dict[tuple[int, int], float]]:
-    """Re-derive ``(skew_data, threshold_map)`` from a routed PCB.
+    """``(skew_data, threshold_map)`` of :func:`derive_skew_limits`."""
+    skew_data, limits = derive_skew_limits(
+        pcb, net_class_map, board_thickness_mm, num_copper_layers
+    )
+    return skew_data, {key: t.skew_mm for key, t in limits.items()}
+
+
+def derive_skew_limits(
+    pcb: PCB,
+    net_class_map: dict[str, NetClassRouting] | None,
+    board_thickness_mm: float | None = None,
+    num_copper_layers: int = 2,
+) -> tuple[dict[tuple[str, str], float], dict[tuple[int, int], PairThresholds]]:
+    """Re-derive ``(skew_data, limits)`` from a routed PCB.
+
+    ``limits`` maps ``(min_net_id, max_net_id)`` to the pair's resolved
+    :class:`~kicad_tools.validate.diffpair_engagement.PairThresholds` --
+    limit, provenance and severity (Issue #6443).  :func:`derive_skew_data`
+    flattens it to the ``threshold_map`` described under Returns.
 
     Walks the PCB's net table, runs the layered differential-pair
     detector, and sums per-net length from PCB-side segments + vias for
@@ -159,7 +178,7 @@ def derive_skew_data(
         return {}, {}
 
     skew_data: dict[tuple[str, str], float] = {}
-    threshold_map: dict[tuple[int, int], float] = {}
+    threshold_map: dict[tuple[int, int], PairThresholds] = {}
 
     for detected_pair in detected:
         pair = detected_pair.pair
@@ -199,14 +218,14 @@ def derive_skew_data(
         from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
 
         key = (p_id, n_id) if p_id <= n_id else (n_id, p_id)
-        threshold_map[key] = resolve_pair_thresholds(net_class_map, p_name, n_name).skew_mm
+        threshold_map[key] = resolve_pair_thresholds(net_class_map, p_name, n_name)
 
         logger.info(
             "[diffpair-skew] %s <-> %s skew=%.3f mm (tolerance=%.3f)",
             p_name,
             n_name,
             skew_mm,
-            threshold_map[key],
+            threshold_map[key].skew_mm,
         )
 
     return skew_data, threshold_map

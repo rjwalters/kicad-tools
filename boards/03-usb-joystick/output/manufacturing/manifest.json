@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.22.0",
-  "generated_at": "2026-10-09T04:23:18.455734+00:00",
+  "generated_at": "2026-10-14T03:40:18.559249+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,8 +29,8 @@
       "size": 982
     },
     "check-report.json": {
-      "sha256": "3011c4ae717a0185d674268af8fe958d9657f27c741aa0e5346632735dcf498f",
-      "size": 7077
+      "sha256": "0833736a0958b3afbcf20949c2158cc537a675d493022c459bfa8b40f55e8483",
+      "size": 15183
     },
     "cpl_jlcpcb.csv": {
       "sha256": "8b435e9347774c7f26e3536b35136d1cf2fc0c9ba3c1de5803fcfd2ab6086b5d",
@@ -53,8 +53,8 @@
       "size": 51818
     },
     "design-source/generate_pcb.py": {
-      "sha256": "a2d4d8bf7034d20092888e2d42c513c68a715b511dba5d6281e4b6ede3d1e125",
-      "size": 7685
+      "sha256": "36afb9c6a8b81878b88b3cf38b91da058c7a281f706d1a16451622e07cc32104",
+      "size": 7988
     },
     "design-source/generate_schematic.py": {
       "sha256": "f509834c144b688688971cfc0ea7614977457f4f56e402dcc569551fa909c464",
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "cd1d1c1fae85c27d439db6510aa6f1af1699b97bd93952b8ec7a225c32e64fa3",
-      "size": 189740
+      "sha256": "e60dfaf3f236d34858c768fdda44af41bec896b996391d3859a7fedf8a7cd56b",
+      "size": 189750
     },
     "images/assembly.png": {
       "sha256": "5116f2d20c6863b59b216a57f7e1e58d88e719b839c7076caa7faf6b5b3e78d6",
@@ -209,12 +209,12 @@
       "size": 497328
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "4c37ff6a64358801a9cce138450e326a2316180fb885a74de18787530635fceb",
-      "size": 486470
+      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
+      "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "37b0a7067492f065ac15ef14b40d8d5eeeedac0d75ad7295b26a12bd63c6c468",
-      "size": 282157
+      "sha256": "7a24dc394f269e214ef4d5dd70eb19aadd3436f12542f0d109e8a81b634534d8",
+      "size": 282787
     },
     "manual-assembly-bom.csv": {
       "sha256": "f51fef1b581623d69c00b1b3604f0a1b193c29e29134a3931e0853ab13030ef7",
@@ -317,12 +317,12 @@
       "size": 2354
     },
     "report.md": {
-      "sha256": "1583d29a8ace857894482a46a19a0c8d3a00d626e608351dfffb8b8587d84dc7",
-      "size": 4976
+      "sha256": "912a83cae798faaa0686f9398f387d1c4b20f2f5aa695f93f28292896bba297e",
+      "size": 4951
     },
     "report.pdf": {
-      "sha256": "e18c5a58b7676132dcf7972546daba527cdb6133df2c7a92afc64a42ddf69539",
-      "size": 3717712
+      "sha256": "7602fd74b17959420c6a2c5dda362f9cf8ffa2b23be2352117bae0ea53386d48",
+      "size": 3750775
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -398,8 +398,9 @@
     },
     {
       "name": "drc",
-      "status": "WARN",
-      "message": "DRC passed with 8 warning(s)"
+      "status": "FAIL",
+      "message": "DRC has 13 error(s)",
+      "details": "netclass_clearance_copper: Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.194mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.195mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.154mm < netclass 'Power' minimum 0.200mm"
     },
     {
       "name": "erc",

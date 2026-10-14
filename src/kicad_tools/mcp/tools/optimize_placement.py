@@ -33,6 +33,7 @@ from kicad_tools.cli.optimize_placement_cmd import (
     _without_caps,
     _write_board_as_read_atomic,
     _write_placements_to_pcb,
+    repair_snapped_silk_refs,
     route_check_placement,
     snap_decoupling,
     weights_to_cost_config,
@@ -600,6 +601,12 @@ def optimize_placement(
                 _write_placements_to_pcb(
                     pcb_path, output_path, best_vector, components, board_origin
                 )
+                # Re-anchor reference text the snap disturbed (issue #6256).
+                silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
+                if silk_repair is not None:
+                    result["snap_silk_repair"] = silk_repair.as_dict()
+                    if silk_repair.warnings():
+                        result.setdefault("warnings", []).extend(silk_repair.warnings())
             result["output_path"] = output_path
         except Exception as e:
             result["warnings"] = [f"Optimization succeeded but save failed: {e}"]

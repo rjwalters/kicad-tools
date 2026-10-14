@@ -4451,8 +4451,11 @@ class RoutingGrid:
 
         # Layer span of the via (indices, inclusive).  SMD pads on layers
         # outside this span never interact with the via barrel/annulus.
-        via_idx_a = self.layer_to_index(via.layers[0].value)
-        via_idx_b = self.layer_to_index(via.layers[1].value)
+        # Issue #6485: the DRILLED span -- a non-micro via is a through
+        # barrel whatever logical layer pair its producer recorded.
+        drilled_a, drilled_b = via.drilled_layers
+        via_idx_a = self.layer_to_index(drilled_a.value)
+        via_idx_b = self.layer_to_index(drilled_b.value)
         via_lo, via_hi = min(via_idx_a, via_idx_b), max(via_idx_a, via_idx_b)
 
         for pad in self._pads:
@@ -4592,8 +4595,10 @@ class RoutingGrid:
 
         # Layer span of the via (indices, inclusive).  A segment on a
         # layer outside this span never touches the via barrel.
-        via_idx_a = self.layer_to_index(via.layers[0].value)
-        via_idx_b = self.layer_to_index(via.layers[1].value)
+        # Issue #6485: the DRILLED span (see ``worst_via_pad_deficit``).
+        drilled_a, drilled_b = via.drilled_layers
+        via_idx_a = self.layer_to_index(drilled_a.value)
+        via_idx_b = self.layer_to_index(drilled_b.value)
         via_lo, via_hi = min(via_idx_a, via_idx_b), max(via_idx_a, via_idx_b)
 
         base_routes = self.routes if foreign_routes is None else foreign_routes
@@ -5175,8 +5180,12 @@ class RoutingGrid:
         # declared F.Cu..B.Cu crosses In1/In2), so judge foreign segments on
         # the whole span -- not just on its two endpoint layers, which let an
         # inner-layer trace pass right through a through via's annulus.
+        # Issue #6485: that span is ``via.drilled_layers``.  A non-micro via
+        # is a through barrel whatever logical pair ``via.layers`` records,
+        # so this gate agrees with ``worst_via_segment_deficit`` and with
+        # the span the C++ backend is handed (``cpp_backend.py``).
         endpoints: list[int] = []
-        for layer in via.layers:
+        for layer in via.drilled_layers:
             with suppress(KeyError, ValueError):
                 endpoints.append(self.layer_to_index(layer.value))
         via_layer_indices: set[int] = (
@@ -5353,7 +5362,12 @@ class RoutingGrid:
 
             if clearance < min_actual_clearance:
                 min_actual_clearance = clearance
-            if clearance < min_drill_clearance:
+            # Issue #6473: the kernel epsilon, as the native twins use
+            # (``Grid3D::validate_route``, ``Pathfinder::own_path_vias_clear``).
+            # Without it a pair sitting exactly on the floor -- the cheapest
+            # legal pair on a 0.1 mm grid -- measures 0.4999999999999998 and
+            # is rejected here while the C++ side accepts it.
+            if clearance < min_drill_clearance - _KERNEL_EPSILON_MM:
                 has_violation = True
                 violation_loc = (via.x, via.y)
 

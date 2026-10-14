@@ -248,6 +248,53 @@ def test_router_report_and_kct_check_agree_on_board03_thresholds():
         assert resolve_pair_thresholds(ncm, p, n).continuity == continuity[key]
     assert "USB_D+/USB_D-: continuity threshold 25.0%" in report
 
+    # Issue #6443: both pairs are declared USB2_FS, so the router report and
+    # kct check quote 2.5 mm, and both name where the number came from.
+    from kicad_tools.validate import DRCChecker
+
+    checker = DRCChecker(
+        pcb, manufacturer="jlcpcb-tier1", layers=4, net_class_map=ncm, verbose=True
+    )
+    findings = {v.nets: v for v in checker.check_diffpair_length_skew().violations}
+    for p, n in (("USB_D+", "USB_D-"), ("USB_MCU_D+", "USB_MCU_D-")):
+        line = next(ln for ln in report.splitlines() if ln.strip().startswith(f"{p}/{n}:"))
+        assert "skew tolerance 2.500 mm [protocol:USB2_FS (Renesas" in line
+        assert line.rstrip().endswith("; error]")
+        got = resolve_pair_thresholds(ncm, p, n)
+        assert (got.skew_mm, got.protocol, got.skew_severity) == (2.5, "USB2_FS", "error")
+        finding = findings[tuple(sorted((p, n)))]
+        assert finding.severity == "info"  # the committed copper passes
+        assert "within tolerance 2.500 mm [protocol:USB2_FS (Renesas" in finding.message
+
+
+def test_board03_bench_rows_carry_the_limit_and_the_stretch_figure():
+    """Issue #6443: 2.5 mm is the gate, 0.5 mm is still reported (P5 stretch)."""
+    _pcb, ncm = _board03()
+    rows = {
+        r["pair"]: r for r in bench.measure_pairs(B03 / "usb_joystick_routed.kicad_pcb", ncm, 4)
+    }
+    assert set(rows) == {"USB_D", "USB_MCU_D"}
+    for row in rows.values():
+        assert row["skew_tolerance_mm"] == 2.5
+        assert row["protocol"] == "USB2_FS"
+        assert row["skew_source"].startswith("protocol:USB2_FS (Renesas")
+        assert (row["skew_severity"], row["skew_pass"]) == ("error", True)
+        assert (row["skew_stretch_mm"], row["skew_stretch_pass"]) == (0.5, True)
+        assert row["max_uncoupled_per_terminal_mm"] == 6.35
+        assert row["max_vias_per_net"] == 4
+    assert rows["USB_D"]["skew_mm"] == pytest.approx(0.166, abs=0.001)
+    table = bench.render_pairs(
+        [{"board": "03", "engine": "-", "seed": 0, "pairs": list(rows.values())}]
+    )
+    assert "| 2.5 | protocol:USB2_FS (Renesas" in table
+    assert "pass (0.5)" in table
+
+
+def test_limit_descriptors_do_not_change_the_pair_digest():
+    pair = {"pair": "X", "skew_mm": 0.1, "skew_tolerance_mm": 0.5}
+    described = dict(pair, protocol="LVDS", skew_source="protocol:LVDS (uncited)", skew_pass=True)
+    assert bench.pair_digest([pair]) == bench.pair_digest([described])
+
 
 def test_resolver_ignores_a_collapsed_class_key():
     """Even with a poisoned class-name key, the net-name key decides."""
@@ -268,6 +315,11 @@ def test_resolver_falls_back_to_negative_net_then_defaults():
     assert (got.continuity, got.source_net) == (0.25, "USB_D-")
     bare = resolve_pair_thresholds({}, "X_P", "X_N")
     assert (bare.continuity, bare.skew_mm, bare.source_net) == (0.7, 0.5, None)
+    assert (bare.protocol, bare.skew_source, bare.skew_severity) == (
+        None,
+        "default:generic",
+        "error",
+    )
 
 
 def test_determinism_and_merge():

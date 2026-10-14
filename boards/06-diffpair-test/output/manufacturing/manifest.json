@@ -29,8 +29,8 @@
       "size": 2381
     },
     "design-source.zip": {
-      "sha256": "79389ad9b281abd1790b739ffd04c7e55b8ee9bad9ff5453da6811edb58cab2a",
-      "size": 12912
+      "sha256": "b24d43719f8078106d8da6d1f06e10a33e16652828bbaef25018a6358564fa23",
+      "size": 12953
     },
     "fill-consistency.json": {
       "sha256": "6aea658a7d30a148c08b041c382b38c562024696eda159f25addb85c3d45b944",
@@ -93,7 +93,7 @@
       "size": 1212
     },
     "native-erc.json": {
-      "sha256": "a83bc2c43bb1d7d80b10a63de4cdf0e2c1adada10c0649ae1a281bc5dae0f928",
+      "sha256": "b1c3a485b0e89cd1336d7e0ddefd09f7e7c2e4e21ae3b3d6726089b4c0c38d5d",
       "size": 986
     },
     "procurement-review.md": {

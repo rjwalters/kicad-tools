@@ -518,7 +518,7 @@ class TestCoupledFineGridReinstallsEdgeKeepout:
         router._edge_clearance = 0.3
         dpr = router._diffpair
 
-        rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
+        rules = DifferentialPairRules.for_pair_type(DifferentialPairType.USB2)
         pos = DifferentialSignal(
             net_name="USB_D+", net_id=1, base_name="USB_D", polarity="P", notation="plus_minus"
         )

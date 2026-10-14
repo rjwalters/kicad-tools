@@ -39,6 +39,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
+import numpy as np
+
 from ..clearance_shapes import KSegment, pad_shape, segment_shape, shapes_clear, via_shape
 from ..layers import Layer
 from ..primitives import Segment, pad_half_extents
@@ -858,10 +860,7 @@ class GridCollisionChecker:
         needs_exact_pad_check = False
         candidate = _candidate_shape(x1, y1, x2, y2, width)
 
-        for gx, gy in cells_to_check:
-            if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
-                continue  # Out of bounds - skip but don't fail
-
+        for gx, gy in self._blocked_cells_in_bounds(cells_to_check, layer_idx):
             # Issue #5240: ``cell_at`` is a documented drop-in for the
             # legacy ``grid.grid[layer][y][x]`` chain (see
             # ``RoutingGrid.cell_at``'s docstring) -- one allocation
@@ -972,6 +971,37 @@ class GridCollisionChecker:
             return False
 
         return True
+
+    def _blocked_cells_in_bounds(
+        self, cells: list[tuple[int, int]], layer_idx: int
+    ) -> list[tuple[int, int]]:
+        """In-bounds ``cells`` whose blocked plane is set, in ``cells`` order.
+
+        Issue #5617: the walk in :meth:`path_is_clear` only acts on a cell
+        whose ``blocked`` flag is set -- every other in-bounds cell falls
+        through all of its branches untouched.  A cProfile of the Board 06
+        diff-pair re-route attributed 24.8 M ``cell_at`` allocations (13 s
+        self time plus 16 s in the ``net`` property alone) to ~8.9 k
+        ``path_is_clear`` calls, nearly all for unblocked cells.  Reading the
+        blocked plane for the whole window in one array op and handing back
+        only the set cells keeps the verdict identical (same cells, same
+        order, same branches) while skipping the dead allocations.  A grid
+        that does not expose a real ``_blocked`` ndarray (a test double)
+        falls back to the original per-cell bounds filter.
+        """
+        grid = self.grid
+        cols, rows = grid.cols, grid.rows
+        blocked = getattr(grid, "_blocked", None)
+        if not isinstance(blocked, np.ndarray) or blocked.ndim != 3 or not cells:
+            return [(gx, gy) for gx, gy in cells if 0 <= gx < cols and 0 <= gy < rows]
+        coords = np.asarray(cells, dtype=np.int64)
+        xs = coords[:, 0]
+        ys = coords[:, 1]
+        in_bounds = (xs >= 0) & (xs < cols) & (ys >= 0) & (ys < rows)
+        xs = xs[in_bounds]
+        ys = ys[in_bounds]
+        hits = blocked[layer_idx, ys, xs].astype(bool)
+        return list(zip(xs[hits].tolist(), ys[hits].tolist(), strict=True))
 
     def _get_path_cells(
         self, gx1: int, gy1: int, gx2: int, gy2: int, clearance: int

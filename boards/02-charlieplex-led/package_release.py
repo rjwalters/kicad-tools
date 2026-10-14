@@ -53,7 +53,7 @@ from pathlib import Path
 BOARD_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BOARD_DIR.parent))
 
-from release_package import Release, board_content, write_zip  # noqa: E402
+from release_package import PIN_ANNOTATION_NODES, Release, board_content, write_zip  # noqa: E402
 
 from kicad_tools.cli.readiness_cmd import (  # noqa: E402
     FAILED,
@@ -291,7 +291,10 @@ def _renders(name: str):
         archive = RELEASE.old("kicad_project.zip")
         with zipfile.ZipFile(__import__("io").BytesIO(archive)) as zf:
             rendered_from = zf.read(options.pcb.name)
-        if board_content(rendered_from) != board_content(options.pcb.read_bytes()):
+        # Pad pin types (#6025) draw nothing, so they do not invalidate a render.
+        if board_content(rendered_from, ignore=PIN_ANNOTATION_NODES) != board_content(
+            options.pcb.read_bytes(), ignore=PIN_ANNOTATION_NODES
+        ):
             raise RuntimeError("board content changed since renders/ was made; re-render it")
         return (options.board_dir / "output" / "renders" / name).read_bytes()
 

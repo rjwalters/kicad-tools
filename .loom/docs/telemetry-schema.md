@@ -2496,7 +2496,8 @@ One OTLP-only log record per role tick and per work-finder tick (Issue #10212),
 split into `chunk_count` records ordered by `chunk_index` when the JSON is
 large:
 the ranked candidate list (every candidate, chunked by `chunk_index`/`chunk_count` when large, with `candidates_total`), the items
-acted on, and a closed-set reason code per skipped candidate. Role ticks record
+acted on, and a closed-set reason code per skipped candidate (work-finder
+skips also carry the un-collapsed `disposition` and `held_until`, #11811). Role ticks record
 the queue the agent actually consumed (`pr-queue`, or Curator's listings) and
 the writes it issued, via a per-tick pick journal (#10432); `candidate_source`
 and `decisions_observed` say what was seen. Empty ticks still

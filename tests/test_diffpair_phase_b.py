@@ -496,7 +496,7 @@ def test_extra_spacing_cells_widens_min_spacing_cells():
         DifferentialSignal,
     )
 
-    rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
+    rules = DifferentialPairRules.for_pair_type(DifferentialPairType.USB2)
     pos = DifferentialSignal(
         net_name="USB_D+",
         net_id=1,
@@ -653,7 +653,7 @@ def test_route_pair_on_fine_grid_uses_finer_resolution():
     router = Autorouter(width=50.0, height=50.0, rules=DesignRules())
     dpr = router._diffpair
 
-    rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
+    rules = DifferentialPairRules.for_pair_type(DifferentialPairType.USB2)
     pos = DifferentialSignal(
         net_name="USB_D+",
         net_id=1,
@@ -998,7 +998,7 @@ def test_route_pair_on_fine_grid_returns_empty_when_no_pads():
     router = Autorouter(width=50.0, height=50.0, rules=DesignRules())
     dpr = router._diffpair
 
-    rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
+    rules = DifferentialPairRules.for_pair_type(DifferentialPairType.USB2)
     pos = DifferentialSignal(
         net_name="USB_D+",
         net_id=1,

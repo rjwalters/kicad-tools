@@ -65,11 +65,21 @@ than merely raising ``--max-unconnected`` to their pad count, which would let
 a substituted open slip through).  Mirrors
 ``check_board_00_e2e.py``'s ``assert_lvs_known_opens`` intent.
 
+Stranded copper (Issue #6491)
+-----------------------------
+A track or via that reaches no pad leaves every pad connected, so it never
+moves ``total_unconnected_pads`` -- yet ``kicad-cli pcb drc`` reports it as an
+unconnected item.  The gate therefore also fails on any net in
+``NetStatusResult.stranded`` (``padless_components > 0``), naming the stray
+track/via.  ``--known-open-nets`` does not excuse it: those nets are tolerated
+for unroutable pads, not for orphan copper.
+
 Exit codes (mirrors ``scripts/ci/check_board_05_blocking.py`` /
 ``check_routed_drc.py``):
     0 -- Unconnected-pad count within threshold (job passes).
     1 -- Tool failure (file missing, PCB parse error, etc.).
-    2 -- Unconnected pads exceed threshold (regression -- job fails).
+    2 -- Unconnected pads exceed threshold, or stranded copper exists
+         (regression -- job fails).
 
 GitHub-Actions annotations (``::error file=...::``) are emitted to stdout so
 the PR Files-changed view surfaces a regression inline.
@@ -80,6 +90,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 DEFAULT_MAX_UNCONNECTED = 0
 
@@ -92,6 +103,78 @@ def annotate_error(file: str, message: str) -> None:
 def annotate_warning(file: str, message: str) -> None:
     """Emit a GitHub-Actions ``::warning file=...::`` annotation."""
     print(f"::warning file={file}::{message}", flush=True)
+
+
+_RESULTS: dict[tuple[str, int, int], Any] = {}
+
+
+def _load_result(pcb_path: Path) -> Any:
+    """Analyze ``pcb_path`` once per file version (strict model).
+
+    :func:`analyze_unconnected` and :func:`analyze_stranded` both read the same
+    :class:`NetStatusResult`; caching keyed by path, size and mtime keeps the
+    gate to one analysis per board.
+
+    Raises:
+        RuntimeError: If the PCB cannot be loaded or analyzed.
+    """
+    # Imported lazily so ``--help`` works even outside the ``uv run``
+    # environment where ``kicad_tools`` is importable.
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+    try:
+        stat = pcb_path.stat()
+        key = (str(pcb_path.resolve()), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None and key in _RESULTS:
+        return _RESULTS[key]
+
+    # ``strict=True`` decides connectivity by REAL geometric copper contact
+    # (shapely polygon intersection), which matches KiCad's connectivity engine
+    # / ``kicad-cli pcb drc`` (Issue #4176).  This is deliberate and load-
+    # bearing for THIS gate: the DEFAULT 0.01mm endpoint-proximity model
+    # UNDER-detects pad<->pour bonds -- a pad whose real copper overlaps a pour
+    # but whose reference point is not within 0.01mm of a trace endpoint is
+    # reported as a FALSE open.  Board 06 ("diffpair-test") is the concrete
+    # case: its GND/+1V2/VBUS_USB pads are genuinely poured-connected
+    # (kicad-cli DRC: 0 unconnected), yet the default model reports 16 false
+    # opens.  strict mode reports 0 there while STILL catching a genuine float
+    # (a pad with no copper reaching it is unconnected under either model), so
+    # it is both sound (no false positives on pour-connected boards) and
+    # complete (the #4531 J2.1-VCC break still fails).  shapely is a CORE
+    # dependency (Issue #3824), so strict mode is always available in CI.
+    try:
+        result = NetStatusAnalyzer(str(pcb_path), strict=True).analyze()
+    except Exception as e:  # noqa: BLE001 -- surface any load/parse failure as a tool error
+        raise RuntimeError(f"failed to analyze {pcb_path}: {e}") from e
+    if key is not None:
+        _RESULTS[key] = result
+    return result
+
+
+def analyze_stranded(pcb_path: Path) -> list[tuple[str, list[str]]]:
+    """Nets carrying a track or via that reaches no pad (Issue #6491).
+
+    Returns:
+        Sorted ``(net_name, [item description, ...])`` for every net in
+        ``NetStatusResult.stranded``.  The descriptions name the stray copper
+        (e.g. ``"Segment 12 (F.Cu)"``, ``"Via 3"``); a net whose fragments
+        could not be described gets a fragment count instead.
+
+    Raises:
+        RuntimeError: If the PCB cannot be loaded or analyzed.
+    """
+    result = _load_result(pcb_path)
+    per_net = [
+        (
+            net.net_name,
+            list(net.stranded_items) or [f"{net.padless_components} stranded fragment(s)"],
+        )
+        for net in result.stranded
+    ]
+    per_net.sort(key=lambda item: item[0])
+    return per_net
 
 
 def analyze_unconnected(pcb_path: Path) -> tuple[int, list[tuple[str, list[str]]]]:
@@ -114,28 +197,7 @@ def analyze_unconnected(pcb_path: Path) -> tuple[int, list[tuple[str, list[str]]
     Raises:
         RuntimeError: If the PCB cannot be loaded or analyzed.
     """
-    # Imported lazily so ``--help`` works even outside the ``uv run``
-    # environment where ``kicad_tools`` is importable.
-    from kicad_tools.analysis.net_status import NetStatusAnalyzer
-
-    # ``strict=True`` decides connectivity by REAL geometric copper contact
-    # (shapely polygon intersection), which matches KiCad's connectivity engine
-    # / ``kicad-cli pcb drc`` (Issue #4176).  This is deliberate and load-
-    # bearing for THIS gate: the DEFAULT 0.01mm endpoint-proximity model
-    # UNDER-detects pad<->pour bonds -- a pad whose real copper overlaps a pour
-    # but whose reference point is not within 0.01mm of a trace endpoint is
-    # reported as a FALSE open.  Board 06 ("diffpair-test") is the concrete
-    # case: its GND/+1V2/VBUS_USB pads are genuinely poured-connected
-    # (kicad-cli DRC: 0 unconnected), yet the default model reports 16 false
-    # opens.  strict mode reports 0 there while STILL catching a genuine float
-    # (a pad with no copper reaching it is unconnected under either model), so
-    # it is both sound (no false positives on pour-connected boards) and
-    # complete (the #4531 J2.1-VCC break still fails).  shapely is a CORE
-    # dependency (Issue #3824), so strict mode is always available in CI.
-    try:
-        result = NetStatusAnalyzer(str(pcb_path), strict=True).analyze()
-    except Exception as e:  # noqa: BLE001 -- surface any load/parse failure as a tool error
-        raise RuntimeError(f"failed to analyze {pcb_path}: {e}") from e
+    result = _load_result(pcb_path)
 
     per_net: list[tuple[str, list[str]]] = []
     for net in result.nets:
@@ -178,6 +240,7 @@ def check_pcb(
 
     try:
         total_unconnected, per_net = analyze_unconnected(pcb_path)
+        stranded = analyze_stranded(pcb_path)
     except RuntimeError as e:
         return 1, str(e)
 
@@ -211,7 +274,24 @@ def check_pcb(
                 lines.append(f"      - {pad}")
     else:
         lines.append("  (no unconnected pads)")
+    lines.append(f"MEASURED stranded_nets = {len(stranded)} (threshold == 0)")
+    for name, items in stranded:
+        lines.append(f"    {name}: stranded copper reaching no pad")
+        for item in items:
+            lines.append(f"      - {item}")
     print("\n".join(lines), flush=True)
+
+    # Issue #6491: stranded copper fails regardless of the pad threshold and
+    # of --known-open-nets -- kicad-cli reports each fragment as unconnected.
+    stranded_message = ""
+    if stranded:
+        detail = "; ".join(f"{name}: {', '.join(items)}" for name, items in stranded)
+        stranded_message = (
+            f"Stranded-copper regression: {len(stranded)} net(s) carry a track or "
+            f"via that reaches no pad ({detail}). kicad-cli reports each fragment "
+            f"as an unconnected item even though every pad is joined. Delete the "
+            f"stray copper or connect it (kct net-status names it)."
+        )
 
     # A known-open net that is no longer open is an IMPROVEMENT, not a failure
     # -- surface it as a warning so reviewers can tighten --known-open-nets
@@ -220,6 +300,8 @@ def check_pcb(
     no_longer_open = sorted(known_open_nets - open_net_names)
 
     if gated_pad_count <= max_unconnected:
+        if stranded_message:
+            return 2, stranded_message
         offenders = (
             f" [tolerated known-open nets: {', '.join(name for name, _ in tolerated)}]"
             if tolerated
@@ -249,7 +331,7 @@ def check_pcb(
         f"name-excludes power/plane nets -- the very bug class here). Either fix "
         f"the routing (kct net-status names the pad) or, if a NEW net is a "
         f"legitimate designed open, add it to --known-open-nets with reviewer "
-        f"sign-off.",
+        f"sign-off." + (f" Also: {stranded_message}" if stranded_message else ""),
     )
 
 

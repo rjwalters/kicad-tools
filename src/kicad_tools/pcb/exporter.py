@@ -6,11 +6,14 @@ This module provides:
 - update_pcb_placements: Update component positions in existing PCB files
 """
 
+import logging
 import uuid
 from pathlib import Path
 
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
 from .layout import PCBLayout
+
+logger = logging.getLogger(__name__)
 
 
 class KiCadPCBExporter:
@@ -189,8 +192,17 @@ class KiCadPCBExporter:
     ) -> str:
         """Generate a via."""
         via_uuid = self._uuid()
+        # Issue #6485: a partial span is never written keyword-less -- KiCad
+        # would drill it as a through via.
+        from kicad_tools.core.layers import resolve_via_type, warn_derived_via_type
+
+        requested_layers = layers
+        type_token, layers = resolve_via_type(layers)
+        # Deriving an HDI via type is never silent (same warning as add_via).
+        warn_derived_via_type(logger, "block exporter", requested_layers, x, y, type_token)
         layer_str = f'"{layers[0]}" "{layers[1]}"'
-        return f'''	(via
+        via_head = f"(via {type_token}" if type_token else "(via"
+        return f'''	{via_head}
 		(at {self._format_coord(x)} {self._format_coord(y)})
 		(size {size})
 		(drill {drill})

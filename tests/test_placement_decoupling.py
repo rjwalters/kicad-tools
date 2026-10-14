@@ -614,3 +614,198 @@ class TestBackSideCaptureSide:
     def test_mirror_when_flipped_away_from_it(self):
         assert self._pad_x(def_side=0, placed_side=1) == pytest.approx(11.0)
         assert self._pad_x(def_side=1, placed_side=0) == pytest.approx(11.0)
+
+
+# ---------------------------------------------------------------------------
+# Reference text disturbed by the snap (issue #6256)
+# ---------------------------------------------------------------------------
+
+
+def _ref(name: str, x: float, y: float, *, layer: str = "F.SilkS", hide: bool = False) -> str:
+    flag = " (hide yes)" if hide else ""
+    return (
+        f'(fp_text reference "{name}" (at {x} {y}) (layer "{layer}") '
+        f"(effects (font (size 1 1) (thickness 0.15)){flag}))"
+    )
+
+
+def _silk_board(
+    *,
+    u1_ref: tuple[float, float] = (4.5, -0.8),
+    c1_at: tuple[float, float] = (26.0, 26.0),
+    c1_hidden: bool = False,
+) -> str:
+    """``_DECAP_PCB`` plus visible references and an unrelated R9.
+
+    The snap moves C1 to (20.5, 15) beside U1 pad 1. U1's reference sits
+    where C1's pad 1 then lands, and C1's own reference lands on U1's.
+    """
+    return f"""\
+(kicad_pcb (version 20230101) (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user) (39 "F.Mask" user))
+  (setup (pad_to_mask_clearance 0.05))
+  (net 0 "") (net 1 "+3V3") (net 2 "GND") (net 3 "EN")
+  (footprint "SOIC" (layer "F.Cu") (at 15.0 15.0 0)
+    {_ref("U1", *u1_ref)}
+    (pad "1" smd rect (at 3.0 0.0) (size 1.0 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "+3V3") (pinfunction "VDD") (pintype "power_in"))
+    (pad "2" smd rect (at -3.0 0.0) (size 1.0 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND") (pinfunction "VSS") (pintype "power_in"))
+    (pad "3" smd rect (at 0.0 1.0) (size 1.0 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "+3V3") (pinfunction "EN") (pintype "input"))
+  )
+  (footprint "C_0805" (layer "F.Cu") (at {c1_at[0]} {c1_at[1]} 0)
+    {_ref("C1", 0, -1.6, hide=c1_hidden)}
+    (pad "1" smd rect (at -1.0 0.0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "+3V3"))
+    (pad "2" smd rect (at 1.0 0.0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND"))
+  )
+  (footprint "R_0805" (layer "F.Cu") (at 5.0 25.0 0)
+    {_ref("R9", 0, -1.6)}
+    (pad "1" smd rect (at -1.0 0.0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "EN"))
+    (pad "2" smd rect (at 1.0 0.0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND"))
+  )
+  (gr_line (start 0 0) (end 30 0) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 30 0) (end 30 30) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 30 30) (end 0 30) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 0 30) (end 0 0) (layer "Edge.Cuts") (width 0.05))
+)
+"""
+
+
+def _silk_findings(path: Path) -> list[tuple[str, tuple[str, ...]]]:
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.silkscreen import check_silk_over_copper, check_silk_overlap
+
+    pcb = PCB.load(str(path))
+    rules = get_profile("jlcpcb").get_design_rules(layers=2)
+    return [
+        (v.rule_id, tuple(v.items))
+        for check in (check_silk_over_copper, check_silk_overlap)
+        for v in check(pcb, rules).violations
+    ]
+
+
+def _ref_at(path: Path, ref: str) -> str:
+    """The raw ``(at ...)`` text of *ref*'s reference, as written."""
+    import re
+
+    match = re.search(
+        rf'\(fp_text reference "{ref}"\s*\(at ([^)]*)\)', path.read_text(), flags=re.DOTALL
+    )
+    assert match is not None
+    return match.group(1)
+
+
+def _snap_run(tmp_path: Path, board: str, capsys) -> tuple[Path, dict]:
+    from kicad_tools.cli.optimize_placement_cmd import run_optimize_placement
+
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text(board)
+    out = tmp_path / "out.kicad_pcb"
+    rc = run_optimize_placement(
+        str(src),
+        output_path=str(out),
+        seed_method="current",
+        max_iterations=0,
+        as_json=True,
+        allow_infeasible=True,
+    )
+    assert rc == 0
+    return out, json.loads(capsys.readouterr().out)
+
+
+class TestSnapSilkRepair:
+    @pytest.fixture(autouse=True)
+    def _needs_deps(self):
+        pytest.importorskip("cmaes", reason="cmaes not installed")
+        pytest.importorskip("shapely", reason="shapely not installed")
+
+    def test_fixture_reproduces_the_collisions_without_repair(self, tmp_path):
+        """Guard: moving C1 by its origin alone recreates the #6256 findings."""
+        board = _silk_board(c1_at=(20.5, 15.0))
+        path = tmp_path / "moved.kicad_pcb"
+        path.write_text(board)
+        findings = _silk_findings(path)
+        assert ("silk_over_copper", ("U1 (reference)", "C1 pad 1")) in findings
+        assert ("silk_overlap", ("U1 (reference)", "C1 (reference)")) in findings
+
+    def test_snap_reanchors_disturbed_references(self, tmp_path, capsys):
+        out, doc = _snap_run(tmp_path, _silk_board(), capsys)
+        [entry] = doc["decoupling"]
+        assert entry["cap"] == "C1" and entry["distance_mm"] < 2.0  # the snap moved C1
+
+        assert _silk_findings(out) == []
+        repair = doc["snap_silk_repair"]
+        assert repair["moved"] == ["C1", "U1"]
+        assert repair["unresolved"] == [] and repair["error"] is None
+        # R9 is outside the affected set: its reference is untouched.
+        assert "R9" not in repair["affected"]
+        assert _ref_at(out, "R9") == "0 -1.6"
+
+    def test_no_snap_move_runs_no_silk_pass(self, tmp_path, capsys):
+        from kicad_tools.cli.optimize_placement_cmd import repair_snapped_silk_refs
+
+        # C1 already beside U1 pad 1, U1's reference clear of it.
+        out, doc = _snap_run(tmp_path, _silk_board(u1_ref=(0.0, -2.0), c1_at=(20.5, 15.0)), capsys)
+        assert doc["snap_silk_repair"] is None
+        before = out.read_bytes()
+        assert repair_snapped_silk_refs(out, []) is None
+        assert out.read_bytes() == before
+
+    def test_hidden_reference_is_never_moved(self, tmp_path, capsys):
+        out, doc = _snap_run(tmp_path, _silk_board(c1_hidden=True), capsys)
+        assert doc["snap_silk_repair"]["moved"] == ["U1"]
+        assert _ref_at(out, "C1") == "0 -1.6"
+        assert _silk_findings(out) == []
+
+    def test_unplaceable_reference_is_reported_not_hidden(self, tmp_path):
+        from kicad_tools.cli.optimize_placement_cmd import repair_snapped_silk_refs
+        from kicad_tools.placement.decoupling import SnapMove
+
+        # A board barely larger than C1: no spot for its reference text.
+        board = f"""\
+(kicad_pcb (version 20230101) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user))
+  (net 0 "") (net 1 "+3V3") (net 2 "GND")
+  (footprint "C_0805" (layer "F.Cu") (at 2.0 1.0 0)
+    {_ref("C1", 0, 0)}
+    (pad "1" smd rect (at -1.0 0.0) (size 1.0 1.2) (layers "F.Cu" "F.Mask") (net 1 "+3V3"))
+    (pad "2" smd rect (at 1.0 0.0) (size 1.0 1.2) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+  (gr_rect (start 0 0) (end 4 2) (layer "Edge.Cuts") (width 0.05))
+)
+"""
+        path = tmp_path / "tiny.kicad_pcb"
+        path.write_text(board)
+        before = path.read_bytes()
+        repair = repair_snapped_silk_refs(path, [SnapMove("C1", "U1.1", 5.0, 1.0)])
+        assert repair is not None and repair.moved == []
+        [(ref, status, _reason)] = repair.unresolved
+        assert ref == "C1" and status in {"unplaceable", "under_component_fallback"}
+        assert any("C1" in w for w in repair.warnings())
+        assert path.read_bytes() == before  # left exactly where it was
+
+    def test_back_side_cap_reference_is_repaired(self, tmp_path):
+        from kicad_tools.cli.optimize_placement_cmd import repair_snapped_silk_refs
+        from kicad_tools.placement.decoupling import SnapMove
+
+        board = f"""\
+(kicad_pcb (version 20230101) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (36 "B.SilkS" user) (38 "B.Mask" user))
+  (net 0 "") (net 1 "+3V3") (net 2 "GND")
+  (footprint "C_0805" (layer "B.Cu") (at 15.0 15.0 0)
+    {_ref("C1", -1.0, 0.0, layer="B.SilkS")}
+    (pad "1" smd rect (at -1.0 0.0) (size 1.0 1.2) (layers "B.Cu" "B.Mask") (net 1 "+3V3"))
+    (pad "2" smd rect (at 1.0 0.0) (size 1.0 1.2) (layers "B.Cu" "B.Mask") (net 2 "GND"))
+  )
+  (gr_rect (start 0 0) (end 30 30) (layer "Edge.Cuts") (width 0.05))
+)
+"""
+        path = tmp_path / "back.kicad_pcb"
+        path.write_text(board)
+        assert any(rule == "silk_over_copper" for rule, _ in _silk_findings(path))
+        repair = repair_snapped_silk_refs(path, [SnapMove("C1", "U1.1", 5.0, 1.0)])
+        assert repair is not None and repair.moved == ["C1"]
+        assert _silk_findings(path) == []

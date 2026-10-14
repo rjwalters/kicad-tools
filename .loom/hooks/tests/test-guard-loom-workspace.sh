@@ -4,7 +4,7 @@
 #
 # Usage: ./defaults/hooks/tests/test-guard-loom-workspace.sh
 #
-# Covers the #4326 guard: `loom-daemon workspace add|remove|set-priority`
+# Covers the #4326 guard: `loom-daemon workspace add|remove|set-weight`
 # mutate the machine-level registry (normally the operator's real
 # ~/.loom/workspaces.json), so the guard ASKS for confirmation unless
 # LOOM_WORKSPACES_PATH (the sanctioned scratch-registry test seam,
@@ -13,7 +13,7 @@
 #
 #   - `loom-daemon workspace add <path>`    -> ask, no LOOM_WORKSPACES_PATH
 #   - `loom-daemon workspace remove <path>` -> ask, no LOOM_WORKSPACES_PATH
-#   - `loom-daemon workspace set-priority <path> <n>` -> ask, no env
+#   - `loom-daemon workspace set-weight <path> <n>` -> ask, no env
 #   - LOOM_WORKSPACES_PATH set in the ambient environment -> allow
 #   - LOOM_WORKSPACES_PATH=... assigned inline on the command line -> allow
 #   - `loom-daemon workspace list` -> ALWAYS allow (read-only, never matched)
@@ -118,8 +118,8 @@ assert_ask "(a) 'workspace add' with no LOOM_WORKSPACES_PATH -> ask" "$result"
 result=$(run_hook "loom-daemon workspace remove /tmp/mig-test")
 assert_ask "(b) 'workspace remove' with no LOOM_WORKSPACES_PATH -> ask" "$result"
 
-result=$(run_hook "loom-daemon workspace set-priority /tmp/mig-test 3")
-assert_ask "(c) 'workspace set-priority' with no LOOM_WORKSPACES_PATH -> ask" "$result"
+result=$(run_hook "loom-daemon workspace set-weight /tmp/mig-test 3")
+assert_ask "(c) 'workspace set-weight' with no LOOM_WORKSPACES_PATH -> ask" "$result"
 
 # --- LOOM_WORKSPACES_PATH already in the environment -> allow --------------
 result=$(run_hook "loom-daemon workspace add /tmp/mig-test" "LOOM_WORKSPACES_PATH=$TMPROOT/scratch.json")

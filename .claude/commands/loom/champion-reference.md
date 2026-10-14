@@ -598,7 +598,7 @@ EXISTING=$(gh issue list --search "Follow-on from PR #$PR_NUMBER" --limit 500)
 | Standard TODOs | 3+ | Create consolidated |
 | Below threshold | < 3 TODOs, no sections | Skip |
 
-**Follow-on Issue Labeling**: Follow-on issues are created with the `loom:curated` label (goes to Champion evaluation).
+**Follow-on Issue Labeling**: Follow-on issues are created with the `loom:triage` label (Curator admission first, #11820).
 
 **Edge Cases Within Follow-on**:
 

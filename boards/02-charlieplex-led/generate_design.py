@@ -31,6 +31,7 @@ from design_spec import (
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
 
@@ -351,6 +352,15 @@ def main() -> int:
 
         # Step 4: Create PCB
         pcb_path = create_charlieplex_pcb(output_dir)
+
+        # Step 4.1: Copy schematic pin names/electrical types onto the pads
+        # (issues #5985, #6025), as KiCad's "Update PCB from Schematic" does.
+        # The router appends its tracks to this text, so the routed PCB
+        # inherits the ``(pintype ...)`` evidence ``kct detect-mistakes``
+        # reads for rails.
+        annotation = annotate_pcb_file_pintypes(pcb_path, sch_path)
+        assert not annotation.missing_pads, annotation.missing_pads
+        print(f"   Pad pin types annotated: {annotation.annotated}")
 
         # Step 5: Route PCB
         routed_path = output_dir / "charlieplex_3x3_routed.kicad_pcb"
