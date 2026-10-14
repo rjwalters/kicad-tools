@@ -793,8 +793,8 @@ STITCH_VIA_PCB = """(kicad_pcb
   (segment (start 15 15.25) (end 15 17) (width 0.25) (layer "F.Cu") (net 1))
   (segment (start 25 15.25) (end 25 17) (width 0.25) (layer "F.Cu") (net 1))
 
-  (via (at 15 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
-  (via (at 25 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 15 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 25 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
 
   (zone
     (net 1)
@@ -2183,8 +2183,11 @@ class TestDisjointZoneIslandConnectivity:
   (via (at 17 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
 """
         if bridge_present:
+            # A partial span needs the ``blind`` keyword: KiCad reads a
+            # keyword-less via as through whatever its pair says (#6493).
+            via_kw = "" if right_via_end == "B.Cu" else "blind "
             copper += f"""
-  (via (at 23 17) (size 0.6) (drill 0.3) (layers "F.Cu" "{right_via_end}") (net 1))
+  (via {via_kw}(at 23 17) (size 0.6) (drill 0.3) (layers "F.Cu" "{right_via_end}") (net 1))
 """
         board = DISJOINT_ISLANDS_BOTH_PADS_OPEN_PCB.replace(
             '(0 "F.Cu" signal)',
@@ -2419,8 +2422,8 @@ BLIND_VIA_INNER_SEGMENT_PCB = """(kicad_pcb
     (pad "3" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "OC_TRIP_N"))
   )
 
-  (via (at 20 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
-  (via (at 30 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 20 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 30 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
 
   (segment (start 20.15 15) (end 29.85 15) (width 0.25) (layer "In2.Cu") (net 1))
   (segment (start 30 15) (end 35 15) (width 0.25) (layer "F.Cu") (net 1))

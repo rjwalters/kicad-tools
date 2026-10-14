@@ -6309,7 +6309,9 @@ def verify_output_connectivity(
             return int(m.group(1))
         return name_to_id.get(m.group(2).replace('\\"', '"'))
 
+    from ..core.layers import kicad_read_via_layers, warn_normalised_vias
     from .layers import Layer
+    from .optimizer.pcb import via_block_type
     from .primitives import Segment, Via
     from .terminal_connectivity import physical_copper_components
 
@@ -6355,6 +6357,7 @@ def verify_output_connectivity(
 
     # Group parsed vias by net
     vias_by_net: dict[int, list[Via]] = {}
+    vias_read_as_through = 0
     for block_match in via_block_re.finditer(pcb_content):
         block = block_match.group(0)
         at_m = at_re.search(block)
@@ -6362,11 +6365,17 @@ def verify_output_connectivity(
         if at_m is None or net_id is None:
             continue
         ls_m = layers_re.search(block)
-        span = (
-            (layer_by_name.get(ls_m.group(1)), layer_by_name.get(ls_m.group(2)))
-            if ls_m
-            else (Layer.F_CU, Layer.B_CU)
-        )
+        if ls_m:
+            # Issue #6493: a keyword-less partial pair is a through via to
+            # KiCad, so read it as one (one rule shared with the schema).
+            (first_name, last_name), normalised = kicad_read_via_layers(
+                (ls_m.group(1), ls_m.group(2)), via_block_type(block)
+            )
+            if normalised:
+                vias_read_as_through += 1
+            span = (layer_by_name.get(first_name), layer_by_name.get(last_name))
+        else:
+            span = (Layer.F_CU, Layer.B_CU)
         first, last = span
         if first is None or last is None:
             first, last = Layer.F_CU, Layer.B_CU
@@ -6382,6 +6391,7 @@ def verify_output_connectivity(
                 net=net_id,
             )
         )
+    warn_normalised_vias(logger, "verify_output_connectivity", vias_read_as_through)
 
     result: dict[int, dict] = {}
     net_names = net_names or {}
