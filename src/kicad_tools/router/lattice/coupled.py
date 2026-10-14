@@ -566,6 +566,34 @@ def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
     identical to :func:`choose_pair_endpoints`.  Returns ``None`` when
     fewer than two couples exist.
     """
+    return _pair_chain(pads_p, pads_n, split_at_taps=False)
+
+
+def choose_pair_tap_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
+    """The pair's chain split at its tap parts too (issue #6535).
+
+    :func:`choose_pair_chain` keeps a tap -- a part holding a single couple,
+    such as a termination resistor straddling P and N (board 06 LVDS R1..R4)
+    -- on the single trunk.  When that trunk declines with ``pair-no-path``
+    (the tap's own P/N pads straddle the straight corridor, and every pad is
+    an obstacle to the fat agent), the caller may retry the pair as this
+    chain: each tap becomes a chain node, so the pair runs IC -> tap -> IC
+    and every segment ends *at* the tap's couple instead of having to get
+    past it.  A tap contributes no hop (entry == exit); pass-through parts
+    are chained exactly as :func:`choose_pair_chain` chains them.
+
+    Returns ``None`` when the result would not differ from
+    :func:`choose_pair_chain` (no tap part lies between the ends), so a
+    caller never retries the same chain.
+    """
+    chain = _pair_chain(pads_p, pads_n, split_at_taps=True)
+    if chain is None or chain == _pair_chain(pads_p, pads_n, split_at_taps=False):
+        return None
+    return chain
+
+
+def _pair_chain(pads_p: list[Pad], pads_n: list[Pad], *, split_at_taps: bool) -> PairChain | None:
+    """Shared body of :func:`choose_pair_chain` / :func:`choose_pair_tap_chain`."""
     if not pads_p or not pads_n:
         return None
     couples = _greedy_couples(pads_p, pads_n)
@@ -598,7 +626,8 @@ def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
     # has no distinct entry and exit -- the trunk passes it on a clear axis, so
     # it stays on the trunk.  Only a part with two or more couples is a
     # pass-through the signal enters on one side and leaves on the other.
-    groups = {g: m for g, m in groups.items() if len(m) >= 2}
+    if not split_at_taps:
+        groups = {g: m for g, m in groups.items() if len(m) >= 2}
     if not groups:
         return trunk
 
@@ -631,11 +660,17 @@ def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
         entry = nearest(members, _couple_mid(pads_p, pads_n, prev))
         exit_ = nearest(members, nxt)
         if exit_ == entry:
-            continue  # no distinct exit: a tap, not a pass-through
+            if not split_at_taps:
+                continue  # no distinct exit: a tap, not a pass-through
+            # Issue #6535: a tap is a chain node with no hop -- the segment
+            # before it ends at its couple and the next one starts there.
+            segments.append((prev, entry))
+            prev = entry
+            continue
         segments.append((prev, entry))
         hops.append((entry, exit_))
         prev = exit_
-    if not hops:
+    if not segments:
         return trunk
     segments.append((prev, end_b))
     return PairChain(segments=segments, hops=hops)
