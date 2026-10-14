@@ -14628,6 +14628,68 @@ class Autorouter:
                             row.append("x")
                     flush_print("    [relief-debug] " + "".join(row))
 
+    def _relief_probe_clearance_violation(
+        self,
+        routes: list[Route],
+        net: int,
+        net_pads: list[Pad],
+    ) -> str | None:
+        """Run relief probe copper through the active backend's commit validator.
+
+        Issue #6286.  Relief probes skip post-route clearance validation by
+        design (they deliberately cross foreign halos), so probe copper may
+        only be committed after it passes the same
+        ``_validate_route_clearance`` gate a normal-mode route clears.  The
+        two backends share the gate but not its signature: the C++ one keys
+        its same-component carve-out on the start/end pads, the Python one
+        on their component refs.  A probe route does not carry its pads, so
+        each route's endpoints are matched to the nearest pads of ``net``.
+
+        Returns:
+            ``None`` when every route passes (or the backend has no
+            validator), else a short description of the first violation.
+        """
+        validate = getattr(self.router, "_validate_route_clearance", None)
+        if validate is None or not net_pads:
+            return None
+
+        def nearest_pad(x: float, y: float, skip: Pad | None = None) -> Pad:
+            candidates = [p for p in net_pads if p is not skip] or net_pads
+            return min(candidates, key=lambda p: (p.x - x) ** 2 + (p.y - y) ** 2)
+
+        for route in routes:
+            if route.segments:
+                head = (route.segments[0].x1, route.segments[0].y1)
+                tail = (route.segments[-1].x2, route.segments[-1].y2)
+            elif route.vias:
+                head = tail = (route.vias[0].x, route.vias[0].y)
+            else:
+                continue
+            start = nearest_pad(*head)
+            end = nearest_pad(*tail, skip=start)
+
+            if isinstance(self.router, CppPathfinder):
+                net_class = self.net_class_map.get(start.net_name)
+                trace_width = net_class.trace_width if net_class else self.rules.trace_width
+                clearance = net_class.clearance if net_class else self.rules.trace_clearance
+                trace_radius_cells = max(
+                    1, math.ceil((trace_width / 2 + clearance) / self.grid.resolution)
+                )
+                found = validate(route, start, end, trace_radius_cells, net_class=net_class)
+                if found is not None:
+                    kind = getattr(found, "kind", None) or "clearance"
+                    return f"{kind} at ({found[0]:.3f}, {found[1]:.3f})"
+            else:
+                refs = {p.component_key for p in (start, end) if p.component_key}
+                if not validate(
+                    route,
+                    net,
+                    component_pitches=getattr(self.router, "component_pitches", None),
+                    exclude_refs=refs or None,
+                ):
+                    return "post-route clearance"
+        return None
+
     def _relief_probe(
         self,
         net: int,
@@ -15348,9 +15410,26 @@ class Autorouter:
                     committed_routes = normal_routes
                 else:
                     # Normal-mode re-route failed (timeout / cost-shape
-                    # divergence).  Fall back to the probe path -- it is
-                    # conflict-free by construction, which is strictly
-                    # better than losing the rescue.
+                    # divergence).  Fall back to the probe path -- but only
+                    # after it passes the same post-route clearance
+                    # validator normal mode applies.  "Conflict-free" means
+                    # the probe crossed no rippable owner net's cells; the
+                    # probe never went through geometric validation, so it
+                    # can hold a via closer to a foreign pad than the rules
+                    # allow (issue #6286: board 05 vias at 0.05-0.085 mm
+                    # the C++ validator had just rejected).
+                    violation = self._relief_probe_clearance_violation(
+                        probe_routes, failed_net, pads_by_net.get(failed_net, [])
+                    )
+                    if violation is not None:
+                        flush_print_fn(
+                            f"  Relief rescue: {failed_name} normal-mode re-route "
+                            f"failed and the relief probe path fails clearance "
+                            f"validation ({violation}) -- rolling back "
+                            f"(issue #6286) ({elapsed_fn()})"
+                        )
+                        _rollback()
+                        return False
                     for route in probe_routes:
                         self._mark_route(route)
                     committed_routes = probe_routes
@@ -15412,7 +15491,8 @@ class Autorouter:
             _rollback()
             return False
 
-        # Commit the failed net's conflict-free probe route.
+        # Commit the failed net's route: the normal-mode re-route, or the
+        # probe path once it passed clearance validation (#6286).
         net_routes[failed_net] = committed_routes
         for route in committed_routes:
             self.grid.mark_route_usage(route)

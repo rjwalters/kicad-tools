@@ -1423,3 +1423,144 @@ def test_partial_normal_mode_reroute_falls_back_to_probe_path():
     assert ok is True, msgs
     assert net_routes[1] == [probe]
     assert all(r is not partial for r in router.routes)
+
+
+def _make_via_probe_router(force_python: bool, foreign_pad_y: float) -> Autorouter:
+    """Net 1 (``U1``, x=5 / x=35 at y=4) plus a foreign ``U9`` pad of net 2.
+
+    The foreign pad sits at ``(20, foreign_pad_y)`` -- directly beside the
+    via a relief probe of net 1 drops at ``(20, 4)``.
+    """
+    router = Autorouter(width=40.0, height=20.0, force_python=force_python)
+    router.add_component(
+        "U1",
+        [
+            {"number": "1", "x": 5.0, "y": 4.0, "width": 0.5, "height": 0.5, "net": 1,
+             "net_name": "N1"},
+            {"number": "2", "x": 35.0, "y": 4.0, "width": 0.5, "height": 0.5, "net": 1,
+             "net_name": "N1"},
+        ],
+    )  # fmt: skip
+    router.add_component(
+        "U9",
+        [
+            {"number": "1", "x": 20.0, "y": foreign_pad_y, "width": 0.5, "height": 0.5,
+             "net": 2, "net_name": "N2"},
+            {"number": "2", "x": 20.0, "y": 16.0, "width": 0.5, "height": 0.5,
+             "net": 2, "net_name": "N2"},
+        ],
+    )  # fmt: skip
+    return router
+
+
+def _require_backend(router: Autorouter, force_python: bool) -> None:
+    from kicad_tools.router.cpp_backend import CppPathfinder
+
+    is_cpp = isinstance(router.router, CppPathfinder)
+    if not force_python and not is_cpp:
+        pytest.skip("C++ router extension not built")
+    assert is_cpp is not force_python
+
+
+def _via_probe_route(router: Autorouter) -> Route:
+    """Net 1 probe: F.Cu to a via at (20, 4), then B.Cu to the far pad."""
+    from kicad_tools.router.primitives import Via
+
+    rules = router.rules
+    return Route(
+        net=1,
+        net_name="N1",
+        segments=[
+            Segment(x1=5.0, y1=4.0, x2=20.0, y2=4.0, width=0.2, layer=Layer.F_CU, net=1),
+            Segment(x1=20.0, y1=4.0, x2=35.0, y2=4.0, width=0.2, layer=Layer.B_CU, net=1),
+        ],
+        vias=[
+            Via(
+                x=20.0,
+                y=4.0,
+                drill=rules.via_drill,
+                diameter=rules.via_diameter,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+            )
+        ],
+    )
+
+
+def _rescue_with_failed_normal_reroute(router: Autorouter, probe: Route):
+    """Run a relief rescue whose probe is conflict-free but whose NORMAL-mode
+    re-route fails, i.e. the path that falls back to the probe copper."""
+    neg_router = NegotiatedRouter(
+        grid=router.grid,
+        router=router.router,
+        rules=router.rules,
+        net_class_map={},
+    )
+    net_routes: dict[int, list[Route]] = {1: []}
+    pads_by_net = {
+        net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+    }
+
+    def probe_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+        # A real probe returns its routes still MARKED on the grid.
+        router._mark_route(probe)
+        return [probe], set()
+
+    msgs: list[str] = []
+    with (
+        patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+        patch.object(Autorouter, "_route_net_negotiated", return_value=[]),
+    ):
+        ok = router._relief_rescue(
+            failed_net=1,
+            neg_router=neg_router,
+            net_routes=net_routes,
+            pads_by_net=pads_by_net,
+            present_factor=1.0,
+            per_net_timeout=2.0,
+            flush_print_fn=msgs.append,
+            elapsed_fn=lambda: "0s",
+        )
+    return ok, net_routes, msgs
+
+
+@pytest.mark.parametrize("force_python", [False, True], ids=["cpp", "python"])
+class TestReliefProbeFallbackIsValidated:
+    """Issue #6286: the probe-path fallback must pass the commit validator.
+
+    When the normal-mode re-route of a conflict-free probe fails, the rescue
+    used to commit the relief PROBE copper -- which skips post-route
+    clearance validation by design -- so on board 05 vias landed 0.05-0.085
+    mm from foreign pads after the C++ validator had rejected the very same
+    positions.  "Conflict-free" only means the probe crossed no rippable
+    owner net; it says nothing about geometric clearance.
+    """
+
+    def test_sub_clearance_via_probe_is_rolled_back(self, force_python):
+        # Default via (0.7 mm) at y=4 -> copper edge at y=4.35; the pad's
+        # edge at 4.65 - 0.25 = 4.40 leaves a 0.05 mm gap -- board 05's
+        # measured gap, well under the 0.2 mm clearance.  Both F.Cu traces
+        # clear the pad (edge 4.10), so only the via can fail validation.
+        router = _make_via_probe_router(force_python, foreign_pad_y=4.65)
+        _require_backend(router, force_python)
+        probe = _via_probe_route(router)
+
+        ok, net_routes, msgs = _rescue_with_failed_normal_reroute(router, probe)
+
+        assert ok is False, msgs
+        assert net_routes[1] == []
+        assert probe not in router.routes
+        assert not any(r.vias for r in router.routes), "no via may be committed"
+        assert any("clearance" in m for m in msgs), msgs
+
+    def test_clean_via_probe_still_commits(self, force_python):
+        # Same probe, foreign pad far away: the fallback keeps working.
+        router = _make_via_probe_router(force_python, foreign_pad_y=10.0)
+        _require_backend(router, force_python)
+        probe = _via_probe_route(router)
+
+        ok, net_routes, msgs = _rescue_with_failed_normal_reroute(router, probe)
+
+        assert ok is True, msgs
+        assert net_routes[1] == [probe]
+        assert probe in router.routes
