@@ -10674,6 +10674,8 @@ yields `not-running`.
 
 ### Autonomous periodic support-role runner (#4015)
 
+> **Step dispatch (accepted design, #11894; not yet implemented).** For a root with `autonomous.workFinder.stepDispatch: on`, the item roles (Curator, Champion promote and merge, Judge, Doctor) are dispatched as steps by the work finder rather than on these intervals, and `demandWidth` doesn't apply. Champion's non-item passes keep running here under `championMode: "non-item"`. The two concurrency budgets merge in the design's last phase. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+
 Before this loop, the periodic **standalone** support roles — Champion,
 Curator, Judge, Auditor, Guide — ran ONLY via GitHub Actions cron
 (`.github/workflows/loom-*.yml`, Phase 2a of epic #3372/#3375), authenticating

@@ -37,7 +37,7 @@ outcome vocabulary for each mode is the table in its section. Never invent one.
    PR_JSON=$(gh pr view "$PR_NUMBER" --json url,state,headRefOid,labels) || PR_JSON=""
    EVALUATED_SHA=$(printf '%s' "$PR_JSON" | jq -r 'select((.url | test("/pull/")) and .state == "OPEN" and any(.labels[]; .name == "loom:pr") and (any(.labels[]; .name | startswith("loom:operator")) | not)) | .headRefOid // empty')
    PIN_FILE="$(git rev-parse --git-common-dir)/loom-champion-pin-pr-$PR_NUMBER"; rm -f "$PIN_FILE"
-   [ -n "$EVALUATED_SHA" ] && printf '%s\n' "$EVALUATED_SHA" > "$PIN_FILE"
+   [ -n "$EVALUATED_SHA" ] && printf '%s %s\n' "$EVALUATED_SHA" "$PPID" > "$PIN_FILE"
    echo "EVALUATED_SHA=${EVALUATED_SHA:-none}"
    ```
 
@@ -45,15 +45,15 @@ outcome vocabulary for each mode is the table in its section. Never invent one.
    #11861): outcome `not-eligible`, no writes. `loom:pr` + `loom:blocked`
    (Champion's own hold) is eligible. (A Doctor-capped PR is the non-item pass's
    Priority 5, not a merge.)
-2. **Pin the head you evaluate.** The printed `EVALUATED_SHA` is the head every
-   criterion below is judged against. **Shell variables do not survive between
-   tool calls**, so when you run Step 3 of `champion-pr-merge.md`, its block's
-   first line must be `EXPECTED_HEAD=<that SHA, written out literally>`. Step 3
-   then uses it as the merge-queue `--approved-sha` and passes
-   `merge-pr.sh --expected-head`. The pin file from step 1 is the fail-closed
-   backstop: while it is under 60 minutes old, a Step 3 run whose
-   `EXPECTED_HEAD` is missing or different prints `CHAMPION-PIN-MISSING` and
-   merges nothing. **Last action, whatever the outcome:**
+2. **Pin the head you evaluate.** `EVALUATED_SHA` is the head every criterion
+   below is judged against. **Shell variables do not survive between tool
+   calls**: in Step 3 of `champion-pr-merge.md`, the block's
+   first line must be `EXPECTED_HEAD=<that SHA, written out literally>` (its
+   merge-queue `--approved-sha` and `merge-pr.sh --expected-head`). The pin
+   file is the fail-closed backstop: while under 60 minutes old, or while the
+   agent process it records still runs (#11902, up to 24h), a Step 3 run without
+   that `EXPECTED_HEAD` prints `CHAMPION-PIN-MISSING` and merges nothing.
+   **Last action, whatever the outcome:**
    `rm -f "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-N"`
 3. **Run `champion-pr-merge.md` for this one PR, as one batch row.** The
    Verdict-State Janitor (Parts 1 and 2), all 6 Safety Criteria with the merge-risk
