@@ -551,7 +551,13 @@ silently, so it would send the key to GitHub instead.
   grant), so no key file sits on the host. It is always read with an
   explicit `--region`: `region`, else `AWS_REGION`, else
   `AWS_DEFAULT_REGION`. With none of these set, `ssm://` refs are refused
-  (logged once) and that owner keeps today's routing. `file:<path>` must be an
+  (logged once) and that owner keeps today's routing. The read runs as the
+  host's instance role: `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, the static key
+  variables and `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` are removed
+  from the `aws` child, so a daemon environment that names another identity
+  (a build-cache profile, say) cannot read as it. A host whose grant is a
+  named profile sets `awsProfile`, which is passed as `--profile`. A failed
+  read logs the exit code and the CLI's first stderr line. `file:<path>` must be an
   owner-only file outside every checkout. An owner with no ref keeps
   today's routing.
 
