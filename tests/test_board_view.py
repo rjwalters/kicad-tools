@@ -517,6 +517,54 @@ class TestMissingLinks:
                 assert (a.a.x, a.a.y) == pytest.approx((r.a.x + ox, r.a.y + oy))
                 assert (a.b.x, a.b.y) == pytest.approx((r.b.x + ox, r.b.y + oy))
 
+    @pytest.mark.skipif(not BOARD_05.exists(), reason="board 05 not present")
+    def test_links_are_frame_equivalent_on_fill_stripped_board_05(self, tmp_path: Path):
+        """Regression for #6319 on a board with tied distances.
+
+        With every zone fill stripped, board 05's GND net has candidate links
+        whose lengths tie in the relative frame but not after adding the
+        origin in floating point.  Choosing links in the absolute frame (the
+        old behaviour) picked a different pad pair for one GND link.
+        """
+        text = BOARD_05.read_text()
+        out: list[str] = []
+        i = 0
+        token = "(filled_polygon"
+        while (j := text.find(token, i)) != -1:
+            out.append(text[i:j])
+            depth = 0
+            k = j
+            while True:
+                c = text[k]
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            i = k + 1
+        out.append(text[i:])
+        stripped = tmp_path / "board05_nofill.kicad_pcb"
+        stripped.write_text("".join(out))
+        assert token not in stripped.read_text()
+
+        pcb = PCB.load(stripped)
+        ox, oy = pcb.board_origin
+        assert (ox, oy) != (0.0, 0.0)
+        rel = missing_links(pcb).links
+        ab = missing_links(pcb, absolute=True).links
+        assert "GND" in rel
+        assert set(rel) == set(ab)
+        for net, rlinks in rel.items():
+            assert len(rlinks) == len(ab[net]), net
+            for r, a in zip(rlinks, ab[net], strict=True):
+                assert (r.a.name, r.b.name) == (a.a.name, a.b.name), net
+                assert a.a.x == pytest.approx(r.a.x + ox, abs=1e-6)
+                assert a.a.y == pytest.approx(r.a.y + oy, abs=1e-6)
+                assert a.b.x == pytest.approx(r.b.x + ox, abs=1e-6)
+                assert a.b.y == pytest.approx(r.b.y + oy, abs=1e-6)
+
     def test_text_listing_prints_end_coordinates(self, cut_board: Path, capsys):
         from kicad_tools.cli.commands.board_view import _print_links
 
