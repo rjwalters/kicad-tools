@@ -45,9 +45,13 @@ partition, which must see shorts) or scoped to one net (every item carrying
 that net -- net-status and ``validate()``).  Fills of *different* zones are
 nodes of one graph, so a via joining two zones' fills is a bridge (#6452).
 
-Copper fragments that reach neither a pad nor a fill (an orphan track or
-via) are their own components.  KiCad's ratsnest counts them as unconnected
-items, so :meth:`CopperContactGraph.open_count` includes them.
+Copper fragments that reach no pad are their own components.  KiCad's
+ratsnest counts a detached track or via as an unconnected item -- and a fill
+island once a track or via sits on it -- so
+:meth:`CopperContactGraph.open_count` includes them.  A component made
+*only* of fill copper (a lone fill island that nothing touches) is the one
+exception: ``kicad-cli pcb drc`` does not report it, so it is left out of
+the count (:meth:`CopperContactGraph.fill_only_components`).
 """
 
 from __future__ import annotations
@@ -149,9 +153,29 @@ class CopperContactGraph:
         """Track/via-only fragments that reach no pad and no fill."""
         return [m for m in self.components() if not self._kinds(m) & {PAD, FILL}]
 
+    def is_fill_only(self, members: list[int]) -> bool:
+        """True for a component made solely of fill copper (no pad/via/track)."""
+        return self._kinds(members) == {FILL}
+
+    def fill_only_components(self) -> list[list[int]]:
+        """Lone fill islands: components whose every item is fill copper.
+
+        ``kicad-cli pcb drc`` does not report these as unconnected items; a
+        fill island only becomes one once a track or via sits on it.
+        """
+        return [m for m in self.components() if self.is_fill_only(m)]
+
+    def counted_components(self) -> list[list[int]]:
+        """Components KiCad's ratsnest counts: everything but lone fill islands."""
+        return [m for m in self.components() if not self.is_fill_only(m)]
+
     def open_count(self) -> int:
-        """Remaining ratsnest connections: copper components - 1 (KiCad parity)."""
-        return max(len(self.components()) - 1, 0)
+        """Remaining ratsnest connections (KiCad parity).
+
+        Counted components - 1, where a counted component holds at least one
+        pad, via or track.  Lone fill islands are excluded.
+        """
+        return max(len(self.counted_components()) - 1, 0)
 
 
 def _expand_copper_layers(cv: ConnectivityValidator, layers: list[str]) -> frozenset[str]:

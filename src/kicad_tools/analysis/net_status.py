@@ -108,11 +108,14 @@ class NetStatus:
             net has no fill copper (or shapely is unavailable). Not part of
             :meth:`to_dict`.
         padless_components: Copper components of this net that hold no pad
-            -- an orphan track or via, or a fill island nothing reaches
-            (Issue #6452).  ``kicad-cli pcb drc`` reports each as an
-            unconnected item, so they count toward :attr:`open_connections`
-            but never toward ``island_count`` / ``islands`` (which stay
-            pad-based).  Always 0 in legacy (``strict=False``) mode.
+            but do hold a track or via -- a detached track or via, or a
+            fill island with only a track or via on it (Issue #6452).
+            ``kicad-cli pcb drc`` reports each as an unconnected item, so
+            they count toward :attr:`open_connections` but never toward
+            ``island_count`` / ``islands`` (which stay pad-based).  A lone
+            fill island (a component made only of fill copper) is NOT
+            counted: kicad-cli does not report it.  Always 0 in legacy
+            (``strict=False``) mode.
     """
 
     net_number: int
@@ -136,7 +139,7 @@ class NetStatus:
     islands: list[list[PadInfo]] = field(default_factory=list, repr=False)
     # Issue #6315: pads bonded to the net's poured fill (the plane anchors).
     fill_bonded_pads: list[PadInfo] = field(default_factory=list, repr=False)
-    # Issue #6452: pad-less copper components (orphan fragments, lone fills).
+    # Issue #6452: pad-less components holding a track or via (not lone fills).
     padless_components: int = 0
 
     @property
@@ -148,9 +151,13 @@ class NetStatus:
         unconnected items ``kicad-cli pcb drc`` reports for it, and the
         quantity DeepPCB reports as remaining "airwires". This is NOT the
         same as :attr:`unconnected_count`: three pads sitting on one shared,
-        stranded island count as ONE open connection, not two.  Components
-        holding no pad (:attr:`padless_components`) count too, because
-        KiCad reports them (Issue #6452).
+        stranded island count as ONE open connection, not two.  Track/via
+        fragments holding no pad (:attr:`padless_components`) count too,
+        because KiCad reports them (Issue #6452); a lone fill island does
+        not, because KiCad does not report it.
+
+        :attr:`status` stays pad-based: a net whose pads are all joined is
+        ``complete`` even when a detached fragment makes this 1.
         """
         return max(self.island_count + self.padless_components - 1, 0)
 
@@ -905,7 +912,9 @@ class NetStatusAnalyzer:
 
         Side effects: ``_fill_bonded_ids`` gets the pads whose component
         holds fill copper (Issue #6315) and ``_padless_components`` the
-        number of components holding no pad.
+        number of components holding no pad but a track or via.  A lone
+        fill island (fill copper only) is skipped: kicad-cli does not
+        report it as an unconnected item.
         """
         from kicad_tools.validate.copper_contact import FILL, PAD, build_copper_contact_graph
 
@@ -921,7 +930,8 @@ class NetStatusAnalyzer:
                 if item.kind == PAD and (node := f"__pad:{item.key[0]}:{item.key[1]}") in wanted
             ]
             if not nodes:
-                padless += 1
+                if not contact.is_fill_only(members):
+                    padless += 1
                 continue
             for node in nodes:
                 graph[node].update(other for other in nodes if other != node)

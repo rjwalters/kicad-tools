@@ -359,9 +359,10 @@ class ConnectivityValidator:
                 if verdict is None:
                     continue
                 issues, has_fill = verdict
-                if issues:
-                    for issue in issues:
-                        result.add(issue)
+                for issue in issues:
+                    result.add(issue)
+                # A lone-fill-island warning does not make the net open.
+                if any(issue.is_error for issue in issues):
                     continue
                 connected_count += 1
                 if has_fill:
@@ -581,15 +582,21 @@ class ConnectivityValidator:
         counted as connected).
 
         Every same-net copper item is a node (:mod:`.copper_contact`).  The
-        number of missing relationships is ``components - 1``, counting
-        fragments that reach no pad (an orphan track or via, a fill island),
-        because ``kicad-cli pcb drc`` reports each as an unconnected item.
+        number of missing relationships is ``counted components - 1``, where
+        a counted component holds a pad, via or track.  That includes
+        fragments that reach no pad (a detached track or via, or a fill
+        island with only a track or via on it), because ``kicad-cli pcb
+        drc`` reports each as an unconnected item.  A *lone* fill island --
+        a component made only of fill copper -- is not counted: kicad-cli
+        does not report it.
 
-        * A net with fill copper reports one ``zone_island`` issue per
-          component beyond the first, naming one endpoint of each
+        * A net with fill copper reports one ``zone_island`` error per
+          counted component beyond the first, naming one endpoint of each
           (Issue #4498).  There is no zone-boundary or nearest-fill bond: a
           pad is on a fill only when its copper overlaps it (the #479
-          heuristic under-reported opens, Issue #6470).
+          heuristic under-reported opens, Issue #6470).  Each lone fill
+          island is reported as a ``zone_island`` **warning** instead, so
+          the floating copper stays visible without failing the net.
         * A net without fill reports one ``partial`` issue whose ``islands``
           are the pad groups (largest first) followed by any pad-less
           fragments; ``unconnected_pads`` lists only real pads.
@@ -609,11 +616,39 @@ class ConnectivityValidator:
 
         if has_fill:
             representatives = [
-                min((graph.items[i] for i in members), key=_rank) for members in components
+                min((graph.items[i] for i in members), key=_rank)
+                for members in graph.counted_components()
             ]
             ordered = sorted(representatives, key=_rank)
-            anchor_id, anchor_desc = describe_item(self, ordered[0])
             issues: list[ConnectivityIssue] = []
+            warnings: list[ConnectivityIssue] = []
+            # kicad-cli does not report a fill island that nothing touches,
+            # so it must not be an error here; keep it visible as a warning.
+            lone_fills = sorted(
+                (
+                    min((graph.items[i] for i in members), key=_rank)
+                    for members in graph.fill_only_components()
+                ),
+                key=_rank,
+            )
+            for item in lone_fills:
+                item_id, item_desc = describe_item(self, item)
+                warnings.append(
+                    ConnectivityIssue(
+                        severity="warning",
+                        issue_type="zone_island",
+                        net_name=net_name,
+                        message=f"{item_desc} touches no other {net_name} copper",
+                        suggestion=(
+                            "Remove the floating island or connect it "
+                            "(kicad-cli does not report a lone fill island)"
+                        ),
+                        islands=((item_id,),),
+                    )
+                )
+            if not ordered:
+                return warnings, has_fill
+            anchor_id, anchor_desc = describe_item(self, ordered[0])
             for item in ordered[1:]:
                 item_id, item_desc = describe_item(self, item)
                 issues.append(
@@ -626,7 +661,7 @@ class ConnectivityValidator:
                         islands=((anchor_id,), (item_id,)),
                     )
                 )
-            return issues, has_fill
+            return issues + warnings, has_fill
 
         pad_node = {(fi, pi): node for (fi, pi), node in self._pad_ids.items()}
         islands: list[list[str]] = []

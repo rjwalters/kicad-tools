@@ -146,7 +146,7 @@ EXPECTED_SHORTS: dict[str, list[list[str]]] = {
 
 def _validate_opens(result) -> dict[str, int]:
     opens: Counter[str] = Counter()
-    for issue in result.issues:
+    for issue in result.errors:
         if issue.issue_type == "zone_island":
             opens[issue.net_name] += 1
         else:
@@ -448,3 +448,142 @@ def test_orphan_track_counts_as_open(tmp_path: Path):
     assert status is not None
     assert (status.island_count, status.padless_components) == (1, 1)
     _check_kicad(path, tmp_path, "GND", 1)
+
+
+# ---------------------------------------------------------------------------
+# Pad-less components: what kicad-cli counts and what it does not
+# ---------------------------------------------------------------------------
+#
+# kicad-cli 10.0.6 reports a detached track or via as an unconnected item, and
+# a fill island once a track or via sits on it.  It does NOT report a lone
+# fill island -- a component made only of fill copper -- whatever the zone's
+# ``island_removal_mode`` and whether the island is a second ``filled_polygon``
+# of the same zone or a zone of its own.
+
+_SQ = tuple[float, float, float, float]
+_MAIN: _SQ = (98, 98, 105, 102)  # covers both pads of ``_two_pads``
+_LONE: _SQ = (110, 98, 115, 102)
+_LONE2: _SQ = (120, 98, 125, 102)
+
+
+def _fills_zone(fills: list[_SQ], uid: str, *, mode: int = 1) -> str:
+    """One F.Cu GND zone holding one ``filled_polygon`` per square in ``fills``."""
+
+    def pts(sq: _SQ) -> str:
+        x0, y0, x1, y1 = sq
+        return f"(xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1})"
+
+    filled = "".join(f'    (filled_polygon (layer "F.Cu") (pts {pts(sq)}))\n' for sq in fills)
+    return (
+        f'  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "{uid}")\n'
+        "    (connect_pads yes (clearance 0))\n"
+        "    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2)"
+        f" (island_removal_mode {mode}))\n"
+        f"    (polygon (pts {pts(fills[0])}))\n"
+        f"{filled}  )\n"
+    )
+
+
+def _two_pads(x2: float = 103) -> str:
+    return _fp("R1", 100, 100, _smd("1", "rect", (1, 1), 1)) + _fp(
+        "R2", x2, 100, _smd("1", "rect", (1, 1), 1)
+    )
+
+
+_PAD_TRACK = _seg((100, 100), (103, 100))
+
+# name -> (board body, opens kicad-cli reports, lone fill islands, padless_components)
+_PADLESS_CASES: dict[str, tuple[str, int, int, int]] = {
+    # Row 1: a lone fill island is not an unconnected item.
+    "lone_fill_same_zone_mode0": (_two_pads() + _fills_zone([_MAIN, _LONE], "z", mode=0), 0, 1, 0),
+    "lone_fill_same_zone_mode1": (_two_pads() + _fills_zone([_MAIN, _LONE], "z", mode=1), 0, 1, 0),
+    "lone_fill_same_zone_mode2": (_two_pads() + _fills_zone([_MAIN, _LONE], "z", mode=2), 0, 1, 0),
+    "lone_fill_other_zone": (
+        _two_pads() + _fills_zone([_MAIN], "z1") + _fills_zone([_LONE], "z2"),
+        0,
+        1,
+        0,
+    ),
+    "two_lone_fills_pads_joined_by_track": (
+        _two_pads() + _PAD_TRACK + _fills_zone([_LONE, _LONE2], "z"),
+        0,
+        2,
+        0,
+    ),
+    "lone_fill_single_pad": (
+        _fp("R1", 100, 100, _smd("1", "rect", (1, 1), 1)) + _fills_zone([_LONE], "z"),
+        0,
+        1,
+        0,
+    ),
+    # Row 2: a fill island with only a via or a track on it is one.
+    "fill_island_with_via_only": (
+        _two_pads() + _fills_zone([_MAIN, _LONE], "z") + _via(112, 100),
+        1,
+        0,
+        1,
+    ),
+    "fill_island_with_track_only": (
+        _two_pads() + _fills_zone([_MAIN, _LONE], "z") + _seg((112, 100), (113, 100)),
+        1,
+        0,
+        1,
+    ),
+    # Row 3: a detached track or via, with every pad connected, is one.
+    "detached_track_all_pads_connected": (
+        _two_pads() + _PAD_TRACK + _seg((100, 105), (103, 105)),
+        1,
+        0,
+        1,
+    ),
+    "detached_via_all_pads_connected": (_two_pads() + _PAD_TRACK + _via(101, 105), 1, 0, 1),
+    # Mixed: the lone fill is skipped, the rest is still counted.
+    "lone_fill_and_detached_track": (
+        _two_pads() + _PAD_TRACK + _seg((100, 105), (103, 105)) + _fills_zone([_LONE], "z"),
+        1,
+        1,
+        1,
+    ),
+    "lone_fill_and_two_open_pads": (_two_pads() + _fills_zone([_LONE], "z"), 1, 1, 0),
+    "pads_on_two_fill_islands": (_two_pads(112) + _fills_zone([_MAIN, _LONE], "z"), 1, 0, 0),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PADLESS_CASES))
+def test_padless_components_match_kicad_cli(tmp_path: Path, name: str):
+    """Lone fill islands are not opens; track/via fragments are (Issue #6452).
+
+    Each fixture is re-measured with the installed kicad-cli when present.
+    """
+    body, expected, lone_fills, padless = _PADLESS_CASES[name]
+    path = _write(tmp_path, name, body)
+    want = {"GND": expected} if expected else {}
+
+    assert _analyzer_opens(path) == want
+    status = NetStatusAnalyzer(path, strict=True).analyze().get_net("GND")
+    assert status is not None
+    assert status.padless_components == padless
+
+    result = ConnectivityValidator(path).validate()
+    assert _validate_opens(result) == want
+    assert result.is_fully_routed is (expected == 0)
+    assert result.connected_nets == (1 if expected == 0 else 0)
+    # A lone fill island stays visible, but only as a warning.
+    assert [(w.issue_type, w.net_name) for w in result.warnings] == [
+        ("zone_island", "GND")
+    ] * lone_fills
+
+    _check_kicad(path, tmp_path, "GND", expected)
+
+
+def test_contact_graph_open_count_skips_fill_only_components(tmp_path: Path):
+    """``open_count`` ignores components made solely of fill copper."""
+    body = (
+        _two_pads() + _PAD_TRACK + _seg((100, 105), (103, 105)) + _fills_zone([_LONE, _LONE2], "z")
+    )
+    validator = ConnectivityValidator(_write(tmp_path, "graph", body))
+    graph = validator._contact_graph(1)
+    assert len(graph.components()) == 4
+    assert len(graph.fill_only_components()) == 2
+    assert len(graph.counted_components()) == 2
+    assert graph.open_count() == 1
