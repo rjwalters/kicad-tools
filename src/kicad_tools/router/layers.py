@@ -160,6 +160,14 @@ class LayerStack:
             context={"layer_name": layer_def.name},
         )
 
+    def are_layers_adjacent(self, a: Layer, b: Layer) -> bool:
+        """True when ``a`` and ``b`` are stack-adjacent copper layers (Issue #6646).
+
+        A micro via is laser-drilled through exactly one dielectric, so it may
+        only join copper layers whose stack indices differ by one.
+        """
+        return abs(self.layer_enum_to_index(a) - self.layer_enum_to_index(b)) == 1
+
     def get_routable_indices(self) -> list[int]:
         """Get grid indices of all routable layers."""
         return [layer.index for layer in self.layers if layer.is_routable]
