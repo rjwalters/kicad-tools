@@ -11954,6 +11954,9 @@ def route_with_rule_relaxation(
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
     _reset_partial_save_state()
+    # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
+    # so the partial save takes the preserved input copper from here.
+    _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
     _reset_interrupt_outcome()
@@ -14498,6 +14501,9 @@ def route_with_combined_escalation(
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
     _reset_partial_save_state()
+    # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
+    # so the partial save takes the preserved input copper from here.
+    _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
     _reset_interrupt_outcome()
@@ -20996,6 +21002,10 @@ def _run_main_impl(args, parser, argv) -> int:
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
     _reset_partial_save_state()
+    # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
+    # so the partial save takes the preserved input copper (captured above,
+    # before routing) from here.
+    _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["quiet"] = quiet
     _reset_interrupt_outcome()
     signal.signal(signal.SIGINT, _handle_interrupt)
