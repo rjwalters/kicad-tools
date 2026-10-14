@@ -565,7 +565,7 @@ class TestStandardSessionMerge:
             types = ["signal", "signal", "mixed", "signal"]
         decl = "\n".join(
             f'    ({31 if n == "B.Cu" else i} "{n}" {t})'
-            for i, (n, t) in enumerate(zip(names, types))
+            for i, (n, t) in enumerate(zip(names, types, strict=True))
         )
         pcb_text = (
             "(kicad_pcb\n  (version 20240108)\n  (layers\n"
