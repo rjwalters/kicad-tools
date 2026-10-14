@@ -4373,6 +4373,8 @@ def _add_route_parser(subparsers) -> None:
         default=None,
         help=(
             "Automatically add missing power copper zones (enabled by default). "
+            "Nets the --net-class-map declares routed (is_pour_net=false and "
+            "route_via other than 'pour') are not auto-poured. "
             "Use --no-auto-pour to preserve the authored plane configuration."
         ),
     )
