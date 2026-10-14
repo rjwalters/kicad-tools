@@ -630,14 +630,18 @@ release, quarantine release, no-op hold lift, reclaim) re-adds `loom:issue`
 beside it or beside any other skip or lane-veto label (#11480's shared
 `restore_veto`).
 
-**`loom:needs-revision` (#10753)**: Champion adds it with a `NEEDS REVISION`
-verdict, routing the issue to Curator instead of waiting for someone to edit
-it. Champion's discovery skips it. Curator revises the body (a dated
-`## Revision` section) and removes it, and the new body hash brings Champion
-back. After at most two rounds plus one final round, Champion files a ranked
-decision with `operator-decision apply` when a preference or authority
-question is named (never a bare `loom:operator` hold); factual findings
-get one Curator disposition round instead. Contract and bound: [`promotion-throughput.md`](promotion-throughput.md).
+**Champion's revise verdict (#10753, #11860)**: a `NEEDS REVISION` verdict
+removes `loom:curated`, adds `loom:triage` and carries a
+`<!-- champion:revise:body-<HASH> -->` marker, so Curator curates the issue a
+second time against the findings and ends it at `loom:curated` again. Every
+Champion evaluation is terminal: promote, revise, block (`loom:blocked` + park
+record) or escalate (`loom:operator`). After at most two rounds plus one final
+round, Champion files a ranked decision with `operator-decision apply` when a
+preference or authority question is named (never a bare `loom:operator`
+hold); factual findings get one Curator disposition round first.
+`loom:needs-revision`, the label this used to set, is retired onto
+`loom:triage` (`labels migrate` also strips `loom:curated`). Contract and
+bound: [`promotion-throughput.md`](promotion-throughput.md).
 
 ## Fact-based de-escalation of a Champion `proposal-escalated` hold (#7650)
 

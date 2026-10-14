@@ -77,8 +77,8 @@
       "size": 262590
     },
     "kicad_project.zip": {
-      "sha256": "25a144bfdcaec7ed246cbed9261b1cc05f76d48ba589fa0b11f4ea143ed64a7f",
-      "size": 77674
+      "sha256": "db42b1265386bce9f15b569b88912323f944ac26a00f2f2a2956ffa9c85b2e05",
+      "size": 78012
     },
     "lvs.json": {
       "sha256": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
@@ -93,7 +93,7 @@
       "size": 1212
     },
     "native-erc.json": {
-      "sha256": "b1c3a485b0e89cd1336d7e0ddefd09f7e7c2e4e21ae3b3d6726089b4c0c38d5d",
+      "sha256": "99fb67674c3b04d307ad334ea9b696c40301d77c8ac7f7ec613942e7b23519a0",
       "size": 986
     },
     "procurement-review.md": {

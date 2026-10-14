@@ -4298,7 +4298,9 @@ def _add_route_parser(subparsers) -> None:
             "Bound the stall-relief rescue's probe and victim re-land "
             "sub-searches by the per-net node-expansion cap instead of their "
             "10 s wall clock (Issue #5870). Needs an active cap "
-            "(--deterministic-budget or --per-net-iterations). Off by default "
+            "(--deterministic-budget or --per-net-iterations). Also switches "
+            "off the 60 s oscillation-escape budget and the remaining-budget "
+            "per-iteration per-net cap (Issue #6475). Off by default "
             "(#4730); use it when the route must not depend on machine load."
         ),
     )
@@ -7753,6 +7755,23 @@ def _add_net_status_parser(subparsers) -> None:
             "(issue #3863)."
         ),
     )
+    net_status_parser.add_argument(
+        "--crossings",
+        dest="net_status_crossings",
+        action="store_true",
+        help=(
+            "Pre-route bundle crossing report (issue #6339): bundle pin "
+            "orders, inversions per entry side, over-sized conflict sets and "
+            "interleaved hub pin columns. Read-only; honours --format json."
+        ),
+    )
+    net_status_parser.add_argument(
+        "--signal-layers",
+        dest="net_status_signal_layers",
+        type=int,
+        default=None,
+        help="Signal-layer count for the --crossings verdict (default: from board)",
+    )
     model_group = net_status_parser.add_mutually_exclusive_group()
     model_group.add_argument(
         "--strict",
@@ -9713,6 +9732,30 @@ def _add_bench_parser(subparsers) -> None:
         help="Run only this board slug (repeatable); default: every board in the manifest",
     )
     bench_external.add_argument(
+        "--suite",
+        choices=["deeppcb", "pcbworld"],
+        default=None,
+        help=(
+            "Benchmark suite (default: deeppcb, the boards.toml boards). 'pcbworld' "
+            "fetches the pinned PCBWorld/PCBench inputs, prepares the D3 'guide' "
+            "boards with PCBWorld's own (external) prep and scores them with BOTH "
+            "the local gates and PCBWorld's Clean Pass, kept separate. Needs "
+            "PCBWORLD_PYTHON, KICAD_CLI (KiCad 9) and PCBNEW_PYTHON; see "
+            "benchmarks/external/README.md."
+        ),
+    )
+    bench_external.add_argument(
+        "--split",
+        default=None,
+        help="--suite pcbworld: D3 split alias from pcbworld.toml (d3a or d3b; default: d3a)",
+    )
+    bench_external.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="--suite pcbworld: number of boards in the deterministic smoke subset (default: 3)",
+    )
+    bench_external.add_argument(
         "--tuned",
         action="store_true",
         help=(
@@ -9730,7 +9773,10 @@ def _add_bench_parser(subparsers) -> None:
     bench_external.add_argument(
         "--manifest",
         default=None,
-        help="Path to boards.toml (default: benchmarks/external/boards.toml)",
+        help=(
+            "Path to boards.toml (default: benchmarks/external/boards.toml); with "
+            "--suite pcbworld, the corpus manifest (default: benchmarks/external/pcbworld.toml)"
+        ),
     )
     bench_external.add_argument(
         "--cache-dir",

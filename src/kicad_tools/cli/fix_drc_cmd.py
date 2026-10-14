@@ -979,14 +979,17 @@ def _regressed_nets(baseline, after) -> set[str]:
 
     A net is "regressed" if it was fully connected (no issue) in the
     ``baseline`` result but is broken (has an entry in ``issues``) in the
-    ``after`` result.  Returns an empty set when either argument is
-    ``None`` -- callers treat that as "no per-net attribution available"
-    and fall back to a bulk rollback.
+    ``after`` result.  Only issues that count as unconnected (errors) are
+    considered: a lone fill island warning does not break a net (Issues
+    #6487 / #6495), so one appearing after a nudge is not a regression.
+    Returns an empty set when either argument is ``None`` -- callers treat
+    that as "no per-net attribution available" and fall back to a bulk
+    rollback.
     """
     if baseline is None or after is None:
         return set()
-    baseline_broken = {issue.net_name for issue in baseline.issues if issue.net_name}
-    after_broken = {issue.net_name for issue in after.issues if issue.net_name}
+    baseline_broken = {i.net_name for i in baseline.unconnected if i.net_name}
+    after_broken = {i.net_name for i in after.unconnected if i.net_name}
     return after_broken - baseline_broken
 
 

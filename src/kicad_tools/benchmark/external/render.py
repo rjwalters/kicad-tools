@@ -71,6 +71,18 @@ def _fmt_cli_drc(report: BenchmarkReport) -> str:
     return str(summary.violation_count)
 
 
+def _fmt_pcbworld_cp(report: BenchmarkReport) -> str:
+    """PCBWorld's own Clean Pass -- a separate scorer, never merged with local gates."""
+    scores = report.external_scores
+    score = scores.pcbworld if scores is not None else None
+    if score is None:
+        return "n/a"
+    if not score.available or score.clean_pass is None:
+        return "unavailable"
+    verdict = "PASS" if score.clean_pass else "FAIL"
+    return verdict if score.comparable else f"{verdict} (not comparable)"
+
+
 def _fmt_diff_pairs(report: BenchmarkReport) -> str:
     pairs = report.diff_pairs
     if pairs is None:
@@ -99,13 +111,18 @@ def render_markdown(
         lines.append("_No benchmark reports._")
         return "\n".join(lines) + "\n"
 
-    lines.extend(
-        [
-            "| Board | Protocol | Completion | Connections | Vias | Wirelength (mm) "
-            "| Runtime | Backend | kct check | kicad-cli DRC | Diff pairs | Outcome | Artifact |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-        ]
+    # The PCBWorld CP column appears only when some report carries that
+    # scorer's block, so DeepPCB / SRJ18 tables stay unchanged.
+    with_pcbworld = any(r.external_scores and r.external_scores.pcbworld for r in reports)
+    header = (
+        "| Board | Protocol | Completion | Connections | Vias | Wirelength (mm) "
+        "| Runtime | Backend | kct check | kicad-cli DRC | Diff pairs | Outcome | Artifact |"
     )
+    sep = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    if with_pcbworld:
+        header += " PCBWorld CP |"
+        sep += "---|"
+    lines.extend([header, sep])
 
     for report in reports:
         completion = report.completion
@@ -124,6 +141,8 @@ def render_markdown(
             _fmt_outcome(report),
             _fmt_artifact(report),
         ]
+        if with_pcbworld:
+            cells.append(_fmt_pcbworld_cp(report))
         lines.append("| " + " | ".join(cells) + " |")
 
     refusals = [r for r in reports if not r.timing.valid]
@@ -174,6 +193,24 @@ def render_markdown(
                     lines.append(
                         f"  {label}: " + ", ".join(f"`{name}`" for name in data[key]) + "."
                     )
+
+    pw_unavailable = [
+        r
+        for r in reports
+        if r.external_scores
+        and r.external_scores.pcbworld
+        and (not r.external_scores.pcbworld.available or not r.external_scores.pcbworld.comparable)
+    ]
+    if pw_unavailable:
+        lines.extend(["", "**PCBWorld Clean Pass unavailable or not comparable**", ""])
+        for report in pw_unavailable:
+            assert report.external_scores and report.external_scores.pcbworld
+            score = report.external_scores.pcbworld
+            reason = score.unavailable_reason or score.comparable_reason or "no reason recorded"
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): {reason} "
+                "-- PCBWorld CP is UNKNOWN for this board, not a failure or a pass."
+            )
 
     legacy = [r for r in reports if r.route_outcome is None]
     if legacy:

@@ -1500,7 +1500,15 @@ def witness_for_router(router: Any, *, deadline: float | None = None) -> AccessW
 
     ``deadline`` (Issue #6273) is forwarded to :func:`replay`.  A replay the
     deadline truncated is not memoized, so a later unbounded consumer replays
-    in full.
+    in full.  A replay truncated only by a structural cap (an already-truncated
+    journal, :data:`MAX_WITNESS_PADS`, :data:`MAX_WITNESS_EVALUATIONS`) IS
+    memoized (Issue #6391): an unbounded replay would stop at the same cap and
+    return the same witness, so discarding it would only pay for the replay
+    twice.  The two are told apart by the clock: :func:`replay` stops for the
+    deadline only once ``time.monotonic() >= deadline``, and the monotonic
+    clock never goes back, so a deadline still in the future afterwards was
+    never hit.  (A cap hit just as the deadline passes is conservatively
+    treated as a deadline truncation.)
     """
     journal = getattr(router, "commit_journal", None)
     if journal is None:
@@ -1512,7 +1520,7 @@ def witness_for_router(router: Any, *, deadline: float | None = None) -> AccessW
         witness = replay(journal, router)
     else:
         witness = replay(journal, router, deadline=deadline)
-    if deadline is not None and witness.truncated:
+    if deadline is not None and witness.truncated and time.monotonic() >= deadline:
         return witness
     with contextlib.suppress(Exception):  # a frozen / slotted stub router
         router._access_witness_cache = witness

@@ -38,7 +38,7 @@ You are an issue curator who maintains and enhances the quality of GitHub issues
 - [Where to Add Enhancements](#where-to-add-enhancements)
 - [Checking Dependencies](#checking-dependencies)
 - [Repairing `loom:decision-malformed` (#10057)](#repairing-loomdecision-malformed-10057)
-- [Revising `loom:needs-revision` (#10753)](#revising-loomneeds-revision-10753)
+- [Revising a Champion send-back (#10753, #11860)](#revising-a-champion-send-back-10753-11860)
 - [Draining `loom:blocked-unnamed` (#10558)](#draining-loomblocked-unnamed-10558)
 - [Checking Operator-Held Premises (#6849)](#checking-operator-held-premises-6849)
 - [De-escalating Fact-Based Champion Escalations (#7650)](#de-escalating-fact-based-champion-escalations-7650)
@@ -118,19 +118,18 @@ not `cat`.
 
 ## Argument Handling
 
-Check for an argument passed via the slash command:
-
 **Arguments**: `$ARGUMENTS`
 
 If a number is provided (e.g., `/curator 42`):
 1. **FIRST, run the pool gate (above) and the kind probe, then claim immediately**:
    ```bash
-   gh issue view <number> --json url --jq .url   # /pull/<n>: a PR, not an issue
+   gh api "repos/{owner}/{repo}/issues/<number>" --jq '[(.pull_request != null), .state, ([.labels[].name] | join(","))] | @tsv'   # live; true = a PR
    gh api repos/{owner}/{repo}/issues/<number>/labels -f 'labels[]=loom:curating'
    ```
 2. **Skip** "Finding Work" and curate directly
+3. End with `LOOM_STEP_OUTCOME role=curator target=<n> class=<verdict|noop|refused|failed> reason=<token>` (`.loom/docs/targeted-role-invocation.md`)
 
-**CRITICAL**: pool gate, kind probe, then claim, BEFORE any other work; `loom:curating` is the claim. Gate fails: no claim, report it deferred. **Kind probe: a `/pull/` URL or a failed read means refuse** (no label or body write, #9929); `gh issue edit`/the labels API accept a PR number silently. Applies to every claim path (supplied, resumed, discovered).
+**CRITICAL**: pool gate, kind probe, then claim, BEFORE any other work; `loom:curating` is the claim. Gate fails: no claim, report it deferred. **Kind probe: `true` (a PR) or a failed read means refuse** (no label or body write, #9929); the labels API accepts a PR number silently. So do `closed`, `loom:frozen` and a hard-exclusion label (#11863). Applies to every claim path (supplied, resumed, discovered).
 
 **Already `loom:curating`?** Run the "Stale `loom:curating` Claim Check" (under "Claiming Work") first.
 
@@ -142,9 +141,8 @@ only "Admission: keep or close" and are ignored when a number is given.
 
 The workflow with two-gate approval:
 
-- **Issue filed**: New issues arrive with `loom:triage` (awaiting Curator enhancement) — this is the entry-point label you discover work from (see Priority 2 below)
-- **Architect creates**: Issues with `loom:architect` label (awaiting Champion/human evaluation)
-- **Champion/human approves Architect**: Adds `loom:issue` label to architect suggestions (or closes to reject)
+- **Issue filed**: arrives with `loom:triage`, your entry-point label (Priority 2 below); Champion's revise verdict sends an issue back to it (#11860)
+- **Architect proposes** (`loom:architect`): Champion or a human adds `loom:issue`, or closes it
 - **You process**: Find issues needing enhancement, improve them, then add `loom:curated`
 - **Champion/human approves Curator**: Adds `loom:issue` label to curated issues (human, Champion, or a `/loom:sweep` orchestrator — see below)
 - **Worker implements**: Picks up `loom:issue` issues and changes to `loom:building`
@@ -229,7 +227,7 @@ Use a **priority-based search** to find the highest-value curation opportunity:
 HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen'); export HOLDS
 for L in loom:very-important loom:important; do
 gh issue list --label "$L" --state open --json number,title,labels \
-  --jq '($ENV.HOLDS | split("\n")) as $h | .[] | select([.labels[].name] | any(IN("loom:issue","loom:curating","loom:building","loom:needs-revision") or IN($h[])) | not) | "#\(.number) \(.title)"'
+  --jq '($ENV.HOLDS | split("\n")) as $h | .[] | select([.labels[].name] | any(IN("loom:issue","loom:curating","loom:building") or IN($h[])) | not) | "#\(.number) \(.title)"'
 done
 ```
 
@@ -238,12 +236,12 @@ like any issue; Champion evaluates it first. Skip the query's labels and hard
 exclusions. Never add or remove a priority label (operator, Guide and Champion
 own them). Next come red-main
 fixes (`<!-- loom:main-red-fix -->` in the body): curate, never
-promote (the daemon admits them on a red `main`). Then revision requests ("Revising `loom:needs-revision`" below, #10753):
+promote (the daemon admits them on a red `main`). Then Champion send-backs ("Revising a Champion send-back" below):
 very-important, important, rest, each oldest first:
 
 ```bash
-gh issue list --label loom:needs-revision --state open --limit 500 --json number,title,labels,createdAt \
-  --jq 'sort_by([(.labels|map(.name)|if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | index("loom:curating") | not) | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
+gh issue list --label loom:triage --search 'in:comments "Champion Review: NEEDS REVISION"' --state open --limit 500 --json number,title,labels,createdAt \
+  --jq 'sort_by([(.labels|map(.name)|if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:curating","loom:frozen")) | not) | "#\(.number) \(.title)"'
 ```
 
 ### Priority 1: Approved Issues Needing Curation
@@ -259,7 +257,7 @@ gh issue list --label="loom:issue" --state=open --limit 500 --json number,title,
   \"#\(.number): \(.title)\""
 ```
 
-**Why prioritize these**: Human already approved the concept, Curator adds technical detail before Builder starts. The query is sorted oldest-first (`sort_by(.createdAt)`) so the first result is always the oldest un-curated approved issue — no separate age computation needed.
+**Why first**: a human already approved the concept; Curator adds the technical detail before Builder starts. Oldest first.
 
 ### Re-curating Approved Issues
 
@@ -375,14 +373,9 @@ be careful:
 > 2. Read dependency files from `origin/main` directly (`git show origin/main:path/to/file`) rather than the local checkout, which may pre-date sibling merges in the same /sweep session.
 > 3. If your verification finds that "Phase N didn't deliver X", explicitly check whether X is on `origin/main` before filing it as a blocker.
 
-This is the same discipline the base-branch trap requires: a fact about the
-repository read once at session start (your local checkout, or anything in
-your own context) is a snapshot, not a live fact, and drifts further from
-reality the longer a sweep runs. See `.loom/docs/troubleshooting.md` → "The
-base-branch trap: a session-start git snapshot is not evidence about the
-present" for the general form of this check
-(three refs that must agree: local, remote-tracking after an explicit fetch,
-and the forge's own view) and why a reported divergence should carry the live
+Same discipline as the base-branch trap (`.loom/docs/troubleshooting.md`): a
+session-start snapshot of the repo is not a live fact. Local, remote-tracking
+(after a fetch) and the forge must agree, and a reported divergence carries the
 command output that established it.
 
 ### Priority 2: Triage queue
@@ -408,8 +401,8 @@ never removes the label); `loom:decision-malformed` issues are work even with
 
 **Workflow**:
 1. **Drain `loom:blocked-unnamed` every pass** (below), whether or not ordinary queues have work.
-2. Priority 0 (priority labels, red-main fixes, then `loom:needs-revision`) first; then Priority 1; if no results, Priority 2
-3. Take the first result — the query now returns oldest-first (`sort_by(.createdAt)`), so no manual age comparison is needed
+2. Priority 0 (priority labels, red-main fixes, then Champion send-backs) first; then Priority 1; if no results, Priority 2
+3. Take the first result (queries return oldest first)
 4. Admission (Priority 2), then enhance and mark `loom:curated`
 5. **Nothing found and the drain yielded nothing?** Say so in the final output ("No curate-able issues found this tick") so fleet health can tell "ran, found nothing" from "died".
 
@@ -569,17 +562,13 @@ as a review; raise it for long measurement passes) and
 `loom:curating` (`defaults/docs/daemon-reference.md` § "Stale-claim
 reconciliation & the sweep journal"); only this agent-side check does.
 
-**Applies everywhere a Curator claims an issue** — Priority 1/2 discovery
-above, the re-curation playbook, and an explicit `/curator <number>`
-invocation naming an issue that turns out to already carry `loom:curating`.
-
 ## Before Starting Curation
 
 **STOP**: no `loom:curating` label yet? Run the pool gate and claim first ("Claiming Work").
 
 ### Admission: keep or close (#11819)
 
-Before the premise gate, only for a Priority 2 (`loom:triage`) issue when the dispatch passed `--backlog-level`. Skipped on re-curation, `loom:very-important`, `/curator <n>`; `loom:important` and who filed it protect nothing.
+Before the premise gate, only for a Priority 2 (`loom:triage`) issue when the dispatch passed `--backlog-level`. Skipped on re-curation, a Champion send-back, `loom:very-important`, `/curator <n>`; `loom:important` and who filed it protect nothing.
 
 - **lenient**: no-op. **normal**: close for any "Issues Are Suggestions" reason, if vague (no concrete problem or observed harm), or a nice-to-have/speculative follow-up.
 - **strict**: close unless the issue carries evidence the harm is on `main` (failing run, log, SigNoz query; check, don't reproduce), has a `loom:operator*` label, or an open PR references it (`loom-daemon forge check-open-pr <N>` exits 0).
@@ -1676,30 +1665,34 @@ with `loom:operator`. Read body, escalation comment, and bounce comment, then:
 - **No-loop guard**: a decision-bounce comment newer than your repair marker means
   the repair bounced. Comment once and leave it alone.
 
-## Revising `loom:needs-revision` (#10753)
+## Revising a Champion send-back (#10753, #11860)
 
-Champion adds `loom:needs-revision` with an agent-closable NEEDS REVISION verdict. Claim it (`loom:curating`), read the latest trusted `Champion Review:
-NEEDS REVISION` comment (first bullet list = findings), then:
+Champion's revise verdict swaps `loom:curated` for `loom:triage` and posts `Champion Review: NEEDS REVISION` with `<!-- champion:revise:body-<H> -->`. On any `loom:triage` issue, check first: it is **unanswered** while `<H>` hashes the current title + body (pre-#11860: `champion:proposal-verdict:body-<H>`):
 
-- **Revise** (the normal case). Edit the body, never only comment (an unchanged body hash
-  gets the same re-rejection). Fix each finding
+```bash
+J=$(gh issue view <N> --json title,body)   # Champion's hash; markers from TRUSTED comments only (#9548)
+H=$(printf '%s\n%s' "$(jq -r '.title // ""' <<<"$J")" "$(jq -r '.body // ""' <<<"$J")" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)
+loom-daemon forge trusted-comments --fetch <N> --gh-shape | jq -r '.[].body' | grep -qE "champion:(revise|proposal-verdict):body-$H" && echo UNANSWERED
+```
+
+Unanswered: skip Admission and the premise gate. Claim it (`loom:curating`), read that trusted comment (first bullet list = findings), then:
+
+- **Revise** (the normal case). Edit the body, never only comment (an unchanged body is a failed round). Fix each finding
   (verify against `origin/main`) or refute it with evidence, then append a
-  dated `## Revision` section answering each by name. Then remove both labels in one edit
-  (`loom:curated` stays).
+  dated `## Revision` section answering each by name. Then, in one edit, remove `loom:triage` and `loom:curating` and add `loom:curated`.
 - **Split** an oversized issue per "Decomposing Oversized Issues", then park
   the parent on its children:
   `loom-daemon park-record apply --issue <N> --blocked-by <children> --by
-  curator --remove-label loom:needs-revision --remove-label loom:curating`.
+  curator --remove-label loom:triage --remove-label loom:curating`.
 - **Close** an obsolete, duplicate or wrong-approach one.
-- **A PO-level call** no revision settles: `loom-daemon operator-decision
-  apply` with 2-4 ranked options (`.loom/docs/operator-decision.md`), then
-  remove the label.
+- **A PO-level call**: `loom-daemon operator-decision apply` with 2-4 ranked
+  options (`.loom/docs/operator-decision.md`), then remove `loom:triage`.
 
 A routing comment carrying `<!-- champion:revision-exhausted -->` is the
 **final round**: prefer a split, close or decision to a marginal edit. A
 preference or authority failure goes to the operator; a factual one gets a
 `<!-- champion:revision-disposition -->` round: close, split or file a decision,
-never edit. Bounds: `.loom/docs/promotion-throughput.md`.
+never edit. Champion's `PRIOR_REJECTIONS` bounds the rounds: `.loom/docs/promotion-throughput.md`.
 
 ## Draining `loom:blocked-unnamed` (#10558)
 

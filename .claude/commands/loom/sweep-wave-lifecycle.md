@@ -306,6 +306,8 @@ For issues without `builder-done`-or-later checkpoints, proceed with the normal 
 
 Dispatch up to `min(resolved-wave-size, surviving-candidates-in-wave-needing-builder)` `loom-builder` subagents **in a single tool-call block** from this orchestrator session, where `resolved-wave-size` is the explicit `--builders-per-wave` value or, when the flag was omitted, the Stage -1 auto wave size ("Resolve auto wave size"). Note this Wave Lifecycle is the **subagent** path, so the auto size here is core-scaled within `[3, 6]` (#3289-safe floor 3, ceiling 6, #3693) — the daemon path never runs this section (it dispatches detached processes and exits at Stage -1). **Do NOT invoke `/loom:sweep` as a subagent here** — see the "One level deep" rule in Execution Model above.
 
+**Tell each Builder the claim is the sweep's (#11863).** Every brief starts `/loom:builder N` and includes, verbatim: `This /loom:sweep pre-flighted #N and holds its claim and lease.` Otherwise its gate reads this sweep's Step 1b lease as `LEASE_ALREADY_HELD` and refuses (a Task cannot get `LOOM_SWEEP_CLAIM_OWNED`, #3719; `worker run --role builder` sets it).
+
 Each builder is responsible for:
 
 - Claiming its issue (`loom:issue` → `loom:building`).
@@ -315,7 +317,7 @@ Each builder is responsible for:
 - Pushing the branch and opening a PR labeled `loom:review-requested`.
 - Closing references: `Closes #N` in the PR body.
 
-**Stacked-dependency gated path (`--depends-on`, #3729 v1; per-issue map generalization, `--auto-stack`, #3759).** This gate fires **only** when a parent is set for the issue being built — look it up in the per-issue map `DEPENDS_ON[N]` (which subsumes the historical single global `DEPENDS_ON`: for a single-issue `--depends-on <parent>` dispatch, `DEPENDS_ON[N]` is just that one entry; for an `--auto-stack` wave, it is one entry per detected child). When `DEPENDS_ON[N]` is unset for issue `N`, the two steps below are byte-for-byte the default behavior. When `DEPENDS_ON[N]=<parent>` is set, the builder for issue `N` must:
+**Stacked-dependency gated path (`--depends-on`, #3729 v1; per-issue map generalization, `--auto-stack`, #3759).** This gate fires **only** when a parent is set for the issue being built — look it up in the per-issue map `DEPENDS_ON[N]` (one entry per detected `--auto-stack` child; a single-issue `--depends-on <parent>` is one entry). When `DEPENDS_ON[N]` is unset for issue `N`, the two steps below are byte-for-byte the default behavior. When `DEPENDS_ON[N]=<parent>` is set, the builder for issue `N` must:
   - Create its worktree branched off the parent's branch: `./.loom/scripts/worktree.sh N --base feature/issue-<parent>` (instead of the bare `./.loom/scripts/worktree.sh N`). `worktree.sh` resolves `feature/issue-<parent>` from `origin/feature/issue-<parent>` (or a local branch), so the parent sweep must have created/pushed its branch first; if the base cannot be resolved, `worktree.sh` hard-fails rather than silently branching off the default branch.
   - Open its PR against the parent branch: `gh pr create --base feature/issue-<parent> --label "loom:review-requested" --body "Closes #N ..."` (instead of the default base). The PR stays stacked on the parent until reconciliation, which now fires automatically when the parent merges (see "Stacked dependency (auto-reconciliation on parent merge)").
   The **only** thing `--auto-stack` changes here is how `DEPENDS_ON[N]` is *sourced* — the `worktree.sh --base` / `gh pr create --base` mechanics are untouched. Two sources feed the map: (a) an explicit single-issue `--depends-on <parent>` (unchanged, typically a daemon `dispatch_sweep` forwarding `depends_on` as `--depends-on`), and (b) an auto-stack-detected same-candidate-set edge (see "Auto-stack detection and wave ordering"). Absent both, the wave lifecycle does not auto-create stacks.
@@ -334,7 +336,7 @@ Each builder is responsible for:
 # exit 0 ⇒ clean · exit 4 ⇒ contamination found and QUARANTINED (continue) · exit 3 ⇒ dirty, NOT quarantined (hard-block)
 ```
 
-Why per builder rather than per wave: with a single post-wave check, N builders share one detection point, so any contamination is attributable only to "some builder in this wave" and the risk window is wave-sized. Checking after each `TaskOutput` narrows the window to one builder and makes attribution exact — the `--label` value names the culprit in the quarantine log entry. See the Backstop section below for the full semantics, and keep the per-wave check as a final belt-and-suspenders pass.
+Per builder, not per wave: one post-wave check would make the risk window wave-sized and the culprit unknown; per `TaskOutput`, the `--label` names it in the quarantine log. Keep the per-wave check as a final pass (Backstop, below).
 
 **Assert the Builder's cwd before it edits anything.** Before the Builder
 subagent prompt does any Write/Edit/Bash file mutation, it MUST capture

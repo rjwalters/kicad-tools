@@ -256,9 +256,10 @@ assert_contains "$(section_body "$PROMO_MD" "Setting Priority")" "label the bloc
     "Champion labels a priority proposal's blocker itself (no daemon inheritance)"
 assert_contains "$(section_body "$PROMO_MD" "Setting Priority")" "never set a level just to get past a capacity cap" \
     "a priority level is never set to dodge a cap"
-STEP3C="$(section_body "$PROMO_MD" "Promote (All Criteria Pass)")"
-assert_contains "$STEP3C" "Step 3c: Capacity Deferral" "Step 3c capacity deferral is present"
-assert_not_contains "$STEP3C" "below 5" "Step 3c's deferral template does not hardcode the backlog cap"
+STEP3="$(section_body "$PROMO_MD" "Promote (All Criteria Pass)")"
+assert_not_contains "$STEP3" "Step 3c: Capacity Deferral" "the Step 3c capacity deferral is gone: a verdict is terminal (#11860)"
+assert_contains "$RATE" "evaluate no more proposals at that level this pass" \
+    "a spent cap stops evaluation before the claim, never after a passing one (#11860)"
 for f in "$PROMO_MD" "$COMMON_MD" "$REF_MD" "$AGENT_MD"; do
     for lit in "fewer than 5" "up to 2 per iteration" "≤2 per iteration" "gated at 5"; do
         assert_doc_lacks "$f" "$lit" "$(basename "$f") does not hardcode '$lit'"

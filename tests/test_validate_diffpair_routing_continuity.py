@@ -183,7 +183,8 @@ class TestDiffPairRoutingContinuityRule:
         assert len(results.violations) == 1
         v = results.violations[0]
         assert v.rule_id == "diffpair_routing_continuity"
-        assert v.severity == "error"
+        # Info only since #6443: the uncoupled-length rule is what gates.
+        assert v.severity == "info"
         # Both net names appear in the message.
         assert "USB_D+" in v.message
         assert "USB_D-" in v.message
@@ -351,7 +352,7 @@ class TestDiffPairRoutingContinuityRule:
             "type field must round-trip to 'diffpair_routing_continuity' "
             "(alias entry in drc/violation.py is missing or wrong)"
         )
-        assert d["severity"] == "error"
+        assert d["severity"] == "info"
 
     def test_board_03_synthetic_usb_pair_passes_at_default(self):
         """Synthetic re-creation of board 03's USB_D+/USB_D- pair.

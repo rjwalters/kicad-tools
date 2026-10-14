@@ -1093,3 +1093,84 @@ class TestAllTrackErrors:
         )
         missing = run_kicad_cli_drc(tmp_path / "b.kicad_pcb")
         assert missing.unconnected_count is None and missing.violation_count is None
+
+
+class TestExternalScoresBlock:
+    """Additive PCBWorld block (issue #6331): schema stays v1, scores stay separate."""
+
+    def test_absent_block_keeps_report_unchanged(self, routed_board: Path) -> None:
+        data = _report(routed_board).to_dict()
+        assert "external_scores" not in data
+        assert data["schema_version"] == 1
+
+    def test_pcbworld_block_serializes_beside_local_gates(self, routed_board: Path) -> None:
+        import dataclasses
+
+        from kicad_tools.benchmark.external import ExternalScores, PCBWorldScore
+
+        score = PCBWorldScore.from_payload(
+            {
+                "available": True,
+                "comparable": True,
+                "clean_pass": False,
+                "routability": 0.5,
+                "drv_errors_only_count": 3,
+                "potential_gain": 1.25,
+                "rollouts": [{"rollout_idx": 0, "potential_gain": 1.25}],
+                "pcbworld_commit": "b" * 40,
+                "kicad_version": "9.0.3",
+                "unknown_key_is_ignored": 1,
+            }
+        )
+        report = dataclasses.replace(
+            _report(routed_board), external_scores=ExternalScores(pcbworld=score)
+        )
+        data = report.to_dict()
+        assert data["schema_version"] == 1
+        pw = data["external_scores"]["pcbworld"]
+        assert pw["clean_pass"] is False
+        assert pw["rollouts"][0]["potential_gain"] == 1.25
+        assert pw["kicad_version"] == "9.0.3"
+        # The local gates are untouched and distinct from PCBWorld's verdict.
+        assert "kct_check" in data and "kicad_cli_drc" in data
+        json.dumps(data)
+
+    def test_unavailable_score_is_null_never_zero(self) -> None:
+        from kicad_tools.benchmark.external import PCBWorldScore
+
+        score = PCBWorldScore(
+            available=False,
+            comparable=False,
+            clean_pass=True,  # even a stray value must not leak when unavailable
+            routability=1.0,
+            drv_errors_only_count=0,
+            unavailable_reason="router produced no output board",
+        )
+        d = score.to_dict()
+        assert d["clean_pass"] is None
+        assert d["routability"] is None
+        assert d["drv_errors_only_count"] is None
+        assert d["potential_gain"] is None
+        assert d["unavailable_reason"]
+
+    def test_render_has_separate_pcbworld_column(self, routed_board: Path) -> None:
+        import dataclasses
+
+        from kicad_tools.benchmark.external import ExternalScores, PCBWorldScore
+
+        plain = render_markdown([_report(routed_board)])
+        assert "PCBWorld CP" not in plain
+
+        ok = PCBWorldScore(available=True, comparable=True, clean_pass=True)
+        gone = PCBWorldScore(available=False, comparable=False, unavailable_reason="no scorer")
+        reports = [
+            dataclasses.replace(_report(routed_board), external_scores=ExternalScores(ok)),
+            dataclasses.replace(
+                _report(routed_board, board_id="other"), external_scores=ExternalScores(gone)
+            ),
+        ]
+        md = render_markdown(reports)
+        assert "| PCBWorld CP |" in md
+        assert "| PASS |" in md
+        assert "| unavailable |" in md
+        assert "UNKNOWN for this board" in md

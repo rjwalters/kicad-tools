@@ -43,7 +43,6 @@ usb3 = NetClassRouting(
     target_diff_impedance=90.0,
     impedance_tolerance_percent=10.0,
     skew_tolerance_mm=0.1,
-    coupled_continuity_threshold=0.9,
     coupled_routing=True,
     diffpair_partner="USB3_RX_N",
 )
@@ -63,7 +62,6 @@ pcie = NetClassRouting(
     intra_pair_clearance=0.075,
     target_diff_impedance=85.0,
     skew_tolerance_mm=0.127,
-    coupled_continuity_threshold=0.9,
     coupled_routing=True,
     diffpair_partner="PCIE_TX_N",
 )
@@ -82,7 +80,6 @@ mipi = NetClassRouting(
     intra_pair_clearance=0.075,
     target_diff_impedance=100.0,
     skew_tolerance_mm=0.038,
-    coupled_continuity_threshold=0.9,
     coupled_routing=True,
     diffpair_partner="MIPI_DATA0_N",
 )

@@ -351,7 +351,9 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
                 f"{RELIEF_SUBSEARCH_BUDGET_S:g}s wall clock (Issue #4730), so "
                 "a loaded or slow machine can still land different copper.  "
                 "Pass --deterministic-rescue to bound them by the per-net "
-                "iteration cap instead (Issue #5870)."
+                "iteration cap instead (Issue #5870).  It also switches off "
+                "the 60s oscillation-escape budget and the remaining-budget "
+                "per-iteration per-net cap (Issue #6475)."
             )
         if timeout and timeout > 0:
             print(
@@ -2196,6 +2198,16 @@ def _make_checkpoint_callback(
             )
 
     def _checkpoint(best_routes, best_metrics) -> None:
+        # Issue #6475: serialising routes draws UUIDs from the global RNG when
+        # deterministic UUIDs are on.  A checkpoint is an observer, so keep the
+        # stream the router sees independent of how many writes happened.
+        rng_state = random.getstate()
+        try:
+            _checkpoint_inner(best_routes, best_metrics)
+        finally:
+            random.setstate(rng_state)
+
+    def _checkpoint_inner(best_routes, best_metrics) -> None:
         from kicad_tools.cli.progress import flush_print
 
         if best_checkpoint is not None:
@@ -2278,6 +2290,13 @@ def _make_checkpoint_callback(
 
     def _checkpoint_completed(routes, metrics) -> None:
         """Retain a completed attempt separately from periodic checkpoints."""
+        rng_state = random.getstate()  # Issue #6475: observer, see _checkpoint
+        try:
+            _checkpoint_completed_inner(routes, metrics)
+        finally:
+            random.setstate(rng_state)
+
+    def _checkpoint_completed_inner(routes, metrics) -> None:
         import tempfile
 
         if best_checkpoint is not None:
@@ -2490,6 +2509,76 @@ def _stash_unrouted_diagnosis(router: "Autorouter", args) -> None:
     if diagnosis is not None:
         router.unrouted_diagnosis = diagnosis
         print(diagnosis.summary_line(), file=sys.stderr)
+
+
+def _prime_access_witness_deadline(args) -> tuple[bool, float | None]:
+    """Whether -- and until when -- the pre-release witness prime may run (#6391).
+
+    Returns ``(run, deadline)``.  Without ``--timeout`` the prime is the same
+    unbounded replay the post-release sidecar writer used to do, only earlier:
+    ``(True, None)``.  Under ``--timeout`` it may spend only what is left
+    beyond BOTH reserves carved out of the routing deadline: the post-route
+    finishing reserve (:func:`_post_route_reserve`, #6273) and the
+    ``--auto-fix`` reserve (:func:`_auto_fix_budget`, #3238) -- auto-fix runs
+    after the release, so time the prime took from it would be gone.  That is
+    ``_finishing_time_left(args) - _post_route_reserve - _auto_fix_reserve``;
+    when that is not in the future the prime is skipped (``(False, None)``) and
+    the sidecars fall back to today's post-release behaviour.
+    """
+    time_left = _finishing_time_left(args)
+    if time_left is None:
+        return True, None
+    reserve = float(getattr(args, "_post_route_reserve", 0.0) or 0.0) + float(
+        getattr(args, "_auto_fix_reserve", 0.0) or 0.0
+    )
+    budget = time_left - reserve
+    if budget <= 0.0:
+        return False, None
+    return True, time.monotonic() + budget
+
+
+def _prime_access_witness(router: "Autorouter", args) -> None:
+    """Replay the commit journal while the routing grid is still live (#6391).
+
+    :func:`_release_routing_engine_state` drops the grid's occupancy planes,
+    and the access-witness sidecars are written after it.  A replay run then
+    still returns the right verdicts and attribution (#6346), but
+    ``pad_access._marking_at`` reads every plane as "no label", so each
+    stranded pad's ``closing_markings`` came out empty.  Running the replay
+    here, immediately before the release, memoizes the complete witness on
+    ``router._access_witness_cache`` (:func:`witness_for_router`); the later
+    sidecar writes reuse it because the journal length is unchanged.
+
+    Segment clearance during the replay is judged against the replayed copper
+    whether or not the R-tree is populated: ``access_witness.replay`` suspends
+    the segment index for its whole run (#6303), so priming before the release
+    changes no verdict.
+
+    Bounded by :func:`_prime_access_witness_deadline` under ``--timeout``.  A
+    skipped or deadline-truncated prime caches nothing, so the post-release
+    path behaves exactly as before.  Skipped after an interrupt (the normal
+    save will not follow) and for a router with no or an empty journal.
+    Never raises a regular exception: a diagnostic must not fail a route.
+    """
+    journal = getattr(router, "commit_journal", None)
+    if journal is None or not len(journal):
+        return
+    if _interrupt_state.get("interrupted"):
+        return
+    run, deadline = _prime_access_witness_deadline(args)
+    if not run:
+        return
+    from kicad_tools.router.access_witness import witness_for_router
+
+    with restore_stage():
+        record_stage("access-witness-prime")
+        try:
+            if deadline is None:
+                witness_for_router(router)
+            else:
+                witness_for_router(router, deadline=deadline)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Warning: access-witness prime failed: {exc}", file=sys.stderr)
 
 
 def _release_routing_engine_state(router: "Autorouter") -> None:
@@ -3195,6 +3284,20 @@ def _save_partial_results() -> bool:
             from .route_receipt import record_publication
 
             record_publication(save_path)
+
+            # Issue #6330: publish the snapshot facts NOW, before the slow
+            # access-witness sidecar below.  A hard kill during that write
+            # would otherwise leave this board beside a timeout receipt with
+            # ``snapshot_saved: false`` and no ``snapshot_state``.  A no-op
+            # without a supervisor control file.
+            from .route_deadline import record_stage
+
+            record_stage(
+                "partial-save",
+                snapshot_saved=True,
+                snapshot=str(save_path),
+                **info,
+            )
 
             # Issue #5639: the deadline / SIGINT save path is the ONLY save
             # path a deadline-killed run ever reaches -- the normal save path
@@ -4172,6 +4275,60 @@ def _router_pair_gaps(
     return gaps
 
 
+def _router_pair_limits(
+    pairs: list[tuple[str, str]] | None,
+    net_class_map: dict | None,
+    board_path: Path,
+) -> list | None:
+    """Native pair limits for each coupled pair (Issue #6443, piece (b)).
+
+    Uncoupled length, skew and via count, resolved by the one resolver
+    ``kct check`` uses
+    (:func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`),
+    so the ``.kicad_dru`` rule and the kct finding quote the same limit and
+    severity.  The uncoupled limit needs the number of components on the net,
+    read from the routed board.  A pair whose class declares no uncoupled or
+    via limit gets no such rule; the skew rule is written for every pair (the
+    generic 0.5 mm default is an error in both engines).  ``None`` (no pair
+    list) keeps whatever an earlier route wrote.
+    """
+    if pairs is None or net_class_map is None:
+        return None
+    from kicad_tools.manufacturers.netclass_dru import PairLimits
+    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+        net_component_counts,
+        uncoupled_limit,
+    )
+
+    components: dict[str, int] = {}
+    if pairs:
+        try:
+            from kicad_tools.schema.pcb import PCB
+
+            components = net_component_counts(PCB.load(str(board_path)))
+        except Exception:  # limits stay valid without it; the count falls back to 1
+            components = {}
+    limits: list[PairLimits] = []
+    for p, n in pairs:
+        t = resolve_pair_thresholds(net_class_map, p, n)
+        count = max(components.get(p, 0), components.get(n, 0))
+        unc, _how = uncoupled_limit(t, count)
+        limits.append(
+            PairLimits(
+                p,
+                n,
+                uncoupled_mm=unc,
+                uncoupled_severity=t.uncoupled_severity,
+                skew_mm=t.skew_mm,
+                skew_severity=t.skew_severity,
+                max_vias=t.max_vias_per_net,
+                vias_severity=t.vias_severity,
+            )
+        )
+    return limits
+
+
 def _warn_unrecognised_coupled_pairs(pairs: list[tuple[str, str]] | None, quiet: bool) -> None:
     """One warning per coupled pair KiCad does not recognise by name (#6429).
 
@@ -4309,6 +4466,11 @@ def _write_drc_constraint_sidecars(
             router_net_classes=net_class_map,
             router_coupled_pairs=coupled_pairs,
             router_pair_gaps=pair_gaps,
+            router_pair_limits=(
+                _router_pair_limits(coupled_pairs, net_class_map, Path(output_path))
+                if pair_gaps is not None
+                else None
+            ),
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -5105,6 +5267,36 @@ def _run_placement_feedback(
     # still gets telemetry -- just without the noisy per-iteration detail.
     loop_verbose = (not quiet) and bool(getattr(args, "verbose", False))
 
+    # Issue #6321: every iteration clears all routes and re-routes, while the
+    # loop's best result waits in a snapshot.  A deadline or Ctrl+C that saves
+    # mid-iteration must save that best state, not the half-finished re-route,
+    # so register a ``pre_save_hook`` that puts it back -- only for the router
+    # the partial save will serialize (an escalation flow may run this loop on
+    # another one).  This loop never moves the router's pads and never writes
+    # the board, so the copper still belongs to ``pcb_path``: no placement
+    # text.  As in ``_run_placement_delta_feedback`` the hook is NOT cleared in
+    # a ``finally``: a deadline unwinds through here (``RouteDeadlineExpired``
+    # is a ``BaseException``) BEFORE the save runs.
+    # A hook some earlier stage left registered (none does today) is chained,
+    # not dropped, and put back afterwards.
+    owns_partial_save = _interrupt_state.get("router") is router
+    previous_hook = _interrupt_state.get("pre_save_hook") if owns_partial_save else None
+    loops: list[Any] = []
+
+    def _restore_best_for_partial_save() -> tuple[dict[str, Any], str | None]:
+        hook_info, hook_text = previous_hook() if previous_hook is not None else ({}, None)
+        if loops and loops[0].restore_best_for_partial_save():
+            hook_info = {
+                **hook_info,
+                "snapshot_state": "best-trial",
+                "snapshot_strategy": "placement-feedback",
+                "snapshot_trial": loops[0].best_iteration,
+            }
+        return hook_info, hook_text
+
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = _restore_best_for_partial_save
+
     try:
         result = router.route_with_placement_feedback(
             pcb=pcb,
@@ -5119,11 +5311,21 @@ def _run_placement_feedback(
             outer_timeout=outer_timeout,
             # Issue #6324: stop between iterations once an interrupt landed.
             stop_requested=_interrupt_pending,
+            # Issue #6321: reach the loop so a partial save can restore its
+            # best routes first.
+            loop_observer=loops.append,
         )
     except Exception as exc:
+        if owns_partial_save:
+            _interrupt_state["pre_save_hook"] = previous_hook
         if not quiet:
             print(f"  Warning: placement feedback failed ({exc}); keeping initial routes")
         return None
+
+    # The loop has returned with its best state restored (grid included), so
+    # nothing is in flight; later stages own ``router.routes`` from here.
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = previous_hook
 
     if not quiet:
         print(f"  Feedback iterations: {result.iterations}")
@@ -11256,6 +11458,9 @@ def route_with_layer_escalation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -12304,6 +12509,9 @@ def route_with_rule_relaxation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -14923,6 +15131,9 @@ def route_with_combined_escalation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
 
     # Issue #6324: never go on to the normal save after an interrupt.
@@ -15266,8 +15477,25 @@ def _validate_route_engine_strategy(args) -> int:
         conflicts.append("--multi-resolution")
     if _resolve_escape_routing_flag(args) is True:
         conflicts.append("--escape-routing")
+    # Issue #6551: the mesh engine has no coupled router, and it owns every
+    # pair net in its whole-netset negotiation (the grid coupled pre-pass is
+    # skipped under it, like the lattice's #6535 fix), so
+    # ``--differential-pairs`` cannot couple anything under mesh.  Reject it
+    # rather than ship uncoupled pairs under a coupled-looking command line.
+    mesh_diffpair_conflict = engine == "mesh" and bool(getattr(args, "differential_pairs", False))
+    if mesh_diffpair_conflict:
+        conflicts.append("--differential-pairs")
 
     if conflicts:
+        diffpair_note = (
+            "The mesh engine has no coupled (differential-pair) router: it "
+            "would route each pair's P and N nets uncoupled (issue #6551). "
+            "For coupled pairs use --route-engine lattice --strategy basic "
+            "--differential-pairs, or --route-engine grid "
+            "--differential-pairs.\n"
+            if mesh_diffpair_conflict
+            else ""
+        )
         print(
             f"Error: --route-engine {engine} is incompatible with "
             f"{', '.join(conflicts)}.\n"
@@ -15277,6 +15505,7 @@ def _validate_route_engine_strategy(args) -> int:
             "--two-phase/--multi-resolution/--escape-routing modifiers "
             "bypass that path, so the engine selection would be silently "
             "ignored and grid copper shipped (issue #4280).\n"
+            f"{diffpair_note}"
             "Supported combination:\n"
             f"    kct route <board> --route-engine {engine} --strategy basic",
             file=sys.stderr,
@@ -17807,7 +18036,10 @@ def _route_parser() -> argparse.ArgumentParser:
             "sub-searches by the per-net node-expansion cap instead of their "
             "10 s wall clock (Issue #5870, mechanism #4536). Only takes effect "
             "with an active cap (--deterministic-budget or "
-            "--per-net-iterations). Off by default because it costs board 07 "
+            "--per-net-iterations). Also switches off the 60 s "
+            "oscillation-escape budget and the remaining-budget per-iteration "
+            "per-net cap (Issue #6475), so --timeout no longer changes reach. "
+            "Off by default because it costs board 07 "
             "routed nets (#4730/#4770); use it when the route must be "
             "independent of machine load."
         ),
@@ -22084,6 +22316,9 @@ def _run_main_impl(args, parser, argv) -> int:
     # ``kicad-cli`` DRC/zone-fill child spawned below.
     # Issue #5944: diagnose unrouted connections while the grid is still live.
     _stash_unrouted_diagnosis(router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(router, args)
     _release_routing_engine_state(router)
 
     _rss.mark("post-finalize")
