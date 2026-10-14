@@ -2417,7 +2417,7 @@ fi
 # The file is co-owned (#4187): Loom's labels sit between `# BEGIN LOOM LABELS`
 # and `# END LOOM LABELS`, and a consumer may keep its own labels above or below.
 # The installer splices the block, but no resync ever refreshed it, so a label
-# upstream added (loom:needs-revision) never arrived and a label upstream retired
+# upstream added (#10753's revise label) never arrived and a label upstream retired
 # (loom:urgent) stayed declared, and the forge drift check below re-created it
 # minutes after `labels migrate --apply` deleted it.
 #

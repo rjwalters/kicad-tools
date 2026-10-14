@@ -117,9 +117,11 @@ unused; where a fleet sets them: `.loom/docs/promotion-throughput.md`):
 - `loom:very-important` / `loom:important`: promote all qualifying proposals (no limit)
 - No priority level: promote up to `$DEFAULT_CAP`
 
-Count each promotion under the level it is promoted with. A cap that blocks a
-passing proposal is a Step 3c capacity deferral, not a rejection. While PR
-rows wait, `LOOM_CHAMPION_PROMOTION_SLICE` also bounds fresh verdicts per
+Count each promotion under the level it is promoted with. Once a level's cap
+is spent, evaluate no more proposals at that level this pass: an unclaimed
+proposal was never evaluated, so nothing is left half-decided. There is no
+capacity deferral (#11860), and a targeted `--issue N` step has no cap. While
+PR rows wait, `LOOM_CHAMPION_PROMOTION_SLICE` also bounds fresh verdicts per
 pause (`champion.md` → "Autonomous Operation").
 
 ### Setting Priority
@@ -649,66 +651,34 @@ Use conservative judgment. **Do NOT promote** if:
 - **Too ambitious**: Multi-week effort or touches many systems
 - **Unverified claims**: "This will fix X" without evidence
 
-**When in doubt, do NOT promote.** Leave a comment explaining concerns and keep the original proposal label (`loom:curated`, `loom:architect`, `loom:hermit`, or `loom:auditor`).
+**When in doubt, do NOT promote** — write one of Step 4's verdicts instead (revise, block or escalate). No evaluation leaves an issue `loom:curated` without a verdict (#11860).
 
 ---
 
 ### Dependency-Defer Fast Path — run this FIRST, before the Idempotency check
 
-**Problem this section fixes.** Step 4's dependency-timing gate
-(`classify-dependency-block.sh --check-defer`) is correct, but it is
-reachable **only** from inside Step 4's escalation branch — which is itself
-reachable only after the body-hash idempotency check below has run to
-completion and decided either "no marker match" or "skip budget exhausted."
-Any pass that, for whatever reason, does not walk that exact call chain end
-to end never reaches the gate at all, and nothing then stops it from
-posting a fresh comment — even when the gate, if it HAD been consulted,
-would have returned `DEFER` on an unchanged fingerprint. (Observed in the
-wild: a proposal accumulated six duplicate "Champion Review: STILL DEFERRED
-(no change)" comments across several days even though the dependency-timing
-gate returned `DEFER` with an unchanged blocker fingerprint on every one of
-those passes — illustrative, not a fixed reference for this repo.)
-
-**The fix: check unconditionally, first, ahead of and independent of every
-other mechanism in this file.** Before the Idempotency check, before
-Step 1, before writing **any** comment on a proposal that already carries a
-Champion comment — look for the most recent recorded
-`<!-- champion:dep-defer:<fp> -->` marker and re-derive the CURRENT answer.
-If both agree the proposal is still deferred at the same fingerprint, stop
-completely for this issue this pass:
+A proposal carrying a recorded `<!-- champion:dep-defer:<fp> -->` marker whose
+blockers are all still open is waiting, not failing: **block it** without a
+re-evaluation (verdict `blocked`, #11860; this used to be a silent no-op that
+left it curated, and before that six duplicate "STILL DEFERRED" comments):
 
 ```bash
 ISSUE_NUMBER=<number>
-
-# Most recent dep-defer marker recorded on ANY existing comment (not just
-# the marker's own verdict comment — a defer marker can end up patched
-# onto a comment this check does not otherwise inspect).
-ALL_COMMENTS_BODY=$("$GH_READ" issue view "$ISSUE_NUMBER" --json comments \
-  --jq '[.comments[].body] | join("\n---\n")' 2>/dev/null)
-EXISTING_DEFER_FP=$(printf '%s\n' "$ALL_COMMENTS_BODY" \
-  | grep -oE '<!-- champion:dep-defer:[0-9a-f]+ -->' \
-  | sed -E 's/<!-- champion:dep-defer:([0-9a-f]+) -->/\1/' \
-  | tail -n 1)
-
-if [ -n "$EXISTING_DEFER_FP" ]; then
+if "$GH_READ" issue view "$ISSUE_NUMBER" --json comments --jq '[.comments[].body] | join("\n")' 2>/dev/null \
+     | grep -qE '<!-- champion:dep-defer:[0-9a-f]+ -->'; then
   DEP_RC=0
   DEFER_OUT=$(./.loom/scripts/classify-dependency-block.sh --issue "$ISSUE_NUMBER" --check-defer) || DEP_RC=$?
-  CURRENT_FP=$(printf '%s\n' "$DEFER_OUT" | sed -n 's/^BLOCKER_FINGERPRINT: //p')
-
-  if [ "$DEP_RC" -eq 0 ] && [ -n "$CURRENT_FP" ] && [ "$CURRENT_FP" = "$EXISTING_DEFER_FP" ]; then
-    echo "#$ISSUE_NUMBER already deferred at fingerprint $CURRENT_FP and still DEFER — STOP. No comment, no claim, no further reasoning about this issue this pass. Continue the batch loop to the next issue."
-    # HARD STOP for this issue: do not run the Idempotency check below, do
-    # not proceed to Step 1, do not post anything.
+  OPEN_BLOCKERS=$(printf '%s\n' "$DEFER_OUT" | sed -n 's/^OPEN_BLOCKERS: //p' | tr ' ' ',')
+  if [ "$DEP_RC" -eq 0 ] && [ -n "$OPEN_BLOCKERS" ]; then
+    loom-daemon park-record apply --issue "$ISSUE_NUMBER" --blocked-by "$OPEN_BLOCKERS" --by champion
+    echo "#$ISSUE_NUMBER blocked on $OPEN_BLOCKERS — verdict: blocked; continue with the next issue"
   fi
 fi
 ```
 
-**Only two outcomes let this issue proceed past the fast path**:
-`DEP_RC=3` (`REEVALUATE` — every recorded blocker has since closed, so the
-old verdict is stale) or `CURRENT_FP` differing from `$EXISTING_DEFER_FP`
-(the blocker set itself changed). Either falls through to the Idempotency
-check and the rest of the Promotion Workflow unchanged — a changed or
-cleared blocker set must still produce a fresh evaluation.
+`DEP_RC=3` (`REEVALUATE`: every recorded blocker has closed) or `4`
+(`PROMOTE_SUBSET`) falls through to the Idempotency check and a fresh
+evaluation. `release-stale-blocked` lifts the block once the blockers close.
 
 ---
 
@@ -718,7 +688,7 @@ cleared blocker set must still produce a fresh evaluation.
 
 **Applies to every proposal evaluated by this file** — `loom:curated`, `loom:architect`, `loom:hermit`, and `loom:auditor` alike — not just the `loom:architect` case that surfaced it.
 
-**The idempotency skip and the escalation threshold are one mechanism, not two** (#4967). Suppressing duplicate comments must never suppress the escalation that eventually puts a stuck proposal in front of a human — read "Bounding the silent skip" below before changing either half.
+**There is no silent skip (#11860).** Every evaluation is terminal, so an unchanged body this file already rejected is not skipped: it goes straight to Step 4's bound, which ends in a verdict. Read "The bound without a silent skip" below before changing either half.
 
 **Does not shadow the Epic-Aware Blocker Check (#5211)**: this section's skip
 is keyed to a hash of the *proposal's own* title + body, which is exactly
@@ -726,21 +696,23 @@ correct for detecting "has the proposal been revised" — but a dependent
 citing an epic as a blocker can sit at an unchanged body hash for weeks while
 the *epic* underneath it finishes. If the "Epic-aware blocker sub-check"
 under criterion 2 runs, it must run on **every** pass regardless of whether
-this section's marker match would otherwise skip silently — the two markers
+this section's marker matched — the two markers
 are independent (`champion:proposal-verdict:body-*` here vs.
 `champion:epic-block:*` in `champion-common.md`), and only the latter is
 keyed to the blocker's own state, so only the latter can detect a resolved
 blocker under an unrevised proposal body.
 
-### Idempotency check (run BEFORE claiming — skip silently on a match, until the skips are capped)
+### Idempotency check (run BEFORE claiming — an already-rejected, unchanged body goes straight to Step 4)
 
-Compute a marker keyed to a **hash of the proposal's own text** (title + body), so a genuine revision always gets a fresh evaluation while an unchanged proposal never gets re-commented. The check is **three-way**, not two-way: no match → evaluate; match with skips left in the budget → skip silently; match with the skip budget exhausted → **escalate** (see "Bounding the silent skip" below).
+Compute a marker keyed to a **hash of the proposal's own text** (title + body), so a genuine revision always gets a fresh evaluation while an unchanged one is never re-evaluated: no match → evaluate; match → **Step 4 directly** on the verdict already on file (`UNREVISED=yes`).
 
 ```bash
 ISSUE_NUMBER=<number>
 
-# Cached ("$GH_READ") — this is a content check, not claim arbitration.
-ISSUE_JSON=$("$GH_READ" issue view "$ISSUE_NUMBER" --json title,body,labels,comments)
+# Cached ("$GH_READ"): a content check. Comments: TRUSTED authors only (#9548):
+# every marker below is control, and an outsider can post a well-formed one.
+ISSUE_JSON=$("$GH_READ" issue view "$ISSUE_NUMBER" --json title,body,labels | jq --argjson c "$(loom-daemon forge trusted-comments --fetch "$ISSUE_NUMBER" --gh-shape)" '.comments = $c') \
+  || { echo "SKIP #$ISSUE_NUMBER: comments unauthenticated (no claim, no verdict)"; exit 0; }
 
 # Portable sha256 (sha256sum on Linux, shasum on macOS) — same fallback shape
 # the repo's own scripts use. 16 hex chars is plenty for change detection.
@@ -761,10 +733,10 @@ BODY_HASH=$(printf '%s\n%s' \
   "$(printf '%s\n' "$ISSUE_JSON" | jq -r '.body // ""')" \
   | _sha256 | awk '{print substr($1, 1, 16)}')
 VERDICT_MARKER="<!-- champion:proposal-verdict:body-$BODY_HASH -->"
+REVISE_MARKER="<!-- champion:revise:body-$BODY_HASH -->"   # Curator's intake keys on it (#11860)
 
-# Escalation inputs, computed HERE rather than in Step 4 (#4967): the skip path
-# below must be able to decide "escalate instead of skipping again" without ever
-# reaching Step 4. Step 4 reuses these same variables.
+# Step 4's inputs, computed HERE (#4967) so a marker match can go straight to
+# Step 4. Step 4 reuses these same variables.
 PRIOR_REJECTIONS=$(printf '%s\n' "$ISSUE_JSON" | jq \
   '[.comments[] | select(.body | contains("Champion Review: NEEDS REVISION"))] | length')
 # A human owns the proposal when it carries ANY hold (#8245, #11795):
@@ -779,8 +751,7 @@ ALREADY_ROUTED=$([ -n "$HELD_BY" ] && echo yes || echo no)
 # The self-healing un-escalation below can only ever clear the operator hold,
 # so it is gated on that hold alone (OP_HOLDS) — never on the whole set.
 OPERATOR_PRESENT=$(printf '%s\n' "$ISSUE_JSON" | jq -e '($ENV.OP_HOLDS | split("\n")) as $o | .labels[] | select(.name | IN($o[]))' >/dev/null && echo yes || echo no)
-SKIP_STREAK=0            # silent skips already recorded for THIS body revision
-ESCALATE_UNREVISED=no    # set to yes to bypass re-evaluation and go straight to Step 4's escalation
+UNREVISED=no             # yes: THIS body already failed; Step 4 decides without re-evaluating (#11860)
 FORCE_REEVALUATE=no      # set to yes when an escalation was just undone (#5664)
 OPERATOR_RULED=no        # set to yes when a human un-parked THIS body revision after its rejection (#8245)
 
@@ -803,10 +774,10 @@ if [ "$OPERATOR_PRESENT" = "yes" ]; then
     HELD_BY=$(printf '%s\n' "$HELD_BY" | tr ',' '\n' | grep -v '^loom:operator$' | paste -sd, -)
     ALREADY_ROUTED=$([ -n "$HELD_BY" ] && echo yes || echo no)
     if [ "$ALREADY_ROUTED" = "no" ]; then
-      # The body hash has not changed, so the verdict marker still matches and the
-      # skip tally is still at the cap. Without this flag the very next branch
-      # would set ESCALATE_UNREVISED=yes and re-escalate on the same stale
-      # dependency finding, undoing the un-escalation in the same pass.
+      # The body hash has not changed, so the verdict marker still matches.
+      # Without this flag the very next branch would set UNREVISED=yes and
+      # re-escalate on the same stale dependency finding, undoing the
+      # un-escalation in the same pass.
       FORCE_REEVALUATE=yes
       echo "#$ISSUE_NUMBER un-escalated — its recorded blocker has closed; re-evaluating from scratch this pass"
     else
@@ -817,25 +788,17 @@ fi
 
 if [ "$FORCE_REEVALUATE" = "no" ] && printf '%s\n' "$ISSUE_JSON" | jq -e --arg m "$VERDICT_MARKER" \
      '.comments[] | select(.body | contains($m))' >/dev/null; then
-  # This exact revision was already evaluated. Read the silent-skip tally carried
-  # by the matching verdict comment. REST, not `gh issue view`: only the REST
-  # payload has the numeric comment id that the PATCH below needs (the `id` from
-  # `gh issue view --json comments` is a GraphQL node id and cannot be PATCHed).
-  VERDICT_COMMENT=$(gh api "repos/{owner}/{repo}/issues/$ISSUE_NUMBER/comments" --paginate \
-    --jq ".[] | select(.body | contains(\"$VERDICT_MARKER\"))" | jq -s 'last')
-  COMMENT_ID=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.id // empty')
+  # This exact revision was already evaluated. The trusted REST listing carries
+  # the verdict's `created_at` the un-park check needs.
+  VERDICT_COMMENT=$(loom-daemon forge trusted-comments --fetch "$ISSUE_NUMBER" \
+    | jq --arg m "$VERDICT_MARKER" '[.[] | select(.body | contains($m))] | last')
   COMMENT_BODY=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.body // ""')
-  SKIP_STREAK=$(printf '%s' "$COMMENT_BODY" \
-    | sed -n "s|.*<!-- champion:unrevised-skips:$BODY_HASH:\([0-9]\{1,\}\) -->.*|\1|p" | tail -n 1)
-  SKIP_STREAK=${SKIP_STREAK:-0}
-  UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
   VERDICT_CREATED_AT=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.created_at // ""')
 
   # Operator un-park (#8245, porting champion-epic.md's #7921): loom:operator
   # removed AFTER this revision's own rejection is a human ruling on THIS body —
-  # stand down, unrevised, until the body changes. Without it the next pass
-  # re-escalates: no label distinguishes "ruled on" from "never escalated", and
-  # the tally is already at the cap. A DIFFERENT signal from FORCE_REEVALUATE
+  # never re-escalate it, unrevised. Without it the next pass re-escalates: no
+  # label distinguishes "ruled on" from "never escalated". A DIFFERENT signal from FORCE_REEVALUATE
   # above (a human's label edit, not a closed dependency) — never fold the two.
   # The actor is not inspected (agents authenticate as the operator); the bot's
   # OWN un-park is excluded by TIME, via the marker classify-dependency-block.sh
@@ -855,87 +818,44 @@ if [ "$FORCE_REEVALUATE" = "no" ] && printf '%s\n' "$ISSUE_JSON" | jq -e --arg m
   fi
 
   if [ "$ALREADY_ROUTED" = "yes" ]; then
-    # Terminal state — a human owns this now. Skip without tallying or escalating.
-    echo "#$ISSUE_NUMBER is held by $HELD_BY — skipping (no comment, no claim, no tally)"
+    # Already terminal: a hold is a verdict (blocked / operator) or a freeze.
+    echo "#$ISSUE_NUMBER is held by $HELD_BY — already terminal (no comment, no claim)"
   elif [ "$OPERATOR_RULED" = "yes" ]; then
-    # A human already answered this revision's escalation by un-parking it.
-    # Re-escalating with nothing new re-fights that ruling (#8245); the ladder
-    # resumes only when the body is revised.
-    echo "#$ISSUE_NUMBER: loom:operator removed at $UNPARKED_AT, after this revision's rejection — a human has ruled on body $BODY_HASH; standing down (no comment, no claim, no tally, no escalation) until it is revised"
-  elif [ "$UNREVISED_EVALS" -ge "${LOOM_MAX_UNREVISED_EVALUATIONS:-2}" ]; then
-    # Silence is not free forever: the skip budget is spent, so this pass does
-    # NOT skip. Fall through to Claim, then jump straight to Step 4's escalation
-    # branch (no re-evaluation — the text is unchanged, so the verdict is too).
-    ESCALATE_UNREVISED=yes
-    echo "#$ISSUE_NUMBER unrevised at $BODY_HASH across $UNREVISED_EVALS evaluations — escalating to the operator instead of skipping again"
+    # A human answered this revision's escalation by un-parking it (#8245):
+    # evaluate afresh; Step 4 never re-escalates this body.
+    echo "#$ISSUE_NUMBER: loom:operator removed at $UNPARKED_AT, after this revision's rejection — re-evaluating; body $BODY_HASH is never escalated again"
   else
-    # Record this cycle's skip IN PLACE by PATCHing the existing verdict comment.
-    # An edit posts no new comment and sends no notification, so the "1 comment,
-    # then silence" guarantee holds while the counter still advances.
-    NEXT_SKIPS=$(( SKIP_STREAK + 1 ))
-    if printf '%s' "$COMMENT_BODY" | grep -q "<!-- champion:unrevised-skips:$BODY_HASH:"; then
-      NEW_BODY=$(printf '%s' "$COMMENT_BODY" \
-        | sed "s|<!-- champion:unrevised-skips:$BODY_HASH:[0-9]\{1,\} -->|<!-- champion:unrevised-skips:$BODY_HASH:$NEXT_SKIPS -->|")
-    else
-      # Verdict comment predates this tally (posted before #4967) — append it.
-      NEW_BODY=$(printf '%s\n\n%s' "$COMMENT_BODY" "<!-- champion:unrevised-skips:$BODY_HASH:$NEXT_SKIPS -->")
-    fi
-    [ -n "$COMMENT_ID" ] && gh api --method PATCH \
-      "repos/{owner}/{repo}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY" >/dev/null
-    echo "Already evaluated #$ISSUE_NUMBER at body revision $BODY_HASH — skipping silently (skip $NEXT_SKIPS recorded; unrevised evaluations now $(( PRIOR_REJECTIONS + NEXT_SKIPS ))/${LOOM_MAX_UNREVISED_EVALUATIONS:-2}, escalates once it reaches the cap; no comment, no claim)"
-    # Continue the batch to the next issue; do not read further or claim.
+    # No silent skip (#11860): Step 4 decides on the verdict already on file.
+    UNREVISED=yes
+    echo "#$ISSUE_NUMBER unchanged since its verdict at $BODY_HASH — straight to Step 4's bound"
   fi
 fi
 ```
 
-If `OPERATOR_RULED=yes`, **stop here** — no comment, no claim, no tally, no escalation: a human has already ruled on this exact body by un-parking it, and only a revision restarts the ladder (#8245).
-
-If the marker is present **and `ESCALATE_UNREVISED=no`**, **stop here for this issue** — do not read comments further, do not claim, do not comment. This is the mechanism that turns "6 identical NEEDS REVISION comments" into "1 comment, then silent skips" for a truly unrevised proposal. If `ESCALATE_UNREVISED=yes`, do **not** stop: continue to the Claim step and then to Step 4, which applies the dependency-timing gate and then escalates on that flag without re-running the 8 criteria. If `FORCE_REEVALUATE=yes` the marker branch never ran at all: claim and go to Step 1 for a full re-evaluation, because the escalation this pass just undid was written against a blocker that has since closed.
+`ALREADY_ROUTED=yes`: **stop here** — no comment, no claim; the hold is already a terminal state. Otherwise claim. `UNREVISED=yes` then goes **straight to Step 4**, skipping Steps 1–3 (the text is unchanged, so the verdict is too); `OPERATOR_RULED=yes` and `FORCE_REEVALUATE=yes` go to Step 1 for a full evaluation (the escalation `FORCE_REEVALUATE` undid was written against a blocker that has since closed).
 
 #### Why a body hash and NOT the issue's `updatedAt` (#4966)
 
 `updatedAt` is **self-invalidating**: posting the verdict comment bumps it, so a marker keyed to it never matches and every pass re-evaluates and re-comments. A hash of title + body changes only when the proposal is edited; comments, label churn and Champion's own verdict leave it alone. Claim staleness has the same trap and the same fix, an anchor Champion's own write does not bump: the label's `labeled` timeline event (Claim below; `judge.md` and `daemon-reference.md` "Stale-claim reconciliation" for `loom:reviewing`/`loom:treating`). Never use `updatedAt` for either.
 
-#### Bounding the silent skip: how idempotency interacts with N=2 escalation (#4967)
+#### The bound without a silent skip (#4967, #11860)
 
-**Read this before editing either mechanism.** The idempotency check and Step 4's escalation are *coupled*, and the coupling is easy to break by touching only one of them — it has already been broken once. When the body-hash marker landed (#4966) it made the skip real, and a real skip returns before Step 4 ever runs. For a genuinely **unrevised** proposal the hash never changes, so the first rejection's marker matches on every later pass, Step 4 became unreachable forever, and `PRIOR_REJECTIONS` — which counts only *posted* rejection comments — froze at 1. Escalation to `loom:operator` could then never fire for exactly the scenario #4954 was filed about: fixing the comment spam had silently traded "noisy, but a human eventually sees it" for "quiet, and no human ever does."
+**Read this before editing either half.** The idempotency check and Step 4's bound are coupled. #4966's real skip once made Step 4 unreachable for an unrevised proposal, so it never escalated (#4967); a per-skip tally (`champion:unrevised-skips`) fixed that, and #11860 removed both: a skip left the issue `loom:curated` with no verdict, and a body-hash counter would never advance anyway, because Curator's revise always changes the hash.
 
-The rule that keeps both properties: **a silent skip must still cost something.** Each skip advances a durable counter, and the counter is what gates escalation — so suppressing comments can never suppress escalation.
+**`PRIOR_REJECTIONS` is the one counter.** It counts every posted `Champion Review: NEEDS REVISION` comment, across revisions, and never resets. An unchanged body (`UNREVISED=yes`) counts as a failed round and goes straight to Step 4's bound. Invariants a future edit must preserve:
 
-| Mechanism | Counts | Written by | Survives a silent skip? |
-|---|---|---|---|
-| `PRIOR_REJECTIONS` | posted `Champion Review: NEEDS REVISION` comments (any revision) | Step 4's reject branch | Yes, but **frozen** while skipping — it cannot advance on its own |
-| `SKIP_STREAK` | silent skips recorded for the **current** body hash | the idempotency skip's in-place `PATCH` of the existing verdict comment | **Yes — this is the counter that keeps advancing** |
-| `UNREVISED_EVALS` = `PRIOR_REJECTIONS + SKIP_STREAK` | evaluation cycles spent on an unrevised proposal | derived | Yes — the single escalation gate, used identically by the skip path and Step 4 |
+- **Every evaluation ends in a verdict**: promote, revise, block or escalate (or the premise-false close). None leaves the issue `loom:curated` with no verdict.
+- **Comment budget for an unrevised proposal is at most 4**: one `NEEDS REVISION`, the final-round and disposition rounds, one escalation (#10753).
+- **Escalation goes through the claim.** `UNREVISED=yes` falls through to the Claim step and the verdict-time recheck, so two concurrent passes cannot post two escalations.
+- **`ALREADY_ROUTED=yes` short-circuits everything.** A proposal carrying `loom:operator`, `loom:blocked` or `loom:frozen` (#8245, #11795) is already terminal: never re-escalated. The self-healing un-escalation runs first and can clear only a *dependency-only* `loom:operator` whose recorded blocker has closed ("Pass 0").
+- **An un-park is a ruling on the current revision (#8245).** `OPERATOR_RULED=yes` re-evaluates but never re-escalates this body. Two preconditions keep that safe: a non-empty `VERDICT_CREATED_AT` (an empty one is a failed REST re-read, and `> ""` matches any historical un-park), and an `UNPARKED_AT` newer than `BOT_UNESCALATED_AT`, so Champion's own un-escalation cannot masquerade as a human's ([`champion-epic-guard-invariants.md`](champion-epic-guard-invariants.md)).
+- **Escalation is gated on the finding's *kind*** (#5664): Step 4's dependency-timing gate blocks, rather than escalates, an open non-cycle dependency.
 
-Escalate once `UNREVISED_EVALS >= LOOM_MAX_UNREVISED_EVALUATIONS` (default **2** — the same N=2 threshold #4954 specified, now measured in *evaluation cycles* rather than in *posted comments*).
-
-**Traced against the #4967 scenario** (proposal fails criteria at body hash H1 and is never revised; Champion cadence is irrelevant — these are consecutive passes):
-
-| Cycle | Marker match? | `PRIOR_REJECTIONS` | `SKIP_STREAK` | `UNREVISED_EVALS` | Outcome | Comments posted |
-|---|---|---|---|---|---|---|
-| 1 | no (H1 unseen) | 0 | 0 | 0 | evaluate → reject → post NEEDS REVISION carrying `VERDICT_MARKER` + `unrevised-skips:H1:0` | 1 |
-| 2 | yes (H1) | 1 | 0 | 1 < 2 | silent skip; `PATCH` the tally to `1` | 0 |
-| 3 | yes (H1) | 1 | 1 | 2 ≥ 2 | `ESCALATE_UNREVISED=yes` → claim → Step 4's bound → final Curator round or ranked decision (#10753) | 1 |
-| 4+ | — | — | — | — | `loom:needs-revision` / `loom:operator` keeps it out of discovery | 0 |
-
-**The bound therefore fires on cycle 3** (this trace is a proposal Curator returned unedited; normally cycle 1's `loom:needs-revision` holds it at Curator) — the same cycle the pre-#4954 behavior escalated on, but with **2 comments instead of 6+**, and with the silent-skip guarantee intact (cycle 2 posts nothing).
-
-Invariants a future edit must preserve:
-
-- **Comment budget for an unrevised proposal is at most 3**: one `NEEDS REVISION`, one final-round `NEEDS REVISION`, one escalation (#10753). The skip path may only ever *edit* the existing verdict comment (`gh api --method PATCH .../issues/comments/<id>` — no notification, no new timeline entry), never post.
-- **The counter must not live in a comment Champion refuses to write.** Anything that requires posting per cycle re-creates this bug; anything derived from the issue's own text is frozen by construction, which is what makes the tally an *edit* of a comment that already exists.
-- **A revision resets `SKIP_STREAK`, not `PRIOR_REJECTIONS`.** A new hash means a new marker, so the tally starts at 0 for the new revision — but the rejection count keeps accumulating across revisions, so a proposal that is revised-and-rejected twice still reaches the bound on its third failing verdict — the Curator loop's bound (#10753). Both paths remain bounded.
-- **Escalation goes through the claim.** `ESCALATE_UNREVISED=yes` falls through to the Claim step and the verdict-time recheck rather than escalating inline, so two concurrent passes cannot post two escalation comments. A lost `PATCH` update between concurrent passes can only *under*count (escalating a cycle later), never double-escalate.
-- **`ALREADY_ROUTED=yes` short-circuits everything.** A proposal carrying any of the three holds, `loom:operator`, `loom:blocked` or `loom:frozen` (#8245, #11795; an operator's hold, which escalating would silently undo) is never re-escalated and never re-tallied; "When NOT to Promote" already excludes the first two from future passes. Since #5664 that short-circuit is **conditional, not unconditional**: the self-healing un-escalation runs first, and only a *dependency-only* escalation whose recorded blocker has closed can clear the label (see "Pass 0"). It stays gated on `loom:operator` alone — the only label it can remove — so a park surviving it keeps `ALREADY_ROUTED=yes`. Everything else short-circuits exactly as before.
-- **An un-park is a ruling on the current revision (#8245).** `loom:operator` removed after this revision's own verdict comment means `OPERATOR_RULED=yes`: stand down, no tally, no escalation, until the body is revised. Two preconditions keep that safe and removing either reintroduces the incident — a non-empty `VERDICT_CREATED_AT` (an empty one is a failed REST re-read, and `> ""` matches any historical un-park), and an `UNPARKED_AT` newer than `BOT_UNESCALATED_AT` so Champion's own un-escalation cannot masquerade as a human's. Full rationale, including why the epic path's presence-based `BOT_UNESCALATABLE` could not be ported verbatim: [`champion-epic-guard-invariants.md`](champion-epic-guard-invariants.md).
-- **Escalation is gated on the finding's *kind*, not just on the count** (#5664). `UNREVISED_EVALS >= N` is necessary but no longer sufficient: Step 4's dependency-timing gate declines to escalate when the only recurring finding is an open, non-cycle dependency. A merits finding — any of the other 7 criteria, a dependency phrase that cites no issue, or a real cycle — escalates on exactly the same cycle it always did.
-
-`LOOM_MAX_UNREVISED_EVALUATIONS` (default **2**) — bounds the silent-skip streak the same way `LOOM_MAX_STANDDOWN_STREAK` (default 3) bounds `judge.md`'s silent stand-downs: silence is a valid response to a repeated no-op, but never an unbounded one.
+`LOOM_MAX_UNREVISED_EVALUATIONS` (default **2**): the `PRIOR_REJECTIONS` count at which Step 4's bound applies.
 
 #### A Curator-appended `## Revision` section is an ordinary body edit, not a special case (#7650, #10753)
 
-Two Curator paths revise a proposal by appending a dated `## Revision` section to its body: "De-escalating Fact-Based Champion Escalations" (#7650, which also removes `loom:operator`) and "Revising `loom:needs-revision`" (#10753, which removes that label). Neither needs Champion-side code. `BODY_HASH` hashes `.title` + `.body` verbatim, so any appended text gives a new `VERDICT_MARKER`; the Idempotency check finds no comment carrying it, and the next pass evaluates fresh, as if a human had edited the proposal. `ALREADY_ROUTED` is already `no` because Curator removed the label first, so `FORCE_REEVALUATE` (Champion's own Pass 0 path) never fires for either. `tests/test-classify-dependency-block.sh` checks that the hash changes when a `## Revision` section is appended.
+Two Curator paths revise a proposal by appending a dated `## Revision` section to its body: "De-escalating Fact-Based Champion Escalations" (#7650, which also removes `loom:operator`) and "Revising a Champion send-back" (#10753, #11860, which puts `loom:curated` back). Neither needs Champion-side code. `BODY_HASH` hashes `.title` + `.body` verbatim, so any appended text gives a new `VERDICT_MARKER`; the Idempotency check finds no comment carrying it, and the next pass evaluates fresh, as if a human had edited the proposal. `tests/test-classify-dependency-block.sh` checks that the hash changes when a `## Revision` section is appended.
 
 ### Claim (staleness-aware, run only when NOT skipped above)
 
@@ -973,7 +893,7 @@ gh issue edit "$ISSUE_NUMBER" --add-label "loom:evaluating"
 
 `LOOM_STALE_EVALUATING_MINUTES` (default **15**) — named to mirror `LOOM_STALE_REVIEWING_MINUTES`/`LOOM_STALE_TREATING_MINUTES`, on a shorter scale since proposal evaluation has no build/CI wait. `check-evaluating-staleness.sh` reads the same env var (or an explicit `--threshold-minutes`) for its own default.
 
-**Release the claim** — `--remove-label "loom:evaluating"` — as part of the SAME `gh issue edit` command that writes the outcome (promote, reject, or escalate) in Steps 3/4 below, never as a separate call. This keeps "claimed but no verdict written yet" the only window where the label is genuinely in flight.
+**Release the claim** — `--remove-label "loom:evaluating"` — as part of the SAME command that writes the verdict (promote, revise, block or escalate) in Steps 3/4 below, never as a separate call. This keeps "claimed but no verdict written yet" the only window where the label is genuinely in flight.
 
 ### Verdict-time recheck (immediately before writing the outcome)
 
@@ -1080,84 +1000,22 @@ This issue has been evaluated and promoted to \`loom:issue\` status. All quality
 fi
 ```
 
-**Step 3c: Capacity Deferral — the level's rate limit blocks promotion this pass (#6729)**
-
-All 8 criteria can pass and Step 3b still not fire: "Rate Limiting by Level"
-above caps no-level promotions per pass. When the cap is what blocks promotion — not
-a quality problem — this is a **capacity deferral, not a rejection**: no
-revision is needed, so Step 4's `VERDICT_MARKER` is never written and the
-proposal's label (`loom:curated`/`loom:architect`/`loom:hermit`/`loom:auditor`)
-is left untouched, exactly as an ordinary re-queue for next iteration.
-
-**Without a guard this repeats every pass** for an issue that keeps losing the
-same capacity gate (observed live: #6628 accumulated 10 near-identical
-"backlog cap reached" comments over ~22 hours, all citing the SAME five
-occupants). `classify-capacity-defer.sh` closes it, keyed to the **level and
-occupant set** that explains the deferral, since a capacity deferral has no
-verdict comment to piggyback its marker on:
-
-```bash
-# LEVEL: `default` (no priority label). OCCUPANTS: empty — a per-pass cap has
-# no standing occupant set, so the first deferral posts and later ones for the
-# same level stay silent (the seen-counter is bumped in place).
-CAP_RC=0
-./.loom/scripts/classify-capacity-defer.sh --issue "$ISSUE_NUMBER" \
-  --level "default" --occupants "" \
-  --apply || CAP_RC=$?
-```
-
-| `CAP_RC` | Marker | What to do |
-|---|---|---|
-| `1` | `POST_COMMENT` + `REASON: first-deferral` or `composition-changed` | **Post the deferral comment** (template below) — the first time this issue hit this level's cap, or the occupant set changed since the last one |
-| `0` | `SKIP_COMMENT` | **Do not post a comment.** Level and occupant set match the last capacity-deferral comment on this issue — `--apply` already bumped that comment's `<!-- champion:capacity-defer-seen:<fingerprint>:<n> -->` counter in place (a stderr warning if nothing was patched is never a reason to post) |
-| `2` | — | The script could not read the issue or the arguments were malformed. Fail toward posting the deferral comment |
-
-**Posting the deferral comment (`CAP_RC=1`)** — carries the two markers the
-next pass's call needs to recognize an unchanged recurrence:
-
-```bash
-./.loom/scripts/post-comment.sh "$ISSUE_NUMBER" --body "<!-- champion:capacity-defer:default:$FINGERPRINT -->
-<!-- champion:capacity-defer-seen:$FINGERPRINT:1 -->
-**Champion Review: no-level per-pass cap reached — deferring promotion**
-
-Evaluated against all 8 promotion criteria; all pass:
-
-- [criterion-by-criterion rationale, as in a normal APPROVED verdict]
-
-**Not promoted this pass — no-level (no priority label) per-pass cap.**
-[DEFAULT_CAP] issues with no priority label were already promoted this pass,
-so this one is held back until a later pass.
-
-This is a **capacity deferral, not a rejection** — no revision is needed, so no
-verdict marker is being written and the proposal label is left untouched. A
-future Champion pass will re-evaluate it and promote it when a slot is free.
-
----
-*Automated by Champion role*"
-```
-
-`$FINGERPRINT` is the value the script printed — use it verbatim. A capacity
-deferral is neither a promotion nor a rejection: continue the loop to the next
-issue and do not count it against the level caps. **No escalation
-counterpart, and none should be added**: it is never a merits problem, and it
-ends on its own once a later pass has a free slot.
+**No Step 3c (#11860).** The capacity deferral (#6729) left a passing proposal `loom:curated` with no verdict. A level cap now stops evaluation before the claim ("Promotion Order"), so it never meets a passing proposal.
 
 ### Step 4: Reject (One or More Criteria Fail)
 
 If any criteria fail, first check whether this rejection has reached **the bound** (#4967, #10753) instead of posting another ordinary verdict — the mechanism that stops the 6x duplicate-comment loop and the revise→reject ping-pong:
 
 ```bash
-# All three were computed by the Idempotency check above (which always runs
-# first — see "Per-issue order in the loop"), so do NOT recompute them here:
-#   PRIOR_REJECTIONS  — posted "Champion Review: NEEDS REVISION" comments (any revision)
-#   SKIP_STREAK       — silent skips recorded for THIS body revision (0 if the marker did not match)
+# Computed by the Idempotency check above (which always runs first — see
+# "Per-issue order in the loop"), so do NOT recompute them here:
+#   PRIOR_REJECTIONS  — posted "Champion Review: NEEDS REVISION" comments (any revision, never reset)
+#   UNREVISED         — yes when THIS body already failed; you came here without re-evaluating (#11860)
 #   ALREADY_ROUTED    — yes when loom:operator, loom:blocked, or loom:frozen is present (#8245)
 #   OPERATOR_RULED    — yes when loom:operator was removed after THIS revision's rejection (#8245)
-# Escalation is gated on evaluation CYCLES, not on posted comments (#4967):
-UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
 ```
 
-**If `UNREVISED_EVALS >= ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}`, `ALREADY_ROUTED=no`, and `OPERATOR_RULED=no`** (the N=2 threshold), **or if `ESCALATE_UNREVISED=yes`** (the idempotency check already made this determination and sent you straight here without re-evaluating): you are at the bound. **First run the dependency-timing gate.**
+**If `PRIOR_REJECTIONS >= ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` or `UNREVISED=yes`, with `ALREADY_ROUTED=no` and `OPERATOR_RULED=no`** (the N=2 threshold): you are at the bound. **First run the dependency-timing gate.** With `OPERATOR_RULED=yes` the bound never applies: a human ruled on this body, so a failure is an ordinary revise verdict (below).
 
 #### Dependency-timing gate — do NOT escalate a finding that clears itself (#5664)
 
@@ -1170,8 +1028,8 @@ DEP_RC=0
 
 | `DEP_RC` | Marker | What to do |
 |---|---|---|
-| `0` | `DEFER` + `OPEN_BLOCKERS:` | **Do not escalate.** No new label, no new comment. Record the deferral in place (below) and continue the batch loop to the next issue |
-| `3` | `REEVALUATE` + `REASON: blockers-cleared` | The recorded findings were dependency-only and every blocker has since **closed**, so the verdict on file is stale. Do **not** escalate on it — go to Step 1 and re-run the 8 criteria (this is the one case where `ESCALATE_UNREVISED=yes` must not skip Steps 1–3) |
+| `0` | `DEFER` + `OPEN_BLOCKERS:` | **Block, do not escalate** (verdict `blocked`, #11860): `loom-daemon park-record apply --issue <number> --blocked-by <OPEN_BLOCKERS, comma-separated> --by champion --remove-label loom:evaluating`. No comment: the park record names the blockers |
+| `3` | `REEVALUATE` + `REASON: blockers-cleared` | The recorded findings were dependency-only and every blocker has since **closed**, so the verdict on file is stale. Do **not** escalate on it — go to Step 1 and re-run the 8 criteria (the one case where `UNREVISED=yes` must not skip Steps 1–3) |
 | `4` | `PROMOTE_SUBSET` + `STARTABLE_SUBSET:` | The blocker is still open, but the issue declares a startable subset (#5664, "Startable-subset carve-out" under criterion 2). This should be rare here — the carve-out normally resolves at Step 2 on a fresh evaluation, before N=2 is ever reached — but if it does fire, treat it like `REEVALUATE`: do **not** escalate, go to Step 1 and re-run the 8 criteria, which will apply the carve-out and promote scoped to the subset if the rest pass |
 | `1` | `NO_DEFER` + `REASON:` | Escalate exactly as before. `merits-finding`, `dependency-cycle`, `no-findings`, `no-recorded-blocker`, and `premise-false-only` all land here — **merits-based escalation is completely unaffected by this gate** |
 | `2` | — | The script could not read the issue. Treat as `NO_DEFER`: fail toward the pre-#5664 behaviour, never toward silence |
@@ -1180,30 +1038,11 @@ The gate is deliberately conservative in one direction: a finding counts as depe
 
 **A `[premise-false]`-tagged bullet is excluded from that "every finding must be dependency-attributable" test, not treated as a disqualifying merits finding (#7904).** That finding kind self-clears through its own separate mechanism — the premise-false close gate below re-verifies the cited mechanical check against current `main` — never by waiting on a blocker, so a premise-false bullet mixed with a genuine open-dependency bullet must still `DEFER` (`REASON: premise-false-only` is reported only when *every* finding was premise-false, leaving nothing to classify; it is a distinct reason from `merits-finding` precisely so the caller can route it to the close gate below instead of escalating). An ordinary merits finding mixed with a premise-false one still escalates exactly as before — the exclusion applies only to the premise-false tag itself.
 
-**Recording a defer (`DEP_RC=0`) — no new comment.** Deferring must not become its own comment stream; the whole point is that waiting is cheap and silent. PATCH the existing verdict comment exactly as the silent-skip path does, adding a one-time blocker marker beside the skip tally:
-
-```bash
-# $COMMENT_ID / $COMMENT_BODY were fetched by the idempotency check — they are
-# EMPTY unless the verdict marker matched. $BLOCKER_FINGERPRINT is the
-# `BLOCKER_FINGERPRINT:` line the script printed.
-DEFER_MARKER="<!-- champion:dep-defer:$BLOCKER_FINGERPRINT -->"
-if [ -n "$COMMENT_ID" ] && ! printf '%s' "$COMMENT_BODY" | grep -qF "$DEFER_MARKER"; then
-  gh api --method PATCH "repos/{owner}/{repo}/issues/comments/$COMMENT_ID" \
-    -f body="$(printf '%s\n%s' "$COMMENT_BODY" "$DEFER_MARKER")" >/dev/null
-fi
-gh issue edit <number> --remove-label "loom:evaluating"   # release the claim if you took one
-```
-
-The marker is a *record*, not a control input: nothing reads it back. If there is
-no verdict comment to PATCH, skip it — the deferral still holds, because the next
-pass re-derives it from the blocker's live state for the cost of one cached read.
-Never substitute a fresh comment for the missing PATCH.
-
-The deferral is **not** bounded by a streak cap, and that is intentional: the condition that ends it is the blocker's own closure, which is an event this pass cannot manufacture and a later pass detects for free. Adding a "defer N times then escalate anyway" cap would re-create #5664 one cycle later. The escape hatches for a blocker that never closes already exist and are not this mechanism: `detect-dependency-cycle.sh` for a genuine deadlock, and `loom:blocked` / `loom:operator` for a human hold.
+**A block is not bounded by a streak cap**, on purpose: it ends when the blocker closes and `release-stale-blocked` lifts `loom:blocked` (the changed body brings a fresh evaluation), an event this pass cannot manufacture. A "block N times then escalate" cap would re-create #5664. A blocker that never closes is `detect-dependency-cycle.sh`'s (a deadlock) or a human's.
 
 **Otherwise (`DEP_RC=1`), the dependency-timing gate does not save this proposal.** Before escalating, assemble `RECURRING_FINDINGS_TEXT` and run the premise-false close gate below — it can end this pass in a close instead of an escalation.
 
-**Assembling `RECURRING_FINDINGS_TEXT`.** Via `ESCALATE_UNREVISED=yes`: lift the **Recurring findings** bullet list verbatim from the prior `NEEDS REVISION` comment (`$COMMENT_BODY`, from the idempotency check) — do not re-derive it. Via a fresh evaluation reaching `UNREVISED_EVALS >= N` in Step 2: derive it from the criteria that just failed. Either way it is the same list the gate inspects and the same list that ends up under **Recurring findings:** in whichever template you use.
+**Assembling `RECURRING_FINDINGS_TEXT`.** Via `UNREVISED=yes`: lift the findings bullet list verbatim from the prior `NEEDS REVISION` comment (`$COMMENT_BODY`, from the idempotency check) — do not re-derive it. Via a fresh evaluation reaching `PRIOR_REJECTIONS >= N`: derive it from the criteria that just failed. Either way it is the same list the gate inspects and the same list that ends up under **Recurring findings:** in whichever template you use.
 
 #### Premise-false close gate — close instead of escalate when every recurring finding is conclusively false (#7657)
 
@@ -1212,7 +1051,7 @@ An open dependency self-clears; a **conclusively false factual premise never doe
 ```bash
 # RECURRING_FINDINGS_TEXT is the exact bullet list you are about to post under
 # "**Recurring findings:**" in either template below -- lifted verbatim from
-# $COMMENT_BODY when ESCALATE_UNREVISED=yes (per "Assembling
+# $COMMENT_BODY when UNREVISED=yes (per "Assembling
 # RECURRING_FINDINGS_TEXT" above), freshly derived from Step 2's failures
 # otherwise. Do not recompute it twice.
 TOTAL_FINDINGS=$(printf '%s\n' "$RECURRING_FINDINGS_TEXT" | grep -c '^- ' || true)
@@ -1281,12 +1120,12 @@ Implemented per #7657.]
 | Case | Action |
 |---|---|
 | The gap is a product-level call: whether the work is wanted, or a choice between legitimate directions that no fact settles (#10001) | File a ranked decision (below) |
-| No trusted `<!-- champion:revision-exhausted -->` comment on this issue yet | Final Curator round: post the NEEDS REVISION template below with that marker on the line after `$VERDICT_MARKER`, adding `loom:needs-revision` as usual |
+| No trusted `<!-- champion:revision-exhausted -->` comment on this issue yet | Final Curator round: the revise verdict below, with that marker on the line after `$REVISE_MARKER` |
 | The final round came back and still fails, and you can name an independently identified preference or authority question (the axis two well-informed people would still disagree on, shown to be a preference, not a fact) | File a ranked decision on that question |
-| The final round came back and still fails, every remaining finding is factual (a wrong path, a missing registry audit, an unverifiable citation), and no trusted `<!-- champion:revision-disposition -->` comment exists yet | Disposition round: post the NEEDS REVISION template below with that marker on the line after `$VERDICT_MARKER`, adding `loom:needs-revision`, and say that Curator must end in a terminal disposition (close, split, or decision), not another edit |
-| Otherwise (factual findings, disposition round already granted) | Stand down: `gh issue edit <number> --remove-label "loom:evaluating"` (your claim only), no other label, verdict or operator hold; continue the batch. The silent-skip ladder (#4967) holds the issue; exhausted rounds alone never make it a human-only question |
+| The final round came back and still fails, every remaining finding is factual (a wrong path, a missing registry audit, an unverifiable citation), and no trusted `<!-- champion:revision-disposition -->` comment exists yet | Disposition round: the revise verdict below, with that marker on the line after `$REVISE_MARKER`, saying that Curator must end in a terminal disposition (close, split, or decision), not another edit |
+| Otherwise (factual findings, disposition round already granted) | File a ranked decision: the agents' last move was the disposition round, and a verdict cannot stand down (#11860; this used to release the claim and leave the issue curated) |
 
-Exhausted rounds are not evidence of a preference call: three failed edits to an incorrect path are still a factual defect, owned by agents. Never apply a bare `loom:operator` hold here. **Filing the decision:** write 2-4 ranked options from the recurring findings, each with a why (typically revise to a named scope / close as not planned / accept as filed; `.loom/docs/operator-decision.md`), then:
+Exhausted rounds are not evidence of a preference call: three failed edits to an incorrect path are still a factual defect, so agents get the final and disposition rounds first. Never apply a bare `loom:operator` hold here. **Filing the decision:** write 2-4 ranked options from the recurring findings, each with a why (typically revise to a named scope / close as not planned / accept as filed; `.loom/docs/operator-decision.md`), then:
 
 ```bash
 ESCALATE_MARKER="<!-- champion:proposal-escalated -->"
@@ -1299,7 +1138,7 @@ loom-daemon operator-decision apply <number> --input /tmp/decision-<number>.json
 $VERDICT_MARKER
 **Champion: Escalating to Operator — Repeated Rejection Without Revision**
 
-[Evaluated $UNREVISED_EVALS+ times: $PRIOR_REJECTIONS rejection(s), $SKIP_STREAK silent skip(s). Name the row above and why no agent revision settles it. The ranked options are in the body.]
+[$PRIOR_REJECTIONS rejection(s), the last on an unrevised body if UNREVISED=yes. Name the row above and why no agent revision settles it. The ranked options are in the body.]
 
 **Recurring findings:**
 - [Criterion that failed, repeated across rejections]: [Specific reason]
@@ -1310,14 +1149,13 @@ $VERDICT_MARKER
 
 On exit 1, `apply` printed every contract failure: fix the JSON and re-run. `RECURRING_FINDINGS_TEXT` (assembled above) goes under **Recurring findings:** — Pass 0 and Curator's #7650 de-escalation read it with the marker. `loom:operator` removes the issue from every future pass, so this posts exactly once.
 
-**Otherwise** (below the bound): leave detailed feedback, keep the original proposal label, release the claim, and **route the issue to Curator** in the same command (#10753). Drop `--add-label "loom:needs-revision"` only when the sole failure is an open dependency: nothing to revise, and the dependency-timing gate waits for the blocker.
+**Otherwise** (below the bound, or `OPERATOR_RULED=yes`) the verdict is **revise** (#10753, #11860): post the findings and send the issue back to Curator in the same command, dropping `loom:curated` and the claim and adding `loom:triage`. Curator puts `loom:curated` back when it has revised; `loom:architect` / `loom:hermit` / `loom:auditor` stay. When the sole failure is an open dependency you can name, the verdict is **block** instead: `loom-daemon park-record apply --issue <number> --blocked-by <refs> --by champion --remove-label loom:evaluating`.
 
 ```bash
-# Both markers are load-bearing: $VERDICT_MARKER makes the next cycle skip
-# silently; the skip tally (seeded at 0) is what that silent skip increments, so
-# the proposal still escalates on schedule while staying quiet (#4967).
+# $VERDICT_MARKER: an unchanged body comes straight back to this Step 4.
+# $REVISE_MARKER: Curator's intake answers this verdict while it names the current body.
 ./.loom/scripts/post-comment.sh <number> --body "$VERDICT_MARKER
-<!-- champion:unrevised-skips:$BODY_HASH:0 -->
+$REVISE_MARKER
 **Champion Review: NEEDS REVISION**
 
 This issue requires additional work before promotion to \`loom:issue\`:
@@ -1329,16 +1167,14 @@ This issue requires additional work before promotion to \`loom:issue\`:
 - [Specific suggestion 1]
 - [Specific suggestion 2]
 
-Keeping the proposal label. Routed to Curator (\`loom:needs-revision\`) to revise the body against these findings; the revision re-enters this queue through the body hash.
+Routed to Curator (\`loom:triage\`) to revise the body against these findings; the revision comes back to this queue as \`loom:curated\`.
 
 ---
 *Automated by Champion role*" \
-  && gh issue edit <number> --remove-label "loom:evaluating" --add-label "loom:needs-revision"
+  && gh issue edit <number> --remove-label "loom:evaluating" --remove-label "loom:curated" --add-label "loom:triage"
 ```
 
-The `$VERDICT_MARKER` (computed in "Idempotency check" above, keyed to a hash of this issue's title + body) is what makes the next cycle's idempotency check skip silently instead of re-evaluating — omitting it, or substituting a timestamp-keyed marker, reopens the duplicate-comment loop this section exists to close. The `champion:unrevised-skips:$BODY_HASH:0` line beside it seeds the silent-skip tally — omitting **that** reopens the opposite failure (#4967): the skips become free, `UNREVISED_EVALS` never advances past `PRIOR_REJECTIONS`, and an unrevised proposal is skipped quietly forever instead of escalating. Both markers ship together or neither works; see "Bounding the silent skip" above.
-
-Do NOT remove the proposal label (`loom:curated`, `loom:architect`, `loom:hermit`, or `loom:auditor`) when rejecting.
+Both markers are load-bearing. Without `$VERDICT_MARKER` (keyed to the title + body hash, never a timestamp) an unchanged body is re-evaluated and re-commented from scratch, the #4954 loop; without `$REVISE_MARKER` Curator curates the issue as new instead of answering the findings.
 
 ---
 
@@ -1348,31 +1184,27 @@ Do NOT remove the proposal label (`loom:curated`, `loom:architect`, `loom:hermit
 
 Continue evaluating issues until all have been processed or all applicable level limits are reached — or, while PR rows still wait, until `${LOOM_CHAMPION_PROMOTION_SLICE:-3}` fresh verdicts are spent (`champion.md` → "Autonomous Operation", #10753). This prevents issues from waiting unnecessarily across multiple 10-minute intervals when they've already met quality criteria.
 
-**Per-issue order in the loop**: run the "Dependency-Defer Fast Path" first — before anything else, including the Idempotency check — then the "Idempotency check", then the "Claim" step (skip if a concurrent evaluation holds a fresh `loom:evaluating`, reclaim if stale) — the latter two from "Concurrency Guard and Idempotency" above — before Step 1 (Read). The idempotency check has **three** outcomes, not two:
+**Per-issue order in the loop**: run the "Dependency-Defer Fast Path" first — before anything else, including the Idempotency check — then the "Idempotency check", then the "Claim" step (skip if a concurrent evaluation holds a fresh `loom:evaluating`, reclaim if stale) — the latter two from "Concurrency Guard and Idempotency" above — before Step 1 (Read):
 
 | Idempotency outcome | Next action |
 |---|---|
-| Dependency-Defer Fast Path hard-stop (recorded `dep-defer` fingerprint unchanged) | Continue the batch loop to the next issue — no comment, no claim, nothing below this row runs |
+| Dependency-Defer Fast Path: the recorded blockers are all still open | Blocked (park record); next issue — nothing below this row runs |
 | No marker match (new or revised proposal) | Claim → Step 1 (Read) → Step 2 (Evaluate) → Step 3 or 4 |
-| Marker match, `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | Tally the skip (`PATCH` the existing verdict comment), continue the loop to the next issue |
-| Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | Claim → **Step 4's escalation branch directly** (skip Steps 1–3: the text is unchanged, so re-evaluating cannot change the verdict) — but run Step 4's **dependency-timing gate** first (`DEFER` continues the loop with no label and no comment, `REEVALUATE` sends you to Step 1 after all, #5664), then the **premise-false close gate** (#7657): every recurring finding re-verified `premise-false` closes the issue instead of escalating; any other outcome takes Step 4's bound table: a final Curator round or a ranked decision (#10753) |
-| Marker match, `ALREADY_ROUTED=yes` (`loom:operator`, `loom:blocked`, or `loom:frozen` present, #8245) | Continue the loop — no tally, no escalation, no comment; a human already owns it |
-| Marker match, `OPERATOR_RULED=yes` (`loom:operator` removed after this revision's rejection, #8245) | Continue the loop — no tally, no escalation, no comment. A human has already ruled on this exact body; only a revision (new hash, new verdict) restarts the ladder |
+| Marker match (`UNREVISED=yes`) | Claim → **Step 4's bound directly** (skip Steps 1–3: the text is unchanged, so the verdict is too): the **dependency-timing gate** first (`DEFER` blocks, `REEVALUATE` sends you to Step 1 after all, #5664), then the **premise-false close gate** (#7657), then the bound table: a final or disposition Curator round, or a ranked decision (#10753) |
+| Marker match, `ALREADY_ROUTED=yes` (`loom:operator`, `loom:blocked`, or `loom:frozen` present, #8245) | Already terminal: no claim, no comment, no escalation; next issue |
+| Marker match, `OPERATOR_RULED=yes` (`loom:operator` removed after this revision's rejection, #8245) | Claim → Step 1 → Step 2 → Step 3 or 4. A human has ruled on this exact body, so Step 4 never escalates it: a failure is a revise verdict |
 | `FORCE_REEVALUATE=yes` (the self-healing un-escalation just cleared `loom:operator`) | Claim → Step 1 (Read) → Step 2 → Step 3 or 4, ignoring the marker entirely (#5664) |
 
-A skip (either the idempotency skip or a fresh-claim skip) means: continue the loop to the next issue, do not count it against the level caps (it was neither promoted nor rejected this pass). An escalation **is** a verdict — count it as you would a rejection.
-
-**Capacity deferral (Step 3c, #6729) is a third kind of non-verdict**: all 8 criteria passed, but the level's rate limit blocked promotion this pass. `classify-capacity-defer.sh` decides whether it is worth a fresh comment (first time, or composition changed) or stays silent (same level + same occupant set) — see Step 3c. Either way, continue the loop without counting it against the level caps.
+**Every evaluation ends in exactly one verdict (#11860)**: promote (`loom:issue`), revise (`loom:triage`), block (`loom:blocked` + park record) or escalate (`loom:operator`), or the premise-false close. Each counts as a fresh verdict; only a promotion counts against the level caps. A fresh-claim skip or a verdict-time-recheck abort is not an evaluation: next issue.
 
 ### When NOT to Promote
 
-Regardless of quality, do NOT promote an issue if:
-- Issue has `loom:blocked` label
-- Issue has `loom:needs-revision` label (Curator is revising it; do not evaluate it either — the revision re-enters through the body hash, #10753)
+Regardless of quality, do NOT promote an issue if any of the following holds. The holds are already terminal; the rest get a Step 4 verdict, never a skip (#11860):
+- Issue has `loom:blocked` label. A block is re-evaluated once its blocker closes: `release-stale-blocked` lifts it, or a targeted step finds every park-record blocker closed (`champion-targeted.md`). Departs from `champion.md` Priority 2's "outside Champion's promotion authority" (#11860)
 - Issue has `loom:operator` label (a human must act or decide — credentials, infra rotations, manual deploys, hardware access, a ruling; sweep will skip these in pre-flight, so promoting to `loom:issue` would only stall the queue). This is also the terminal state the N=2 escalation in Step 4 routes to, so an escalated proposal is automatically excluded from every future pass. **The one exception (#5664)**: "Pass 0: Self-Healing Un-Escalation Re-Scan" may *remove* the label first, when — and only when — the escalation was Champion's own, its recurring findings were dependency-only, and every recorded blocker has since closed. Once the label is gone the issue is an ordinary candidate again; while it is present, nothing here promotes it.
-- Issue title contains "DISCUSSION" or "RFC" (requires human input)
-- Issue mentions breaking changes without migration plan
-- Issue references external dependencies that need coordination
+- Issue title contains "DISCUSSION" or "RFC" (requires human input: escalate)
+- Issue mentions breaking changes without migration plan (revise)
+- Issue references external dependencies that need coordination (block, or escalate if a human must coordinate)
 
 ### When NOT to Even Claim (fresh `loom:evaluating`)
 

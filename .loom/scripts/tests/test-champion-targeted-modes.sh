@@ -171,10 +171,12 @@ check "--issue: claims with loom:evaluating via the promo per-issue order" \
 check "--issue: the verdict set is one table, the single place to change it" \
   doc_has "$TARGETED_MD" '**This table is the only list of `--issue` outcomes.**'
 VERDICTS="$(awk '/^### Promotion verdict set/{on=1;next} on&&/^## /{exit} on&&/^\| `/{print $2}' "$TARGETED_MD" | tr -d '`' | tr '\n' ' ')"
-check "--issue: today's verdicts (promoted revise operator closed deferred skipped not-eligible)" \
-  eval '[[ "$VERDICTS" == "promoted revise operator closed deferred skipped not-eligible " ]]'
-check "--issue: loom:needs-revision is still today's revise verdict (compatible until the terminal-verdict change)" \
-  doc_has "$TARGETED_MD" '| `revise` | Step 4 | NEEDS REVISION comment + `loom:needs-revision`'
+check "--issue: the four terminal verdicts plus closed and not-eligible, no deferred/skipped (#11860)" \
+  eval '[[ "$VERDICTS" == "promoted revise blocked operator closed not-eligible " ]]'
+check "--issue: revise sends the issue to Curator as loom:triage without loom:curated (#11860)" \
+  doc_has "$TARGETED_MD" '`loom:curated` and the claim removed, `loom:triage` added'
+check "--issue: a blocked issue is re-evaluated only once its blocker has closed (#11860)" \
+  doc_has "$TARGETED_MD" 'or a merged PR, remove `loom:blocked` and go on; else outcome `blocked`'
 # --non-item
 NONITEM="$(awk '/^## `--non-item`/{on=1} on' "$TARGETED_MD")"
 out="$NONITEM"

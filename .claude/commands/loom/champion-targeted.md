@@ -77,36 +77,34 @@ the next step, after a fresh evaluation.
 
 ## `--issue N`: one promotion verdict
 
-1. **Kind probe and eligibility:** `gh issue view N --json url,state,labels`. A
+1. **Kind probe and eligibility:** `gh issue view N --json url,state,body,labels`. A
    `/pull/` URL, a failed read, or a closed issue: outcome `not-eligible`. It
    must carry a proposal label (`loom:curated`, `loom:architect`, `loom:hermit`
    or `loom:auditor`) and neither `loom:issue` nor `loom:building`; otherwise
-   `not-eligible`.
+   `not-eligible`; so is `loom:operator`. `loom:blocked` (#11860): when every
+   blocker `loom-daemon park-record parse` reads from the body is a closed issue
+   or a merged PR, remove `loom:blocked` and go on; else outcome `blocked`.
 2. **Run `champion-issue-promo.md`'s per-issue order for this issue only**
    ("Issue Promotion Batch Processing" → "Per-issue order in the loop"): the
    Dependency-Defer Fast Path, the Idempotency check (its self-healing
    un-escalation is Pass 0 for this one issue), the Claim with `loom:evaluating`
-   (staleness-aware, so a stale claim on `N` is reclaimed: Pass 0b for this
-   issue), Steps 1-4, and the verdict-time recheck. Goal Discovery runs as
-   usual. One issue has used no slot of the per-pass level cap, so the cap
-   defers it only when that cap is `0`.
+   (staleness-aware: Pass 0b for this issue), Steps 1-4, and the verdict-time
+   recheck. The per-pass level cap and the promotion slice do not apply.
 3. **Exactly one outcome**, from the verdict set below.
 
 ### Promotion verdict set
 
-**This table is the only list of `--issue` outcomes.** A change to the verdict
-set (the terminal-verdicts change) edits this table and the promotion steps it
-names, nowhere else.
+**This table is the only list of `--issue` outcomes.** An evaluation is
+**terminal** (#11860): no `deferred`, no `skipped`.
 
 | Outcome | Written by | End state |
 |---|---|---|
 | `promoted` | Step 3 | `loom:issue` added, claim released |
-| `revise` | Step 4 | NEEDS REVISION comment + `loom:needs-revision`, claim released |
-| `operator` | Step 4's escalation and bound ladder | `loom:operator` with the ranked decision |
+| `revise` | Step 4 | NEEDS REVISION + revise marker; `loom:curated` and the claim removed, `loom:triage` added |
+| `blocked` | Dependency-Defer Fast Path, Step 4's `DEFER` or dependency-only failure; step 1 | `loom:blocked` + park record |
+| `operator` | Step 4's ranked decision, a dependency cycle | `loom:operator` |
 | `closed` | Step 4's premise-false close gate | issue closed |
-| `deferred` | Dependency-Defer Fast Path, Step 4's dependency-timing `DEFER`, Step 3c | no label change |
-| `skipped` | Idempotency silent skip, `ALREADY_ROUTED` / `OPERATOR_RULED`, a fresh concurrent claim, the verdict-time recheck abort | no label change |
-| `not-eligible` | Step 1 above | no writes |
+| `not-eligible` | step 1, a fresh concurrent claim, the verdict-time recheck abort | no writes |
 
 ## `--non-item`: the interval run without item queues
 
