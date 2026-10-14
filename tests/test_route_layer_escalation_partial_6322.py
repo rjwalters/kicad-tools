@@ -29,7 +29,7 @@ from kicad_tools.router.core import Autorouter
 
 _PARTS = {"R1": (10.0, 10.0), "R2": (30.0, 10.0)}
 _NET_OF = {("R1", "1"): 1, ("R2", "1"): 1, ("R1", "2"): 2, ("R2", "2"): 2}
-_NETS = {1: "A", 2: "B"}
+_NETS = {1: "A", 2: "B", 3: "C"}
 
 
 def _board_text() -> str:
@@ -161,7 +161,7 @@ class TestDeadlineDuringTheFirstAttempt:
 
     def test_preserved_input_copper_is_kept_exactly_once(self, monkeypatch, tmp_path, control):
         source = tmp_path / "input.kicad_pcb"
-        fixed = '  (segment (start 2 2) (end 4 2) (width 0.2) (layer "B.Cu") (net 1))\n'
+        fixed = '  (segment (start 2 2) (end 4 2) (width 0.2) (layer "B.Cu") (net 3))\n'
         source.write_text(_board_text()[: -len(")\n")] + fixed + ")\n")
         output = tmp_path / "output.kicad_pcb"
         patch = _Interrupt(monkeypatch, interrupt=_raise_deadline)

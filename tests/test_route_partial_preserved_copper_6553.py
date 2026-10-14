@@ -26,11 +26,12 @@ from kicad_tools.router.core import Autorouter
 
 _PARTS = {"R1": (10.0, 10.0), "R2": (30.0, 10.0)}
 _NET_OF = {("R1", "1"): 1, ("R2", "1"): 1, ("R1", "2"): 2, ("R2", "2"): 2}
-_NETS = {1: "A", 2: "B"}
+_NETS = {1: "A", 2: "B", 3: "C"}
 
-# Preserved input copper, away from the pads so it does not block routing.
-_FIXED_SEGMENT = '  (segment (start 2 2) (end 4 2) (width 0.2) (layer "B.Cu") (net 1))\n'
-_FIXED_VIA = '  (via (at 3 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
+# Preserved input copper, on a pad-less net the router never re-routes (a
+# re-routed net's preserved copper is deduped away, #6626), away from the pads.
+_FIXED_SEGMENT = '  (segment (start 2 2) (end 4 2) (width 0.2) (layer "B.Cu") (net 3))\n'
+_FIXED_VIA = '  (via (at 3 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 3))\n'
 
 
 def _board_text() -> str:
