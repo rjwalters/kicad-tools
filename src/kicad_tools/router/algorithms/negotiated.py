@@ -1380,6 +1380,9 @@ class NegotiatedRouter:
                         committed = route
                 if committed is not None:
                     routes.append(committed)
+                    from .steiner import pin_steiner_arrival_layers
+
+                    pin_steiner_arrival_layers(pad_objs, (i, j), committed)
                     # Collect grid cells from the routed segments so later
                     # edges can terminate early upon reaching this tree.
                     joined_cells = tree_cells.setdefault(target_root, set())

@@ -514,6 +514,9 @@ class Pad:
     through_hole: bool = False  # PTH pads block both layers
     drill: float = 0.0  # Drill diameter for PTH pads (0 = use pad size)
     steiner_point: bool = False  # True for virtual Steiner tree branch points
+    layer_agnostic: bool = (
+        False  # Issue #6634: goal on ANY routable layer until first arrival pins it
+    )
     footprint_name: str = ""  # Library footprint name, e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm"
     rotation: float = 0.0
     """Residual board-space rotation in degrees (issue #4910).
