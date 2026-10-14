@@ -343,6 +343,73 @@ class ClosureAttempt:
     #: copper opens a link on another net the loop bans just those sites
     #: (:func:`site_key`) so the retry welds the pad somewhere else.
     sites: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    #: Issue #6425: every via this attempt placed, as ``(x, y, diameter,
+    #: drill)`` in board coordinates, so the DRC gate can tell its own
+    #: declared-size vias from foreign copper (:func:`declared_via_exemption`).
+    vias: list[tuple[float, float, float, float]] = field(default_factory=list)
+
+
+#: Issue #6425: the kicad-cli via-SIZE checks a closer via trips purely
+#: because the run's declared via (``--via-diameter`` / ``--via-drill``) is
+#: below the project's floors.  The board's own process -- not the oracle --
+#: decides whether that via is acceptable, and the final route-time DRC
+#: still reports every one of them.  Never extended to clearance, hole
+#: clearance, shorts or any other geometric check.
+VIA_DIMENSION_TYPES = frozenset({"drill_out_of_range", "via_diameter", "annular_width"})
+
+#: Issue #6425: how far (mm) a violation's item position may sit from a via
+#: the attempt placed and still name that via (KiCad reports a via's centre).
+VIA_MATCH_TOLERANCE_MM = 0.01
+
+
+def declared_via_exemption(
+    attempt: ClosureAttempt,
+    declared_via: tuple[float, float] | None,
+    tolerance: float = VIA_MATCH_TOLERANCE_MM,
+) -> Callable[[DRCViolation], bool]:
+    """Predicate: is a violation only the attempt's own declared-size via? (Issue #6425)
+
+    True when the violation's type is one of :data:`VIA_DIMENSION_TYPES` and
+    EVERY item position is a via ``attempt`` placed at exactly
+    ``declared_via`` (``(diameter, drill)``).  ``None`` exempts nothing.
+    """
+    if declared_via is None:
+        return lambda _v: False
+    size, drill = declared_via
+    own = [
+        (x, y)
+        for x, y, d, h in attempt.vias
+        if math.isclose(d, size, abs_tol=1e-4) and math.isclose(h, drill, abs_tol=1e-4)
+    ]
+
+    def exempt(v: DRCViolation) -> bool:
+        if v.type_str not in VIA_DIMENSION_TYPES or not own:
+            return False
+        positions = _item_positions(v)
+        return bool(positions) and all(
+            any(math.hypot(px - x, py - y) <= tolerance for x, y in own) for px, py in positions
+        )
+
+    return exempt
+
+
+def gated_error_count(
+    before: GeometricDRCResult,
+    after: GeometricDRCResult,
+    exempt: Callable[[DRCViolation], bool] | None = None,
+) -> int:
+    """``after.error_count`` minus its NEW errors ``exempt`` waives (Issue #6425).
+
+    Errors already present in ``before`` are never waived: they were counted
+    in the baseline the gate compares against.
+    """
+    if exempt is None:
+        return after.error_count
+    old = {_violation_signature(v) for v in before.error_violations}
+    waived = sum(
+        1 for v in after.error_violations if _violation_signature(v) not in old and exempt(v)
+    )
+    return after.error_count - waived
 
 
 def site_key(key: str, x: float, y: float) -> str:
@@ -440,17 +507,22 @@ def attribute_regressions(
     after: GeometricDRCResult,
     footprints: dict[str, list[tuple[float, float, float, float, float]]],
     tolerance: float = 0.5,
+    exempt: Callable[[DRCViolation], bool] | None = None,
 ) -> set[str]:
     """Closer keys whose new copper sits at an error that ``after`` added.
 
     An error is "new" when its (type, item positions) signature is absent from
     ``before``.  It is pinned on every closer with copper within ``tolerance``
-    mm of one of its item positions.
+    mm of one of its item positions.  Errors ``exempt`` waives (Issue #6425:
+    the attempt's own declared-size vias, :func:`declared_via_exemption`)
+    blame nobody.
     """
     old = {_violation_signature(v) for v in before.error_violations}
     culprits: set[str] = set()
     for v in after.error_violations:
         if _violation_signature(v) in old:
+            continue
+        if exempt is not None and exempt(v):
             continue
         for px, py in _item_positions(v):
             for key, caps in footprints.items():
@@ -561,6 +633,7 @@ def run_oracle_completion(
     time_left: Callable[[], float | None] | None = None,
     call_cost_estimate: float = 0.0,
     cut_attributor: CutAttributor | None = None,
+    declared_via: tuple[float, float] | None = None,
 ) -> OracleCompletionResult:
     """Close the KiCad-reported unconnected links on ``nets``, round by round.
 
@@ -609,6 +682,15 @@ def run_oracle_completion(
             Zone`` (anchored at outline corners, so
             :func:`attribute_link_regressions` cannot place it).  When it
             blames nothing, the proximity attribution is used.
+        declared_via: Issue #6425.  The run's declared via as ``(diameter,
+            drill)`` (``kct route --via-diameter`` / ``--via-drill``).  A new
+            ``drill_out_of_range`` / ``via_diameter`` / ``annular_width``
+            error whose every item is a via the attempt placed at exactly
+            that size is not a regression: it only says the declared via is
+            below the project floors, which the board's process, not this
+            loop, accepts or rejects (the final route-time DRC still reports
+            it).  Every other error type, and a via of any other size, is
+            gated as before.  ``None`` exempts nothing.
     """
     scope = set(nets)
     say = log or (lambda _msg: None)
@@ -703,18 +785,20 @@ def run_oracle_completion(
                 pcb_path.write_bytes(backup)
                 stop = STOP_ORACLE_FAILED
                 break
-            if geo_after.error_count > errors:
-                culprits = attribute_regressions(geo, geo_after, attempt.footprints) - banned
+            exempt = declared_via_exemption(attempt, declared_via)
+            gated = gated_error_count(geo, geo_after, exempt)
+            if gated > errors:
+                culprits = (
+                    attribute_regressions(geo, geo_after, attempt.footprints, exempt=exempt)
+                    - banned
+                )
                 pcb_path.write_bytes(backup)
                 if not culprits:
                     stop = STOP_DRC_REGRESSED
                     break
-                say(
-                    f"    DRC +{geo_after.error_count - errors}; retrying without {', '.join(sorted(culprits))}"
-                )
+                say(f"    DRC +{gated - errors}; retrying without {', '.join(sorted(culprits))}")
                 round_notes.extend(
-                    f"{c}: withdrawn -- its copper raised KiCad DRC by "
-                    f"{geo_after.error_count - errors}"
+                    f"{c}: withdrawn -- its copper raised KiCad DRC by {gated - errors}"
                     for c in sorted(culprits)
                 )
                 banned |= culprits
@@ -1315,6 +1399,9 @@ class PourLinkCloser:
                 key = f"pad:{pad.net_name}:{pad.reference}.{pad.pad_number}"
                 caps = attempt.footprints.setdefault(key, [])
                 attempt.sites.setdefault(key, []).append((placement.via_x, placement.via_y))
+                attempt.vias.append(
+                    (placement.via_x, placement.via_y, placement.size, placement.drill)
+                )
                 caps.append(
                     (
                         placement.via_x,
@@ -1429,6 +1516,9 @@ class PourLinkCloser:
                 model.drills.append((vx, vy, route.via_drill))
             attempt.footprints.setdefault(key, []).extend(
                 (x1 + ox, y1 + oy, x2 + ox, y2 + oy, hw) for x1, y1, x2, y2, hw in route.capsules()
+            )
+            attempt.vias.extend(
+                (vx + ox, vy + oy, route.via_size, route.via_drill) for vx, vy in route.vias
             )
             attempt.applied += 1
 

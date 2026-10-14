@@ -353,9 +353,17 @@ def point_clear_of_copper(
         )
 
     if same_net_vias:
+        # Issue #6289: a same-net neighbour is still a separate drilled hole,
+        # so with a drill + fab floor supplied the centre spacing must also
+        # clear ``min_hole_to_hole`` edge-to-edge (neighbours share this
+        # candidate's drill).  On a small via the copper-only
+        # ``via_size + clearance`` leaves a 0.45 mm hole gap vs 0.5 mm.
+        same_net_min_dist = via_size + clearance
+        if via_drill > 0 and min_hole_to_hole > 0:
+            same_net_min_dist = max(same_net_min_dist, min_hole_to_hole + via_drill)
         for vx, vy in same_net_vias:
             dist = math.sqrt((vx - x) ** 2 + (vy - y) ** 2)
-            if dist < via_size + clearance:
+            if dist < same_net_min_dist:
                 return False
 
     if other_net_tracks:

@@ -504,3 +504,121 @@ def test_offpad_search_continues_after_first_alternative_keepout(process, isolat
     chosen = process.select_offpad_position(pcb, via, "U2.35", preferred, ["F.Cu"])
     assert chosen != first
     assert chosen == pytest.approx(later)
+
+
+# ---------------------------------------------------------------------------
+# Issue #6425: the reserved route's pour welds
+# ---------------------------------------------------------------------------
+
+ORIGIN = (118.5, 67.5)
+
+
+def _sheet(x, y):
+    return x + ORIGIN[0], y + ORIGIN[1]
+
+
+def test_weld_move_clears_the_land_and_is_idempotent(process, repaired):
+    """A pad-edge GND weld (C13.2) is moved to its reviewed off-land site."""
+    import math
+
+    from kicad_tools.sexp import parse_string
+
+    (ref, net, old, new) = next(m for m in process.WELD_MOVES if m[0] == "C13.2")
+    doc = parse_file(repaired)
+    vx, vy = _sheet(*old)
+    px, py = _sheet(32.3, 32.0)  # C13.2 centre: the weld's F.Cu tail start
+    doc.add(
+        parse_string(
+            f'(via (at {vx} {vy}) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") '
+            f'(tenting (front yes) (back yes)) (net "{net}"))'
+        )
+    )
+    doc.add(
+        parse_string(
+            f'(segment (start {px} {py}) (end {vx} {vy}) (width 0.2) (layer "F.Cu") (net "{net}"))'
+        )
+    )
+    repaired.write_text(serialize_sexp(doc))
+    with pytest.raises(ValueError, match="Via drill too close"):
+        process.validate_process(repaired, check_native=False)
+    assert process.repair(repaired) == 1
+    pcb = process.validate_process(repaired, check_native=False)
+    assert any(math.dist(v.position, new) < 1e-6 for v in pcb.vias)
+    assert not any(math.dist(v.position, old) < 1e-6 for v in pcb.vias)
+    assert process.repair(repaired) == 0
+
+
+def test_absent_weld_moves_are_allowed(process, repaired):
+    """The committed (pre-#6425) route has none of the welds."""
+    assert process.WELD_MOVES
+    assert process.repair(repaired) == 0
+
+
+@pytest.mark.parametrize("back_tail", [False, True])
+def test_single_layer_weld_via_is_trimmed(process, repaired, back_tail):
+    """U2.36's +3.3V weld via bonds only F.Cu (the pour's layer): drop the drill."""
+    import math
+
+    from kicad_tools.sexp import parse_string
+
+    ref, net, at = process.SINGLE_LAYER_WELDS[0]
+    doc = parse_file(repaired)
+    vx, vy = _sheet(*at)
+    px, py = _sheet(35.16, 19.25)  # U2.36 centre
+    doc.add(
+        parse_string(
+            f'(via (at {vx} {vy}) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") '
+            f'(tenting (front yes) (back yes)) (net "{net}"))'
+        )
+    )
+    doc.add(
+        parse_string(
+            f'(segment (start {px} {py}) (end {vx} {vy}) (width 0.2) (layer "F.Cu") (net "{net}"))'
+        )
+    )
+    if back_tail:
+        # A B.Cu branch makes the via a real layer change: never trimmed.
+        doc.add(
+            parse_string(
+                f"(segment (start {vx} {vy}) (end {vx + 0.5} {vy}) (width 0.2) "
+                f'(layer "B.Cu") (net "{net}"))'
+            )
+        )
+    repaired.write_text(serialize_sexp(doc))
+    assert process.trim_single_layer_welds(repaired) == (0 if back_tail else 1)
+    from kicad_tools.schema.pcb import PCB
+
+    left = [v for v in PCB.load(repaired).vias if math.dist(v.position, at) < 1e-3]
+    assert len(left) == (1 if back_tail else 0), ref
+    assert process.trim_single_layer_welds(repaired) == 0
+
+
+def _recipe():
+    spec = importlib.util.spec_from_file_location(
+        "board04_recipe_6425", BOARD / "generate_design.py"
+    )
+    recipe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recipe)
+    return recipe
+
+
+@pytest.mark.parametrize("welded", [False, True])
+def test_tie_via_skipped_only_for_a_pad_already_welded_off_pad(tmp_path, welded):
+    from kicad_tools.schema.pcb import PCB
+
+    text = """(kicad_pcb (version 20240108) (generator "test")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 0 "") (net 1 "GND")
+      (footprint "test" (layer "F.Cu") (at 33.25 26.16)
+        (property "Reference" "U2")
+        (pad "23" smd rect (at 0 0) (size 0.3 1.475) (layers "F.Cu") (net 1 "GND")))
+    """
+    if welded:
+        text += """
+      (via (at 33.25 27.08) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") (net 1))
+      (segment (start 33.25 26.16) (end 33.25 27.08) (width 0.2) (layer "F.Cu") (net 1))
+        """
+    path = tmp_path / "tie.kicad_pcb"
+    path.write_text(text + ")")
+    recipe = _recipe()
+    pcb = PCB.load(path)
+    assert recipe._pad_has_offpad_bond(pcb, 33.25, 25.838, "GND") == ("U2.23" if welded else None)
