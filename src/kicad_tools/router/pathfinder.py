@@ -1997,6 +1997,7 @@ class Router:
             self.rules.trace_clearance,
             component_pitches=self.component_pitches,
             exclude_refs=exclude_refs,
+            violation_only=True,
         )
         hit = violation is None
         memo[key] = hit
