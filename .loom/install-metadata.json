@@ -1,6 +1,6 @@
 {
   "loom_version": "0.19.1154",
-  "loom_commit": "a661bf0d507bb02e74f5aacc1e0e1869878f9297",
+  "loom_commit": "9086c5eb90893212b418186a85216681fe12376c",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -433,7 +433,11 @@
     ".loom/scripts/tests/test-classify-error.sh",
     ".loom/scripts/tests/test-merge-pr-auto-blocked-settle.sh",
     ".loom/scripts/tests/test-merge-pr-head-mismatch.sh",
-    ".claude/commands/loom/sweep-arguments.md"
+    ".claude/commands/loom/sweep-arguments.md",
+    ".loom/scripts/tests/fixtures/config_resolver/.loom-local/fleet-repo.json",
+    ".loom/scripts/check-dependabot-labels.sh",
+    ".loom/scripts/tests/lib/assert.sh",
+    ".loom/scripts/tests/test-check-dependabot-labels.sh"
   ],
   "last_resync": "2026-10-14",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",

@@ -19,10 +19,17 @@
 #     advisory `note:` only (scaffolds such as quickstarts/), never a failure
 #   - a repo with no .github/dependabot.yml is a clean no-op (exit 0)
 #   - a config whose `updates:` list cannot be parsed fails loudly
+#   - `directories:` lists and inline `labels: [...]` (the rendered fleet
+#     policy shape) are parsed, one row per directory
+#   - a lockfile-bearing manifest that declares no dependencies needs no entry,
+#     unless it is a pnpm or npm workspace root
 #   - THIS repo's own .github/dependabot.yml passes (the #7577 regression guard)
 #
 # Hermetic: builds throwaway git trees under mktemp; no network, forge, or
-# commits (only `git add`, so no git identity is required).
+# commits (only `git add`, so no git identity is required). The script under
+# test is a thin wrapper over `loom-daemon check-dependabot-labels`, so this
+# suite needs a built loom-daemon (loom_test_require_daemon_bin: it FAILS,
+# never SKIPs, without one) and runs in CI's Installer Integration Tests job.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-check-dependabot-labels.sh
@@ -32,6 +39,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCRIPT="$HELPERS_DIR/check-dependabot-labels.sh"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "check-dependabot-labels"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -222,6 +233,87 @@ if [[ "$RC" -ne 0 ]] && grep -q "parsed zero entries" <<< "$OUT"; then
     pass "non-zero exit with an explicit parse failure message"
 else
     fail "expected a loud parse failure (rc=$RC): $OUT"
+fi
+
+# --- Test 7b: the rendered fleet-policy shape is understood ----------------
+# A rendered org-wide policy writes `directories:` lists and inline
+# `labels: [...]` flow lists (both valid GitHub syntax).
+echo "Test 7b: directories: lists and inline labels are parsed"
+REPO="$(new_repo rendered-shape)"
+add_manifest "$REPO" "a" '{"left-pad":"1.0.0"}' "package-lock.json"
+add_manifest "$REPO" "b" '{"left-pad":"1.0.0"}' "pnpm-lock.yaml"
+write_config "$REPO" <<'EOF'
+  - package-ecosystem: "npm"
+    directories:
+      - "/a"
+      - "/b"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "loom:review-requested"]
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+  - package-ecosystem: "github-actions"
+    directories: ["/"]
+    labels: ["dependencies", "loom:review-requested"]
+EOF
+OUT="$(run_check "$REPO")"; RC=$?
+if [[ "$RC" -eq 0 ]]; then
+    pass "exit 0 when every directory of a directories: list is covered"
+else
+    fail "expected exit 0, got $RC: $OUT"
+fi
+sed -i.bak 's/labels: \["dependencies", "loom:review-requested"\]$/labels: ["dependencies"]/' "$REPO/.github/dependabot.yml"
+OUT="$(run_check "$REPO")"; RC=$?
+if [[ "$RC" -ne 0 ]] && grep -q "'npm' (directory '/a')" <<< "$OUT" && grep -q "'npm' (directory '/b')" <<< "$OUT"; then
+    pass "an inline labels list without the review label fails for each directory"
+else
+    fail "expected failures naming /a and /b (rc=$RC): $OUT"
+fi
+
+# --- Test 7c: a dependency-free lockfile manifest needs no entry -------------
+echo "Test 7c: a lockfile-bearing manifest that declares no dependencies is a note"
+REPO="$(new_repo dependency-free)"
+add_manifest "$REPO" "." '{}' "pnpm-lock.yaml"
+add_manifest "$REPO" "pkg" '{"left-pad":"1.0.0"}' "package-lock.json"
+write_config "$REPO" <<EOF
+$(npm_entry "/pkg")
+EOF
+OUT="$(run_check "$REPO")"; RC=$?
+if [[ "$RC" -eq 0 ]] && grep -q "^note: package.json has a lockfile but declares no dependencies" <<< "$OUT"; then
+    pass "exit 0 with an advisory note for the dependency-free root"
+else
+    fail "expected exit 0 and a note (rc=$RC): $OUT"
+fi
+
+# --- Test 7d: workspace roots are never exempt (Judge repro, #11828) ---------
+echo "Test 7d: a dependency-free workspace root with a lockfile still fails"
+REPO="$(new_repo pnpm-workspace)"
+printf '{"private":true}\n' > "$REPO/package.json"
+printf '' > "$REPO/pnpm-lock.yaml"
+printf 'packages:\n  - "pkgs/*"\n' > "$REPO/pnpm-workspace.yaml"
+add_manifest "$REPO" "pkgs/m" '{"left-pad":"1.0.0"}'
+write_config "$REPO" <<EOF
+$(npm_entry "/pkgs/m")
+EOF
+OUT="$(run_check "$REPO")"; RC=$?
+if [[ "$RC" -ne 0 ]] && grep -q "^ERROR: package.json has a committed lockfile" <<< "$OUT"; then
+    pass "a pnpm workspace root (pnpm-workspace.yaml) is not exempt"
+else
+    fail "expected the pnpm workspace root to fail (rc=$RC): $OUT"
+fi
+REPO="$(new_repo npm-workspace)"
+printf '{"private":true,"workspaces":["pkgs/*"]}\n' > "$REPO/package.json"
+printf '{}\n' > "$REPO/package-lock.json"
+add_manifest "$REPO" "pkgs/m" '{"left-pad":"1.0.0"}'
+write_config "$REPO" <<EOF
+$(npm_entry "/pkgs/m")
+EOF
+OUT="$(run_check "$REPO")"; RC=$?
+if [[ "$RC" -ne 0 ]] && grep -q "^ERROR: package.json has a committed lockfile" <<< "$OUT"; then
+    pass "an npm workspace root (workspaces key) is not exempt"
+else
+    fail "expected the npm workspace root to fail (rc=$RC): $OUT"
 fi
 
 # --- Test 8: this repo's own config passes (#7577 regression guard) ---------

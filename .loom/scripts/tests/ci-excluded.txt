@@ -14,6 +14,7 @@
 
 test-install-reinstall-safety.sh  Already wired in the "Installer Integration Tests" job (#4188); excluded here to avoid double-running it.
 test-check-labels-drift.sh  Needs a built loom-daemon with `labels` (#10013); wired in the "Installer Integration Tests" job beside check-labels-drift.sh itself, which downloads the shared build first. It calls `loom_test_require_daemon_bin`, so it must FAIL, never SKIP, without a binary.
+test-check-dependabot-labels.sh  Needs a built loom-daemon since #11828 made check-dependabot-labels.sh a thin wrapper over `loom-daemon check-dependabot-labels`; wired in the "Installer Integration Tests" job beside the check itself, which downloads the shared build first. It calls `loom_test_require_daemon_bin`, so it must FAIL, never SKIP, without a binary.
 test-spawn-codex.sh  Already wired in the "Codex Adapter Smoke (mocked)" job (#4468), which adds adapter-specific hermeticity guards; excluded here to avoid double-running it.
 
 # epic #7810 PR 3: each of these drives a thin stub that execs a `loom-daemon`
