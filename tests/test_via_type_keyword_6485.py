@@ -250,6 +250,17 @@ def _coupled_four_layer_routes(monkeypatch, backend: str):
     A wall at x = 3.0 blocks F.Cu, In2.Cu and B.Cu, so the pair has to leave
     F.Cu, cross on In1.Cu and come back -- four vias whose LOGICAL transition
     is F.Cu <-> In1.Cu.
+
+    Issue #6543: the hole-to-hole floor is stated, not the 0.5 mm default.
+    Since #6473 both coupled backends hold the pair's OWN vias to
+    ``max(min_drill_clearance, min_hole_to_hole)``.  At this fixture's 0.6 mm
+    pair pitch a side-by-side P/N via pair has a 0.4 mm drill gap, so under a
+    0.5 mm floor no legal out-and-back exists: the search then returned a
+    route that never left In1.Cu again and stopped at the F.Cu-only pads
+    (two vias, an open on every leg).  0.35 mm admits the P/N pair and still
+    rejects the 0.4 mm out/back spacing the route used before #6473, so the
+    own-via floor stays live here.  The fixture asserts both properties so it
+    can never again pass on an illegal or unconnected route.
     """
     monkeypatch.setenv("KCT_COUPLED_CPP", "1" if backend == "cpp" else "0")
     rules = DesignRules(
@@ -259,7 +270,7 @@ def _coupled_four_layer_routes(monkeypatch, backend: str):
         via_diameter=0.3,
         via_clearance=0.05,
         grid_resolution=0.1,
-        min_hole_to_hole=0.5,
+        min_hole_to_hole=0.35,
     )
     grid = RoutingGrid(
         width=6.0, height=3.0, rules=rules, layer_stack=LayerStack.four_layer_all_signal()
@@ -284,6 +295,18 @@ def _coupled_four_layer_routes(monkeypatch, backend: str):
         pytest.skip("C++ coupled backend not built")
     assert pathfinder.last_coupled_backend == backend
     assert result is not None, "the fixture must route"
+    # Issue #6543: the route lands on the pad's own layer -- the pads are
+    # F.Cu-only SMD, so a leg that ends on In1.Cu is an open.
+    for route, end in zip(result, (p_end, n_end), strict=True):
+        last = route.segments[-1]
+        assert (last.x2, last.y2) == (end.x, end.y)
+        assert last.layer == Layer.F_CU, f"{route.net_name} ends on {last.layer.name}"
+    # ... and its drills, both rails, respect the stated hole-to-hole floor.
+    drills = [(via.x, via.y) for route in result for via in route.vias]
+    for i, a in enumerate(drills):
+        for b in drills[i + 1 :]:
+            gap = ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5 - rules.via_drill
+            assert gap >= rules.min_hole_to_hole - 1e-6, (a, b, gap)
     return result
 
 
