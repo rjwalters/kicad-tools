@@ -58,7 +58,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
@@ -99,6 +99,27 @@ Segment = tuple[float, float, float, float, str] | tuple[float, float, float, fl
 #: ``(x1, y1, x2, y2, width, layer or None)``: a track (layer set) or a via (``None``:
 #: all layers, a zero-length segment) that may stand between a pair's traces.
 Obstacle = tuple[float, float, float, float, float, str | None]
+
+
+class PadRect(NamedTuple):
+    """A pad as a rotated rectangle in board coordinates."""
+
+    cx: float
+    cy: float
+    hx: float  # half extents along the pad's own axes
+    hy: float
+    cos: float
+    sin: float
+    layers: frozenset[str]
+    net: str
+
+
+@dataclass(frozen=True)
+class Copper:
+    """The board copper a pair's traces may be separated by (see :func:`measure_uncoupled`)."""
+
+    tracks: Sequence[Obstacle] = ()
+    pads: Sequence[PadRect] = ()
 
 
 @dataclass(frozen=True)
@@ -189,14 +210,74 @@ def _width(seg: Segment) -> float:
     return float(seg[5]) if len(seg) > 5 else 0.0
 
 
-def _blocked(a: Segment, b: Segment, t0: float, obstacles: Sequence[Obstacle]) -> bool:
+def _pad_local(pad: PadRect, x: float, y: float) -> tuple[float, float]:
+    """``(x, y)`` in the pad's own axes (KiCad's negated-angle convention)."""
+    dx, dy = x - pad.cx, y - pad.cy
+    return dx * pad.cos - dy * pad.sin, dx * pad.sin + dy * pad.cos
+
+
+def _pad_on_layer(pad: PadRect, layer: str) -> bool:
+    return layer in pad.layers or "*.Cu" in pad.layers
+
+
+def _pad_seg_dist(pad: PadRect, p: tuple[float, float], q: tuple[float, float]) -> float:
+    """Distance from segment ``p-q`` to the pad rectangle (0 when they intersect)."""
+    x1, y1 = _pad_local(pad, *p)
+    x2, y2 = _pad_local(pad, *q)
+    hx, hy = pad.hx, pad.hy
+    # Liang-Barsky clip of the segment against the box.
+    t0, t1 = 0.0, 1.0
+    dx, dy = x2 - x1, y2 - y1
+    for pk, qk in ((-dx, x1 + hx), (dx, hx - x1), (-dy, y1 + hy), (dy, hy - y1)):
+        if pk == 0.0:
+            if qk < 0.0:
+                break
+        else:
+            r = qk / pk
+            if pk < 0.0:
+                t0 = max(t0, r)
+            else:
+                t1 = min(t1, r)
+            if t0 > t1:
+                break
+    else:
+        return 0.0
+
+    def to_box(x: float, y: float) -> float:
+        return math.hypot(max(abs(x) - hx, 0.0), max(abs(y) - hy, 0.0))
+
+    corners = [(sx * hx, sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
+    return min(
+        to_box(x1, y1),
+        to_box(x2, y2),
+        *(_seg_dist((x1, y1), (x2, y2), c, c) for c in corners),
+    )
+
+
+def _buried(seg: Segment, net: str, pads: Sequence[PadRect]) -> bool:
+    """True when both ends of ``seg`` lie inside one pad of its own net.
+
+    A stub that is nothing but pad copper is not a trace KiCad pairs.
+    """
+    for pad in pads:
+        if pad.net != net or not _pad_on_layer(pad, seg[4]):
+            continue
+        if all(
+            abs(lx) < pad.hx - _TOUCH_EPS and abs(ly) < pad.hy - _TOUCH_EPS
+            for lx, ly in (_pad_local(pad, seg[0], seg[1]), _pad_local(pad, seg[2], seg[3]))
+        ):
+            return True
+    return False
+
+
+def _blocked(a: Segment, b: Segment, t0: float, copper: Copper) -> bool:
     """True when copper intervenes between ``a`` and ``b`` where their overlap starts.
 
     The probe runs from ``a``'s centreline, ``t0`` mm from its start, straight
     across to ``b``'s centreline.  Any other primitive on the layer (a track of
-    either net or a third net, or a via) whose copper reaches the probe blocks
-    the pairing -- except copper that overlaps ``a`` or ``b`` themselves, which
-    is part of the same conductor, not something standing between them.
+    either net or a third net, a via, a pad) whose copper reaches the probe
+    blocks the pairing -- except copper that overlaps ``a`` or ``b`` themselves,
+    which is part of the same conductor, not something standing between them.
     """
     lo = math.hypot(a[2] - a[0], a[3] - a[1])
     ux, uy = (a[2] - a[0]) / lo, (a[3] - a[1]) / lo
@@ -211,7 +292,8 @@ def _blocked(a: Segment, b: Segment, t0: float, obstacles: Sequence[Obstacle]) -
     minx, maxx = min(pa[0], pb[0]), max(pa[0], pb[0])
     miny, maxy = min(pa[1], pb[1]), max(pa[1], pb[1])
     wa, wb = _width(a), _width(b)
-    for ob in obstacles:
+    a1, a2, b1, b2 = (a[0], a[1]), (a[2], a[3]), (b[0], b[1]), (b[2], b[3])
+    for ob in copper.tracks:
         if ob[5] is not None and ob[5] != a[4]:
             continue
         r = ob[4] / 2.0
@@ -223,11 +305,28 @@ def _blocked(a: Segment, b: Segment, t0: float, obstacles: Sequence[Obstacle]) -
         ):
             continue
         c1, c2 = (ob[0], ob[1]), (ob[2], ob[3])
-        if _seg_dist(c1, c2, (a[0], a[1]), (a[2], a[3])) < r + wa / 2.0 - _TOUCH_EPS:
+        if _seg_dist(c1, c2, a1, a2) < r + wa / 2.0 - _TOUCH_EPS:
             continue
-        if _seg_dist(c1, c2, (b[0], b[1]), (b[2], b[3])) < r + wb / 2.0 - _TOUCH_EPS:
+        if _seg_dist(c1, c2, b1, b2) < r + wb / 2.0 - _TOUCH_EPS:
             continue
         if _seg_dist(c1, c2, pa, pb) < r - _TOUCH_EPS:
+            return True
+    for pad in copper.pads:
+        if not _pad_on_layer(pad, a[4]):
+            continue
+        reach = math.hypot(pad.hx, pad.hy)
+        if (
+            pad.cx + reach < minx
+            or pad.cx - reach > maxx
+            or pad.cy + reach < miny
+            or pad.cy - reach > maxy
+        ):
+            continue
+        if _pad_seg_dist(pad, a1, a2) < wa / 2.0 - _TOUCH_EPS:
+            continue
+        if _pad_seg_dist(pad, b1, b2) < wb / 2.0 - _TOUCH_EPS:
+            continue
+        if _pad_seg_dist(pad, pa, pb) <= _TOUCH_EPS:
             return True
     return False
 
@@ -235,8 +334,10 @@ def _blocked(a: Segment, b: Segment, t0: float, obstacles: Sequence[Obstacle]) -
 def _coupled_length(
     own: Sequence[Segment],
     partner: Sequence[Segment],
-    obstacles: Sequence[Obstacle] = (),
+    copper: Copper | None = None,
     own_leads: bool = True,
+    own_net: str = "",
+    partner_net: str = "",
 ) -> float:
     """Sum, over unblocked parallel ``own``/``partner`` pairs, of their overlap.
 
@@ -245,13 +346,16 @@ def _coupled_length(
     ``own_leads`` says whose stored direction fixes where a pair's overlap
     "starts" for the blocking probe (the P net's, in KiCad).
     """
+    pads = copper.pads if copper else ()
+    own_live = [s for s in own if not (pads and _buried(s, own_net, pads))]
+    partner_live = [s for s in partner if not (pads and _buried(s, partner_net, pads))]
     total = 0.0
-    for a in own:
-        for b in partner:
+    for a in own_live:
+        for b in partner_live:
             span = _coupled_interval(a, b)
             if span is None:
                 continue
-            if obstacles:
+            if copper:
                 if own_leads:
                     t0 = span[0]
                 else:
@@ -259,7 +363,7 @@ def _coupled_length(
                     # same way, a's high end when they run opposite ways.
                     same = (a[2] - a[0]) * (b[2] - b[0]) + (a[3] - a[1]) * (b[3] - b[1]) > 0.0
                     t0 = span[0] if same else span[1]
-                if _blocked(a, b, t0, obstacles):
+                if _blocked(a, b, t0, copper):
                     continue
             total += span[1] - span[0]
     return total
@@ -268,17 +372,49 @@ def _coupled_length(
 def measure_uncoupled(
     own: Sequence[Segment],
     partner: Sequence[Segment],
-    obstacles: Sequence[Obstacle] = (),
+    copper: Copper | None = None,
     own_leads: bool = True,
+    own_net: str = "",
+    partner_net: str = "",
 ) -> float:
     """Uncoupled length (mm) of ``own`` against ``partner``: KiCad's per-net figure.
 
-    ``obstacles`` is the other copper of the board (see :data:`Obstacle`); with
-    none given every parallel overlap couples.
+    ``copper`` is the rest of the board's copper (see :class:`Copper`); without
+    it every parallel overlap couples.  ``own_net`` / ``partner_net`` name the
+    nets of the two lists so a trace buried in its own pad can be recognised.
     """
-    return max(
-        0.0, sum(_length(s) for s in own) - _coupled_length(own, partner, obstacles, own_leads)
-    )
+    coupled = _coupled_length(own, partner, copper, own_leads, own_net, partner_net)
+    return max(0.0, sum(_length(s) for s in own) - coupled)
+
+
+def _board_copper(pcb: PCB) -> Copper:
+    """Every track, via and pad of ``pcb`` as pairing obstacles."""
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    tracks: list[Obstacle] = [
+        (s.start[0], s.start[1], s.end[0], s.end[1], s.width, s.layer) for s in pcb.segments
+    ]
+    tracks += [
+        (v.position[0], v.position[1], v.position[0], v.position[1], v.size, None) for v in pcb.vias
+    ]
+    pads: list[PadRect] = []
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            ox, oy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+            ang = math.radians(pad.rotation)
+            pads.append(
+                PadRect(
+                    fp.position[0] + ox,
+                    fp.position[1] + oy,
+                    pad.size[0] / 2.0,
+                    pad.size[1] / 2.0,
+                    math.cos(ang),
+                    math.sin(ang),
+                    frozenset(pad.layers),
+                    pad.net_name or "",
+                )
+            )
+    return Copper(tracks, pads)
 
 
 def net_component_counts(pcb: PCB) -> dict[str, int]:
@@ -305,20 +441,15 @@ def measure_pair(
     for net_id, bucket in ((p_id, p_segs), (n_id, n_segs)):
         for s in pcb.segments_in_net(net_id):
             bucket.append((s.start[0], s.start[1], s.end[0], s.end[1], s.layer, s.width))
-    obstacles: list[Obstacle] = [
-        (s.start[0], s.start[1], s.end[0], s.end[1], s.width, s.layer) for s in pcb.segments
-    ]
-    obstacles += [
-        (v.position[0], v.position[1], v.position[0], v.position[1], v.size, None) for v in pcb.vias
-    ]
+    copper = _board_copper(pcb)
     comps = components if components is not None else net_component_counts(pcb)
     return PairMeasure(
         p_name=p_name,
         n_name=n_name,
         p_routed_mm=sum(_length(s) for s in p_segs),
         n_routed_mm=sum(_length(s) for s in n_segs),
-        p_uncoupled_mm=measure_uncoupled(p_segs, n_segs, obstacles, own_leads=True),
-        n_uncoupled_mm=measure_uncoupled(n_segs, p_segs, obstacles, own_leads=False),
+        p_uncoupled_mm=measure_uncoupled(p_segs, n_segs, copper, True, p_name, n_name),
+        n_uncoupled_mm=measure_uncoupled(n_segs, p_segs, copper, False, n_name, p_name),
         vias_p=sum(1 for _ in pcb.vias_in_net(p_id)),
         vias_n=sum(1 for _ in pcb.vias_in_net(n_id)),
         components_p=comps.get(p_name, 0),
