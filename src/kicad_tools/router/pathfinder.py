@@ -6280,6 +6280,8 @@ class Router:
                     top, bottom = copper_span(*existing_via.layers, *new_via.layers)
                     if top != existing_via.layers[0] or bottom != existing_via.layers[1]:
                         existing_via.layers = (top, bottom)
+                        # Issue #6677: keep span_type consistent with new span.
+                        existing_via.refresh_span_type()
 
                     # Remove the new via since we're reusing the existing one
                     vias_to_remove.add(i)
