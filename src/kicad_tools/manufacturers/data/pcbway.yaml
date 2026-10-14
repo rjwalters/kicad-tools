@@ -11,6 +11,22 @@
 #
 # All measurements in millimeters unless otherwise noted.
 #
+# Via-type capabilities (Issue #6640, verified 2026-10-14):
+# ``blind_buried_vias_supported`` / ``micro_vias_supported`` are ``true`` on
+# the 4- and 6-layer configs only.
+#   - https://www.pcbway.com/hdi-pcb.html: "PCBWay manufactures and assembles
+#     HDI PCBs designed with blind, buried, and micro-via technologies";
+#     capability table "Via Types: Blind via, buried via, through-hole via",
+#     "HDI builds 1+N+1, 2+N+2, ... , 6+N+6", "Min. laser drilling Standard
+#     4 mil", "Max. laser drilling 8 mil".
+#   - https://www.pcbway.com/capabilities.html, "Advanced PCB" table, row 2
+#     "Blind and Buried Vias": "HDI(1+1+....+N+......+1+1)" is listed as
+#     "Normal process"; row 1 lists "3L<=Layers<=16L" as normal process.
+# The smallest HDI build (1+N+1) needs at least four copper layers, so the
+# 2-layer configs keep the fail-closed ``false`` default.  These are
+# "Advanced PCB" options (priced separately from the standard quote), the
+# same way via-in-pad is.
+#
 # PCBWay offers via-in-pad (epoxy-filled, plated-over) as a standard
 # option, so ``via_in_pad_supported: true`` on every stackup block.
 # Mirrors the router's MFR_PCBWAY.via_in_pad_supported in
@@ -92,6 +108,8 @@ design_rules:
     inner_copper_oz: 0.5
     via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
     via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
+    blind_buried_vias_supported: true  # #6640: PCBWay hdi-pcb.html "Via Types: Blind via, buried via", verified 2026-10-14
+    micro_vias_supported: true         # #6640: PCBWay hdi-pcb.html "micro-via", "Min. laser drilling Standard 4 mil", verified 2026-10-14
 
   6layer_1oz:
     min_trace_width_mm: 0.0889      # 3.5 mil
@@ -115,3 +133,5 @@ design_rules:
     inner_copper_oz: 0.5
     via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
     via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
+    blind_buried_vias_supported: true  # #6640: PCBWay hdi-pcb.html "Via Types: Blind via, buried via", verified 2026-10-14
+    micro_vias_supported: true         # #6640: PCBWay hdi-pcb.html "micro-via", "Min. laser drilling Standard 4 mil", verified 2026-10-14
