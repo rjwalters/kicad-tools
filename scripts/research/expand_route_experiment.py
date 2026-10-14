@@ -1359,14 +1359,11 @@ def pick_artifact(routed: Path) -> tuple[Path | None, str | None]:
     """The board to grade: the ``-o`` output, else the deadline's best-so-far.
 
     When the hard ``--timeout`` fires, ``kct route`` exits 124 without writing
-    the requested output. What it leaves depends on the stage it was in:
-
-    * inside the routing stage -- a raw ``<stem>_partial.kicad_pcb`` holding the
-      copper committed so far. The ``unverified_output`` its timeout sidecar
-      names is, in that case, a snapshot with **no** copper at all (measured on
-      chorus: 0 segments vs. 1318 mm in the ``_partial``), so the partial wins;
-    * in a later stage -- no ``_partial``; the sidecar's ``unverified_output``
-      is the last checkpoint.
+    the requested output, and its ``.timeout.json`` sidecar names the best
+    board: ``snapshot`` (the raw ``_partial`` holding the copper committed so
+    far, recovered by the supervisor even if the worker was hard-killed before
+    recording it; issue #6308), else ``unverified_output`` (the last checkpoint,
+    which is what a deadline in a later stage leaves).
 
     Either is still the honest answer to "what did this budget buy", so it is
     graded -- and labelled ``deadline`` so it is never mistaken for a finished
@@ -1375,15 +1372,14 @@ def pick_artifact(routed: Path) -> tuple[Path | None, str | None]:
     """
     if routed.exists():
         return routed, "final"
-    partial = routed.with_name(f"{routed.stem}_partial.kicad_pcb")
-    if partial.exists():
-        return partial, "deadline"
     sidecar = routed.with_suffix(".timeout.json")
     if sidecar.exists():
         with contextlib.suppress(OSError, ValueError):
-            named = json.loads(sidecar.read_text()).get("unverified_output")
-            if named and Path(named).exists():
-                return Path(named), "deadline"
+            report = json.loads(sidecar.read_text())
+            for key in ("snapshot", "unverified_output"):
+                named = report.get(key)
+                if named and Path(named).exists():
+                    return Path(named), "deadline"
     return None, None
 
 

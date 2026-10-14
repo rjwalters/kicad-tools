@@ -388,16 +388,17 @@ def test_deadline_best_so_far_is_graded_and_labelled(tmp_path):
 
     partial = tmp_path / "b_routed_partial.kicad_pcb"
     partial.write_text("(kicad_pcb)")
-    assert ere.pick_artifact(routed) == (partial, "deadline")
+    # An unreferenced _partial is no longer probed: the sidecar is trusted.
+    assert ere.pick_artifact(routed) == (None, None)
 
-    # A raw partial (deadline inside the routing stage) wins over the sidecar's
-    # named snapshot, which in that case carries no copper at all.
     sidecar = tmp_path / "b_routed.timeout.json"
     named = tmp_path / "b_routed_timeout_unverified_abc.kicad_pcb"
     named.write_text("(kicad_pcb)")
     sidecar.write_text(json.dumps({"unverified_output": str(named)}))
+    assert ere.pick_artifact(routed) == (named, "deadline")
+    # ``snapshot`` (copper-bearing) is read before ``unverified_output``.
+    sidecar.write_text(json.dumps({"unverified_output": str(named), "snapshot": str(partial)}))
     assert ere.pick_artifact(routed) == (partial, "deadline")
-    # Deadline in a later stage: no partial, so the sidecar's checkpoint is it.
     partial.unlink()
     assert ere.pick_artifact(routed) == (named, "deadline")
     named.unlink()
@@ -618,8 +619,11 @@ def _stub_route(monkeypatch, *, sidecar: dict | None = None, graded: list | None
         if sidecar is None:
             out.write_text(inp.read_text())
         else:
-            out.with_name(f"{out.stem}_partial.kicad_pcb").write_text(inp.read_text())
-            out.with_suffix(".timeout.json").write_text(json.dumps(sidecar))
+            partial = out.with_name(f"{out.stem}_partial.kicad_pcb")
+            partial.write_text(inp.read_text())
+            out.with_suffix(".timeout.json").write_text(
+                json.dumps({"snapshot": str(partial), **sidecar})
+            )
         return {"cmd": " ".join(extra), "exit_code": 0 if sidecar is None else 124, "wall_s": 0.1}
 
     def fake_grade(routed, board):

@@ -71,6 +71,46 @@ raise SystemExit(route_cmd._in_process_main([]))
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process group regression")
+@pytest.mark.parametrize("case", ["fresh", "stale", "torn"])
+def test_routing_deadline_names_partial_when_killed_before_record(tmp_path, case):
+    """Issue #6308: the sidecar names the copper-bearing _partial itself."""
+    output = tmp_path / "output.kicad_pcb"
+    output.write_text("(kicad_pcb)")  # copper-less checkpoint, gets quarantined
+    partial = tmp_path / "output_partial.kicad_pcb"
+    copper = "(kicad_pcb (segment (start 0 0) (end 1 1) (width 0.2) (layer F.Cu) (net 1)))"
+    if case == "stale":
+        partial.write_text(copper)
+        os.utime(partial, (1, 1))
+    script = f"""
+import signal, time, json, os
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(os.environ["KCT_ROUTE_DEADLINE_CONTROL"]).write_text(json.dumps(dict(stage="routing", output={str(output)!r}, snapshot_saved=False)))
+if {case!r} == "fresh":
+    Path({str(partial)!r}).write_text({copper!r})
+if {case!r} == "torn":
+    Path({str(partial)!r} + ".tmp").write_text("(kicad_pcb (segm")
+    Path({str(partial)!r}).write_text({copper!r})
+time.sleep(100)
+"""
+    assert (
+        route_deadline._supervise(
+            [sys.executable, "-c", script], 1.5, tmp_path / "control.json", save_seconds=0.3
+        )
+        == 124
+    )
+    report = json.loads(output.with_suffix(".timeout.json").read_text())
+    assert report["stage"] == "routing"
+    assert not output.exists()
+    if case == "fresh":
+        assert report["snapshot_saved"] is True
+        assert "(segment" in Path(report["snapshot"]).read_text()
+    else:
+        assert report["snapshot_saved"] is False
+        assert "snapshot" not in report
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group regression")
 def test_unresponsive_work_and_descendant_are_killed_within_save_window(tmp_path):
     sentinel = tmp_path / "descendant-wrote"
     output = tmp_path / "output.kicad_pcb"
