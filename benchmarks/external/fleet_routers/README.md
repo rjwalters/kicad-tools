@@ -102,12 +102,12 @@ Every output is copied into a **fresh** grading directory beside copies of the f
 `dsn_audit` exports the DSN and compares what it **emitted** against what the board, the frozen project and the frozen DRU declare. It flags:
 
 - net classes missing from the DSN;
-- class values exported differently, whether relaxed or tightened;
-- dropped net-class assignments;
+- class values exported differently, whether relaxed or tightened, read from each class's own `(class ...)` block;
+- net-class assignments the DSN's class membership does not reproduce;
 - project board rules (edge clearance, stricter floors);
 - DRU constraints the DSN's global values do not already imply;
-- keepouts and rule areas;
-- copper zones and planes;
+- rule areas whose track/via restriction has no matching `keepout`/`wire_keepout`/`via_keepout` on each of their copper layers;
+- copper zones with no matching `(plane ...)` for their net on each of their layers;
 - copper-layer text;
 - copper layers, pads or nets missing from the export.
 
