@@ -1577,6 +1577,16 @@ def _output_verification_exit(verification: _OutputVerification, args) -> int | 
     return None
 
 
+# Issue #6351: copper (segments, vias) carried by the user's input board,
+# recorded by ``_stage_input_for_auto_pour`` before it is copied onto the
+# output path (where checkpoints later overwrite it), keyed by output path.
+_INPUT_COPPER_BASELINE: dict[str, tuple[int, int]] = {}
+
+
+def _baseline_key(path: Path) -> str:
+    return str(path.resolve())
+
+
 def _write_routed_pcb(
     pcb_path: Path,
     output_path: Path,
@@ -1668,7 +1678,15 @@ def _write_routed_pcb(
     # touching the output file so silent data loss becomes a loud, safe
     # failure independent of any future parser dialect regression.
     if guard_copper_loss:
-        _, in_segs, in_vias = _strip_route_blocks(original_content)
+        # Issue #6351: when the input was staged onto output_path, the
+        # content read above may include a best-so-far checkpoint written by
+        # this very run.  Prefer the copper count captured from the user's
+        # input before staging.
+        baseline = _INPUT_COPPER_BASELINE.get(_baseline_key(output_path))
+        if baseline is not None:
+            in_segs, in_vias = baseline
+        else:
+            _, in_segs, in_vias = _strip_route_blocks(original_content)
         _, out_segs, out_vias = _strip_route_blocks(output_content)
         in_total = in_segs + in_vias
         out_total = out_segs + out_vias
@@ -6158,6 +6176,11 @@ def _stage_input_for_auto_pour(pcb_path: Path, output_path: Path) -> Path:
     """
     if pcb_path.resolve() == output_path.resolve():
         return pcb_path
+    try:
+        _, in_segs, in_vias = _strip_route_blocks(pcb_path.read_text())
+        _INPUT_COPPER_BASELINE[_baseline_key(output_path)] = (in_segs, in_vias)
+    except (OSError, UnicodeDecodeError):
+        _INPUT_COPPER_BASELINE.pop(_baseline_key(output_path), None)
     shutil.copy2(pcb_path, output_path)
     return output_path
 
