@@ -514,9 +514,21 @@ def _via_spans_layer(via: Via, layer: Layer) -> bool:
     cannot drift.
     """
     # Issue #6099: physical stack order, not enum value.
-    lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-    hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+    # Issue #6485: the DRILLED span, not the logical ``via.layers`` pair.  A
+    # non-micro via is a through barrel whatever layer transition its producer
+    # recorded, so a gate that skipped the layers outside ``via.layers`` waved
+    # through copper the fabricated barrel shorts.
+    lo, hi = _via_drilled_stack_span(via)
     return lo <= layer.stack_order <= hi
+
+
+def _via_drilled_stack_span(via: Via) -> tuple[int, int]:
+    """``(lowest, highest)`` stack order the via's barrel occupies (#6485)."""
+    first, second = via.drilled_layers
+    return (
+        min(first.stack_order, second.stack_order),
+        max(first.stack_order, second.stack_order),
+    )
 
 
 # Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
@@ -3945,18 +3957,31 @@ class CoupledPathfinder:
         current_x, current_y = start_pad.x, start_pad.y
         current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
 
+        # Issue #6485: ``(current_layer_idx, layer_idx)`` is the path's
+        # LOGICAL layer transition (e.g. F.Cu -> In1.Cu), not the drilled
+        # span.  The coupled search has no blind/buried process: both backends
+        # admit a layer change only where the barrel is clear on EVERY layer
+        # (``_is_via_blocked`` sweeps ``0..num_layers``; C++
+        # ``CoupledPathfinder::via_route_geometry_clear`` sets
+        # ``layer_from = 0`` / ``layer_to = layers - 1``), and
+        # ``RoutingGrid._mark_via`` blocks every layer once it is placed.
+        # Reporting the logical pair verbatim wrote a keyword-less
+        # ``(via ... (layers "F.Cu" "In1.Cu"))`` that KiCad drills as a
+        # through via while every reader of ``via.layers`` missed the barrel
+        # on the remaining layers.  Same normalization as the single-ended
+        # builders (``pathfinder.py`` / ``cpp_backend.py``, Issue #5013/#5174).
+        physical_top_layer = Layer(self.grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self.grid.index_to_layer(self.grid.num_layers - 1))
+
         for wx, wy, layer_idx, is_via in path:
             if is_via:
-                # Add via
+                # Add via - a through barrel over the full stack (see above).
                 via = Via(
                     x=current_x,
                     y=current_y,
                     drill=self.rules.via_drill,
                     diameter=self.rules.via_diameter,
-                    layers=(
-                        Layer(self.grid.index_to_layer(current_layer_idx)),
-                        Layer(self.grid.index_to_layer(layer_idx)),
-                    ),
+                    layers=(physical_top_layer, physical_bottom_layer),
                     net=start_pad.net,
                     net_name=start_pad.net_name,
                 )
@@ -6152,13 +6177,12 @@ class DiffPairRouter:
             deficit = gap_deficit(shape, segment_shape(seg), trace_floor)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
-        v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-        v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+        # Issue #6485: drilled spans (see ``_via_spans_layer``).
+        v_lo, v_hi = _via_drilled_stack_span(via)
         for other in universe.vias:
             if other.net == via.net:
                 continue
-            o_lo = min(other.layers[0].stack_order, other.layers[1].stack_order)
-            o_hi = max(other.layers[0].stack_order, other.layers[1].stack_order)
+            o_lo, o_hi = _via_drilled_stack_span(other)
             if o_hi < v_lo or o_lo > v_hi:
                 continue  # barrels never share a layer
             deficit = gap_deficit(shape, via_shape(other), clearance)

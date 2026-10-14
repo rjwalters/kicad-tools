@@ -158,8 +158,14 @@ def test_shape_preserves_same_net_and_layer_policy(shape, net, layer, through, v
     seg = Segment(10, 10, 10.5, 10, 0.02, Layer.F_CU, 2)
     assert grid.validate_segment_clearance(seg, exclude_net=2)[0] is valid
     assert (grid.worst_segment_pad_deficit(seg, 2)[0] == 0) is valid
-    via = Via(10, 10, 0.1, 0.2, (Layer.F_CU, Layer.F_CU), 2)
+    # Issue #6485: an F.Cu-only barrel is a micro via; it is the via that
+    # keeps the layer policy above (a B.Cu SMD pad is out of its reach).
+    via = Via(10, 10, 0.1, 0.2, (Layer.F_CU, Layer.F_CU), 2, is_micro=True)
     assert (grid.worst_via_pad_deficit(via, 2)[0] == 0) is valid
+    # The same pair on a NON-micro via is drilled F.Cu..B.Cu, so it lands on
+    # the pad whichever side that pad is on: only same-net contact is legal.
+    through = Via(10, 10, 0.1, 0.2, (Layer.F_CU, Layer.F_CU), 2)
+    assert (grid.worst_via_pad_deficit(through, 2)[0] == 0) is (net == 2)
 
 
 @pytest.mark.parametrize("shape", ["rect", "circle"])

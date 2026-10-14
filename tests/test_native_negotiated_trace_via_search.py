@@ -117,7 +117,10 @@ def test_python_route_sync_preserves_stored_via_layer_span():
     grid = RoutingGrid(10, 10, rules, layer_stack=LayerStack.four_layer_all_signal())
     native = CppGrid.from_routing_grid(grid)
     router = CppPathfinder(native, rules)
-    grid.routes.append(Route(2, "other", vias=[Via(5, 5, 0.3, 0.6, (Layer.F_CU, Layer.IN1_CU), 2)]))
+    # Issue #6485: the span that is preserved is the DRILLED one.  A micro via
+    # keeps F.Cu..In1.Cu; the same pair on a non-micro via is a through barrel.
+    span = (Layer.F_CU, Layer.IN1_CU)
+    grid.routes.append(Route(2, "other", vias=[Via(5, 5, 0.3, 0.6, span, 2, is_micro=True)]))
     router._sync_stored_routes(grid)
     segment = router_cpp.Segment()
     segment.x1, segment.y1, segment.x2, segment.y2 = 4, 5, 6, 5
@@ -125,3 +128,12 @@ def test_python_route_sync_preserves_stored_via_layer_span():
     for layer, legal in [(0, False), (1, False), (2, True), (3, True)]:
         segment.layer = layer
         assert native._impl.trace_stored_vias_clear(segment, 0.2) == legal
+
+    grid = RoutingGrid(10, 10, rules, layer_stack=LayerStack.four_layer_all_signal())
+    native = CppGrid.from_routing_grid(grid)
+    router = CppPathfinder(native, rules)
+    grid.routes.append(Route(2, "other", vias=[Via(5, 5, 0.3, 0.6, span, 2)]))
+    router._sync_stored_routes(grid)
+    for layer in range(4):
+        segment.layer = layer
+        assert not native._impl.trace_stored_vias_clear(segment, 0.2)
