@@ -5,9 +5,11 @@ Arms (all share ``--seed``; only the cache differs):
 
 ``baseline``      default ``kct route`` recipe, cache off.
 ``nogood-full``   ``--nogood-cache`` with the whole-grid failure window
-                  (sound on occupancy; the arm that must be output-identical).
+                  (every grid plane fingerprinted, drained failures only; the
+                  arm that must be output-identical).
 ``nogood-m<N>``   ``--nogood-cache --nogood-cache-margin-cells N`` (bounded
-                  window; may false-hit, which shows up as a quality delta).
+                  window; heuristic that may false-hit, which shows up as a quality
+                  delta).
 
 Reuses ``net_order_experiment``'s board recipes, subprocess profiling and
 referee (``measure_completion`` / ``measure_copper``), then adds the cache

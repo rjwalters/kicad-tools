@@ -16182,27 +16182,54 @@ class Autorouter:
             return self._mark_route(route, enforce_pad_access=True)
 
         # Issue #6353 (experiment, default OFF): validity-aware nogood cache.
+        # Everything below is skipped when the cache is disabled, so the
+        # default path makes exactly the pre-#6353 call.
         nogood = self._get_nogood_cache()
-        ng_key = ng_win = None
+        ng_key = ng_win = ng_extra = None
         failed_pairs: list[tuple[Pad, Pad]] = []
+        ng_definitive: list[bool] = []  # one entry per recorded failure
+        ng_reason: list[int] = []  # last #6369 failure code, for replay
         cb = failure_callback
         if nogood is not None:
+            from .nogood_cache import (
+                reset_search_exhausted,
+                search_budget_context,
+                search_failure_is_definitive,
+            )
+
+            search_router = self.router
             ng_key = nogood.make_key(
                 net,
                 [(p.x, p.y, str(p.layer), p.net) for p in pad_objs],
                 reverse_search,
                 None if os.environ.get(_NOGOOD_ENV_IGNORE_PF) else present_cost_factor,
+                search_budget_context(search_router, per_net_timeout),
             )
             ng_win = nogood.window(self.grid, [(p.x, p.y) for p in pad_objs])
-            cached = nogood.lookup(ng_key, self.grid, ng_win)
+            ng_extra = self._nogood_extra_state
+            cached = nogood.lookup(ng_key, self.grid, ng_win, ng_extra)
             if cached is not None:
+                cached_pairs, cached_reason = cached
+                # Replay the one persistent side effect of a failed search
+                # (#6369 per-net failure code) so ``net-status --why`` agrees.
+                store = getattr(search_router, "search_failures_by_net", None)
+                if isinstance(store, dict) and cached_reason:
+                    store[int(net)] = int(cached_reason)
                 if failure_callback is not None:
-                    for src, tgt in cached:
+                    for src, tgt in cached_pairs:
                         failure_callback(src, tgt)
                 return routes
 
+            reset_search_exhausted(search_router)
+
             def cb(src: Pad, tgt: Pad) -> None:
                 failed_pairs.append((src, tgt))
+                ng_definitive.append(search_failure_is_definitive(search_router))
+                get_info = getattr(search_router, "get_last_failure_info", None)
+                info = get_info() if get_info is not None else None
+                if info and info.get("failure_reason"):
+                    ng_reason[:] = [int(info["failure_reason"])]
+                reset_search_exhausted(search_router)
                 if failure_callback is not None:
                     failure_callback(src, tgt)
 
@@ -16217,11 +16244,32 @@ class Autorouter:
             nogood is not None
             and not new_routes
             and failed_pairs
+            and all(ng_definitive)
             and not neg_router._last_timeout_failures
         ):
-            nogood.insert(ng_key, self.grid, ng_win, tuple(failed_pairs))
+            nogood.insert(
+                ng_key,
+                self.grid,
+                ng_win,
+                (tuple(failed_pairs), ng_reason[0] if ng_reason else None),
+                ng_extra,
+            )
         routes.extend(new_routes)
         return routes
+
+    def _nogood_extra_state(self) -> object:
+        """Non-array search state for the nogood fingerprint (Issue #6353).
+
+        The C++ wrapper's #6098 grid stamp covers corridor reservations,
+        fixed fills, keepout rule areas and the router-side net maps, which
+        live outside the grid's numpy planes.  ``None`` on the pure-Python
+        router (those inputs are then grid arrays already hashed).
+        """
+        stamp = getattr(self.router, "_py_grid_state_stamp", None)
+        py_grid = getattr(self.router, "_py_grid", None)
+        if stamp is None or py_grid is None:
+            return None
+        return stamp(py_grid)
 
     def _get_nogood_cache(self):
         """Lazily build the opt-in nogood cache from env (None = disabled)."""

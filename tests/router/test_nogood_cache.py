@@ -65,16 +65,16 @@ KEY = NogoodCache.make_key(1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], Fa
 
 
 def test_key_stable_and_discriminating():
-    assert NogoodCache.make_key(
-        1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], False, 0.5
-    ) == KEY
+    assert (
+        NogoodCache.make_key(1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], False, 0.5) == KEY
+    )
     assert NogoodCache.make_key(1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], True, 0.5) != KEY
-    assert NogoodCache.make_key(
-        1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], False, 0.6
-    ) != KEY
+    assert (
+        NogoodCache.make_key(1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], False, 0.6) != KEY
+    )
 
 
-def test_unchanged_copper_hits_even_after_unrelated_generation_bump():
+def test_unchanged_window_hits_after_change_outside_bounded_window():
     g, c = _FakeGrid(), NogoodCache(margin_cells=3)
     win = c.window(g, [(2, 2), (8, 8)])
     assert c.lookup(KEY, g, win) is None
@@ -164,6 +164,107 @@ def test_oracle_stale_failure_not_served_after_blocker_removed(monkeypatch, marg
     third = r._route_net_negotiated(1, 0.5)
     assert [x for x in third if x.segments], "stale nogood suppressed a feasible route"
     assert cache.stats.invalidations == 1 or margin is not None
+
+
+def _open_router(history: float = 0.0) -> Autorouter:
+    """Net 1 on an empty board; optional history cost on the straight corridor."""
+    r = Autorouter(
+        width=20.0, height=10.0, rules=DesignRules(grid_resolution=0.25), force_python=True
+    )
+    r.add_component("U1", [_pad("1", 3.0, 5.0, 1, "A"), _pad("2", 17.0, 5.0, 1, "A")])
+    if history:
+        r.grid._history_cost[:, 10:31, 20:61] += history
+    return r
+
+
+@pytest.mark.parametrize(
+    "plane", ["_usage_count", "_history_cost", "_is_obstacle", "_is_zone", "_pad_blocked"]
+)
+def test_full_fingerprint_covers_non_occupancy_planes(plane):
+    """Judge repro (PR #6605): usage/history/obstacle/zone edits left
+    ``_blocked``/``_net`` and ``occupancy_generation`` untouched, so the
+    occupancy-only fingerprint served the cached failure anyway."""
+    r = _open_router()
+    g, c = r.grid, NogoodCache(margin_cells=None)
+    win = c.window(g, [(3.0, 5.0), (17.0, 5.0)])
+    c.insert(KEY, g, win, "fail")
+    gen = g.occupancy_generation
+    arr = getattr(g, plane)
+    arr[0, 20, 40] = arr[0, 20, 40] + 3 if arr.dtype.kind in "iuf" else not arr[0, 20, 40]
+    assert g.occupancy_generation == gen  # the old fast path would have hit here
+    assert c.lookup(KEY, g, win) is None
+    assert c.stats.hits == 0 and c.stats.invalidations == 1
+
+
+def test_saved_snapshots_do_not_invalidate():
+    g, c = _FakeGrid(), NogoodCache()
+    win = c.window(g, [])
+    c.insert(KEY, g, win, "fail")
+    g._saved_blocked = g._blocked.copy()
+    assert c.lookup(KEY, g, win) == "fail"
+
+
+def test_key_includes_budget_context():
+    terms = [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)]
+    a = NogoodCache.make_key(1, terms, False, 0.5, (100, True, None, False, False))
+    b = NogoodCache.make_key(1, terms, False, 0.5, (200, True, None, False, False))
+    assert a != b
+
+
+def test_oracle_iteration_capped_failure_not_served_after_history_change(monkeypatch):
+    """Only history changes between attempts, under an iteration cap.
+
+    With history on the straight corridor the capped search runs out of
+    iterations; with the history gone the same cap routes the net.  Neither
+    occupancy nor ``occupancy_generation`` changes, so before the fix the
+    capped failure was cached and served as a stale nogood.
+    """
+    monkeypatch.setenv("KCT_NOGOOD_CACHE", "1")
+    r = _open_router(history=50.0)
+    r.router._max_iterations_override = 100
+    cache = r._get_nogood_cache()
+    first = r._route_net_negotiated(1, 0.5)
+    assert not [x for x in first if x.segments], "precondition: capped search fails"
+    assert cache.stats.insertions == 0, "budget-limited failure must not be cached"
+    gen = r.grid.occupancy_generation
+    r.grid._history_cost[:] = 0.0
+    assert r.grid.occupancy_generation == gen
+    second = r._route_net_negotiated(1, 0.5)
+    assert [x for x in second if x.segments], "stale nogood suppressed a feasible route"
+    assert cache.stats.hits == 0
+
+
+def test_definitive_gate_requires_drained_search():
+    from kicad_tools.router.nogood_cache import (
+        reset_search_exhausted,
+        search_failure_is_definitive,
+    )
+
+    class PyRouter:
+        last_route_exhausted = True
+
+    class CppRouter:
+        def __init__(self, reason, py_drained):
+            self._py_router = PyRouter()
+            self._py_router.last_route_exhausted = py_drained
+            self._reason = reason
+
+        def _try_python_fallback(self):  # marker only
+            raise AssertionError
+
+        def get_last_failure_info(self):
+            return {"failure_reason": self._reason} if self._reason else None
+
+    assert search_failure_is_definitive(PyRouter())
+    assert search_failure_is_definitive(CppRouter(1, True))  # NO_PATH + py drained
+    assert not search_failure_is_definitive(CppRouter(2, True))  # ITERATION_LIMIT
+    assert not search_failure_is_definitive(CppRouter(3, True))  # TIMEOUT
+    assert not search_failure_is_definitive(CppRouter(1, False))  # fallback capped/skipped
+    assert not search_failure_is_definitive(CppRouter(None, True))  # refused commit
+    py = PyRouter()
+    reset_search_exhausted(py)
+    assert not search_failure_is_definitive(py)
+    assert not search_failure_is_definitive(object())
 
 
 def test_default_has_no_cache(monkeypatch):

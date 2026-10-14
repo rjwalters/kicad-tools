@@ -17575,8 +17575,10 @@ def _route_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "EXPERIMENTAL (Issue #6353, default off): answer a repeated, "
-            "completely-failed negotiated net attempt from a bounded cache "
-            "while the copper in its failure window is unchanged."
+            "completely-failed negotiated net attempt from a bounded cache. "
+            "Only failures whose search drained its open set are cached "
+            "(never timeouts or iteration-cap give-ups), and a hit requires "
+            "the grid state the search reads to be unchanged."
         ),
     )
     parser.add_argument(
@@ -17584,7 +17586,10 @@ def _route_parser() -> argparse.ArgumentParser:
         default="full",
         help=(
             "Failure-window margin in grid cells around the net's terminals, "
-            "or 'full' (default) to fingerprint the whole grid (sound)."
+            "or 'full' (default) to fingerprint every grid plane (occupancy, "
+            "usage, history/present cost, obstacle, zone). A numeric margin is "
+            "a heuristic that can serve a stale failure when state outside "
+            "the window changes."
         ),
     )
     parser.add_argument(
