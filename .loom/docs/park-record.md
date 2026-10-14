@@ -139,6 +139,17 @@ These writers differ from `apply` in two documented ways:
   the body. Readers key on `loom:blocked` first, so a leftover record on an
   unblocked issue declares nothing.
 
+### Champion's PR holds (#11861)
+
+Champion's merge-risk and critical-file holds write a reason-only record on
+the PR (`reason="champion merge-risk hold"` / `"champion critical-file hold"`,
+`by=champion`, `loom_daemon::champion_hold`), keep `loom:pr`, and add
+`loom:blocked`. The release pass skips it (`Unstated`): only Champion or a
+human releases it. A dependency-only promotion finding writes one record per
+open blocker (`park-record apply --blocked-by --by champion`, #11860; or
+`classify-dependency-block.sh --check-defer --apply`), which the release pass
+lifts when the blockers close.
+
 ## Who reads one
 
 - `loom-daemon check-stale-blocked` (`defaults/scripts/check-stale-blocked.sh`,

@@ -114,6 +114,15 @@ assert_doc_contains() {
     fi
 }
 
+assert_doc_lacks() {
+    local file="$1" needle="$2" msg="$3"
+    if grep -qF -- "$needle" "$file"; then
+        fail "$msg (unexpected literal in $file: $needle)"
+    else
+        pass "$msg"
+    fi
+}
+
 # =====================================================================
 # Fixture comment bodies (the real shapes champion-issue-promo.md posts)
 # =====================================================================
@@ -1274,26 +1283,20 @@ echo "--- Doc pins: the Champion prose actually calls the gate ---"
         "champion-issue-promo.md invokes the classifier"
     assert_doc_contains "$CHAMPION_PROMO_MD" "--check-defer" \
         "Step 4's escalation path runs the dependency-timing gate"
-    assert_doc_contains "$CHAMPION_PROMO_MD" "--check-unescalate --apply" \
-        "the self-healing re-scan actually applies the un-escalation"
-    assert_doc_contains "$CHAMPION_PROMO_MD" "Pass 0: Self-Healing Un-Escalation Re-Scan" \
-        "the re-scan has its own named section that runs before evaluation"
-    assert_doc_contains "$CHAMPION_PROMO_MD" 'FORCE_REEVALUATE=no' \
-        "an un-escalated proposal bypasses the body-hash marker instead of re-escalating in the same pass"
-    assert_doc_contains "$CHAMPION_PROMO_MD" 'LOOM_MAX_UNESCALATION_RESCANS' \
-        "the re-scan is bounded per pass"
-    assert_doc_contains "$CHAMPION_MD" "Pass 0" \
-        "champion.md explains why loom:operator is excluded from discovery yet still examined"
+    assert_doc_contains "$CHAMPION_PROMO_MD" "loom-daemon park-record apply --issue" \
+        "a DEFER blocks the proposal on loom:blocked with park records (#11860)"
+    assert_doc_contains "$CHAMPION_PROMO_MD" "Pass 0: Self-Healing Un-Escalation Re-Scan (#5664) — retired (#11861)" \
+        "Pass 0 is marked retired, not silently dropped"
+    assert_doc_lacks "$CHAMPION_PROMO_MD" "--check-unescalate --apply" \
+        "no prompt path un-escalates a loom:operator hold any more (#11861)"
+    assert_doc_contains "$CHAMPION_MD" "\`loom:operator\` is excluded and never examined (#11861)" \
+        "champion.md excludes loom:operator from discovery and never examines it"
     assert_doc_contains "$CHAMPION_REF_MD" "classify-dependency-block.sh --check-defer" \
         "champion-reference.md's decision table documents the defer condition"
-    assert_doc_contains "$CURATOR_MD" "classify-dependency-block.sh --issue" \
-        "curator.md invokes the classifier for its fact-based de-escalation procedure (#7650)"
-    assert_doc_contains "$CURATOR_MD" "--check-fact-unescalate" \
-        "curator.md's de-escalation procedure calls the new fact-checkable mode"
-    assert_doc_contains "$CURATOR_MD" "--resolutions-file" \
-        "curator.md's procedure supplies the per-finding resolutions Curator itself verified"
-    assert_doc_contains "$CURATOR_MD" "De-escalating Fact-Based Champion Escalations" \
-        "the de-escalation procedure has its own named section"
+    assert_doc_lacks "$CURATOR_MD" "--check-fact-unescalate" \
+        "curator.md no longer removes loom:operator via the fact de-escalation (#11861)"
+    assert_doc_contains "$CURATOR_MD" "Operator-held issues: no Curator action (#11861)" \
+        "curator.md states the retirement in its own section"
     assert_doc_contains "$CHAMPION_PROMO_MD" "## Revision" \
         "champion-issue-promo.md documents how a Curator-appended Revision section interacts with BODY_HASH (#7650)"
 }

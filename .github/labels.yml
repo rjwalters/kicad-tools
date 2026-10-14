@@ -305,6 +305,15 @@
   color: "10B981"  # emerald-500
 
 # Status Labels
+# loom:blocked: waiting on something named, released when it resolves. Applied
+# with `loom-daemon park-record apply` (a park record in the body). Two shapes
+# need no other change to clear (#11861): a capability-only park (a
+# <!-- loom:capability=<name> --> marker, no named blocker, no decision block),
+# which a host holding that capability may attempt in propose-only mode
+# (#6893); and Champion's merge-risk / critical-file PR hold, the ONE shape in
+# which loom:pr may coexist with loom:blocked (a reason-only park record plus
+# Champion's hold-state marker comment). Champion re-evaluates and releases
+# that hold; merge-pr.sh still refuses to merge while it stands.
 - name: loom:blocked
   description: "Waiting on something named (another change, a capability); released once it resolves"
   color: "EF4444"  # red-500
@@ -329,22 +338,19 @@
 # something named (another change, a capability), released automatically;
 # loom:operator = a human must act or decide now; loom:frozen = not now.
 #
-# loom:operator is the "a human is needed" state (#5502). On an ISSUE it is a
-# park: no dispatch route (work finder, watchdog re-dispatch, checkpoint
-# resume, epic supervisor) builds it until a human removes the label. What
-# the human must do comes from the body, not a sub-label: a ```decision block
-# (#10057) makes it a decision; a <!-- loom:capability=<name> --> marker (#6892)
-# with no decision block makes it mechanical work a host holding that
-# capability may attempt in propose-only mode (#6893). It folds the retired
-# loom:operator-only, -decision, -mechanical and -blocked labels (a named
-# blocker stays in the body text).
-# On a PULL REQUEST it is NOT a park: Champion's merge-risk and critical-file
-# holds re-evaluate themselves, and Doctor drains a held PR (#7660).
+# loom:operator is the "a human is needed" state (#5502). It is a no-op for
+# every role (#11861): a park on issues AND pull requests, so no dispatch
+# route and no Curator, Champion, Judge, Doctor or Builder step acts on it
+# until a human removes the label. What the human must do comes from the
+# body, not a sub-label: a ```decision block (#10057) makes it a decision. It
+# folds the retired loom:operator-only, -decision, -mechanical and -blocked
+# labels (a named blocker stays in the body text).
 # Applied by any role escalating to a human, by `loom-daemon operator-decision
-# apply`, by Champion (merge-risk and critical-file holds), by merge-pr.sh's
-# #8508 escalation (defaults/docs/merge-pr-exit-code-exceptions.md) and by its
+# apply`, by merge-pr.sh's #8508 escalation
+# (defaults/docs/merge-pr-exit-code-exceptions.md) and by its
 # partial-increment reset (#9264) when the issue body carries a
-# `loom:remainder-hold` marker. Removed by a human.
+# `loom:remainder-hold` marker. Removed by a human. Champion's merge-risk and
+# critical-file PR holds are loom:blocked, not this label (#11861).
 - name: loom:operator
   description: "A human must act or decide; the body's decision block says what. Only a human removes it."
   color: "EA580C"  # orange-600 - operator-action signal

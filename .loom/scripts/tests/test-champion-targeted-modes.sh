@@ -120,8 +120,10 @@ printf '%s\n' "$EVAL_SHA" > "$PIN_FILE"
 run_step3
 check "pin file + NO EXPECTED_HEAD (the env var was lost between calls): no merge, no queue call" \
   eval '[[ ! -e "$TMP/merge-argv" && ! -e "$TMP/queue-argv" ]]'
-check "pin file + no EXPECTED_HEAD: CHAMPION-PIN-MISSING names the SHA to write, outcome rc=1 (failed)" \
-  eval 'has "CHAMPION-PIN-MISSING pr=42: set EXPECTED_HEAD=$EVAL_SHA" && has "CHAMPION-MERGE-OUTCOME pr=42 rc=1"'
+check "pin file + no EXPECTED_HEAD: CHAMPION-PIN-MISSING names the SHA to write, outcome rc=9 (re-queued, #11861)" \
+  eval 'has "CHAMPION-PIN-MISSING pr=42: set EXPECTED_HEAD=$EVAL_SHA" && has "CHAMPION-MERGE-OUTCOME pr=42 rc=9"'
+check "a lost pin is a re-queue, never 'Merge failed' (#11861)" \
+  eval 'has "not merged this pass (exit 9)" && hasnt "Merge failed"'
 run_step3 1111111111111111111111111111111111111111
 check "pin file + a DIFFERENT EXPECTED_HEAD: no merge" eval '[[ ! -e "$TMP/merge-argv" ]] && has CHAMPION-PIN-MISSING'
 run_step3 "$EVAL_SHA"
@@ -156,10 +158,10 @@ check "an unknown or doubled argument refuses and touches nothing" \
 check "--pr: writes the pin file only for an eligible PR" doc_has "$TARGETED_MD" '[ -n "$EVALUATED_SHA" ] && printf'
 check "--pr: Step 3 must carry the SHA literally (env does not survive tool calls)" \
   doc_has "$TARGETED_MD" 'first line must be `EXPECTED_HEAD=<that SHA, written out literally>`'
-check "--pr: a lost pin is outcome failed, never merged" doc_has "$TARGETED_MD" 'Also `CHAMPION-PIN-MISSING`: nothing merged'
-check "--pr: the pin file is removed at the end of every step" doc_has "$TARGETED_MD" '**Remove the pin file (`rm -f`) as the step'\''s last action'
+check "--pr: a lost pin is outcome requeued, never merged" doc_has "$TARGETED_MD" '9 (`CHAMPION-PIN-MISSING`): not merged, still approved, no "Merge Failed"'
+check "--pr: the pin file is removed at the end of every step, by a literal command" doc_has "$TARGETED_MD" '`rm -f "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-N"`'
 check "batch Step 3 never reads a pin it was not given: the guard is a no-op without a pin file" \
-  doc_has "$PR_MERGE_MD" 'if [ -n "$PIN" ] && [ "${EXPECTED_HEAD:-}" != "$PIN" ]; then MERGE_RC=1'
+  doc_has "$PR_MERGE_MD" 'if [ -n "$PIN" ] && [ "${EXPECTED_HEAD:-}" != "$PIN" ]; then MERGE_RC=9'
 check "--pr: full criteria, sticky holds, merge-risk axes, health pass" \
   doc_has "$TARGETED_MD" 'all 6 Safety Criteria with the merge-risk'
 check "--pr: exit 8 is outcome head-moved, not a failure" \
@@ -181,7 +183,7 @@ check "--issue: a blocked issue is re-evaluated only once its blocker has closed
 NONITEM="$(awk '/^## `--non-item`/{on=1} on' "$TARGETED_MD")"
 out="$NONITEM"
 check "--non-item: names the role-runner knob that launches it" has 'autonomous.roleRunner.championMode: "non-item"'
-for q in "Pass 0, Pass 0b, Pass 0c" "Priority 3: architect, hermit and auditor proposals" "Priority 4: epic proposals" \
+for q in "Pass 0b, Pass 0c" "Priority 3: architect, hermit and auditor proposals" "Priority 4: epic proposals" \
          "Priority 5: Doctor-cycle-capped PRs" "Rollout Check Pass" "Held-PR Census and Per-PR Digest"; do
   check "--non-item runs: $q" has "$q"
 done

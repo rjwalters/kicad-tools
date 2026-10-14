@@ -82,7 +82,7 @@ Agents coordinate through labels. See `.github/labels.yml` for full definitions.
 child issues.
 
 **Holds**: `loom:blocked` (waiting), `loom:operator` (a human must act or
-decide; dispatch skips it), `loom:abort` (abort in-flight work, returns to
+decide; no role acts on it), `loom:abort` (abort in-flight work, returns to
 `loom:issue`). Priority: `loom:very-important` / `loom:important` (set by
 humans, Guide, Champion); order only, never a hold or an approval.
 `loom:frozen`: not now. Every agent and daemon path ignores it; only a human removes it (#11743).

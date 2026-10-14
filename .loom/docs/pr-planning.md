@@ -90,8 +90,12 @@ never a branch name. Fork PRs and other branch shapes are a deliberate
 exclusion: unless interactive, they are still admitted only when no open PR
 carries `loom:review-requested`, and nothing here adds a label.
 
-Drafts and hard holds never gain authority from origin. Doctor's existing
-`loom:operator` plus `loom:changes-requested` stale-diff repair route remains
-available; the operator merge hold stays in place. Pending/failing checks can
+Drafts and holds never gain authority from origin, and every queue drops every
+park, `loom:operator` included (#11861). The one exception is Champion's: it
+keeps a `loom:pr` + `loom:blocked` PR, its own merge-risk or critical-file hold,
+which it re-evaluates; and Doctor's and Judge's keep `loom:changes-requested`
+and `loom:review-requested` beside `loom:blocked` when a trusted Champion hold
+marker stands (`fetch_queue` reads the comments), so a held PR Champion routes
+for repair keeps its hold through the whole round trip. Pending/failing checks can
 block a merge while still leaving actionable repair work. The queue is a plan;
 fresh claim, CI, dependency and merge guards remain mandatory before acting.

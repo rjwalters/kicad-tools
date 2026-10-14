@@ -5300,16 +5300,14 @@ repository is now the parallelism boundary:
   champion run — so it adds no forge query per tick per repository. Only PR
   rows count, and the `loom:pr` count leaves out PRs held for a human —
   those also carrying `loom:blocked`, `loom:operator` or `loom:frozen`
-  (the set `champion-pr-merge.md` names as not merge-eligible; the critical-file
-  hold is one of them, via `loom:operator`) — because Champion cannot drain
-  them (#9410). Likewise the `loom:changes-requested` count leaves out PRs
-  Doctor will not drain — those also carrying `loom:blocked` or
-  `loom:frozen` (`doctor.md` Priority 2's skip set; this includes the
-  Doctor-cycle-cap park) — but still counts
-  `loom:operator` (Doctor drains stale held PRs Champion routes to it, #7660)
-  and `loom:treating` (a live Doctor claim) (#9421). The
-  `loom:review-requested` count is unfiltered: Judge's queue has no label
-  exclusions. The labels come from the same listing rows. A failed listing records nothing, and an entry older than
+  (the set `champion-pr-merge.md` names as not merge-eligible; Champion's
+  merge-risk and critical-file holds are among them, via `loom:blocked`,
+  #11861) — because Champion cannot drain them (#9410). Likewise the
+  `loom:changes-requested` and `loom:review-requested` counts leave out PRs
+  Doctor or Judge will not drain — every park, `loom:blocked`,
+  `loom:operator` (#11861: no role acts on it) and `loom:frozen` (this
+  includes the Doctor-cycle-cap park) — but still count `loom:treating` (a
+  live Doctor claim) (#9421). The labels come from the same listing rows. A failed listing records nothing, and an entry older than
   `demandWidth.staleSecs` is ignored, so an axis nobody has observed recently is
   **unobserved** and changes nothing. An axis has **two** readings (#9414): the
   **fresh** sum (only entries younger than `staleSecs`), which the reservation

@@ -54,12 +54,12 @@ Whatever overlap the partition **could not** avoid (unavoidable groups, or a rea
 
 ## Capability-aware lane (#6885 Part 2, #6893)
 
-`loom:operator` is a hard skip for an issue. A `loom:operator` item whose body carries a capability marker and **no** `decision` block is a mechanical ask: "needs host/admin access or a credential, but **no judgement**" (`.loom/docs/label-state-machine.md` → "The kind comes from the body"). This section is the *only* place that treats it differently, and it does so under four gates that all have to pass. **Nothing here weakens `loom:operator` for any other item**: a decision, a marker-less hold, and `loom:blocked` (including one waiting on a capability marker) are unchanged, and the routing tables above land every non-matching case on the ordinary hard-skip row.
+`loom:blocked` is a hard skip. A `loom:blocked` item whose only blocker is a capability — a capability marker, **no** park record naming a blocker, **no** `decision` block — is a mechanical ask: "needs host/admin access or a credential, but **no judgement**" (`.loom/docs/label-state-machine.md` → "Capability marker"). This section is the *only* place that treats it differently, under four gates that all have to pass. `loom:operator` never enters the lane (#11861: no role acts on it), and nothing here weakens any other skip.
 
 ### Eligibility (all four gates, in order — any failure means "skip exactly as today")
 
 1. **This worker declares capabilities.** `LOOM_WORKER_CAPABILITIES` is set in the environment, e.g. `export LOOM_WORKER_CAPABILITIES="host-sudo,cloud-profile:prod-aws"`. Unset (the default on every host) ⇒ the lane is inert and this whole section is a no-op. It is read from the **environment only, never from `.loom/config.json`** — a capability is a property of the machine and its credentials, and a file committed to git must not be able to assert that the host running it has root.
-2. **The item is exactly the mechanical shape.** `loom:operator` is present, **no** `decision` block is in the body, and **none** of `loom:blocked` / `loom:frozen` is present. A contradictory body (a capability marker *and* a decision block) resolves in favour of the decision — skip.
+2. **The item is exactly the capability-only shape.** `loom:blocked` (or the retired `loom:needs-capability`) is present, **no** park record names a blocker, **no** `decision` block is in the body, and **none** of `loom:operator` / `loom:frozen` is present. A contradictory body (a capability marker *and* a decision block) resolves in favour of the decision — skip.
 3. **The body declares at least one capability, and every declared value is recognized.** Parse the item body with the reference parser — never a hand-rolled regex, so this side and the daemon's (`loom-daemon/src/capability.rs`) cannot diverge:
    ```bash
    CAPS=$(gh issue view N --json body --jq .body | ./.loom/scripts/extract-capability-markers.sh); RC=$?
@@ -72,7 +72,7 @@ Whatever overlap the partition **could not** avoid (unavoidable groups, or a rea
 Do **not** stall silently — turn the park into a named request. Post one comment (idempotent: if a comment already names the same missing capability, skip re-posting) and move on to the next candidate:
 
 ```
-Capability request (#6893): this item is a mechanical `loom:operator` ask and declares
+Capability request (#6893): this item is a capability-only `loom:blocked` park and declares
 `<!-- loom:capability=<missing> -->`, which this worker does not hold.
 
 Held by this worker: <the LOOM_WORKER_CAPABILITIES list, or "(none)">
@@ -82,14 +82,14 @@ The item stays parked. To unblock it, either run a sweep on a host that holds th
 missing capability, or have an operator perform the mechanical step directly.
 ```
 
-Never add, remove, or swap a label on this path. The item keeps `loom:operator` exactly as it was.
+Never add, remove, or swap a label on this path. The item keeps `loom:blocked` exactly as it was.
 
 ### Behavior when every capability IS held: propose mode only (AC4)
 
 **The lane's output is a proposal, never a live credentialed action.** This first rollout has no live-execution mode at all, by design — the daemon's own routing enum has exactly one dispatchable variant and it is `ProposeDispatch` (`loom-daemon/src/capability.rs`). Concretely, the phase that runs for such an item MUST:
 
 - Produce **the exact commands** an operator would run (a fenced block, copy-pasteable, with real values substituted — not a sketch), **or** a PR containing the mechanical change, whichever fits the item.
-- Post that proposal as a comment (or the PR body) and **stop**. The item stays `loom:operator` and is not closed; an operator's approval and execution is the next step.
+- Post that proposal as a comment (or the PR body) and **stop**. The item stays `loom:blocked` and is not closed; an operator's approval and execution is the next step.
 - **Never** execute against a credential, run the proposed commands, `sudo`, mutate cloud/infra state, or use an admin-scoped token — even though gate 1 asserts the worker *holds* the capability. Holding it is what makes the proposal accurate; it is not permission to use it.
 
 Adding a live-execution mode is out of scope here and requires its own explicit, separate opt-in — file it as its own issue rather than extending this section.
@@ -108,7 +108,7 @@ Three rules, all mandatory, all reported in the proposal itself:
 
 ### Scope
 
-This lane applies under the `all` sentinel's "Aggressive candidate taxonomy" (issue-set path) and Mode C's C0 per-PR pre-flight, which are the two surfaces that resolve items regardless of label. **Mode A/B's conservative pre-flight skip rules are unchanged** (Wave Lifecycle step 1 still hard-skips `loom:operator` outright) — an explicitly-named issue in Mode A is not a whole-backlog routing decision, and narrowing the blast radius of a first rollout is worth more than uniformity here.
+This lane applies under the `all` sentinel's "Aggressive candidate taxonomy" (issue-set path) and Mode C's C0 per-PR pre-flight, which are the two surfaces that resolve items regardless of label. **Mode A/B's conservative pre-flight skip rules are unchanged** (Wave Lifecycle step 1 still hard-skips `loom:blocked` outright) — an explicitly-named issue in Mode A is not a whole-backlog routing decision, and narrowing the blast radius of a first rollout is worth more than uniformity here.
 
 ## Operator-gate advisory scan (body-phrase + title-prefix detection, #5137, extended #6391)
 

@@ -17,7 +17,7 @@
 # `loom:changes-requested` — i.e. the only way a `loom:pr` PR reaches Doctor —
 # a held PR could never be reported as conflicting nor routed for a rebase.
 # Measured on rjwalters/loom 2026-08-22: 21 open PRs carried `loom:pr` +
-# `loom:operator`, 20 of the 21 were CONFLICTING (two untouched for 63h), and
+# `loom:blocked`, 20 of the 21 were CONFLICTING (two untouched for 63h), and
 # Doctor's `loom:changes-requested` queue was empty.
 #
 # The #6720 fix decouples MERGE PERMISSION from HEALTH REPORTING:
@@ -31,10 +31,10 @@
 #      `champion:merge-risk-hold` marker PRESERVED so the hold re-binds and the
 #      mandatory reversal comment stays mandatory (#4742). A rebase must not
 #      launder a held PR into an unheld one.
-#   4. `loom:operator` is KEPT on the held-and-stale route (narrowing #5802,
+#   4. `loom:blocked` is KEPT on the held-and-stale route (narrowing #5802,
 #      which clears it on the unheld route) — the human merge decision is still
 #      outstanding, and Doctor's `loom:changes-requested` queue filters
-#      `loom:blocked` / `loom:frozen`, not `loom:operator`.
+#      `loom:blocked` / `loom:frozen`, not `loom:blocked`.
 #
 # Follow-up incident (#6848/#6852): the #6720 fix routes ANY held-and-stale PR
 # to Doctor, including one whose ONLY blocker is the standing hold itself (no
@@ -50,7 +50,7 @@
 # new history-tracking machinery, so it is what `HELD_CI_FAILING` is keyed on;
 # criterion #6 is reordered to run BEFORE #5 so that signal is known before
 # #5's routing decision. Neither branch ever touches the hold marker or
-# `loom:operator` — #6720's core property (a held PR is never silently dropped
+# `loom:blocked` — #6720's core property (a held PR is never silently dropped
 # from reporting) holds on both.
 #
 # This file asserts:
@@ -60,21 +60,21 @@
 #      (`loom:changes-requested`) instead of sitting silently.
 #   1B. THE HOLD-ONLY VARIANT (#6852): the identical shape MINUS the failing
 #       check -> the automatic route is SUSPENDED, not fired; the PR stays on
-#       `loom:pr`, still reported, still carrying `loom:operator`.
+#       `loom:pr`, still reported, still carrying `loom:blocked`.
 #   2. Criteria #4/#6/#5 are evaluated under a hold; #3 and the merge are not.
 #   3. The conflict notice, the stale notice, and the suspension notice are
 #      each posted exactly once across repeated ticks (10-minute cron
 #      anti-spam).
 #   4. The hold marker survives the route to Doctor on every held path, AND is
 #      untouched (trivially) on the suspended path.
-#   5. `loom:operator` is kept on the held route (routed or suspended) and
+#   5. `loom:blocked` is kept on the held route (routed or suspended) and
 #      still cleared on the unheld route (#5802 not regressed).
 #   6. A FRESH hold (red axis this tick) gets the same health pass as a sticky
 #      one, for both the hold-plus-feedback and hold-only variants — neither
 #      defect is sticky-specific.
 #   7. The never-held green path is byte-for-byte unchanged (still merges).
 #   8. The held-PR census jq pipeline computes count / conflicting / at-Doctor,
-#      and a hold-only-suspended PR (still `loom:pr` + `loom:operator`) is
+#      and a hold-only-suspended PR (still `loom:pr` + `loom:blocked`) is
 #      still counted exactly like one that routed.
 #   9. The stale-notice marker is keyed per-episode (head SHA), not
 #      posted-ever: a PR that cycled back to `loom:pr` with new commits and
@@ -91,23 +91,23 @@
 # `loom:blocked` exclusion, edit-in-place vs. create) in the shipped markdown.
 #
 # Recurrence incident (#7048): #6720's own fix is what made this possible —
-# 2026-08-28 ~16:31Z the operator batch-removed `loom:operator` from 22
+# 2026-08-28 ~16:31Z the operator batch-removed `loom:blocked` from 22
 # CONFLICTING held PRs so Doctor could rebase them (the release terms were
 # journaled in the operator's own incident tracking, outside this repo).
 # Doctor's rebases worked, but a bare
-# `--remove-label loom:operator` is not one of the four durable release
+# `--remove-label loom:blocked` is not one of the four durable release
 # signals "Sticky holds" (#4742) recognizes, so the hold MARKER survived and
 # re-derived on the next read. When the axes were still red for the SAME
 # reason (a structurally-red blast-radius axis does not change just because
-# `main` moved), "Hold behavior" silently reasserted `loom:operator` —
+# `main` moved), "Hold behavior" silently reasserted `loom:blocked` —
 # overriding the operator's own recent, explicit decision within hours.
-# Because `loom:operator` is exactly what excludes a PR from Doctor's
+# Because `loom:blocked` is exactly what excludes a PR from Doctor's
 # Priority-1 CONFLICTING queue (#5978), the relabeled PRs could never be
 # rebased again: 17 of the 22 released PRs were re-held within ~29 hours, and
 # the merge pace (recovered to ~15/day) dropped back to zero. #7048 narrows
 # "Hold behavior": a manual release is still not a release SIGNAL (the axes
 # are still re-judged fresh, unweakened) — but when the freshly-derived
-# concern is byte-identical to the one already on record AND `loom:operator`
+# concern is byte-identical to the one already on record AND `loom:blocked`
 # was hand-removed since that record was written, the label is not silently
 # reasserted. A genuinely new/different concern still re-holds normally.
 #
@@ -115,7 +115,7 @@
 # PR as plain `loom:pr`, unmerged and out of the census (#10280). A human
 # removal (an `unlabeled` event after the hold) is now release signal (e):
 # same concern -> PASS (merge); a new concern -> a fresh hold notice plus
-# `loom:operator`. The label is still never silently reasserted over the
+# `loom:blocked`. The label is still never silently reasserted over the
 # same concern. test-champion-pr-merge-hold-release.sh runs the SHIPPED
 # precheck against canned forge JSON.
 # This file's Test 14/14B/15/15B cover the per-PR decision; Test 16
@@ -283,23 +283,23 @@ champion_pr_pass() {
     else
         # Never held, or held-and-released: the four axes are judged normally.
         if [ "$axes_red" = true ]; then
-            # Manual-release detection (#7048): the bot never removes
-            # loom:operator on this path (only a real merge or the unheld-
-            # stale route do that), so "a prior hold episode existed AND the
-            # label is not currently on the PR" can only mean a human removed
-            # it by hand since that episode's marker was posted.
+            # Manual-release detection (#7048, #11861): the shipped precheck
+            # also requires a human `unlabeled` event (Champion lifts the
+            # label for a Doctor round-trip; that bot removal is repaired, not
+            # a release, see test-champion-pr-merge-hold-release.sh). This
+            # mirror models only the human-removal case.
             local manual_release_since_hold=false
-            if [ "$prior_hold" = true ] && ! state_has "label:loom:operator" "$state"; then
+            if [ "$prior_hold" = true ] && ! state_has "label:loom:blocked" "$state"; then
                 manual_release_since_hold=true
             fi
 
             if [ "$manual_release_since_hold" = true ] && [ "$reason_changed" != true ]; then
                 # #11416 (supersedes #7048's "respected, still held"): a
-                # human released exactly this concern -> PASS. loom:operator
+                # human released exactly this concern -> PASS. loom:blocked
                 # is NOT reapplied, and the hold does not block the merge.
                 echo "RELEASE:human-same-concern"
             else
-                # "Hold behavior" — idempotent notice + loom:operator, no merge.
+                # "Hold behavior" — idempotent notice + loom:blocked, no merge.
                 # A NEW concern after a human removal always posts (#11416).
                 if [ "$manual_release_since_hold" != true ] && state_has "marker:champion:merge-risk-hold" "$state"; then
                     echo "HOLD_NOTICE:suppressed"
@@ -307,7 +307,7 @@ champion_pr_pass() {
                     state_add "marker:champion:merge-risk-hold" "$state"
                     echo "COMMENT:champion:merge-risk-hold"
                 fi
-                state_add "label:loom:operator" "$state"
+                state_add "label:loom:blocked" "$state"
                 echo "HOLD:fresh"
                 MERGE_BLOCKED_BY_HOLD=true
             fi
@@ -361,7 +361,7 @@ champion_pr_pass() {
             fi
             echo "SUSPENDED:hold-only"
             # No label touched, no marker touched — the PR stays exactly
-            # where it was (loom:pr + loom:operator + the hold marker).
+            # where it was (loom:pr + loom:blocked + the hold marker).
         else
             # ---- Stale PR: hold-plus-feedback, or unheld (#6720/#5802) --
             # #6860: keyed on last_activity, not on marker existence alone — a
@@ -378,13 +378,10 @@ champion_pr_pass() {
                 state_add "label:loom:changes-requested" "$state"
                 echo "LABEL_REMOVE:loom:pr"
                 echo "LABEL_ADD:loom:changes-requested"
-                # loom:operator: conditional on whether a hold is still in
-                # force (#6720 narrowing #5802).
+                # #11861: the hold label (loom:blocked) stays on; Doctor
+                # serves a changes-requested PR with a trusted hold marker.
                 if [ "$MERGE_BLOCKED_BY_HOLD" = true ]; then
-                    echo "LABEL_KEEP:loom:operator"
-                else
-                    state_remove "label:loom:operator" "$state"
-                    echo "LABEL_REMOVE:loom:operator"
+                    echo "LABEL_KEEP:loom:blocked"
                 fi
                 # The hold marker is NEVER touched on this path.
             fi
@@ -600,7 +597,7 @@ echo "Test 1: THE REGRESSION SHAPE, hold-plus-feedback — held + CONFLICTING + 
 # suspension covered by Test 1B below.
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 OUT=$(champion_pr_pass "$S" true "" false CONFLICTING 63 fail)
 
 assert_contains "$OUT" "HOLD:sticky" "the sticky hold is still recognized and still binds"
@@ -613,8 +610,8 @@ assert_contains "$OUT" "LABEL_ADD:loom:changes-requested" \
     "the held+stale+hold-plus-feedback PR REACHES DOCTOR via loom:changes-requested (AC #3, unchanged by #6852)"
 assert_lacks "$OUT" "COMMENT:champion:held-stale-suspended" \
     "a hold-plus-feedback PR is never suspended — only a hold-ONLY PR is (#6852)"
-assert_eq "loom:changes-requested,loom:operator" "$(state_labels "$S")" \
-    "final labels: loom:changes-requested + loom:operator (loom:pr gone)"
+assert_eq "loom:blocked,loom:changes-requested" "$(state_labels "$S")" \
+    "final labels: loom:changes-requested + loom:blocked (loom:pr gone; the hold stays on, #11861)"
 TESTS_RUN=$((TESTS_RUN + 1))
 if state_has "marker:champion:merge-risk-hold" "$S"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -635,7 +632,7 @@ echo "Test 1B: THE HOLD-ONLY VARIANT (#6852) — held + CONFLICTING + past 24h, 
 # by any of it.
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 OUT=$(champion_pr_pass "$S" true "" false CONFLICTING 63 pass)
 
 assert_contains "$OUT" "HOLD:sticky" "the sticky hold is still recognized and still binds"
@@ -651,8 +648,8 @@ assert_lacks "$OUT" "COMMENT:champion:stale-pr-notice" \
 assert_lacks "$OUT" "LABEL_REMOVE:loom:pr" "loom:pr is NOT removed — the automatic rebase cycle is suspended (AC #2)"
 assert_lacks "$OUT" "LABEL_ADD:loom:changes-requested" \
     "the hold-only PR does NOT reach Doctor — routing it would buy nothing (AC #2)"
-assert_eq "loom:operator,loom:pr" "$(state_labels "$S")" \
-    "final labels UNCHANGED: still loom:pr + loom:operator, still held-and-stale (AC #2, #3)"
+assert_eq "loom:blocked,loom:pr" "$(state_labels "$S")" \
+    "final labels UNCHANGED: still loom:pr + loom:blocked, still held-and-stale (AC #2, #3)"
 TESTS_RUN=$((TESTS_RUN + 1))
 if state_has "marker:champion:merge-risk-hold" "$S"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -668,7 +665,7 @@ echo
 echo "Test 1C: hold-only suspension notice idempotency across repeated ticks (#6852)"
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 TICK1=$(champion_pr_pass "$S" true "" false CONFLICTING 63 pass)
 TICK2=$(champion_pr_pass "$S" true "" false CONFLICTING 64 pass)
 TICK3=$(champion_pr_pass "$S" true "" false CONFLICTING 65 pass)
@@ -677,7 +674,7 @@ assert_contains "$TICK2" "SUSPEND_NOTICE:suppressed" "tick 2 suppresses the dupl
 assert_contains "$TICK3" "SUSPEND_NOTICE:suppressed" "tick 3 suppresses the duplicate suspension notice"
 assert_lacks "$TICK2" "LABEL_REMOVE:loom:pr" "tick 2 still does not route — no label swap ever runs on this path"
 assert_lacks "$TICK3" "LABEL_ADD:loom:changes-requested" "tick 3 still does not route — no label swap ever runs on this path"
-assert_eq "loom:operator,loom:pr" "$(state_labels "$S")" \
+assert_eq "loom:blocked,loom:pr" "$(state_labels "$S")" \
     "labels stay unchanged across every tick of a sustained hold-only suspension"
 rm -f "$S"
 echo
@@ -686,7 +683,7 @@ echo
 echo "Test 2: the mechanical criteria are evaluated under a hold; #3 and the merge are not"
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 OUT=$(champion_pr_pass "$S" true "" false MERGEABLE 1 pass)
 assert_contains "$OUT" "EVAL:criterion-4" "criterion #4 (conflict) runs under a hold (AC #1)"
 assert_contains "$OUT" "EVAL:criterion-5" "criterion #5 (recency) runs under a hold (AC #1)"
@@ -700,16 +697,16 @@ echo
 # ---------------------------------------------------------------------
 echo "Test 3: held + CONFLICTING but NOT stale — surfaced, not routed"
 # Doctor's Priority 1 queue (loom:pr + CONFLICTING) deliberately excludes
-# loom:operator (#5978) so autonomous work never force-pushes a held PR.
+# loom:blocked (#5978) so autonomous work never force-pushes a held PR.
 # Conflict alone is therefore a report; conflict PLUS staleness is a route.
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 OUT=$(champion_pr_pass "$S" true "" false CONFLICTING 3 pass)
 assert_contains "$OUT" "COMMENT:champion:held-pr-conflict-notice" "the conflict is reported"
 assert_lacks "$OUT" "LABEL_ADD:loom:changes-requested" \
     "a merely-conflicting held PR is NOT routed to Doctor (respects #5978)"
-assert_eq "loom:operator,loom:pr" "$(state_labels "$S")" "labels are unchanged by a conflict report"
+assert_eq "loom:blocked,loom:pr" "$(state_labels "$S")" "labels are unchanged by a conflict report"
 rm -f "$S"
 echo
 
@@ -719,7 +716,7 @@ echo "Test 4: idempotency across repeated cron ticks — one comment per episode
 # fires, exactly as #6720 shipped; Test 1C above is the hold-only counterpart.
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 TICK1=$(champion_pr_pass "$S" true "" false CONFLICTING 63 fail)
 TICK2=$(champion_pr_pass "$S" true "" false CONFLICTING 64 fail)
 TICK3=$(champion_pr_pass "$S" true "" false CONFLICTING 65 fail)
@@ -733,24 +730,23 @@ rm -f "$S"
 echo
 
 # ---------------------------------------------------------------------
-echo "Test 5: loom:operator — kept on the held route, still cleared on the unheld route (#5802)"
-# Held, hold-plus-feedback: the human merge decision is still outstanding, so
-# the label stays. ci=fail keeps this the routed variant (#6852) — see Test 1B
-# for the hold-only variant, where loom:operator is also kept, but because the
-# label is simply never touched.
+echo "Test 5: loom:blocked — kept on the held route, still cleared on the unheld route (#5802)"
+# Held, hold-plus-feedback (#11861): loom:blocked stays on through the
+# round-trip (Doctor serves a trusted-marker Champion hold), so the PR is never
+# a plain approval while held. ci=fail keeps this the routed variant (#6852).
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 OUT=$(champion_pr_pass "$S" true "" false MERGEABLE 30 fail)
-assert_contains "$OUT" "LABEL_KEEP:loom:operator" "held+stale+hold-plus-feedback keeps loom:operator (AC #4)"
-assert_contains "$(state_labels "$S")" "loom:operator" "loom:operator survives in the final label set"
+assert_contains "$OUT" "LABEL_KEEP:loom:blocked" "held+stale+hold-plus-feedback keeps loom:blocked (#11861)"
+assert_contains "$(state_labels "$S")" "loom:blocked" "loom:blocked survives in the final label set"
 rm -f "$S"
 
 # Unheld: #5802's original behavior, unchanged. Unheld routing never depended
 # on CI status before #6852 and still does not — ci=pass here on purpose.
 S=$(state_new)
 OUT=$(champion_pr_pass "$S" false "" false MERGEABLE 30 pass)
-assert_contains "$OUT" "LABEL_REMOVE:loom:operator" "unheld+stale still clears loom:operator (#5802 not regressed)"
+assert_lacks "$OUT" "LABEL_REMOVE:loom:blocked" "unheld+stale has no Champion hold label to lift"
 assert_contains "$OUT" "LABEL_ADD:loom:changes-requested" "unheld+stale still routes to Doctor"
 assert_eq "loom:changes-requested" "$(state_labels "$S")" "unheld+stale final labels are unchanged from #5802"
 rm -f "$S"
@@ -769,7 +765,7 @@ assert_contains "$OUT" "HOLD:fresh" "the fresh hold blocks the merge"
 assert_contains "$OUT" "EVAL:criterion-5" "criterion #5 still runs behind a fresh hold"
 assert_contains "$OUT" "COMMENT:champion:held-pr-conflict-notice" "a freshly-held conflicting PR is surfaced too"
 assert_contains "$OUT" "LABEL_ADD:loom:changes-requested" "a freshly-held, hold-plus-feedback stale PR reaches Doctor too"
-assert_contains "$OUT" "LABEL_KEEP:loom:operator" "the fresh hold's loom:operator is kept on the route"
+assert_contains "$OUT" "LABEL_KEEP:loom:blocked" "the fresh hold's loom:blocked is kept on the route (#11861)"
 TESTS_RUN=$((TESTS_RUN + 1))
 if state_has "marker:champion:merge-risk-hold" "$S"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -793,8 +789,8 @@ assert_contains "$OUT" "COMMENT:champion:held-pr-conflict-notice" "a freshly-hel
 assert_contains "$OUT" "SUSPENDED:hold-only" "the freshly-held, hold-only stale PR is suspended, not routed"
 assert_contains "$OUT" "COMMENT:champion:held-stale-suspended" "the suspension notice is posted"
 assert_lacks "$OUT" "LABEL_ADD:loom:changes-requested" "a freshly-held, hold-only stale PR does NOT reach Doctor"
-assert_eq "loom:operator,loom:pr" "$(state_labels "$S")" \
-    "final labels: still loom:pr + loom:operator — the fresh hold's own label add survives, untouched by the suspension"
+assert_eq "loom:blocked,loom:pr" "$(state_labels "$S")" \
+    "final labels: still loom:pr + loom:blocked — the fresh hold's own label add survives, untouched by the suspension"
 TESTS_RUN=$((TESTS_RUN + 1))
 if state_has "marker:champion:merge-risk-hold" "$S"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -820,7 +816,7 @@ rm -f "$S"
 # signal merge exactly as before #6720.
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 OUT=$(champion_pr_pass "$S" true "new head commit abc1234" false MERGEABLE 2 pass)
 assert_contains "$OUT" "MERGE" "a genuinely-released hold with green axes still merges (#4742 semantics intact)"
 rm -f "$S"
@@ -829,7 +825,7 @@ rm -f "$S"
 # marker survived. This is the "rebase does not launder a held PR" property.
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-state_add "label:loom:operator" "$S"
+state_add "label:loom:blocked" "$S"
 OUT=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 2 pass)
 assert_contains "$OUT" "HOLD_NOTICE:suppressed" "the re-hold after a rebase is silent (idempotency guard)"
 assert_contains "$OUT" "NO_MERGE:hold" "a rebased-but-still-red PR is re-held, not laundered into a merge"
@@ -838,16 +834,16 @@ echo
 
 # ---------------------------------------------------------------------
 echo "Test 8: held-PR census counts the set, the conflicts, and the ones out at Doctor"
-# #6445 below (loom:pr + loom:operator, CONFLICTING, no loom:changes-requested)
+# #6445 below (loom:pr + loom:blocked, CONFLICTING, no loom:changes-requested)
 # is exactly the shape a hold-only-suspended PR (#6852) leaves behind: it never
 # left loom:pr, so it is invisible to HELD_AT_DOCTOR but still counted in
-# HELD_COUNT/HELD_CONFLICTING via the loom:operator query alone — this doubles
+# HELD_COUNT/HELD_CONFLICTING via the loom:blocked query alone — this doubles
 # as the #6852 "never silently dropped from reporting" check (#6720's core
 # property), independent of whether the PR routed or was suspended.
 CENSUS_FIXTURE='[
-  {"number":6445,"createdAt":"2026-08-10T00:00:00Z","updatedAt":"2026-08-19T14:59:00Z","mergeable":"CONFLICTING","labels":[{"name":"loom:pr"},{"name":"loom:operator"}]},
-  {"number":6484,"createdAt":"2026-08-12T00:00:00Z","updatedAt":"2026-08-19T14:59:00Z","mergeable":"CONFLICTING","labels":[{"name":"loom:changes-requested"},{"name":"loom:operator"}]},
-  {"number":6621,"createdAt":"2026-08-18T00:00:00Z","updatedAt":"2026-08-22T09:00:00Z","mergeable":"MERGEABLE","labels":[{"name":"loom:pr"},{"name":"loom:operator"}]}
+  {"number":6445,"createdAt":"2026-08-10T00:00:00Z","updatedAt":"2026-08-19T14:59:00Z","mergeable":"CONFLICTING","labels":[{"name":"loom:pr"},{"name":"loom:blocked"}]},
+  {"number":6484,"createdAt":"2026-08-12T00:00:00Z","updatedAt":"2026-08-19T14:59:00Z","mergeable":"CONFLICTING","labels":[{"name":"loom:changes-requested"},{"name":"loom:blocked"}]},
+  {"number":6621,"createdAt":"2026-08-18T00:00:00Z","updatedAt":"2026-08-22T09:00:00Z","mergeable":"MERGEABLE","labels":[{"name":"loom:pr"},{"name":"loom:blocked"}]}
 ]'
 assert_eq "3 2 1" "$(printf '%s\n' "$CENSUS_FIXTURE" | held_census)" \
     "census: 3 held, 2 conflicting, 1 out at Doctor (AC #5)"
@@ -1168,7 +1164,7 @@ assert_doc_contains "$CHAMPION_MD" \
 
 assert_doc_contains "$CHAMPION_MD" \
     'HELD="${MERGE_BLOCKED_BY_HOLD:-false}"' \
-    "the stale-PR block reads MERGE_BLOCKED_BY_HOLD to decide the loom:operator reversal"
+    "the stale-PR block reads MERGE_BLOCKED_BY_HOLD to decide the loom:blocked reversal"
 
 assert_doc_contains "$CHAMPION_MD" \
     '<!-- champion:held-pr-conflict-notice -->' \
@@ -1179,8 +1175,12 @@ assert_doc_contains "$CHAMPION_MD" \
     "the conflict notice uses the startswith idempotency guard (#5371), not a substring match"
 
 assert_doc_contains "$CHAMPION_MD" \
-    'Kept loom:operator on #$PR_NUMBER' \
-    "the stale route keeps loom:operator when a hold is in force (AC #4)"
+    'PR keeps loom:blocked (#11861): Doctor works it by its trusted marker.' \
+    "the stale route keeps loom:blocked on a held PR (#11861)"
+
+assert_doc_lacks "$CHAMPION_MD" \
+    'Lifted loom:blocked on #' \
+    "the stale route never lifts the hold label (#11861 review)"
 
 assert_doc_contains "$CHAMPION_MD" \
     "**Never delete or edit the \`champion:merge-risk-hold\` comment here**" \
@@ -1199,8 +1199,8 @@ assert_doc_contains "$CHAMPION_COMMON_MD" \
     "champion-common.md's Completion Report requires the merge-risk hold census line"
 
 assert_doc_contains "$LABEL_SM_MD" \
-    "The stale-PR route out of \`loom:pr\` (#5802, narrowed by #6720)" \
-    "label-state-machine.md documents the loom:operator decision for the held route (AC #4)"
+    "The stale-PR route out of \`loom:pr\` (#5802, #6720, #6852)" \
+    "label-state-machine.md documents the loom:blocked decision for the held route (AC #4)"
 
 assert_doc_contains "$CHAMPION_MD" \
     'STALE_MARKER="<!-- champion:stale-pr-notice:$LAST_ACTIVITY -->"' \
@@ -1274,7 +1274,7 @@ assert_doc_lacks "$CHAMPION_MD" \
 
 # --- #6843: criterion #5 must not derive staleness from `updatedAt` ---
 # `updatedAt` is bumped by ANY PR write, including the Held-PR Health Pass's
-# OWN comments (conflict notices, loom:operator reasserts) — so a held PR
+# OWN comments (conflict notices, loom:blocked reasserts) — so a held PR
 # nobody but Champion touches never accumulates real staleness and the stale
 # route above (Test 1-6) never fires in practice, even though this file's
 # mirror (which takes hours_ago as a plain input) cannot see that failure
@@ -1405,7 +1405,7 @@ assert_doc_contains "$CHAMPION_MD" \
     "the sticky-hold precheck computes MANUAL_RELEASE_SINCE_HOLD (#7048)"
 
 assert_doc_contains "$CHAMPION_MD" \
-    'OPERATOR_LABEL_NOW=$(jq -r '"'"'[.labels[].name] | any(. == "loom:operator")'"'"' <<<"$PR_JSON")' \
+    'HOLD_LABEL_NOW=$(jq -r '"'"'[.labels[].name] | any(. == "loom:blocked")'"'"' <<<"$PR_JSON")' \
     "manual release is detected from the SAME already-fetched PR_JSON, no extra forge call (#7048)"
 
 assert_doc_contains "$CHAMPION_MD" \
@@ -1425,8 +1425,8 @@ assert_doc_contains "$CHAMPION_MD" \
     "a NEW concern after a human removal always posts a fresh hold notice, bypassing the idempotency guard (#11416)"
 
 assert_doc_contains "$CHAMPION_MD" \
-    'gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true' \
-    "loom:operator is still reapplied on the genuinely-new-reason branch — #7048 narrows, does not remove, the reapply (AC #1)"
+    'loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion merge-risk hold"' \
+    "loom:blocked is still reapplied on the genuinely-new-reason branch — #7048 narrows, does not remove, the reapply (AC #1)"
 
 assert_doc_lacks "$CHAMPION_MD" \
     "Undercounts a manually-released, still-open hold by design" \
@@ -1441,68 +1441,68 @@ assert_doc_contains "$CHAMPION_MD" \
     "the pinned digest carries the released-not-merged line too (#11416)"
 
 echo
-echo "Test 14: human release, SAME concern — released and merged, loom:operator NOT reapplied (#11416, was #7048)"
-# The #10280 shape: held, then the operator removed loom:operator (absent
+echo "Test 14: human release, SAME concern — released and merged, loom:blocked NOT reapplied (#11416, was #7048)"
+# The #10280 shape: held, then the operator removed loom:blocked (absent
 # from the state below), and the re-read finds the SAME concern. Under #7048
 # this stayed held as plain loom:pr, unmerged; #11416 makes it a release.
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-# loom:operator deliberately NOT added — models the hand removal.
-OUT=$(champion_pr_pass "$S" true "loom:operator removed by rjwalters" true MERGEABLE 2 pass 2026-08-01T00:00:00Z false)
+# loom:blocked deliberately NOT added — models the hand removal.
+OUT=$(champion_pr_pass "$S" true "loom:blocked removed by rjwalters" true MERGEABLE 2 pass 2026-08-01T00:00:00Z false)
 assert_contains "$OUT" "RELEASE:human-same-concern" "the human removal releases the hold for the same concern"
 assert_lacks "$OUT" "COMMENT:champion:merge-risk-hold" "the ORIGINAL hold notice is not reposted"
 assert_lacks "$OUT" "NO_MERGE:hold" "the hold no longer blocks the merge — never silently loom:pr and unmerged (#11416 AC3)"
 assert_eq "MERGE" "$(tail -n 1 <<<"$OUT")" "the PR merges on this tick (criteria #4-#6 green)"
-assert_lacks "$(state_labels "$S")" "loom:operator" "loom:operator is NOT reapplied over the human's decision"
+assert_lacks "$(state_labels "$S")" "loom:blocked" "loom:blocked is NOT reapplied over the human's decision"
 rm -f "$S"
 echo
 
 echo "Test 14B: human release, SAME concern, but CONFLICTING — no hold, so it routes like any unheld PR (#11416)"
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-OUT=$(champion_pr_pass "$S" true "loom:operator removed by rjwalters" true CONFLICTING 2 pass)
+OUT=$(champion_pr_pass "$S" true "loom:blocked removed by rjwalters" true CONFLICTING 2 pass)
 assert_contains "$OUT" "NO_MERGE:conflict" "blocked only by the conflict, not by the hold"
 assert_lacks "$OUT" "COMMENT:champion:held-pr-conflict-notice" "no held-PR conflict notice — it is not held"
-assert_lacks "$(state_labels "$S")" "loom:operator" "loom:operator stays off, so Doctor's Priority-1 queue can rebase it (#5978)"
+assert_lacks "$(state_labels "$S")" "loom:blocked" "loom:blocked stays off, so Doctor's Priority-1 queue can rebase it (#5978)"
 rm -f "$S"
 echo
 
-echo "Test 15: human release, but a NEW/different concern — fresh hold notice, loom:operator IS reapplied (#7048, #11416)"
+echo "Test 15: human release, but a NEW/different concern — fresh hold notice, loom:blocked IS reapplied (#7048, #11416)"
 # The operator has not seen THIS concern before, so re-flagging it is fair.
 # #11416: the new notice is POSTED despite the existing marker, so it becomes
 # the hold on record and the human's next removal releases it.
 S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
-OUT=$(champion_pr_pass "$S" true "loom:operator removed by rjwalters" true MERGEABLE 2 pass 2026-08-01T00:00:00Z true)
+OUT=$(champion_pr_pass "$S" true "loom:blocked removed by rjwalters" true MERGEABLE 2 pass 2026-08-01T00:00:00Z true)
 assert_contains "$OUT" "HOLD:fresh" "a genuinely new/different concern re-holds normally, even after a manual release (AC #1)"
 assert_contains "$OUT" "COMMENT:champion:merge-risk-hold" "the new concern gets its own hold notice, not a suppressed one (#11416)"
 assert_contains "$OUT" "NO_MERGE:hold" "a new concern blocks the merge"
 assert_lacks "$OUT" "RELEASE:human-same-concern" "this is not the same-concern release path"
-assert_contains "$(state_labels "$S")" "loom:operator" "loom:operator is reapplied — the operator has not seen this NEW reason yet"
+assert_contains "$(state_labels "$S")" "loom:blocked" "loom:blocked is reapplied — the operator has not seen this NEW reason yet"
 rm -f "$S"
 echo
 
 echo "Test 15B: manual release detection requires a PRIOR hold episode — a PR's very first hold is unaffected (#7048)"
 # prior_hold=false (never held before): MANUAL_RELEASE_SINCE_HOLD is
-# trivially false regardless of whether loom:operator happens to be absent
+# trivially false regardless of whether loom:blocked happens to be absent
 # (it always is, on a first-ever hold) — this must behave exactly like the
 # pre-#7048 "fresh hold" path (Test 6/6B above), not the respected path.
 S=$(state_new)
 OUT=$(champion_pr_pass "$S" false "" true MERGEABLE 2 pass)
-assert_contains "$OUT" "HOLD:fresh" "a PR's first-ever hold always reapplies loom:operator, never the respected path"
+assert_contains "$OUT" "HOLD:fresh" "a PR's first-ever hold always reapplies loom:blocked, never the respected path"
 assert_lacks "$OUT" "RELEASE:human-same-concern" "no prior episode exists to have been manually released from"
-assert_contains "$(state_labels "$S")" "loom:operator" "loom:operator is applied on the ordinary first-ever hold"
+assert_contains "$(state_labels "$S")" "loom:blocked" "loom:blocked is applied on the ordinary first-ever hold"
 rm -f "$S"
 echo
 
 # ---------------------------------------------------------------------
 echo "Test 16: MERGE-WAVE REGRESSION (#7048) — N previously-held, manually-released PRs must drain to zero open conflicts, not restabilize into an all-held deadlock"
 # This is the exact incident shape from the issue: 2026-08-28->08-29,
-# rjwalters batch-released loom:operator from 22 CONFLICTING held PRs so
-# Doctor could rebase them; the bot re-applied loom:operator to 17 of them
+# rjwalters batch-released loom:blocked from 22 CONFLICTING held PRs so
+# Doctor could rebase them; the bot re-applied loom:blocked to 17 of them
 # within ~29 hours as each rebase re-derived the same still-red concern,
 # and the merge pace dropped back to zero. Doctor's Priority-1 queue only
-# ever touches a CONFLICTING PR that does NOT carry loom:operator (#5978) —
+# ever touches a CONFLICTING PR that does NOT carry loom:blocked (#5978) —
 # so once the bot relabels a PR, Doctor can never rebase it again, and it
 # stays CONFLICTING forever. This wave models that queue directly: PRE-#7048
 # reapply logic always reasserts the label (axes never actually go green in
@@ -1530,13 +1530,13 @@ hold_reapply_decision_POST7048() {
 }
 
 # Simulate a merge wave over $n PRs, all previously held for the SAME
-# structurally-red concern and all manually released (loom:operator absent,
+# structurally-red concern and all manually released (loom:blocked absent,
 # hold marker still present) right before the wave starts. Each tick, Doctor
 # rebases exactly one CONFLICTING, non-excluded PR (its Priority-1 queue):
 # the rebase mechanically clears THAT PR's own conflict, then Champion
 # re-judges it (axes still red, same reason, manual release in force). If
 # $decision_fn says "reapply" the PR becomes EXCLUDED — stuck CONFLICTING
-# forever, since Doctor's queue will never touch a loom:operator PR again. If
+# forever, since Doctor's queue will never touch a loom:blocked PR again. If
 # it says "do not reapply", the PR is free to proceed (modeled here as
 # merging, since nothing further blocks it once Doctor+the label are out of
 # the way) — and per the issue's own observed shape, merging one PR moves

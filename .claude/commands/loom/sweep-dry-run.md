@@ -76,7 +76,7 @@ When `--builders-per-wave` was passed explicitly, the header shows the number wi
 - Issue number
 - Title (truncated reasonably if very long)
 - Current labels (comma-separated, or `(none)`)
-- Planned action (`would build`, `would curate, build`, `would skip (<reason>)`, `would route to Judge (existing PR #X in flight)`, `would merge (existing PR #X already loom:pr)`, `would skip (PR #X held by loom:operator)` — the linked PR is `loom:pr` but also carries `loom:operator`, per #6398; `would skip (existing PR #X is draft/unlabeled)` — the one open linked PR is a draft and/or has no actionable label, so neither Judge nor Builder is dispatched, per #8160). Under the `all` sentinel (`SWEEP_ALL_AGGRESSIVE=true`) the aggressive actions also appear: `would reclaim (stale loom:building), build`, `would unblock (#N merged), build`, `would skip (still blocked by #N)`, `would skip (explicit hold: "<phrase>")`, `would expand epic (→ #a #b)`, `would skip (needs decomposition)`, `would reclaim (stale loom:abort), build`, `would skip (abort flag set)`, `would skip (operator)`, `would skip (waiting on capability <name>)`, `would propose (mechanical lane, holds: <caps>)`, `would skip (mechanical: missing capability <name>)` (#6893).
+- Planned action (`would build`, `would curate, build`, `would skip (<reason>)`, `would route to Judge (existing PR #X in flight)`, `would merge (existing PR #X already loom:pr)`, `would skip (PR #X held — <label>)` — the linked `loom:pr` PR also carries `loom:operator` or `loom:blocked` (#6398); `would skip (existing PR #X is draft/unlabeled)` — the one open linked PR is a draft and/or has no actionable label, so neither Judge nor Builder is dispatched, per #8160). Under the `all` sentinel (`SWEEP_ALL_AGGRESSIVE=true`) the aggressive actions also appear: `would reclaim (stale loom:building), build`, `would unblock (#N merged), build`, `would skip (still blocked by #N)`, `would skip (explicit hold: "<phrase>")`, `would expand epic (→ #a #b)`, `would skip (needs decomposition)`, `would reclaim (stale loom:abort), build`, `would skip (abort flag set)`, `would skip (operator)`, `would skip (waiting on capability <name>)`, `would propose (mechanical lane, holds: <caps>)`, `would skip (mechanical: missing capability <name>)` (#6893).
 - Wave assignment (shown via the `Wave N:` group header)
 - **Operator-gate annotation (only under the `all` sentinel, appended, never replacing the planned action — #5137)**: when step 1c matched, append `⚠ body declares operator-gating: "<phrase>"` and/or `⚠ depends on #A, which is loom:operator` after the planned action, one per matched signal. No match → no suffix, row unchanged from today.
 
@@ -168,7 +168,7 @@ Total: 1 would-judge, 1 would-doctor-then-judge, 1 would-merge, 2 would-skip. No
 - `would skip (PR closed without merge)` — `state: CLOSED` (non-merged).
 - `would skip (loom:blocked)` — PR carries `loom:blocked` (do not act on operator-flagged PRs).
 - `would skip (multiple actionable labels)` — PR carries two or more of `{loom:review-requested, loom:changes-requested, loom:pr}` simultaneously (human-attention case — which transition is canonical?).
-- `would skip (loom:operator)` — PR is `loom:pr` but also carries `loom:operator` (Champion's merge-risk hold, or another operator-applied hold); C1c does not route it to Merge (#6398).
+- `would skip (loom:operator)` / `would skip (loom:blocked)` — the PR is parked (a human's hold, or Champion's hold, #11861); C0 skips it (#6398).
 
 ### Out of scope for dry-run output (all modes)
 

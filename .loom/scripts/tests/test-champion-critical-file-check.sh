@@ -34,8 +34,8 @@
 # label-check/size-check/ci-status, even though nothing about a diff's
 # critical-file-ness clears on its own. A fleet PR was re-evaluated and
 # re-rejected ~59 times over 36 hours this way (200-300s/tick), invisible to
-# the operator queue the whole time (no loom:operator* label). The fix routes
-# criterion #3's FAIL through its own durable hold instead — `loom:operator`
+# the operator queue the whole time (no loom:blocked* label). The fix routes
+# criterion #3's FAIL through its own durable hold instead — `loom:blocked`
 # + a `<!-- champion:critical-file-hold -->` marker, mirroring criterion #2's
 # merge-risk hold — released only when a later push narrows the diff so it no
 # longer matches any critical-file pattern.
@@ -49,7 +49,7 @@
 #      `gh pr view <number> --json files` invocation for either the
 #      criterion #3 FILES command or the criterion #2 evidence-gathering
 #      command, and does contain the paginated replacement.
-#   4. (#6879) A fresh critical-file FAIL applies the loom:operator label and
+#   4. (#6879) A fresh critical-file FAIL applies the loom:blocked label and
 #      posts the champion:critical-file-hold marker comment exactly once; a
 #      repeated FAIL against an unchanged file set is idempotent (no
 #      duplicate label/comment); and a later PASS (diff no longer touches a
@@ -466,7 +466,7 @@ assert_doc_contains "$CHAMPION_MD" \
 # Durable critical-file hold (#6879): a critical-file FAIL is a one-way
 # terminal state (nothing about a diff's critical-file-ness changes without a
 # human decision or a later push that narrows the diff), so criterion #3 now
-# applies its own durable hold (`loom:operator` + `<!-- champion:critical-
+# applies its own durable hold (`loom:blocked` + `<!-- champion:critical-
 # file-hold -->`) instead of routing through the shared "Transient failures"
 # template. Mirrored here (same rationale as the mirrors above: the criterion
 # is prose an LLM instance executes, not a standalone script) from
@@ -515,7 +515,7 @@ assert_lacks() {
 # needing real timestamps (a deterministic check-loop makes this sufficient —
 # see the doc's own rationale for skipping criterion #2's sticky-hold
 # machinery). `released` is #9016's state: the operator hand-removed
-# loom:operator at the head the hold was written against.
+# loom:blocked at the head the hold was written against.
 hold_state_get() {
     local f="$1"
     [[ -f "$f" ]] && awk '{print $1}' "$f" || echo "none"
@@ -528,7 +528,7 @@ hold_state_set() {
     printf '%s %s' "$2" "${3:-}" >"$1"
 }
 
-# LABEL_FILE tracks whether loom:operator is currently applied ("1"/"0").
+# LABEL_FILE tracks whether loom:blocked is currently applied ("1"/"0").
 label_get() {
     local f="$1"
     [[ -f "$f" ]] && cat "$f" || echo "0"
@@ -590,13 +590,13 @@ champion_critical_file_hold_tick() {
                 ;;
             stands)
                 echo "HOLD:stands"
-                echo "LABEL_ADD:loom:operator"
+                echo "LABEL_ADD:loom:blocked"
                 label_set "$label_file" "1"
                 ;;
             hold|rearm)
                 [[ "$action" == "rearm" ]] && echo "REARM:${state_head:-<none>}->$head_sha"
                 echo "COMMENT:champion:critical-file-hold"
-                echo "LABEL_ADD:loom:operator"
+                echo "LABEL_ADD:loom:blocked"
                 hold_state_set "$hold_state_file" "held" "$head_sha"
                 label_set "$label_file" "1"
                 ;;
@@ -609,7 +609,7 @@ champion_critical_file_hold_tick() {
         esac
     elif [[ "$state" == "held" || "$state" == "released" ]]; then
         echo "COMMENT:champion:critical-file-hold-cleared"
-        echo "LABEL_REMOVE:loom:operator"
+        echo "LABEL_REMOVE:loom:blocked"
         hold_state_set "$hold_state_file" "cleared" ""
         label_set "$label_file" "0"
     else
@@ -628,12 +628,12 @@ critical_fixture=$'src/lib.rs\n.github/workflows/new-ci-job.yml'
 out="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF")"
 assert_contains "$out" "COMMENT:champion:critical-file-hold" \
     "a fresh critical-file FAIL posts the champion:critical-file-hold marker comment"
-assert_contains "$out" "LABEL_ADD:loom:operator" \
-    "a fresh critical-file FAIL adds the loom:operator label"
+assert_contains "$out" "LABEL_ADD:loom:blocked" \
+    "a fresh critical-file FAIL adds the loom:blocked label"
 assert_eq "held" "$(hold_state_get "$HS")" \
     "hold state is recorded as held after the first rejection"
 assert_eq "1" "$(label_get "$LF")" \
-    "loom:operator is applied after the first rejection"
+    "loom:blocked is applied after the first rejection"
 
 echo
 echo "--- critical-file hold: no duplicate label/comment on a repeated rejection with an unchanged file set (idempotency, #6879) ---"
@@ -647,7 +647,7 @@ assert_eq "0" "$comment_count" \
 assert_eq "held" "$(hold_state_get "$HS")" \
     "hold state remains held (unchanged) across the repeated rejection"
 assert_eq "1" "$(label_get "$LF")" \
-    "loom:operator remains applied (label add is idempotent) across the repeated rejection"
+    "loom:blocked remains applied (label add is idempotent) across the repeated rejection"
 
 echo
 echo "--- critical-file hold: label/marker cleared when a later push no longer touches a critical file (#6879) ---"
@@ -656,12 +656,12 @@ clean_fixture=$'src/lib.rs\nsrc/other.rs'
 out3="$(printf '%s\n' "$clean_fixture" | champion_critical_file_hold_tick "$HS" "$LF")"
 assert_contains "$out3" "COMMENT:champion:critical-file-hold-cleared" \
     "a PASS after a prior hold posts the champion:critical-file-hold-cleared marker comment"
-assert_contains "$out3" "LABEL_REMOVE:loom:operator" \
-    "a PASS after a prior hold removes the loom:operator label"
+assert_contains "$out3" "LABEL_REMOVE:loom:blocked" \
+    "a PASS after a prior hold removes the loom:blocked label"
 assert_eq "cleared" "$(hold_state_get "$HS")" \
     "hold state is recorded as cleared once the diff no longer matches a critical pattern"
 assert_eq "0" "$(label_get "$LF")" \
-    "loom:operator is removed once the diff no longer matches a critical pattern"
+    "loom:blocked is removed once the diff no longer matches a critical pattern"
 
 out4="$(printf '%s\n' "$clean_fixture" | champion_critical_file_hold_tick "$HS" "$LF")"
 assert_eq "PASS:no-hold" "$out4" \
@@ -679,22 +679,22 @@ echo
 echo "--- critical-file hold: an operator's label removal at the held head is a durable release (#9016) ---"
 
 # Merge train #8996's exact shape: the hold stands, the operator removes
-# loom:operator by hand (the documented release), and the NEXT Champion tick
+# loom:blocked by hand (the documented release), and the NEXT Champion tick
 # must not put it back — that re-add is what made the documented
 # `merge-pr.sh <N>` path unusable, because the #8112 verdict-contradiction
-# guard refuses `loom:pr` + `loom:operator` and has no override flag.
+# guard refuses `loom:pr` + `loom:blocked` and has no override flag.
 HS="$(mktemp)"
 LF="$(mktemp)"
 rm -f "$HS" "$LF"
 
 printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-A" >/dev/null
 assert_eq "1" "$(label_get "$LF")" \
-    "precondition: the hold is standing with loom:operator applied at sha-A"
+    "precondition: the hold is standing with loom:blocked applied at sha-A"
 
-label_set "$LF" "0"   # operator: gh pr edit --remove-label "loom:operator"
+label_set "$LF" "0"   # operator: gh pr edit --remove-label "loom:blocked"
 rel="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-A")"
-assert_lacks "$rel" "LABEL_ADD:loom:operator" \
-    "the tick after a hand-removal at the held head does NOT re-apply loom:operator (#9016)"
+assert_lacks "$rel" "LABEL_ADD:loom:blocked" \
+    "the tick after a hand-removal at the held head does NOT re-apply loom:blocked (#9016)"
 assert_contains "$rel" "COMMENT:champion:critical-file-release-respected" \
     "the tick records the release durably, behind its own marker"
 assert_eq "released" "$(hold_state_get "$HS")" \
@@ -702,7 +702,7 @@ assert_eq "released" "$(hold_state_get "$HS")" \
 assert_eq "sha-A" "$(hold_head_get "$HS")" \
     "the release is recorded against the head it was made at"
 assert_eq "0" "$(label_get "$LF")" \
-    "loom:operator stays OFF, so merge-pr.sh sees no loom:pr/loom:operator contradiction (#8112)"
+    "loom:blocked stays OFF, so merge-pr.sh sees no loom:pr/loom:blocked contradiction (#8112)"
 
 # ...and it stays released across further ticks, with no comment spam: this is
 # the "non-racy" half of the acceptance criterion. An operator can release,
@@ -711,7 +711,7 @@ rel2="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$H
 assert_eq "RELEASED:no-rehold:sha-A" "$rel2" \
     "a later tick at the same head is a complete no-op — no label, no comment (idempotent ack)"
 assert_eq "0" "$(label_get "$LF")" \
-    "loom:operator is still OFF after repeated ticks at the released head"
+    "loom:blocked is still OFF after repeated ticks at the released head"
 
 echo
 echo "--- critical-file hold: the release survives an EQUIVALENT head move (#9416) ---"
@@ -724,7 +724,7 @@ for kind in tree clean-merge rebase-patch-identical; do
     hold_state_set "$HS" "released" "sha-A"
     label_set "$LF" "0"
     eq="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "$kind")"
-    assert_lacks "$eq" "LABEL_ADD:loom:operator" \
+    assert_lacks "$eq" "LABEL_ADD:loom:blocked" \
         "an equivalent head move ($kind) does NOT re-arm the hold (#9416)"
     assert_lacks "$eq" "COMMENT:champion:critical-file-hold" \
         "an equivalent head move ($kind) posts no new hold notice"
@@ -733,7 +733,7 @@ for kind in tree clean-merge rebase-patch-identical; do
     assert_eq "sha-B" "$(hold_head_get "$HS")" \
         "the release is re-anchored at the new head, so the next tick needs no comparison ($kind)"
     assert_eq "0" "$(label_get "$LF")" \
-        "loom:operator stays OFF across an equivalent head move ($kind)"
+        "loom:blocked stays OFF across an equivalent head move ($kind)"
 done
 
 # ...and the re-anchored release is then honored at the new head with no
@@ -750,18 +750,18 @@ label_set "$LF" "0"
 noans="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "")"
 assert_contains "$noans" "REARM:sha-A->sha-B" \
     "no equivalence answer re-arms the hold — fail closed, the pre-#9416 behavior (#9416)"
-assert_contains "$noans" "LABEL_ADD:loom:operator" \
-    "the fail-closed arm re-applies loom:operator, so nothing merges unlooked-at"
+assert_contains "$noans" "LABEL_ADD:loom:blocked" \
+    "the fail-closed arm re-applies loom:blocked, so nothing merges unlooked-at"
 
 # A legacy hold (no recorded head) is never carried by equivalence either: there
 # is no recorded head to compare against, so there is nothing to prove.
 hold_state_set "$HS" "held" ""
 label_set "$LF" "0"
 legacy_eq="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "tree")"
-assert_contains "$legacy_eq" "LABEL_ADD:loom:operator" \
+assert_contains "$legacy_eq" "LABEL_ADD:loom:blocked" \
     "a legacy hold with no recorded head re-arms even when an equivalence kind is offered (#9416)"
 
-# THE RESISTING CASE for #9416: a released episode whose `loom:operator` is BACK
+# THE RESISTING CASE for #9416: a released episode whose `loom:blocked` is BACK
 # ON. Proven equivalence must NOT be read as a live release — somebody put the
 # label back, which is a re-assertion of the hold, and the operator-release
 # inference (#9016) only ever meant "the label is absent". The hold stands.
@@ -769,11 +769,11 @@ hold_state_set "$HS" "released" "sha-A"
 label_set "$LF" "1"
 relabeled="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "tree")"
 assert_contains "$relabeled" "HOLD:stands" \
-    "a re-added loom:operator overrides a proven equivalence — the hold stands (#9416)"
+    "a re-added loom:blocked overrides a proven equivalence — the hold stands (#9416)"
 assert_lacks "$relabeled" "champion:critical-file-release-respected" \
-    "no release is acknowledged while loom:operator is applied"
+    "no release is acknowledged while loom:blocked is applied"
 assert_eq "1" "$(label_get "$LF")" \
-    "loom:operator stays ON when a human re-asserted the hold"
+    "loom:blocked stays ON when a human re-asserted the hold"
 
 echo
 echo "--- critical-file hold: a new push re-arms the hold after a release (#9016) ---"
@@ -787,8 +787,8 @@ assert_contains "$rearm" "REARM:sha-A->sha-B" \
     "a FAIL at a new head after a release re-arms the hold"
 assert_contains "$rearm" "COMMENT:champion:critical-file-hold" \
     "the re-arm is a NEW hold notice, not an edit of the old one"
-assert_contains "$rearm" "LABEL_ADD:loom:operator" \
-    "the re-arm re-applies loom:operator at the new head"
+assert_contains "$rearm" "LABEL_ADD:loom:blocked" \
+    "the re-arm re-applies loom:blocked at the new head"
 assert_eq "sha-B" "$(hold_head_get "$HS")" \
     "the new episode records the new head"
 
@@ -796,7 +796,7 @@ assert_eq "sha-B" "$(hold_head_get "$HS")" \
 # has to race a tick, whatever the history.
 label_set "$LF" "0"
 rel3="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B")"
-assert_lacks "$rel3" "LABEL_ADD:loom:operator" \
+assert_lacks "$rel3" "LABEL_ADD:loom:blocked" \
     "a release at the re-armed head is honored too (no re-add), not read as the older release"
 assert_eq "released" "$(hold_state_get "$HS")" \
     "the second release is recorded like the first"
@@ -806,7 +806,7 @@ assert_eq "released" "$(hold_state_get "$HS")" \
 hold_state_set "$HS" "held" ""
 label_set "$LF" "0"
 legacy="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B")"
-assert_contains "$legacy" "LABEL_ADD:loom:operator" \
+assert_contains "$legacy" "LABEL_ADD:loom:blocked" \
     "a legacy hold with no recorded head re-arms instead of silently releasing (fail-safe)"
 
 # And a released episode still closes normally once the diff narrows.
@@ -832,12 +832,12 @@ assert_doc_contains "$CRITICAL_HOLD_MD" \
     "the hold prompt defines a distinct cleared-marker for the diff-narrowed release path"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'gh pr edit "$PR_NUMBER" --add-label "loom:operator"' \
-    "the durable-hold path applies loom:operator (#5502) on FAIL"
+    'loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion critical-file hold" --by champion' \
+    "the durable-hold path applies loom:blocked + a reason-only park record on FAIL (#11861)"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'gh pr edit "$PR_NUMBER" --remove-label "loom:operator"' \
-    "the release path removes loom:operator once the diff no longer touches a critical file"
+    'gh pr edit "$PR_NUMBER" --remove-label "loom:blocked"' \
+    "the release path removes loom:blocked once the diff no longer touches a critical file"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     "#6879" \
@@ -863,8 +863,8 @@ assert_doc_contains "$CRITICAL_HOLD_MD" \
     "both the hold and the release notice record the head they were written against (reused by merge-pr.sh's #7419 staleness warning)"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'OPERATOR_LABEL_NOW=$(jq -r ' \
-    "the tick reads whether loom:operator is currently applied — the signal a hand-removal produces"
+    'HOLD_LABEL_NOW=$(jq -r ' \
+    "the tick reads whether loom:blocked is currently applied — the signal a hand-removal produces"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     'CF_ACTION=respect' \
@@ -879,8 +879,8 @@ assert_doc_contains "$CRITICAL_HOLD_MD" \
 # not put the label back at this head. The pre-#9016 wording promised a
 # `merge-pr.sh` run the #8112 guard refused.
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'gh pr edit $PR_NUMBER --remove-label \"loom:operator\"' \
-    "the hold notice's Next steps tell the operator to remove loom:operator first"
+    'gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"' \
+    "the hold notice's Next steps tell the operator to remove loom:blocked first"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     './.loom/scripts/merge-pr.sh $PR_NUMBER' \
@@ -889,7 +889,7 @@ assert_doc_contains "$CRITICAL_HOLD_MD" \
 # One line, not a two-line needle: `grep -F` splits a needle on newlines and
 # ORs the parts, so a multi-line pin silently degrades to "either line".
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'no need to beat a Champion tick to it.' \
+    "put it back while this PR's change is the one this notice" \
     "the hold notice states that the release is durable, i.e. the procedure is not a race (#9016)"
 
 assert_doc_lacks "$CRITICAL_HOLD_MD" \

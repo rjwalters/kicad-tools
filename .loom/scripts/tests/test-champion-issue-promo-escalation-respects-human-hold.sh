@@ -285,12 +285,13 @@ else
     else
         fail "ALREADY_ROUTED is not derived from HELD_BY"
     fi
-    # The self-healing un-escalation must stay gated on the ONE label it can
-    # remove -- widening its gate would call the script on a loom:blocked park.
-    if grep -qE '^if \[ "\$OPERATOR_PRESENT" = "yes" \]' <<<"$BLOCK"; then
-        pass "the #5664 self-healing un-escalation is gated on OPERATOR_PRESENT, not on the widened ALREADY_ROUTED"
+    # #11861: loom:operator is a no-op for every role, so the #5664
+    # self-healing un-escalation is retired: nothing in the guard may call
+    # --check-unescalate or remove the operator hold.
+    if grep -qE 'check-unescalate|OPERATOR_PRESENT' <<<"$BLOCK"; then
+        fail "the guard still runs the retired self-healing un-escalation (#11861)"
     else
-        fail "the self-healing un-escalation is not gated on OPERATOR_PRESENT"
+        pass "the retired #5664 un-escalation is gone from the guard (#11861)"
     fi
     if grep -qE '^ *OPERATOR_RULED=no' <<<"$BLOCK"; then
         pass "OPERATOR_RULED is initialised alongside the other escalation inputs"

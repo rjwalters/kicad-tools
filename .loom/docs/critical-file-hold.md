@@ -14,8 +14,9 @@ failures: they clear on their own, or on the next push, so they use the shared
 "Transient failures" template in that file's "PR Rejection Workflow". A
 critical-file FAIL is not like them. It is a **one-way terminal state** —
 nothing about a diff's critical-file-ness changes without a human decision or a
-later push that narrows the diff — so it gets a durable `loom:operator` hold on
-criterion #2's pattern instead.
+later push that narrows the diff — so it gets a durable hold on criterion #2's
+pattern instead: `loom:blocked` with a reason-only park record (#11861; it was
+`loom:operator` before that label became a no-op for every role).
 
 It does **not** need criterion #2's sticky-hold judgment-call machinery (#4742).
 That machinery exists because #2 is a judgment call that a later re-read might
@@ -29,10 +30,11 @@ The hold's whole purpose is "a human merges this one by hand". Until #9016 that
 path did not work, for a reason that is worth recording because the fix had two
 plausible shapes and only one was safe:
 
-The hold keeps `loom:pr` (Judge really did approve) and adds `loom:operator`.
+The hold keeps `loom:pr` (Judge really did approve) and adds the hold label
+(`loom:operator` until #11861, `loom:blocked` since).
 `merge-pr.sh` refuses any PR carrying both at once — the verdict-contradiction
 guard #8112, which has **no** override flag by design. So the operator's only
-route was to remove `loom:operator` and merge; but the next Champion tick
+route was to remove the label and merge; but the next Champion tick
 re-added it, because the criterion-#3 verdict is deterministic and nothing on the
 PR recorded that a human had already decided. On merge train #8996 (2026-09-26)
 the label came back 1m42s after the operator's release comment; the PR merged
@@ -41,14 +43,14 @@ only by removing the label and running `merge-pr.sh` in the *same* shell command
 The tempting fix — relax #8112 — was rejected: that guard is the thing standing
 between the fleet and a merge of a PR whose verdict state contradicts itself.
 #9016 left it exactly as strict and made the **release** durable instead: a
-hand-removed `loom:operator`, while the episode is open and the change the PR
+hand-removed hold label, while the episode is open and the change the PR
 makes has not moved, *is* the release signal. Champion records it, stands down on
 the label, and says so once.
 
-That inference is sound because `loom:operator` is the only label Champion ever
-removes and re-adds outside a merge, so "an open episode + the label absent" can
-only mean a human removed it. #7048 already makes the same inference for
-criterion #2's hold.
+That inference is sound because Champion never removes the hold label while
+an episode is open: since #11861 the label is `loom:blocked` and it stays on
+through a Doctor round-trip too, so "an open episode + the label absent" can
+only mean a human removed it.
 
 ### Two other shapes that were rejected
 

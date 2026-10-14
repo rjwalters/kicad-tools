@@ -103,6 +103,9 @@ case "\$1 \$2" in
       echo "LABEL-:\$5" >>"\$S/writes"; grep -vxF "\$5" "\$S/labels" >"\$S/l.tmp"; mv "\$S/l.tmp" "\$S/labels"
     fi ;;
   "pr diff") echo ".github/workflows/ci.yml" ;;
+  "api repos/{owner}/{repo}/issues/$PR/events")
+    f=""; while [ \$# -gt 0 ]; do [ "\$1" = --jq ] && f=\$2; shift; done
+    jq -r ".[]? as \\\$e | [\\\$e] | \$f" "\$S/events.json" ;;
 esac
 exit 0
 EOF
@@ -110,6 +113,8 @@ cat >"$T/bin/loom-daemon" <<EOF
 #!/usr/bin/env bash
 S="$T"
 case "\$1 \$2" in
+  "park-record apply")
+    echo "LABEL+:loom:blocked" >>"\$S/writes"; grep -qxF loom:blocked "\$S/labels" || echo loom:blocked >>"\$S/labels" ;;
   "forge trusted-comments")
     [ -e "\$S/trust_down" ] && { echo "forge trusted-comments: --fetch failed" >&2; exit 1; }
     jq -c --arg bot "$BOT" '[.[] | select(.author.login == \$bot or .author.login == "rjwalters")]' "\$S/comments.json" ;;
@@ -156,7 +161,7 @@ chmod +x "$T/bin/gh" "$T/bin/loom-daemon" "$T/w/.loom/scripts/"*.sh
 
 # --- harness -------------------------------------------------------------------
 reset() { # <head>
-    echo '[]' >"$T/comments.json"; : >"$T/labels"; echo "$1" >"$T/head"
+    echo '[]' >"$T/comments.json"; echo '[]' >"$T/events.json"; : >"$T/labels"; echo "$1" >"$T/head"
     echo repo >"$T/mode"; rm -f "$T/trust_down" "$T/last_why"
 }
 tick() { # [FAIL|PASS] — sets WRITES (";"-joined) and OUT
@@ -164,10 +169,16 @@ tick() { # [FAIL|PASS] — sets WRITES (";"-joined) and OUT
     OUT=$(cd "$T/w" && env -u LOOM_DAEMON_BIN PATH="$T/bin:$PATH" CRITERION3_RESULT="${1:-FAIL}" bash "$T/tick.sh" 2>&1)
     WRITES=$(paste -sd';' "$T/writes")
 }
-label() { grep -qxF loom:operator "$T/labels" && echo present || echo absent; }
+label() { grep -qxF loom:blocked "$T/labels" && echo present || echo absent; }
 push() { echo "$1" >"$T/head"; }
-operator_release() { grep -vxF loom:operator "$T/labels" >"$T/l.tmp"; mv "$T/l.tmp" "$T/labels"; }
-operator_reassert() { grep -qxF loom:operator "$T/labels" || echo loom:operator >>"$T/labels"; }
+# A removal by <actor type> (#11861): only a human one is a release.
+unlabel() { # <User|Bot> <login>
+    grep -vxF loom:blocked "$T/labels" >"$T/l.tmp"; mv "$T/l.tmp" "$T/labels"
+    jq --arg t "$1" --arg l "$2" '. + [{event: "unlabeled", label: {name: "loom:blocked"}, created_at: "9999", actor: {type: $t, login: $l}}]' \
+        "$T/events.json" >"$T/e.tmp" && mv "$T/e.tmp" "$T/events.json"
+}
+operator_release() { unlabel User rjwalters; }
+operator_reassert() { grep -qxF loom:blocked "$T/labels" || echo loom:blocked >>"$T/labels"; }
 comment_as() { # <author> <body>
     jq --arg b "$2" --arg a "$1" '. + [{author: {login: $a}, body: $b}]' "$T/comments.json" >"$T/c.tmp"
     mv "$T/c.tmp" "$T/comments.json"
@@ -175,8 +186,8 @@ comment_as() { # <author> <body>
 
 echo "--- release survives repository-proven tree-identical moves; a real change re-arms ---"
 reset "$A"
-tick; check "COMMENT:hold;LABEL+:loom:operator" "$WRITES" "fresh FAIL at A: hold notice + loom:operator"
-tick; check "LABEL+:loom:operator" "$WRITES" "repeat tick: hold stands, no second notice"
+tick; check "COMMENT:hold;LABEL+:loom:blocked" "$WRITES" "fresh FAIL at A: hold notice + loom:blocked"
+tick; check "LABEL+:loom:blocked" "$WRITES" "repeat tick: hold stands, no second notice"
 operator_release
 tick; check "COMMENT:released:same-head" "$WRITES" "operator removed the label at A: release acknowledged once, label not re-added"
 tick; check "" "$WRITES" "repeat tick at A: no writes at all"
@@ -185,10 +196,11 @@ tick; check "COMMENT:released:tree" "$WRITES" "re-date A->B: release re-recorded
 tick; check "" "$WRITES" "repeat tick at B: idempotent"
 push "$C"
 tick; check "COMMENT:released:tree" "$WRITES" "second no-op B->C: release carried again"
-tick; check "absent" "$(label)" "loom:operator still absent after the no-op chain"
+tick; check "absent" "$(label)" "loom:blocked still absent after the no-op chain"
+
 push "$D"
-tick; check "COMMENT:hold(rearm);LABEL+:loom:operator" "$WRITES" "content change C->D (no-op wording): hold re-armed"
-tick; check "LABEL+:loom:operator" "$WRITES" "repeat tick at D: re-armed hold stands, no second notice"
+tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "content change C->D (no-op wording): hold re-armed"
+tick; check "LABEL+:loom:blocked" "$WRITES" "repeat tick at D: re-armed hold stands, no second notice"
 
 echo "--- an unacknowledged release survives one or many moves ---"
 reset "$A"
@@ -208,14 +220,14 @@ operator_reassert
 tick; check "" "$WRITES" "operator re-added the label at the released head: nothing written"
 check "present" "$(label)" "label stays on"
 push "$C"
-tick; check "LABEL+:loom:operator" "$WRITES" "a no-op move after the reassertion: hold stands, the old release is NOT carried"
+tick; check "LABEL+:loom:blocked" "$WRITES" "a no-op move after the reassertion: hold stands, the old release is NOT carried"
 check "present" "$(label)" "label still on after the move"
 
 echo "--- every unknown fails closed, naming why ---"
 for mode in unknown disabled; do
     reset "$A"; tick; operator_release; tick
     echo "$mode" >"$T/mode"; push "$B"
-    tick; check "COMMENT:hold(rearm);LABEL+:loom:operator" "$WRITES" "equivalence $mode: tree-identical move still re-arms (fail closed)"
+    tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "equivalence $mode: tree-identical move still re-arms (fail closed)"
     case "$mode" in
         unknown) needle="forge compare" ;;
         disabled) needle="switched off" ;;
@@ -223,28 +235,28 @@ for mode in unknown disabled; do
     grep -q "$needle" "$T/last_why" 2>/dev/null; check 0 "$?" "equivalence $mode: the re-arm notice names the reason"
 done
 reset "$A"; tick; operator_release; tick; push "$ABSENT"
-tick; check "COMMENT:hold(rearm);LABEL+:loom:operator" "$WRITES" "missing commit object: re-arms"
+tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "missing commit object: re-arms"
 grep -q "not in the local clone" "$T/last_why"; check 0 "$?" "missing commit object: reason surfaced"
 # A legacy hold: no hold-state line, so no recorded head to prove anything from.
 reset "$B"
 comment_as "$BOT" "<!-- champion:critical-file-hold -->
 **Champion: Holding for Human Merge — Critical File**"
-tick; check "COMMENT:hold(rearm);LABEL+:loom:operator" "$WRITES" "legacy hold (no recorded head), label absent: re-arms"
+tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "legacy hold (no recorded head), label absent: re-arms"
 grep -q "legacy hold" "$T/last_why"; check 0 "$?" "legacy hold: reason surfaced"
 
 echo "--- untrusted and quoted markers never carry a release ---"
 forged="<!-- champion:critical-file-release-respected -->
 <!-- champion:hold-state head=$A -->"
 reset "$A"; comment_as outsider "$forged"
-tick; check "COMMENT:hold;LABEL+:loom:operator" "$WRITES" "outsider-forged release at the current head: ignored, fresh hold"
+tick; check "COMMENT:hold;LABEL+:loom:blocked" "$WRITES" "outsider-forged release at the current head: ignored, fresh hold"
 reset "$A"; comment_as "$BOT" "As the notice said:
 > $forged"
-tick; check "COMMENT:hold;LABEL+:loom:operator" "$WRITES" "quoted release marker (not at body start): ignored, fresh hold"
+tick; check "COMMENT:hold;LABEL+:loom:blocked" "$WRITES" "quoted release marker (not at body start): ignored, fresh hold"
 reset "$A"; comment_as outsider "$forged"; touch "$T/trust_down"
 tick; check "" "$WRITES" "trust filter down + forged release: no release honored, no release written"
 grep -q "no release honored" <<<"$OUT"; check 0 "$?" "trust filter down: the deferral is reported"
 rm -f "$T/trust_down"
-tick; check "COMMENT:hold;LABEL+:loom:operator" "$WRITES" "trust filter back: the forged marker drops out and the hold lands"
+tick; check "COMMENT:hold;LABEL+:loom:blocked" "$WRITES" "trust filter back: the forged marker drops out and the hold lands"
 reset "$A"; tick; operator_release; tick; push "$B"; touch "$T/trust_down"
 tick; check "" "$WRITES" "trust filter down + genuine release + re-date: deferred, nothing re-added"
 rm -f "$T/trust_down"
@@ -254,8 +266,32 @@ echo "--- a released critical-file FAIL is never merged by the tick; PASS closes
 reset "$A"; tick; operator_release; tick; push "$B"; tick; tick
 grep -c "MERGE" "$T/writes" >/dev/null; check 1 "$?" "no merge-pr.sh call from any released tick"
 grep -qE '^(pr merge|api .*merge)' "$T/gh.argv"; check 1 "$?" "no gh merge call from any tick"
-tick PASS; check "LABEL-:loom:operator;COMMENT:cleared" "$WRITES" "PASS with an open episode: cleared notice"
+tick PASS; check "LABEL-:loom:blocked;COMMENT:cleared" "$WRITES" "PASS with an open episode: cleared notice"
 tick PASS; check "" "$WRITES" "repeat PASS: no writes"
+
+echo "--- #11861: the shared loom:blocked stays while a merge-risk hold stands ---"
+reset "$A"
+comment_as "$BOT" "<!-- champion:merge-risk-hold -->
+<!-- champion:hold-state head=$A -->
+held on blast radius"
+tick
+tick PASS; check "COMMENT:cleared" "$WRITES" "critical-file clears, merge-risk still held: label NOT removed"
+check "present" "$(label)" "loom:blocked stays for the standing merge-risk hold"
+reset "$A"
+comment_as "$BOT" "<!-- champion:merge-risk-hold -->
+held"
+comment_as "$BOT" "merging
+<!-- champion:merge-risk-hold-cleared -->"
+tick
+tick PASS; check "LABEL-:loom:blocked;COMMENT:cleared" "$WRITES" "merge-risk already reversed: the label comes off"
+
+echo "--- #11861: an unreadable trust filter never clears (fail closed) ---"
+reset "$A"
+tick; touch "$T/trust_down"
+tick PASS; check "" "$WRITES" "trust filter down + PASS: no clear, no label write"
+check "present" "$(label)" "loom:blocked kept while the trusted read fails"
+rm -f "$T/trust_down"
+tick PASS; check "LABEL-:loom:blocked;COMMENT:cleared" "$WRITES" "trust filter back: the clear lands"
 
 echo
 echo "Results: $((TESTS_RUN - TESTS_FAILED))/$TESTS_RUN passed, $TESTS_FAILED failed"

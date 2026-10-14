@@ -346,7 +346,7 @@ Check for an argument passed via the slash command:
 ### PR Fix Mode
 
 If a number is provided (e.g., `/doctor 123`):
-1. Treat that number as the target **PR** to fix
+1. Treat that number as the target **PR** to fix. `loom:frozen` or any `loom:operator*` label on it (#11861): refuse, writing nothing
 2. **Skip** the "Finding Work" section entirely
 3. Claim the PR exactly as in Work Process step 2 (a dispatched PR can
    already be claimed by a concurrent Doctor)
@@ -422,7 +422,7 @@ Full convention and rationale: `.loom/docs/untrusted-external-content.md`. A mar
 
 ## Finding Work
 
-**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+**Skip any item labelled `loom:frozen` or `loom:operator`** (#11861): don't read it as work, comment on it, or relabel it. Only a human removes them.
 
 Use the shared queue and walk its rows in order:
 ```bash
@@ -437,7 +437,8 @@ row; keep a per-pass visited set. Preserve PR origin during repairs.
 ### Priority 1: Approved PRs with Merge Conflicts (URGENT)
 
 **Find approved PRs with merge conflicts that aren't already claimed and are
-not on an explicit operator hold.**
+not parked (`loom:blocked`, Champion's merge-risk / critical-file hold
+included; `loom:operator`; `loom:frozen`).**
 
 **Why earlier in the baseline?** They are approved but blocked, and conflicts only get
 harder over time.
@@ -445,7 +446,7 @@ harder over time.
 ### Priority 2: PRs with Changes Requested (NORMAL)
 
 **Find PRs with review feedback that aren't already claimed and are not on an
-explicit hard hold (`loom:blocked` / `loom:frozen`).**
+explicit hold (`loom:blocked` / `loom:operator` / `loom:frozen`).**
 
 > **Claim discipline for every queue above.** The `loom:treating` filter in this
 > queue is a point-in-time snapshot: a claim can land between your list call and
@@ -454,31 +455,14 @@ explicit hard hold (`loom:blocked` / `loom:frozen`).**
 > from PR Fix Mode, or from an explicit user instruction — run the
 > "Stale `loom:treating` Claim Check" in the Work Process below.
 >
-> **Hold exclusion (Priority 2 queue, #5272).** `loom:blocked` and
-> `loom:frozen` are the same generic "taken out of
-> automated flow" signal the work-finder already honors for `loom:issue` rows
-> — the shared queue excludes both so autonomous Finding Work never
-> auto-claims a held PR. This does not change PR Fix Mode or an explicit user
-> instruction naming a PR by number — those remain a deliberate human
-> decision to work on that specific PR, same as everywhere else in this file.
->
-> **Why this query does NOT also exclude `loom:operator` (#7660).** Unlike
-> `loom:blocked` / `loom:frozen` above, `loom:operator` is
-> **deliberately left unfiltered** here — this is not an oversight. When
-> Champion routes a stale, held PR from `loom:pr` to `loom:changes-requested`,
-> it intentionally *keeps* `loom:operator` so this Priority 2 queue can still
-> pick the PR up and refresh the diff; see `.loom/docs/label-state-machine.md`
-> § "Stale departure to Doctor" (#6720/#6852) for the full rationale. Adding a
-> `loom:operator` exclusion to this query would reproduce the exact bug #6720
-> fixed (held PRs becoming permanently stuck as `CONFLICTING`, unreachable by
-> Doctor) — do not add one.
->
-> **Operator-hold exclusion (Priority 1 queue, #5978).** The shared queue
-> skips `loom:operator` approved-conflict PRs (feedback rows remain eligible)
-> so autonomous Finding Work never rebases/pushes to a held PR. Outside
-> "Routing to a human" below, Doctor never adds or removes `loom:operator`
-> (see `.loom/docs/label-state-machine.md`). Same PR Fix Mode /
-> explicit-user-instruction carve-out as the Priority 2 note above.
+> **Hold exclusion (both queues, #5272, #11861).** The shared queue drops
+> every park, `loom:operator` included: no role acts on an item a human must
+> decide, so autonomous Finding Work never claims, rebases or pushes to a held
+> PR. One exception (#11861): Champion's own hold sent back for fixes
+> (`loom:changes-requested` + `loom:blocked` with a standing trusted Champion
+> hold marker) is in the queue. Work it as any feedback PR and leave
+> `loom:blocked` on: only a human removes it. An explicit user instruction naming a PR is a human decision, but
+> never overrides `loom:frozen` or `loom:operator`.
 
 ### Routing to a human
 
@@ -487,7 +471,7 @@ explicit user instruction to park a PR, or a finding whose fix needs a
 human's hands (a secret rotation, a machine you cannot reach) — never because
 a fix is hard or two attempts failed (#10001). The rule is
 `.loom/docs/label-state-machine.md` → "Routing to a human": a human's hands →
-`loom:operator` + a capability marker and a comment naming the step; a ruling
+`loom:operator` and a comment naming the step; a ruling
 → `loom-daemon operator-decision apply`; either can carry a `Blocked by #N`
 line; automation-resolvable waiting → `loom:blocked` with a park record.
 
@@ -496,9 +480,8 @@ line; automation-resolvable waiting → `loom:blocked` with a park record.
 gh pr edit <number> --add-label "loom:operator" --remove-label "loom:changes-requested"
 ```
 
-Drop `loom:changes-requested` in the same edit: on a PR `loom:operator` is
-not a park (#7660), so the label alone would hand the PR straight back to
-your own queue.
+Drop `loom:changes-requested` in the same edit, so the PR leaves the
+changes queue's count as well as its listing.
 
 ### Stale-Verdict Check (before claiming from Priority 1 or Priority 2)
 
@@ -538,21 +521,21 @@ at all.
 ### Other PRs Needing Attention
 
 **Find PRs with merge conflicts (any label):** this is a broad diagnostic scan,
-not itself a claim path — the shared queue above (which excludes `loom:treating` and, for approved
-conflicts, `loom:operator`) is what autonomous Finding Work actually
-claims from. Still excludes `loom:operator` here too, so a Doctor skimming this
-list doesn't hand-pick a held PR (#5978).
+not itself a claim path — the shared queue above (which excludes
+`loom:treating` and every park) is what autonomous Finding Work actually
+claims from. Excludes parks here too, so a Doctor skimming this list doesn't
+hand-pick a held PR (#5978).
 ```bash
 gh pr list --state=open --json number,title,labels,mergeable \
-  | jq -r '.[] | select(.mergeable == "CONFLICTING") | select(.labels | all(.name != "loom:operator" and .name != "loom:frozen")) | "#\(.number): \(.title)"'
+  | jq -r '.[] | select(.mergeable == "CONFLICTING") | select(.labels | all(.name != "loom:operator" and .name != "loom:blocked" and .name != "loom:frozen")) | "#\(.number): \(.title)"'
 ```
 
 **Find all open PRs:**
 ```bash
 # Check primary queues first
-PRIORITY_1=$(gh pr list --label="loom:pr" --state=open --json number,mergeable,labels | jq '[.[] | select(.mergeable == "CONFLICTING") | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
-# PR-lane parks: holds but loom:operator (#7660), retired names incl. (#11795)
-PR_PARKS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null | grep -vx 'loom:operator' || printf 'loom:blocked\nloom:frozen')
+# Parks: every hold, loom:operator included (#11861), retired names incl. (#11795)
+PR_PARKS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen')
+PRIORITY_1=$(gh pr list --label="loom:pr" --state=open --json number,mergeable,labels | jq --arg p "$PR_PARKS" '[.[] | select(.mergeable == "CONFLICTING") | select(any(.labels[]?.name; IN(($p | split("\n"))[])) | not)] | length')
 PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested $(sed 's/^/-label:/' <<<"$PR_PARKS" | tr '\n' ' ')" --json number | jq 'length')
 
 if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
@@ -614,7 +597,7 @@ When the user explicitly instructs you to work on a specific PR by number:
 ```
 
 **Behavior**:
-1. **Proceed immediately** — skip the required-label check
+1. **Proceed immediately** — skip the required-label check, never the `loom:frozen` / `loom:operator` refusal (#11861)
 2. **Interpret as approval** — the instruction is implicit approval to work the PR
 3. **Apply working label** — add `loom:treating` to track it
 4. **Document override** — comment "Addressing issues on this PR"

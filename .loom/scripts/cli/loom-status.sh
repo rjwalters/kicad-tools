@@ -244,14 +244,17 @@ format_duration() {
     fi
 }
 
-# Count open issues/PRs carrying a label. Echoes an integer on success;
+# Count open issues/PRs carrying a label, or ANY of several labels (deduplicated
+# by number, #11861: the Parked line counts a hold under every name that folds
+# into it, so it does not undercount while `labels migrate` has not relabelled
+# the retired names yet). Echoes an integer on success;
 # returns non-zero (and echoes nothing) when gh is unavailable, unauthenticated,
 # or the forge is not GitHub — callers omit the work-queue rather than error.
-# $1 = issue|pr, $2 = label
+# $1 = issue|pr, $2.. = label(s)
 count_label() {
-    local kind="$1" label="$2" n
+    local kind="$1" label n
     command -v gh &>/dev/null || return 1
-    n=$(gh "$kind" list --label "$label" --state open --json number --jq 'length' 2>/dev/null) || return 1
+    n=$(for label in "${@:2}"; do gh "$kind" list --label "$label" --state open --limit 1000 --json number --jq '.[].number' 2>/dev/null || exit 1; done | sort -u | wc -l | tr -d ' ') || return 1
     [[ "$n" =~ ^[0-9]+$ ]] || return 1
     echo "$n"
 }
@@ -290,8 +293,13 @@ work_queue_json() {
     hermit=$(count_label issue "loom:hermit") || { echo "null"; return 0; }
     curated=$(count_label issue "loom:curated") || { echo "null"; return 0; }
     auditor=$(count_label issue "loom:auditor") || { echo "null"; return 0; }
-    held_operator=$(count_label issue "loom:operator") || { echo "null"; return 0; }
-    held_blocked=$(count_label issue "loom:blocked") || { echo "null"; return 0; }
+    # A hold's names: the active label plus the retired names that fold into it
+    # (`labels aliases`); the active name alone when no daemon answers.
+    # requires-daemon: labels optional   #11861 — without `labels aliases` the Parked line counts the active label only
+    # shellcheck disable=SC2046  # one label per line, no spaces in label names
+    held_operator=$(count_label issue $("${LOOM_DAEMON_BIN:-loom-daemon}" labels aliases loom:operator 2>/dev/null | grep . || echo loom:operator)) || { echo "null"; return 0; }
+    # shellcheck disable=SC2046
+    held_blocked=$(count_label issue $("${LOOM_DAEMON_BIN:-loom-daemon}" labels aliases loom:blocked 2>/dev/null | grep . || echo loom:blocked)) || { echo "null"; return 0; }
     held_frozen=$(count_label issue "loom:frozen") || { echo "null"; return 0; }
     jq -nc \
         --argjson issue "$issue" \

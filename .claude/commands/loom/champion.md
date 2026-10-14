@@ -60,19 +60,12 @@ evaluated is re-discovered here. `title`/`body` feed `champion-issue-promo.md`'s
 body-hash idempotency check (the issue's aggregate `updatedAt` is deliberately
 NOT used for it, #4966):
 
-> **`loom:operator` is excluded here, but not unexamined (#5664).**
-> `champion-issue-promo.md` → "Pass 0: Self-Healing Un-Escalation Re-Scan" runs
-> one bounded scan of `loom:operator` proposals *before* this discovery
-> query and removes the label from any whose escalation was Champion's own,
-> dependency-only, and whose recorded blocker has since closed. Those issues then
-> match the query below in the same pass. Without that scan, an escalation for an
-> open dependency — a condition that clears itself — would be permanent, because
-> the only actor that could notice the blocker closed is the one this exclusion
-> tells to ignore it.
->
-> **A `loom:operator` proposal you read that is really blocked on a missing
-> capability** is swapped to `loom:blocked` + capability marker (#5818), an
-> opportunistic per-occurrence call. **Any hold you apply** follows
+> **`loom:operator` is excluded and never examined (#11861).** It is a no-op
+> for every role; only a human removes it. A dependency-only finding never
+> lands there: it is a `loom:blocked` park (`park-record apply
+> --blocked-by`, #11860), which the daemon's stale-blocked release pass lifts
+> when the blocker closes, so the issue matches this query again. (Pass 0's
+> un-escalation of such holds is retired.) **Any hold you apply** follows
 > `.loom/docs/label-state-machine.md` → "Routing to a human" (#10001).
 
 > **`loom:evaluating` is excluded here too, but not unexamined (#6828).**

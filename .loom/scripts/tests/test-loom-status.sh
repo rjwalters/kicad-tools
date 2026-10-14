@@ -76,26 +76,35 @@ mkdir -p "$FAKE_BIN"
 # ---- Fake `gh` stub -----------------------------------------------------------
 # Answers `gh issue list --label <label> --state open --json number --jq length`
 # and the `pr` equivalent with a fixed count per label, driven by the
-# GH_LABEL_COUNTS env var (space-separated "label=count" pairs).
+# GH_LABEL_COUNTS env var (space-separated "label=count" pairs). With
+# `--jq '.[].number'` (the Parked line's per-name listing, #11861) it prints
+# the item numbers instead: GH_LABEL_NUMBERS ("label=1,2,3" pairs) when set
+# for the label, else 1..count.
 cat > "$FAKE_BIN/gh" <<'FAKEGH'
 #!/usr/bin/env bash
 kind="$1"; shift
-label=""
+label=""; jqx=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --label) label="$2"; shift 2 ;;
+        --jq) jqx="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
+if [[ "$jqx" == '.[].number' ]]; then
+    for pair in $GH_LABEL_NUMBERS; do
+        [[ "${pair%%=*}" == "$label" ]] && { tr ',' '\n' <<<"${pair#*=}"; exit 0; }
+    done
+fi
 for pair in $GH_LABEL_COUNTS; do
     key="${pair%%=*}"
     val="${pair#*=}"
     if [[ "$key" == "$label" ]]; then
-        echo "$val"
+        if [[ "$jqx" == '.[].number' ]]; then seq 1 "$val"; else echo "$val"; fi
         exit 0
     fi
 done
-echo "0"
+[[ "$jqx" == '.[].number' ]] || echo "0"
 FAKEGH
 chmod +x "$FAKE_BIN/gh"
 
@@ -319,6 +328,27 @@ held_frozen="$(echo "$OUT" | jq -r '.work_queue."loom:frozen"' 2>/dev/null)"
 assert_eq "2" "$held_operator" "work_queue --json includes loom:operator"
 assert_eq "2" "$held_blocked" "work_queue --json includes loom:blocked"
 assert_eq "0" "$held_frozen" "work_queue --json defaults loom:frozen to 0 when unset (stub default)"
+
+# #11861: during the migration an issue may still carry a retired name. The
+# Parked counts read every name that folds into a hold (`labels aliases`),
+# deduplicated by number, so they neither undercount nor double-count.
+ALIAS_BIN="$WORKDIR/alias-daemon"
+cat > "$ALIAS_BIN" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1 $2" == "labels aliases" ]] || exit 1
+case "$3" in
+  loom:operator) printf 'loom:operator\nloom:operator-only\n' ;;
+  loom:blocked) printf 'loom:blocked\nloom:needs-capability\n' ;;
+  *) echo "$3" ;;
+esac
+STUB
+chmod +x "$ALIAS_BIN"
+run_status_json LOOM_DAEMON_BIN="$ALIAS_BIN" LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json" \
+    GH_LABEL_NUMBERS="loom:operator=1,2 loom:operator-only=2,3,4 loom:blocked=7 loom:needs-capability=8"
+assert_eq "4" "$(echo "$OUT" | jq -r '.work_queue."loom:operator"' 2>/dev/null)" \
+    "loom:operator counts retired-name items too, deduplicated (#11861)"
+assert_eq "2" "$(echo "$OUT" | jq -r '.work_queue."loom:blocked"' 2>/dev/null)" \
+    "loom:blocked counts loom:needs-capability items too (#11861)"
 
 # ===================================================================
 # 9. LOOM_DAEMON_BIN pointed at a non-executable path: treated identically

@@ -258,7 +258,7 @@ human-hands step — not a hard or uncertain review (#10001). The rule is
 `.loom/docs/label-state-machine.md` → "Routing to a human": a ruling, on an
 issue or a PR → `loom-daemon operator-decision apply <number> --input d.json`
 (2-4 ranked options; adds `loom:operator`); a human's hands → `loom:operator`
-+ a capability marker (+ `Blocked by #N` if it waits on something named);
++ a comment naming the step (+ `Blocked by #N` if it waits on something named);
 automation-resolvable waiting → `loom:blocked` with a park record.
 
 ## Argument Handling
@@ -268,7 +268,7 @@ Check for an argument passed via the slash command:
 **Arguments**: `$ARGUMENTS`
 
 If a number is provided (e.g., `/judge 123`), it is the target **PR**: skip "Finding Work", and gate it before any claim, label or comment (#11863):
-1. **Kind and state probe** (live, one REST read): `gh api "repos/{owner}/{repo}/issues/<number>" --jq '[(.pull_request != null), .state, ([.labels[].name] | join(","))] | @tsv'`. Refuse, writing nothing, on `false` (an issue number; Judge is a PR role), `closed`, `loom:frozen`, or a failed read.
+1. **Kind and state probe** (live, one REST read): `gh api "repos/{owner}/{repo}/issues/<number>" --jq '[(.pull_request != null), .state, ([.labels[].name] | join(","))] | @tsv'`. Refuse, writing nothing, on `false` (an issue number; Judge is a PR role), `closed`, `loom:frozen`, any `loom:operator*` label (#11861; retired names too), or a failed read.
 2. **Stage**: `loom:review-requested` (or `loom:reviewing` alone) → claim exactly as Primary Queue step 2 (stale check, PR lease, then the label) and evaluate. Neither those nor a verdict label (e.g. only `loom:important`) → "Fallback Queue" rules (guard, review only, never claim or label). A verdict label without `loom:review-requested` → no-op, unless the operator asked for this re-review (see "Exception").
 3. End with the outcome line from `.loom/docs/targeted-role-invocation.md`: `LOOM_STEP_OUTCOME role=judge target=<n> class=<verdict|noop|refused|failed> reason=<token>`.
 
@@ -276,7 +276,7 @@ If no argument is provided, use the normal finding work workflow below.
 
 ## Label Workflow
 
-**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+**Skip any item labelled `loom:frozen` or `loom:operator`** (#11861): don't read it as work, comment on it, or relabel it. Only a human removes them. A `loom:blocked` PR `pr-queue` serves you is Champion's hold back from Doctor: review it normally and leave `loom:blocked` on; either verdict keeps it.
 
 **Find PRs ready for evaluation (green badges):**
 ```bash
@@ -322,7 +322,7 @@ section for the full carve-out list).
 
 **User commands override the label-based state machine.** When the user names a PR ("evaluate pr 599 as judge", "check pr 577"):
 
-1. **Proceed immediately**: skip the label checks; the instruction is the approval
+1. **Gate first**: the probe above. The instruction approves the stage and overrides a stale claim, never `closed` / `loom:frozen` / `loom:operator` / an issue number
 2. **Claim** as in Primary Queue step 2 (PR lease, then `loom:reviewing`) and note "Evaluating this PR per user request" in a comment
 3. **Evaluate** in a worktree ("PR Branch Isolation", "Worktree-Aware Code Access")
 4. **Finish normally**: `post-verdict.sh` with `$VERDICT_SHA` from the Verdict-Time CAS Recheck (`loom:pr` or `loom:changes-requested`)
@@ -838,7 +838,7 @@ nothing would ever look at it again. Sweep those two queues first:
 #   1 = gh/env error.
 UNANCHORED=""; ANCHORED=""
 for PR in $("$GH_READ" pr list --state=open --limit 200 --json number,labels \
-    --jq '.[] | select([.labels[].name] | any(. == "loom:pr" or . == "loom:changes-requested")) | select(any(.labels[]?.name; . == "loom:frozen") | not) | .number'); do
+    --jq '.[] | select([.labels[].name] | any(. == "loom:pr" or . == "loom:changes-requested")) | select(any(.labels[]?.name; . == "loom:frozen" or . == "loom:operator") | not) | .number'); do
   ./.loom/scripts/verdict-staleness-guard.sh "$PR" --clear --anchor
   case "$?" in
     13) ANCHORED="$ANCHORED #$PR" ;;
@@ -2567,7 +2567,7 @@ EOF
 # and anchor any verdict that carries no marker at all (never `|| true` — see
 # "Stale-Verdict Sweep"; exit 11 = still UNVERIFIABLE, 13 = anchored)
 for PR in $("$GH_READ" pr list --state=open --limit 200 --json number,labels \
-    --jq '.[] | select([.labels[].name] | any(. == "loom:pr" or . == "loom:changes-requested")) | select(any(.labels[]?.name; . == "loom:frozen") | not) | .number'); do
+    --jq '.[] | select([.labels[].name] | any(. == "loom:pr" or . == "loom:changes-requested")) | select(any(.labels[]?.name; . == "loom:frozen" or . == "loom:operator") | not) | .number'); do
   ./.loom/scripts/verdict-staleness-guard.sh "$PR" --clear --anchor
   [ "$?" -eq 11 ] && echo "UNVERIFIABLE verdict on #$PR — do not trust it"
 done

@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1158",
-  "loom_commit": "f7db3179647083a4df8fe500b1d48a541958a315",
+  "loom_version": "0.19.1159",
+  "loom_commit": "eda4f971db62b88c66ab797cd0f24f525ffc377a",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -458,7 +458,23 @@
     ".loom/scripts/tests/test-token-model-class.sh",
     ".loom/scripts/tests/test-verdict-staleness-guard-tree.sh",
     ".loom/scripts/tests/test-verify-proposal-refs.sh",
-    ".loom/scripts/tests/test-version-check-gate.sh"
+    ".loom/scripts/tests/test-version-check-gate.sh",
+    ".agents/skills/loom-champion/SKILL.md",
+    ".agents/skills/loom-guide/SKILL.md",
+    ".claude/commands/loom/champion-held-pr-staleness.md",
+    ".claude/commands/loom/champion-targeted.md",
+    ".claude/commands/loom/sweep-dry-run.md",
+    ".claude/commands/loom/sweep-scheduling-signals.md",
+    ".loom/docs/critical-file-hold.md",
+    ".loom/docs/pr-planning.md",
+    ".loom/docs/targeted-role-invocation.md",
+    ".loom/scripts/tests/test-champion-held-pr-health-pass.sh",
+    ".loom/scripts/tests/test-champion-issue-promo-escalation-respects-human-hold.sh",
+    ".loom/scripts/tests/test-champion-pr-merge-hold-release.sh",
+    ".loom/scripts/tests/test-champion-targeted-modes.sh",
+    ".loom/scripts/tests/test-classify-dependency-block.sh",
+    ".loom/scripts/tests/test-critical-file-hold-tick.sh",
+    ".loom/scripts/tests/test-targeted-role-invocation.sh"
   ],
   "last_resync": "2026-10-14",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
