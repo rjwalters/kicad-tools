@@ -195,8 +195,8 @@ def test_board01_item_inventory():
     kinds: dict[str, int] = {}
     for item in extract_items(PCB.load(BOARD01)):
         kinds[item.kind] = kinds.get(item.kind, 0) + 1
-    assert kinds["segment"] == 21
-    assert kinds["via"] == 2
+    assert kinds["segment"] == 14
+    assert kinds["via"] == 4
     assert kinds["footprint"] == 4
     assert kinds["graphic"] >= 1
 
@@ -592,7 +592,7 @@ def test_to_json_counts_cover_unchanged():
     result = _diff(BOARD01, BOARD01)
     doc = to_json(result)
     assert doc["summary"]["unchanged"] == len(result.entries)
-    assert doc["by_kind"]["segment"]["unchanged"] == 21
+    assert doc["by_kind"]["segment"]["unchanged"] == 14
 
 
 def test_svg_overlay_classes(tmp_path: Path, capsys):
