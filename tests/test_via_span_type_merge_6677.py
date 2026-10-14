@@ -20,10 +20,10 @@ def test_sidecar_round_trips_span_type():
 
 def test_old_sidecar_without_span_type_loads_none():
     v = _via(Layer.F_CU, Layer.B_CU)
-    payload = _via_to_list(v, "N")
+    payload = _via_to_list(v, "")
     assert len(payload) == 8
-    assert _via_from_list(payload, "N").span_type is None
-    assert _via_from_list([*payload, "N"], "N").span_type is None
+    assert _via_from_list(payload, "").span_type is None
+    assert _via_from_list([*payload, ""], "").span_type is None
 
 
 def test_widen_to_both_outer_clears_span_type():
