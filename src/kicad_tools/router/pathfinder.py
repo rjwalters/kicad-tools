@@ -222,6 +222,17 @@ class Router:
     - GreedyHeuristic: Fast but suboptimal
     """
 
+    # Issue #6366: per-net A* heuristic-weight overrides (net id -> weight),
+    # consulted by ``route`` when the caller passes the default weight.
+    # ``Autorouter`` installs its own dict here; the empty class default is
+    # never mutated.
+    net_astar_weights: dict[int, float] = {}
+
+    # Issue #6366: this pathfinder honours ``NetClassRouting.preferred_layers``
+    # (``_get_layer_preference_cost``), so the evolutionary ``preferred_layers``
+    # gene is live on this backend.  ``CppPathfinder`` sets this False.
+    supports_layer_preferences: bool = True
+
     # Issue #3441: the pure-Python pathfinder implements waypoint injection
     # (#2330) -- off-grid pad positions are injected directly into the A*
     # search graph (see ``_create_waypoint`` / ``_waypoint_grid_edges``).
@@ -301,6 +312,16 @@ class Router:
         # is a proof.  ``CppPathfinder`` memoizes the proof so the negotiated
         # loop does not re-run this 10-100x-slower search on an unchanged grid.
         self.last_route_exhausted: bool = False
+
+        # Issue #6329: True when the most recent ``route()`` stopped because its
+        # per-net WALL-CLOCK deadline fired (not the iteration cap, not a
+        # drain).  Under ``--deterministic-budget`` the fallback is meant to be
+        # bounded by ``_max_iterations_override``; when the wall clock binds
+        # first, how far the search got depends on machine load, so the
+        # C++ backend reports it as a determinism loss.
+        # ``last_route_deadline_iterations`` is the expansion count reached.
+        self.last_route_deadline_hit: bool = False
+        self.last_route_deadline_iterations: int = 0
 
         # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
         # Same layer moves - orthogonal directions
@@ -428,6 +449,11 @@ class Router:
         # configuration between routes cannot be served from it either.
         self._via_halo_cache: dict[tuple[int, int, int], bool] = {}
         self._via_halo_cache_token: int | None = None
+        # Issue #5617: memo for the geometry verdict of ``_trace_halo_clear``
+        # (the ``halo.clear(segment, ...)`` call after the ``cell_known``
+        # guard).  Same soundness contract as ``_via_halo_cache``.
+        self._trace_halo_cache: dict[tuple, bool] = {}
+        self._trace_halo_cache_token: tuple | None = None
 
         # Issue #5617: memos for the two SITE-level via preconditions --
         # predicates of the candidate CELL alone, with no ``net`` / ``layer``
@@ -1506,6 +1532,8 @@ class Router:
         self._net_name_to_id = dict(mapping)
         self._route_halo_names = {net: name for name, net in mapping.items()}
         self._route_halo_class = None
+        self._trace_halo_cache.clear()
+        self._trace_halo_cache_token = None
         # Issue #4507: the search-time pairwise projection is keyed by net id
         # through this map -- rebuild it on the next consult.
         self._pairwise_search_cache = None
@@ -1794,9 +1822,44 @@ class Router:
             return False
         if not all(halo.cell_known(x, y, layer) for x, y in cells):
             return False
-        name = self._route_halo_names.get(net, "")
         nc = self._halo_net_class(net)
-        x1, y1 = self.grid.grid_to_world(*(from_cell or (gx, gy)))
+        # Issue #5617: the verdict below is a pure function of the step
+        # ``(from_cell -> (gx, gy))`` on ``layer`` for ``net`` (its class is
+        # in the key by identity), the halo snapshot (``state_version``) and
+        # the router's rule configuration (``clear_via_cache`` /
+        # ``set_net_name_to_id`` drop the memo).  The exhausted-resume and
+        # negotiated re-searches probe the same steps again on an unchanged
+        # grid.  ``cell_known`` above stays per-call: it depends on ``cells``.
+        rules = self.rules
+        token = (
+            id(halo),
+            halo.state_version,
+            # Rule values ``halo.clear`` reads; callers may mutate them in place.
+            rules.trace_width,
+            rules.trace_clearance,
+            rules.via_clearance,
+            rules.min_hole_to_hole,
+            rules.min_drill_clearance,
+            id(rules.pairwise_clearance),
+        )
+        if self._trace_halo_cache_token != token:
+            self._trace_halo_cache.clear()
+            self._trace_halo_cache_token = token
+        fx, fy = from_cell or (gx, gy)
+        key = (
+            layer,
+            gx,
+            gy,
+            fx,
+            fy,
+            net,
+            (id(nc), nc.trace_width, nc.clearance, nc.intra_pair_clearance) if nc else None,
+        )
+        hit = self._trace_halo_cache.get(key)
+        if hit is not None:
+            return hit
+        name = self._route_halo_names.get(net, "")
+        x1, y1 = self.grid.grid_to_world(fx, fy)
         x2, y2 = self.grid.grid_to_world(gx, gy)
         copper_layer = self._grid_layer_object(layer)
         if copper_layer is None:
@@ -1813,7 +1876,14 @@ class Router:
         )
         partner = self._resolve_partner_net_id(name)
         gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
-        return halo.clear(segment, self, partner_net=partner, partner_clearance=gap)
+        hit = halo.clear(segment, self, partner_net=partner, partner_clearance=gap)
+        if len(self._trace_halo_cache) >= self._TRACE_HALO_CACHE_MAX:
+            self._trace_halo_cache.clear()
+        self._trace_halo_cache[key] = hit
+        return hit
+
+    #: Entry cap for ``_trace_halo_cache`` (issue #5617); memory backstop only.
+    _TRACE_HALO_CACHE_MAX = 500_000
 
     #: Issue #6389: mirrors ``PAD_EXACT_HOLE_GUARD_MM`` in the native
     #: ``Pathfinder::pad_step_clear`` -- a step that comes this close to any
@@ -3976,6 +4046,8 @@ class Router:
         # geometry changes, this covers everything else ``clear`` reads.
         self._via_halo_cache.clear()
         self._via_halo_cache_token = None
+        self._trace_halo_cache.clear()
+        self._trace_halo_cache_token = None
         self.invalidate_pad_geometry_cache()
 
     def invalidate_pad_geometry_cache(self) -> None:
@@ -4358,6 +4430,10 @@ class Router:
         # Issue #5923: clamp to the bounded-excursion wall deadline, if any
         # (identity otherwise) -- same choke point as ``CppPathfinder.route``.
         per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #6366: per-net A* weight override (evolutionary gene).
+        net_weights = getattr(self, "net_astar_weights", None)
+        if weight == 1.0 and net_weights:
+            weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
             return self._route_impl(
                 start,
@@ -4447,6 +4523,8 @@ class Router:
         # Issue #6098: only a drained open set (set after the A* loop) proves
         # unreachability; every other exit leaves this False.
         self.last_route_exhausted = False
+        self.last_route_deadline_hit = False  # Issue #6329
+        self.last_route_deadline_iterations = 0
 
         # Issue #2330: Reset waypoint state for this route call
         self._waypoint_world_coords.clear()
@@ -4827,6 +4905,10 @@ class Router:
             # Per-net timeout check (Issue #1605)
             if deadline is not None and iterations % timeout_check_interval == 0:
                 if time.monotonic() >= deadline:
+                    # Issue #6329: record that the WALL clock, not the
+                    # iteration cap, ended this search.
+                    self.last_route_deadline_hit = True
+                    self.last_route_deadline_iterations = iterations
                     break
 
             current = heapq.heappop(open_set)

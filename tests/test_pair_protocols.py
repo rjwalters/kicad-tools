@@ -336,8 +336,8 @@ def test_board03_pairs_are_full_speed_usb_at_2p5_mm():
         got = resolve_pair_thresholds(ncm, p, n)
         assert (got.skew_mm, got.protocol, got.skew_severity) == (2.5, "USB2_FS", "error")
         assert got.skew_stretch_mm == 0.5
-    # The continuity override is piece (b)'s to remove.
-    assert ncm["USB_D+"].coupled_continuity_threshold == 0.25
+    # Piece (b) removed the continuity override (continuity is info-only).
+    assert ncm["USB_D+"].coupled_continuity_threshold is None
 
 
 def test_board03_local_check_reads_the_table_and_the_committed_copper_passes():

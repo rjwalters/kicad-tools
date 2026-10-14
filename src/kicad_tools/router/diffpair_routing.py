@@ -3175,6 +3175,8 @@ class CoupledPathfinder:
         n_goal_pos: GridPos,
         start_layer: int,
         end_layer: int,
+        p_goal_any_layer: bool,
+        n_goal_any_layer: bool,
         p_net: int,
         n_net: int,
         p_net_name: str,
@@ -3251,6 +3253,8 @@ class CoupledPathfinder:
                 if timeout_seconds is not None and timeout_seconds > 0
                 else 0.0
             ),
+            p_goal_any_layer=p_goal_any_layer,
+            n_goal_any_layer=n_goal_any_layer,
         )
 
         # Mirror the diagnostic bookkeeping the Python loop maintains.
@@ -3540,6 +3544,8 @@ class CoupledPathfinder:
             n_goal_pos=n_goal_pos,
             start_layer=start_layer,
             end_layer=end_layer,
+            p_goal_any_layer=bool(p_end.through_hole),
+            n_goal_any_layer=bool(n_end.through_hole),
             p_net=p_start.net,
             n_net=n_start.net,
             p_net_name=p_start.net_name,
@@ -3705,11 +3711,17 @@ class CoupledPathfinder:
                 )
 
             # Goal check - both traces must reach their goals
+            # Issue #6499: an SMD goal pad is only reached on its own layer;
+            # a through-hole goal pad is reached on any layer.
             p_at_goal = (
-                current.state.p_pos.x == p_goal_pos.x and current.state.p_pos.y == p_goal_pos.y
+                current.state.p_pos.x == p_goal_pos.x
+                and current.state.p_pos.y == p_goal_pos.y
+                and (p_end.through_hole or current.state.p_pos.layer == p_goal_pos.layer)
             )
             n_at_goal = (
-                current.state.n_pos.x == n_goal_pos.x and current.state.n_pos.y == n_goal_pos.y
+                current.state.n_pos.x == n_goal_pos.x
+                and current.state.n_pos.y == n_goal_pos.y
+                and (n_end.through_hole or current.state.n_pos.layer == n_goal_pos.layer)
             )
 
             if p_at_goal and n_at_goal:

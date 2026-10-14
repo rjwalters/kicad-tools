@@ -42,9 +42,9 @@ The ``intra_pair_clearance`` value used for comparison defaults to a
 caller-supplied per-pair map (``intra_pair_clearance_map``).  When omitted
 or when a particular pair is not in the map, the rule falls back to the
 manufacturer's ``min_clearance_mm`` -- which makes the rule equivalent to
-the generic clearance rule (no extra constraint).  The intended call site
-(the autorouter consumer in #2559) computes the per-pair map from
-:meth:`NetClassRouting.effective_intra_pair_clearance` and passes it in.
+the generic clearance rule (no extra constraint).  The production call site
+(``DRCChecker.check_diffpair_clearance_intra``, Issue #6575) passes the
+floored router gap ``DesignRules.pair_gap()`` for every detected pair.
 """
 
 from __future__ import annotations
