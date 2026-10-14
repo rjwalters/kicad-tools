@@ -342,7 +342,9 @@ CoupledRouteResult CoupledPathfinder::route(
     const std::vector<int>& routable_layers,
     const std::vector<uint8_t>& corridor_bitset,
     int max_iterations_budget,
-    double timeout_seconds) {
+    double timeout_seconds,
+    bool p_goal_any_layer,
+    bool n_goal_any_layer) {
 
     CoupledRouteResult result;
 
@@ -508,8 +510,12 @@ CoupledRouteResult CoupledPathfinder::route(
         pool.push_back(current);
 
         // Goal check (diffpair_routing.py:1762-1771).
-        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y);
-        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y);
+        // Issue #6499: an SMD goal pad is only reached on its own layer; a
+        // through-hole goal pad (``*_goal_any_layer``) is reached on any.
+        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y &&
+                          (p_goal_any_layer || current.p_layer == end_layer));
+        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y &&
+                          (n_goal_any_layer || current.n_layer == end_layer));
         if (p_at_goal && n_at_goal) {
             // Reconstruct root->goal path from the pool parent chain.
             std::vector<CoupledPathNode> rev;

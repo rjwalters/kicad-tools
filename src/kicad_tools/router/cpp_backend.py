@@ -91,7 +91,7 @@ logger = logging.getLogger(__name__)
 # v54 (Issue #6473): ``CoupledPathfinder.route`` holds a layer change to the
 # fab hole-to-hole floor against the pair's own earlier vias and between the
 # P and N via of the move.  A v53 .so returns coupled via pairs below it.
-_REQUIRED_CPP_BUILD_VERSION = 54
+_REQUIRED_CPP_BUILD_VERSION = 55
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -5409,6 +5409,8 @@ class CppCoupledPathfinder:
         corridor_bitset: list[int],
         max_iterations_budget: int,
         timeout_seconds: float,
+        p_goal_any_layer: bool = False,
+        n_goal_any_layer: bool = False,
     ) -> tuple[list[tuple[int, int, int, int, int, int, bool]] | None, dict]:
         """Run the coupled C++ search.
 
@@ -5440,6 +5442,8 @@ class CppCoupledPathfinder:
             corridor_bitset,
             int(max_iterations_budget),
             float(timeout_seconds),
+            bool(p_goal_any_layer),
+            bool(n_goal_any_layer),
         )
         diagnostics = {
             "iterations": int(res.iterations),
