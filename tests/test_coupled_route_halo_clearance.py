@@ -515,6 +515,34 @@ def test_backend_parity_under_a_partnered_net_class(intra_pair_clearance):
 
 
 @requires_cpp
+def test_backend_parity_under_a_floored_partnered_net_class():
+    """Issue #6560: both arms waive at the FLOORED pair gap, never the class value.
+
+    A 0.075 mm class gap under an authored 0.15 mm board minimum
+    (``DesignRules.pair_gap``, #6443).  Swept beside a partner *rail* -- the
+    copper the waiver acts on -- so the floor is load-bearing: a 0.2 mm floor
+    re-blocks ``PARTNER_WAIVED`` (0.15 mm edge-to-edge) on both arms, which a
+    floor applied to only one arm would turn into a parity break.
+    """
+    for authored in (0.15, 0.2):
+        _, pathfinder = _partner_rail_context(0.075)
+        pathfinder.rules.authored_min_clearance = authored
+        cpp = pathfinder._get_cpp_coupled_impl()
+        assert cpp is not None
+        sampled, under, over = _partner_sweep(pathfinder, cpp)
+        assert sampled > 0
+        assert (under, over) == (0, 0), authored
+
+    _, floored = _partner_rail_context(0.075)
+    floored.rules.authored_min_clearance = 0.2
+    assert floored._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+    assert floored._get_cpp_coupled_impl().trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+    _, unfloored = _partner_rail_context(0.075)
+    assert not unfloored._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+    assert not unfloored._get_cpp_coupled_impl().trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+
+
+@requires_cpp
 def test_partner_waiver_absent_when_the_partner_is_not_in_the_net_name_map():
     """No resolvable partner id => no waiver, on both arms.
 

@@ -95,8 +95,15 @@ def test_fixed_via_physical_span_intersects_selected_layers(
     from kicad_tools.router.rules import DesignRules
 
     path = tmp_path / "mixed.kicad_pcb"
-    text = board_text().replace(
-        '(layers "F.Cu" "B.Cu")', f'(layers "{via_layers[0]}" "{via_layers[1]}")'
+    # A partial span needs its type keyword: KiCad reads a keyword-less via
+    # as a through via whatever its pair says (Issue #6493).
+    keyword = "" if set(via_layers) == {"F.Cu", "B.Cu"} else "blind "
+    if keyword and "F.Cu" not in via_layers and "B.Cu" not in via_layers:
+        keyword = "buried "
+    text = (
+        board_text()
+        .replace('(layers "F.Cu" "B.Cu")', f'(layers "{via_layers[0]}" "{via_layers[1]}")')
+        .replace("(via (at 106 103)", f"(via {keyword}(at 106 103)")
     )
     path.write_text(text)
     stack = LayerStack(

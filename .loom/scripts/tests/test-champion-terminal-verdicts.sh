@@ -271,6 +271,9 @@ STUB
 cat >"$VIEW/bin/loom-daemon" <<'STUB'
 #!/usr/bin/env bash
 [ "${1:-} ${2:-}" = "forge trusted-comments" ] || exit 2
+echo fetch >>"$LOOM_TEST_FIX/tc-calls"
+# LOOM_TEST_REFETCH_FAIL: every fetch after the first fails (#11902's brief outage).
+[ -n "${LOOM_TEST_REFETCH_FAIL:-}" ] && [ "$(wc -l <"$LOOM_TEST_FIX/tc-calls")" -gt 1 ] && exit 1
 if [[ " $* " == *" --gh-shape "* ]]; then
   jq '[.comments[] | select((.authorAssociation // "MEMBER") != "NONE")]' "$LOOM_TEST_FIX/issue.json"
 else
@@ -289,6 +292,8 @@ echo "RESULT REVISE_MARKER=${REVISE_MARKER:-}"
 echo "RESULT UNREVISED=${UNREVISED:-}"
 echo "RESULT PRIOR_REJECTIONS=${PRIOR_REJECTIONS:-}"
 echo "RESULT SKIP_STREAK=${SKIP_STREAK:-unset}"
+echo "RESULT FINDINGS=$(printf '%s\n' "${COMMENT_BODY:-}" | grep -c '^- ')"
+echo "RESULT VERDICT_CREATED_AT=${VERDICT_CREATED_AT:-}"
 EOF
 # $1 fixture dir, $2 title, $3 body, $4 comments JSON array (gh issue view
 # shape), $5 REST comments JSON array.
@@ -335,6 +340,18 @@ else
         "PRIOR_REJECTIONS counts every NEEDS REVISION verdict across revisions (never reset by a new body)"
     assert_eq "yes" "$(result_of "$OUT" UNREVISED)" \
         "an unchanged, already-rejected body goes straight to Step 4 (UNREVISED=yes), never a silent skip"
+
+    # --- #11902: the unrevised route lifts its findings from the trusted
+    # comments the block already holds; a failed second fetch must not empty them.
+    FINDINGS_C="$(jq -c --arg h "$H" '.[3].body += "\n- criterion 2: the scope names no file\n- criterion 5: no test plan"' <<<"$COMMENTS")"
+    F7="$FIXTURE_DIR/fix/refetch-fails"
+    make_fixture "$F7" "$TITLE" "$BODY" "$FINDINGS_C" "$(to_rest <<<"$FINDINGS_C")"
+    OUT="$(LOOM_TEST_REFETCH_FAIL=1 run_guard "$F7")"
+    assert_eq "yes" "$(result_of "$OUT" UNREVISED)" "refetch outage: still UNREVISED=yes"
+    assert_eq "2" "$(result_of "$OUT" FINDINGS)" "refetch outage: COMMENT_BODY still carries the verdict's findings list"
+    assert_eq "2026-10-03T00:00:00Z" "$(result_of "$OUT" VERDICT_CREATED_AT)" \
+        "the verdict time comes from the held comment's createdAt"
+    assert_eq "1" "$(wc -l <"$F7/tc-calls" | tr -d ' ')" "the comments are fetched once per idempotency check, never re-read"
 
     # --- Curator's unanswered-marker check against Champion's hash.
     section_body "Revising a Champion send-back" <"$CURATOR_MD" \

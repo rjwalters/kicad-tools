@@ -31,17 +31,50 @@ hosts by whichever happened to see more work.
 
 ## The rule
 
-### 1. Fold by `repo#issue`
+### 1. Fold by `repo#issue` + `step`
 
 Rows are grouped by `owner/repo` plus issue number — not the bare issue
-number, which collides across repos. A row with no repo or issue (a private
-row withheld from the public dashboard view) has nothing to fold on and stays
-one item per row.
+number, which collides across repos — plus the row's **`step`** (#11910).
+A row with no repo or issue (a private row withheld from the public
+dashboard view) has nothing to fold on and stays one item per row.
+
+`step` is the role session that would advance the item: the step-dispatch
+design ([`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md)
+§12, #11894) dispatches one step of one item at a time, so the same issue can
+be a Builder row on one host and a Judge row on another. Those are two
+pieces of work and fold to two fleet items; only rows at the same step fold
+together.
+
+- **Values** are the classifier's `Step` names
+  (`loom-daemon/src/work_finder/step_item.rs`): `curator`,
+  `curator_keep_or_close`, `champion_promote`, `champion_reevaluate`,
+  `builder`, `judge`, `doctor`, `champion_merge`,
+  `champion_hold_reevaluate`.
+- **An absent `step` is `builder`.** Every plan published before step
+  dispatch was a Builder plan, so an older host's row folds into the same
+  item as a newer host's explicit `builder` row. A host that does not set
+  the field omits it from the wire (never `null`), so older readers parse
+  newer plans unchanged: the change is additive, with no schema bump.
+- **An unknown step name** (a newer daemon's step this build does not know)
+  is kept verbatim and is its own fold key. It never merges into `builder`
+  or into another step.
+- Each merged item carries its resolved `step`; every observation under it
+  (the primary and `others`) is that host's row unchanged.
+
+Today no producer sets `step`: the host-local plan is still a Builder plan,
+so every row folds as `builder` and the merge behaves exactly as it did
+before the field. The step-dispatch producer sets it once it ships behind
+`autonomous.workFinder.stepDispatch`.
+
+The dashboard port (`mergeFleetQueue`, below) has not been ported to the
+`step` key yet: its pinned copy of the fixture predates the two step cases,
+and it still folds by `repo#issue` alone. While no producer sets `step` the
+two agree; the port has to land before step dispatch publishes `step` rows.
 
 ### 2. Pick the primary
 
 The **primary** is the observation that classifies the item for the fleet.
-Among the hosts that list the same issue, in order:
+Among the hosts that list the same issue at the same step, in order:
 
 1. **Most advanced `plan_state`** — `running` > `next` > `queued` >
    `blocked`. An `unknown` state (a newer daemon's state this build does not

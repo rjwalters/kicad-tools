@@ -257,26 +257,26 @@ failing check, #6852; a hold-only stale PR stays on `loom:pr`, untouched).
 
 On that held route **`loom:blocked` stays on** (#11861), so the PR is never a
 plain approval while the hold stands, and `merge-pr.sh` refuses it throughout
-(it refuses any `loom:blocked` PR, `--allow-unapproved` included). Doctor
-still reaches it: Doctor's queue (`pr-queue --role doctor`, the lanes, the
-targeted path) serves `loom:changes-requested` + `loom:blocked` when a trusted
-Champion hold marker stands (`champion_hold::doctor_may_work`), and Doctor
-returns it to review as usual. After the Doctor-cycle cap (a trusted
-`<!-- loom:doctor-cycle-cap -->` comment the sweep now writes) Doctor stops,
-and the Capped-PR Recovery Pass posts one recommendation for a human, keeping
-`loom:blocked` on. Judge's queue and
-review gate serve `loom:review-requested` + `loom:blocked` the same way
-(`judge_may_review`); both verdicts leave the label on, and the re-approval
-restores `loom:pr` + `loom:blocked` (the janitor exception) and the precheck re-judges the hold;
-the push is release signal (c). Champion never removes the label while the
-hold stands, so a removal is always a human's release.
+(it refuses any `loom:blocked` PR, `--allow-unapproved` included). Champion
+never removes the label while the hold stands, so a removal is always a
+human's release.
 
-A held PR whose Doctor cycle is capped (`doctor_cycle_capped`) leaves
-automation's hands: Doctor skips it and Judge and Champion never see it. The
-Capped-PR Recovery Pass, which also reads `loom:blocked` +
-`loom:changes-requested`, never grants it a cycle or removes `loom:blocked`;
-it posts one comment (`<!-- champion:capped-hold-recommendation -->`) asking a
-human to review it, close it or remove the hold. Find such PRs with
+The Doctor/Judge round trip still runs under the hold. Doctor's queue
+(`pr-queue --role doctor`, the lanes, the targeted path) serves
+`loom:changes-requested` + `loom:blocked` when a trusted Champion hold marker
+stands (`champion_hold::doctor_may_work`), and Doctor returns it to review as
+usual. Judge's queue and review gate serve `loom:review-requested` +
+`loom:blocked` the same way (`judge_may_review`); both verdicts leave the label
+on, the re-approval restores `loom:pr` + `loom:blocked` (the janitor exception)
+and the precheck re-judges the hold. The push is release signal (c).
+
+A held PR whose Doctor cycle is capped (`doctor_cycle_capped`, a trusted
+`<!-- loom:doctor-cycle-cap -->` comment the sweep writes) leaves automation's
+hands: Doctor skips it and Judge and Champion never see it. The Capped-PR
+Recovery Pass, which also reads `loom:blocked` + `loom:changes-requested`,
+never grants it a cycle or removes `loom:blocked`; it posts one comment
+(`<!-- champion:capped-hold-recommendation -->`) asking a human to review it,
+close it or remove the hold. Find such PRs with
 `gh pr list --label loom:blocked --label loom:changes-requested`.
 
 ### The out-of-band AC hold on an issue (#6883)
@@ -714,6 +714,8 @@ above. Nothing about the guard changes for any other blocking label.
   #11795 kept the label.
 
 ## Label registry: the source of truth (#10013)
+
+> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, `stale_after_minutes` (described below as inert) becomes live claim liveness for the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 `defaults/labels.json` is the single source of truth for label semantics: each
 label's name, description, color, `kind`, `applied_by`/`removed_by`, and the

@@ -2779,7 +2779,10 @@ def test_stub_obstacles_are_physical_and_layer_aware(tmp_path, kind, net, layer,
     )
     pcb = PCB.load(_write(tmp_path, text))
     reason = _check_stub_clearance(pcb, pcb.vias[0], (12.427, 10), ["B.Cu"], 0.2, 0.127)
-    assert (reason is not None) == blocked
+    # Issue #6493: a keyword-less via is a through via to KiCad whatever its
+    # ``(layers ...)`` pair says, so an ``"F.Cu" "F.Cu"`` via still has a
+    # barrel on B.Cu and blocks the B.Cu stub.
+    assert (reason is not None) == (blocked or kind == "via")
 
 
 @pytest.mark.parametrize("gap,blocked", [(0.126, True), (0.128, False)])

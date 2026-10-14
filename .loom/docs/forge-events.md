@@ -411,7 +411,11 @@ minutes, or at once after a `401`.
 
 The work finder's candidate listings and the stage-dwell sampler's stage
 listings ask the mirror first: `GET /v1/mirror/items?repo=&label=&state=open`
-(every page, with bodies). The answer is used only when **every** page's
+(every page, with bodies). The step engine's all-open listing (#11897) asks
+the same endpoint with no `label`; it is the only caller allowed to, and it
+stands in for the unfiltered ETag walk of every open item. Each item may
+carry `labels_at` (label → time applied), which the stage-entry provider
+reads first. The answer is used only when **every** page's
 watermark is fresh:
 
 - the mirror knows the repo, it has not moved, and it has completed at least
@@ -437,7 +441,7 @@ mirror's saving is on active repos, where every host used to pay its own
 **Decision reads never come from the mirror.** Claim, label-transition and
 merge reads stay on their current path (the poll gate's invariant 3: reads
 that gate a decision are never held). The mirror's listing answers only discovery reads, and a source
-test pins its two call sites.
+test pins its three call sites.
 
 ### 8.2 Wakes
 

@@ -18646,6 +18646,126 @@ class Autorouter:
 
         return result
 
+    def _via_bonds_same_net_zone(self, via: Via) -> bool:
+        """Whether a same-net zone cell of the routing grid covers ``via``.
+
+        Issue #6596 guard: a via can be bonded through zone fill on a layer
+        no segment touches (a stitching via).  Grids without zone arrays
+        (test doubles, released engines) report no zone.
+        """
+        grid = self.grid
+        try:
+            gx, gy = grid.world_to_grid(via.x, via.y)
+            is_zone = grid._is_zone
+            net = grid._net
+            for layer_idx in range(int(is_zone.shape[0])):
+                if bool(is_zone[layer_idx, gy, gx]) and int(net[layer_idx, gy, gx]) == via.net:
+                    return True
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return False
+        return False
+
+    def _remove_single_layer_vias(self) -> int:
+        """Drop vias whose same-net copper lies on one layer only (Issue #6596).
+
+        A through via that bonds copper on a single layer does no electrical
+        work, and KiCad reports it as ``via_dangling``.  The usual source is a
+        RSMT Steiner branch point: :func:`~.algorithms.steiner.build_rsmt`
+        gives the virtual Steiner pad the first terminal's layer, so the edge
+        that *ends* on it must transition onto that layer with a via even
+        when every branch leaving the point runs on the other layer.
+
+        A via is a candidate only when its net has known pads, it is not
+        micro, not in-pad, not on a pour net, not over a same-net zone cell, touches no same-net pad, and
+        its same-net segments/vias span fewer than two layers
+        (:func:`~.terminal_connectivity.single_layer_via_indices`).  Copper
+        preserved from the input board counts as bonding copper but is never
+        removed.  Each candidate is removed only if the net's layer-aware
+        copper component count (:func:`~.terminal_connectivity.copper_component_count`)
+        does not rise; otherwise it is put back.
+
+        Returns:
+            Number of vias removed.
+        """
+        from .terminal_connectivity import copper_component_count, single_layer_via_indices
+
+        routes_by_net: dict[int, list[Route]] = {}
+        for route in self.routes:
+            if route.net != 0 and route.vias:
+                routes_by_net.setdefault(route.net, []).append(route)
+        if not routes_by_net:
+            return 0
+
+        own_ids = {id(r) for r in self.routes}
+        fixed_routes = [
+            r
+            for r in (
+                *getattr(self, "existing_routes", ()),
+                *getattr(self, "placement_preserved_routes", ()),
+            )
+            if id(r) not in own_ids
+        ]
+
+        removed = 0
+        for net_id in sorted(routes_by_net):
+            try:
+                if self._is_pour_net(net_id):
+                    continue
+            except (AttributeError, TypeError):
+                continue
+            net_routes = [r for r in self.routes if r.net == net_id]
+            fixed = [r for r in fixed_routes if r.net == net_id]
+            pads = [self.pads[k] for k in self.nets.get(net_id, ()) if k in self.pads]
+            if not pads:
+                # Without the net's terminals there is no way to tell what a
+                # via might be serving (synthetic or partially loaded nets).
+                continue
+
+            def _net_copper(
+                net_routes: list[Route] = net_routes, fixed: list[Route] = fixed
+            ) -> tuple[list, list, list[Route | None]]:
+                segments = [s for r in (*net_routes, *fixed) for s in r.segments]
+                vias: list = []
+                owners: list[Route | None] = []
+                for r in net_routes:
+                    vias.extend(r.vias)
+                    owners.extend([r] * len(r.vias))
+                for r in fixed:
+                    vias.extend(r.vias)
+                    owners.extend([None] * len(r.vias))
+                return segments, vias, owners
+
+            segments, vias, owners = _net_copper()
+            candidates: list[tuple[Route, Via]] = []
+            for k in single_layer_via_indices(pads, segments, vias):
+                owner = owners[k]
+                via = vias[k]
+                if (
+                    owner is not None
+                    and not via.is_micro
+                    and not via.in_pad
+                    and not self._via_bonds_same_net_zone(via)
+                ):
+                    candidates.append((owner, via))
+            if not candidates:
+                continue
+
+            baseline = copper_component_count(pads, segments, vias)
+            for owner, via in candidates:
+                position = next(i for i, v in enumerate(owner.vias) if v is via)
+                del owner.vias[position]
+                segments, vias, _ = _net_copper()
+                after = copper_component_count(pads, segments, vias)
+                if after > baseline:
+                    owner.vias.insert(position, via)
+                    continue
+                baseline = after
+                removed += 1
+
+        if removed:
+            flush_print(f"  Cleanup: removed {removed} single-layer junction via(s) (issue #6596)")
+        return removed
+
     def cleanup_artifacts(
         self,
         oob_margin: float = 0.5,
@@ -18683,6 +18803,10 @@ class Autorouter:
               (#1603) removed because their net has no real route
               (Issue #3441) -- prevents failed nets from being reported
               as "partially connected" via their stub copper.
+            - ``single_layer_vias_removed``: Vias whose same-net copper
+              sits on one layer only, dropped because removing them leaves
+              the net's layer-aware copper exactly as connected
+              (Issue #6596; see :meth:`_remove_single_layer_vias`).
         """
         stats: dict[str, int] = {
             "net0_routes_removed": 0,
@@ -18693,6 +18817,7 @@ class Autorouter:
             "segments_restored": 0,
             "vias_restored": 0,
             "orphan_escape_routes_removed": 0,
+            "single_layer_vias_removed": 0,
         }
 
         # -- Step 0 (Issue #3441): Drop orphan escape stubs --
@@ -18859,6 +18984,9 @@ class Autorouter:
                     f"  Cleanup: restored segments/vias for {len(degraded_nets)} "
                     f"net(s) to preserve connectivity"
                 )
+
+        # -- Step 5 (Issue #6596): Drop single-layer junction vias --
+        stats["single_layer_vias_removed"] = self._remove_single_layer_vias()
 
         # Issue #2960: ``cleanup_artifacts`` may remove entire routes
         # (Step 1) or strip vias from surviving routes (Steps 2/3), and

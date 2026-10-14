@@ -1992,7 +1992,7 @@ def _hdi_blind_via_under_foreign_pad_pcb() -> str:
     (uuid "00000000-0000-0000-0000-0000000000f4"))
   (segment (start 110 110) (end 130 110) (width 0.25) (layer "B.Cu") (net 2)
     (uuid "00000000-0000-0000-0000-0000000000f5"))
-  (via (at 110 110) (size 0.4) (drill 0.2) (layers "In2.Cu" "B.Cu") (net 2)
+  (via blind (at 110 110) (size 0.4) (drill 0.2) (layers "In2.Cu" "B.Cu") (net 2)
     (uuid "00000000-0000-0000-0000-0000000000f6"))
 )
 """

@@ -6,87 +6,87 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "bbb32ec75a1ef50df14697b3992193e2cc06c59657e3f01bc140762973410532",
+      "sha256": "8b1c27af79a80f6622c501c36dba077db3d38c0a5d8e42ef35da12a69ddc6dd6",
       "size": 1208
     },
     "assembly-back.pdf": {
-      "sha256": "7a9471c486495ca710ca4c1180ef1e29bb69b92d2db4b1f833ec059ee4d3d150",
-      "size": 7350
+      "sha256": "634ad786fc26d8b2ca8756635a2033b21024174c92015b68b340747183d0bb7d",
+      "size": 7125
     },
     "assembly-front.pdf": {
-      "sha256": "2c114230cc52b17ef0769cbbb94d4559e87f7e72adc185e90600db1d2501140b",
-      "size": 11303
+      "sha256": "fefc73c2a198d426fb445fb48333fdad2b742d590a203ba05bf2e0e0fdbba775",
+      "size": 11090
     },
     "bom_jlcpcb.csv": {
       "sha256": "9f279e0b3cbe583b95b3b7af202a91f6825e67e4451e7ae3b438b7d42d12efdd",
       "size": 240
     },
     "check-report.json": {
-      "sha256": "58788986733dfd25ce68804e85ad3a69c9cd9ae5f14729cd43cdd5cd55e5c44d",
-      "size": 8151
+      "sha256": "eb91c353e96587cadcceccf01a2af777cb1e6e2279ccee1275b3a69cd76454a4",
+      "size": 8174
     },
     "cpl_jlcpcb.csv": {
       "sha256": "fa86f220fefc8d3d7b135c6f78e9133f55d22bd5a6042f1548f79eae2afadc30",
       "size": 181
     },
     "gerbers/gerbers.zip": {
-      "sha256": "99cee1431c3202d20c0c14eeb4c254a68d4514640ab1f20ed004e7b495897f31",
-      "size": 12032
+      "sha256": "8cb59b95dfcfcee42dbd74e78bc45d12a3e3ca425508761742bc929ebd937775",
+      "size": 11612
     },
     "images/assembly.png": {
-      "sha256": "667d43917e5de890899bbc12827e71b65e03b3b6418fefe99475091d2d3f09d9",
-      "size": 101914
+      "sha256": "1cadbdcde2169e08438f00dc4faeddd06cc7f1d39447fa15710e93afda7308ea",
+      "size": 99097
     },
     "images/layer_B_Cu.png": {
-      "sha256": "e84dff22f4e51313205753eba0fb104907bd1e5e2cf73235d9c01b51bc05dd68",
-      "size": 80326
+      "sha256": "59fc411a2d5f6dab59d05e0f5f731708ac293ef22eb9249005cfef9d8f89cd9c",
+      "size": 77793
     },
     "images/layer_F_Cu.png": {
-      "sha256": "24732c5cd9f2920305743485f0a781fb4033e313f6a3af50541a541486de7a14",
-      "size": 96417
+      "sha256": "cd49543062fabff5f736f32d72eb5bfa7391c9811ab028edf86ec27606c42b93",
+      "size": 93245
     },
     "images/pcb_back.png": {
-      "sha256": "fe4ef075aade8e58cf1d1eefd3c4d2b5ef85e6fedbbaddd7238175ddd79086a1",
-      "size": 82556
+      "sha256": "e5b9b6c1ceab6914da20e9f38eb1395ac7aff5b28ffbff47332e6bbfb54bba53",
+      "size": 80080
     },
     "images/pcb_copper.png": {
-      "sha256": "9a8a9ff241605966234751ba6543fb8d1751c409f615c65a17b40ffb03d6b548",
-      "size": 87575
+      "sha256": "3f5ee81269331ba4a1c632389b9db26df4749270339ac1c723b117d9cb2453fa",
+      "size": 84533
     },
     "images/pcb_front.png": {
-      "sha256": "c54132311aae6251fa2e45f7b8ffa57fae5f52540b675cd76ecf249fc7515a5d",
-      "size": 115426
+      "sha256": "35ca2ffe5bc6a3e46004eb9de0ef204ca6e73c7f81f470b331a0ee93db97bef6",
+      "size": 112115
     },
     "images/schematic_voltage_divider.png": {
       "sha256": "27f0d0565c634d8f676c0d0b5e2edc214da86fdaa29c5f495a58dde423e213bf",
       "size": 118129
     },
     "kicad_project.zip": {
-      "sha256": "ccd0975f49f99d1bb4c12d76c758d7864f4653d9e415735fb15315167616e362",
-      "size": 13096
+      "sha256": "a14e8161712b8eea5f31d0865a2ca9a18f281ed2510a6027349108e51ae42b83",
+      "size": 14195
     },
     "native-drc.json": {
-      "sha256": "de969c2d39e65b8d225ed2198c03afd505dd82b8601722833f786aaf0ff62813",
-      "size": 277
+      "sha256": "3ab94f68747e7c81fb6c4b1aa41c8a31a1b5ad36d3869f3a57439c541f4eb3a4",
+      "size": 252
     },
     "procurement-review.md": {
       "sha256": "25eec92b01f7b00c1cc9cb4e0c9370f30d51efba672ad249a72b7968de5924cf",
       "size": 10341
     },
     "report.md": {
-      "sha256": "9c1445fac227d2c4fb8429d8f356ae9d46359c717ff14566d9dbf282e9a545b6",
+      "sha256": "12de5c42cd650b26d8c26dfb8a49dd3de96864d3cc75920ca52cfbcedf2af5e2",
       "size": 2794
     },
     "report.pdf": {
-      "sha256": "998e77b8af761327951b84cff688fe4f9efe0bdda091d19298c07e15638cf33f",
-      "size": 774254
+      "sha256": "a06d40013bd666519aa7ad92ad80f68e5d754c4407939aa6e822325098daaf1a",
+      "size": 754590
     },
     "schematic.pdf": {
-      "sha256": "b42f9780878d98ebec066a15e2e9720bbd778b5193ab5ee1712df86b6c9c7abb",
+      "sha256": "c809376882da8ec5a672831bbe6880c5e6dede91578cd17553755031cd9ea08b",
       "size": 47876
     }
   },
-  "generated_at": "2026-10-14T11:27:19.048248+00:00",
+  "generated_at": "2026-10-14T17:28:58.816449+00:00",
   "kicad_tools_version": "0.22.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -123,7 +123,7 @@
       "status": "OK"
     },
     {
-      "message": "Drill holes present (4 vias, 4 TH pads)",
+      "message": "Drill holes present (3 vias, 4 TH pads)",
       "name": "drill_holes",
       "status": "OK"
     },

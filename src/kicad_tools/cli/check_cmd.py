@@ -3227,19 +3227,24 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
             return "/".join(n for n in v.nets if n)
         return v.rule_id
 
-    def _metric(rule_id: str) -> str:
+    def _metric(v: DRCViolation) -> str:
+        rule_id = v.rule_id
         # diffpair_routing_continuity measures a coupled *fraction*, not a
         # length skew -- label the column accordingly.
         if rule_id == "diffpair_routing_continuity":
             return "continuity"
         if rule_id == "diffpair_uncoupled_length":
-            return "uncoupled"
+            from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+                is_via_count_finding,
+            )
+
+            return "vias" if is_via_count_finding(v) else "uncoupled"
         return "skew"
 
     rows: list[tuple[str, str, str, str, str]] = []
     for v in sorted(measurements, key=lambda x: (x.rule_id, _subject(x))):
         subject = _subject(v)
-        metric = _metric(v.rule_id)
+        metric = _metric(v)
         measured = f"{v.actual_value:.3f}" if v.actual_value is not None else "-"
         tol = f"{v.required_value:.3f}" if v.required_value is not None else "-"
         status = "FAIL" if v.is_error else "pass"

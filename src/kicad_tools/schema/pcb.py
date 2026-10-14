@@ -1904,6 +1904,11 @@ class Via:
     # :attr:`via_type` (#3124).  ``None`` = side not present in the node.
     tenting_front: str | None = None
     tenting_back: str | None = None
+    # Issue #6493: ``True`` when :meth:`from_sexp` widened a keyword-less
+    # partial ``(layers ...)`` pair to ``F.Cu``/``B.Cu``, the span KiCad
+    # actually reads.  Only the PCB loader consumes it (one warning per
+    # board); the source S-expression is not rewritten.
+    layers_read_as_through: bool = field(default=False, compare=False, repr=False)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -1941,6 +1946,14 @@ class Via:
                 for i in range(len(layers.values))
                 if isinstance(layers.values[i], str)
             ]
+            # Issue #6493: KiCad reads a via with no blind/buried/micro
+            # keyword as a through via, whatever its layer pair says.
+            from ..core.layers import kicad_read_via_layers
+
+            read_layers, normalised = kicad_read_via_layers(via.layers, via.via_type)
+            if normalised:
+                via.layers = list(read_layers)
+                via.layers_read_as_through = True
         # Issue #4624: per-via tenting override
         # ``(tenting (front yes|no|none) (back yes|no|none))``.
         if tenting := sexp.find("tenting"):
@@ -3042,6 +3055,8 @@ class PCB:
 
     def _parse(self):
         """Parse the PCB data structure."""
+        # Issue #6493: keyword-less partial-span vias read as through.
+        vias_read_as_through = 0
         for child in self._sexp.iter_children():
             tag = child.tag
             if tag is None:
@@ -3077,6 +3092,8 @@ class PCB:
                 self._arcs.append(Arc.from_sexp(child))
             elif tag == "via":
                 via = Via.from_sexp(child)
+                if via.layers_read_as_through:
+                    vias_read_as_through += 1
                 self._vias.append(via)
             elif tag == "zone":
                 zone = Zone.from_sexp(child)
@@ -3127,6 +3144,14 @@ class PCB:
                 # rules.  These are top-level siblings of ``(setup …)``, NOT
                 # nested inside it, so ``_parse_setup`` never sees them.
                 self._parse_net_class(child)
+
+        if vias_read_as_through:
+            from ..core.layers import warn_normalised_vias
+
+            board_path = getattr(self, "_path", None)
+            warn_normalised_vias(
+                logger, str(board_path) if board_path else "PCB", vias_read_as_through
+            )
 
         # Post-parse fixup: recover net_number from name for KiCad 10 name-only
         # format.  KiCad 10 may emit inline (net "name") without a numeric ID,
@@ -4351,6 +4376,8 @@ class PCB:
                     )
                 )
 
+        from ..core.layers import kicad_read_via_layers
+
         # Remove from S-expression tree
         removed_count = 0
         sexp_to_remove = []
@@ -4370,11 +4397,24 @@ class PCB:
             at_node = child.find("at")
             layers_node = child.find("layers")
             if at_node and layers_node:
-                layers = tuple(
+                raw_layers = tuple(
                     layers_node.get_string(i) or ""
                     for i in range(len(layers_node.values))
                     if isinstance(layers_node.values[i], str)
                 )
+                # Issue #6493: Via.layers holds the span KiCad *reads*
+                # (keyword-less partial pairs widen to F.Cu/B.Cu), so key
+                # the raw node on the same normalised span or a uuid-less
+                # keyword-less partial via would never match here.
+                raw_type = (
+                    child.values[0]
+                    if child.values
+                    and isinstance(child.values[0], str)
+                    and child.values[0] in ("micro", "blind", "buried")
+                    else None
+                )
+                layers, _ = kicad_read_via_layers(raw_layers, raw_type)
+                layers = tuple(layers)
                 key = (
                     round(at_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
                     round(at_node.get_float(1) or 0.0, _COORD_MATCH_QUANT),
