@@ -79,7 +79,7 @@ Exactly one per row:
 |---|---|
 | `success` | Ran and was scored. The fixed placement held and no rule loss is known. |
 | `non-comparable` | Ran and was scored, but the router saw a lossy view of the rules. `lost_constraints` lists each one. |
-| `invalid-fixed-placement` | The output moved, rotated or flipped a footprint, changed a pad net, the outline or the copper layers, or removed or changed an input zone. Zones **added** by a router (kct pours GND/VCC) are allowed and recorded in `zones_added_by_tool`. |
+| `invalid-fixed-placement` | The output moved, rotated or flipped a footprint, changed a pad net, the outline or the copper layers, or removed or changed an input zone. The baseline is the prepared input outside the router's run directory, and the router's own working copy must still hash to it after the run; otherwise the row is `invalid-fixed-placement` with reason "router modified its input". Zones **added** by a router (kct pours GND/VCC) are allowed and recorded in `zones_added_by_tool`. |
 | `timeout` | Killed at the cap. A partial board or session is kept as `partial_artifact` and is **never** scored as a result. |
 | `tool-failure` | The pin mismatched, the build failed, the executable is missing, the native backend is missing, or the tool exited non-zero without output. `stage` says which. |
 | `missing-output` | Exit 0, but no fresh output was written. |

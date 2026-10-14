@@ -162,11 +162,30 @@ def _file_entry(rel: str | None, repo: Path) -> dict[str, Any]:
     return {"path": rel, "sha256": sha256_file(repo / rel)}
 
 
+def board_paths(key: str) -> dict[str, str | None]:
+    """Repo-relative path each manifest slot of board ``key`` is frozen from.
+
+    Shared by :func:`freeze_board` and :func:`verify_manifest`, so a slot the
+    manifest records as absent can be re-checked for a file that later appeared.
+    """
+    bdir, stem = BOARD_SPECS[key]
+    if stem is None:
+        return {"input": None, "project": None, "dru": None, "schematic": None}
+    out = f"{bdir}/output"
+    return {
+        "input": f"{out}/{stem}.kicad_pcb",
+        "project": f"{out}/{stem}.kicad_pro",
+        "dru": f"{out}/{stem}_routed.kicad_dru",
+        "schematic": f"{out}/{stem}.kicad_sch",
+    }
+
+
 def freeze_board(key: str, repo: Path = REPO) -> dict[str, Any]:
     """Compute one board's manifest entry from the tree as it is now."""
     bdir, stem = BOARD_SPECS[key]
     out = f"{bdir}/output"
-    pcb_rel = f"{out}/{stem}.kicad_pcb" if stem else None
+    slots = board_paths(key)
+    pcb_rel = slots["input"]
     if pcb_rel is None or not (repo / pcb_rel).exists():
         return {
             "key": key,
@@ -176,12 +195,13 @@ def freeze_board(key: str, repo: Path = REPO) -> dict[str, Any]:
         }
     text = (repo / pcb_rel).read_text()
     counts = Counter(head for head, _, _ in iter_forms(text, level=1))
-    dru_rel = f"{out}/{stem}_routed.kicad_dru"
+    dru_rel = slots["dru"]
     dru = _file_entry(dru_rel, repo)
     if dru.get("absent"):
         dru["provenance"] = "absent"
         dru["note"] = "no .kicad_dru at this revision; graded on .kicad_pro alone"
     else:
+        assert dru_rel is not None
         managed = KCT_DRU_MARKER in (repo / dru_rel).read_text()
         dru["provenance"] = "kct-managed fab floors" if managed else "board-authored"
         dru["note"] = (
@@ -206,9 +226,9 @@ def freeze_board(key: str, repo: Path = REPO) -> dict[str, Any]:
             "zones": counts.get("zone", 0),
         },
         "copper_layers": layers,
-        "project": _file_entry(f"{out}/{stem}.kicad_pro", repo),
+        "project": _file_entry(slots["project"], repo),
         "dru": dru,
-        "schematic": _file_entry(f"{out}/{stem}.kicad_sch", repo),
+        "schematic": _file_entry(slots["schematic"], repo),
         "routing_sidecars": [_file_entry(s, repo) for s in sidecars],
     }
 
@@ -222,11 +242,24 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
 
 
 def verify_manifest(manifest: dict[str, Any], repo: Path = REPO) -> list[str]:
-    """Every frozen file must still hash the same, and every absence still hold."""
+    """Every frozen file must still hash the same, and every absence still hold.
+
+    An absence is a manifest slot with ``path: None`` (board 09's DRU) or an
+    excluded board (08, no PCB). If the file the slot would be frozen from now
+    exists, the manifest no longer describes the tree and that is drift too.
+    """
     problems: list[str] = []
     for board in manifest["boards"]:
+        expected = board_paths(board["key"])
         if board["status"] != "included":
+            rel = expected["input"]
+            if rel is not None and (repo / rel).exists():
+                problems.append(f"{board['key']}: {rel} now exists but the board is excluded")
             continue
+        for slot in ("input", "project", "dru", "schematic"):
+            rel = expected[slot]
+            if board[slot].get("path") is None and rel is not None and (repo / rel).exists():
+                problems.append(f"{board['key']}: {rel} now exists but is recorded absent")
         entries = [board["input"], board["project"], board["dru"], board["schematic"]]
         entries += board.get("routing_sidecars", [])
         for entry in entries:
@@ -988,6 +1021,19 @@ def run_tool(
             rec.stage = "exec"
         return rec
 
+    # The router's working copy lives in run_dir, which the router can write. A
+    # tool that moved footprints in its input AND its output would compare
+    # clean against that copy, and the SES merge below uses it as its base, so
+    # it must still be byte-identical to the prepared input.
+    work_sha = sha256_file(work_in) if work_in.exists() else None
+    if work_sha != prep.sha256:
+        rec.outcome = "invalid-fixed-placement"
+        rec.reason = "router modified its input"
+        rec.placement_violations = [
+            f"input: {work_in.name} sha256 {work_sha or 'missing'} != prepared {prep.sha256}"
+        ]
+        return rec
+
     if tool == "fastroute":
         try:
             ses_lost, counts = ses_import(produced, local.pcb, out)
@@ -999,7 +1045,8 @@ def run_tool(
     rec.output = str(out)
 
     try:
-        fp_in, fp_out = fingerprint(local.pcb), fingerprint(out)
+        # Baseline from the prepared input outside run_dir, never the router's copy.
+        fp_in, fp_out = fingerprint(prep.pcb), fingerprint(out)
         violations = compare_fingerprints(fp_in, fp_out)
         rec.tool_config["zones_added_by_tool"] = added_zones(fp_in, fp_out)
     except Exception as exc:  # noqa: BLE001

@@ -5,7 +5,9 @@
 comparison honest, using fake router executables and small fixtures (no
 upstream build, no network):
 
-* the manifest matches the tree, with 08's exclusion and 09's no-DRU marker;
+* freeze/verify/prepare catch drift (against a throwaway copy of board 00, so
+  regenerating a committed board never fails this file), and the committed
+  manifest keeps 08's exclusion and 09's no-DRU marker;
 * one copper-stripping policy that never touches nested forms;
 * outputs are graded beside the FROZEN rules, never tool-emitted ones;
 * nonzero DRC / unconnected counts stay visible, a missing referee is
@@ -14,7 +16,8 @@ upstream build, no network):
   round-trip keeps placement and pad nets;
 * a router that writes a partial board, spawns a child and hangs is a
   ``timeout`` with both processes gone; reruns never see stale artifacts;
-* moved footprints / rewritten pad nets make a row invalid.
+* moved footprints / rewritten pad nets make a row invalid, including when the
+  router also rewrites its own input copy.
 
 The driver is not a package module, so it is loaded by path.
 """
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -33,7 +37,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "benchmarks" / "external" / "fleet_routers" / "run.py"
-BOARD00 = REPO_ROOT / "boards" / "00-simple-led" / "output" / "simple_led.kicad_pcb"
+BOARD00_OUT = Path("boards") / "00-simple-led" / "output"
 
 
 def _load():
@@ -58,15 +62,44 @@ def manifest(fr):
     return fr.load_manifest()
 
 
-@pytest.fixture
-def prep(fr, manifest, tmp_path):
-    board = next(b for b in manifest["boards"] if b["key"] == "00")
-    return fr.prepare_board(board, tmp_path / "input")
+def _copy_board00(dest: Path) -> Path:
+    """A throwaway repo holding only board 00's frozen inputs.
+
+    Tests freeze and verify THIS tree, never the live ``boards/`` checkout, so
+    regenerating a committed board file cannot fail this test file.
+    """
+    src = REPO_ROOT / BOARD00_OUT
+    out = dest / BOARD00_OUT
+    out.mkdir(parents=True)
+    for name in (
+        "simple_led.kicad_pcb",
+        "simple_led.kicad_pro",
+        "simple_led_routed.kicad_dru",
+        "simple_led.kicad_sch",
+    ):
+        if (src / name).exists():
+            shutil.copy2(src / name, out / name)
+    return dest
 
 
 @pytest.fixture
-def board00(manifest):
-    return next(b for b in manifest["boards"] if b["key"] == "00")
+def tmp_repo(tmp_path):
+    return _copy_board00(tmp_path / "repo")
+
+
+@pytest.fixture
+def board00(fr, tmp_repo):
+    return fr.freeze_board("00", repo=tmp_repo)
+
+
+@pytest.fixture
+def prep(fr, board00, tmp_repo, tmp_path):
+    return fr.prepare_board(board00, tmp_path / "input", repo=tmp_repo)
+
+
+@pytest.fixture
+def board00_pcb(tmp_repo):
+    return tmp_repo / BOARD00_OUT / "simple_led.kicad_pcb"
 
 
 def _fake_exe(path: Path, body: str) -> Path:
@@ -110,19 +143,80 @@ def stub_referees(fr, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-REFREEZE = (
-    "a fleet input changed: re-freeze deliberately with "
-    "`uv run python benchmarks/external/fleet_routers/run.py freeze` and commit manifest.json"
+def _frozen(fr, repo: Path) -> dict:
+    return {"boards": fr.freeze_all(repo=repo)}
+
+
+def test_freeze_then_verify_is_clean(fr, tmp_repo):
+    manifest = _frozen(fr, tmp_repo)
+    boards = {b["key"]: b for b in manifest["boards"]}
+    assert boards["00"]["status"] == "included"
+    assert boards["00"]["dru"]["provenance"] == "kct-managed fab floors"
+    assert all(boards[k]["status"] == "excluded" for k in boards if k != "00")
+    assert fr.verify_manifest(manifest, repo=tmp_repo) == []
+
+
+@pytest.mark.parametrize(
+    "name", ["simple_led.kicad_pcb", "simple_led.kicad_pro", "simple_led_routed.kicad_dru"]
 )
+def test_verify_detects_drift(fr, tmp_repo, name):
+    manifest = _frozen(fr, tmp_repo)
+    path = tmp_repo / BOARD00_OUT / name
+    path.write_text(path.read_text() + "\n")  # e.g. a board regeneration
+    problems = fr.verify_manifest(manifest, repo=tmp_repo)
+    assert problems == [f"00: {(BOARD00_OUT / name).as_posix()} hash drifted"]
 
 
-def test_manifest_hashes_match_tree(fr, manifest):
-    assert fr.verify_manifest(manifest) == [], REFREEZE
+def test_verify_detects_missing_frozen_file(fr, tmp_repo):
+    manifest = _frozen(fr, tmp_repo)
+    (tmp_repo / BOARD00_OUT / "simple_led.kicad_sch").unlink()
+    assert any("is missing" in p for p in fr.verify_manifest(manifest, repo=tmp_repo))
 
 
-def test_manifest_is_exactly_what_freeze_produces(fr, manifest):
-    """Hand edits or a forgotten re-freeze cannot slip through."""
-    assert manifest["boards"] == fr.freeze_all(), REFREEZE
+def test_verify_detects_broken_absence(fr, tmp_repo):
+    """A recorded absence (09-style DRU, 08-style excluded board) must still hold."""
+    dru = tmp_repo / BOARD00_OUT / "simple_led_routed.kicad_dru"
+    dru_text = dru.read_text()
+    dru.unlink()
+    manifest = _frozen(fr, tmp_repo)
+    assert manifest["boards"][0]["dru"] == {
+        "path": None,
+        "absent": True,
+        "provenance": "absent",
+        "note": "no .kicad_dru at this revision; graded on .kicad_pro alone",
+    }
+    assert fr.verify_manifest(manifest, repo=tmp_repo) == []
+    dru.write_text(dru_text)
+    excluded = tmp_repo / "boards/01-voltage-divider/output/voltage_divider.kicad_pcb"
+    excluded.parent.mkdir(parents=True)
+    excluded.write_text("(kicad_pcb)\n")
+    problems = fr.verify_manifest(manifest, repo=tmp_repo)
+    assert any(
+        "simple_led_routed.kicad_dru now exists but is recorded absent" in p for p in problems
+    )
+    assert any(
+        "voltage_divider.kicad_pcb now exists but the board is excluded" in p for p in problems
+    )
+
+
+def test_prepare_refuses_drifted_input(fr, board00, tmp_repo, tmp_path):
+    pcb = tmp_repo / BOARD00_OUT / "simple_led.kicad_pcb"
+    pcb.write_text(pcb.read_text() + "\n")
+    with pytest.raises(RuntimeError, match="input hash drifted"):
+        fr.prepare_board(board00, tmp_path / "input", repo=tmp_repo)
+
+
+def test_run_refuses_on_manifest_drift(fr, tmp_repo, tmp_path, monkeypatch, capsys):
+    path = tmp_path / "manifest.json"
+    manifest = _frozen(fr, tmp_repo)
+    manifest["boards"][0]["input"]["sha256"] = "0" * 64
+    path.write_text(json.dumps(manifest))
+    verify = fr.verify_manifest
+    monkeypatch.setattr(fr, "verify_manifest", lambda m, repo=None: verify(m, repo=tmp_repo))
+    assert fr.main(["--manifest", str(path), "verify"]) == 1
+    rc = fr.main(["--manifest", str(path), "run", "--work-dir", str(tmp_path / "w"), "--tools", ""])
+    assert rc == 2
+    assert "manifest drift -- refusing to run" in capsys.readouterr().out
 
 
 def test_manifest_covers_fleet_with_explicit_markers(manifest):
@@ -152,12 +246,6 @@ def test_manifest_pins_match_ecosystem_registry(manifest):
         assert manifest["pins"][tool]["commit"] == reg[tool]["pinned_commit"]
 
 
-def test_verify_detects_drift(fr, manifest, tmp_path):
-    drifted = json.loads(json.dumps(manifest))
-    drifted["boards"][0]["dru"]["sha256"] = "0" * 64
-    assert any("hash drifted" in p for p in fr.verify_manifest(drifted))
-
-
 # ---------------------------------------------------------------------------
 # Stripping policy
 # ---------------------------------------------------------------------------
@@ -182,9 +270,11 @@ def test_strip_removes_only_top_level_copper(fr):
     assert out.count("\n") == PCB_SNIPPET.count("\n") - 3
 
 
-def test_prepare_keeps_input_bytes_when_nothing_to_strip(fr, prep):
+def test_prepare_keeps_input_bytes_when_nothing_to_strip(fr, prep, board00_pcb):
+    if fr.strip_copper(board00_pcb.read_text())[1] != {"segment": 0, "arc": 0, "via": 0}:
+        pytest.skip("board 00's committed input is no longer copper-free")
     assert prep.stripped == {"segment": 0, "arc": 0, "via": 0}
-    assert prep.pcb.read_bytes() == BOARD00.read_bytes()
+    assert prep.pcb.read_bytes() == board00_pcb.read_bytes()
     assert (prep.frozen_dir / "simple_led.kicad_dru").exists()
 
 
@@ -235,10 +325,10 @@ def test_missing_drc_json_is_unavailable_not_zero(fr, prep, tmp_path, stub_refer
     assert res["clean_pass"] is not True
 
 
-def test_missing_scorer_executable_is_unavailable(fr, tmp_path):
-    res = fr.kicad_cli_drc(BOARD00, tmp_path / "drc.json", kicad_cli=str(tmp_path / "nope"))
+def test_missing_scorer_executable_is_unavailable(fr, board00_pcb, tmp_path):
+    res = fr.kicad_cli_drc(board00_pcb, tmp_path / "drc.json", kicad_cli=str(tmp_path / "nope"))
     assert res["ran"] is False
-    assert fr.kct_sync(BOARD00, None)["ran"] is False
+    assert fr.kct_sync(board00_pcb, None)["ran"] is False
 
 
 @pytest.mark.parametrize(
@@ -276,15 +366,15 @@ KEEPOUT = """  (zone (net 0) (net_name "") (layers "F.Cu") (uuid "a0000000-0000-
 
 
 @pytest.fixture
-def rule_bearing(tmp_path):
+def rule_bearing(tmp_path, board00_pcb):
     """Board 00 plus a keepout, a GND pour, copper text, a second net class, a DRU."""
     d = tmp_path / "rb"
     d.mkdir()
-    text = BOARD00.read_text()
+    text = board00_pcb.read_text()
     cut = text.rstrip().rfind(")")
     pcb = d / "rb.kicad_pcb"
     pcb.write_text(text[:cut] + KEEPOUT + ")\n")
-    pro = json.loads(BOARD00.with_suffix(".kicad_pro").read_text())
+    pro = json.loads(board00_pcb.with_suffix(".kicad_pro").read_text())
     pro["net_settings"]["classes"].append({"name": "Power", "clearance": 0.3, "track_width": 0.5})
     pro["net_settings"]["netclass_patterns"] = [{"netclass": "Power", "pattern": "VCC"}]
     (d / "rb.kicad_pro").write_text(json.dumps(pro))
@@ -486,23 +576,50 @@ def test_pin_mismatch_refuses_to_run(fr, prep, board00, tmp_path):
     assert (rec.outcome, rec.stage) == ("tool-failure", "pin")
 
 
+#: Fake-router helper: nudge the first footprint 1 mm in x and rewrite the net
+#: of its first pad. Content-agnostic, so it survives a board 00 regeneration.
+MOVE_SRC = """
+import re, sys
+def move(t):
+    i = t.index("(footprint ")
+    m = re.compile(r"\\(at ([-\\d.]+) ").search(t, i)
+    t = t[: m.start(1)] + str(float(m.group(1)) + 1) + t[m.end(1) :]
+    m = re.compile(r'\\(net \\d+ "[^"]+"\\)').search(t, t.index("(pad ", i))
+    return t[: m.start()] + '(net 0 "")' + t[m.end() :]
+args = sys.argv[1:]
+src, out = args[1], args[args.index("-o") + 1]
+"""
+
+
 def test_moved_footprint_is_invalid_fixed_placement(fr, prep, board00, tmp_path):
-    spec = _tm(
-        tmp_path,
-        """
-        import sys
-        args = sys.argv[1:]
-        text = open(args[1]).read().replace("(at 148.5 85.5 0)", "(at 149.5 85.5 0)", 1)
-        text = text.replace('(net 2 "LED_ANODE") (pintype', '(net 1 "VCC") (pintype', 1)
-        open(args[args.index("-o") + 1], "w").write(text)
-        """,
-    )
+    spec = _tm(tmp_path, MOVE_SRC + "open(out, 'w').write(move(open(src).read()))\n")
     rec = fr.run_tool("tracemaker", spec, prep, board00, tmp_path / "tm", BUDGETS)
     assert rec.outcome == "invalid-fixed-placement"
     joined = " ".join(rec.placement_violations)
-    assert "footprints: R1" in joined
-    assert "pad_nets: R1:2" in joined
+    assert "footprints: " in joined
+    assert "pad_nets: " in joined
     assert rec.score is None
+
+
+def test_router_rewriting_its_input_is_invalid_fixed_placement(fr, prep, board00, tmp_path):
+    """Moving parts in the input copy AND the output must not compare clean."""
+    spec = _tm(
+        tmp_path,
+        MOVE_SRC
+        + "moved = move(open(src).read())\n"
+        + "open(src, 'w').write(moved)\n"
+        + "open(out, 'w').write(moved)\n",
+    )
+    rec = fr.run_tool("tracemaker", spec, prep, board00, tmp_path / "tm", BUDGETS)
+    assert rec.outcome == "invalid-fixed-placement"
+    assert rec.reason == "router modified its input"
+    assert rec.score is None
+    # The rewritten working copy and the output agree, so a baseline taken from
+    # the router's copy (the old behaviour) would have passed this row.
+    work_in = tmp_path / "tm" / "run" / "simple_led.kicad_pcb"
+    out = tmp_path / "tm" / "run" / "simple_led_routed.kicad_pcb"
+    assert fr.compare_fingerprints(fr.fingerprint(work_in), fr.fingerprint(out)) == []
+    assert fr.compare_fingerprints(fr.fingerprint(prep.pcb), fr.fingerprint(out)) != []
 
 
 def test_kct_refuses_without_worktree_native_backend(fr, prep, board00, tmp_path, monkeypatch):
