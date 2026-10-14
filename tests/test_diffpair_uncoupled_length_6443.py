@@ -59,12 +59,13 @@ def via(at, net):
     )
 
 
-def pad(at, net, size=(0.8, 0.95), ref="R1"):
+def pad(at, net, size=(0.8, 0.95), ref="R1", shape="roundrect"):
+    rratio = "(roundrect_rratio 0.25) " if shape == "roundrect" else ""
     return (
         f'\t(footprint "X" (layer "F.Cu") (at {at[0]} {at[1]}) (uuid "{uuid.uuid4()}")\n'
         f'\t\t(property "Reference" "{ref}" (at 0 0) (layer "F.SilkS") (uuid "{uuid.uuid4()}"))\n'
-        f'\t\t(pad "1" smd roundrect (at 0 0) (size {size[0]} {size[1]}) '
-        f'(layers "F.Cu" "F.Mask" "F.Paste") (roundrect_rratio 0.25) (net "{net}") '
+        f'\t\t(pad "1" smd {shape} (at 0 0) (size {size[0]} {size[1]}) '
+        f'(layers "F.Cu" "F.Mask" "F.Paste") {rratio}(net "{net}") '
         f'(uuid "{uuid.uuid4()}")))\n'
     )
 
@@ -208,6 +209,14 @@ PINNED = {
 #   third-net traces, vias and pads all block, at any distance);
 # * copper that overlaps either trace of the pair (same conductor) does not block;
 # * a trace lying wholly inside a pad of its own net does not couple.
+#
+# The real-copper residue of that first model (regenerated board 06: USB2_D read
+# 13.437 mm against KiCad's 14.194 mm) pinned the rule down further (the
+# "touching_*" and "pad_*_edge_*" cases below): only a track or via touching an
+# END of the overlap is exempt (not any copper overlapping a trace), a pad
+# stops blocking only when one of the pair's traces leaves it, and "in the pad"
+# is KiCad's ray-cast test, under which a point on the top edge is outside and
+# one on the bottom edge inside.
 _NB = seg((0, 2), (16, 2), "T_N")  # N1: 0..16 at y=2, beside the 20 mm P trace
 #: Pad half-size and gap used by the buried-stub cases (a 0.26 mm trace pair).
 _GAP = 1.65
@@ -338,6 +347,30 @@ PINNED.update(
             [_w(0, 20, 0, "T_P"), _w(0, 20, _GAP, "T_N"), pad((0.3, 0.8), "X", (0.8, 0.5))],
             20.0,
             "a third-net pad standing between the traces blocks",
+        ),
+        # Issue #6554, round 2: the cases the first model got wrong (it read 4.0).
+        "touching_partner_mid_run_blocks": (
+            [P20, _NB, seg((0, 1.0), (3, 2.0), "T_N")],
+            20.0,
+            "an N stub joined to N1 mid-run still stands between at the overlap "
+            "start: only copper touching an END of the overlap is exempt",
+        ),
+        "third_net_touching_partner_blocks": (
+            [P20, _NB, seg((0, 1.0), (3, 2.0), "X")],
+            20.0,
+            "the same for a third net: touching the trace is not touching the overlap end",
+        ),
+        "pad_top_edge_is_outside": (
+            [P20, _NB, pad((0, 0.5), "T_P", (1.0, 1.0), shape="rect")],
+            20.0,
+            "P runs along its pad's top edge, outside by KiCad's ray-cast test: "
+            "P does not leave the pad, so the pad stands between",
+        ),
+        "pad_bottom_edge_is_inside": (
+            [P20, _NB, pad((0, 1.5), "T_N", (1.0, 1.0), ref="R2", shape="rect")],
+            4.0,
+            "N starts on its pad's bottom edge, inside by the same test: N leaves "
+            "the pad, so the pad does not block",
         ),
     }
 )
@@ -756,6 +789,64 @@ def test_kct_equals_kicad_on_committed_copper(tmp_path) -> None:
                 theirs = seen[tuple(sorted((p, n)))]
                 assert theirs == pytest.approx(kicad_mm, abs=1e-3)
                 assert mine == pytest.approx(theirs, abs=1e-3)
+
+
+#: Board 06's synthetic regression fixture: real router copper with grid-step
+#: diagonals, pads at trace ends and pairs left uncoupled.  KiCad's figures, read
+#: off kicad-cli 10.0.6 (Issue #6554).  The first pairing model read USB2_D
+#: 8.423, USB3_RX1 49.422, USB3_TX2 4.068 and MIPI_D0 22.197 mm here.
+FIXTURE_06 = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
+FIXTURE_06_KICAD = {
+    "USB2_D": 8.5727,
+    "USB3_TX1": 35.4495,
+    "USB3_RX1": 49.5276,
+    "USB3_TX2": 4.1385,
+    "USB3_RX2": 32.1650,
+    "PCIE_TX": 7.4169,
+    "PCIE_RX": 6.2083,
+    "MIPI_CLK": 24.0083,
+    "MIPI_D0": 22.4092,
+}
+
+
+def _fixture_06_kct() -> dict[str, float]:
+    pcb = PCB.load(str(REPO / FIXTURE_06))
+    ids = {n.name: n.number for n in pcb.nets.values()}
+    return {
+        base: measure_pair(
+            pcb, ids[f"{base}+"], ids[f"{base}-"], f"{base}+", f"{base}-"
+        ).uncoupled_mm
+        for base in FIXTURE_06_KICAD
+    }
+
+
+def test_kct_equals_kicad_on_board_06_regression_fixture() -> None:
+    """kct's figure equals KiCad's on every pair of the board-06 fixture (Issue #6554)."""
+    mine = _fixture_06_kct()
+    for base, kicad_mm in FIXTURE_06_KICAD.items():
+        assert mine[base] == pytest.approx(kicad_mm, abs=1e-3), base
+
+
+def test_board_06_regression_fixture_figures_are_kicads(tmp_path) -> None:
+    """The pinned fixture figures are what kicad-cli itself reports."""
+    exe = _kicad_cli()
+    import shutil
+
+    src = REPO / FIXTURE_06
+    work = tmp_path / src.name
+    for suffix in (".kicad_pcb", ".kicad_pro"):
+        shutil.copyfile(src.with_suffix(suffix), work.with_suffix(suffix))
+    work.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "u"\n (condition "A.inDiffPair(\'*\')")\n'
+        " (constraint diff_pair_uncoupled (max 0.01mm)))\n"
+    )
+    seen = {}
+    for v in kicad_report(exe, work):
+        if v["type"] == "diff_pair_uncoupled_length_too_long":
+            nets = {i["description"].rsplit("[", 1)[-1].split("]", 1)[0] for i in v["items"]}
+            base = min(nets)[:-1]
+            seen[base] = float(v["description"].rsplit("actual", 1)[1].split("mm")[0])
+    assert seen == pytest.approx(FIXTURE_06_KICAD, abs=1e-3)
 
 
 def test_limit_only_block_has_no_gap_header() -> None:

@@ -25,32 +25,30 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 | Question | KiCad's answer |
 |---|---|
 | Per net or P + N summed? | Per net; the pair's figure is `max(uncoupled(P), uncoupled(N))`. |
-| What is coupled? | The projected overlap of a P segment and an N segment on one layer that are parallel (anti-parallel too) to within about 0.01° (0.02° is already uncoupled), **unless copper stands between them where the overlap starts** (see "How pairs are formed"). |
+| What is coupled? | The projected overlap of a P segment and an N segment on one layer whose lines never meet in KiCad's 32-bit coordinates (anti-parallel too; 0.005° still couples on 20 mm traces, 0.02° does not), **unless copper stands between them** (see "How pairs are formed"). |
 | Distance limit? | None, unless a `diff_pair_gap (max ..)` is present. kct emits only `(min ..)`, so two parallel runs 10 mm apart are coupled. |
 | Via barrels? | Not counted. Vias that sit side by side cost nothing; offset vias cost only the track copper left without a partner. |
 
 ### How pairs are formed
 
-Issue #6554. KiCad pairs primitives; kct matches it (to 1 µm on every
-committed pair and pinned probe) with a rule inferred from black-box probes:
+Issue #6554. KiCad pairs primitives; kct repeats it (to 1 µm on every
+committed pair, board 06's regression fixture and the pinned probes):
 
 * Each parallel same-layer P/N segment pair couples over its overlap, and the
   pairs are **summed**, not unioned (a net can read negative; kct clamps at 0).
-* A pair does **not** couple at all when other copper (a track of any net, a
-  via or a pad, at any distance) crosses the straight line between the traces
-  at the **start of their overlap**; copper overlapping either trace does not
-  block, nor does copper starting later (an N stub at 3 to 8 mm on a 0 to 16 mm
-  run leaves it coupled; one at 0 to 5 mm uncouples it all).
-* "Start" follows the **P trace's stored direction**: P stored 20 → 0 anchors
-  at x = 20. N's and the blocker's direction are irrelevant.
-* A trace lying wholly inside a pad of its own net is not paired; board 06's
-  two buried stubs (0.125 and 0.2 mm) are KiCad's whole extra 0.325 mm.
+* A pair does **not** couple when other copper (a track of any net, the pair's
+  own included, a via or a pad, at any distance) reaches the probe between the
+  two overlaps' nearest points, which is where the overlap starts on the **P
+  trace's stored direction** (1 nm rounding can move it on a diagonal).
+* Exempt: a track or via touching an **end of the overlap**, and a pad that
+  one of the two traces **leaves** (KiCad's ray-cast pad test: a point on the
+  top or right edge is outside, on the bottom or left edge inside). So a stub
+  buried in its own pad does not pair; board 06's two are its extra 0.325 mm.
 
 ### Known divergences
 
-* **Third-net copper overlapping a pair trace** (a short) and a **third-net pad
-  over a trace** are paired by KiCad in ways kct does not model; neither occurs
-  on a routed pair. kct models every pad as its (rotated) rectangle.
+* kct models every pad as its (rotated) rectangle; KiCad uses the pad's
+  shape (a rounded corner can let a probe past). Zones never block.
 * **Arcs** are not measured by kct.
 * **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them; the
   first fixture belongs to the length-tuning phase (#6447).

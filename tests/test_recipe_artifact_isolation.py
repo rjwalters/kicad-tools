@@ -46,6 +46,17 @@ def test_pair_improvement_cannot_hide_new_physical_error():
     assert gate.unexpected_baseline_errors(key, errors) == {}
 
 
+def test_historical_uncoupled_length_allows_only_the_known_pair():
+    # Issue #6554: USB2_D over its uncoupled limit is KiCad's figure on the
+    # regenerated witness; a second over-limit pair is a new physical error.
+    gate = load("check_diffpair_coverage")
+    key = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
+    errors = {"diffpair_length_skew": 9, "diffpair_uncoupled_length": 1}
+    assert gate.unexpected_baseline_errors(key, errors) == {}
+    errors["diffpair_uncoupled_length"] = 2
+    assert gate.unexpected_baseline_errors(key, errors) == {"diffpair_uncoupled_length": 2}
+
+
 def test_matchgroup_improvement_cannot_hide_new_physical_error():
     gate = load("check_matchgroup_coverage")
     key = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
