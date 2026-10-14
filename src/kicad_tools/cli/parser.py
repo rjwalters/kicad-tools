@@ -4278,7 +4278,18 @@ def _add_route_parser(subparsers) -> None:
             "node-expansion count. --timeout is kept only as a safety "
             "backstop. Combine with --seed for byte-stable re-routes. "
             "Relief-rescue sub-searches keep a 10 s wall clock unless "
-            "--deterministic-rescue is also passed."
+            "--deterministic-rescue is also passed. With --deterministic-budget "
+            "alone, each negotiated rip-up iteration also gives every per-net "
+            "search a budget of 10%% of the remaining stage time, and the "
+            "pure-Python A* fallback usually hits it before the iteration cap "
+            "(Issue #6329; logged as '[deterministic-budget] per-net wall clock "
+            "bound net ...'); --deterministic-rescue removes that budget and the "
+            "60 s oscillation-escape budget (Issue #6475). Still wall-clock-bound "
+            "even with both flags: the relief-rescue transaction bound; the "
+            "post-negotiation sweep (60 s, 10 s per net); the trace optimizer / "
+            "DRC nudge, which are skipped when little --timeout is left; and the "
+            "outer --timeout stage deadline (logged as '[deterministic-budget] "
+            "stage deadline fired')."
         ),
     )
     # Issue #5870: per-run opt-in for the iteration-bounded relief rescue
@@ -4290,7 +4301,9 @@ def _add_route_parser(subparsers) -> None:
             "Bound the stall-relief rescue's probe and victim re-land "
             "sub-searches by the per-net node-expansion cap instead of their "
             "10 s wall clock (Issue #5870). Needs an active cap "
-            "(--deterministic-budget or --per-net-iterations). Off by default "
+            "(--deterministic-budget or --per-net-iterations). Also switches "
+            "off the 60 s oscillation-escape budget and the remaining-budget "
+            "per-iteration per-net cap (Issue #6475). Off by default "
             "(#4730); use it when the route must not depend on machine load."
         ),
     )

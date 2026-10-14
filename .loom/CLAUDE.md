@@ -149,9 +149,8 @@ Agents coordinate through labels. See `.github/labels.yml` for full definitions.
 **Epic Lifecycle**: `loom:epic` → phased `loom:architect` + `loom:epic-phase`
 child issues.
 
-**Escape-hatch / status labels**: `loom:blocked` (needs help),
-`loom:operator-only` (human action outside automation: credentials, infra,
-hardware; dispatch skips it), `loom:abort` (abort in-flight work, returns to
+**Holds**: `loom:blocked` (waiting), `loom:operator` (a human must act or
+decide; dispatch skips it), `loom:abort` (abort in-flight work, returns to
 `loom:issue`). Priority: `loom:very-important` / `loom:important` (set by
 humans, Guide, Champion); order only, never a hold or an approval.
 `loom:frozen`: not now. Every agent and daemon path ignores it; only a human removes it (#11743).
@@ -170,7 +169,7 @@ it is not the best outcome. Comment the rationale before closing; rescope
 instead of closing when the core is worth keeping (drop back to
 `loom:triage`/`loom:curated`, removing `loom:issue`, so it isn't re-dispatched
 with a stale scope). Never close an issue that encodes a pending human
-decision — route it to `loom:blocked` or `loom:operator-only` instead.
+decision — route it to `loom:operator` instead.
 
 ## Git Worktree Workflow
 

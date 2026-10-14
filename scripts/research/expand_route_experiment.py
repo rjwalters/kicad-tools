@@ -1364,7 +1364,12 @@ def grid_args(scale: float, policy: str, grid_mm: float | None = None) -> list[s
     return ["--max-cells", str(int(round(DEFAULT_MAX_CELLS * scale * scale)))]
 
 
-def pick_artifact(routed: Path) -> tuple[Path | None, str | None]:
+#: ``kct route`` exits after which a file at ``-o`` is a leftover periodic
+#: checkpoint, not a finished route (1: error e.g. refused save; 5: failure).
+CRASHED_EXIT_CODES = (1, 5)
+
+
+def pick_artifact(routed: Path, exit_code: int | None = None) -> tuple[Path | None, str | None]:
     """The board to grade: the ``-o`` output, else the deadline's best-so-far.
 
     When the hard ``--timeout`` fires, ``kct route`` exits 124 without writing
@@ -1380,6 +1385,9 @@ def pick_artifact(routed: Path) -> tuple[Path | None, str | None]:
     the deadline landed in is itself load-dependent.
     """
     if routed.exists():
+        # Issue #6475: after a crashed route the file is the last checkpoint.
+        if exit_code in CRASHED_EXIT_CODES:
+            return routed, "checkpoint"
         return routed, "final"
     sidecar = routed.with_suffix(".timeout.json")
     if sidecar.exists():
@@ -1449,7 +1457,7 @@ def run_one(
     if grid_policy == "pinned":
         row["pinned_grid_mm"] = grid_mm
     row.update(timeout_sidecar_facts(routed))
-    artifact, kind = pick_artifact(routed)
+    artifact, kind = pick_artifact(routed, row.get("exit_code"))
     if artifact is not None:
         row["routed"] = str(artifact)
         row["artifact"] = kind
