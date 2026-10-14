@@ -8206,6 +8206,28 @@ class EscapeRouter:
         # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
         escape_layer = self._select_inner_escape_layer(pad.layer)
 
+        # Issue #6646: a micro via spans exactly one dielectric.  When the
+        # stack has no inner signal layer the escape layer falls back to the
+        # opposite outer layer, which is non-adjacent on a 4+ layer board;
+        # decline instead of emitting a full-stack micro via.
+        if is_micro_via_used and self.grid.layer_stack is not None:
+            try:
+                adjacent = self.grid.layer_stack.are_layers_adjacent(pad.layer, escape_layer)
+            except Exception:
+                adjacent = True
+            if not adjacent:
+                logger.info(
+                    "In-pad micro-via rescue for pad %s (ref=%s pin=%s) "
+                    "declined: landing layer %s is not stack-adjacent to %s "
+                    "(Issue #6646).",
+                    pad.net_name,
+                    pad.ref,
+                    pad.pin,
+                    escape_layer.value,
+                    pad.layer.value,
+                )
+                return None
+
         # Inner-layer escape point: continue inward toward the package
         # body (same direction the deferred surface escape would have
         # used) so the main router can pick up from there.
