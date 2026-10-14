@@ -148,7 +148,7 @@
           "log_threshold": null
         }
       ],
-      "pair_digest": "978806e6fd010810",
+      "pair_digest": "94872ab4ac84bc95",
       "nets_routed": "27/27",
       "kct_errors_by_rule": {
         "clearance_via_zone": 1,
@@ -312,7 +312,7 @@
           "log_threshold": null
         }
       ],
-      "pair_digest": "5da02945440ddc41",
+      "pair_digest": "981e15a4180f3456",
       "nets_routed": "24/27",
       "kct_errors_by_rule": {
         "connectivity": 2,
@@ -509,7 +509,7 @@
           "log_threshold": null
         }
       ],
-      "pair_digest": "45beaeb927cdeb90",
+      "pair_digest": "24c4e391899bbe5f",
       "nets_routed": "16/18",
       "kct_errors_by_rule": {
         "connectivity": 2
@@ -742,7 +742,7 @@
           "log_threshold": null
         }
       ],
-      "pair_digest": "03191dd45215aefc",
+      "pair_digest": "07df6d25f3f9798c",
       "nets_routed": "14/18",
       "kct_errors_by_rule": {
         "connectivity": 4
@@ -977,7 +977,7 @@
           "log_threshold": null
         }
       ],
-      "pair_digest": "a6e72280bf350d84",
+      "pair_digest": "c2bafa229f65d07f",
       "nets_routed": "17/18",
       "kct_errors_by_rule": {
         "connectivity": 1,
@@ -1322,7 +1322,7 @@
           "log_threshold": null
         }
       ],
-      "pair_digest": "243d0864df9c3051",
+      "pair_digest": "ad0e0b743ba27470",
       "nets_routed": "23/26",
       "kct_errors_by_rule": {
         "connectivity": 1,
@@ -1667,7 +1667,7 @@
           "log_threshold": null
         }
       ],
-      "pair_digest": "29f4981c0785089a",
+      "pair_digest": "e89311ddd59148b6",
       "nets_routed": "16/26",
       "kct_errors_by_rule": {
         "connectivity": 7,

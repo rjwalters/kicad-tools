@@ -583,6 +583,10 @@ def kicad_pair_verdicts(routed: Path, pairs: list[dict], timeout: int = 600) -> 
 _LIMIT_KEYS = frozenset(
     {
         "log_threshold",
+        # Issue #6638: limit descriptors, not copper -- a rule change alone must
+        # never shift the digest.
+        "continuity_threshold_pct",
+        "skew_tolerance_mm",
         "protocol",
         "skew_source",
         "skew_severity",

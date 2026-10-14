@@ -151,7 +151,7 @@
           }
         }
       ],
-      "pair_digest": "84c475ee368f4093",
+      "pair_digest": "4dfacb4a9d0d5347",
       "nets_routed": "24/27",
       "kct_errors_by_rule": {
         "connectivity": 2,
@@ -311,7 +311,7 @@
           }
         }
       ],
-      "pair_digest": "978806e6fd010810",
+      "pair_digest": "94872ab4ac84bc95",
       "nets_routed": "27/27",
       "kct_errors_by_rule": {
         "clearance_via_zone": 1,
