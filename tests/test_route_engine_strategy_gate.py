@@ -170,6 +170,75 @@ class TestIncompatibleCombosHardError:
         assert "--escape-routing" in err
 
 
+class TestMeshRejectsDifferentialPairs:
+    """Issue #6551: the mesh engine has no coupled router and owns every pair
+    net, so ``--route-engine mesh --differential-pairs`` must fail loudly
+    (rc 2) and point at the lattice / grid engines instead."""
+
+    def test_mesh_basic_differential_pairs_hard_errors(self, pcb: Path, capsys):
+        rc = route_main(
+            [
+                str(pcb),
+                "--route-engine",
+                "mesh",
+                "--strategy",
+                "basic",
+                "--differential-pairs",
+            ]
+        )
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "--route-engine mesh is incompatible with --differential-pairs" in err
+        assert "#4280" in err
+        assert "#6551" in err
+        assert "--route-engine lattice" in err
+        assert "--route-engine grid" in err
+        outputs = [p for p in pcb.parent.iterdir() if p != pcb]
+        assert outputs == [], f"gate must not write outputs, found {outputs}"
+
+    def test_fires_before_file_validation(self, tmp_path: Path, capsys):
+        rc = route_main(
+            [
+                str(tmp_path / "missing.kicad_pcb"),
+                "--route-engine",
+                "mesh",
+                "--strategy",
+                "basic",
+                "--differential-pairs",
+            ]
+        )
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "--differential-pairs" in err
+        assert "not found" not in err
+
+    def test_outer_kct_entry_hard_errors(self, pcb: Path, capsys):
+        rc = kct_main(
+            [
+                "route",
+                str(pcb),
+                "--route-engine",
+                "mesh",
+                "--strategy",
+                "basic",
+                "--differential-pairs",
+            ]
+        )
+        assert rc == 2
+        assert "--differential-pairs" in capsys.readouterr().err
+
+    def test_validator_mesh_basic_without_flag_unchanged(self, capsys):
+        args = _gate_args(route_engine="mesh", strategy="basic", differential_pairs=False)
+        assert _validate_route_engine_strategy(args) == 0
+        assert "--differential-pairs" not in capsys.readouterr().err
+
+    def test_validator_lattice_accepts_differential_pairs(self, capsys):
+        """The lattice routes pairs coupled -- the flag stays legal there."""
+        args = _gate_args(route_engine="lattice", strategy="basic", differential_pairs=True)
+        assert _validate_route_engine_strategy(args) == 0
+        assert capsys.readouterr().err == ""
+
+
 class TestGridIsUntouched:
     """Acceptance 4: the gate is a strict no-op for --route-engine grid."""
 

@@ -15263,8 +15263,25 @@ def _validate_route_engine_strategy(args) -> int:
         conflicts.append("--multi-resolution")
     if _resolve_escape_routing_flag(args) is True:
         conflicts.append("--escape-routing")
+    # Issue #6551: the mesh engine has no coupled router, and it owns every
+    # pair net in its whole-netset negotiation (the grid coupled pre-pass is
+    # skipped under it, like the lattice's #6535 fix), so
+    # ``--differential-pairs`` cannot couple anything under mesh.  Reject it
+    # rather than ship uncoupled pairs under a coupled-looking command line.
+    mesh_diffpair_conflict = engine == "mesh" and bool(getattr(args, "differential_pairs", False))
+    if mesh_diffpair_conflict:
+        conflicts.append("--differential-pairs")
 
     if conflicts:
+        diffpair_note = (
+            "The mesh engine has no coupled (differential-pair) router: it "
+            "would route each pair's P and N nets uncoupled (issue #6551). "
+            "For coupled pairs use --route-engine lattice --strategy basic "
+            "--differential-pairs, or --route-engine grid "
+            "--differential-pairs.\n"
+            if mesh_diffpair_conflict
+            else ""
+        )
         print(
             f"Error: --route-engine {engine} is incompatible with "
             f"{', '.join(conflicts)}.\n"
@@ -15274,6 +15291,7 @@ def _validate_route_engine_strategy(args) -> int:
             "--two-phase/--multi-resolution/--escape-routing modifiers "
             "bypass that path, so the engine selection would be silently "
             "ignored and grid copper shipped (issue #4280).\n"
+            f"{diffpair_note}"
             "Supported combination:\n"
             f"    kct route <board> --route-engine {engine} --strategy basic",
             file=sys.stderr,
