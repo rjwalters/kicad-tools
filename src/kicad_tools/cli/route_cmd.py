@@ -10325,6 +10325,7 @@ def route_with_layer_escalation(
                     # single whole-netset ``route_netset`` call can starve every
                     # later escalation attempt.
                     lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
+                    lattice_max_iterations=getattr(args, "lattice_iterations", None),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -11609,6 +11610,7 @@ def route_with_rule_relaxation(
                     # Issue #4798: bound by THIS tier's fair slice, not the
                     # whole remaining run budget.
                     lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
+                    lattice_max_iterations=getattr(args, "lattice_iterations", None),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -14184,6 +14186,7 @@ def route_with_combined_escalation(
                         # Issue #4798: bound by THIS cell's fair slice, not the
                         # whole remaining run budget.
                         lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
+                        lattice_max_iterations=getattr(args, "lattice_iterations", None),
                         # Issue #4170 (Phase 2b-1): board-relative boundary stub
                         # terminals whose tip cells are carved open as same-net
                         # reconnection targets (None when no --region / no stubs).
@@ -16951,6 +16954,8 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
 
 def _route_parser() -> argparse.ArgumentParser:
     """Shared parser for supervisor preflight and worker execution."""
+    from kicad_tools.cli.parser import LATTICE_ITERATIONS_HELP, positive_int
+
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
         description="Autoroute a KiCad PCB file",
@@ -17239,7 +17244,8 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Max iterations for negotiated routing (default: 15). "
             "Also applies to two-phase routing when --two-phase-iterations "
-            "is not explicitly set."
+            "is not explicitly set. Does NOT apply to --route-engine lattice; "
+            "use --lattice-iterations for its round cap."
         ),
     )
     parser.add_argument(
@@ -18054,6 +18060,13 @@ def _route_parser() -> argparse.ArgumentParser:
             "--escape-routing is rejected (issue #4280). Grid remains the "
             "production default and works with every strategy."
         ),
+    )
+    parser.add_argument(
+        "--lattice-iterations",
+        type=positive_int,
+        default=None,
+        metavar="N",
+        help=LATTICE_ITERATIONS_HELP,
     )
     parser.add_argument(
         "--lattice-optimize",
@@ -20281,6 +20294,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
+                lattice_max_iterations=getattr(args, "lattice_iterations", None),
                 # Issue #4170 (Phase 2b-1): board-relative boundary stub
                 # terminals whose tip cells are carved open as same-net
                 # reconnection targets (None when no --region / no stubs).
@@ -20365,6 +20379,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
+                lattice_max_iterations=getattr(args, "lattice_iterations", None),
                 # Issue #4170 (Phase 2b-1): board-relative boundary stub
                 # terminals whose tip cells are carved open as same-net
                 # reconnection targets (None when no --region / no stubs).
