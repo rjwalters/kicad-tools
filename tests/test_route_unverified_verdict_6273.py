@@ -62,6 +62,12 @@ def no_time_for_drc(monkeypatch):
         "_post_route_drc_budget",
         lambda args: {"time_left": 0.0, "drc_cost_estimate": 0.0},
     )
+    # Issue #6644: the post-route zone fill discovers kicad-cli by launching
+    # ``kicad-cli version``, which takes a native-concurrency permit. Under CI
+    # load the wait for that permit (not the code under test) pushed this test
+    # past its 60s cap. These tests exercise the verdict when DRC is skipped,
+    # not kicad-cli discovery, so report it as absent instead of queueing.
+    monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: None)
 
 
 @pytest.fixture
