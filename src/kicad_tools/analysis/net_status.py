@@ -42,6 +42,31 @@ from kicad_tools.geometry.copper import PAD_FALLBACK_ERODE, pad_size_box
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+    from kicad_tools.validate.copper_contact import CopperItem
+
+# Issue #6491: how many stranded items ``NetStatus.suggested_fix`` names.
+_MAX_STRANDED_IN_FIX = 5
+
+
+def _stranded_item_label(pcb: PCB, item: CopperItem) -> str:
+    """Name a stranded track or via the way ``validate()`` does (Issue #6491).
+
+    :func:`~kicad_tools.validate.copper_contact.describe_item` takes a
+    ``ConnectivityValidator`` but reads it (``cv.pcb``) only for a pad, and a
+    stranded component holds none, so a shim carrying ``pcb`` is enough.  A
+    track also gets its layer, which is what finds it on a busy board.
+    """
+    from types import SimpleNamespace
+    from typing import cast
+
+    from kicad_tools.validate.copper_contact import TRACK, describe_item
+
+    shim = cast("ConnectivityValidator", SimpleNamespace(pcb=pcb))
+    label = describe_item(shim, item)[1]
+    if item.kind == TRACK and item.layers:
+        label += f" ({', '.join(sorted(item.layers))})"
+    return label
 
 
 @dataclass
@@ -116,6 +141,13 @@ class NetStatus:
             fill island (a component made only of fill copper) is NOT
             counted: kicad-cli does not report it.  Always 0 in legacy
             (``strict=False``) mode.
+        stranded_items: Human descriptions of the tracks and vias in those
+            pad-less components (e.g. ``"Segment 12 (F.Cu)"``, ``"Via 3"``),
+            named as ``ConnectivityValidator.validate()`` names them
+            (Issue #6491).  One component may hold several items, so the
+            length is NOT :attr:`padless_components`.  Fill copper is not
+            listed: a fill island only counts because of the track or via on
+            it, and that item is the one to delete or connect.
     """
 
     net_number: int
@@ -141,6 +173,24 @@ class NetStatus:
     fill_bonded_pads: list[PadInfo] = field(default_factory=list, repr=False)
     # Issue #6452: pad-less components holding a track or via (not lone fills).
     padless_components: int = 0
+    # Issue #6491: the tracks/vias in those components, for ``suggested_fix``.
+    stranded_items: list[str] = field(default_factory=list)
+
+    @property
+    def is_stranded(self) -> bool:
+        """True when the net carries copper that reaches no pad (Issue #6491).
+
+        Independent of :attr:`status`, which stays pad-based: a net whose pads
+        are all joined is ``complete`` even with a detached track or via, but
+        kicad-cli still reports that fragment as an unconnected item, so the
+        completion gates fail on this signal too.
+
+        A net with no pads is never stranded: kicad-cli 10.0.6 reports no
+        unconnected item for a track on a pad-less net (there is nothing to
+        connect it to), which is also why :attr:`open_connections` is 0 there.
+        Such a net is already ``unrouted``.
+        """
+        return self.padless_components > 0 and self.total_pads > 0
 
     @property
     def open_connections(self) -> int:
@@ -157,7 +207,10 @@ class NetStatus:
         not, because KiCad does not report it.
 
         :attr:`status` stays pad-based: a net whose pads are all joined is
-        ``complete`` even when a detached fragment makes this 1.
+        ``complete`` even when a detached fragment makes this 1.  Gate on
+        :attr:`is_stranded` (board-wide: :attr:`NetStatusResult.stranded_count`)
+        for that case -- ``kct net-status`` and
+        ``scripts/ci/check_net_status.py`` both fail on it (Issue #6491).
         """
         return max(self.island_count + self.padless_components - 1, 0)
 
@@ -274,7 +327,21 @@ class NetStatus:
         Uses the real analyzed filename (:attr:`source_file`) so the printed
         remedy is copy-pasteable; before issue #4679 this hardcoded a literal
         ``board.kicad_pcb`` regardless of the file analyzed.
+
+        A net whose only defect is stranded copper (every pad joined, a track
+        or via reaching no pad) names that copper instead: there is nothing to
+        route, the fix is to delete or connect it (Issue #6491).
         """
+        if self.is_stranded and self.unconnected_count == 0:
+            if not self.stranded_items:
+                return (
+                    f"Delete or connect {self.padless_components} stranded copper "
+                    "fragment(s) (track/via reaching no pad)"
+                )
+            shown = self.stranded_items[:_MAX_STRANDED_IN_FIX]
+            more = len(self.stranded_items) - len(shown)
+            suffix = f" (+{more} more)" if more > 0 else ""
+            return f"Delete or connect stranded copper: {', '.join(shown)}{suffix}"
         if self.is_plane_net:
             layers = self.plane_layers or ([self.plane_layer] if self.plane_layer else [])
             layers_info = ", ".join(layers) if layers else "unknown"
@@ -299,6 +366,7 @@ class NetStatus:
             "routed_connections": self.routed_connections,
             "open_connections": self.open_connections,
             "padless_components": self.padless_components,
+            "stranded_items": list(self.stranded_items),
             "is_plane_net": self.is_plane_net,
             "has_filled_zone": self.has_filled_zone,
             "is_advisory_incomplete": self.is_advisory_incomplete,
@@ -306,7 +374,9 @@ class NetStatus:
             "plane_layers": list(self.plane_layers),
             "has_routing": self.has_routing,
             "has_vias": self.has_vias,
-            "suggested_fix": self.suggested_fix if self.status != "complete" else "",
+            "suggested_fix": (
+                self.suggested_fix if self.status != "complete" or self.is_stranded else ""
+            ),
             "connected_pads": [
                 {
                     "name": p.full_name,
@@ -378,6 +448,21 @@ class NetStatusResult:
     def unrouted(self) -> list[NetStatus]:
         """Nets with no routing at all."""
         return [n for n in self.nets if n.status == "unrouted"]
+
+    @property
+    def stranded(self) -> list[NetStatus]:
+        """Nets carrying a track or via that reaches no pad (Issue #6491).
+
+        Orthogonal to :attr:`complete` / :attr:`incomplete`: a ``complete``
+        net can be stranded (see :attr:`NetStatus.is_stranded`).  kicad-cli reports each such fragment as an
+        unconnected item, so completion gates must fail on these too.
+        """
+        return [n for n in self.nets if n.is_stranded]
+
+    @property
+    def stranded_count(self) -> int:
+        """Number of nets with stranded copper (Issue #6491)."""
+        return len(self.stranded)
 
     @property
     def complete_count(self) -> int:
@@ -465,6 +550,7 @@ class NetStatusResult:
             "incomplete_count": self.incomplete_count,
             "blocking_incomplete_count": self.blocking_incomplete_count,
             "unrouted_count": self.unrouted_count,
+            "stranded_count": self.stranded_count,
             "total_unconnected_pads": self.total_unconnected_pads,
             "total_connections": self.total_connections,
             "routed_connections": self.routed_connections,
@@ -483,6 +569,8 @@ class NetStatusResult:
             f"  Unrouted:   {self.unrouted_count} (0% connected)",
             f"  Total unconnected pads: {self.total_unconnected_pads}",
         ]
+        if self.stranded_count:
+            lines.append(f"  Stranded:   {self.stranded_count} (track/via reaching no pad)")
         return "\n".join(lines)
 
 
@@ -582,6 +670,8 @@ class NetStatusAnalyzer:
         self._fill_bonded_ids: set[str] = set()
         # Issue #6452: pad-less copper components of the current net.
         self._padless_components = 0
+        # Issue #6491: descriptions of the tracks/vias in those components.
+        self._stranded_items: list[str] = []
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
@@ -737,6 +827,7 @@ class NetStatusAnalyzer:
 
         self._fill_bonded_ids = set()
         self._padless_components = 0
+        self._stranded_items = []
         if len(pad_infos) < 2:
             # Single-pad nets are always "complete"
             status.connected_pads = pad_infos
@@ -748,6 +839,7 @@ class NetStatusAnalyzer:
             if self.strict and (segments or vias or status.has_filled_zone):
                 self._build_connectivity_graph(net_number, pad_infos)
                 status.padless_components = self._padless_components
+                status.stranded_items = list(self._stranded_items)
                 status.fill_bonded_pads = [
                     p for p in pad_infos if p.connectivity_id in self._fill_bonded_ids
                 ]
@@ -756,6 +848,7 @@ class NetStatusAnalyzer:
         # Build connectivity graph
         graph = self._build_connectivity_graph(net_number, pad_infos)
         status.padless_components = self._padless_components
+        status.stranded_items = list(self._stranded_items)
         # Issue #6315: which pads the poured fill itself bonds (recorded by
         # ``_apply_zone_connectivity`` while the graph was built).
         status.fill_bonded_pads = [
@@ -912,7 +1005,8 @@ class NetStatusAnalyzer:
 
         Side effects: ``_fill_bonded_ids`` gets the pads whose component
         holds fill copper (Issue #6315) and ``_padless_components`` the
-        number of components holding no pad but a track or via.  A lone
+        number of components holding no pad but a track or via, and
+        ``_stranded_items`` those tracks and vias (Issue #6491).  A lone
         fill island (fill copper only) is skipped: kicad-cli does not
         report it as an unconnected item.
         """
@@ -922,6 +1016,7 @@ class NetStatusAnalyzer:
         wanted = {p.connectivity_id for p in pad_infos}
         graph: dict[str, set[str]] = defaultdict(set)
         padless = 0
+        stranded: list[str] = []
         for members in contact.components():
             items = [contact.items[i] for i in members]
             nodes = [
@@ -932,12 +1027,16 @@ class NetStatusAnalyzer:
             if not nodes:
                 if not contact.is_fill_only(members):
                     padless += 1
+                    stranded.extend(
+                        _stranded_item_label(self.pcb, item) for item in items if item.kind != FILL
+                    )
                 continue
             for node in nodes:
                 graph[node].update(other for other in nodes if other != node)
             if any(item.kind == FILL for item in items):
                 self._fill_bonded_ids.update(nodes)
         self._padless_components = padless
+        self._stranded_items = stranded
         return graph
 
     def _build_connectivity_graph_legacy(

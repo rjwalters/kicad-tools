@@ -191,8 +191,12 @@ def main(argv: list[str] | None = None) -> int:
         # Create a result with just this net (--net validated above)
         filtered = NetStatusResult(nets=[net_status], total_nets=1)
     elif args.incomplete:
+        # Issue #6491: a complete net with stranded copper still fails the
+        # exit code, so --incomplete keeps it in view.
         filtered = NetStatusResult(
-            nets=result.incomplete + result.unrouted,
+            nets=result.incomplete
+            + result.unrouted
+            + [n for n in result.stranded if n.status == "complete"],
             total_nets=result.total_nets,
         )
     else:
@@ -231,6 +235,12 @@ def exit_code_for(result: NetStatusResult, allow_stranded_pour_pads: bool = Fals
     A pad stranded on a pour fails (2), exactly as kicad-cli reports it as an
     unconnected item, unless the user explicitly opts in to treating
     pour-only residuals as advisory.
+
+    Stranded copper -- a track or via reaching no pad -- also fails (2),
+    even on a net whose pads are all joined (``status == "complete"``):
+    kicad-cli reports each fragment as an unconnected item (Issue #6491).
+    ``--allow-stranded-pour-pads`` does not relax this; that flag is about
+    pads on a pour, not orphan copper.
     """
     from kicad_tools.router.completion_verdict import allow_stranded_pour_pads as _allowed
 
@@ -239,7 +249,7 @@ def exit_code_for(result: NetStatusResult, allow_stranded_pour_pads: bool = Fals
         if _allowed(allow_stranded_pour_pads)
         else result.incomplete_count
     )
-    if incomplete > 0 or result.unrouted_count > 0:
+    if incomplete > 0 or result.unrouted_count > 0 or result.stranded_count > 0:
         return 2
     return 0
 
@@ -295,6 +305,8 @@ def output_text(
     print(f"  Complete:   {counted.complete_count} (all pads connected)")
     print(f"  Incomplete: {counted.incomplete_count} (partially connected)")
     print(f"  Unrouted:   {counted.unrouted_count} (no pads connected)")
+    if counted.stranded_count:
+        print(f"  Stranded:   {counted.stranded_count} (track/via reaching no pad)")
     print()
 
     if by_class:
@@ -323,11 +335,23 @@ def _output_flat(
         for net in result.incomplete + result.unrouted:
             _print_net_status(net, verbose)
 
-    elif not incomplete_only:
+    elif not incomplete_only and not result.stranded:
         if net_filter is not None:
             print(f"Selected net '{net_filter}' is fully connected.")
         else:
             print("All nets are fully connected!")
+
+    # Issue #6491: copper reaching no pad fails the exit code even when every
+    # pad is joined, so name it -- an "all connected" banner over exit 2
+    # would leave the user nothing to fix.
+    stranded_complete = [n for n in result.stranded if n.status == "complete"]
+    if stranded_complete:
+        print()
+        print("Stranded Copper (pads all connected, track/via reaching no pad):")
+        print("=" * 60)
+        for net in stranded_complete:
+            print(f"  [~] {net.net_name} ({net.padless_components} stranded fragment(s))")
+            print(f"    -> Fix: {net.suggested_fix}")
 
     # Show complete nets if not filtering
     if not incomplete_only and result.complete:
@@ -412,6 +436,7 @@ def output_json(
             "complete": result.complete_count,
             "incomplete": result.incomplete_count,
             "unrouted": result.unrouted_count,
+            "stranded": result.stranded_count,
             "total_unconnected_pads": result.total_unconnected_pads,
         },
     }

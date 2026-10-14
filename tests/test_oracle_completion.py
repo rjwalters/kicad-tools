@@ -312,14 +312,14 @@ class TestCliSurfaces:
         monkeypatch.delenv(ALLOW_STRANDED_ENV, raising=False)
         # One incomplete pour net: raw count 1, blocking count 0.
         pour_only = SimpleNamespace(
-            incomplete_count=1, blocking_incomplete_count=0, unrouted_count=0
+            incomplete_count=1, blocking_incomplete_count=0, unrouted_count=0, stranded_count=0
         )
         assert exit_code_for(pour_only) == 2  # default: same verdict as kicad-cli
         assert exit_code_for(pour_only, True) == 0  # explicit advisory opt-in
         monkeypatch.setenv(ALLOW_STRANDED_ENV, "1")
         assert exit_code_for(pour_only) == 0
         signal_gap = SimpleNamespace(
-            incomplete_count=1, blocking_incomplete_count=1, unrouted_count=0
+            incomplete_count=1, blocking_incomplete_count=1, unrouted_count=0, stranded_count=0
         )
         assert exit_code_for(signal_gap, True) == 2  # opt-in never hides a signal gap
 

@@ -663,3 +663,190 @@ def test_abutting_different_net_pads_short(tmp_path: Path, name: str):
     assert _three_models(path, "VCC") == (0, 0, 0)
     if _kicad_cli() is not None:
         assert _kicad_shorts(path, tmp_path) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #6491: stranded copper fails the net-status gates
+# ---------------------------------------------------------------------------
+#
+# ``status`` stays pad-based, so a net whose pads are all joined is
+# ``complete`` even with a detached track or via on it -- yet kicad-cli reports
+# that fragment as an unconnected item.  ``NetStatus.is_stranded`` /
+# ``NetStatusResult.stranded_count`` carry it to ``kct net-status``'s exit code
+# and ``scripts/ci/check_net_status.py``.
+
+# ``_HEADER`` declares an empty ``VCC`` net, which is ``unrouted`` and would
+# fail the gates on its own; these fixtures drop it so stranded copper is the
+# only defect on the board.
+_HEADER_GND_ONLY = _HEADER.replace(' (net 2 "VCC")', "")
+
+_STRANDED_6491: dict[str, tuple[str, list[str]]] = {
+    "detached_track_all_pads_connected": (
+        _PADLESS_CASES["detached_track_all_pads_connected"][0],
+        ["Segment 1 (F.Cu)"],
+    ),
+    "detached_via_all_pads_connected": (
+        _PADLESS_CASES["detached_via_all_pads_connected"][0],
+        ["Via 0"],
+    ),
+    "one_pad_net_with_stranded_track": (
+        _fp("R1", 100, 100, _smd("1", "rect", (1, 1), 1)) + _seg((100, 105), (103, 105)),
+        ["Segment 0 (F.Cu)"],
+    ),
+    # A fill island with only a via on it: the via is what to delete/connect.
+    "fill_island_with_via_only": (_PADLESS_CASES["fill_island_with_via_only"][0], ["Via 0"]),
+}
+
+
+def _write_gnd_only_6491(tmp_path: Path, name: str, body: str) -> Path:
+    path = tmp_path / f"{name}.kicad_pcb"
+    path.write_text(_HEADER_GND_ONLY + body + ")\n")
+    return path
+
+
+def _load_check_net_status_6491():
+    import importlib.util
+    import sys
+
+    script = REPO / "scripts" / "ci" / "check_net_status.py"
+    spec = importlib.util.spec_from_file_location("check_net_status_6491", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["check_net_status_6491"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("name", sorted(_STRANDED_6491))
+def test_stranded_copper_fails_net_status_exit_code_6491(tmp_path: Path, name: str):
+    from kicad_tools.cli.net_status_cmd import exit_code_for
+
+    body, items = _STRANDED_6491[name]
+    path = _write_gnd_only_6491(tmp_path, name, body)
+    result = NetStatusAnalyzer(path, strict=True).analyze()
+    gnd = result.get_net("GND")
+    assert gnd is not None
+
+    # Pad-based verdicts are unchanged ...
+    assert gnd.status == "complete"
+    assert result.incomplete == [] and result.unrouted == []
+    assert result.blocking_incomplete == []
+    # ... but the stray copper is an open connection, and now a gate failure.
+    assert gnd.open_connections == 1
+    assert gnd.is_stranded
+    assert gnd.stranded_items == items
+    assert [n.net_name for n in result.stranded] == ["GND"]
+    assert result.stranded_count == 1
+    assert exit_code_for(result) == 2
+    # The pour-pad opt-in is about pads on a pour, not orphan copper.
+    assert exit_code_for(result, allow_stranded_pour_pads=True) == 2
+
+    fix = gnd.suggested_fix
+    assert "Route traces" not in fix
+    assert fix == f"Delete or connect stranded copper: {', '.join(items)}"
+    data = gnd.to_dict()
+    assert data["suggested_fix"] == fix
+    assert data["stranded_items"] == items
+    assert result.to_dict()["stranded_count"] == 1
+
+    _check_kicad(path, tmp_path, "GND", 1)
+
+
+@pytest.mark.parametrize("name", sorted(_STRANDED_6491))
+def test_check_net_status_gate_fails_on_stranded_copper_6491(tmp_path: Path, name: str):
+    body, items = _STRANDED_6491[name]
+    path = _write_gnd_only_6491(tmp_path, name, body)
+    helper = _load_check_net_status_6491()
+
+    exit_code, message = helper.check_pcb(path, max_unconnected=0)
+    assert exit_code == 2
+    assert "Stranded-copper" in message
+    for item in items:
+        assert item in message
+    # --known-open-nets tolerates unroutable pads, not orphan copper.
+    assert helper.check_pcb(path, max_unconnected=0, known_open_nets={"GND"})[0] == 2
+
+
+def test_removing_the_stray_track_clears_the_gates_6491(tmp_path: Path):
+    """The same board without the detached track exits 0 on both gates."""
+    from kicad_tools.cli.net_status_cmd import exit_code_for
+
+    path = _write_gnd_only_6491(tmp_path, "clean", _two_pads() + _PAD_TRACK)
+    result = NetStatusAnalyzer(path, strict=True).analyze()
+    gnd = result.get_net("GND")
+    assert gnd is not None
+    assert (gnd.status, gnd.open_connections, gnd.is_stranded) == ("complete", 0, False)
+    assert gnd.stranded_items == []
+    assert gnd.to_dict()["suggested_fix"] == ""
+    assert result.stranded_count == 0
+    assert exit_code_for(result) == 0
+    assert _load_check_net_status_6491().check_pcb(path, max_unconnected=0)[0] == 0
+
+
+def test_stray_track_on_padless_net_is_not_stranded_6491(tmp_path: Path):
+    """kicad-cli reports nothing for a track on a net with no pads.
+
+    The net is already ``unrouted`` (so ``kct net-status`` exits 2 as before);
+    it is not double-counted as stranded, and ``open_connections`` stays 0.
+    """
+    body = _two_pads() + _PAD_TRACK + _seg((100, 108), (103, 108), net=2)
+    path = _write(tmp_path, "padless_net_track", body)
+    result = NetStatusAnalyzer(path, strict=True).analyze()
+    vcc = result.get_net("VCC")
+    assert vcc is not None
+    assert (vcc.status, vcc.open_connections, vcc.padless_components) == ("unrouted", 0, 1)
+    assert not vcc.is_stranded
+    assert result.stranded_count == 0
+    _check_kicad(path, tmp_path, "VCC", 0)
+
+
+def test_lone_fill_island_is_not_stranded_6491(tmp_path: Path):
+    """A fill-only component is not reported by kicad-cli, so not stranded."""
+    body, *_ = _PADLESS_CASES["lone_fill_same_zone_mode1"]
+    path = _write_gnd_only_6491(tmp_path, "lone_fill", body)
+    result = NetStatusAnalyzer(path, strict=True).analyze()
+    assert result.stranded_count == 0
+
+
+def test_stranded_fix_without_descriptions_and_truncation_6491():
+    """Hand-built statuses: a count fallback, and a capped item list."""
+    from kicad_tools.analysis.net_status import NetStatus, PadInfo
+
+    pad = PadInfo("R1", "1", (0.0, 0.0), is_connected=True, layers=["F.Cu"])
+    bare = NetStatus(
+        net_number=1, net_name="GND", total_pads=1, connected_pads=[pad], padless_components=2
+    )
+    assert bare.suggested_fix.startswith("Delete or connect 2 stranded copper fragment(s)")
+
+    many = NetStatus(
+        net_number=1,
+        net_name="GND",
+        total_pads=1,
+        connected_pads=[pad],
+        padless_components=1,
+        stranded_items=[f"Via {i}" for i in range(7)],
+    )
+    assert many.suggested_fix == (
+        "Delete or connect stranded copper: Via 0, Via 1, Via 2, Via 3, Via 4 (+2 more)"
+    )
+
+
+def test_kct_net_status_cli_names_stranded_copper_6491(tmp_path: Path, capsys):
+    """``kct net-status`` exits 2 and prints the stray item, not an all-clear."""
+    from kicad_tools.cli.net_status_cmd import main
+
+    body, items = _STRANDED_6491["detached_track_all_pads_connected"]
+    path = _write_gnd_only_6491(tmp_path, "cli", body)
+
+    assert main([str(path)]) == 2
+    out = capsys.readouterr().out
+    assert "All nets are fully connected!" not in out
+    assert "Stranded:   1" in out
+    assert f"Delete or connect stranded copper: {items[0]}" in out
+
+    assert main([str(path), "--incomplete"]) == 2
+    assert items[0] in capsys.readouterr().out
+
+    assert main([str(path), "--format", "json"]) == 2
+    data = json.loads(capsys.readouterr().out)
+    assert data["summary"]["stranded"] == 1
