@@ -259,7 +259,7 @@ def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
             extent = max(extent, float(seg.width) - 2 * math.hypot(sx - ex, sy - ey))
     via = getattr(escape, "via", None)
     if via is not None and (
-        copper_span_contains(via.layers[0], via.layers[1], escape.escape_layer)
+        copper_span_contains(*getattr(via, "drilled_layers", via.layers), escape.escape_layer)
     ):
         extent = max(extent, float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey))
     return extent if extent > 0.0 else None

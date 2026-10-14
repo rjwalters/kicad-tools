@@ -126,7 +126,10 @@ def isolate_kelvin_branch(
                 )
             )
         for via in route.vias:
-            first, last = sorted(grid.layer_to_index(layer.value) for layer in via.layers)
+            first, last = sorted(
+                grid.layer_to_index(layer.value)
+                for layer in getattr(via, "drilled_layers", via.layers)
+            )
             group = []
             for layer in range(first, last + 1):
                 group.append(len(objects))

@@ -311,7 +311,8 @@ def repair_class_pad_pairs(
     for key, route in routes.items():
         own = own_clr[key]
         for via in route.vias:
-            la, lb = lidx(via.layers[0]), lidx(via.layers[1])
+            drilled = getattr(via, "drilled_layers", via.layers)
+            la, lb = lidx(drilled[0]), lidx(drilled[1])
             if la is None or lb is None:
                 span = set(range(n_layers))
             else:

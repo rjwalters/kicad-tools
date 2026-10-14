@@ -651,7 +651,9 @@ class LatticePathfinder:
                 # A routing stack may select only part of the physical board
                 # (for example F.Cu only). Imported through-via endpoints need
                 # not themselves be present in that selected stack.
-                first, last = sorted(layer.stack_order for layer in via.layers)
+                first, last = sorted(
+                    layer.stack_order for layer in getattr(via, "drilled_layers", via.layers)
+                )
                 occupied_layers = tuple(
                     layer.index
                     for layer in self.layer_stack.layers
