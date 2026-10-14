@@ -6975,6 +6975,12 @@ def _apply_escape_corridor_reservation(router: "Autorouter", args) -> None:
     """
     if getattr(args, "escape_corridor_reservation", False):
         router.enable_escape_corridor_reservation = True
+    # Issue #6352 (EXPERIMENTAL): the hidden --escape-corridor-assignment flow
+    # selects the joint min-cost-flow planner strategy and implies the
+    # reservation itself.  "greedy" (default) leaves the router untouched.
+    if getattr(args, "escape_corridor_assignment", "greedy") == "flow":
+        router.enable_escape_corridor_reservation = True
+        router.escape_corridor_assignment = "flow"
 
 
 def _apply_pad_access_invariant(router: "Autorouter", args) -> None:
@@ -17933,6 +17939,17 @@ def _route_parser() -> argparse.ArgumentParser:
             "channel instead of competing greedily.  Default OFF "
             "(byte-identical to prior behaviour when absent)."
         ),
+    )
+    parser.add_argument(
+        "--escape-corridor-assignment",
+        choices=("greedy", "flow"),
+        default="greedy",
+        # Issue #6352 (EXPERIMENTAL, research-only): joint min-cost-flow
+        # pin -> exit assignment for the escape-corridor planner.  Hidden from
+        # --help -- it exists so scripts/research/escape_flow_experiment.py can
+        # select the treatment arm; ``flow`` implies
+        # --escape-corridor-reservation.  Default ``greedy`` is byte-identical.
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--no-plane-via-reservation",

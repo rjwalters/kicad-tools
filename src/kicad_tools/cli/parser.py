@@ -4013,6 +4013,17 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--escape-corridor-assignment",
+        choices=("greedy", "flow"),
+        default="greedy",
+        # Issue #6352 (EXPERIMENTAL, research-only): joint min-cost-flow
+        # pin -> exit assignment for the escape-corridor planner.  Hidden from
+        # --help -- it exists so scripts/research/escape_flow_experiment.py can
+        # select the treatment arm; ``flow`` implies
+        # --escape-corridor-reservation.  Default ``greedy`` is byte-identical.
+        help=argparse.SUPPRESS,
+    )
+    route_parser.add_argument(
         "--no-plane-via-reservation",
         action="store_true",
         default=False,

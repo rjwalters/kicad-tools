@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .congestion_estimator import CongestionEstimator
@@ -132,6 +132,17 @@ class EscapeCorridorPlan:
     ref: str
     clusters: list[EscapeCluster] = field(default_factory=list)
     total_reserved_cells: int = 0
+    # Issue #6352 (experimental): which assignment strategy produced the
+    # clusters ("greedy" -- the #4474 face/octant + round-robin layers path --
+    # or "flow", the joint min-cost-flow pin -> exit assignment), and, when
+    # "flow" was requested but could not be used, why the plan fell back to
+    # greedy.  ``flow_stats`` carries solver instrumentation (pins, exits,
+    # capacity, assigned/unassigned, cost) so an inert treatment cannot pass
+    # as a null result.  The greedy default leaves all three at their
+    # defaults, so a default plan is unchanged.
+    assignment: str = "greedy"
+    fallback_reason: str | None = None
+    flow_stats: dict[str, Any] = field(default_factory=dict)
 
     @property
     def cluster_count(self) -> int:
@@ -200,6 +211,17 @@ class EscapeCorridorPlanner:
             layers (e.g. a 2-layer board).  Defaults to False (assign over
             all routable layers, inner-preferred) so existing callers are
             unchanged.
+        assignment: Pin -> corridor assignment strategy (Issue #6352,
+            EXPERIMENTAL).  ``"greedy"`` (default) is the #4474 path: nearest
+            face, ``(face, octant)`` clusters, round-robin layers.  ``"flow"``
+            solves the pin -> ``(face, layer)`` exit assignment jointly with
+            min-cost max-flow (``escape_flow.py``) under per-exit capacities
+            derived from free grid cells, then builds the same
+            :class:`EscapeCluster` objects so :meth:`reserve` is shared.  When
+            the flow assigns no pin, or leaves any pin unassigned, the plan
+            falls back to greedy and records ``fallback_reason``.
+        flow_cost_model: Cost-model overrides for ``assignment="flow"``
+            (defaults to :class:`~kicad_tools.router.escape_flow.EscapeFlowCostModel`).
     """
 
     def __init__(
@@ -214,7 +236,13 @@ class EscapeCorridorPlanner:
         min_reserve_demand: float = 0.0,
         min_reserve_demand_frac: float = 0.0,
         inner_layers_only: bool = False,
+        assignment: str = "greedy",
+        flow_cost_model: Any = None,
     ) -> None:
+        if assignment not in ("greedy", "flow"):
+            raise ValueError(f"unknown escape-corridor assignment {assignment!r}")
+        self.assignment = assignment
+        self.flow_cost_model = flow_cost_model
         self.grid = grid
         self.congestion = congestion_estimator
         self.net_pad_positions = net_pad_positions or {}
@@ -234,7 +262,23 @@ class EscapeCorridorPlanner:
 
         Does NOT touch the grid -- call :meth:`reserve` (or
         :meth:`plan_and_reserve`) to commit the reservation.
+
+        With ``assignment="flow"`` (Issue #6352) the joint min-cost-flow
+        assignment is tried first; an empty or infeasible flow falls back to
+        the greedy plan below with ``fallback_reason`` recorded.
         """
+        if self.assignment == "flow":
+            flow_plan, reason, stats = self._plan_flow(package)
+            if flow_plan is not None:
+                return flow_plan
+            greedy = self._plan_greedy(package)
+            greedy.fallback_reason = reason
+            greedy.flow_stats = stats
+            return greedy
+        return self._plan_greedy(package)
+
+    def _plan_greedy(self, package: PackageInfo) -> EscapeCorridorPlan:
+        """The #4474 greedy plan: nearest face, octant clusters, round-robin layers."""
         clusters = self._cluster_pins(package)
         for cluster in clusters:
             self._size_corridor(package, cluster)
@@ -386,6 +430,267 @@ class EscapeCorridorPlanner:
         if nearest == dist_w:
             return "W"
         return "E"
+
+    # ------------------------------------------------------------------
+    # Experimental: joint min-cost-flow assignment (Issue #6352)
+    # ------------------------------------------------------------------
+
+    _FLOW_FACES = ("N", "E", "S", "W")
+
+    def _plan_flow(
+        self, package: PackageInfo
+    ) -> tuple[EscapeCorridorPlan | None, str | None, dict[str, Any]]:
+        """Build a plan from the joint pin -> (face, layer) flow assignment.
+
+        Returns ``(plan, None, stats)`` on success, or ``(None, reason,
+        stats)`` when the caller must fall back to greedy.  Never touches the
+        grid's reservation state -- capacity probing only reads cells.
+        """
+        from .escape_flow import (
+            EscapeFlowCostModel,
+            ExitSlot,
+            assign_pins_to_exits,
+            exit_point,
+            pin_exit_cost_mm,
+        )
+
+        model = self.flow_cost_model or EscapeFlowCostModel()
+        bbox = package.bounding_box
+        min_x, min_y, max_x, max_y = bbox
+        pkg_pad_xy = {(round(p.x, 4), round(p.y, 4)) for p in package.pads}
+
+        # Canonical pin order: (ref, pin, net, x, y).  Ties in the flow resolve
+        # toward lower indices, so this order IS the tie-break.
+        pins: list[tuple[Pad, tuple[float, float]]] = []
+        for pad in sorted(
+            package.pads,
+            key=lambda p: (str(p.ref), str(p.pin), int(p.net), p.x, p.y),
+        ):
+            net_id = int(pad.net)
+            if net_id == 0:
+                continue
+            dest = self._destination_for(net_id, pad, package, pkg_pad_xy)
+            if dest is None:
+                continue
+            pins.append((pad, dest))
+
+        layers = self._routable_layers()
+        stats: dict[str, Any] = {"pins": len(pins), "layers": list(layers)}
+        if not pins:
+            return None, "no routable pins", stats
+        if not layers:
+            return None, "no routable layers", stats
+
+        package_nets = frozenset(int(p.net) for p in package.pads if int(p.net) != 0)
+        offset = self._flow_probe_offset(package)
+        peak = self._peak_demand()
+        exits: list[ExitSlot] = []
+        congestion: list[float] = []
+        load_step = model.to_units(model.load_step_mm)
+        for face in self._FLOW_FACES:
+            face_demand = self._face_demand(face, bbox, offset)
+            norm = min(1.0, face_demand / peak) if peak > 0.0 else 0.0
+            for layer_idx in layers:
+                cap = self._exit_capacity(face, bbox, offset, layer_idx, package_nets)
+                exits.append(
+                    ExitSlot(
+                        face=face,
+                        layer_idx=layer_idx,
+                        capacity=cap,
+                        load_step_cost=load_step,
+                    )
+                )
+                congestion.append(norm)
+        stats["exits"] = len(exits)
+        stats["exit_capacity"] = {f"{e.face}/L{e.layer_idx}": e.capacity for e in exits}
+
+        costs: dict[tuple[int, int], int] = {}
+        for pi, (pad, dest) in enumerate(pins):
+            pin_face = self._face_of(pad, min_x, min_y, max_x, max_y)
+            pad_layer = self._pad_layer_index(pad)
+            for ei, slot in enumerate(exits):
+                needs_via = (not pad.through_hole) and pad_layer != slot.layer_idx
+                mm = pin_exit_cost_mm(
+                    pin_xy=(pad.x, pad.y),
+                    pin_face=pin_face,
+                    dest_xy=dest,
+                    exit_face=slot.face,
+                    bbox=bbox,
+                    needs_via=needs_via,
+                    exit_congestion=congestion[ei],
+                    model=model,
+                )
+                costs[(pi, ei)] = model.to_units(mm)
+
+        result = assign_pins_to_exits(len(pins), exits, costs)
+        stats.update(
+            {
+                "total_capacity": result.total_capacity,
+                "assigned": result.assigned_count,
+                "unassigned": len(result.unassigned),
+                "cost": result.total_cost,
+                "augmentations": result.augmentations,
+            }
+        )
+        if result.assigned_count == 0:
+            return None, "empty: flow assigned no pin", stats
+        if not result.feasible:
+            return (
+                None,
+                f"infeasible: {len(result.unassigned)} of {len(pins)} pins unassigned",
+                stats,
+            )
+
+        # Count pins whose flow exit differs from the greedy nearest face --
+        # the only place the joint assignment can change corridor geometry
+        # beyond layer choice.
+        moved = 0
+        buckets: dict[tuple[str, int, str], list[tuple[Pad, tuple[float, float], tuple]]] = {}
+        for pi, ei in sorted(result.assignment.items()):
+            pad, dest = pins[pi]
+            slot = exits[ei]
+            if slot.face != self._face_of(pad, min_x, min_y, max_x, max_y):
+                moved += 1
+            ep = exit_point(slot.face, pad.x, pad.y, bbox)
+            octant = _octant_of(dest[0] - ep[0], dest[1] - ep[1])
+            buckets.setdefault((slot.face, slot.layer_idx, octant), []).append((pad, dest, ep))
+        stats["face_moved"] = moved
+
+        clusters: list[EscapeCluster] = []
+        for (face, layer_idx, octant), members in sorted(buckets.items()):
+            n = len(members)
+            ox = sum(m[2][0] for m in members) / n
+            oy = sum(m[2][1] for m in members) / n
+            dcx = sum(m[1][0] for m in members) / n
+            dcy = sum(m[1][1] for m in members) / n
+            ddx, ddy = dcx - ox, dcy - oy
+            norm = math.hypot(ddx, ddy)
+            edir = (1.0, 0.0) if norm == 0.0 else (ddx / norm, ddy / norm)
+            cluster = EscapeCluster(
+                face=face,
+                dest_octant=octant,
+                pads=[m[0] for m in members],
+                net_ids=frozenset(int(m[0].net) for m in members),
+                escape_dir=edir,
+                origin=(ox, oy),
+                destination=(dcx, dcy),
+                layer_idx=layer_idx,
+            )
+            self._size_corridor(package, cluster)
+            clusters.append(cluster)
+        stats["clusters"] = len(clusters)
+        plan = EscapeCorridorPlan(
+            ref=package.ref, clusters=clusters, assignment="flow", flow_stats=stats
+        )
+        return plan, None, stats
+
+    def _pad_layer_index(self, pad: Pad) -> int | None:
+        """Grid layer index of the pad's copper (``None`` if not in the stack)."""
+        to_index = getattr(self.grid, "layer_to_index", None)
+        if to_index is None:
+            return None
+        try:
+            return int(to_index(pad.layer.value))
+        except Exception:
+            return None
+
+    def _flow_probe_offset(self, package: PackageInfo) -> float:
+        """Distance outside the pad-centre bbox where exit capacity is probed.
+
+        Clears the largest pad half-extent plus one track pitch, so the probe
+        line sits in the channel a fanned-out track actually uses rather than
+        on the pads' own clearance halo.
+        """
+        half = 0.0
+        for p in package.pads:
+            half = max(half, 0.5 * max(float(p.width), float(p.height)))
+        return half + self._track_pitch()
+
+    def _track_pitch(self) -> float:
+        rules = getattr(self.grid, "rules", None)
+        width = float(getattr(rules, "trace_width", 0.2) or 0.2)
+        clearance = float(getattr(rules, "trace_clearance", 0.15) or 0.15)
+        return width + clearance
+
+    @staticmethod
+    def _face_probe_line(
+        face: str, bbox: tuple[float, float, float, float], offset: float
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Endpoints of the probe segment running along ``face`` at ``offset``."""
+        min_x, min_y, max_x, max_y = bbox
+        if face == "N":
+            return (min_x, min_y - offset), (max_x, min_y - offset)
+        if face == "S":
+            return (min_x, max_y + offset), (max_x, max_y + offset)
+        if face == "W":
+            return (min_x - offset, min_y), (min_x - offset, max_y)
+        return (max_x + offset, min_y), (max_x + offset, max_y)
+
+    def _exit_capacity(
+        self,
+        face: str,
+        bbox: tuple[float, float, float, float],
+        offset: float,
+        layer_idx: int,
+        package_nets: frozenset[int],
+    ) -> int:
+        """Tracks that fit through ``face`` on ``layer_idx`` (hypothesis).
+
+        Walks the probe line one grid cell at a time and counts cells that
+        are free, or blocked only by one of the package's own nets (its pad
+        halos are passable for the net that owns them).  Capacity is the free
+        length divided by one track pitch.  A face of zero span (a single-row
+        package's short side) still probes one cell.
+        """
+        res = float(self.grid.resolution)
+        (x0, y0), (x1, y1) = self._face_probe_line(face, bbox, offset)
+        length = math.hypot(x1 - x0, y1 - y0)
+        steps = max(1, int(length / res) + 1)
+        cols = getattr(self.grid, "cols", None)
+        rows = getattr(self.grid, "rows", None)
+        cell_at = getattr(self.grid, "cell_at", None)
+        seen: set[tuple[int, int]] = set()
+        free = 0
+        for i in range(steps):
+            t = 0.0 if steps == 1 else i / (steps - 1)
+            wx = x0 + (x1 - x0) * t
+            wy = y0 + (y1 - y0) * t
+            # Off-board probe points are not free (world_to_grid clamps).
+            ox = getattr(self.grid, "origin_x", 0.0)
+            oy = getattr(self.grid, "origin_y", 0.0)
+            rgx = round((wx - ox) / res)
+            rgy = round((wy - oy) / res)
+            if cols is not None and rows is not None and not (0 <= rgx < cols and 0 <= rgy < rows):
+                continue
+            gx, gy = self.grid.world_to_grid(wx, wy)
+            if (gx, gy) in seen:
+                continue
+            seen.add((gx, gy))
+            if cell_at is None:
+                free += 1
+                continue
+            cell = cell_at(layer_idx, gy, gx)
+            if not cell.blocked or (cell.net != 0 and int(cell.net) in package_nets):
+                free += 1
+        return int((free * res) // self._track_pitch()) if free else 0
+
+    def _face_demand(
+        self, face: str, bbox: tuple[float, float, float, float], offset: float
+    ) -> float:
+        """Mean ``CongestionEstimator`` tile demand along a face's probe line."""
+        if self.congestion is None:
+            return 0.0
+        tgrid = self.congestion.grid
+        (x0, y0), (x1, y1) = self._face_probe_line(face, bbox, offset)
+        samples = 8
+        tiles: set[tuple[int, int]] = set()
+        for i in range(samples):
+            t = i / (samples - 1)
+            col, row = tgrid.tile_at(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+            tiles.add((row, col))
+        if not tiles:
+            return 0.0
+        return sum(self.congestion.get_tile_demand(r, c) for r, c in sorted(tiles)) / len(tiles)
 
     # ------------------------------------------------------------------
     # Step 2: corridor sizing (demand-driven)
