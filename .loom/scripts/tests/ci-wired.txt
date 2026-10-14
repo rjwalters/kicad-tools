@@ -78,6 +78,7 @@ test-clean-stale-building-labels.sh
 test-config-resolver.sh
 test-config-tiers-cli-migration.sh
 test-cpu-budget.sh
+test-create-issue-refuse-labels.sh
 test-create-pr-priority-labels.sh
 test-create-pr-provenance.sh
 test-create-pr-rate-limit-fallback.sh
@@ -176,6 +177,7 @@ test-repo-mismatch-fallback.sh
 test-require-daemon-bin.sh
 test-require-daemon-bin-provenance.sh
 test-resync-installed-agent-skills-guard.sh
+test-resync-installed-agents-hooks.sh
 test-resync-installed-gh-config-guard.sh
 test-resync-installed-guard-check.sh
 test-resync-installed-host-optout.sh

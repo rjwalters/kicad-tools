@@ -49,6 +49,16 @@
 #   .loom/runtimes/         <- defaults/runtimes/         (recursive; BACKFILLED if absent, #4688)
 #   .loom/bin/              <- defaults/.loom/bin/        (recursive; live consumer CLI)
 #   .claude/commands/loom/  <- defaults/.claude/commands/loom/ (recursive)
+#   .claude/agents/         <- defaults/.claude/agents/        (recursive; only when the
+#                                                              repo has a real directory
+#                                                              there -- a symlinked one,
+#                                                              this repo's dogfood link,
+#                                                              is left alone, #11033)
+#   .loom/hooks/tests/      <- defaults/hooks/tests/           (recursive; only when the
+#                                                              repo already carries the
+#                                                              directory, otherwise an
+#                                                              un-synced-drift line names
+#                                                              the files, #11033)
 #   .agents/skills/         <- defaults/.agents/skills/       (recursive; BACKFILLED if
 #                                                              absent like .loom/runtimes/
 #                                                              above, #8673 — MARKER-GATED,
@@ -2260,6 +2270,25 @@ if [[ -d "$DEFAULTS_DIR/hooks" && -d "$INSTALLED_HOOKS" ]]; then
     shopt -u nullglob
 fi
 
+# ---------- walk hooks/tests (#11033) ----------
+#
+# The top-level walk above never reached defaults/hooks/tests/. Synced when the
+# repo already has the directory (not force-populated); otherwise, and for any
+# file a pin or a symlink kept back, the drift is named instead of silent.
+if [[ -d "$DEFAULTS_DIR/hooks/tests" && -d "$INSTALLED_HOOKS" ]]; then
+    if [[ -d "$INSTALLED_HOOKS/tests" && ! -L "$INSTALLED_HOOKS/tests" ]]; then
+        resync_tree "$DEFAULTS_DIR/hooks/tests" "$INSTALLED_HOOKS/tests" "hooks/tests" "hooks/tests"
+    else
+        _unsynced_tests=""
+        for _t in "$DEFAULTS_DIR/hooks/tests/"*.sh; do
+            [[ -f "$_t" ]] && _unsynced_tests+="$(basename "$_t") "
+        done
+        if [[ -n "$_unsynced_tests" ]]; then
+            note "  ${YELLOW}un-synced drift${NC} .loom/hooks/tests/ is not installed here; upstream ships: ${_unsynced_tests% } (create the directory and resync to install them)"
+        fi
+    fi
+fi
+
 # ---------- walk scripts (recursive, matching the installer's verify walk) ----------
 
 if [[ -d "$DEFAULTS_DIR/scripts" && -d "$INSTALLED_SCRIPTS" ]]; then
@@ -2306,6 +2335,14 @@ if [[ -d "$WRITE_ROOT/.loom/bin" ]]; then
 fi
 if [[ -d "$WRITE_ROOT/.claude/commands/loom" ]]; then
     resync_tree "$DEFAULTS_DIR/.claude/commands/loom" "$WRITE_ROOT/.claude/commands/loom" "commands/loom" ".claude/commands/loom"
+fi
+# `.claude/agents/` (#11033): the subagent definitions. A symlinked directory is
+# the dogfood link (loom-daemon/src/init/git.rs) and its target is the source.
+if [[ -L "$WRITE_ROOT/.claude/agents" ]]; then
+    note "  ${YELLOW}skipped${NC}   .claude/agents ${YELLOW}(symlink)${NC}"
+    N_SKIPPED=$((N_SKIPPED + 1))
+elif [[ -d "$WRITE_ROOT/.claude/agents" ]]; then
+    resync_tree "$DEFAULTS_DIR/.claude/agents" "$WRITE_ROOT/.claude/agents" "agents" ".claude/agents"
 fi
 # `.agents/skills/` (#8673): deliberately UNCONDITIONAL, like `.loom/runtimes/`
 # above (#4688) — it is a provisioning gap for any repo installed before this
@@ -3355,6 +3392,41 @@ if [[ -x "$GUARD_CHECK_SCRIPT" ]]; then
     esac
 fi
 
+# ---------- settings.json hook-wiring drift (#11033) ----------
+#
+# .claude/settings.json is repo-owned, so a hook upstream wires that the repo does
+# not is only REPORTED, never added (a roll-pause.sh PreToolUse entry shipped this
+# way, and hooks/tests asserts it). The upstream wiring is the (event, matcher,
+# script) table in scripts/install/provision-hooks.sh, read from the source
+# checkout next to DEFAULTS_DIR, else the machine checkout. A hook counts as wired
+# when some command under that event in the repo's settings names the script
+# (user-scope wiring may still cover it). Warn-only: no exit code, no write.
+report_unwired_hooks() {
+    local settings="$WRITE_ROOT/.claude/settings.json" lib
+    [[ -f "$settings" ]] && command -v jq >/dev/null 2>&1 || return 0
+    is_ignored ".claude/settings.json" && return 0
+    for lib in "$(dirname "$DEFAULTS_DIR")/scripts/install/provision-hooks.sh" \
+               "${LOOM_HOME:-$HOME/.local/share/loom}/scripts/install/provision-hooks.sh"; do
+        [[ -r "$lib" ]] && break
+        lib=""
+    done
+    [[ -n "$lib" ]] || return 0
+    local i event matcher name unwired=""
+    # The table is read in a subshell: the library only defines functions and arrays.
+    while IFS=$'\037' read -r event matcher name; do
+        jq -e --arg e "$event" --arg n "$name" \
+            '[.hooks[$e][]?.hooks[]?.command | strings | select(contains($n))] | length > 0' \
+            "$settings" >/dev/null 2>&1 || unwired+="    $event [$matcher] $name"$'\n'
+    done < <( ( source "$lib" 2>/dev/null || exit 0
+                for i in "${!_PHOOK_NAMES[@]}"; do
+                    printf '%s\037%s\037%s\n' "${_PHOOK_TYPES[i]}" "${_PHOOK_MATCHERS[i]}" "${_PHOOK_NAMES[i]}"
+                done ) )
+    [[ -n "$unwired" ]] || return 0
+    warn "upstream wires hook(s) that .claude/settings.json does not (the file is repo-owned and was NOT modified; add them, or run the installer's hook wiring):"
+    printf '%s' "$unwired" >&2
+}
+report_unwired_hooks
+
 # ---------- forge merge-configuration check (#9287) ----------
 #
 # merge-pr.sh can only merge when the repository's allow_* merge flags and
@@ -3572,7 +3644,7 @@ collect_resync_dirt() {
             # dirt: the hint below went silent and `land-resync-commit.sh`
             # refused to land the run it was printed for. `.github/labels.yml`
             # is refresh_labels_block()'s output (#11033).
-            .claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.github/labels.yml|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes|.gitignore|.agents/skills/*)
+            .claude/commands/loom/*|.claude/agents/*|.claude/README.md|.github/CONFIGURATION.md|.github/labels.yml|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes|.gitignore|.agents/skills/*)
                 RESYNC_DIRT_PATHS+=("$path")
                 ;;
             *)

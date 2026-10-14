@@ -301,7 +301,7 @@ is_resync_surface_path() {
     case "$1" in
         .loom/hooks/* | .loom/scripts/* | .loom/roles/* | .loom/docs/* | \
             .loom/bin/* | .loom/runtimes/* | .agents/skills/* | \
-            .claude/commands/loom/* | .claude/README.md | .claude/biome.jsonc | \
+            .claude/commands/loom/* | .claude/agents/* | .claude/README.md | .claude/biome.jsonc | \
             .github/CONFIGURATION.md | .github/labels.yml | .loom/biome.jsonc | .loom/CLAUDE.md | \
             .loom/install-metadata.json | .gitattributes | .gitignore)
             return 0

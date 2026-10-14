@@ -29,7 +29,9 @@
 #                         exclusive with --body.
 #   --label, -l LABEL     Label to apply at creation. Repeatable. A single
 #                         comma-separated value is also accepted, matching
-#                         `gh issue create --label "a,b"`.
+#                         `gh issue create --label "a,b"`. `loom:issue` and
+#                         `loom:curated` are REFUSED (exit 2, no forge call):
+#                         issues enter at `loom:triage` (#11820).
 #   --repo, -R OWNER/REPO Target repository. Omit for the current repo (the
 #                         preferred form -- the REST path then resolves the
 #                         repo from the git remote with zero API calls).
@@ -150,7 +152,7 @@ source "$SCRIPT_DIR/lib/filing-lock.sh"
 usage() {
   # Line range = the whole leading comment block (keep in sync when the header
   # grows; `--help` silently truncating its own docs is its own small #8289).
-  sed -n '2,143p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+  sed -n '2,142p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 TITLE=""
@@ -205,15 +207,17 @@ while [[ $# -gt 0 ]]; do
         # Trim surrounding whitespace from "a, b".
         _l="${_l#"${_l%%[![:space:]]*}"}"
         _l="${_l%"${_l##*[![:space:]]}"}"
+        # Issues enter at loom:triage (#11820, operator ruling 2026-10-13):
+        # opening one as loom:issue or loom:curated skips Curator admission.
+        # Refused here, before any forge call.
+        [[ "$_l" =~ ^loom:(issue|curated)$ ]] && {
+          echo "create-issue.sh: refusing --label $_l: issues enter at loom:triage and reach $_l through Curator admission. Use --label loom:triage (or no --label: the default)." >&2; exit 2; }
         [[ -n "$_l" ]] && LABELS+=("$_l")
       done
       shift 2
       ;;
     --repo | -R) REPO_NWO="${2:-}"; shift 2 ;;
-    --force | --skip-duplicate-check)
-      SKIP_DUP_CHECK=true
-      shift
-      ;;
+    --force | --skip-duplicate-check) SKIP_DUP_CHECK=true; shift ;;
     --parent) PARENT="${2:-}"; shift 2 ;;
     --duplicate-threshold)
       DUP_THRESHOLD="${2:-}"

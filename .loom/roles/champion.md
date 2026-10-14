@@ -192,7 +192,7 @@ Follow-on issues are only created when meaningful work is identified:
 
 ### Follow-on Issue Labeling
 
-Follow-on issues are created with the `loom:curated` label (returns to Champion for evaluation).
+Follow-on issues are created with the `loom:triage` label (Curator admission first, #11820).
 
 ### Duplicate Prevention
 

@@ -524,6 +524,95 @@ The same roster decides whose comments Loom believes: a marker counts only from
 a repo insider, one of these Apps, or `forge.trustedCommenters` (#9548, see
 [`comment-trust.md`](comment-trust.md)).
 
+### Reads through a read gateway (`forge.gateway`)
+
+A read gateway is a transparent relay in front of `api.github.com`: it
+answers each request with what GitHub returns to an App installation token
+it mints itself, and it refuses writes. Each (host, owner) gets its own
+gateway key. Stock `gh` 2.100.0 or newer reaches the gateway through
+`api_host` in a profile's `hosts.yml`. Older `gh` ignores `api_host`
+silently, so it would send the key to GitHub instead.
+
+```json
+"forge": { "gateway": {
+  "origin": "https://github-proxy.example.com",
+  "region": "example-region-1",
+  "keyRefs": {
+    "example-org": "ssm:///github-proxy/profiles/relay-host-example-org/key",
+    "other-org":   "ssm:///github-proxy/profiles/relay-host-other-org/key"
+  }
+} }
+```
+
+- **`origin`**: `https://<host>` or a bare host. No path, port or
+  credentials, and never a GitHub host (a trailing `.` included).
+- **`keyRefs`** (`key_refs` is accepted too): owner → where its key is read.
+  Prefer `ssm://<parameter>` (read with the AWS CLI under the host's own
+  grant), so no key file sits on the host. It is always read with an
+  explicit `--region`: `region`, else `AWS_REGION`, else
+  `AWS_DEFAULT_REGION`. With none of these set, `ssm://` refs are refused
+  (logged once) and that owner keeps today's routing. `file:<path>` must be an
+  owner-only file outside every checkout. An owner with no ref keeps
+  today's routing.
+
+The daemon re-reads this block every minute. When it is set and `gh` is new
+enough, it publishes `.loom/gh-config-gateway/<owner>/` and rewrites it
+every five minutes, so a rotated key is picked up. `hosts.yml` (0600, in a
+0700 directory) holds only the key and `api_host`, which is written every
+time the file is. It names no `user` or `git_protocol`, so it is never a git
+credential. The directory is named `gh-config-*` so the managed `.gitignore`
+block and every stager's credential refusal already cover it: a profile can
+never be committed. The key never appears in argv, logs or spans. From then
+on:
+
+- **Daemon reads** (facade reads and conditional ETag reads) try the
+  gateway profile before any reader App. A gateway refusal withdraws it like
+  a reader. Any gateway attempt that times out, gets a transport error, or
+  fails with a `5xx` is run once more on the readers, then the writer. That
+  includes a `5xx` GitHub relayed, which cannot always be told apart.
+  The gateway is **withdrawn** everywhere for five minutes only on its own
+  evidence: a transport error, a `5xx` it marked (`x-github-proxy-refusal`,
+  or its opaque `{error, request_id}` body), or one that never reached it
+  (no `x-github-proxy-version`, or an edge status `520`–`530`). A `gh` that
+  failed before sending is neither rerun nor an outage. Either way the
+  read continues to the readers, then the writer. A page walk under a
+  gateway profile follows next links only on its `api_host`.
+- **Agent `gh` calls**: the front sends a read to the gateway only when it
+  can classify it *and* name its owner for certain.
+  - The reads it classifies: `issue|pr view|list`, `pr checks|diff`,
+    `repo view`, `run|workflow view|list`, `label list`, and `gh api <path>`
+    that is not `graphql`, has no method, field or input flag, and uses only
+    flags that shape is known to take.
+  - A call whose `--json`/`--jq`/`--template` names a `viewer*` value is
+    answered for the caller, so it stays on the caller, as do `issue|pr
+    status`.
+  - The owner comes from the last `-R` (attached `-Rowner/repo` too), a
+    `repos/<o>/<r>` path, a positional `github.com` URL, `GH_REPO`, or a lone
+    `origin` remote. A flag's value is never read as a URL, and when two
+    sources disagree the call stays direct.
+  - Everything else stays on the session's credential: every mutation,
+    `gh api -X …`, GraphQL, search, `gh release`, `gh auth git-credential`,
+    `--watch`, `run view --log`, and any call on a TTY.
+  - If the gateway attempt fails with a `5xx` or a transport error, the
+    front runs the same call direct and books it as direct. On the
+    gateway's own evidence (as above) it also skips the gateway for five
+    minutes.
+- **Writes, git and releases** are unchanged: the writer App, no `api_host`.
+- **`GH_NO_UPDATE_NOTIFIER=1`** is set for the daemon and every agent,
+  whether or not a gateway is configured.
+
+**Break-glass.** Unset `forge.gateway`. Within a minute the profiles are
+removed, agents stop being offered them, and routing is exactly what it was
+before. The same holds below gh 2.100.0, which is logged once. The fleet
+store fetch never goes through the gateway, so the store can always be read
+to unset it.
+
+**Measuring it.** `loom.forge.calls` carries `route`: `gateway`,
+`direct_read` (a read that went to GitHub directly, through a reader App or
+the writer), `direct` (writes and unclassified calls) or `none` (shed).
+The writer's read share is `route = direct_read` on the writer's `account`
+over all reads. A rise means a classifier gap, not an outage.
+
 ### The cached-permission window: `403 … not accessible by integration` (#6074)
 
 An installation token is minted with the permissions the installation held **at
