@@ -422,14 +422,13 @@ def missing_links(pcb: PCB, *, absolute: bool = False) -> LinkReport:
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
     ox, oy = pcb.board_origin
-    dx, dy = (ox, oy) if absolute else (0.0, 0.0)
     report = LinkReport()
 
     for status in NetStatusAnalyzer(pcb).analyze().nets:
         if status.total_pads < 2 or status.status == "complete":
             continue
         islands = [
-            [LinkEnd(p.full_name, p.position[0] + dx, p.position[1] + dy) for p in island]
+            [LinkEnd(p.full_name, p.position[0], p.position[1]) for p in island]
             for island in status.islands
             if island
         ]
@@ -445,7 +444,20 @@ def missing_links(pcb: PCB, *, absolute: bool = False) -> LinkReport:
                 }
             )
             continue
-        report.links[status.net_name] = _spanning_links(status.net_name, islands)
+        # Choose links in the board-relative frame so the choice (including
+        # tie-breaks) is identical for absolute=True/False and independent of
+        # the origin offset; shift only the chosen ends afterwards.
+        links = _spanning_links(status.net_name, islands)
+        if absolute:
+            links = [
+                MissingLink(
+                    k.net,
+                    LinkEnd(k.a.name, k.a.x + ox, k.a.y + oy),
+                    LinkEnd(k.b.name, k.b.x + ox, k.b.y + oy),
+                )
+                for k in links
+            ]
+        report.links[status.net_name] = links
 
     report.pour_advisory.sort(key=lambda entry: entry["net"])
     return report

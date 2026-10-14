@@ -165,7 +165,12 @@ def _print_links(result: dict[str, Any]) -> None:
     )
     for net, pairs in links.items():
         for pair in pairs:
-            print(f"  {net}: {pair['from']} -> {pair['to']}  {pair['length_mm']:.2f} mm")
+            fx, fy = pair["from_mm"]
+            tx, ty = pair["to_mm"]
+            print(
+                f"  {net}: {pair['from']} ({fx:.2f}, {fy:.2f}) -> "
+                f"{pair['to']} ({tx:.2f}, {ty:.2f})  {pair['length_mm']:.2f} mm"
+            )
     for entry in result["pour_advisory"]:
         groups = " | ".join(", ".join(island) for island in entry["islands"])
         print(

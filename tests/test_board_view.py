@@ -502,6 +502,32 @@ class TestMissingLinks:
         assert (link.a.x, link.a.y) == pytest.approx((126.0, 60.0))
         assert (link.b.x, link.b.y) == pytest.approx((124.0, 70.0))
 
+    def test_links_are_frame_equivalent(self, cut_board: Path):
+        """Same pad pairs in both frames; absolute ends are relative + origin."""
+        pcb = PCB.load(cut_board)
+        ox, oy = pcb.board_origin
+        assert (ox, oy) != (0.0, 0.0)
+        rel = missing_links(pcb).links
+        ab = missing_links(pcb, absolute=True).links
+        assert set(rel) == set(ab)
+        for net, rlinks in rel.items():
+            assert len(rlinks) == len(ab[net])
+            for r, a in zip(rlinks, ab[net], strict=True):
+                assert (r.a.name, r.b.name) == (a.a.name, a.b.name)
+                assert (a.a.x, a.a.y) == pytest.approx((r.a.x + ox, r.a.y + oy))
+                assert (a.b.x, a.b.y) == pytest.approx((r.b.x + ox, r.b.y + oy))
+
+    def test_text_listing_prints_end_coordinates(self, cut_board: Path, capsys):
+        from kicad_tools.cli.commands.board_view import _print_links
+
+        result = board_view(str(cut_board), "list")
+        _print_links(result)
+        out = capsys.readouterr().out
+        (pair,) = result["missing_links"]["SIG"]
+        fx, fy = pair["from_mm"]
+        tx, ty = pair["to_mm"]
+        assert f"{pair['from']} ({fx:.2f}, {fy:.2f}) -> {pair['to']} ({tx:.2f}, {ty:.2f})" in out
+
     def test_removed_trace_is_named_by_list(self, board: Path, cut_board: Path):
         """A fixture with one trace removed: ``list`` names the net and pad pair."""
         before = board_view(str(board), "list")
@@ -874,7 +900,7 @@ class TestCli:
         out = capsys.readouterr().out
         assert "Frame: sheet-absolute" in out
         assert "Unfinished nets: 2 (2 missing links)" in out
-        assert "SIG: R1.1 -> R2.1  15.00 mm" in out
+        assert "SIG: R1.1 (" in out and ") -> R2.1 (" in out and ")  15.00 mm" in out
         assert "GND: pour leaves 2 separate islands" in out
 
     def test_every_image_view_writes_a_png(self, cut_board: Path, tmp_path: Path, capsys):
