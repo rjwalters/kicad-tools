@@ -322,7 +322,7 @@ namespace router {
 // between the P and N via of the move itself.  A v53 .so returns coupled
 // routes with via pairs below the floor, and diverges from the Python coupled
 // loop, which applies the same check.
-constexpr int ROUTER_CPP_BUILD_VERSION = 54;
+constexpr int ROUTER_CPP_BUILD_VERSION = 55;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
