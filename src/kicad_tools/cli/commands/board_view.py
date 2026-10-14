@@ -42,7 +42,7 @@ _DESCRIPTION = (
     "'kicad-tools[visualization]'), not kicad-cli. Axes are board-relative by default, "
     "the frame of `kct net-status` and `kct pcb move-footprint --to`; `kct check` "
     "locations are sheet-absolute (use --absolute). Missing links come from the same "
-    "connectivity model as `kct check`. Zone pours are not drawn. Treat what you read "
+    "connectivity model as `kct check`. Zone pours are drawn only with --zones. Treat what you read "
     "off an image as a hypothesis and confirm it with `kct net-status` or `kct check`."
 )
 
@@ -73,6 +73,49 @@ def _add_common(parser: ArgumentParser, *, image: bool, default_format: str) -> 
             "board-relative ones"
         ),
     )
+    if image:
+        parser.add_argument(
+            "--zones",
+            dest="board_view_zones",
+            action="store_true",
+            help="Draw filled zone pours, translucent, in the colour of their layer",
+        )
+        parser.add_argument(
+            "--drc-report",
+            dest="board_view_drc_report",
+            default=None,
+            metavar="REPORT",
+            help=(
+                "Mark the violation locations of a DRC report (kicad-cli JSON/text); they are "
+                "sheet-absolute and are shifted by the board origin in the default frame"
+            ),
+        )
+        parser.add_argument(
+            "--net-classes",
+            dest="board_view_net_classes",
+            action="store_true",
+            help=(
+                "Colour copper by net class (board net_class blocks, sibling .kicad_pro "
+                "patterns) instead of by layer"
+            ),
+        )
+        parser.add_argument(
+            "--compare",
+            dest="board_view_compare",
+            default=None,
+            metavar="AFTER_PCB",
+            help=(
+                "Second board: pcb is drawn as 'before' (left), this as 'after' (right), "
+                "over one shared window"
+            ),
+        )
+        parser.add_argument(
+            "--compare-drc-report",
+            dest="board_view_compare_drc_report",
+            default=None,
+            metavar="REPORT",
+            help="DRC report for the --compare board",
+        )
     add_format_flag(parser, default=default_format, dest="board_view_format")
 
 
@@ -165,7 +208,12 @@ def _print_links(result: dict[str, Any]) -> None:
     )
     for net, pairs in links.items():
         for pair in pairs:
-            print(f"  {net}: {pair['from']} -> {pair['to']}  {pair['length_mm']:.2f} mm")
+            fx, fy = pair["from_mm"]
+            tx, ty = pair["to_mm"]
+            print(
+                f"  {net}: {pair['from']} ({fx:.2f}, {fy:.2f}) -> "
+                f"{pair['to']} ({tx:.2f}, {ty:.2f})  {pair['length_mm']:.2f} mm"
+            )
     for entry in result["pour_advisory"]:
         groups = " | ".join(", ".join(island) for island in entry["islands"])
         print(
@@ -203,6 +251,11 @@ def run_board_view_command(args: Namespace) -> int:
         margin_mm=getattr(args, "board_view_margin", 4.0),
         max_size_px=getattr(args, "board_view_max_size", 1568),
         output_path=output,
+        zones=getattr(args, "board_view_zones", False),
+        drc_report=getattr(args, "board_view_drc_report", None),
+        net_classes=getattr(args, "board_view_net_classes", False),
+        compare_to=getattr(args, "board_view_compare", None),
+        compare_drc_report=getattr(args, "board_view_compare_drc_report", None),
     )
     if not result["success"]:
         return _fail(as_json, view, source, str(result["error_message"]))

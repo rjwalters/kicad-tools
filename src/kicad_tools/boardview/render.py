@@ -23,6 +23,7 @@ import difflib
 import io
 import math
 import textwrap
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,9 @@ from .model import (
     PadGeo,
     Point,
     collect_geometry,
+    drc_marker_points,
     missing_links,
+    net_class_map,
 )
 
 __all__ = [
@@ -42,6 +45,7 @@ __all__ = [
     "MATPLOTLIB_HINT",
     "MAX_VISION_API_PX",
     "VIEWS",
+    "Overlays",
     "board_view",
     "draw_panel",
     "matplotlib_available",
@@ -88,6 +92,42 @@ _RATS_OTHER = "#9a9a9a"
 _THRU_PAD = "#e8c21a"
 _VIA = "#d8d8d8"
 _OUTLINE = "#8c8c8c"
+_DRC = "#00ff66"
+_ZONE_ALPHA = 0.28
+
+# Net-class palette (issue #6317): none is green, magenta, white or gold, which
+# the DRC markers, missing links, highlight and through-hole pads already use.
+_CLASS_DEFAULT = ("#8fb8de", "pale blue")
+_CLASS_PALETTE: tuple[tuple[str, str], ...] = (
+    ("#ff9f1c", "orange"),
+    ("#b388eb", "violet"),
+    ("#c68b59", "tan"),
+    ("#f4a6a6", "salmon"),
+    ("#2ec4b6", "teal"),
+    ("#d0d0a0", "khaki"),
+)
+
+
+def class_colors(classes: set[str]) -> dict[str, tuple[str, str]]:
+    """(hex, word) per net class; ``Default`` is always pale blue."""
+    out = {"Default": _CLASS_DEFAULT}
+    others = sorted(c for c in classes if c != "Default")
+    for index, name in enumerate(others):
+        out[name] = _CLASS_PALETTE[index % len(_CLASS_PALETTE)]
+    return out
+
+
+@dataclass
+class Overlays:
+    """Opt-in extras for one panel (issue #6317); the default draws none."""
+
+    zones: bool = False
+    #: net -> class name for this board; None keeps colouring copper by layer.
+    net_classes: dict[str, str] | None = None
+    colors: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: DRC violation locations already in the drawing frame.
+    drc: list[Point] = field(default_factory=list)
+
 
 _DPI = 100
 _TITLE_FONT_PT = 9.0
@@ -192,8 +232,10 @@ def draw_panel(
     only_layer: str | None = None,
     px_per_mm: float = 20.0,
     labels: bool = True,
+    overlays: Overlays | None = None,
 ) -> None:
     """Draw one panel into *ax*, whose data coordinates are frame mm."""
+    overlays = overlays or Overlays()
     from matplotlib.collections import LineCollection, PatchCollection, PolyCollection
     from matplotlib.patches import Circle
 
@@ -213,12 +255,41 @@ def draw_panel(
         xs, ys = [p[0] for p in line], [p[1] for p in line]
         ax.plot(xs, ys, color=_OUTLINE, linewidth=1.0, zorder=0.5)
 
+    def net_color(layer: str, net_name: str) -> str:
+        if overlays.net_classes is None:
+            return _layer_style(layer)[0]
+        cls = overlays.net_classes.get(net_name, "Default")
+        return overlays.colors.get(cls, _CLASS_DEFAULT)[0]
+
     alpha = 0.85 if only_layer else 0.6
     for layer in reversed(geo.copper):  # back first, front on top
         if only_layer and layer != only_layer:
             continue
-        color = _layer_style(layer)[0]
+        if overlays.zones:
+            fills = [z for z in geo.zones if z.layer == layer]
+            fills = [
+                z
+                for z in fills
+                if _box_hits(
+                    box,
+                    min(p[0] for p in z.points),
+                    min(p[1] for p in z.points),
+                    max(p[0] for p in z.points),
+                    max(p[1] for p in z.points),
+                )
+            ]
+            if fills:
+                ax.add_collection(
+                    PolyCollection(
+                        [list(z.points) for z in fills],
+                        facecolors=[net_color(layer, z.net) for z in fills],
+                        edgecolors="none",
+                        alpha=_ZONE_ALPHA,
+                        zorder=0.8,
+                    )
+                )
         dim: list[Any] = []
+        dim_c: list[str] = []
         dim_w: list[float] = []
         hot: list[Any] = []
         hot_w: list[float] = []
@@ -233,11 +304,12 @@ def draw_panel(
                 hot_w.append(lw(track.width))
             else:
                 dim.append(track.points)
+                dim_c.append(net_color(layer, track.net))
                 dim_w.append(lw(track.width))
         if dim:
             ax.add_collection(
                 LineCollection(
-                    dim, colors=color, linewidths=dim_w, alpha=alpha, capstyle="round", zorder=1
+                    dim, colors=dim_c, linewidths=dim_w, alpha=alpha, capstyle="round", zorder=1
                 )
             )
         if hot:
@@ -251,7 +323,13 @@ def draw_panel(
                 )
             )
             ax.add_collection(
-                LineCollection(hot, colors=color, linewidths=hot_w, capstyle="round", zorder=2.1)
+                LineCollection(
+                    hot,
+                    colors=net_color(layer, net or ""),
+                    linewidths=hot_w,
+                    capstyle="round",
+                    zorder=2.1,
+                )
             )
 
     shown: list[PadGeo] = []
@@ -267,7 +345,10 @@ def draw_panel(
             continue
         shown.append(pad)
         polys.append(pad.outline())
-        faces.append(_THRU_PAD if len(pad.layers) > 1 else _layer_style(next(iter(pad.layers)))[0])
+        if len(pad.layers) > 1:
+            faces.append(_THRU_PAD)
+        else:
+            faces.append(net_color(next(iter(pad.layers)), pad.net))
         edges.append(_HILITE if (net and pad.net == net) else "none")
         if pad.drill > 0:
             holes.append(Circle((pad.x, pad.y), pad.drill / 2))
@@ -334,6 +415,21 @@ def draw_panel(
                     markeredgewidth=1.4,
                     zorder=6.6,
                 )
+
+    drc_xs = [p[0] for p in overlays.drc if inside(p[0], p[1], 0.5)]
+    drc_ys = [p[1] for p in overlays.drc if inside(p[0], p[1], 0.5)]
+    if drc_xs:
+        ax.plot(
+            drc_xs,
+            drc_ys,
+            linestyle="none",
+            marker="D",
+            markersize=11,
+            markerfacecolor="none",
+            markeredgecolor=_DRC,
+            markeredgewidth=1.8,
+            zorder=7,
+        )
 
     if labels:
         _draw_labels(ax, shown, geo.pads, box, net=net, px_per_mm=px_per_mm, inside=inside)
@@ -463,25 +559,37 @@ def _plan(
     return plan
 
 
+@dataclass
+class _Panel:
+    """One axes in the figure: a board, optionally one layer of it."""
+
+    geo: BoardGeometry
+    report: LinkReport
+    overlays: Overlays
+    layer: str | None = None
+    title: str | None = None
+    title_color: str = "#ffffff"
+
+
 def _render(
-    geo: BoardGeometry,
-    report: LinkReport,
+    panels: list[_Panel],
     box: Box,
     *,
     net: str | None,
-    per_layer: bool,
     max_px: int,
     paragraphs: list[str],
+    cols: int | None = None,
 ) -> tuple[bytes, int, int, float, str]:
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
-    panels: list[str | None] = list(geo.copper) if per_layer else [None]
-    cols = 1 if len(panels) == 1 else (2 if len(panels) <= 4 else 3)
+    if cols is None:
+        cols = 1 if len(panels) == 1 else (2 if len(panels) <= 4 else 3)
     rows = math.ceil(len(panels) / cols)
-    fig_w, fig_h, ppm, lines = _plan(box, rows, cols, max_px, paragraphs, per_layer)
+    titled = any(panel.title for panel in panels)
+    fig_w, fig_h, ppm, lines = _plan(box, rows, cols, max_px, paragraphs, titled)
     w_mm, h_mm = box[2] - box[0], box[3] - box[1]
-    m_top = _M_TOP_PANEL if per_layer else _M_TOP_PLAIN
+    m_top = _M_TOP_PANEL if titled else _M_TOP_PLAIN
     band = fig_h - rows * (m_top + _M_BOTTOM + h_mm * ppm)
 
     # A Figure with its own Agg canvas: no pyplot, so no global backend or
@@ -503,7 +611,7 @@ def _render(
 
     cell_w = _M_LEFT + w_mm * ppm + _M_RIGHT
     cell_h = m_top + h_mm * ppm + _M_BOTTOM
-    for index, layer in enumerate(panels):
+    for index, panel in enumerate(panels):
         row, col = divmod(index, cols)
         left = col * cell_w + _M_LEFT
         top = band + row * cell_h + m_top
@@ -515,10 +623,18 @@ def _render(
                 (h_mm * ppm) / fig_h,
             )
         )
-        draw_panel(ax, geo, report, box, net=net, only_layer=layer, px_per_mm=ppm)
-        if layer is not None:
-            hex_color, word = _layer_style(layer)
-            ax.set_title(f"{layer} ({word})", color=hex_color, fontsize=9, pad=4)
+        draw_panel(
+            ax,
+            panel.geo,
+            panel.report,
+            box,
+            net=net,
+            only_layer=panel.layer,
+            px_per_mm=ppm,
+            overlays=panel.overlays,
+        )
+        if panel.title:
+            ax.set_title(panel.title, color=panel.title_color, fontsize=9, pad=4)
 
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=_DPI, facecolor=fig.get_facecolor())
@@ -548,7 +664,12 @@ def _paragraphs(
     report: LinkReport,
     net: str | None,
     box: Box,
+    *,
+    overlays: Overlays | None = None,
+    drc_source: str | None = None,
+    drc_count: int = 0,
 ) -> list[str]:
+    overlays = overlays or Overlays()
     n_nets, n_links = len(report.links), report.link_count
     if net is None:
         what = "window" if view == "crop" else "overview"
@@ -579,13 +700,54 @@ def _paragraphs(
         )
     window = ", ".join(_fmt(v) for v in box)
     frame = f"{_frame_note(geo)} Window x0, y0, x1, y1 = {window}."
-    layers = ", ".join(f"{layer} {_layer_style(layer)[1]}" for layer in geo.copper)
-    key = (
-        f"Colours: {layers}; through-hole pads gold; vias light grey with a black hole; board "
-        "outline grey. Zone pours are not drawn, so a pad with no track may still be connected "
-        "through a pour. " + CAVEAT
-    )
-    return [head, frame, key]
+    if overlays.net_classes is None:
+        layers = ", ".join(f"{layer} {_layer_style(layer)[1]}" for layer in geo.copper)
+        colours = f"Colours: {layers}; "
+    else:
+        classes = ", ".join(f"{name} {word}" for name, (_, word) in sorted(overlays.colors.items()))
+        colours = f"Colours: copper (tracks and SMD pads) by net class, not by layer: {classes}; "
+    key = f"{colours}through-hole pads gold; vias light grey with a black hole; board outline grey."
+    if overlays.zones:
+        key += (
+            " Zone fills (filled pours) are drawn translucent, under the tracks, in the colour "
+            "of their "
+            + ("net class." if overlays.net_classes is not None else "layer.")
+            + " Fill is shown as filed in the board: stale until the zones are refilled."
+        )
+    else:
+        key += (
+            " Zone pours are not drawn, so a pad with no track may still be connected "
+            "through a pour."
+        )
+    if drc_source:
+        key += (
+            f" Bright green hollow diamonds mark {drc_count} DRC violation location"
+            f"{'s' if drc_count != 1 else ''} from {drc_source} (reported sheet-absolute; "
+            "placed here by the frame rule above)."
+        )
+    return [head, frame, key + " " + CAVEAT]
+
+
+def _load_board(path: Path, absolute: bool) -> tuple[Any, BoardGeometry, LinkReport]:
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(path)
+    return pcb, collect_geometry(pcb, absolute=absolute), missing_links(pcb, absolute=absolute)
+
+
+def _drc_points(report_path: str | None, pcb: Any, absolute: bool) -> list[Point]:
+    """Violation locations from a ``kct check`` / ``kicad-cli`` report, in frame mm."""
+    if not report_path:
+        return []
+    from kicad_tools.drc.report import DRCReport
+
+    report = DRCReport.load(report_path)
+    raw = [(loc.x_mm, loc.y_mm) for v in report.violations for loc in v.locations]
+    return drc_marker_points(raw, pcb.board_origin, absolute=absolute)
+
+
+def _union(a: Box, b: Box) -> Box:
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
 
 
 def board_view(
@@ -598,6 +760,11 @@ def board_view(
     margin_mm: float = 4.0,
     max_size_px: int = MAX_VISION_API_PX,
     output_path: str | None = None,
+    zones: bool = False,
+    drc_report: str | None = None,
+    net_classes: bool = False,
+    compare_to: str | None = None,
+    compare_drc_report: str | None = None,
 ) -> dict[str, Any]:
     """Render one question-specific view of a board, or list its missing links.
 
@@ -613,6 +780,15 @@ def board_view(
         margin_mm: Margin round the net for ``net`` and ``layers``.
         max_size_px: Longest image side (default 1568).
         output_path: Where to save the PNG, if anywhere.
+        zones: Draw filled pours, translucent, in the colour of their layer.
+        drc_report: A ``kct check`` / ``kicad-cli`` DRC report (JSON or text);
+            its violation locations are marked.
+        net_classes: Colour copper by net class (board ``net_class`` blocks and
+            the sibling ``.kicad_pro`` patterns) instead of by layer.
+        compare_to: A second board.  ``pcb_path`` becomes the "before" (left)
+            panel and this the "after" (right), over one shared window.  Not
+            available for ``layers``.
+        compare_drc_report: DRC report for the ``compare_to`` board.
 
     Returns:
         A dict with ``success`` and ``error_message``; on success the frame,
@@ -634,6 +810,18 @@ def board_view(
         return _failure(view, pcb_path, f"The {view!r} view needs a net name")
     if view in ("overview", "list"):
         net = None
+    other_path = Path(compare_to) if compare_to else None
+    if other_path is not None and view != "list":
+        if view == "layers":
+            return _failure(
+                view, pcb_path, "The 'layers' view cannot be combined with a comparison"
+            )
+        if not other_path.exists():
+            return _failure(view, pcb_path, f"PCB file not found: {compare_to}")
+        if other_path.suffix != ".kicad_pcb":
+            return _failure(
+                view, pcb_path, f"Invalid file extension: {other_path.suffix} (expected .kicad_pcb)"
+            )
     if view != "list":
         if not MIN_SIZE_PX <= max_size_px <= 8192:
             return _failure(
@@ -644,12 +832,8 @@ def board_view(
         if not matplotlib_available():
             return _failure(view, pcb_path, MATPLOTLIB_HINT)
 
-    from kicad_tools.schema.pcb import PCB
-
     try:
-        pcb = PCB.load(path)
-        geo = collect_geometry(pcb, absolute=absolute)
-        report = missing_links(pcb, absolute=absolute)
+        pcb, geo, report = _load_board(path, absolute)
     except Exception as exc:  # a malformed board is a user error, not a crash
         return _failure(view, pcb_path, f"Could not read {pcb_path}: {exc}")
 
@@ -674,7 +858,18 @@ def board_view(
     if view == "list":
         return result
 
-    if net is not None and net not in geo.net_names():
+    other: tuple[Any, BoardGeometry, LinkReport] | None = None
+    if other_path is not None:
+        try:
+            other = _load_board(other_path, absolute)
+        except Exception as exc:
+            return _failure(view, pcb_path, f"Could not read {compare_to}: {exc}")
+
+    boards = [(path, pcb, geo, report)]
+    if other is not None and other_path is not None:
+        boards.append((other_path, other[0], other[1], other[2]))
+
+    if net is not None and not any(net in b[2].net_names() for b in boards):
         close = difflib.get_close_matches(net, sorted(geo.net_names()), n=5, cutoff=0.5)
         hint = f" Did you mean: {', '.join(close)}?" if close else ""
         return _failure(view, pcb_path, f"Net {net!r} has no pads or copper on this board.{hint}")
@@ -686,28 +881,108 @@ def board_view(
         wx0, wy0, wx1, wy1 = (float(v) for v in window)
         box = (min(wx0, wx1), min(wy0, wy1), max(wx0, wx1), max(wy0, wy1))
     elif view == "overview":
-        if geo.bounds is None:
+        found = [b[2].bounds for b in boards if b[2].bounds is not None]
+        if not found:
             return _failure(view, pcb_path, "Nothing to draw: no board outline, pads or copper")
-        bx0, by0, bx1, by1 = geo.bounds
-        box = (bx0 - 1.0, by0 - 1.0, bx1 + 1.0, by1 + 1.0)
+        union = found[0]
+        for other_bounds in found[1:]:
+            union = _union(union, other_bounds)
+        box = (union[0] - 1.0, union[1] - 1.0, union[2] + 1.0, union[3] + 1.0)
     else:
         assert net is not None
-        box = net_window(geo, report, net, margin_mm)
-        if box is None:
+        windows = [w for b in boards if (w := net_window(b[2], b[3], net, margin_mm)) is not None]
+        if not windows:
             return _failure(view, pcb_path, f"Net {net!r} has no pads to centre a view on")
+        box = windows[0]
+        for extra in windows[1:]:
+            box = _union(box, extra)
     if box[2] - box[0] < 0.5 or box[3] - box[1] < 0.5:
         return _failure(view, pcb_path, "Window is smaller than 0.5 mm on a side")
 
-    paragraphs = _paragraphs(view, path.name, geo, report, net, box)
+    # Overlays are per board; the class palette is shared so a pair agrees.
+    try:
+        marks = [
+            _drc_points(drc_report, pcb, absolute),
+            _drc_points(compare_drc_report, other[0], absolute) if other else [],
+        ]
+    except Exception as exc:
+        return _failure(view, pcb_path, f"Could not read DRC report: {exc}")
+    class_of: list[dict[str, str] | None] = [None] * len(boards)
+    palette: dict[str, tuple[str, str]] = {}
+    if net_classes:
+        class_of = [net_class_map(b[1], b[0], b[2].net_names()) for b in boards]
+        used = {c for m in class_of if m for c in m.values()} | {"Default"}
+        palette = class_colors(used)
+    overlays = [
+        Overlays(
+            zones=zones,
+            net_classes=class_of[i],
+            colors=palette,
+            drc=marks[i] if i < len(marks) else [],
+        )
+        for i in range(len(boards))
+    ]
+
+    drc_given = bool(drc_report or (compare_drc_report and other))
+    names = [b[0].name for b in boards]
+    first_name = f"{names[0]} (left, before)" if other else names[0]
+    drc_names = [Path(r).name for r in (drc_report, compare_drc_report if other else None) if r]
+    paragraphs = _paragraphs(
+        view,
+        first_name,
+        geo,
+        report,
+        net,
+        box,
+        overlays=overlays[0],
+        drc_source=" and ".join(drc_names) if drc_given and drc_names else None,
+        drc_count=sum(len(m) for m in marks),
+    )
+    if other:
+        o_geo, o_report = boards[1][2], boards[1][3]
+        after_note = (
+            f"Right panel, after: {names[1]}, same window and scale as the left one; "
+            f"{len(o_report.links)} unfinished nets, {o_report.link_count} missing links."
+        )
+        if o_geo.origin != geo.origin:
+            after_note += (
+                f" The two boards have different origins {_fmt(geo.origin[0])},"
+                f"{_fmt(geo.origin[1])} and {_fmt(o_geo.origin[0])},{_fmt(o_geo.origin[1])}: "
+                "the same window is not the same place on the sheet."
+            )
+        paragraphs.insert(1, after_note)
+
+    panels: list[_Panel]
+    if view == "layers":
+        panels = []
+        for layer in geo.copper:
+            hex_color, word = _layer_style(layer)
+            panels.append(
+                _Panel(
+                    geo,
+                    report,
+                    overlays[0],
+                    layer,
+                    f"{layer} ({word})",
+                    "#ffffff" if overlays[0].net_classes is not None else hex_color,
+                )
+            )
+    elif other:
+        panels = [
+            _Panel(boards[i][2], boards[i][3], overlays[i], None, label)
+            for i, label in enumerate((f"before: {names[0]}", f"after: {names[1]}"))
+        ]
+    else:
+        panels = [_Panel(geo, report, overlays[0])]
+
     try:
         png, width, height, ppm, title = _render(
-            geo,
-            report,
+            panels,
             box,
             net=net,
-            per_layer=view == "layers",
             max_px=max_size_px,
             paragraphs=paragraphs,
+            cols=2 if other else None,
         )
     except ValueError as exc:
         return _failure(view, pcb_path, str(exc))
@@ -719,6 +994,16 @@ def board_view(
         out.write_bytes(png)
         saved = str(out)
 
+    key = _color_key(geo.copper)
+    if net_classes:
+        key = {k: v for k, v in key.items() if k not in geo.copper}
+        for name, (_, word) in sorted(palette.items()):
+            key[f"net_class:{name}"] = word
+    if zones:
+        key["zone_fill"] = "translucent, in the colour of the layer (or net class) of the fill"
+    if drc_given:
+        key["drc_markers"] = "bright green hollow diamonds"
+
     result.update(
         {
             "image_base64": base64.b64encode(png).decode("ascii"),
@@ -729,8 +1014,27 @@ def board_view(
             "px_per_mm": round(ppm, 3),
             "pad_labels_drawn": ppm >= PAD_LABEL_MIN_PX_PER_MM,
             "title": title,
-            "color_key": _color_key(geo.copper),
-            "pours_drawn": False,
+            "color_key": key,
+            "pours_drawn": zones,
         }
     )
+    if net_classes:
+        result["net_classes"] = {
+            name: {
+                "color": word,
+                "nets": sorted(n for n, c in (class_of[0] or {}).items() if c == name),
+            }
+            for name, (_, word) in sorted(palette.items())
+        }
+    if drc_given:
+        result["drc_marker_count"] = sum(len(m) for m in marks)
+    if other:
+        o_report = boards[1][3]
+        result["compare"] = {
+            "before": str(pcb_path),
+            "after": str(compare_to),
+            "after_unfinished_net_count": len(o_report.links),
+            "after_missing_link_count": o_report.link_count,
+            "after_missing_links": o_report.links_to_dict(),
+        }
     return result

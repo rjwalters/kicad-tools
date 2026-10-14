@@ -100,6 +100,7 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
         "match_group_length_skew",
         "diffpair_length_skew",
         "diffpair_routing_continuity",
+        "diffpair_uncoupled_length",
     }
 )
 
@@ -138,6 +139,20 @@ _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
         "clearance_pad_via",
     }
 )
+
+
+def _authored_min_clearance_mm(pcb_path: str | Path) -> float | None:
+    """The board's authored minimum clearance (``.kicad_pro``), or ``None``.
+
+    Same resolver ``kct route`` records as ``_authored_min_clearance``
+    (Issue #6575).
+    """
+    from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+    try:
+        return read_declared_clearance_rules(pcb_path).project_min_clearance_mm
+    except (OSError, ValueError):
+        return None
 
 
 def _is_floating_net(net: str) -> bool:
@@ -1139,6 +1154,7 @@ CHECK_CATEGORIES = [
     "diffpair_clearance_intra",
     "diffpair_length_skew",
     "diffpair_routing_continuity",
+    "diffpair_uncoupled_length",
     "dimensions",
     "doc_drift",
     "edge",
@@ -1916,6 +1932,7 @@ def main(argv: list[str] | None = None) -> int:
             "match_group_length_skew",
             "diffpair_length_skew",
             "diffpair_routing_continuity",
+            "diffpair_uncoupled_length",
         )
         _inactive_rules = [
             rule
@@ -2226,6 +2243,7 @@ def main(argv: list[str] | None = None) -> int:
             copper_oz_inner=resolved_copper_inner,
             suppress_library=args.suppress_library,
             net_class_map=net_class_map,
+            authored_min_clearance_mm=_authored_min_clearance_mm(pcb_path),
             # The CLI already prints its own up-front INACTIVE warning
             # below, so suppress the per-rule checker-level warning here to
             # avoid duplicating it (Issue #3917 Defect 3).
@@ -2898,6 +2916,7 @@ def build_check_rule_set(
         copper_oz_outer=copper_outer,
         copper_oz_inner=copper_inner,
         net_class_map=net_class_map,
+        authored_min_clearance_mm=_authored_min_clearance_mm(project_pcb_path),
         warn_on_inactive_skew_rules=False,
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,
@@ -3106,6 +3125,7 @@ def run_selected_checks(
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
         "diffpair_length_skew": checker.check_diffpair_length_skew,
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,
+        "diffpair_uncoupled_length": checker.check_diffpair_uncoupled_length,
         "dimensions": checker.check_dimensions,
         "doc_drift": _doc_drift_check,
         "edge": checker.check_edge_clearances,
@@ -3212,6 +3232,8 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
         # length skew -- label the column accordingly.
         if rule_id == "diffpair_routing_continuity":
             return "continuity"
+        if rule_id == "diffpair_uncoupled_length":
+            return "uncoupled"
         return "skew"
 
     rows: list[tuple[str, str, str, str, str]] = []
@@ -3221,6 +3243,12 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
         measured = f"{v.actual_value:.3f}" if v.actual_value is not None else "-"
         tol = f"{v.required_value:.3f}" if v.required_value is not None else "-"
         status = "FAIL" if v.is_error else "pass"
+        if v.rule_id == "diffpair_routing_continuity":
+            # Info-only since #6443: below the threshold is a measurement,
+            # not a failure.
+            status = "info"
+        elif v.severity == "warning":
+            status = "warn"
         rows.append((subject, metric, measured, tol, status))
 
     subject_w = max(len("Group/Pair"), *(len(r[0]) for r in rows))

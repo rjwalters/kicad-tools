@@ -180,14 +180,39 @@ What was run, exactly:
   loaded host (load average 7-9), so wall times are inflated and not comparable.
 
 Determinism (main, repeat runs, `diffpair_bench.py determinism`): 9 of 10 cells identical.
-**`06b` grid seed 42 differs** (16/18 nets and `connectivity: 2` against 18/18 and
-`diffpair_length_skew: 2`). Both runs have `--deterministic-rescue`. The logs agree
-through negotiated iteration 3 and diverge at iteration 4 (adaptive history 0.50 vs
-3.00, 6 vs 4 failed nets in recovery); the first run spent 62 s in the stagnation-recovery
-step the second did not. The log prints a *wall-clock* "Relief-rescue transaction bound"
-(issue #4781) that `--deterministic-rescue` does not cover, which is my suspect. That is
-not confirmed. So the "identical, including grid with `--deterministic-rescue`"
-acceptance criterion is **met for 9 of 10 cells and not met for `06b` grid seed 42**.
+**`06b` grid seed 42 differed** (16/18 nets and `connectivity: 2` against 18/18 and
+`diffpair_length_skew: 2`). Both runs had `--deterministic-rescue`.
+
+Cause (issue #6475). It is **not** the #4781 relief-rescue transaction bound (this
+board runs 0 rescues). Passing `--timeout` to a `--deterministic-budget
+--deterministic-rescue` route left three wall clocks live in the grid negotiated loop:
+
+1. the oscillation-escape budget `min(60 s, 25 % of remaining)` (#2415): on `06b` a
+   strategy re-routes four nets at several seconds each, so 60 s lands between
+   strategies on one run and inside a strategy on the next, leaving nets unrouted;
+2. checkpoint timing: with `--seed` every `to_sexp()` draws a UUID from the global RNG,
+   so the number of checkpoint writes before the escape's `random.shuffle` / `sample`
+   (throttled by `--checkpoint-interval`) moved the stream;
+3. the per-iteration per-net cap derived from the remaining stage budget (#3989).
+
+Fix: under `--deterministic-rescue` with an active expansion cap, causes 1 and 3 are
+switched off (the stage deadline is untouched), and a checkpoint write saves and
+restores the RNG state (cause 2).
+
+The "16/18" row was not a finished route. The run exited 1 (the #6351 copper-loss guard
+refused the save) and the harness graded the leftover periodic checkpoint, labelled
+`final`; a checkpoint has no zone fill, hence the two `connectivity` errors. **The three
+exit-1 `06b` grid rows of `baseline-main-db58570c.json` (seed 42 rep 0, seed 43 rep 0 and
+rep 1) are checkpoint grades**, so the seed-43 rows that "agree" are too. The harness
+now marks exit 1 and 5 rows `valid: false` and labels the artifact `checkpoint`.
+
+Result with the fix (`data/research/diffpair_bench/determinism-06b-grid-b9041b37.json`,
+`expand_route_experiment.py pairs --boards 06b --engines grid --seeds 42,43 --repeat 2`,
+host load average about 4.5): `diffpair_bench.py determinism` reports both cells
+identical; all four rows are `valid: true`, route exit 3, artifact `final`, 18/18 nets,
+`{diffpair_length_skew: 2}`, 229 to 243 s wall. Routed-board md5: seed 42 `feb49a72...`
+(both reps), seed 43 `39d3fcff...` (both reps). A run on a deliberately loaded host was
+not made.
 
 ## Other findings
 

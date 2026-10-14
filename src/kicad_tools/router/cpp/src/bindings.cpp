@@ -821,7 +821,8 @@ NB_MODULE(router_cpp, m) {
              "effective_target_spacing"_a, "effective_approach_radius"_a,
              "effective_departure_radius"_a,
              "routable_layers"_a, "corridor_bitset"_a,
-             "max_iterations_budget"_a, "timeout_seconds"_a)
+             "max_iterations_budget"_a, "timeout_seconds"_a,
+             "p_goal_any_layer"_a, "n_goal_any_layer"_a)
         .def("route_centerline", &CoupledPathfinder::route_centerline,
              "starts"_a, "goals"_a, "p_net"_a, "n_net"_a, "half_pitch"_a,
              "p_side"_a, "p_half"_a, "p_gap"_a, "n_half"_a, "n_gap"_a,

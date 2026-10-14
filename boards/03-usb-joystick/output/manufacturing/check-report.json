@@ -1,5 +1,5 @@
 {
-  "file": "/work/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "file": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6025/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
@@ -79,11 +79,11 @@
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.166 mm within tolerance 0.500 mm",
+      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.166 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
       "location": null,
       "layer": null,
       "actual_value": 0.1657,
-      "required_value": 0.5,
+      "required_value": 2.5,
       "items": [],
       "nets": [
         "USB_D+",
@@ -98,11 +98,11 @@
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- length-skew 0.000 mm within tolerance 0.500 mm",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- length-skew 0.000 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
       "location": null,
       "layer": null,
       "actual_value": 0.0,
-      "required_value": 0.5,
+      "required_value": 2.5,
       "items": [],
       "nets": [
         "USB_MCU_D+",

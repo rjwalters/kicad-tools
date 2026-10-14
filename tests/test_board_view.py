@@ -502,6 +502,80 @@ class TestMissingLinks:
         assert (link.a.x, link.a.y) == pytest.approx((126.0, 60.0))
         assert (link.b.x, link.b.y) == pytest.approx((124.0, 70.0))
 
+    def test_links_are_frame_equivalent(self, cut_board: Path):
+        """Same pad pairs in both frames; absolute ends are relative + origin."""
+        pcb = PCB.load(cut_board)
+        ox, oy = pcb.board_origin
+        assert (ox, oy) != (0.0, 0.0)
+        rel = missing_links(pcb).links
+        ab = missing_links(pcb, absolute=True).links
+        assert set(rel) == set(ab)
+        for net, rlinks in rel.items():
+            assert len(rlinks) == len(ab[net])
+            for r, a in zip(rlinks, ab[net], strict=True):
+                assert (r.a.name, r.b.name) == (a.a.name, a.b.name)
+                assert (a.a.x, a.a.y) == pytest.approx((r.a.x + ox, r.a.y + oy))
+                assert (a.b.x, a.b.y) == pytest.approx((r.b.x + ox, r.b.y + oy))
+
+    @pytest.mark.skipif(not BOARD_05.exists(), reason="board 05 not present")
+    def test_links_are_frame_equivalent_on_fill_stripped_board_05(self, tmp_path: Path):
+        """Regression for #6319 on a board with tied distances.
+
+        With every zone fill stripped, board 05's GND net has candidate links
+        whose lengths tie in the relative frame but not after adding the
+        origin in floating point.  Choosing links in the absolute frame (the
+        old behaviour) picked a different pad pair for one GND link.
+        """
+        text = BOARD_05.read_text()
+        out: list[str] = []
+        i = 0
+        token = "(filled_polygon"
+        while (j := text.find(token, i)) != -1:
+            out.append(text[i:j])
+            depth = 0
+            k = j
+            while True:
+                c = text[k]
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            i = k + 1
+        out.append(text[i:])
+        stripped = tmp_path / "board05_nofill.kicad_pcb"
+        stripped.write_text("".join(out))
+        assert token not in stripped.read_text()
+
+        pcb = PCB.load(stripped)
+        ox, oy = pcb.board_origin
+        assert (ox, oy) != (0.0, 0.0)
+        rel = missing_links(pcb).links
+        ab = missing_links(pcb, absolute=True).links
+        assert "GND" in rel
+        assert set(rel) == set(ab)
+        for net, rlinks in rel.items():
+            assert len(rlinks) == len(ab[net]), net
+            for r, a in zip(rlinks, ab[net], strict=True):
+                assert (r.a.name, r.b.name) == (a.a.name, a.b.name), net
+                assert a.a.x == pytest.approx(r.a.x + ox, abs=1e-6)
+                assert a.a.y == pytest.approx(r.a.y + oy, abs=1e-6)
+                assert a.b.x == pytest.approx(r.b.x + ox, abs=1e-6)
+                assert a.b.y == pytest.approx(r.b.y + oy, abs=1e-6)
+
+    def test_text_listing_prints_end_coordinates(self, cut_board: Path, capsys):
+        from kicad_tools.cli.commands.board_view import _print_links
+
+        result = board_view(str(cut_board), "list")
+        _print_links(result)
+        out = capsys.readouterr().out
+        (pair,) = result["missing_links"]["SIG"]
+        fx, fy = pair["from_mm"]
+        tx, ty = pair["to_mm"]
+        assert f"{pair['from']} ({fx:.2f}, {fy:.2f}) -> {pair['to']} ({tx:.2f}, {ty:.2f})" in out
+
     def test_removed_trace_is_named_by_list(self, board: Path, cut_board: Path):
         """A fixture with one trace removed: ``list`` names the net and pad pair."""
         before = board_view(str(board), "list")
@@ -874,7 +948,7 @@ class TestCli:
         out = capsys.readouterr().out
         assert "Frame: sheet-absolute" in out
         assert "Unfinished nets: 2 (2 missing links)" in out
-        assert "SIG: R1.1 -> R2.1  15.00 mm" in out
+        assert "SIG: R1.1 (" in out and ") -> R2.1 (" in out and ")  15.00 mm" in out
         assert "GND: pour leaves 2 separate islands" in out
 
     def test_every_image_view_writes_a_png(self, cut_board: Path, tmp_path: Path, capsys):
@@ -1028,3 +1102,253 @@ class TestBoard05:
         assert max(result["width_px"], result["height_px"]) <= 1568
         assert result["frame"] == "board-relative"
         assert list(result["color_key"])[:4] == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+
+
+# ---------------------------------------------------------------------------
+# Overlays (issue #6317): zone fill, DRC markers, before/after, net classes
+# ---------------------------------------------------------------------------
+
+# A violation at sheet-absolute (112, 58): board-relative (12, 8).
+DRC_TEXT = """** Drc report for views.kicad_pcb **
+** Found 1 DRC violations **
+[clearance]: Clearance violation (clearance 0.2000 mm; actual 0.1000 mm)
+    Rule: netclass 'Default'; error
+    @(112.0000 mm, 58.0000 mm): Track on F.Cu
+** End of Report **
+"""
+
+
+def _poly_collections(ax):
+    from matplotlib.collections import PolyCollection
+
+    return [c for c in ax.collections if type(c) is PolyCollection]
+
+
+class TestZoneFill:
+    def test_geometry_carries_the_fill_in_the_board_frame(self, board: Path):
+        geo = collect_geometry(PCB.load(board))
+        (fill,) = geo.zones
+        assert fill.layer == "F.Cu" and fill.net == "GND"
+        # (104, 66) in the file is (4, 16) board-relative.
+        assert fill.points[0] == (4.0, 16.0)
+        absolute = collect_geometry(PCB.load(board), absolute=True)
+        assert absolute.zones[0].points[0] == (104.0, 66.0)
+
+    def test_fill_is_drawn_only_when_asked(self, board: Path):
+        pcb = PCB.load(board)
+        geo, report = collect_geometry(pcb), missing_links(pcb)
+        assert geo.bounds is not None
+        plain = _poly_collections(_axes(geo, report, geo.bounds))
+        with_fill = _poly_collections(
+            _axes(geo, report, geo.bounds, overlays=render_module.Overlays(zones=True))
+        )
+        assert len(with_fill) == len(plain) + 1
+        fill = [c for c in with_fill if c.get_zorder() < 1][0]
+        assert len(fill.get_paths()) == 1
+        assert fill.get_alpha() < 0.5
+
+    def test_title_and_key_name_the_fill(self, board: Path):
+        pytest.importorskip("matplotlib")
+        off = board_view(str(board), "overview")
+        on = board_view(str(board), "overview", zones=True)
+        assert off["pours_drawn"] is False and "zone_fill" not in off["color_key"]
+        assert on["pours_drawn"] is True and "zone_fill" in on["color_key"]
+        flat = " ".join(on["title"].split())
+        assert "Zone fills" in flat and "translucent" in flat
+        assert "Zone pours are not drawn" not in flat
+
+    def test_default_output_is_unchanged_by_the_new_flags_being_off(self, board: Path):
+        pytest.importorskip("matplotlib")
+        a = board_view(str(board), "overview")
+        b = board_view(
+            str(board), "overview", zones=False, drc_report=None, net_classes=False, compare_to=None
+        )
+        assert a["image_base64"] == b["image_base64"]
+
+
+class TestDrcMarkers:
+    def test_origin_is_subtracted_only_in_the_board_frame(self):
+        from kicad_tools.boardview.model import drc_marker_points
+
+        assert drc_marker_points([(112, 58), (112, 58)], ORIGIN) == [(12.0, 8.0)]
+        assert drc_marker_points([(112, 58)], ORIGIN, absolute=True) == [(112.0, 58.0)]
+
+    @pytest.mark.parametrize("absolute", [False, True])
+    def test_marker_lands_on_the_violation(self, board: Path, tmp_path: Path, absolute: bool):
+        pytest.importorskip("matplotlib")
+        report = tmp_path / "drc.rpt"
+        report.write_text(DRC_TEXT)
+        result = board_view(str(board), "overview", drc_report=str(report), absolute=absolute)
+        assert result["success"], result["error_message"]
+        assert result["drc_marker_count"] == 1
+        assert "drc_markers" in result["color_key"]
+        assert "green hollow diamonds" in " ".join(result["title"].split())
+
+        pcb = PCB.load(board)
+        geo = collect_geometry(pcb, absolute=absolute)
+        from kicad_tools.boardview.model import drc_marker_points
+
+        (point,) = drc_marker_points([(112, 58)], pcb.board_origin, absolute=absolute)
+        ax = _axes(
+            geo,
+            missing_links(pcb, absolute=absolute),
+            geo.bounds,
+            overlays=render_module.Overlays(drc=[point]),
+        )
+        marks = [ln for ln in ax.lines if ln.get_marker() == "D"]
+        assert len(marks) == 1
+        assert _is_point(
+            (marks[0].get_xdata()[0], marks[0].get_ydata()[0]), _in_frame((112, 58), absolute)
+        )
+
+    def test_unreadable_report_is_an_error(self, board: Path, tmp_path: Path):
+        pytest.importorskip("matplotlib")
+        result = board_view(str(board), "overview", drc_report=str(tmp_path / "missing.rpt"))
+        assert result["success"] is False
+        assert "DRC report" in result["error_message"]
+
+
+class TestBeforeAfter:
+    def test_pair_is_side_by_side_and_capped(self, board: Path, cut_board: Path):
+        pytest.importorskip("matplotlib")
+        result = board_view(str(board), "overview", compare_to=str(cut_board))
+        assert result["success"], result["error_message"]
+        width, height = result["width_px"], result["height_px"]
+        assert max(width, height) <= MAX_VISION_API_PX
+        single = board_view(str(board), "overview")
+        assert result["px_per_mm"] < single["px_per_mm"]
+        assert "Right panel, after: cut.kicad_pcb" in " ".join(result["title"].split())
+        assert result["compare"]["after_missing_link_count"] == 2
+        assert set(result["compare"]["after_missing_links"]) == {"OPEN", "SIG"}
+        assert result["missing_link_count"] == 1
+
+    def test_two_panels_each_with_its_own_data(self, board: Path, cut_board: Path):
+        pytest.importorskip("matplotlib")
+        result = board_view(str(board), "overview", compare_to=str(cut_board))
+        assert result["success"]
+        # Each panel draws its own links: before has 1, after has 2.
+        for path, expected in ((board, 1), (cut_board, 2)):
+            pcb = PCB.load(path)
+            assert missing_links(pcb).link_count == expected
+
+    def test_pad_labels_survive_the_halved_scale(self, board: Path, cut_board: Path):
+        pytest.importorskip("matplotlib")
+        window = (5, 6, 15, 14)  # 10 mm: well above 40 px/mm even halved
+        pair = board_view(str(board), "crop", window=window, compare_to=str(cut_board))
+        assert pair["success"], pair["error_message"]
+        assert pair["pad_labels_drawn"] is True
+        assert pair["px_per_mm"] >= render_module.PAD_LABEL_MIN_PX_PER_MM
+        assert max(pair["width_px"], pair["height_px"]) <= MAX_VISION_API_PX
+
+    def test_layers_view_cannot_be_paired(self, board: Path, cut_board: Path):
+        result = board_view(str(board), "layers", net="SIG", compare_to=str(cut_board))
+        assert result["success"] is False
+        assert "comparison" in result["error_message"]
+
+    def test_missing_second_board(self, board: Path, tmp_path: Path):
+        result = board_view(str(board), "overview", compare_to=str(tmp_path / "no.kicad_pcb"))
+        assert result["success"] is False
+        assert "not found" in result["error_message"]
+
+
+class TestNetClasses:
+    def _with_classes(self, tmp_path: Path) -> Path:
+        path = tmp_path / "classes.kicad_pcb"
+        path.write_text(board_text())
+        (tmp_path / "classes.kicad_pro").write_text(
+            json.dumps(
+                {
+                    "net_settings": {
+                        "classes": [{"name": "Default"}, {"name": "Power"}],
+                        "netclass_patterns": [
+                            {"netclass": "Power", "pattern": "GND"},
+                            {"netclass": "Sig", "pattern": "SI*"},
+                        ],
+                    }
+                }
+            )
+        )
+        return path
+
+    def test_map_from_project_patterns_and_default(self, tmp_path: Path):
+        from kicad_tools.boardview.model import net_class_map
+
+        path = self._with_classes(tmp_path)
+        mapping = net_class_map(PCB.load(path), path, {"GND", "SIG", "OPEN"})
+        assert mapping == {"GND": "Power", "SIG": "Sig", "OPEN": "Default"}
+
+    def test_copper_is_coloured_by_class_and_the_title_says_so(self, tmp_path: Path):
+        pytest.importorskip("matplotlib")
+        path = self._with_classes(tmp_path)
+        by_layer = board_view(str(path), "overview")
+        by_class = board_view(str(path), "overview", net_classes=True)
+        assert by_class["success"], by_class["error_message"]
+        assert by_class["image_base64"] != by_layer["image_base64"]
+        key = by_class["color_key"]
+        assert "F.Cu" not in key
+        assert {"net_class:Default", "net_class:Power", "net_class:Sig"} <= set(key)
+        assert len({key[k] for k in key if k.startswith("net_class:")}) == 3
+        flat = " ".join(by_class["title"].split())
+        assert "by net class, not by layer" in flat
+        for word in (key["net_class:Power"], key["net_class:Sig"]):
+            assert word in flat
+        assert by_class["net_classes"]["Power"]["nets"] == ["GND"]
+
+    def test_track_colours_follow_the_class(self, tmp_path: Path):
+        pytest.importorskip("matplotlib")
+        from matplotlib.collections import LineCollection
+        from matplotlib.colors import to_hex
+
+        path = self._with_classes(tmp_path)
+        pcb = PCB.load(path)
+        geo, report = collect_geometry(pcb), missing_links(pcb)
+        mapping = net_class_map_for(pcb, path, geo)
+        colors = render_module.class_colors(set(mapping.values()))
+        ax = _axes(
+            geo,
+            report,
+            geo.bounds,
+            overlays=render_module.Overlays(net_classes=mapping, colors=colors),
+        )
+        drawn = {
+            to_hex(c, keep_alpha=False)
+            for col in ax.collections
+            if isinstance(col, LineCollection)
+            for c in col.get_colors()
+        }
+        assert colors["Sig"][0] in drawn  # the SIG route
+        assert colors["Default"][0] in drawn  # the OPEN route
+        assert render_module._layer_style("F.Cu")[0] not in drawn
+
+
+def net_class_map_for(pcb, path, geo):
+    from kicad_tools.boardview.model import net_class_map
+
+    return net_class_map(pcb, path, geo.net_names())
+
+
+class TestOverlayCli:
+    def test_flags_reach_the_renderer(self, board: Path, cut_board: Path, tmp_path: Path, capsys):
+        pytest.importorskip("matplotlib")
+        drc = tmp_path / "drc.rpt"
+        drc.write_text(DRC_TEXT)
+        out = tmp_path / "all.png"
+        code = kct_main(
+            [
+                "board-view", "overview", str(board), "-o", str(out), "--zones",
+                "--net-classes", "--drc-report", str(drc), "--compare", str(cut_board),
+                "--format", "json",
+            ]
+        )  # fmt: skip
+        document = json.loads(capsys.readouterr().out)
+        assert code == 0, document
+        assert document["pours_drawn"] is True
+        assert document["drc_marker_count"] == 1
+        assert "compare" in document and "net_classes" in document
+        assert max(_png_size(out.read_bytes())) <= MAX_VISION_API_PX
+
+    def test_mcp_schema_exposes_the_overlays(self):
+        from kicad_tools.mcp.tools.registry import TOOL_REGISTRY
+
+        props = TOOL_REGISTRY["board_view"].parameters["properties"]
+        assert {"zones", "drc_report", "net_classes", "compare_to"} <= set(props)

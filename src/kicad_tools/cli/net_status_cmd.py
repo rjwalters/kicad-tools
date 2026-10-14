@@ -139,6 +139,26 @@ def main(argv: list[str] | None = None) -> int:
             "(issue #3863)."
         ),
     )
+    parser.add_argument(
+        "--crossings",
+        action="store_true",
+        help=(
+            "Pre-route bundle crossing report (issue #6339): per part-pair "
+            "bundle, pin orders, inversions per entry side, forced crossings "
+            "and over-sized conflict sets; plus hub pin columns whose exit "
+            "directions interleave. Read-only; honours --format json and --net."
+        ),
+    )
+    parser.add_argument(
+        "--signal-layers",
+        type=int,
+        default=None,
+        dest="signal_layers",
+        help=(
+            "Signal-layer count for the --crossings over-size verdict "
+            "(default: copper layers of type signal)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -147,6 +167,9 @@ def main(argv: list[str] | None = None) -> int:
     if not pcb_path.exists():
         print(f"Error: PCB not found: {pcb_path}", file=sys.stderr)
         return 1
+
+    if args.crossings:
+        return output_crossings(pcb_path, args.format, args.signal_layers, args.net)
 
     # Connectivity model selection (issue #4557): strict (real copper
     # geometry) is the default; --strict is an explicit no-op kept for script
@@ -227,6 +250,27 @@ def main(argv: list[str] | None = None) -> int:
     # this unchanged to avoid breaking script consumers; documented in the
     # --net help text).
     return exit_code_for(result, getattr(args, "allow_stranded_pour_pads", False))
+
+
+def output_crossings(
+    pcb_path: Path, fmt: str, signal_layers: int | None = None, net: str | None = None
+) -> int:
+    """``--crossings``: pre-route bundle crossing report (issue #6339)."""
+    from kicad_tools.router.bundle_crossings import compute_bundle_crossings, format_report_text
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        report = compute_bundle_crossings(PCB.load(str(pcb_path)), signal_layers)
+    except Exception as e:
+        print(f"Error during crossing analysis: {e}", file=sys.stderr)
+        return 1
+    if net:
+        report = report.filtered(net)
+    if fmt == "json":
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(format_report_text(report))
+    return 0
 
 
 def exit_code_for(result: NetStatusResult, allow_stranded_pour_pads: bool = False) -> int:

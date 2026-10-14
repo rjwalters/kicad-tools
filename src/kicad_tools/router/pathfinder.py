@@ -222,6 +222,17 @@ class Router:
     - GreedyHeuristic: Fast but suboptimal
     """
 
+    # Issue #6366: per-net A* heuristic-weight overrides (net id -> weight),
+    # consulted by ``route`` when the caller passes the default weight.
+    # ``Autorouter`` installs its own dict here; the empty class default is
+    # never mutated.
+    net_astar_weights: dict[int, float] = {}
+
+    # Issue #6366: this pathfinder honours ``NetClassRouting.preferred_layers``
+    # (``_get_layer_preference_cost``), so the evolutionary ``preferred_layers``
+    # gene is live on this backend.  ``CppPathfinder`` sets this False.
+    supports_layer_preferences: bool = True
+
     # Issue #3441: the pure-Python pathfinder implements waypoint injection
     # (#2330) -- off-grid pad positions are injected directly into the A*
     # search graph (see ``_create_waypoint`` / ``_waypoint_grid_edges``).
@@ -301,6 +312,16 @@ class Router:
         # is a proof.  ``CppPathfinder`` memoizes the proof so the negotiated
         # loop does not re-run this 10-100x-slower search on an unchanged grid.
         self.last_route_exhausted: bool = False
+
+        # Issue #6329: True when the most recent ``route()`` stopped because its
+        # per-net WALL-CLOCK deadline fired (not the iteration cap, not a
+        # drain).  Under ``--deterministic-budget`` the fallback is meant to be
+        # bounded by ``_max_iterations_override``; when the wall clock binds
+        # first, how far the search got depends on machine load, so the
+        # C++ backend reports it as a determinism loss.
+        # ``last_route_deadline_iterations`` is the expansion count reached.
+        self.last_route_deadline_hit: bool = False
+        self.last_route_deadline_iterations: int = 0
 
         # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
         # Same layer moves - orthogonal directions
@@ -4409,6 +4430,10 @@ class Router:
         # Issue #5923: clamp to the bounded-excursion wall deadline, if any
         # (identity otherwise) -- same choke point as ``CppPathfinder.route``.
         per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #6366: per-net A* weight override (evolutionary gene).
+        net_weights = getattr(self, "net_astar_weights", None)
+        if weight == 1.0 and net_weights:
+            weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
             return self._route_impl(
                 start,
@@ -4498,6 +4523,8 @@ class Router:
         # Issue #6098: only a drained open set (set after the A* loop) proves
         # unreachability; every other exit leaves this False.
         self.last_route_exhausted = False
+        self.last_route_deadline_hit = False  # Issue #6329
+        self.last_route_deadline_iterations = 0
 
         # Issue #2330: Reset waypoint state for this route call
         self._waypoint_world_coords.clear()
@@ -4878,6 +4905,10 @@ class Router:
             # Per-net timeout check (Issue #1605)
             if deadline is not None and iterations % timeout_check_interval == 0:
                 if time.monotonic() >= deadline:
+                    # Issue #6329: record that the WALL clock, not the
+                    # iteration cap, ended this search.
+                    self.last_route_deadline_hit = True
+                    self.last_route_deadline_iterations = iterations
                     break
 
             current = heapq.heappop(open_set)

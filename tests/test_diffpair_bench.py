@@ -107,7 +107,7 @@ def test_engine_commands_carry_no_replay_flag():
 def test_cli_extra_replay_flag_is_refused(tmp_path):
     with pytest.raises(bench.PairBenchError):
         bench.main(
-            ["run", "--label", "x", "--work-dir", str(tmp_path), "--extra", "--apply-plan p.json"]
+            ["run", "--label", "x", "--work-dir", str(tmp_path), "--extra", "--resume p.kicad_pcb"]
         )
 
 
@@ -180,11 +180,18 @@ def _board03():
 
 
 def test_board03_class_has_per_net_variants():
-    """The precondition: same class name, different thresholds."""
+    """The precondition: same class name, different per-net variants.
+
+    The variants no longer differ by ``coupled_continuity_threshold`` (removed
+    from board 03 by #6443: continuity is info-only); each net still names its
+    own partner, which is enough to make the class-name alias ambiguous.
+    """
     _pcb, ncm = _board03()
     assert ncm["USB_D+"].name == ncm["USB_MCU_D+"].name == "HighSpeed"
-    assert ncm["USB_D+"].coupled_continuity_threshold == 0.25
-    assert ncm["USB_MCU_D+"].coupled_continuity_threshold is None
+    assert ncm["USB_D+"] != ncm["USB_MCU_D+"]
+    assert ncm["USB_D+"].diffpair_partner == "USB_D-"
+    assert ncm["USB_MCU_D+"].diffpair_partner == "USB_MCU_D-"
+    assert ncm["USB_D+"].coupled_continuity_threshold is None
 
 
 def test_build_synth_routing_does_not_collapse_variants():
@@ -235,7 +242,8 @@ def test_router_report_and_kct_check_agree_on_board03_thresholds():
 
     usb_d = (ids["USB_D+"], ids["USB_D-"])
     mcu = (ids["USB_MCU_D+"], ids["USB_MCU_D-"])
-    assert continuity[tuple(sorted(usb_d))] == 0.25
+    # Issue #6443 removed board 03's 0.25 override: continuity is info-only.
+    assert continuity[tuple(sorted(usb_d))] == 0.7
     assert continuity[tuple(sorted(mcu))] == 0.7
 
     for (p, n), key in (
@@ -246,7 +254,7 @@ def test_router_report_and_kct_check_agree_on_board03_thresholds():
         assert f"continuity threshold {continuity[key] * 100:.1f}%" in line
         assert f"skew tolerance {skew_tol[key]:.3f} mm" in line
         assert resolve_pair_thresholds(ncm, p, n).continuity == continuity[key]
-    assert "USB_D+/USB_D-: continuity threshold 25.0%" in report
+    assert "USB_D+/USB_D-: continuity threshold 70.0%" in report
 
     # Issue #6443: both pairs are declared USB2_FS, so the router report and
     # kct check quote 2.5 mm, and both name where the number came from.
@@ -302,8 +310,11 @@ def test_resolver_ignores_a_collapsed_class_key():
 
     _pcb, ncm = _board03()
     poisoned = dict(ncm)
-    poisoned["HighSpeed"] = ncm["USB_MCU_D+"]  # the 70 % variant under the class name
-    assert resolve_pair_thresholds(poisoned, "USB_D+", "USB_D-").continuity == 0.25
+    from dataclasses import replace
+
+    # A different variant under the class name; the net-name key still decides.
+    poisoned["HighSpeed"] = replace(ncm["USB_MCU_D+"], skew_tolerance_mm=9.0)
+    assert resolve_pair_thresholds(poisoned, "USB_D+", "USB_D-").skew_mm == 2.5
 
 
 def test_resolver_falls_back_to_negative_net_then_defaults():
@@ -312,7 +323,7 @@ def test_resolver_falls_back_to_negative_net_then_defaults():
     _pcb, ncm = _board03()
     only_n = {"USB_D-": ncm["USB_D-"]}
     got = resolve_pair_thresholds(only_n, "USB_D+", "USB_D-")
-    assert (got.continuity, got.source_net) == (0.25, "USB_D-")
+    assert (got.continuity, got.source_net) == (0.7, "USB_D-")
     bare = resolve_pair_thresholds({}, "X_P", "X_N")
     assert (bare.continuity, bare.skew_mm, bare.source_net) == (0.7, 0.5, None)
     assert (bare.protocol, bare.skew_source, bare.skew_severity) == (
@@ -392,3 +403,95 @@ def test_06b_lattice_route_couples_with_copper_on_both_nets(tmp_path):
     assert "Post-optimize backstop demoted" not in log
     assert "routed by both the lattice and an earlier pass" not in log
     assert len(_coupled_pairs_with_copper(row["pairs"])) >= 1  # target (and today): 3
+
+
+# ---------------------------------------------------------------------------
+# Issue #6475: harness fixes
+# ---------------------------------------------------------------------------
+
+
+def test_replay_flags_are_real_kct_route_flags():
+    from kicad_tools.cli.route_cmd import _route_parser
+
+    known = set(_route_parser()._option_string_actions)
+    assert bench.REPLAY_FLAGS
+    assert "--resume" in bench.REPLAY_FLAGS
+    for flag in bench.REPLAY_FLAGS:
+        assert flag in known, f"{flag} is not a kct route flag"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--resume", "x.kicad_pcb"],
+        ["--resume=x.kicad_pcb"],
+        ["--resu", "x.kicad_pcb"],
+        ["--resu=x.kicad_pcb"],
+    ],
+)
+def test_resume_and_its_abbreviation_are_refused(args):
+    with pytest.raises(bench.PairBenchError):
+        bench.check_no_replay(args)
+
+
+def test_unrelated_flags_are_not_refused():
+    bench.check_no_replay(["--seed", "42", "--route-engine", "grid", "--rescue-x"])
+
+
+def test_extra_reaches_kct_route_and_the_row_cmd(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run_route(inp, out, extra, timeout, log):
+        seen["extra"] = list(extra)
+        log.write_text("")
+        return {"exit_code": 0, "cmd": ["kct", "route", *extra]}
+
+    monkeypatch.setattr(ere, "run_route", fake_run_route)
+    monkeypatch.setattr(ere, "pick_artifact", lambda *a, **k: (None, None))
+    row = bench.run_cell(
+        ere.BOARDS["06b"],
+        "grid",
+        42,
+        10.0,
+        tmp_path,
+        extra_args=["--checkpoint-interval", "0"],
+    )
+    assert seen["extra"][-2:] == ["--checkpoint-interval", "0"]
+    assert "--checkpoint-interval" in row["cmd"]
+
+
+def test_extra_resume_is_refused_in_run_cell(tmp_path):
+    row = bench.run_cell(
+        ere.BOARDS["06b"], "grid", 42, 10.0, tmp_path, extra_args=["--resu", "x.kicad_pcb"]
+    )
+    assert row["valid"] is False
+    assert row["invalid_reasons"] == ["replay flag"]
+
+
+@pytest.mark.parametrize("code", [1, 5])
+def test_crashed_route_row_is_invalid_and_not_final(tmp_path, monkeypatch, code):
+    def fake_run_route(inp, out, extra, timeout, log):
+        out.write_text("(kicad_pcb)")
+        log.write_text("")
+        return {"exit_code": code, "cmd": []}
+
+    monkeypatch.setattr(ere, "run_route", fake_run_route)
+    monkeypatch.setattr(ere, "grade", lambda *a, **k: {})
+    monkeypatch.setattr(ere, "manufacturable", lambda *a, **k: False)
+    monkeypatch.setattr(ere, "find_net_class_map", lambda *a, **k: None)
+    monkeypatch.setattr(bench, "load_net_class_map", lambda *a, **k: {})
+    monkeypatch.setattr(bench, "measure_pairs", lambda *a, **k: [])
+    monkeypatch.setattr(bench, "committed_copper_matches", lambda *a, **k: None)
+    row = bench.run_cell(ere.BOARDS["06b"], "grid", 42, 10.0, tmp_path)
+    assert row["artifact"] == "checkpoint"
+    assert row["valid"] is False
+    assert any(f"exited {code}" in r for r in row["invalid_reasons"])
+
+
+def test_pick_artifact_labels_by_exit_code(tmp_path):
+    out = tmp_path / "o.kicad_pcb"
+    out.write_text("x")
+    assert ere.pick_artifact(out, 0)[1] == "final"
+    assert ere.pick_artifact(out, 3)[1] == "final"
+    assert ere.pick_artifact(out, 1)[1] == "checkpoint"
+    assert ere.pick_artifact(out)[1] == "final"

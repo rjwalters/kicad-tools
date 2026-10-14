@@ -1456,3 +1456,98 @@ Ordered by how directly the measurements support them.
 | #6307 | Router: board 04 loses net `SWO` when its placement is spread to 2x. |
 | #6306 | `kct route` refuses a 120 x 80 mm board with one LQFP-48; the auto-grid error omits `--max-cells` and advises enlarging the board. |
 | #6308 | `kct route --timeout`: the sidecar's `unverified_output` names a copper-less board when the deadline lands in the routing stage. |
+
+## Update (#6307): board 04 at uniform 2x
+
+The 8/9 result (net `SWO` demoted after a via-vs-foreign-segment collision
+with `NRST`) no longer reproduces. On current main, the harness command from
+#6307 (`--grid-policy pinned --grid-mm 0.05 --scales 2.0 --modes uniform`,
+seed 42, `--no-cache`) routes 9/9, 43/43 connections, 31 vias, 384.6 mm, with
+0 `kct check` and 0 kicad-cli DRC errors, and the log contains no
+via-vs-foreign-segment recovery or demotion. Intervening router changes
+(lattice/pad-mask and recovery fixes since #6304) removed the collision; no
+code change was made under #6307, so the specific mechanism that kept
+recovery from separating `SWO` and `NRST` was not isolated. The row is now
+guarded by `tests/test_board04_uniform_2x_6307.py` (slow). The fragility the
+issue noted (a one-capacitor placement change flipping the result) is still
+a property of this router; the monotonicity assumption in `auto_pcb_size`
+remains unproven in general.
+
+## Do plan overflow edges predict the stuck nets? (#6309)
+
+Question: is the routing plan's `move_component` relief a usable trigger for
+`router/placement_nudge.py`? The plan sidecar already ships (Epic #5510), so
+the test is whether its overflowed edges coincide with the nets the stuck
+classifier calls `PLACEMENT_BOUND` / `CONGESTION_SATURATED`. No new instrument
+code was written; the inputs are `kct net-status --why --format json` beside
+`<stem>.routing_plan.json`, and `scripts/routing_plan_fleet_table.py`.
+
+Provenance: kct `86fd7afa1` (main), 2026-10-14, host loom-worker, scratch dir
+`/tmp/b6309/05` (no tracked `output/` touched).
+
+**Board 05.** Route argv (the `docs/reference/routing-plan.md` recipe, with
+`--timeout` 1200 rather than 3600, and `--no-cache` so it is a real route, not
+a replay; the route finished inside the budget):
+
+```
+PYTHONHASHSEED=0 kct route boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb \
+  -o /tmp/b6309/05/bldc_controller_routed.kicad_pcb --auto-layers --starting-layers 4 \
+  --max-layers 4 --manufacturer jlcpcb-tier1 --micro-via-in-pad-fallback --backend cpp \
+  --seed 7 --timeout 1200 --per-net-timeout 60 --allow-unsafe-grid \
+  --escape-corridor-reservation --skip-nets '+24V,+5V,+3V3,GND,PHASE_A,PHASE_B,PHASE_C' --no-cache
+kct net-status /tmp/b6309/05/bldc_controller_routed.kicad_pcb --why --format json
+kct net-status /tmp/b6309/05/bldc_controller_routed.kicad_pcb --strict --format json > net_status.json
+python scripts/routing_plan_fleet_table.py /tmp/b6309/05 --sha 86fd7afa1
+```
+
+Plan: 2 overflowed edges, total overflow 2, `feasible: false`. Both edges are
+bounded by `U2` on both sides, and each carries a `move_component` relief
+(`U2`, dx 0, dy +2.0 mm, expected overflow 1) plus a deferred `swap_pins`.
+
+| stuck class | stuck nets | cross an overflowed edge | argv |
+|---|---|---|---|
+| `placement_bound` | 1 (EN_B) | 1 (EN_B, edge 187-207) | rows above |
+| `congestion_saturated` | 2 (CPH, GND_SENSE) | 0 | rows above |
+| `budget_starved` | 3 (PHASE_A/B/C) | 0 | rows above |
+| `escape_blocked`, `pour_discontinuous` | 0 | n/a | rows above |
+
+| overflowed edges | count |
+|---|---|
+| total | 2 |
+| crossed by at least one stuck net | 1 (187-207, via EN_B) |
+| crossed by **no** stuck net | 1 (226-227; crossers PWM_B and EN_C both routed) |
+
+Fleet-table row (strict opens: CPH, EN_B, GND_SENSE): recall 0.33 (1/3),
+precision 0.50 (1/2). The `budget_starved` PHASE_A/B/C are nets the recipe
+itself passes to `--skip-nets`; they are listed by `--why` but are not real
+opens, so they only pad the "0 crossing" row.
+
+**Chorus-test: not measured.** The fixture lives in the sibling `chorus`
+repository, and `boards/external/chorus-test-revA` is a dangling symlink on this
+host (`../../../chorus` does not exist; a `find` for `chorus-test*` finds only
+that symlink). There is therefore no chorus row, and none is invented. Anyone
+with the fixture can reproduce it with `scripts/route_chorus.py --pcb PATH`'s
+main-pass flags followed by the same `net-status` and fleet-table commands.
+
+### Verdict: no-go (on one board of evidence)
+
+- The only `PLACEMENT_BOUND` net does cross an overflowed edge, but that net is
+  one of three real opens, and the plan misses the two `CONGESTION_SATURATED`
+  ones entirely. Recall on real opens is 1/3 here and was 1/6 in the
+  2026-09-21 table; a trigger keyed on plan overflow would act on a minority of
+  the stuck nets.
+- Half the overflowed edges (1 of 2) are crossed by no stuck net, so the
+  trigger would also spread `U2` for a corridor whose nets all routed
+  (precision 1/2 here, 1/2 in the earlier table; boards 02 and 04 overflowed and
+  routed 100%).
+- Both edges propose the same relief (`U2` +2 mm in y). A trigger would fire the
+  same move twice and for one edge without any failing net; the existing per-net
+  `PLACEMENT_BOUND` trigger already identifies EN_B.
+- This agrees with the #6304 measurement that inter-footprint channels are
+  nowhere near full on the fleet.
+
+Caveats: single run, single board, and board 05 is not seed-deterministic
+(#3894, #6329), so another run may differ by a net. The earlier table's six opens
+were a 3600 s run; this one has three. The chorus half of the acceptance
+criterion is open until the fixture is available; nothing here suggests it would
+flip the verdict, but it has not been shown. No build issue is filed.

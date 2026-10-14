@@ -408,3 +408,42 @@ requests already included in `nets_requested` are never added a second time.
 Requested placement-invalid single-pad/coupled nets remain blocked even though
 physical benchmark connectivity can report them trivially complete. Metadata-
 absent callers retain the historical multi-pad denominator and single-pad count.
+
+### `external_scores` (additive, issue #6331)
+
+Present only on reports produced by a suite that is scored by a third-party
+tool (currently `kct bench external --suite pcbworld`); absent otherwise, so
+DeepPCB and SRJ18 reports are unchanged. Retains schema version 1.
+
+```json
+"external_scores": {
+  "pcbworld": {
+    "available": true,
+    "comparable": true,
+    "comparable_reason": null,
+    "unavailable_reason": null,
+    "clean_pass": true,
+    "routability": 1.0,
+    "drv_errors_only_count": 0,
+    "potential_gain": 1.5,
+    "rollouts": [{"rollout_idx": 0, "seed": 42, "clean_pass": true, "potential_gain": 1.5}],
+    "pcbworld_commit": "b3d62f5c...",
+    "pcbench_commit": "dec3be75...",
+    "kicad_version": "9.0.3",
+    "pcbnew_python": "/path/to/python",
+    "input_sha256": "...",
+    "pcbworld_board_id": "pcbworld/d3a/0003_..."
+  }
+}
+```
+
+`pcbworld` is PCBWorld's own Clean Pass (fully connected and zero error-level
+DRC violations), read from PCBWorld's scorer output. It is **never** merged
+with, averaged with, or inferred from `kct_check` / `kicad_cli_drc`, which
+remain the stricter local gates. When `available` is `false`, `clean_pass`,
+`routability`, `drv_errors_only_count` and `potential_gain` are `null` (never
+`0`) and `unavailable_reason` says why. `comparable: false` marks a row that
+must not be read against PCBWorld's published numbers. `rollouts` keeps
+`potential_gain` per rollout so PCBWorld's @5 selection (largest potential
+gain) can be reproduced. For these reports `board_id` is the stable
+`pcbworld/<split>/<NNNN_name>` identifier.

@@ -91,15 +91,19 @@ BOARD_06_SIDECAR = (
 NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
     "diffpair_length_skew",
     "diffpair_routing_continuity",
+    "diffpair_uncoupled_length",
     "match_group_length_skew",
 )
 
 # The archived synthetic witness includes the September MIPI repair: only
-# DQS/TMDS residuals contribute two skew and two continuity errors. The real
-# assembled SDRAM demo has its own zero-error readiness checks.
+# DQS/TMDS residuals contribute two skew errors. The same residuals still fall
+# below the continuity threshold, but continuity is info-only since #6443 and
+# no longer an error, and no board 07 class declares an uncoupled-length limit.
+# The real assembled SDRAM demo has its own zero-error readiness checks.
 BOARD_07_EXPECTED_FAMILY_DELTA = {
     "diffpair_length_skew": 2,
-    "diffpair_routing_continuity": 2,
+    "diffpair_routing_continuity": 0,
+    "diffpair_uncoupled_length": 0,
     "match_group_length_skew": 0,
 }
 
@@ -407,3 +411,16 @@ class TestCiGateCountsGatedFamilies:
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
         assert blocking == 5 + sum(BOARD_07_EXPECTED_FAMILY_DELTA.values())
         assert advisory.get("connectivity", 0) == 4
+
+
+def test_authored_min_clearance_reaches_drc_checker(tmp_path):
+    """A ``.kicad_pro`` ``rules.min_clearance`` is read for DRCChecker (#6575)."""
+    from kicad_tools.cli.check_cmd import _authored_min_clearance_mm
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb (version 20240108))\n")
+    assert _authored_min_clearance_mm(pcb) is None
+    (tmp_path / "b.kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.15}}}})
+    )
+    assert _authored_min_clearance_mm(pcb) == 0.15
