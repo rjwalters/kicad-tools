@@ -101,7 +101,8 @@ def physical_copper_components(
         shapes.extend(shapely.buffer(shapely.points(centres), radii))
         for via in via_list:
             mask = 0
-            for layer in copper_layers_in_span(*getattr(via, "drilled_layers", via.layers)):
+            span_lo, span_hi = getattr(via, "drilled_layers", via.layers)
+            for layer in copper_layers_in_span(span_lo, span_hi):
                 mask |= 1 << layer.value
             masks.append(mask)
 
