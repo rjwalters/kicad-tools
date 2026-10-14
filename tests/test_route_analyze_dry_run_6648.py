@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -145,3 +145,27 @@ def test_dry_run_help_says_analyze_never_routes():
     flat = " ".join(help_text.split())
     assert "still routes in memory" not in flat
     assert "never routes" in flat
+
+
+@pytest.mark.parametrize("entry", ["route_with_layer_escalation", "route_with_combined_escalation"])
+def test_escalation_wrappers_skip_stale_cleanup_under_dry_run(tmp_path, entry):
+    """Defence in depth (ported from 893e4d7d6): called directly with
+    ``dry_run``, the escalation wrappers pass ``dry_run=True`` to the
+    stale-sibling cleanup."""
+    seen: list[bool] = []
+
+    def _fake_cleanup(output_path, quiet=False, *, dry_run=False):
+        seen.append(dry_run)
+        raise RuntimeError("stop after cleanup")
+
+    args = MagicMock()
+    args.dry_run = True
+    with patch.object(route_cmd, "_cleanup_stale_layer_artifacts", side_effect=_fake_cleanup):
+        with pytest.raises(RuntimeError, match="stop after cleanup"):
+            getattr(route_cmd, entry)(
+                pcb_path=tmp_path / "board.kicad_pcb",
+                output_path=tmp_path / "out.kicad_pcb",
+                args=args,
+                quiet=True,
+            )
+    assert seen == [True]
