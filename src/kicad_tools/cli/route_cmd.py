@@ -2089,6 +2089,7 @@ def _make_checkpoint_callback(
     quiet: bool = False,
     *,
     preserved_sexp: str = "",
+    preserved_routes: "list[Route] | None" = None,
     router_provider: "Callable[[], Autorouter] | None" = None,
     source_pcb_path: Path | None = None,
     best_checkpoint: "BestCheckpointWriter | None" = None,
@@ -2151,6 +2152,17 @@ def _make_checkpoint_callback(
     # re-emits route copper in the board's own net-reference dialect.
     name_only = _board_uses_name_only_dialect(pcb_path)
 
+    def _checkpoint_preserved(routed) -> str:
+        """Issue #6626: preserved copper minus what ``routed`` re-routes."""
+        router = router_provider() if router_provider is not None else None
+        return _dedupe_preserved_sexp(
+            preserved_sexp,
+            preserved_routes,
+            routed,
+            stub_net_ids=getattr(router, "_stub_terminals", None) or (),
+            name_only=name_only,
+        )
+
     # Mutable container so the closure can write back the timestamp.
     # ``[None]`` sentinel means "no checkpoint written yet"; the first
     # improvement event triggers an immediate write.
@@ -2186,8 +2198,9 @@ def _make_checkpoint_callback(
 
         def _write(dest: Path) -> None:
             route_sexp = "\n\t".join(r.to_sexp(name_only=name_only) for r in best_routes)
-            if preserved_sexp:
-                route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
+            kept = _checkpoint_preserved(best_routes)
+            if kept:
+                route_sexp = f"{route_sexp}\n\t{kept}" if route_sexp else kept
             _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, dest)
             _write_routed_pcb(
                 pcb_path, dest, route_sexp, is_checkpoint=True, layer_count=layer_count
@@ -2247,8 +2260,9 @@ def _make_checkpoint_callback(
             # Issue #3155: carry preserved existing copper through every
             # checkpoint so the strip-then-rewrite (#2976) inside
             # _write_routed_pcb does not erase it from the staged input.
-            if preserved_sexp:
-                route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
+            kept = _checkpoint_preserved(best_routes)
+            if kept:
+                route_sexp = f"{route_sexp}\n\t{kept}" if route_sexp else kept
             router = router_provider() if router_provider is not None else None
             layer_count = router.grid.num_layers if router is not None else 2
             if (
@@ -2320,8 +2334,9 @@ def _make_checkpoint_callback(
             router = router_provider() if router_provider is not None else None
             layers = router.grid.num_layers if router is not None else 2
             sexp = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
-            if preserved_sexp:
-                sexp = f"{sexp}\n\t{preserved_sexp}" if sexp else preserved_sexp
+            kept = _checkpoint_preserved(routes)
+            if kept:
+                sexp = f"{sexp}\n\t{kept}" if sexp else kept
             fd, name = tempfile.mkstemp(
                 prefix=output_path.stem + "_completed_unverified_",
                 suffix=output_path.suffix,
@@ -2411,6 +2426,48 @@ def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route
                 blocks.append((offset, block))
     raw = "\n".join(block for _, block in sorted(blocks))
     return routes, "\n\t".join(part for part in (ordinary, raw) if part)
+
+
+def _dedupe_preserved_sexp(
+    preserved_sexp: str,
+    preserved_routes: "list[Route] | None",
+    routed: "list[Route]",
+    *,
+    stub_net_ids=(),
+    name_only: bool = False,
+) -> str:
+    """Drop preserved copper that a re-routed net replaces (issue #6626).
+
+    Applies the rule :func:`_finalize_routes` uses for the final output (a net
+    that is re-routed is emitted from the routed copy only; stub nets keep
+    their preserved copper) to the already-serialized ``preserved_sexp`` that
+    partial saves and checkpoints append.  Verbatim blocks that are not in
+    ``preserved_routes`` (placement-preserved nets) are left untouched.
+    """
+    if not preserved_sexp or not preserved_routes:
+        return preserved_sexp
+    routed_ids = {r.net for r in routed} - set(stub_net_ids)
+    if not routed_ids:
+        return preserved_sexp
+    # ``Route.to_sexp`` mints a fresh uuid per call, so the serialized text
+    # cannot be matched against re-serialized routes: filter it by net instead.
+    drop_ids = {r.net for r in preserved_routes if r.net in routed_ids}
+    drop_names = {r.net_name for r in preserved_routes if r.net in routed_ids and r.net_name}
+    if not drop_ids:
+        return preserved_sexp
+    from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
+
+    spans = []
+    for kind in ("segment", "via"):
+        for start, end, block in _extract_balanced_blocks(preserved_sexp, kind):
+            num = re.search(r"\(net\s+(\d+)\s*\)", block)
+            name = re.search(r'\(net\s+"((?:\\.|[^"\\])*)"\s*\)', block)
+            if (num and int(num.group(1)) in drop_ids) or (name and name.group(1) in drop_names):
+                spans.append((start, end))
+    result = preserved_sexp
+    for start, end in sorted(spans, reverse=True):
+        result = result[:start] + result[end:]
+    return result.strip()
 
 
 def _serialize_preserved_routes(
@@ -2935,9 +2992,12 @@ _interrupt_state: dict[str, Any] = {
     # top-level segment/via from the placement text (#2976 -- which is also
     # why a checkpoint already sitting on the staged ``<output>`` is never
     # doubled), and ``router.to_sexp()`` does not emit preserved copper.  The
-    # layer-escalation flow captures it once before any checkpoint can
-    # overwrite it.  ``None`` (the other flows) adds nothing.
+    # route flows (layer-escalation, adaptive, combined and main) capture it
+    # once before any checkpoint can overwrite it (#6553).  ``None`` adds
+    # nothing.  ``source_routes`` is the same copper as ``Route`` objects so
+    # the save can drop what the router re-routed (#6626).
     "source_copper": None,
+    "source_routes": None,
     # Issue #6324: the exit code ``_handle_interrupt`` decided on (5 = partial
     # saved, 130 = nothing saved), recorded BEFORE it raises ``SystemExit``.
     # That raise is discarded when the signal lands inside a ``__del__``, so
@@ -2959,6 +3019,7 @@ def _reset_partial_save_state() -> None:
     _interrupt_state["placement_text"] = None
     _interrupt_state["partial_save_info"] = None
     _interrupt_state["source_copper"] = None
+    _interrupt_state["source_routes"] = None
 
 
 def _pcb_text(pcb: Any) -> str:
@@ -3259,7 +3320,13 @@ def _save_partial_results() -> bool:
         # Issue #6322: ``_insert_sexp_before_closing`` below drops every
         # segment/via already in the placement text (a checkpoint's copper,
         # but also preserved input copper), so put the latter back.
-        source_copper = _interrupt_state.get("source_copper")
+        source_copper = _dedupe_preserved_sexp(
+            _interrupt_state.get("source_copper") or "",
+            _interrupt_state.get("source_routes"),
+            router.routes,
+            stub_net_ids=getattr(router, "_stub_terminals", None) or (),
+            name_only=name_only,
+        )
         if source_copper and route_sexp:
             route_sexp = f"{route_sexp}\n\t{source_copper}"
 
@@ -10507,6 +10574,7 @@ def route_with_layer_escalation(
     _interrupt_state["pcb_path"] = pcb_path
     _reset_partial_save_state()
     _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
     _interrupt_state["best_completed_attempt"] = False
@@ -10626,6 +10694,7 @@ def route_with_layer_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
@@ -11986,6 +12055,7 @@ def route_with_rule_relaxation(
     # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
     # so the partial save takes the preserved input copper from here.
     _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
     _reset_interrupt_outcome()
@@ -12003,6 +12073,7 @@ def route_with_rule_relaxation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
@@ -14537,6 +14608,7 @@ def route_with_combined_escalation(
     # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
     # so the partial save takes the preserved input copper from here.
     _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
     _reset_interrupt_outcome()
@@ -14554,6 +14626,7 @@ def route_with_combined_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
@@ -21172,6 +21245,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # so the partial save takes the preserved input copper (captured above,
     # before routing) from here.
     _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
     _reset_interrupt_outcome()
     signal.signal(signal.SIGINT, _handle_interrupt)
@@ -21747,6 +21821,7 @@ def _run_main_impl(args, parser, argv) -> int:
             float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
             quiet=quiet,
             preserved_sexp=_preserved_sexp,
+            preserved_routes=_preserved_routes,
             router_provider=lambda: router,
             source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
             best_checkpoint=getattr(args, "_best_checkpoint", None),
