@@ -447,6 +447,10 @@ class MeshPathfinder:
         model is net-AGNOSTIC (plain polygons, no same-net exemption); this is
         safe only because ``fixed_copper`` is pre-filtered to non-listed nets
         by the driver, so a net being routed never self-blocks on its own seed.
+
+        Issue #6566: committed copper is now tracked per net and a connection
+        sees only OTHER nets' copper, so a multi-pad net's later star legs are
+        not blocked by the copper of its earlier legs (shared anchor pad).
         ``fixed_copper=None`` / ``[]`` seeds nothing and is a byte-identical
         no-op relative to the pre-#4364 negotiation.
 
@@ -480,7 +484,10 @@ class MeshPathfinder:
             # it (net-vs-net short avoidance).  Per-layer so an F.Cu net is not
             # blocked by another net's B.Cu cross-under.  Reset each pass so a
             # rip-up genuinely frees the corridor.
-            committed_by_layer: dict[int, list[list[Pt]]] = {}
+            # Issue #6566: kept PER NET (net -> layer -> capsules) so a
+            # connection never treats its own net's committed copper (an
+            # earlier star leg sharing its anchor pad) as an obstacle.
+            committed_by_net: dict[int, dict[int, list[list[Pt]]]] = {}
             # Issue #4364: pre-seed the preserved copper of NON-listed nets as
             # an immovable hard obstacle.  The dict is reset every pass (so a
             # rip-up frees listed-net corridors), therefore the fixed seed must
@@ -488,9 +495,17 @@ class MeshPathfinder:
             # inflates and layer-buckets it identically to same-pass committed
             # copper, so both the in-layer fit and ``_route_via_injection``
             # (which reads the whole dict) honor it.
-            self._seed_fixed_copper(committed_by_layer, fixed_copper)
+            for fixed in fixed_copper or []:
+                self._seed_fixed_copper(committed_by_net.setdefault(fixed.net, {}), [fixed])
             for key, start, end, net_class in ordered:
                 start_L = self._layer_index(start.layer) or 0
+                # Issue #6566: only copper of OTHER nets is an obstacle.
+                committed_by_layer: dict[int, list[list[Pt]]] = {}
+                for other_net, by_layer in committed_by_net.items():
+                    if other_net == start.net:
+                        continue
+                    for lidx, polys in by_layer.items():
+                        committed_by_layer.setdefault(lidx, []).extend(polys)
                 # Issue #4274: the net's own-layer committed copper doubles as
                 # the lane-assignment model -- ``_route_with_portals`` narrows
                 # this net's portals by that copper so its funnel produces a
@@ -531,7 +546,7 @@ class MeshPathfinder:
                 for edge in portals:
                     navmesh.commit_portal(edge)
                 for lidx, polys in self._route_obstacles_by_layer(route).items():
-                    committed_by_layer.setdefault(lidx, []).extend(polys)
+                    committed_by_net.setdefault(route.net, {}).setdefault(lidx, []).extend(polys)
 
             if len(routes) > best_count:
                 best_count = len(routes)

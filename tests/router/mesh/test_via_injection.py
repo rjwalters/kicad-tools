@@ -70,13 +70,16 @@ def _connections(pads):
 
 
 def _same_layer_shorts(routes) -> int:
-    """Different-net segments intersecting ON THE SAME layer (real shorts)."""
+    """Different-net segments intersecting ON THE SAME layer (real shorts).
+
+    Compared by net (not route key): star legs of one net legally overlap (#6566).
+    """
     from kicad_tools.router.mesh.geometry import segments_intersect
 
     segs = []
-    for key, route in routes.items():
+    for route in routes.values():
         for s in route.segments:
-            segs.append((key, s.layer, (s.x1, s.y1), (s.x2, s.y2)))
+            segs.append((route.net, s.layer, (s.x1, s.y1), (s.x2, s.y2)))
     count = 0
     for i in range(len(segs)):
         for j in range(i + 1, len(segs)):
