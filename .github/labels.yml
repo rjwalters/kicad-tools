@@ -94,22 +94,9 @@
   description: Implementation blocked, needs help or clarification
   color: "EF4444"  # red-500
 
-- name: loom:urgent
-  description: Critical/blocking issue requiring immediate attention
-  color: "DC2626"  # red-600
-
 - name: loom:abort
   description: Signal to abort shepherd for this issue (returns to loom:issue)
   color: "F97316"  # orange-500 - warning/signal color
-
-# loom:operator-only vs loom:blocked: operator-only = a human must act OUTSIDE
-# automation (credentials, infra, hardware) and sweep/shepherd skip it entirely;
-# blocked = waiting on a dependency but otherwise automatable. Keep the
-# description at/under GitHub's 100-char label-description limit so sync-labels.sh
-# can create it (a longer description fails with HTTP 422 and the label never syncs).
-- name: loom:operator-only
-  description: "Requires human action outside automation (credentials, infra, hardware); sweep/shepherd skip"
-  color: "F97316"  # orange-500 - operator-action signal (matches loom:abort)
 
 # Epic Labels
 - name: loom:epic
@@ -120,18 +107,12 @@
   description: Issue is part of an epic phase (references parent epic)
   color: "8B5CF6"  # violet-500 - lighter variant for child issues
 
-# Tier Labels (Goal Alignment)
-- name: tier:goal-advancing
-  description: Directly implements a milestone deliverable or unblocks goal work
-  color: "0E8A16"  # green - highest priority
-
-- name: tier:goal-supporting
-  description: Infrastructure, testing, or docs for milestone features
-  color: "FBCA04"  # yellow - medium priority
-
-- name: tier:maintenance
-  description: Cleanup, refactoring, or improvements not tied to current goals
-  color: "D4C5F9"  # purple - lower priority
+# Retired Loom labels (2AMLogic/2am#4345): loom:urgent, loom:operator-only and
+# the tier:goal-advancing / tier:goal-supporting / tier:maintenance labels used
+# to be declared here. rjwalters/loom retired them (defaults/labels.json
+# `retired`; loom:operator-only -> loom:operator, the rest have no
+# replacement), so they are no longer offered as valid labels. Do not re-add a
+# name from that registry outside the Loom-managed block.
 
 # External Contribution Gate
 # Not part of the loom: workflow. Builders MUST skip issues carrying this label
