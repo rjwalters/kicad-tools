@@ -435,6 +435,8 @@ def _apply_declared_clearances(path: Path, pcb_rules, design_rules) -> list[str]
     design_rules.via_clearance = resolved.via_mm
     # Issue #6443: the authored board minimum floors the coupled pair gap.
     design_rules.authored_min_clearance = resolved.authored_min_clearance_mm
+    # Issue #6561: the pair gap uses the same stackup-aware fab floor.
+    design_rules.mfr_clearance_floor = resolved.fab_floor_mm
     return resolved.warnings
 
 

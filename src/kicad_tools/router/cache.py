@@ -185,6 +185,11 @@ class CacheKey:
         authored_min = getattr(rules, "authored_min_clearance", None)
         if authored_min is not None:
             rules_data["authored_min_clearance"] = float(authored_min)
+        # Issue #6561: the stackup-aware fab clearance floor also floors the
+        # coupled pair gap.  Only keyed when set.
+        mfr_floor = getattr(rules, "mfr_clearance_floor", None)
+        if mfr_floor is not None:
+            rules_data["mfr_clearance_floor"] = float(mfr_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
         # Issue #5004: flips whether the same-component carve-out grants an
@@ -396,6 +401,11 @@ class SubProblemSignature:
         authored_min = getattr(rules, "authored_min_clearance", None)
         if authored_min is not None:
             rules_data["authored_min_clearance"] = float(authored_min)
+        # Issue #6561: the stackup-aware fab clearance floor also floors the
+        # coupled pair gap.  Only keyed when set.
+        mfr_floor = getattr(rules, "mfr_clearance_floor", None)
+        if mfr_floor is not None:
+            rules_data["mfr_clearance_floor"] = float(mfr_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
         # Issue #5004: see ``CacheKey.compute`` above -- same reasoning
