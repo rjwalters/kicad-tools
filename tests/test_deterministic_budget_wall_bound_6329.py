@@ -183,3 +183,8 @@ def test_help_names_the_remaining_wall_clock_stages(parser_factory) -> None:
     assert "per-net wall clock bound" in text
     assert "post-negotiation sweep" in text
     assert "--deterministic-rescue" in text
+    # Issue #6475: --deterministic-rescue removes the 10%-of-stage per-net
+    # budget, so the help must not say it binds "even with both flags".
+    assert "Issue #6475" in text
+    assert "removes that budget" in text
+    assert "stage deadline fired" in text
