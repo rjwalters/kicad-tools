@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from .diffpair_clearance_intra import DiffPairClearanceIntraRule
     from .diffpair_length_skew import DiffPairLengthSkewRule
     from .diffpair_routing_continuity import DiffPairRoutingContinuityRule
+    from .diffpair_uncoupled_length import DiffPairUncoupledLengthRule
     from .dimensions import DimensionRules
     from .edge import EdgeClearanceRule
     from .impedance import ImpedanceRule, NetImpedanceSpec
@@ -51,6 +52,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "DiffPairClearanceIntraRule": ".diffpair_clearance_intra",
     "DiffPairLengthSkewRule": ".diffpair_length_skew",
     "DiffPairRoutingContinuityRule": ".diffpair_routing_continuity",
+    "DiffPairUncoupledLengthRule": ".diffpair_uncoupled_length",
     "DimensionRules": ".dimensions",
     "EdgeClearanceRule": ".edge",
     "ImpedanceRule": ".impedance",
@@ -84,6 +86,7 @@ __all__ = [
     "DiffPairClearanceIntraRule",
     "DiffPairLengthSkewRule",
     "DiffPairRoutingContinuityRule",
+    "DiffPairUncoupledLengthRule",
     "DimensionRules",
     "EdgeClearanceRule",
     "ImpedanceRule",

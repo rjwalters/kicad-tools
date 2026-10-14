@@ -62,7 +62,7 @@ def test_all_advisory_board_reads_zero_blocking(capsys) -> None:
     advisory bucket lists them (the exact headline complaint)."""
     violations = [
         DRCViolation(rule_id="connectivity", severity="error", message="GND incomplete"),
-        DRCViolation(rule_id="diffpair_length_skew", severity="error", message="skew"),
+        DRCViolation(rule_id="diffpair_routing_continuity", severity="info", message="cont"),
         DRCViolation(rule_id="copper_sliver", severity="warning", message="sliver"),
     ]
     out = _render_capsys(violations, capsys)
@@ -71,7 +71,7 @@ def test_all_advisory_board_reads_zero_blocking(capsys) -> None:
     assert "Advisory/quality:  3 advisory" in out
     assert "connectivity" in out
     assert "copper_sliver" in out
-    assert "diffpair_length_skew" in out
+    assert "diffpair_routing_continuity" in out
 
 
 def test_manufacturing_violation_counted_in_manufacturing_bucket(capsys) -> None:

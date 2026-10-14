@@ -2861,6 +2861,49 @@ class TestGranularRollback:
         assert output_file.read_bytes() == original_content
 
 
+class TestRegressedNetsIgnoresLoneFill6495:
+    """Issue #6495: a lone fill island warning never marks a net regressed."""
+
+    @staticmethod
+    def _result(*issues: tuple[str, str, str]):
+        from kicad_tools.validate.connectivity import (
+            ConnectivityIssue,
+            ConnectivityResult,
+        )
+
+        return ConnectivityResult(
+            issues=[
+                ConnectivityIssue(
+                    severity=severity,
+                    issue_type=issue_type,
+                    net_name=net,
+                    message="m",
+                    suggestion="s",
+                )
+                for severity, issue_type, net in issues
+            ]
+        )
+
+    def test_new_lone_fill_warning_is_not_regressed(self):
+        from kicad_tools.cli.fix_drc_cmd import _regressed_nets
+
+        after = self._result(("warning", "zone_island", "GND"))
+        assert _regressed_nets(self._result(), after) == set()
+
+    def test_new_real_error_is_regressed(self):
+        from kicad_tools.cli.fix_drc_cmd import _regressed_nets
+
+        after = self._result(("error", "zone_island", "GND"))
+        assert _regressed_nets(self._result(), after) == {"GND"}
+
+    def test_lone_fill_baseline_then_real_error_is_regressed(self):
+        from kicad_tools.cli.fix_drc_cmd import _regressed_nets
+
+        baseline = self._result(("warning", "zone_island", "GND"))
+        after = self._result(("warning", "zone_island", "GND"), ("error", "zone_island", "GND"))
+        assert _regressed_nets(baseline, after) == {"GND"}
+
+
 class TestCountConnectedNets:
     """Tests for the _count_connected_nets helper."""
 

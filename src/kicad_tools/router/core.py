@@ -20109,6 +20109,7 @@ class Autorouter:
         stagnation_patience: int = 3,
         outer_timeout: float | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        loop_observer: Any = None,
     ) -> PlacementFeedbackResult:
         """Route with automatic placement adjustment on failures.
 
@@ -20162,6 +20163,13 @@ class Autorouter:
             stop_requested: Issue #6324: optional predicate checked once
                 per outer iteration; True exits with
                 ``exit_reason="pf_interrupted"``.  Default None.
+            loop_observer: Optional ``Callable[[PlacementFeedbackLoop], None]``,
+                called once with the loop before it runs (issue #6321).  Each
+                iteration clears every route before it re-routes, so a caller
+                that may have to save mid-run (``kct route``'s deadline /
+                Ctrl+C partial save) needs the loop to call
+                :meth:`~kicad_tools.router.placement_feedback.PlacementFeedbackLoop.restore_best_for_partial_save`
+                first.  Default None.
 
         Returns:
             PlacementFeedbackResult with:
@@ -20221,6 +20229,8 @@ class Autorouter:
             outer_timeout=outer_timeout,
             stop_requested=stop_requested,
         )
+        if loop_observer is not None:
+            loop_observer(feedback_loop)
 
         return feedback_loop.run(
             max_adjustments=max_adjustments,

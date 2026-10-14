@@ -819,6 +819,33 @@ class TestDeadlineDuringATrial:
         assert state["snapshot_placement"] == "moved"
         assert state["snapshot_discarded_trial"] == "R4 translate"
 
+    def test_snapshot_facts_published_before_the_witness_write_6330(
+        self, monkeypatch, tmp_path, board
+    ):
+        """A kill during the slow access-witness write must still leave the facts."""
+        source, output = board
+        control = tmp_path / "control.json"
+        control.write_text(json.dumps({"stage": "routing", "output": str(output)}))
+        monkeypatch.setenv(route_deadline.CONTROL_ENV, str(control))
+        seen: dict = {}
+
+        def killed(*_args, **_kwargs):
+            seen.update(json.loads(control.read_text()))
+            raise SystemExit(137)  # stands in for the SIGKILL mid-write
+
+        monkeypatch.setattr(route_cmd, "_write_access_witness_sidecar", killed)
+        router = _CopperRouter(interrupt=_Deadline(on_call=2))
+
+        with pytest.raises(SystemExit):
+            _interrupted_run(monkeypatch, router, source, output)
+
+        assert _partial(output).exists()
+        assert seen["snapshot_saved"] is True
+        assert seen["snapshot"] == str(_partial(output))
+        assert seen["snapshot_state"] == "last-accepted"
+        assert seen["snapshot_placement"] == "moved"
+        assert seen["snapshot_discarded_trial"] == "R4 translate"
+
     def test_the_sidecar_reports_the_source_placement_when_nothing_was_kept(
         self, monkeypatch, tmp_path, board
     ):

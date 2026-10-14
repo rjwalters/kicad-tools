@@ -84,8 +84,14 @@ class PairThresholds:
     :attr:`skew_severity` follows the source: a cited or explicit limit is an
     ``error``; a limit that is an ``uncited`` table value is a ``warning``.
     The generic 0.5 mm default stays an ``error``, as it was before #6443.
-    The uncoupled-length and via limits are resolved here but not yet
-    checked -- the rule is #6443 piece (b).
+    The uncoupled-length and via limits (piece (b)) resolve the same way and
+    carry their own severity: :attr:`uncoupled_severity` and
+    :attr:`vias_severity` are ``warning`` when the limit is an ``uncited``
+    table value, ``error`` otherwise.  :attr:`max_uncoupled_total_mm` is the
+    KiCad-equivalent limit (one net's uncoupled length, see
+    ``validate/rules/diffpair_uncoupled_length.py``); when the class sets none
+    it is derived per pair as ``max_uncoupled_per_terminal_mm`` x the number
+    of components on the net, by the rule that knows the board.
     """
 
     continuity: float
@@ -97,6 +103,8 @@ class PairThresholds:
     max_uncoupled_per_terminal_mm: float | None = None
     max_uncoupled_total_mm: float | None = None
     max_vias_per_net: int | None = None
+    uncoupled_severity: str = "error"
+    vias_severity: str = "error"
     provenance: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -177,17 +185,18 @@ def resolve_pair_thresholds(
     if skew is None:
         skew, skew_src, skew_severity = DEFAULT_SKEW_TOLERANCE_MM, GENERIC_PROVENANCE, "error"
     provenance["skew_mm"] = skew_src or GENERIC_PROVENANCE
-    per_terminal, src, _sev = limit(
+    per_terminal, src, unc_severity = limit(
         "max_uncoupled_per_terminal_mm", "max_uncoupled_per_terminal_mm"
     )
     if src:
         provenance["max_uncoupled_per_terminal_mm"] = src
-    vias, src, _sev = limit("max_vias_per_net", "max_vias_per_net")
+    vias, src, vias_severity = limit("max_vias_per_net", "max_vias_per_net")
     if src:
         provenance["max_vias_per_net"] = src
     total = getattr(nc, "max_uncoupled_total_mm", None) if nc is not None else None
     if total is not None:
         provenance["max_uncoupled_total_mm"] = f"class:{class_name}"
+        unc_severity = "error"
     return PairThresholds(
         continuity=continuity,
         skew_mm=float(skew),
@@ -197,6 +206,8 @@ def resolve_pair_thresholds(
         max_uncoupled_per_terminal_mm=per_terminal,
         max_uncoupled_total_mm=total,
         max_vias_per_net=int(vias) if vias is not None else None,
+        uncoupled_severity=unc_severity,
+        vias_severity=vias_severity,
         provenance=provenance,
     )
 

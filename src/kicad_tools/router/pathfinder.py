@@ -434,6 +434,11 @@ class Router:
         # configuration between routes cannot be served from it either.
         self._via_halo_cache: dict[tuple[int, int, int], bool] = {}
         self._via_halo_cache_token: int | None = None
+        # Issue #5617: memo for the geometry verdict of ``_trace_halo_clear``
+        # (the ``halo.clear(segment, ...)`` call after the ``cell_known``
+        # guard).  Same soundness contract as ``_via_halo_cache``.
+        self._trace_halo_cache: dict[tuple, bool] = {}
+        self._trace_halo_cache_token: tuple | None = None
 
         # Issue #5617: memos for the two SITE-level via preconditions --
         # predicates of the candidate CELL alone, with no ``net`` / ``layer``
@@ -1512,6 +1517,8 @@ class Router:
         self._net_name_to_id = dict(mapping)
         self._route_halo_names = {net: name for name, net in mapping.items()}
         self._route_halo_class = None
+        self._trace_halo_cache.clear()
+        self._trace_halo_cache_token = None
         # Issue #4507: the search-time pairwise projection is keyed by net id
         # through this map -- rebuild it on the next consult.
         self._pairwise_search_cache = None
@@ -1800,9 +1807,44 @@ class Router:
             return False
         if not all(halo.cell_known(x, y, layer) for x, y in cells):
             return False
-        name = self._route_halo_names.get(net, "")
         nc = self._halo_net_class(net)
-        x1, y1 = self.grid.grid_to_world(*(from_cell or (gx, gy)))
+        # Issue #5617: the verdict below is a pure function of the step
+        # ``(from_cell -> (gx, gy))`` on ``layer`` for ``net`` (its class is
+        # in the key by identity), the halo snapshot (``state_version``) and
+        # the router's rule configuration (``clear_via_cache`` /
+        # ``set_net_name_to_id`` drop the memo).  The exhausted-resume and
+        # negotiated re-searches probe the same steps again on an unchanged
+        # grid.  ``cell_known`` above stays per-call: it depends on ``cells``.
+        rules = self.rules
+        token = (
+            id(halo),
+            halo.state_version,
+            # Rule values ``halo.clear`` reads; callers may mutate them in place.
+            rules.trace_width,
+            rules.trace_clearance,
+            rules.via_clearance,
+            rules.min_hole_to_hole,
+            rules.min_drill_clearance,
+            id(rules.pairwise_clearance),
+        )
+        if self._trace_halo_cache_token != token:
+            self._trace_halo_cache.clear()
+            self._trace_halo_cache_token = token
+        fx, fy = from_cell or (gx, gy)
+        key = (
+            layer,
+            gx,
+            gy,
+            fx,
+            fy,
+            net,
+            (id(nc), nc.trace_width, nc.clearance, nc.intra_pair_clearance) if nc else None,
+        )
+        hit = self._trace_halo_cache.get(key)
+        if hit is not None:
+            return hit
+        name = self._route_halo_names.get(net, "")
+        x1, y1 = self.grid.grid_to_world(fx, fy)
         x2, y2 = self.grid.grid_to_world(gx, gy)
         copper_layer = self._grid_layer_object(layer)
         if copper_layer is None:
@@ -1819,7 +1861,14 @@ class Router:
         )
         partner = self._resolve_partner_net_id(name)
         gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
-        return halo.clear(segment, self, partner_net=partner, partner_clearance=gap)
+        hit = halo.clear(segment, self, partner_net=partner, partner_clearance=gap)
+        if len(self._trace_halo_cache) >= self._TRACE_HALO_CACHE_MAX:
+            self._trace_halo_cache.clear()
+        self._trace_halo_cache[key] = hit
+        return hit
+
+    #: Entry cap for ``_trace_halo_cache`` (issue #5617); memory backstop only.
+    _TRACE_HALO_CACHE_MAX = 500_000
 
     #: Issue #6389: mirrors ``PAD_EXACT_HOLE_GUARD_MM`` in the native
     #: ``Pathfinder::pad_step_clear`` -- a step that comes this close to any
@@ -3982,6 +4031,8 @@ class Router:
         # geometry changes, this covers everything else ``clear`` reads.
         self._via_halo_cache.clear()
         self._via_halo_cache_token = None
+        self._trace_halo_cache.clear()
+        self._trace_halo_cache_token = None
         self.invalidate_pad_geometry_cache()
 
     def invalidate_pad_geometry_cache(self) -> None:

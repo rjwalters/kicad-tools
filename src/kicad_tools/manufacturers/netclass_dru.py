@@ -29,7 +29,9 @@ ignores them.
 A second managed block (Issue #6443) carries one native ``diff_pair_gap``
 rule per router-coupled pair KiCad recognises by name, at the gap the router
 laid it at (:meth:`kicad_tools.router.rules.DesignRules.pair_gap`); see
-:func:`pair_gap_block_rules`.
+:func:`pair_gap_block_rules`.  The same block carries the pair's native
+``diff_pair_uncoupled``, ``skew`` and ``via_count`` rules at the limits the
+protocol table or the net class resolves (:func:`pair_limit_rules`).
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 #: Sentinel markers of the kct-owned router net-class block.  Distinct from
 #: the fab-floors (#4600), creepage (#4508) and keepout (#6039) markers.
@@ -351,21 +354,193 @@ def _positive_suffix(net_name: str) -> bool:
     return False
 
 
-def merge_pair_gap_block(existing: str | None, rules: list[tuple[str, str, float]]) -> str | None:
+@dataclass(frozen=True)
+class PairLimits:
+    """The limits one coupled pair carries into the ``.kicad_dru`` (Issue #6443).
+
+    ``None`` leaves that rule out.  A severity is ``"error"`` or
+    ``"warning"``: a limit that is an ``uncited`` protocol value is a warning
+    in kicad-cli exactly as it is in ``kct check``.
+    """
+
+    p: str
+    n: str
+    uncoupled_mm: float | None = None
+    uncoupled_severity: str = "error"
+    skew_mm: float | None = None
+    skew_severity: str = "error"
+    max_vias: int | None = None
+    vias_severity: str = "error"
+
+
+#: Rule-name prefixes of the generated pair-limit rules.
+PAIR_UNCOUPLED_RULE_PREFIX = "kct diff pair uncoupled - "
+PAIR_SKEW_RULE_PREFIX = "kct diff pair skew - "
+PAIR_VIA_RULE_PREFIX = "kct diff pair vias - "
+
+
+def _polarity_index(net_name: str) -> int | None:
+    """Index of the ``MatchDpSuffix`` polarity character of ``net_name``."""
+    for i in range(len(net_name) - 1, -1, -1):
+        ch = net_name[i]
+        if (ch.isascii() and ch.isdigit()) or ch == "_":
+            continue
+        return i if ch in "+-PN" else None
+    return None
+
+
+def diff_pair_base_name(net_name: str) -> str | None:
+    """KiCad's base name of a diff-pair net: the name up to its polarity character.
+
+    ``USB_D+`` -> ``USB_D``; ``LVDS1_P`` -> ``LVDS1_``.  The argument of
+    ``A.inDiffPair('..')``.
+    """
+    idx = _polarity_index(net_name)
+    return net_name[:idx] if idx is not None else None
+
+
+def pair_in_diff_pair_condition(p: str) -> str | None:
+    """``A.inDiffPair('<base>')`` selecting the copper of the pair of ``p``."""
+    base = diff_pair_base_name(p)
+    return f"A.inDiffPair('{_dru_string(base)}')" if base else None
+
+
+def pair_net_name_condition(p: str, n: str) -> str:
+    """Net-name condition selecting both halves of a pair KiCad does not recognise."""
+    return pair_gap_condition(p, n)
+
+
+def pair_limit_rules(
+    limits: Iterable[PairLimits], net_names: Iterable[str] | None = None
+) -> list[PairLimits]:
+    """The pair-limit rules the managed block must carry, sorted and de-duplicated.
+
+    A pair needs at least one limit.  With ``net_names``, pairs whose nets are
+    not both on the board are dropped.  Pairs KiCad recognises by name
+    (:func:`is_coupled_diff_pair`) are oriented ``(P, N)`` by its suffix rule;
+    the others keep the router's order.  Repeated pairs keep the stricter
+    limit of each kind.
+    """
+    present = None if net_names is None else set(net_names)
+    best: dict[tuple[str, str], PairLimits] = {}
+    for item in limits:
+        if (
+            not item.p
+            or not item.n
+            or item.p == item.n
+            or (item.uncoupled_mm is None and item.skew_mm is None and item.max_vias is None)
+        ):
+            continue
+        if present is not None and (item.p not in present or item.n not in present):
+            continue
+        p, n = item.p, item.n
+        if is_coupled_diff_pair(p, n) and not _positive_suffix(p):
+            p, n = n, p
+        elif not is_coupled_diff_pair(p, n):
+            p, n = sorted((p, n))
+        fixed = PairLimits(
+            p,
+            n,
+            None if item.uncoupled_mm is None else round(item.uncoupled_mm, 6),
+            item.uncoupled_severity,
+            None if item.skew_mm is None else round(item.skew_mm, 6),
+            item.skew_severity,
+            item.max_vias,
+            item.vias_severity,
+        )
+        old = best.get((p, n))
+        if old is not None:
+            fixed = PairLimits(
+                p,
+                n,
+                _stricter(old.uncoupled_mm, fixed.uncoupled_mm),
+                fixed.uncoupled_severity if old.uncoupled_mm is None else old.uncoupled_severity,
+                _stricter(old.skew_mm, fixed.skew_mm),
+                fixed.skew_severity if old.skew_mm is None else old.skew_severity,
+                None
+                if old.max_vias is None and fixed.max_vias is None
+                else min(v for v in (old.max_vias, fixed.max_vias) if v is not None),
+                fixed.vias_severity if old.max_vias is None else old.vias_severity,
+            )
+        best[(p, n)] = fixed
+    return [best[key] for key in sorted(best)]
+
+
+def _stricter(a: float | None, b: float | None) -> float | None:
+    values = [v for v in (a, b) if v is not None]
+    return min(values) if values else None
+
+
+def _severity_clause(severity: str) -> str:
+    return "" if severity == "error" else f"\n  (severity {severity})"
+
+
+def render_pair_limit_rules(item: PairLimits) -> list[str]:
+    """The native rules of one pair.
+
+    A pair KiCad recognises by name is selected with ``A.inDiffPair`` and gets
+    all three rules.  Any other pair is selected by net name: KiCad only
+    evaluates ``skew`` and ``via_count`` for it (the skew rule without
+    ``within_diff_pairs``; measured on kicad-cli 10.0.6 it still reports
+    ``|L_p - L_n|``), while ``diff_pair_uncoupled`` is ignored whatever its
+    condition says, so no such rule is written -- ``kct check`` reports that
+    limit as kct-only.
+    """
+    recognised = is_coupled_diff_pair(item.p, item.n)
+    condition = (
+        pair_in_diff_pair_condition(item.p) if recognised else None
+    ) or pair_net_name_condition(item.p, item.n)
+    name = f"{item.p}/{item.n}"
+    out: list[str] = []
+
+    def rule(prefix: str, constraint: str, severity: str) -> str:
+        return (
+            f"(rule {json.dumps(prefix + name)}\n"
+            f"  (condition {json.dumps(condition)})\n"
+            f"  (constraint {constraint}){_severity_clause(severity)})"
+        )
+
+    if item.uncoupled_mm is not None and recognised:
+        out.append(
+            rule(
+                PAIR_UNCOUPLED_RULE_PREFIX,
+                f"diff_pair_uncoupled (max {item.uncoupled_mm}mm)",
+                item.uncoupled_severity,
+            )
+        )
+    if item.skew_mm is not None:
+        within = " (within_diff_pairs)" if recognised else ""
+        out.append(
+            rule(PAIR_SKEW_RULE_PREFIX, f"skew (max {item.skew_mm}mm){within}", item.skew_severity)
+        )
+    if item.max_vias is not None:
+        out.append(
+            rule(PAIR_VIA_RULE_PREFIX, f"via_count (max {item.max_vias})", item.vias_severity)
+        )
+    return out
+
+
+def merge_pair_gap_block(
+    existing: str | None,
+    rules: list[tuple[str, str, float]],
+    limit_rules: list[PairLimits] | None = None,
+) -> str | None:
     """Merge the router diff-pair gap block into ``.kicad_dru`` content.
 
     Same contract as :func:`merge_netclass_block`: rules present -> replace
     any existing block with a fresh one appended at the end; no rules ->
     remove a stale block, otherwise return ``existing`` unchanged.
-    Idempotent.
+    ``limit_rules`` (:func:`pair_limit_rules`) join the gap rules in the same
+    block, after them.  Idempotent.
     """
+    limit_rules = limit_rules or []
     pattern = re.compile(
         r"\n*" + re.escape(DRU_PAIR_GAP_BLOCK_BEGIN) + r".*?" + re.escape(DRU_PAIR_GAP_BLOCK_END),
         re.DOTALL,
     )
     had_block = existing is not None and pattern.search(existing) is not None
     base = pattern.sub("", existing).lstrip("\n") if had_block and existing else existing
-    if not rules:
+    if not rules and not limit_rules:
         if not had_block or base is None:
             return existing
         return base.rstrip("\n") + "\n" if base.strip() else ""
@@ -375,6 +550,12 @@ def merge_pair_gap_block(existing: str | None, rules: list[tuple[str, str, float
         "# gap, manufacturer minimum, authored board min_clearance).",
         *(render_pair_gap_rule(p, n, gap) for p, n, gap in rules),
     ]
+    if limit_rules:
+        body.append("# Uncoupled length, skew and via count of each coupled pair, at the limit the")
+        body.append("# protocol table or the net class resolves (Issue #6443); a warning where")
+        body.append("# that limit is uncited.")
+        for item in limit_rules:
+            body.extend(render_pair_limit_rules(item))
     block = f"{DRU_PAIR_GAP_BLOCK_BEGIN}\n" + "\n".join(body) + f"\n{DRU_PAIR_GAP_BLOCK_END}"
     if base is None or not base.strip():
         return f"{_DRU_VERSION_HEADER}\n\n{block}\n"

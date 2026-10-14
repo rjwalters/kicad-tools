@@ -97,6 +97,7 @@ PUBLIC_EXPORTS = {
         "DiffPairClearanceIntraRule": ".diffpair_clearance_intra",
         "DiffPairLengthSkewRule": ".diffpair_length_skew",
         "DiffPairRoutingContinuityRule": ".diffpair_routing_continuity",
+        "DiffPairUncoupledLengthRule": ".diffpair_uncoupled_length",
         "DimensionRules": ".dimensions",
         "EdgeClearanceRule": ".edge",
         "ImpedanceRule": ".impedance",

@@ -1,9 +1,11 @@
 {
-  "all_by_type": {},
+  "all_by_type": {
+    "via_dangling": 1
+  },
   "by_type": {},
   "error_count": 0,
   "note": null,
-  "pcb_sha256": "852f31785b660a0795969460b79847e114807ca18f0c48a670848fbbbc3acb88",
+  "pcb_sha256": "3fee04fe0726be49ec6a02873a94e3db77337a78437de85180a242c030cf7638",
   "ran": true,
   "reason": "ok",
   "refill_during_check": false,

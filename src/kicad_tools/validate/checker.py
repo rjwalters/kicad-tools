@@ -21,6 +21,7 @@ from .rules.dangling_copper import DanglingCopperRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
+from .rules.diffpair_uncoupled_length import DiffPairUncoupledLengthRule
 from .rules.edge import EdgeClearanceRule
 from .rules.impedance import ImpedanceRule
 from .rules.match_group_length_skew import MatchGroupLengthSkewRule
@@ -326,6 +327,7 @@ class DRCChecker:
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
+        "check_diffpair_uncoupled_length",
         "check_dimensions",
         "check_edge_clearances",
         "check_impedance",
@@ -469,8 +471,6 @@ class DRCChecker:
         "doc_drift_stale_pin": CATEGORY_ADVISORY,
         "doc_drift_unresolvable_pin": CATEGORY_ADVISORY,
         "impedance": CATEGORY_ADVISORY,
-        "diffpair_clearance_intra": CATEGORY_ADVISORY,
-        "diffpair_length_skew": CATEGORY_ADVISORY,
         "diffpair_routing_continuity": CATEGORY_ADVISORY,
         "match_group_length_skew": CATEGORY_ADVISORY,
         # Pin-1 / polarity silkscreen markers: assembly-legibility
@@ -538,6 +538,15 @@ class DRCChecker:
         "net_undeclared": CATEGORY_MANUFACTURING,
         "zone_fill": CATEGORY_MANUFACTURING,
         "zone_fill_disabled": CATEGORY_MANUFACTURING,
+        # Pair rules whose findings block ``manufacturable`` when the limit is
+        # cited or explicit (maintainer decision on #6443, 2026-10-13): the
+        # same findings reach kicad-cli as errors through the routed
+        # ``.kicad_dru``, so they are fab-blocking, not advisory.  An
+        # ``uncited`` limit is a warning.  Explicit entries are REQUIRED: the
+        # ``diffpair`` prefix fallback below is advisory.
+        "diffpair_clearance_intra": CATEGORY_MANUFACTURING,
+        "diffpair_length_skew": CATEGORY_MANUFACTURING,
+        "diffpair_uncoupled_length": CATEGORY_MANUFACTURING,
         "zone_no_net": CATEGORY_MANUFACTURING,
         "zone_unfilled": CATEGORY_MANUFACTURING,
     }
@@ -1009,6 +1018,51 @@ class DRCChecker:
             engaged_pairs=engaged_pairs,
             threshold_map=threshold_map,
             emit_info=self._emit_skew_info,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_diffpair_uncoupled_length(self) -> DRCResults:
+        """Check uncoupled length and via count for engaged differential pairs.
+
+        Issue #6443 (P1 piece (b) of epic #6441).  For each engaged pair the
+        larger of the two nets' uncoupled lengths (the figure KiCad's
+        ``diff_pair_uncoupled`` checks, see
+        :mod:`~kicad_tools.validate.rules.diffpair_uncoupled_length`) is held
+        to ``max_uncoupled_total_mm`` of the class, or the protocol's
+        per-terminal allowance x the components on the net; each net's via
+        count is held to ``max_vias_per_net``.  Limits and severities come
+        from the same resolver as the skew check
+        (:func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`).
+
+        A pair whose names KiCad does not recognise gets one ``info`` line
+        saying its limit is kct-only (KiCad's native check cannot see it).
+
+        Like the other pair rules this is a no-op without a ``net_class_map``.
+        """
+        from kicad_tools.manufacturers.netclass_dru import is_coupled_diff_pair
+        from kicad_tools.validate.diffpair_engagement import (
+            derive_engagement_state,
+            resolve_pair_thresholds,
+        )
+
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_uncoupled_length")
+        engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
+        names = {n.number: n.name for n in self.pcb.nets.values() if n.name}
+        limits = {}
+        kct_only = {}
+        for a, b in engaged_pairs:
+            na, nb = names.get(a), names.get(b)
+            if not na or not nb:
+                continue
+            limits[(a, b)] = resolve_pair_thresholds(self.net_class_map, na, nb)
+            if not (is_coupled_diff_pair(na, nb) or is_coupled_diff_pair(nb, na)):
+                kct_only[(a, b)] = f"KiCad does not recognise {na}/{nb} as a differential pair"
+        rule = DiffPairUncoupledLengthRule(
+            engaged_pairs=engaged_pairs,
+            limits=limits,
+            emit_info=self._emit_skew_info,
+            kct_only=kct_only,
         )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
