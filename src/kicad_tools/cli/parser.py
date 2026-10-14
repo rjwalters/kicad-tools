@@ -19,7 +19,28 @@ from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.format_options import add_format_flag
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
-__all__ = ["create_parser"]
+__all__ = ["LATTICE_ITERATIONS_HELP", "create_parser", "positive_int"]
+
+
+def positive_int(value: str) -> int:
+    """argparse ``type=`` for a strictly positive integer (``N >= 1``)."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
+# Issue #6362: shared by ``route_parser`` here and ``route_cmd._route_parser``
+# so the two ``--lattice-iterations`` declarations cannot drift.
+LATTICE_ITERATIONS_HELP = (
+    "Round cap for the lattice engine's whole-netset negotiation (default: 12). "
+    "Applies only to '--route-engine lattice' and to '--complete', which drives "
+    "the lattice; --iterations does not affect the lattice. Raise it when the "
+    "log says 'stopped by: round cap'. Must be >= 1."
+)
 
 # Module docstring used as epilog in help
 CLI_DOCSTRING = """
@@ -3816,7 +3837,15 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument(
         "--generations", type=int, default=10, help="Evolutionary optimizer generations"
     )
-    route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
+    route_parser.add_argument(
+        "--iterations",
+        type=int,
+        default=15,
+        help=(
+            "Max iterations (default: 15). Does NOT apply to --route-engine "
+            "lattice; use --lattice-iterations for its round cap."
+        ),
+    )
     # Issue #3101: Best-metric early-stop patience.  Mirror of the inner
     # parser flag at route_cmd.py; both sites must stay in sync per
     # ``tests/test_cli_parser_drift.py``.
@@ -4879,6 +4908,15 @@ def _add_route_parser(subparsers) -> None:
             "'strategy' was already taken by the negotiation-algorithm flag "
             "above, so the substrate selector is --route-engine.)"
         ),
+    )
+    # Issue #6362: lattice negotiation round cap.  Forwarded to the inner
+    # route_cmd parser by ``commands/routing.py``.
+    route_parser.add_argument(
+        "--lattice-iterations",
+        type=positive_int,
+        default=None,
+        metavar="N",
+        help=LATTICE_ITERATIONS_HELP,
     )
     route_parser.add_argument(
         "--lattice-optimize",

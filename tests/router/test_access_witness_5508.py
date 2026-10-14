@@ -225,6 +225,135 @@ class TestGridObserver:
         assert "truncated" in journal.summary_line()
 
 
+class TestTruncateTo:
+    """``CommitJournal.truncate_to`` forgets a discarded trial's tail (#6320)."""
+
+    def test_drops_the_tail_and_reports_how_many(self):
+        journal = CommitJournal()
+        kept, discarded = _route_obj(net=1), _route_obj(net=2)
+        journal.observe("mark", kept)
+        length, truncated = journal.mark()
+        journal.observe("resync_remove", kept)
+        journal.observe("mark", discarded)
+
+        assert journal.truncate_to(length, truncated) == 2
+        assert [r.route_id for r in journal.records] == [id(kept)]
+        assert journal.to_dict()["record_count"] == 1
+        # Nothing left to drop: idempotent.
+        assert journal.truncate_to(length, truncated) == 0
+        # A length past the end keeps everything.
+        assert journal.truncate_to(10) == 0
+        assert len(journal) == 1
+
+    def test_a_rip_cut_away_no_longer_turns_a_remark_into_a_restore(self):
+        journal = CommitJournal()
+        route = _route_obj()
+        journal.observe("mark", route)
+        length, truncated = journal.mark()
+        journal.observe("unmark", route)  # ripped only inside the discarded tail
+
+        journal.truncate_to(length, truncated)
+        journal.observe("mark", route)
+
+        assert [r.kind for r in journal.records] == ["commit", "commit"]
+
+    def test_a_rip_in_the_kept_prefix_still_classifies_the_remark(self):
+        journal = CommitJournal()
+        route, other = _route_obj(net=1), _route_obj(net=2)
+        journal.observe("mark", route)
+        journal.observe("unmark", route)
+        length, truncated = journal.mark()
+        journal.observe("mark", other)
+
+        journal.truncate_to(length, truncated)
+        journal.observe("mark", route)
+
+        assert [r.kind for r in journal.records] == ["commit", "rip", "restore"]
+
+    def test_a_resync_addition_does_not_clear_the_rip(self):
+        """Mirrors ``observe``: only a ``mark`` re-lands a ripped route."""
+        journal = CommitJournal()
+        route = _route_obj()
+        journal.observe("mark", route)
+        journal.observe("unmark", route)
+        journal.observe("resync_add", route)
+        length, truncated = journal.mark()
+        journal.observe("mark", _route_obj(net=9))
+
+        journal.truncate_to(length, truncated)
+        journal.observe("mark", route)
+
+        assert journal.records[-1].kind == "restore"
+
+    def test_the_cap_flag_goes_back_to_its_pre_trial_value(self):
+        journal = CommitJournal()
+        journal.records = [
+            CommitRecord(
+                index=i,
+                kind="commit",
+                added=True,
+                pass_name=PASS_INITIAL,
+                iteration=0,
+                net=1,
+                net_name="N",
+                route_id=i,
+                is_escape=False,
+                segments=(),
+                vias=(),
+            )
+            for i in range(MAX_JOURNAL_RECORDS - 1)
+        ]
+        length, truncated = journal.mark()
+        assert truncated is False
+        # The trial fills the journal and then hits the cap.
+        journal.observe("mark", _route_obj(net=1))
+        journal.observe("mark", _route_obj(net=2))
+        assert journal.truncated is True
+
+        journal.truncate_to(length, truncated)
+
+        assert len(journal) == MAX_JOURNAL_RECORDS - 1
+        assert journal.truncated is False
+
+    def test_truncated_none_leaves_the_flag_alone(self):
+        journal = CommitJournal()
+        journal.observe("mark", _route_obj())
+        journal.truncated = True
+        journal.truncate_to(0)
+        assert journal.truncated is True
+        assert len(journal) == 0
+
+    def test_negative_length_is_rejected(self):
+        with pytest.raises(ValueError):
+            CommitJournal().truncate_to(-1)
+
+    def test_replay_tolerates_removing_a_route_whose_commit_was_cut(self):
+        """A grid reset AFTER the truncation retires copper the journal lost.
+
+        A no-rebuild restore truncates without touching the grid, so the next
+        reset journals ``resync_remove`` for routes still on the stale grid
+        whose commits are gone.  The placement-delta loop drops those records
+        again (``_TrialInFlight.journal_rewound``), but any other caller that
+        truncates (#6321) can leave them, and the replay must not choke.
+        """
+        from kicad_tools.router.access_witness import witness_for_router
+
+        router = _kelvin_fixture()
+        journal = router.commit_journal
+        length, truncated = journal.mark()
+        trial_route = _route_obj()
+        router.grid.mark_route(trial_route)
+        journal.truncate_to(length, truncated)
+
+        router._reset_for_new_trial()
+
+        removals = [r for r in journal.records[length:] if r.route_id == id(trial_route)]
+        assert [r.added for r in removals] == [False], "the unknown id was journaled"
+        witness = witness_for_router(router)
+        assert witness is not None
+        assert witness.record_count == len(journal)
+
+
 # ---------------------------------------------------------------------------
 # Commit order on the Phase 1a fixture
 # ---------------------------------------------------------------------------

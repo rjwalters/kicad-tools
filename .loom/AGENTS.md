@@ -86,6 +86,7 @@ child issues.
 hardware; dispatch skips it), `loom:abort` (abort in-flight work, returns to
 `loom:issue`). Priority: `loom:very-important` / `loom:important` (set by
 humans, Guide, Champion); order only, never a hold or an approval.
+`loom:frozen`: not now. Every agent and daemon path ignores it; only a human removes it (#11743).
 
 ### REST vs GraphQL for forge queries
 
