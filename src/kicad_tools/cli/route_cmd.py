@@ -23345,7 +23345,9 @@ def _run_main_impl(args, parser, argv) -> int:
             # source board (see _save_partial_results), not a frozen pre-pass
             # snapshot. Emit exactly one canonical-output line.
             print(f"  Canonical output: {output_path} (full route + optimize + DRC)")
-            print("  Next: kct net-status --why (diagnose stuck nets), then re-run with --timeout / --layers")
+            print(
+                "  Next: kct net-status --why (diagnose stuck nets), then re-run with --timeout / --layers"
+            )
 
     # Export failed nets to file if requested
     if getattr(args, "export_failed_nets", None) and not all_nets_routed:
