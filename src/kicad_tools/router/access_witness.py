@@ -415,7 +415,10 @@ class CommitRecord:
 
 @dataclass
 class CommitJournal:
-    """Append-only, ordered record of every copper mutation in one run.
+    """Ordered record of every copper mutation in one run.
+
+    Append-only while routing; the one exception is :meth:`truncate_to`, which
+    forgets the tail of a trial discarded without a grid rebuild (#6320).
 
     Install with :meth:`attach` on the routing grid; the router sets the
     ``(pass, iteration)`` context around each stage with :meth:`context`.
@@ -431,7 +434,11 @@ class CommitJournal:
     iteration: int = 0
 
     _ripped: set[int] = field(default_factory=set, repr=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Re-entrant (issue #6320): :meth:`truncate_to` runs from ``kct route``'s
+    # Ctrl+C handler, which executes on the main thread between bytecodes --
+    # possibly while that same thread is inside :meth:`observe`.  A plain
+    # ``Lock`` would deadlock the handler against its own thread.
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     # -- context ---------------------------------------------------------
 
@@ -488,6 +495,70 @@ class CommitJournal:
                     vias=tuple(_copy_vias(route.vias)),
                 )
             )
+
+    # -- rewinding --------------------------------------------------------
+
+    def mark(self) -> tuple[int, bool]:
+        """``(length, truncated)`` now: the argument pair for :meth:`truncate_to`.
+
+        Take it where a caller may later want to forget everything journaled
+        after this point -- e.g. at the start of a placement trial that may be
+        discarded without the grid ever being rebuilt (issue #6320).
+        """
+        with self._lock:
+            return len(self.records), self.truncated
+
+    def truncate_to(self, length: int, truncated: bool | None = None) -> int:
+        """Forget every record from index ``length`` on; return how many went.
+
+        For a caller that discards copper by restoring a snapshot of
+        ``router.routes`` *without* re-deriving the grid -- the partial save of
+        an interrupted placement-delta trial (issue #6320).  That restore emits
+        no grid events, so without this the journal would go on describing the
+        discarded trial's copper (its ``resync_remove`` of every route and its
+        re-route's commits) beside a saved board that does not contain it, and
+        a :func:`replay` of it would attribute stranded pads to commits that
+        were thrown away.  A restore that DOES rebuild the grid journals the
+        removal and re-mark explicitly and must not truncate.
+
+        Args:
+            length: The journal length to keep -- the first element of a
+                :meth:`mark` taken before the discarded work began.  Values
+                past the current length keep everything.
+            truncated: The :attr:`truncated` flag to restore (the second
+                element of that :meth:`mark`).  ``None`` leaves it alone.  A
+                trial that hit :data:`MAX_JOURNAL_RECORDS` set the flag for
+                records that are now being discarded anyway, so the caller
+                normally passes the pre-trial value back.
+
+        The rip bookkeeping that classifies a later re-mark as ``restore``
+        rather than ``commit`` is recomputed from the kept prefix, so a route
+        ripped only inside the discarded tail is a fresh ``commit`` again.
+
+        A later removal of a route whose commit was cut away (a grid rebuild
+        after the truncation retires whatever the stale grid still held) is
+        harmless: :func:`replay` treats a removal that matches nothing it holds
+        as a no-op.
+        """
+        if length < 0:
+            raise ValueError(f"cannot truncate a commit journal to {length} records")
+        with self._lock:
+            dropped = max(0, len(self.records) - length)
+            if dropped:
+                del self.records[length:]
+                ripped: set[int] = set()
+                for record in self.records:
+                    if not record.added:
+                        ripped.add(record.route_id)
+                    elif record.kind != "rollback":
+                        # A ``commit`` / ``restore`` re-lands the route.  A
+                        # resync's ``rollback`` addition does not clear the rip,
+                        # matching :meth:`observe`.
+                        ripped.discard(record.route_id)
+                self._ripped = ripped
+            if truncated is not None:
+                self.truncated = bool(truncated)
+            return dropped
 
     def attach(self, grid: Any) -> None:
         """Install this journal as ``grid.commit_observer``."""
