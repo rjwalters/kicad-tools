@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """Adaptive and combined flows save a ``_partial`` from the FIRST tier (#6625).
 
 ``route_with_rule_relaxation`` (``--adaptive-rules``) and
@@ -75,7 +76,7 @@ def _ctrl_c():
 
 @pytest.mark.parametrize("flow", list(_FLOWS))
 class TestFirstTierInterrupt:
-    def test_deadline_saves_partial(self, monkeypatch, board, control, flow):  # noqa: F811
+    def test_deadline_saves_partial(self, monkeypatch, board, control, flow):
         source, output = board
         hook = _Hook(monkeypatch, interrupt=_deadline)
 
@@ -93,7 +94,7 @@ class TestFirstTierInterrupt:
         # The in-flight tier is not a completed attempt.
         assert not hook.state_at_interrupt.get("best_completed_attempt")
 
-    def test_ctrl_c_saves_partial(self, monkeypatch, board, flow):  # noqa: F811
+    def test_ctrl_c_saves_partial(self, monkeypatch, board, flow):
         source, output = board
         hook = _Hook(monkeypatch, interrupt=_ctrl_c)
 
@@ -108,7 +109,7 @@ class TestFirstTierInterrupt:
         monkeypatch,
         board,
         control,
-        flow,  # noqa: F811
+        flow,
     ):
         source, output = board
         hook = _Hook(monkeypatch, interrupt=_deadline, interrupt_on=2)
