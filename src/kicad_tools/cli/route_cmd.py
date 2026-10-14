@@ -10370,6 +10370,8 @@ def route_with_layer_escalation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -11808,6 +11810,8 @@ def route_with_rule_relaxation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -14337,6 +14341,8 @@ def route_with_combined_escalation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -18941,7 +18947,10 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Automatically create copper pour zones for power-classified "
             "nets (GND, VCC, etc.) when the input PCB has none "
-            "(default: enabled). Use --no-auto-pour to disable."
+            "(default: enabled). A net the --net-class-map declares routed "
+            "(is_pour_net=false and route_via other than 'pour') is never "
+            "auto-poured, whatever its name; --skip-nets still forces a pour. "
+            "Use --no-auto-pour to disable."
         ),
     )
     parser.add_argument(
@@ -20511,6 +20520,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
