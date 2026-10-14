@@ -413,12 +413,45 @@ def measure_pairs(routed: Path, net_class_map, layers: int, log_text: str = "") 
                 "log_threshold": log["log_thresholds"].get(f"{pname}/{nname}"),
             }
         )
+        # Issue #6443: where the limit came from, what a breach costs, and the
+        # P5 stretch figure (reported, never a gate).
+        row = out[-1]
+        skew = row["skew_mm"]
+        row.update(
+            {
+                "protocol": thr.protocol,
+                "skew_source": thr.skew_source,
+                "skew_severity": thr.skew_severity,
+                "skew_pass": None if skew is None else skew <= thr.skew_mm + 1e-6,
+                "skew_stretch_mm": thr.skew_stretch_mm,
+                "skew_stretch_pass": None if skew is None else skew <= thr.skew_stretch_mm + 1e-6,
+                "max_uncoupled_per_terminal_mm": thr.max_uncoupled_per_terminal_mm,
+                "max_vias_per_net": thr.max_vias_per_net,
+            }
+        )
     return out
+
+
+#: Keys that describe a pair's limits, not its copper.  They stay out of
+#: :func:`pair_digest` so a rule change alone never reads as a routing change.
+_LIMIT_KEYS = frozenset(
+    {
+        "log_threshold",
+        "protocol",
+        "skew_source",
+        "skew_severity",
+        "skew_pass",
+        "skew_stretch_mm",
+        "skew_stretch_pass",
+        "max_uncoupled_per_terminal_mm",
+        "max_vias_per_net",
+    }
+)
 
 
 def pair_digest(pairs: list[dict]) -> str:
     """Hash of the pair metrics -- what two runs must share to be 'identical'."""
-    keep = [{k: v for k, v in p.items() if k != "log_threshold"} for p in pairs]
+    keep = [{k: v for k, v in p.items() if k not in _LIMIT_KEYS} for p in pairs]
     return hashlib.sha256(json.dumps(keep, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -545,6 +578,37 @@ def render(rows: list[dict]) -> str:
             f"{r.get('kct_errors_by_rule') or '-'} | {r.get('kicad_cli_errors_by_type') or '-'} | "
             f"{r.get('kicad_drc_unconnected', '-')} | {r.get('manufacturable')} | {r.get('wall_s', '-')} |"
         )
+    return "\n".join(out)
+
+
+def render_pairs(rows: list[dict]) -> str:
+    """One line per pair: skew against its limit, the limit's source, the stretch figure."""
+    out = [
+        "| Board | Engine | Seed | Pair | Outcome | Routed P/N mm | Skew mm | Limit mm | Source | "
+        "Severity | Skew | Stretch (mm) | Uncoupled mm | Vias P/N |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    ]
+
+    def verdict(value) -> str:
+        return "-" if value is None else ("pass" if value else "FAIL")
+
+    for r in rows:
+        for p in r.get("pairs") or []:
+            routed = p.get("routed_mm") or ["-", "-"]
+            skew = p.get("skew_mm")
+            stretch = p.get("skew_stretch_mm")
+            stretch_cell = (
+                "-" if stretch is None else f"{verdict(p.get('skew_stretch_pass'))} ({stretch})"
+            )
+            out.append(
+                f"| {r['board']} | {r['engine']} | {r['seed']} | {p['pair']} | "
+                f"{p.get('outcome') or '-'} | {routed[0]}/{routed[1]} | "
+                f"{'-' if skew is None else skew} | {p.get('skew_tolerance_mm')} | "
+                f"{p.get('skew_source', '-')} | {p.get('skew_severity', '-')} | "
+                f"{verdict(p.get('skew_pass'))} | "
+                f"{stretch_cell} | "
+                f"{p.get('uncoupled_mm')} | {p.get('vias_p')}/{p.get('vias_n')} |"
+            )
     return "\n".join(out)
 
 
@@ -688,8 +752,12 @@ def _cmd_summary(args) -> int:
     for path in args.files:
         doc = json.loads(path.read_text())
         print(f"### {path.name}\n")
-        print(render([r for r in doc["rows"] if r.get("rep", 0) == 0]))
+        rows = [r for r in doc["rows"] if r.get("rep", 0) == 0]
+        print(render(rows))
         print()
+        if args.pairs:
+            print(render_pairs(rows))
+            print()
     return 0
 
 
@@ -737,6 +805,11 @@ def main(argv: list[str] | None = None) -> int:
     rem.set_defaults(func=_cmd_remeasure)
     summ = sub.add_parser("summary", help="markdown table of one or more result files")
     summ.add_argument("files", type=Path, nargs="+")
+    summ.add_argument(
+        "--pairs",
+        action="store_true",
+        help="also print one line per pair: skew, limit, the limit's source, stretch figure",
+    )
     summ.set_defaults(func=_cmd_summary)
     mrg = sub.add_parser("merge", help="combine result files (later files replace earlier cells)")
     mrg.add_argument("files", type=Path, nargs="+")

@@ -944,12 +944,14 @@ class DRCChecker:
             context to supply ``skew_data``).
         """
         from kicad_tools.validate.diffpair_engagement import derive_engagement_state
-        from kicad_tools.validate.diffpair_skew import derive_skew_data
+        from kicad_tools.validate.diffpair_skew import derive_skew_limits
 
         if self.net_class_map is None:
             self._warn_inactive_skew_rule("diffpair_length_skew")
 
-        skew_data, skew_threshold_map = derive_skew_data(
+        # Issue #6443: the limit, its provenance and its severity all come
+        # from the one resolver (class field > protocol default > generic).
+        skew_data, limits = derive_skew_limits(
             self.pcb,
             self.net_class_map,
             board_thickness_mm=self.design_rules.board_thickness_mm,
@@ -959,8 +961,10 @@ class DRCChecker:
         rule = DiffPairLengthSkewRule(
             skew_data=skew_data,
             engaged_pairs=engaged_pairs,
-            threshold_map=skew_threshold_map,
+            threshold_map={key: t.skew_mm for key, t in limits.items()},
             emit_info=self._emit_skew_info,
+            severity_map={key: t.skew_severity for key, t in limits.items()},
+            source_map={key: t.skew_source for key, t in limits.items()},
         )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 

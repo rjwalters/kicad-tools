@@ -184,35 +184,37 @@ class TestDifferentialPairRules:
 
     def test_usb2_rules(self):
         """Test USB 2.0 differential pair rules."""
-        rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
+        rules = DifferentialPairRules.for_pair_type(DifferentialPairType.USB2)
         assert rules.spacing == 0.2
         assert rules.max_length_delta == 2.5
         assert rules.impedance == 90.0
 
     def test_usb3_rules(self):
         """Test USB 3.0 differential pair rules."""
-        rules = DifferentialPairRules.for_type(DifferentialPairType.USB3)
+        rules = DifferentialPairRules.for_pair_type(DifferentialPairType.USB3)
         assert rules.spacing == 0.15
-        assert rules.max_length_delta == 0.5
+        # Issue #6443: the protocol table's USB3_SS value (was 0.5 in the
+        # private for_type table, 0.1 in the recipe guide).
+        assert rules.max_length_delta == 0.1
         assert rules.impedance == 90.0
 
     def test_ethernet_rules(self):
         """Test Ethernet differential pair rules."""
-        rules = DifferentialPairRules.for_type(DifferentialPairType.ETHERNET)
+        rules = DifferentialPairRules.for_pair_type(DifferentialPairType.ETHERNET)
         assert rules.spacing == 0.2
         assert rules.max_length_delta == 2.0
         assert rules.impedance == 100.0
 
     def test_hdmi_rules(self):
         """Test HDMI differential pair rules."""
-        rules = DifferentialPairRules.for_type(DifferentialPairType.HDMI)
+        rules = DifferentialPairRules.for_pair_type(DifferentialPairType.HDMI)
         assert rules.spacing == 0.15
         assert rules.max_length_delta == 0.5
         assert rules.impedance == 100.0
 
     def test_lvds_rules(self):
         """Test LVDS differential pair rules."""
-        rules = DifferentialPairRules.for_type(DifferentialPairType.LVDS)
+        rules = DifferentialPairRules.for_pair_type(DifferentialPairType.LVDS)
         assert rules.spacing == 0.15
         assert rules.max_length_delta == 0.5
         assert rules.impedance == 100.0

@@ -91,7 +91,8 @@ if TYPE_CHECKING:
 #   USB 3.0 / PCIe Gen 2+ : ~0.5-1 mm budget
 #   MIPI D-PHY             : ~1 mm budget
 #   DDR4 DQ-strobe         : ~0.5 mm budget
-#   USB 2.0 HS/FS          : ~3 mm budget (loose -- set explicitly per class)
+#   USB 2.0 FS / HS        : 2.5 mm / 1.27 mm -- declare ``pair_protocol``
+#                            (Issue #6443, ``router/pair_protocols.py``)
 #
 # 0.5 mm is a sane middle ground that fires on egregious failures while
 # not nagging on routine USB HS work.  Tighter classes (PCIe Gen 3+,
@@ -162,6 +163,8 @@ class DiffPairLengthSkewRule(DRCRule):
         threshold_map: dict[tuple[int, int], float] | None = None,
         default_tolerance_mm: float = DEFAULT_SKEW_TOLERANCE_MM,
         emit_info: bool = False,
+        severity_map: dict[tuple[int, int], str] | None = None,
+        source_map: dict[tuple[int, int], str] | None = None,
     ) -> None:
         """Initialize the rule.
 
@@ -191,6 +194,14 @@ class DiffPairLengthSkewRule(DRCRule):
                 ``kct check --verbose`` surface per-pair measurements even
                 on a clean board (Issue #3917 AC5).  Defaults to False
                 (no advisory noise on the default, non-verbose path).
+            severity_map: Optional per-pair severity of an over-skew
+                finding (``"error"`` or ``"warning"``), keyed like
+                ``threshold_map``.  Missing pairs are errors.  A limit
+                taken from an ``uncited`` protocol default is a warning
+                (Issue #6443): a number nobody sourced must not gate.
+            source_map: Optional per-pair provenance of the limit (e.g.
+                ``"protocol:USB2_FS (Renesas ...)"``), appended to the
+                finding's message.
         """
         # Normalize skew_data keys -- name tuples sorted lexicographically
         # so the caller does not have to maintain P/N ordering.
@@ -213,6 +224,12 @@ class DiffPairLengthSkewRule(DRCRule):
 
         self._default_tolerance_mm = default_tolerance_mm
         self._emit_info = emit_info
+
+        def _norm(src: dict[tuple[int, int], str] | None) -> dict[tuple[int, int], str]:
+            return {((a, b) if a <= b else (b, a)): v for (a, b), v in (src or {}).items()}
+
+        self._severity_map = _norm(severity_map)
+        self._source_map = _norm(source_map)
 
     def check(
         self,
@@ -291,6 +308,8 @@ class DiffPairLengthSkewRule(DRCRule):
                         name_b=name_b,
                         skew_mm=skew_mm,
                         tolerance_mm=tolerance_mm,
+                        severity=self._severity_map.get(key, "error"),
+                        source=self._source_map.get(key),
                     )
                 )
             elif self._emit_info:
@@ -303,6 +322,7 @@ class DiffPairLengthSkewRule(DRCRule):
                         name_b=name_b,
                         skew_mm=skew_mm,
                         tolerance_mm=tolerance_mm,
+                        source=self._source_map.get(key),
                     )
                 )
 
@@ -314,15 +334,17 @@ class DiffPairLengthSkewRule(DRCRule):
         name_b: str,
         skew_mm: float,
         tolerance_mm: float,
+        source: str | None = None,
     ) -> DRCViolation:
         """Build an ``info`` DRCViolation for a passing engaged pair."""
         first, second = sorted([name_a, name_b])
+        suffix = f" [{source}]" if source else ""
         return DRCViolation(
             rule_id=self.rule_id,
             severity="info",
             message=(
                 f"Engaged differential pair {first}/{second} length-skew "
-                f"{skew_mm:.3f} mm within tolerance {tolerance_mm:.3f} mm"
+                f"{skew_mm:.3f} mm within tolerance {tolerance_mm:.3f} mm{suffix}"
             ),
             location=None,
             layer=None,
@@ -338,16 +360,19 @@ class DiffPairLengthSkewRule(DRCRule):
         name_b: str,
         skew_mm: float,
         tolerance_mm: float,
+        severity: str = "error",
+        source: str | None = None,
     ) -> DRCViolation:
         """Build a DRCViolation for an over-skew engaged pair."""
         # Stable lexicographic naming so reports don't flap.
         first, second = sorted([name_a, name_b])
+        suffix = f" [{source}]" if source else ""
         return DRCViolation(
             rule_id=self.rule_id,
-            severity="error",
+            severity=severity,
             message=(
                 f"Engaged differential pair {first}/{second} length-skew "
-                f"{skew_mm:.3f} mm exceeds tolerance {tolerance_mm:.3f} mm"
+                f"{skew_mm:.3f} mm exceeds tolerance {tolerance_mm:.3f} mm{suffix}"
             ),
             location=None,
             layer=None,

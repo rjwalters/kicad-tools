@@ -645,10 +645,16 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
                 net_class_map[net],
                 diffpair_partner=prefix + partner,
                 intra_pair_clearance=0.15,
+                # Issue #6443: the ATmega32U4 is a full-speed (12 Mbit/s)
+                # device, so both pairs take the USB2_FS limits from the
+                # protocol table -- 2.5 mm intra-pair skew (Renesas FS guide,
+                # Table 2) instead of the generic 0.5 mm.  0.5 mm remains the
+                # P5 stretch target (#6447).
+                pair_protocol="USB2_FS",
             )
     for net in ["USB_D+", "USB_D-"]:
         # Short USB-C/ESD branches: routing_plan.usb_geometry separately
-        # requires >=4 mm common run, <=16 mm copper, <=0.5 mm skew.
+        # requires >=4 mm common run, <=16 mm copper, <=2.5 mm skew.
         net_class_map[net] = _dc_replace(net_class_map[net], coupled_continuity_threshold=0.25)
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))

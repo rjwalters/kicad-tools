@@ -41,8 +41,17 @@ test in ``tests/test_validate_diffpair_routing_continuity.py``
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from kicad_tools.router.pair_protocols import (
+    SKEW_STRETCH_TARGET_MM,
+    PairProtocol,
+    Sourced,
+    protocol_defaults,
+    protocol_provenance,
+)
 
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
@@ -52,6 +61,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+#: Provenance of a limit no class field and no protocol supplied.
+GENERIC_PROVENANCE = "default:generic"
+
+
 @dataclass(frozen=True)
 class PairThresholds:
     """The thresholds ``kct check`` applies to one diff pair (Issue #6442).
@@ -59,11 +72,52 @@ class PairThresholds:
     ``continuity`` is a fraction (0.25 == 25 %); ``skew_mm`` is in mm.
     ``source_net`` names the net whose class supplied them (``None`` when
     neither net has a class and the module defaults apply).
+
+    Issue #6443 adds the protocol-aware limits.  Each is resolved as
+    ``class field > protocol default > generic default`` and
+    :attr:`provenance` records which of the three supplied it, per field::
+
+        {"skew_mm": "protocol:USB2_FS (Renesas, ... Table 2)"}   # table value
+        {"skew_mm": "class:USB3"}                                # explicit
+        {"skew_mm": "default:generic"}                           # 0.5 mm
+
+    :attr:`skew_severity` follows the source: a cited or explicit limit is an
+    ``error``; a limit that is an ``uncited`` table value is a ``warning``.
+    The generic 0.5 mm default stays an ``error``, as it was before #6443.
+    The uncoupled-length and via limits are resolved here but not yet
+    checked -- the rule is #6443 piece (b).
     """
 
     continuity: float
     skew_mm: float
     source_net: str | None
+    protocol: str | None = None
+    skew_severity: str = "error"
+    skew_stretch_mm: float = SKEW_STRETCH_TARGET_MM
+    max_uncoupled_per_terminal_mm: float | None = None
+    max_uncoupled_total_mm: float | None = None
+    max_vias_per_net: int | None = None
+    provenance: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def skew_source(self) -> str:
+        """Where the skew limit came from (see :attr:`provenance`)."""
+        return self.provenance.get("skew_mm", GENERIC_PROVENANCE)
+
+
+def _resolve_limit(
+    class_value: float | None,
+    table_value: Sourced | None,
+    class_name: str,
+    protocol: PairProtocol | None,
+) -> tuple[float | None, str | None, str]:
+    """One limit as ``(value, provenance, severity)``: class > protocol > none."""
+    if class_value is not None:
+        return class_value, f"class:{class_name}", "error"
+    if table_value is not None and protocol is not None:
+        severity = "error" if table_value.cited else "warning"
+        return table_value.value, protocol_provenance(protocol, table_value), severity
+    return None, None, "error"
 
 
 def resolve_pair_thresholds(
@@ -71,13 +125,17 @@ def resolve_pair_thresholds(
     p_name: str,
     n_name: str,
 ) -> PairThresholds:
-    """Resolve a pair's continuity and skew thresholds -- the single source.
+    """Resolve a pair's thresholds and their provenance -- the single source.
 
     The positive net's class wins, then the negative net's, then the rule
     defaults (one-sided-declaration policy, #2558/#2638).  Lookup is by
     NET NAME only: a class-name key is shared by every net of the class
     and, when the class has per-net variants (board 03's ``HighSpeed``),
     would report an arbitrary one of them.
+
+    Within the chosen class each limit resolves as ``class field >
+    protocol default > generic default`` (Issue #6443); the protocol
+    defaults are :data:`kicad_tools.router.pair_protocols.PROTOCOL_DEFAULTS`.
 
     Used by :func:`derive_engagement_state`, ``derive_skew_data`` and the
     router's pair report, so the three can never print different numbers
@@ -94,14 +152,53 @@ def resolve_pair_thresholds(
     nc = nc_p if nc_p is not None else nc_n
     source = p_name if nc_p is not None else (n_name if nc_n is not None else None)
     continuity = DEFAULT_COUPLED_CONTINUITY_THRESHOLD
-    skew = DEFAULT_SKEW_TOLERANCE_MM
     if nc is not None and hasattr(nc, "effective_coupled_continuity_threshold"):
         continuity = nc.effective_coupled_continuity_threshold(
             default=DEFAULT_COUPLED_CONTINUITY_THRESHOLD
         )
-    if nc is not None and hasattr(nc, "effective_skew_tolerance"):
-        skew = nc.effective_skew_tolerance(default=DEFAULT_SKEW_TOLERANCE_MM)
-    return PairThresholds(continuity=continuity, skew_mm=skew, source_net=source)
+
+    protocol: PairProtocol | None = None
+    row = None
+    if nc is not None and hasattr(nc, "effective_pair_protocol"):
+        protocol = nc.effective_pair_protocol()
+        row = protocol_defaults(protocol)
+    class_name = str(getattr(nc, "name", "") or "")
+
+    def limit(field_name: str, table_field: str) -> tuple[float | None, str | None, str]:
+        return _resolve_limit(
+            getattr(nc, field_name, None) if nc is not None else None,
+            getattr(row, table_field) if row is not None else None,
+            class_name,
+            protocol,
+        )
+
+    provenance: dict[str, str] = {}
+    skew, skew_src, skew_severity = limit("skew_tolerance_mm", "max_skew_mm")
+    if skew is None:
+        skew, skew_src, skew_severity = DEFAULT_SKEW_TOLERANCE_MM, GENERIC_PROVENANCE, "error"
+    provenance["skew_mm"] = skew_src or GENERIC_PROVENANCE
+    per_terminal, src, _sev = limit(
+        "max_uncoupled_per_terminal_mm", "max_uncoupled_per_terminal_mm"
+    )
+    if src:
+        provenance["max_uncoupled_per_terminal_mm"] = src
+    vias, src, _sev = limit("max_vias_per_net", "max_vias_per_net")
+    if src:
+        provenance["max_vias_per_net"] = src
+    total = getattr(nc, "max_uncoupled_total_mm", None) if nc is not None else None
+    if total is not None:
+        provenance["max_uncoupled_total_mm"] = f"class:{class_name}"
+    return PairThresholds(
+        continuity=continuity,
+        skew_mm=float(skew),
+        source_net=source,
+        protocol=protocol.name if protocol is not None else None,
+        skew_severity=skew_severity,
+        max_uncoupled_per_terminal_mm=per_terminal,
+        max_uncoupled_total_mm=total,
+        max_vias_per_net=int(vias) if vias is not None else None,
+        provenance=provenance,
+    )
 
 
 def pair_threshold_report(
@@ -138,7 +235,7 @@ def pair_threshold_report(
         t = resolve_pair_thresholds(net_class_map, p_name, n_name)
         lines.append(
             f"    {p_name}/{n_name}: continuity threshold {t.continuity * 100:.1f}%, "
-            f"skew tolerance {t.skew_mm:.3f} mm"
+            f"skew tolerance {t.skew_mm:.3f} mm [{t.skew_source}; {t.skew_severity}]"
         )
     return sorted(lines)
 

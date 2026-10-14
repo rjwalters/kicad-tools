@@ -20,6 +20,11 @@ from kicad_tools.manufacturers.fabrication_overrides import (
     discover_fabrication_overrides_sidecar,
     load_fabrication_overrides,
 )
+from kicad_tools.router.pair_protocols import (
+    PROTOCOL_DEFAULTS,
+    SKEW_STRETCH_TARGET_MM,
+    PairProtocol,
+)
 from kicad_tools.router.quantize import OffAngleSegmentError, verify_segment_45
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
@@ -27,6 +32,14 @@ from kicad_tools.validate.rules.clearance import CopperElement
 from kicad_tools.validate.rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
 
 PLAN = Path(__file__).with_name("routing-plan.json")
+
+# Issue #6443: USB_D is a full-speed (12 Mbit/s) pair, so its intra-pair skew
+# bound is the USB2_FS value of the protocol defaults table -- 2.5 mm, per the
+# Renesas full-speed board guide (Table 2).  It was the generic 0.5 mm, five
+# times tighter than that guidance.  0.5 mm stays the stretch target the P5
+# skew tuner (#6447) aims for; the reviewed copper sits at 0.166 mm.
+USB_FS_MAX_SKEW_MM = float(PROTOCOL_DEFAULTS[PairProtocol.USB2_FS].max_skew_mm.value)
+USB_SKEW_STRETCH_TARGET_MM = SKEW_STRETCH_TARGET_MM
 
 # Issue #5006: the board's reviewed, cited fabrication floors live in this
 # committed sidecar -- the single source of truth shared by the Python
@@ -274,9 +287,14 @@ def usb_geometry(path):
         for a, b in [("USB_D+", "USB_D-"), ("USB_D-", "USB_D+")]
     )
     skew = abs(lengths["USB_D+"] - lengths["USB_D-"])
-    if coupled < 4.0 or max(lengths["USB_D+"], lengths["USB_D-"]) > 16.0 or skew > 0.5:
+    if (
+        coupled < 4.0
+        or max(lengths["USB_D+"], lengths["USB_D-"]) > 16.0
+        or skew > USB_FS_MAX_SKEW_MM
+    ):
         raise ValueError(
-            f"USB branch bounds failed: lengths={lengths}, common={coupled}, skew={skew}"
+            f"USB branch bounds failed: lengths={lengths}, common={coupled}, skew={skew} "
+            f"(limit {USB_FS_MAX_SKEW_MM} mm)"
         )
     if max(lengths["USB_MCU_D+"], lengths["USB_MCU_D-"]) > 4.0:
         raise ValueError("MCU USB launch exceeds 4 mm")
