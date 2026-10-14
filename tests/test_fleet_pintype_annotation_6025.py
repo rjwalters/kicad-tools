@@ -38,11 +38,29 @@ ANNOTATED_BOARDS = [
         ("charlieplex_3x3.kicad_pcb", "charlieplex_3x3_routed.kicad_pcb"),
     ),
     (
+        "03-usb-joystick",
+        "usb_joystick.kicad_sch",
+        (
+            "usb_joystick.kicad_pcb",
+            "usb_joystick_routed.kicad_pcb",
+            # Readiness evidence copies are hash-pinned by readiness.json and
+            # must carry the same pad pin types as the board they witness.
+            "readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb",
+            "readiness-verification/fill-refilled/usb_joystick_routed.kicad_pcb",
+        ),
+    ),
+    (
         "09-usbc-pd-power",
         "usbc_pd_power.kicad_sch",
         ("usbc_pd_power.kicad_pcb",),
     ),
 ]
+
+#: Named mechanical/shield pads with no schematic pin (board 03's J2 joystick
+#: mounting tabs are pads ``MP``), so they legitimately carry no ``pintype``.
+UNMAPPED_MECHANICAL_PADS = {
+    "03-usb-joystick": {"J2.MP"},
+}
 
 _CASES = [
     pytest.param(board, sch, pcb, id=f"{board}/{pcb}")
@@ -72,6 +90,8 @@ def test_committed_board_is_pintype_annotated(board: str, sch: str, pcb: str) ->
         f"{fp.reference}.{pad.number}"
         for fp in PCB.load(pcb_path).footprints
         for pad in fp.pads
-        if pad.number and not pad.pintype
+        if pad.number
+        and not pad.pintype
+        and f"{fp.reference}.{pad.number}" not in UNMAPPED_MECHANICAL_PADS.get(board, ())
     ]
     assert not untyped, f"{board}/{pcb}: pads without pintype: {untyped}"
