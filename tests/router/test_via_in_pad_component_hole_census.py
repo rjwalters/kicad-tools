@@ -360,3 +360,30 @@ def test_hole_census_survives_both_worker_entry_points(tmp_path, monkeypatch):
     _run_monte_carlo_trial(payload)
     _run_evolutionary_trial(payload)
     assert seen == [False, False]
+
+
+def test_both_worker_entry_points_build_the_same_hole_index(tmp_path, monkeypatch):
+    """Issue #6347: the Monte Carlo worker installed the census after the pads
+    and the evolutionary worker before them.  Both now go through one shared
+    builder, so their physical-hole indexes are identical."""
+    import pickle
+
+    from kicad_tools.router.algorithms.evolutionary import _run_evolutionary_trial
+    from kicad_tools.router.core import Autorouter, _run_monte_carlo_trial
+
+    router = _loaded_holes(tmp_path, kind="thru_hole", ref="H1")
+    payload = pickle.loads(pickle.dumps(router._serialize_for_parallel()))
+    payload.update(
+        trial_num=0, seed=1, base_order=[], use_negotiated=False, chrom_idx=0, net_order=None
+    )
+    seen = []
+
+    def inspect_worker(worker, *_args, **_kwargs):
+        seen.append(list(worker.grid._component_hole_index.holes))
+        return []
+
+    monkeypatch.setattr(Autorouter, "route_all", inspect_worker)
+    _run_monte_carlo_trial(payload)
+    _run_evolutionary_trial(payload)
+    assert len(seen) == 2 and seen[0]
+    assert seen[0] == seen[1]
