@@ -3237,10 +3237,13 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
             return "continuity"
         if rule_id == "diffpair_uncoupled_length":
             from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+                is_per_terminal_finding,
                 is_via_count_finding,
             )
 
-            return "vias" if is_via_count_finding(v) else "uncoupled"
+            if is_via_count_finding(v):
+                return "vias"
+            return "uncpl/term" if is_per_terminal_finding(v) else "uncoupled"
         return "skew"
 
     rows: list[tuple[str, str, str, str, str]] = []
