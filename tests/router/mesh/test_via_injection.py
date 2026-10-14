@@ -297,32 +297,102 @@ def test_single_net_route_is_inert_no_vias() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_through_via_f_to_b_with_inner_layers_reserved() -> None:
-    rules = DesignRules(allowed_layers=["F.Cu", "B.Cu"])
+_OUTLINE_40x30 = [(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)]
+
+
+def _f_to_b_board(rules):
     stack = LayerStack.four_layer_all_signal()
-    outline = [(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)]
     start = _pad(5.0, 15.0, 1, "A1", layer=Layer.F_CU)
     end = _pad(35.0, 15.0, 1, "A2", layer=Layer.B_CU)
-    pf = MeshPathfinder(outline, [start, end], rules, layer_stack=stack)
-    res = pf._route_via_injection(start, end, None, {}, present_cost_factor=0.0)
-    assert res is not None
+    return MeshPathfinder(_OUTLINE_40x30, [start, end], rules, layer_stack=stack), start, end
+
+
+def _route_capturing_corridor(monkeypatch, pf, start, end, net_class=None):
+    """Run the layered via-injection search and capture the A* corridor.
+
+    The emitted copper alone cannot discriminate reservation: on an open
+    board the unreserved corridor passes In1/In2 only as zero-length runs and
+    every mesh via is ``(top, bottom)`` by construction.  The corridor's layer
+    sequence is what the search actually visited.
+    """
+    from kicad_tools.router.mesh.navmesh import NavMesh
+
+    captured: list = []
+    real = NavMesh.astar_layered
+
+    def spy(self, *args, **kwargs):
+        corridor = real(self, *args, **kwargs)
+        captured.append(corridor)
+        return corridor
+
+    monkeypatch.setattr(NavMesh, "astar_layered", spy)
+    res = pf._route_via_injection(start, end, net_class, {}, present_cost_factor=0.0)
+    assert captured, "layered A* was never invoked"
+    return res, captured[-1]
+
+
+def _layer_sequence(corridor) -> list[int]:
+    """Distinct consecutive layers the corridor visits (``LayeredStep[1]``)."""
+    seq: list[int] = []
+    for step in corridor:
+        if not seq or seq[-1] != step[1]:
+            seq.append(step[1])
+    return seq
+
+
+def test_unreserved_corridor_steps_through_every_layer(monkeypatch) -> None:
+    """Control: with no reservation the via hops are adjacent-layer, so the
+    F.Cu -> B.Cu corridor walks 0 -> 1 -> 2 -> 3."""
+    pf, start, end = _f_to_b_board(DesignRules())
+    res, corridor = _route_capturing_corridor(monkeypatch, pf, start, end)
+    assert res is not None and corridor is not None
+    assert _layer_sequence(corridor) == [0, 1, 2, 3]
+
+
+def test_through_via_f_to_b_with_inner_layers_reserved(monkeypatch) -> None:
+    """AC1: with In1/In2 reserved the search hops F.Cu -> B.Cu in ONE via
+    step that spans the reserved layers, and emits a (F, B) through-via."""
+    pf, start, end = _f_to_b_board(DesignRules(allowed_layers=["F.Cu", "B.Cu"]))
+    res, corridor = _route_capturing_corridor(monkeypatch, pf, start, end)
+    assert res is not None and corridor is not None
+    assert _layer_sequence(corridor) == [0, 3]
+    via_hops = [
+        (corridor[i - 1][1], corridor[i][1]) for i in range(1, len(corridor)) if corridor[i][3]
+    ]
+    assert via_hops == [(0, 3)]
     route, _ = res
     assert route.vias and route.vias[0].layers == (Layer.F_CU, Layer.B_CU)
     assert {s.layer for s in route.segments} == {Layer.F_CU, Layer.B_CU}
 
 
-def _f_to_b_board(rules):
-    stack = LayerStack.four_layer_all_signal()
-    outline = [(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)]
-    start = _pad(5.0, 15.0, 1, "A1", layer=Layer.F_CU)
-    end = _pad(35.0, 15.0, 1, "A2", layer=Layer.B_CU)
-    return MeshPathfinder(outline, [start, end], rules, layer_stack=stack), start, end
-
-
-def test_reserved_inner_layers_carry_no_signal_copper() -> None:
+def test_reserved_inner_layers_carry_no_signal_copper(monkeypatch) -> None:
+    """AC3: no corridor step -- in-layer move or via landing -- is on a
+    reserved layer, so no signal copper can be laid there."""
     pf, start, end = _f_to_b_board(DesignRules(allowed_layers=["F.Cu", "B.Cu"]))
-    route, _ = pf._route_via_injection(start, end, None, {}, present_cost_factor=0.0)
-    assert {s.layer for s in route.segments} <= {Layer.F_CU, Layer.B_CU}
+    res, corridor = _route_capturing_corridor(monkeypatch, pf, start, end)
+    assert res is not None and corridor is not None
+    assert not {step[1] for step in corridor} & {1, 2}
+    assert {s.layer for s in res[0].segments} <= {Layer.F_CU, Layer.B_CU}
+
+
+def test_allowed_layers_mutation_after_construction_is_honoured(monkeypatch) -> None:
+    """AC4: the escalation ladder mutates the shared ``rules`` in place; the
+    mesh pathfinder must read ``allowed_layers`` at call time, both ways."""
+    rules = DesignRules()
+    pf, start, end = _f_to_b_board(rules)
+    res, corridor = _route_capturing_corridor(monkeypatch, pf, start, end)
+    assert res is not None and corridor is not None
+    assert _layer_sequence(corridor) == [0, 1, 2, 3]
+
+    rules.allowed_layers = ["F.Cu", "B.Cu"]
+    res, corridor = _route_capturing_corridor(monkeypatch, pf, start, end)
+    assert res is not None and corridor is not None
+    assert _layer_sequence(corridor) == [0, 3]
+
+    rules.allowed_layers = None
+    res, corridor = _route_capturing_corridor(monkeypatch, pf, start, end)
+    assert res is not None and corridor is not None
+    assert _layer_sequence(corridor) == [0, 1, 2, 3]
 
 
 def test_hard_avoid_layers_honoured() -> None:
