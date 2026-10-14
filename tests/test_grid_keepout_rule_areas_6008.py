@@ -401,6 +401,73 @@ def test_trial_reset_and_worker_payload_keep_rule_areas(tmp_path: Path) -> None:
     assert worker.grid._blocked[0, gy, gx]
 
 
+def _worker_entry_points():
+    from kicad_tools.router.algorithms.evolutionary import _run_evolutionary_trial
+    from kicad_tools.router.core import _run_monte_carlo_trial
+
+    return [_run_monte_carlo_trial, _run_evolutionary_trial]
+
+
+def _inspect_worker_rule_areas(payload: dict, monkeypatch) -> list[tuple[int, bool]]:
+    """Run both trial workers on ``payload``; per worker, record how many
+    rule areas its grid installs and whether the wall cell ends up blocked."""
+    from kicad_tools.router.core import Autorouter
+
+    gx = gy = None
+    seen: list[tuple[int, bool]] = []
+
+    def inspect(worker, *_args, **_kwargs):
+        nonlocal gx, gy
+        installed = worker._install_grid_rule_area_keepouts()
+        gx, gy = worker.grid.world_to_grid(115.0, 108.0)
+        seen.append((installed, bool(worker.grid._blocked[0, gy, gx])))
+        return []
+
+    monkeypatch.setattr(Autorouter, "route_all", inspect)
+    for run in _worker_entry_points():
+        run(payload)
+    return seen
+
+
+@pytest.mark.parametrize("force_python", BACKENDS)
+def test_both_trial_workers_install_rule_areas(
+    tmp_path: Path, force_python: bool, monkeypatch
+) -> None:
+    """Issue #6347: evolutionary trials dropped the #6008 ``rule_area_keepouts``
+    payload that Monte Carlo trials installed -- both now share one builder."""
+    import pickle
+
+    router = _load(tmp_path, _board(_wall()), force_python)
+    router._install_grid_rule_area_keepouts()
+    payload = pickle.loads(pickle.dumps(router._serialize_for_parallel()))
+    assert payload["force_python"] is force_python
+    payload.update(
+        trial_num=0, seed=1, base_order=[], use_negotiated=False, chrom_idx=0, net_order=None
+    )
+    assert _inspect_worker_rule_areas(payload, monkeypatch) == [(1, True), (1, True)]
+
+    # Present but empty: the parent resolved no areas, so none install.
+    payload["rule_area_keepouts"] = []
+    assert _inspect_worker_rule_areas(payload, monkeypatch) == [(0, False), (0, False)]
+
+    # Older payload without the key: no source board, therefore no areas.
+    del payload["rule_area_keepouts"]
+    assert _inspect_worker_rule_areas(payload, monkeypatch) == [(0, False), (0, False)]
+
+
+def test_trial_workers_share_one_router_builder() -> None:
+    """Issue #6347: one construction site, so payload keys cannot drift."""
+    import inspect
+
+    from kicad_tools.router.core import build_worker_router
+
+    for run in _worker_entry_points():
+        source = inspect.getsource(run)
+        assert "build_worker_router(config)" in source, run.__name__
+        assert "add_pad" not in source, run.__name__
+    assert "rule_area_keepouts" in inspect.getsource(build_worker_router)
+
+
 # ---------------------------------------------------------------------------
 # Unrouted-cause classifier (#5944) names the rule area
 # ---------------------------------------------------------------------------
