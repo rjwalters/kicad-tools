@@ -37,6 +37,25 @@ _BOARD00 = textwrap.dedent(
     """
 )
 
+_BOARD01 = textwrap.dedent(
+    """
+    import contextlib, importlib.util, io, sys
+    from pathlib import Path
+
+    gen = Path(sys.argv[1])
+    sys.path.insert(0, str(gen.parent))
+    spec = importlib.util.spec_from_file_location("board01_generate_design", gen)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    with contextlib.redirect_stdout(io.StringIO()):
+        spec.loader.exec_module(mod)
+        for out in sys.argv[2:]:
+            sch = mod.create_voltage_divider_schematic(Path(out))
+            pcb = mod.create_voltage_divider_pcb(Path(out))
+            mod.annotate_pcb_file_pintypes(pcb, sch)
+    """
+)
+
 _BOARD06_PCB = textwrap.dedent(
     """
     import importlib.util, sys
@@ -95,3 +114,21 @@ def test_board06_pcb_generator_is_byte_reproducible():
     first = _run(_BOARD06_PCB, [gen], seed="0")
     assert first == _run(_BOARD06_PCB, [gen], seed="987")
     assert '(uuid "' in first
+
+
+def test_board01_design_capture_equals_committed(tmp_path):
+    """Board 01's generator is the producer of its committed design files (#6354).
+
+    Covers the schematic and unrouted PCB (including the four literal
+    ``(model ...)`` 3D blocks).  The routed PCB is deliberately not compared:
+    that would fail on every legitimate router change.
+    """
+    _require_symbol_libs()
+    board = REPO_ROOT / "boards" / "01-voltage-divider"
+    a, b = tmp_path / "a", tmp_path / "b"
+    _run(_BOARD01, [str(board / "generate_design.py"), str(a), str(b)], seed="1")
+    for name in ("voltage_divider.kicad_sch", "voltage_divider.kicad_pcb"):
+        committed = (board / "output" / name).read_bytes()
+        assert (a / name).read_bytes() == committed, f"{name}: differs from committed"
+        assert (b / name).read_bytes() == committed, f"{name}: second in-process run differs"
+    assert (a / "voltage_divider.kicad_pcb").read_bytes().count(b"(model ") == 4
