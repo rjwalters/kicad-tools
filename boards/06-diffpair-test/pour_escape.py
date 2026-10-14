@@ -17,6 +17,10 @@ from kicad_tools.manufacturers.dru_generator import (
     DRU_FLOORS_BLOCK_BEGIN,
     DRU_FLOORS_BLOCK_END,
 )
+from kicad_tools.manufacturers.netclass_dru import (
+    DRU_PAIR_GAP_BLOCK_BEGIN,
+    DRU_PAIR_GAP_BLOCK_END,
+)
 
 # Rule-name families the fab-floors generator (Issue #4600) can emit that
 # this escape search folds into its physical minima: family -> (the KiCad
@@ -77,6 +81,76 @@ _DRU_RULE_RE = re.compile(
     r"\s*\(constraint (?P<constraint>\w+) \(min (?P<value>[0-9.]+)mm\)\)\)"
 )
 
+# Issue #6443: the router's managed diff-pair block
+# (:func:`kicad_tools.manufacturers.netclass_dru.merge_pair_gap_block`) may sit
+# next to the fab floors.  Rule-name prefix -> the exact constraint shape that
+# prefix must carry.  ``diff_pair_gap`` is a *minimum* spacing between the two
+# halves of a pair; it is folded board-wide into ``clearance`` (conservative:
+# every escape path then keeps at least that much from other-net copper,
+# the pair partner included).  ``skew``, ``diff_pair_uncoupled`` and
+# ``via_count`` are *maximum* length/count limits on the pair's own routing,
+# not copper-spacing minima, so they cannot be violated by the clearance this
+# search keeps; they are ignored.  Any other stanza in the block fails closed.
+_PAIR_BLOCK_RULES = {
+    "kct diff pair gap - ": re.compile(r"diff_pair_gap \(min (?P<value>[0-9.]+)mm\)"),
+    "kct diff pair uncoupled - ": re.compile(r"diff_pair_uncoupled \(max [0-9.]+mm\)"),
+    "kct diff pair skew - ": re.compile(r"skew \(max [0-9.]+mm\)(?: \(within_diff_pairs\))?"),
+    "kct diff pair vias - ": re.compile(r"via_count \(max \d+\)"),
+}
+_PAIR_RULE_RE = re.compile(
+    r'\(rule "(?P<name>[^"]+)"\n'
+    r'\s*\(condition "(?P<condition>[^"]*)"\)\n'
+    r"\s*\(constraint (?P<constraint>[^\n]+?)\)"
+    r"(?:\n\s*\(severity (?:warning|error|ignore)\))?\)"
+)
+
+
+def _pair_block_minima(block_inner: str) -> dict[str, float] | None:
+    """Minima from the router diff-pair block, or ``None`` on any unknown stanza."""
+    lines = [line for line in block_inner.splitlines() if not line.strip().startswith("#")]
+    inner = "\n".join(lines).strip("\n")
+    minima: dict[str, float] = {}
+    if not inner.strip():
+        return minima
+    for stanza in re.split(r"\n(?=\(rule )", inner):
+        match = _PAIR_RULE_RE.fullmatch(stanza.strip())
+        if match is None:
+            return None
+        name = match.group("name")
+        shape = next((rx for p, rx in _PAIR_BLOCK_RULES.items() if name.startswith(p)), None)
+        if shape is None:
+            return None  # unknown rule in the managed pair block -- fail closed
+        constraint = shape.fullmatch(match.group("constraint"))
+        if constraint is None:
+            return None  # the prefix's constraint shape changed -- fail closed
+        if "value" in constraint.groupdict():
+            value = float(constraint.group("value"))
+            minima["clearance"] = max(minima.get("clearance", 0.0), value)
+    return minima
+
+
+def _split_pair_block(dru_text: str) -> tuple[str, dict[str, float]] | None:
+    """Remove the router diff-pair block from ``dru_text`` and parse it.
+
+    Returns ``(remaining text, minima)``; ``None`` when the block is malformed
+    (unbalanced or repeated sentinels) or carries a stanza we do not model.
+    A file without the block passes through unchanged with no minima.
+    """
+    begins = dru_text.count(DRU_PAIR_GAP_BLOCK_BEGIN)
+    ends = dru_text.count(DRU_PAIR_GAP_BLOCK_END)
+    if begins == 0 and ends == 0:
+        return dru_text, {}
+    if begins != 1 or ends != 1:
+        return None
+    start = dru_text.index(DRU_PAIR_GAP_BLOCK_BEGIN)
+    stop = dru_text.index(DRU_PAIR_GAP_BLOCK_END)
+    if stop < start:
+        return None
+    minima = _pair_block_minima(dru_text[start + len(DRU_PAIR_GAP_BLOCK_BEGIN) : stop])
+    if minima is None:
+        return None
+    return dru_text[:start] + dru_text[stop + len(DRU_PAIR_GAP_BLOCK_END) :], minima
+
 
 def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
     """Extract escape minima from a *pure* kct fab-floors ``.kicad_dru``.
@@ -91,7 +165,24 @@ def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
     is silently ignored. Anything else -- an unknown family (e.g. the
     net-class-scoped ampacity widths), a family with an unexpected
     constraint, condition or ``(layer ...)`` clause -- fails closed.
+
+    The one other block tolerated is the router's managed diff-pair block
+    (Issue #6443, :func:`_split_pair_block`), itself parsed strictly.
     """
+    split = _split_pair_block(dru_text)
+    if split is None:
+        return None
+    dru_text, pair_minima = split
+    minima = _floor_block_minima(dru_text)
+    if minima is None:
+        return None
+    for field, value in pair_minima.items():
+        minima[field] = max(minima.get(field, 0.0), value)
+    return minima
+
+
+def _floor_block_minima(dru_text: str) -> dict[str, float] | None:
+    """The fab-floors half of :func:`_kct_managed_floor_minima`."""
     body_lines = [
         line
         for line in dru_text.splitlines()

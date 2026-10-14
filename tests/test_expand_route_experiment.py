@@ -1063,8 +1063,9 @@ def test_grade_counts_diff_pair_errors_with_the_run_dirs_net_class_map(tmp_path,
     row, seen = _grade_offline(monkeypatch, tmp_path / "run", sidecar=True)
 
     assert row["kct_check_by_rule"]["diffpair_length_skew"] == 1
-    assert row["kct_check_by_rule"]["diffpair_routing_continuity"] == 1
-    assert row["kct_check_errors_total"] == row["kct_check_errors"] >= 2
+    # Continuity is info-only since #6443: the uncoupled pair is not an error.
+    assert "diffpair_routing_continuity" not in row["kct_check_by_rule"]
+    assert row["kct_check_errors_total"] == row["kct_check_errors"] >= 1
     assert row["kct_check_net_class_map"] == str(tmp_path / "run" / "net_class_map.json")
     assert row["kct_check_inactive_rules"] == []
     # kicad-cli: every error on a track, and the unconnected count is a column.
@@ -1082,6 +1083,7 @@ def test_grade_without_a_sidecar_says_so_instead_of_passing(tmp_path, monkeypatc
         "match_group_length_skew",
         "diffpair_length_skew",
         "diffpair_routing_continuity",
+        "diffpair_uncoupled_length",
     }
 
 
