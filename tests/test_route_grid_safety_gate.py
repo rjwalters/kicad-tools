@@ -50,7 +50,7 @@ class _GateReached(Exception):
     """Sentinel raised just past the gate to prove routing was allowed."""
 
 
-def _unsafe_selection() -> GridAutoSelection:
+def _unsafe_selection(safe_grid_cells: int | None = None) -> GridAutoSelection:
     """A selection matching the board-05 memory-coerced unsafe grid."""
     return GridAutoSelection(
         resolution=0.1,
@@ -65,6 +65,7 @@ def _unsafe_selection() -> GridAutoSelection:
         memory_budget_used=4_000_000,
         lattice_rescued=False,
         memory_forced_unsafe_grid=True,
+        safe_grid_cells=safe_grid_cells,
     )
 
 
@@ -1008,3 +1009,66 @@ class TestOuterCliForwardsExplicitDefaults:
 
     def test_explicit_default_mfr_alias_is_forwarded(self):
         assert "--manufacturer" in self._sub_argv(["--mfr", "jlcpcb"])
+
+
+# ---------------------------------------------------------------------------
+# Issue #6306: the refusal must name a concrete --max-cells value and must not
+# advise enlarging the board (a fixed cell budget makes bigger boards worse).
+# ---------------------------------------------------------------------------
+
+
+def test_refusal_names_concrete_max_cells_and_not_enlarge(tmp_path, capsys):
+    code, _ = _run_main_to_gate(tmp_path, _unsafe_selection(safe_grid_cells=2_400_000), [])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--max-cells 2,400,000" in err
+    assert "enlarge" not in err.lower()
+    assert "ceiling" not in err  # 2.4M is within the auto-bump ceiling
+    assert "--allow-unsafe-grid" in err
+
+
+def test_refusal_flags_value_above_bump_ceiling(tmp_path, capsys):
+    code, _ = _run_main_to_gate(tmp_path, _unsafe_selection(safe_grid_cells=9_000_000), [])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--max-cells 9,000,000" in err
+    assert "high memory use" in err
+
+
+def test_refusal_without_safe_cells_has_no_max_cells_option(tmp_path, capsys):
+    code, _ = _run_main_to_gate(tmp_path, _unsafe_selection(), [])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--max-cells" not in err
+    assert "enlarge" not in err.lower()
+    assert "  1. Add routing layers" in err
+
+
+def test_grid_safety_error_default_message_6306():
+    from kicad_tools.router.io import GridSafetyError
+
+    msg = str(GridSafetyError(0.1, 0.15, 500_000, safe_grid_cells=2_400_000))
+    assert "--max-cells 2,400,000" in msg
+    assert "enlarge" not in msg.lower()
+    assert "enlarge" not in str(GridSafetyError(0.1, 0.15, 500_000)).lower()
+
+
+def test_safe_grid_cells_round_trip_clears_gate():
+    """Re-running selection with the reported value clears the gate."""
+    result, _ = _select_memory_capped()
+    assert result.memory_forced_unsafe_grid is True
+    n = result.safe_grid_cells
+    assert n is not None and n > 500_000
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rerun = auto_select_grid_resolution(
+            _memory_capped_fine_pitch_pads(),
+            clearance=0.15,
+            board_width=100.0,
+            board_height=100.0,
+            max_cells=n,
+            candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+        )
+    assert rerun.memory_forced_unsafe_grid is False
+    assert rerun.safe_grid_cells is None
+    assert rerun.resolution <= 0.075

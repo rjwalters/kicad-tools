@@ -119,6 +119,31 @@ class GridResolutionError(ValueError):
         super().__init__(message)
 
 
+# Issue #6306: ceiling of the auto-grid budget retry (see
+# ``auto_select_grid_resolution``); a safe grid needing more cells than this
+# cannot be reached by the automatic bump alone.
+GRID_BUMP_CEILING = 4_000_000
+
+
+def _round_up_readable(cells: int) -> int:
+    """Round ``cells`` up to two significant digits (never down)."""
+    if cells <= 0:
+        return cells
+    magnitude = 10 ** max(len(str(cells)) - 2, 0)
+    return -(-cells // magnitude) * magnitude
+
+
+def format_max_cells_option(safe_grid_cells: int) -> str:
+    """Option text naming the concrete ``--max-cells`` value (issue #6306)."""
+    text = f"Pass --max-cells {safe_grid_cells:,} so the clearance-safe grid fits the cell budget"
+    if safe_grid_cells > GRID_BUMP_CEILING:
+        text += (
+            f" (needs ~{safe_grid_cells:,} cells, above the {GRID_BUMP_CEILING:,}-cell "
+            "auto-grid ceiling; expect high memory use)"
+        )
+    return text
+
+
 class GridSafetyError(ValueError):
     """Raised when auto-grid selection would route on a DRC-unsafe grid.
 
@@ -150,7 +175,9 @@ class GridSafetyError(ValueError):
         clearance: float,
         memory_budget_used: int | None = None,
         message: str | None = None,
+        safe_grid_cells: int | None = None,
     ):
+        self.safe_grid_cells = safe_grid_cells
         self.grid_resolution = grid_resolution
         self.clearance = clearance
         self.recommended = clearance / 2
@@ -167,8 +194,9 @@ class GridSafetyError(ValueError):
                 f"({self.recommended}mm) because the memory budget cap forced a "
                 f"coarser grid{budget}. The router's own safety rule rejects this "
                 f"grid; routing would produce clearance-violating vias/segments "
-                f"(DRC shorts). Options: enlarge/split the board, loosen the "
-                f"manufacturer clearance, add layers, or pass "
+                f"(DRC shorts). Options: "
+                f"{format_max_cells_option(safe_grid_cells) + ', ' if safe_grid_cells else ''}"
+                f"loosen the manufacturer clearance, add layers, or pass "
                 f"allow_unsafe_grid=True (CLI: --allow-unsafe-grid or --force) to "
                 f"route anyway and accept the DRC risk."
             )
@@ -951,6 +979,11 @@ class GridAutoSelection:
             0.15mm with no memory pressure) and a #3441 lattice rescue are
             intentional pad-alignment trade-offs, not memory-cap coercion, so
             they do NOT set this flag.
+        safe_grid_cells: Issue #6306. Set only when ``memory_forced_unsafe_grid``
+            is True: the ``max_cells`` value (rounded up to two significant
+            digits) at which the coarsest clearance-safe candidate
+            (``<= clearance/2``) fits the memory filter, i.e. passing exactly
+            this as ``max_cells`` / ``--max-cells`` clears the gate.
     """
 
     resolution: float
@@ -965,6 +998,7 @@ class GridAutoSelection:
     memory_budget_used: int = 0
     lattice_rescued: bool = False
     memory_forced_unsafe_grid: bool = False
+    safe_grid_cells: int | None = None
 
     def summary(self) -> str:
         """Human-readable summary of the selection."""
@@ -1507,7 +1541,7 @@ def auto_select_grid_resolution(
     # nothing is silently lost, plus we emit our own actionable warning
     # naming the memory cap as the cause.
     # ------------------------------------------------------------------
-    BUMP_CEILING = 4_000_000  # Matches compute_multi_resolution_plan ceiling
+    BUMP_CEILING = GRID_BUMP_CEILING  # Matches compute_multi_resolution_plan ceiling
     recommended_max = clearance / 2
     bumped = False
     if (
@@ -1695,6 +1729,11 @@ def auto_select_grid_resolution(
             off_grid_pct = best_off_grid / total_pads * 100 if total_pads else 0.0
             grid_unsafe_by_memory_cap = False
             memory_forced_unsafe_grid = False
+    safe_grid_cells: int | None = None
+    if memory_forced_unsafe_grid and board_width is not None and board_height is not None:
+        coarsest_safe = max(c for c in pre_memory_candidates if c <= recommended_max)
+        needed = math.ceil(board_width * board_height / (coarsest_safe * coarsest_safe))
+        safe_grid_cells = _round_up_readable(needed)
     if grid_unsafe_by_memory_cap:
         if lattice_rescued:
             # Issue #3441: the lattice rescue *chose* this grid because it
@@ -1801,6 +1840,7 @@ def auto_select_grid_resolution(
         memory_budget_used=effective_max_cells,
         lattice_rescued=lattice_rescued,
         memory_forced_unsafe_grid=memory_forced_unsafe_grid,
+        safe_grid_cells=safe_grid_cells,
     )
 
 

@@ -1763,3 +1763,12 @@ class TestShiftedCoarseGridSelection:
         assert result.clearance_compliant_at_clearance_over_2
         assert not result.memory_forced_unsafe_grid
         assert 30 * 30 / result.resolution**2 <= result.memory_budget_used
+
+
+def test_safe_grid_cells_default_none_and_rounding():
+    from kicad_tools.router.io import _round_up_readable
+
+    assert GridAutoSelection(0.1, 0, 0, 0.0, []).safe_grid_cells is None
+    assert _round_up_readable(2_366_864) == 2_400_000
+    assert _round_up_readable(2_400_000) == 2_400_000
+    assert _round_up_readable(99) == 99
