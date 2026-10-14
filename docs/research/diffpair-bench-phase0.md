@@ -301,8 +301,9 @@ routing effects show up:
 - Rule effects (#6556). `diffpair_routing_continuity` errors are gone everywhere because
   continuity is now info only. `diffpair_uncoupled_length` errors are new on 03 USB_D and
   06rf USB2_D.
-- Routing effects (#6475, #6535, #6550). The 06b grid @42/@43 baseline rows were exit-1
-  checkpoint grades (16/18). They are now finished routes at 18/18. 03 lattice @43 went
+- Routing effects (#6475, #6535, #6550). Three of the four 06b grid @42/@43 baseline rows
+  (@42 rep 0, @43 rep 0 and rep 1) were exit-1 checkpoint grades (16/18); @42 rep 1 was
+  already a finished exit-3 route at 18/18. All four are now finished routes at 18/18. 03 lattice @43 went
   from 24/27 to 26/27. 06b lattice @43 went from 16/18 to 18/18. 06rf lattice @42 went from
   16/26 to 15/26, and 06rf grid @42 from 23/26 to 22/26.
 - 06rf stays far from routed on both engines: lattice reaches 2/9 pairs coupled with 5 pairs
