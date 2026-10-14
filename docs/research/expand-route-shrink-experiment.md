@@ -1510,7 +1510,7 @@ pad more than a few tenths of a millimetre from the centroid is missed.
   vertices stay scaled):** all 181 displaced ends land on their pads
   (0 displaced of 303), and 24/27 nets reconnect. That is the only "automatic"
   repair, and it is a coordinate rule, not `drc_nudge`. It trades the
-  displacement for geometry: 342 `kct check` errors (98 `clearance_pad_segment`,
+  displacement for geometry: 342 `kct check` errors (99 `clearance_pad_segment`,
   98 `clearance_segment_via`, 68 `clearance_segment_segment`, ...) and 648
   `kicad-cli` errors, with 25 of 27 nets named in a violation. Segments that
   now join a moved end and a scaled end are no longer on the routing grid,
