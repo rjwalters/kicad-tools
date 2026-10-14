@@ -1352,11 +1352,16 @@ class RoutingClearances:
         via: The resolved via clearance (:func:`resolve_via_clearance`).
         manufacturer: The fab profile whose floor was applied, or ``None``
             when none was configured or discoverable.
+        authored_min_clearance_mm: The project's authored board minimum
+            (``.kicad_pro`` ``rules.min_clearance``), or ``None`` when it
+            declares none -- the coupled pair-gap floor (Issue #6443,
+            :attr:`~kicad_tools.router.rules.DesignRules.authored_min_clearance`).
     """
 
     trace: ResolvedClearance
     via: ResolvedClearance
     manufacturer: str | None = None
+    authored_min_clearance_mm: float | None = None
 
     @property
     def trace_mm(self) -> float:
@@ -1441,4 +1446,9 @@ def resolve_routing_clearances(
         default_mm=target_mm,
         trace_clearance_mm=trace.required_mm,
     )
-    return RoutingClearances(trace=trace, via=via, manufacturer=manufacturer)
+    return RoutingClearances(
+        trace=trace,
+        via=via,
+        manufacturer=manufacturer,
+        authored_min_clearance_mm=declared.project_min_clearance_mm,
+    )

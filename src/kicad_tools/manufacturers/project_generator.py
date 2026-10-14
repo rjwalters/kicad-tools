@@ -899,12 +899,18 @@ def _strip_managed_dru_blocks(text: str) -> str:
     """``.kicad_dru`` content outside every kct-managed block, whitespace-normalised."""
     from .dru_generator import DRU_FLOORS_BLOCK_BEGIN, DRU_FLOORS_BLOCK_END
     from .keepout_dru import DRU_KEEPOUT_BLOCK_BEGIN, DRU_KEEPOUT_BLOCK_END
-    from .netclass_dru import DRU_NETCLASS_BLOCK_BEGIN, DRU_NETCLASS_BLOCK_END
+    from .netclass_dru import (
+        DRU_NETCLASS_BLOCK_BEGIN,
+        DRU_NETCLASS_BLOCK_END,
+        DRU_PAIR_GAP_BLOCK_BEGIN,
+        DRU_PAIR_GAP_BLOCK_END,
+    )
 
     for begin, end in (
         (DRU_FLOORS_BLOCK_BEGIN, DRU_FLOORS_BLOCK_END),
         (DRU_KEEPOUT_BLOCK_BEGIN, DRU_KEEPOUT_BLOCK_END),
         (DRU_NETCLASS_BLOCK_BEGIN, DRU_NETCLASS_BLOCK_END),
+        (DRU_PAIR_GAP_BLOCK_BEGIN, DRU_PAIR_GAP_BLOCK_END),
     ):
         text = re.sub(re.escape(begin) + r".*?" + re.escape(end), "", text, flags=re.DOTALL)
     lines = [line.strip() for line in text.splitlines()]
@@ -1124,6 +1130,7 @@ def write_drc_constraints(
     preserve_board_rules: str | None = None,
     router_net_classes: Mapping[str, NetClassRouting] | None = None,
     router_coupled_pairs: Iterable[tuple[str, str]] | None = None,
+    router_pair_gaps: Iterable[tuple[str, str, float]] | None = None,
     _board_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
@@ -1178,6 +1185,15 @@ def write_drc_constraints(
     both engines skip their intra-pair gap.  ``None`` keeps whatever a
     previous route recorded.
 
+    Router pair gaps (Issue #6443): ``router_pair_gaps`` lists ``(P, N,
+    gap_mm)`` for the pairs the router coupled, each gap resolved by
+    :meth:`~kicad_tools.router.rules.DesignRules.pair_gap` -- the value the
+    router laid the pair at.  Each pair KiCad recognises by name gets one
+    native ``diff_pair_gap (min ..)`` rule in its own managed block (see
+    :func:`~kicad_tools.manufacturers.netclass_dru.pair_gap_block_rules`);
+    an empty list removes a stale block, and ``None`` leaves whatever a
+    previous route wrote.
+
     The written ``.kicad_pro`` is stamped (:func:`stamp_kct_project`).  On a
     renamed output an existing destination is replaced only when it equals
     the source, equals the merged result, or still carries a valid kct stamp
@@ -1191,6 +1207,8 @@ def write_drc_constraints(
             map (Issue #6390); see above.
         router_coupled_pairs: The router's coupled-routed ``(P, N)`` pairs
             (Issue #6429); see above.
+        router_pair_gaps: The router's ``(P, N, gap_mm)`` coupled-pair gaps
+            (Issue #6443); see above.
         preserve_board_rules: Caller override for the project's
             ``KCT_PRESERVE_BOARD_RULES`` text variable (same spellings),
             applied to both sidecars without being written into the project;
@@ -1252,6 +1270,7 @@ def write_drc_constraints(
                 preserve_board_rules=preserve_board_rules,
                 router_net_classes=router_net_classes,
                 router_coupled_pairs=router_coupled_pairs,
+                router_pair_gaps=router_pair_gaps,
                 _board_path=pcb_path,
             )
             for result in rendered:
@@ -1363,6 +1382,15 @@ def write_drc_constraints(
         merged_dru = apply_netclass_dru_rules(
             merged_dru, rules, project_data, preserve_board_rules=preserve_board_rules
         )
+        # Issue #6443: one native diff_pair_gap rule per router-coupled pair.
+        if router_pair_gaps is not None:
+            from .netclass_dru import merge_pair_gap_block, pair_gap_block_rules
+
+            gap_rules = pair_gap_block_rules(
+                router_pair_gaps, board_net_names(board) if board.exists() else None
+            )
+            merged = merge_pair_gap_block(merged_dru, gap_rules)
+            merged_dru = merged if merged is not None else merged_dru
         dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have
