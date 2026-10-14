@@ -281,15 +281,38 @@ def shrink(src: Path, routed: Path, scale: float, out_dir: Path) -> dict:
     return result
 
 
+def moved_by_route(scaled_input: Path, routed: Path, tol: float = 1e-3) -> list[str]:
+    """References whose position differs between the route's input and output."""
+    from kicad_tools.schema.pcb import PCB
+
+    a, b = PCB.load(str(scaled_input)), PCB.load(str(routed))
+    ref_b = {f.reference: f for f in b.footprints}
+    out = []
+    for f in a.footprints:
+        g = ref_b[f.reference]
+        ax, ay = f.position[0] + a.board_origin[0], f.position[1] + a.board_origin[1]
+        bx, by = g.position[0] + b.board_origin[0], g.position[1] + b.board_origin[1]
+        # 270 and -90 are the same orientation; the router re-emits the latter.
+        drot = ((f.rotation or 0.0) - (g.rotation or 0.0)) % 360.0
+        if abs(ax - bx) > tol or abs(ay - by) > tol or min(drot, 360.0 - drot) > 1e-6:
+            out.append(f.reference)
+    return sorted(out)
+
+
 def kicad_violation_nets(board: Path) -> dict:
     """Run ``kicad-cli pcb drc --refill-zones`` (JSON); map violations to net names."""
-    if shutil.which("kicad-cli") is None:
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    # Same resolver ``ere.grade`` uses: kicad-cli is often not on PATH (macOS
+    # app bundle), and a bare ``shutil.which`` then silently rips nothing.
+    cli = find_kicad_cli()
+    if cli is None:
         return {"ran": False, "nets": []}
     with tempfile.TemporaryDirectory() as td:
         rep = Path(td) / "drc.json"
         subprocess.run(
             [
-                "kicad-cli", "pcb", "drc", "--refill-zones", "--all-track-errors",
+                str(cli), "pcb", "drc", "--refill-zones", "--all-track-errors",
                 "--format", "json", "--severity-error", "-o", str(rep), str(board),
             ],
             capture_output=True, text=True, timeout=600, check=False,
@@ -343,10 +366,25 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=float, default=600)
     ap.add_argument("--json", type=Path)
     ap.add_argument("--skip-reroute", action="store_true")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--scaled-input",
+        type=Path,
+        help="the expanded, unrouted board the route started from; when given, "
+        "footprints the route itself moved (placement feedback) are counted",
+    )
+    ap.add_argument(
+        "--extra",
+        default="",
+        help="extra kct route arguments for the re-route, as one quoted string "
+        "(e.g. the lattice protocol the step-1 route used)",
+    )
     args = ap.parse_args(argv)
 
     board = ere.BOARDS[args.board]
     res = shrink(args.src, args.routed, args.scale, args.out_dir)
+    if args.scaled_input:
+        res["footprints_moved_by_route"] = moved_by_route(args.scaled_input, args.routed)
     for name in ("s0_naive", "s1_snap"):
         res[name]["grade"] = ere.grade(Path(res[name]["board"]), board)
         res[name]["kicad_nets"] = kicad_violation_nets(Path(res[name]["board"]))
@@ -360,7 +398,8 @@ def main(argv=None) -> int:
             (s1["grade"].get("stuck_nets") or {}).keys()
         )
         zone_nets = set(s1["grade"].get("zone_nets") or [])
-        bad -= {""}
+        # kicad-cli's "<no net>" bucket names no net that could be ripped.
+        bad -= {"", "<no net>"}
         inp = args.out_dir / "s2_reroute" / "in" / args.src.name
         ripped = rip_nets(Path(s1["board"]), bad, inp)
         out = args.out_dir / "s2_reroute" / args.src.stem
@@ -368,7 +407,14 @@ def main(argv=None) -> int:
         run = ere.run_route(
             inp,
             out,
-            ["--preserve-existing", "--grid", str(args.grid_mm), "--seed", "42"],
+            [
+                "--preserve-existing",
+                "--grid",
+                str(args.grid_mm),
+                "--seed",
+                str(args.seed),
+                *args.extra.split(),
+            ],
             args.timeout,
             out.parent / "route.log",
         )

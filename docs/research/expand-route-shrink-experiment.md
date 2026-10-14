@@ -48,7 +48,8 @@ It is one net on one board, in a grid configuration where the *default* grid
 already routes that net at 1x, so it does not change the verdict; but it is a
 real instance of the premise holding, and a single shrink of that one route is
 the cheapest possible test of the rest of the idea. That probe is filed as
-#6310.
+#6310, and it answered no-go: see
+["The one shrink"](#the-one-shrink-board-03-rigid-15x-back-to-1x-issue-6310).
 
 **`rigid` mode on board 05 has since been measured (#6312), and it does not
 help, under protocol (a) at a 1200 s budget.** On board 05 with
@@ -1314,7 +1315,8 @@ What would change the verdict, in order of cost:
 
 1. **#6310 says go** — board 03's rigid 1.5x route survives a single shrink to
    1x with `USB_D+` intact and both DRC engines clean, with repair confined to
-   trace ends at pads.
+   trace ends at pads. *Answered: no-go under both the grid engine and the
+   lattice protocol (see the #6310 section below).*
 2. **`rigid` mode helps a board that is partial under the shipped router.**
    Measured on board 05 in #6312, and it does not: see
    ["Verdict under the decision rule"](#verdict-under-the-decision-rule).
@@ -1459,14 +1461,130 @@ Ordered by how directly the measurements support them.
 
 ## The one shrink: board 03 rigid 1.5x back to 1x (Issue #6310)
 
-**Verdict: no-go on a compaction pass.** The premise did not reproduce, and
-the shrink itself ends as "route again at 1x".
+**Verdict: no-go on a compaction pass.** The probe was run twice: first under
+the grid engine (the issue's own command), then again on `origin/main` after
+the lattice coupled-pair changes (#6517, #6534, #6542, #6568), under the
+deterministic lattice protocol. Both runs give no-go. The lattice run also
+removes the premise: at 1x, `USB_D+` already routes, so expansion has no net
+to win back.
 
-Harness: `scripts/research/shrink_experiment.py` (new; imports
-`expand_route_experiment.py`). One run of each step, `--seed 42`, pinned
-0.05 mm grid, 900 s budget, shared loaded host.
+Harness: `scripts/research/shrink_experiment.py` (imports
+`expand_route_experiment.py`). Result rows for the lattice run:
+`data/research/expand_route_shrink/03_rigid_shrink.json`. Routed boards stay
+in scratch.
 
-### Step 1: the 1.5x rigid route did not reproduce as complete and clean
+### Lattice protocol on current main (the run that decides)
+
+Tree: `origin/main` at `b9041b37d`. `main` moved while the runs were going
+(the next merges include #6443's pair-rule changes to `kct check`). The rows
+were not re-run on the newer tree.
+
+Every route in this subsection used:
+
+```
+kct route --route-engine lattice --strategy basic --layers 4 --no-auto-layers \
+    --deterministic-budget --per-net-iterations 1000000 \
+    --no-placement-delta-feedback --seed 42 --no-cache --grid 0.05
+```
+
+Step 1 used `expand_route_experiment.py route --grid-policy pinned --grid-mm
+0.05 --extra '<protocol>'`. The shrink used `shrink_experiment.py --extra
+'<protocol>'`, so the repair route ran under the same protocol. The host is
+an 8-core machine whose load average was between 13 and 53 during the runs,
+because other agents were running.
+
+**Step 1: the 1.5x rigid route, and the 1x baseline.**
+
+| Placement | Nets (all) | Signal nets unfinished | `kct check --mfr` errors | `kicad-cli` errors (unconnected) | Pours split | Vias | Wire mm |
+|---|---|---|---|---|---|---|---|
+| 1x | 26/27 | **0** (`USB_D+` routed, 1 via) | 2 (diffpair skew, diffpair continuity) | 0 (1) | `VBUS` | 73 | 941.5 |
+| 1.5x uniform | 27/27 | 0 | 2 (diffpair skew, diffpair continuity) | 0 (0) | none | 62 | 1345.6 |
+| 1.5x rigid | 25/27 | 0 | 1 (diffpair continuity, 46.1 % < 70 %) | 0 (3) | `GND`, `VCC` | 69 | 1250.1 |
+
+- **The premise does not hold under this protocol.** `USB_D+` is not lost at
+  1x. All 24 signal nets route at every scale. None of the three rows is
+  clean on `kct check`, and the reason is the same in all three: `USB_D` is
+  only partially coupled. Its connector leg `J1.B6->U2.3` falls back to an
+  uncoupled route (`pair-no-path` at 1x and uniform 1.5x, `pair-leg-keepout`
+  at rigid 1.5x). Pair continuity is 19.4 %, 38.2 % and 46.1 % against a
+  70 % threshold. Expansion raises the continuity figure but does not couple
+  the leg. That leg is tracked by #6378 and #6444. The 1x `VBUS` pour split
+  is tracked by #6589.
+- **The rigid row reproduces.** A second run with a 2400 s budget produced
+  copper identical to the first run, apart from UUIDs. A second run with the
+  900 s budget did not: it hit the wall-clock deadline at 907.8 s (load
+  average about 41) and finished with 1 signal net open and 212 `kicad-cli`
+  errors. `--deterministic-budget` makes each net's search reproducible, but
+  the overall `--timeout` is still wall-clock. On a loaded host, a deadline
+  cut-off can therefore look like a different route.
+- **No footprint moved during the route.** Feedback was off. Every footprint
+  in the routed board sits where the scaled input put it. An earlier version
+  of the census reported U1, U2, R3 and R4 as moved, but that was only
+  rotation spelled `270` versus `-90`; the census now compares rotations
+  modulo 360.
+
+**Step 2: the inverse map (acceptance criterion 1).** The routed board has
+825 segments, 69 vias and 48 connected copper components. 200 vertices
+translate with their cluster, and 1519 scale by 1/1.5 about the outline
+centre (148.5, 87.5).
+
+- **Trace ends on a pad at 1.5x: 451. Displaced from that pad after the
+  inverse map: 298 (66 %), on 19 nets**, including `USB_D+` (28 ends) and
+  `USB_D-` (26 ends). The miss from the pad centre has a median of 1.48 mm and
+  a maximum of 4.35 mm. By rounded millimetre: 0: 10, 1: 141, 2: 46, 3: 94,
+  4: 7. Only 10 of the 298 miss by 0.5 mm or less.
+- The naive board grades 6/27 nets, 18 signal nets open, 350 `kct check`
+  errors and 709 `kicad-cli` errors (41 unconnected).
+
+**Step 3: repair with existing machinery.**
+
+- **Snap.** Each pad-attached vertex translates with its pad's footprint
+  (394 vertices), and free vertices stay scaled. All 298 displaced ends land
+  back on their pads (0 of 451 displaced), so this is the only repair that
+  happens automatically. All 24 signal nets are connected again, but the
+  board has 413 `kct check` errors and 817 `kicad-cli` errors (199
+  `shorting_items`, 246 `clearance`, 135 `hole_clearance`, 48
+  `tracks_crossing`, ...). Every one of the 27 nets except `USB_CC2` is named
+  in a violation.
+- **Rip and re-route.** Every net named in a `kicad-cli` violation or left
+  stuck was ripped: 26 of 27 nets, 878 of 894 segments and vias. Only
+  `USB_CC2` (one item) survived. `kct route --preserve-existing` then
+  re-routed under the same protocol. The first attempt hit the 900 s deadline
+  during zone fill and wrote no board. With a 2400 s budget it finished in
+  1377 s.
+
+**Step 4: grade (acceptance criterion 2).**
+
+| Stage | Nets (all) | Signal nets unfinished | `kct check --mfr jlcpcb` | `kicad-cli pcb drc --refill-zones` (unconnected) |
+|---|---|---|---|---|
+| naive inverse map | 6/27 | 18 | 350 | 709 (41) |
+| snapped | 24/27 | 0 (3 pours split) | 413 | 817 (11) |
+| snapped, 26 nets re-routed | 26/27 | 0 (`VBUS` pour split) | 2 (diffpair skew, diffpair continuity) | 0 (1) |
+| *fresh 1x route, for comparison* | 26/27 | 0 (`VBUS` pour split) | 2 (same two rules) | 0 (1) |
+
+The `kct check` counts for the first two rows are graded without the
+board's net-class map, so the diffpair rules were inactive for those rows
+only. The rows are far from clean either way.
+
+The repaired board matches a fresh 1x route: the same nets, the same two
+`kct check` rules, the same `VBUS` split, 73 vias in both, and 929.7 mm of
+wire against 941.5 mm. `USB_D+` is present, with 1 via, but it was
+re-routed, not kept.
+
+**Go / no-go (lattice protocol): no-go.** Against the issue's rule:
+
+- `USB_D+` was not kept by the shrink. Snapping put its 28 displaced ends
+  back on their pads, but the snapped board shorts. The only clean board
+  re-routed `USB_D+` along with 25 other nets.
+- The repair was not limited to trace ends at pads. It re-routed 26 of 27
+  nets (96 %), which amounts to routing again at 1x, and the result is the
+  1x baseline.
+- There was nothing to win back. Under this protocol the 1x route already
+  completes `USB_D+`.
+
+### First run: grid engine, the issue's command (superseded by the lattice run above)
+
+#### Step 1: the 1.5x rigid route did not reproduce as complete and clean
 
 The command in the issue, re-run (`--no-cache`):
 
@@ -1484,7 +1602,7 @@ is, in this run, a route that already has errors before any shrink, against a
 1x baseline that loses a different net. Single runs on both sides, so this
 shows the earlier table is not stable, not that it was wrong.
 
-### Step 2: the inverse map (acceptance criterion 1)
+#### Step 2: the inverse map (acceptance criterion 1)
 
 Footprints go back to their 1x positions (per-footprint delta between the 1x
 board and the routed board, all 38 footprints had moved). Copper: a connected
@@ -1504,7 +1622,7 @@ The count is large because a pad's offset from its cluster centroid scales by
 1/1.5 under the inter-cluster map but not under the cluster translation; any
 pad more than a few tenths of a millimetre from the centroid is missed.
 
-### Step 3: repair with existing machinery (acceptance criterion 1, second half)
+#### Step 3: repair with existing machinery (acceptance criterion 1, second half)
 
 - **Snap (pad-attached vertices translate with their pad's cluster, free
   vertices stay scaled):** all 181 displaced ends land on their pads
@@ -1512,7 +1630,7 @@ pad more than a few tenths of a millimetre from the centroid is missed.
   repair, and it is a coordinate rule, not `drc_nudge`. It trades the
   displacement for geometry: 342 `kct check` errors (99 `clearance_pad_segment`,
   98 `clearance_segment_via`, 68 `clearance_segment_segment`, ...) and 648
-  `kicad-cli` errors, with 25 of 27 nets named in a violation. Segments that
+  `kicad-cli` errors, with 24 of 27 nets named in a violation. Segments that
   now join a moved end and a scaled end are no longer on the routing grid,
   at 45 degrees or at clearance; `drc_nudge` moves segments by tenths of a
   millimetre and cannot repair violations of this size, and it only runs
@@ -1521,7 +1639,7 @@ pad more than a few tenths of a millimetre from the centroid is missed.
   (791 of 808 segments and vias) were ripped, and
   `kct route --preserve-existing --grid 0.05` routed them again.
 
-### Step 4: grade (acceptance criterion 2)
+#### Step 4: grade (acceptance criterion 2)
 
 | Stage | Nets (all) | Signal nets unfinished | `kct check --mfr jlcpcb` | `kicad-cli pcb drc --refill-zones` |
 |---|---|---|---|---|
@@ -1534,7 +1652,7 @@ The final board is the same result as the 1x baseline row of Step 1 (26/27,
 against 708.5 mm and 73 vias). `USB_D+` is present and clean, but it was
 re-routed, not preserved.
 
-### Go / no-go
+#### Go / no-go (grid engine)
 
 The issue's criteria: go needs the shrunk board to keep `USB_D+`, be clean on
 both engines, and confine repair to trace ends at pads. No-go if repair
