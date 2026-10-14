@@ -6473,7 +6473,9 @@ def _stage_input_for_auto_pour(pcb_path: Path, output_path: Path) -> Path:
     return output_path
 
 
-def _cleanup_stale_layer_artifacts(output_path: Path, quiet: bool = False) -> list[Path]:
+def _cleanup_stale_layer_artifacts(
+    output_path: Path, quiet: bool = False, dry_run: bool = False
+) -> list[Path]:
     """Remove any stale ``<stem>_<N>layer.kicad_pcb`` siblings of *output_path*.
 
     The auto-layers escalation paths rename the output to include the layer
@@ -6492,12 +6494,16 @@ def _cleanup_stale_layer_artifacts(output_path: Path, quiet: bool = False) -> li
             the route command was asked to write.  Stale ``_4layer`` and
             ``_6layer`` siblings of this path's stem are removed.
         quiet: Suppress informational output.
+        dry_run: Delete nothing (issue #6563: ``--dry-run`` must not touch
+            the user's files).
 
     Returns:
         List of paths that were actually removed.  Useful for tests
         and verbose logging.
     """
     removed: list[Path] = []
+    if dry_run:
+        return removed
     # Accept str or Path -- the escalation entry points are sometimes
     # passed string paths in tests.
     output_path = Path(output_path)
@@ -10358,7 +10364,9 @@ def route_with_layer_escalation(
     # from a previous failed-2L run before routing begins.  Without this,
     # a successful 2L run leaves the prior failed 4L/6L artifact behind
     # and the output directory shows a confusing pair of routed PCBs.
-    _cleanup_stale_layer_artifacts(output_path, quiet=quiet)
+    _cleanup_stale_layer_artifacts(
+        output_path, quiet=quiet, dry_run=getattr(args, "dry_run", False)
+    )
 
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
@@ -14332,7 +14340,9 @@ def route_with_combined_escalation(
     # from a previous failed-2L run before routing begins.  Without this,
     # a successful 2L run leaves the prior failed 4L/6L artifact behind
     # and the output directory shows a confusing pair of routed PCBs.
-    _cleanup_stale_layer_artifacts(output_path, quiet=quiet)
+    _cleanup_stale_layer_artifacts(
+        output_path, quiet=quiet, dry_run=getattr(args, "dry_run", False)
+    )
 
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
@@ -18176,7 +18186,10 @@ def _route_parser() -> argparse.ArgumentParser:
             "and exit without loading the router, routing, or writing any "
             "file (including with --complete).  On the escalation flows (--auto-layers, the default; "
             "--auto-pcb-size; --auto-mfr-tier; --adaptive-rules) the plan is "
-            "printed once per layer count the ladder would try."
+            "printed once per layer count the ladder would try.  Exception: "
+            "--analyze --dry-run on those flows still routes in memory "
+            "(no analysis report, no files written or deleted, no cache "
+            "entry); use --layers N for the analysis-only path."
         ),
     )
     parser.add_argument(
@@ -22113,7 +22126,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     "component and the cache stores routes without placement "
                     "(issues #4468, #5890)"
                 )
-        if use_cache and cache_key is not None and router.routes:
+        if use_cache and cache_key is not None and router.routes and not args.dry_run:
             import time
 
             try:

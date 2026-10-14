@@ -199,3 +199,35 @@ def test_analyze_dry_run_does_not_stage_input_at_output(tmp_path):
     out_path = tmp_path / "out.kicad_pcb"
     route_cmd.main([str(pcb), "--dry-run", "--analyze", "--grid", "0.1", "-o", str(out_path)])
     assert not out_path.exists()
+
+
+def test_analyze_dry_run_keeps_stale_layer_siblings(tmp_path):
+    """``--analyze --dry-run`` (default flow) must not delete ``out_4layer.kicad_pcb``."""
+    pcb = _write_board(tmp_path / "board.kicad_pcb")
+    out_path = tmp_path / "out.kicad_pcb"
+    stale = tmp_path / "out_4layer.kicad_pcb"
+    stale.write_text("USER FILE")
+    route_cmd.main(
+        [
+            str(pcb),
+            "--dry-run",
+            "--analyze",
+            "--grid",
+            "0.1",
+            "--no-cache",
+            "--skip-drc",
+            "-o",
+            str(out_path),
+        ]
+    )
+    assert stale.read_text() == "USER FILE"
+
+
+def test_cleanup_stale_layer_artifacts_dry_run_deletes_nothing(tmp_path):
+    out_path = tmp_path / "out.kicad_pcb"
+    stale = tmp_path / "out_6layer.kicad_prl"
+    stale.write_text("x")
+    assert route_cmd._cleanup_stale_layer_artifacts(out_path, quiet=True, dry_run=True) == []
+    assert stale.exists()
+    assert route_cmd._cleanup_stale_layer_artifacts(out_path, quiet=True) == [stale]
+    assert not stale.exists()
