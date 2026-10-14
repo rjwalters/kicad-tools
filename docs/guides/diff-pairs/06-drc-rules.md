@@ -37,9 +37,9 @@ Source: `DiffPairUncoupledLengthRule` in
 `src/kicad_tools/validate/rules/diffpair_uncoupled_length.py`.
 Holds the larger of the two nets' uncoupled lengths to the pair's limit
 (`max_uncoupled_total_mm`, else the protocol's per-terminal allowance times the
-components on the net), each net's via count to `max_vias_per_net`, and warns
-on unequal P and N via counts. How KiCad measures it, the known divergences and
-the pairs KiCad cannot see are in [guide 08](08-uncoupled-length.md).
+components on the net), each terminal's uncoupled copper outside the
+courtyards to `max_uncoupled_per_terminal_mm` (kct-only), each net's via count
+to `max_vias_per_net`, and warns on unequal P and N via counts. Details: [guide 08](08-uncoupled-length.md).
 
 ## `diffpair_length_skew`
 

@@ -92,6 +92,14 @@ class PairThresholds:
     ``validate/rules/diffpair_uncoupled_length.py``); when the class sets none
     it is derived per pair as ``max_uncoupled_per_terminal_mm`` x the number
     of components on the net, by the rule that knows the board.
+
+    Issue #6615 adds the kct-only per-terminal check of
+    :attr:`max_uncoupled_per_terminal_mm` itself.  Its severity,
+    :attr:`uncoupled_per_terminal_severity`, follows the per-terminal limit's
+    own source (an explicit ``max_uncoupled_total_mm`` makes only the total an
+    ``error``).  :attr:`gather_ignore` is the class's
+    ``NetClassRouting.gather_ignore`` (``"courtyard"``, ``"none"`` or a radius
+    in mm).
     """
 
     continuity: float
@@ -106,6 +114,8 @@ class PairThresholds:
     uncoupled_severity: str = "error"
     vias_severity: str = "error"
     provenance: Mapping[str, str] = field(default_factory=dict)
+    uncoupled_per_terminal_severity: str = "error"
+    gather_ignore: str | float = "courtyard"
 
     @property
     def skew_source(self) -> str:
@@ -190,6 +200,8 @@ def resolve_pair_thresholds(
     )
     if src:
         provenance["max_uncoupled_per_terminal_mm"] = src
+    per_terminal_severity = unc_severity
+    gather = getattr(nc, "gather_ignore", None) if nc is not None else None
     vias, src, vias_severity = limit("max_vias_per_net", "max_vias_per_net")
     if src:
         provenance["max_vias_per_net"] = src
@@ -209,6 +221,8 @@ def resolve_pair_thresholds(
         uncoupled_severity=unc_severity,
         vias_severity=vias_severity,
         provenance=provenance,
+        uncoupled_per_terminal_severity=per_terminal_severity,
+        gather_ignore=gather if gather is not None else "courtyard",
     )
 
 

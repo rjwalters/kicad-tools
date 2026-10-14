@@ -1533,8 +1533,19 @@ class NetClassRouting:
 
     max_uncoupled_per_terminal_mm: float | None = None
     """Uncoupled copper allowed at each pair terminal, in mm.  ``None`` ->
-    the protocol default, if any.  Data only in #6443 piece (a); the rule
-    that checks it is piece (b)."""
+    the protocol default, if any.  Derives the total limit (#6443) and is
+    checked per terminal, outside :attr:`gather_ignore`, by the kct-only
+    per-terminal figure of ``diffpair_uncoupled_length`` (#6615)."""
+
+    gather_ignore: str | float = "courtyard"
+    """The region around each pair terminal whose uncoupled copper the
+    per-terminal check ignores (Issue #6615, epic #6441).
+
+    ``"courtyard"`` (the default): the footprint's courtyard as drawn.  A
+    number ``r``: the courtyard grown by ``r`` mm.  ``"none"``: nothing is
+    ignored.  A footprint with no usable courtyard falls back to its pads'
+    bounding box plus 0.25 mm (IPC-7351 nominal courtyard excess).  See
+    ``docs/guides/diff-pairs/08-uncoupled-length.md``."""
 
     max_uncoupled_total_mm: float | None = None
     """Total uncoupled copper allowed per net, in mm (KiCad's
@@ -1661,6 +1672,15 @@ class NetClassRouting:
             ValueError: :attr:`pair_protocol` names no known protocol.
         """
         parse_protocol(self.pair_protocol)
+        gather = self.gather_ignore
+        if isinstance(gather, bool) or not (
+            gather in ("courtyard", "none")
+            or (isinstance(gather, (int, float)) and math.isfinite(gather) and gather >= 0)
+        ):
+            raise ValueError(
+                f"net class {self.name!r}: gather_ignore must be 'courtyard', 'none' "
+                f"or a non-negative radius in mm, got {gather!r}"
+            )
         if self.coupled_continuity_threshold is not None:
             warnings.warn(
                 f"net class {self.name!r}: coupled_continuity_threshold is "
@@ -1854,6 +1874,7 @@ class NetClassRouting:
         - ``skew_tolerance_mm`` (Phase 3H / #2647)
         - ``pair_protocol`` / ``max_uncoupled_per_terminal_mm`` /
           ``max_uncoupled_total_mm`` / ``max_vias_per_net`` (#6443)
+        - ``gather_ignore`` (#6615)
         - ``diffpair_partner`` (Phase 1B / #2558)
         - ``target_diff_impedance`` (Phase 3K / #2650)
         - ``target_single_impedance`` (Phase 3K / #2650)
@@ -1914,6 +1935,7 @@ class NetClassRouting:
             "max_uncoupled_per_terminal_mm": self.max_uncoupled_per_terminal_mm,
             "max_uncoupled_total_mm": self.max_uncoupled_total_mm,
             "max_vias_per_net": self.max_vias_per_net,
+            "gather_ignore": self.gather_ignore,
             "length_match_group": self.length_match_group,
             "length_match_reference": self.length_match_reference,
             "length_match_tolerance_mm": self.length_match_tolerance_mm,
@@ -2008,6 +2030,7 @@ class NetClassRouting:
             max_uncoupled_per_terminal_mm=data.get("max_uncoupled_per_terminal_mm"),
             max_uncoupled_total_mm=data.get("max_uncoupled_total_mm"),
             max_vias_per_net=data.get("max_vias_per_net"),
+            gather_ignore=data.get("gather_ignore", "courtyard"),
             length_match_group=data.get("length_match_group"),
             length_match_reference=data.get("length_match_reference"),
             length_match_tolerance_mm=data.get("length_match_tolerance_mm"),
