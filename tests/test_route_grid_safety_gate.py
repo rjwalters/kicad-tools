@@ -1021,7 +1021,8 @@ def test_refusal_names_concrete_max_cells_and_not_enlarge(tmp_path, capsys):
     code, _ = _run_main_to_gate(tmp_path, _unsafe_selection(safe_grid_cells=2_400_000), [])
     assert code == 1
     err = capsys.readouterr().err
-    assert "--max-cells 2,400,000" in err
+    assert "--max-cells 2400000 " in err
+    assert "--max-cells 2,400,000" not in err  # argparse type=int rejects commas
     assert "enlarge" not in err.lower()
     assert "ceiling" not in err  # 2.4M is within the auto-bump ceiling
     assert "--allow-unsafe-grid" in err
@@ -1031,7 +1032,8 @@ def test_refusal_flags_value_above_bump_ceiling(tmp_path, capsys):
     code, _ = _run_main_to_gate(tmp_path, _unsafe_selection(safe_grid_cells=9_000_000), [])
     assert code == 1
     err = capsys.readouterr().err
-    assert "--max-cells 9,000,000" in err
+    assert "--max-cells 9000000 " in err
+    assert "needs ~9,000,000 cells" in err  # separators stay in prose only
     assert "high memory use" in err
 
 
@@ -1048,7 +1050,8 @@ def test_grid_safety_error_default_message_6306():
     from kicad_tools.router.io import GridSafetyError
 
     msg = str(GridSafetyError(0.1, 0.15, 500_000, safe_grid_cells=2_400_000))
-    assert "--max-cells 2,400,000" in msg
+    assert "--max-cells 2400000 " in msg
+    assert "--max-cells 2,400,000" not in msg
     assert "enlarge" not in msg.lower()
     assert "enlarge" not in str(GridSafetyError(0.1, 0.15, 500_000)).lower()
 
@@ -1072,3 +1075,82 @@ def test_safe_grid_cells_round_trip_clears_gate():
     assert rerun.memory_forced_unsafe_grid is False
     assert rerun.safe_grid_cells is None
     assert rerun.resolution <= 0.075
+
+
+_MAX_CELLS_FLAG_RE = re.compile(r"--max-cells (\S+)")
+
+
+def test_printed_max_cells_flag_parses_and_clears_gate(tmp_path, capsys):
+    """The exact ``--max-cells <token>`` text in the refusal is copy-pasteable.
+
+    Judge feedback on PR #6537: the refusal printed ``--max-cells 2,400,000``,
+    which ``type=int`` rejects.  Take the token straight out of the real
+    refusal on stderr, feed it through both real argparse definitions
+    (``kct route`` in ``cli/parser.py`` and ``route_cmd``'s own parser), and
+    confirm that re-running selection with the parsed value clears the gate.
+    """
+    from kicad_tools.cli.parser import create_parser
+
+    result, _ = _select_memory_capped()
+    assert result.memory_forced_unsafe_grid is True
+    n = result.safe_grid_cells
+    assert n is not None
+
+    # 1. The CLI refusal for this selection prints the flag.
+    code, gate_reached = _run_main_to_gate(tmp_path, result, [])
+    assert code == 1 and gate_reached is False
+    err = capsys.readouterr().err
+    match = _MAX_CELLS_FLAG_RE.search(err)
+    assert match is not None, err
+    token = match.group(1)
+    assert token == str(n)
+
+    # 2. The token parses through the top-level ``kct route`` parser.
+    args = create_parser().parse_args(["route", "board.kicad_pcb", "--max-cells", token])
+    assert args.max_cells == n
+    assert isinstance(args.max_cells, int)
+
+    # 3. The token parses through route_cmd's own parser, and the value it
+    #    hands the selector clears the gate end to end.
+    seen: dict[str, int] = {}
+
+    def _real_selection(*_args, **kwargs):
+        seen["max_cells"] = kwargs["max_cells"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return auto_select_grid_resolution(
+                _memory_capped_fine_pitch_pads(),
+                clearance=0.15,
+                board_width=100.0,
+                board_height=100.0,
+                max_cells=kwargs["max_cells"],
+                candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+            )
+
+    # Not _run_main_to_gate: it pins the selector to a fixed return value,
+    # whereas here the selector must run on the max_cells argparse produced.
+    with patch("kicad_tools.router.io.auto_select_grid_resolution", side_effect=_real_selection):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)\n")
+        pads = [PadPosition(x=10.0, y=10.0), PadPosition(x=20.0, y=10.0)]
+        reached = {"value": False}
+
+        def _sentinel(*_a, **_k):
+            reached["value"] = True
+            raise _GateReached
+
+        with (
+            patch("kicad_tools.router.io.extract_pad_positions", return_value=pads),
+            patch("kicad_tools.router.io.extract_board_dimensions", return_value=(200.0, 200.0)),
+            patch("kicad_tools.router.io.compute_multi_resolution_plan", return_value=None),
+            patch("kicad_tools.router.io.load_pads_for_analysis", return_value=pads),
+            patch.object(route_cmd, "_resolve_starting_layers", side_effect=_sentinel),
+        ):
+            try:
+                code = route_cmd.main([str(pcb), "--quiet", "--max-cells", token])
+            except _GateReached:
+                code = None
+
+    assert seen["max_cells"] == n
+    assert reached["value"] is True, capsys.readouterr().err
+    assert code is None

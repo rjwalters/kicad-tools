@@ -134,8 +134,14 @@ def _round_up_readable(cells: int) -> int:
 
 
 def format_max_cells_option(safe_grid_cells: int) -> str:
-    """Option text naming the concrete ``--max-cells`` value (issue #6306)."""
-    text = f"Pass --max-cells {safe_grid_cells:,} so the clearance-safe grid fits the cell budget"
+    """Option text naming the concrete ``--max-cells`` value (issue #6306).
+
+    The flag value is printed as a plain integer (``--max-cells 2400000``):
+    ``--max-cells`` is ``type=int`` and argparse rejects ``2,400,000``, so the
+    printed flag must be copy-pasteable.  Thousands separators appear only in
+    prose.
+    """
+    text = f"Pass --max-cells {safe_grid_cells} so the clearance-safe grid fits the cell budget"
     if safe_grid_cells > GRID_BUMP_CEILING:
         text += (
             f" (needs ~{safe_grid_cells:,} cells, above the {GRID_BUMP_CEILING:,}-cell "
