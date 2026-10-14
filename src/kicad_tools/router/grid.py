@@ -4657,6 +4657,7 @@ class RoutingGrid:
         component_pitches: dict[str, float] | None = None,
         exclude_refs: set[str] | None = None,
         pads: Iterable[Pad] | None = None,
+        violation_only: bool = False,
     ) -> tuple[float, tuple[float, float] | None]:
         """The pad half of :meth:`validate_segment_clearance` (Issue #6389).
 
@@ -4668,9 +4669,22 @@ class RoutingGrid:
         ``own_pad_step_clear``) asks exactly the validator's question, with
         its per-component clearances and same-component carve-outs.  ``pads``
         narrows the scan to a pre-filtered candidate set; default every pad.
+
+        Issue #5617: ``violation_only=True`` is for callers that read only
+        ``violation_loc`` (the pure-Python A* own-pad step gate).  Pads that
+        provably cannot violate -- their bounding circle, grown by the trace
+        half-width, is still ``required_clearance`` away from the segment's
+        bounding box -- are skipped before the exact rect/disc distance, so
+        the returned ``min_actual`` then ignores them.  ``violation_loc`` is
+        identical: a skipped pad has a gap >= its required clearance and
+        could neither set it nor be carved out into one.
         """
         min_actual = float("inf")
         violation_loc: tuple[float, float] | None = None
+        if violation_only:
+            seg_lo_x, seg_hi_x = (x1, x2) if x1 <= x2 else (x2, x1)
+            seg_lo_y, seg_hi_y = (y1, y2) if y1 <= y2 else (y2, y1)
+        clearance_memo: dict[tuple[str, float | None], float] = {}
         # Check against all stored pads
         for pad in self._pads if pads is None else pads:
             # Skip same-net pads (clearance not required within same net)
@@ -4728,7 +4742,22 @@ class RoutingGrid:
             # When validating against a pad, use the clearance for that component
             pad_ref = pad.component_key
             pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
-            required_clearance = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
+            memo_key = (pad.ref, pin_pitch)
+            memo_hit = clearance_memo.get(memo_key)
+            if memo_hit is None:
+                memo_hit = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
+                clearance_memo[memo_key] = memo_hit
+            required_clearance = memo_hit
+
+            if violation_only:
+                # Lower bound of the segment-to-pad-centre distance via the
+                # segment's bounding box; the pad's copper (rect of any
+                # rotation, or disc) lies within 0.5*hypot(w, h) of its centre.
+                gap_x = max(seg_lo_x - pad.x, pad.x - seg_hi_x, 0.0)
+                gap_y = max(seg_lo_y - pad.y, pad.y - seg_hi_y, 0.0)
+                reach = 0.5 * math.hypot(pad.width, pad.height) + half_width + required_clearance
+                if gap_x * gap_x + gap_y * gap_y > (reach + 1e-6) ** 2:
+                    continue
 
             # Issue #3545: NET-AWARE tightening of the same-component
             # carve-out.  Same-net pads are already skipped at the top of
