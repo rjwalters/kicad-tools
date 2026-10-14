@@ -1524,6 +1524,9 @@ class CppPathfinder:
         #   "failure_y": float,
         # } or ``None`` if no diagnostic was captured.
         self._last_failure_info: dict | None = None
+        # Issue #6369: {net_id: last FAILURE_* code}, filled by the negotiated
+        # router; persisted to ``<stem>.search_failures.json`` by ``kct route``.
+        self.search_failures_by_net: dict[int, int] = {}
 
         # Issue #2587 / Epic #2556 Phase 1C-cont: Reverse map for diff-pair
         # partner resolution.  The autorouter populates this via

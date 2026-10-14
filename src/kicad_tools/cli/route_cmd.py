@@ -3661,6 +3661,24 @@ def _write_routing_plan_sidecar(
         print(f"  {routing_plan.summary_line()}")
 
 
+def _write_search_failures_sidecar(output_path: Path, router: object | None) -> Path | None:
+    """Persist each net's last C++ search-failure reason (issue #6369).
+
+    ``net-status --why`` reads this so a geometric give-up (``no_path``,
+    ``via_via_blocked``, ``pairwise_blocked``) is not mislabelled
+    ``budget_starved``.  No-op without recorded failures.
+    """
+    from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
+
+    pathfinder = getattr(router, "router", None)
+    by_id = getattr(pathfinder, "search_failures_by_net", None)
+    if not isinstance(by_id, dict) or not by_id:
+        return None
+    names = getattr(router, "net_names", None) or {}
+    named = {names[nid]: code for nid, code in by_id.items() if names.get(nid)}
+    return write_search_failures_sidecar(output_path, named)
+
+
 def _write_access_witness_sidecar(
     output_path: Path,
     router: object | None,
@@ -3731,6 +3749,8 @@ def _write_access_witness_sidecar(
         witness_for_router,
     )
     from kicad_tools.router.pad_access_invariant import format_veto_report
+
+    _write_search_failures_sidecar(output_path, router)
 
     journal = getattr(router, "commit_journal", None)
     if journal is None or not len(journal):

@@ -995,3 +995,66 @@ class TestReadOnly:
         classify_stuck_nets(congestion_pcb)
         after = congestion_pcb.read_bytes()
         assert before == after
+
+
+class TestSearchFailuresSidecar6369:
+    """Issue #6369: per-net router failure reasons travel via a sidecar."""
+
+    def test_write_and_load_roundtrip(self, tmp_path: Path):
+        from kicad_tools.router.stuck_classifier import (
+            load_search_failures_sidecar,
+            write_search_failures_sidecar,
+        )
+
+        board = tmp_path / "x_routed.kicad_pcb"
+        path = write_search_failures_sidecar(board, {"TGT": 1, "OTHER": 3, "NONE": 0})
+        assert path == tmp_path / "x_routed.search_failures.json"
+        assert load_search_failures_sidecar(board) == {"TGT": "no_path", "OTHER": "timeout"}
+
+    def test_empty_writes_nothing_and_missing_loads_none(self, tmp_path: Path):
+        from kicad_tools.router.stuck_classifier import (
+            load_search_failures_sidecar,
+            write_search_failures_sidecar,
+        )
+
+        board = tmp_path / "x.kicad_pcb"
+        assert write_search_failures_sidecar(board, {}) is None
+        assert load_search_failures_sidecar(board) is None
+        (tmp_path / "x.search_failures.json").write_text("not json")
+        assert load_search_failures_sidecar(board) is None
+
+    def test_sidecar_autodiscovered_by_classifier(self, budget_starved_pcb: Path):
+        from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
+
+        write_search_failures_sidecar(budget_starved_pcb, {"TGT": 1})
+        d = next(
+            x for x in classify_stuck_nets(budget_starved_pcb).diagnoses if x.net_name == "TGT"
+        )
+        assert d.classification is not StuckClass.BUDGET_STARVED
+        assert "no_path" in d.evidence
+
+    def test_budget_reason_in_sidecar_stays_budget_starved(self, budget_starved_pcb: Path):
+        from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
+
+        write_search_failures_sidecar(budget_starved_pcb, {"TGT": 3})
+        d = next(
+            x for x in classify_stuck_nets(budget_starved_pcb).diagnoses if x.net_name == "TGT"
+        )
+        assert d.classification is StuckClass.BUDGET_STARVED
+
+    def test_route_cmd_writer_maps_net_ids_to_names(self, tmp_path: Path):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _write_search_failures_sidecar
+        from kicad_tools.router.stuck_classifier import load_search_failures_sidecar
+
+        router = SimpleNamespace(
+            router=SimpleNamespace(search_failures_by_net={4: 5, 9: 1}),
+            net_names={4: "VBUS"},
+        )
+        out = tmp_path / "b.kicad_pcb"
+        assert _write_search_failures_sidecar(out, router) is not None
+        assert load_search_failures_sidecar(out) == {"VBUS": "via_via_blocked"}
+        # No recorded failures -> no sidecar.
+        empty = SimpleNamespace(router=SimpleNamespace(search_failures_by_net={}), net_names={})
+        assert _write_search_failures_sidecar(tmp_path / "c.kicad_pcb", empty) is None
