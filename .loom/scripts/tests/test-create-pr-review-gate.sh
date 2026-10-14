@@ -169,7 +169,6 @@ git init -q "$FIXTURE_REPO"
 git -C "$FIXTURE_REPO" remote add origin https://github.com/owner/repo.git
 mkdir -p "$FIXTURE_REPO/.loom"
 export LOOM_GH_BIN="$STUB_DIR/gh"
-export LOOM_GH_NO_POLICY_LAUNCHER=1  # no host egress-policy launcher over the stub (#9995)
 export LOOM_WRITE_SCOPE_CACHE_DIR="$STUB_DIR/write-scope-cache"
 unset GH_REPO LOOM_REPO
 

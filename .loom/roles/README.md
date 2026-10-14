@@ -88,10 +88,6 @@ guide, hermit, judge) declare `[]`; builder, doctor, driver and loom declare
 `["*"]`. What `check` matches, and its fail-closed rule, are in
 `defaults/docs/guard-hooks.md` ("Per-role tool restriction").
 
-`deny-specs` also appends the forge-egress bypass specs (#9989) for **every**
-role, whatever its allowlist, when a resolved forge egress policy enforces the
-API route — see `defaults/docs/forge-egress.md`. With no policy it adds nothing.
-
 ```json
 { "toolPolicy": { "allowedCapabilities": [] } }               // reaches none
 { "toolPolicy": { "allowedCapabilities": ["cloud-cli"] } }    // reaches only that one

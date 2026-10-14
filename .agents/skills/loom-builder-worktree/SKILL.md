@@ -333,7 +333,8 @@ while true; do
   fi
 
   # Find available issues
-  ISSUES=$(gh issue list --label="loom:issue" --state=open --limit 500 --json number --jq '.[].number')
+  EXCL="$(./.loom/scripts/skip-labels.sh --jq-not)"
+  ISSUES=$(gh issue list --label="loom:issue" --state=open --limit 500 --json number,labels --jq ".[] | select($EXCL) | .number")
 
   for ISSUE_NUMBER in $ISSUES; do
     # Try atomic claim

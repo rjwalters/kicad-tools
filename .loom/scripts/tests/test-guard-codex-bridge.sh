@@ -254,20 +254,6 @@ parity_vector "gh pr merge redirect" \
     "shell" '{"command":["bash","-lc","gh pr merge 123 --squash"],"workdir":"."}' \
     "deny" "guard-loom-workflow.sh" "$WT"
 
-# (3b) forge-egress launcher bypass -> deny on both (#9989). The bridge runs
-# guard-loom-workflow.sh, so the rule needs no second table; a stub daemon
-# answers `forge egress guard` as the real one does under an enforcing policy
-# (the classifier itself is tested in loom-daemon).
-FE_STUB="$TMPROOT/stub-loom-daemon"
-printf '%s\n' '#!/usr/bin/env bash' \
-    '[[ "$1 $2 $3" == "forge egress guard" ]] || exit 2' \
-    'echo "BLOCKED [routing.denied-by-guard]: stub (origin: machine)"; exit 1' > "$FE_STUB"
-chmod +x "$FE_STUB"
-LOOM_DAEMON_SELF_BIN="$FE_STUB" parity_vector "forge-egress bypass (curl api.github.com)" \
-    "Bash" '{"command":"curl -sS https://api.github.com/zen"}' \
-    "shell" '{"command":["bash","-lc","curl -sS https://api.github.com/zen"],"workdir":"."}' \
-    "deny" "guard-loom-workflow.sh" "$WT"
-
 # (4) protected-branch force push -> deny on both (destructive policy)
 parity_vector "force-push to the default branch" \
     "Bash" '{"command":"git push --force origin main"}' \

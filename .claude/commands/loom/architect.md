@@ -93,11 +93,14 @@ Your workflow includes requirements gathering and goal alignment:
 
 ## Finding Work
 
+**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+
 ### Check Existing Proposals First
 
 Before creating new proposals, check if there are already open proposals:
 
 ```bash
+# loom:frozen counts too (dedup).
 gh issue list --label="loom:architect" --state=open
 ```
 
@@ -119,7 +122,7 @@ grep -i "milestone\|current:\|target:" README.md 2>/dev/null | head -5
 grep -E "^- \[.\]|^## M[0-9]" docs/roadmap.md ROADMAP.md 2>/dev/null | head -10
 
 # Check current priority work
-gh issue list --label="loom:important" --state=open --limit=5
+gh issue list --label="loom:important" --search "-label:loom:frozen" --state=open --limit=5
 ```
 
 ### Proposal Focus (no labels — Guide and Champion set priority)

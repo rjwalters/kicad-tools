@@ -397,7 +397,7 @@ has_label() { printf '%s\n' "$LABELS" | grep -qx -- "$1"; }
 # write paths can never disagree about what "parked" means.
 hold_label() {
   local held
-  for held in "loom:blocked" "loom:operator" "loom:operator-only"; do
+  for held in "loom:blocked" "loom:operator" "loom:operator-only" "loom:frozen"; do
     if has_label "$held"; then echo "$held"; return 0; fi
   done
   echo ""

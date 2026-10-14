@@ -113,17 +113,19 @@ echo "Test 1: the ready/building queries exclude loom:operator-only (and, #7071,
 # #7083: the query itself was renamed ready_json= (it is filtered again,
 # against the open-linked-PR exclusion set, before the final `ready=` bullet
 # text is assembled — see test-guide-work-plan-ready-open-pr-exclude.sh) but
-# the --search clause covered by this test is unchanged.
+# the --search clause covered by this test is unchanged. Further `-label:`
+# terms may follow (loom:frozen, #11743), so the patterns stop at a space or
+# the closing quote.
 READY_LINE="$(grep -n '^  ready_json=' <<<"$RPB_BODY" || true)"
 BUILDING_LINE="$(grep -n '^  building=' <<<"$RPB_BODY" || true)"
 
-if grep -q '^  ready_json=\$("\$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked"' <<<"$RPB_BODY"; then
+if grep -q '^  ready_json=\$("\$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked[ "]' <<<"$RPB_BODY"; then
     pass "the ready_json= query excludes loom:building, loom:operator-only, and loom:blocked via --search"
 else
     fail "expected ready_json= to carry --search \"-label:loom:building -label:loom:operator-only -label:loom:blocked\" (got: $READY_LINE)"
 fi
 
-if grep -q '^  building=\$("\$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only"' <<<"$RPB_BODY"; then
+if grep -q '^  building=\$("\$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only[ "]' <<<"$RPB_BODY"; then
     pass "the building= query excludes loom:operator-only via --search"
 else
     fail "expected building= to carry --search \"-label:loom:operator-only\" (got: $BUILDING_LINE)"

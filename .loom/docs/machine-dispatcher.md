@@ -302,7 +302,7 @@ resolution precedence.
 
 `~/.loom/workspaces.json` is a **machine-level, cross-repo, cross-session**
 file — never scope a test or an ad-hoc verification step at it directly. Both
-the `loom-daemon workspace add|remove|list|set-priority` CLI and the daemon
+the `loom-daemon workspace add|remove|list|set-weight` CLI and the daemon
 itself honor `LOOM_WORKSPACES_PATH` (`loom-daemon/src/workspace_registry.rs`)
 as a redirect: when set, every registry read/write for that process goes to
 the given file instead of the real one. This is the sanctioned seam for
@@ -312,7 +312,7 @@ way, and it is the correct tool for a builder/auditor session manually
 verifying `workspace add`/`status`/priority behavior too:
 
 ```bash
-LOOM_WORKSPACES_PATH=/tmp/scratch-workspaces.json loom-daemon workspace add /tmp/some-dir --priority 3
+LOOM_WORKSPACES_PATH=/tmp/scratch-workspaces.json loom-daemon workspace add /tmp/some-dir --weight 3
 LOOM_WORKSPACES_PATH=/tmp/scratch-workspaces.json loom-daemon workspace list
 ```
 
@@ -462,7 +462,7 @@ Run it from inside the repo:
 ```bash
 loom migrate --dry-run          # full file-by-file plan; makes no changes
 loom migrate                    # apply; prints a per-file report, stages the result
-loom migrate --priority 20      # workspace-registry priority (default 3)
+loom migrate --weight 20        # workspace draw weight (default 1)
 loom migrate --force            # proceed despite an uncommitted working tree
 ```
 
@@ -533,7 +533,7 @@ boundary no matter where it is invoked. What one pass does:
    registration** exists and points at the machine checkout's
    `mcp-loom/dist/index.js`, `claude mcp add --scope user`-ing it if absent or
    mis-pointed (skipped with a clear note when the `claude` CLI is not on PATH).
-7. **Register** the repo via `loom-daemon workspace add … --priority N` (skipped
+7. **Register** the repo via `loom-daemon workspace add … --weight N` (skipped
    with a clear note when `loom-daemon` is not on PATH), **re-stamp**
    `.loom/install-metadata.json` (`loom_version`, `loom_commit`,
    `migrated_to_machine_model`, `install_model`), and **refresh** the CLAUDE.md

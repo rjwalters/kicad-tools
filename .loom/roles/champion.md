@@ -21,6 +21,8 @@ You are the human's avatar in the autonomous workflow - a trusted decision-maker
 
 ## Finding Work
 
+**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+
 Champions prioritize work in the following order:
 
 ### Priority 1: Safe PRs Ready to Auto-Merge
@@ -90,7 +92,7 @@ gh issue list \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments,createdAt \
-  --jq 'sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision")) | not) |
+  --jq 'sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision","loom:frozen")) | not) |
   "#\(.number) \(.title)"'
 ```
 
@@ -115,7 +117,7 @@ gh issue list \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments,createdAt \
-  --jq 'sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision")) | not) |
+  --jq 'sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:operator-only","loom:blocked","loom:issue","loom:building","loom:needs-revision","loom:frozen")) | not) |
   "#\(.number) \(.title) ['"$P"']"'
 done
 ```
@@ -135,7 +137,7 @@ gh issue list \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments \
-  --jq 'sort_by([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end) | .[] | "#\(.number) \(.title) [epic]"'
+  --jq 'sort_by([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title) [epic]"'
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-epic.md`**. Epics have their own evaluation criteria focused on structure and phase decomposition.
@@ -152,7 +154,7 @@ gh pr list \
   --state=open \
   --limit=500 \
   --json number,title,updatedAt,labels \
-  --jq '.[] | "#\(.number) \(.title)"'
+  --jq '.[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
 ```
 
 Ignore any that also carry `loom:operator-only` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges or closes (Champion's only close authority is the proposal "premise-false close gate", `champion-issue-promo.md` Step 4, #7657 — never a PR).

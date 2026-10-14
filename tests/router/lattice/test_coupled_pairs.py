@@ -723,3 +723,412 @@ def test_core_uses_uncoupled_fallback_for_blocked_pair(capsys) -> None:
     assert "WARNING: diff pair D routed uncoupled" in out
     stats = router._lattice_negotiation_stats
     assert stats.routed == stats.total == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #6378: chain-ordered endpoints through a pass-through part
+# ---------------------------------------------------------------------------
+
+# A SOT-23-6-style flow-through ESD part (board 03 U2), centred at (15, 6)
+# with the signal flowing along +x: the entry column carries D+ / GND / D-
+# (pins 3/2/1), the exit column D+ / VBUS / D- (pins 4/5/6).  P and N are
+# 1.9 mm apart with a FOREIGN pad between them on both sides, so each
+# column's P/N midpoint lands on that foreign pad.
+_SOT_W, _SOT_H = 1.06, 0.6
+_SOT_IN_X, _SOT_OUT_X = 13.86, 16.14
+
+
+def _chain_pads() -> dict[str, Pad]:
+    def sot(x: float, y: float, net: int, name: str, pin: str) -> Pad:
+        return Pad(
+            x=x,
+            y=y,
+            width=_SOT_W,
+            height=_SOT_H,
+            net=net,
+            net_name=name,
+            layer=Layer.F_CU,
+            ref="U2",
+            pin=pin,
+        )
+
+    return {
+        "J1.P": _pad(3.0, 5.5, 1, "D+", ref="J1"),
+        "J1.N": _pad(3.0, 6.5, 2, "D-", ref="J1"),
+        "U2.3": sot(_SOT_IN_X, 5.05, 1, "D+", "3"),
+        "U2.2": sot(_SOT_IN_X, 6.0, 9, "GND", "2"),
+        "U2.1": sot(_SOT_IN_X, 6.95, 2, "D-", "1"),
+        "U2.4": sot(_SOT_OUT_X, 5.05, 1, "D+", "4"),
+        "U2.5": sot(_SOT_OUT_X, 6.0, 10, "VBUS", "5"),
+        "U2.6": sot(_SOT_OUT_X, 6.95, 2, "D-", "6"),
+        "U1.P": _pad(27.0, 5.5, 1, "D+", ref="U1"),
+        "U1.N": _pad(27.0, 6.5, 2, "D-", ref="U1"),
+    }
+
+
+def test_choose_pair_chain_goes_through_pass_through_part() -> None:
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    pads = _chain_pads()
+    ps = [pads["J1.P"], pads["U2.3"], pads["U2.4"], pads["U1.P"]]
+    ns = [pads["J1.N"], pads["U2.1"], pads["U2.6"], pads["U1.N"]]
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    # J1 -> U2 entry, U2 exit -> U1 -- NOT the J1 -> U1 trunk across U2.
+    assert chain.segments == [((0, 0), (1, 1)), ((2, 2), (3, 3))]
+    assert chain.hops == [((1, 1), (2, 2))]
+    assert choose_pair_endpoints(ps, ns) == ((0, 0), (3, 3)), "the ends are unchanged"
+
+
+def test_choose_pair_chain_is_the_trunk_without_interior_parts() -> None:
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    # Two couples: exactly today's single farthest-apart trunk.
+    ps = [_pad(3.0, 5.0, 1, "D+", ref="J1"), _pad(27.0, 5.0, 1, "D+", ref="U1")]
+    ns = [_pad(3.0, 6.0, 2, "D-", ref="J1"), _pad(27.0, 6.0, 2, "D-", ref="U1")]
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+    # USB-C dual row: the second row sits on the END part (J1), so it is an
+    # extra, not an interior part -- still the single trunk (board 06 USB2_D).
+    ps3 = ps + [_pad(4.35, 5.0, 1, "D+", ref="J1")]
+    ns3 = ns + [_pad(4.35, 6.0, 2, "D-", ref="J1")]
+    chain3 = choose_pair_chain(ps3, ns3)
+    assert chain3 is not None
+    assert chain3.segments == [choose_pair_endpoints(ps3, ns3)] and chain3.hops == []
+    assert choose_pair_chain(ps[:1], ns[:1]) is None
+
+
+def test_relocate_pair_anchor_moves_blocked_midpoint_off_the_part() -> None:
+    from kicad_tools.router.lattice.coupled import relocate_pair_anchor
+    from kicad_tools.router.lattice.history import PhysicalHistory
+
+    pads = _chain_pads()
+    order = list(pads.values())
+    pf = LatticePathfinder(
+        [(0.0, 0.0), (30.0, 0.0), (30.0, 12.0), (0.0, 12.0)], order, _RULES, LayerStack.two_layer()
+    )
+    obstacles = pf.obstacles
+    half = _PITCH / 2.0
+
+    def exempt_for(*names: str) -> frozenset[int]:
+        return frozenset(order.index(pads[n]) for n in names)
+
+    seg_pads = ("U2.4", "U2.6", "U1.P", "U1.N")
+    anchor = relocate_pair_anchor(
+        obstacles,
+        pads["U2.4"],
+        pads["U2.6"],
+        (27.0, 6.0),
+        half_pitch=half,
+        layers=(0,),
+        exempt=exempt_for(*seg_pads),
+        pair_nets={1, 2},
+    )
+    assert anchor is not None
+    vbus = obstacles.pad_rects[order.index(pads["U2.5"])]
+    assert anchor[0] > vbus[2] + half, "anchor clears the VBUS keep-out grown by pitch/2"
+    assert anchor[1] == pytest.approx(6.0), "slides perpendicular to the P-N axis"
+    assert anchor[0] - _SOT_OUT_X < 3.0, "computed shift, not a runaway"
+
+    # Keepout-aware (board 03: U2.5's #6401 VBUS via reservation sits just
+    # outside the part, where the anchor would otherwise land): the anchor
+    # moves past a track-blocking area and the doglegs avoid it.
+    from kicad_tools.router.lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+
+    vx = anchor[0]
+    via_site = KeepoutArea(
+        polygon=((vx - 0.4, 5.6), (vx + 0.4, 5.6), (vx + 0.4, 6.4), (vx - 0.4, 6.4)),
+        layers=frozenset({0, 1}),
+        blocks_tracks=True,
+        blocks_vias=True,
+    )
+    mask = LatticeKeepoutMask([via_site])
+    moved = relocate_pair_anchor(
+        obstacles,
+        pads["U2.4"],
+        pads["U2.6"],
+        (27.0, 6.0),
+        half_pitch=half,
+        layers=(0,),
+        exempt=exempt_for(*seg_pads),
+        pair_nets={1, 2},
+        keepouts=mask,
+        trace_half=_HS.trace_width / 2.0,
+    )
+    assert moved is not None and moved[0] > vx + 0.4 + half
+    assert not mask.segment_blocked(moved, moved, 0, 1, half + _HS.trace_width / 2.0)
+
+    # An unblocked midpoint keeps anchor=None.
+    assert (
+        relocate_pair_anchor(
+            obstacles,
+            pads["U1.P"],
+            pads["U1.N"],
+            (15.0, 6.0),
+            half_pitch=half,
+            layers=(0,),
+            exempt=exempt_for(*seg_pads),
+            pair_nets={1, 2},
+        )
+        is None
+    )
+
+    # The relocated segment routes COUPLED on the otherwise empty board; the
+    # un-relocated one cannot leave the part (pair-escape-a).
+    pc = CoupledConnection(
+        key=("pair", 1, 2, 1),
+        pair_name="D",
+        pad_p_a=pads["U2.4"],
+        pad_n_a=pads["U2.6"],
+        pad_p_b=pads["U1.P"],
+        pad_n_b=pads["U1.N"],
+        net_class=_HS,
+        pitch=_PITCH,
+    )
+    res, reason = pf._route_pair_impl(
+        pc, committed=pf._fresh_committed(), history=PhysicalHistory(), present=1.0
+    )
+    assert res is None and reason == "pair-escape-a"
+    from dataclasses import replace
+
+    res, reason = pf._route_pair_impl(
+        replace(pc, anchor_a=anchor),
+        committed=pf._fresh_committed(),
+        history=PhysicalHistory(),
+        present=1.0,
+    )
+    assert res is not None, reason
+
+
+def _chain_autorouter(extra: list[Pad] | None = None) -> object:
+    from kicad_tools.router.core import Autorouter
+
+    router = Autorouter(30, 12, strategy="lattice", net_class_map={"D+": _HS, "D-": _HS})
+    for pad in list(_chain_pads().values()) + list(extra or []):
+        key = (pad.ref, pad.pin if pad.ref == "U2" else f"{pad.ref}{pad.net}{pad.x}")
+        router.pads[key] = pad
+        router.nets.setdefault(pad.net, []).append(key)
+        router.net_names[pad.net] = pad.net_name
+    return router
+
+
+def test_core_chains_pair_through_pass_through_part(capsys) -> None:
+    router = _chain_autorouter()
+    coupled, reserved = router._lattice_coupled_connections()
+    assert [pc.key for pc in coupled] == [("pair", 1, 2, 0), ("pair", 1, 2, 1)]
+    # The U2-side end of each segment is relocated off the part; the J1 / U1
+    # ends are clear and keep the midpoint.
+    assert coupled[0].anchor_a is None and coupled[0].anchor_b is not None
+    assert coupled[0].anchor_b[0] < _SOT_IN_X
+    assert coupled[1].anchor_a is not None and coupled[1].anchor_b is None
+    assert coupled[1].anchor_a[0] > _SOT_OUT_X
+    assert len(reserved[1]) == 4 and len(reserved[2]) == 4
+    assert [(h[1], h[2].pin, h[3].pin) for h in router._lattice_pair_hops] == [
+        (1, "3", "4"),
+        (2, "1", "6"),
+    ]
+
+    routes_p = router.route_net(1)
+    routes_n = router.route_net(2)
+    assert router._lattice_pair_outcomes == {"D": "coupled"}, router._lattice_pair_outcomes
+    assert [o for _n, _l, o in router._lattice_pair_segment_outcomes] == ["coupled", "coupled"]
+    pads = _chain_pads()
+    assert _net_connected(routes_p, [pads[k] for k in ("J1.P", "U2.3", "U2.4", "U1.P")])
+    assert _net_connected(routes_n, [pads[k] for k in ("J1.N", "U2.1", "U2.6", "U1.N")])
+    stats = router._lattice_negotiation_stats
+    assert stats.routed == stats.total == 4, stats  # 2 segments + 2 hops
+    out = capsys.readouterr().out
+    assert "D[0] J1.1->U2.3: coupled" in out and "D[1] U2.4->U1.1: coupled" in out
+
+
+def test_core_reports_partially_coupled_pair(capsys) -> None:
+    # A slot wall in the J1 -> U2 segment: that segment falls back
+    # single-ended (#6373, per segment) while U2 -> U1 still couples.
+    walls = [
+        Pad(
+            x=8.0,
+            y=y,
+            width=0.5,
+            height=h,
+            net=20 + i,
+            net_name=f"WALL{i}",
+            layer=Layer.F_CU,
+            ref=f"W{i}",
+            pin="1",
+        )
+        for i, (y, h) in enumerate(((9.15, 6.5), (1.85, 6.5)))
+    ]
+    router = _chain_autorouter(walls)
+    routes_p = router.route_net(1)
+    router.route_net(2)
+    assert router._lattice_pair_outcomes == {"D": "partially-coupled:1/2"}
+    segs = router._lattice_pair_segment_outcomes
+    assert segs[0][2].startswith("uncoupled-fallback:") and segs[1][2] == "coupled"
+    pads = _chain_pads()
+    assert _net_connected(routes_p, [pads[k] for k in ("J1.P", "U2.3", "U2.4", "U1.P")])
+    out = capsys.readouterr().out
+    assert "WARNING: diff pair D only partially coupled (1/2 segments)" in out
+    assert "J1.1->U2.3 (uncoupled-fallback:" in out
+
+
+def test_core_single_segment_pair_keeps_legacy_key() -> None:
+    router = _autorouter({"D+": _HS, "D-": _HS})
+    coupled, reserved = router._lattice_coupled_connections()
+    assert [pc.key for pc in coupled] == [("pair", 1, 2)]
+    assert coupled[0].anchor_a is None and coupled[0].anchor_b is None
+    assert router._lattice_pair_hops == []
+    assert all(len(v) == 2 for v in reserved.values())
+
+
+def test_aggregate_pair_outcome() -> None:
+    from kicad_tools.router.core import _aggregate_pair_outcome
+
+    assert _aggregate_pair_outcome(["pair-no-path"]) == "pair-no-path"
+    assert _aggregate_pair_outcome(["coupled", "coupled"]) == "coupled"
+    assert _aggregate_pair_outcome(["uncoupled-fallback:x", "coupled"]) == "partially-coupled:1/2"
+    assert (
+        _aggregate_pair_outcome(["uncoupled-fallback:x", "uncoupled-fallback:y"])
+        == "uncoupled-fallback:x"
+    )
+
+
+def test_lattice_key_naming_accepts_chain_keys() -> None:
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.route_cmd import _net_name_for_lattice_key
+
+    router = SimpleNamespace(net_names={1: "D+", 2: "D-", 5: "SIG"})
+    assert _net_name_for_lattice_key(router, ("pair", 1, 2)) == "D+/D-"
+    assert _net_name_for_lattice_key(router, ("pair", 1, 2, 1)) == "D+/D-"
+    assert _net_name_for_lattice_key(router, (("pair", 1, 2, 0), "N")) == "D-"
+    assert _net_name_for_lattice_key(router, (("pair", 1, 2), "P")) == "D+"
+    assert _net_name_for_lattice_key(router, (1, "hop", 0)) == "D+"
+    assert _net_name_for_lattice_key(router, (5, 3)) == "SIG"
+
+
+def _trunk_autorouter(extra: list[Pad]) -> object:
+    """J1 -> U1 pair (as on ``_chain_autorouter``) plus ``extra`` pads."""
+    from kicad_tools.router.core import Autorouter
+
+    router = Autorouter(30, 12, strategy="lattice", net_class_map={"D+": _HS, "D-": _HS})
+    base = [
+        _pad(3.0, 5.5, 1, "D+", ref="J1"),
+        _pad(3.0, 6.5, 2, "D-", ref="J1"),
+        _pad(27.0, 5.5, 1, "D+", ref="U1"),
+        _pad(27.0, 6.5, 2, "D-", ref="U1"),
+    ]
+    for pad in base + extra:
+        key = (pad.ref, f"{pad.pin}-{pad.net}-{pad.x}-{pad.y}")
+        router.pads[key] = pad
+        router.nets.setdefault(pad.net, []).append(key)
+        router.net_names[pad.net] = pad.net_name
+    return router
+
+
+@pytest.mark.parametrize(
+    "tp1, tp2",
+    [
+        ((15.0, 2.0), (15.0, 10.0)),  # far apart (8 mm), either side of the trunk
+        ((15.0, 3.5), (16.0, 3.5)),  # adjacent (1 mm)
+    ],
+    ids=["far", "adjacent"],
+)
+def test_one_test_point_per_net_keeps_single_coupled_trunk(tp1, tp2) -> None:
+    """A couple whose P and N sit on different refs (TP1 on D+, TP2 on D-)
+    is not a pass-through part: the pair keeps the single J1 -> U1 trunk
+    and the test points attach as extras, exactly as before #6378."""
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    tps = [_pad(*tp1, 1, "D+", ref="TP1"), _pad(*tp2, 2, "D-", ref="TP2")]
+    router = _trunk_autorouter(tps)
+    coupled, _reserved = router._lattice_coupled_connections()
+    assert [pc.key for pc in coupled] == [("pair", 1, 2)], "legacy single-trunk key"
+    assert coupled[0].anchor_a is None and coupled[0].anchor_b is None
+    assert router._lattice_pair_hops == []
+    assert {coupled[0].pad_p_a.ref, coupled[0].pad_p_b.ref} == {"J1", "U1"}
+
+    ps = [p for p in router.pads.values() if p.net == 1]
+    ns = [p for p in router.pads.values() if p.net == 2]
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+
+    routes_p = router.route_net(1)
+    routes_n = router.route_net(2)
+    assert router._lattice_pair_outcomes == {"D": "coupled"}, router._lattice_pair_outcomes
+    assert _net_connected(routes_p, ps)
+    assert _net_connected(routes_n, ns)
+
+
+def test_nets_through_different_parts_keep_single_trunk() -> None:
+    """D+ runs through U2 (pins 1/6) and D- through U3 (pins 1/6): neither
+    part carries both nets, so neither is a pass-through part of the PAIR.
+    The pair keeps the single trunk (no cross-ref waypoints, no hops)."""
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    def pin(x: float, y: float, net: int, ref: str, p: str) -> Pad:
+        pad = _pad(x, y, net, "D+" if net == 1 else "D-", ref=ref)
+        pad.pin = p
+        return pad
+
+    parts = [
+        pin(13.0, 2.5, 1, "U2", "1"),
+        pin(17.0, 2.5, 1, "U2", "6"),
+        pin(13.0, 9.5, 2, "U3", "1"),
+        pin(17.0, 9.5, 2, "U3", "6"),
+    ]
+    router = _trunk_autorouter(parts)
+    ps = [p for p in router.pads.values() if p.net == 1]
+    ns = [p for p in router.pads.values() if p.net == 2]
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+
+    coupled, _reserved = router._lattice_coupled_connections()
+    assert [pc.key for pc in coupled] == [("pair", 1, 2)]
+    assert router._lattice_pair_hops == []
+    routes_p = router.route_net(1)
+    routes_n = router.route_net(2)
+    assert router._lattice_pair_outcomes == {"D": "coupled"}, router._lattice_pair_outcomes
+    assert _net_connected(routes_p, ps)
+    assert _net_connected(routes_n, ns)
+
+
+def test_termination_tap_stays_on_the_trunk() -> None:
+    """A termination resistor straddling P and N (one couple, entry == exit)
+    is a tap, not a pass-through part: the pair keeps the single trunk
+    (board 06 LVDS regression, #6378)."""
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    ps = [_pad(3.0, 5.5, 1, "D+", ref="U1"), _pad(27.0, 5.5, 1, "D+", ref="U2")]
+    ns = [_pad(3.0, 6.5, 2, "D-", ref="U1"), _pad(27.0, 6.5, 2, "D-", ref="U2")]
+    ps.append(_pad(15.0, 5.5, 1, "D+", ref="R1"))
+    ns.append(_pad(15.0, 6.5, 2, "D-", ref="R1"))
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+
+
+def test_board06_lvds_pairs_keep_single_trunk() -> None:
+    """The CURRENT board 06 LVDS design (terminations R1-R4) must keep every
+    pair on one coupled trunk, as on main (3/4 coupled there)."""
+    from pathlib import Path
+
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    board = (
+        Path(__file__).resolve().parents[3]
+        / "boards/06-diffpair-test/output/diffpair_test.kicad_pcb"
+    )
+    router, _ = load_pcb_for_routing(
+        str(board),
+        skip_nets=["GND", "+3V3", "+1V8", "+1V2", "VBUS_USB"],
+        strategy="lattice",
+        force_python=True,
+    )
+    coupled, _reserved = router._lattice_coupled_connections()
+    lvds = [pc for pc in coupled if pc.pair_name.startswith("LVDS")]
+    assert len(lvds) == 4, [pc.pair_name for pc in coupled]
+    assert all(len(pc.key) == 3 for pc in lvds), "no chain segments for taps"
+    assert router._lattice_pair_hops == []

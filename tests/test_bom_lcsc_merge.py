@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.route_lint_gate import _is_kicad_lock
 from kicad_tools.export.bom_formats import read_existing_lcsc_assignments
 from kicad_tools.schema.bom import BOMItem
 
@@ -38,6 +39,19 @@ def _make_item(
         lcsc=lcsc,
         dnp=dnp,
     )
+
+
+def _snapshot_dir(root: Path) -> dict[Path, bytes]:
+    """Byte snapshot of every file under *root*, minus KiCad lock files.
+
+    ``~<project>.kicad_pro.lck`` files are transient markers that any
+    in-place ``kicad-cli`` reader of the committed project creates and
+    deletes (another xdist worker, or a developer with KiCad open), so
+    they are not export side effects (issue #6338).
+    """
+    return {
+        p: p.read_bytes() for p in root.rglob("*") if p.is_file() and not _is_kicad_lock(p.name)
+    }
 
 
 def _write_jlcpcb_csv(path: Path, rows: list[list[str]]) -> None:
@@ -307,7 +321,7 @@ def test_board06_default_repeat_export_preserves_non_lcsc_spec(tmp_path, auto_lc
 
     board = Path(__file__).resolve().parents[1] / "boards/06-diffpair-test"
     pcb = board / "output/diffpair_test_routed.kicad_pcb"
-    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    before = _snapshot_dir(board)
     mock = MagicMock()
     mock.__enter__.return_value = mock
     mock._get_client.return_value = None
@@ -351,4 +365,24 @@ def test_board06_default_repeat_export_preserves_non_lcsc_spec(tmp_path, auto_lc
             assert entries[0].lcsc_part == ""
         else:
             assert second.lcsc_enrichment is None
-    assert before == {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    assert before == _snapshot_dir(board)
+
+
+def test_snapshot_dir_ignores_transient_kicad_lock(tmp_path):
+    """A lock file present only in the "before" snapshot does not count (#6338)."""
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "diffpair_test.kicad_sch").write_text("(kicad_sch)")
+    lock = out / "~diffpair_test.kicad_pro.lck"
+    lock.write_text('{"hostname":"h","username":"u"}')
+    before = _snapshot_dir(tmp_path)
+    lock.unlink()
+    assert before == _snapshot_dir(tmp_path)
+    assert lock not in before
+
+    # Any other new or changed file is still a difference.
+    (out / "stray.csv").write_text("x")
+    assert before != _snapshot_dir(tmp_path)
+    (out / "stray.csv").unlink()
+    (out / "diffpair_test.kicad_sch").write_text("(kicad_sch changed)")
+    assert before != _snapshot_dir(tmp_path)

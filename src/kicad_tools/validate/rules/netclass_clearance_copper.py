@@ -180,11 +180,18 @@ def check_netclass_clearance_copper(
     # gaps), nor the P/N gap of a coupled diff pair (routed at the class's
     # intra-pair clearance), exactly like the kicad-cli rule kct emits for
     # them (``isCoupledDiffPair()``, mirrored name-for-name); an authored
-    # class still governs both.
-    from kicad_tools.manufacturers.netclass_dru import is_coupled_diff_pair
-    from kicad_tools.manufacturers.project_generator import router_netclass_provenance
+    # class still governs both.  Issue #6429: the pairs the router coupled
+    # under names KiCad does not recognise (``X_POS``/``X_NEG``) are recorded
+    # in ``meta.kct_router_diff_pairs`` and exempted by the same predicate the
+    # emitted .kicad_dru rule encodes.
+    from kicad_tools.manufacturers.netclass_dru import is_router_coupled_pair
+    from kicad_tools.manufacturers.project_generator import (
+        recorded_router_coupled_pairs,
+        router_netclass_provenance,
+    )
 
     router_classes = set(router_netclass_provenance(project)[0])
+    recorded_pairs = recorded_router_coupled_pairs(project)
     package_floors = {
         num: value for num, value in floors.items() if classes[num] not in router_classes
     }
@@ -201,7 +208,7 @@ def check_netclass_clearance_copper(
                 and a.source_footprint is not None
                 and a.source_footprint is b.source_footprint
             )
-            coupled = is_coupled_diff_pair(a.net_name, b.net_name)
+            coupled = is_router_coupled_pair(a.net_name, b.net_name, recorded_pairs)
             governing = package_floors if same_package or coupled else floors
             required_class = pair_floor(governing, a.net_number, b.net_number)
             if required_class <= fab_floor + DRC_TOLERANCE:

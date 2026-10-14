@@ -23,7 +23,9 @@ host config → repo config — see `config_resolver.rs`).
       "tickIntervalSecs": 60,
       "maxConcurrent": 3,
       "maxAdmissionsPerTick": 3,
-      "drawTemperature": 80
+      "weightBonusRedMainFix": 400,
+      "weightBonusVeryImportant": 100,
+      "weightBonusImportant": 20
     },
     "lifecycle": {
       "leaseTtlMinutes": 15,
@@ -47,7 +49,11 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | `dispatch` | `tickIntervalSecs` | 60 | 5–3600 | Work-finder tick cadence | `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` |
 | `dispatch` | `maxConcurrent` | 3 | 1–256 | Sweep concurrency ceiling (dynamic cap stays bounded by disk/RAM) | `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` |
 | `dispatch` | `maxAdmissionsPerTick` | 3 | 1–64 | Ramp cap: new sweeps admitted per tick (#4234) | `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` |
-| `dispatch` | `drawTemperature` | 80 | 1–100000 (integer) | Temperature of the workspace draw's softmax over `fleet_priority` (#11684; [`priority-model.md`](priority-model.md)): small = nearly strict priority order, large = nearly uniform. Re-read every tick (hot-applies) | — | — |
+| `dispatch` | `weightBonusRedMainFix` | 400 | 0–1000000 (integer) | Points added to a repo's draw `weight` while it holds a verified red-main fix (#11742; [`priority-model.md`](priority-model.md)). Re-read every tick (hot-applies) | — | — |
+| `dispatch` | `weightBonusVeryImportant` | 100 | 0–1000000 (integer) | Points added while the repo has dispatchable `loom:very-important` work (#11742). Hot-applies | — | — |
+| `dispatch` | `weightBonusImportant` | 20 | 0–1000000 (integer) | Points added while the repo has dispatchable `loom:important` work (#11742). Hot-applies | — | — |
+
+`dispatch.drawTemperature` (the #11684 softmax temperature) is retired by #11742: it is still accepted so an existing config keeps starting, and ignored.
 | `lifecycle` | `leaseTtlMinutes` | 15.0 | >0–1440 | Lease-freshness TTL (#6286) | — | `LOOM_LEASE_TTL_MINUTES` |
 | `lifecycle` | `idleExitMinutes` | 60 | 1–10080 | Idle-exit turnaround (#4467) | `autonomous.idleExit.idleMinutes` | `LOOM_AUTONOMOUS_IDLE_EXIT_MINUTES` |
 | `rework` | `buildBackoffHigh` | 40 | 1–100000 | Per-repo PR-debt level that engages a repo's build back-off (#9410, #10624) | `autonomous.workFinder.buildBackoff.high` | — |

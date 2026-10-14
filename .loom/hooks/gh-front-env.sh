@@ -7,8 +7,7 @@
 # to `$CLAUDE_ENV_FILE`, which Claude Code sources before every Bash tool call
 # in the session AND in its Task subagents, so their plain `gh` reads are
 # ETag-revalidated like a dispatched worker's (#10331). Order is the worker's:
-# managed launcher (#9987) when a policy names one, then the front, then the
-# PATH the session already had. Opt out with LOOM_GH_SHIM=0.
+# the front, then the PATH the session already had. Opt out with LOOM_GH_SHIM=0.
 #
 # CONTRACT: a cost optimisation, never a guard. Every resolution failure is
 # exit 0, `session-env` itself always exits 0, and nothing reaches stdout

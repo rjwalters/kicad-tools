@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1152",
-  "loom_commit": "5b4e1390c19f1b9ac488b75f2e959eb5935bbc97",
+  "loom_version": "0.19.1154",
+  "loom_commit": "a661bf0d507bb02e74f5aacc1e0e1869878f9297",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -435,7 +435,7 @@
     ".loom/scripts/tests/test-merge-pr-head-mismatch.sh",
     ".claude/commands/loom/sweep-arguments.md"
   ],
-  "last_resync": "2026-10-13",
+  "last_resync": "2026-10-14",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1081"
 }

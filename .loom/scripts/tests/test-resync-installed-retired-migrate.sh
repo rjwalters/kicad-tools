@@ -32,7 +32,7 @@ export GIT_COMMITTER_NAME="test" GIT_COMMITTER_EMAIL="test@example.com"
 
 # Fake daemon: `labels migrate --help` succeeds unless FAKE_NO_VERB=1; a real
 # `labels migrate` logs argv to FAKE_LOG, prints FAKE_STDOUT, exits FAKE_RC.
-# Everything else (update-gitignore, forge egress, ...) succeeds silently.
+# Everything else (update-gitignore, ...) succeeds silently.
 FAKE="$WORKDIR/fake-loom-daemon"
 cat > "$FAKE" <<'FAKE_EOF'
 #!/usr/bin/env bash

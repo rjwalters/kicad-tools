@@ -228,10 +228,16 @@ reset_log
 _strip_one_closed_issue_building_label "101"
 assert_eq "" "$(read_log)" "Open issue #101 -> no-op (label left in place)"
 
-# T3: closed but no loom:building label -> no-op (idempotent).
+# T3: closed, no loom:building but still loom:issue -> only loom:issue is
+# stripped (#11517, operator ruling 2026-10-13: a closed issue must not keep
+# the queue label consumers read as "Ready").
 reset_log
 _strip_one_closed_issue_building_label "102"
-assert_eq "" "$(read_log)" "Closed issue #102 (no loom:building) -> no-op, idempotent"
+log="$(read_log)"
+assert_contains "$log" "issue edit 102 --repo owner/repo --remove-label loom:issue" \
+  "Closed issue #102 (loom:issue, no loom:building) -> loom:issue stripped (#11517)"
+assert_not_contains "$log" "--remove-label loom:building" \
+  "Closed issue #102 -> no loom:building removal attempted"
 
 # T4: target is actually a PR (has .pull_request) -> skip.
 reset_log
@@ -268,8 +274,10 @@ assert_contains "$log" "issue edit 100 --repo owner/repo --remove-label loom:bui
   "Multi-target: #100 (closed, building) is stripped"
 assert_not_contains "$log" "issue edit 101" \
   "Multi-target: #101 (open) is left alone"
-assert_not_contains "$log" "issue edit 102" \
-  "Multi-target: #102 (closed, not building) is left alone"
+assert_not_contains "$log" "issue edit 102 --repo owner/repo --remove-label loom:building" \
+  "Multi-target: #102 (closed, not building) keeps no building removal"
+assert_contains "$log" "issue edit 102 --repo owner/repo --remove-label loom:issue" \
+  "Multi-target: #102 (closed, still loom:issue) loses loom:issue (#11517)"
 
 # T8: no close targets at all -> no-op, no gh calls.
 reset_log
@@ -349,8 +357,8 @@ echo "Testing merge-pr.sh wiring..."
 src="$(cat "$MERGE_PR_SRC")"
 assert_contains "$src" "_strip_closed_issue_building_labels || true" \
   "merge-pr.sh invokes the closed-issue cleanup pass at the confirmed-merge choke point"
-assert_contains "$src" 'forge_gh_remove_label_rl_safe "$REPO_NWO" "$issue_num" "loom:building"' \
-  "merge-pr.sh strips loom:building via the rate-limit-safe remove wrapper (#4856-style)"
+assert_contains "$src" 'forge_gh_remove_label_rl_safe "$REPO_NWO" "$issue_num" "$label"' \
+  "merge-pr.sh strips loom:building / loom:issue via the rate-limit-safe remove wrapper (#4856-style)"
 
 # --- Summary ---
 echo ""

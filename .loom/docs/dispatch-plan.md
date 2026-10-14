@@ -84,7 +84,7 @@ fleet order:     #600 (a, round 0), #700 (b, round 0), #601 (a, round 1), #602 (
 
 ## What the merge deliberately does not compare
 
-**`workspace_priority` is per-host and unsynced.** It comes from each host's
+**`workspace_weight` is per-host and unsynced.** It comes from each host's
 own `.loom/config.json`, so host A's `priority: 100` and host B's
 `priority: 100` are two unrelated operators numbering their own repos.
 Comparing them across hosts would let one host's local numbering silently

@@ -785,8 +785,8 @@ discover_project_goals() {
 
   # 3. Current priority work
   echo "Current priority work:"
-  "$GH_READ" issue list --label="loom:very-important" --state=open --limit=5
-  "$GH_READ" issue list --label="loom:important" --state=open --limit=5
+  "$GH_READ" issue list --label="loom:very-important" --search "-label:loom:frozen" --state=open --limit=5
+  "$GH_READ" issue list --label="loom:important" --search "-label:loom:frozen" --state=open --limit=5
 
   # 4. Summary
   echo "Simplification proposals should support these focus areas"
@@ -805,9 +805,9 @@ check_backlog_balance() {
   echo "=== Backlog Priority Balance ==="
 
   # Priority is two labels set by Guide/Champion (#11103); count, never apply.
-  vi=$("$GH_READ" issue list --label="loom:very-important" --state=open --json number --jq 'length')
-  imp=$("$GH_READ" issue list --label="loom:important" --state=open --json number --jq 'length')
-  ready=$("$GH_READ" issue list --label="loom:issue" --state=open --json number --jq 'length')
+  vi=$("$GH_READ" issue list --label="loom:very-important" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
+  imp=$("$GH_READ" issue list --label="loom:important" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
+  ready=$("$GH_READ" issue list --label="loom:issue" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
 
   echo "Very important:     $vi"
   echo "Important:          $imp"
@@ -1227,6 +1227,6 @@ EOF
 # Create standalone removal issue
 ./.loom/scripts/create-issue.sh --title "Remove [thing]" --body "..." --label "loom:hermit"
 
-# Check existing hermit suggestions
+# Check existing hermit suggestions (loom:frozen counts: dedup)
 "$GH_READ" issue list --label="loom:hermit" --state=open
 ```

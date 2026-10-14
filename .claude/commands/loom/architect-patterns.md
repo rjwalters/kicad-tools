@@ -455,8 +455,8 @@ discover_project_goals() {
 
   # 3. Current priority work
   echo "Current priority work:"
-  gh issue list --label="loom:very-important" --state=open --limit=5
-  gh issue list --label="loom:important" --state=open --limit=5
+  gh issue list --label="loom:very-important" --search "-label:loom:frozen" --state=open --limit=5
+  gh issue list --label="loom:important" --search "-label:loom:frozen" --state=open --limit=5
 
   # 4. Summary
   echo "Goal-advancing proposals should target these areas"
@@ -482,9 +482,9 @@ check_backlog_balance() {
   echo "=== Backlog Priority Balance ==="
 
   # Priority is two labels set by Guide/Champion (#11103); count, never apply.
-  vi=$(gh issue list --label="loom:very-important" --state=open --json number --jq 'length')
-  imp=$(gh issue list --label="loom:important" --state=open --json number --jq 'length')
-  ready=$(gh issue list --label="loom:issue" --state=open --json number --jq 'length')
+  vi=$(gh issue list --label="loom:very-important" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
+  imp=$(gh issue list --label="loom:important" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
+  ready=$(gh issue list --label="loom:issue" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
 
   echo "Very important:     $vi"
   echo "Important:          $imp"

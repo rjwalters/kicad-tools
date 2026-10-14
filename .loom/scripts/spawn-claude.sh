@@ -780,57 +780,24 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
     # the env-var form already in this process's environment (forwarded by
     # name); best-effort read-only bind of ~/.config/gh only when neither
     # token env var is present.
-    #
-    # Forge-egress policy (#9987): `loom-daemon forge egress container-args`
-    # makes the whole decision and this block only appends its lines. Line 1
-    # is an explicit `loom-forge-egress: <status>`; a managed host gets 2am's
-    # gh launcher, upstream gh, policy and credential REFERENCE read-only and
-    # neither ~/.config/gh nor GH_TOKEN/GITHUB_TOKEN; an unconfigured (or
-    # observe-unmanaged, findings logged) host gets the legacy credentials
-    # above. Without a capable daemon only a host with no policy or managed
-    # marker keeps them. Anything else — a refusal (unreadable/invalid policy,
-    # missing launcher or image check under `required`), a failed helper,
-    # empty output — has no status line and REFUSES (78): never empty-means-none.
-    # requires-daemon: forge >= 0.19.758   #9987 — `forge egress container-args --image`, declared at this repo's VERSION because it lands WITH this marker (the first release carrying it is the post-merge bump). Hard on a host with a forge-egress policy (this block refuses, exit 78, below the floor); a host with no policy never needs it and keeps today's behaviour.
+    for _containment_var in GH_TOKEN GITHUB_TOKEN; do
+        if [[ -n "${!_containment_var+x}" ]]; then _containment_mounts+=(-e "$_containment_var"); fi
+    done
+    if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && -n "${HOME:-}" && -d "${HOME}/.config/gh" ]]; then
+        _containment_mounts+=(-v "${HOME}/.config/gh:${HOME}/.config/gh:ro")
+    fi
+    # The agent `gh` front's ledger sink (#10607), read-write, so a contained
+    # worker's forge-call rows reach the daemon. Best-effort: no daemon, or one
+    # without the verb, mounts nothing.
+    # requires-daemon: gh-shim optional   `gh-shim container-mount`; an older binary prints usage on stderr and nothing on stdout, so no sink is mounted.
     # shellcheck source=lib/locate-daemon-bin.sh
     source "${_script_dir}/lib/locate-daemon-bin.sh"
-    _containment_gh=()
     _containment_gh_bin="$(loom_locate_daemon_bin "$WORKSPACE" 2>/dev/null || true)"
-    if [[ -n "$_containment_gh_bin" ]] && "$_containment_gh_bin" forge egress container-args --help >/dev/null 2>&1; then
-        # stderr passes through: the named refusal or observe findings reach the log.
-        _containment_gh_out="$("$_containment_gh_bin" forge egress container-args --image "$_containment_image")" || _containment_gh_out=""
+    if [[ -n "$_containment_gh_bin" ]]; then
         while IFS= read -r _containment_gh_line; do # Bash 3.2: no mapfile
-            _containment_gh+=("$_containment_gh_line")
-        done <<<"$_containment_gh_out"
-    else
-        # No capable daemon: only a host with nothing policy-shaped keeps the
-        # legacy credentials. Probe the policy DIRECTORIES, not the files: a
-        # root-owned 0700 dir hides its policy/marker from `-e` (EACCES), and
-        # like the daemon only "not there at all" means absent. The env list
-        # can only ADD directories (tests), never remove the fixed two.
-        _containment_gh_policy="${LOOM_FORGE_EGRESS_POLICY:-}${LOOM_FORGE_EGRESS_MANAGED:-}"
-        # shellcheck disable=SC2086 # word-split the optional extra dirs
-        for _containment_var in /etc/loom/forge-egress /etc/2am/github-egress ${LOOM_FORGE_EGRESS_PROBE_DIRS:-}; do
-            if [[ -e "$_containment_var" || -L "$_containment_var" ]]; then _containment_gh_policy+="$_containment_var"; fi
-        done
-        if [[ -z "$_containment_gh_policy" ]]; then
-            _containment_gh=("loom-forge-egress: unconfigured")
-            for _containment_var in GH_TOKEN GITHUB_TOKEN; do
-                if [[ -n "${!_containment_var+x}" ]]; then _containment_gh+=(-e "$_containment_var"); fi
-            done
-            if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && -n "${HOME:-}" && -d "${HOME}/.config/gh" ]]; then
-                _containment_gh+=(-v "${HOME}/.config/gh:${HOME}/.config/gh:ro")
-            fi
-        fi
+            if [[ -n "$_containment_gh_line" ]]; then _containment_mounts+=("$_containment_gh_line"); fi
+        done < <("$_containment_gh_bin" gh-shim container-mount 2>/dev/null || true)
     fi
-    case "${_containment_gh[0]:-}" in
-        "loom-forge-egress: managed" | "loom-forge-egress: unconfigured" | "loom-forge-egress: observe-unmanaged") ;;
-        *)
-            log_error "spawn-claude: no explicit forge egress answer (a refused policy, a failed helper, or a policy host without a capable loom-daemon) — refusing to mount ~/.config/gh or forward GH_TOKEN/GITHUB_TOKEN (#9987)."
-            exit 78 # EX_CONFIG
-            ;;
-    esac
-    _containment_mounts+=("${_containment_gh[@]:1}")
     # Git commit identity (check-git-identity.sh's global user.name/user.email).
     if [[ -n "${HOME:-}" && -f "${HOME}/.gitconfig" ]]; then
         _containment_mounts+=(-v "${HOME}/.gitconfig:${HOME}/.gitconfig:ro")
@@ -885,8 +852,7 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
 
     # --- Env passthrough ---
     # Every LOOM_*/CLAUDE_*/SAFEHOUSE*/CODEX_* var (GH_TOKEN/GITHUB_TOKEN
-    # come from the forge-egress block above, never under a policy, #9987)
-    # already present in THIS process's environment (exported by the daemon
+    # come from the forge auth block above) already present in THIS process's environment (exported by the daemon
     # before it spawned this script — LOOM_SWEEP_CLAIM_OWNED, LOOM_ROLE,
     # LOOM_RUNTIME, LOOM_MODEL/LOOM_EFFORT when set, etc. — or already
     # resolved above, e.g. CLAUDE_CODE_OAUTH_TOKEN when
@@ -1429,7 +1395,7 @@ fi
 
 # --- Per-role tool restriction at spawn (#8256) ---
 # Defense in depth for the guard hooks: the role JSON's
-# toolPolicy.allowedCapabilities (plus any forge-egress policy) become
+# toolPolicy.allowedCapabilities become
 # --disallowedTools specs, computed by `loom-daemon role-tool-policy
 # deny-specs`. Bypassable on its own (`bash -c 'ssh …'`), which is why the hooks
 # are the backstop. Appended last so no positional follows the variadic flag,

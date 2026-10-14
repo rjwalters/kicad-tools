@@ -294,13 +294,15 @@ fi
 # managed block, i.e. all of them -- strands the block, and the block is where
 # the credential ignore rules live, so stranding it is itself a security
 # regression (#9046). The credential-class check below runs BEFORE this
-# allowlist and is unaffected either way.
+# allowlist and is unaffected either way. `.github/labels.yml` (#11033) is
+# co-owned the same way and accepted for the same reason: resync refreshes its
+# Loom-managed label block, and a stranded block keeps declaring retired labels.
 is_resync_surface_path() {
     case "$1" in
         .loom/hooks/* | .loom/scripts/* | .loom/roles/* | .loom/docs/* | \
             .loom/bin/* | .loom/runtimes/* | .agents/skills/* | \
             .claude/commands/loom/* | .claude/README.md | .claude/biome.jsonc | \
-            .github/CONFIGURATION.md | .loom/biome.jsonc | .loom/CLAUDE.md | \
+            .github/CONFIGURATION.md | .github/labels.yml | .loom/biome.jsonc | .loom/CLAUDE.md | \
             .loom/install-metadata.json | .gitattributes | .gitignore)
             return 0
             ;;
