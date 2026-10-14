@@ -262,6 +262,10 @@ themselves ([#5985]):
 - **Boards 00 and 01** call it right after they write the unrouted PCB, and
   their committed unrouted and routed outputs carry `pintype` ([#6025]).
   Every pin on these boards is `passive`, so no new rails appear.
+- **Board 02** calls it right after it writes the unrouted PCB. Its
+  committed unrouted and routed outputs carry `pintype`, annotated in place
+  so the committed copper is unchanged, and `package_release.py` rewrote its
+  readiness package ([#6025]).
 - **Other boards** are not wired yet, and their committed outputs carry no
   `pintype` ([#6025]). To annotate a board by hand, run this on its unrouted
   and routed PCBs. It edits only the pads' `pinfunction`/`pintype` children
