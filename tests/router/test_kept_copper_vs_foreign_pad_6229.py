@@ -360,6 +360,17 @@ def _route(tmp_path: Path, *, short: bool) -> tuple[int, Path]:
 
 
 class TestCliPreserveExisting:
+    @pytest.fixture(autouse=True)
+    def _no_kicad_cli_discovery(self, request, monkeypatch):
+        # Issue #6645: the post-route zone fill discovers kicad-cli via
+        # ``kicad-cli version``, which takes a native-concurrency permit; under
+        # CI load the queueing (not the code under test) blew the 60s cap.
+        # These tests assert the preserve-existing verdict, not discovery.
+        # test_kicad_cli_agrees needs the real binary, so it is exempt.
+        if request.node.name.startswith("test_kicad_cli_agrees"):
+            return
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: None)
+
     def test_input_short_fails_the_run_and_is_labelled(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -379,6 +390,10 @@ class TestCliPreserveExisting:
         rc, _out = _route(tmp_path, short=False)
         assert rc == 0
 
+    # Issue #6645: this test legitimately queues for native-concurrency permits
+    # (route zone fill + its own kicad-cli DRC) before running a real DRC, so
+    # it gets an explicit cap well above the 60s default.
+    @pytest.mark.timeout(180)
     def test_kicad_cli_agrees(self, tmp_path: Path) -> None:
         """Both engines report the short on the written board."""
         from kicad_tools.cli.runner import find_kicad_cli

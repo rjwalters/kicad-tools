@@ -171,7 +171,7 @@
           "max_vias_per_net": 4
         }
       ],
-      "pair_digest": "eadbbffa23378dfa",
+      "pair_digest": "502d8a3cc55baf49",
       "nets_routed": "26/27",
       "kct_errors_by_rule": {
         "diffpair_routing_continuity": 1
@@ -443,7 +443,7 @@
           "max_vias_per_net": null
         }
       ],
-      "pair_digest": "26c276ae7da77a54",
+      "pair_digest": "6afd7e125b79f3aa",
       "nets_routed": "18/18",
       "kct_errors_by_rule": {
         "diffpair_length_skew": 4,
@@ -884,7 +884,7 @@
           "max_vias_per_net": null
         }
       ],
-      "pair_digest": "c687f85b35857d3b",
+      "pair_digest": "ac8002212ff61adb",
       "nets_routed": "15/26",
       "kct_errors_by_rule": {
         "connectivity": 8,
@@ -1250,7 +1250,7 @@
           "max_vias_per_net": null
         }
       ],
-      "pair_digest": "ea419449e2b3ac2f",
+      "pair_digest": "2fad973bc289a4ee",
       "nets_routed": "33/34",
       "kct_errors_by_rule": {
         "diffpair_length_skew": 7,
