@@ -13726,8 +13726,15 @@ class DiffPairRouter:
         # baseline's "coupled" LVDS pairs carried 0 mm of N copper).  So the
         # grid pre-pass is skipped for them and their nets go to the main
         # strategy (the lattice) like an engagement-refused pair's.
-        lattice_owned_diff_nets: set[int] = set()
-        lattice_owns_pairs = getattr(self.autorouter, "_strategy", "grid") == "lattice"
+        # Issue #6551: the mesh engine has the same whole-netset blind spot
+        # (it negotiates every net without seeing ``routes``), so it owns
+        # its pairs too.  The mesh has no coupled router, so under mesh an
+        # engaged pair is routed *uncoupled*; the CLI rejects
+        # ``--route-engine mesh --differential-pairs`` for that reason, and
+        # this guard protects library callers.
+        engine_owned_diff_nets: set[int] = set()
+        pair_engine = getattr(self.autorouter, "_strategy", "grid")
+        engine_owns_pairs = pair_engine in ("lattice", "mesh")
         # Issue #3089: track diff-pair nets whose coupled search hit the
         # ``per_pair_timeout`` budget.  Same handling as refused-engagement
         # nets: drop them from ``diff_net_ids`` so the main strategy picks
@@ -13761,15 +13768,24 @@ class DiffPairRouter:
                 refused_diff_nets.add(p_id)
                 refused_diff_nets.add(n_id)
                 continue
-            if lattice_owns_pairs:
-                msg = (
-                    f"[diffpair-engage] {pair}: routed by the lattice engine; grid "
-                    f"coupled pre-pass skipped (issue #6535)"
-                )
-                print(f"  {msg}")
-                logger.info(msg)
-                lattice_owned_diff_nets.add(p_id)
-                lattice_owned_diff_nets.add(n_id)
+            if engine_owns_pairs:
+                if pair_engine == "mesh":
+                    msg = (
+                        f"[diffpair-engage] {pair}: routed UNCOUPLED by the mesh "
+                        f"engine (it has no coupled router); grid coupled "
+                        f"pre-pass skipped (issue #6551)"
+                    )
+                    print(f"  {msg}")
+                    logger.warning(msg)
+                else:
+                    msg = (
+                        f"[diffpair-engage] {pair}: routed by the lattice engine; grid "
+                        f"coupled pre-pass skipped (issue #6535)"
+                    )
+                    print(f"  {msg}")
+                    logger.info(msg)
+                engine_owned_diff_nets.add(p_id)
+                engine_owned_diff_nets.add(n_id)
                 continue
             # Issue #3439: aggregate budget check + per-pair clamp.
             pair_timeout = effective_per_pair_timeout
@@ -13890,9 +13906,10 @@ class DiffPairRouter:
                 # routes here; drop their nets from ``diff_net_ids`` so the
                 # main strategy routes them normally.
                 diff_net_ids = diff_net_ids - refused_diff_nets
-            if lattice_owned_diff_nets:
-                # Issue #6535: the lattice (main strategy) routes these.
-                diff_net_ids = diff_net_ids - lattice_owned_diff_nets
+            if engine_owned_diff_nets:
+                # Issues #6535 / #6551: the lattice or mesh (main strategy)
+                # routes these.
+                diff_net_ids = diff_net_ids - engine_owned_diff_nets
             if budget_exit_diff_nets:
                 # Issue #3089: coupled-routing-budget-exit pairs also
                 # produced no routes; drop their nets from
