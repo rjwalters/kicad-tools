@@ -56,6 +56,8 @@ from .base import DesignRules
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
 
+    from .netclass_dru import PairLimits
+
 logger = logging.getLogger(__name__)
 
 # Severities for DRC rule categories that are *not* manufacturability
@@ -1131,6 +1133,7 @@ def write_drc_constraints(
     router_net_classes: Mapping[str, NetClassRouting] | None = None,
     router_coupled_pairs: Iterable[tuple[str, str]] | None = None,
     router_pair_gaps: Iterable[tuple[str, str, float]] | None = None,
+    router_pair_limits: Iterable[PairLimits] | None = None,
     _board_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
@@ -1193,6 +1196,15 @@ def write_drc_constraints(
     :func:`~kicad_tools.manufacturers.netclass_dru.pair_gap_block_rules`);
     an empty list removes a stale block, and ``None`` leaves whatever a
     previous route wrote.
+
+    Router pair limits (Issue #6443): ``router_pair_limits`` are the
+    :class:`~kicad_tools.manufacturers.netclass_dru.PairLimits` of those pairs
+    -- uncoupled length, skew and via count, resolved by
+    :func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`.
+    They are written as native ``diff_pair_uncoupled`` / ``skew`` /
+    ``via_count`` rules in the same block as the gaps; see
+    :func:`~kicad_tools.manufacturers.netclass_dru.render_pair_limit_rules`
+    for the pairs KiCad does not recognise by name.
 
     The written ``.kicad_pro`` is stamped (:func:`stamp_kct_project`).  On a
     renamed output an existing destination is replaced only when it equals
@@ -1271,6 +1283,7 @@ def write_drc_constraints(
                 router_net_classes=router_net_classes,
                 router_coupled_pairs=router_coupled_pairs,
                 router_pair_gaps=router_pair_gaps,
+                router_pair_limits=router_pair_limits,
                 _board_path=pcb_path,
             )
             for result in rendered:
@@ -1383,13 +1396,13 @@ def write_drc_constraints(
             merged_dru, rules, project_data, preserve_board_rules=preserve_board_rules
         )
         # Issue #6443: one native diff_pair_gap rule per router-coupled pair.
-        if router_pair_gaps is not None:
-            from .netclass_dru import merge_pair_gap_block, pair_gap_block_rules
+        if router_pair_gaps is not None or router_pair_limits is not None:
+            from .netclass_dru import merge_pair_gap_block, pair_gap_block_rules, pair_limit_rules
 
-            gap_rules = pair_gap_block_rules(
-                router_pair_gaps, board_net_names(board) if board.exists() else None
-            )
-            merged = merge_pair_gap_block(merged_dru, gap_rules)
+            on_board = board_net_names(board) if board.exists() else None
+            gap_rules = pair_gap_block_rules(router_pair_gaps or [], on_board)
+            limit_rules = pair_limit_rules(router_pair_limits or [], on_board)
+            merged = merge_pair_gap_block(merged_dru, gap_rules, limit_rules)
             merged_dru = merged if merged is not None else merged_dru
         dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)

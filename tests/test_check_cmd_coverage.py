@@ -430,6 +430,21 @@ class TestRuleCategoryTaxonomy:
             category = DRCChecker.category_for_rule(rule_id)
             assert category in valid, f"{rule_id} -> {category!r} is not a valid category"
 
+    def test_pair_rules_that_block_manufacturable_are_manufacturing(self) -> None:
+        """Issue #6443: a cited or explicit pair limit blocks ``manufacturable``
+        (and reaches kicad-cli as an error), so those rules are fab-blocking in
+        the report.  Continuity is info-only and stays advisory."""
+        for rule_id in (
+            "diffpair_length_skew",
+            "diffpair_uncoupled_length",
+            "diffpair_clearance_intra",
+        ):
+            assert DRCChecker.category_for_rule(rule_id) == DRCChecker.CATEGORY_MANUFACTURING
+        assert (
+            DRCChecker.category_for_rule("diffpair_routing_continuity")
+            == DRCChecker.CATEGORY_ADVISORY
+        )
+
     def test_advisory_quality_rules_classified(self) -> None:
         """The routing-intent / quality rules that inflated the headline
         must land in the advisory bucket."""
@@ -438,9 +453,7 @@ class TestRuleCategoryTaxonomy:
             "ampacity",
             "copper_sliver",
             "impedance",
-            "diffpair_length_skew",
             "diffpair_routing_continuity",
-            "diffpair_clearance_intra",
             "match_group_length_skew",
             "silk_over_copper",
         ):
@@ -500,7 +513,7 @@ class TestRuleCategoryTaxonomy:
         assert DRCChecker.is_advisory_rule("connectivity") is True
         for rule_id in (
             "copper_sliver",
-            "diffpair_length_skew",
+            "diffpair_routing_continuity",
             "ampacity",
             "impedance",
             "silk_over_copper",

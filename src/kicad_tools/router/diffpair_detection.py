@@ -79,8 +79,9 @@ def build_synth_routing(
 
     The previous idiom was ``synth_routing.setdefault(cls.name, cls)``,
     which let the first net seen win the class-name key.  Board 03's
-    ``HighSpeed`` class has per-net variants (``USB_D+``/``USB_D-`` carry
-    ``coupled_continuity_threshold=0.25``; ``USB_MCU_D*`` do not), so any
+    ``HighSpeed`` class has per-net variants (each net names its own
+    ``diffpair_partner``; before #6443 ``USB_D+``/``USB_D-`` also carried
+    ``coupled_continuity_threshold=0.25``), so any
     lookup that fell through to the class-name key returned an arbitrary
     variant -- the router and ``kct check`` could then print different
     thresholds for the same pair.  A class whose variants differ gets no

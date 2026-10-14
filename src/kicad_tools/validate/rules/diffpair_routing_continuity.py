@@ -453,11 +453,16 @@ class DiffPairRoutingContinuityRule(DRCRule):
         first, second = sorted([name_a or f"net-{net_a}", name_b or f"net-{net_b}"])
         return DRCViolation(
             rule_id=self.rule_id,
-            severity="error",
+            # Info since #6443: the share of a pair that stays coupled is a
+            # proxy.  What a fab or a protocol limits is the uncoupled length
+            # (``diffpair_uncoupled_length``), and KiCad has no native check
+            # for a coupled fraction, so the two engines could not agree on
+            # an error here.
+            severity="info",
             message=(
                 f"Engaged differential pair {first}/{second} routing "
                 f"continuity {coupled_fraction:.1%} below threshold "
-                f"{threshold:.1%}"
+                f"{threshold:.1%} (info only; see diffpair_uncoupled_length)"
             ),
             location=None,
             layer=None,

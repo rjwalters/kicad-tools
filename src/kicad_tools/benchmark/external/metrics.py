@@ -684,6 +684,7 @@ SIDECAR_GATED_RULES: tuple[str, ...] = (
     "match_group_length_skew",
     "diffpair_length_skew",
     "diffpair_routing_continuity",
+    "diffpair_uncoupled_length",
 )
 
 

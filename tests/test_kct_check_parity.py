@@ -91,15 +91,19 @@ BOARD_06_SIDECAR = (
 NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
     "diffpair_length_skew",
     "diffpair_routing_continuity",
+    "diffpair_uncoupled_length",
     "match_group_length_skew",
 )
 
 # The archived synthetic witness includes the September MIPI repair: only
-# DQS/TMDS residuals contribute two skew and two continuity errors. The real
-# assembled SDRAM demo has its own zero-error readiness checks.
+# DQS/TMDS residuals contribute two skew errors. The same residuals still fall
+# below the continuity threshold, but continuity is info-only since #6443 and
+# no longer an error, and no board 07 class declares an uncoupled-length limit.
+# The real assembled SDRAM demo has its own zero-error readiness checks.
 BOARD_07_EXPECTED_FAMILY_DELTA = {
     "diffpair_length_skew": 2,
-    "diffpair_routing_continuity": 2,
+    "diffpair_routing_continuity": 0,
+    "diffpair_uncoupled_length": 0,
     "match_group_length_skew": 0,
 }
 
