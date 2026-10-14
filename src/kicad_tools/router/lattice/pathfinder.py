@@ -2774,6 +2774,12 @@ class LatticePathfinder:
         # ``routed_items``).  With ``uncoupled_fallback`` off the two
         # tie-break keys are pinned to 0, so the selection (and escape-plan
         # release) is exactly the pre-#6373 first-best-pass rule.
+        # Issue #6378: a pair that passes through an interior part arrives as
+        # one ``CoupledConnection`` per chain SEGMENT, so ``coupled_count``
+        # counts coupled segments and ``routed_items`` counts each segment
+        # once.  Both stay monotone in "more coupling is better": a pass that
+        # couples more segments at equal completion still wins, and the
+        # fallback / congested-probe logic below applies per segment.
         best_score: tuple[int, int, int] = (-1, -1, -1)
         # Leg-unit accounting of the best pass for the honest stats.
         best_fallback_pairs = 0

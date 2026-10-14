@@ -15808,18 +15808,31 @@ def _net_name_for_lattice_key(router: "Autorouter", key: object) -> str:
     """Resolve a lattice ``failure_reasons``/endpoints key to a net name.
 
     Issue #4477.  Singles are keyed ``(net_id, seq)`` (issue #4278); coupled
-    diff pairs are keyed ``("pair", p_net_id, n_net_id)`` (issue #4270).  Any
-    other shape (defensive) falls back to ``str(key)`` rather than raising --
-    a reporting helper must never break the completion pass it is reporting
-    on.
+    diff pairs are keyed ``("pair", p_net_id, n_net_id)`` (issue #4270), or
+    ``("pair", p, n, seg_idx)`` for one segment of a chained pair, whose
+    in-part hops are ``(net_id, "hop", i)`` (issue #6378).  An
+    uncoupled-fallback leg is ``(pair_key, "P"|"N")`` (issue #6373) and is
+    named by its own net.  Any other shape (defensive) falls back to
+    ``str(key)`` rather than raising -- a reporting helper must never break
+    the completion pass it is reporting on.
     """
-    if isinstance(key, tuple) and len(key) == 3 and key[0] == "pair":
-        _tag, p_id, n_id = key
+    if (
+        isinstance(key, tuple)
+        and len(key) == 2
+        and key[1] in ("P", "N")
+        and isinstance(key[0], tuple)
+        and len(key[0]) >= 3
+        and key[0][0] == "pair"
+    ):
+        leg_net = key[0][1] if key[1] == "P" else key[0][2]
+        return router.net_names.get(leg_net, str(leg_net))
+    if isinstance(key, tuple) and len(key) in (3, 4) and key[0] == "pair":
+        p_id, n_id = key[1], key[2]
         p_name = router.net_names.get(p_id, str(p_id))
         n_name = router.net_names.get(n_id, str(n_id))
         return f"{p_name}/{n_name}"
-    if isinstance(key, tuple) and len(key) == 2:
-        net_id, _seq = key
+    if isinstance(key, tuple) and len(key) in (2, 3) and isinstance(key[0], int):
+        net_id = key[0]
         return router.net_names.get(net_id, str(net_id))
     return str(key)
 
