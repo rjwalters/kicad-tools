@@ -156,7 +156,7 @@ jobs:
         #
         # --dist loadgroup (PR #6228): a class-scoped fixture runs once per
         # xdist worker that receives a test from its class, so under the
-        # default --dist load the ~25 CPU-min board-04 --auto-mfr-tier route
+        # default --dist load the ~10 min board-04 --auto-mfr-tier route
         # could run on up to 4 workers.  Tests marked
         # @pytest.mark.xdist_group(...) stay on one worker; ungrouped tests
         # load-balance exactly as under --dist load.
@@ -169,6 +169,13 @@ jobs:
         # so board 05 occupies one worker while the rest load-balance on the
         # other three; against the ~41-min median that stays under 90 min.
         # Twice-daily, push and workflow_dispatch runs leave it unset.
+        #
+        # --durations=25 (Issue #6478): a class-scoped fixture's cost shows
+        # as the "setup" line of its first test, so the next fixture that
+        # creeps toward --timeout=1200 is visible in a green run's log.  The
+        # board-04 4L --auto-mfr-tier fixture took 342-623 s at its 5k cap (it
+        # was past 4200 s at 200k after #6439), well clear of the Sunday
+        # board-05 case on another worker.
         env:
           KCT_LATTICE_BOARD_GUARD: ${{ github.event.schedule == '0 9 * * 0' && '1' || '' }}
-        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 -m slow
+        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 --durations=25 -m slow
