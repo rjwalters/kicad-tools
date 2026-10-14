@@ -10540,7 +10540,12 @@ def route_with_layer_escalation(
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -11984,7 +11989,12 @@ def route_with_rule_relaxation(
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -14535,7 +14545,12 @@ def route_with_combined_escalation(
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -20919,7 +20934,12 @@ def _run_main_impl(args, parser, argv) -> int:
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=args.quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
