@@ -184,9 +184,11 @@ __all__ = [
     "DEFAULT_VIA_CLEARANCE_MM",
     "DeclaredClearanceRules",
     "ResolvedClearance",
+    "RoutingClearances",
     "RuleSource",
     "read_declared_clearance_rules",
     "resolve_base_clearance",
+    "resolve_routing_clearances",
     "resolve_via_clearance",
     "strictest_net_class_clearance",
     "trace_via_clearance_mm",
@@ -1334,3 +1336,109 @@ def resolve_via_clearance(
             resolved.source_label,
         )
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# The shared routing-tool entry point (#6283)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RoutingClearances:
+    """The trace and via clearance a routing tool should apply (#6283).
+
+    Attributes:
+        trace: The resolved board-wide base (:func:`resolve_base_clearance`).
+        via: The resolved via clearance (:func:`resolve_via_clearance`).
+        manufacturer: The fab profile whose floor was applied, or ``None``
+            when none was configured or discoverable.
+    """
+
+    trace: ResolvedClearance
+    via: ResolvedClearance
+    manufacturer: str | None = None
+
+    @property
+    def trace_mm(self) -> float:
+        return self.trace.required_mm
+
+    @property
+    def via_mm(self) -> float:
+        return self.via.required_mm
+
+    @property
+    def warnings(self) -> list[str]:
+        """Every resolver warning, trace first, de-duplicated."""
+        out: list[str] = []
+        for resolved in (self.trace, self.via):
+            if resolved.warning and resolved.warning not in out:
+                out.append(resolved.warning)
+        return out
+
+
+def resolve_routing_clearances(
+    pcb_path: str | Path,
+    *,
+    target_mm: float,
+    manufacturer: str | None = None,
+    discover_manufacturer: bool = True,
+) -> RoutingClearances:
+    """Resolve ``trace_clearance`` / ``via_clearance`` for a routing tool (#6283).
+
+    ``kct route`` resolves both values from the board's ``.kicad_pro`` /
+    ``.kicad_dru`` through its own CLI wrappers.  ``kct route-auto`` and the
+    MCP ``route_net`` tool took both from the ``.kicad_pcb`` alone
+    (:meth:`~kicad_tools.router.io.ParsedDesignRules.to_design_rules`), so a
+    project rule the board's own DRC enforces was invisible to them.  This is
+    the one place those tools resolve the pair.
+
+    * The trace base is :func:`resolve_base_clearance` with ``target_mm`` as a
+      **non-explicit** target: a declared project rule above it raises it, and
+      nothing declared leaves it untouched.
+    * The via clearance is :func:`resolve_via_clearance` with ``target_mm`` as
+      its nothing-declared fallback (not the 0.20mm dataclass default), so a
+      board that declares nothing keeps today's ``via_clearance`` exactly.
+    * The fab floor comes from ``manufacturer`` or, when that is ``None`` and
+      ``discover_manufacturer`` is set, from the board's ``project.kct``
+      ``target_fab`` (:func:`kicad_tools.sync.discover.resolve_target_fab_for_pcb`).
+      With neither, no floor applies -- matching ``kct route`` without ``--mfr``.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb``; sidecars are found by suffix.
+        target_mm: The clearance the tool would otherwise use -- the
+            ``.kicad_pcb``'s own ``min_clearance``.
+        manufacturer: An explicit fab profile, if the caller has one.
+        discover_manufacturer: Look up the board's declared ``target_fab``
+            when ``manufacturer`` is ``None``.
+
+    Returns:
+        Both resolved values with provenance and any warnings.  Never raises
+        on missing or malformed sidecars.
+    """
+    from .mfr_limits import resolve_clearance
+
+    if manufacturer is None and discover_manufacturer:
+        try:
+            from kicad_tools.sync.discover import resolve_target_fab_for_pcb
+
+            manufacturer = resolve_target_fab_for_pcb(pcb_path)
+        except Exception:  # pragma: no cover - discovery is best-effort
+            manufacturer = None
+
+    fab_floor = resolve_clearance(manufacturer)
+    declared = read_declared_clearance_rules(pcb_path)
+
+    trace = resolve_base_clearance(
+        target_mm=target_mm,
+        declared=declared,
+        fab_floor_mm=fab_floor,
+        manufacturer=manufacturer,
+    )
+    via = resolve_via_clearance(
+        declared=declared,
+        fab_floor_mm=fab_floor,
+        manufacturer=manufacturer,
+        default_mm=target_mm,
+        trace_clearance_mm=trace.required_mm,
+    )
+    return RoutingClearances(trace=trace, via=via, manufacturer=manufacturer)

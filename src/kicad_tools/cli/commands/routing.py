@@ -1316,6 +1316,10 @@ def run_route_command(args) -> int:
     # False, so only forward when the user set it -- flag-off is byte-identical.
     if getattr(args, "lattice_optimize", False):
         sub_argv.append("--lattice-optimize")
+    # Issue #6362: forward --lattice-iterations only when set (default None =
+    # the built-in cap of 12), so an unset flag is byte-identical.
+    if getattr(args, "lattice_iterations", None) is not None:
+        sub_argv.extend(["--lattice-iterations", str(args.lattice_iterations)])
     # Issue #2589: forward --seed for deterministic runs.  Default is None
     # (router uses os.urandom-derived state, existing behaviour).
     if getattr(args, "seed", None) is not None:

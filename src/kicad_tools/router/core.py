@@ -1767,6 +1767,11 @@ class Autorouter:
         # grow with the netset: whichever of the two fires first bounds the
         # run.  ``None`` means "no absolute cap" (legacy behaviour).
         self._lattice_deadline: float | None = None
+        # Issue #6362: lattice netset negotiation round cap, sourced from the
+        # CLI's ``--lattice-iterations``.  ``None`` means the built-in default
+        # (``LATTICE_NEGOTIATION_DEFAULT_ROUNDS``), so an unset flag is
+        # byte-identical.  ``--iterations`` (the grid negotiator) never reaches it.
+        self._lattice_max_iterations: int | None = None
         # Issue #4477 (epic #4465, Phase 4): pad endpoints (``"REF.PIN"``) for
         # every connection dispatched into the lattice negotiation, keyed by
         # the SAME key ``pf.failure_reasons`` uses.  Lets a ``--complete``
@@ -4693,7 +4698,10 @@ class Autorouter:
         # only binds on a board that has not converged, and the best-pass
         # ranking only ever accepts a strictly better pass, so a board that
         # converges within 8 passes is unchanged.
-        max_iterations = 12
+        # Issue #6362: ``--lattice-iterations`` overrides the cap.
+        from .lattice.round_cap import LATTICE_NEGOTIATION_DEFAULT_ROUNDS, lattice_stop_reason
+
+        max_iterations = self._lattice_max_iterations or LATTICE_NEGOTIATION_DEFAULT_ROUNDS
         # Issue #4355: the preserved copper of NON-listed nets
         # (``existing_routes`` loaded under --preserve-existing / --nets /
         # --region, keyed by their real net ids) must be a HARD clearance
@@ -4780,10 +4788,20 @@ class Autorouter:
             f"(iterations={stats.iterations}, converged={stats.converged}, "
             f"lattice_builds={stats.lattice_builds})"
         )
+        # Issue #6362: name the limit that stopped an unconverged run.
+        stop_reason = lattice_stop_reason(stats, max_iterations)
+        if stop_reason:
+            print(f"    {stop_reason}")
         # Issue #6395: say what the pad-side class repair did, honestly.
         from .lattice.class_pad_repair import PAIR_LENGTH_TOLERANCE_MM
 
         repair = getattr(pf, "class_pad_repair_stats", None)
+        if stats.lattice_builds > 1:
+            print(
+                f"  Pad class clearance (#6489): re-negotiated with "
+                f"{len(pf._class_pad_growth)} grown pad keep-out(s) "
+                f"(lattice_builds={stats.lattice_builds})"
+            )
         if repair is not None and repair.skipped == "voltage-map":
             print(
                 "  Pad class clearance (#6395): skipped -- HV pairwise clearance "
@@ -17945,6 +17963,7 @@ class Autorouter:
         Returns:
             Sorted list of demoted net ids (empty in the common case).
         """
+        self.last_floor_demoted_nets = []
         if not self.routes:
             return []
         net_routes = self._build_net_routes_map()
@@ -17958,7 +17977,10 @@ class Autorouter:
         demoted = self._demote_seg_seg_overlap_nets(net_routes, neg_router, finalize=True)
         # Issue #6243: authored netclass minima, whichever engine or post-pass
         # produced the copper.  Dormant (one dict check) without floors.
-        demoted.extend(self.demote_authored_floor_violation_nets())
+        floor_demoted = self.demote_authored_floor_violation_nets()
+        # Issue #6489: let the CLI name the real reason for these demotions.
+        self.last_floor_demoted_nets = sorted(set(floor_demoted))
+        demoted.extend(floor_demoted)
         demoted.extend(self.demote_routing_short_nets())
         return sorted(set(demoted))
 

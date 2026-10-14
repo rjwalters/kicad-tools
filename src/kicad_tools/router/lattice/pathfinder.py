@@ -17,7 +17,10 @@ by-construction choke (``primitives.Segment`` 45-degree enforcement).
 **Static substrate invariant (mirrors the mesh's ``triangulation_calls``
 discipline):** the lattice + its per-layer static masks are built **once per
 board** (:meth:`build`, counted by :attr:`lattice_builds`); negotiation only
-mutates committed-copper state and history costs -- never the lattice.
+mutates committed-copper state and history costs -- never the lattice.  The
+one exception (issue #6489): when the class-pad repair leaves a shortfall,
+:meth:`route_netset` grows exactly those pads and rebuilds for a bounded
+re-negotiation; with nothing left it never rebuilds.
 
 **Via model:** via edges join *matching lattice nodes on adjacent layers*
 and every emitted via is a through-via spanning the whole stack.
@@ -88,6 +91,9 @@ _GOAL: _State = (("GOAL",), -1)  # type: ignore[assignment]
 # path also avoids).  A search-tuning knob, not a geometric constant -- it only
 # widens the candidate set, never the copper.
 _OVERSIZE_STUB_KMAX = 4096
+
+#: Issue #6489: most re-negotiations with grown pads after a class-pad repair.
+_MAX_PAD_GROWTH_ROUNDS = 2
 
 
 @dataclass(frozen=True)
@@ -279,6 +285,9 @@ class LatticePathfinder:
         self._lattice: OctilinearLattice | None = None
         self._obstacles: LatticeObstacleModel | None = None
         self.lattice_builds: int = 0
+        # Issue #6489: pad index -> class clearance, for pads whose keep-out
+        # grows because the class-pad repair could not clear them.
+        self._class_pad_growth: dict[int, float] = {}
         # Per-connection decline reasons for the best negotiation pass
         # (honest shortfall diagnosis; reset by :meth:`route_netset`).
         self.failure_reasons: dict[object, str] = {}
@@ -538,6 +547,23 @@ class LatticePathfinder:
         subset as ``rules.designer_clearance_floors``; rules built elsewhere
         (``None``) treat every floor as designer-authored, as before.
         """
+        extra = self._grown_pad_extra()
+        if extra is None:
+            return self._designer_pad_extra()
+        designer_extra = self._designer_pad_extra()
+        if designer_extra is None:
+            return extra
+        return [max(a, b) for a, b in zip(extra, designer_extra, strict=True)]
+
+    def _grown_pad_extra(self) -> list[float] | None:
+        """Issue #6489: keep-out growth for pads the repair could not clear."""
+        grown = self._class_pad_growth
+        if not grown:
+            return None
+        base = self.rules.trace_clearance
+        return [max(0.0, grown.get(i, 0.0) - base) for i in range(len(self.pads))]
+
+    def _designer_pad_extra(self) -> list[float] | None:
         from ..authored_clearance import pad_authored_floor
 
         base = self.rules.trace_clearance
@@ -2643,6 +2669,66 @@ class LatticePathfinder:
         return None
 
     def route_netset(
+        self,
+        connections: list[Connection],
+        **kwargs: Any,
+    ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
+        """Negotiate, then re-negotiate once with grown pads if needed (#6489).
+
+        :meth:`_route_netset_once` repairs class-pad shortfalls geometrically.
+        A slot narrower than ``width + 2 x class`` has no legal translation, so
+        the repair leaves it and the router's backstop would delete the whole
+        net.  When shortfalls remain, exactly those pads' static keep-out grows
+        to their class and the netset is negotiated again (bounded rounds); the
+        new result is kept only if it routes at least as much with fewer
+        shortfalls.  With nothing left the first result is returned untouched
+        (no rebuild, ``lattice_builds`` unchanged).
+        """
+        self._class_pad_growth = {}
+        best = self._route_netset_once(connections, **kwargs)
+        for _round in range(_MAX_PAD_GROWTH_ROUNDS):
+            rstats = self.class_pad_repair_stats
+            if rstats is None or not rstats.unrepaired_pads or best[1].deadline_hit:
+                break
+            wanted = {
+                i: req
+                for i, req in rstats.unrepaired_pads.items()
+                if req > self._class_pad_growth.get(i, 0.0) + 1e-9
+            }
+            if not wanted:
+                break
+            saved = (
+                self.failure_reasons,
+                self.pair_outcomes,
+                self.class_pad_repair_stats,
+                dict(self._class_pad_growth),
+                self._lattice,
+                self._obstacles,
+            )
+            self._class_pad_growth.update(wanted)
+            self._lattice = None
+            self._obstacles = None
+            routes, stats = self._route_netset_once(connections, **kwargs)
+            new_left = (
+                self.class_pad_repair_stats.total_remaining if self.class_pad_repair_stats else 0
+            )
+            old_left = saved[2].total_remaining if saved[2] else 0
+            if stats.routed >= best[1].routed and new_left < old_left:
+                best = (routes, replace(stats, lattice_builds=self.lattice_builds))
+                continue
+            (
+                self.failure_reasons,
+                self.pair_outcomes,
+                self.class_pad_repair_stats,
+                self._class_pad_growth,
+                self._lattice,
+                self._obstacles,
+            ) = saved
+            break
+        routes, stats = best
+        return routes, replace(stats, lattice_builds=self.lattice_builds)
+
+    def _route_netset_once(
         self,
         connections: list[Connection],
         *,

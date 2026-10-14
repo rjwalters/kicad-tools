@@ -226,11 +226,14 @@ def route_net(
     pcb_text = path.read_text()
     pcb_rules = parse_pcb_design_rules(pcb_text)
     design_rules = pcb_rules.to_design_rules()
+    # Issue #6283: honour the board's .kicad_pro / .kicad_dru clearances.
+    clearance_warnings = _apply_declared_clearances(path, pcb_rules, design_rules)
 
     # Get board dimensions
     outline = pcb.get_board_outline()
     if not outline:
         return RouteNetResult(
+            warnings=clearance_warnings,
             success=False,
             net_name=net_name,
             error_message="Could not determine board outline",
@@ -321,6 +324,7 @@ def route_net(
 
     if len(net_pads) < 2:
         return RouteNetResult(
+            warnings=clearance_warnings,
             success=True,
             net_name=net_name,
             routed_connections=0,
@@ -338,6 +342,7 @@ def route_net(
         routes = router.route_net(net_number)
     except Exception as e:
         return RouteNetResult(
+            warnings=clearance_warnings,
             success=False,
             net_name=net_name,
             error_message=f"Routing failed: {e}",
@@ -376,6 +381,7 @@ def route_net(
             pcb.save(save_path)
 
             return RouteNetResult(
+                warnings=clearance_warnings,
                 success=True,
                 net_name=net_name,
                 routed_connections=len(routes),
@@ -387,6 +393,7 @@ def route_net(
             )
         except Exception as e:
             return RouteNetResult(
+                warnings=clearance_warnings,
                 success=False,
                 net_name=net_name,
                 routed_connections=len(routes),
@@ -397,12 +404,36 @@ def route_net(
     else:
         # Routing failed
         return RouteNetResult(
+            warnings=clearance_warnings,
             success=False,
             net_name=net_name,
             total_connections=max(0, len(net_pads) - 1),
             error_message="Autorouter could not find a valid path",
             suggestions=_generate_suggestions(net_status, net_pads, pcb),
         )
+
+
+def _apply_declared_clearances(path: Path, pcb_rules, design_rules) -> list[str]:
+    """Resolve trace/via clearance from the board's own rule files (Issue #6283).
+
+    ``ParsedDesignRules.to_design_rules()`` reads the ``.kicad_pcb`` alone, so
+    a ``.kicad_pro`` board minimum / netclass or a ``.kicad_dru`` (via-scoped)
+    clearance that the board's DRC enforces was invisible to ``route_net`` and
+    ``route_net_auto``.  Both now share
+    :func:`~kicad_tools.router.clearance_resolver.resolve_routing_clearances`:
+    the ``.kicad_pcb`` ``min_clearance`` stays the target, declared rules can
+    only raise it, and the board's discovered ``target_fab`` supplies the
+    floor.  A board that declares nothing and names no fab keeps exactly the
+    values it had before.
+
+    Mutates ``design_rules`` in place and returns the resolver's warnings.
+    """
+    from kicad_tools.router.clearance_resolver import resolve_routing_clearances
+
+    resolved = resolve_routing_clearances(path, target_mm=pcb_rules.min_clearance)
+    design_rules.trace_clearance = resolved.trace_mm
+    design_rules.via_clearance = resolved.via_mm
+    return resolved.warnings
 
 
 def _detect_stub_terminals_for_pcb(pcb: PCB, region_box: tuple[float, float, float, float]) -> dict:
@@ -683,6 +714,8 @@ def route_net_auto(
     pcb_text = path.read_text()
     pcb_rules = parse_pcb_design_rules(pcb_text)
     design_rules = pcb_rules.to_design_rules()
+    # Issue #6283: honour the board's .kicad_pro / .kicad_dru clearances.
+    clearance_warnings = _apply_declared_clearances(path, pcb_rules, design_rules)
 
     # Apply explicit via-geometry overrides (Issue #4247).  Only the fields the
     # caller explicitly passes are overridden; the rest still derive from the
@@ -825,7 +858,7 @@ def route_net_auto(
                 "strategy_used": getattr(result.strategy_used, "name", str(result.strategy_used)),
                 "metrics": {},
                 "repair_actions": [],
-                "warnings": [],
+                "warnings": list(clearance_warnings),
                 "performance": {},
                 "error_message": (
                     f"--region: routing net '{net_name}' produced geometry "
@@ -838,6 +871,8 @@ def route_net_auto(
     # Convert to dict with net_name included
     result_dict = result.to_dict()
     result_dict["net_name"] = net_name
+    if clearance_warnings:
+        result_dict["warnings"] = list(clearance_warnings) + list(result_dict.get("warnings", []))
 
     # Issue #6001: why is the net (still) unrouted -- congested or blocked?
     if diagnose_unrouted_budget and diagnose_unrouted_budget > 0 and not result.success:

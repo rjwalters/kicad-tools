@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router.lattice.geometry import seg_seg_dist
+from kicad_tools.router.lattice.pathfinder import _MAX_PAD_GROWTH_ROUNDS
 from kicad_tools.router.rules import DesignRules
 
 # Runtime-heavy full-board negotiation: excluded from the CI fast lane
@@ -124,7 +125,8 @@ def test_engaged_pair_census_and_coupled_floor(negotiated) -> None:
         else:
             assert outcome != "not-attempted"
             assert (pc.key, "P") not in routes and (pc.key, "N") not in routes
-    assert stats.lattice_builds == 1
+    # One build, plus at most the #6489 pad-growth re-negotiations.
+    assert 1 <= stats.lattice_builds <= 1 + _MAX_PAD_GROWTH_ROUNDS
 
 
 def test_coupled_pairs_meet_class_intra_floor_and_exact_pitch(negotiated) -> None:

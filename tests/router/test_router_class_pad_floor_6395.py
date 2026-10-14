@@ -410,11 +410,13 @@ def _pair_board() -> Autorouter:
     return router
 
 
-def test_declined_pair_routed_single_ended_is_held_to_the_budget(capsys) -> None:
+def test_declined_pair_routed_single_ended_is_held_to_the_budget(capsys, monkeypatch) -> None:
     """A detected-but-declined pair goes entirely through the ordinary star, so
     its copper is repairable -- but under the pair length budget.  Here the run
     meets 45-degree legs at both ends: the ~0.027 mm shift would shorten the
     net by ~0.038 mm, so the move is refused, left in place and reported."""
+    # Isolate the repair's budget: #6489's re-negotiation would route round the pad.
+    monkeypatch.setattr("kicad_tools.router.lattice.pathfinder._MAX_PAD_GROWTH_ROUNDS", 0)
     router = _pair_board()
     routes = router.route_net(1)
     assert routes and routes[0].segments
@@ -472,3 +474,93 @@ def test_router_logs_the_voltage_map_skip(monkeypatch, capsys) -> None:
     assert router._lattice_pathfinder.class_pad_repair_stats.skipped == "voltage-map"
     out = capsys.readouterr().out
     assert "Pad class clearance (#6395): skipped -- HV pairwise clearance" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #6489: an unrepairable slot becomes a search constraint.
+# ---------------------------------------------------------------------------
+
+_SLOT_OUTLINE = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
+
+
+def _slot_pads(extra: list[Pad] | None = None) -> list[Pad]:
+    """Two Power-class GND bars whose gap (0.55 mm) is below ``0.2 + 2 x 0.2``."""
+    wall = {"width": 8.0, "height": 0.6, "net": 0, "net_name": "GND", "ref": "J1"}
+    return [
+        Pad(x=10.0, y=10.0 - 0.575, pin="1", **wall),
+        Pad(x=10.0, y=10.0 + 0.575, pin="2", **wall),
+        *(extra or []),
+    ]
+
+
+def _slot_pf(extra: list[Pad]) -> LatticePathfinder:
+    pads = _slot_pads(extra)
+    pf = LatticePathfinder(_SLOT_OUTLINE, pads, _rules(), LayerStack.two_layer())
+    pf.set_pad_class_clearances([POWER, POWER] + [BASE] * len(extra))
+    return pf
+
+
+def _left(pf: LatticePathfinder, routes: dict) -> int:
+    n = 0
+    for route in routes.values():
+        for seg in route.segments:
+            for pad in pf.pads[:2]:
+                if (
+                    seg.layer == pad.layer
+                    and copper_gap(segment_shape(seg), pad_shape(pad)) < POWER - EPS
+                ):
+                    n += 1
+    return n
+
+
+def test_single_ended_route_avoids_a_slot_the_repair_cannot_clear() -> None:
+    a = Pad(x=2.0, y=10.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R1", pin="1")
+    b = Pad(x=18.0, y=10.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R2", pin="1")
+    pf = _slot_pf([a, b])
+    routes, stats = pf.route_netset([((1, 0), a, b, None)])
+    assert (1, 0) in routes and stats.routed == 1
+    assert _left(pf, routes) == 0
+    assert pf.class_pad_repair_stats is not None
+    assert pf.class_pad_repair_stats.total_remaining == 0
+    assert stats.lattice_builds == 2  # one targeted growth round, no more
+
+
+def test_uncoupled_fallback_pair_leg_avoids_the_slot() -> None:
+    from kicad_tools.router.lattice.coupled import CoupledConnection
+
+    def pad(x: float, y: float, net: int, name: str, ref: str) -> Pad:
+        return Pad(x=x, y=y, width=0.6, height=0.6, net=net, net_name=name, ref=ref, pin="1")
+
+    # A 1 mm pitch is too wide for the coupled search here, which declines
+    # (``uncoupled-fallback``); the legs then route single-ended.
+    pp_a, pn_a = pad(2.0, 9.5, 1, "D+", "J2"), pad(2.0, 10.5, 2, "D-", "J2")
+    pp_b, pn_b = pad(18.0, 9.5, 1, "D+", "U1"), pad(18.0, 10.5, 2, "D-", "U1")
+    pf = _slot_pf([pp_a, pn_a, pp_b, pn_b])
+    pc = CoupledConnection(
+        key=("pair", 1, 2),
+        pair_name="D",
+        pad_p_a=pp_a,
+        pad_n_a=pn_a,
+        pad_p_b=pp_b,
+        pad_n_b=pn_b,
+        net_class=None,
+        pitch=1.0,
+    )
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:")
+    assert stats.lattice_builds == 2
+    legs = [k for k in routes if isinstance(k, tuple) and k[1:] in (("P",), ("N",))]
+    assert len(legs) == 2
+    assert _left(pf, routes) == 0
+
+
+def test_no_shortfall_means_no_rebuild_and_identical_routes() -> None:
+    a = Pad(x=2.0, y=3.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R1", pin="1")
+    b = Pad(x=18.0, y=3.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R2", pin="1")
+    pf = _slot_pf([a, b])
+    routes, stats = pf.route_netset([((1, 0), a, b, None)])
+    assert stats.lattice_builds == 1
+    assert pf._class_pad_growth == {}
+    pf2 = _slot_pf([a, b])
+    routes2, _ = pf2._route_netset_once([((1, 0), a, b, None)])
+    assert _coords(routes) == _coords(routes2)

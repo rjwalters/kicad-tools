@@ -30,8 +30,16 @@ from types import SimpleNamespace
 import pytest
 
 from kicad_tools.cli import route_cmd, route_deadline
-from kicad_tools.router import PlacementDelta, PlacementDeltaFeedbackLoop
+from kicad_tools.router import PlacementDelta, PlacementDeltaFeedbackLoop, access_witness
+from kicad_tools.router.access_witness import (
+    ACCESS_WITNESS_SIDECAR_SUFFIX,
+    PASS_ITERATION,
+    PASS_RESET,
+    CommitJournal,
+)
 from kicad_tools.router.core import Autorouter
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.primitives import Segment
 from kicad_tools.schema.pcb import PCB
 from tests.router.test_placement_delta_feedback import FakePad, FakeRouter
 
@@ -1199,3 +1207,202 @@ def test_a_loop_on_another_router_leaves_the_pinned_save_alone(board):
     assert route_cmd._interrupt_state["placement_text"] is None
     assert route_cmd._save_partial_results() is True
     assert _positions(_partial(output)) == _PARTS, "the pinned router routed the source board"
+
+
+# --------------------------------------------------------------------------- #
+# The access-witness sidecar beside the partial board (#6320)                  #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class _JournaledTrace(_Trace):
+    """A ``_Trace`` the real ``CommitJournal`` can record (Route-shaped)."""
+
+    @property
+    def net_name(self) -> str:
+        return _NETS[self.net]
+
+    is_escape = False
+    vias: tuple = ()
+
+    @property
+    def segments(self) -> list[Segment]:
+        return [
+            Segment(
+                x1=self.x1,
+                y1=self.y1,
+                x2=self.x2,
+                y2=self.y2,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=self.net,
+                net_name=self.net_name,
+            )
+        ]
+
+
+class _JournalRouter(_GridRouter):
+    """A ``_GridRouter`` whose grid feeds a real ``CommitJournal``.
+
+    As on the real router, marking a route journals a commit and a trial reset
+    journals the removal of everything the discarded grid held.  Records of
+    routing call N carry ``(PASS_ITERATION, N)``; the reset that precedes it
+    carries ``(PASS_RESET, N)``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.commit_journal = CommitJournal()
+        # Journal length at the END of each routing call -- i.e. at the start
+        # of the next trial, since keeping a delta journals nothing.
+        self.journal_len_after_call: dict[int, int] = {}
+        super().__init__(*args, **kwargs)
+
+    def _route_everything_reachable(self) -> list[_Trace]:
+        return [
+            _JournaledTrace(r.net, r.x1, r.y1, r.x2, r.y2)
+            for r in super()._route_everything_reachable()
+        ]
+
+    def _reset_for_new_trial(self) -> None:
+        with self.commit_journal.context(PASS_RESET, self.route_calls + 1):
+            for route in self.grid.get("copper", ()):
+                self.commit_journal.observe("resync_remove", route)
+        super()._reset_for_new_trial()
+
+    def _mark_route(self, route: _Trace) -> None:
+        super()._mark_route(route)
+        self.commit_journal.observe("mark", route)
+
+    def route_all_negotiated(self, **kwargs):
+        with self.commit_journal.context(PASS_ITERATION, self.route_calls + 1):
+            result = super().route_all_negotiated(**kwargs)
+        self.journal_len_after_call[self.route_calls] = len(self.commit_journal)
+        return result
+
+
+def _witness_sidecar(board_path: Path) -> CommitJournal:
+    path = board_path.parent / f"{board_path.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+    assert path.exists(), f"no access-witness sidecar beside {board_path.name}"
+    return CommitJournal.from_dict(json.loads(path.read_text())["journal"])
+
+
+def _live_copper(journal: CommitJournal) -> list[tuple]:
+    """The copper a reader replaying *journal* from an empty board ends with."""
+    live: list[tuple[int, tuple]] = []
+    for record in journal:
+        shape = tuple(
+            sorted(
+                (s.net, round(s.x1, 3), round(s.y1, 3), round(s.x2, 3), round(s.y2, 3))
+                for s in record.segments
+            )
+        )
+        if record.added:
+            live.append((record.route_id, shape))
+            continue
+        # By route id, falling back to geometry (the replay's own rule).
+        match = next((i for i, (rid, _) in enumerate(live) if rid == record.route_id), None)
+        if match is None:
+            match = next((i for i, (_, geom) in enumerate(live) if geom == shape), None)
+        if match is not None:
+            del live[match]
+    return sorted(seg for _, shape in live for seg in shape)
+
+
+def _board_copper(board_path: Path) -> list[tuple]:
+    return sorted(
+        (
+            s.net_number,
+            round(s.start[0], 3),
+            round(s.start[1], 3),
+            round(s.end[0], 3),
+            round(s.end[1], 3),
+        )
+        for s in PCB.load(board_path).segments
+    )
+
+
+class TestAccessWitnessOfAnInterruptedTrial:
+    """The sidecar's journal describes the saved board, not the discarded trial."""
+
+    @pytest.mark.parametrize("rerouted", [0, 1], ids=["no-net-back", "one-net-back"])
+    def test_deadline_after_a_kept_delta(self, monkeypatch, board, rerouted):
+        source, output = board
+        router = _JournalRouter(interrupt=_Deadline(on_call=2, rerouted=rerouted))
+
+        assert _interrupted_run(monkeypatch, router, source, output) == route_deadline.TIMEOUT_EXIT
+
+        saved = _partial(output)
+        assert _routed_nets_with_copper_on_every_pad(saved) == {"A", "B", "C"}
+        journal = _witness_sidecar(saved)
+        # Exactly the journal as it stood when the discarded trial began ...
+        assert len(journal) == router.journal_len_after_call[1]
+        assert [r.index for r in journal] == list(range(len(journal)))
+        # ... so none of the trial's records -- its reset or its re-route.
+        assert not [r for r in journal if r.iteration == 2]
+        # Every live route in the journal is on the board, and vice versa.
+        assert _live_copper(journal) == _board_copper(saved)
+
+    def test_ctrl_c_with_nothing_kept(self, board):
+        source, output = board
+        router = _JournalRouter(interrupt=_CtrlC(on_call=1))
+
+        with pytest.raises(SystemExit):
+            _run_loop(router, source, output)
+
+        saved = _partial(output)
+        assert _routed_nets_with_copper_on_every_pad(saved) == {"A", "C"}
+        journal = _witness_sidecar(saved)
+        assert not [r for r in journal if r.iteration == 1]
+        assert _live_copper(journal) == _board_copper(saved)
+
+    def test_the_cap_flag_is_put_back(self, monkeypatch, board):
+        """A trial that fills the journal leaves ``truncated`` as it found it."""
+        source, output = board
+        monkeypatch.setattr(access_witness, "MAX_JOURNAL_RECORDS", 9)
+        router = _JournalRouter(interrupt=_Deadline(on_call=2, rerouted=3))
+        assert len(router.commit_journal) < 9
+
+        assert _interrupted_run(monkeypatch, router, source, output) == route_deadline.TIMEOUT_EXIT
+
+        payload = json.loads(
+            _partial(output)
+            .with_name(f"{_partial(output).stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}")
+            .read_text()
+        )
+        assert payload["journal"]["record_count"] == router.journal_len_after_call[1]
+        assert payload["journal"]["truncated"] is False
+
+    def test_the_loops_own_revert_still_journals_the_resync(self, board):
+        """``rebuild_grid=True`` is unchanged: removal + re-mark stay journaled."""
+        source, output = board
+        router = _JournalRouter(r2_move_helps=False)
+        initial = len(router.commit_journal)
+
+        _run_loop(router, source, output)
+
+        assert len(router.commit_journal) > initial
+        resets = [r for r in router.commit_journal if r.pass_name == PASS_RESET]
+        assert resets and all(not r.added for r in resets)
+        assert _live_copper(router.commit_journal) == sorted(
+            (t.net, t.x1, t.y1, t.x2, t.y2) for t in router.routes
+        )
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_a_swallowed_ctrl_c_resumes_into_a_replayable_journal(self, board):
+        """#6324's resume path: the abandon rebuild retires ids the save cut away."""
+        source, output = board
+        router = _JournalRouter(interrupt=_SwallowedCtrlC(on_call=1))
+
+        assert _run_loop(router, source, output) is None
+
+        # The in-handler save's sidecar describes the board it sits beside.
+        saved = _partial(output)
+        assert _live_copper(_witness_sidecar(saved)) == _board_copper(saved)
+        # The run went on; the journal still replays (no raise) and agrees
+        # with the router's copper.
+        witness = access_witness.witness_for_router(router)
+        assert witness is not None
+        assert witness.record_count == len(router.commit_journal)
+        assert _live_copper(router.commit_journal) == sorted(
+            (t.net, t.x1, t.y1, t.x2, t.y2) for t in router.routes
+        )

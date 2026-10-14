@@ -31,6 +31,8 @@ Usage:
 
 from __future__ import annotations
 
+import gc
+import re
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -1037,6 +1039,80 @@ _ATOM_TERMINATORS = frozenset(" \t\n\r()")
 _COMMENT_CHARS = frozenset("#;")
 _ESCAPE_MAP = {"n": "\n", "t": "\t", "r": "\r"}
 
+# Issue #5617: single-pass tokenizer for ``Parser._parse_fast``.  Each match is
+# the whitespace/comment run the recursive parser skips before an expression
+# (the same ``_WHITESPACE`` / ``_COMMENT_CHARS`` sets; a comment runs up to,
+# not including, its newline), followed by exactly one token:
+#
+#   1 ``(``   2 ``)``   3 a quoted string with no backslash (its body)
+#   4 a bare atom: up to the next ``_ATOM_TERMINATORS`` char; a ``"`` may
+#     appear inside but not first, exactly as in ``_parse_atom``
+#   5 end of input   6 any other character (an escaped/unterminated string)
+#
+# Groups 5 and 6 make the alternation total, so every attempt matches at the
+# position the previous match ended: ``finditer`` never skips input and the
+# greedy skip prefix is never backtracked into.  Groups 5/6 are where the fast
+# path hands the text to the recursive parser.
+_TOKEN_RE = re.compile(
+    r"[ \t\n\r]*(?:[#;][^\n]*[ \t\n\r]*)*"
+    r'(?:(\()|(\))|"([^"\\]*)"|([^ \t\n\r()"#;][^ \t\n\r()]*)|(\Z)|(.))',
+    re.DOTALL,
+)
+_TRAILING_RE = re.compile(r"[ \t\n\r]*(?:[#;][^\n]*[ \t\n\r]*)*\Z")
+
+
+def _bare_atom(token: str) -> SExp:
+    """The node for an unquoted, non-head atom token.
+
+    Shared by :meth:`Parser._parse_atom` and :meth:`Parser._parse_fast` so the
+    two parse paths cannot disagree about numbers versus bare symbols.
+    """
+    # Try to parse as number, but preserve original string for round-trip
+    # Check for likely number patterns first to avoid exception overhead
+    first_char = token[0]
+    if first_char.isdigit() or (first_char == "-" and len(token) > 1):
+        try:
+            if "." in token or "e" in token or "E" in token:
+                node = SExp(value=float(token))
+            else:
+                node = SExp(value=int(token))
+            node._original_str = token
+            return node
+        except ValueError:
+            pass
+    # A bare (unquoted) string token: record that it was parsed bare so the
+    # serializer can keep it bare on round-trip rather than re-quoting it via
+    # the keyword allowlist heuristic (issue #4185).
+    return SExp(value=token, _originally_bare=True)
+
+
+def _head_atom_list(token: str) -> SExp:
+    """The list node whose first element is the bare atom ``token``.
+
+    Mirrors the head-token branch of :meth:`Parser._parse_list`.
+    """
+    if token and not token[0].isdigit() and token[0] != "-":
+        # Valid name - create node directly with name
+        return SExp(name=token)
+    first_char = token[0]
+    if first_char.isdigit() or (first_char == "-" and len(token) > 1):
+        # Numeric - use as name (for layer definitions like (0 "F.Cu"))
+        return SExp(name=token)
+    # Something else - make anonymous list with this as first child
+    return SExp(children=[SExp(value=token)])
+
+
+def _retain_arc_source(node: SExp, text: str, start: int, end: int) -> None:
+    """Keep a copper arc's lexical text for byte-exact round-trip."""
+    # Copper arcs must survive analysis-only load/save byte-for-byte.
+    # Retain their lexical node text, including whitespace/comments; the
+    # canonical snapshot above the serializer guards against replaying stale
+    # text after a descendant is edited (e.g. PCB.page_fit()).
+    if node.name == "arc" and node.find("width") is not None and node.find("layer") is not None:
+        node._source_text = text[start:end]
+        node._source_canonical = node.to_string(compact=True)
+
+
 # =============================================================================
 # Element classification constants for serialization formatting
 #
@@ -1166,13 +1242,108 @@ class Parser:
         return (line, column)
 
     def parse(self) -> SExp:
-        """Parse the entire document."""
+        """Parse the entire document.
+
+        The cyclic garbage collector is paused for the duration (Issue
+        #5617).  A routed board is ~200k freshly allocated nodes and lists,
+        and each allocation-triggered collection re-traverses the growing,
+        still-live tree -- about a third of the parse time on board 06.  The
+        parser creates no reference cycles, so a pause frees nothing it would
+        have freed; the previous enabled/disabled state is restored on exit,
+        including on ``ParseError``.
+        """
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            return self._parse_document()
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+    def _parse_document(self) -> SExp:
+        """Parse the entire document (collector state managed by :meth:`parse`)."""
+        if not self._track_positions:
+            root = self._parse_fast()
+            if root is not None:
+                self.pos = self.length
+                return root
+            # Not a well-formed list document the fast path accepts (escaped
+            # or unterminated string, atom root, trailing content, ...): the
+            # recursive parser below decides, and raises its usual errors.
+            self.pos = 0
         self._skip_whitespace()
         result = self._parse_expr()
         self._skip_whitespace()
         if self.pos < self.length:
             raise ParseError(f"Unexpected content at position {self.pos}")
         return result
+
+    def _parse_fast(self) -> SExp | None:
+        """Single-pass, non-recursive parse of a well-formed list document.
+
+        Issue #5617: the recursive parser spends almost all of its time on
+        per-token Python overhead -- a ``_parse_expr`` call, a separate
+        whitespace skip and a character-at-a-time scan for every one of the
+        ~370k tokens in a routed board 06.  Here ``_TOKEN_RE`` does the
+        scanning in one ``finditer`` pass and an explicit stack replaces the
+        recursion; the nodes are built by the same helpers
+        (``_head_atom_list``, ``_bare_atom``, ``_retain_arc_source``) under
+        the same head-element rules as :meth:`_parse_list`, so the tree is
+        identical.
+
+        Returns ``None`` -- never raises -- for anything outside the common
+        case: a document whose root is not a list, a string containing a
+        backslash, unbalanced parentheses, or content after the root.
+        :meth:`parse` then re-parses with the recursive parser, which
+        produces the result (or ``ParseError``) it always has.  Position
+        tracking is not supported here; :meth:`parse` does not call this when
+        it is enabled.
+        """
+        text = self.text
+        # Open lists, innermost last.  ``None`` = head element not seen yet:
+        # the node's shape depends on it (see ``_parse_list``).
+        nodes: list[SExp | None] = []
+        starts: list[int] = []
+        push_node = nodes.append
+        push_start = starts.append
+        for m in _TOKEN_RE.finditer(text):
+            kind = m.lastindex
+            if kind == 1:
+                push_node(None)
+                push_start(m.start(1))
+                continue
+            if not nodes:
+                return None
+            if kind == 2:
+                child = nodes.pop()
+                if child is None:
+                    child = SExp()  # Empty list
+                start = starts.pop()
+                if child.name == "arc":
+                    _retain_arc_source(child, text, start, m.end())
+                if not nodes:
+                    if _TRAILING_RE.match(text, m.end()) is None:
+                        return None
+                    return child
+            elif kind == 4:
+                token = m.group(4)
+                if nodes[-1] is None:
+                    nodes[-1] = _head_atom_list(token)
+                    continue
+                child = _bare_atom(token)
+            elif kind == 3:
+                child = SExp(value=m.group(3))
+                child._originally_quoted = True
+            else:
+                return None
+            parent = nodes[-1]
+            if parent is None:
+                # A quoted string or a list as the head element.
+                nodes[-1] = SExp(children=[child])
+            else:
+                parent.children.append(child)
+        return None
 
     def _parse_expr(self) -> SExp:
         """Parse a single S-expression."""
@@ -1204,13 +1375,7 @@ class Parser:
         else:
             node = self._parse_atom()
 
-        # Copper arcs must survive analysis-only load/save byte-for-byte.
-        # Retain their lexical node text, including whitespace/comments; the
-        # canonical snapshot above the serializer guards against replaying stale
-        # text after a descendant is edited (e.g. PCB.page_fit()).
-        if node.name == "arc" and node.find("width") is not None and node.find("layer") is not None:
-            node._source_text = text[start_pos : self.pos]
-            node._source_canonical = node.to_string(compact=True)
+        _retain_arc_source(node, text, start_pos, self.pos)
 
         # Set position if tracking is enabled
         if self._track_positions:
@@ -1254,20 +1419,7 @@ class Parser:
                 pos += 1
             self.pos = pos
             if pos > start:
-                token = text[start:pos]
-                # Check if it's a valid name (most common case)
-                if token and not token[0].isdigit() and token[0] != "-":
-                    # Valid name - create node directly with name
-                    node = SExp(name=token)
-                else:
-                    # Try as number
-                    first_char = token[0]
-                    if first_char.isdigit() or (first_char == "-" and len(token) > 1):
-                        # Numeric - use as name (for layer definitions like (0 "F.Cu"))
-                        node = SExp(name=token)
-                    else:
-                        # Something else - make anonymous list with this as first child
-                        node = SExp(children=[SExp(value=token)])
+                node = _head_atom_list(text[start:pos])
             else:
                 raise ParseError(f"Expected atom at position {pos}")
         else:
@@ -1374,25 +1526,7 @@ class Parser:
         if pos == start:
             raise ParseError(f"Expected atom at position {pos}")
 
-        token = text[start:pos]
-
-        # Try to parse as number, but preserve original string for round-trip
-        # Check for likely number patterns first to avoid exception overhead
-        first_char = token[0]
-        if first_char.isdigit() or (first_char == "-" and len(token) > 1):
-            try:
-                if "." in token or "e" in token or "E" in token:
-                    node = SExp(value=float(token))
-                else:
-                    node = SExp(value=int(token))
-                node._original_str = token
-                return node
-            except ValueError:
-                pass
-        # A bare (unquoted) string token: record that it was parsed bare so the
-        # serializer can keep it bare on round-trip rather than re-quoting it via
-        # the keyword allowlist heuristic (issue #4185).
-        return SExp(value=token, _originally_bare=True)
+        return _bare_atom(text[start:pos])
 
     def _skip_whitespace(self):
         """Skip whitespace and comments."""
