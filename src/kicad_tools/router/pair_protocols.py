@@ -7,11 +7,17 @@ USB2 pair may be 2.5 mm out of match, while ``NetClassRouting`` and the
 :data:`PROTOCOL_DEFAULTS`.
 
 Every value is a :class:`Sourced` number: it carries the document it came
-from, or the literal tag :data:`UNCITED`.  The tag matters -- a limit with no
-source is reported at ``warning`` severity, never as a gate (maintainer
-decision 1 on #6443).  A field that is ``None`` means the table has **no**
-value for that protocol; the generic default applies (skew) or no limit is
-resolved (uncoupled length, via count).
+from, or the literal tag :data:`UNCITED`.  The tag matters -- a limit taken
+from an ``uncited`` table value is reported at ``warning`` severity; a cited
+table value, or a limit set explicitly on the class, is an ``error``.  A field
+that is ``None`` means the table has **no** value for that protocol; the
+generic default applies (skew) or no limit is resolved (uncoupled length, via
+count).
+
+The generic default (:data:`GENERIC_SKEW_MM`, for a class that declares no
+protocol) has no source either, but in this piece it **stays an error**, so no
+existing untagged class changes severity.  Whether it should warn too is an
+open maintainer decision on #6443; this module does not settle it.
 
 Resolution order, implemented once in
 :func:`kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`::
@@ -43,6 +49,12 @@ SKEW_STRETCH_TARGET_MM = 0.5
 _RENESAS_FS = "Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2"
 _TI_APP_A = "TI SPRAAR7J App. A"
 _TI_BREAKOUT = "TI SPRAAR7J §3.3 (breakout within 0.25 in of the package)"
+#: TI SPRAAR7J is written for a high-speed-capable USB2 PHY.  The full-speed
+#: row borrows its via count and breakout distance, and its source strings say
+#: so: piece (b) will turn these into limits on full-speed pairs.
+_HS_GUIDANCE_ON_FS = "; high-speed guidance, applied to full speed"
+_TI_APP_A_ON_FS = _TI_APP_A + _HS_GUIDANCE_ON_FS
+_TI_BREAKOUT_ON_FS = _TI_BREAKOUT + _HS_GUIDANCE_ON_FS
 
 
 class PairProtocol(Enum):
@@ -112,8 +124,8 @@ PROTOCOL_DEFAULTS: dict[PairProtocol, ProtocolDefaults] = {
     _P.USB2_FS: ProtocolDefaults(
         protocol=_P.USB2_FS,
         max_skew_mm=Sourced(2.5, _RENESAS_FS),
-        max_uncoupled_per_terminal_mm=Sourced(6.35, _TI_BREAKOUT),
-        max_vias_per_net=Sourced(4, _TI_APP_A),
+        max_uncoupled_per_terminal_mm=Sourced(6.35, _TI_BREAKOUT_ON_FS),
+        max_vias_per_net=Sourced(4, _TI_APP_A_ON_FS),
         gap_mm=_uncited(0.2),
         trace_width_mm=_uncited(0.2),
         diff_impedance_ohm=Sourced(90.0, _RENESAS_FS),

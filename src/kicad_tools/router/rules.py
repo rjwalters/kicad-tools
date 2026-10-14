@@ -1569,6 +1569,18 @@ class NetClassRouting:
     routed-net improvement, and otherwise reverted atomically.
     """
 
+    def __post_init__(self) -> None:
+        """Reject an unknown :attr:`pair_protocol` where the class is declared.
+
+        Without this a typo such as ``pair_protocol="USB9"`` is only caught
+        when something resolves the class's limits, which can be mid-route
+        (Issue #6443).  The stored value is left as given.
+
+        Raises:
+            ValueError: :attr:`pair_protocol` names no known protocol.
+        """
+        parse_protocol(self.pair_protocol)
+
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.
 

@@ -17,7 +17,7 @@ or the tag `uncited`.
 
 | `pair_protocol` | Max skew | Uncoupled per terminal | Vias per net | Source |
 |---|---|---|---|---|
-| `USB2_FS` (12 Mbit/s) | 2.5 mm | 6.35 mm | 4 | Renesas, *Guidelines for Full-Speed USB2.0 Board Design*, Table 2; TI SPRAAR7J §3.3 and App. A |
+| `USB2_FS` (12 Mbit/s) | 2.5 mm | 6.35 mm | 4 | Renesas, *Guidelines for Full-Speed USB2.0 Board Design*, Table 2 (skew); TI SPRAAR7J §3.3 and App. A (uncoupled length and vias: high-speed guidance, applied to full speed) |
 | `USB2_HS` (480 Mbit/s) | 1.27 mm | 6.35 mm | 4 | TI SPRAAR7J App. A (50 mil) and §3.3 |
 | `USB3_SS` | 0.1 mm | none | none | uncited |
 | `LVDS` | 0.5 mm | none | none | uncited |
@@ -53,6 +53,11 @@ USB_D+/USB_D-: continuity threshold 25.0%, skew tolerance 2.500 mm [protocol:USB
 
 The uncoupled-length allowance and the via count are resolved and reported.
 The rule that checks them is not built (issue #6443, piece b).
+
+On `USB2_FS` those two limits come from TI SPRAAR7J, which is written for a
+high-speed-capable PHY. Their source strings say "high-speed guidance,
+applied to full speed", so the report shows it when piece (b) starts checking
+them.
 
 ## Stretch target
 

@@ -7,6 +7,7 @@ explicit limit is an error and an uncited one a warning.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 import sys
@@ -76,6 +77,11 @@ def test_the_cited_values():
         assert row.max_uncoupled_per_terminal_mm.value == 6.35
         assert "TI SPRAAR7J" in row.max_uncoupled_per_terminal_mm.source
         assert (row.max_vias_per_net.value, row.max_vias_per_net.cited) == (4, True)
+    # TI SPRAAR7J is high-speed guidance.  The full-speed row says it borrows it.
+    for borrowed in (fs.max_uncoupled_per_terminal_mm, fs.max_vias_per_net):
+        assert "high-speed guidance, applied to full speed" in borrowed.source
+    for own in (hs.max_uncoupled_per_terminal_mm, hs.max_vias_per_net, fs.max_skew_mm):
+        assert "applied to full speed" not in own.source
 
 
 def test_only_the_usb2_rows_are_cited_today():
@@ -230,6 +236,32 @@ def test_sidecar_round_trip_and_unknown_protocol():
     assert NetClassRouting.from_dict({"name": "Cls"}).pair_protocol is None
     with pytest.raises(ValueError, match="unknown pair protocol"):
         NetClassRouting.from_dict({"name": "Cls", "pair_protocol": "USB9"})
+
+
+def test_unknown_protocol_fails_where_the_class_is_declared():
+    """A typo must not survive until something resolves the limits mid-route."""
+    with pytest.raises(ValueError, match="unknown pair protocol 'USB9'"):
+        NetClassRouting(name="Cls", pair_protocol="USB9")
+    with pytest.raises(ValueError, match="unknown pair protocol"):
+        dataclasses.replace(NetClassRouting(name="Cls"), pair_protocol="USB2_XS")
+    # Known spellings are accepted and stored as given.
+    assert NetClassRouting(name="Cls", pair_protocol="usb2_fs").pair_protocol == "usb2_fs"
+    assert NetClassRouting(name="Cls", pair_protocol="usb2_fs").effective_skew_tolerance() == 2.5
+    assert NetClassRouting(name="Cls").pair_protocol is None
+
+
+def test_board06_committed_readiness_is_current():
+    """Board 06's report hash-binds its recipe and sidecar (Issue #6443).
+
+    Editing ``assembled-demo/generate.py`` or ``output/net_class_map.json``
+    without re-pinning (``scripts/boards/refresh_readiness.py``) turns the
+    committed report from ``ready`` into ``unverified``.
+    """
+    from kicad_tools.cli.board_readiness import read_readiness
+
+    report = read_readiness(BOARDS / "06-diffpair-test")
+    assert report["blockers"] == []
+    assert report["status"] == "ready"
 
 
 # ---------------------------------------------------------------------------
