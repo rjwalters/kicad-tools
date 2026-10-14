@@ -650,7 +650,7 @@ placement-delta feedback off, no `rigid` row finishes more routed nets than
 `uniform` is no better (7, 6 and 5 unfinished at 1.1x, 1.25x and 1.5x). One
 run per expanded row, except `rigid` 1.25x and 1.5x, which have two each.
 
-Three things to hold against that sentence:
+Four things to hold against that sentence:
 
 - It is board 05 only, and it says nothing about any other board.
 - It is one budget. No row varied the 1200 s ceiling or the per-net iteration
@@ -970,9 +970,10 @@ Counted on routed nets (the zone-checked count), and against the four nets
 two `rigid` 1.25x runs) and leaves unfinished one to four nets that 1x
 finished. The one is `VM` at `rigid` 1.2x; the fours are `rigid` 1.5x at
 seed 42, `uniform` 1.1x and the second `rigid` 1.25x run. On the
-classifier's count, which does not see `VM`, the same losses are zero to
-three. Neither figure counts the zone nets `+5V` and `V3P3`, which this
-section leaves out everywhere.
+classifier's count, which does not see `VM`, the losses are zero to four:
+one fewer in the nine rows that leave `VM` unfinished, and still four at
+`uniform` 1.1x, which finishes `VM`. Neither figure counts the zone nets
+`+5V` and `V3P3`, which this section leaves out everywhere.
 
 Renders (`kct board-view net`) were made for every net whose state differs
 between 1x and an expanded row of block P; five are committed under
