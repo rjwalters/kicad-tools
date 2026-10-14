@@ -903,7 +903,12 @@ class DRCChecker:
             from kicad_tools.router.rules import DesignRules as RouterDesignRules
 
             router_rules = RouterDesignRules(
-                manufacturer=self.manufacturer, authored_min_clearance=authored
+                manufacturer=self.manufacturer,
+                authored_min_clearance=authored,
+                # Issue #6561: the same stackup-aware fab floor this check
+                # enforces (and the no-class ``fallback`` above uses), not the
+                # layer-agnostic ``MfrLimits.min_clearance``.
+                mfr_clearance_floor=self.design_rules.min_clearance_mm,
             )
         names = {net.number: net.name for net in self.pcb.nets.values()}
         threshold_map: dict[tuple[int, int], float] = {}

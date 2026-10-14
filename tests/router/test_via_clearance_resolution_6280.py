@@ -583,5 +583,6 @@ def test_a_second_resolution_does_not_treat_the_resolved_value_as_explicit(tmp_p
     args.manufacturer = "oshpark"  # a later pass with a coarser fab floor
     _resolve_route_clearance(args, pcb, [], quiet=True)
 
-    assert args.via_clearance == pytest.approx(0.152), "re-floored, not frozen"
+    # Issue #6561: the oshpark floor for this 2-layer board's stackup.
+    assert args.via_clearance == pytest.approx(0.1524), "re-floored, not frozen"
     assert args._via_clearance_rule_source == RuleSource.FAB_FLOOR.value
