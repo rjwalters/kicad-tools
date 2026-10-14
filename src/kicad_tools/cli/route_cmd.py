@@ -4147,6 +4147,60 @@ def _router_pair_gaps(
     return gaps
 
 
+def _router_pair_limits(
+    pairs: list[tuple[str, str]] | None,
+    net_class_map: dict | None,
+    board_path: Path,
+) -> list | None:
+    """Native pair limits for each coupled pair (Issue #6443, piece (b)).
+
+    Uncoupled length, skew and via count, resolved by the one resolver
+    ``kct check`` uses
+    (:func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`),
+    so the ``.kicad_dru`` rule and the kct finding quote the same limit and
+    severity.  The uncoupled limit needs the number of components on the net,
+    read from the routed board.  A pair whose class declares no uncoupled or
+    via limit gets no such rule; the skew rule is written for every pair (the
+    generic 0.5 mm default is an error in both engines).  ``None`` (no pair
+    list) keeps whatever an earlier route wrote.
+    """
+    if pairs is None or net_class_map is None:
+        return None
+    from kicad_tools.manufacturers.netclass_dru import PairLimits
+    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+        net_component_counts,
+        uncoupled_limit,
+    )
+
+    components: dict[str, int] = {}
+    if pairs:
+        try:
+            from kicad_tools.schema.pcb import PCB
+
+            components = net_component_counts(PCB.load(str(board_path)))
+        except Exception:  # limits stay valid without it; the count falls back to 1
+            components = {}
+    limits: list[PairLimits] = []
+    for p, n in pairs:
+        t = resolve_pair_thresholds(net_class_map, p, n)
+        count = max(components.get(p, 0), components.get(n, 0))
+        unc, _how = uncoupled_limit(t, count)
+        limits.append(
+            PairLimits(
+                p,
+                n,
+                uncoupled_mm=unc,
+                uncoupled_severity=t.uncoupled_severity,
+                skew_mm=t.skew_mm,
+                skew_severity=t.skew_severity,
+                max_vias=t.max_vias_per_net,
+                vias_severity=t.vias_severity,
+            )
+        )
+    return limits
+
+
 def _warn_unrecognised_coupled_pairs(pairs: list[tuple[str, str]] | None, quiet: bool) -> None:
     """One warning per coupled pair KiCad does not recognise by name (#6429).
 
@@ -4284,6 +4338,11 @@ def _write_drc_constraint_sidecars(
             router_net_classes=net_class_map,
             router_coupled_pairs=coupled_pairs,
             router_pair_gaps=pair_gaps,
+            router_pair_limits=(
+                _router_pair_limits(coupled_pairs, net_class_map, Path(output_path))
+                if pair_gaps is not None
+                else None
+            ),
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:

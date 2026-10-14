@@ -118,6 +118,7 @@ GLOBAL_NET_EVIDENCE_RULES = frozenset(
         "dangling_copper",
         "diffpair_length_skew",
         "diffpair_routing_continuity",
+        "diffpair_uncoupled_length",
         "impedance",
         "isolated_copper",
         "match_group_length_skew",

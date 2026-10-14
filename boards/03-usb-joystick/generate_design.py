@@ -652,10 +652,11 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
                 # P5 stretch target (#6447).
                 pair_protocol="USB2_FS",
             )
-    for net in ["USB_D+", "USB_D-"]:
-        # Short USB-C/ESD branches: routing_plan.usb_geometry separately
-        # requires >=4 mm common run, <=16 mm copper, <=2.5 mm skew.
-        net_class_map[net] = _dc_replace(net_class_map[net], coupled_continuity_threshold=0.25)
+    # Issue #6443: no ``coupled_continuity_threshold`` override.  Continuity
+    # is info-only now; the short USB-C/ESD branches are bounded by the
+    # uncoupled-length limit (USB2_FS: 6.35 mm x components on the net) and
+    # by routing_plan.usb_geometry (>=4 mm common run, <=16 mm copper,
+    # <=2.5 mm skew).
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")

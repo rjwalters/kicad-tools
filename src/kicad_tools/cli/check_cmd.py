@@ -100,6 +100,7 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
         "match_group_length_skew",
         "diffpair_length_skew",
         "diffpair_routing_continuity",
+        "diffpair_uncoupled_length",
     }
 )
 
@@ -1139,6 +1140,7 @@ CHECK_CATEGORIES = [
     "diffpair_clearance_intra",
     "diffpair_length_skew",
     "diffpair_routing_continuity",
+    "diffpair_uncoupled_length",
     "dimensions",
     "doc_drift",
     "edge",
@@ -1916,6 +1918,7 @@ def main(argv: list[str] | None = None) -> int:
             "match_group_length_skew",
             "diffpair_length_skew",
             "diffpair_routing_continuity",
+            "diffpair_uncoupled_length",
         )
         _inactive_rules = [
             rule
@@ -3106,6 +3109,7 @@ def run_selected_checks(
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
         "diffpair_length_skew": checker.check_diffpair_length_skew,
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,
+        "diffpair_uncoupled_length": checker.check_diffpair_uncoupled_length,
         "dimensions": checker.check_dimensions,
         "doc_drift": _doc_drift_check,
         "edge": checker.check_edge_clearances,
@@ -3212,6 +3216,8 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
         # length skew -- label the column accordingly.
         if rule_id == "diffpair_routing_continuity":
             return "continuity"
+        if rule_id == "diffpair_uncoupled_length":
+            return "uncoupled"
         return "skew"
 
     rows: list[tuple[str, str, str, str, str]] = []
@@ -3221,6 +3227,12 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
         measured = f"{v.actual_value:.3f}" if v.actual_value is not None else "-"
         tol = f"{v.required_value:.3f}" if v.required_value is not None else "-"
         status = "FAIL" if v.is_error else "pass"
+        if v.rule_id == "diffpair_routing_continuity":
+            # Info-only since #6443: below the threshold is a measurement,
+            # not a failure.
+            status = "info"
+        elif v.severity == "warning":
+            status = "warn"
         rows.append((subject, metric, measured, tol, status))
 
     subject_w = max(len("Group/Pair"), *(len(r[0]) for r in rows))

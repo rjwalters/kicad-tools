@@ -61,6 +61,8 @@ def _init_type_category_map() -> None:
             # Phase 3I or manual touch-up) -- the skew is a function of the
             # routed geometry of the two halves, not their footprints.
             ViolationType.DIFFPAIR_LENGTH_SKEW: ViolationCategory.ROUTING,
+            # Differential-pair uncoupled length / via count (Issue #6443).
+            ViolationType.DIFFPAIR_UNCOUPLED_LENGTH: ViolationCategory.ROUTING,
             # Match-group (N-trace) length-skew (Issue #2702, Epic #2661 Phase 2G).
             # N>=3 generalization of DIFFPAIR_LENGTH_SKEW: same routing-
             # fixable nature (serpentine tuning of the shorter members up
@@ -176,6 +178,10 @@ class ViolationType(Enum):
     # geometric topology of the route.  Distinct from CLEARANCE because
     # it checks a length-matching property, not edge-to-edge spacing.
     DIFFPAIR_LENGTH_SKEW = "diffpair_length_skew"
+    # Differential-pair uncoupled length and via count (Issue #6443): the
+    # larger of the two nets' copper that runs beside no partner copper, and
+    # each net's via count, against the protocol or class limit.
+    DIFFPAIR_UNCOUPLED_LENGTH = "diffpair_uncoupled_length"
     # Match-group (N-trace) length-skew (Issue #2702, Epic #2661 Phase 2G).
     # Fires when a declared match group's per-member routed-length skew
     # (``max(L) - min(L)`` across the group) exceeds the per-class
@@ -365,6 +371,9 @@ class ViolationType(Enum):
             # downstream filter that compares by exact type value.  This
             # entry is the only defense; do NOT delete it as "redundant".
             "diffpair_length_skew": cls.DIFFPAIR_LENGTH_SKEW,
+            # Issue #6443.  Explicit like its siblings: the fuzzy fallback
+            # would otherwise yield UNKNOWN.
+            "diffpair_uncoupled_length": cls.DIFFPAIR_UNCOUPLED_LENGTH,
             # Match-group (N-trace) length-skew (Issue #2702, Epic #2661
             # Phase 2G).  MUST be aliased explicitly even though the
             # rule_id string ``"match_group_length_skew"`` does NOT

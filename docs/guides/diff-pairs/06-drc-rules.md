@@ -1,9 +1,8 @@
 # 06 — Differential-Pair DRC Rules
 
-Four `rule_id`s in `kicad_tools.validate.rules.*` validate the routed result.
-Run via `kct check --rules=<rule_id>`. The rule_id strings below are the
-public CLI surface and match the `ViolationType.from_string` alias table in
-`src/kicad_tools/drc/violation.py`.
+Five `rule_id`s in `kicad_tools.validate.rules.*` validate the routed result
+(`kct check --rules=<rule_id>`). They match the `ViolationType.from_string`
+alias table in `src/kicad_tools/drc/violation.py`.
 
 ## `diffpair_clearance_intra`
 
@@ -18,26 +17,29 @@ manufacturer's inter-net floor.
 kct check board.kicad_pcb --rules=diffpair_clearance_intra
 ```
 
-Remediate: raise the routed gap to `effective_intra_pair_clearance()`, OR
-lower `intra_pair_clearance` on the net class if the tight gap is
-intentional (see guide 02).
+Remediate: raise the routed gap to `effective_intra_pair_clearance()`, or
+lower `intra_pair_clearance` if the tight gap is intentional (guide 02).
 
-## `diffpair_routing_continuity`
+## `diffpair_routing_continuity` (info only)
 
 Source: `DiffPairRoutingContinuityRule` in
 `src/kicad_tools/validate/rules/diffpair_routing_continuity.py`.
-Fires when an engaged pair's coupled fraction (share of P's routed length
+Measures an engaged pair's coupled fraction (share of P's routed length
 whose nearest point on N is within the coupling window AND parallel within
-±15°) falls below `effective_coupled_continuity_threshold(default=0.7)`.
-Topology check, not edge-to-edge spacing.
+±15°). **Info severity only since #6443**: it never fails a board, and KiCad
+has no native check for it. What a fab or protocol limits is the uncoupled
+length (next rule). `coupled_continuity_threshold` is **deprecated** (it only
+moves the figure the info line compares with) and emits a `DeprecationWarning`.
 
-```bash
-kct check board.kicad_pcb --rules=diffpair_routing_continuity
-```
+## `diffpair_uncoupled_length`
 
-Remediate: re-route the pair through `CoupledPathfinder` (set
-`coupled_routing=True`), tighten launch geometry, or lower the per-class
-threshold for hobby boards (see guide 02).
+Source: `DiffPairUncoupledLengthRule` in
+`src/kicad_tools/validate/rules/diffpair_uncoupled_length.py`.
+Holds the larger of the two nets' uncoupled lengths to the pair's limit
+(`max_uncoupled_total_mm`, else the protocol's per-terminal allowance times the
+components on the net), each net's via count to `max_vias_per_net`, and warns
+on unequal P and N via counts. How KiCad measures it, the known divergences and
+the pairs KiCad cannot see are in [guide 08](08-uncoupled-length.md).
 
 ## `diffpair_length_skew`
 
@@ -76,21 +78,19 @@ Remediate: re-route with `apply_impedance_driven_sizing` (set
 `target_diff_impedance` so the router consumes the stackup), correct the
 stackup, or relax `impedance_tolerance_percent` (see guide 03).
 
-## Running all four together
+## Running all five together
 
-```bash
-kct check board.kicad_pcb \
-  --rules=diffpair_clearance_intra,diffpair_routing_continuity,diffpair_length_skew,impedance
-```
+`--rules=diffpair_clearance_intra,diffpair_routing_continuity,diffpair_length_skew,diffpair_uncoupled_length,impedance`,
+or `kct check --mfr jlcpcb`, which enables all five plus the manufacturer's
+inter-net floors.
 
-Or use a manufacturer profile — `kct check --mfr jlcpcb` enables all four
-plus the manufacturer's inter-net floors.
+## Native pair rules
 
-## Native `diff_pair_gap` rules
-
-`kct route` writes one `diff_pair_gap (min ..)` rule per coupled pair KiCad
-recognises by name into a managed `.kicad_dru` block, at the gap it routed
-(guide 02, "The gap the router lays"). Byte-identical across re-routes.
+`kct route` writes native `diff_pair_gap`, `diff_pair_uncoupled`, `skew` and
+`via_count` rules per coupled pair into one managed `.kicad_dru` block, at the
+limits `kct check` resolves (guide 02 for the gap, guide 08 for the rest).
+Pair violations block `manufacturable` only when the limit is cited or
+explicit; the generic 0.5 mm skew default stays an error.
 
 ## ViolationType enumeration
 
