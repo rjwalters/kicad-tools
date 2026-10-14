@@ -22,10 +22,11 @@ import math
 import pytest
 
 from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.diffpair_routing import CoupledPathfinder, CoupledState, GridPos
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
-from kicad_tools.router.primitives import Route, Segment, Via
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not available")
@@ -224,3 +225,232 @@ def test_cpp_search_spaces_its_own_vias(method):
     (ax, ay, ad), (bx, by, bd) = vias
     gap = math.hypot(ax - bx, ay - by) - (ad + bd) / 2
     assert gap >= 0.5 - 1e-4, f"same-route vias {gap:.3f} mm drill-to-drill (< 0.5)"
+
+
+# ---------------------------------------------------------------------------
+# Issue #6473: validator tolerance
+# ---------------------------------------------------------------------------
+
+
+def _small_rules() -> DesignRules:
+    """The walled-fixture rules: 0.2 mm drills on a 0.1 mm grid, floor 0.5 mm."""
+    return DesignRules(
+        trace_width=0.2,
+        trace_clearance=0.1,
+        via_drill=0.2,
+        via_diameter=0.3,
+        via_clearance=0.05,
+        grid_resolution=0.1,
+        min_hole_to_hole=0.5,
+    )
+
+
+def test_python_validator_accepts_a_pair_exactly_on_the_floor():
+    """Centres 0.7 mm apart with 0.2 mm drills measure 0.4999999999999998.
+
+    That is the cheapest legal pair on a 0.1 mm grid; the native twins accept
+    it (``floor - CLEARANCE_EPSILON_MM``) and so must the Python validator.
+    """
+    rules = _small_rules()
+    grid = RoutingGrid(width=6.0, height=3.0, rules=rules, layer_stack=LayerStack.two_layer())
+
+    def via(x: float) -> Via:
+        return Via(x=x, y=1.5, drill=0.2, diameter=0.3, layers=(Layer.F_CU, Layer.B_CU), net=1)
+
+    a, on_floor, below = via(2.7), via(3.4), via(3.3)
+    assert (on_floor.x - a.x) - 0.2 < 0.5  # the float artefact this test is about
+    valid, gap, _loc = grid.validate_same_net_drill_spacing(
+        on_floor, same_net=1, route_vias=[a, on_floor]
+    )
+    assert valid is True
+    assert gap == pytest.approx(0.5, abs=1e-9)
+    valid, gap, _loc = grid.validate_same_net_drill_spacing(
+        below, same_net=1, route_vias=[a, below]
+    )
+    assert valid is False
+    assert gap == pytest.approx(0.4, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Issue #6473: coupled (diff-pair) search, both backends
+# ---------------------------------------------------------------------------
+
+FLOOR = 0.5
+COUPLED_BACKENDS = [
+    pytest.param(True, id="cpp", marks=requires_cpp),
+    pytest.param(False, id="python"),
+]
+
+
+def _coupled_fixture(pitch: float, height: float, use_cpp: bool, b_wall: float | None = None):
+    """A pair crossing an F.Cu wall at x=3.0 on a two-layer board.
+
+    Both rails must hop to B.Cu.  ``b_wall`` adds a B.Cu wall that forces
+    them back up.  Pads sit on F.Cu at x=1.0 and x=5.0, ``pitch`` apart.
+    """
+    rules = _small_rules()
+    grid = RoutingGrid(width=6.0, height=height, rules=rules, layer_stack=LayerStack.two_layer())
+    grid.add_keepout(3.0, 0.0, 3.0, height, layers=[Layer.F_CU])
+    if b_wall is not None:
+        grid.add_keepout(b_wall, 0.0, b_wall, height, layers=[Layer.B_CU])
+    y_p, y_n = height / 2 - pitch / 2, height / 2 + pitch / 2
+
+    def pad(x: float, y: float, net: int, name: str, ref: str) -> Pad:
+        return Pad(
+            x=x, y=y, width=0.2, height=0.2, net=net, net_name=name, layer=Layer.F_CU, ref=ref
+        )
+
+    pads = (
+        pad(1.0, y_p, 1, "D_P", "A"),
+        pad(5.0, y_p, 1, "D_P", "B"),
+        pad(1.0, y_n, 2, "D_N", "C"),
+        pad(5.0, y_n, 2, "D_N", "D"),
+    )
+    for p in pads:
+        grid.add_pad(p)
+    cells = round(pitch / rules.grid_resolution)
+    pf = CoupledPathfinder(
+        grid=grid, rules=rules, target_spacing_cells=cells, min_spacing_cells=cells
+    )
+    pf._use_cpp_coupled = use_cpp
+    result = pf.route_coupled(*pads, max_iterations_budget=200000)
+    assert pf.last_coupled_backend == ("cpp" if use_cpp else "python")
+    return pf, result
+
+
+def _via_cells(route: Route) -> list[tuple[float, float]]:
+    return [(round(v.x, 3), round(v.y, 3)) for v in route.vias]
+
+
+def _coupled_gaps(result, drill: float = 0.2) -> tuple[list[float], list[float]]:
+    """(same-rail, P-vs-N) drill edge-to-edge gaps of a coupled result."""
+    p_vias, n_vias = _via_cells(result[0]), _via_cells(result[1])
+    same = [
+        _drill_gap(a, b, drill)
+        for vias in (p_vias, n_vias)
+        for i, a in enumerate(vias)
+        for b in vias[i + 1 :]
+    ]
+    cross = [_drill_gap(a, b, drill) for a in p_vias for b in n_vias]
+    return same, cross
+
+
+#: The three walled fixtures (``_coupled_fixture`` keyword arguments).
+_TIGHT = {"pitch": 0.6, "height": 3.0}
+_LEGAL = {"pitch": 0.8, "height": 6.0}
+_STAGGERED = {"pitch": 0.6, "height": 6.0, "b_wall": 4.0}
+
+
+@pytest.mark.parametrize("use_cpp", COUPLED_BACKENDS)
+def test_coupled_search_tight_pair_has_no_via_pair_below_the_floor(use_cpp):
+    """Pitch 0.6 mm: side-by-side vias are 0.4 mm drill-to-drill, under the floor.
+
+    On main both backends returned P vias (2.8, 1.2) / (3.2, 1.2) and N vias
+    (2.8, 1.8) / (3.2, 1.8): 0.2 mm same-rail and 0.4 mm P-vs-N.  ``None`` is
+    an acceptable answer here; an under-floor pair is not.
+    """
+    pf, result = _coupled_fixture(use_cpp=use_cpp, **_TIGHT)
+    assert pf.last_rejections["via_own_h2h"] > 0
+    if result is None:
+        return
+    same, cross = _coupled_gaps(result)
+    assert all(g >= FLOOR - 1e-4 for g in same), same
+    assert all(g >= FLOOR - 1e-4 for g in cross), cross
+    # What the search does find: the rails stagger inside the departure zone
+    # so the two drills sit on a diagonal.
+    assert _via_cells(result[0]) == [(1.3, 1.2)]
+    assert _via_cells(result[1]) == [(1.7, 1.8)]
+
+
+@pytest.mark.parametrize("use_cpp", COUPLED_BACKENDS)
+def test_coupled_search_takes_a_legal_layer_change(use_cpp):
+    """Pitch 0.8 mm: a side-by-side via pair is legal (0.6 mm), so the pair
+    hops the wall coupled -- with each rail's two vias pushed from 0.2 mm
+    apart (main: x=2.8 and x=3.2) out to the floor (x=2.8 and x=3.5).
+
+    The board is 6 x 6 mm rather than 6 x 3 because ``route_coupled`` caps
+    its own iterations at ``cols * rows * 4``; on the 6 x 3 board that cap
+    (7564) ends the search before it gets over the wall at this pitch.
+    """
+    _pf, result = _coupled_fixture(use_cpp=use_cpp, **_LEGAL)
+    assert result is not None
+    p_route, n_route = result
+    assert _via_cells(p_route) == [(2.8, 2.6), (3.5, 2.6)]
+    assert _via_cells(n_route) == [(2.8, 3.4), (3.5, 3.4)]
+    same, cross = _coupled_gaps(result)
+    assert min(same) == pytest.approx(0.5, abs=1e-6)
+    assert min(cross) == pytest.approx(0.6, abs=1e-6)
+    # It really is a there-and-back layer change ending on the pad layer.
+    for route in result:
+        assert route.segments[0].layer == Layer.F_CU
+        assert route.segments[-1].layer == Layer.F_CU
+        assert any(s.layer == Layer.B_CU for s in route.segments)
+
+
+@pytest.mark.parametrize("use_cpp", COUPLED_BACKENDS)
+def test_coupled_search_tight_pair_staggers_both_layer_changes(use_cpp):
+    """Pitch 0.6 mm with a B.Cu wall forcing the pair back up: four vias, the
+    P-vs-N pairs staggered onto the floor, none below it."""
+    _pf, result = _coupled_fixture(use_cpp=use_cpp, **_STAGGERED)
+    assert result is not None
+    assert len(result[0].vias) == 2 and len(result[1].vias) == 2
+    same, cross = _coupled_gaps(result)
+    assert min(same) >= FLOOR - 1e-4, same
+    assert min(cross) >= FLOOR - 1e-4, cross
+
+
+@requires_cpp
+@pytest.mark.parametrize("fixture", [_TIGHT, _LEGAL, _STAGGERED], ids=["tight", "legal", "stag"])
+def test_coupled_backends_agree_on_the_walled_fixtures(fixture):
+    cpp_pf, cpp_result = _coupled_fixture(use_cpp=True, **fixture)
+    py_pf, py_result = _coupled_fixture(use_cpp=False, **fixture)
+    assert (cpp_result is None) == (py_result is None)
+    if cpp_result is not None:
+        for cpp_route, py_route in zip(cpp_result, py_result, strict=True):
+            assert _via_cells(cpp_route) == _via_cells(py_route)
+    assert cpp_pf.last_iterations == py_pf.last_iterations
+    assert cpp_pf.last_rejections["via_own_h2h"] == py_pf.last_rejections["via_own_h2h"]
+
+
+def _open_pathfinder(allow_swap_via: bool = False) -> CoupledPathfinder:
+    rules = _small_rules()
+    grid = RoutingGrid(width=6.0, height=6.0, rules=rules, layer_stack=LayerStack.two_layer())
+    return CoupledPathfinder(
+        grid=grid,
+        rules=rules,
+        target_spacing_cells=8,
+        min_spacing_cells=6,
+        allow_swap_via=allow_swap_via,
+    )
+
+
+def _via_moves(pf: CoupledPathfinder, pitch_cells: int, own_vias=None) -> int:
+    state = CoupledState(GridPos(30, 30, 0), GridPos(30, 30 + pitch_cells, 0), (1, 0))
+    moves = pf._get_coupled_neighbors(
+        state, p_net=1, n_net=2, target_spacing_cells=pitch_cells, own_vias=own_vias
+    )
+    return sum(1 for _state, _cost, is_via in moves if is_via)
+
+
+@pytest.mark.parametrize("swap", [False, True], ids=["plain", "swap-via"])
+def test_coupled_via_move_predicate(swap):
+    """The via move itself, with nothing else in the way (Python loop).
+
+    Centres must be >= 0.7 mm (7 cells) apart.  ``allow_swap_via`` adds a
+    second, Python-only via move per layer that drills the same two cells;
+    it takes the same check.
+    """
+    pf = _open_pathfinder(allow_swap_via=swap)
+    per_layer = 2 if swap else 1
+    # P-vs-N of the move itself.
+    assert _via_moves(pf, pitch_cells=6) == 0
+    assert pf.last_rejections["via_own_h2h"] == per_layer
+    assert _via_moves(pf, pitch_cells=7) == per_layer  # exactly on the floor
+    assert _via_moves(pf, pitch_cells=8) == per_layer
+    # Against an earlier via of the SAME rail (P at (30, 30)) ...
+    assert _via_moves(pf, 8, own_vias=[(24, 30)]) == 0
+    assert _via_moves(pf, 8, own_vias=[(23, 30)]) == per_layer
+    # ... and of the PARTNER rail (N at (30, 38)): the list is not per-rail.
+    assert _via_moves(pf, 8, own_vias=[(100, 100), (34, 34)]) == 0
+    # A via stack on the cells of an earlier via pair is the same two drills.
+    assert _via_moves(pf, 8, own_vias=[(30, 30), (30, 38)]) == per_layer
