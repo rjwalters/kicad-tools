@@ -664,17 +664,9 @@ def _run_parallel(
                     routes, score, _ = future.result()
                     completed += 1
 
-                    if progress_callback is not None:
-                        if not progress_callback(
-                            completed / num_trials,
-                            f"Completed {completed}/{num_trials} trials",
-                            True,
-                        ):
-                            # Cancel remaining futures
-                            for f in futures:
-                                f.cancel()
-                            break
-
+                    # Issue #6364: fold this trial into the best BEFORE the
+                    # progress callback can cancel, so a cancel returns the
+                    # best of every completed trial -- including this one.
                     is_new_best = score > best_score
                     if is_new_best:
                         best_score = score
@@ -696,6 +688,23 @@ def _run_parallel(
                             f"  Trial {trial_num + 1}: {net_count}/{len(base_order)} nets, "
                             f"{via_count} vias, score={score:.2f} {status}"
                         )
+
+                    if progress_callback is not None and not progress_callback(
+                        completed / num_trials,
+                        f"Completed {completed}/{num_trials} trials",
+                        True,
+                    ):
+                        # Issue #6364: a cancel must not join the trials still
+                        # running (``shutdown(wait=True)`` would block until
+                        # each finishes).  Abandon them, as the timeout
+                        # branch below does, and return the best so far.
+                        if verbose:
+                            print(
+                                f"  Cancelled after {completed}/{num_trials} trials; "
+                                f"returning best (score={best_score:.2f})"
+                            )
+                        terminate_executor(executor)
+                        return best_routes, best_score, best_trial
 
                 except Exception as e:
                     if verbose:

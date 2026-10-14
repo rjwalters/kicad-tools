@@ -292,6 +292,134 @@ def test_parallel_evolutionary_timeout_returns_best_without_waiting(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# Issue #6364: a progress-callback cancel keeps the best and does not wait
+# ---------------------------------------------------------------------------
+
+
+def _fake_parallel_unscored_trial(config):
+    """Trial 0 finishes at once but scores ``-inf``; the rest block."""
+    if config["trial_num"] == 0:
+        return [], float("-inf"), 0
+    time.sleep(60)
+    return [], 0.0, config["trial_num"]
+
+
+def test_parallel_monte_carlo_cancel_returns_triggering_trial_without_waiting(monkeypatch):
+    """A ``False`` callback return after the first completion while another
+    trial blocks: the call returns promptly with that first trial as best."""
+    monkeypatch.setattr(core_mod, "_run_monte_carlo_trial", _fake_parallel_trial)
+    router = _router()
+    calls: list[float] = []
+
+    def cancel(progress, _message, _cancelable):
+        calls.append(progress)
+        return False
+
+    started = time.monotonic()
+    routes = mc_mod.run_monte_carlo(
+        router, num_trials=3, seed=1, verbose=False, num_workers=2, progress_callback=cancel
+    )
+    # No ``shutdown(wait=True)`` join of the trial still sleeping for 60 s.
+    assert time.monotonic() - started < 20
+    # The trial whose completion triggered the cancel is not dropped.
+    assert [r.net for r in routes] == [1]
+    assert calls[0] == pytest.approx(1 / 3)
+    _assert_workers_gone()
+
+
+def test_parallel_monte_carlo_cancel_with_no_scored_trial_returns_empty(monkeypatch):
+    """Edge case: cancelling before any trial produced a best still returns
+    ``(None, -inf, -1)`` without hanging."""
+    monkeypatch.setattr(core_mod, "_run_monte_carlo_trial", _fake_parallel_unscored_trial)
+    router = _router()
+    started = time.monotonic()
+    result = mc_mod._run_parallel(
+        autorouter=router,
+        num_trials=3,
+        use_negotiated=False,
+        base_seed=1,
+        base_order=[1, 2, 3],
+        num_workers=2,
+        verbose=False,
+        progress_callback=lambda *_a: False,
+    )
+    assert time.monotonic() - started < 20
+    assert result == (None, float("-inf"), -1)
+    _assert_workers_gone()
+
+
+# ---------------------------------------------------------------------------
+# Issue #6364: a failed pre_save_hook stays "inconsistent" after a best-trial
+# restore
+# ---------------------------------------------------------------------------
+
+
+def test_failed_hook_with_best_trial_stays_inconsistent(interrupt_state):
+    router = _router()
+    router.routes = [_route(2, 30.0)]
+    mc_mod.publish_best_trial(
+        router, [_route(1, 10.0)], strategy="monte-carlo", trial=4, score=100.0
+    )
+    partial = interrupt_state(router)
+
+    def broken_hook():
+        raise RuntimeError("restore failed")
+
+    route_cmd._interrupt_state["pre_save_hook"] = broken_hook
+
+    assert route_cmd._save_partial_results() is True
+    # The best trial's copper is still what gets saved ...
+    assert "(start 10" in partial.read_text()
+    info = route_cmd._interrupt_state["partial_save_info"]
+    # ... but the receipt keeps flagging the failed hook, and records both facts.
+    assert info["snapshot_state"] == "inconsistent"
+    assert info["snapshot_strategy"] == "monte-carlo"
+    assert info["snapshot_trial"] == 4
+    assert info["snapshot_restore_error"] == "RuntimeError: restore failed"
+
+
+def test_failed_best_trial_hook_chain_stays_inconsistent(interrupt_state):
+    """The hook shape PR #6549 (#6321) registers -- it reports ``best-trial``
+    on success and chains an earlier hook -- must not mask a failure either."""
+    router = _router()
+    mc_mod.publish_best_trial(
+        router, [_route(1, 10.0)], strategy="evolutionary", trial=2, score=50.0
+    )
+    interrupt_state(router)
+
+    def previous_hook():
+        raise OSError("cannot serialize moved placement")
+
+    def chained_best_hook():
+        hook_info, hook_text = previous_hook()
+        return {**hook_info, "snapshot_state": "best-trial"}, hook_text
+
+    route_cmd._interrupt_state["pre_save_hook"] = chained_best_hook
+
+    assert route_cmd._save_partial_results() is True
+    info = route_cmd._interrupt_state["partial_save_info"]
+    assert info["snapshot_state"] == "inconsistent"
+    assert info["snapshot_strategy"] == "evolutionary"
+    assert info["snapshot_trial"] == 2
+    assert "snapshot_restore_error" in info
+
+
+def test_successful_hook_with_best_trial_reports_best_trial(interrupt_state):
+    router = _router()
+    mc_mod.publish_best_trial(
+        router, [_route(1, 10.0)], strategy="monte-carlo", trial=1, score=100.0
+    )
+    interrupt_state(router)
+    route_cmd._interrupt_state["pre_save_hook"] = lambda: ({}, None)
+
+    assert route_cmd._save_partial_results() is True
+    info = route_cmd._interrupt_state["partial_save_info"]
+    assert info["snapshot_state"] == "best-trial"
+    assert info["snapshot_trial"] == 1
+    assert "snapshot_restore_error" not in info
+
+
+# ---------------------------------------------------------------------------
 # Worker payload: layer stack and search budgets reach worker trials
 # ---------------------------------------------------------------------------
 

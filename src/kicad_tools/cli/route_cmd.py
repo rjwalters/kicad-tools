@@ -3065,7 +3065,12 @@ def _restore_best_trial(router: Any, info: dict[str, Any]) -> None:
     meta = getattr(router, "_best_trial_meta", None)
     meta = meta if isinstance(meta, dict) else {}
     router.routes = list(best)
-    info["snapshot_state"] = "best-trial"
+    # Issue #6364: never downgrade ``"inconsistent"`` (a failed
+    # ``pre_save_hook``) to a clean-looking ``"best-trial"``: the receipt must
+    # still flag a board whose copper and footprints may disagree.  The
+    # strategy/trial keys are recorded either way, so both facts are reported.
+    if info.get("snapshot_state") != "inconsistent":
+        info["snapshot_state"] = "best-trial"
     info["snapshot_strategy"] = meta.get("strategy")
     info["snapshot_trial"] = meta.get("trial")
 
