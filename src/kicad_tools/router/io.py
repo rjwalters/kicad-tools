@@ -129,7 +129,7 @@ def _round_up_readable(cells: int) -> int:
     """Round ``cells`` up to two significant digits (never down)."""
     if cells <= 0:
         return cells
-    magnitude = 10 ** max(len(str(cells)) - 2, 0)
+    magnitude = int(10 ** max(len(str(cells)) - 2, 0))
     return -(-cells // magnitude) * magnitude
 
 
