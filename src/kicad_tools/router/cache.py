@@ -180,6 +180,11 @@ class CacheKey:
         # Only keyed when present, so every floor-free key is unchanged.
         if getattr(rules, "net_clearance_floors", None):
             rules_data["net_clearance_floors"] = sorted(rules.net_clearance_floors.items())
+        # Issue #6443: the authored board minimum floors the coupled pair gap,
+        # so it changes the emitted copper.  Only keyed when set.
+        authored_min = getattr(rules, "authored_min_clearance", None)
+        if authored_min is not None:
+            rules_data["authored_min_clearance"] = float(authored_min)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
         # Issue #5004: flips whether the same-component carve-out grants an
@@ -386,6 +391,11 @@ class SubProblemSignature:
         # Only keyed when present, so every floor-free key is unchanged.
         if getattr(rules, "net_clearance_floors", None):
             rules_data["net_clearance_floors"] = sorted(rules.net_clearance_floors.items())
+        # Issue #6443: the authored board minimum floors the coupled pair gap,
+        # so it changes the emitted copper.  Only keyed when set.
+        authored_min = getattr(rules, "authored_min_clearance", None)
+        if authored_min is not None:
+            rules_data["authored_min_clearance"] = float(authored_min)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
         # Issue #5004: see ``CacheKey.compute`` above -- same reasoning

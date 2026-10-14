@@ -86,6 +86,12 @@ kct check board.kicad_pcb \
 Or use a manufacturer profile — `kct check --mfr jlcpcb` enables all four
 plus the manufacturer's inter-net floors.
 
+## Native `diff_pair_gap` rules
+
+`kct route` writes one `diff_pair_gap (min ..)` rule per coupled pair KiCad
+recognises by name into a managed `.kicad_dru` block, at the gap it routed
+(guide 02, "The gap the router lays"). Byte-identical across re-routes.
+
 ## ViolationType enumeration
 
 Each `rule_id` maps to a member of the `ViolationType` enum in

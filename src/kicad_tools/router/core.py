@@ -1541,6 +1541,8 @@ class Autorouter:
         # preferences); aliasing the module-level singleton leaked those
         # writes into every later Autorouter in the same process.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
+        # Issue #6443: classes whose floored pair-gap notice was printed.
+        self._pair_gap_notified: set[str] = set()
         self.layer_stack = layer_stack
         self._force_python = force_python
         # Populated by the PCB loader and consumed only when pairwise voltage
@@ -4492,21 +4494,14 @@ class Autorouter:
                 self._lattice_pair_outcomes[pair_name] = "no-net-class"
                 continue
             trace_w = nc.trace_width or self.rules.trace_width
-            intra = nc.effective_intra_pair_clearance()
-            # Fab floor (issue #4270): an intra-pair air gap below the
-            # configured manufacturer's minimum copper clearance is
-            # unmanufacturable and would fail the exact kicad-cli DRC gate
-            # the committed board-06 output passes (its grid-quantized
-            # gaps sit above the floor).  Clamp the emitted gap up to the
-            # floor; the class value is honored when it already clears it.
-            mfr = self.rules.manufacturer
-            if mfr:
-                try:
-                    from .mfr_limits import get_mfr_limits
-
-                    intra = max(intra, get_mfr_limits(mfr).min_clearance)
-                except Exception:
-                    pass
+            # Fab floor (issue #4270) and authored board floor (issue #6443):
+            # an intra-pair air gap below the manufacturer's minimum copper
+            # clearance is unmanufacturable, and one below the board's
+            # authored ``min_clearance`` fails kicad-cli twice per coupled
+            # segment pair (``diff_pair_gap_out_of_range`` and
+            # ``clearance``).  Clamp the emitted gap up to both; the class
+            # value is honored when it already clears them.
+            intra = self._pair_gap_mm(nc)
             pitch = trace_w + intra
             multi = len(chain.segments) > 1
             res_p: list[tuple[str, str]] = []
@@ -4540,6 +4535,32 @@ class Autorouter:
             reserved[p_id] = res_p
             reserved[n_id] = res_n
         return coupled, reserved
+
+    def _pair_gap_mm(self, net_class: Any) -> float:
+        """The coupled gap of ``net_class``'s pairs, floored (Issue #6443).
+
+        :meth:`DesignRules.pair_gap` -- ``max(class value, manufacturer
+        minimum, authored board minimum)`` -- plus one notice per class the
+        first time a floor raises its gap, naming the class and both values.
+        Every routing-time reader of a pair's intra-pair gap (the lattice
+        coupled pitch and the grid pair sites) goes through here, so they
+        agree with each other and with the emitted ``diff_pair_gap`` rule.
+        """
+        resolved = self.rules.pair_gap(net_class)
+        if resolved.raised:
+            # ``getattr``: tests build partial routers via ``__new__``.
+            notified = getattr(self, "_pair_gap_notified", None)
+            if notified is None:
+                notified = self._pair_gap_notified = set()
+            name = str(getattr(net_class, "name", "?"))
+            if name not in notified:
+                notified.add(name)
+                print(
+                    f"  Diff-pair gap: class {name} intra-pair gap "
+                    f"{resolved.class_mm:.4g}mm raised to {resolved.gap_mm:.4g}mm "
+                    f"({resolved.source}; issue #6443)"
+                )
+        return resolved.gap_mm
 
     def _lattice_relocate_pair_anchors(self, pc: Any) -> Any:
         """Move a blocked coupled endpoint off its part (issue #6378).
@@ -19084,7 +19105,9 @@ class Autorouter:
             net_class = self._resolve_net_class_for_pair(dp)
             if net_class is not None:
                 tolerance_mm = net_class.effective_skew_tolerance(0.5)
-                intra_pair_clearance_mm = net_class.effective_intra_pair_clearance()
+                # Issue #6443: floored like the routed gap, so a meander
+                # never re-closes a pair below the board's own minimum.
+                intra_pair_clearance_mm = self._pair_gap_mm(net_class)
                 length_critical = net_class.length_critical
 
             p_route, n_route, result = tune_diff_pair_skew(
@@ -19326,7 +19349,8 @@ class Autorouter:
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
-                intra_pair_clearance_mm = net_class.effective_intra_pair_clearance()
+                # Issue #6443: floored like the routed gap.
+                intra_pair_clearance_mm = self._pair_gap_mm(net_class)
                 length_critical = net_class.length_critical
 
             # Issue #3440: the impedance resolver can overwrite a class's

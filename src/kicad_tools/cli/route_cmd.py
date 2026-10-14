@@ -4113,6 +4113,40 @@ def _router_coupled_pairs(
     )
 
 
+def _router_pair_gaps(
+    pairs: list[tuple[str, str]] | None,
+    net_class_map: dict | None,
+    router: object | None = None,
+) -> list[tuple[str, str, float]] | None:
+    """``(P, N, gap_mm)`` for each coupled pair, as the router laid it (Issue #6443).
+
+    The gap is the router's own :meth:`~kicad_tools.router.core.Autorouter._pair_gap_mm`
+    -- ``max(class intra-pair gap, manufacturer minimum, authored board
+    min_clearance)`` -- so the emitted ``diff_pair_gap`` rule and the routed
+    copper agree by construction.  ``None`` (no pair list) keeps whatever an
+    earlier route wrote.  The class is found by net name, then through the
+    class-name keyed view (:func:`~kicad_tools.router.diffpair_detection.build_synth_routing`),
+    the lookup the lattice uses.
+    """
+    if pairs is None or net_class_map is None:
+        return None
+    from kicad_tools.router.diffpair_detection import build_synth_routing
+    from kicad_tools.router.diffpair_routing import _floored_pair_gap
+
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    gaps: list[tuple[str, str, float]] = []
+    for p, n in pairs:
+        nc = net_class_map.get(p) or net_class_map.get(n)
+        if nc is None:
+            nc = synth_routing.get(net_to_class.get(p, "")) or synth_routing.get(
+                net_to_class.get(n, "")
+            )
+        if nc is None or not hasattr(nc, "effective_intra_pair_clearance"):
+            continue
+        gaps.append((p, n, _floored_pair_gap(router, nc)))
+    return gaps
+
+
 def _warn_unrecognised_coupled_pairs(pairs: list[tuple[str, str]] | None, quiet: bool) -> None:
     """One warning per coupled pair KiCad does not recognise by name (#6429).
 
@@ -4149,6 +4183,7 @@ def _write_drc_constraint_sidecars(
     source_pcb_path: Path | None = None,
     net_class_map: dict | None = None,
     coupled_pairs: list[tuple[str, str]] | None = None,
+    pair_gaps: list[tuple[str, str, float]] | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -4201,6 +4236,10 @@ def _write_drc_constraint_sidecars(
             not recognise by name are recorded in the ``.kicad_pro`` and
             exempted from the router class's clearance in both engines.
             ``None`` keeps whatever an earlier route recorded.
+        pair_gaps: ``(P, N, gap_mm)`` per coupled pair, as the router laid
+            it (:func:`_router_pair_gaps`, Issue #6443).  Each pair KiCad
+            recognises by name gets a native ``diff_pair_gap`` rule.
+            ``None`` keeps whatever an earlier route wrote.
     """
     try:
         from kicad_tools.manufacturers import (
@@ -4244,6 +4283,7 @@ def _write_drc_constraint_sidecars(
             source_pcb_path=source_pcb_path,
             router_net_classes=net_class_map,
             router_coupled_pairs=coupled_pairs,
+            router_pair_gaps=pair_gaps,
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -4510,6 +4550,7 @@ def run_post_route_drc(
         source_pcb_path=source_pcb_path,
         net_class_map=_effective_class_map or None,
         coupled_pairs=_coupled_pairs,
+        pair_gaps=_router_pair_gaps(_coupled_pairs, _effective_class_map or None, router),
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -5804,6 +5845,7 @@ def _fill_zones_after_route(
             # Use the same propagated source/fabrication constraints as DRC,
             # before native filling can bake a weaker default into the output.
             class_map = _pour_closer_net_class_map(router, args)
+            coupled_pairs = _router_coupled_pairs(output_path, class_map, router)
             _write_drc_constraint_sidecars(
                 output_path,
                 args.manufacturer,
@@ -5812,7 +5854,8 @@ def _fill_zones_after_route(
                 quiet=quiet,
                 source_pcb_path=Path(args.pcb),
                 net_class_map=class_map,
-                coupled_pairs=_router_coupled_pairs(output_path, class_map, router),
+                coupled_pairs=coupled_pairs,
+                pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
             )
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
@@ -5880,6 +5923,7 @@ def _fill_zones_after_route(
         and getattr(args, "manufacturer", None)
     ):
         class_map = _pour_closer_net_class_map(router, args)
+        coupled_pairs = _router_coupled_pairs(output_path, class_map, router)
         _write_drc_constraint_sidecars(
             output_path,
             args.manufacturer,
@@ -5888,7 +5932,8 @@ def _fill_zones_after_route(
             quiet=True,
             source_pcb_path=Path(args.pcb),
             net_class_map=class_map,
-            coupled_pairs=_router_coupled_pairs(output_path, class_map, router),
+            coupled_pairs=coupled_pairs,
+            pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
         )
 
     _fill_started = time.monotonic()
@@ -9030,6 +9075,9 @@ def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) 
 
     args.clearance = value
     args._clearance_rule_source = source
+    # Issue #6443: the authored board minimum floors the coupled pair gap
+    # (``DesignRules.authored_min_clearance`` / ``DesignRules.pair_gap``).
+    args._authored_min_clearance = declared.project_min_clearance_mm
     if warning is not None:
         print(warning, file=sys.stderr)
     if banner is not None and not quiet:
@@ -10000,6 +10048,8 @@ def route_with_layer_escalation(
         # the routing cache so a --copper 2 run is never served a --copper 1
         # route.
         min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+        # Issue #6443: the authored board minimum floors the pair gap.
+        authored_min_clearance=getattr(args, "_authored_min_clearance", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -11593,6 +11643,8 @@ def route_with_rule_relaxation(
             # the routing cache so a --copper 2 run is never served a --copper 1
             # route.
             min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+            # Issue #6443: the authored board minimum floors the pair gap.
+            authored_min_clearance=getattr(args, "_authored_min_clearance", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -14167,6 +14219,8 @@ def route_with_combined_escalation(
                 # the routing cache so a --copper 2 run is never served a --copper 1
                 # route.
                 min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+                # Issue #6443: the authored board minimum floors the pair gap.
+                authored_min_clearance=getattr(args, "_authored_min_clearance", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -20228,6 +20282,8 @@ def _run_main_impl(args, parser, argv) -> int:
         # the routing cache so a --copper 2 run is never served a --copper 1
         # route.
         min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+        # Issue #6443: the authored board minimum floors the pair gap.
+        authored_min_clearance=getattr(args, "_authored_min_clearance", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.

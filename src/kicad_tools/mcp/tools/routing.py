@@ -433,6 +433,8 @@ def _apply_declared_clearances(path: Path, pcb_rules, design_rules) -> list[str]
     resolved = resolve_routing_clearances(path, target_mm=pcb_rules.min_clearance)
     design_rules.trace_clearance = resolved.trace_mm
     design_rules.via_clearance = resolved.via_mm
+    # Issue #6443: the authored board minimum floors the coupled pair gap.
+    design_rules.authored_min_clearance = resolved.authored_min_clearance_mm
     return resolved.warnings
 
 
