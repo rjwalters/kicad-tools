@@ -582,6 +582,15 @@ _DIALECTS = pytest.mark.parametrize("name_only", [False, True], ids=["numeric", 
 
 @_DIALECTS
 class TestCliPreserveExisting:
+    @pytest.fixture(autouse=True)
+    def _no_kicad_cli_discovery(self, monkeypatch):
+        # Issue #6645: the post-route zone fill discovers kicad-cli via
+        # ``kicad-cli version``, which takes a native-concurrency permit; under
+        # CI load the queueing (not the code under test) blew the 60s cap.
+        # These tests assert the preserve-existing verdict, not discovery.
+        # (The module-level test_kicad_cli_agrees is outside this class.)
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: None)
+
     def test_kept_near_miss_fails_the_run(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], name_only: bool
     ) -> None:
@@ -632,6 +641,9 @@ class TestCliPreserveExisting:
         ("same_net", set()),
     ],
 )
+# Issue #6645: legitimately queues for native-concurrency permits (route zone
+# fill + its own kicad-cli DRC) before a real DRC; explicit cap above 60s default.
+@pytest.mark.timeout(180)
 @_DIALECTS
 def test_kicad_cli_agrees(
     tmp_path: Path,
