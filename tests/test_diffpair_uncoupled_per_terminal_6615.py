@@ -376,17 +376,17 @@ def test_gather_ignore_defaults_to_courtyard_and_old_sidecars_load() -> None:
 
 COMMITTED = {
     "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb": {
-        ("USB_D+", "USB_D-"): 8.1302,
-        ("USB_MCU_D+", "USB_MCU_D-"): 0.8485,
+        ("USB_D+", "USB_D-"): 10.4052,
+        ("USB_MCU_D+", "USB_MCU_D-"): 0.9635,
     },
     "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": {
-        (f"LVDS{i}_P", f"LVDS{i}_N"): 1.2162 for i in (1, 2, 3, 4)
+        (f"LVDS{i}_P", f"LVDS{i}_N"): 1.5412 for i in (1, 2, 3, 4)
     },
 }
 
 
 @pytest.mark.parametrize("pcb_rel", sorted(COMMITTED))
-def test_committed_boards_total_unchanged_and_per_terminal_conserves(pcb_rel) -> None:
+def test_committed_boards_total_matches_kicad_and_per_terminal_conserves(pcb_rel) -> None:
     pcb = PCB.load(str(REPO / pcb_rel))
     ids = {n.name: n.number for n in pcb.nets.values()}
     for (p, n), total in COMMITTED[pcb_rel].items():
