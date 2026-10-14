@@ -587,3 +587,79 @@ def test_contact_graph_open_count_skips_fill_only_components(tmp_path: Path):
     assert len(graph.fill_only_components()) == 2
     assert len(graph.counted_components()) == 2
     assert graph.open_count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Exact abutment: copper sharing an edge touches (Issue #6490)
+# ---------------------------------------------------------------------------
+#
+# kicad-cli treats pad copper that shares an edge with other pad copper or a
+# fill as touching: a same-net bond, a different-net short.  A shared edge
+# has zero intersection area and polygonised circles tangent off-axis do not
+# even ``intersects()``, so the model bonds exact pad outlines within
+# ``copper_contact._TOUCH``.
+
+
+def _kicad_shorts(path: Path, out_dir: Path) -> int:
+    """Number of ``shorting_items`` live kicad-cli reports for ``path``."""
+    out = out_dir / f"{path.stem}.shorts.drc.json"
+    subprocess.run(
+        [str(_kicad_cli()), "pcb", "drc", "--format", "json", "-o", str(out), str(path)],
+        capture_output=True,
+        check=False,
+    )
+    violations = json.loads(out.read_text()).get("violations", [])
+    return sum(1 for v in violations if v.get("type") == "shorting_items")
+
+
+def test_abutting_same_net_rect_pads_bond(tmp_path: Path):
+    """Two GND 1x1 rect pads sharing the edge x = 10.5 are one conductor."""
+    body = (
+        _fp("U1", 10, 10, _smd("1", "rect", (1, 1), 1))
+        + _fp("U2", 11, 10, _smd("1", "rect", (1, 1), 1))
+        + _fp("U3", 15, 10, _smd("1", "rect", (1, 1), 1))
+        + _seg((11, 10), (15, 10))
+    )
+    path = _write(tmp_path, "abut_pads_same_net", body)
+    assert _three_models(path, "GND") == (0, 0, 0)
+    assert _partition_shorts(path) == []
+    _check_kicad(path, tmp_path, "GND", 0)
+
+
+def test_pad_edge_on_same_net_fill_edge_bonds(tmp_path: Path):
+    """A GND pad whose edge x = 10.5 is exactly the GND fill's edge bonds."""
+    body = (
+        _fp("U1", 10, 10, _smd("1", "rect", (1, 1), 1))
+        + _fp("U2", 15, 10, _smd("1", "rect", (1, 1), 1))
+        + _zone(1, "F.Cu", 10.5, 9, 20, 11, "z")
+    )
+    path = _write(tmp_path, "abut_pad_fill", body)
+    assert _three_models(path, "GND") == (0, 0, 0)
+    assert _partition_shorts(path) == []
+    _check_kicad(path, tmp_path, "GND", 0)
+
+
+# name -> (GND pad, VCC pad, VCC footprint offset from the GND one at (10, 10))
+_ABUTTING_SHORTS = {
+    "rect_shared_edge": (("rect", 1.0), ("rect", 1.0), (1.0, 0.0)),
+    "circle_tangent_on_axis": (("circle", 1.0), ("circle", 1.0), (1.0, 0.0)),
+    # 3-4-5 offsets: tangent at ~36.87 deg, exact in KiCad's nm grid.  The
+    # polygonised disks leave a chord gap here that bare intersects() misses.
+    "circle_tangent_off_axis": (("circle", 1.0), ("circle", 1.0), (0.8, 0.6)),
+    "large_circle_tangent_off_axis": (("circle", 5.0), ("circle", 5.0), (4.0, 3.0)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ABUTTING_SHORTS))
+def test_abutting_different_net_pads_short(tmp_path: Path, name: str):
+    """Different-net pads that share an edge or are tangent are a short."""
+    (gnd_shape, gnd_d), (vcc_shape, vcc_d), (dx, dy) = _ABUTTING_SHORTS[name]
+    body = _fp("U1", 10, 10, _smd("1", gnd_shape, (gnd_d, gnd_d), 1)) + _fp(
+        "U2", 10 + dx, 10 + dy, _smd("1", vcc_shape, (vcc_d, vcc_d), 2)
+    )
+    path = _write(tmp_path, f"abut_{name}", body)
+    assert _partition_shorts(path) == [["GND", "VCC"]]
+    assert _three_models(path, "GND") == (0, 0, 0)
+    assert _three_models(path, "VCC") == (0, 0, 0)
+    if _kicad_cli() is not None:
+        assert _kicad_shorts(path, tmp_path) == 1

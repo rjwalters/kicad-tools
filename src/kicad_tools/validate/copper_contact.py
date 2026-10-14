@@ -20,13 +20,15 @@ Two nodes bond only where their copper really meets on a shared copper layer:
 ==============  ==============================================================
 pair            bond when
 ==============  ==============================================================
-pad - pad       outlines overlap by positive area (an exposed pad over its
-                thermal-via pads, Issue #6435); disjoint same-number pads stay
+pad - pad       exact outlines touch -- overlap, or share an edge within
+                ``_TOUCH`` (2.5 um, Issue #6490) -- e.g. an exposed pad over
+                its thermal-via pads (#6435); disjoint same-number pads stay
                 separate (Issue #5151)
 pad - via       annulus overlaps the outline by positive area (#5133)
 pad - track     the track centreline enters the outline, or its copper
                 penetrates the outline by more than 1 um (#4678, #5060)
-pad - fill      outline overlaps the solid by positive area (#6453)
+pad - fill      exact outline touches the solid -- overlap, or a shared
+                edge within ``_TOUCH`` (#6453, #6490)
 via - via       annuli overlap by positive area
 via - track     the track copper penetrates the via disk by more than 1 um
 via - fill      annulus intersects the solid (#5382)
@@ -77,6 +79,19 @@ _TOLERANCE = 0.01
 # Strictly positive contact depth (mm) a track needs into a pad or via, so
 # copper separated by a real clearance moat never fuses (steps 2a2/2a3).
 _PENETRATION = 1e-3
+# Distance (mm) within which two *exact* pad outlines -- or an exact pad
+# outline and a fill -- count as touching (Issue #6490).  kicad-cli treats
+# copper sharing an edge as touching (a same-net bond, a different-net
+# short), but a shared edge has zero intersection area and polygonised
+# circles (``quad_segs=32``) tangent off-axis do not even ``intersects()``:
+# the two chords leave a gap of up to ``2 * r * (1 - cos(pi / 128))``, about
+# 1.5 um at r = 2.5 mm and 2.4 um at r = 4 mm (an M4 mounting pad).  This is
+# a tessellation allowance, not a clearance -- KiCad never routes a
+# micron-scale gap.  It must stay below the ~4.6 um gap of
+# ``test_roundrect_box_corner_does_not_touch_foreign_fill`` (a fill clear of
+# a roundrect's rounded corner but over its box corner), so 2.5 um sits in
+# the (2.4, 4.6) um window with margin on both sides.
+_TOUCH = 2.5e-3
 
 PAD = "pad"
 VIA = "via"
@@ -205,6 +220,11 @@ def _area_contact(a: Any, b: Any) -> bool:
     if not a.intersects(b):
         return False
     return bool(a.intersection(b).area > CONTACT_AREA_EPSILON)
+
+
+def _edge_contact(a: Any, b: Any) -> bool:
+    """Exact outlines touch: they overlap or meet within ``_TOUCH`` (#6490)."""
+    return bool(a.distance(b) <= _TOUCH)
 
 
 def _collect_items(cv: ConnectivityValidator, net_number: int | None) -> list[CopperItem]:
@@ -352,7 +372,7 @@ def _bonded(a: CopperItem, b: CopperItem) -> bool:
         if a.center is not None and b.center is not None and _close(a.center, b.center):
             return True
         if a.exact and b.exact:
-            return _area_contact(a.geom, b.geom)
+            return _edge_contact(a.geom, b.geom)
         return bool(a.geom.intersects(b.geom))
     if kinds == (PAD, VIA):
         if a.center is not None and b.center is not None and _close(a.center, b.center):
@@ -368,7 +388,7 @@ def _bonded(a: CopperItem, b: CopperItem) -> bool:
         return _track_reaches(b, a.geom, 0.0)
     if kinds == (PAD, FILL):
         if a.exact:
-            return _area_contact(a.geom, b.geom)
+            return _edge_contact(a.geom, b.geom)
         return bool(a.geom.intersects(b.geom))
     if kinds == (VIA, VIA):
         if a.center is not None and b.center is not None and _close(a.center, b.center):
