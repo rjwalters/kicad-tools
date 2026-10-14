@@ -926,6 +926,7 @@ def board_view(
     drc_given = bool(drc_report or (compare_drc_report and other))
     names = [b[0].name for b in boards]
     first_name = f"{names[0]} (left, before)" if other else names[0]
+    drc_names = [Path(r).name for r in (drc_report, compare_drc_report if other else None) if r]
     paragraphs = _paragraphs(
         view,
         first_name,
@@ -934,27 +935,22 @@ def board_view(
         net,
         box,
         overlays=overlays[0],
-        drc_source=(
-            f"{Path(drc_report).name}"
-            + (f" and {Path(compare_drc_report).name}" if other and compare_drc_report else "")
-            if drc_given and (drc_report or compare_drc_report)
-            else None
-        ),
+        drc_source=" and ".join(drc_names) if drc_given and drc_names else None,
         drc_count=sum(len(m) for m in marks),
     )
     if other:
         o_geo, o_report = boards[1][2], boards[1][3]
-        extra = (
+        after_note = (
             f"Right panel, after: {names[1]}, same window and scale as the left one; "
             f"{len(o_report.links)} unfinished nets, {o_report.link_count} missing links."
         )
         if o_geo.origin != geo.origin:
-            extra += (
+            after_note += (
                 f" The two boards have different origins {_fmt(geo.origin[0])},"
                 f"{_fmt(geo.origin[1])} and {_fmt(o_geo.origin[0])},{_fmt(o_geo.origin[1])}: "
                 "the same window is not the same place on the sheet."
             )
-        paragraphs.insert(1, extra)
+        paragraphs.insert(1, after_note)
 
     panels: list[_Panel]
     if view == "layers":
