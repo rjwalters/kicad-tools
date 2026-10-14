@@ -40,6 +40,7 @@ from kicad_tools.core.geometry import (
 )
 
 from . import wall_deadline as _wall_deadline
+from .clearance_kernel import CLEARANCE_EPSILON_MM as _KERNEL_EPSILON_MM
 from .clearance_resolver import trace_via_clearance_mm
 from .clearance_shapes import (
     KShape,
@@ -2210,6 +2211,41 @@ class CoupledPathfinder:
             return False
         return pos.x == goal.x and pos.y == goal.y
 
+    def _coupled_own_vias_clear(
+        self, state: CoupledState, own_vias: list[tuple[int, int]] | None
+    ) -> bool:
+        """May both rails drop a via where they stand? (Issue #6473).
+
+        KiCad's ``hole_to_hole`` rule exempts neither two vias of one net
+        (#5673) nor the two rails of a differential pair, and the stored-via
+        checks behind ``_is_via_blocked`` only see committed copper.  So the
+        new P and N drills must keep ``max(min_drill_clearance,
+        min_hole_to_hole)`` edge to edge from each other and from every via
+        already on the joint path (``own_vias``, both rails).  A candidate on
+        the cell of an earlier via is that same drill (a via stack).  Same
+        predicate and kernel epsilon as the native
+        ``Pathfinder::own_path_vias_clear`` and the coupled C++ loop.
+        """
+        rules = self.rules
+        floor = max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+        limit = floor - _KERNEL_EPSILON_MM
+        drill = rules.via_drill
+        res = self.grid.resolution
+        px, py = state.p_pos.x, state.p_pos.y
+        nx, ny = state.n_pos.x, state.n_pos.y
+
+        def under(ax: int, ay: int, bx: int, by: int) -> bool:
+            if ax == bx and ay == by:
+                return False
+            return math.hypot(ax - bx, ay - by) * res - drill < limit
+
+        if under(px, py, nx, ny):
+            return False
+        for vx, vy in own_vias or ():
+            if under(px, py, vx, vy) or under(nx, ny, vx, vy):
+                return False
+        return True
+
     def _get_coupled_neighbors(
         self,
         state: CoupledState,
@@ -2226,6 +2262,7 @@ class CoupledPathfinder:
         n_visited: frozenset[tuple[int, int, int]] | None = None,
         p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
         n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
+        own_vias: list[tuple[int, int]] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -2276,6 +2313,12 @@ class CoupledPathfinder:
                 permissive behaviour).
             n_visited: Issue #3078: companion to ``p_visited`` for the
                 negative trace.  Same encoding and semantics.
+            own_vias: Issue #6473: ``(x, y)`` cells of the vias already on
+                the current A* parent chain, both rails.  A layer change is
+                rejected when either new drill would sit under the fab
+                hole-to-hole floor from one of them (see
+                :meth:`_coupled_own_vias_clear`).  The P-vs-N check of the
+                move itself runs with or without it.
 
         Returns list of (new_state, cost, is_via) tuples.
         """
@@ -2749,10 +2792,22 @@ class CoupledPathfinder:
             state.n_pos, n_start
         )
 
+        # Issue #6473: hole-to-hole floor among the pair's OWN vias.  It is
+        # layer-independent, so it is evaluated once, lazily, and shared with
+        # the swap-via move below (which drills the same two cells).  NOT
+        # waived at endpoint pads: that exemption is about pad metal.
+        own_h2h_clear: bool | None = None
+
         # Try layer change (via) - both traces must change layer together
         routable_layers = self.grid.get_routable_indices()
         for new_layer in routable_layers:
             if new_layer == state.p_pos.layer:
+                continue
+
+            if own_h2h_clear is None:
+                own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
+            if not own_h2h_clear:
+                self.last_rejections["via_own_h2h"] += 1
                 continue
 
             # Check if vias can be placed at both positions.  Skip the
@@ -2798,6 +2853,14 @@ class CoupledPathfinder:
         if self.allow_swap_via:
             for new_layer in routable_layers:
                 if new_layer == state.p_pos.layer:
+                    continue
+
+                # Issue #6473: the swap drills the same two cells as the
+                # plain layer change, so it takes the same own-via floor.
+                if own_h2h_clear is None:
+                    own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
+                if not own_h2h_clear:
+                    self.last_rejections["via_own_h2h"] += 1
                     continue
 
                 # Both pads must be able to host a via at their current
@@ -3659,10 +3722,15 @@ class CoupledPathfinder:
             p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
             n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
             bucket = max(1, prox_radius)
+            # Issue #6473: via cells already on this joint path (both rails).
+            own_vias: list[tuple[int, int]] = []
             walker: CoupledNode | None = current
             while walker is not None:
                 p_cell = (walker.state.p_pos.x, walker.state.p_pos.y, walker.state.p_pos.layer)
                 n_cell = (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
+                if walker.via_from_parent:
+                    own_vias.append(p_cell[:2])
+                    own_vias.append(n_cell[:2])
                 p_visited_cells.add(p_cell)
                 n_visited_cells.add(n_cell)
                 if prox_radius > 1:
@@ -3708,6 +3776,7 @@ class CoupledPathfinder:
                 n_visited=n_visited_frozen,
                 p_trail_buckets=p_trail_buckets,
                 n_trail_buckets=n_trail_buckets,
+                own_vias=own_vias,
             ):
                 # Issue #6243: authored netclass minima on both rails, through
                 # the grid's kernel-backed gate.  Dormant without floors.

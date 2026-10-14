@@ -5353,7 +5353,12 @@ class RoutingGrid:
 
             if clearance < min_actual_clearance:
                 min_actual_clearance = clearance
-            if clearance < min_drill_clearance:
+            # Issue #6473: the kernel epsilon, as the native twins use
+            # (``Grid3D::validate_route``, ``Pathfinder::own_path_vias_clear``).
+            # Without it a pair sitting exactly on the floor -- the cheapest
+            # legal pair on a 0.1 mm grid -- measures 0.4999999999999998 and
+            # is rejected here while the C++ side accepts it.
+            if clearance < min_drill_clearance - _KERNEL_EPSILON_MM:
                 has_violation = True
                 violation_loc = (via.x, via.y)
 

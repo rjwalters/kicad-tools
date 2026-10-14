@@ -446,6 +446,10 @@ CoupledRouteResult CoupledPathfinder::route(
     std::unordered_map<std::string, int64_t> rejections;
     auto rej = [&rejections](const char* reason) { ++rejections[reason]; };
 
+    // Issue #6473: via cells of the popped node's joint path, rebuilt on
+    // every pop by the parent-chain walk below.
+    std::vector<std::pair<int, int>> own_vias;
+
     // Endpoint (x,y,layer) cells stripped from the trail sets, mirroring the
     // Python discard at diffpair_routing.py:1829-1838.
     const uint64_t p_start_cell = xyl_key(p_start_x, p_start_y, start_layer);
@@ -557,10 +561,18 @@ CoupledRouteResult CoupledPathfinder::route(
         // longer chain does not leak into this one.
         for (auto& kv : p_prox) kv.second.clear();
         for (auto& kv : n_prox) kv.second.clear();
+        // Issue #6473: the via cells already on this joint path (both rails;
+        // a via move is taken in place, so a ``via_from_parent`` node sits on
+        // its own two drills).  Mirror of the Python ``own_vias`` list.
+        own_vias.clear();
         {
             int walk = current_idx;
             while (walk >= 0) {
                 const CoupledAStarNode& nd = pool[static_cast<size_t>(walk)];
+                if (nd.via_from_parent) {
+                    own_vias.emplace_back(nd.p_x, nd.p_y);
+                    own_vias.emplace_back(nd.n_x, nd.n_y);
+                }
                 uint64_t pc = xyl_key(nd.p_x, nd.p_y, nd.p_layer);
                 uint64_t nc = xyl_key(nd.n_x, nd.n_y, nd.n_layer);
                 p_visited.insert(pc);
@@ -603,6 +615,34 @@ CoupledRouteResult CoupledPathfinder::route(
                 }
             }
             return false;
+        };
+
+        // Issue #6473: mirror of Python ``_coupled_own_vias_clear``.  KiCad's
+        // ``hole_to_hole`` rule exempts neither a same-net pair (#5673) nor
+        // the two rails of a diff pair, so a new P/N via pair must keep
+        // ``max(min_drill_clearance, min_hole_to_hole)`` drill edge to drill
+        // edge from each other and from every via already on the joint path.
+        // A candidate on the cell of an earlier via is that same drill (a
+        // via stack F -> In1 -> B).  Same predicate and epsilon as
+        // ``Pathfinder::own_path_vias_clear``.
+        auto own_vias_clear = [&](int px, int py, int nx, int ny) -> bool {
+            const double res = static_cast<double>(grid_.resolution());
+            const double drill = static_cast<double>(rules_.via_drill);
+            const double floor_mm = static_cast<double>(
+                std::max(rules_.min_drill_clearance, rules_.min_hole_to_hole));
+            auto under = [&](int ax, int ay, int bx, int by) -> bool {
+                if (ax == bx && ay == by) return false;
+                const double gap =
+                    std::hypot(static_cast<double>(ax - bx), static_cast<double>(ay - by)) * res -
+                    drill;
+                return gap < floor_mm - clearance::CLEARANCE_EPSILON_MM;
+            };
+            if (under(px, py, nx, ny)) return false;
+            for (const auto& v : own_vias) {
+                if (under(px, py, v.first, v.second)) return false;
+                if (under(nx, ny, v.first, v.second)) return false;
+            }
+            return true;
         };
 
         // Self-intersection guard, mirror of ``_self_intersects``
@@ -823,8 +863,20 @@ CoupledRouteResult CoupledPathfinder::route(
                            at_goal(current.p_x, current.p_y, p_start_x, p_start_y);
             bool n_at_ep = at_goal(current.n_x, current.n_y, n_goal_x, n_goal_y) ||
                            at_goal(current.n_x, current.n_y, n_start_x, n_start_y);
+            // Issue #6473: hole-to-hole floor among the pair's OWN vias --
+            // P-vs-N of this move, and either against every earlier via of
+            // either rail.  ``via_route_geometry_clear`` only sees stored
+            // copper.  Applied at endpoint pads too: that exemption is about
+            // pad metal, not drills.  Layer-independent, so evaluated once
+            // (and only when there is a layer to change to).
+            int own_h2h_clear = -1;
             for (int new_layer : routable_layers) {
                 if (new_layer == current.p_layer) continue;
+                if (own_h2h_clear < 0) {
+                    own_h2h_clear = own_vias_clear(current.p_x, current.p_y,
+                                                   current.n_x, current.n_y) ? 1 : 0;
+                }
+                if (own_h2h_clear == 0) { rej("via_own_h2h"); continue; }
                 if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }
                 if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) { rej("via_blocked_n"); continue; }
                 if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }

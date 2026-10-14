@@ -317,7 +317,12 @@ namespace router {
 // ``Grid3D::validate_route`` checks the route's vias pairwise and holds the
 // same-net stored-via drill check to ``min_hole_clearance``.  A v52 .so would
 // commit two same-route vias below the fab floor, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 53;
+// v54 (Issue #6473): ``CoupledPathfinder::route`` holds a layer change to the
+// fab hole-to-hole floor against the pair's OWN earlier vias (both rails) and
+// between the P and N via of the move itself.  A v53 .so returns coupled
+// routes with via pairs below the floor, and diverges from the Python coupled
+// loop, which applies the same check.
+constexpr int ROUTER_CPP_BUILD_VERSION = 54;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

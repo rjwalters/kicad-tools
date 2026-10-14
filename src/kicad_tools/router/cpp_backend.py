@@ -88,7 +88,10 @@ logger = logging.getLogger(__name__)
 # v53 (Issue #6464): both A* loops and ``Grid3D.validate_route`` hold a via to
 # the fab hole-to-hole floor against the route's OWN earlier vias.  A v52 .so
 # commits same-route via pairs below the floor.
-_REQUIRED_CPP_BUILD_VERSION = 53
+# v54 (Issue #6473): ``CoupledPathfinder.route`` holds a layer change to the
+# fab hole-to-hole floor against the pair's own earlier vias and between the
+# P and N via of the move.  A v53 .so returns coupled via pairs below it.
+_REQUIRED_CPP_BUILD_VERSION = 54
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
