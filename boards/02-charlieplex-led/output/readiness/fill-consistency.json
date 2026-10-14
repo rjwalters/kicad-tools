@@ -7,7 +7,7 @@
     "charlieplex_3x3_routed.kicad_pro": "c342d7bef40541498c43f4adaddff31fc4da05a9a8d23f1dba4028d78eecfd01"
   },
   "deltas_mm2": {},
-  "engine": "10.0.1",
+  "engine": "10.0.6",
   "refill_returncode": 0,
   "refilled_areas_mm2": {},
   "refilled_pcb": "output/readiness/fill-refilled/charlieplex_3x3_routed.kicad_pcb",
