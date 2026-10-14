@@ -141,6 +141,12 @@ EXPECTED_SHORTS: dict[str, list[list[str]]] = {
         ["+5V_OUT", "KELVIN_N"],
         ["SENSE_N", "SENSE_P"],
     ],
+    # A keyword-less "In1.Cu"/"F.Cu"-style via is a through via to KiCad
+    # (Issue #6493): kicad-cli 10.0.6 reports "Via [+3V3] on F.Cu - B.Cu"
+    # shorting a VIN track on B.Cu, which reading the pair literally hid.
+    "boards/09-usbc-pd-power/engineering/routing-investigation/support-routing/support.kicad_pcb": [
+        ["+3V3", "VIN"],
+    ],
 }
 
 

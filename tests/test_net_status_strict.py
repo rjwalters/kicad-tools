@@ -556,6 +556,9 @@ def test_pour_chain_requires_actual_via_layer_span(
     via_layers, pour_layer, trace_end, fill_start, expected
 ):
     """A front pad reaches a pour only through continuous, layer-valid copper."""
+    # A partial span is written ``blind``: KiCad reads a keyword-less via as
+    # a through via whatever its pair says (Issue #6493).
+    via_kind = "" if via_layers == '"F.Cu" "B.Cu"' else "blind "
     board = f'''(kicad_pcb (version 20240108) (generator test)
       (general (thickness 1.6))
       (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)
@@ -568,7 +571,7 @@ def test_pour_chain_requires_actual_via_layer_span(
         (pad "1" smd rect (at 0 0) (size .6 .6) (layers "{pour_layer}") (net 1 "PWR")))
       (segment (start 0 0) (end {trace_end} 0) (width .2) (layer "F.Cu") (net 1))
       (segment (start 2 0) (end 4 0) (width .2) (layer "{pour_layer}") (net 1))
-      (via (at 2 0) (size .6) (drill .3) (layers {via_layers}) (net 1))
+      (via {via_kind}(at 2 0) (size .6) (drill .3) (layers {via_layers}) (net 1))
       (zone (net 1) (net_name "PWR") (layer "{pour_layer}") (hatch edge .5)
         (connect_pads (clearance .2)) (min_thickness .1) (fill yes)
         (polygon (pts (xy {fill_start} -1) (xy 10 -1) (xy 10 1) (xy {fill_start} 1)))
