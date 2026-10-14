@@ -628,3 +628,58 @@ class TestClearanceRuleDiffPairFalseExemption:
         # With an explicit declaration: exempt.
         declared = _build_diff_pair_set(pcb, declared_pairs={(7, 8)})
         assert (7, 8) in declared
+
+
+# ---------------------------------------------------------------------------
+# DRCChecker wiring: floored pair gap (Issue #6575)
+# ---------------------------------------------------------------------------
+
+
+def _x_pair_pcb(gap_mm: float) -> _StubPCB:
+    return _StubPCB(
+        _nets={0: _StubNet(0, ""), 1: _StubNet(1, "X_POS"), 2: _StubNet(2, "X_NEG")},
+        _segments=_parallel_segments(
+            net_a=1, name_a="X_POS", net_b=2, name_b="X_NEG", gap_mm=gap_mm
+        ),
+    )
+
+
+def _checker(gap_mm: float, **kwargs):
+    from kicad_tools.validate import DRCChecker
+
+    pcb = _x_pair_pcb(gap_mm)
+    checker = DRCChecker(pcb, manufacturer="jlcpcb", **kwargs)
+    checker.design_rules = _design_rules(0.127)
+    return checker
+
+
+def _class_map():
+    from kicad_tools.router.rules import NetClassRouting
+
+    nc = NetClassRouting(name="X", intra_pair_clearance=0.075)
+    return {"X_POS": nc, "X_NEG": nc}
+
+
+class TestCheckerFlooredPairGap:
+    def test_authored_minimum_floors_class_gap(self):
+        results = _checker(
+            0.10, net_class_map=_class_map(), authored_min_clearance_mm=0.15
+        ).check_diffpair_clearance_intra()
+        assert len(results.violations) == 1
+        assert results.violations[0].required_value == 0.15
+
+    def test_gap_at_floor_passes(self):
+        results = _checker(
+            0.15, net_class_map=_class_map(), authored_min_clearance_mm=0.15
+        ).check_diffpair_clearance_intra()
+        assert len(results.violations) == 0
+
+    def test_unclassed_pair_uses_authored_minimum(self):
+        results = _checker(0.14, authored_min_clearance_mm=0.15).check_diffpair_clearance_intra()
+        assert len(results.violations) == 1
+        assert results.violations[0].required_value == 0.15
+
+    def test_no_class_no_authored_uses_manufacturer_minimum(self):
+        checker = _checker(0.10)
+        assert len(checker.check_diffpair_clearance_intra().violations) == 1
+        assert len(_checker(0.13).check_diffpair_clearance_intra().violations) == 0

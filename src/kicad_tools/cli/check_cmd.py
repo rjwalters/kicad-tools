@@ -141,6 +141,20 @@ _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
 )
 
 
+def _authored_min_clearance_mm(pcb_path: str | Path) -> float | None:
+    """The board's authored minimum clearance (``.kicad_pro``), or ``None``.
+
+    Same resolver ``kct route`` records as ``_authored_min_clearance``
+    (Issue #6575).
+    """
+    from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+    try:
+        return read_declared_clearance_rules(pcb_path).project_min_clearance_mm
+    except (OSError, ValueError):
+        return None
+
+
 def _is_floating_net(net: str) -> bool:
     """True for KiCad's unconnected/no-net sentinel as resolved by dimensions.py.
 
@@ -2229,6 +2243,7 @@ def main(argv: list[str] | None = None) -> int:
             copper_oz_inner=resolved_copper_inner,
             suppress_library=args.suppress_library,
             net_class_map=net_class_map,
+            authored_min_clearance_mm=_authored_min_clearance_mm(pcb_path),
             # The CLI already prints its own up-front INACTIVE warning
             # below, so suppress the per-rule checker-level warning here to
             # avoid duplicating it (Issue #3917 Defect 3).
@@ -2901,6 +2916,7 @@ def build_check_rule_set(
         copper_oz_outer=copper_outer,
         copper_oz_inner=copper_inner,
         net_class_map=net_class_map,
+        authored_min_clearance_mm=_authored_min_clearance_mm(project_pcb_path),
         warn_on_inactive_skew_rules=False,
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,
