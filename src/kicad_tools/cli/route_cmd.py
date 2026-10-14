@@ -5102,6 +5102,36 @@ def _run_placement_feedback(
     # still gets telemetry -- just without the noisy per-iteration detail.
     loop_verbose = (not quiet) and bool(getattr(args, "verbose", False))
 
+    # Issue #6321: every iteration clears all routes and re-routes, while the
+    # loop's best result waits in a snapshot.  A deadline or Ctrl+C that saves
+    # mid-iteration must save that best state, not the half-finished re-route,
+    # so register a ``pre_save_hook`` that puts it back -- only for the router
+    # the partial save will serialize (an escalation flow may run this loop on
+    # another one).  This loop never moves the router's pads and never writes
+    # the board, so the copper still belongs to ``pcb_path``: no placement
+    # text.  As in ``_run_placement_delta_feedback`` the hook is NOT cleared in
+    # a ``finally``: a deadline unwinds through here (``RouteDeadlineExpired``
+    # is a ``BaseException``) BEFORE the save runs.
+    # A hook some earlier stage left registered (none does today) is chained,
+    # not dropped, and put back afterwards.
+    owns_partial_save = _interrupt_state.get("router") is router
+    previous_hook = _interrupt_state.get("pre_save_hook") if owns_partial_save else None
+    loops: list[Any] = []
+
+    def _restore_best_for_partial_save() -> tuple[dict[str, Any], str | None]:
+        hook_info, hook_text = previous_hook() if previous_hook is not None else ({}, None)
+        if loops and loops[0].restore_best_for_partial_save():
+            hook_info = {
+                **hook_info,
+                "snapshot_state": "best-trial",
+                "snapshot_strategy": "placement-feedback",
+                "snapshot_trial": loops[0].best_iteration,
+            }
+        return hook_info, hook_text
+
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = _restore_best_for_partial_save
+
     try:
         result = router.route_with_placement_feedback(
             pcb=pcb,
@@ -5116,11 +5146,21 @@ def _run_placement_feedback(
             outer_timeout=outer_timeout,
             # Issue #6324: stop between iterations once an interrupt landed.
             stop_requested=_interrupt_pending,
+            # Issue #6321: reach the loop so a partial save can restore its
+            # best routes first.
+            loop_observer=loops.append,
         )
     except Exception as exc:
+        if owns_partial_save:
+            _interrupt_state["pre_save_hook"] = previous_hook
         if not quiet:
             print(f"  Warning: placement feedback failed ({exc}); keeping initial routes")
         return None
+
+    # The loop has returned with its best state restored (grid included), so
+    # nothing is in flight; later stages own ``router.routes`` from here.
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = previous_hook
 
     if not quiet:
         print(f"  Feedback iterations: {result.iterations}")
