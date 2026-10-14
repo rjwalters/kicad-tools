@@ -25,6 +25,11 @@ win in KiCad.  The conditions test ``NetClass`` only, never ``Type``, so the
 router's via-scoped DRU recognizer
 (:func:`kicad_tools.router.clearance_resolver._is_via_scoped_condition`)
 ignores them.
+
+A second managed block (Issue #6443) carries one native ``diff_pair_gap``
+rule per router-coupled pair KiCad recognises by name, at the gap the router
+laid it at (:meth:`kicad_tools.router.rules.DesignRules.pair_gap`); see
+:func:`pair_gap_block_rules`.
 """
 
 from __future__ import annotations

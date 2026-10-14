@@ -36,8 +36,8 @@ from kicad_tools.manufacturers.netclass_dru import (
     render_pair_gap_rule,
 )
 from kicad_tools.router.board_clearance_rules import KICAD_CONSTRAINT_KEYWORDS, parse_dru
-from kicad_tools.router.layers import Layer
 from kicad_tools.router.lattice.geometry import seg_seg_dist
+from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
@@ -248,15 +248,15 @@ def test_rendered_block_passes_the_kicad_cli_keyword_guard(tmp_path) -> None:
 
 
 def test_block_merge_is_idempotent_and_removable() -> None:
-    base = "(version 1)\n\n(rule \"mine\"\n  (constraint clearance (min 0.2mm)))\n"
+    base = '(version 1)\n\n(rule "mine"\n  (constraint clearance (min 0.2mm)))\n'
     rules = [("LVDS1_P", "LVDS1_N", 0.15)]
     once = merge_pair_gap_block(base, rules)
     assert once is not None and once.count(DRU_PAIR_GAP_BLOCK_BEGIN) == 1
     assert merge_pair_gap_block(once, rules) == once
-    assert "(rule \"mine\"" in once
+    assert '(rule "mine"' in once
     removed = merge_pair_gap_block(once, [])
     assert removed is not None and DRU_PAIR_GAP_BLOCK_END not in removed
-    assert "(rule \"mine\"" in removed
+    assert '(rule "mine"' in removed
     assert merge_pair_gap_block(base, []) == base
 
 
