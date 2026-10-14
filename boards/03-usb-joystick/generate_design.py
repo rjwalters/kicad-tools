@@ -114,6 +114,16 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     pcb_path = _pcb_gen.write_pcb(output_dir / "usb_joystick.kicad_pcb")
     _pcb_gen.stage_local_footprints(output_dir)
     print(f"   PCB: {pcb_path}")
+
+    # Issue #6025: carry schematic pin types onto the pads right after the
+    # unrouted PCB is written, before routing/packaging consume it.  The replay
+    # keeps pad metadata, so the routed PCB inherits the ``(pintype ...)``
+    # evidence ``kct detect-mistakes`` reads for rails.
+    from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+
+    annotation = annotate_pcb_file_pintypes(pcb_path, output_dir / "usb_joystick.kicad_sch")
+    assert not annotation.missing_pads, annotation.missing_pads
+    print(f"   Pad pin types annotated: {annotation.annotated}")
     print(f"\n   Board size: {_pcb_gen.BOARD_WIDTH}mm x {_pcb_gen.BOARD_HEIGHT}mm")
     return pcb_path
 
