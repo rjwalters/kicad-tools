@@ -211,3 +211,66 @@ def warn_derived_via_type(
         keyword,
         keyword,
     )
+
+
+def kicad_read_via_layers(
+    layers: tuple[str, ...] | list[str],
+    via_type: str | None,
+) -> tuple[tuple[str, ...], bool]:
+    """Return the layer span KiCad *reads* for a parsed via node (Issue #6493).
+
+    The reader half of :func:`resolve_via_type`.  KiCad (kicad-cli 10.0.6)
+    decides a via's drilled span from its type keyword, not from its
+    ``(layers ...)`` pair: a ``(via ...)`` node with no ``micro`` /
+    ``blind`` / ``buried`` token is a through via whatever the pair says,
+    and ``kicad-cli pcb upgrade --force`` rewrites it to
+    ``(layers "F.Cu" "B.Cu")``.  Taking a keyword-less ``"In1.Cu" "B.Cu"``
+    pair literally made kicad-tools model a blind via that KiCad never
+    builds -- a false open where the barrel really joins F.Cu, and a false
+    clean where it really shorts a track on a layer the pair omits.
+
+    Every via parser (``schema.pcb.Via.from_sexp`` and the router's two
+    regex parsers) routes its span through this one rule:
+
+    * a ``micro`` / ``blind`` / ``buried`` via keeps its declared layers;
+    * a keyword-less via whose two layers are recognised copper layers
+      other than the outer ``F.Cu``/``B.Cu`` pair reads as
+      ``("F.Cu", "B.Cu")``;
+    * anything else (already the outer pair, or a layer list that is not
+      two recognised copper names) is returned unchanged -- nothing can be
+      inferred from it.
+
+    Args:
+        layers: The layer names from the node's ``(layers ...)`` child.
+        via_type: The node's type keyword, or ``None`` when it has none.
+
+    Returns:
+        ``(layers, normalised)`` -- ``normalised`` is ``True`` when the span
+        was widened to the outer pair, so callers can report the count.
+    """
+    layer_tuple = tuple(layers)
+    if via_type is not None:
+        return layer_tuple, False
+    if len(layer_tuple) != 2 or any(name not in _COPPER_LAYER_INDEX for name in layer_tuple):
+        return layer_tuple, False
+    if set(layer_tuple) == _OUTER_COPPER_LAYERS:
+        return layer_tuple, False
+    return ("F.Cu", "B.Cu"), True
+
+
+def warn_normalised_vias(log: logging.Logger, source: str, count: int) -> None:
+    """Log ONE warning for *count* keyword-less partial-span vias (Issue #6493).
+
+    A no-op when ``count`` is zero.  Callers aggregate per board instead of
+    warning per via.
+    """
+    if count <= 0:
+        return
+    log.warning(
+        "%s: %d via(s) have a partial (layers ...) span but no "
+        "blind/buried/micro keyword. KiCad reads such a via as a through via "
+        "(F.Cu to B.Cu), so it is read that way here; add the keyword if a "
+        "blind or buried via was meant.",
+        source,
+        count,
+    )

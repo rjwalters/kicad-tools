@@ -107,15 +107,18 @@ _FIXTURE_TEMPLATE = """(kicad_pcb
       )
     )
   )
-  (via (at 100 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1)
+  (via {via_kw}(at 100 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1)
     (uuid "via-1"))
 )
 """
 
 
-def _fixture(tmp_path: Path, via_layers: str) -> Path:
+def _fixture(tmp_path: Path, via_layers: str, via_kw: str = "") -> Path:
+    # ``via_kw`` is the via-type keyword (with trailing space).  A partial
+    # span needs ``blind``/``buried``: KiCad reads a keyword-less via as a
+    # through via whatever its pair says (Issue #6493).
     pcb_path = tmp_path / "pour_audit_fixture.kicad_pcb"
-    pcb_path.write_text(_FIXTURE_TEMPLATE.format(via_layers=via_layers))
+    pcb_path.write_text(_FIXTURE_TEMPLATE.format(via_layers=via_layers, via_kw=via_kw))
     return pcb_path
 
 
@@ -136,7 +139,7 @@ class TestViaLayerSpanAwarePourAudit:
         touches) -- the modelling gap this test guards against.
         """
         pytest.importorskip("shapely")
-        pcb_path = _fixture(tmp_path, '"F.Cu" "In1.Cu"')
+        pcb_path = _fixture(tmp_path, '"F.Cu" "In1.Cu"', "blind ")
 
         audit = generate_design_mod._audit_pour_nets(pcb_path, ["GND"])
         info = audit["GND"]
