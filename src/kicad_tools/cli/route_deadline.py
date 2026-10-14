@@ -150,7 +150,27 @@ def remaining_deadline() -> float | None:
     return float(value) if value is not None else None
 
 
+# Issue #6324: a ``RouteDeadlineExpired`` raised from a signal handler is
+# discarded by the interpreter when the signal lands inside a ``__del__``
+# ("Exception ignored in ...").  Recording that the deadline fired lets the
+# route flows' stage-boundary polls re-raise it, so a swallowed deadline still
+# ends in the partial-save handler instead of routing on until the SIGKILL.
+_deadline_state: dict[str, bool] = {"fired": False}
+
+
+def deadline_fired() -> bool:
+    """Whether the supervisor's deadline signal has been delivered."""
+    return _deadline_state["fired"]
+
+
+def reset_deadline_state() -> None:
+    """Forget a delivered deadline (end of an in-process invocation)."""
+    _deadline_state["fired"] = False
+
+
 def _deadline_signal(signum, frame) -> None:
+    # Record first: everything after this line may itself be interrupted.
+    _deadline_state["fired"] = True
     stage = _read_control(Path(os.environ[CONTROL_ENV])).get("stage", "routing")
     record_stage(
         stage, interrupted_stage=stage, interrupted_function=frame.f_code.co_name if frame else None

@@ -19738,6 +19738,7 @@ class Autorouter:
         per_net_timeout: float | None = None,
         stagnation_patience: int = 3,
         outer_timeout: float | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> PlacementFeedbackResult:
         """Route with automatic placement adjustment on failures.
 
@@ -19788,6 +19789,9 @@ class Autorouter:
                 exceeded between iterations the loop exits with
                 ``exit_reason="pf_timeout"``.  Default None (no outer
                 cap).
+            stop_requested: Issue #6324: optional predicate checked once
+                per outer iteration; True exits with
+                ``exit_reason="pf_interrupted"``.  Default None.
 
         Returns:
             PlacementFeedbackResult with:
@@ -19845,6 +19849,7 @@ class Autorouter:
             max_movement=max_movement,
             stagnation_patience=stagnation_patience,
             outer_timeout=outer_timeout,
+            stop_requested=stop_requested,
         )
 
         return feedback_loop.run(
