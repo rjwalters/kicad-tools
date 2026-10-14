@@ -25,7 +25,7 @@
       "size": 526
     },
     "check-report.json": {
-      "sha256": "4d73273424195d25986a689346e316ace0630639bf2bbdebbe45dc1e13c256ef",
+      "sha256": "ea3d4cb8c3f4473596f2bd2518a6b235e1495486e9f04c171bd8619ab1efaf65",
       "size": 2086
     },
     "cpl_jlcpcb.csv": {
@@ -45,12 +45,12 @@
       "size": 2429
     },
     "design-source/generate_design.py": {
-      "sha256": "0be230207cb70e796e9b0dd3c85bc23bcf36713ae061ff0f8caa1e849a954157",
-      "size": 114090
+      "sha256": "18d2e388b90c15db10a7d0fb77f69ab3be3fccd5e2602d9163ca5bfff8947afc",
+      "size": 117564
     },
     "design-source/manufacturing_process.py": {
-      "sha256": "34fddc4c2ad9f1fcfa0420c8329e2a59af4e22782bb784d863739c2d2aa7f088",
-      "size": 20977
+      "sha256": "362b92beca0353ab6cce2a45a3c4f062dbfed3a4e56ac9ca7ecd803b11021a9e",
+      "size": 26271
     },
     "design-source/project.kct": {
       "sha256": "ab100511243df8b8a25dd5e094e15d7ab57240d3c60b14ca16bf32bc94592702",
@@ -61,8 +61,8 @@
       "size": 33
     },
     "gerbers/gerbers.zip": {
-      "sha256": "27f09cc9fc709473b7213c0ac46eec2ab5931c902cff7cd8e3787c227b7bf447",
-      "size": 45860
+      "sha256": "3a7b87bd3aba074d8aca096b70fc3a061fe2bb59559a4fd0a8fd9408bf4145c2",
+      "size": 45869
     },
     "images/assembly.png": {
       "sha256": "13c8323b975a1191f79843c910fd5e1e4f3b6b936d0d9efd7a95f30d2e09a28f",
@@ -93,7 +93,7 @@
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "a1e17c9399a5dce6779f9cb10426ced6449fbdf326175cf5d026bc7d051e5547",
+      "sha256": "c45ef8f7df43be6464724b4efec9674f1b1300f49c6fe77b6b31eef3f7fe476f",
       "size": 68840
     },
     "manual-assembly-bom.csv": {
@@ -105,8 +105,8 @@
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "273a0f3f593d79f7a8fb7f9797355d59121af82bf8ddcebb882ca0547aefc9cd",
-      "size": 4638
+      "sha256": "9903191e47eb4c8485cde03512ebbc45e20e403659fc8db35d5af9242bbb63e4",
+      "size": 1213
     },
     "native-erc-linux.json": {
       "sha256": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",

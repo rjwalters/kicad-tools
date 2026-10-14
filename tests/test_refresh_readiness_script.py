@@ -116,3 +116,94 @@ def test_failed_gate_publishes_nothing(mod, tmp_path, monkeypatch):
     with pytest.raises(mod.GateFailure, match="native DRC"):
         mod.refresh(board, "2026-10-09T00:00:00+00:00")
     assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+# --------------------------------------------------------------------------- Issue #6269
+_CHECK_SCRIPT = """\
+import json, sys
+from pathlib import Path
+
+warnings = int(Path(__file__).with_name("warnings.txt").read_text())
+meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "manifest")}
+meta["lvs"] = {"status": "PASSED", "mismatches": [], "copper_mismatches": []}
+report = {"summary": {"errors": 0, "warnings": warnings}, "meta_checks": meta}
+Path(sys.argv[2]).write_text(json.dumps(report))
+sys.exit(2 if warnings else 0)
+"""
+
+
+def _hooked_board(mod, tmp_path, monkeypatch, warnings: int) -> Path:
+    board = _fake_board(tmp_path)
+    (board / "check_board.py").write_text(_CHECK_SCRIPT)
+    (board / "warnings.txt").write_text(str(warnings))
+    import kicad_tools.cli.board_readiness as board_readiness
+
+    # read_readiness() itself is covered elsewhere; this fake report is minimal.
+    monkeypatch.setattr(
+        board_readiness, "read_readiness", lambda _b: {"status": "ready", "blockers": []}
+    )
+    monkeypatch.setitem(
+        mod.BOARDS,
+        board.name,
+        mod.BoardConfig(
+            routed_pcb="output/board_routed.kicad_pcb",
+            schematic="output/board.kicad_sch",
+            tier="jlcpcb-tier1",
+            erc=(),
+            check_script="check_board.py",
+            archives=(),
+        ),
+    )
+
+    def generic_check_must_not_run(*_):
+        raise AssertionError("kct check ran although the board has a check hook")
+
+    monkeypatch.setattr(mod, "gate_kct_check", generic_check_must_not_run)
+    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: 0)
+    monkeypatch.setattr(mod, "gate_net_status", lambda *a: 100.0)
+    monkeypatch.setattr(mod, "gate_sync", lambda *a: None)
+    return board
+
+
+def test_board_check_hook_replaces_kct_check(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    published = mod.refresh(board, "2026-10-14T00:00:00+00:00", dry_run=True)
+    assert "output/readiness.json" in published
+
+
+def test_refusing_board_check_hook_publishes_nothing(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=1)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    with pytest.raises(mod.GateFailure, match="check_board.py failed"):
+        mod.refresh(board, "2026-10-14T00:00:00+00:00")
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    ("data", "ok"),
+    [
+        ({"summary": {"errors": 0, "warnings": 0}}, True),
+        ({"summary": {"errors": 1, "warnings": 0}}, False),
+        ({"summary": {"errors": 0, "warnings": 2}}, False),
+        ({"summary": {}}, False),  # a report without counts never passes
+    ],
+)
+def test_check_report_verdict_requires_clean_summary(mod, data, ok):
+    meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "lvs", "manifest")}
+    report = {**data, "meta_checks": meta}
+    if ok:
+        assert mod.check_report_verdict(report, "x") == (True, 0)
+    else:
+        with pytest.raises(mod.GateFailure):
+            mod.check_report_verdict(report, "x")
+    meta["manifest"] = {"status": "FAILED"}
+    with pytest.raises(mod.GateFailure):
+        mod.check_report_verdict(report, "x")
+
+
+def test_board04_uses_its_own_manufacturing_check(mod):
+    cfg = mod.BOARDS["04-stm32-devboard"]
+    assert cfg.check_script == "check_manufacturing.py"
+    board = mod.REPO_ROOT / "boards" / "04-stm32-devboard"
+    assert (board / cfg.check_script).is_file()
+    assert (board / cfg.routed_pcb).is_file() and (board / cfg.schematic).is_file()

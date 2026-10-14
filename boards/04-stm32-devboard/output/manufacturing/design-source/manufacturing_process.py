@@ -53,6 +53,47 @@ INSET_ROUTE_MOVES = [
     # clearance at C10.1; the original 0.075 mm gap is insufficient.
     ("C10.1", "OSC_IN", (17.95, 15.20), (17.95, 15.15)),
 ]
+# Issue #6425: the reserved route (``kct route`` with its plane-via
+# reservation on, the recipe default since #6425) welds every stranded GND pad
+# into the B.Cu pour with a 0.30/0.15 mm through via at the pad edge.  The
+# stitch cascade only keeps the DRILL off a same-net land, but this process
+# needs 0.10 mm from drill edge to any SMT land (``validate_process``), and
+# these welds sit 0.07-0.15 mm (centre to land) from their own land.  Each
+# moves straight away from the nearest land point until the drill clears it
+# by 0.105 mm, screened by ``select_offpad_position`` like every other bond.
+# On the reserved route the ``MOVES`` above are all absent -- the signal
+# escapes (U2.6 / U2.39 / U2.7) are already outside-pad router vias, U1.2 and
+# the four LQFP VSS pads are bonded by these welds instead of the historical
+# stitch / ``tie_power_pads`` in-pad vias -- and each is accepted by the
+# complete-physical-net check.  Like ``INSET_ROUTE_MOVES``, a missing weld is
+# allowed: the committed (pre-#6425) route has none of them.
+WELD_MOVES = [
+    ("C1.2", "GND", (4.58, 18.72), (4.58, 18.83)),
+    ("C2.2", "GND", (15.58, 10.72), (15.58, 10.83)),
+    ("C3.2", "GND", (15.58, 16.72), (15.58, 16.83)),
+    ("C10.2", "GND", (19.58, 15.28), (19.58, 15.17)),
+    ("C11.2", "GND", (25.58, 16.72), (25.58, 16.83)),
+    ("C12.2", "GND", (26.58, 32.72), (26.58, 32.83)),
+    ("C13.2", "GND", (31.58, 32.72), (31.58, 32.83)),
+    ("C14.2", "GND", (36.58, 32.72), (36.58, 32.83)),
+    ("C15.2", "GND", (26.58, 36.72), (26.58, 36.83)),
+    ("C16.2", "GND", (31.58, 36.72), (31.58, 36.83)),
+    # U1 has two pad-2 lands (pin and tab); one weld each.
+    ("U1.2", "GND", (3.95, 10.90), (3.95, 10.93)),
+    ("U1.2", "GND", (12.30, 10.00), (12.33, 10.00)),
+    ("U2.23", "GND", (33.25, 27.05), (33.25, 27.08)),
+    ("U2.47", "GND", (28.75, 16.95), (28.75, 16.92)),
+]
+# Issue #6425: pour welds whose through via bonds copper on ONE layer only.
+# The +3.3V pour is F.Cu-only, so the oracle's U2.36 weld (pad -> F.Cu track
+# -> 0.30/0.15 via inside the F.Cu pour) drills a hole that joins nothing:
+# the track already ends inside the pour, which the recipe refills after this
+# repair.  ``trim_single_layer_welds`` removes exactly these vias (absence is
+# allowed, the committed route has none); the post-refill copper LVS and the
+# kicad-cli unconnected gate prove the pad still reaches its pour.
+SINGLE_LAYER_WELDS = [
+    ("U2.36", "+3.3V", (36.40, 19.25)),
+]
 
 
 def physical_fingerprint(path):
@@ -267,7 +308,7 @@ def _repair_staged(pcb_path):
     pcb, doc = PCB.load(pcb_path), parse_file(pcb_path)
     ox, oy = pcb.board_origin
     changed = 0
-    for move in MOVES + INSET_ROUTE_MOVES:
+    for move in MOVES + INSET_ROUTE_MOVES + WELD_MOVES:
         # The recipe refills after repair. Screen fixed copper against the
         # current staged moves, without treating obsolete fill as an obstacle.
         # Keep zone boundaries and keepouts in the geometry model.
@@ -291,7 +332,7 @@ def _repair_staged(pcb_path):
             # The pinned historical route has no C11 transition at this
             # location. Its absence is allowed; validate_process below still
             # checks every drill against every SMT land on either variant.
-            if move in INSET_ROUTE_MOVES:
+            if move in INSET_ROUTE_MOVES or move in WELD_MOVES:
                 continue
             # A fresh route may connect this circuit through a different
             # outside-pad via (or entirely on the surface). The fingerprint
@@ -348,6 +389,7 @@ def _repair_staged(pcb_path):
     pcb_path.write_text(serialize_sexp(doc))
     trim_obsolete_nrst_tail(pcb_path)
     trim_redundant_gnd_stitch(pcb_path)
+    trim_single_layer_welds(pcb_path)
     (pcb_path.parent / "manufacturing-requirements.json").write_text(
         json.dumps(OPTIONS, indent=2) + "\n"
     )
@@ -424,6 +466,81 @@ def trim_redundant_gnd_stitch(pcb_path):
             raise ValueError("Board04 ground stitch is required for pad connectivity")
     pcb_path.write_text(candidate_text)
     return 1
+
+
+def trim_single_layer_welds(pcb_path):
+    """Remove the reviewed pour-weld vias that bond copper on one layer only.
+
+    Only a via listed in ``SINGLE_LAYER_WELDS`` is touched, and only when the
+    shared topology checker reports it ``via_dangling`` and every layer it
+    bonds carries a zone of its own net whose outline holds the via, so the
+    weld track's end lies inside that pour once it is refilled.
+    """
+    from shapely.geometry import Point, Polygon
+
+    from kicad_tools.validate.rules.dangling_copper import DanglingCopperRule
+
+    pcb_path = Path(pcb_path)
+    pcb = PCB.load(pcb_path)
+    findings = DanglingCopperRule().check(pcb, process_rules()).violations
+    remove = set()
+    for ref, net, at in SINGLE_LAYER_WELDS:
+        vias = [
+            v
+            for v in pcb.vias
+            if pcb.nets[v.net_number].name == net and math.dist(v.position, at) < 0.001
+        ]
+        if not vias:
+            continue
+        if len(vias) != 1:
+            raise ValueError(f"Ambiguous single-layer weld {ref}")
+        via = vias[0]
+        if not any(
+            finding.rule_id == "via_dangling"
+            and net in finding.nets
+            and math.dist(finding.location, at) < 0.001
+            for finding in findings
+        ):
+            continue
+        bonded = {
+            s.layer
+            for s in pcb.segments
+            if s.net_number == via.net_number
+            and any(math.dist(p, via.position) < 0.001 for p in (s.start, s.end))
+        }
+        pours = {
+            zone.layer
+            for zone in pcb.zones
+            if zone.keepout is None
+            and zone.net_name == net
+            and Polygon(zone.polygon).contains(Point(at).buffer(via.size / 2))
+        }
+        if len(bonded) != 1 or not bonded <= pours:
+            raise ValueError(f"Single-layer weld {ref} does not end inside its own pour")
+        remove.add(at)
+    if not remove:
+        return 0
+    ox, oy = pcb.board_origin
+    net_names = {num: net.name for num, net in pcb.nets.items()}
+
+    def listed(node) -> bool:
+        if node.name != "via":
+            return False
+        at = node.find_child("at")
+        net = node.find_child("net")
+        name = net.get_string(0) if net is not None else None
+        if net is not None and name is not None and name.lstrip("-").isdigit():
+            name = net_names.get(int(name), name)
+        return any(
+            math.dist((at.get_float(0) - ox, at.get_float(1) - oy), pos) < 0.001 and name == wnet
+            for _, wnet, pos in SINGLE_LAYER_WELDS
+            if pos in remove
+        )
+
+    doc = parse_file(pcb_path)
+    doc.children = [node for node in doc.children if not listed(node)]
+    pcb_path.write_text(serialize_sexp(doc))
+    return len(remove)
 
 
 def trim_obsolete_nrst_tail(pcb_path):

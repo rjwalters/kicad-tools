@@ -1306,7 +1306,7 @@
 		(uuid "920db61a-39fb-5d63-84f5-f396cefb5a1c")
 		(at 149.5 89.5)
 		(property "Reference" "U2"
-			(at 0 -5.5 0)
+			(at 0 -6 0)
 			(layer "F.SilkS")
 			(uuid "73611722-7884-59d8-84da-a3779916c39c")
 			(effects
