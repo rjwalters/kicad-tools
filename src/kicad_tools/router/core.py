@@ -10,6 +10,7 @@ import os
 import random
 import time
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -730,19 +731,64 @@ def _lattice_tap_chain_retry_pairs(
     )
 
 
-def _lattice_pair_coupling_score(
-    coupled: list[Any], outcomes: dict[object, str], pair_names: frozenset[str]
-) -> float:
-    """Coupled fraction summed over ``pair_names`` (issue #6535).
+def _lattice_pair_coupling(
+    coupled: list[Any], outcomes: dict[object, str]
+) -> dict[str, tuple[int, int]]:
+    """Per-pair ``(coupled_segments, total_segments)`` over every pair (#6535, #6550).
 
-    Each pair contributes the share of its chain segments that coupled: 1 for
-    a fully coupled pair, ``k/n`` for a partially coupled one, 0 otherwise.
+    ``coupled`` is one negotiation's chain connections; each pair maps to how
+    many of its chain segments came back ``coupled`` out of how many it has.
+    Pairs appear in ``coupled`` order.
     """
-    per_pair: dict[str, list[bool]] = {}
+    per_pair: dict[str, list[int]] = {}
     for pc in coupled:
-        if pc.pair_name in pair_names:
-            per_pair.setdefault(pc.pair_name, []).append(outcomes.get(pc.key) == "coupled")
-    return sum(sum(flags) / len(flags) for flags in per_pair.values() if flags)
+        counts = per_pair.setdefault(pc.pair_name, [0, 0])
+        counts[0] += outcomes.get(pc.key) == "coupled"
+        counts[1] += 1
+    return {name: (k, n) for name, (k, n) in per_pair.items()}
+
+
+def _lattice_retried_coupled_fraction(
+    coupling: dict[str, tuple[int, int]], retry_pairs: frozenset[str]
+) -> Fraction:
+    """Exact coupled fraction summed over ``retry_pairs`` (``k/n`` per pair)."""
+    return sum(
+        (Fraction(k, n) for name, (k, n) in coupling.items() if name in retry_pairs and n),
+        Fraction(0),
+    )
+
+
+def _lattice_tap_chain_retry_keeps(
+    first: dict[str, tuple[int, int]],
+    after: dict[str, tuple[int, int]],
+    retry_pairs: frozenset[str],
+    first_failed: int,
+    failed: int,
+    deadline_hit: bool,
+) -> tuple[bool, list[str]]:
+    """Keep/discard verdict for a tap-chain retry (issues #6535, #6550).
+
+    The retry is kept only when no deadline was hit, no more connections are
+    unrouted, the retried pairs' summed coupled fraction strictly rises, and
+    **no other pair** couples fewer segments than in the first negotiation.
+    A non-retried pair keeps its chain in both runs (same ``n``), so its raw
+    coupled count compares exactly; the retried pairs' ``n`` changes (trunk
+    -> tap chain), hence exact fractions there.  Returns ``(kept, regressed)``
+    where ``regressed`` names each non-retried pair that lost coupled
+    segments as ``"NAME k/n -> k'/n'"``.
+    """
+    regressed: list[str] = []
+    for name, (k, n) in first.items():
+        if name in retry_pairs:
+            continue
+        k_after, n_after = after.get(name, (0, n))
+        if k_after < k:
+            regressed.append(f"{name} {k}/{n} -> {k_after}/{n_after}")
+    improved = _lattice_retried_coupled_fraction(
+        after, retry_pairs
+    ) > _lattice_retried_coupled_fraction(first, retry_pairs)
+    kept = not deadline_hit and failed <= first_failed and improved and not regressed
+    return kept, regressed
 
 
 def _star_topology_pads(pads: list[Pad]) -> tuple[Pad, list[Pad]]:
@@ -5040,8 +5086,9 @@ class Autorouter:
         each named pair as its :func:`choose_pair_tap_chain` segments; its
         tap pads become chain endpoints rather than extras.  The retry is kept
         only when it couples strictly more of the retried pairs' segments
-        without leaving more connections unrouted and without hitting the
-        deadline; otherwise every piece of state the first negotiation left
+        without leaving more connections unrouted, without costing any other
+        pair a coupled segment (issue #6550) and without hitting the
+        deadline (:func:`_lattice_tap_chain_retry_keeps`); otherwise every piece of state the first negotiation left
         (router and pathfinder) is restored and ``first`` is returned.
         """
         first_routes, first_stats, first_coupled = first
@@ -5058,7 +5105,9 @@ class Autorouter:
             pf._obstacles,
         )
         first_failed = len(pf.failure_reasons)
-        first_score = _lattice_pair_coupling_score(first_coupled, pf.pair_outcomes, retry_pairs)
+        # Every pair's first-run coupling, read before the retry's
+        # ``route_netset`` replaces ``pf.pair_outcomes`` (issue #6550).
+        first_coupling = _lattice_pair_coupling(first_coupled, pf.pair_outcomes)
         if pf._class_pad_growth:
             # The first negotiation left grown pad keep-outs (#6489) baked into
             # the lattice; ``route_netset`` starts from ungrown pads, so the
@@ -5067,15 +5116,20 @@ class Autorouter:
             pf._obstacles = None
         coupled, connections = self._lattice_netset_connections(retry_pairs)
         routes_by_key, stats = negotiate(connections, coupled)
-        score = _lattice_pair_coupling_score(coupled, pf.pair_outcomes, retry_pairs)
+        coupling = _lattice_pair_coupling(coupled, pf.pair_outcomes)
         failed = len(pf.failure_reasons)
-        kept = not stats.deadline_hit and score > first_score and failed <= first_failed
+        kept, regressed = _lattice_tap_chain_retry_keeps(
+            first_coupling, coupling, retry_pairs, first_failed, failed, stats.deadline_hit
+        )
+        first_score = sum(k / n for name, (k, n) in first_coupling.items() if name in retry_pairs)
+        score = sum(k / n for name, (k, n) in coupling.items() if name in retry_pairs)
         print(
             f"  Diff pairs (lattice): tap-chain retry for {len(retry_pairs)} pair(s) whose "
             f"trunk declined pair-no-path ({', '.join(sorted(retry_pairs))}): "
             f"{'kept' if kept else 'discarded'} (coupled segments {first_score:g} -> "
             f"{score:g}, unrouted connections {first_failed} -> {failed}"
-            f"{', deadline hit' if stats.deadline_hit else ''}; issue #6535)"
+            f"{', deadline hit' if stats.deadline_hit else ''}"
+            f"{', regressed: ' + ', '.join(regressed) if regressed else ''}; issue #6535)"
         )
         if kept:
             return routes_by_key, stats, coupled

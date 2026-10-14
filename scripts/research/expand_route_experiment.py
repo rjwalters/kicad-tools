@@ -217,6 +217,15 @@ BOARDS: dict[str, Board] = {
         net_class_map="boards/06-diffpair-test/regression-fixture/net_class_map.json",
         pair_bench_only=True,
     ),
+    # 07rf: the match-group regression fixture (no copper on any pair).
+    "07rf": Board(
+        "07rf",
+        "boards/07-matchgroup-test/regression-fixture/matchgroup_test.kicad_pcb",
+        layers=4,
+        note="regression fixture: match-group pairs",
+        net_class_map="boards/07-matchgroup-test/regression-fixture/net_class_map.json",
+        pair_bench_only=True,
+    ),
     "04": Board("04", "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb"),
     "05": Board("05", "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb", layers=4),
     "chorus": Board(
