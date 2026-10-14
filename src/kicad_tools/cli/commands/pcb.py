@@ -1900,6 +1900,7 @@ def _run_export_dsn_command(args, pcb_path: Path) -> int:
                 "layers": len(exporter.layers),
                 "nets": len(exporter.nets),
                 "components": len(exporter.footprints),
+                "omissions": exporter.omissions,
                 "success": True,
             }
         )
@@ -1909,6 +1910,12 @@ def _run_export_dsn_command(args, pcb_path: Path) -> int:
     print(f"  Layers: {len(exporter.layers)}")
     print(f"  Nets: {len(exporter.nets)}")
     print(f"  Components: {len(exporter.footprints)}")
+    # Informational (issue #6594): board constraints the DSN cannot carry.
+    omissions = exporter.omissions
+    if omissions:
+        print(f"  Not exported ({len(omissions)}):")
+        for line in omissions:
+            print(f"    - {line}")
     return 0
 
 
