@@ -440,24 +440,20 @@ def test_two_disjoint_fills_not_unioned(strict: bool):
 
 
 # ---------------------------------------------------------------------------
-# Issue #4673 Part 3: blind-via / unspanned-pad bonding residual (PINNED).
+# Issue #4673 Part 3: blind-via / unspanned-pad bonding (pin flipped, #6452).
 #
-# In strict mode, via copper geometries are deliberately LAYER-UNFILTERED when
-# bonding to pads (``copper_geoms.extend((self._via_geom(via), None) ...)`` and
-# the chain-merge ``_find_pads_touching_geom(via_geom, pad_positions)`` call in
-# ``net_status.py``).  Rationale: a via barrel is modeled as one vertical
-# copper cylinder, and for the overwhelmingly-common through-via the barrel
-# really does reach every layer, so filtering would only add cost.  The
-# accepted consequence -- flagged in the #4665 review and pinned here rather
-# than fixed -- is that a BLIND via whose 2D copper footprint overlaps a pad
-# on a layer the via does NOT span still bonds to that pad, over-connecting
-# relative to the physical board (KiCad would report the open).  The geometry
-# is rare (a blind via landing exactly on top of an unspanned pad is itself a
-# layout smell that other DRC rules flag), and the failure direction matches
-# the legacy model's known over-connect bias rather than introducing a new
-# false-open class.  If the layer-span filter is ever added, these pins must
-# be flipped DELIBERATELY (first test's expectation becomes "incomplete") --
-# and the fleet connectivity counts re-verified.
+# Strict mode used to bond via copper to pads LAYER-UNFILTERED, so a blind
+# via whose 2D footprint overlapped a pad on a layer it does not span still
+# bonded to that pad.  This block pinned that accepted over-connect and asked
+# for the pin to be flipped deliberately once via->pad bonding gained a
+# layer-span filter.  The shared copper-contact model (Issue #6452) bonds a
+# via only on layers it spans, so the pin is now flipped.
+#
+# Verified against kicad-cli 10.0.6: with the ``blind`` via-type keyword the
+# fixture reports 2 unconnected items (both F.Cu pads open, both vias
+# dangling).  Without the keyword KiCad parses the via as a THROUGH via
+# whatever its ``(layers ...)`` say, and reports the net connected -- so the
+# fixture must carry the keyword to describe a real blind via.
 # ---------------------------------------------------------------------------
 
 
@@ -467,8 +463,11 @@ def _blind_via_board(*, via_layers: str) -> str:
     The vias span ``via_layers``.  With a through span (``"F.Cu" "B.Cu"``) the
     bond is physically real.  With a blind ``"In1.Cu" "B.Cu"`` span the via
     copper never reaches F.Cu, so the F.Cu pads are physically open -- but the
-    2D via footprint still overlaps the pad copper.
+    2D via footprint still overlaps the pad copper.  A non-through span is
+    written with KiCad's ``blind`` via-type keyword, without which KiCad
+    treats the via as through.
     """
+    via_kind = "" if via_layers == '"F.Cu" "B.Cu"' else "blind "
     return f"""(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -484,24 +483,25 @@ def _blind_via_board(*, via_layers: str) -> str:
     (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "r2"))
     (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
   (segment (start 100 100) (end 110 100) (width 0.25) (layer "B.Cu") (net 1) (uuid "s1"))
-  (via (at 100 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1) (uuid "v1"))
-  (via (at 110 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1) (uuid "v2"))
+  (via {via_kind}(at 100 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1) (uuid "v1"))
+  (via {via_kind}(at 110 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1) (uuid "v2"))
 )
 """
 
 
-def test_pin_blind_via_bonds_unspanned_pad_overconnect():
-    """PIN (#4673 Part 3): a blind via overlapping an unspanned pad still bonds.
+def test_blind_via_does_not_bond_unspanned_pad():
+    """#4673 Part 3 pin, flipped by #6452: a blind via never bonds an unspanned pad.
 
     The In1.Cu-B.Cu blind vias never reach F.Cu, so the F.Cu pads are
-    physically open; KiCad would report SIG unconnected.  Strict mode's
-    layer-unfiltered via->pad bonding nonetheless reports ``complete``.
-    This test pins the ACCEPTED over-connect residual -- see the block
-    comment above for the rationale.  If via->pad bonding gains a
-    layer-span filter, flip this expectation to ``incomplete``.
+    physically open.  kicad-cli 10.0.6 reports 2 unconnected items on this
+    exact board; strict mode now reports the net incomplete with the same
+    count (two stranded pads plus the via/trace fragment).
     """
     board = _blind_via_board(via_layers='"In1.Cu" "B.Cu"')
-    assert _status(board, "SIG", strict=True) == "complete"
+    assert _status(board, "SIG", strict=True) == "incomplete"
+    sig = _analyze(board, strict=True).get_net("SIG")
+    assert sig is not None
+    assert sig.open_connections == 2
 
 
 def test_through_via_bonds_pads_legitimately():

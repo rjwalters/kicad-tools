@@ -15,6 +15,12 @@ Every board below was checked against ``kicad-cli pcb drc`` (KiCad 10.0.6);
 the expected results in the tests are kicad-cli's ``unconnected_items``.
 The optional ``test_*_agrees_with_kicad_cli`` cases re-run that check when
 kicad-cli is installed.
+
+Every case also runs with the footprint at 90 degrees (Issue #6470).  The
+pad then spans x 9..11, y 9.8..10.2 while the copper stays put, so each
+verdict flips: ``trace_false_contact`` becomes a real contact (x 10.7 is on
+the pad) and ``trace_false_open`` a real open.  ``validate()`` used to match
+trace ends to pad *centres* and called both trace contacts partial.
 """
 
 from __future__ import annotations
@@ -82,11 +88,19 @@ _CASES: dict[str, tuple[float, str, bool]] = {
 }
 
 
+_ROTATIONS = (0.0, 90.0)
+
+
 def _board(tmp_path: Path, name: str, *, fp_rot: float = 0.0) -> tuple[Path, bool]:
+    """Write case ``name`` with U1 at ``fp_rot``; return (path, kicad verdict).
+
+    Rotating U1 by 90 swaps its pad's extent while the copper stays put, so
+    kicad-cli's verdict flips (checked by ``test_cases_agree_with_kicad_cli``).
+    """
     u2y, copper, connected = _CASES[name]
-    path = tmp_path / f"{name}.kicad_pcb"
+    path = tmp_path / f"{name}_{int(fp_rot)}.kicad_pcb"
     path.write_text(_BOARD.format(fp_rot=fp_rot, pad_rot=fp_rot + 90, u2y=u2y, copper=copper))
-    return path, connected
+    return path, connected if fp_rot % 180 == 0 else not connected
 
 
 def _strict_islands(path: Path) -> tuple[int, str]:
@@ -95,9 +109,10 @@ def _strict_islands(path: Path) -> tuple[int, str]:
     return status.island_count, status.status
 
 
+@pytest.mark.parametrize("fp_rot", _ROTATIONS)
 @pytest.mark.parametrize("name", sorted(_CASES))
-def test_strict_net_status_uses_absolute_pad_rotation(tmp_path: Path, name: str):
-    path, connected = _board(tmp_path, name)
+def test_strict_net_status_uses_absolute_pad_rotation(tmp_path: Path, name: str, fp_rot: float):
+    path, connected = _board(tmp_path, name, fp_rot=fp_rot)
     islands, status = _strict_islands(path)
     if connected:
         assert (islands, status) == (1, "complete")
@@ -105,13 +120,34 @@ def test_strict_net_status_uses_absolute_pad_rotation(tmp_path: Path, name: str)
         assert (islands, status) == (2, "incomplete")
 
 
+@pytest.mark.parametrize("fp_rot", _ROTATIONS)
 @pytest.mark.parametrize("name", sorted(_CASES))
-def test_pad_partition_uses_absolute_pad_rotation(tmp_path: Path, name: str):
+def test_pad_partition_uses_absolute_pad_rotation(tmp_path: Path, name: str, fp_rot: float):
     """The stitch / LVS partition shares the same pad geometry."""
-    path, connected = _board(tmp_path, name)
+    path, connected = _board(tmp_path, name, fp_rot=fp_rot)
     partition = ConnectivityValidator(path).extract_pad_partition()
     joined = frozenset({"U1.1", "U2.1"}) in partition
     assert joined is connected
+
+
+@pytest.mark.parametrize("fp_rot", _ROTATIONS)
+@pytest.mark.parametrize("name", sorted(_CASES))
+def test_validate_uses_pad_copper_not_centre(tmp_path: Path, name: str, fp_rot: float):
+    """``validate()`` bonds a trace end anywhere on the pad copper (Issue #6470).
+
+    It used to match trace endpoints to pad *centres* (0.01 mm), so
+    ``trace_false_open`` at 0 degrees and ``trace_false_contact`` at 90 --
+    both connected per kicad-cli -- reported ``partial``.
+    """
+    path, connected = _board(tmp_path, name, fp_rot=fp_rot)
+    result = ConnectivityValidator(path).validate()
+    issues = [i for i in result.issues if i.net_name == "SIG"]
+    if connected:
+        assert issues == []
+    else:
+        assert len(issues) == 1
+        expected = "zone_island" if name.startswith("pour") else "partial"
+        assert issues[0].issue_type == expected
 
 
 def test_footprint_rotation_alone_does_not_orient_pad(tmp_path: Path):
@@ -139,10 +175,11 @@ def _kicad_cli() -> Path | None:
 
 
 @pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
+@pytest.mark.parametrize("fp_rot", _ROTATIONS)
 @pytest.mark.parametrize("name", sorted(_CASES))
-def test_cases_agree_with_kicad_cli(tmp_path: Path, name: str):
-    path, connected = _board(tmp_path, name)
-    out = tmp_path / f"{name}.json"
+def test_cases_agree_with_kicad_cli(tmp_path: Path, name: str, fp_rot: float):
+    path, connected = _board(tmp_path, name, fp_rot=fp_rot)
+    out = tmp_path / f"{name}_{int(fp_rot)}.json"
     subprocess.run(
         [
             str(_kicad_cli()),

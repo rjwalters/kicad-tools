@@ -4,6 +4,7 @@ import tracemalloc
 
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.connectivity import ConnectivityValidator
+from kicad_tools.validate.copper_contact import build_copper_contact_graph
 
 
 def test_fragmented_solid_zone_uses_bounded_python_memory(tmp_path):
@@ -25,14 +26,16 @@ def test_fragmented_solid_zone_uses_bounded_python_memory(tmp_path):
     )
     validator = ConnectivityValidator(PCB.load(board))
     assert len(validator.pcb.zones[0].filled_polygons) == 2000
-    bonds = []
     tracemalloc.start()
     try:
-        validator._connect_pour_pads_label_free({}, {}, lambda a, b: bonds.append((a, b)))
+        # The shared copper-contact graph (Issue #6452) replaced the label-free
+        # pour bonder; it must keep the same bounded pair bookkeeping.
+        graph = build_copper_contact_graph(validator, None)
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert bonds == []
+    # A solid fill never bonds its own disjoint fragments.
+    assert len(graph.components()) == 2000
     # Deliberately generous relative to linear bookkeeping (<5 MiB here).
     # This measures Python allocation, not native GEOS buffers or wall time.
     assert peak < 64 * 1024 * 1024, f"fragment bookkeeping allocated {peak} bytes"

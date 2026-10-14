@@ -153,8 +153,9 @@ def output_table(
     print(f"\n{'=' * 60}")
     if result.error_count > 0:
         details = []
-        if result.zone_islands:
-            details.append(f"{len(result.zone_islands)} unconnected item relationships")
+        unconnected_items = [i for i in result.zone_islands if i.is_error]
+        if unconnected_items:
+            details.append(f"{len(unconnected_items)} unconnected item relationships")
         if result.unconnected_pad_count:
             details.append(f"{result.unconnected_pad_count} unconnected pads")
         detail = ", ".join(details) or f"{result.error_count} connectivity errors"
@@ -225,8 +226,12 @@ def output_summary(result: ConnectivityResult, pcb_path: Path) -> None:
         print(f"Partial:           {len(result.partial)}")
     if result.isolated:
         print(f"Isolated:          {len(result.isolated)}")
-    if result.zone_islands:
-        print(f"Unconnected items: {len(result.zone_islands)}")
+    unconnected_items = [i for i in result.zone_islands if i.is_error]
+    if unconnected_items:
+        print(f"Unconnected items: {len(unconnected_items)}")
+    lone_fills = len(result.zone_islands) - len(unconnected_items)
+    if lone_fills:
+        print(f"Lone fill islands: {lone_fills} (warning)")
 
     print("-" * 40)
     print(f"Total errors:      {result.error_count}")

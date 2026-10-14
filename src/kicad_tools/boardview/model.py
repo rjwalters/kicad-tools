@@ -410,7 +410,8 @@ def missing_links(pcb: PCB, *, absolute: bool = False) -> LinkReport:
     pour copper and is incomplete only by an advisory residual is not an
     error there, so it gets no link here and is listed under
     ``pour_advisory`` instead.  A net therefore has links exactly when
-    ``kct check`` reports it, and ``len(links) == open_connections``.  A
+    ``kct check`` reports it, and ``len(links) == island_count - 1`` (pad-less
+    copper fragments add to ``open_connections`` but draw no link).  A
     ``pour_advisory`` entry lists the net's islands as pad names; it does not
     say which island the fill belongs to, because the analyzer does not.
 

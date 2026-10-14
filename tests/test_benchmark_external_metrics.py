@@ -241,18 +241,24 @@ class TestMeasureCompletion:
         assert sig2.routed_connections == 1
 
     def test_single_pad_net_has_one_island_and_no_connections(self, routed_board: Path) -> None:
+        """SIG3's arc touches nothing: no pad connection is needed, but the
+        stranded arc is one unconnected item -- kicad-cli 10.0.6 reports
+        ``Pad 2 [SIG3] of R3`` <-> ``Track (arc) [SIG3]`` (Issue #6452)."""
         result = NetStatusAnalyzer(str(routed_board)).analyze()
         sig3 = result.get_net("SIG3")
         assert sig3 is not None
         assert sig3.island_count == 1
+        assert sig3.padless_components == 1
         assert sig3.total_connections == 0
-        assert sig3.open_connections == 0
+        assert sig3.routed_connections == 0
+        assert sig3.open_connections == 1
 
     def test_net_status_result_aggregates(self, routed_board: Path) -> None:
+        # kicad-cli reports 2 unconnected items: SIG2's open and SIG3's arc.
         result = NetStatusAnalyzer(str(routed_board)).analyze()
         assert result.total_connections == 3
         assert result.routed_connections == 2
-        assert result.open_connections == 1
+        assert result.open_connections == 2
         assert result.connection_completion_percentage == pytest.approx(200 / 3, abs=1e-6)
 
     def test_net_status_dicts_expose_connection_fields(self, routed_board: Path) -> None:
@@ -260,7 +266,7 @@ class TestMeasureCompletion:
         data = result.to_dict()
         assert data["total_connections"] == 3
         assert data["routed_connections"] == 2
-        assert data["open_connections"] == 1
+        assert data["open_connections"] == 2
         sig2 = next(n for n in data["nets"] if n["net_name"] == "SIG2")
         assert sig2["island_count"] == 2
         assert sig2["open_connections"] == 1
