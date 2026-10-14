@@ -527,6 +527,7 @@ def transform_routes(
                     # downstream dimensions DRC exemption to misfire.
                     in_pad=via.in_pad,
                     is_micro=via.is_micro,
+                    span_type=via.span_type,
                 )
             )
         transformed.append(
@@ -610,6 +611,7 @@ def normalize_routes_to_origin(
                     # through normalize <-> transform round-trip.
                     in_pad=via.in_pad,
                     is_micro=via.is_micro,
+                    span_type=via.span_type,
                 )
             )
         normalized.append(
@@ -863,6 +865,7 @@ class RoutingCache:
                         # files still deserialize.
                         "in_pad": via.in_pad,
                         "is_micro": via.is_micro,
+                        "span_type": via.span_type,
                     }
                     for via in route.vias
                 ],
@@ -932,6 +935,7 @@ class RoutingCache:
                     # were serialised before these fields existed).
                     in_pad=via.get("in_pad", False),
                     is_micro=via.get("is_micro", False),
+                    span_type=via.get("span_type"),
                 )
                 for via in route_dict["vias"]
             ]

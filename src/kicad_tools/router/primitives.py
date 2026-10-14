@@ -242,21 +242,43 @@ class Via:
     # output exactly.  The router's in-pad escape (#3118) is the primary
     # producer of micro vias from inside the routing pipeline.
     is_micro: bool = False
+    # Issue #6662: KiCad's ``blind`` / ``buried`` type keyword, or ``None``.
+    # The router never *creates* a blind or buried via (it has no such
+    # process), but it does import them: ``--preserve-existing`` copper, the
+    # lattice's fixed copper and the connectivity verifier all build router
+    # vias from a board file.  KiCad drills a ``(via blind ...)`` /
+    # ``(via buried ...)`` only through its declared ``layers`` span, so the
+    # keyword has to survive into the model -- without it
+    # :attr:`drilled_layers` widened an imported In1/In2 buried via to a full
+    # F.Cu..B.Cu barrel and :meth:`to_sexp` re-wrote it as a through via.
+    span_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.span_type not in (None, "blind", "buried"):
+            raise ValueError(
+                f"Via.span_type must be 'blind', 'buried' or None, got {self.span_type!r}"
+            )
 
     @property
     def drilled_layers(self) -> tuple[Layer, Layer]:
         """The layer pair this via is physically drilled between (issue #6485).
 
-        The router has exactly two via kinds.  A micro via (:attr:`is_micro`)
-        is laser-drilled over the span it carries.  Every other via is an
-        ordinary mechanically drilled *through* via: the router has no blind
-        or buried process, so its barrel runs from ``F.Cu`` to ``B.Cu``
+        A micro via (:attr:`is_micro`) is laser-drilled over the span it
+        carries, and an imported KiCad ``blind`` / ``buried`` via
+        (:attr:`span_type`, issue #6662) is drilled only through its declared
+        span, exactly as KiCad builds it.  Every other via is an ordinary
+        mechanically drilled *through* via: the router has no blind or buried
+        process of its own, so its barrel runs from ``F.Cu`` to ``B.Cu``
         whatever logical layer transition :attr:`layers` happens to record.
 
         :attr:`layers` already given as the outer pair is returned as held
         (either order), so a through via serialises byte-for-byte as before.
         """
-        if self.is_micro or {self.layers[0], self.layers[1]} == {Layer.F_CU, Layer.B_CU}:
+        if (
+            self.is_micro
+            or self.span_type is not None
+            or {self.layers[0], self.layers[1]} == {Layer.F_CU, Layer.B_CU}
+        ):
             return self.layers
         return (Layer.F_CU, Layer.B_CU)
 
@@ -265,7 +287,9 @@ class Via:
 
         Emits ``(via micro ...)`` when :attr:`is_micro` is True so the
         micro-via token survives the route -> finalize -> file
-        round-trip (issue #3124).  Otherwise emits a plain ``(via ...)``.
+        round-trip (issue #3124), and ``(via blind ...)`` /
+        ``(via buried ...)`` for an imported :attr:`span_type` via (issue
+        #6662).  Otherwise emits a plain ``(via ...)``.
 
         Issue #6485: a plain ``(via ...)`` is ALWAYS written on the outer
         ``F.Cu``/``B.Cu`` pair (see :attr:`drilled_layers`).  KiCad reads a
@@ -286,7 +310,12 @@ class Via:
         drilled_start, drilled_end = self.drilled_layers
         layer_start = drilled_start.kicad_name
         layer_end = drilled_end.kicad_name
-        type_token = " micro" if self.is_micro else ""
+        if self.is_micro:
+            type_token = " micro"
+        elif self.span_type is not None:
+            type_token = f" {self.span_type}"
+        else:
+            type_token = ""
         net_ref = f'"{self.net_name}"' if name_only and self.net_name else str(self.net)
         # Issue #3925: field order matches KiCad's canonical writer
         # (uuid BEFORE net).  Emitting net before uuid caused every via to
