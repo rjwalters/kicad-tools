@@ -370,11 +370,13 @@ class TestSignatureDriftPrevention:
         sig = inspect.signature(Autorouter.apply_match_group_tuning)
         param_names = [name for name in sig.parameters if name != "self"]
         # AC8: parameter names asserted exactly.
-        assert param_names == ["detected_groups", "verbose"], (
+        assert param_names == ["detected_groups", "verbose", "engage"], (
             f"apply_match_group_tuning signature drift: {param_names}"
         )
         # `verbose` must default to True (mirrors the diff-pair sibling).
         assert sig.parameters["verbose"].default is True
+        # Issue #6674: the default keeps the --length-match-groups policy.
+        assert sig.parameters["engage"].default == "length_critical"
         # `detected_groups` is positional-or-keyword with no default.
         assert sig.parameters["detected_groups"].default is inspect.Parameter.empty
 
