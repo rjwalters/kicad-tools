@@ -3135,8 +3135,9 @@ class CoupledPathfinder:
 
         Issue #5711 additionally threads the diff-pair intra-pair waiver.
         ``RouteHaloRefiner.trace_clear`` resolves the candidate's
-        ``diffpair_partner`` to a net id and passes
-        ``nc.effective_intra_pair_clearance()`` as that pair's required gap;
+        ``diffpair_partner`` to a net id and passes the pair gap
+        (``DesignRules.pair_gap(nc)``, floored per #6443 / #6560) as that
+        pair's required gap;
         without it the C++ arm demanded the ordinary (wider) class clearance
         against the partner rail's committed copper.  That divergence is in
         the over-blocking direction -- it cannot produce a DRC violation --
@@ -3155,8 +3156,9 @@ class CoupledPathfinder:
             if net_class is None:
                 continue
             partner_net = refiner._resolve_partner_net_id(name)
+            # Issue #6560: the floored pair gap (#6443), as the Python arm.
             partner_clearance = (
-                net_class.effective_intra_pair_clearance() if partner_net is not None else None
+                self.rules.pair_gap(net_class).gap_mm if partner_net is not None else None
             )
             setter(
                 net_id,
@@ -7199,8 +7201,9 @@ class DiffPairRouter:
         """
         net_class_map = getattr(self.autorouter, "net_class_map", None) or {}
         nc = net_class_map.get(net_name)
+        # Issue #6560: floored (#6443) -- the gap the coupled router lays.
         intra = (
-            nc.effective_intra_pair_clearance()
+            _floored_pair_gap(self.autorouter, nc)
             if nc is not None
             else self.autorouter.rules.trace_clearance
         )
@@ -12100,7 +12103,8 @@ class DiffPairRouter:
             net_class = net_class_map.get(pair.positive.net_name)
             if net_class is not None:
                 length_critical = bool(net_class.length_critical)
-                intra_clearance = net_class.effective_intra_pair_clearance()
+                # Issue #6560: floored (#6443), not the bare class value.
+                intra_clearance = _floored_pair_gap(self.autorouter, net_class)
             else:
                 length_critical = True
                 intra_clearance = self.autorouter.rules.trace_clearance
