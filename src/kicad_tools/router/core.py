@@ -1522,6 +1522,9 @@ def _emit_route_checkpoint(
         flush_print(f"  checkpoint: write failed ({exc!r}); continuing")
 
 
+_NOGOOD_ENV_IGNORE_PF = "KCT_NOGOOD_CACHE_IGNORE_PF"
+
+
 class Autorouter:
     """High-level autorouter for complete PCBs with net class awareness.
 
@@ -16178,15 +16181,55 @@ class Autorouter:
             # dropping copper.
             return self._mark_route(route, enforce_pad_access=True)
 
+        # Issue #6353 (experiment, default OFF): validity-aware nogood cache.
+        nogood = self._get_nogood_cache()
+        ng_key = ng_win = None
+        failed_pairs: list[tuple[Pad, Pad]] = []
+        cb = failure_callback
+        if nogood is not None:
+            ng_key = nogood.make_key(
+                net,
+                [(p.x, p.y, str(p.layer), p.net) for p in pad_objs],
+                reverse_search,
+                None if os.environ.get(_NOGOOD_ENV_IGNORE_PF) else present_cost_factor,
+            )
+            ng_win = nogood.window(self.grid, [(p.x, p.y) for p in pad_objs])
+            cached = nogood.lookup(ng_key, self.grid, ng_win)
+            if cached is not None:
+                if failure_callback is not None:
+                    for src, tgt in cached:
+                        failure_callback(src, tgt)
+                return routes
+
+            def cb(src: Pad, tgt: Pad) -> None:
+                failed_pairs.append((src, tgt))
+                if failure_callback is not None:
+                    failure_callback(src, tgt)
+
         new_routes = neg_router.route_net_negotiated(
             pad_objs,
             present_cost_factor,
             mark_route,
             per_net_timeout=per_net_timeout,
-            failure_callback=failure_callback,
+            failure_callback=cb,
         )
+        if (
+            nogood is not None
+            and not new_routes
+            and failed_pairs
+            and not neg_router._last_timeout_failures
+        ):
+            nogood.insert(ng_key, self.grid, ng_win, tuple(failed_pairs))
         routes.extend(new_routes)
         return routes
+
+    def _get_nogood_cache(self):
+        """Lazily build the opt-in nogood cache from env (None = disabled)."""
+        if not hasattr(self, "_nogood_cache"):
+            from .nogood_cache import nogood_cache_from_env
+
+            self._nogood_cache = nogood_cache_from_env()
+        return self._nogood_cache
 
     def _demote_seg_seg_overlap_nets(
         self,

@@ -17570,6 +17570,24 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--nogood-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "EXPERIMENTAL (Issue #6353, default off): answer a repeated, "
+            "completely-failed negotiated net attempt from a bounded cache "
+            "while the copper in its failure window is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--nogood-cache-margin-cells",
+        default="full",
+        help=(
+            "Failure-window margin in grid cells around the net's terminals, "
+            "or 'full' (default) to fingerprint the whole grid (sound)."
+        ),
+    )
+    parser.add_argument(
         "--early-stop-patience",
         type=int,
         default=2,
@@ -19365,6 +19383,10 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "nogood_cache", False):
+        # Issue #6353: experiment-only plumbing; read by Autorouter lazily.
+        os.environ["KCT_NOGOOD_CACHE"] = "1"
+        os.environ["KCT_NOGOOD_CACHE_MARGIN_CELLS"] = str(args.nogood_cache_margin_cells)
     # Issue #6155: resolve --manufacturer against the board's project.kct
     # before anything (the lint gate included) reads it.
     _resolve_route_manufacturer(args, argv)
