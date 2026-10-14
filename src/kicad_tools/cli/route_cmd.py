@@ -6446,13 +6446,17 @@ def _stage_input_for_auto_pour(pcb_path: Path, output_path: Path) -> Path:
     See: issue #2548 — ``kct route`` should not modify INPUT when output
     differs.  Mirrors the ``shutil.copy2`` pattern in ``runner.py``.
     """
-    if pcb_path.resolve() == output_path.resolve():
-        return pcb_path
+    # Record the input copper baseline on both branches (issue #6531): an
+    # in-place run must not inherit a stale entry from an earlier run that
+    # targeted the same output path in this process, and it needs a baseline
+    # of its own taken before any checkpoint overwrites the file.
     try:
         _, in_segs, in_vias = _strip_route_blocks(pcb_path.read_text())
         _INPUT_COPPER_BASELINE[_baseline_key(output_path)] = (in_segs, in_vias)
     except (OSError, UnicodeDecodeError):
         _INPUT_COPPER_BASELINE.pop(_baseline_key(output_path), None)
+    if pcb_path.resolve() == output_path.resolve():
+        return pcb_path
     shutil.copy2(pcb_path, output_path)
     return output_path
 
