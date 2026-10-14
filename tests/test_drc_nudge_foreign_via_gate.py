@@ -172,6 +172,7 @@ class TestPostNudgeForeignViaPredicate:
             drill=0.3,
             diameter=0.6,
             layers=(Layer.F_CU, Layer.F_CU),
+            is_micro=True,  # Issue #6502: only a micro via keeps a partial barrel
             net=20,
         )
         foreign_route = Route(net=20, net_name="BOOT0", vias=[f_only_via])

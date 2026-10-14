@@ -397,6 +397,7 @@ class TestViaLengthPolicy:
                     drill=0.2,
                     diameter=0.45,
                     layers=(CopperLayer.F_CU, CopperLayer.IN1_CU),
+                    is_micro=True,  # Issue #6502: only micro vias are blind
                     net=100,
                     net_name="DQ0",
                 )
@@ -472,9 +473,10 @@ class TestThroughViaPromotion:
             layers=(CopperLayer.F_CU, CopperLayer.IN1_CU),
             net=1,
         )
-        # Default (blind supported): partial span 1.6 * 1/3 = 0.5333mm.
-        partial = DiffPairLengthTracker._via_length(via, 1.6, 4)
-        assert abs(partial - 1.6 * 1 / 3) < 1e-9
+        # Issue #6502: a standard via is a drilled-through barrel whatever
+        # its logical pair, so it reads the full thickness under either policy.
+        default = DiffPairLengthTracker._via_length(via, 1.6, 4)
+        assert abs(default - 1.6) < 1e-9
         # Promoted (blind unsupported): full board thickness.
         promoted = DiffPairLengthTracker._via_length(via, 1.6, 4, blind_buried_supported=False)
         assert abs(promoted - 1.6) < 1e-9
@@ -563,12 +565,12 @@ class TestThroughViaPromotion:
         assert abs(lengths[101] - 11.6) < 1e-9
         assert tracker.get_group_skew(group) < 1e-9
 
-        # Sanity: with the legacy partial-span policy the SAME geometry
-        # would read a nonzero skew (A4 = 10 + 0.533 = 10.533 vs A0 = 11.6),
-        # which is exactly the tuner-vs-checker split Issue #4007 fixed.
-        legacy = MatchGroupTracker()
-        legacy.record_routes([a4, a0], [group], board_thickness_mm=1.6, num_copper_layers=4)
-        assert legacy.get_group_skew(group) > 1.0
+        # Issue #6502: A4's standard via is drilled through whatever its
+        # logical pair, so the default (blind-supported) policy now reads the
+        # same 11.6mm -- the #4007 tuner-vs-checker split cannot reopen.
+        default = MatchGroupTracker()
+        default.record_routes([a4, a0], [group], board_thickness_mm=1.6, num_copper_layers=4)
+        assert default.get_group_skew(group) < 1e-9
 
 
 # =============================================================================

@@ -131,6 +131,7 @@ class TestSegmentClearsForeignVia:
             drill=0.3,
             diameter=0.6,
             layers=(Layer.F_CU, Layer.IN1_CU),
+            is_micro=True,  # Issue #6502: only a micro via keeps a partial barrel
             net=99,
             net_name="OTHER",
         )
@@ -476,6 +477,7 @@ class TestApplyEscapeRoutesGate:
             drill=0.3,
             diameter=0.6,
             layers=(Layer.F_CU, Layer.IN1_CU),  # Does NOT reach B.Cu
+            is_micro=True,  # Issue #6502: only a micro via keeps a partial barrel
             net=10,
             net_name="OTHER",
         )

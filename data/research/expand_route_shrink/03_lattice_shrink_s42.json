@@ -1,0 +1,2195 @@
+{
+  "scale": 1.5,
+  "origin": [
+    148.5,
+    87.5
+  ],
+  "footprints": 38,
+  "footprints_moved": 38,
+  "segments": 825,
+  "vias": 69,
+  "components": 48,
+  "s0_naive": {
+    "board": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/shrink/s0_naive/usb_joystick.kicad_pcb",
+    "vertex_census": {
+      "scaled": 1519,
+      "translated_with_cluster": 200
+    },
+    "ends_on_pads_expanded": 451,
+    "ends_displaced": 298,
+    "displaced_nets": [
+      "BTN1",
+      "BTN2",
+      "BTN3",
+      "BTN4",
+      "HWB",
+      "ISP_MISO",
+      "ISP_MOSI",
+      "ISP_SCK",
+      "JOY_BTN",
+      "JOY_X",
+      "JOY_X_RAW",
+      "JOY_Y",
+      "RESET",
+      "UCAP",
+      "USB_CC1",
+      "USB_D+",
+      "USB_D-",
+      "XTAL1",
+      "XTAL2"
+    ],
+    "miss_mm_max": 4.352,
+    "miss_mm_median": 1.481,
+    "displaced_detail": [
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.142
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.02
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.042
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.318
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "BTN4",
+        "ref": "R15",
+        "pad": "2",
+        "miss_mm": 0.425
+      },
+      {
+        "net": "JOY_X_RAW",
+        "ref": "J2",
+        "pad": "3",
+        "miss_mm": 3.137
+      },
+      {
+        "net": "JOY_X_RAW",
+        "ref": "J2",
+        "pad": "3",
+        "miss_mm": 3.2
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.161
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.192
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "J2",
+        "pad": "5",
+        "miss_mm": 4.165
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "J2",
+        "pad": "5",
+        "miss_mm": 4.144
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.755
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.775
+      },
+      {
+        "net": "RESET",
+        "ref": "R5",
+        "pad": "2",
+        "miss_mm": 0.43
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.919
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.755
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.775
+      },
+      {
+        "net": "ISP_MOSI",
+        "ref": "U1",
+        "pad": "10",
+        "miss_mm": 2.216
+      },
+      {
+        "net": "ISP_MOSI",
+        "ref": "U1",
+        "pad": "10",
+        "miss_mm": 2.243
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.346
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.318
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.961
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 2.985
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.158
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.191
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.011
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 2.985
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.188
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.282
+      },
+      {
+        "net": "XTAL2",
+        "ref": "U1",
+        "pad": "16",
+        "miss_mm": 2.787
+      },
+      {
+        "net": "XTAL2",
+        "ref": "U1",
+        "pad": "16",
+        "miss_mm": 2.769
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "B7",
+        "miss_mm": 1.811
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "B7",
+        "miss_mm": 1.886
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.161
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.192
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.399
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.315
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.037
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.067
+      },
+      {
+        "net": "HWB",
+        "ref": "U1",
+        "pad": "33",
+        "miss_mm": 2.232
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.481
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.346
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "B6",
+        "miss_mm": 2.174
+      },
+      {
+        "net": "XTAL2",
+        "ref": "U1",
+        "pad": "16",
+        "miss_mm": 2.787
+      },
+      {
+        "net": "XTAL2",
+        "ref": "U1",
+        "pad": "16",
+        "miss_mm": 2.769
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.399
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.109
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.164
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.181
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.62
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "A6",
+        "miss_mm": 1.646
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "A6",
+        "miss_mm": 1.612
+      },
+      {
+        "net": "RESET",
+        "ref": "J3",
+        "pad": "5",
+        "miss_mm": 0.972
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.481
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.346
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.031
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.755
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.775
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.315
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.285
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "B6",
+        "miss_mm": 2.174
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.188
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.037
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.067
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.297
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.197
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "U1",
+        "pad": "11",
+        "miss_mm": 2.354
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "U1",
+        "pad": "11",
+        "miss_mm": 2.425
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.775
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.188
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.282
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.155
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.145
+      },
+      {
+        "net": "ISP_MOSI",
+        "ref": "J3",
+        "pad": "4",
+        "miss_mm": 2.049
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 0.984
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.164
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "U1",
+        "pad": "25",
+        "miss_mm": 3.111
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.13
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.62
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "B6",
+        "miss_mm": 2.055
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "B6",
+        "miss_mm": 2.174
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.252
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.135
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "B7",
+        "miss_mm": 1.886
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.064
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.048
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.161
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.192
+      },
+      {
+        "net": "XTAL2",
+        "ref": "U1",
+        "pad": "16",
+        "miss_mm": 2.769
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.932
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.961
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.181
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.282
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.252
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.346
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.318
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.533
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.575
+      },
+      {
+        "net": "XTAL2",
+        "ref": "U1",
+        "pad": "16",
+        "miss_mm": 2.769
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.067
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.252
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "ISP_SCK",
+        "ref": "U1",
+        "pad": "9",
+        "miss_mm": 2.015
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.073
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.203
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.158
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.164
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.181
+      },
+      {
+        "net": "RESET",
+        "ref": "J3",
+        "pad": "5",
+        "miss_mm": 1.143
+      },
+      {
+        "net": "RESET",
+        "ref": "J3",
+        "pad": "5",
+        "miss_mm": 1.16
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "C11",
+        "pad": "1",
+        "miss_mm": 0.75
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "C11",
+        "pad": "1",
+        "miss_mm": 0.766
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "C11",
+        "pad": "1",
+        "miss_mm": 0.8
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "A7",
+        "miss_mm": 1.944
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "A7",
+        "miss_mm": 1.882
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.011
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 2.985
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.073
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.203
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.62
+      },
+      {
+        "net": "USB_D+",
+        "ref": "R4",
+        "pad": "1",
+        "miss_mm": 2.75
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.188
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.145
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.13
+      },
+      {
+        "net": "RESET",
+        "ref": "R5",
+        "pad": "2",
+        "miss_mm": 0.43
+      },
+      {
+        "net": "XTAL1",
+        "ref": "U1",
+        "pad": "17",
+        "miss_mm": 2.833
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.481
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "B7",
+        "miss_mm": 1.811
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "B7",
+        "miss_mm": 1.886
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.011
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 2.985
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.961
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "A7",
+        "miss_mm": 1.944
+      },
+      {
+        "net": "USB_CC1",
+        "ref": "J1",
+        "pad": "A5",
+        "miss_mm": 1.348
+      },
+      {
+        "net": "USB_CC1",
+        "ref": "J1",
+        "pad": "A5",
+        "miss_mm": 1.375
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "6",
+        "miss_mm": 0.458
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.285
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.037
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.067
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "6",
+        "miss_mm": 0.458
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 1.481
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.155
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.145
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "B6",
+        "miss_mm": 2.055
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "B6",
+        "miss_mm": 2.174
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.072
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.144
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.932
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.961
+      },
+      {
+        "net": "HWB",
+        "ref": "U1",
+        "pad": "33",
+        "miss_mm": 2.708
+      },
+      {
+        "net": "HWB",
+        "ref": "U1",
+        "pad": "33",
+        "miss_mm": 2.615
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.303
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.297
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "U1",
+        "pad": "11",
+        "miss_mm": 2.425
+      },
+      {
+        "net": "JOY_X_RAW",
+        "ref": "J2",
+        "pad": "3",
+        "miss_mm": 3.2
+      },
+      {
+        "net": "JOY_X_RAW",
+        "ref": "J2",
+        "pad": "3",
+        "miss_mm": 3.227
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.192
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.81
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "4",
+        "miss_mm": 1.153
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "4",
+        "miss_mm": 1.027
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.282
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.252
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "U1",
+        "pad": "25",
+        "miss_mm": 3.111
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.297
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.197
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.192
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "U1",
+        "pad": "25",
+        "miss_mm": 3.136
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "U1",
+        "pad": "25",
+        "miss_mm": 3.111
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 0.837
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.197
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.011
+      },
+      {
+        "net": "USB_D+",
+        "ref": "J1",
+        "pad": "A6",
+        "miss_mm": 1.646
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.303
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.297
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 2.985
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "C11",
+        "pad": "1",
+        "miss_mm": 0.75
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "C11",
+        "pad": "1",
+        "miss_mm": 0.766
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.064
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.048
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.58
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.627
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.042
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.087
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.318
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.775
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.13
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.62
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.932
+      },
+      {
+        "net": "BTN1",
+        "ref": "U1",
+        "pad": "18",
+        "miss_mm": 2.919
+      },
+      {
+        "net": "BTN4",
+        "ref": "R15",
+        "pad": "2",
+        "miss_mm": 0.425
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 0.984
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.627
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.744
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "R16",
+        "pad": "2",
+        "miss_mm": 0.43
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.067
+      },
+      {
+        "net": "RESET",
+        "ref": "J3",
+        "pad": "5",
+        "miss_mm": 1.16
+      },
+      {
+        "net": "RESET",
+        "ref": "J3",
+        "pad": "5",
+        "miss_mm": 1.182
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.744
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.81
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.775
+      },
+      {
+        "net": "ISP_MOSI",
+        "ref": "J3",
+        "pad": "4",
+        "miss_mm": 2.049
+      },
+      {
+        "net": "UCAP",
+        "ref": "U1",
+        "pad": "6",
+        "miss_mm": 1.399
+      },
+      {
+        "net": "UCAP",
+        "ref": "U1",
+        "pad": "6",
+        "miss_mm": 1.389
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.775
+      },
+      {
+        "net": "ISP_MOSI",
+        "ref": "U1",
+        "pad": "10",
+        "miss_mm": 2.297
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "J2",
+        "pad": "5",
+        "miss_mm": 4.352
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "J2",
+        "pad": "5",
+        "miss_mm": 4.165
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 0.837
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.135
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 2.985
+      },
+      {
+        "net": "UCAP",
+        "ref": "U1",
+        "pad": "6",
+        "miss_mm": 1.389
+      },
+      {
+        "net": "JOY_X_RAW",
+        "ref": "J2",
+        "pad": "3",
+        "miss_mm": 3.227
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "U1",
+        "pad": "25",
+        "miss_mm": 3.136
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "U1",
+        "pad": "25",
+        "miss_mm": 3.111
+      },
+      {
+        "net": "BTN3",
+        "ref": "U1",
+        "pad": "20",
+        "miss_mm": 3.192
+      },
+      {
+        "net": "BTN2",
+        "ref": "U1",
+        "pad": "19",
+        "miss_mm": 3.067
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.303
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.297
+      },
+      {
+        "net": "BTN3",
+        "ref": "R14",
+        "pad": "2",
+        "miss_mm": 0.425
+      },
+      {
+        "net": "USB_D-",
+        "ref": "R3",
+        "pad": "1",
+        "miss_mm": 2.726
+      },
+      {
+        "net": "RESET",
+        "ref": "J3",
+        "pad": "5",
+        "miss_mm": 0.972
+      },
+      {
+        "net": "RESET",
+        "ref": "J3",
+        "pad": "5",
+        "miss_mm": 1.143
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.048
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.031
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "R16",
+        "pad": "2",
+        "miss_mm": 0.43
+      },
+      {
+        "net": "USB_D-",
+        "ref": "J1",
+        "pad": "B7",
+        "miss_mm": 1.886
+      },
+      {
+        "net": "ISP_MOSI",
+        "ref": "U1",
+        "pad": "10",
+        "miss_mm": 2.243
+      },
+      {
+        "net": "ISP_MOSI",
+        "ref": "U1",
+        "pad": "10",
+        "miss_mm": 2.297
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.142
+      },
+      {
+        "net": "RESET",
+        "ref": "SW5",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "R11",
+        "pad": "2",
+        "miss_mm": 1.722
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "R11",
+        "pad": "2",
+        "miss_mm": 1.829
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.197
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.011
+      },
+      {
+        "net": "XTAL1",
+        "ref": "U1",
+        "pad": "17",
+        "miss_mm": 2.833
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.048
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.031
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "R11",
+        "pad": "2",
+        "miss_mm": 1.722
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "R11",
+        "pad": "2",
+        "miss_mm": 1.829
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "R11",
+        "pad": "2",
+        "miss_mm": 1.887
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.144
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.33
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.181
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "JOY_X",
+        "ref": "U1",
+        "pad": "41",
+        "miss_mm": 1.031
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "U1",
+        "pad": "11",
+        "miss_mm": 2.451
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "U1",
+        "pad": "11",
+        "miss_mm": 2.381
+      },
+      {
+        "net": "BTN1",
+        "ref": "SW1",
+        "pad": "1",
+        "miss_mm": 0.984
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.297
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.197
+      },
+      {
+        "net": "HWB",
+        "ref": "U1",
+        "pad": "33",
+        "miss_mm": 2.615
+      },
+      {
+        "net": "HWB",
+        "ref": "U1",
+        "pad": "33",
+        "miss_mm": 2.232
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.135
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 1.226
+      },
+      {
+        "net": "XTAL1",
+        "ref": "U1",
+        "pad": "17",
+        "miss_mm": 2.848
+      },
+      {
+        "net": "XTAL1",
+        "ref": "U1",
+        "pad": "17",
+        "miss_mm": 2.833
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "J2",
+        "pad": "5",
+        "miss_mm": 4.352
+      },
+      {
+        "net": "USB_CC1",
+        "ref": "J1",
+        "pad": "A5",
+        "miss_mm": 1.375
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 0.984
+      },
+      {
+        "net": "BTN2",
+        "ref": "SW2",
+        "pad": "1",
+        "miss_mm": 1.164
+      },
+      {
+        "net": "ISP_SCK",
+        "ref": "U1",
+        "pad": "9",
+        "miss_mm": 1.99
+      },
+      {
+        "net": "ISP_SCK",
+        "ref": "U1",
+        "pad": "9",
+        "miss_mm": 2.015
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 0.837
+      },
+      {
+        "net": "BTN3",
+        "ref": "SW3",
+        "pad": "1",
+        "miss_mm": 1.135
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.087
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.072
+      },
+      {
+        "net": "BTN4",
+        "ref": "SW4",
+        "pad": "1",
+        "miss_mm": 0.837
+      },
+      {
+        "net": "XTAL1",
+        "ref": "U1",
+        "pad": "17",
+        "miss_mm": 2.848
+      },
+      {
+        "net": "XTAL1",
+        "ref": "U1",
+        "pad": "17",
+        "miss_mm": 2.833
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.197
+      },
+      {
+        "net": "BTN4",
+        "ref": "U1",
+        "pad": "21",
+        "miss_mm": 3.011
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.33
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "4",
+        "miss_mm": 1.153
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.145
+      },
+      {
+        "net": "JOY_Y",
+        "ref": "U1",
+        "pad": "40",
+        "miss_mm": 1.13
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.755
+      },
+      {
+        "net": "RESET",
+        "ref": "U1",
+        "pad": "13",
+        "miss_mm": 2.775
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.569
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.533
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "U1",
+        "pad": "11",
+        "miss_mm": 2.381
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "U1",
+        "pad": "11",
+        "miss_mm": 2.354
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.569
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.575
+      },
+      {
+        "net": "USB_D-",
+        "ref": "U2",
+        "pad": "1",
+        "miss_mm": 0.58
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "J2",
+        "pad": "5",
+        "miss_mm": 4.144
+      },
+      {
+        "net": "JOY_BTN",
+        "ref": "J2",
+        "pad": "5",
+        "miss_mm": 4.081
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.109
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "3",
+        "miss_mm": 1.02
+      },
+      {
+        "net": "USB_D+",
+        "ref": "U2",
+        "pad": "4",
+        "miss_mm": 1.027
+      },
+      {
+        "net": "BTN3",
+        "ref": "R14",
+        "pad": "2",
+        "miss_mm": 0.425
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.191
+      },
+      {
+        "net": "ISP_MISO",
+        "ref": "J3",
+        "pad": "1",
+        "miss_mm": 1.182
+      }
+    ],
+    "grade": {
+      "nets_complete": 6,
+      "nets_total": 27,
+      "nets_blocking_incomplete": 18,
+      "connections_routed": 18,
+      "connections_total": 115,
+      "via_count": 69,
+      "vias_per_connection": 3.833,
+      "wirelength_mm": 860.7,
+      "kct_check_errors": 350,
+      "kct_check_errors_total": 350,
+      "kct_check_by_rule": {
+        "clearance_pad_segment": 105,
+        "clearance_pad_via": 9,
+        "clearance_segment_segment": 75,
+        "clearance_segment_via": 72,
+        "clearance_via_via": 6,
+        "connectivity": 21,
+        "diffpair_clearance_intra": 19,
+        "hole_to_hole_clearance": 16,
+        "pth_hole_clearance": 22,
+        "via_in_pad": 5
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": null,
+      "kct_check_inactive_rules": [
+        "match_group_length_skew",
+        "diffpair_length_skew",
+        "diffpair_routing_continuity"
+      ],
+      "kicad_drc_errors": 709,
+      "kicad_drc_unconnected": 41,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {
+        "clearance": 187,
+        "hole_clearance": 129,
+        "shorting_items": 199,
+        "solder_mask_bridge": 115,
+        "starved_thermal": 4,
+        "track_width": 65,
+        "tracks_crossing": 10
+      },
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 5,
+        "placement_bound": 9,
+        "budget_starved": 4,
+        "pour_discontinuous": 3
+      },
+      "signal_nets_unfinished": 18,
+      "stuck_nets": {
+        "BTN1": "placement_bound",
+        "BTN2": "placement_bound",
+        "BTN3": "placement_bound",
+        "BTN4": "placement_bound",
+        "HWB": "placement_bound",
+        "ISP_MISO": "budget_starved",
+        "ISP_MOSI": "budget_starved",
+        "ISP_SCK": "placement_bound",
+        "JOY_BTN": "congestion_saturated",
+        "JOY_X": "congestion_saturated",
+        "JOY_X_RAW": "placement_bound",
+        "JOY_Y": "congestion_saturated",
+        "RESET": "placement_bound",
+        "UCAP": "budget_starved",
+        "USB_CC1": "budget_starved",
+        "USB_D+": "congestion_saturated",
+        "USB_D-": "congestion_saturated",
+        "XTAL2": "placement_bound",
+        "GND": "pour_discontinuous",
+        "VBUS": "pour_discontinuous",
+        "VCC": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "BTN1": 4,
+        "BTN2": 6,
+        "BTN3": 10,
+        "BTN4": 6,
+        "GND": 1,
+        "ISP_MISO": 2,
+        "ISP_MOSI": 2,
+        "ISP_SCK": 2,
+        "JOY_BTN": 4,
+        "JOY_X": 4,
+        "JOY_Y": 4,
+        "USB_CC1": 1,
+        "USB_D-": 1,
+        "VBUS": 5,
+        "VCC": 17
+      },
+      "zone_nets": [
+        "GND",
+        "VCC"
+      ]
+    },
+    "kicad_nets": {
+      "ran": true,
+      "nets": {
+        "GND": 99,
+        "USB_D+": 125,
+        "USB_CC1": 38,
+        "BTN2": 55,
+        "JOY_Y": 79,
+        "USB_D-": 82,
+        "JOY_X": 39,
+        "JOY_BTN": 131,
+        "<no net>": 53,
+        "BTN1": 95,
+        "BTN3": 103,
+        "VBUS": 88,
+        "HWB": 16,
+        "BTN4": 70,
+        "VCC": 75,
+        "RESET": 44,
+        "UCAP": 28,
+        "ISP_SCK": 20,
+        "USB_MCU_D-": 38,
+        "USB_MCU_D+": 43,
+        "ISP_MISO": 41,
+        "XTAL1": 11,
+        "JOY_X_RAW": 15,
+        "JOY_Y_RAW": 24,
+        "XTAL2": 11,
+        "ISP_MOSI": 6,
+        "AREF": 4
+      },
+      "violations": 710
+    }
+  },
+  "s1_snap": {
+    "board": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/shrink/s1_snap/usb_joystick.kicad_pcb",
+    "vertex_census": {
+      "pad_end_translated": 394,
+      "translated_with_cluster": 200,
+      "scaled": 1125
+    },
+    "ends_on_pads_expanded": 451,
+    "ends_displaced": 0,
+    "displaced_nets": [],
+    "miss_mm_max": 0.0,
+    "miss_mm_median": 0.0,
+    "displaced_detail": [],
+    "grade": {
+      "nets_complete": 24,
+      "nets_total": 27,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 47,
+      "connections_total": 115,
+      "via_count": 69,
+      "vias_per_connection": 1.468,
+      "wirelength_mm": 957.6,
+      "kct_check_errors": 413,
+      "kct_check_errors_total": 413,
+      "kct_check_by_rule": {
+        "clearance_net0_bridge": 2,
+        "clearance_pad_segment": 110,
+        "clearance_pad_via": 9,
+        "clearance_segment_segment": 140,
+        "clearance_segment_via": 75,
+        "clearance_via_via": 6,
+        "connectivity": 3,
+        "diffpair_clearance_intra": 22,
+        "hole_to_hole_clearance": 16,
+        "pth_hole_clearance": 25,
+        "via_in_pad": 5
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": null,
+      "kct_check_inactive_rules": [
+        "match_group_length_skew",
+        "diffpair_length_skew",
+        "diffpair_routing_continuity"
+      ],
+      "kicad_drc_errors": 817,
+      "kicad_drc_unconnected": 11,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {
+        "clearance": 246,
+        "hole_clearance": 135,
+        "shorting_items": 199,
+        "solder_mask_bridge": 119,
+        "starved_thermal": 5,
+        "track_width": 65,
+        "tracks_crossing": 48
+      },
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 3
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {
+        "GND": "pour_discontinuous",
+        "VBUS": "pour_discontinuous",
+        "VCC": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "BTN1": 4,
+        "BTN2": 6,
+        "BTN3": 10,
+        "BTN4": 6,
+        "GND": 1,
+        "ISP_MISO": 2,
+        "ISP_MOSI": 2,
+        "ISP_SCK": 2,
+        "JOY_BTN": 4,
+        "JOY_X": 4,
+        "JOY_Y": 4,
+        "USB_CC1": 1,
+        "USB_D-": 1,
+        "VBUS": 5,
+        "VCC": 17
+      },
+      "zone_nets": [
+        "GND",
+        "VCC"
+      ]
+    },
+    "kicad_nets": {
+      "ran": true,
+      "nets": {
+        "JOY_Y": 73,
+        "BTN1": 110,
+        "BTN3": 147,
+        "BTN4": 111,
+        "JOY_X": 37,
+        "JOY_BTN": 137,
+        "VCC": 75,
+        "RESET": 40,
+        "VBUS": 77,
+        "ISP_MISO": 47,
+        "UCAP": 32,
+        "USB_CC1": 49,
+        "USB_D-": 103,
+        "BTN2": 66,
+        "USB_D+": 110,
+        "HWB": 20,
+        "GND": 83,
+        "USB_MCU_D+": 48,
+        "ISP_SCK": 34,
+        "USB_MCU_D-": 45,
+        "XTAL1": 16,
+        "<no net>": 65,
+        "JOY_X_RAW": 14,
+        "JOY_Y_RAW": 23,
+        "XTAL2": 9,
+        "ISP_MOSI": 11,
+        "AREF": 4
+      },
+      "violations": 817
+    }
+  },
+  "footprints_moved_by_route": [],
+  "s2_reroute": {
+    "ripped_nets": [
+      "AREF",
+      "BTN1",
+      "BTN2",
+      "BTN3",
+      "BTN4",
+      "GND",
+      "HWB",
+      "ISP_MISO",
+      "ISP_MOSI",
+      "ISP_SCK",
+      "JOY_BTN",
+      "JOY_X",
+      "JOY_X_RAW",
+      "JOY_Y",
+      "JOY_Y_RAW",
+      "RESET",
+      "UCAP",
+      "USB_CC1",
+      "USB_D+",
+      "USB_D-",
+      "USB_MCU_D+",
+      "USB_MCU_D-",
+      "VBUS",
+      "VCC",
+      "XTAL1",
+      "XTAL2"
+    ],
+    "ripped_copper_items": 878,
+    "route": {
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/shrink/s2_reroute/in/usb_joystick.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/shrink/s2_reroute/usb_joystick_routed.kicad_pcb --timeout 2400 --no-cache --preserve-existing --grid 0.05 --seed 42 --route-engine lattice --strategy basic --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback",
+      "exit_code": 3,
+      "wall_s": 1377.1,
+      "killed_by_harness": false
+    },
+    "board": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/shrink/s2_reroute/usb_joystick_routed.kicad_pcb",
+    "grade": {
+      "nets_complete": 26,
+      "nets_total": 27,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 114,
+      "connections_total": 115,
+      "via_count": 73,
+      "vias_per_connection": 0.64,
+      "wirelength_mm": 929.7,
+      "kct_check_errors": 2,
+      "kct_check_errors_total": 2,
+      "kct_check_by_rule": {
+        "diffpair_length_skew": 1,
+        "diffpair_routing_continuity": 1
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/shrink/s2_reroute/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 1,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 1
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {
+        "VBUS": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "BTN1": 4,
+        "BTN2": 6,
+        "BTN3": 6,
+        "BTN4": 6,
+        "ISP_MISO": 2,
+        "ISP_MOSI": 2,
+        "JOY_BTN": 6,
+        "JOY_X": 4,
+        "JOY_Y": 4,
+        "RESET": 8,
+        "USB_D+": 1,
+        "USB_D-": 2,
+        "VBUS": 4,
+        "VCC": 18
+      },
+      "zone_nets": [
+        "GND",
+        "VBUS",
+        "VCC"
+      ]
+    },
+    "kicad_nets": {
+      "ran": true,
+      "nets": {
+        "VBUS": 2
+      },
+      "violations": 0
+    },
+    "zone_nets": [
+      "GND",
+      "VCC"
+    ]
+  }
+}
