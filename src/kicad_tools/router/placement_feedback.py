@@ -65,6 +65,89 @@ class _PadNetSnapshot:
     router_bindings: list[_RouterPadNetBinding]
 
 
+_SEXP_MISSING = object()
+
+
+@dataclass
+class _CosmeticSnapshot:
+    """Absolute pre-mirror state of one footprint's silk/fab (Issue #6325).
+
+    A mirror flips the footprint's texts and graphics in two parallel
+    representations -- the parsed ``fp.texts``/``fp.graphics`` objects and the
+    raw ``property``/``fp_text``/``fp_*`` children of ``fp._sexp_node`` that
+    ``PCB.save`` writes -- and neither is in ``_snapshot_placement``.  This
+    records both, by object identity:
+
+    * ``objects``: each text/graphic object with a copy of its ``__dict__``;
+    * ``nodes``: EVERY node of each cosmetic S-expression subtree with all of
+      its slot values (``children`` as a shallow list copy).  The mirror only
+      rewrites values, replaces atoms and inserts/removes child nodes, so
+      putting back every original node's slots rebuilds the original object
+      graph exactly -- node identities included, which keeps the
+      ``_text_angle_synthetic`` id set (also recorded) valid.
+
+    :meth:`restore` only writes absolute values, so it is idempotent and safe
+    to interrupt and repeat.  That makes the undo independent of WHEN a signal
+    handler runs, and of which thread the kernel delivered the signal to.
+    """
+
+    footprint: Any
+    objects: list[tuple[Any, dict[str, Any]]]
+    nodes: list[tuple[Any, tuple[Any, ...]]]
+    synthetic: set[int] | None
+
+    @classmethod
+    def capture(cls, fp: Any, cosmetic_tags: frozenset[str]) -> _CosmeticSnapshot:
+        objects = [
+            (obj, copy.deepcopy(vars(obj)))
+            for obj in [*getattr(fp, "texts", []), *getattr(fp, "graphics", [])]
+            if hasattr(obj, "__dict__")
+        ]
+        nodes: list[tuple[Any, tuple[Any, ...]]] = []
+        sexp_node = getattr(fp, "_sexp_node", None)
+        if sexp_node is not None:
+            from kicad_tools.sexp import SExp
+
+            slots = SExp.__slots__
+            stack = [c for c in sexp_node.iter_children() if c.tag in cosmetic_tags]
+            while stack:
+                node = stack.pop()
+                state = tuple(
+                    list(node.children)
+                    if slot == "children"
+                    else getattr(node, slot, _SEXP_MISSING)
+                    for slot in slots
+                )
+                nodes.append((node, state))
+                stack.extend(node.children)
+        synthetic = getattr(fp, "__dict__", {}).get("_text_angle_synthetic")
+        return cls(
+            footprint=fp,
+            objects=objects,
+            nodes=nodes,
+            synthetic=set(synthetic) if synthetic is not None else None,
+        )
+
+    def restore(self) -> None:
+        for obj, attrs in self.objects:
+            vars(obj).update(copy.deepcopy(attrs))
+        if self.nodes:
+            from kicad_tools.sexp import SExp
+
+            slots = SExp.__slots__
+            for node, state in self.nodes:
+                for slot, value in zip(slots, state, strict=True):
+                    if value is _SEXP_MISSING:
+                        continue
+                    setattr(node, slot, list(value) if slot == "children" else value)
+        fp_state = getattr(self.footprint, "__dict__", None)
+        if fp_state is not None:
+            if self.synthetic is None:
+                fp_state.pop("_text_angle_synthetic", None)
+            else:
+                fp_state["_text_angle_synthetic"] = set(self.synthetic)
+
+
 @dataclass
 class _TrialInFlight:
     """The last ACCEPTED state, held while a delta trial is in flight (#6314).
@@ -76,16 +159,14 @@ class _TrialInFlight:
     used to be locals of ``run_delta``, so an interrupt (a routing deadline or
     Ctrl+C) that saved a partial board had nothing to restore from.
 
-    ``mirror_flips`` tracks the one transform the placement snapshot cannot
-    undo by itself: a ``mirror`` also flips the footprint's silk/fab cosmetics,
-    and only re-applying it (an involution) puts those back.  One entry is
-    appended after every application, so ``mirror_applied`` (an odd count) is
-    true exactly while the board carries an un-reverted one.  A count rather
-    than a flag because the undo can be entered twice at once -- by the loop's
-    own revert and, from a signal handler in the middle of it, by
-    ``restore_last_accepted`` -- and a flag cannot tell "flipped back twice"
-    from "flipped back once"; ``list.append`` is also a single atomic step,
-    which a read-modify-write of a flag or an integer is not.
+    ``cosmetics`` covers the one transform the placement snapshot cannot: a
+    ``mirror`` also flips the footprint's silk/fab texts and graphics, which
+    live outside ``placement``.  It is an absolute snapshot of them taken
+    before the application starts (``None`` for every other kind), so the undo
+    writes them back however far the application got and however the loop's
+    own revert and a signal handler's ``restore_last_accepted`` interleave
+    (Issue #6325).  It used to count re-applications of the mirror instead,
+    which a handler running between the flip and its count got wrong.
     """
 
     delta: PlacementDelta
@@ -94,7 +175,7 @@ class _TrialInFlight:
     router_pads: list[tuple[Any, float, float, Any]]
     pad_nets: _PadNetSnapshot | None
     routes: list[Route]
-    mirror_flips: list[None] = field(default_factory=list)
+    cosmetics: _CosmeticSnapshot | None = None
     # Issue #6320: ``CommitJournal.mark()`` of the router's commit journal when
     # the trial began -- ``(length, truncated)`` -- or ``None`` for a router
     # without one.  A restore that skips the grid rebuild truncates the journal
@@ -106,10 +187,6 @@ class _TrialInFlight:
     # routes while the grid still holds the trial's copper, so a later grid
     # rebuild of this trial must not journal its reset-and-re-mark on top.
     journal_rewound: bool = False
-
-    @property
-    def mirror_applied(self) -> bool:
-        return len(self.mirror_flips) % 2 == 1
 
 
 def _journal_mark(router: Any) -> tuple[int, bool] | None:
@@ -1690,6 +1767,27 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         self._trial = None
         return True
 
+    def _snapshot_cosmetics(
+        self, delta: PlacementDelta, strategy: ResolutionStrategy
+    ) -> _CosmeticSnapshot | None:
+        """Snapshot the silk/fab a ``mirror`` *delta* is about to flip (#6325).
+
+        ``None`` for every other kind (none of them touches the cosmetics) and
+        when the target cannot be resolved -- the application then fails
+        before mutating anything.  The footprint is resolved exactly as the
+        applicator resolves it, so the snapshot is of the part it flips.
+        """
+        if self.pcb is None or delta.kind != "mirror" or not strategy.actions:
+            return None
+        applicator = self._strategy_applicator
+        try:
+            fp = applicator._find_footprint(self.pcb, strategy.actions[0].target)
+        except ValueError:
+            return None
+        if fp is None:
+            return None
+        return _CosmeticSnapshot.capture(fp, applicator._COSMETIC_SEXP_TAGS)
+
     def _undo_trial(self, trial: _TrialInFlight, *, rebuild_grid: bool) -> None:
         """Put back everything *trial* changed; idempotent and re-entrant.
 
@@ -1697,22 +1795,24 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         revert and by :meth:`restore_last_accepted`, because a signal handler
         can run the second in the middle of the first.  Every step writes
         absolute snapshot values, so repeating or nesting them converges on
-        the same state; the mirror is the exception and is counted
-        (``_TrialInFlight.mirror_flips``) so it ends up flipped back an odd
-        number of times however the two interleave.
+        the same state, whichever step a signal handler lands in.
 
         Issue #4560: a mirror ALSO moves the footprint's cosmetics (silk/fab
         texts + graphics, in both the Python objects and the raw S-expression
         children ``PCB.save`` writes), and those live OUTSIDE
-        ``_snapshot_placement`` -- texts/graphics carry no per-object node
-        back-reference, so there is nothing to snapshot them by.  Re-apply the
-        mirror first: it is an involution (``test_double_flip_is_identity``),
-        so the second application returns the cosmetics to their original side
-        and geometry, and the placement restore immediately below erases the
-        residual round-trip drift it leaves on layer/rotation/pads.  Without
-        this, a run that reverts a mirror and later KEEPS another delta saves
-        a board whose copper is on the front while its silk/fab is mirrored
-        onto the back.
+        ``_snapshot_placement``.  Without putting them back, a run that
+        reverts a mirror and later KEEPS another delta saves a board whose
+        copper is on the front while its silk/fab is mirrored onto the back.
+        Issue #6325: they are restored from ``_TrialInFlight.cosmetics``, an
+        absolute snapshot, right AFTER the placement restore, whose
+        ``fp.layer``/``fp.rotation`` setters turn text angles as a side
+        effect.  This used to re-apply the mirror (an involution) a counted
+        number of times; a handler that ran mid-application, between the flip
+        and its count, re-applied it once too often.  Masking the signals
+        around the application could not close that window: a process-directed
+        SIGINT/SIGTERM is delivered to any thread that does not block it (e.g.
+        an OpenBLAS worker), and Python still runs the handler on the main
+        thread mid-application.  An absolute restore needs no window at all.
 
         Issue #5536: a ``reorder_pins`` delta's effect is entirely a pad->net
         rebinding, which no geometry snapshot can see -- ``_restore_pad_nets``
@@ -1728,12 +1828,10 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 that goes on appending to ``router.routes`` once the handler
                 returns, and the snapshot is what the loop then reverts from.
         """
-        if self.pcb is not None:
-            while trial.mirror_applied:
-                self._strategy_applicator.apply_strategy(self.pcb, trial.strategy)
-                trial.mirror_flips.append(None)
         self._restore_pad_nets(trial.pad_nets)
         self._restore_placement(trial.placement)
+        if trial.cosmetics is not None:
+            trial.cosmetics.restore()
         self._restore_router_pads(trial.router_pads)
         if rebuild_grid:
             self._rebuild_grid_for_routes(trial.routes)
@@ -2666,6 +2764,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 pad_nets=pre_pad_nets,
                 routes=pre_routes,
                 journal_mark=_journal_mark(self.router),
+                cosmetics=self._snapshot_cosmetics(delta, strategy),
             )
             self._trial = trial
 
@@ -2680,8 +2779,6 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 if self.verbose:
                     print(f"  Delta application failed: {result.message}")
                 break
-            if delta.kind == "mirror":
-                trial.mirror_flips.append(None)
             # Keep the router's flat pad geometry in lockstep with the PCB.
             self._apply_delta_to_router_pads(delta)
 

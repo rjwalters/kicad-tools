@@ -846,6 +846,14 @@ def _u1(pcb):
     return next(fp for fp in pcb.footprints if fp.reference == "U1")
 
 
+def _cosmetic_nodes(fp) -> list[str]:
+    """The serialized silk/fab children of *fp*'s footprint node."""
+    from kicad_tools.recovery.applicator import StrategyApplicator
+
+    tags = StrategyApplicator._COSMETIC_SEXP_TAGS
+    return [c.to_string() for c in fp._sexp_node.iter_children() if c.tag in tags]
+
+
 def _xy(point) -> tuple[float, float]:
     # Round to the serializer's precision so an exact-equality comparison is
     # meaningful across a save/reparse round trip.
@@ -947,7 +955,7 @@ class TestRevertedMirrorLeavesNoCosmeticResidue:
         ``restore_last_accepted`` is what a deadline / Ctrl+C partial save
         calls instead of the revert this trial never reached.  A mirror is the
         hard case: the placement snapshot cannot put the silk/fab back, so the
-        restore has to re-apply the mirror exactly once.
+        restore writes them back from the trial's cosmetic snapshot (#6325).
         """
         from kicad_tools.cli.route_deadline import RouteDeadlineExpired
         from kicad_tools.schema.pcb import PCB
@@ -982,6 +990,10 @@ class TestRevertedMirrorLeavesNoCosmeticResidue:
         assert router.pads[("U1", "1")].x == pytest.approx(102.0)
         assert len(router.routes) == 1, "the baseline routes are back"
 
+        # Issue #6325: restored from an absolute snapshot, so the silk/fab
+        # S-expression is byte-identical, not merely flipped back.
+        assert _cosmetic_nodes(fp) == _cosmetic_nodes(_u1(PCB.load(str(_MIRROR_FRONT))))
+
         out = tmp_path / "after_interrupted_mirror.kicad_pcb"
         pcb.save(str(out))
         assert _cosmetic_state(_u1(PCB.load(str(out)))) == original
@@ -993,13 +1005,14 @@ class TestRevertedMirrorLeavesNoCosmeticResidue:
     def test_rewind_inside_the_reverts_own_flip_back_leaves_upright_cosmetics(
         self, tmp_path: Path, when: str
     ):
-        """Issue #6314: two undos of one mirror at once must not flip it thrice.
+        """Issue #6314: two undos of one mirror at once must converge.
 
         A Ctrl+C partial save that does not stop the run (#6324) can call
         ``restore_last_accepted`` in the middle of the loop's own revert --
-        here around the revert's re-application of the mirror, the one step
-        that is not a plain overwrite.  Each of the two then wants to flip the
-        cosmetics back; between them they must do so an odd number of times.
+        here around its placement restore, just before the silk/fab is put
+        back.  Both undos write absolute snapshot values (#6325: the revert no
+        longer re-applies the mirror), so nesting them must leave the
+        cosmetics exactly as they were, and the mirror applied only once.
         """
         from kicad_tools.schema.pcb import PCB
 
@@ -1010,18 +1023,27 @@ class TestRevertedMirrorLeavesNoCosmeticResidue:
         apply_strategy = applicator.apply_strategy
         calls = []
 
-        def _rewound_apply(board, strategy):
+        def _counted_apply(board, strategy):
             calls.append(strategy)
-            # Call 1 is the mirror itself; call 2 is the revert flipping it back.
-            fire = len(calls) == 2
+            return apply_strategy(board, strategy)
+
+        applicator.apply_strategy = _counted_apply
+        restore_placement = loop._restore_placement
+        fired = []
+
+        def _rewound_restore(snapshot):
+            # The loop's own revert of the mirror trial (still published).
+            trial = loop._trial
+            fire = not fired and trial is not None and trial.delta.kind == "mirror"
+            if fire:
+                fired.append(True)
             if fire and when == "as-it-starts":
                 assert loop.restore_last_accepted() is True
-            result = apply_strategy(board, strategy)
+            restore_placement(snapshot)
             if fire and when == "once-it-is-done":
                 assert loop.restore_last_accepted() is True
-            return result
 
-        applicator.apply_strategy = _rewound_apply
+        loop._restore_placement = _rewound_restore
         result = loop.run_delta(max_adjustments=3)
 
         assert [d.kind for d in result.reverted_deltas] == ["mirror"]
@@ -1029,7 +1051,8 @@ class TestRevertedMirrorLeavesNoCosmeticResidue:
         # is never tried.
         assert result.applied_deltas == []
         assert result.exit_reason == "pd_interrupted"
-        assert len(calls) == 4, "applied once, flipped back three times: upright"
+        assert fired, "the rewind must have landed inside the revert"
+        assert len(calls) == 1, "applied once; the undo restores, never re-applies"
 
         fp = _u1(pcb)
         assert fp.layer == "F.Cu"

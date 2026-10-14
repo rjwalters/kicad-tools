@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import signal
 import sys
 import tempfile
+import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -1406,3 +1409,154 @@ class TestAccessWitnessOfAnInterruptedTrial:
         assert _live_copper(router.commit_journal) == sorted(
             (t.net, t.x1, t.y1, t.x2, t.y2) for t in router.routes
         )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #6325: a signal inside a mirror's application                          #
+# --------------------------------------------------------------------------- #
+
+
+class TestSignalInsideAMirrorApplication:
+    """A real, process-directed SIGINT that lands inside a mirror trial.
+
+    The silk/fab flip is outside the placement snapshot, so the undo must put
+    it back however far the application (or the loop's own revert) got.
+
+    The signal is sent with ``os.kill(os.getpid(), SIGINT)`` -- the way Ctrl+C
+    and the deadline's ``killpg`` arrive -- while another thread is alive and
+    numpy is imported.  A process-directed signal is delivered to ANY thread
+    that does not block it, so masking it on the main thread does not defer
+    it: CPython's C handler runs on the other thread and the main thread runs
+    ``_handle_interrupt`` at its next bytecode check, mid-application.  The
+    fix therefore must not depend on when the handler runs.  (``raise_signal``
+    is ``pthread_kill(self)`` and would only test the main thread's mask.)
+    """
+
+    @staticmethod
+    def _board_with_silk(path: Path) -> None:
+        text = _board_text().replace(
+            '(property "Reference" "R3")',
+            '(property "Reference" "R3")\n'
+            '    (fp_text user "X" (at 0 1.5) (layer "F.SilkS")'
+            " (effects (font (size 1 1) (thickness 0.15))))\n"
+            '    (fp_line (start -1 1) (end 1 1) (layer "F.Fab") (width 0.1))',
+        )
+        path.write_text(text)
+
+    @staticmethod
+    def _deltas_with_mirror() -> list[PlacementDelta]:
+        return [
+            PlacementDelta(net_name="B", target_ref="R2", kind="translate", dx=_MOVE, dy=0.0),
+            PlacementDelta(net_name="C", target_ref="R3", kind="mirror"),
+        ]
+
+    @pytest.fixture
+    def other_thread(self):
+        """numpy imported (OpenBLAS workers on Linux) plus one idle Python thread."""
+        import numpy  # noqa: F401  -- ``kct route`` always has it loaded
+
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, name="issue-6325-bystander", daemon=True)
+        thread.start()
+        yield thread
+        stop.set()
+        thread.join(timeout=5)
+
+    @pytest.mark.parametrize("landing", ["mid-cosmetics", "after-cosmetics", "revert"])
+    def test_silk_and_fab_stay_on_the_front(self, tmp_path, monkeypatch, other_thread, landing):
+        from kicad_tools.recovery.applicator import StrategyApplicator
+
+        assert other_thread.is_alive()
+        source = tmp_path / "board.kicad_pcb"
+        output = tmp_path / "board_routed.kicad_pcb"
+        self._board_with_silk(source)
+        router = _CopperRouter()
+        monkeypatch.setattr(
+            _CopperRouter,
+            "route_with_placement_delta_feedback",
+            lambda self, **kw: Autorouter.route_with_placement_delta_feedback(
+                self, delta_proposer=lambda _p: self._deltas(), **kw
+            ),
+        )
+        router._deltas = self._deltas_with_mirror
+
+        state = {"fired": False, "inside": False, "handled_inside": None}
+
+        def send_sigint() -> None:
+            """Signal the PROCESS, then give the handler time to run here."""
+            state["fired"] = True
+            state["inside"] = True
+            try:
+                os.kill(os.getpid(), signal.SIGINT)
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    time.sleep(0.005)
+            finally:
+                state["inside"] = False
+
+        if landing == "mid-cosmetics":
+            # The parsed texts/graphics and the first S-expression node that
+            # carries a layer flipped (it is now on the back); the rest not.
+            real_node = StrategyApplicator._mirror_cosmetic_node
+
+            def flip_node_then_signal(node):
+                real_node(node)
+                layer = node.find_child("layer")
+                if not state["fired"] and layer is not None and layer.get_string(0)[:2] == "B.":
+                    send_sigint()
+
+            monkeypatch.setattr(
+                StrategyApplicator, "_mirror_cosmetic_node", staticmethod(flip_node_then_signal)
+            )
+        elif landing == "after-cosmetics":
+            # Cosmetics fully flipped; keep-upright and the bookkeeping not yet.
+            real_cosmetics = StrategyApplicator._mirror_footprint_cosmetics
+
+            def flip_then_signal(applicator, fp):
+                real_cosmetics(applicator, fp)
+                if not state["fired"]:
+                    send_sigint()
+
+            monkeypatch.setattr(StrategyApplicator, "_mirror_footprint_cosmetics", flip_then_signal)
+        else:
+            # Inside the loop's OWN revert of the mirror trial, between the
+            # placement restore and whatever puts the silk/fab back.
+            real_restore = PlacementDeltaFeedbackLoop._restore_placement
+
+            def restore_then_signal(loop, snapshot):
+                real_restore(loop, snapshot)
+                trial = loop._trial
+                if not state["fired"] and trial is not None and trial.delta.kind == "mirror":
+                    send_sigint()
+
+            monkeypatch.setattr(
+                PlacementDeltaFeedbackLoop, "_restore_placement", restore_then_signal
+            )
+
+        def handler(signum, frame):
+            if state["handled_inside"] is None:
+                state["handled_inside"] = state["inside"]
+            route_cmd._handle_interrupt(signum, frame)
+
+        previous = signal.signal(signal.SIGINT, handler)
+        try:
+            with pytest.raises(SystemExit):
+                _run_loop(router, source, output)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+
+        assert state["fired"], "the mirror trial must have been reached"
+        # The point of the test: the handler ran WHILE the mirror (or its
+        # revert) was in progress, not after it -- whatever the platform.
+        assert state["handled_inside"] is True
+        partial_text = _partial(output).read_text()
+        assert "B.SilkS" not in partial_text and "B.Fab" not in partial_text
+        assert "justify" not in partial_text
+        (r3,) = [fp for fp in PCB.load(_partial(output)).footprints if fp.reference == "R3"]
+        assert str(r3.layer) == "F.Cu"
+        assert [(t.layer, t.position) for t in r3.texts if t.text == "X"] == [
+            ("F.SilkS", (0.0, 1.5))
+        ]
+        assert [(g.layer, g.start, g.end) for g in r3.graphics] == [
+            ("F.Fab", (-1.0, 1.0), (1.0, 1.0))
+        ]
