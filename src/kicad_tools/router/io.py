@@ -4823,6 +4823,7 @@ def load_pcb_for_routing(
     localize_lattice_to_region: bool = False,
     lattice_link_budget_s: float | None = None,
     lattice_deadline: float | None = None,
+    lattice_max_iterations: int | None = None,
     min_trace_width_floor: float | None = None,
     placement_disposition: RoutingPlacementDisposition | None = None,
     project_path: str | Path | None = None,
@@ -4943,6 +4944,10 @@ def load_pcb_for_routing(
                 the total budget the user asked for.  When both this and
                 ``lattice_link_budget_s`` are set the TIGHTER bound wins.
                 ``None`` means "no absolute ceiling".
+        lattice_max_iterations: Issue #6362.  Round cap for the lattice netset
+                negotiation, stamped on ``router._lattice_max_iterations``.
+                Sourced from the CLI ``--lattice-iterations``; ``None`` keeps
+                the built-in default (12).
         min_trace_width_floor: Issue #4700.  Minimum legal trace width (mm)
                 for the target fab tier -- the SAME
                 ``get_design_rules(layers, copper_oz).min_trace_width_mm``
@@ -5792,6 +5797,10 @@ def load_pcb_for_routing(
     # preserves "bounded only by the per-link budget (or not at all)".
     if lattice_deadline is not None:
         router._lattice_deadline = lattice_deadline
+
+    # Issue #6362: ``--lattice-iterations`` round cap; ``None`` keeps the default.
+    if lattice_max_iterations is not None:
+        router._lattice_max_iterations = lattice_max_iterations
 
     # Issue #4170 (Phase 2b-1): carve bare boundary stub endpoints open as
     # same-net A* targets and store them for the Autorouter target-merge shim.
