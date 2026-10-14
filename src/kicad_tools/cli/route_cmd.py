@@ -3666,14 +3666,16 @@ def _write_search_failures_sidecar(output_path: Path, router: object | None) -> 
 
     ``net-status --why`` reads this so a geometric give-up (``no_path``,
     ``via_via_blocked``, ``pairwise_blocked``) is not mislabelled
-    ``budget_starved``.  No-op without recorded failures.
+    ``budget_starved``.  Without recorded failures any stale sidecar a
+    previous route left at the same path is removed (the writer unlinks on
+    ``{}``), so the sidecar only ever describes the run that wrote it.
     """
     from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
 
     pathfinder = getattr(router, "router", None)
     by_id = getattr(pathfinder, "search_failures_by_net", None)
     if not isinstance(by_id, dict) or not by_id:
-        return None
+        return write_search_failures_sidecar(output_path, {})
     names = getattr(router, "net_names", None) or {}
     named = {names[nid]: code for nid, code in by_id.items() if names.get(nid)}
     return write_search_failures_sidecar(output_path, named)

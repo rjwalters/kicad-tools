@@ -1058,3 +1058,40 @@ class TestSearchFailuresSidecar6369:
         # No recorded failures -> no sidecar.
         empty = SimpleNamespace(router=SimpleNamespace(search_failures_by_net={}), net_names={})
         assert _write_search_failures_sidecar(tmp_path / "c.kicad_pcb", empty) is None
+
+    def test_rewrite_with_no_failures_removes_stale_sidecar(self, tmp_path: Path):
+        """A re-route recording nothing must not inherit the prior run's reasons."""
+        from kicad_tools.router.stuck_classifier import (
+            load_search_failures_sidecar,
+            write_search_failures_sidecar,
+        )
+
+        board = tmp_path / "x_routed.kicad_pcb"
+        assert write_search_failures_sidecar(board, {"VBUS": 1}) is not None
+        assert load_search_failures_sidecar(board) == {"VBUS": "no_path"}
+        assert write_search_failures_sidecar(board, {}) is None
+        assert not (tmp_path / "x_routed.search_failures.json").exists()
+        assert load_search_failures_sidecar(board) is None
+
+    def test_route_cmd_writer_removes_stale_sidecar(self, tmp_path: Path):
+        """The route_cmd early-return path must also clear a stale sidecar."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _write_search_failures_sidecar
+        from kicad_tools.router.stuck_classifier import load_search_failures_sidecar
+
+        out = tmp_path / "b.kicad_pcb"
+        first = SimpleNamespace(
+            router=SimpleNamespace(search_failures_by_net={4: 1}), net_names={4: "VBUS"}
+        )
+        assert _write_search_failures_sidecar(out, first) is not None
+        assert load_search_failures_sidecar(out) == {"VBUS": "no_path"}
+        # Second route: no failures recorded (e.g. Python pathfinder / no attribute).
+        for second in (
+            SimpleNamespace(router=SimpleNamespace(search_failures_by_net={}), net_names={}),
+            SimpleNamespace(router=SimpleNamespace(), net_names={}),
+            None,
+        ):
+            _write_search_failures_sidecar(out, first)
+            assert _write_search_failures_sidecar(out, second) is None
+            assert load_search_failures_sidecar(out) is None

@@ -1614,8 +1614,15 @@ def write_search_failures_sidecar(
 ) -> Path | None:
     """Write ``{net_name: reason}`` next to the routed board (issue #6369).
 
-    Reasons are stored as labels.  Returns ``None`` (writing nothing) for an
-    empty map or a blocked write -- a diagnostic never fails a route.
+    Reasons are stored as labels.  The sidecar describes only the run that
+    wrote it: an empty map (nothing recorded) *removes* any sidecar a previous
+    route left at the same path, so ``net-status --why`` never quotes a stale
+    reason.  Returns ``None`` for an empty map or a blocked write -- a
+    diagnostic never fails a route.
+
+    Semantics are "last failure wins" per net: a net that failed in an early
+    negotiation iteration and was never re-attempted (e.g. the global budget
+    ran out first) keeps that earlier, possibly geometric, reason.
     """
     import json
 
@@ -1624,9 +1631,13 @@ def write_search_failures_sidecar(
         label = normalize_search_failure(reason)
         if label:
             labelled[str(name)] = label
-    if not labelled:
-        return None
     sidecar = _search_failures_sidecar_path(output_path)
+    if not labelled:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            sidecar.unlink(missing_ok=True)
+        return None
     try:
         sidecar.write_text(json.dumps({"search_failures": labelled}, indent=2, sort_keys=True))
     except (OSError, TypeError, ValueError):
