@@ -21844,8 +21844,32 @@ def _run_main_impl(args, parser, argv) -> int:
         def do_routing():
             nonlocal diffpair_warnings, relaxed_nets_report, diffpair_budget_exit_pairs
 
-            # Adaptive multi-resolution routing (when --grid auto selects it)
-            if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
+            # Issue #6666: decide escape routing ONCE, before the adaptive
+            # branch.  ``_should_use_escape_routing`` prints its verdict, so it
+            # must not be re-evaluated below.  Before this, the adaptive branch
+            # returned before the escape decision was ever made, so any board
+            # with a multi-resolution plan silently lost the dense-package
+            # escape pre-phase (``route_with_escape``).  That path was latent
+            # until PR #4877 made ``load_pads_for_analysis`` read KiCad 7+
+            # refs; afterwards every auto-grid board with a fine-pitch package
+            # took it, and chorus-test's U5/U8 escapes collapsed (30/51 ->
+            # 19/51 at 8a98a69f1).
+            use_escape_routing = _should_use_escape_routing(router, escape_routing_flag, quiet)
+            use_adaptive_grid = multi_res_plan is not None and multi_res_plan.is_multi_resolution
+            if use_adaptive_grid and use_escape_routing:
+                # The escape pre-phase wins over the adaptive grid.  The
+                # plan's fine zones are already on ``router.fine_zones``, so
+                # the escape router's sub-grid stage still uses them.
+                use_adaptive_grid = False
+                if not quiet:
+                    flush_print(
+                        "  Adaptive multi-resolution grid skipped: the dense-package "
+                        "escape pre-phase takes precedence (#6666)"
+                    )
+
+            # Adaptive multi-resolution routing (when --grid auto selects it
+            # and no dense package needs the escape pre-phase)
+            if use_adaptive_grid:
                 from kicad_tools.router.adaptive_grid import AdaptiveGridRouter
 
                 if not quiet:
@@ -22017,8 +22041,9 @@ def _run_main_impl(args, parser, argv) -> int:
 
                 return adaptive_result.all_routes
 
-            # Check if escape routing should run as a pre-phase
-            if _should_use_escape_routing(router, escape_routing_flag, quiet):
+            # Check if escape routing should run as a pre-phase (decided once
+            # above -- Issue #6666)
+            if use_escape_routing:
                 # Issue #3952: compose the escape pre-phase with the
                 # CoupledPathfinder diff-pair pre-pass when
                 # --differential-pairs is requested so Phase A runs on
