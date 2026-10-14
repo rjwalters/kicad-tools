@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -364,6 +365,22 @@ KEEPOUT = """  (zone (net 0) (net_name "") (layers "F.Cu") (uuid "a0000000-0000-
   (gr_text "CU" (at 158 95) (layer "F.Cu") (effects (font (size 1 1) (thickness 0.15))))
 """
 
+# Issue #6642: since #6594 the exporter writes the KEEPOUT fixture's rule area
+# and GND pour, so they are no longer losses.  These two still are: Specctra
+# polygons have no arc form, so an arc-outlined rule area is dropped, and a
+# copper zone without a net has no (plane ...) form -- yet both are copper a
+# router must keep clear of.
+OMITTED = """  (zone (net 0) (net_name "") (layers "B.Cu") (uuid "a0000000-0000-0000-0000-000000000003") (name "arcko")
+    (hatch edge 0.5) (connect_pads (clearance 0)) (min_thickness 0.25)
+    (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon (pts (xy 140 80) (arc (start 142 80) (mid 143 81) (end 142 82)) (xy 140 82))))
+  (zone (net 0) (net_name "") (layer "F.Cu") (uuid "a0000000-0000-0000-0000-000000000004")
+    (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.25)
+    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon (pts (xy 154 90) (xy 156 90) (xy 156 92) (xy 154 92))))
+"""
+
 
 @pytest.fixture
 def rule_bearing(tmp_path, board00_pcb):
@@ -373,7 +390,7 @@ def rule_bearing(tmp_path, board00_pcb):
     text = board00_pcb.read_text()
     cut = text.rstrip().rfind(")")
     pcb = d / "rb.kicad_pcb"
-    pcb.write_text(text[:cut] + KEEPOUT + ")\n")
+    pcb.write_text(text[:cut] + KEEPOUT + OMITTED + ")\n")
     pro = json.loads(board00_pcb.with_suffix(".kicad_pro").read_text())
     pro["net_settings"]["classes"].append({"name": "Power", "clearance": 0.3, "track_width": 0.5})
     pro["net_settings"]["netclass_patterns"] = [{"netclass": "Power", "pattern": "VCC"}]
@@ -393,21 +410,59 @@ def test_dsn_audit_detects_omitted_constraints(fr, rule_bearing):
         rule_bearing.with_suffix(".dsn"),
     )
     kinds = {e["kind"] for e in lost}
-    assert {
-        "netclass",
-        "netclass_assignment",
-        "netclass_rule",
-        "dru",
-        "keepout",
-        "zone",
-        "copper_text",
-    } <= kinds
+    assert {"dru", "keepout", "zone", "copper_text"} <= kinds
     details = " ".join(e["detail"] for e in lost)
-    assert "'Power'" in details
     assert "edge_clearance" in details
+    # Issue #6642: only the genuinely omitted rule area and zone are reported;
+    # the plain keepout ("ko") and the GND pour are exported since #6594.
+    keepouts = [e["detail"] for e in lost if e["kind"] == "keepout"]
+    assert len(keepouts) == 1 and "'arcko'" in keepouts[0], keepouts
+    zones = [e["detail"] for e in lost if e["kind"] == "zone"]
+    assert zones == ["zone <no net>@F.Cu not exported"], zones
+    # The Power class, its values and its VCC assignment are exported too.
+    assert not kinds & {"netclass", "netclass_assignment"}, lost
+    assert "'Power'" not in details and "Power." not in details, lost
     # A DRU floor the DSN's global clearance already satisfies is not a loss.
     assert "'Clear'" not in details
     assert rule_bearing.with_suffix(".dsn").exists()
+
+
+def test_dsn_audit_detects_dropped_class_rules_and_membership(fr, rule_bearing):
+    """Issue #6642: class checks read each emitted (class ...) block.
+
+    The exporter now writes the Power class faithfully, so tamper with the DSN
+    the audit reads (an existing ``dsn_path`` is not re-exported) to prove the
+    netclass checks still fire on a genuinely degraded export.
+    """
+    from kicad_tools.export.dsn import KiCadToDSNExporter
+
+    dsn = rule_bearing.with_suffix(".dsn")
+    text = KiCadToDSNExporter(rule_bearing).export(dsn)
+    start = text.index("(class Power")
+    block = text[start : text.index("(rule", start)]
+    power_rule = text[start:].index("(width 500.0)") + start
+    text = text[:power_rule] + "(width 250.0)" + text[power_rule + len("(width 500.0)") :]
+    dsn.write_text(text.replace(block, block.replace('"VCC"', "").replace("VCC", "")))
+
+    def audit():
+        return fr.dsn_audit(
+            rule_bearing,
+            rule_bearing.with_suffix(".kicad_pro"),
+            rule_bearing.with_suffix(".kicad_dru"),
+            dsn,
+        )
+
+    lost = audit()
+    details = [e["detail"] for e in lost if e["kind"] == "netclass_rule"]
+    assert any("Power.track_width 0.5 mm exported as 0.25 mm (relaxed)" in d for d in details)
+    assigned = [e["detail"] for e in lost if e["kind"] == "netclass_assignment"]
+    assert any("'VCC'" in d and "exported in none" in d for d in assigned), assigned
+
+    # Dropping the class outright is a "netclass" loss: VCC is still assigned.
+    stripped = re.sub(r"\n    \(class Power\b.*?\n    \)", "", text, count=1, flags=re.S)
+    assert "(class Power" not in stripped
+    dsn.write_text(stripped)
+    assert {"kind": "netclass", "detail": "net class 'Power' not exported"} in audit()
 
 
 def test_dsn_audit_without_project_is_a_loss(fr, prep, tmp_path):
