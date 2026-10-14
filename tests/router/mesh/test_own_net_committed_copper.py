@@ -114,3 +114,18 @@ def test_autorouter_mesh_connects_all_pads_of_three_pad_net() -> None:
         for k in near:
             nodes[f(("pad", i))] = f(k)
     assert len({f(("pad", i)) for i in range(len(pads))}) == 1
+
+
+def test_via_keepout_and_standoff_helpers_6566():
+    """Placed vias are keep-outs and a via keeps a body standoff from copper."""
+    from kicad_tools.router.mesh.pathfinder import (
+        _point_polygon_distance,
+        _via_keepout,
+    )
+
+    octagon = _via_keepout((10.0, 10.0), 0.65)
+    # The octagon circumscribes the disc: every edge is >= radius from centre.
+    assert _point_polygon_distance((10.0, 10.0), octagon) == 0.0
+    assert _point_polygon_distance((10.0 + 0.65 + 0.25, 10.0), octagon) == pytest.approx(
+        0.25, abs=1e-6
+    )

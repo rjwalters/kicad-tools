@@ -488,6 +488,10 @@ class MeshPathfinder:
             # connection never treats its own net's committed copper (an
             # earlier star leg sharing its anchor pad) as an obstacle.
             committed_by_net: dict[int, dict[int, list[list[Pt]]]] = {}
+            # Issue #6566: via sites each net has committed this pass, so a
+            # later star leg of the same net never stacks a second via on the
+            # same portal midpoint (coincident holes -> hole_to_hole errors).
+            committed_via_sites: dict[int, list[Pt]] = {}
             # Issue #4364: pre-seed the preserved copper of NON-listed nets as
             # an immovable hard obstacle.  The dict is reset every pass (so a
             # rip-up frees listed-net corridors), therefore the fixed seed must
@@ -542,11 +546,30 @@ class MeshPathfinder:
                     failed.append((key, start, end, net_class))
                     continue
                 route, portals = result
+                # Issue #6566: drop a via coinciding with one this net already
+                # committed (the earlier via already joins the same layers).
+                sites = committed_via_sites.setdefault(route.net, [])
+                route.vias = [
+                    v
+                    for v in route.vias
+                    if not any(math.hypot(v.x - sx, v.y - sy) < 1e-3 for sx, sy in sites)
+                ]
+                sites.extend((v.x, v.y) for v in route.vias)
                 routes[key] = route
                 for edge in portals:
                     navmesh.commit_portal(edge)
+                net_committed = committed_by_net.setdefault(route.net, {})
                 for lidx, polys in self._route_obstacles_by_layer(route).items():
-                    committed_by_net.setdefault(route.net, {}).setdefault(lidx, []).extend(polys)
+                    net_committed.setdefault(lidx, []).extend(polys)
+                # Issue #6566: a placed via is copper on every layer; make it a
+                # keep-out for OTHER nets (own-net copper is exempt above).
+                for via in route.vias:
+                    keepout = _via_keepout(
+                        (via.x, via.y),
+                        via.diameter / 2 + self.rules.trace_width / 2 + self.rules.trace_clearance,
+                    )
+                    for lidx in range(self.layer_stack.num_layers):
+                        net_committed.setdefault(lidx, []).append(keepout)
 
             if len(routes) > best_count:
                 best_count = len(routes)
@@ -753,9 +776,15 @@ class MeshPathfinder:
         # A through-via spans every copper layer, so its body must clear
         # committed cross-net copper on ALL layers -- not just the two the A*
         # hop nominally joins.  Check every layer with committed copper.
+        # Issue #6566: the capsules are sized for a trace CENTRELINE
+        # (``trace_width + clearance``), but a via body is wider -- require the
+        # extra ``via_radius - trace_width / 2`` standoff from every polygon.
+        standoff = max(via_radius - self.rules.trace_width / 2, 0.0)
         for caps in committed_by_layer.values():
             for poly in caps:
                 if point_in_polygon(site, poly):
+                    return False
+                if standoff > 0.0 and _point_polygon_distance(site, poly) < standoff:
                     return False
         return True
 
@@ -1106,6 +1135,38 @@ def _segment_capsule(a: Pt, b: Pt, half_width: float) -> list[Pt] | None:
         (bx - nx * half_width, by - ny * half_width),
         (ax - nx * half_width, ay - ny * half_width),
     ]
+
+
+def _via_keepout(centre: Pt, radius: float) -> list[Pt]:
+    """Octagon circumscribing the disc of ``radius`` about ``centre`` (#6566)."""
+    vertex_r = radius / math.cos(math.pi / 8)
+    return [
+        (
+            centre[0] + vertex_r * math.cos(math.pi / 8 + k * math.pi / 4),
+            centre[1] + vertex_r * math.sin(math.pi / 8 + k * math.pi / 4),
+        )
+        for k in range(8)
+    ]
+
+
+def _point_polygon_distance(p: Pt, poly: list[Pt]) -> float:
+    """Distance from ``p`` to the polygon boundary (0 when on/inside it)."""
+    if point_in_polygon(p, poly):
+        return 0.0
+    best = math.inf
+    n = len(poly)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        len2 = dx * dx + dy * dy
+        t = (
+            0.0
+            if len2 < 1e-18
+            else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / len2))
+        )
+        best = min(best, math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy)))
+    return best
 
 
 def _inflate_polygon(poly: list[Pt], margin: float) -> list[Pt]:
