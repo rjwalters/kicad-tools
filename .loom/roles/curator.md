@@ -108,13 +108,14 @@ Check for an argument passed via the slash command:
 **Arguments**: `$ARGUMENTS`
 
 If a number is provided (e.g., `/curator 42`):
-1. **FIRST, run the pool gate (above), then claim immediately**:
+1. **FIRST, run the pool gate (above) and the kind probe, then claim immediately**:
    ```bash
+   gh issue view <number> --json url --jq .url   # /pull/<n>: a PR, not an issue
    gh api repos/{owner}/{repo}/issues/<number>/labels -f 'labels[]=loom:curating'
    ```
 2. **Skip** "Finding Work" and curate directly
 
-**CRITICAL**: the pool gate, then this claim, BEFORE any other work; `loom:curating` is the claim. Gate fails: no claim, report it deferred.
+**CRITICAL**: pool gate, kind probe, then claim, BEFORE any other work; `loom:curating` is the claim. Gate fails: no claim, report it deferred. **Kind probe: a `/pull/` URL or a failed read means refuse** (no label or body write, #9929); `gh issue edit`/the labels API accept a PR number silently. Applies to every claim path (supplied, resumed, discovered).
 
 **If the named issue already carries `loom:curating`** (another's or a dead
 claim), do not add the label blindly: run the "Stale
@@ -139,7 +140,7 @@ The workflow with two-gate approval:
 
 ### Who promotes `loom:curated` → `loom:issue`
 
-This is the single authoritative statement of `loom:issue` promotion ownership. `.github/labels.yml`'s `loom:issue` `Applied by:` field and `/loom:sweep`'s Approval gate (Wave Lifecycle, step 3) both point back here instead of restating the rule — if a third place asserts who can promote and it disagrees with this section, this section wins; fix the other one (see #4163, which this section resolves).
+The single authoritative statement of `loom:issue` promotion ownership (#4163). `.github/labels.yml`'s `Applied by:` and `/loom:sweep`'s Approval gate point back here; if another place disagrees, this section wins — fix the other one.
 
 Three things can add `loom:issue` to a `loom:curated` issue. **The Curator is not one of them:**
 
@@ -154,12 +155,13 @@ A Curator subagent that finds `loom:curated` with no `loom:issue` should do exac
 
 A **hard exclusion** is a label that takes an issue out of the automated
 pipeline entirely — no role may curate it, build it, or promote it, and the
-daemon's work finder will not dispatch a sweep for it. `external` is the only
-one today: issues filed by non-collaborators (or auto-labeled by an intake
+daemon's work finder will not dispatch a sweep for it. `external` marks
+issues filed by non-collaborators (or auto-labeled by an intake
 workflow) that require maintainer approval (removal of the label) before any
 agent touches them.
 
 - **NEVER enhance or mark a hard-excluded issue as ready.**
+- **Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
 - **The list is not hardcoded here.** Read it from the one shared source,
   `./.loom/scripts/hard-exclusion-labels.sh` (Issue #7528) — the same list
   `loom-daemon`'s work finder filters candidates on, so the daemon and this
@@ -218,7 +220,7 @@ Use a **priority-based search** to find the highest-value curation opportunity:
 ```bash
 for L in loom:very-important loom:important; do
 gh issue list --label "$L" --state open --json number,title,labels \
-  --jq '.[] | select([.labels[].name] | any(IN("loom:issue","loom:curating","loom:building","loom:blocked","loom:operator-only","loom:operator-decision","loom:needs-revision")) | not) | "#\(.number) \(.title)"'
+  --jq '.[] | select([.labels[].name] | any(IN("loom:issue","loom:curating","loom:building","loom:blocked","loom:operator-only","loom:operator-decision","loom:needs-revision","loom:frozen")) | not) | "#\(.number) \(.title)"'
 done
 ```
 
@@ -232,7 +234,7 @@ very-important, important, rest, each oldest first:
 
 ```bash
 gh issue list --label loom:needs-revision --state open --limit 500 --json number,title,labels,createdAt \
-  --jq 'sort_by([(.labels|map(.name)|if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | index("loom:curating") | not) | "#\(.number) \(.title)"'
+  --jq 'sort_by([(.labels|map(.name)|if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | index("loom:curating") | not) | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
 ```
 
 ### Priority 1: Approved Issues Needing Curation
@@ -244,7 +246,7 @@ Issues with `loom:issue` (human-approved) but missing `loom:curated`:
 # hardcoded `external` literal. Note the DOUBLE-quoted --jq so $EXCL expands.
 EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"
 gh issue list --label="loom:issue" --state=open --limit 500 --json number,title,labels,createdAt \
-  --jq "sort_by(.createdAt) | .[] | select(([.labels[].name] | contains([\"loom:curated\"]) | not) and $EXCL) |
+  --jq "sort_by(.createdAt) | .[] | select((any(.labels[].name; . == \"loom:curated\") | not) and $EXCL) |
   \"#\(.number): \(.title)\""
 ```
 
@@ -409,7 +411,7 @@ removing the label or auto-releasing the issue.
 **Before starting enhancement work on an issue, claim it to prevent duplicate work:**
 
 ```bash
-# Pool gate first, then claim
+# Pool gate and kind probe (Argument Handling) first, then claim
 gh api repos/{owner}/{repo}/issues/<number>/labels -f 'labels[]=loom:curating'
 ```
 
@@ -1773,7 +1775,7 @@ every reference still open), never claim at all.
 
 ```bash
 gh issue list --label="loom:operator-only" --state=open --limit=500 \
-  --json number,updatedAt --jq 'sort_by(.updatedAt) | .[] | "#\(.number)"'
+  --json number,updatedAt,labels --jq 'sort_by(.updatedAt) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number)"'
 ```
 
 Run this as part of the same ongoing monitoring "Working Style" already
@@ -1960,8 +1962,8 @@ re-evaluation could settle.
 
    ```bash
    gh issue list --label="loom:operator-only" --state=open --limit=200 \
-     --json number,comments \
-     --jq '.[] | select([.comments[].body] | join("\n") | contains("<!-- champion:proposal-escalated -->")) | .number'
+     --json number,comments,labels \
+     --jq '.[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | select([.comments[].body] | join("\n") | contains("<!-- champion:proposal-escalated -->")) | .number'
    ```
 
 2. **Read the latest escalation comment's `Recurring findings:` bullets** —

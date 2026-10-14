@@ -14,6 +14,7 @@ linked doc disagree, the linked doc wins.
 |---|---|
 | Model precedence chain, escalation ladder | [`model-selection.md`](model-selection.md) |
 | `runtimes.*` — runtime resolution, `roles`, `preference`, `rolePreference`, `backstopCeiling`, observability markers | [`runtime-adapters.md`](runtime-adapters.md) |
+| `runtimes.roleDraw`, `runtimes.excludeProviders` — weighted per-stage, per-attempt runtime draw | [`role-draw.md`](role-draw.md) |
 | Model profiles, the API-key account pool (`loom-daemon api-keys`) | [`runtime-model-trials.md`](runtime-model-trials.md) |
 | Claude OAuth account pool, rotation, exhaustion holds | [`token-pool.md`](token-pool.md) |
 

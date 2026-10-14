@@ -519,7 +519,7 @@ chmod +x "$MP/bin/gh"
 # pushed to the local bare repo above; nothing after this point fetches.
 git -C "$MP/repo" remote set-url origin https://github.com/loom/test.git
 MP_OUT="$(cd "$MP/repo" && PATH="$MP/bin:$PATH" GH_TOKEN=x \
-    LOOM_GH_BIN="$MP/bin/gh" LOOM_GH_NO_POLICY_LAUNCHER=1 LOOM_WRITE_SCOPE_CACHE_DIR="$MP/write-scope-cache" \
+    LOOM_GH_BIN="$MP/bin/gh" LOOM_WRITE_SCOPE_CACHE_DIR="$MP/write-scope-cache" \
     env -u GH_REPO -u LOOM_REPO \
     bash .loom/scripts/merge-pr.sh 1 2>&1)"
 MP_RC=$?

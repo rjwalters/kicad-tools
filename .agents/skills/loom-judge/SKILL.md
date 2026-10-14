@@ -312,6 +312,8 @@ If no argument is provided, use the normal finding work workflow below.
 
 ## Label Workflow
 
+**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+
 **Find PRs ready for evaluation (green badges):**
 ```bash
 loom-daemon pr-queue --role judge
@@ -922,7 +924,7 @@ nothing would ever look at it again. Sweep those two queues first:
 #   1 = gh/env error.
 UNANCHORED=""; ANCHORED=""
 for PR in $("$GH_READ" pr list --state=open --limit 200 --json number,labels \
-    --jq '.[] | select([.labels[].name] | any(. == "loom:pr" or . == "loom:changes-requested")) | .number'); do
+    --jq '.[] | select([.labels[].name] | any(. == "loom:pr" or . == "loom:changes-requested")) | select(any(.labels[]?.name; . == "loom:frozen") | not) | .number'); do
   ./.loom/scripts/verdict-staleness-guard.sh "$PR" --clear --anchor
   case "$?" in
     13) ANCHORED="$ANCHORED #$PR" ;;
@@ -2651,7 +2653,7 @@ EOF
 # and anchor any verdict that carries no marker at all (never `|| true` — see
 # "Stale-Verdict Sweep"; exit 11 = still UNVERIFIABLE, 13 = anchored)
 for PR in $("$GH_READ" pr list --state=open --limit 200 --json number,labels \
-    --jq '.[] | select([.labels[].name] | any(. == "loom:pr" or . == "loom:changes-requested")) | .number'); do
+    --jq '.[] | select([.labels[].name] | any(. == "loom:pr" or . == "loom:changes-requested")) | select(any(.labels[]?.name; . == "loom:frozen") | not) | .number'); do
   ./.loom/scripts/verdict-staleness-guard.sh "$PR" --clear --anchor
   [ "$?" -eq 11 ] && echo "UNVERIFIABLE verdict on #$PR — do not trust it"
 done

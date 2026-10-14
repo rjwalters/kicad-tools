@@ -80,7 +80,6 @@ cat "$TMP/leases.ndjson" 2>/dev/null || true
 EOF
 chmod +x "$TMP/gh"
 export LOOM_GH_BIN="$TMP/gh"
-export LOOM_GH_NO_POLICY_LAUNCHER=1  # no host egress-policy launcher over the stub (#9995)
 unset WORKTREE_ALLOW_SHARED_LEASE
 
 NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

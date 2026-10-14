@@ -81,7 +81,6 @@ exec "\$inner" "\$@"
 EOF
   chmod +x "$aux/gh"
   export LOOM_GH_BIN="$aux/gh"
-  export LOOM_GH_NO_POLICY_LAUNCHER=1  # no host egress-policy launcher over the fixture gh (#9995)
   export LOOM_WRITE_SCOPE_CACHE_DIR="$aux/cache"
   unset GH_REPO LOOM_REPO
 }

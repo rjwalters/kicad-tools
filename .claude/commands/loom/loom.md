@@ -161,11 +161,12 @@ When the daemon is running, you coordinate work via MCP tools where available, a
    - MCP: `mcp__loom__list_sweeps` (currently-dispatched sweeps with PIDs and started_at), `mcp__loom__get_sweep_status <sweep_id>` (per-sweep phase, blockers, last activity), `mcp__loom__tail_event_bus` (short tail, recent lifecycle events)
    - CLI: `loom-daemon status` (registry + dynamic-cap inputs + health-gate state + per-token usage; add `--pipeline` for the forge-side snapshot in the same call, replacing step 2's separate `gh` calls)
 
-2. **Assess pipeline** using read-only gh commands (or `loom-daemon status --pipeline` from step 1):
+2. **Assess pipeline** using read-only gh commands (or `loom-daemon status --pipeline` from step 1).
+   **Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
    ```bash
-   gh issue list --label="loom:issue" --state=open --json number,title --limit=20
-   gh issue list --label="loom:building" --state=open --json number,title --limit=20
-   gh pr list --label="loom:review-requested" --json number,title --limit=20
+   gh issue list --label="loom:issue" --search "-label:loom:frozen" --state=open --json number,title --limit=20
+   gh issue list --label="loom:building" --search "-label:loom:frozen" --state=open --json number,title --limit=20
+   gh pr list --label="loom:review-requested" --search "-label:loom:frozen" --json number,title --limit=20
    ```
 
 3. **Dispatch new sweeps** via MCP or CLI. Derive the target workspace root once

@@ -22,7 +22,10 @@
 #      until Epic #3835 Phase 3 ships (the file doesn't exist yet anywhere).
 #   2. Legacy    <repo_root>/.loom/config.json         — today's status quo.
 #   3. Tracked   <repo_root>/.loom-project/project.json — new in #4039.
-#   4. Ignored   <repo_root>/.loom-local/local.json     — new in #4039.
+#   4. Fleet     <repo_root>/.loom-local/fleet-repo.json — the per-repo fleet
+#                tier (#11738), written by the daemon's fleet sync from the
+#                fleet store's repos[].config; beats the committed config.
+#   5. Ignored   <repo_root>/.loom-local/local.json     — new in #4039.
 #
 # A missing/malformed file at ANY tier soft-fails to `{}` for that tier (it
 # contributes nothing to the merge) — this never aborts the calling script.
@@ -101,8 +104,8 @@ loom_resolve_config() {
         --argjson a "$tier_defaults" \
         --argjson b "$tier_legacy" \
         --argjson c "$tier_project" \
-        --argjson d "$tier_local" \
-        '$a * $b * $c * $d'
+        --argjson d "$(_loom_config_soft_read "$repo_root/.loom-local/fleet-repo.json")" --argjson e "$tier_local" \
+        '$a * $b * $c * $d * $e'
 }
 
 # loom_config_get <repo_root> <dotted.path> [default]

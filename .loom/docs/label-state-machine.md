@@ -84,6 +84,7 @@ each definition, for the terse version of this same table):
 | `loom:blocked-unnamed` | A queue marker, **not** a park label: the daemon tick applies it to an open `loom:blocked` *issue* naming no blocker and stating no reason (`check-stale-blocked`'s Undocumented), skipping operator holds, claims, permanent blocks and daemon holds; Curator drains it (`unnamed-block-review.md`) and removes it. Coexists with `loom:blocked`; the tick also clears it once the issue is named, reasoned or unblocked (#10558) | No (`loom:blocked` already skips) |
 | `loom:operator-only` | Requires human action or ruling *outside* automation entirely (credentials, infra, hardware, an owner-gated decision) | **Yes** — sweep/shepherd skip it, except the narrow capability-matched `loom:operator-mechanical` case (#6893, see "Dispatch path" below) |
 | `loom:needs-capability` | Blocked on a missing tool/agent capability — not an operator-by-right decision, but automation genuinely cannot proceed without the capability existing first (#5817) | **Yes** — sweep/shepherd skip it, identically to `loom:operator-only` today |
+| `loom:frozen` | Not now: don't touch, nothing is pending (#11743) | **Yes, and so does everything else**: no agent or daemon path reads it as work, comments on it or relabels it. A human applies it and only a human removes it; there is no automatic release. Unlike `loom:blocked`, nothing re-evaluates it |
 | `loom:operator` | The engine has stopped on this specific artifact and a human must act, but the item stays live in its normal queue so the engine's own release conditions can still fire | **New-builder skip only** — the work finder does not *start* a fresh `--claim-owned` build on it (vibesql#6664); re-evaluation lanes (Champion/role ticks, watchdog re-dispatch, reaper resume, explicit `loom-daemon dispatch <N>`) still reach it |
 
 The distinguishing property of `loom:operator` is that it is **re-evaluable**:
@@ -732,7 +733,11 @@ rationale: [`premise-gate.md`](premise-gate.md).
 **`loom:decision-malformed` (#10057)**: the operator UI bounces a
 `loom:operator-decision` issue without a valid `decision` block into this label.
 Curator repairs it (back to `loom:operator-decision`) or, if no operator call
-exists, removes it and re-routes; a repeat bounce is left alone.
+exists, removes it and re-routes; a repeat bounce is left alone. It is a
+work-finder skip label (#11480), so a bounced Decision issue is never build
+work. No daemon release path (claim release, quarantine release, no-op hold
+lift, reclaim) re-adds `loom:issue` beside it or beside any other skip or
+lane-veto label (#11480's shared `restore_veto`).
 
 **`loom:needs-revision` (#10753)**: Champion adds it with a `NEEDS REVISION`
 verdict, routing the issue to Curator instead of waiting for someone to edit

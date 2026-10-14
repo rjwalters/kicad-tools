@@ -38,32 +38,26 @@ no priority side listing), and no priority exempts a candidate from any gate
 
 ## Selection: workspace first, then issue
 
-1. **Pick a workspace** among those with dispatchable work, at random,
-   weighted by workspace priority.
-   - The pool is three-tier (#11547). A workspace whose next candidate is a
-     verified red-main fix wins the draw (`pool: "red-main-fix"`); else a
-     workspace holding any open, dispatchable `loom:very-important` work wins
-     (`"very-important"`); if several qualify at a tier, the draw is among
-     just those. Otherwise it is over every workspace with dispatchable work
-     (`"all"`).
-   - **Weight mapping (softmax, #11684).** A workspace's `fleet_priority`
-     (the `priority` integer in `workspaces.json`; lower = higher priority,
-     default `100`) is read as a negative logit with one temperature `T`:
-     `weight = max(1, round(1_000_000 * exp(-(priority - p_min) / T)))`.
-     `p_min` is the smallest priority **in the pool being drawn over** (after
-     the tier selection above), so the pool's top workspace always weighs
-     1,000,000 and only priority *differences* matter. `T` is the
-     hyperparameter `dispatch.drawTemperature` (integer, 1–100000, default
-     `80`; see [`hyperparameters.md`](hyperparameters.md)), re-read every
-     tick: small `T` is nearly strict priority order, large `T` nearly
-     uniform. At `T = 80` the weight falls by `e` every 80 priority units:
-     priority 20 outweighs 200 about 9.5x, and a gap of 100 is about 3.5x.
-     The weight never reaches 0, so no workspace is ever starved.
-     `priority_pick::softmax_weight` is the one implementation. (Before
-     #11684 the weight was `max(1, 1000 / (1 + priority))`, a fixed curve.)
+1. **Pick a workspace** among those with dispatchable work, at random, with
+   probability **P = w / Σw** (#11742; operator ruling 2026-10-13). There are **no tiers**:
+   nothing wins the draw outright.
+   - **Base weight.** A workspace's `weight` (the integer in `workspaces.json`,
+     set from the fleet store's required `repos[].weight`; higher = more draws,
+     `0` = never drawn) is its share of draws. N repos at weight 1 and loom at
+     weight N give loom about half the draws while every repo has work.
+   - **Bonuses.** While a workspace's remaining candidates include a verified
+     red-main fix, `loom:very-important` work or `loom:important` work, the
+     matching bonus is added to its weight; bonuses stack:
+     `w = weight + redMainFix? + veryImportant? + important?`. The points are
+     hyperparameters `dispatch.weightBonusRedMainFix` (default `400`),
+     `dispatch.weightBonusVeryImportant` (`100`) and
+     `dispatch.weightBonusImportant` (`20`), re-read every tick (see
+     [`hyperparameters.md`](hyperparameters.md)). A workspace of weight `0`
+     earns no bonus: it stays off. `priority_pick::draw_workspace` is the one
+     implementation.
    - **Reproducibility.** The draw uses a seedable RNG (`PickRng`, SplitMix64).
-     A fixed seed reproduces the exact pick sequence. The draw (pool,
-     candidates with weights, total weight, temperature, `p_min`, roll, pick)
+     A fixed seed reproduces the exact pick sequence. The draw (candidates
+     with base weight, bonus and effective weight, total weight, roll, pick)
      is `WorkspaceDraw`, the record `pick.decision` carries. The dispatch
      tick's seed is derived
      from the wall-clock minute and the host id (scheme `loom-draw/v1`, #11683:
@@ -80,15 +74,20 @@ no priority side listing), and no priority exempts a candidate from any gate
 **The red-main-fix lane** (#11547, operator ruling on #11278). A verified
 red-main fix is an issue carrying `<!-- loom:main-red-fix -->` whose repo's
 `main` is verified red this tick. While `main` is red nothing in that repo can
-merge, so the fix leads: first in its workspace and its workspace first in the
-draw. It is not a level and changes no gate: it keeps only its existing bypass
+merge, so the fix leads its workspace and adds the red-main bonus to the
+workspace's weight in the draw. It is not a level and changes no gate: it keeps only its existing bypass
 of the build back-off, the file-overlap gate and the repo-sharding slice,
 which a red `main` would otherwise deadlock. On a green `main` the marker
-grants nothing.
+grants nothing. With `autonomous.workFinder.redMainAutofile.enabled` on (off
+by default), the daemon files that issue itself when `main` turns red, and
+closes it when `main` is green again (#11766; daemon-reference.md,
+"Auto-filed red-main fix issue").
 
 **Removed ordering keys** (gone from dispatch since #11508): the star, the
 starred-at time and its restart store, the inherited-level key, and the
-cross-workspace tier and round-robin interleave.
+cross-workspace tier and round-robin interleave; and (#11742) the draw's
+red-main-fix and very-important pool tiers, the `fleet_priority` softmax and
+`dispatch.drawTemperature`.
 
 ## The very-important cap (#11509)
 

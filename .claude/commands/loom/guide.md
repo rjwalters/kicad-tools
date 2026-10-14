@@ -154,6 +154,8 @@ Writes stay literal `gh` (so the guard hooks still see them). Full policy:
 
 ## Finding Work
 
+**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+
 ```bash
 # Find all human-approved issues ready for work (exclude building issues,
 # loom:operator-only issues, and loom:blocked issues — #6941: labels.yml
@@ -165,7 +167,7 @@ Writes stay literal `gh` (so the guard hooks still see them). Full policy:
 # NOTE: gh ANDs --label values, so `--label "!loom:building"` matches a literal
 # label no issue carries and silently returns an empty set. Exclude building,
 # operator-only, and blocked issues with raw search terms instead.
-"$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked" --state open --json number,title,labels,body
+"$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked -label:loom:frozen" --state open --json number,title,labels,body
 ```
 
 ## Priority Labels and Duplicate Checks
@@ -217,9 +219,9 @@ discover_project_goals
 check_backlog_balance() {
   echo "=== Backlog Priority Balance ==="
 
-  vi=$("$GH_READ" issue list --label="loom:very-important" --state=open --json number --jq 'length')
-  imp=$("$GH_READ" issue list --label="loom:important" --state=open --json number --jq 'length')
-  ready=$("$GH_READ" issue list --label="loom:issue" --state=open --json number --jq 'length')
+  vi=$("$GH_READ" issue list --label="loom:very-important" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
+  imp=$("$GH_READ" issue list --label="loom:important" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
+  ready=$("$GH_READ" issue list --label="loom:issue" --state=open --json number,labels --jq '[.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
 
   echo "Very important:     $vi"
   echo "Important:          $imp"
@@ -369,7 +371,7 @@ Without orphan recovery, orphaned `loom:building` labels cause:
 
 ```bash
 # Get all loom:building issues
-"$GH_READ" issue list --label "loom:building" --state open --json number,title
+"$GH_READ" issue list --label "loom:building" --search "-label:loom:frozen" --state open --json number,title
 
 # For each issue, check:
 # 1. Worktree exists?
@@ -452,7 +454,7 @@ EOF
 ```bash
 # 1. Find loom:building issues without PRs
 echo "=== In-Progress Issues ==="
-"$GH_READ" issue list --label "loom:building" --state open
+"$GH_READ" issue list --label "loom:building" --search "-label:loom:frozen" --state open
 
 # 2. Find recently merged PRs
 echo "=== Recently Merged PRs ==="
@@ -510,7 +512,7 @@ For each `loom:blocked` issue, check if all dependencies have resolved:
 ```bash
 # Get all blocked issues
 # --limit: gh defaults to 30 (#10553)
-"$GH_READ" issue list --label "loom:blocked" --state open --limit 1000 --json number,title,body
+"$GH_READ" issue list --label "loom:blocked" --search "-label:loom:frozen" --state open --limit 1000 --json number,title,body
 
 # For each issue:
 # Parse body dependencies; unblock when all are closed
@@ -668,12 +670,13 @@ has_permanent_block() {  # unreadable => true
 check_and_unblock() {
   # --limit: gh defaults to 30 (#10553)
   local blocked_limit=1000 blocked_json blocked_count
-  blocked_json=$("$GH_READ" issue list --label "loom:blocked" --state open --limit "$blocked_limit" --json number,body,title)
+  # loom:frozen is dropped in the loop below.
+  blocked_json=$("$GH_READ" issue list --label "loom:blocked" --state open --limit "$blocked_limit" --json number,body,title,labels)
   blocked_count=$(printf '%s\n' "$blocked_json" | jq 'length')
   if [ "$blocked_count" -ge "$blocked_limit" ]; then
     echo "WARNING: loom:blocked listing hit --limit $blocked_limit; truncated" >&2
   fi
-  printf '%s\n' "$blocked_json" | jq -c '.[]' | while read -r issue; do
+  printf '%s\n' "$blocked_json" | jq -c '.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)' | while read -r issue; do
     local number=$(printf '%s\n' "$issue" | jq -r '.number')
     local body=$(printf '%s\n' "$issue" | jq -r '.body')
     local title=$(printf '%s\n' "$issue" | jq -r '.title')
@@ -817,7 +820,7 @@ pr_state=$(gh pr view "$pr_number" --json state,mergedAt --jq '.state')
 
 ```bash
 # Get all open epics
-"$GH_READ" issue list --label "loom:epic" --state open --json number,title,body
+"$GH_READ" issue list --label "loom:epic" --search "-label:loom:frozen" --state open --json number,title,body
 ```
 
 ### Track Phase Progress
@@ -831,7 +834,7 @@ check_epic_progress() {
   # Get epic body to parse phases
   local body=$(gh issue view "$epic_number" --json body --jq '.body')
 
-  # Find all phase issues for this epic
+  # Find all phase issues for this epic (loom:frozen too)
   local phase_issues=$("$GH_READ" issue list \
     --label="loom:epic-phase" \
     --state=all \
@@ -871,7 +874,7 @@ Include epic status in triage summaries:
 If an epic has had no progress in 7+ days:
 
 ```bash
-# Check last activity on epic issues
+# Check last activity on epic issues (loom:frozen too)
 LAST_CLOSED=$("$GH_READ" issue list \
   --label="loom:epic-phase" \
   --state=closed \
@@ -1823,10 +1826,10 @@ render_plan_body() {
   # section, never which items appear in it.
   local held vimp imp ready building review approved curated proposals epics
   # #11103: the two priority levels, one section each.
-  vimp=$("$GH_READ" issue list --label "loom:very-important" --state open --limit 200 --json number,title \
-    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
-  imp=$("$GH_READ" issue list --label "loom:important" --state open --limit 200 --json number,title \
-    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
+  vimp=$("$GH_READ" issue list --label "loom:very-important" --state open --limit 200 --json number,title,labels \
+    --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title)"')
+  imp=$("$GH_READ" issue list --label "loom:important" --state open --limit 200 --json number,title,labels \
+    --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title)"')
   # #7008: exclude loom:operator-only (a human-only decision, not buildable
   # by automation) the same way the "Finding Work" search does; `ready` also
   # excludes loom:building (an issue already claimed is no longer "ready").
@@ -1843,12 +1846,12 @@ render_plan_body() {
   # can only be derived once `approved_json` (fetched further down) is in
   # hand, so the final bullet-formatted `ready` is assembled after it.
   local ready_json
-  ready_json=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked" --state open --limit 200 --json number,title \
+  ready_json=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked -label:loom:frozen" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number)')
-  building=$("$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only" --state open --limit 200 --json number,title \
+  building=$("$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only -label:loom:frozen" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
-  review=$("$GH_READ" pr list --label "loom:review-requested" --state open --limit 200 --json number,title \
-    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
+  review=$("$GH_READ" pr list --label "loom:review-requested" --state open --limit 200 --json number,title,labels \
+    --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title)"')
   # #5930/#6457: PRs carrying `loom:operator` are Judge-approved work stuck on
   # a human merge-risk-hold decision — folded into the generated region (see
   # the "#5930, DO NOT put a hand-written narrative section outside the
@@ -1868,7 +1871,7 @@ render_plan_body() {
   # reintroducing a second query, which #6457 removed on purpose).
   local approved_json
   approved_json=$("$GH_READ" pr list --label "loom:pr" --state open --limit 200 --json number,title,labels,closingIssuesReferences \
-    --jq 'sort_by(.number)')
+    --jq 'sort_by(.number) | [.[] | select(any(.labels[]?.name; . == "loom:frozen") | not)]')
   approved=$(printf '%s' "$approved_json" | jq -r '.[] | "- **#\(.number)**: \(.title)"')
   held=$(printf '%s' "$approved_json" | jq -r '.[] | select([(.labels // [])[].name] | index("loom:operator")) | "- **#\(.number)**: \(.title)"')
   # #7083: derive the set of issue numbers already closed by an open
@@ -1883,16 +1886,16 @@ render_plan_body() {
     jq -c '[.[] | (.closingIssuesReferences // [])[].number] | unique')
   ready=$(printf '%s' "$ready_json" | jq -r --argjson excl "$pr_linked_issues" \
     '.[] | select((.number as $n | $excl | index($n)) | not) | "- **#\(.number)**: \(.title)"')
-  curated=$("$GH_READ" issue list --label "loom:curated" --state open --limit 200 --json number,title \
-    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title) *(curated)*"')
+  curated=$("$GH_READ" issue list --label "loom:curated" --state open --limit 200 --json number,title,labels \
+    --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title) *(curated)*"')
   local architect hermit
-  architect=$("$GH_READ" issue list --label "loom:architect" --state open --limit 200 --json number,title \
-    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title) *(architect)*"')
-  hermit=$("$GH_READ" issue list --label "loom:hermit" --state open --limit 200 --json number,title \
-    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title) *(hermit)*"')
+  architect=$("$GH_READ" issue list --label "loom:architect" --state open --limit 200 --json number,title,labels \
+    --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title) *(architect)*"')
+  hermit=$("$GH_READ" issue list --label "loom:hermit" --state open --limit 200 --json number,title,labels \
+    --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title) *(hermit)*"')
   proposals="${architect}${architect:+${hermit:+$'\n'}}${hermit}"
-  epics=$("$GH_READ" issue list --label "loom:epic" --state open --limit 200 --json number,title \
-    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
+  epics=$("$GH_READ" issue list --label "loom:epic" --state open --limit 200 --json number,title,labels \
+    --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title)"')
 
   section "Operator Attention: Merge-Risk-Hold Pileup" \
     "Judge-approved PRs stuck under a \`loom:operator\` merge-risk hold — implementation work is done, only a human merge decision is missing." \

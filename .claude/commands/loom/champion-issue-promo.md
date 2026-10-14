@@ -57,8 +57,8 @@ discover_project_goals() {
   [ -f README.md ] && grep -i "milestone\|current:\|target:" README.md | head -5
   grep -E "^- \[.\]|^## M[0-9]" docs/roadmap.md ROADMAP.md 2>/dev/null | head -10
   echo "Current priority work:"
-  gh issue list --label="loom:very-important" --state=open --limit=5
-  gh issue list --label="loom:important" --state=open --limit=5
+  gh issue list --label="loom:very-important" --search "-label:loom:frozen" --state=open --limit=5
+  gh issue list --label="loom:important" --search "-label:loom:frozen" --state=open --limit=5
 }
 discover_project_goals
 ```
@@ -78,11 +78,11 @@ promoted (`loom:issue` / `loom:building`), unheld (#7613) issues per level.
 ```bash
 check_backlog_balance() {
   echo "=== Backlog Level Balance ==="
-  # Promoted (loom:issue/loom:building), unheld (#7613) issues, by level.
+  # Promoted (loom:issue/loom:building), unheld (#7613) issues, by level; loom:frozen dropped too.
   promoted_json=$( { gh issue list --label="loom:issue" --state=open --limit 500 --json number,labels
     gh issue list --label="loom:building" --state=open --limit 500 --json number,labels; } |
     jq -s 'add | unique_by(.number) |
-    [.[] | select([.labels[].name] | any(IN("loom:operator-only","loom:blocked")) | not) |
+    [.[] | select([.labels[].name] | any(IN("loom:operator-only","loom:blocked","loom:frozen")) | not) |
     {number, level: ([.labels[].name] | if index("loom:very-important") then "loom:very-important"
       elif index("loom:important") then "loom:important" else "default" end)}]')
   _occupants() { printf '%s' "$promoted_json" | jq -r --arg l "$1" \
@@ -187,7 +187,7 @@ same mechanism — see the un-escalation table below.
 for LABEL in loom:curated loom:architect loom:hermit loom:auditor; do
   gh issue list --label "$LABEL" --label "loom:operator-only" --state open --limit 200 \
     --json number,labels,comments \
-    --jq '.[] | select([.comments[].body] | join("\n") | contains("<!-- champion:proposal-escalated -->")) | .number'
+    --jq '.[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | select([.comments[].body] | join("\n") | contains("<!-- champion:proposal-escalated -->")) | .number'
 done | sort -un | head -n "${LOOM_MAX_UNESCALATION_RESCANS:-5}" | while read -r N; do
   ./.loom/scripts/classify-dependency-block.sh --issue "$N" --check-unescalate --apply
 done
@@ -261,7 +261,7 @@ blocker had long since cleared.
 # sufficient here — no need to loop over the four proposal labels the way
 # Pass 0 does for loom:operator-only.
 gh issue list --label "loom:evaluating" --state open --limit 200 \
-  --json number --jq '.[] | .number' \
+  --json number,labels --jq '.[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | .number' \
   | sort -un | head -n "${LOOM_MAX_EVALUATING_RESCANS:-5}" | while read -r N; do
   STALE_OUT=$(./.loom/scripts/check-evaluating-staleness.sh --issue "$N"); STALE_RC=$?
   DECISION=$(printf '%s\n' "$STALE_OUT" | sed -n 's/^DECISION=//p')
@@ -368,7 +368,7 @@ prose.
 # scanning every open issue's full comment thread — mirrors Pass 0's per-label
 # loop shape, but the query itself does the label exclusion (`-label:`) so no
 # separate jq filter is needed here.
-gh issue list --search 'in:comments "Champion Review: APPROVED" -label:loom:issue' \
+gh issue list --search 'in:comments "Champion Review: APPROVED" -label:loom:issue -label:loom:frozen' \
   --state open --limit 200 --json number --jq '.[] | .number' \
   | sort -un | head -n "${LOOM_MAX_PROMOTION_MISMATCH_RESCANS:-5}" | while read -r N; do
   ./.loom/scripts/check-promotion-landed.sh --issue "$N" --apply

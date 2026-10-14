@@ -505,6 +505,8 @@ issue and prefer commenting on it over filing a new one.** This is not scoped to
 one label: the Auditor runs across many repos and hosts, and an un-deduped filer
 is a noise machine (prior art: #4736 filed 7 duplicate "still blocked" comments).
 
+**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+
 ```bash
 # Run this gate before EVERY issue filing in this role, whatever the label:
 TITLE="…"   # the title you are about to file

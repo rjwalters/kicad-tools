@@ -208,7 +208,7 @@ else
     # Negative control: drop the held-issue exclusion (#7613). The same
     # fixture must then count the two held issues, or the occupant
     # assertions above prove nothing.
-    sed 's/select(\[\.labels\[\]\.name\] | any(IN("loom:operator-only","loom:blocked")) | not) |//' \
+    sed 's/select(\[\.labels\[\]\.name\] | any(IN("loom:operator-only","loom:blocked","loom:frozen")) | not) |//' \
         "$FIXTURE_DIR/balance.sh" >"$FIXTURE_DIR/balance-old.sh"
     if cmp -s "$FIXTURE_DIR/balance.sh" "$FIXTURE_DIR/balance-old.sh"; then
         fail "negative control: could not strip the held-issue filter (has the block changed shape?)"

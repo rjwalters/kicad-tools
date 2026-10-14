@@ -422,6 +422,8 @@ Full convention and rationale: `.loom/docs/untrusted-external-content.md`. A mar
 
 ## Finding Work
 
+**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+
 Use the shared queue and walk its rows in order:
 ```bash
 QUEUE=$(loom-daemon pr-queue --role doctor) || exit 1
@@ -570,14 +572,14 @@ claims from. Still excludes `loom:operator` here too, so a Doctor skimming this
 list doesn't hand-pick a held PR (#5978).
 ```bash
 gh pr list --state=open --json number,title,labels,mergeable \
-  | jq -r '.[] | select(.mergeable == "CONFLICTING") | select(.labels | all(.name != "loom:operator")) | "#\(.number): \(.title)"'
+  | jq -r '.[] | select(.mergeable == "CONFLICTING") | select(.labels | all(.name != "loom:operator" and .name != "loom:frozen")) | "#\(.number): \(.title)"'
 ```
 
 **Find all open PRs:**
 ```bash
 # Check primary queues first
-PRIORITY_1=$(gh pr list --label="loom:pr" --state=open --json number,mergeable | jq '[.[] | select(.mergeable == "CONFLICTING")] | length')
-PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only" --json number | jq 'length')
+PRIORITY_1=$(gh pr list --label="loom:pr" --state=open --json number,mergeable,labels | jq '[.[] | select(.mergeable == "CONFLICTING") | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
+PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only -label:loom:frozen" --json number | jq 'length')
 
 if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
   echo "No labeled work, checking fallback queue..."

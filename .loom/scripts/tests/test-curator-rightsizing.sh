@@ -144,6 +144,23 @@ expect "loom-curator skill has the section"           "$SRS" "Consolidation gate
 expect "loom-guide skill has the handoff"             "$(cat "$GUIDE_SKILL")" "sibling micro-issues: leave for Curator"
 
 echo ""
+echo "Test group 6: Curator refuses a PR target before its first claim write (#9929)"
+# Not rightsizing, but the same prompt-lint shape: a trim must not drop the
+# kind probe, and it must precede the `loom:curating` write on the claim path.
+ARGS="$(section "$CURATOR_MD" '^## Argument Handling')"
+expect "kind probe reads the target url"            "$ARGS" "gh issue view <number> --json url"
+expect "a /pull/ url or failed read means refuse"   "$ARGS" "a \`/pull/\` URL or a failed read means refuse"
+probe_line="$(grep -nF -- "--json url --jq .url" <<< "$ARGS" | head -1 | cut -d: -f1)"
+claim_line="$(grep -nF -- "labels[]=loom:curating" <<< "$ARGS" | head -1 | cut -d: -f1)"
+if [[ -n "$probe_line" && -n "$claim_line" && "$probe_line" -lt "$claim_line" ]]; then
+    pass "probe precedes the loom:curating claim write"
+else
+    fail "probe precedes the loom:curating claim write (probe=$probe_line claim=$claim_line)"
+fi
+CLAIMING="$(awk '/^## Claiming Work/{f=1;next} /^## /{f=0} f' "$CURATOR_MD")"
+expect "general claim recipe defers to the kind probe" "$CLAIMING" "kind probe (Argument Handling)"
+
+echo ""
 echo "================================"
 echo "Tests run:    $TESTS_RUN"
 echo -e "Tests passed: ${GREEN}${TESTS_PASSED}${NC}"

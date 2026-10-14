@@ -2202,23 +2202,19 @@ stderr naming the one that was used:
    checkout, `stashes` sends it one read-only `ReadIssueState` request: the
    repo root, its `owner/repo`, and an issue number. The daemon accepts it only
    for a root in `~/.loom/workspaces.json`, re-derives the slug from that
-   root's `origin` itself (a mismatch is *unknown*), applies the forge-egress
-   admission gate, and runs the single `gh issue view` through its own
-   `GhInvocation` routing (per-owner App credential, managed launcher). Only
-   `OPEN`/`CLOSED`/unknown and a non-secret route label come back; the daemon
+   root's `origin` itself (a mismatch is *unknown*), and runs the single
+   `gh issue view` through its own `GhInvocation` routing (per-owner App
+   credential). Only `OPEN`/`CLOSED`/unknown and a non-secret route label
+   come back; the daemon
    may live anywhere, including outside every managed root. Once the daemon
    has answered, its answer is final for the run: an *unknown* from it is
    never retried under ambient credentials.
 2. **Standalone (`standalone-gh/<launcher>`).** With no daemon (absent, down,
    an untrusted socket, a daemon too old to know the request) or a repo the
    daemon does not manage, the read runs in the CLI process through the same
-   `GhInvocation` facade, behind the same admission gate. An unconfigured host
-   keeps its ambient `gh` login, unchanged. A governed host uses the policy's
-   managed launcher, and a routing refusal (`standalone-refused:<codes>`) is
-   *unknown*, never a direct request.
+   `GhInvocation` facade, with the ambient `gh` login.
 
-Whenever no policy-compliant path exists the answer is *unknown*, and unknown
-never retires a stash.
+A read that fails is *unknown*, and unknown never retires a stash.
 
 **A blind run is an error, not "0 retirable" (#8876).** When at least one issue was looked up and
 *every* lookup failed, the run prints one line ahead of the per-stash verdicts

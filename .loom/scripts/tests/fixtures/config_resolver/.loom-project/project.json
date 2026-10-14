@@ -15,5 +15,6 @@
     "command": "make test"
   },
   "projectOnly": "project-value",
-  "overriddenByLocal": "project-value"
+  "overriddenByLocal": "project-value",
+  "overriddenByFleetRepo": "project-value"
 }
