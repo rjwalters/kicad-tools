@@ -3193,6 +3193,20 @@ def _save_partial_results() -> bool:
 
             record_publication(save_path)
 
+            # Issue #6330: publish the snapshot facts NOW, before the slow
+            # access-witness sidecar below.  A hard kill during that write
+            # would otherwise leave this board beside a timeout receipt with
+            # ``snapshot_saved: false`` and no ``snapshot_state``.  A no-op
+            # without a supervisor control file.
+            from .route_deadline import record_stage
+
+            record_stage(
+                "partial-save",
+                snapshot_saved=True,
+                snapshot=str(save_path),
+                **info,
+            )
+
             # Issue #5639: the deadline / SIGINT save path is the ONLY save
             # path a deadline-killed run ever reaches -- the normal save path
             # (and its ``_write_access_witness_sidecar`` call) is downstream of
