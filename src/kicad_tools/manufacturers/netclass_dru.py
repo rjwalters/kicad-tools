@@ -545,11 +545,11 @@ def merge_pair_gap_block(
             return existing
         return base.rstrip("\n") + "\n" if base.strip() else ""
 
-    body = [
-        "# The gap the router laid each coupled pair at: max(class intra-pair",
-        "# gap, manufacturer minimum, authored board min_clearance).",
-        *(render_pair_gap_rule(p, n, gap) for p, n, gap in rules),
-    ]
+    body: list[str] = []
+    if rules:
+        body.append("# The gap the router laid each coupled pair at: max(class intra-pair")
+        body.append("# gap, manufacturer minimum, authored board min_clearance).")
+        body.extend(render_pair_gap_rule(p, n, gap) for p, n, gap in rules)
     if limit_rules:
         body.append("# Uncoupled length, skew and via count of each coupled pair, at the limit the")
         body.append("# protocol table or the net class resolves (Issue #6443); a warning where")

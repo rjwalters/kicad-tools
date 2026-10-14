@@ -11,7 +11,8 @@
 #      - `release-1`        -> PR-style (clean up pr-<N> worktree)
 #      - `fix/foo-bar`      -> PR-style
 #      - `feature/issue-42-fix` (extra suffix) -> PR-style (strict regex)
-#   4. doctor.md (defaults/) documents the branch-isolation requirement.
+#   4. doctor.md (defaults/) documents the branch-isolation requirement,
+#      including the #9401 occupied-worktree yield (live process, no lease).
 #
 # This is a static / simulation test — we do not exercise the real `gh pr
 # checkout` round-trip because that would require a live forge. The
@@ -94,6 +95,56 @@ assert_grep "pr-worktree\.sh" "$DOCTOR_MD" \
     "doctor.md references pr-worktree.sh helper"
 assert_grep "\^feature/issue-" "$DOCTOR_MD" \
     "doctor.md documents the feature/issue-<N> regex heuristic"
+
+# #9401: a live process in the PR worktree with no PR lease = yield, not reset.
+assert_grep "^### Occupied worktree: yield, never reset \(#9401\)" "$DOCTOR_MD" \
+    "doctor.md has the 'Occupied worktree' yield section (#9401)"
+assert_grep "After \`lease pr claim\` succeeds and \*\*before\*\* \`worktree\.sh\`" "$DOCTOR_MD" \
+    "occupied-worktree check runs after the lease claim, before worktree setup"
+assert_grep "readlink \"/proc/\\\$p/cwd\".*\|\| lsof -a -p" "$DOCTOR_MD" \
+    "occupied-worktree probe reads /proc cwd with an lsof fallback"
+assert_grep "\[ \"\\\$q\" = \"\\\$S\" \] \|\|" "$DOCTOR_MD" \
+    "occupied-worktree probe excludes the Doctor's own session"
+assert_grep "^post \`Doctor yielding: live process in <WT> \(pid <pid>: <command>\) with no PR$" "$DOCTOR_MD" \
+    "yield comment names the worktree, pid and command"
+assert_grep "lease; worktree left untouched\.\` and stop — no snapshot, reset or checkout\." "$DOCTOR_MD" \
+    "yield stops without touching the worktree"
+assert_grep "\*\*Occupied → yield\*\*: \`lease pr release\`, drop any \`loom:treating\` you added" "$DOCTOR_MD" \
+    "yield releases the lease and the doctor's own loom:treating"
+assert_grep "\*\*Cannot probe\*\* \(no \`pgrep\`, or neither \`/proc\` nor \`lsof\`\): treat a dirty" "$DOCTOR_MD" \
+    "documents the no-pgrep/no-lsof fallback (dirty = occupied)"
+occ_line=$(grep -n "^### Occupied worktree" "$DOCTOR_MD" | head -1 | cut -d: -f1)
+pick_line=$(grep -n "^Pick the worktree by branch shape" "$DOCTOR_MD" | head -1 | cut -d: -f1)
+if [[ -n "$occ_line" && -n "$pick_line" && "$occ_line" -lt "$pick_line" ]]; then
+    pass "occupied-worktree check precedes worktree selection/checkout"
+else
+    fail "occupied-worktree check precedes worktree selection/checkout (occ=$occ_line pick=$pick_line)"
+fi
+
+# Behavioral: run the documented probe verbatim. A missing worktree must print
+# nothing (not every process); a reparented process inside one must be reported.
+probe_dir=$(mktemp -d)
+awk -v h="### Occupied worktree" 'index($0,h)==1{f=1} f&&/^```bash$/{g=1;next} g&&/^```$/{exit} g' "$DOCTOR_MD" > "$probe_dir/probe.txt"
+if [[ -s "$probe_dir/probe.txt" ]]; then
+    run_probe() { (cd "$probe_dir" && mkdir -p .loom/worktrees && sed "s#\.loom/worktrees/<issue-N|pr-N>#.loom/worktrees/$1#" probe.txt | bash 2>/dev/null); }
+    if [[ -z "$(run_probe nonexistent-1)" ]]; then
+        pass "occupied-worktree probe prints nothing for a nonexistent worktree"
+    else
+        fail "occupied-worktree probe prints processes for a nonexistent worktree"
+    fi
+    mkdir -p "$probe_dir/.loom/worktrees/pr-1"
+    (cd "$probe_dir/.loom/worktrees/pr-1" && setsid sleep 30 >/dev/null 2>&1 &)
+    sleep 0.3
+    if run_probe pr-1 | grep -q "sleep 30"; then
+        pass "occupied-worktree probe reports a live process inside an existing worktree"
+    else
+        fail "occupied-worktree probe misses a live process inside an existing worktree"
+    fi
+    pkill -u "$(id -u)" -f "^sleep 30$" 2>/dev/null || true
+else
+    fail "could not extract the occupied-worktree probe snippet from doctor.md"
+fi
+rm -rf "$probe_dir"
 
 # --- Test 4: branch-to-worktree classification (in-script regex simulation) ---
 echo ""
