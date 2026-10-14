@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from typing import Any
 
 # Canonical copper layer ordering from top (front) to bottom (back).
 # KiCad supports up to 30 inner layers named In1.Cu .. In30.Cu.
@@ -230,7 +231,10 @@ def kicad_read_via_layers(
     clean where it really shorts a track on a layer the pair omits.
 
     Every via parser (``schema.pcb.Via.from_sexp`` and the router's two
-    regex parsers) routes its span through this one rule:
+    regex parsers), and the raw-node readers that take a via's layers
+    straight from the tree (zone-fill clearance, DSN export, the DRC local
+    rerouter, the reasoning state and ``strip_traces``; Issue #6614, with
+    :func:`via_node_type`), route the span through this one rule:
 
     * a ``micro`` / ``blind`` / ``buried`` via keeps its declared layers;
     * a keyword-less via whose two layers are recognised copper layers
@@ -256,6 +260,21 @@ def kicad_read_via_layers(
     if set(layer_tuple) == _OUTER_COPPER_LAYERS:
         return layer_tuple, False
     return ("F.Cu", "B.Cu"), True
+
+
+def via_node_type(node: Any) -> str | None:
+    """Return a parsed ``(via ...)`` node's ``micro``/``blind``/``buried`` keyword.
+
+    KiCad writes the type keyword as a bare atom straight after ``via``; a
+    through via carries none.  ``node`` is a :class:`kicad_tools.sexp.SExp`
+    (anything with a ``values`` list).  Returns ``None`` for a keyword-less
+    via -- the ``via_type`` argument :func:`kicad_read_via_layers` expects
+    from a raw-node reader (Issue #6614).
+    """
+    values = getattr(node, "values", None)
+    if values and isinstance(values[0], str) and values[0] in VIA_TYPE_KEYWORDS:
+        return values[0]
+    return None
 
 
 def warn_normalised_vias(log: logging.Logger, source: str, count: int) -> None:

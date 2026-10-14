@@ -208,6 +208,164 @@ def test_router_pair_gaps_use_the_routers_floored_gap() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #6560: the remaining coupled-path readers are floored too
+# ---------------------------------------------------------------------------
+
+
+def _partnered(intra: float = 0.075, *, length_critical: bool = False) -> dict:
+    """``D+``/``D-`` of one ``_hs`` class, each naming the other as partner."""
+
+    def rail(partner: str) -> NetClassRouting:
+        return NetClassRouting(
+            name="HS",
+            trace_width=0.2,
+            clearance=0.15,
+            intra_pair_clearance=intra,
+            coupled_routing=True,
+            diffpair_partner=partner,
+            length_critical=length_critical,
+        )
+
+    return {"D+": rail("D-"), "D-": rail("D+")}
+
+
+def _pad_dict(number: str, x: float, y: float, net: int, name: str) -> dict:
+    return {
+        "number": number,
+        "x": x,
+        "y": y,
+        "width": 0.4,
+        "height": 0.4,
+        "net": net,
+        "net_name": name,
+    }
+
+
+@pytest.mark.parametrize(("authored", "expected"), [(0.15, 0.15), (None, 0.075)])
+def test_inline_serpentine_uses_the_floored_pair_gap(monkeypatch, authored, expected) -> None:
+    """Site 1: ``match_pair_lengths`` gets the floored gap, not the class value."""
+    import dataclasses
+
+    import kicad_tools.router.diffpair_routing as dpr_mod
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.diffpair import (
+        DifferentialPair,
+        DifferentialPairType,
+        DifferentialSignal,
+    )
+
+    ncm = _partnered(length_critical=True)
+    router = Autorouter(
+        width=30.0,
+        height=10.0,
+        rules=DesignRules(authored_min_clearance=authored),
+        net_class_map=ncm,
+    )
+    router.add_component(
+        "U1", [_pad_dict("1", 5.0, 4.6, 1, "D+"), _pad_dict("2", 5.0, 5.4, 2, "D-")]
+    )
+    router.add_component(
+        "J1", [_pad_dict("1", 25.0, 4.6, 1, "D+"), _pad_dict("2", 25.0, 5.4, 2, "D-")]
+    )
+    pair = DifferentialPair(
+        name="D",
+        positive=DifferentialSignal(
+            net_name="D+", net_id=1, base_name="D", polarity="P", notation="plus_minus"
+        ),
+        negative=DifferentialSignal(
+            net_name="D-", net_id=2, base_name="D", polarity="N", notation="plus_minus"
+        ),
+        pair_type=DifferentialPairType.USB2,
+    )
+    # Force a mismatch on whatever geometry the router lays (P 0.5 mm long)
+    # so the run always reaches the inline serpentine branch.
+    pair.rules = dataclasses.replace(pair.rules, max_length_delta=0.1)
+    monkeypatch.setattr(
+        dpr_mod,
+        "calculate_route_length",
+        lambda routes: 20.0 + (0.5 if routes and routes[0].net == 1 else 0.0),
+    )
+
+    seen: list[float] = []
+
+    def _record(*_a, **kwargs):
+        seen.append(kwargs["intra_pair_clearance_mm"])
+        return False
+
+    monkeypatch.setattr(dpr_mod, "match_pair_lengths", _record)
+    router._diffpair.route_differential_pair_coupled(pair)
+    assert seen, "the coupled route never reached the inline serpentine branch"
+    assert seen == [pytest.approx(expected)] * len(seen)
+
+
+@pytest.mark.parametrize(("authored", "expected"), [(0.15, 0.15), (None, 0.075)])
+def test_pair_seg_clearance_uses_the_floored_pair_gap(authored, expected) -> None:
+    """Site 2: the P/N centreline bound is ``width + floored gap``."""
+    from kicad_tools.router.core import Autorouter
+
+    router = Autorouter(
+        10, 10, rules=DesignRules(authored_min_clearance=authored), net_class_map=_partnered()
+    )
+    pathfinder = SimpleNamespace(_get_trace_width_for_net=lambda _name: 0.2)
+    bound = router._diffpair._pair_seg_clearance(pathfinder, "D+")
+    assert bound == pytest.approx(0.2 + expected)
+    # A net without a class keeps the global trace clearance (unchanged).
+    assert router._diffpair._pair_seg_clearance(pathfinder, "X") == pytest.approx(
+        0.2 + router.rules.trace_clearance
+    )
+
+
+def _armed_coupled_pathfinder(authored: float | None):
+    from kicad_tools.router.diffpair_routing import CoupledPathfinder
+    from kicad_tools.router.grid import RoutingGrid
+
+    rules = DesignRules(authored_min_clearance=authored)
+    grid = RoutingGrid(width=5, height=5, rules=rules)
+    pathfinder = CoupledPathfinder(grid, rules, target_spacing_cells=3, net_class_map=_partnered())
+    pathfinder.set_net_name_to_id({"D+": 1, "D-": 2})
+    return grid, pathfinder
+
+
+@pytest.mark.parametrize(("authored", "expected"), [(0.15, 0.15), (None, 0.075)])
+def test_cpp_halo_partner_clearance_uses_the_floored_pair_gap(authored, expected) -> None:
+    """Site 3: ``set_halo_net_dimensions`` receives the floored gap for both rails."""
+    _, pathfinder = _armed_coupled_pathfinder(authored)
+    calls: dict[int, tuple] = {}
+    fake_impl = SimpleNamespace(
+        set_halo_net_dimensions=lambda net, *rest: calls.update({net: rest})
+    )
+    pathfinder._install_cpp_halo_net_dimensions(fake_impl)
+    assert set(calls) == {1, 2}
+    for net, (_w, _c, _v, partner_net, partner_clearance) in calls.items():
+        assert partner_net == (2 if net == 1 else 1)
+        assert partner_clearance == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(("authored", "expected"), [(0.15, 0.15), (None, 0.075)])
+def test_python_halo_partner_clearance_uses_the_floored_pair_gap(
+    monkeypatch, authored, expected
+) -> None:
+    """Site 3b: ``RouteHaloRefiner.trace_clear`` measures at the floored gap."""
+    grid, pathfinder = _armed_coupled_pathfinder(authored)
+    seen: list[tuple] = []
+
+    class _RecordingHalo:
+        def cell_known(self, *_a) -> bool:
+            return True
+
+        def clear(self, segment, _router, *, partner_net=None, partner_clearance=None) -> bool:
+            seen.append((segment.net, partner_net, partner_clearance))
+            return True
+
+    monkeypatch.setattr(grid, "_route_halo", _RecordingHalo(), raising=False)
+    refiner = pathfinder._halo_refiner
+    for net in (1, 2):
+        assert refiner.trace_clear([(2, 2)], 0, 2, 2, net)
+    assert [(net, partner) for net, partner, _ in seen] == [(1, 2), (2, 1)]
+    assert [gap for *_, gap in seen] == [pytest.approx(expected)] * 2
+
+
+# ---------------------------------------------------------------------------
 # The diff_pair_gap managed block
 # ---------------------------------------------------------------------------
 

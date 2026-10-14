@@ -138,20 +138,26 @@ def _validate(pathfinder, route):
 
 
 @pytest.mark.parametrize(
-    "span,blocked",
+    "span,is_micro,blocked",
     [
-        ((Layer.F_CU, Layer.B_CU), True),
-        ((Layer.B_CU, Layer.F_CU), True),
-        ((Layer.F_CU, Layer.IN1_CU), False),
+        ((Layer.F_CU, Layer.B_CU), False, True),
+        ((Layer.B_CU, Layer.F_CU), False, True),
+        # Issue #6485: only a micro via stops short of the outer pair, so the
+        # partial-span case that must NOT reach In2.Cu is pinned on a micro via.
+        ((Layer.F_CU, Layer.IN1_CU), True, False),
+        # Issue #6502 (PR #6628): the same pair on a NON-micro via is drilled
+        # F.Cu..B.Cu, so the candidate-side validator reads its drilled span
+        # and the In2.Cu trace genuinely obstructs the barrel.
+        ((Layer.F_CU, Layer.IN1_CU), False, True),
     ],
 )
-def test_omitted_layer_trace_remains_an_obstacle_to_physical_via(span, blocked):
+def test_omitted_layer_trace_remains_an_obstacle_to_physical_via(span, is_micro, blocked):
     grid, native, pathfinder = _context([Layer.F_CU, Layer.B_CU])
     stored = Segment(3, 4, 5, 4, 0.2, Layer.IN2_CU, 2)
     grid.routes.append(Route(2, "stored", segments=[stored]))
     pathfinder._sync_stored_routes(grid)
     assert _native_trace_valid(native, 0) and _native_trace_valid(native, 1)
-    via = Via(4, 4, 0.3, 0.6, span, 1)
+    via = Via(4, 4, 0.3, 0.6, span, 1, is_micro=is_micro)
     assert (_validate(pathfinder, Route(1, "candidate", vias=[via])) is not None) is blocked
     # A valid spaced candidate remains allowed; omitted copper is not a blanket ban.
     via.y = 5

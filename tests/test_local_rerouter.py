@@ -8,6 +8,8 @@ Covers:
 - Layer and net preservation on rerouted segments
 """
 
+import pytest
+
 from kicad_tools.drc.local_rerouter import LocalRerouter
 from kicad_tools.sexp import SExp, parse_string
 
@@ -782,3 +784,57 @@ class TestMakeSegmentNodeCanonicalUuid:
         assert _uuid_at_seed(7) != _uuid_at_seed(8), (
             "Different seeds must yield different DRC-rerouted segment UUIDs."
         )
+
+
+_FOUR_LAYER_VIA_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (net 1 "SIG")
+  (net 2 "OTHER")
+  (via {via_kw}(at 5 5) (size 0.6) (drill 0.3) (layers {pair}) (net 2) (uuid "via-obs"))
+)
+"""
+
+
+class TestLocalRerouterViaLayerSpan:
+    """Issue #6614: foreign vias block the layers KiCad's barrel occupies."""
+
+    @pytest.mark.parametrize(
+        "via_kw,pair,layer,blocks",
+        [
+            # A keyword-less partial pair is a through via to KiCad: its
+            # barrel is on F.Cu even though the pair never names it.
+            ("", '"In1.Cu" "B.Cu"', "F.Cu", True),
+            ("", '"In1.Cu" "F.Cu"', "B.Cu", True),
+            # A through via is copper on the inner layers it passes through.
+            ("", '"F.Cu" "B.Cu"', "In1.Cu", True),
+            # Keyworded blind/buried vias keep their declared span.
+            ("blind ", '"In2.Cu" "B.Cu"', "F.Cu", False),
+            ("blind ", '"F.Cu" "In1.Cu"', "In1.Cu", True),
+            ("blind ", '"F.Cu" "In1.Cu"', "B.Cu", False),
+            ("buried ", '"In1.Cu" "In2.Cu"', "F.Cu", False),
+        ],
+    )
+    def test_via_obstacle_follows_kicad_read_span(self, via_kw, pair, layer, blocks):
+        doc = _parse_pcb(_FOUR_LAYER_VIA_PCB.format(via_kw=via_kw, pair=pair))
+        nets = _build_nets(doc)
+        rerouter = LocalRerouter(doc, nets, resolution=0.1, padding=0.5)
+
+        blocked: set[tuple[int, int]] = set()
+        rerouter._mark_local_obstacles(
+            blocked,
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            100,
+            100,
+            layer,
+            1,
+            SExp.list("segment"),
+            0.2,
+            0.2,
+        )
+        assert bool(blocked) == blocks

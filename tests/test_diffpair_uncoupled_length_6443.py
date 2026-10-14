@@ -598,3 +598,26 @@ def test_known_divergence_kct_never_exceeds_kicad_on_committed_copper(tmp_path) 
                 theirs = seen[tuple(sorted((p, n)))]
                 assert theirs == pytest.approx(kicad_mm, abs=1e-3)
                 assert mine <= theirs <= mine + 3.0
+
+
+def test_limit_only_block_has_no_gap_header() -> None:
+    merged = merge_pair_gap_block("(version 1)\n", [], [USB])
+    assert merged and "The gap the router laid" not in merged
+    assert "Uncoupled length, skew and via count" in merged
+    with_gap = merge_pair_gap_block("(version 1)\n", [("A_P", "A_N", 0.2)], [USB])
+    assert with_gap and "The gap the router laid" in with_gap
+
+
+def test_measurement_summary_labels_via_findings_vias(tmp_path, capsys) -> None:
+    from kicad_tools.cli.check_cmd import _print_measurement_summary
+
+    items = [
+        seg((0, 0), (20, 0), "T_P"),
+        seg((0, 0.4), (20, 0.4), "T_N"),
+        *(via((i, 5), "T_P") for i in range(5)),
+    ]
+    res = _run(_pcb(tmp_path, items), _classes(pair_protocol="USB2_FS"))
+    _print_measurement_summary(res.violations)
+    rows = [ln.split() for ln in capsys.readouterr().out.splitlines() if "T_N" in ln]
+    assert len([r for r in rows if "vias" in r]) == 2  # cap breach + unequal
+    assert not [r for r in rows if "uncoupled" in r]

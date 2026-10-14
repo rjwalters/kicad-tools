@@ -196,7 +196,7 @@ def test_board01_item_inventory():
     for item in extract_items(PCB.load(BOARD01)):
         kinds[item.kind] = kinds.get(item.kind, 0) + 1
     assert kinds["segment"] == 14
-    assert kinds["via"] == 4
+    assert kinds["via"] == 3  # issue #6596 dropped the single-layer tee via
     assert kinds["footprint"] == 4
     assert kinds["graphic"] >= 1
 

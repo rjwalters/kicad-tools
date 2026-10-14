@@ -500,6 +500,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     from shapely.geometry import LineString, Point
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.core.layers import kicad_read_via_layers
 
     text = pcb_path.read_text()
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
@@ -526,7 +527,11 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         m = re.search(r'\(layers "([^"]+)" "([^"]+)"\)', via_text)
         if not m:
             return frozenset()
-        named = frozenset(m.groups())
+        # Issue #6614: KiCad reads a via with no blind/buried/micro keyword
+        # as a through via whatever its pair says, so read the span the
+        # same way (one rule shared with the schema and router parsers).
+        kw = re.match(r"\s*\(via\s+(micro|blind|buried)\b", via_text)
+        named = frozenset(kicad_read_via_layers(m.groups(), kw.group(1) if kw else None)[0])
         copper_named = frozenset(layer for layer in named if layer.endswith(".Cu"))
         indices = [
             copper_layer_order.index(layer) for layer in copper_named if layer in copper_layer_order

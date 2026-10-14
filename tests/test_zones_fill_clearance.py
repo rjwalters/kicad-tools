@@ -127,6 +127,33 @@ class TestForeignPadCarved:
         assert fill.intersection(via).area == pytest.approx(0.0, abs=1e-9)
         assert fill.distance(via) >= 0.3 - 1e-6
 
+    @pytest.mark.parametrize(
+        "via_kw,carved",
+        [
+            # Issue #6614: KiCad reads a keyword-less partial pair as a
+            # through via, so its barrel is on F.Cu and must be carved.
+            ("", True),
+            # A real blind In1.Cu/B.Cu via never reaches the F.Cu pour.
+            ("blind ", False),
+        ],
+    )
+    def test_keywordless_partial_span_via_is_carved_from_outer_fill(self, via_kw, carved):
+        board = _BOARD.replace(
+            '(via (at 12 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")',
+            f'(via {via_kw}(at 12 5) (size 0.6) (drill 0.3) (layers "In1.Cu" "B.Cu")',
+        )
+        assert board != _BOARD
+        doc = _parse(board)
+        apply_foreign_pad_clearance(doc)
+
+        fill = _fill_polygon(doc)
+        via = shapely.geometry.Point(12.0, 5.0).buffer(0.3)
+        if carved:
+            assert fill.intersection(via).area == pytest.approx(0.0, abs=1e-9)
+            assert fill.distance(via) >= 0.3 - 1e-6
+        else:
+            assert fill.intersection(via).area > 0.0
+
     def test_fill_still_has_substantial_copper(self):
         """The carve removes only the antipads, not the whole pour."""
         doc = _parse(_BOARD)

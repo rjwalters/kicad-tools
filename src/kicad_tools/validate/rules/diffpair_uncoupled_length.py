@@ -75,6 +75,20 @@ _SIN_TOL = math.sin(math.radians(KICAD_PARALLEL_TOLERANCE_DEG))
 #: Float-comparison slack (mm) on a limit, as the sibling skew rule has.
 UNCOUPLED_EPSILON_MM = 1e-6
 
+# Phrases that mark a via-count finding.  Both via sites build their message
+# from these and :func:`is_via_count_finding` matches on them, so the
+# ``kct check`` summary can label via counts ``vias`` (Issue #6576).
+VIA_OVER_LIMIT_PHRASE = "vias, limit"
+VIA_UNEQUAL_PHRASE = "unequal via counts"
+
+
+def is_via_count_finding(v: DRCViolation) -> bool:
+    """True for a via-count finding (its measured/limit values are via counts)."""
+    return v.rule_id == "diffpair_uncoupled_length" and (
+        VIA_OVER_LIMIT_PHRASE in v.message or VIA_UNEQUAL_PHRASE in v.message
+    )
+
+
 Segment = tuple[float, float, float, float, str]  # x1, y1, x2, y2, layer
 
 
@@ -351,7 +365,7 @@ class DiffPairUncoupledLengthRule(DRCRule):
                         self._violation(
                             limits.vias_severity,
                             f"Differential pair {first}/{second}: net {name} has "
-                            f"{count} vias, limit {cap} [{src}]",
+                            f"{count} {VIA_OVER_LIMIT_PHRASE} {cap} [{src}]",
                             m,
                             float(count),
                             float(cap),
@@ -362,7 +376,7 @@ class DiffPairUncoupledLengthRule(DRCRule):
             results.add(
                 self._violation(
                     "warning",
-                    f"Differential pair {first}/{second} has unequal via counts "
+                    f"Differential pair {first}/{second} has {VIA_UNEQUAL_PHRASE} "
                     f"({m.p_name}: {m.vias_p}, {m.n_name}: {m.vias_n})",
                     m,
                     float(abs(m.vias_p - m.vias_n)),

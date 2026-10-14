@@ -712,6 +712,22 @@ results = rule.check(pcb, design_rules)
 
 Increase via pad size or use larger drill.
 
+### Via Type Not Supported by the Fab
+
+**Error:** `via_type_unsupported` — `Blind via at (105.000, 100.000) on F.Cu-In1.Cu (net 'SIG'): the current manufacturer profile does not support blind/buried vias (blind_buried_vias_supported=False). ...`
+
+KiCad decides what a fab must drill from a via's type keyword: `(via blind ...)`
+and `(via buried ...)` need sequential lamination or controlled-depth drilling,
+and `(via micro ...)` needs laser drilling. A keyword-less via is a through via
+whatever its layer pair says. The `via_type` category errors on every typed via
+whose capability the `--mfr` profile lacks (`blind_buried_vias_supported`,
+`micro_vias_supported`). Both default to `false`, and no shipped profile claims
+either yet, so the check fails closed until a fab's published capability is
+sourced into its profile YAML.
+
+**Fix:** replace the via with a through via, or skip the category
+(`--skip via_type`) when your order includes the HDI process.
+
 ### Via Under Package Body
 
 **Warning:** `via_under_body` — `Via@112.5/80.25:F.Cu-B.Cu:d0.3/s0.6 (net 'SDA') ... is under the package body of U3 (Package_DFN_QFN:QFN-24-1EP_4x4mm...)`

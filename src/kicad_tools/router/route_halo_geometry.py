@@ -639,7 +639,8 @@ class RouteHaloRefiner:
             name,
         )
         partner = self._resolve_partner_net_id(name)
-        gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
+        # Issue #6560: the floored pair gap (#6443), matching the C++ arm.
+        gap = self.rules.pair_gap(nc).gap_mm if nc and partner is not None else None
         return bool(halo.clear(segment, self, partner_net=partner, partner_clearance=gap))
 
     #: Entry cap for :attr:`_via_memo` (issue #5696).  Purely a memory

@@ -215,11 +215,10 @@ gh issue list --label "loom:evaluating" --state open --limit 200 \
   fi
 
   RECLAIM_MARKER="<!-- champion:evaluating-stale-reclaim -->"
-  # Raw JSON, filtered with a local `jq --arg` (NOT `gh ... --jq --arg ...` —
-  # `gh`'s own --jq takes a single literal filter string with no --arg support).
-  COMMENTS_JSON=$(gh issue view "$N" --json comments)
+  # TRUSTED authors only (#9548, #11899): a forged marker must not escalate.
+  COMMENTS_JSON=$(loom-daemon forge trusted-comments --fetch "$N" --gh-shape </dev/null) || { echo "#$N: comments unreadable, skip"; continue; }
   PRIOR_RECLAIMS=$(printf '%s\n' "$COMMENTS_JSON" \
-    | jq --arg m "$RECLAIM_MARKER" '[.comments[] | select((.body // "") | contains($m))] | length')
+    | jq --arg m "$RECLAIM_MARKER" '[.[] | select((.body // "") | contains($m))] | length')
 
   if [ "$PRIOR_RECLAIMS" -ge "$(( ${LOOM_MAX_EVALUATING_RECLAIMS:-3} - 1 ))" ]; then
     # This would be the Nth reclaim of the SAME issue — reclaiming again would
@@ -692,12 +691,11 @@ OPERATOR_RULED=no        # set to yes when a human un-parked THIS body revision 
 
 if [ "$FORCE_REEVALUATE" = "no" ] && printf '%s\n' "$ISSUE_JSON" | jq -e --arg m "$VERDICT_MARKER" \
      '.comments[] | select(.body | contains($m))' >/dev/null; then
-  # This exact revision was already evaluated. The trusted REST listing carries
-  # the verdict's `created_at` the un-park check needs.
-  VERDICT_COMMENT=$(loom-daemon forge trusted-comments --fetch "$ISSUE_NUMBER" \
-    | jq --arg m "$VERDICT_MARKER" '[.[] | select(.body | contains($m))] | last')
+  # This exact revision was already evaluated. Read the verdict from the trusted
+  # comments already held (#11902): a second fetch that failed left Step 4 no findings.
+  VERDICT_COMMENT=$(printf '%s\n' "$ISSUE_JSON" | jq --arg m "$VERDICT_MARKER" '[.comments[] | select(.body | contains($m))] | last')
   COMMENT_BODY=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.body // ""')
-  VERDICT_CREATED_AT=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.created_at // ""')
+  VERDICT_CREATED_AT=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.createdAt // ""')
 
   # Operator un-park (#8245, porting champion-epic.md's #7921): loom:operator
   # removed AFTER this revision's own rejection is a human ruling on THIS body —
@@ -714,7 +712,7 @@ if [ "$FORCE_REEVALUATE" = "no" ] && printf '%s\n' "$ISSUE_JSON" | jq -e --arg m
     --jq '($ENV.OP_HOLDS | split("\n")) as $o | .[] | select(.event == "unlabeled" and (.label.name | IN($o[]))) | .created_at' \
     | sort | tail -n 1)
   # Unknown inputs fail OPEN, never closed (#7965's rule): an empty
-  # VERDICT_CREATED_AT is a failed REST re-read, and `> ""` matches ANY un-park.
+  # VERDICT_CREATED_AT is an unknown time, and `> ""` matches ANY un-park.
   if [ -n "$UNPARKED_AT" ] && [ -n "$VERDICT_CREATED_AT" ] \
      && [[ "$UNPARKED_AT" > "$VERDICT_CREATED_AT" ]] \
      && { [ -z "$BOT_UNESCALATED_AT" ] || [[ "$UNPARKED_AT" > "$BOT_UNESCALATED_AT" ]]; }; then
@@ -752,7 +750,7 @@ fi
 - **Comment budget for an unrevised proposal is at most 4**: one `NEEDS REVISION`, the final-round and disposition rounds, one escalation (#10753).
 - **Escalation goes through the claim.** `UNREVISED=yes` falls through to the Claim step and the verdict-time recheck, so two concurrent passes cannot post two escalations.
 - **`ALREADY_ROUTED=yes` short-circuits everything.** A proposal carrying `loom:operator`, `loom:blocked` or `loom:frozen` (#8245, #11795) is already terminal: never re-escalated (Pass 0's un-escalation is retired, #11861).
-- **An un-park is a ruling on the current revision (#8245).** `OPERATOR_RULED=yes` re-evaluates but never re-escalates this body. Two preconditions keep that safe: a non-empty `VERDICT_CREATED_AT` (an empty one is a failed REST re-read, and `> ""` matches any historical un-park), and an `UNPARKED_AT` newer than `BOT_UNESCALATED_AT`, so Champion's own un-escalation cannot masquerade as a human's ([`champion-epic-guard-invariants.md`](champion-epic-guard-invariants.md)).
+- **An un-park is a ruling on the current revision (#8245).** `OPERATOR_RULED=yes` re-evaluates but never re-escalates this body. Two preconditions keep that safe: a non-empty `VERDICT_CREATED_AT` (an empty one is an unknown time, and `> ""` matches any historical un-park), and an `UNPARKED_AT` newer than `BOT_UNESCALATED_AT`, so Champion's own un-escalation cannot masquerade as a human's ([`champion-epic-guard-invariants.md`](champion-epic-guard-invariants.md)).
 - **Escalation is gated on the finding's *kind*** (#5664): Step 4's dependency-timing gate blocks, rather than escalates, an open non-cycle dependency.
 
 `LOOM_MAX_UNREVISED_EVALUATIONS` (default **2**): the `PRIOR_REJECTIONS` count at which Step 4's bound applies.
