@@ -227,8 +227,8 @@ def coupled_engaged_pairs(
     The router's own decision (Issue #6429): :func:`detect_diff_pairs` with
     the class map and KiCad groups, filtered by
     :func:`~kicad_tools.router.diffpair.should_engage_coupled` -- the same
-    ``synth_routing`` / ``net_to_class`` wiring every engagement site uses
-    (``core.py``'s lattice and grid pre-passes).  A pair listed here is routed
+    ``synth_routing`` / ``net_to_class`` wiring (:func:`build_synth_routing`)
+    every engagement site uses (``core.py``'s lattice and grid pre-passes).  A pair listed here is routed
     P against N at its class's ``intra_pair_clearance``, so both DRC engines
     must exempt its own P/N gap from the router class's full clearance.
 
@@ -251,14 +251,11 @@ def coupled_engaged_pairs(
         ids = {nid: name for nid, name in net_names.items() if name}
     else:
         ids = dict(enumerate(sorted(n for n in net_names if n), start=1))
-    net_to_class: dict[str, str] = {}
-    synth_routing: dict = dict(net_class_map)
-    for net_name, net_class in net_class_map.items():
-        class_name = getattr(net_class, "name", None)
-        if not class_name:
-            continue
-        net_to_class[net_name] = class_name
-        synth_routing.setdefault(class_name, net_class)
+    # Must be the exact wiring core.py's engagement sites use (#6442): a
+    # class whose per-net variants differ (e.g. in ``coupled_routing``)
+    # gets no class-name alias, so each member answers from its own
+    # net-name key rather than whichever variant happened to be seen first.
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
     try:
         detected = detect_diff_pairs(
             ids,

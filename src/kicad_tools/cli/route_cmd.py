@@ -5607,6 +5607,7 @@ def _fill_zones_after_route(
                 return
             # Use the same propagated source/fabrication constraints as DRC,
             # before native filling can bake a weaker default into the output.
+            class_map = _pour_closer_net_class_map(router, args)
             _write_drc_constraint_sidecars(
                 output_path,
                 args.manufacturer,
@@ -5614,10 +5615,8 @@ def _fill_zones_after_route(
                 copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
                 quiet=quiet,
                 source_pcb_path=Path(args.pcb),
-                net_class_map=_pour_closer_net_class_map(router, args),
-                coupled_pairs=_router_coupled_pairs(
-                    output_path, _pour_closer_net_class_map(router, args), router
-                ),
+                net_class_map=class_map,
+                coupled_pairs=_router_coupled_pairs(output_path, class_map, router),
             )
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
@@ -5684,6 +5683,7 @@ def _fill_zones_after_route(
         and getattr(args, "pcb", None)
         and getattr(args, "manufacturer", None)
     ):
+        class_map = _pour_closer_net_class_map(router, args)
         _write_drc_constraint_sidecars(
             output_path,
             args.manufacturer,
@@ -5691,10 +5691,8 @@ def _fill_zones_after_route(
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
             quiet=True,
             source_pcb_path=Path(args.pcb),
-            net_class_map=_pour_closer_net_class_map(router, args),
-            coupled_pairs=_router_coupled_pairs(
-                output_path, _pour_closer_net_class_map(router, args), router
-            ),
+            net_class_map=class_map,
+            coupled_pairs=_router_coupled_pairs(output_path, class_map, router),
         )
 
     _fill_started = time.monotonic()

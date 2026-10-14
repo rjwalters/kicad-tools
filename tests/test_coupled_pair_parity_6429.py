@@ -162,6 +162,38 @@ def test_coupled_engaged_pairs_follows_the_router_gate():
     ) or ("X_POS", "SIG") in coupled_engaged_pairs({1: "X_POS", 2: "SIG"}, {"X_POS": partner})
 
 
+def _router_engaged_pairs(class_map, names):
+    """The pairs ``core.py``'s engagement sites couple (``build_synth_routing``)."""
+    from kicad_tools.router.diffpair import should_engage_coupled
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+
+    synth, net_to_class = build_synth_routing(class_map)
+    detected = detect_diff_pairs(
+        dict(enumerate(names, start=1)), net_class_routing=synth, net_to_class=net_to_class
+    )
+    return sorted(
+        (d.pair.positive.net_name, d.pair.negative.net_name)
+        for d in detected
+        if should_engage_coupled(d.pair, synth, net_to_class)[0]
+    )
+
+
+@pytest.mark.parametrize("off_first", [True, False], ids=["off-first", "on-first"])
+def test_coupled_engaged_pairs_matches_router_for_mixed_class_variants(off_first):
+    # One class name, per-net variants differing in ``coupled_routing``: the
+    # recorded pairs must be exactly what the router couples, whichever variant
+    # is seen first (the setdefault idiom let it answer for every member).
+    on = NetClassRouting(name="HighSpeed", clearance=0.15, coupled_routing=True)
+    off = NetClassRouting(name="HighSpeed", clearance=0.15, coupled_routing=False)
+    on_nets = {"X_POS": on, "X_NEG": on}
+    off_nets = {"A_POS": off, "A_NEG": off}
+    class_map = {**off_nets, **on_nets} if off_first else {**on_nets, **off_nets}
+    names = list(class_map)
+    expected = [("X_POS", "X_NEG")]
+    assert _router_engaged_pairs(class_map, names) == expected
+    assert coupled_engaged_pairs(names, class_map) == expected
+
+
 # ------------------------------------------------- both engines, recorded pair
 
 
