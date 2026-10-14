@@ -1472,3 +1472,111 @@ guarded by `tests/test_board04_uniform_2x_6307.py` (slow). The fragility the
 issue noted (a one-capacitor placement change flipping the result) is still
 a property of this router; the monotonicity assumption in `auto_pcb_size`
 remains unproven in general.
+
+## The one shrink: board 03 rigid 1.5x back to 1x (Issue #6310)
+
+**Verdict: no-go on a compaction pass.** The premise did not reproduce, and
+the shrink itself ends as "route again at 1x".
+
+**Provenance: none of this section's numbers is backed by a committed file.**
+The step-1 harness JSON and the `shrink_experiment.py --json` output were
+written to `/tmp/ers-03/` on the worker host and no longer exist, so every
+figure below (including the route lengths, via counts and the miss-distance
+histogram) was read from that run's output and cannot be re-read from the repo.
+Treat them as the same class as the "not committed" rows above (#6304); the
+commands in the script docstring regenerate the experiment, not these exact
+values (the note's own Step 1 shows the 1x/1.5x results vary run to run).
+
+Harness: `scripts/research/shrink_experiment.py` (new; imports
+`expand_route_experiment.py`). One run of each step, `--seed 42`, pinned
+0.05 mm grid, 900 s budget, shared loaded host.
+
+### Step 1: the 1.5x rigid route did not reproduce as complete and clean
+
+The command in the issue, re-run (`--no-cache`):
+
+| Placement | Nets (all / signal) | `kct check` errors | `kicad-cli` DRC errors | Unfinished |
+|---|---|---|---|---|
+| 1x | 26/27, 23/24 | 2 (1 connectivity, 1 diffpair continuity) | 0 | `USB_CC1` (`placement_bound`) |
+| 1.5x uniform | 26/27, 24/24 | 4 | 10 (`tracks_crossing`) | `GND` (`pour_discontinuous`) |
+| **1.5x rigid** | 26/27, 24/24 | **2** (diffpair skew 1, continuity 1) | **2** (`tracks_crossing`) | `GND` (`pour_discontinuous`) |
+
+Differences from the issue's table: the rigid route is 24/24 on signal nets
+but is not "27/27 including pours" and not clean on either engine, and the
+net stuck at 1x on this run is `USB_CC1`, not `USB_D+` (`USB_D+` routes at 1x
+here, with 2 vias). So the case the issue singles out as "worth trying"
+is, in this run, a route that already has errors before any shrink, against a
+1x baseline that loses a different net. Single runs on both sides, so this
+shows the earlier table is not stable, not that it was wrong.
+
+### Step 2: the inverse map (acceptance criterion 1)
+
+Footprints go back to their 1x positions (per-footprint delta between the 1x
+board and the routed board, all 38 footprints had moved). Copper: a connected
+component that touches pads of exactly one cluster translates with it (222
+vertices); every other vertex scales by 1/1.5 about the outline centre
+(1323 vertices). The board holds 737 segments, 71 vias, 56 components.
+
+- **Trace ends on a pad at 1.5x: 303. Displaced from that pad after the
+  inverse map: 181 (60 %), on 19 of the board's nets**, including `USB_D+`
+  (14 ends) and `USB_D-`. Miss distance from the pad centre: median 1.84 mm,
+  max 4.56 mm; histogram by rounded mm 0:2, 1:62, 2:64, 3:42, 4:9, 5:2.
+  Only 2 of the 181 miss by 0.5 mm or less.
+- The naive 1x board grades 7/27 nets connected, 340 `kct check` errors, 644
+  `kicad-cli` errors.
+
+The count is large because a pad's offset from its cluster centroid scales by
+1/1.5 under the inter-cluster map but not under the cluster translation; any
+pad more than a few tenths of a millimetre from the centroid is missed.
+
+### Step 3: repair with existing machinery (acceptance criterion 1, second half)
+
+- **Snap (pad-attached vertices translate with their pad's cluster, free
+  vertices stay scaled):** all 181 displaced ends land on their pads
+  (0 displaced of 303), and 24/27 nets reconnect. That is the only "automatic"
+  repair, and it is a coordinate rule, not `drc_nudge`. It trades the
+  displacement for geometry: 342 `kct check` errors (98 `clearance_pad_segment`,
+  98 `clearance_segment_via`, 68 `clearance_segment_segment`, ...) and 648
+  `kicad-cli` errors, with 25 of 27 nets named in a violation (24 real nets plus kicad-cli's `<no net>` bucket). Segments that
+  now join a moved end and a scaled end are no longer on the routing grid,
+  at 45 degrees or at clearance; `drc_nudge` moves segments by tenths of a
+  millimetre and cannot repair violations of this size, and it only runs
+  inside `kct route`, where it is handed routes the router created.
+- **Rip and re-route what is still violating:** 24 of the 27 nets with copper
+  (791 of 808 segments and vias) were ripped, and
+  `kct route --preserve-existing --grid 0.05` routed them again.
+
+### Step 4: grade (acceptance criterion 2)
+
+| Stage | Nets (all) | Signal nets unfinished | `kct check --mfr jlcpcb` | `kicad-cli pcb drc --refill-zones` |
+|---|---|---|---|---|
+| naive inverse map | 7/27 | 17 | 340 | 644 |
+| snapped | 24/27 | 0 (3 pours discontinuous) | 342 | 648 |
+| snapped, 24 nets re-routed | 26/27 | 1 (`USB_CC1`, `placement_bound`) | 2 (connectivity, diffpair continuity) | 0 (1 unconnected) |
+
+The final board is the same result as the 1x baseline row of Step 1 (26/27,
+`USB_CC1` open, 2 `kct check` errors, 0 `kicad-cli` errors; 710 mm and 71 vias
+against 708.5 mm and 73 vias). `USB_D+` is present and clean, but it was
+re-routed, not preserved.
+
+### Go / no-go
+
+The issue's criteria: go needs the shrunk board to keep `USB_D+`, be clean on
+both engines, and confine repair to trace ends at pads. No-go if repair
+re-routes a large share of nets.
+
+- Repair is not confined to ends at pads: 60 % of pad ends were displaced and
+  the only repair that avoided re-routing left 648 `kicad-cli` errors.
+- The fix that works re-routes 24 of 27 nets (89 %), which is "route again at
+  1x", and its result equals the 1x baseline (so it also loses a net, `USB_CC1`).
+- The rigid 1.5x route that would be shrunk was itself not clean (2 `kct
+  check`, 2 `kicad-cli` errors, `GND` fill split).
+
+**No-go.** Do not build the compaction pass, the alternating-axis loop or a
+`kct route` flag on this evidence. Limits: one board, one seed, one run per
+step; the inverse map is the simplest reading of the issue (cluster by
+connected component, pad-attachment by pad bounding box). A smarter shrink
+could displace fewer ends, but the 648-error snapped board and the 89 %
+re-route share show the cost is in the inter-cluster copper, which no end-repair
+addresses. Re-running Step 1 with other seeds would show whether the 1.5x rigid
+route is ever complete and clean here; it was not done.
