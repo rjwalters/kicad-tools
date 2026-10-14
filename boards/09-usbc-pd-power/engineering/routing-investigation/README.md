@@ -43,7 +43,9 @@ and [branch-current modeling #4980](https://github.com/rjwalters/kicad-tools/iss
 ## Known artifact: SENSE_P track on pad U3.9 (#6484)
 
 Both snapshots carry the same `SENSE_P` F.Cu track,
-(76.1, 31.0) -> (77.91, 31.545), width 0.25 mm. It reaches about 9 um into
+(174.6, 103.5) -> (176.41, 104.045) in file coordinates, width 0.25 mm
+(segment uuid `36c0cca9-5bc6-47e8-be23-8c7454622f97` in `first.kicad_pcb`,
+the uuid `first-native-drc.json` reports). It reaches about 9 um into
 pad `U3.9` (`SENSE_N`), and kicad-cli reports it under `shorting_items`. This
 is a **known artifact and is intentionally left in place**: the files are
 frozen historical evidence (committed 2026-09-10, before the exact-pad-outline
