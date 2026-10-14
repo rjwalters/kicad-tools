@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import logging
+import subprocess
 from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest import mock
@@ -24,7 +25,7 @@ from unittest import mock
 import pytest
 
 from kicad_tools.cli.parser import create_parser
-from kicad_tools.cli.route_cmd import _route_parser
+from kicad_tools.cli.route_cmd import _normalize_deterministic_budget, _route_parser
 from kicad_tools.placement.route_check import deadline_fired
 from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
 from kicad_tools.router.core import DETERMINISTIC_BUDGET_STAGE_DEADLINE_LINE
@@ -34,6 +35,7 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
+from tests.test_route_auto_mfr_tier_integration import _assert_deterministic
 
 requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend unavailable")
 
@@ -188,3 +190,46 @@ def test_help_names_the_remaining_wall_clock_stages(parser_factory) -> None:
     assert "Issue #6475" in text
     assert "removes that budget" in text
     assert "stage deadline fired" in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #6533: the slow mfr-tier fixture must not trip on this banner
+# ---------------------------------------------------------------------------
+
+
+def _banner(timeout: float | None) -> str:
+    args = SimpleNamespace(
+        deterministic_budget=True,
+        deterministic_rescue=False,
+        per_net_timeout=30.0,
+        max_search_iterations=0,
+        per_net_iterations=0,
+        timeout=timeout,
+    )
+    out = io.StringIO()
+    with redirect_stdout(out):
+        _normalize_deterministic_budget(args, quiet=False)
+    return out.getvalue()
+
+
+def _proc(stdout: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=["kct"], returncode=0, stdout=stdout, stderr="")
+
+
+@pytest.mark.parametrize("timeout", [None, 600.0])
+def test_mfr_tier_determinism_check_ignores_the_banner(timeout: float | None) -> None:
+    """The banner quotes 'stage deadline fired' mid-line on every run (#6329).
+
+    With ``--timeout`` set, the advisory even quotes the full
+    ``[deterministic-budget] stage deadline fired`` marker -- still mid-line.
+    """
+    banner = _banner(timeout)
+    assert "stage deadline fired" in banner  # the trap the bare substring fell into
+    _assert_deterministic(_proc(banner + "Routed 7/7 nets\n"))
+
+
+@pytest.mark.parametrize("timeout", [None, 600.0])
+def test_mfr_tier_determinism_check_catches_a_fired_deadline(timeout: float | None) -> None:
+    log = _banner(timeout) + DETERMINISTIC_BUDGET_STAGE_DEADLINE_LINE + "\nRouted 7/7 nets\n"
+    with pytest.raises(AssertionError, match="stage deadline fired"):
+        _assert_deterministic(_proc(log))

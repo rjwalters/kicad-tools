@@ -124,6 +124,8 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.placement.route_check import DEADLINE_FIRED_MARKER, deadline_fired
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "04-stm32-devboard"
 UNROUTED_PCB = BOARD_DIR / "output" / "stm32_devboard.kicad_pcb"
@@ -326,9 +328,16 @@ def _run_route_auto_mfr_tier(
 
 
 def _assert_deterministic(proc: subprocess.CompletedProcess[str]) -> None:
-    """No wall-clock stage deadline fired, so the counts are reproducible."""
-    assert "stage deadline fired" not in proc.stdout, (
-        "A wall-clock stage deadline fired during a --deterministic-budget run, "
+    """No wall-clock stage deadline fired, so the counts are reproducible.
+
+    Issue #6533: the router's own line is matched at the *start* of a line via
+    ``deadline_fired`` / ``DEADLINE_FIRED_MARKER``.  A bare substring check
+    tripped on every run, because the ``--deterministic-budget`` startup
+    banner (#6329) quotes 'stage deadline fired' mid-line.
+    """
+    assert not deadline_fired(proc.stdout), (
+        f"A wall-clock stage deadline fired ({DEADLINE_FIRED_MARKER!r} line) "
+        "during a --deterministic-budget run, "
         "so its routed counts are no longer machine-independent.\n"
         f"Last 3000 chars of stdout:\n{proc.stdout[-3000:]}"
     )
