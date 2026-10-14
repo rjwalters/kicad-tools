@@ -56,7 +56,7 @@ def test_fine_grid_receives_pair_and_foreign_physical_pitches(physical_router, m
         positive=DifferentialSignal("USB_D+", 1, "USB_D", "P", "plus_minus"),
         negative=DifferentialSignal("USB_D-", 2, "USB_D", "N", "plus_minus"),
         pair_type=DifferentialPairType.USB2,
-        rules=DifferentialPairRules.for_type(DifferentialPairType.USB2),
+        rules=DifferentialPairRules.for_pair_type(DifferentialPairType.USB2),
     )
     monkeypatch.setattr(
         router._diffpair,

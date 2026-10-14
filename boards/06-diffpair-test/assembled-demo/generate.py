@@ -435,6 +435,7 @@ def main():
                 target_diff_impedance=100,
                 impedance_tolerance_percent=15,
                 skew_tolerance_mm=0.1,
+                pair_protocol="LVDS",  # Issue #6443 (explicit 0.1 mm above wins)
                 coupled_continuity_threshold=0.8,
                 diffpair_partner=f"LVDS{i}_{other}",
             )

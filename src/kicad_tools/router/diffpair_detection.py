@@ -269,7 +269,7 @@ def _make_pair_from_names(
         positive=p_signal,
         negative=n_signal,
         pair_type=pair_type,
-        rules=DifferentialPairRules.for_type(pair_type),
+        rules=DifferentialPairRules.for_pair_type(pair_type),
     )
 
 

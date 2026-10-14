@@ -307,6 +307,7 @@
     "impedance_tolerance_percent": 15,
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": 0.1,
+    "pair_protocol": "LVDS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -339,6 +340,7 @@
     "impedance_tolerance_percent": 15,
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": 0.1,
+    "pair_protocol": "LVDS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -371,6 +373,7 @@
     "impedance_tolerance_percent": 15,
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": 0.1,
+    "pair_protocol": "LVDS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -403,6 +406,7 @@
     "impedance_tolerance_percent": 15,
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": 0.1,
+    "pair_protocol": "LVDS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -435,6 +439,7 @@
     "impedance_tolerance_percent": 15,
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": 0.1,
+    "pair_protocol": "LVDS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -467,6 +472,7 @@
     "impedance_tolerance_percent": 15,
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": 0.1,
+    "pair_protocol": "LVDS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -499,6 +505,7 @@
     "impedance_tolerance_percent": 15,
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": 0.1,
+    "pair_protocol": "LVDS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -531,6 +538,7 @@
     "impedance_tolerance_percent": 15,
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": 0.1,
+    "pair_protocol": "LVDS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null

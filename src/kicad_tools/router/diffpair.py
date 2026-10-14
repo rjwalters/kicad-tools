@@ -22,6 +22,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .pair_protocols import PairProtocol
     from .rules import NetClassRouting
 
 
@@ -53,29 +54,74 @@ class DifferentialPairRules:
     impedance: float = 90.0
 
     @classmethod
+    def from_protocol(cls, protocol: PairProtocol | str | None) -> DifferentialPairRules:
+        """Rules of a protocol, read from the one defaults table (Issue #6443).
+
+        A value the protocol's row does not carry falls back to the
+        ``CUSTOM`` row (gap, width, impedance) or to the generic 0.5 mm skew.
+        """
+        from .pair_protocols import (
+            GENERIC_SKEW_MM,
+            PROTOCOL_DEFAULTS,
+            PairProtocol,
+            parse_protocol,
+        )
+
+        custom = PROTOCOL_DEFAULTS[PairProtocol.CUSTOM]
+        row = PROTOCOL_DEFAULTS[parse_protocol(protocol) or PairProtocol.CUSTOM]
+
+        def pick(name: str) -> float:
+            value = getattr(row, name) or getattr(custom, name)
+            return float(value.value)
+
+        skew = row.max_skew_mm
+        return cls(
+            spacing=pick("gap_mm"),
+            max_length_delta=float(skew.value) if skew is not None else GENERIC_SKEW_MM,
+            trace_width=pick("trace_width_mm"),
+            impedance=pick("diff_impedance_ohm"),
+        )
+
+    @classmethod
+    def for_pair_type(cls, pair_type: DifferentialPairType) -> DifferentialPairRules:
+        """Rules of a name-detected pair type, via :meth:`from_protocol`.
+
+        Name detection cannot tell full-speed from high-speed USB2, so
+        ``USB2`` maps to ``USB2_FS`` (2.5 mm, the value this table always
+        returned).  A class that declares ``pair_protocol`` is resolved by
+        :func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`
+        instead, and that is what ``kct check`` and the router report apply.
+        """
+        return cls.from_protocol(_PAIR_TYPE_PROTOCOL.get(pair_type, "CUSTOM"))
+
+    @classmethod
     def for_type(cls, pair_type: DifferentialPairType) -> DifferentialPairRules:
-        """Get predefined rules for a differential pair type."""
-        rules_map = {
-            DifferentialPairType.USB2: cls(
-                spacing=0.2, max_length_delta=2.5, trace_width=0.2, impedance=90.0
-            ),
-            DifferentialPairType.USB3: cls(
-                spacing=0.15, max_length_delta=0.5, trace_width=0.2, impedance=90.0
-            ),
-            DifferentialPairType.ETHERNET: cls(
-                spacing=0.2, max_length_delta=2.0, trace_width=0.2, impedance=100.0
-            ),
-            DifferentialPairType.HDMI: cls(
-                spacing=0.15, max_length_delta=0.5, trace_width=0.2, impedance=100.0
-            ),
-            DifferentialPairType.LVDS: cls(
-                spacing=0.15, max_length_delta=0.5, trace_width=0.15, impedance=100.0
-            ),
-            DifferentialPairType.CUSTOM: cls(
-                spacing=0.2, max_length_delta=1.0, trace_width=0.2, impedance=90.0
-            ),
-        }
-        return rules_map.get(pair_type, rules_map[DifferentialPairType.CUSTOM])
+        """Deprecated shim over the protocol defaults table (Issue #6443).
+
+        Use :meth:`for_pair_type`, or :meth:`from_protocol` with a
+        :class:`~kicad_tools.router.pair_protocols.PairProtocol`.
+        """
+        import warnings
+
+        warnings.warn(
+            "DifferentialPairRules.for_type is deprecated: it is a shim over "
+            "kicad_tools.router.pair_protocols.PROTOCOL_DEFAULTS. Use "
+            "DifferentialPairRules.for_pair_type or .from_protocol.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return cls.for_pair_type(pair_type)
+
+
+#: Name-detected pair type -> the protocol row its rules are read from.
+_PAIR_TYPE_PROTOCOL: dict[DifferentialPairType, str] = {
+    DifferentialPairType.USB2: "USB2_FS",
+    DifferentialPairType.USB3: "USB3_SS",
+    DifferentialPairType.ETHERNET: "ETHERNET",
+    DifferentialPairType.HDMI: "HDMI_TMDS",
+    DifferentialPairType.LVDS: "LVDS",
+    DifferentialPairType.CUSTOM: "CUSTOM",
+}
 
 
 @dataclass
@@ -133,7 +179,7 @@ class DifferentialPair:
 
     def __post_init__(self):
         if self.rules is None:
-            self.rules = DifferentialPairRules.for_type(self.pair_type)
+            self.rules = DifferentialPairRules.for_pair_type(self.pair_type)
 
     @property
     def length_delta(self) -> float:
@@ -524,7 +570,7 @@ def group_differential_pairs(
                     positive=polarity_map["P"],
                     negative=polarity_map["N"],
                     pair_type=pair_type,
-                    rules=DifferentialPairRules.for_type(pair_type),
+                    rules=DifferentialPairRules.for_pair_type(pair_type),
                 )
             )
 
@@ -772,7 +818,7 @@ class DifferentialPairConfig:
 
     def get_rules(self, pair_type: DifferentialPairType) -> DifferentialPairRules:
         """Get rules with any config overrides applied."""
-        base_rules = DifferentialPairRules.for_type(pair_type)
+        base_rules = DifferentialPairRules.for_pair_type(pair_type)
         return DifferentialPairRules(
             spacing=self.spacing if self.spacing is not None else base_rules.spacing,
             max_length_delta=(

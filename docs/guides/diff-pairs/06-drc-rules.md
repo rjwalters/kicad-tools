@@ -44,14 +44,21 @@ threshold for hobby boards (see guide 02).
 Source: `DiffPairLengthSkewRule` in
 `src/kicad_tools/validate/rules/diffpair_length_skew.py`.
 Fires when an engaged pair's routed length skew (`|L_p - L_n|`) exceeds
-`effective_skew_tolerance(default=0.5)`. Total-length parity, not topology.
+its limit. Total-length parity, not topology.
+
+The limit resolves as `skew_tolerance_mm` on the class, then the declared
+`pair_protocol`'s value in the protocol defaults table, then the generic
+0.5 mm (see [guide 07](07-protocol-defaults.md)). The finding names the source
+in brackets. It is an **error** when the limit is cited or explicit, and a
+**warning** when the limit is an `uncited` table value.
 
 ```bash
 kct check board.kicad_pcb --rules=diffpair_length_skew
 ```
 
 Remediate: insert serpentine on the shorter half (manual today; #2648 will
-automate), or relax `skew_tolerance_mm` on the net class (see guide 04).
+automate), declare the pair's real `pair_protocol`, or set
+`skew_tolerance_mm` on the net class (see guide 04).
 
 ## `impedance`
 

@@ -20,8 +20,10 @@ usb3 = NetClassRouting(
 )
 ```
 
-Read it via the accessor, which falls back to the rule's module-level
-default when the field is unset:
+Read it via the accessor. When the field is unset it returns the declared
+`pair_protocol`'s value from the protocol defaults table
+([guide 07](07-protocol-defaults.md)), and the rule's module-level default
+when the class declares no protocol either:
 
 ```python
 nc = NetClassRouting(name="USB2", skew_tolerance_mm=None)
