@@ -50,12 +50,24 @@ auto-skips as pours, on both engines:
   blocks tracks and vias.  The lattice keep-out test has zero clearance
   (copper edge against the area), so each area is the reserved copper
   grown by the clearance a signal net must keep from it.
+
+Issue #6589: copper clearance alone keeps a reserved site *drillable*, not
+*usable*.  The post-route stitcher only accepts a via whose whole pad sits
+on same-net fill on the plane layer (#4432), and the pour pulls back from
+every foreign through-via -- and every foreign track on that layer -- by
+more than the copper clearance.  A foreign via 0.87 mm from board 03's
+reserved ``U1.7`` site was legal, yet its antipad on ``In2.Cu`` cut into
+the site and the pour link stayed open.  :func:`plane_via_keepout_areas`
+therefore adds, per site, a second disc grown by the plane's fill pullback
+(:func:`plane_fill_pullback`, derived from the pour's own zone clearance
+and ``min_thickness`` via :func:`plane_fills_from_pcb`) that blocks vias
+on every layer and tracks on the plane layer(s) only.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -69,10 +81,13 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
 
 __all__ = [
+    "PlaneFill",
     "PlaneViaSite",
     "PlaneViaSiteRules",
     "PlaneViaReservation",
     "PlaneViaStub",
+    "plane_fill_pullback",
+    "plane_fills_from_pcb",
     "plane_via_keepout_areas",
     "reserve_plane_via_sites",
     "select_plane_via_pads",
@@ -965,12 +980,90 @@ def _capsule_polygon(
     return tuple(points)
 
 
+@dataclass(frozen=True)
+class PlaneFill:
+    """One copper pour that carries a reserved net (Issue #6589).
+
+    Attributes:
+        layer: KiCad copper layer name the pour fills (``"In2.Cu"``).
+        clearance: The zone's own clearance to foreign copper (mm), i.e.
+            its ``(connect_pads (clearance ...))``.
+        min_thickness: The zone's ``min_thickness`` (mm).
+    """
+
+    layer: str
+    clearance: float
+    min_thickness: float
+
+
+def plane_fill_pullback(fill: PlaneFill, clearance: float = 0.0) -> float:
+    """Distance a pour's fill retreats from the edge of foreign copper (mm).
+
+    The fill keeps the larger of its zone clearance and the copper
+    ``clearance`` floor from foreign copper, and KiCad's minimum-width pass
+    (fill deflated and re-inflated by ``min_thickness / 2``) pulls a curved
+    knockout's edge back by up to half the minimum thickness more.  Board 03
+    (zone clearance 0.3 mm, ``min_thickness`` 0.25 mm) measured 0.424 mm
+    from a foreign via's barrel edge to the ``VBUS`` fill; this gives 0.425.
+    Never below ``clearance``.
+    """
+    return max(float(fill.clearance), float(clearance)) + max(float(fill.min_thickness), 0.0) / 2.0
+
+
+def plane_fills_from_pcb(pcb: Any, nets: Iterable[str]) -> dict[str, list[PlaneFill]]:
+    """The copper pours of ``nets`` on a parsed board (Issue #6589).
+
+    Args:
+        pcb: The board's root S-expression (``load_pcb``).
+        nets: Net names whose pours are wanted.
+
+    Returns:
+        Net name -> one :class:`PlaneFill` per (zone, copper layer), in file
+        order.  Rule areas (``keepout``) and zones of other nets are skipped;
+        a missing clearance or ``min_thickness`` reads as 0.
+    """
+    wanted = set(nets)
+    fills: dict[str, list[PlaneFill]] = {}
+    if pcb is None:
+        return fills
+    for zone in pcb.iter_children():
+        if zone.tag != "zone" or zone.find_child("keepout") is not None:
+            continue
+        net_name: str | None = None
+        node = zone.find_child("net_name")
+        if node is not None:
+            net_name = node.get_string(0)
+        else:
+            node = zone.find_child("net")
+            if node is not None and node.get_int(0) is None:
+                net_name = node.get_string(0)
+        if not net_name or net_name not in wanted:
+            continue
+        layers: list[str] = []
+        for tag in ("layer", "layers"):
+            node = zone.find_child(tag)
+            if node is not None:
+                layers += [str(v) for v in node.get_atoms() if str(v).endswith(".Cu")]
+        zone_clearance = 0.0
+        connect = zone.find_child("connect_pads")
+        if connect is not None:
+            node = connect.find_child("clearance")
+            if node is not None:
+                zone_clearance = float(node.get_float(0) or 0.0)
+        node = zone.find_child("min_thickness")
+        min_thickness = float(node.get_float(0) or 0.0) if node is not None else 0.0
+        for layer in layers:
+            fills.setdefault(net_name, []).append(PlaneFill(layer, zone_clearance, min_thickness))
+    return fills
+
+
 def plane_via_keepout_areas(
     reservation: PlaneViaReservation,
     *,
     clearance: float,
     layer_index: Callable[[object], int],
     num_layers: int,
+    plane_fills: Mapping[str, Sequence[tuple[int, float]]] | None = None,
 ) -> list[Any]:
     """Project a reservation onto the lattice engine's keep-out model (#6401).
 
@@ -988,9 +1081,17 @@ def plane_via_keepout_areas(
         layer_index: Maps a pad's :class:`~.layers.Layer` to the lattice
             layer index.
         num_layers: Copper layers in the stack.
+        plane_fills: Issue #6589 -- site net -> ``(lattice layer index,
+            fill pullback)`` for each pour carrying it.  Each site of such a
+            net gets a second disc of radius ``via_diameter / 2 + pullback``
+            (when that exceeds the copper disc) that blocks vias on every
+            layer and tracks on those plane layers only, so the pour still
+            covers the whole reserved via after routing.  Tracks on other
+            layers keep the copper-clearance disc unchanged.
 
     Returns:
-        ``KeepoutArea`` instances, sites first, in reservation order.
+        ``KeepoutArea`` instances: per site its copper disc (then its fill
+        disc, if any), then the stubs, in reservation order.
     """
     from .lattice.obstacles import KeepoutArea
 
@@ -1007,6 +1108,19 @@ def plane_via_keepout_areas(
                 name=f"plane-via-site:{site.net_name}:{'/'.join(site.pads)}",
             )
         )
+        fills = (plane_fills or {}).get(site.net_name) or ()
+        plane_layers = frozenset(int(layer) for layer, _p in fills if 0 <= int(layer) < num_layers)
+        pullback = max((float(p) for _l, p in fills), default=0.0)
+        if plane_layers and pullback > clearance:
+            areas.append(
+                KeepoutArea(
+                    polygon=_regular_polygon(site.x, site.y, rules.via_diameter / 2.0 + pullback),
+                    layers=plane_layers,
+                    blocks_tracks=True,
+                    blocks_vias=True,
+                    name=f"plane-via-fill:{site.net_name}:{'/'.join(site.pads)}",
+                )
+            )
     for stub in reservation.stubs:
         try:
             layer = int(layer_index(stub.layer))
@@ -1114,6 +1228,7 @@ def reserve_router_plane_via_sites(
     via_drill: float | None = None,
     clearance: float | None = None,
     stub_width: float | None = None,
+    plane_fills: Mapping[str, Sequence[PlaneFill]] | None = None,
 ) -> PlaneViaReservation:
     """Reserve pour-pad via sites on a loaded ``Autorouter`` (Issue #6401).
 
@@ -1142,6 +1257,12 @@ def reserve_router_plane_via_sites(
         via_drill: That via's drill (mm).
         clearance: Copper clearance floor (mm), e.g. ``--clearance``.
         stub_width: Pad-to-via stub width (mm).
+        plane_fills: Issue #6589 -- each reserved net's pours (e.g.
+            :func:`plane_fills_from_pcb` on the board being routed).  The
+            lattice keep-out of each site then also holds foreign vias, and
+            tracks on the pour's layer, outside the pour's fill pullback, so
+            the pour still covers the reserved via.  ``None``/missing net:
+            copper clearance only (the #6401 behaviour).
 
     Returns:
         The reservation (empty when there are no eligible pads).
@@ -1180,12 +1301,34 @@ def reserve_router_plane_via_sites(
             return int(stack.layer_enum_to_index(layer))
         return int(grid.layer_to_index(layer.value))  # type: ignore[attr-defined]
 
+    def name_index(name: str) -> int | None:
+        if stack is not None:
+            layer_def = stack.get_layer_by_name(name)
+            return None if layer_def is None else int(layer_def.index)
+        from .layers import Layer
+
+        for layer in Layer:
+            if layer.kicad_name == name:
+                try:
+                    return int(grid.layer_to_index(layer.value))
+                except Exception:
+                    return None
+        return None
+
+    fill_layers: dict[str, list[tuple[int, float]]] = {}
+    for name in nets:
+        for fill in (plane_fills or {}).get(name) or ():
+            index = name_index(fill.layer)
+            if index is not None:
+                fill_layers.setdefault(name, []).append((index, plane_fill_pullback(fill, gap)))
+
     router._plane_via_keepout_areas = tuple(
         plane_via_keepout_areas(
             reservation,
             clearance=gap,
             layer_index=layer_index,
             num_layers=int(grid.num_layers),
+            plane_fills=fill_layers,
         )
     )
     return reservation
