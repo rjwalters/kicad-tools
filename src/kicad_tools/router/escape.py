@@ -258,10 +258,10 @@ def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
             # Only the disc contained in the real round end cap is metal.
             extent = max(extent, float(seg.width) - 2 * math.hypot(sx - ex, sy - ey))
     via = getattr(escape, "via", None)
-    if via is not None and (
-        copper_span_contains(via.layers[0], via.layers[1], escape.escape_layer)
-    ):
-        extent = max(extent, float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey))
+    if via is not None:
+        via_lo, via_hi = getattr(via, "drilled_layers", via.layers)
+        if copper_span_contains(via_lo, via_hi, escape.escape_layer):
+            extent = max(extent, float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey))
     return extent if extent > 0.0 else None
 
 
