@@ -330,7 +330,10 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
             "[deterministic-budget] Iteration-budgeted routing enabled "
             "(Issue #3538): per-net wall-clock cutoff DISABLED, C++ A* "
             f"iteration backstop pinned to {args.max_search_iterations:,} "
-            "node expansions.  Routed output is reproducible across machines."
+            "node expansions.  Routed output is reproducible across machines "
+            "unless a later '[deterministic-budget] per-net wall clock bound' "
+            "or 'stage deadline fired' line says a wall clock bound first "
+            "(Issue #6329)."
         )
         print(
             "[deterministic-budget] Per-net iteration cap "
@@ -17996,7 +17999,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "Bound routing work by an ITERATION budget instead of wall-clock "
             "time so the routed output (and its DRC count) is reproducible "
             "across machines regardless of runner speed or load (Issue #3538). "
-            "The per-net A* search is the only wall-clock-coupled stage that "
+            "The per-net A* search is the main wall-clock-coupled stage that "
             "lands different amounts of copper on a slow vs fast machine; this "
             "flag disables the per-net wall-clock cutoff (--per-net-timeout 0) "
             "and pins the C++ A* iteration backstop (--max-search-iterations) "
@@ -18012,8 +18015,20 @@ def _route_parser() -> argparse.ArgumentParser:
             "iteration backstop value can be overridden by passing an explicit "
             "--max-search-iterations N alongside this flag (N is then used "
             "verbatim); see DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS for the "
-            "default. Relief-rescue sub-searches keep a 10 s wall clock unless "
-            "--deterministic-rescue is also passed."
+            "default. "
+            "Relief-rescue sub-searches keep a 10 s wall clock unless "
+            "--deterministic-rescue is also passed. With --deterministic-budget "
+            "alone, each negotiated rip-up iteration also gives every per-net "
+            "search a budget of 10%% of the remaining stage time, and the "
+            "pure-Python A* fallback usually hits it before the iteration cap "
+            "(Issue #6329; logged as '[deterministic-budget] per-net wall clock "
+            "bound net ...'); --deterministic-rescue removes that budget and the "
+            "60 s oscillation-escape budget (Issue #6475). Still wall-clock-bound "
+            "even with both flags: the relief-rescue transaction bound; the "
+            "post-negotiation sweep (60 s, 10 s per net); the trace optimizer / "
+            "DRC nudge, which are skipped when little --timeout is left; and the "
+            "outer --timeout stage deadline (logged as '[deterministic-budget] "
+            "stage deadline fired')."
         ),
     )
     parser.add_argument(
