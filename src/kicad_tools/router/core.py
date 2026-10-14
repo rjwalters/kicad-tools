@@ -5695,8 +5695,15 @@ class Autorouter:
                         return False
             for via in route.vias:
                 gx, gy = self.grid.world_to_grid(via.x, via.y)
-                for layer in [via.layers[0], via.layers[1]]:
-                    if self.grid.is_blocked(gx, gy, layer, net):
+                # Check every layer the barrel is drilled through, not just
+                # the logical pair: a non-micro via recorded as
+                # (F.Cu, In1.Cu) is still an F.Cu..B.Cu barrel (#6485, #6630).
+                lo, hi = sorted(
+                    self.grid.layer_to_index(layer.value)
+                    for layer in getattr(via, "drilled_layers", via.layers)
+                )
+                for layer_idx in range(lo, hi + 1):
+                    if self.grid.is_blocked_for_net(gx, gy, layer_idx, net):
                         return False
         return True
 

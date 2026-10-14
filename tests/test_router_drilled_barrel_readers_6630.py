@@ -140,3 +140,131 @@ def test_class_pad_repair_via_span_includes_bcu():
     route = Route(net=1, net_name="N", segments=[], vias=[_via()])
     stats = repair_class_pad_pairs(pf, {"k": route}, {"k": None})
     assert stats.via_found == 1
+
+
+def _validator(grid):
+    from kicad_tools.router.core import Autorouter
+
+    router = object.__new__(Autorouter)
+    router.grid = grid
+    return router
+
+
+@pytest.mark.parametrize("blocked_layer", [Layer.IN2_CU, Layer.B_CU])
+def test_core_transformed_route_validation_sees_barrel(blocked_layer):
+    stack = LayerStack.four_layer_sig_sig_gnd_pwr()
+    grid = RoutingGrid(10, 10, rules=DesignRules(grid_resolution=0.1), layer_stack=stack)
+    gx, gy = grid.world_to_grid(5.0, 5.0)
+    cell = grid.cell_at(grid.layer_to_index(blocked_layer.value), gy, gx)
+    cell.blocked = True
+    cell.net = 2
+    router = _validator(grid)
+
+    through = [Route(net=1, net_name="N", segments=[], vias=[_via()])]
+    assert router._validate_transformed_routes(through, 1) is False
+
+    # A micro via's laser-drilled span stays (F.Cu, In1.Cu): the deeper
+    # blockage is not in its way.
+    micro = [Route(net=1, net_name="N", segments=[], vias=[_via(is_micro=True)])]
+    assert router._validate_transformed_routes(micro, 1) is True
+
+
+# --- is_micro=True: the span stays (F.Cu, In1.Cu); B.Cu is not seen ---------
+
+
+def test_micro_via_span_is_the_logical_pair():
+    via = _via(is_micro=True)
+    assert via.drilled_layers == (Layer.F_CU, Layer.IN1_CU)
+
+
+def test_terminal_connectivity_micro_does_not_reach_bcu():
+    pads = [_pad(5, 5, Layer.F_CU, ref="U1"), _pad(5, 5, Layer.B_CU, ref="U2")]
+    comps = physical_copper_components(pads, [], [_via(is_micro=True)])
+    assert comps[0] != comps[1]
+
+
+def test_escape_extent_micro_not_on_bcu():
+    esc = EscapeRoute(
+        pad=_pad(5, 5, Layer.F_CU),
+        direction=EscapeDirection.NORTH,
+        escape_point=(5.0, 5.0),
+        escape_layer=Layer.B_CU,
+        via=_via(is_micro=True),
+    )
+    assert escape_endpoint_copper_extent(esc) != pytest.approx(0.6)
+
+
+def test_kelvin_isolation_micro_leaves_bcu_free():
+    from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
+
+    stack = LayerStack.four_layer_sig_sig_gnd_pwr()
+    grid = RoutingGrid(10, 10, rules=DesignRules(grid_resolution=0.1), layer_stack=stack)
+    grid.routes.append(Route(net=1, net_name="N", segments=[], vias=[_via(is_micro=True)]))
+    root = _pad(2, 2, Layer.F_CU, pin="1")
+    target = _pad(8, 8, Layer.F_CU, pin="2")
+    bcu = grid.layer_to_index(Layer.B_CU.value)
+    f_cu = grid.layer_to_index(Layer.F_CU.value)
+    row, col = round(5.0 / grid.resolution), round(5.0 / grid.resolution)
+    with isolate_kelvin_branch(grid, [root, target], root, target):
+        assert grid._blocked[f_cu, row, col]
+        assert not grid._blocked[bcu, row, col]
+
+
+def test_io_fixed_copper_micro_no_bcu_violation():
+    from kicad_tools.router.io import validate_routes
+
+    stack = LayerStack.four_layer_sig_sig_gnd_pwr()
+    rules = DesignRules(grid_resolution=0.1)
+    grid = RoutingGrid(10, 10, rules=rules, layer_stack=stack)
+    bcu = grid.layer_to_index(Layer.B_CU.value)
+    grid.install_fixed_fills(
+        FixedFillObstacles((FixedFill("GND", 2, bcu, 0.2, box(4.9, 4.9, 5.1, 5.1)),))
+    )
+    router = SimpleNamespace(
+        grid=grid,
+        routes=[Route(net=1, net_name="N", segments=[], vias=[_via(is_micro=True)])],
+        rules=rules,
+        net_names={1: "N"},
+        net_class_map=None,
+        pads={},
+        nets={},
+        component_pitches={},
+    )
+    violations = validate_routes(router)
+    assert not any(v.obstacle_type == "fixed_copper" for v in violations)
+
+
+def test_lattice_fixed_copper_micro_span_excludes_bcu():
+    from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+
+    stack = LayerStack.four_layer_sig_sig_gnd_pwr()
+    pf = object.__new__(LatticePathfinder)
+    pf.layer_stack = stack
+    pf.rules = DesignRules(grid_resolution=0.1)
+    pf._set_fixed_copper([Route(net=1, net_name="N", segments=[], vias=[_via(is_micro=True)])])
+    occupied = pf._fixed_vias[0][4]
+    assert stack.layer_enum_to_index(Layer.B_CU) not in occupied
+    assert set(occupied) == {
+        stack.layer_enum_to_index(Layer.F_CU),
+        stack.layer_enum_to_index(Layer.IN1_CU),
+    }
+
+
+def test_class_pad_repair_micro_span_excludes_bcu():
+    from kicad_tools.router.lattice.class_pad_repair import repair_class_pad_pairs
+
+    stack = LayerStack.four_layer_sig_sig_gnd_pwr()
+    rules = DesignRules(grid_resolution=0.1)
+    pad = _pad(5.6, 5.0, Layer.B_CU, net=2, ref="U9")
+    pf = SimpleNamespace(
+        pad_class_clearances=[0.5],
+        _pairwise=None,
+        pads=[pad],
+        rules=rules,
+        layer_stack=stack,
+        _pad_layer_indices=lambda p: (stack.layer_enum_to_index(p.layer),),
+        _conn_geometry=lambda cls, net=None: (0.1, rules.trace_clearance),
+    )
+    route = Route(net=1, net_name="N", segments=[], vias=[_via(is_micro=True)])
+    stats = repair_class_pad_pairs(pf, {"k": route}, {"k": None})
+    assert stats.via_found == 0
