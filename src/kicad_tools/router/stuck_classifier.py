@@ -86,6 +86,9 @@ __all__ = [
     "classify_stuck_nets_from_pcb",
     "is_budget_search_failure",
     "normalize_search_failure",
+    "SEARCH_FAILURES_SIDECAR_SUFFIX",
+    "write_search_failures_sidecar",
+    "load_search_failures_sidecar",
 ]
 
 
@@ -1595,6 +1598,70 @@ def normalize_search_failure(reason: str | int | None) -> str | None:
     return str(reason)
 
 
+#: Issue #6369: sidecar carrying each net's last router search-failure reason.
+SEARCH_FAILURES_SIDECAR_SUFFIX = ".search_failures.json"
+
+
+def _search_failures_sidecar_path(path: str | Path) -> Path:
+    given = Path(path)
+    if given.name.endswith(SEARCH_FAILURES_SIDECAR_SUFFIX):
+        return given
+    return given.parent / f"{given.stem}{SEARCH_FAILURES_SIDECAR_SUFFIX}"
+
+
+def write_search_failures_sidecar(
+    output_path: str | Path, failures: Mapping[str, str | int]
+) -> Path | None:
+    """Write ``{net_name: reason}`` next to the routed board (issue #6369).
+
+    Reasons are stored as labels.  The sidecar describes only the run that
+    wrote it: an empty map (nothing recorded) *removes* any sidecar a previous
+    route left at the same path, so ``net-status --why`` never quotes a stale
+    reason.  Returns ``None`` for an empty map or a blocked write -- a
+    diagnostic never fails a route.
+
+    Semantics are "last failure wins" per net: a net that failed in an early
+    negotiation iteration and was never re-attempted (e.g. the global budget
+    ran out first) keeps that earlier, possibly geometric, reason.
+    """
+    import json
+
+    labelled = {}
+    for name, reason in failures.items():
+        label = normalize_search_failure(reason)
+        if label:
+            labelled[str(name)] = label
+    sidecar = _search_failures_sidecar_path(output_path)
+    if not labelled:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            sidecar.unlink(missing_ok=True)
+        return None
+    try:
+        sidecar.write_text(json.dumps({"search_failures": labelled}, indent=2, sort_keys=True))
+    except (OSError, TypeError, ValueError):
+        return None
+    return sidecar
+
+
+def load_search_failures_sidecar(path: str | Path) -> dict[str, str] | None:
+    """Load the sidecar for board *path*; ``None`` when absent or unreadable."""
+    import json
+
+    sidecar = _search_failures_sidecar_path(path)
+    if not sidecar.is_file():
+        return None
+    try:
+        block = json.loads(sidecar.read_text()).get("search_failures")
+        if not isinstance(block, dict):
+            return None
+        out = {str(k): str(v) for k, v in block.items() if v}
+        return out or None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
 def is_budget_search_failure(reason: str) -> bool:
     """True when a search-failure label means "ran out of time/iterations"."""
     lowered = reason.lower()
@@ -1855,6 +1922,11 @@ def classify_stuck_nets(
     witness = load_access_witness_sidecar(
         pcb_path if access_witness_path is None else access_witness_path
     )
+
+    # Issue #6369: auto-discover the router's per-net search-failure sidecar
+    # unless the caller supplied its own map.  Absent sidecar -> unchanged.
+    if search_failures is None:
+        search_failures = load_search_failures_sidecar(pcb_path)
 
     pcb = PCB.load(str(pcb_path))
     return classify_stuck_nets_from_pcb(

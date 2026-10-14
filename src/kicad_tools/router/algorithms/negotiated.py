@@ -1535,6 +1535,12 @@ class NegotiatedRouter:
         info = get_info()
         if not info:
             return
+        # Issue #6369: remember each net's last search-failure code on the
+        # shared pathfinder so the saved board's ``net-status --why`` can tell
+        # a geometric give-up from a spent budget.
+        store = getattr(self.router, "search_failures_by_net", None)
+        if isinstance(store, dict) and info.get("failure_reason"):
+            store[int(failed_net)] = int(info["failure_reason"])
         if info.get("failure_reason") not in self._BLOCKER_FAILURE_REASONS:
             return
         blocking_net = int(info.get("blocking_via_net") or 0)
