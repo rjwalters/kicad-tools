@@ -1952,23 +1952,46 @@ def _run_import_ses_command(args, pcb_path: Path) -> int:
     except Exception as e:
         return fail(f"Error importing SES: {e}")
 
+    # Issue #6593: a session that imports nothing, or drops any wire/via,
+    # must not look like a clean import.  The destination is still written.
+    skipped = [str(s) for s in getattr(importer, "skipped", [])]
+    imported_wires = getattr(importer, "imported_wires", len(importer.wires))
+    imported_vias = getattr(importer, "imported_vias", len(importer.vias))
+    problems: list[str] = []
+    if skipped:
+        problems.append(f"{len(skipped)} SES element(s) skipped")
+    if imported_wires + imported_vias == 0:
+        problems.append("no wires or vias imported")
+    success = not problems
+
     if as_json:
-        emit_json(
-            {
-                "command": "import-ses",
-                "pcb": str(pcb_path),
-                "ses": str(ses_path),
-                "output": str(dest),
-                "wires": len(importer.wires),
-                "vias": len(importer.vias),
-                "success": True,
-            }
-        )
-        return 0
+        payload = {
+            "command": "import-ses",
+            "pcb": str(pcb_path),
+            "ses": str(ses_path),
+            "output": str(dest),
+            "wires": imported_wires,
+            "vias": imported_vias,
+            "ses_wires": len(importer.wires),
+            "ses_vias": len(importer.vias),
+            "skipped": skipped,
+            "success": success,
+        }
+        if problems:
+            payload["error"] = "; ".join(problems)
+        emit_json(payload)
+        return 0 if success else 1
 
     print(f"Imported SES routes into {dest}")
-    print(f"  Wires: {len(importer.wires)}")
-    print(f"  Vias: {len(importer.vias)}")
+    print(f"  Wires: {imported_wires}/{len(importer.wires)}")
+    print(f"  Vias: {imported_vias}/{len(importer.vias)}")
+    if skipped:
+        print(f"  Skipped: {len(skipped)}")
+        for reason in skipped:
+            print(f"    - {reason}")
+    if problems:
+        print(f"Error: SES import incomplete: {'; '.join(problems)}", file=sys.stderr)
+        return 1
     return 0
 
 
