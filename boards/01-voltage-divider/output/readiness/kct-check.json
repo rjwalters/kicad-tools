@@ -28,8 +28,8 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 28,
-    "coverage_skipped": 8,
+    "coverage_checked": 32,
+    "coverage_skipped": 5,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
   },
@@ -85,7 +85,7 @@
     },
     "erc": {
       "status": "PASSED",
-      "detail": "0 error(s), 1 warning(s)"
+      "detail": "0 error(s), 0 warning(s)"
     },
     "lvs": {
       "status": "PASSED",
@@ -167,15 +167,21 @@
       "blocking": true
     },
     "diffpair_length_skew": {
-      "status": "skipped:no_diff_pairs_detected",
-      "state": "skipped",
-      "reason": "no_diff_pairs_detected",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "diffpair_routing_continuity": {
-      "status": "skipped:no_diff_pairs_detected",
-      "state": "skipped",
-      "reason": "no_diff_pairs_detected",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "dimensions": {
@@ -215,9 +221,9 @@
       "blocking": true
     },
     "match_group_length_skew": {
-      "status": "skipped:no_net_class_map",
-      "state": "skipped",
-      "reason": "no_net_class_map",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "netclass_clearance_copper": {
