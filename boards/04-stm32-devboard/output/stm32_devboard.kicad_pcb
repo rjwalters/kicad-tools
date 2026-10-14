@@ -114,7 +114,7 @@
     (layer "F.Cu")
     (uuid "920db61a-39fb-5d63-84f5-f396cefb5a1c")
     (at 149.5 89.5)
-    (fp_text reference "U2" (at 0 -5.5) (layer "F.SilkS") (uuid "5f766318-57f6-57e7-b6a9-075d90af8338")
+    (fp_text reference "U2" (at 0 -6.0) (layer "F.SilkS") (uuid "5f766318-57f6-57e7-b6a9-075d90af8338")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "STM32F103C8T6" (at 0 5.5) (layer "F.Fab") (uuid "099edf3b-f0c4-5583-9b67-fba6f867975b")

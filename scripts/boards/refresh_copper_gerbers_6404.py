@@ -28,8 +28,14 @@ from pathlib import Path
 COPPER_MEMBER = re.compile(r"-(?:F|B|In\d+)_Cu\.[A-Za-z0-9]+$")
 
 
-def refresh_copper_gerbers(pcb: Path, archive: Path) -> list[str]:
-    """Replace the copper-layer members of ``archive`` with a fresh plot of ``pcb``."""
+def refresh_copper_gerbers(
+    pcb: Path, archive: Path, members: re.Pattern[str] = COPPER_MEMBER
+) -> list[str]:
+    """Replace the ``members`` (default: copper layers) of ``archive`` with a fresh plot.
+
+    Issue #6269 passes a silkscreen pattern to swap in just the re-plotted
+    ``F_Silkscreen`` member after a reference-text move.
+    """
     from kicad_tools.export.gerber import GerberExporter
 
     with tempfile.TemporaryDirectory(prefix="kct-6404-gerber-") as tmp:
@@ -41,12 +47,12 @@ def refresh_copper_gerbers(pcb: Path, archive: Path) -> list[str]:
     replaced: list[str] = []
     out: list[tuple[zipfile.ZipInfo, bytes]] = []
     for info, data in entries:
-        if COPPER_MEMBER.search(info.filename):
+        if members.search(info.filename):
             data = fresh_members[info.filename]
             replaced.append(info.filename)
         out.append((info, data))
     if not replaced:
-        raise RuntimeError(f"no copper members in {archive}")
+        raise RuntimeError(f"no members matching {members.pattern!r} in {archive}")
     with zipfile.ZipFile(archive, "w") as new:
         for info, data in out:
             new.writestr(info, data, compress_type=info.compress_type)
