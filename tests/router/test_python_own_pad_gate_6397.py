@@ -46,8 +46,6 @@ requires_cpp = pytest.mark.skipif(
 
 NET = 1
 TARGET = (7.5, 7.5)
-#: ``CLEARANCE_EPSILON_MM`` of the native clearance kernel / ``grid.cpp``.
-NATIVE_EPSILON = 1e-4
 
 
 class _Twin:
@@ -118,34 +116,6 @@ class _Twin:
             component_pitches=self.router.component_pitches,
             exclude_refs=refs,
         )[0]
-
-    def grazes_the_rule(self, step: tuple[int, int, int, int], width: float, refs) -> bool:
-        """Is this step's pad gap within the native epsilon of the clearance rule?
-
-        The two validators differ there and nowhere else: ``Grid3D`` accepts
-        ``gap >= required - CLEARANCE_EPSILON_MM`` (1e-4), the Python
-        ``segment_pad_clearance`` rejects ``gap < required`` with no tolerance.
-        A step at exactly 0.15 mm (0.14999999999999963 in floats) is therefore
-        legal natively and rejected in Python -- by the Python validator and
-        by the gate that shares its code, so the gate is still never stricter
-        than the validator it guards.
-        """
-        gx1, gy1, gx2, gy2 = step
-        ax, ay = self.grid.grid_to_world(gx1, gy1)
-        bx, by = self.grid.grid_to_world(gx2, gy2)
-        gap, _loc = self.grid.segment_pad_clearance(
-            ax,
-            ay,
-            bx,
-            by,
-            0,
-            width / 2,
-            NET,
-            self.rules.trace_clearance,
-            component_pitches=self.router.component_pitches,
-            exclude_refs=refs,
-        )
-        return abs(gap - CLEARANCE) <= NATIVE_EPSILON
 
     def expand(self, cell: tuple[int, int], *, backward: bool, own_gate) -> set[tuple[int, int]]:
         """Planar neighbours ``_expand_bidirectional_neighbors`` pushes from ``cell``."""
@@ -257,9 +227,8 @@ def test_gate_inputs_match_the_native_gate_inputs() -> None:
 def test_step_verdict_matches_cpp_and_the_validator(rotated, relaxed, width) -> None:
     """Three verdicts on every step near the tip: Python gate, C++ gate, validator.
 
-    The Python gate equals the Python validator on every step, and the C++
-    gate on every step that is not within the native epsilon of the rule
-    (see :meth:`_Twin.grazes_the_rule`).
+    The Python gate equals the Python validator and the C++ gate on every
+    step, including the ones that land on the rule to float noise (#6509).
     """
     twin = _Twin(rotated)
     if relaxed:
@@ -271,23 +240,15 @@ def test_step_verdict_matches_cpp_and_the_validator(rotated, relaxed, width) -> 
     memo: dict = {}
     disagreements = []
     rejected = 0
-    grazing = 0
     for step in twin.steps:
         gx1, gy1, gx2, gy2 = step
         py = twin.router._own_pad_step_clear(gx1, gy1, gx2, gy2, 0, NET, width, refs, memo)
         cpp = bool(pathfinder._impl.own_pad_step_clear(gx1, gy1, gx2, gy2, 0, NET, width))
         validator = twin.validator(step, width, refs)
         rejected += not py
-        if py != validator:
+        if not py == cpp == validator:
             disagreements.append((step, py, cpp, validator))
-        elif py != cpp:
-            # Only ever Python-stricter, and only on the epsilon boundary.
-            if py or not twin.grazes_the_rule(step, width, refs):
-                disagreements.append((step, py, cpp, validator))
-            else:
-                grazing += 1
     assert not disagreements, disagreements[:5]
-    assert grazing <= len(twin.steps) // 100, "epsilon-boundary steps must stay a rarity"
     if relaxed:
         assert rejected == 0, "the same-component skip carve-out exempts every U2 pad"
     else:
@@ -303,9 +264,8 @@ def test_bidirectional_expansion_matches_the_cpp_gate(rotated, backward) -> None
     For every planar step the ungated expansion admits: it is refused with
     the gate on if and only if it is outside both metal boxes, touches an
     own-pad cell on either end, and ``Pathfinder::own_pad_step_clear`` says
-    the swept segment is too close to a pad.  The one tolerated difference
-    is a step within the native epsilon of the rule, which only the Python
-    side refuses (see :meth:`_Twin.grazes_the_rule`).
+    the swept segment is too close to a pad.  Steps on the rule to float
+    noise get the same verdict on both sides (#6509).
     """
     twin = _Twin(rotated)
     router = twin.router
@@ -327,10 +287,7 @@ def test_bidirectional_expansion_matches_the_cpp_gate(rotated, backward) -> None
 
     actual = twin.gate_rejections((refs, width, {}), backward=backward)
     assert expected, "the window must contain steps the C++ gate rejects"
-    assert set(expected) <= set(actual), sorted(set(expected) - set(actual))[:5]
-    python_only = sorted(set(actual) - set(expected))
-    assert all(twin.grazes_the_rule(step, width, refs) for step in python_only), python_only[:5]
-    assert len(python_only) <= len(actual) // 20
+    assert set(actual) == set(expected), sorted(set(actual) ^ set(expected))[:5]
 
 
 # ---------------------------------------------------------------------------

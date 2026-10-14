@@ -255,6 +255,7 @@ class TestValidateRouteClearanceWithForeignContext:
             drill=0.3,
             diameter=0.6,
             layers=(Layer.F_CU, Layer.IN1_CU),
+            is_micro=True,  # Issue #6502: only a micro via keeps a partial barrel
             net=99,
         )
         router.set_segment_foreign_context(foreign_vias=[foreign_via])
@@ -745,6 +746,7 @@ class TestFindNetsWithSegmentViaViolationsPerformance:
             drill=0.3,
             diameter=0.6,
             layers=(Layer.F_CU, Layer.F_CU),
+            is_micro=True,  # Issue #6502: only a micro via keeps a partial barrel
             net=2,
         )
         stub = Segment(

@@ -225,7 +225,7 @@ four families whose other leaves already spoke JSON --
 `create-footprint-lib/generate-footprint`, `parts cache/sync-catalog`,
 `pcb export-dsn/import-ses`. Each emits one document keyed by `command`
 plus that command's own summary (`cleared` / `action` for the two cache
-commands, `layers`/`nets`/`components` for `export-dsn`,
+commands, `layers`/`nets`/`components`/`omissions` for `export-dsn`,
 `wires`/`vias` for `import-ses`, `path`/`file_size_bytes`/`source` for
 `download`). Three details worth reusing:
 

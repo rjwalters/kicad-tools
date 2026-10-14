@@ -1066,6 +1066,124 @@ class TestRevertedMirrorLeavesNoCosmeticResidue:
         assert "(justify mirror)" not in text
 
 
+def _text_angles(fp) -> list[tuple[str, str, float]]:
+    """(type, layer, board-frame angle) of every footprint text."""
+    return [(t.text_type, t.layer, round(t.rotation, 6)) for t in fp.texts]
+
+
+class TestRevertedRotateLeavesNoCosmeticResidue:
+    """Issue #6557: a reverted rotate must not leave keep-upright text flipped.
+
+    Both rotation kinds go through ``StrategyApplicator._apply_rotate_component``,
+    which ends in ``fp.keep_texts_upright()``: a text the rotate turned upside
+    down gets another 180 degrees and a swapped justification.  The revert puts
+    ``fp.rotation`` back through the setter, which takes back only the rigid
+    turn -- so without a cosmetic snapshot the part's silk/fab text was left
+    rotated 180 degrees.  Same revert-then-keep-then-save shape as the mirror
+    test above.
+    """
+
+    @staticmethod
+    def _rotate(kind: str) -> PlacementDelta:
+        return PlacementDelta(
+            net_name="DQ2",
+            target_ref="U1",
+            kind=kind,
+            # -90 takes the 30-degree texts to 300, which keep-upright flips
+            # (a +90 turn would land them at 120 and never exercise the flip).
+            rotation_delta=180.0 if kind == "rotate_180" else -90.0,
+            source_action="de_reverse_bundle" if kind == "rotate_180" else "endpoint_align",
+        )
+
+    @classmethod
+    def _loop(cls, pcb, kind: str):
+        # U1's anchor is x=100; the router pad starts 2mm to its right.
+        #   rotate_180        -> x = 98             (still failing -> reverted)
+        #   rotate_align -90  -> (100, 102)         (still failing -> reverted)
+        #   translate         -> x = 102 + 1 = 103  (routes -> kept)
+        pad = FakePad(102.0, 100.0, "U1", "1")
+
+        def _needs_the_translate(router: FakeRouter) -> list[int]:
+            return [] if abs(router.pads[("U1", "1")].x - 103.0) < 1e-6 else [2]
+
+        router = FakeRouter([pad], 2, _needs_the_translate)
+        translate = PlacementDelta(
+            net_name="DQ2",
+            target_ref="U1",
+            kind="translate",
+            dx=1.0,
+            source_action="move_component",
+        )
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            delta_proposer=lambda _pcb: [cls._rotate(kind), translate],
+        )
+        return loop, router
+
+    @pytest.mark.parametrize("kind", ["rotate_180", "rotate_align"])
+    def test_revert_then_keep_saves_unflipped_text(self, tmp_path: Path, kind: str):
+        from kicad_tools.schema.pcb import PCB
+
+        pristine = _u1(PCB.load(str(_MIRROR_FRONT)))
+        original_nodes = _cosmetic_nodes(pristine)
+        original_angles = _text_angles(pristine)
+        original_state = _cosmetic_state(pristine)
+
+        pcb = PCB.load(str(_MIRROR_FRONT))
+        loop, _router = self._loop(pcb, kind)
+        result = loop.run_delta(max_adjustments=3)
+
+        assert [d.kind for d in result.reverted_deltas] == [kind]
+        assert [d.kind for d in result.applied_deltas] == ["translate"]
+
+        # Live objects: the reverted rotate left nothing behind.
+        fp = _u1(pcb)
+        assert fp.rotation == pytest.approx(30.0, abs=1e-6)
+        assert _text_angles(fp) == original_angles
+        assert _cosmetic_state(fp) == original_state
+        # Byte-identical silk/fab S-expression (angle AND justification).
+        assert _cosmetic_nodes(fp) == original_nodes
+
+        # ...and the SAVED file agrees.
+        out = tmp_path / f"after_reverted_{kind}.kicad_pcb"
+        pcb.save(str(out))
+        reloaded = _u1(PCB.load(str(out)))
+        assert _text_angles(reloaded) == original_angles
+        assert _cosmetic_nodes(reloaded) == original_nodes
+
+    @pytest.mark.parametrize("kind", ["rotate_180", "rotate_align"])
+    def test_interrupted_rotate_trial_restores_unflipped_text(self, kind: str):
+        """``restore_last_accepted`` mid-rotate-trial restores the text too."""
+        from kicad_tools.cli.route_deadline import RouteDeadlineExpired
+        from kicad_tools.schema.pcb import PCB
+
+        original_nodes = _cosmetic_nodes(_u1(PCB.load(str(_MIRROR_FRONT))))
+        pcb = PCB.load(str(_MIRROR_FRONT))
+        loop, router = self._loop(pcb, kind)
+        route = router.route_all_negotiated
+
+        def _deadline_in_the_rotate_trial(**kwargs):
+            if router.route_calls == 1:  # call 1 was the baseline
+                router.route_calls += 1
+                raise RouteDeadlineExpired()
+            return route(**kwargs)
+
+        router.route_all_negotiated = _deadline_in_the_rotate_trial
+        with pytest.raises(RouteDeadlineExpired):
+            loop.run_delta(max_adjustments=3)
+
+        assert loop.trial_in_flight is not None and loop.trial_in_flight.kind == kind
+        assert loop.restore_last_accepted() is True
+        assert loop.restore_last_accepted() is False
+
+        fp = _u1(pcb)
+        assert fp.rotation == pytest.approx(30.0, abs=1e-6)
+        assert _cosmetic_nodes(fp) == original_nodes
+        assert router.pads[("U1", "1")].x == pytest.approx(102.0)
+
+
 # --------------------------------------------------------------------------- #
 # Driver: anchor / budget / kind skips (with logged reason)                    #
 # --------------------------------------------------------------------------- #

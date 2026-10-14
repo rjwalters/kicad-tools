@@ -4847,7 +4847,9 @@ class RoutingGrid:
                 min_actual = clearance
 
             # Issue #1016: Check violation against component-specific clearance
-            if clearance < required_clearance:
+            # Issue #6509: same 1e-4 mm slack as native segment_pad_clear
+            # (grid.cpp), so float noise at exactly the rule is accepted.
+            if clearance < required_clearance - _KERNEL_EPSILON_MM:
                 violation_loc = (pad.x, pad.y)
         return min_actual, violation_loc
 
@@ -4928,6 +4930,9 @@ class RoutingGrid:
             and partner_net != exclude_net
             and partner_clearance is not None
         )
+        # Non-Optional alias for the comparisons below; only read when
+        # ``partner_active`` (which already implies it is not None).
+        partner_floor: float = partner_clearance if partner_clearance is not None else min_clearance
 
         # Segment half-width for edge-to-edge distance calculation
         seg_half_width = seg.width / 2
@@ -5026,14 +5031,14 @@ class RoutingGrid:
                     # Issue #2559 / Phase 1C: tighter clearance for the
                     # diff-pair partner only.
                     effective_clearance = (
-                        partner_clearance
+                        partner_floor
                         if partner_active and other_seg.net == partner_net
                         else min_clearance
                     )
 
                     if clearance < best:
                         best = clearance
-                    if clearance < effective_clearance:
+                    if clearance < effective_clearance - _KERNEL_EPSILON_MM:
                         found = True
                         loc = (
                             (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
@@ -5123,14 +5128,14 @@ class RoutingGrid:
 
                     # Issue #2559 / Phase 1C: tighter clearance for partner.
                     effective_clearance = (
-                        partner_clearance
+                        partner_floor
                         if partner_active and route.net == partner_net
                         else min_clearance
                     )
 
                     if clearance < min_actual_clearance:
                         min_actual_clearance = clearance
-                    if clearance < effective_clearance:
+                    if clearance < effective_clearance - _KERNEL_EPSILON_MM:
                         # Violation location at midpoint
                         has_violation = True
                         violation_loc = (
@@ -5159,7 +5164,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < via_floor:
+                if clearance < via_floor - _KERNEL_EPSILON_MM:
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -5258,7 +5263,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < segment_floor:
+                if clearance < segment_floor - _KERNEL_EPSILON_MM:
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -5315,7 +5320,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < min_clearance:
+                if clearance < min_clearance - _KERNEL_EPSILON_MM:
                     has_violation = True
                     violation_loc = (via.x, via.y)
 

@@ -6458,13 +6458,17 @@ def _stage_input_for_auto_pour(pcb_path: Path, output_path: Path) -> Path:
     See: issue #2548 — ``kct route`` should not modify INPUT when output
     differs.  Mirrors the ``shutil.copy2`` pattern in ``runner.py``.
     """
-    if pcb_path.resolve() == output_path.resolve():
-        return pcb_path
+    # Record the input copper baseline on both branches (issue #6531): an
+    # in-place run must not inherit a stale entry from an earlier run that
+    # targeted the same output path in this process, and it needs a baseline
+    # of its own taken before any checkpoint overwrites the file.
     try:
         _, in_segs, in_vias = _strip_route_blocks(pcb_path.read_text())
         _INPUT_COPPER_BASELINE[_baseline_key(output_path)] = (in_segs, in_vias)
     except (OSError, UnicodeDecodeError):
         _INPUT_COPPER_BASELINE.pop(_baseline_key(output_path), None)
+    if pcb_path.resolve() == output_path.resolve():
+        return pcb_path
     shutil.copy2(pcb_path, output_path)
     return output_path
 
@@ -7013,9 +7017,13 @@ def _apply_plane_via_reservation(
     try:
         from kicad_tools.cli.stitch_cmd import find_all_plane_nets
         from kicad_tools.core.sexp_file import load_pcb
-        from kicad_tools.router.plane_via_sites import reserve_router_plane_via_sites
+        from kicad_tools.router.plane_via_sites import (
+            plane_fills_from_pcb,
+            reserve_router_plane_via_sites,
+        )
 
-        nets = sorted(names & set(find_all_plane_nets(load_pcb(Path(pcb_path)))))
+        pcb = load_pcb(Path(pcb_path))
+        nets = sorted(names & set(find_all_plane_nets(pcb)))
         if not nets:
             return
         reservation = reserve_router_plane_via_sites(
@@ -7024,6 +7032,9 @@ def _apply_plane_via_reservation(
             via_diameter=getattr(args, "via_diameter", None),
             via_drill=getattr(args, "via_drill", None),
             clearance=getattr(args, "clearance", None),
+            # Issue #6589: keep foreign vias / plane-layer tracks outside the
+            # pour's fill pullback, so the pour still covers each site.
+            plane_fills=plane_fills_from_pcb(pcb, nets),
         )
     except Exception as exc:  # advisory: never fail a route over a reservation
         logger.warning("Plane-via reservation skipped: %s", exc)

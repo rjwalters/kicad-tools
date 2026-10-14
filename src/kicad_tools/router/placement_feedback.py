@@ -68,9 +68,21 @@ class _PadNetSnapshot:
 _SEXP_MISSING = object()
 
 
+# Delta kinds whose applicator path rewrites footprint silk/fab in a way the
+# placement restore cannot undo (issue #6557): ``mirror`` flips the cosmetics
+# (``StrategyApplicator._apply_mirror_component``), and both rotation kinds go
+# through ``StrategyApplicator._apply_rotate_component``.  Both end in
+# ``fp.keep_texts_upright()``, which turns board-absolute text angles by 180
+# degrees and swaps their justification -- the ``fp.rotation`` setter's rigid
+# ``-delta`` turn on revert does not take that flip back.  A trial of one of
+# these kinds snapshots the cosmetics (``_snapshot_cosmetics``) so the revert
+# can restore them absolutely.
+_COSMETIC_REWRITING_KINDS: frozenset[str] = frozenset({"mirror", "rotate_180", "rotate_align"})
+
+
 @dataclass
 class _CosmeticSnapshot:
-    """Absolute pre-mirror state of one footprint's silk/fab (Issue #6325).
+    """Absolute pre-trial state of one footprint's silk/fab (#6325, #6557).
 
     A mirror flips the footprint's texts and graphics in two parallel
     representations -- the parsed ``fp.texts``/``fp.graphics`` objects and the
@@ -159,10 +171,12 @@ class _TrialInFlight:
     used to be locals of ``run_delta``, so an interrupt (a routing deadline or
     Ctrl+C) that saved a partial board had nothing to restore from.
 
-    ``cosmetics`` covers the one transform the placement snapshot cannot: a
-    ``mirror`` also flips the footprint's silk/fab texts and graphics, which
-    live outside ``placement``.  It is an absolute snapshot of them taken
-    before the application starts (``None`` for every other kind), so the undo
+    ``cosmetics`` covers what the placement snapshot cannot: a ``mirror``
+    also flips the footprint's silk/fab texts and graphics, and a
+    ``rotate_180``/``rotate_align`` ends in ``keep_texts_upright`` (Issue
+    #6557), and those live outside ``placement``.  It is an absolute snapshot
+    of them taken before the application starts (``None`` for every kind not
+    in ``_COSMETIC_REWRITING_KINDS``), so the undo
     writes them back however far the application got and however the loop's
     own revert and a signal handler's ``restore_last_accepted`` interleave
     (Issue #6325).  It used to count re-applications of the mirror instead,
@@ -1892,14 +1906,19 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
     def _snapshot_cosmetics(
         self, delta: PlacementDelta, strategy: ResolutionStrategy
     ) -> _CosmeticSnapshot | None:
-        """Snapshot the silk/fab a ``mirror`` *delta* is about to flip (#6325).
+        """Snapshot the silk/fab a *delta* is about to rewrite (#6325, #6557).
 
-        ``None`` for every other kind (none of them touches the cosmetics) and
-        when the target cannot be resolved -- the application then fails
-        before mutating anything.  The footprint is resolved exactly as the
-        applicator resolves it, so the snapshot is of the part it flips.
+        Taken for every kind in :data:`_COSMETIC_REWRITING_KINDS`: a
+        ``mirror`` flips the silk/fab, and both rotation kinds end in
+        ``fp.keep_texts_upright()``, whose 180-degree text flip and
+        justification swap the ``fp.rotation`` setter cannot undo on revert.
+        ``None`` for every other kind (they never touch the cosmetics beyond
+        what the placement restore puts back) and when the target cannot be
+        resolved -- the application then fails before mutating anything.  The
+        footprint is resolved exactly as the applicator resolves it, so the
+        snapshot is of the part it changes.
         """
-        if self.pcb is None or delta.kind != "mirror" or not strategy.actions:
+        if self.pcb is None or delta.kind not in _COSMETIC_REWRITING_KINDS or not strategy.actions:
             return None
         applicator = self._strategy_applicator
         try:

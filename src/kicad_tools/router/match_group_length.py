@@ -365,7 +365,9 @@ class MatchGroupTracker:
             blind_buried_supported: When ``False`` (Issue #4007), a
                 standard (non-micro) via is measured as a full through-via
                 (see :meth:`DiffPairLengthTracker._via_length`).  Defaults
-                to ``True`` (legacy partial-span behavior).
+                to ``True`` (the drilled span, ``Via.drilled_layers``: a
+                standard router via is through, a micro via partial;
+                issue #6502).
 
         Returns:
             Total geometric length (segments + vias) in mm.

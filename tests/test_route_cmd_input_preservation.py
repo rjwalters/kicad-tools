@@ -143,6 +143,58 @@ class TestStageInputForAutoPour:
         assert _sha256(input_pcb) == input_hash
 
 
+def _make_pcb_with_copper(n_segments: int, n_vias: int) -> str:
+    """Pour-candidate PCB carrying ``n_segments`` segments and ``n_vias`` vias."""
+    body = _make_pcb_with_pour_candidates()
+    copper = []
+    for i in range(n_segments):
+        copper.append(f'  (segment (start {i} 5) (end {i} 6) (width 0.2) (layer "F.Cu") (net 3))\n')
+    for i in range(n_vias):
+        copper.append(
+            f'  (via (at {i} 20) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
+        )
+    # Insert before the Edge.Cuts outline (top level, inside kicad_pcb).
+    return body.replace(_PCB_FOOTER, "".join(copper) + _PCB_FOOTER)
+
+
+class TestStageInputCopperBaseline:
+    """Issue #6531: the #6351 copper baseline is recorded on in-place runs too."""
+
+    def test_in_place_run_replaces_stale_baseline(self, tmp_path: Path, monkeypatch):
+        """``A -> O`` then ``O -> O`` in one process: baseline is O's own counts."""
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "_INPUT_COPPER_BASELINE", {})
+        a = tmp_path / "a.kicad_pcb"
+        o = tmp_path / "o.kicad_pcb"
+        a.write_text(_make_pcb_with_copper(n_segments=7, n_vias=3))
+
+        route_cmd._stage_input_for_auto_pour(a, o)
+        key = route_cmd._baseline_key(o)
+        assert route_cmd._INPUT_COPPER_BASELINE[key] == (7, 3)
+
+        # O now holds a different board (e.g. the routed result of run 1).
+        o.write_text(_make_pcb_with_copper(n_segments=2, n_vias=1))
+        returned = route_cmd._stage_input_for_auto_pour(o, Path(str(o)))
+
+        assert returned == o
+        assert route_cmd._INPUT_COPPER_BASELINE[key] == (2, 1)
+
+    def test_in_place_unreadable_input_leaves_no_entry(self, tmp_path: Path, monkeypatch):
+        """In-place staging of an undecodable file drops any stale entry."""
+        from kicad_tools.cli import route_cmd
+
+        o = tmp_path / "o.kicad_pcb"
+        o.write_bytes(b"(kicad_pcb \xff\xfe\xfd)")
+        key = route_cmd._baseline_key(o)
+        monkeypatch.setattr(route_cmd, "_INPUT_COPPER_BASELINE", {key: (99, 99)})
+
+        returned = route_cmd._stage_input_for_auto_pour(o, o)
+
+        assert returned == o
+        assert key not in route_cmd._INPUT_COPPER_BASELINE
+
+
 # ---------------------------------------------------------------------------
 # Behavioral test: auto-pour does not mutate INPUT when staged via helper
 # ---------------------------------------------------------------------------
