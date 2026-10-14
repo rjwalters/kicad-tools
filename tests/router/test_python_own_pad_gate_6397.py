@@ -487,6 +487,11 @@ def test_unchecked_python_search_builds_a_rejected_via_pair(monkeypatch) -> None
     assert verdicts and verdicts[0] is False
 
 
+def _child_via_anc(parent: AStarNode) -> AStarNode | None:
+    """``via_anc`` for a child of ``parent``, as both Python A* loops set it (#6526)."""
+    return parent if parent.via_from_parent else parent.via_anc
+
+
 def test_own_path_vias_clear_walks_every_earlier_via() -> None:
     router, _pads, rules = _walled_router()
     floor_cells = math.ceil((0.5 + rules.via_drill) / rules.grid_resolution)  # 7 cells = 0.7 mm
@@ -496,11 +501,10 @@ def test_own_path_vias_clear_walks_every_earlier_via() -> None:
         node = AStarNode(0.0, 0.0, 0, 10, 0)
         layer = 0
         for gx in range(1, end + 1):
-            node = AStarNode(0.0, 0.0, gx, 10, layer, node, False, via_anc=node.via_anc)
+            node = AStarNode(0.0, 0.0, gx, 10, layer, node, False, via_anc=_child_via_anc(node))
             if gx in via_columns:
                 layer = 1 - layer
-                node = AStarNode(0.0, 0.0, gx, 10, layer, node, True)
-                node.via_anc = node
+                node = AStarNode(0.0, 0.0, gx, 10, layer, node, True, via_anc=_child_via_anc(node))
         return node
 
     assert router._own_path_vias_clear(_path(end=20))  # no via on the path yet
@@ -511,9 +515,82 @@ def test_own_path_vias_clear_walks_every_earlier_via() -> None:
     far = _path(10, 30, end=30)
     back = far
     for gx in range(29, 13, -1):
-        back = AStarNode(0.0, 0.0, gx, 10, back.layer, back, False, via_anc=back.via_anc)
+        back = AStarNode(0.0, 0.0, gx, 10, back.layer, back, False, via_anc=_child_via_anc(back))
     assert not router._own_path_vias_clear(back)
     # A via stack at one cell is one drill.
     stacked = _path(10, end=10)
     assert stacked.via_from_parent
     assert router._own_path_vias_clear(stacked)
+
+
+# --- Issue #6526: ``via_anc`` must never point at its own node ----------------
+
+
+def _walk_vias_by_parent(node: AStarNode | None) -> list[AStarNode]:
+    """Every via node on ``node``'s path, nearest first, found by walking ``parent``."""
+    found = []
+    while node is not None:
+        if node.via_from_parent:
+            found.append(node)
+        node = node.parent
+    return found
+
+
+def _walk_vias_by_anc(node: AStarNode) -> list[AStarNode]:
+    """The node sequence ``Router._own_path_vias_clear`` visits from ``node``."""
+    found = []
+    cur = node if node.via_from_parent else node.via_anc
+    while cur is not None:
+        found.append(cur)
+        cur = cur.via_anc
+    return found
+
+
+def test_via_anc_walk_visits_every_via_on_the_path() -> None:
+    """The ``via_anc`` chain is exactly the set of via nodes on the parent chain.
+
+    Covers two separated vias, a via stack at one cell (F -> In1 -> B), and a
+    node whose own edge is the path's first via.
+    """
+    node = AStarNode(0.0, 0.0, 0, 10, 0)
+    nodes = [node]
+    # (gx, via?) steps: planar, via, planar..., via, via (stack), planar
+    steps = [(1, False), (1, True), (2, False), (3, False), (3, True), (3, True), (4, False)]
+    layer = 0
+    for gx, is_via in steps:
+        if is_via:
+            layer += 1
+        node = AStarNode(0.0, 0.0, gx, 10, layer, node, is_via, via_anc=_child_via_anc(node))
+        nodes.append(node)
+    for n in nodes:
+        assert n.via_anc is not n
+        walked = _walk_vias_by_anc(n)
+        assert [id(v) for v in walked] == [id(v) for v in _walk_vias_by_parent(n)]
+    first_via = nodes[2]
+    assert first_via.via_from_parent and first_via.via_anc is None
+    assert _walk_vias_by_anc(first_via) == [first_via]
+
+
+@pytest.mark.parametrize("method", ["route", "route_bidirectional"])
+def test_python_search_leaves_no_cyclic_node_garbage(method) -> None:
+    """With the cyclic GC off, no ``AStarNode`` outlives the search (Issue #6526).
+
+    The search on this fixture places two vias.  When via nodes referenced
+    themselves through ``via_anc`` their whole node tree survived the return
+    (1135 / 2181 nodes) until the next full collection.
+    """
+    import gc
+
+    router, pads, _rules = _walled_router()
+    gc.collect()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        route = getattr(router, method)(pads[0], pads[1])
+        assert route is not None and len(route.vias) == 2
+        del route
+        alive = sum(1 for obj in gc.get_objects() if isinstance(obj, AStarNode))
+    finally:
+        if was_enabled:
+            gc.enable()
+    assert alive == 0, f"{alive} AStarNode objects left for the cyclic GC"

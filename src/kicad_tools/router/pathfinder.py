@@ -187,8 +187,11 @@ class AStarNode:
     via_from_parent: bool = field(compare=False, default=False)
     direction: tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
     seq: int = field(compare=False, default=0)
-    # Issue #6473: nearest via node on this node's path (itself when it was
-    # reached through a via); twin of the native ``AStarNode::via_anc``.
+    # Issue #6473: nearest via node strictly above this node on its path
+    # (``None`` when there is none); twin of the native ``AStarNode::via_anc``.
+    # Never ``self`` (issue #6526): a self-reference made every via node a
+    # reference cycle, so a search's node tree outlived it until the cyclic
+    # GC ran.  A node reached through a via is found via ``via_from_parent``.
     via_anc: Optional["AStarNode"] = field(compare=False, default=None, repr=False)
 
     def __lt__(self, other: "AStarNode") -> bool:
@@ -1987,8 +1990,11 @@ class Router:
         :meth:`RoutingGrid.validate_same_net_drill_spacing`, which measures
         the vias :meth:`_convert_path_to_route` emits at these cell centres.
         A via stack at one cell (F -> In1 -> B) is one drill.
+
+        Walks ``current`` itself when it was reached through a via, then each
+        ``via_anc`` (nearest via strictly above, issue #6526) up to the root.
         """
-        node = current.via_anc
+        node = current if current.via_from_parent else current.via_anc
         if node is None:
             return True
         rules = self.rules
@@ -2000,8 +2006,7 @@ class Router:
                 vx, vy = self.grid.grid_to_world(node.x, node.y)
                 if math.sqrt((wx - vx) ** 2 + (wy - vy) ** 2) - radius - radius < floor:
                     return False
-            parent = node.parent
-            node = parent.via_anc if parent is not None else None
+            node = node.via_anc
         return True
 
     def _own_pad_gate_inputs(self, start: Pad, end: Pad) -> tuple[set[str] | None, float]:
@@ -5420,7 +5425,7 @@ class Router:
                         False,
                         new_direction,
                         seq=next(seq_counter),
-                        via_anc=current.via_anc,
+                        via_anc=current if current.via_from_parent else current.via_anc,
                     )
                     heapq.heappush(open_set, neighbor_node)
 
@@ -5572,8 +5577,8 @@ class Router:
                         current,
                         True,
                         seq=next(seq_counter),
+                        via_anc=current if current.via_from_parent else current.via_anc,
                     )
-                    neighbor_node.via_anc = neighbor_node
                     heapq.heappush(open_set, neighbor_node)
 
         # No path found.  Issue #6098: the open set is empty only when the
@@ -7120,7 +7125,7 @@ class Router:
                     False,
                     new_direction,
                     seq=neighbor_seq,
-                    via_anc=current.via_anc,
+                    via_anc=current if current.via_from_parent else current.via_anc,
                 )
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
@@ -7237,8 +7242,8 @@ class Router:
                     current,
                     True,
                     seq=neighbor_seq,
+                    via_anc=current if current.via_from_parent else current.via_anc,
                 )
-                neighbor_node.via_anc = neighbor_node
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
 
