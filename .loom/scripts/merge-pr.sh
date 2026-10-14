@@ -3333,7 +3333,7 @@ _remove_loom_worktree() {
   #     records, not worktree/branch-name collision, and would not have caught
   #     #5031 (the colliding worktree came from a separate host that never
   #     touched this daemon's lock).
-  #   - #4146 (open, loom:operator-only): *measures* the cross-host collision
+  #   - #4146 (open, loom:operator): *measures* the cross-host collision
   #     rate (observation only, behavior unchanged on collision by design). This
   #     guard is the behavioral mitigation for the data-loss instance #4146 is
   #     meant to eventually quantify.
