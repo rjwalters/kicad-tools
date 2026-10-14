@@ -1469,3 +1469,30 @@ class TestDdrReversedGeometryMode:
         # A point well inside the lower wall must still be blocked.
         gx, gy = grid.world_to_grid(ddr_repro_mod.BOARD_W / 2.0, 5.0)
         assert grid.cell_at(layer_index, gy, gx).blocked is True
+
+
+# =============================================================================
+# Issue #6285: routing frame carries the project sidecars
+# =============================================================================
+
+
+class TestRoutingFrameSidecars:
+    def test_frame_sees_project_clearance_rules(self, generate_design_mod, tmp_path):
+        from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+        src = tmp_path / "board.kicad_pcb"
+        src.write_text("(kicad_pcb)")
+        shutil_src = BOARD_DIR / "output" / "matchgroup_test.kicad_pro"
+        (tmp_path / "board.kicad_pro").write_text(shutil_src.read_text())
+        frame = tmp_path / "board_routing_frame.kicad_pcb"
+        frame.write_text("(kicad_pcb)")
+        written = generate_design_mod.copy_project_sidecars(src, frame)
+        assert written == [tmp_path / "board_routing_frame.kicad_pro"]
+        assert not (tmp_path / "board_routing_frame.kicad_dru").exists()
+        rules = read_declared_clearance_rules(frame)
+        assert rules.project_min_clearance_mm == pytest.approx(0.15)
+
+    def test_no_sidecars_is_noop(self, generate_design_mod, tmp_path):
+        src = tmp_path / "a.kicad_pcb"
+        src.write_text("x")
+        assert generate_design_mod.copy_project_sidecars(src, tmp_path / "f.kicad_pcb") == []

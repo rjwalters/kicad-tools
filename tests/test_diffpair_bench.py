@@ -180,11 +180,18 @@ def _board03():
 
 
 def test_board03_class_has_per_net_variants():
-    """The precondition: same class name, different thresholds."""
+    """The precondition: same class name, different per-net variants.
+
+    The variants no longer differ by ``coupled_continuity_threshold`` (removed
+    from board 03 by #6443: continuity is info-only); each net still names its
+    own partner, which is enough to make the class-name alias ambiguous.
+    """
     _pcb, ncm = _board03()
     assert ncm["USB_D+"].name == ncm["USB_MCU_D+"].name == "HighSpeed"
-    assert ncm["USB_D+"].coupled_continuity_threshold == 0.25
-    assert ncm["USB_MCU_D+"].coupled_continuity_threshold is None
+    assert ncm["USB_D+"] != ncm["USB_MCU_D+"]
+    assert ncm["USB_D+"].diffpair_partner == "USB_D-"
+    assert ncm["USB_MCU_D+"].diffpair_partner == "USB_MCU_D-"
+    assert ncm["USB_D+"].coupled_continuity_threshold is None
 
 
 def test_build_synth_routing_does_not_collapse_variants():
@@ -235,7 +242,8 @@ def test_router_report_and_kct_check_agree_on_board03_thresholds():
 
     usb_d = (ids["USB_D+"], ids["USB_D-"])
     mcu = (ids["USB_MCU_D+"], ids["USB_MCU_D-"])
-    assert continuity[tuple(sorted(usb_d))] == 0.25
+    # Issue #6443 removed board 03's 0.25 override: continuity is info-only.
+    assert continuity[tuple(sorted(usb_d))] == 0.7
     assert continuity[tuple(sorted(mcu))] == 0.7
 
     for (p, n), key in (
@@ -246,7 +254,7 @@ def test_router_report_and_kct_check_agree_on_board03_thresholds():
         assert f"continuity threshold {continuity[key] * 100:.1f}%" in line
         assert f"skew tolerance {skew_tol[key]:.3f} mm" in line
         assert resolve_pair_thresholds(ncm, p, n).continuity == continuity[key]
-    assert "USB_D+/USB_D-: continuity threshold 25.0%" in report
+    assert "USB_D+/USB_D-: continuity threshold 70.0%" in report
 
     # Issue #6443: both pairs are declared USB2_FS, so the router report and
     # kct check quote 2.5 mm, and both name where the number came from.
@@ -302,8 +310,11 @@ def test_resolver_ignores_a_collapsed_class_key():
 
     _pcb, ncm = _board03()
     poisoned = dict(ncm)
-    poisoned["HighSpeed"] = ncm["USB_MCU_D+"]  # the 70 % variant under the class name
-    assert resolve_pair_thresholds(poisoned, "USB_D+", "USB_D-").continuity == 0.25
+    from dataclasses import replace
+
+    # A different variant under the class name; the net-name key still decides.
+    poisoned["HighSpeed"] = replace(ncm["USB_MCU_D+"], skew_tolerance_mm=9.0)
+    assert resolve_pair_thresholds(poisoned, "USB_D+", "USB_D-").skew_mm == 2.5
 
 
 def test_resolver_falls_back_to_negative_net_then_defaults():
@@ -312,7 +323,7 @@ def test_resolver_falls_back_to_negative_net_then_defaults():
     _pcb, ncm = _board03()
     only_n = {"USB_D-": ncm["USB_D-"]}
     got = resolve_pair_thresholds(only_n, "USB_D+", "USB_D-")
-    assert (got.continuity, got.source_net) == (0.25, "USB_D-")
+    assert (got.continuity, got.source_net) == (0.7, "USB_D-")
     bare = resolve_pair_thresholds({}, "X_P", "X_N")
     assert (bare.continuity, bare.skew_mm, bare.source_net) == (0.7, 0.5, None)
     assert (bare.protocol, bare.skew_source, bare.skew_severity) == (

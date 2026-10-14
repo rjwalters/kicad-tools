@@ -168,12 +168,15 @@ DRC PASSED - No violations found
 
 ## CLI: Diff-Pair and Match-Group Rules (`--net-class-map`)
 
-Three DRC rule families need per-net routing metadata that a `.kicad_pcb`
+Four DRC rule families need per-net routing metadata that a `.kicad_pcb`
 file does **not** persist on its own (length-match-group membership,
 `coupled_routing` flags, skew tolerances):
 
 - `diffpair_length_skew` — intra-pair length mismatch
-- `diffpair_routing_continuity` — broken / un-coupled diff-pair routing
+- `diffpair_routing_continuity` — coupled fraction of a diff pair (info only
+  since #6443)
+- `diffpair_uncoupled_length` — uncoupled length and via count of a diff pair
+  (guide 08 of `diff-pairs/`)
 - `match_group_length_skew` — length skew across a declared match group
 
 These rules re-derive their working state from a **net-class map** and

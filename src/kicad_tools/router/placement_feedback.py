@@ -199,6 +199,19 @@ def _journal_mark(router: Any) -> tuple[int, bool] | None:
     return int(length), bool(truncated)
 
 
+def _safe_journal_mark(router: Any) -> tuple[int, bool] | None:
+    """:func:`_journal_mark`, or ``None`` for a router whose journal is unusable.
+
+    The blocker-geometry loop runs against many test doubles (``MagicMock``
+    routers among them); a mark it cannot take only means a later no-rebuild
+    restore leaves the journal alone (issue #6321).
+    """
+    try:
+        return _journal_mark(router)
+    except Exception:
+        return None
+
+
 def _truncate_journal_to(router: Any, journal_mark: tuple[int, bool] | None) -> None:
     """Rewind ``router.commit_journal`` to *journal_mark* (issue #6320).
 
@@ -606,6 +619,68 @@ class PlacementFeedbackLoop:
         # ``ref -> ((x, y), rotation, layer)`` -- layer added by #4560 so a
         # kept mirror (layer flip) is visible in the diff artifact.
         self._original_positions: dict[str, tuple[tuple[float, float], float, str | None]] = {}
+        # Issue #6321: the best routed state ``run`` has seen, held on the
+        # loop (not in ``run``'s locals) so an interrupt's partial save can put
+        # it back while an iteration is re-routing.  ``_best_journal_mark`` is
+        # the router's commit-journal mark taken with the snapshot (#6320).
+        # ``_iteration_in_flight`` is the iteration whose live copper may NOT
+        # be the best snapshot (it cleared the routes and is re-routing, or
+        # re-routed to a result no better than the best), else ``None``.
+        # ``_best_rewound`` is set once ``restore_best_for_partial_save`` has
+        # rewound the live routes under ``run``.
+        self._best_routes: list[Route] = []
+        self._best_routed_count: int = -1
+        self._best_iteration: int = -1
+        self._best_journal_mark: tuple[int, bool] | None = None
+        self._iteration_in_flight: int | None = None
+        self._best_rewound: bool = False
+
+    # --- interrupt recovery (issue #6321) ----------------------------------
+
+    @property
+    def best_iteration(self) -> int:
+        """Iteration the best snapshot came from (``-1`` = the pre-loop input)."""
+        return self._best_iteration
+
+    def restore_best_for_partial_save(self) -> bool:
+        """Put the best routes ``run`` has seen back on the router, cheaply.
+
+        For ``kct route``'s deadline and Ctrl+C partial saves, which serialize
+        ``router.routes`` while ``run`` may be in the middle of an iteration:
+        every iteration clears all routes before it re-routes, so the live
+        copper there is a half-finished re-route rather than the best result
+        the run already had.  This loop moves footprints only on ``self.pcb``,
+        never the router's pads, so the best routes still match the board on
+        disk and only ``router.routes`` needs to be put back.
+
+        The routing grid is deliberately NOT rebuilt (it is the one step here
+        whose cost grows with the board -- ~380 ms on board 05 -- and a
+        partial save runs inside a 5 s kill window); the router's commit
+        journal is truncated to the snapshot's mark instead, so the
+        access-witness sidecar describes the saved copper (#6320).  If the
+        run nevertheless resumes (a ``SystemExit`` Python discarded, #6324),
+        ``run`` notices, does not judge the rewound iteration, stops and
+        restores the best state WITH a grid rebuild.
+
+        Returns:
+            ``True`` when an iteration was in flight and a best snapshot
+            existed, so the live routes were replaced; ``False`` otherwise
+            (nothing to restore, or the live routes already are the best).
+        """
+        if self._iteration_in_flight is None or self._best_routed_count < 0:
+            return False
+        # Published BEFORE the routes change, so ``run`` can always tell.
+        self._best_rewound = True
+        self.router.routes = copy.deepcopy(self._best_routes)
+        _truncate_journal_to(self.router, self._best_journal_mark)
+        return True
+
+    def _snapshot_best(self, routed_count: int, iteration: int) -> None:
+        """Record the live routes as the best state (issue #2840 / #6321)."""
+        self._best_routes = copy.deepcopy(list(self.router.routes))
+        self._best_journal_mark = _safe_journal_mark(self.router)
+        self._best_routed_count = routed_count
+        self._best_iteration = iteration
 
     def run(
         self,
@@ -660,9 +735,15 @@ class PlacementFeedbackLoop:
         # Only deep-copies on strict improvement (Strategy B from #2803:
         # minimal memory cost — at most ``max_adjustments + 1`` snapshots
         # taken, only one retained).
-        best_routes_snapshot: list[Route] = []
-        best_routed_count = -1
-        best_iteration = -1
+        #
+        # Issue #6321: the best state lives on the loop (``self._best_*``) so
+        # ``restore_best_for_partial_save`` can reach it mid-iteration.
+        self._best_routes = []
+        self._best_routed_count = -1
+        self._best_iteration = -1
+        self._best_journal_mark = None
+        self._iteration_in_flight = None
+        self._best_rewound = False
 
         # Issue #3504: the routes snapshot above is only geometrically
         # meaningful when paired with the component placement it was
@@ -690,9 +771,7 @@ class PlacementFeedbackLoop:
         # pre-feedback input state" in the restore log.
         if self.router.routes:
             pre_loop_failed = self.router.get_failed_nets()
-            best_routed_count = len(self.router.nets) - 1 - len(pre_loop_failed)
-            best_routes_snapshot = copy.deepcopy(list(self.router.routes))
-            best_iteration = -1
+            self._snapshot_best(len(self.router.nets) - 1 - len(pre_loop_failed), -1)
 
         if self.verbose:
             print("\n=== Placement-Routing Feedback Loop ===")
@@ -744,9 +823,22 @@ class PlacementFeedbackLoop:
                     print("\n  Interrupt requested; exiting placement feedback loop.")
                 exit_reason = "pf_interrupted"
                 break
+            # Issue #6321: a partial save rewound the live routes and the run
+            # did not stop (#6324).  Starting another re-route would only
+            # discard the state that save stood behind.
+            if self._best_rewound:
+                if self.verbose:
+                    print("\n  Routes rewound by a partial save; exiting placement feedback loop.")
+                exit_reason = "pf_interrupted"
+                break
 
             if self.verbose:
                 print(f"\n--- Iteration {iteration} ---")
+
+            # Issue #6321: from here until this iteration's routes are known to
+            # be the best, ``router.routes`` is not a state the run stands
+            # behind; an interrupt's partial save restores the best instead.
+            self._iteration_in_flight = iteration
 
             # Clear previous routes and reset grid
             self._clear_routes()
@@ -756,6 +848,16 @@ class PlacementFeedbackLoop:
                 routes = self.router.route_all_negotiated(**negotiated_kwargs)
             else:
                 routes = self.router.route_all()
+
+            # Issue #6321: the best routes were put back underneath this
+            # re-route.  Whatever it went on to produce is mixed with (or
+            # replaced by) that snapshot, so do not judge it: stop, and let the
+            # end-of-loop restore re-derive the best state with its grid.
+            if self._best_rewound:
+                if self.verbose:
+                    print("  Routes rewound by a partial save; abandoning this iteration.")
+                exit_reason = "pf_interrupted"
+                break
 
             # Check for failures
             failed_nets = self.router.get_failed_nets()
@@ -769,11 +871,8 @@ class PlacementFeedbackLoop:
             # ``self.router.routes`` in a worse state than a prior pass
             # produced, and the final ``PlacementFeedbackResult`` reports
             # the regression.  Deep-copy only on strict improvement.
-            if routed_count > best_routed_count:
+            if routed_count > self._best_routed_count:
                 improved = True
-                best_routed_count = routed_count
-                best_routes_snapshot = copy.deepcopy(list(self.router.routes))
-                best_iteration = iteration
                 # Issue #3504: capture the placement these routes were
                 # computed against, atomically with the routes themselves.
                 # At this point in the iteration NO move has yet been
@@ -781,6 +880,12 @@ class PlacementFeedbackLoop:
                 # of the loop body), so ``self.pcb`` still reflects the
                 # placement that produced ``routes`` above.
                 best_placement_snapshot = self._snapshot_placement()
+                self._snapshot_best(routed_count, iteration)
+                # Issue #6321: the live routes ARE the best now.  A regressed
+                # iteration stays "in flight" until the next one starts (or
+                # the end-of-loop restore runs), so a save in between still
+                # gets the best routes rather than the regression.
+                self._iteration_in_flight = None
             else:
                 improved = False
 
@@ -790,18 +895,19 @@ class PlacementFeedbackLoop:
                 if improved:
                     print(
                         f"  [iter {iteration}] routed={routed_count}/{total_nets} "
-                        f"(best={best_routed_count}); improved"
+                        f"(best={self._best_routed_count}); improved"
                     )
                 else:
-                    delta = routed_count - best_routed_count
+                    delta = routed_count - self._best_routed_count
                     tag = "tied" if delta == 0 else "reverted"
                     print(
                         f"  [iter {iteration}] routed={routed_count}/{total_nets} "
-                        f"(best={best_routed_count}, delta={delta:+d}); {tag}"
+                        f"(best={self._best_routed_count}, delta={delta:+d}); {tag}"
                     )
 
             # Success - all nets routed
             if not failed_nets:
+                self._iteration_in_flight = None
                 if self.verbose:
                     print("\n✓ All nets routed successfully!")
                 return PlacementFeedbackResult(
@@ -915,17 +1021,24 @@ class PlacementFeedbackLoop:
         # the placement keeps the returned routes geometrically consistent
         # with the placement (and with ``placement_diff``, which is built
         # from ``self.pcb`` below).
+        #
+        # Issue #6321: a partial save that rewound the live routes underneath
+        # the loop (``restore_best_for_partial_save``) skipped the grid
+        # rebuild, and the iteration it interrupted may have gone on mixing
+        # its own copper into the restored routes, so the routed count is no
+        # guide then: restore unconditionally.
         current_routed_count = len(self.router.nets) - 1 - len(self.router.get_failed_nets())
-        if best_routed_count > current_routed_count:
+        rewound = self._best_rewound and self._best_routed_count >= 0
+        if self._best_routed_count > current_routed_count or rewound:
             if self.verbose:
                 best_label = (
                     "the pre-feedback input state (#3474)"
-                    if best_iteration == -1
-                    else f"iter {best_iteration}"
+                    if self._best_iteration == -1
+                    else f"iter {self._best_iteration}"
                 )
                 print(
                     f"  Restoring best snapshot from {best_label} "
-                    f"(routed={best_routed_count}) "
+                    f"(routed={self._best_routed_count}) "
                     f"instead of final iter (routed={current_routed_count})"
                 )
             # Deep-copy the snapshot so the loop's internal best state
@@ -935,7 +1048,16 @@ class PlacementFeedbackLoop:
             # Placement first, so the grid rebuild below re-adds the pads at
             # the coordinates the restored routes were computed against.
             self._restore_placement(best_placement_snapshot)
-            self._rebuild_grid_for_routes(copy.deepcopy(best_routes_snapshot))
+            self._rebuild_grid_for_routes(copy.deepcopy(self._best_routes))
+            if self._best_rewound:
+                # Issue #6320/#6321: the no-rebuild restore already cut the
+                # journal back to the best snapshot's mark, so it lists exactly
+                # the restored routes; this rebuild's reset-and-re-mark (and
+                # anything the resumed re-route journaled) would describe them
+                # twice.  Checked AFTER the rebuild: a signal-handler restore
+                # can land in the middle of it.
+                _truncate_journal_to(self.router, self._best_journal_mark)
+        self._iteration_in_flight = None
 
         # Final failure analysis -- computed AFTER restoration so the
         # result reflects the restored state, not the live last-iteration

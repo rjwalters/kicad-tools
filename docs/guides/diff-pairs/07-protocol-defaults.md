@@ -46,18 +46,21 @@ The router's pair report and `kct check --verbose` print where each limit
 came from:
 
 ```
-USB_D+/USB_D-: continuity threshold 25.0%, skew tolerance 2.500 mm [protocol:USB2_FS (Renesas, ...); error]
+USB_D+/USB_D-: continuity threshold 70.0%, skew tolerance 2.500 mm [protocol:USB2_FS (Renesas, ...); error]
 ```
 
-## What is not checked yet
+## Uncoupled length and via count
 
-The uncoupled-length allowance and the via count are resolved and reported.
-The rule that checks them is not built (issue #6443, piece b).
+Since #6443 piece (b) the uncoupled-length allowance and the via count are
+checked, by `diffpair_uncoupled_length` (guide 06) in `kct check` and by native
+`diff_pair_uncoupled` / `via_count` rules in the routed `.kicad_dru`. The
+uncoupled limit is the per-terminal allowance times the number of components on
+the net (6.35 mm x 3 = 19.05 mm for board 03's `USB_D+`), unless the class sets
+`max_uncoupled_total_mm`.
 
-On `USB2_FS` those two limits come from TI SPRAAR7J, which is written for a
-high-speed-capable PHY. Their source strings say "high-speed guidance,
-applied to full speed", so the report shows it when piece (b) starts checking
-them.
+On `USB2_FS` the per-terminal and via limits come from TI SPRAAR7J, which is
+written for a high-speed-capable PHY. Their source strings say "high-speed
+guidance, applied to full speed", and a finding quotes the source.
 
 ## Stretch target
 

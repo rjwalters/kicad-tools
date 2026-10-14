@@ -10,6 +10,7 @@ This module provides:
 import logging
 import math
 import re
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -1642,6 +1643,16 @@ class NetClassRouting:
             ValueError: :attr:`pair_protocol` names no known protocol.
         """
         parse_protocol(self.pair_protocol)
+        if self.coupled_continuity_threshold is not None:
+            warnings.warn(
+                f"net class {self.name!r}: coupled_continuity_threshold is "
+                "deprecated and no longer gates anything: routing continuity is "
+                "an info-only measurement since Issue #6443. Limit the uncoupled "
+                "length instead (pair_protocol, max_uncoupled_total_mm, "
+                "max_uncoupled_per_terminal_mm).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.

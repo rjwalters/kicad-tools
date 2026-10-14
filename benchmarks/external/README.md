@@ -134,6 +134,74 @@ the same `--output-dir`: `<slug>.<protocol>.json` and
 `report.<protocol>.md` (e.g. `strf.tuned.json` / `report.tuned.md` vs.
 `strf.zero-touch.json` / `report.zero-touch.md`).
 
+## PCBWorld suite (`--suite pcbworld`, issue #6331)
+
+PCBWorld's D3 is a *generated* corpus: PCBWorld's own prep code converts
+PCBench source boards to KiCad 9 and writes the scored `guide` variant. The
+suite therefore pins two upstream repositories in [`pcbworld.toml`](pcbworld.toml)
+instead of listing boards in `boards.toml`:
+
+| Input | Pin | License |
+|---|---|---|
+| PCBWorld (`LGAI-Research/PCBWorld`) | `b3d62f5c37e7528670d112e03d9a90029f23f4f3` | BSD-3-Clause; its `engine` submodule is GPL-3.0 and is never fetched or built here |
+| PCBench (`PCBench/PCBench`) | `dec3be75cbdef74787625f9043c7391cd473bb64` | MIT repository, **mixed per-board licenses** -- boards are cache-only |
+
+Nothing third-party is committed: both repos are fetched into the gitignored
+cache (`.cache/kct-benchmarks/external/pcbworld/`), PCBWorld's prep steps
+(`convert_v9`, `drc_fix_v9`, `make_guide`, `sort_prefix`) and scorer
+(`eval.pipeline`) run **only as subprocesses** under PCBWorld's own
+interpreter with its checkout as cwd (PCBWorld ships a `kicad_tools.py` that
+would shadow this package if imported). Split membership comes from PCBWorld's
+own `configs/datasets/d3.json` (`d3a` = easy/test, `d3b` = medium/test).
+
+### One-time setup (manual; not automated)
+
+You need a KiCad **9** toolchain and a Python environment for PCBWorld
+(see PCBWorld's `tools/datagen/pcbench_prep/README.md`). Building PCBWorld's
+GPL engine is out of scope; point at existing installs:
+
+```bash
+export PCBWORLD_PYTHON=/path/to/pcbworld-env/bin/python   # PCBWorld's own environment
+export KICAD_CLI=/path/to/kicad9/kicad-cli                # must report 9.x
+export PCBNEW_PYTHON=/path/to/python-with-kicad9-pcbnew
+uv run kct build-native --check                           # timing needs the C++ backend
+```
+
+### Run
+
+```bash
+# Deterministic smoke subset: the first 3 boards of D3-A's test list
+uv run kct bench external --suite pcbworld --split d3a --limit 3
+```
+
+Boards are identified `pcbworld/<split>/<NNNN_name>` (taken from PCBWorld's
+split file). The suite skips `normalize_board` (guide boards are already
+stripped; ripping up again could alter the task) and fails if a prepared
+board contains any track or via.
+
+### Two scorers, never merged
+
+Each report keeps the existing local gates (`kct_check`, `kicad_cli_drc`,
+completion) **and** an additive `external_scores.pcbworld` block with
+PCBWorld's own Clean Pass, routability, error-only DRC count and *per-rollout*
+`potential_gain` (PCBWorld's @5 rule selects by largest potential gain, not
+"any rollout clean"). The markdown table shows them in separate columns
+(`kicad-cli DRC` vs `PCBWorld CP`).
+
+* An unavailable PCBWorld score (no routed output, scorer failure) is `null`
+  with a reason -- never `0`, never a pass.
+* A non-KiCad-9 `KICAD_CLI` makes the run fail before preparation; a Clean
+  Pass from another major version is never reported.
+* Rebuilt boards are **not** byte-identical to the paper's set (KiCad 9's
+  DRC report caps change `make_guide` widths on some boards; UUIDs are
+  re-minted). Provenance records the PCBWorld/PCBench SHAs, `kicad-cli`
+  version, `pcbnew` Python and a per-board input SHA-256; do not claim
+  byte-identity.
+
+Phase 1 only prepares and validates the protocol. Full D3-A/D3-B runs and
+CP@1/CP@5 publication belong to #6332 and #6333. The unit/CLI tests mock
+PCBWorld, KiCad and the network entirely.
+
 ## Committed results (issue #4942, Epic #4932 Phase 2)
 
 `results/` holds the committed JSON + markdown output of zero-touch runs

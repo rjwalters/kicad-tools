@@ -357,6 +357,9 @@ def measure_pairs(routed: Path, net_class_map, layers: int, log_text: str = "") 
     for v in pcb.vias:
         vias[v.net_number] = vias.get(v.net_number, 0) + 1
     rule = DiffPairRoutingContinuityRule(engaged_pairs=set())
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import net_component_counts
+
+    components = net_component_counts(pcb)
     out: list[dict] = []
     for d in sorted(detect_pairs(pcb, net_class_map), key=lambda d: d.pair.positive.net_name):
         pair = d.pair
@@ -427,9 +430,153 @@ def measure_pairs(routed: Path, net_class_map, layers: int, log_text: str = "") 
                 "skew_stretch_pass": None if skew is None else skew <= thr.skew_stretch_mm + 1e-6,
                 "max_uncoupled_per_terminal_mm": thr.max_uncoupled_per_terminal_mm,
                 "max_vias_per_net": thr.max_vias_per_net,
+                # Continuity is a measurement since #6443, never a verdict.
+                "continuity_label": "info",
             }
         )
+        row.update(_uncoupled_columns(pcb, pid, nid, pname, nname, thr, skew, components))
     return out
+
+
+def _uncoupled_columns(pcb, pid, nid, pname, nname, thr, skew, components) -> dict:
+    """The #6443 columns of one pair: per-net uncoupled length, limits, kct verdicts.
+
+    ``uncoupled_net_mm`` is each net's length beside no partner copper and
+    ``uncoupled_kicad_mm`` the larger of the two -- the figure KiCad's
+    ``diff_pair_uncoupled`` compares (``validate/rules/diffpair_uncoupled_length.py``).
+    A pair with an unrouted half ("coupled outcome without copper", P0) is
+    ``unrouted``: it has no uncoupled length, only no copper.  ``kct_verdict``
+    is ``pass`` / ``fail`` / ``warn`` (a breach of an ``uncited`` limit) /
+    ``None`` (nothing to judge).
+    """
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+        measure_pair,
+        uncoupled_limit,
+    )
+
+    m = measure_pair(pcb, pid, nid, pname, nname, components)
+    if not m.routed:
+        return {
+            "unrouted": True,
+            "uncoupled_net_mm": None,
+            "uncoupled_kicad_mm": None,
+            "components": m.components,
+            "max_uncoupled_total_mm": None,
+            "uncoupled_limit_source": None,
+            "uncoupled_severity": thr.uncoupled_severity,
+            "uncoupled_pass": None,
+            "vias_pass": None,
+            "vias_severity": thr.vias_severity,
+            "kct_verdict": {"skew": None, "uncoupled": None, "vias": None},
+        }
+    limit, how = uncoupled_limit(thr, m.components)
+    unc_pass = None if limit is None else m.uncoupled_mm <= limit + 1e-6
+    cap = thr.max_vias_per_net
+    vias_pass = None if cap is None else max(m.vias_p, m.vias_n) <= cap
+    skew_pass = None if skew is None else skew <= thr.skew_mm + 1e-6
+
+    def verdict(ok, severity):
+        return (
+            None if ok is None else ("pass" if ok else ("fail" if severity == "error" else "warn"))
+        )
+
+    return {
+        "unrouted": False,
+        "uncoupled_net_mm": [round(m.p_uncoupled_mm, 3), round(m.n_uncoupled_mm, 3)],
+        "uncoupled_kicad_mm": round(m.uncoupled_mm, 3),
+        "components": m.components,
+        "max_uncoupled_total_mm": None if limit is None else round(limit, 3),
+        "uncoupled_limit_source": how,
+        "uncoupled_severity": thr.uncoupled_severity,
+        "uncoupled_pass": unc_pass,
+        "vias_pass": vias_pass,
+        "vias_severity": thr.vias_severity,
+        "kct_verdict": {
+            "skew": verdict(skew_pass, thr.skew_severity),
+            "uncoupled": verdict(unc_pass, thr.uncoupled_severity),
+            "vias": verdict(vias_pass, thr.vias_severity),
+        },
+    }
+
+
+#: kicad-cli violation type -> the rule the verdict is filed under.
+_KICAD_PAIR_TYPES = {
+    "skew_out_of_range": "skew",
+    "diff_pair_uncoupled_length_too_long": "uncoupled",
+    "too_many_vias": "vias",
+    "diff_pair_gap_out_of_range": "gap",
+}
+
+
+def kicad_pair_verdicts(routed: Path, pairs: list[dict], timeout: int = 600) -> None:
+    """Add ``kicad_cli_verdict`` to every pair row from one kicad-cli DRC pass.
+
+    Per rule, ``fail`` when kicad-cli reports an error on either net of the
+    pair, ``warn`` for a warning-severity report, else ``pass``.  A rule the
+    ``.kicad_dru`` does not carry for the pair (limit absent, or a pair KiCad
+    does not recognise by name) stays ``None``: kicad-cli did not judge it.
+    Rows get ``None`` for every rule when kicad-cli cannot run.
+    """
+    import subprocess
+    import tempfile
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    exe = find_kicad_cli()
+    found: dict[tuple[str, str], str] | None = None
+    if exe is not None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "drc.json"
+            subprocess.run(
+                [
+                    str(exe),
+                    "pcb",
+                    "drc",
+                    "--format",
+                    "json",
+                    "--severity-all",
+                    "-o",
+                    str(report),
+                    str(routed),
+                ],
+                check=False,
+                capture_output=True,
+                timeout=timeout,
+            )
+            if report.is_file():
+                found = {}
+                for v in json.loads(report.read_text()).get("violations", []):
+                    rule = _KICAD_PAIR_TYPES.get(v.get("type"))
+                    if rule is None:
+                        continue
+                    for item in v.get("items", []):
+                        net = item.get("description", "").rsplit("[", 1)[-1].split("]", 1)[0]
+                        key = (net, rule)
+                        # an error outranks a warning
+                        if found.get(key) != "fail":
+                            found[key] = "fail" if v.get("severity") == "error" else "warn"
+    dru = routed.with_suffix(".kicad_dru")
+    dru_text = dru.read_text() if dru.is_file() else ""
+    for p in pairs:
+        if found is None or p.get("unrouted"):
+            p["kicad_cli_verdict"] = {"skew": None, "uncoupled": None, "vias": None, "gap": None}
+            continue
+        names = p["nets"]
+        verdict = {}
+        for rule, tag in (
+            ("skew", "kct diff pair skew - "),
+            ("uncoupled", "kct diff pair uncoupled - "),
+            ("vias", "kct diff pair vias - "),
+            ("gap", "kct diff pair gap - "),
+        ):
+            judged = any(f'"{tag}{a}/{b}"' in dru_text for a, b in (names, names[::-1]))
+            hits = [found.get((n, rule)) for n in names]
+            verdict[rule] = (
+                None
+                if not judged
+                else ("fail" if "fail" in hits else ("warn" if "warn" in hits else "pass"))
+            )
+        p["kicad_cli_verdict"] = verdict
 
 
 #: Keys that describe a pair's limits, not its copper.  They stay out of
@@ -445,6 +592,21 @@ _LIMIT_KEYS = frozenset(
         "skew_stretch_pass",
         "max_uncoupled_per_terminal_mm",
         "max_vias_per_net",
+        # Issue #6443 columns: derived from the same copper, kept out so a
+        # baseline file's digest still matches the same copper.
+        "continuity_label",
+        "unrouted",
+        "uncoupled_net_mm",
+        "uncoupled_kicad_mm",
+        "components",
+        "max_uncoupled_total_mm",
+        "uncoupled_limit_source",
+        "uncoupled_severity",
+        "uncoupled_pass",
+        "vias_pass",
+        "vias_severity",
+        "kct_verdict",
+        "kicad_cli_verdict",
     }
 )
 
@@ -545,6 +707,7 @@ def run_cell(
         ncm_path = ere.find_net_class_map(artifact)  # the router-written sidecar
     ncm = load_net_class_map(ncm_path, pcb_path=artifact)
     pairs = measure_pairs(artifact, ncm, board.layers, log_text)
+    kicad_pair_verdicts(artifact, pairs)
     row["pairs"] = pairs
     row["pair_digest"] = pair_digest(pairs)
     row["nets_routed"] = f"{row.get('nets_complete')}/{row.get('nets_total')}"
@@ -582,15 +745,29 @@ def render(rows: list[dict]) -> str:
 
 
 def render_pairs(rows: list[dict]) -> str:
-    """One line per pair: skew against its limit, the limit's source, the stretch figure."""
+    """One line per pair: skew and uncoupled length against their limits, both engines' verdicts.
+
+    ``Unc. P/N`` is each net's uncoupled length (KiCad's per-net figure; the
+    pair's figure is the larger), ``Limit`` its derived limit.  The verdict
+    cells read ``kct/kicad-cli`` per rule: ``pass``, ``FAIL`` (error), ``warn``
+    (a breach of an ``uncited`` limit) or ``-`` (not judged).  Continuity is
+    info only and is not shown as a verdict.
+    """
     out = [
         "| Board | Engine | Seed | Pair | Outcome | Routed P/N mm | Skew mm | Limit mm | Source | "
-        "Severity | Skew | Stretch (mm) | Uncoupled mm | Vias P/N |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+        "Severity | Skew | Stretch (mm) | Unc. P/N mm | Unc. limit mm | Vias P/N | "
+        "Skew kct/cli | Unc. kct/cli | Vias kct/cli |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     ]
 
     def verdict(value) -> str:
         return "-" if value is None else ("pass" if value else "FAIL")
+
+    def cell(v) -> str:
+        return "-" if v is None else {"fail": "FAIL"}.get(v, v)
+
+    def both(p: dict, rule: str) -> str:
+        return f"{cell((p.get('kct_verdict') or {}).get(rule))}/{cell((p.get('kicad_cli_verdict') or {}).get(rule))}"
 
     for r in rows:
         for p in r.get("pairs") or []:
@@ -600,6 +777,12 @@ def render_pairs(rows: list[dict]) -> str:
             stretch_cell = (
                 "-" if stretch is None else f"{verdict(p.get('skew_stretch_pass'))} ({stretch})"
             )
+            net_unc = p.get("uncoupled_net_mm")
+            unc_cell = (
+                "unrouted"
+                if p.get("unrouted")
+                else ("-" if net_unc is None else f"{net_unc[0]}/{net_unc[1]}")
+            )
             out.append(
                 f"| {r['board']} | {r['engine']} | {r['seed']} | {p['pair']} | "
                 f"{p.get('outcome') or '-'} | {routed[0]}/{routed[1]} | "
@@ -607,7 +790,9 @@ def render_pairs(rows: list[dict]) -> str:
                 f"{p.get('skew_source', '-')} | {p.get('skew_severity', '-')} | "
                 f"{verdict(p.get('skew_pass'))} | "
                 f"{stretch_cell} | "
-                f"{p.get('uncoupled_mm')} | {p.get('vias_p')}/{p.get('vias_n')} |"
+                f"{unc_cell} | {p.get('max_uncoupled_total_mm') or '-'} | "
+                f"{p.get('vias_p')}/{p.get('vias_n')} | "
+                f"{both(p, 'skew')} | {both(p, 'uncoupled')} | {both(p, 'vias')} |"
             )
     return "\n".join(out)
 
@@ -737,6 +922,7 @@ def remeasure(doc: dict) -> dict:
         log = routed.parent / "route.log"
         text = log.read_text(errors="replace") if log.is_file() else ""
         row["pairs"] = measure_pairs(routed, ncm, board.layers, text)
+        kicad_pair_verdicts(routed, row["pairs"])
         row["pair_digest"] = pair_digest(row["pairs"])
     return doc
 

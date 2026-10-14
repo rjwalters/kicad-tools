@@ -1288,14 +1288,6 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "0.15",
         "--via-diameter",
         "0.30",
-        # Issue #6280: ``kct route`` now resolves via clearance from the
-        # board's own rules (0.15mm netclass here) instead of the old 0.20mm
-        # default.  This board's reviewed escape repair
-        # (``manufacturing_process.MOVES``) moves vias at fixed coordinates of
-        # the route it was reviewed against, so pin the 0.20mm the review was
-        # made at until the escapes are re-reviewed at the declared rule.
-        "--via-clearance",
-        "0.2",
         # Issue #6401 / #6425: ``kct route`` reserves a via site per pour-net
         # IC pin before signal routing (on by default; this recipe used to opt
         # out with ``--no-plane-via-reservation``).  Since #6425 the oracle's

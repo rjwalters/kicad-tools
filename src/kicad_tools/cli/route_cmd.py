@@ -3193,6 +3193,20 @@ def _save_partial_results() -> bool:
 
             record_publication(save_path)
 
+            # Issue #6330: publish the snapshot facts NOW, before the slow
+            # access-witness sidecar below.  A hard kill during that write
+            # would otherwise leave this board beside a timeout receipt with
+            # ``snapshot_saved: false`` and no ``snapshot_state``.  A no-op
+            # without a supervisor control file.
+            from .route_deadline import record_stage
+
+            record_stage(
+                "partial-save",
+                snapshot_saved=True,
+                snapshot=str(save_path),
+                **info,
+            )
+
             # Issue #5639: the deadline / SIGINT save path is the ONLY save
             # path a deadline-killed run ever reaches -- the normal save path
             # (and its ``_write_access_witness_sidecar`` call) is downstream of
@@ -4169,6 +4183,60 @@ def _router_pair_gaps(
     return gaps
 
 
+def _router_pair_limits(
+    pairs: list[tuple[str, str]] | None,
+    net_class_map: dict | None,
+    board_path: Path,
+) -> list | None:
+    """Native pair limits for each coupled pair (Issue #6443, piece (b)).
+
+    Uncoupled length, skew and via count, resolved by the one resolver
+    ``kct check`` uses
+    (:func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`),
+    so the ``.kicad_dru`` rule and the kct finding quote the same limit and
+    severity.  The uncoupled limit needs the number of components on the net,
+    read from the routed board.  A pair whose class declares no uncoupled or
+    via limit gets no such rule; the skew rule is written for every pair (the
+    generic 0.5 mm default is an error in both engines).  ``None`` (no pair
+    list) keeps whatever an earlier route wrote.
+    """
+    if pairs is None or net_class_map is None:
+        return None
+    from kicad_tools.manufacturers.netclass_dru import PairLimits
+    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+        net_component_counts,
+        uncoupled_limit,
+    )
+
+    components: dict[str, int] = {}
+    if pairs:
+        try:
+            from kicad_tools.schema.pcb import PCB
+
+            components = net_component_counts(PCB.load(str(board_path)))
+        except Exception:  # limits stay valid without it; the count falls back to 1
+            components = {}
+    limits: list[PairLimits] = []
+    for p, n in pairs:
+        t = resolve_pair_thresholds(net_class_map, p, n)
+        count = max(components.get(p, 0), components.get(n, 0))
+        unc, _how = uncoupled_limit(t, count)
+        limits.append(
+            PairLimits(
+                p,
+                n,
+                uncoupled_mm=unc,
+                uncoupled_severity=t.uncoupled_severity,
+                skew_mm=t.skew_mm,
+                skew_severity=t.skew_severity,
+                max_vias=t.max_vias_per_net,
+                vias_severity=t.vias_severity,
+            )
+        )
+    return limits
+
+
 def _warn_unrecognised_coupled_pairs(pairs: list[tuple[str, str]] | None, quiet: bool) -> None:
     """One warning per coupled pair KiCad does not recognise by name (#6429).
 
@@ -4306,6 +4374,11 @@ def _write_drc_constraint_sidecars(
             router_net_classes=net_class_map,
             router_coupled_pairs=coupled_pairs,
             router_pair_gaps=pair_gaps,
+            router_pair_limits=(
+                _router_pair_limits(coupled_pairs, net_class_map, Path(output_path))
+                if pair_gaps is not None
+                else None
+            ),
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -5102,6 +5175,36 @@ def _run_placement_feedback(
     # still gets telemetry -- just without the noisy per-iteration detail.
     loop_verbose = (not quiet) and bool(getattr(args, "verbose", False))
 
+    # Issue #6321: every iteration clears all routes and re-routes, while the
+    # loop's best result waits in a snapshot.  A deadline or Ctrl+C that saves
+    # mid-iteration must save that best state, not the half-finished re-route,
+    # so register a ``pre_save_hook`` that puts it back -- only for the router
+    # the partial save will serialize (an escalation flow may run this loop on
+    # another one).  This loop never moves the router's pads and never writes
+    # the board, so the copper still belongs to ``pcb_path``: no placement
+    # text.  As in ``_run_placement_delta_feedback`` the hook is NOT cleared in
+    # a ``finally``: a deadline unwinds through here (``RouteDeadlineExpired``
+    # is a ``BaseException``) BEFORE the save runs.
+    # A hook some earlier stage left registered (none does today) is chained,
+    # not dropped, and put back afterwards.
+    owns_partial_save = _interrupt_state.get("router") is router
+    previous_hook = _interrupt_state.get("pre_save_hook") if owns_partial_save else None
+    loops: list[Any] = []
+
+    def _restore_best_for_partial_save() -> tuple[dict[str, Any], str | None]:
+        hook_info, hook_text = previous_hook() if previous_hook is not None else ({}, None)
+        if loops and loops[0].restore_best_for_partial_save():
+            hook_info = {
+                **hook_info,
+                "snapshot_state": "best-trial",
+                "snapshot_strategy": "placement-feedback",
+                "snapshot_trial": loops[0].best_iteration,
+            }
+        return hook_info, hook_text
+
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = _restore_best_for_partial_save
+
     try:
         result = router.route_with_placement_feedback(
             pcb=pcb,
@@ -5116,11 +5219,21 @@ def _run_placement_feedback(
             outer_timeout=outer_timeout,
             # Issue #6324: stop between iterations once an interrupt landed.
             stop_requested=_interrupt_pending,
+            # Issue #6321: reach the loop so a partial save can restore its
+            # best routes first.
+            loop_observer=loops.append,
         )
     except Exception as exc:
+        if owns_partial_save:
+            _interrupt_state["pre_save_hook"] = previous_hook
         if not quiet:
             print(f"  Warning: placement feedback failed ({exc}); keeping initial routes")
         return None
+
+    # The loop has returned with its best state restored (grid included), so
+    # nothing is in flight; later stages own ``router.routes`` from here.
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = previous_hook
 
     if not quiet:
         print(f"  Feedback iterations: {result.iterations}")
