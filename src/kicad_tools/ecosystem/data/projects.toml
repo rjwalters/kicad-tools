@@ -106,6 +106,9 @@ last_verified = "2026-10-06"
 # Freerouting 2.2.4 row (0.75/0.70/0.20 vs 0.73/0.60/0.30), hence "about".
 # Discussion and what it means for our benchmark: issue #5942.
 pinned_commit = "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00"
+# Issue #6352: our independent (ideas-only) test of its min-cost-flow
+# escape-corridor idea -- a null result on this fleet.
+research_docs = ["docs/research/kct-route-escape-flow-experiment.md"]
 summary = """
 C++20/CUDA KiCad 9/10 router that reads and writes `.kicad_pcb` directly \
 and is judged by `kicad-cli` DRC. Octilinear-lattice A\\* with exact \

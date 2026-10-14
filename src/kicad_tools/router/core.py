@@ -1795,6 +1795,17 @@ class Autorouter:
         # to pre-#4474 main: the planner is never constructed and no cells are
         # reserved.  Set True to opt in.
         self.enable_escape_corridor_reservation = False
+        # Issue #6352 (EXPERIMENTAL, epic #5947 candidate 1): pin -> corridor
+        # assignment strategy used by ``_reserve_escape_corridors``.
+        # ``"greedy"`` (default) is the #4474 planner unchanged; ``"flow"``
+        # solves the pin -> (face, layer) exit assignment jointly with
+        # min-cost max-flow (``escape_flow.py``) and falls back to greedy per
+        # package when the flow is empty or infeasible.  Only consulted when
+        # ``enable_escape_corridor_reservation`` is on.
+        self.escape_corridor_assignment = "greedy"
+        # Per-run flow counters (``planned`` / ``infeasible`` / ``empty`` /
+        # ``error``), populated only when the flow strategy is selected.
+        self._escape_flow_counters: dict[str, int] = {}
         # Populated by ``_reserve_escape_corridors`` when the flag is on so
         # tests / diagnostics can inspect the per-package plans after a run.
         self._escape_corridor_plans: list[Any] = []
@@ -6579,6 +6590,10 @@ class Autorouter:
         from .kelvin import detect_kelvin_topology
 
         if not dense_packages:
+            if getattr(self, "escape_corridor_assignment", "greedy") == "flow":
+                # Issue #6352: make "the flow arm had nothing to plan" visible
+                # in the log rather than indistinguishable from "never ran".
+                print("  Escape-flow summary: packages=0 (no dense packages) (Issue #6352)")
             return
 
         estimator = self._ensure_congestion_estimator()
@@ -6636,7 +6651,19 @@ class Autorouter:
             min_reserve_demand_frac=_ESCAPE_CORRIDOR_MIN_RESERVE_DEMAND_FRAC,
             max_corridor_length_mm=_ESCAPE_CORRIDOR_MAX_LENGTH_MM,
             inner_layers_only=_ESCAPE_CORRIDOR_INNER_LAYERS_ONLY,
+            # Issue #6352: experimental joint min-cost-flow assignment; the
+            # "greedy" default is the #4474 planner unchanged.
+            assignment=getattr(self, "escape_corridor_assignment", "greedy"),
         )
+        use_flow = planner.assignment == "flow"
+        if use_flow:
+            self._escape_flow_counters = {
+                "packages": 0,
+                "planned": 0,
+                "infeasible": 0,
+                "empty": 0,
+                "error": 0,
+            }
 
         # Mutate the existing list in place (do NOT rebind) so a lazily-built
         # escape router that already captured this reference still sees the
@@ -6651,14 +6678,53 @@ class Autorouter:
                     getattr(pkg, "ref", "?"),
                     exc_info=True,
                 )
+                if use_flow:
+                    self._escape_flow_counters["packages"] += 1
+                    self._escape_flow_counters["error"] += 1
                 continue
             self._escape_corridor_plans.append(plan)
+            if use_flow:
+                self._record_escape_flow_plan(pkg, plan)
             if plan.total_reserved_cells > 0:
                 print(
                     f"  Escape corridors ({pkg.ref}): {plan.cluster_count} cluster(s), "
                     f"{plan.total_reserved_cells} cells reserved across "
                     f"layers {sorted(plan.layers_used())} (Issue #4474)"
                 )
+        if use_flow:
+            c = self._escape_flow_counters
+            print(
+                f"  Escape-flow summary: packages={c['packages']} planned={c['planned']} "
+                f"infeasible={c['infeasible']} empty={c['empty']} error={c['error']} "
+                "(Issue #6352)"
+            )
+
+    def _record_escape_flow_plan(self, pkg: PackageInfo, plan: Any) -> None:
+        """Count + log one package's flow outcome (Issue #6352 instrumentation).
+
+        Only called when ``escape_corridor_assignment == "flow"``.  The log
+        lines are what ``scripts/research/escape_flow_experiment.py`` parses
+        to prove the treatment arm actually fired (an inert treatment must not
+        pass as a null result).
+        """
+        c = self._escape_flow_counters
+        c["packages"] += 1
+        stats = getattr(plan, "flow_stats", {}) or {}
+        if getattr(plan, "assignment", "greedy") == "flow":
+            c["planned"] += 1
+            print(
+                f"  Escape-flow ({pkg.ref}): planned pins={stats.get('pins')} "
+                f"exits={stats.get('exits')} capacity={stats.get('total_capacity')} "
+                f"face_moved={stats.get('face_moved')} clusters={stats.get('clusters')} "
+                f"layers={sorted(plan.layers_used())} cells={plan.total_reserved_cells}"
+            )
+            return
+        reason = getattr(plan, "fallback_reason", None) or "unknown"
+        if reason.startswith("infeasible"):
+            c["infeasible"] += 1
+        else:
+            c["empty"] += 1
+        print(f"  Escape-flow ({pkg.ref}): fallback to greedy -- {reason}")
 
     # ------------------------------------------------------------------
     # Impedance-driven sizing activation
