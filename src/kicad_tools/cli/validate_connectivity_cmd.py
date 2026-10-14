@@ -12,7 +12,10 @@ Usage:
 Exit Codes:
     0 - No errors (fully routed, warnings may be present)
     1 - Errors found (unrouted connections)
-    2 - Warnings found (only with --strict)
+    2 - Warnings found (only with --strict).  Lone fill islands are reported
+        as warnings but never fail --strict: kicad-cli does not report them,
+        so counting them would make the exit code depend on whether
+        kicad-cli is installed (Issue #6495).
 """
 
 import argparse
@@ -53,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit with error code on warnings",
+        help="Exit with error code on warnings (lone fill islands excluded)",
     )
     parser.add_argument(
         "-v",
@@ -103,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     # Exit code
     if filtered_result.error_count > 0:
         return 1
-    elif filtered_result.warning_count > 0 and args.strict:
+    elif filtered_result.strict_warning_count > 0 and args.strict:
         return 2
     return 0
 
@@ -136,7 +139,11 @@ def output_table(
         "isolated": ("ISOLATED PADS", result.isolated),
         "zone_island": (
             "UNCONNECTED ZONE/ITEM RELATIONSHIPS",
-            result.zone_islands,
+            result.unconnected_zone_islands,
+        ),
+        "lone_fill": (
+            "LONE FILL ISLANDS (WARNINGS, NOT UNCONNECTED)",
+            result.lone_fill_islands,
         ),
     }
 
@@ -153,7 +160,7 @@ def output_table(
     print(f"\n{'=' * 60}")
     if result.error_count > 0:
         details = []
-        unconnected_items = [i for i in result.zone_islands if i.is_error]
+        unconnected_items = result.unconnected_zone_islands
         if unconnected_items:
             details.append(f"{len(unconnected_items)} unconnected item relationships")
         if result.unconnected_pad_count:
@@ -204,7 +211,9 @@ def output_json(result: ConnectivityResult, pcb_path: Path) -> None:
             "unrouted_count": len(result.unrouted),
             "partial_count": len(result.partial),
             "isolated_count": len(result.isolated),
-            "zone_island_count": len(result.zone_islands),
+            # Issue #6495: errors only; lone fills are counted separately.
+            "zone_island_count": len(result.unconnected_zone_islands),
+            "lone_fill_island_count": len(result.lone_fill_islands),
             "unconnected_pads": result.unconnected_pad_count,
         },
         "issues": [i.to_dict() for i in result.issues],
@@ -226,10 +235,10 @@ def output_summary(result: ConnectivityResult, pcb_path: Path) -> None:
         print(f"Partial:           {len(result.partial)}")
     if result.isolated:
         print(f"Isolated:          {len(result.isolated)}")
-    unconnected_items = [i for i in result.zone_islands if i.is_error]
+    unconnected_items = result.unconnected_zone_islands
     if unconnected_items:
         print(f"Unconnected items: {len(unconnected_items)}")
-    lone_fills = len(result.zone_islands) - len(unconnected_items)
+    lone_fills = len(result.lone_fill_islands)
     if lone_fills:
         print(f"Lone fill islands: {lone_fills} (warning)")
 

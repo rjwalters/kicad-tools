@@ -113,6 +113,23 @@ class ConnectivityIssue:
         """Check if this is a warning (not an error)."""
         return self.severity == "warning"
 
+    @property
+    def counts_as_unconnected(self) -> bool:
+        """True if this issue is an unconnected item (Issue #6495).
+
+        This is the single definition every consumer (``summary()``, the
+        ``kct validate --connectivity`` counts and ``kct fix-drc``'s
+        regressed-net attribution) uses.  Only errors count: a lone fill
+        island is a warning that kicad-cli does not report (#6487), so it is
+        visible but never unconnected.
+        """
+        return self.is_error
+
+    @property
+    def is_lone_fill_island(self) -> bool:
+        """True for a lone fill island warning (a fill nothing else touches)."""
+        return self.issue_type == "zone_island" and self.is_warning
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {
@@ -195,6 +212,31 @@ class ConnectivityResult:
         return [i for i in self.issues if i.issue_type == "zone_island"]
 
     @property
+    def unconnected(self) -> list[ConnectivityIssue]:
+        """Issues that count as unconnected items (errors only, Issue #6495)."""
+        return [i for i in self.issues if i.counts_as_unconnected]
+
+    @property
+    def unconnected_zone_islands(self) -> list[ConnectivityIssue]:
+        """``zone_island`` issues that count as unconnected items."""
+        return [i for i in self.zone_islands if i.counts_as_unconnected]
+
+    @property
+    def lone_fill_islands(self) -> list[ConnectivityIssue]:
+        """Lone fill island warnings: visible, but never unconnected (#6487)."""
+        return [i for i in self.issues if i.is_lone_fill_island]
+
+    @property
+    def strict_warning_count(self) -> int:
+        """Warnings that fail ``--strict``; lone fill islands are excluded.
+
+        kicad-cli does not report a lone fill island, so the native-reconciled
+        path never sees one.  Excluding them here makes the ``--strict`` exit
+        code identical with and without kicad-cli (Issue #6495).
+        """
+        return sum(1 for i in self.issues if i.is_warning and not i.is_lone_fill_island)
+
+    @property
     def unconnected_pad_count(self) -> int:
         """Total number of unconnected pads."""
         return sum(len(i.unconnected_pads) for i in self.issues)
@@ -246,8 +288,10 @@ class ConnectivityResult:
             parts.append(f"  Partial connections: {len(self.partial)}")
         if self.isolated:
             parts.append(f"  Isolated pads: {len(self.isolated)}")
-        if self.zone_islands:
-            parts.append(f"  Orphaned zone islands: {len(self.zone_islands)}")
+        if self.unconnected_zone_islands:
+            parts.append(f"  Orphaned zone islands: {len(self.unconnected_zone_islands)}")
+        if self.lone_fill_islands:
+            parts.append(f"  Lone fill islands: {len(self.lone_fill_islands)} (warning)")
         parts.append(f"  Total unconnected pads: {self.unconnected_pad_count}")
 
         return "\n".join(parts)
