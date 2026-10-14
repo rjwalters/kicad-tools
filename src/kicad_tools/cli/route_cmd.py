@@ -55,6 +55,7 @@ Layer Stack Configuration:
 
 import argparse
 import contextlib
+import functools
 import logging
 import math
 import os
@@ -2828,6 +2829,14 @@ _interrupt_state: dict[str, Any] = {
     # ``partial_save_info``: what the last partial save wrote (which state,
     # which placement), for the ``.timeout.json`` receipt.
     "partial_save_info": None,
+    # Issue #6322: fixed input copper (``--preserve-existing``) the partial
+    # save must re-insert beside the router's.  The insertion strips every
+    # top-level segment/via from the placement text (#2976 -- which is also
+    # why a checkpoint already sitting on the staged ``<output>`` is never
+    # doubled), and ``router.to_sexp()`` does not emit preserved copper.  The
+    # layer-escalation flow captures it once before any checkpoint can
+    # overwrite it.  ``None`` (the other flows) adds nothing.
+    "source_copper": None,
     # Issue #6324: the exit code ``_handle_interrupt`` decided on (5 = partial
     # saved, 130 = nothing saved), recorded BEFORE it raises ``SystemExit``.
     # That raise is discarded when the signal lands inside a ``__del__``, so
@@ -2848,6 +2857,7 @@ def _reset_partial_save_state() -> None:
     _interrupt_state["pre_save_hook"] = None
     _interrupt_state["placement_text"] = None
     _interrupt_state["partial_save_info"] = None
+    _interrupt_state["source_copper"] = None
 
 
 def _pcb_text(pcb: Any) -> str:
@@ -3136,6 +3146,13 @@ def _save_partial_results() -> bool:
         # numeric.  Detect from the content already in hand (avoid re-reading).
         name_only = bool(_NAME_ONLY_NET_RE.search(original_content))
         route_sexp = router.to_sexp(name_only=name_only)
+
+        # Issue #6322: ``_insert_sexp_before_closing`` below drops every
+        # segment/via already in the placement text (a checkpoint's copper,
+        # but also preserved input copper), so put the latter back.
+        source_copper = _interrupt_state.get("source_copper")
+        if source_copper and route_sexp:
+            route_sexp = f"{route_sexp}\n\t{source_copper}"
 
         if route_sexp:
             # When the interrupt state holds a best *completed* attempt from
@@ -9990,6 +10007,34 @@ def _rung_dedup_fingerprint(
     )
 
 
+def _restores_interrupt_handlers(func: "Callable[..., int]") -> "Callable[..., int]":
+    """Put SIGINT/SIGTERM back as they were when ``func`` returns or raises.
+
+    Issue #6322: :func:`route_with_layer_escalation` installs
+    ``_handle_interrupt`` once its partial-save state is bound, and has dozens
+    of exits.  ``_process_state_guard`` would restore a leaked handler at the
+    outermost boundary, but the flow should not rely on that.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> int:
+        saved: dict[signal.Signals, Any] = {}
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(ValueError):  # not on the main thread
+                saved[signum] = signal.getsignal(signum)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            for signum, handler in saved.items():
+                if handler is None:
+                    continue  # installed from C; cannot be reinstalled
+                with contextlib.suppress(ValueError):
+                    signal.signal(signum, handler)
+
+    return wrapper
+
+
+@_restores_interrupt_handlers
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -9999,6 +10044,12 @@ def route_with_layer_escalation(
     """Route a PCB with automatic layer escalation.
 
     Tries routing at 2, 4, and 6 layers until success or max is reached.
+
+    Issue #6322: this is the default ``kct route`` flow (``--auto-layers``), so
+    it binds the partial-save state the way the other escalation flows do --
+    a deadline or Ctrl+C saves ``<stem>_partial.kicad_pcb`` with the copper
+    routed so far.  The SIGINT/SIGTERM handlers it installs are restored on
+    every exit, including a raise (``_restores_interrupt_handlers``).
 
     Args:
         pcb_path: Path to input PCB file
@@ -10127,6 +10178,27 @@ def route_with_layer_escalation(
     # original copper.  Capturing here keeps it stable across all attempts.
     _preserve = bool(getattr(args, "preserve_existing", False))
     _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
+
+    # Issue #6322: bind the partial-save state so a deadline or Ctrl+C on this
+    # (default) path saves ``<stem>_partial`` instead of nothing.  ``pcb_path``
+    # is final here (staged).  It is also what checkpoints overwrite with
+    # routed copper, so the save takes the preserved input copper from
+    # ``_preserved_sexp`` (captured above) rather than from disk.  The router is
+    # pinned per attempt below; ``best_completed_attempt`` stays False so the
+    # save always goes to ``_partial`` and never promotes an unverified
+    # attempt to ``<output>``.  The interrupt outcome is deliberately NOT
+    # reset: a nested call (``--auto-mfr-tier`` / size escalation) must still
+    # see an interrupt whose exit an earlier call swallowed (#6324).
+    _interrupt_state["output_path"] = output_path
+    _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
+    _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["quiet"] = quiet
+    _interrupt_state["router"] = None
+    _interrupt_state["best_completed_attempt"] = False
+    for _signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(ValueError):  # not on the main thread
+            signal.signal(_signum, _handle_interrupt)
 
     # Layer stacks to try (in escalation order)
     layer_configs = _layer_escalation_base_configs()
@@ -10445,6 +10517,11 @@ def route_with_layer_escalation(
                 print(f"  Error loading PCB: {e}")
             continue
 
+        # Issue #6322: until an attempt completes, the in-flight attempt's
+        # copper is the "routed so far" a partial save should carry.
+        if best_result is None:
+            _interrupt_state["router"] = router
+
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
@@ -10672,6 +10749,9 @@ def route_with_layer_escalation(
         # Track best result (Issue #2396: absolute nets_routed comparison)
         if best_result is None or _is_better_result(result, best_result):
             best_result = result
+            # Issue #6322: from now on a partial save carries the best
+            # completed attempt (not a later, possibly worse, in-flight one).
+            _interrupt_state["router"] = best_result.router
             if not quiet:
                 flush_print(
                     f"  Best result so far: {best_result.layer_count}L with "
@@ -10973,6 +11053,12 @@ def route_with_layer_escalation(
     #   * only when there are still failed nets to address.
     # The loop mutates ``final_result.router.routes`` in place, so we
     # refresh ``final_result``'s stats afterwards before optimize/save.
+    #
+    # Issue #6322: pin the chosen router for every later stage's partial save.
+    # It also makes ``_run_placement_delta_feedback`` own the save
+    # (``owns_partial_save``), so a kept delta's moved placement reaches it.
+    _interrupt_state["router"] = final_result.router
+
     _stop_rc = _interrupt_requested_exit()  # issue #6324
     if _stop_rc is not None:
         return _stop_rc
