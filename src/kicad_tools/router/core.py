@@ -10990,7 +10990,13 @@ class Autorouter:
                 where iter 0 already produced the high-water mark (the
                 board-07 pattern: iter 4's best is identical to iter 0's
                 and iters 5-15 only make things worse).  Set to ``None``
-                to disable.  Default: 2 (stop after 2 stall iterations).
+                (or ``0``) to disable -- Issue #6361: this disables EVERY
+                progress-based early stop, including the
+                :func:`should_terminate_early` overflow-stagnation stop, so
+                the loop runs until ``max_iterations``, the ``timeout``, or a
+                structural exit (no nets left to rip up, power-net stall).
+                Adaptive parameter tuning stays on.  Default: 2 (stop after
+                2 stall iterations).
             best_stall_min_iterations: Minimum number of completed rip-up
                 iterations before the ``best_stall_patience`` check can
                 fire (Issue #3101).  Default: 2.  Prevents the patience
@@ -11630,6 +11636,20 @@ class Autorouter:
             """Get formatted elapsed time."""
             elapsed = time.time() - start_time
             return f"{elapsed:.1f}s"
+
+        def unused_budget_str(iteration: int) -> str:
+            """Describe the budget an early stop at ``iteration`` leaves unused.
+
+            Issue #6361: both early-stop gates run at the TOP of rip-up
+            iteration ``iteration``, before its rip-up work, so iterations
+            ``iteration..max_iterations`` inclusive are never executed.
+            """
+            iters_left = max(0, max_iterations - iteration + 1)
+            parts = [f"{iters_left} of {max_iterations} rip-up iteration(s) left"]
+            if timeout:
+                secs_left = max(0.0, float(timeout) - (time.time() - start_time))
+                parts.append(f"{secs_left:.1f}s of {float(timeout):.0f}s timeout left")
+            return "unused budget: " + ", ".join(parts)
 
         flush_print("\n--- Iteration 0: Initial routing with sharing ---")
         # Issue #5517: tag every commit from here to the grace pass as the
@@ -12380,8 +12400,18 @@ class Autorouter:
                     # "keep going at overflow==0 with unrouted nets" guard
                     # inside ``should_terminate_early``.
                     unrouted = total_nets - sum(1 for r in net_routes.values() if r)
-                    if adaptive and should_terminate_early(
-                        overflow_history, iteration, unrouted_count=unrouted
+                    # Issue #6361: ``best_stall_patience`` of ``None``/``0``
+                    # (the CLI's ``--early-stop-patience 0``) opts out of
+                    # EVERY progress-based early stop, not just the #3101
+                    # best-metric check below -- otherwise no user-facing
+                    # setting lets the loop spend its full iteration/time
+                    # budget.  ``adaptive`` tuning stays on either way.
+                    if (
+                        adaptive
+                        and best_stall_patience
+                        and should_terminate_early(
+                            overflow_history, iteration, unrouted_count=unrouted
+                        )
                     ):
                         if perturbation and perturbation_stagnation_count < 3:
                             # Activate perturbation instead of terminating
@@ -12410,7 +12440,8 @@ class Autorouter:
                                 1 for n, r in net_routes.items() if r and n not in partial_at_term
                             )
                             print(
-                                f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})"
+                                f"\n  ⚠ Early termination: no progress detected ({elapsed_str()}; "
+                                f"{unused_budget_str(iteration)})"
                             )
                             print(f"    Overflow history: {overflow_history[-5:]}")
                             print(
@@ -12452,7 +12483,8 @@ class Autorouter:
                             f"overflow={best_metrics.overflow}) for "
                             f"{best_stall_count} consecutive iter(s); "
                             f"patience={best_stall_patience} "
-                            f"(Issue #3101) ({elapsed_str()})"
+                            f"(Issue #3101) ({elapsed_str()}; "
+                            f"{unused_budget_str(iteration)})"
                         )
                         self._reset_perturbation()
                         break

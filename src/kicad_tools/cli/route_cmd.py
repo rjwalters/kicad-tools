@@ -17448,9 +17448,11 @@ def _route_parser() -> argparse.ArgumentParser:
             "(routed_count, clearance_violations, overflow) before the "
             "outer loop breaks early (Issue #3101). Default: 2. The "
             "iteration-0 result is preserved via the existing post-loop "
-            "best-state restore. Use 0 to disable (matches pre-#3101 "
-            "behaviour where the loop ran until --iterations or one of "
-            "the existing should_terminate_early heuristics fired)."
+            "best-state restore. Use 0 to disable every progress-based "
+            "early stop -- this one AND the overflow-stagnation stop "
+            "(Issue #6361) -- so the loop runs its full --iterations / "
+            "--timeout budget (ending early only when no nets are left to "
+            "rip up or on the power-net stall abort)."
         ),
     )
     parser.add_argument(

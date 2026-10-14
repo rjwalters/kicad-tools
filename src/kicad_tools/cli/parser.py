@@ -3856,8 +3856,10 @@ def _add_route_parser(subparsers) -> None:
         help=(
             "Consecutive non-improving negotiated iterations before the "
             "outer loop breaks early (Issue #3101). Default: 2. Use 0 to "
-            "disable. Iteration-0 result is preserved by the existing "
-            "best-state restore."
+            "disable every progress-based early stop (including the "
+            "overflow-stagnation stop, Issue #6361) so the loop runs its "
+            "full --iterations / --timeout budget. Iteration-0 result is "
+            "preserved by the existing best-state restore."
         ),
     )
     # Issue #3438 / #3414: targeted rip-up.  Mirror of the inner parser flag
