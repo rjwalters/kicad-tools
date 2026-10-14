@@ -492,7 +492,20 @@ class SESToKiCadImporter:
                 f"padstack {padstack_name!r} range [{lo}-{hi}] does not fit the "
                 f"board's {len(copper_layers)} copper layers"
             )
-        return copper_layers[lo], copper_layers[hi]
+        # The DSN exporter only ever writes full-span ``Via[0-(n-1)]`` names, but
+        # its layer list (signal/power layers named in KICAD_TO_DSN_LAYER) can be
+        # shorter than the board's copper, so the index is not comparable to
+        # ``copper_layers``.  Only full-span ranges are recoverable; treat them
+        # as F.Cu-B.Cu and skip anything else rather than invent a blind/buried via.
+        from .dsn import KICAD_TO_DSN_LAYER
+
+        exportable = [layer for layer in copper_layers if layer in KICAD_TO_DSN_LAYER]
+        if lo == 0 and hi in (len(copper_layers) - 1, len(exportable) - 1):
+            return copper_layers[0], copper_layers[-1]
+        return (
+            f"padstack {padstack_name!r} range [{lo}-{hi}] is ambiguous against the "
+            f"board's {len(copper_layers)} copper layers (not a full-span via)"
+        )
 
     # -- Results --
 

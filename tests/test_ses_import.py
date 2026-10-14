@@ -545,10 +545,51 @@ class TestStandardSessionMerge:
         )
         imp = SESToKiCadImporter(_write(tmp_path, _session(body)))
         out = imp.merge_into(pcb, tmp_path / "o.kicad_pcb")
-        through, blind = _vias(out)
+        (through,) = _vias(out)
         assert '(layers "F.Cu" "B.Cu")' in through
-        assert '(layers "F.Cu" "In1.Cu")' in blind
-        assert blind.lstrip().startswith("(via blind ")
+        # Via[0-1] is not a full span on a 4-layer board; the exporter never
+        # writes partial spans, so it is skipped rather than guessed (#6602).
+        (skip,) = imp.skipped
+        assert skip.kind == "via" and "Via[0-1]" in skip.reason
+
+    @pytest.mark.parametrize("kind", ["ten_layer", "mixed_inner"])
+    def test_via_fallback_never_buried_when_dsn_drops_layers(self, tmp_path, kind):
+        """Round trip: the exporter's Via[0-n] name must not come back blind/buried."""
+        from kicad_tools.export.dsn import KiCadToDSNExporter
+
+        if kind == "ten_layer":
+            names = ["F.Cu", *(f"In{i}.Cu" for i in range(1, 9)), "B.Cu"]
+            types = ["signal"] * 10
+        else:
+            names = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+            types = ["signal", "signal", "mixed", "signal"]
+        decl = "\n".join(
+            f'    ({31 if n == "B.Cu" else i} "{n}" {t})'
+            for i, (n, t) in enumerate(zip(names, types))
+        )
+        pcb_text = (
+            "(kicad_pcb\n  (version 20240108)\n  (layers\n"
+            f'{decl}\n    (44 "Edge.Cuts" user)\n  )\n'
+            '  (net 0 "")\n  (net 1 "GND")\n)\n'
+        )
+        pcb = _write(tmp_path, pcb_text, "board.kicad_pcb")
+        exporter = KiCadToDSNExporter(pcb)
+        exporter._load()
+        exporter._extract_layers()
+        assert len(exporter._layers) < len(names)  # exporter keeps fewer layers
+        via_name = exporter._via_padstack_name_for(0.6)
+
+        body = f'    (network_out (net GND (via "{via_name}" 100000 100000)))'
+        imp = SESToKiCadImporter(_write(tmp_path, _session(body)))
+        out = imp.merge_into(pcb, tmp_path / "o.kicad_pcb")
+        vias = _vias(out)
+        if vias:
+            (via,) = vias
+            assert '(layers "F.Cu" "B.Cu")' in via
+            assert not via.lstrip().startswith(("(via blind", "(via buried"))
+        else:
+            (skip,) = imp.skipped
+            assert skip.kind == "via" and via_name in skip.reason
 
     def test_unknown_padstack_is_skipped_not_defaulted(self, tmp_path):
         pcb = _write(tmp_path, FOUR_LAYER_PCB, "four.kicad_pcb")
