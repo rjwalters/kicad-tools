@@ -304,18 +304,9 @@
   description: "Curator-enriched, awaiting approval. Additive; coexists with loom:issue. Applied by: Curator only."
   color: "10B981"  # emerald-500
 
-# loom:needs-revision (#10753): Champion's NEEDS REVISION verdict routes the
-# issue to Curator instead of waiting for someone to edit it. Champion's
-# discovery skips the label; Curator revises the body (a dated `## Revision`
-# section) and removes it, and the changed body hash brings Champion back.
-# Bounded: see .loom/docs/promotion-throughput.md.
-- name: loom:needs-revision
-  description: "Champion asked for a revision: Curator revises the body, then removes this. Applied by: Champion."
-  color: "6EE7B7"  # emerald-300 - one step back from loom:curated
-
 # Status Labels
 - name: loom:blocked
-  description: "Implementation blocked, needs help or clarification"
+  description: "Waiting on something named (another change, a capability); released once it resolves"
   color: "EF4444"  # red-500
 
 # loom:blocked-unnamed (#10558): a queue marker, NOT a park label. It coexists
@@ -330,91 +321,33 @@
   description: "Signal to abort the sweep for this issue (returns to loom:issue)"
   color: "F97316"  # orange-500 - warning/signal color
 
-# loom:operator-only vs loom:blocked: operator-only = a human must act or rule
-# OUTSIDE automation (credentials, infra, hardware, or an owner-gated decision
-# on owner-tracked code) and sweep skips it entirely;
-# blocked = waiting on a dependency but otherwise automatable. Keep the
-# description at/under GitHub's 100-char label-description limit so sync-labels.sh
-# can create it (a longer description fails with HTTP 422 and the label never syncs).
-- name: loom:operator-only
-  description: "Requires human action or ruling outside automation (creds, infra, hardware); sweep skips"
-  color: "F97316"  # orange-500 - operator-action signal (matches loom:abort)
-
-# loom:needs-capability (#5817): a narrower claim than loom:operator-only —
-# blocked on a missing tool/agent capability, not an operator-by-right
-# decision. Skips sweep identically to loom:operator-only today (same
-# hard-skip rows in sweep.md and the same warn-operator-gated.sh
-# dependency-declared check); the routing convention for when to apply this
-# vs. loom:operator-only is out of scope here (see #5818). Keep the
-# description at/under GitHub's 100-char label-description limit — see the
-# comment above loom:operator-only.
-- name: loom:needs-capability
-  description: "Blocked on a missing tool/agent capability, not operator-by-right; link the capability-request issue"
-  color: "FDE68A"  # amber-200 - distinct from the operator-only orange family
-
-# loom:operator-only sub-kind labels (#5671). A single `loom:operator-only` was
-# carrying several meanings with no mechanical way to tell them apart —
-# these three ALWAYS accompany `loom:operator-only` (never replace it; every
-# existing filter/skip that keys off the base label is unaffected) and record
-# WHICH kind at the point of application. Exactly one of the three is applied
-# per issue/PR. See .loom/docs/label-state-machine.md "operator-only sub-kinds"
-# for the full decision table and the machine-readable-blocker convention.
-# NOTE (#5826): loom:operator-decision is no longer the safe unsure-default —
-# being unsure is a sign the analysis is incomplete, not a reason to apply the
-# label. Only apply loom:operator-only once a specific sub-kind fits. An
-# unstated objective is filed as a decision (#10000; the objective sub-kind was
-# retired in #11105).
-# NOTE (#6881, updated #6893): loom:operator-mechanical's "no judgement
-# required" describes the WORK. The base loom:operator-only label's hard skip
-# still wins for every sub-kind by default -- with ONE narrow, fail-closed
-# exception since #6893: a mechanical item whose body declares
-# `<!-- loom:capability=<name> -->` marker(s) (#6892) that the executing HOST
-# holds (LOOM_WORKER_CAPABILITIES, env-only) is routed to a PROPOSE-ONLY lane
-# instead of parked -- it emits the commands / a PR for an operator to
-# approve, never a live credentialed action. The other two sub-kinds are
-# unchanged and hard-skip unconditionally, marker or no marker.
-- name: loom:operator-blocked
-  description: "operator-only sub-kind: self-clearing, waiting on a named issue/infra to land"
-  color: "FDBA74"  # orange-300 - lightest: transient, expected to clear on its own
-
-# A loom:operator-mechanical item may additionally declare the capability(ies)
-# it needs via `<!-- loom:capability=<name> -->` marker(s) in its body (#6892)
-# -- meaningful only alongside THIS sub-kind, ignored by the other two. See
-# .loom/docs/label-state-machine.md "Capability-declaration convention" for
-# the closed vocabulary and parser contract, and its "Dispatch path (#6893)"
-# subsection for the four gates that consume it.
-- name: loom:operator-mechanical
-  description: "operator-only sub-kind: no judgement needed; parks unless a declared capability is held (#6893)"
-  color: "FB923C"  # orange-400
-
-- name: loom:operator-decision
-  description: "operator-only sub-kind: preference/authority axis named; not a safe default (#5826)"
-  color: "C2410C"  # orange-700 - darkest
-
 - name: loom:decision-malformed
-  description: "operator-decision bounced for missing/invalid decision block; Curator repairs or re-routes (#10057)"
-  color: "C2410C"  # same family as loom:operator-decision
+  description: "Decision bounced for a missing/invalid decision block; Curator repairs or re-routes (#10057)"
+  color: "C2410C"  # orange-700 - the decision family
 
-# loom:operator is the first-class "a human is needed" pipeline state (#5502):
-# the engine (any role, plus sweep/shepherd dispatch) will not act on this
-# item further until a human does. It differs from BOTH neighbors above:
-# vs. loom:operator-only — operator-only tells sweep/shepherd to SKIP the item
-# entirely; loom:operator does not — the item stays in the normal
-# re-evaluation queue so a role's own exit rule (e.g. Champion's head-SHA
-# precheck, an explicit human comment, or a new artifact) can still clear it
-# automatically. vs. loom:blocked — blocked means "waiting on a dependency,
-# still automatable"; loom:operator means "the engine has stopped and only a
-# human moves it forward." See .loom/docs/label-state-machine.md for the full
-# entry/exit model.
-# Applied by: Champion (merge-risk and critical-file holds), and by
-# merge-pr.sh's #8508 escalation when the #8248 required-check freshness guard
-# blocks a merge that its own automated re-date remedy could not unblock
-# (defaults/docs/merge-pr-exit-code-exceptions.md), and by merge-pr.sh's
+# Holds (#11795): three labels, one meaning each. loom:blocked = waiting on
+# something named (another change, a capability), released automatically;
+# loom:operator = a human must act or decide now; loom:frozen = not now.
+#
+# loom:operator is the "a human is needed" state (#5502). On an ISSUE it is a
+# park: no dispatch route (work finder, watchdog re-dispatch, checkpoint
+# resume, epic supervisor) builds it until a human removes the label. What
+# the human must do comes from the body, not a sub-label: a ```decision block
+# (#10057) makes it a decision; a <!-- loom:capability=<name> --> marker (#6892)
+# with no decision block makes it mechanical work a host holding that
+# capability may attempt in propose-only mode (#6893). It folds the retired
+# loom:operator-only, -decision, -mechanical and -blocked labels (a named
+# blocker stays in the body text).
+# On a PULL REQUEST it is NOT a park: Champion's merge-risk and critical-file
+# holds re-evaluate themselves, and Doctor drains a held PR (#7660).
+# Applied by any role escalating to a human, by `loom-daemon operator-decision
+# apply`, by Champion (merge-risk and critical-file holds), by merge-pr.sh's
+# #8508 escalation (defaults/docs/merge-pr-exit-code-exceptions.md) and by its
 # partial-increment reset (#9264) when the issue body carries a
 # `loom:remainder-hold` marker. Removed by a human.
 - name: loom:operator
-  description: "Engine stops work on this item; human is the only transition out. Sweep/shepherd do not skip it."
-  color: "EA580C"  # orange-600 - operator-action signal, one shade darker than operator-only
+  description: "A human must act or decide; the body's decision block says what. Only a human removes it."
+  color: "EA580C"  # orange-600 - operator-action signal
 
 # loom:frozen (#11743) means "not now, don't touch": nothing is pending, so
 # nothing re-evaluates it. Unlike loom:blocked (waiting on something, released
