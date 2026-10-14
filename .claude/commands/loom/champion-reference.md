@@ -308,7 +308,7 @@ gh issue edit <number> --add-label "loom:evaluating"
 
 ### Edge Case 5d: Capacity Deferral (#6729) — retired (#11860)
 
-A level cap now stops evaluation before the claim, so a passing proposal is never held back with no verdict (`champion-issue-promo.md` → "Promotion Order"). `classify-capacity-defer.sh` has no caller in the promotion flow.
+A level cap now stops evaluation before the claim, so a passing proposal is never held back with no verdict (`champion-issue-promo.md` → "Promotion Order"). Its idempotency classifier, `classify-capacity-defer.sh`, is retired (#11904).
 
 ---
 

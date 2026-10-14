@@ -137,7 +137,7 @@
 	(segment (start 145 120) (end 145 125) (width 0.25) (layer "F.Cu") (net 3) (uuid "seg-4"))
 	(segment (start 145 125) (end 134.25 125) (width 0.25) (layer "F.Cu") (net 3) (uuid "seg-5"))
 	(via (at 140 125) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
-	(via (at 145 135) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 2) (uuid "via-2"))
+	(via blind (at 145 135) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 2) (uuid "via-2"))
 	(zone
 		(net 1)
 		(net_name "GND")

@@ -1532,6 +1532,9 @@ def _emit_route_checkpoint(
         flush_print(f"  checkpoint: write failed ({exc!r}); continuing")
 
 
+_NOGOOD_ENV_IGNORE_PF = "KCT_NOGOOD_CACHE_IGNORE_PF"
+
+
 class Autorouter:
     """High-level autorouter for complete PCBs with net class awareness.
 
@@ -16241,6 +16244,61 @@ class Autorouter:
             # dropping copper.
             return self._mark_route(route, enforce_pad_access=True)
 
+        # Issue #6353 (experiment, default OFF): validity-aware nogood cache.
+        # Everything below is skipped when the cache is disabled, so the
+        # default path makes exactly the pre-#6353 call.
+        nogood = self._get_nogood_cache()
+        ng_key = ng_win = ng_extra = None
+        failed_pairs: list[tuple[Pad, Pad]] = []
+        ng_definitive: list[bool] = []  # one entry per recorded failure
+        ng_reason: list[int] = []  # last #6369 failure code, for replay
+        if nogood is not None:
+            from .nogood_cache import (
+                reset_search_exhausted,
+                search_budget_context,
+                search_failure_is_definitive,
+            )
+
+            search_router = self.router
+            ng_key = nogood.make_key(
+                net,
+                [(p.x, p.y, str(p.layer), p.net) for p in pad_objs],
+                reverse_search,
+                None if os.environ.get(_NOGOOD_ENV_IGNORE_PF) else present_cost_factor,
+                search_budget_context(search_router, per_net_timeout),
+            )
+            ng_win = nogood.window(self.grid, [(p.x, p.y) for p in pad_objs])
+            ng_extra = self._nogood_extra_state
+            cached = nogood.lookup(ng_key, self.grid, ng_win, ng_extra)
+            if cached is not None:
+                cached_pairs, cached_reason = cached
+                # Replay the one persistent side effect of a failed search
+                # (#6369 per-net failure code) so ``net-status --why`` agrees.
+                store = getattr(search_router, "search_failures_by_net", None)
+                if isinstance(store, dict) and cached_reason:
+                    store[int(net)] = int(cached_reason)
+                if failure_callback is not None:
+                    for src, tgt in cached_pairs:
+                        failure_callback(src, tgt)
+                return routes
+
+            reset_search_exhausted(search_router)
+            downstream_callback = failure_callback
+
+            def record_nogood_failure(src: Pad, tgt: Pad) -> None:
+                failed_pairs.append((src, tgt))
+                ng_definitive.append(search_failure_is_definitive(search_router))
+                get_info = getattr(search_router, "get_last_failure_info", None)
+                info = get_info() if get_info is not None else None
+                if info and info.get("failure_reason"):
+                    ng_reason[:] = [int(info["failure_reason"])]
+                reset_search_exhausted(search_router)
+                if downstream_callback is not None:
+                    downstream_callback(src, tgt)
+
+            failure_callback = record_nogood_failure
+
+        ng_start = time.monotonic() if nogood is not None else 0.0
         new_routes = neg_router.route_net_negotiated(
             pad_objs,
             present_cost_factor,
@@ -16248,8 +16306,50 @@ class Autorouter:
             per_net_timeout=per_net_timeout,
             failure_callback=failure_callback,
         )
+        if (
+            nogood is not None
+            and not new_routes
+            and failed_pairs
+            and all(ng_definitive)
+            and not neg_router._last_timeout_failures
+        ):
+            from .nogood_cache import attempt_may_have_timed_out
+
+            # Belt and braces next to the drained-search gate above: a failure
+            # that used (most of) its wall-clock budget is never cached.  It
+            # can only suppress an insertion.
+            if not attempt_may_have_timed_out(time.monotonic() - ng_start, per_net_timeout):
+                nogood.insert(
+                    ng_key,
+                    self.grid,
+                    ng_win,
+                    (tuple(failed_pairs), ng_reason[0] if ng_reason else None),
+                    ng_extra,
+                )
         routes.extend(new_routes)
         return routes
+
+    def _nogood_extra_state(self) -> object:
+        """Non-array search state for the nogood fingerprint (Issue #6353).
+
+        The C++ wrapper's #6098 grid stamp covers corridor reservations,
+        fixed fills, keepout rule areas and the router-side net maps, which
+        live outside the grid's numpy planes.  ``None`` on the pure-Python
+        router (those inputs are then grid arrays already hashed).
+        """
+        stamp = getattr(self.router, "_py_grid_state_stamp", None)
+        py_grid = getattr(self.router, "_py_grid", None)
+        if stamp is None or py_grid is None:
+            return None
+        return stamp(py_grid)
+
+    def _get_nogood_cache(self):
+        """Lazily build the opt-in nogood cache from env (None = disabled)."""
+        if not hasattr(self, "_nogood_cache"):
+            from .nogood_cache import nogood_cache_from_env
+
+            self._nogood_cache = nogood_cache_from_env()
+        return self._nogood_cache
 
     def _demote_seg_seg_overlap_nets(
         self,
@@ -18646,6 +18746,126 @@ class Autorouter:
 
         return result
 
+    def _via_bonds_same_net_zone(self, via: Via) -> bool:
+        """Whether a same-net zone cell of the routing grid covers ``via``.
+
+        Issue #6596 guard: a via can be bonded through zone fill on a layer
+        no segment touches (a stitching via).  Grids without zone arrays
+        (test doubles, released engines) report no zone.
+        """
+        grid = self.grid
+        try:
+            gx, gy = grid.world_to_grid(via.x, via.y)
+            is_zone = grid._is_zone
+            net = grid._net
+            for layer_idx in range(int(is_zone.shape[0])):
+                if bool(is_zone[layer_idx, gy, gx]) and int(net[layer_idx, gy, gx]) == via.net:
+                    return True
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return False
+        return False
+
+    def _remove_single_layer_vias(self) -> int:
+        """Drop vias whose same-net copper lies on one layer only (Issue #6596).
+
+        A through via that bonds copper on a single layer does no electrical
+        work, and KiCad reports it as ``via_dangling``.  The usual source is a
+        RSMT Steiner branch point: :func:`~.algorithms.steiner.build_rsmt`
+        gives the virtual Steiner pad the first terminal's layer, so the edge
+        that *ends* on it must transition onto that layer with a via even
+        when every branch leaving the point runs on the other layer.
+
+        A via is a candidate only when its net has known pads, it is not
+        micro, not in-pad, not on a pour net, not over a same-net zone cell, touches no same-net pad, and
+        its same-net segments/vias span fewer than two layers
+        (:func:`~.terminal_connectivity.single_layer_via_indices`).  Copper
+        preserved from the input board counts as bonding copper but is never
+        removed.  Each candidate is removed only if the net's layer-aware
+        copper component count (:func:`~.terminal_connectivity.copper_component_count`)
+        does not rise; otherwise it is put back.
+
+        Returns:
+            Number of vias removed.
+        """
+        from .terminal_connectivity import copper_component_count, single_layer_via_indices
+
+        routes_by_net: dict[int, list[Route]] = {}
+        for route in self.routes:
+            if route.net != 0 and route.vias:
+                routes_by_net.setdefault(route.net, []).append(route)
+        if not routes_by_net:
+            return 0
+
+        own_ids = {id(r) for r in self.routes}
+        fixed_routes = [
+            r
+            for r in (
+                *getattr(self, "existing_routes", ()),
+                *getattr(self, "placement_preserved_routes", ()),
+            )
+            if id(r) not in own_ids
+        ]
+
+        removed = 0
+        for net_id in sorted(routes_by_net):
+            try:
+                if self._is_pour_net(net_id):
+                    continue
+            except (AttributeError, TypeError):
+                continue
+            net_routes = [r for r in self.routes if r.net == net_id]
+            fixed = [r for r in fixed_routes if r.net == net_id]
+            pads = [self.pads[k] for k in self.nets.get(net_id, ()) if k in self.pads]
+            if not pads:
+                # Without the net's terminals there is no way to tell what a
+                # via might be serving (synthetic or partially loaded nets).
+                continue
+
+            def _net_copper(
+                net_routes: list[Route] = net_routes, fixed: list[Route] = fixed
+            ) -> tuple[list, list, list[Route | None]]:
+                segments = [s for r in (*net_routes, *fixed) for s in r.segments]
+                vias: list = []
+                owners: list[Route | None] = []
+                for r in net_routes:
+                    vias.extend(r.vias)
+                    owners.extend([r] * len(r.vias))
+                for r in fixed:
+                    vias.extend(r.vias)
+                    owners.extend([None] * len(r.vias))
+                return segments, vias, owners
+
+            segments, vias, owners = _net_copper()
+            candidates: list[tuple[Route, Via]] = []
+            for k in single_layer_via_indices(pads, segments, vias):
+                owner = owners[k]
+                via = vias[k]
+                if (
+                    owner is not None
+                    and not via.is_micro
+                    and not via.in_pad
+                    and not self._via_bonds_same_net_zone(via)
+                ):
+                    candidates.append((owner, via))
+            if not candidates:
+                continue
+
+            baseline = copper_component_count(pads, segments, vias)
+            for owner, via in candidates:
+                position = next(i for i, v in enumerate(owner.vias) if v is via)
+                del owner.vias[position]
+                segments, vias, _ = _net_copper()
+                after = copper_component_count(pads, segments, vias)
+                if after > baseline:
+                    owner.vias.insert(position, via)
+                    continue
+                baseline = after
+                removed += 1
+
+        if removed:
+            flush_print(f"  Cleanup: removed {removed} single-layer junction via(s) (issue #6596)")
+        return removed
+
     def cleanup_artifacts(
         self,
         oob_margin: float = 0.5,
@@ -18683,6 +18903,10 @@ class Autorouter:
               (#1603) removed because their net has no real route
               (Issue #3441) -- prevents failed nets from being reported
               as "partially connected" via their stub copper.
+            - ``single_layer_vias_removed``: Vias whose same-net copper
+              sits on one layer only, dropped because removing them leaves
+              the net's layer-aware copper exactly as connected
+              (Issue #6596; see :meth:`_remove_single_layer_vias`).
         """
         stats: dict[str, int] = {
             "net0_routes_removed": 0,
@@ -18693,6 +18917,7 @@ class Autorouter:
             "segments_restored": 0,
             "vias_restored": 0,
             "orphan_escape_routes_removed": 0,
+            "single_layer_vias_removed": 0,
         }
 
         # -- Step 0 (Issue #3441): Drop orphan escape stubs --
@@ -18859,6 +19084,9 @@ class Autorouter:
                     f"  Cleanup: restored segments/vias for {len(degraded_nets)} "
                     f"net(s) to preserve connectivity"
                 )
+
+        # -- Step 5 (Issue #6596): Drop single-layer junction vias --
+        stats["single_layer_vias_removed"] = self._remove_single_layer_vias()
 
         # Issue #2960: ``cleanup_artifacts`` may remove entire routes
         # (Step 1) or strip vias from surviving routes (Steps 2/3), and

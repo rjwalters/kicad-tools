@@ -8890,6 +8890,14 @@ def _resolve_route_copper_oz(
     stackup_inner: float | None = None
     if not probe_stackup or (cli_outer is not None and cli_inner is not None):
         return (cli_outer, cli_inner)
+    # Issue #6561: the clearance floor (``_resolve_route_clearance``) and the
+    # trace-width floor (``_apply_manufacturer_trace_width_floor``) both need
+    # the board's stackup copper weight; parse the board once per run.
+    memo_key = (str(pcb_path), raw)
+    memo = getattr(args, "_route_copper_oz_memo", None)
+    if isinstance(memo, tuple) and len(memo) == 2 and memo[0] == memo_key:
+        cached: tuple[float | None, float | None] = memo[1]
+        return cached
     try:
         from kicad_tools.physics.stackup import Stackup
         from kicad_tools.schema.pcb import PCB
@@ -8900,10 +8908,39 @@ def _resolve_route_copper_oz(
     except Exception:  # noqa: BLE001 - never crash `route` on a stackup quirk
         stackup_outer = stackup_inner = None
 
-    return (
+    result = (
         cli_outer if cli_outer is not None else stackup_outer,
         cli_inner if cli_inner is not None else stackup_inner,
     )
+    with contextlib.suppress(AttributeError):  # read-only args stand-ins
+        args._route_copper_oz_memo = (memo_key, result)
+    return result
+
+
+def _resolve_route_clearance_floor(args, pcb_path) -> float | None:
+    """The stackup-aware fab clearance floor for this run (Issue #6561).
+
+    :func:`kicad_tools.router.mfr_limits.resolve_clearance` with the
+    effective copper layer count (``--layers`` or the board's stack) and
+    outer copper weight (``--copper`` > board stackup > profile default) --
+    the same ``<layers>layer_<oz>oz`` key ``kct check --mfr`` and the
+    emitted ``.kicad_dru`` use, so route's floor matches the fab rules it
+    writes instead of the layer-agnostic ``MfrLimits.min_clearance``.
+
+    A malformed ``--copper`` is ignored here (the profile default applies);
+    :func:`_apply_manufacturer_trace_width_floor` reports it and exits 1.
+    """
+    from kicad_tools.router.mfr_limits import resolve_clearance
+
+    manufacturer = getattr(args, "manufacturer", None)
+    if not manufacturer:
+        return None
+    layers = _effective_layer_count_for_rules(args, pcb_path)
+    try:
+        copper_outer, _ = _resolve_route_copper_oz(args, pcb_path, probe_stackup=True)
+    except ValueError:
+        copper_outer = None
+    return resolve_clearance(manufacturer, layers, copper_outer)
 
 
 def _sub_floor_net_class_widths(net_class_map, floor: float) -> list[tuple[str, float]]:
@@ -9194,6 +9231,7 @@ def _decide_route_clearance(
     manufacturer: str | None,
     explicit_manufacturer: bool,
     declared: "DeclaredClearanceRules | None" = None,
+    fab_floor_mm: float | None = None,
 ) -> tuple[float, str, str | None, str | None]:
     """Precedence core for :func:`_resolve_route_clearance`.
 
@@ -9218,6 +9256,11 @@ def _decide_route_clearance(
             on every invocation, including an explicit ``--clearance`` -- the
             explicit value still wins, but the resolver needs the declared
             rules to say so when it undercuts one.
+        fab_floor_mm: The stackup-aware fab floor
+            (:func:`_resolve_route_clearance_floor`, Issue #6561).  ``None``
+            falls back to the layer-agnostic
+            :func:`~kicad_tools.router.mfr_limits.resolve_clearance` of
+            ``manufacturer``.
 
     Returns:
         ``(value, source, banner, warning)``.  ``banner`` is ``None`` when no
@@ -9227,10 +9270,12 @@ def _decide_route_clearance(
     from kicad_tools.router.clearance_resolver import RuleSource, resolve_base_clearance
     from kicad_tools.router.mfr_limits import resolve_clearance
 
+    if fab_floor_mm is None:
+        fab_floor_mm = resolve_clearance(manufacturer)
     resolved = resolve_base_clearance(
         target_mm=clearance,
         declared=declared,
-        fab_floor_mm=resolve_clearance(manufacturer),
+        fab_floor_mm=fab_floor_mm,
         explicit_target=explicit_clearance,
         explicit_manufacturer=explicit_manufacturer,
         manufacturer=manufacturer,
@@ -9321,12 +9366,25 @@ def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) 
         pcb_path, board_net_classes=_board_declared_net_classes(pcb_path)
     )
 
+    # Issue #6561: the fab floor for the board's actual stackup, stashed for
+    # the via resolver, the pair-gap floor (``DesignRules.mfr_clearance_floor``)
+    # and the relaxation ladder.
+    fab_floor = _resolve_route_clearance_floor(args, pcb_path)
+    args._mfr_clearance_floor = fab_floor
+    if fab_floor is not None and getattr(args, "min_clearance_floor", None) is None:
+        # ``get_relaxation_tiers`` clamps with ``max(min_clearance_floor,
+        # MfrLimits.min_clearance)``, so this can only RAISE the ladder floor
+        # (jlcpcb 2-layer 2oz: 0.127 -> 0.1524mm), never lower it -- the same
+        # contract #4700 gives ``--min-trace``.
+        args.min_clearance_floor = fab_floor
+
     value, source, banner, warning = _decide_route_clearance(
         clearance=float(getattr(args, "clearance", DEFAULT_ROUTE_CLEARANCE_MM)),
         explicit_clearance=explicit_clearance,
         manufacturer=getattr(args, "manufacturer", None),
         explicit_manufacturer=explicit_manufacturer,
         declared=declared,
+        fab_floor_mm=fab_floor,
     )
 
     args.clearance = value
@@ -9412,9 +9470,13 @@ def _resolve_route_via_clearance(
     if not hasattr(args, "_via_clearance_explicit"):
         args._via_clearance_explicit = getattr(args, "via_clearance", None)
     explicit = args._via_clearance_explicit
+    # Issue #6561: the stackup-aware floor ``_resolve_route_clearance`` stashed.
+    fab_floor = getattr(args, "_mfr_clearance_floor", None)
+    if fab_floor is None:
+        fab_floor = resolve_clearance(manufacturer)
     resolved = resolve_via_clearance(
         declared=declared,
-        fab_floor_mm=resolve_clearance(manufacturer),
+        fab_floor_mm=fab_floor,
         explicit_via_mm=float(explicit) if explicit is not None else None,
         explicit_manufacturer=explicit_manufacturer,
         manufacturer=manufacturer,
@@ -10340,6 +10402,8 @@ def route_with_layer_escalation(
         min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
         # Issue #6443: the authored board minimum floors the pair gap.
         authored_min_clearance=getattr(args, "_authored_min_clearance", None),
+        # Issue #6561: the stackup-aware fab floor for the pair gap.
+        mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -10398,6 +10462,8 @@ def route_with_layer_escalation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -11838,6 +11904,8 @@ def route_with_rule_relaxation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -11979,6 +12047,8 @@ def route_with_rule_relaxation(
             min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
             # Issue #6443: the authored board minimum floors the pair gap.
             authored_min_clearance=getattr(args, "_authored_min_clearance", None),
+            # Issue #6561: the stackup-aware fab floor for the pair gap.
+            mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -12383,9 +12453,12 @@ def route_with_rule_relaxation(
     from kicad_tools.router import get_mfr_limits
 
     mfr = get_mfr_limits(args.manufacturer)
+    # Issue #6561: the ladder bottoms out at the higher of the flat and the
+    # stackup-aware floor (jlcpcb 2-layer 2oz: 0.1524mm).
+    clearance_floor = max(mfr.min_clearance, getattr(args, "_mfr_clearance_floor", None) or 0.0)
     at_minimum = (
         final_result.trace_width <= mfr.min_trace + 0.001
-        and final_result.clearance <= mfr.min_clearance + 0.001
+        and final_result.clearance <= clearance_floor + 0.001
     )
     if at_minimum and not quiet:
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
@@ -14371,6 +14444,8 @@ def route_with_combined_escalation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -14562,6 +14637,8 @@ def route_with_combined_escalation(
                 min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
                 # Issue #6443: the authored board minimum floors the pair gap.
                 authored_min_clearance=getattr(args, "_authored_min_clearance", None),
+                # Issue #6561: the stackup-aware fab floor for the pair gap.
+                mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -15009,9 +15086,12 @@ def route_with_combined_escalation(
     from kicad_tools.router import get_mfr_limits
 
     mfr = get_mfr_limits(args.manufacturer)
+    # Issue #6561: the ladder bottoms out at the higher of the flat and the
+    # stackup-aware floor (jlcpcb 2-layer 2oz: 0.1524mm).
+    clearance_floor = max(mfr.min_clearance, getattr(args, "_mfr_clearance_floor", None) or 0.0)
     at_minimum = (
         final_result.trace_width <= mfr.min_trace + 0.001
-        and final_result.clearance <= mfr.min_clearance + 0.001
+        and final_result.clearance <= clearance_floor + 0.001
     )
     if at_minimum and not quiet:
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
@@ -17710,6 +17790,29 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--nogood-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "EXPERIMENTAL (Issue #6353, default off): answer a repeated, "
+            "completely-failed negotiated net attempt from a bounded cache. "
+            "Only failures whose search drained its open set are cached "
+            "(never timeouts or iteration-cap give-ups), and a hit requires "
+            "the grid state the search reads to be unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--nogood-cache-margin-cells",
+        default="full",
+        help=(
+            "Failure-window margin in grid cells around the net's terminals, "
+            "or 'full' (default) to fingerprint every grid plane (occupancy, "
+            "usage, history/present cost, obstacle, zone). A numeric margin is "
+            "a heuristic that can serve a stale failure when state outside "
+            "the window changes."
+        ),
+    )
+    parser.add_argument(
         "--early-stop-patience",
         type=int,
         default=2,
@@ -18985,7 +19088,10 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Automatically create copper pour zones for power-classified "
             "nets (GND, VCC, etc.) when the input PCB has none "
-            "(default: enabled). Use --no-auto-pour to disable."
+            "(default: enabled). A net the --net-class-map declares routed "
+            "(is_pour_net=false and route_via other than 'pour') is never "
+            "auto-poured, whatever its name; --skip-nets still forces a pour. "
+            "Use --no-auto-pour to disable."
         ),
     )
     parser.add_argument(
@@ -19529,6 +19635,10 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "nogood_cache", False):
+        # Issue #6353: experiment-only plumbing; read by Autorouter lazily.
+        os.environ["KCT_NOGOOD_CACHE"] = "1"
+        os.environ["KCT_NOGOOD_CACHE_MARGIN_CELLS"] = str(args.nogood_cache_margin_cells)
     # Issue #6155: resolve --manufacturer against the board's project.kct
     # before anything (the lint gate included) reads it.
     _resolve_route_manufacturer(args, argv)
@@ -20684,6 +20794,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -20801,6 +20913,8 @@ def _run_main_impl(args, parser, argv) -> int:
         min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
         # Issue #6443: the authored board minimum floors the pair gap.
         authored_min_clearance=getattr(args, "_authored_min_clearance", None),
+        # Issue #6561: the stackup-aware fab floor for the pair gap.
+        mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.

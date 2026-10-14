@@ -196,9 +196,11 @@ def test_an_unreadable_dru_contributes_nothing(tmp_path) -> None:
 def test_a_sub_floor_declaration_is_raised_to_the_discovered_fab(tmp_path) -> None:
     from kicad_tools.router.mfr_limits import resolve_clearance
 
-    floor = resolve_clearance("oshpark")
-    assert floor is not None and floor > 0.1
     pcb = _board(tmp_path, project=_project(netclass=0.1), target_fab="oshpark")
+    # Issue #6561: the floor is the profile value for the board's own stackup
+    # (a 2-layer board here), not the layer-agnostic ``MfrLimits`` value.
+    floor = resolve_clearance("oshpark", 2)
+    assert floor is not None and floor > 0.1
 
     resolved = resolve_routing_clearances(pcb, target_mm=0.1)
 

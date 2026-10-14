@@ -32,6 +32,7 @@ from unittest.mock import patch
 import pytest
 
 from kicad_tools.cli import route_cmd
+from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.io import (
     DesignRules,
     GridAutoSelection,
@@ -529,6 +530,10 @@ def _route_cli(tmp_path, extra_args, board: str = _OFF_GRID_ROUTABLE_PCB) -> tup
 
     ``--layers 2`` pins the fixed-layer path (``--auto-layers`` diverts to
     ``route_with_layer_escalation``, which never reaches the block under test).
+    ``--no-auto-build-native`` keeps a run without ``router_cpp.*.so`` from
+    compiling the extension into the source tree mid-test (issue #6544); the
+    ``auto`` backend then falls back to Python, so tests whose output depends
+    on the backend must pin ``--backend`` themselves.
     Returns the exit code and the texts of any ``warnings.warn`` emissions.
     """
     pcb_file = tmp_path / "off_grid.kicad_pcb"
@@ -547,19 +552,39 @@ def _route_cli(tmp_path, extra_args, board: str = _OFF_GRID_ROUTABLE_PCB) -> tup
                 "0.2",
                 "--layers",
                 "2",
+                "--no-auto-build-native",
                 *extra_args,
             ]
         )
     return code, [str(w.message) for w in caught]
 
 
-def test_fine_pitch_advisories_fire_for_grid_engine(tmp_path, capsys):
-    """The default grid engine keeps every advisory (#2254 behavior intact)."""
-    _route_cli(tmp_path, [])
+@pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+def test_fine_pitch_advisories_fire_for_grid_engine_cpp(tmp_path, capsys):
+    """The default grid engine keeps every advisory (#2254 behavior intact).
+
+    The full report only prints under the C++ backend: the Python pathfinder
+    has waypoint injection and prints a one-line summary instead (#3441), so
+    the backend is pinned rather than left to ``auto`` (issue #6544).
+    """
+    _route_cli(tmp_path, ["--backend", "cpp"])
     captured = capsys.readouterr()
     combined = captured.out + captured.err
     for marker in _GRID_ADVISORY_MARKERS:
         assert marker in combined, f"grid engine lost advisory {marker!r}"
+    assert "skipped for --route-engine" not in combined
+
+
+def test_fine_pitch_advisories_fire_for_grid_engine_python(tmp_path, capsys):
+    """The grid engine still advises on the always-available Python backend.
+
+    Under waypoint injection the advisory is the one-line off-grid summary
+    (#3441), never the non-grid skip line (issue #6544).
+    """
+    _route_cli(tmp_path, ["--backend", "python"])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "pads off-grid; waypoint injection will handle pad connections" in combined
     assert "skipped for --route-engine" not in combined
 
 

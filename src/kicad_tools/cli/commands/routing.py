@@ -1077,6 +1077,13 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--lint-gate-waivers", args.lint_gate_waivers])
     if getattr(args, "lint_gate_strict", False):
         sub_argv.append("--lint-gate-strict")
+    # Issue #6353: forward the experimental nogood-cache flags.  Both default
+    # off / "full", so only forward a non-default value.
+    if getattr(args, "nogood_cache", False):
+        sub_argv.append("--nogood-cache")
+    nogood_margin = getattr(args, "nogood_cache_margin_cells", "full")
+    if nogood_margin and str(nogood_margin) != "full":
+        sub_argv.extend(["--nogood-cache-margin-cells", str(nogood_margin)])
     # Issue #2819: forward --max-search-iterations to the inner parser.
     # Both defaults are 0 (= use cols*rows*4 heuristic), so only forward
     # when the user passed a non-default value (matches the per-net-timeout

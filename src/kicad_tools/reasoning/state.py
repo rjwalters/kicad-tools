@@ -11,6 +11,7 @@ This module extracts and represents PCB state in a form that:
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core.layers import kicad_read_via_layers, via_node_type
 from ..drc.report import DRCReport
 from ..schema.pcb import _is_footprint_tag
 from ..sexp import SExp, parse_file
@@ -617,7 +618,12 @@ class PCBState:
         if layers_node:
             layer_atoms = layers_node.get_atoms()
             if len(layer_atoms) >= 2:
-                layers = (str(layer_atoms[0]), str(layer_atoms[1]))
+                # Issue #6614: a keyword-less via is a through via to KiCad,
+                # whatever its pair says.
+                read, _ = kicad_read_via_layers(
+                    (str(layer_atoms[0]), str(layer_atoms[1])), via_node_type(via_node)
+                )
+                layers = (read[0], read[-1])
 
         uuid_node = via_node.find("uuid")
         uuid = str(uuid_node.get_first_atom()) if uuid_node else ""

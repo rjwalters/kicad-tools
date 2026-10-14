@@ -1854,7 +1854,7 @@ fi
 
 **Ordering invariant**: Step 2's comment is on the PR before this runs.
 `merge-pr.sh` names no actor, so a merge without Step 2 looks like a human ran
-it (#4742's unattributable hold reversal).
+it (#4742).
 
 **Timeout invariant (#9096)**: run this block under a **600000 ms** Bash-tool
 timeout, with `LOOM_AUTO_MERGE_TIMEOUT` (420s below) **strictly under** it, so
@@ -1867,12 +1867,12 @@ PR_NUMBER=$1
 
 echo "Attempting to merge PR #$PR_NUMBER..."
 
-# Ensure we're on main so .loom/scripts exists (issue #2289)
-# merge-pr.sh may not exist on PR branches checked out via gh pr checkout
+# On main, so .loom/scripts/merge-pr.sh exists (#2289)
 git checkout main 2>/dev/null || true
 
-# `--pr N` (#11859): its live pin file means this block MUST set EXPECTED_HEAD=<sha>.
-PIN=$(find "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-$PR_NUMBER" -mmin -60 -exec cat {} \; 2>/dev/null)
+# `--pr N` (#11859): a live pin means this block MUST set EXPECTED_HEAD=<sha>. Live: <60 min old, or <24h while its step's agent runs (#11902).
+PF="$(git rev-parse --git-common-dir)/loom-champion-pin-pr-$PR_NUMBER"; PIN=; PIN_PID=; { read -r PIN PIN_PID < "$PF"; } 2>/dev/null
+{ [ -n "$(find "$PF" -mmin -60)" ] || { [ "${PIN_PID:-0}" -gt 1 ] && kill -0 "$PIN_PID" && [ -n "$(find "$PF" -mmin -1440)" ]; } || PIN=; } 2>/dev/null
 if [ -n "$PIN" ] && [ "${EXPECTED_HEAD:-}" != "$PIN" ]; then MERGE_RC=9; echo "CHAMPION-PIN-MISSING pr=$PR_NUMBER: set EXPECTED_HEAD=$PIN in this block; not merging"; else
 # Queue mode (#10256): only a DIRECT first stdout line + rc 0 falls through.
 HEAD_SHA=${EXPECTED_HEAD:-$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)}
@@ -1930,9 +1930,8 @@ After merge, verify linked issues were auto-closed by GitHub.
 
 **Before confirming (or forcing) any linked issue's close, run the Out-of-Band
 Acceptance-Criteria Gate for that issue** (defined just below). Merging proves
-only what CI can check — nothing about a criterion naming a live external
-source, a scheduled run, or an observation over time. This is where "PR
-merged" becomes "issue done", the only place that inference can be checked.
+only what CI can check (not a live external source, a scheduled run, or an
+observation over time), so this is where "PR merged" becomes "issue done".
 
 ```bash
 PR_NUMBER=$1
@@ -3169,9 +3168,9 @@ Never the failure exit **1**; each means "the merge did not happen":
   MERGED is the queue working; anything else (UNDETERMINED, REFUSED, bad mode,
   a too-old `loom-daemon`) is a **stall** Step 3 already surfaced
   (`CHAMPION-MERGE-QUEUE-STALL`, #10628): name it in the summary, no error.
-- **9** — Step 3's own `CHAMPION-PIN-MISSING` (`--pr N`, #11859): the block ran
-  without the `EXPECTED_HEAD` its pin file names, so nothing ran. The pin was
-  lost, not the merge: re-queue, post **no** "Merge Failed" comment (#11861).
+- **9** — Step 3's `CHAMPION-PIN-MISSING` (`--pr N`, #11859, #11861): the block
+  lacked the `EXPECTED_HEAD` its live pin names, so nothing ran. The pin was
+  lost, not the merge.
 
 **Do not follow the 5 failure steps above for any of these outcomes:**
 
