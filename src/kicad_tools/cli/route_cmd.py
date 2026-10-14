@@ -12131,6 +12131,12 @@ def route_with_rule_relaxation(
                 print(f"  Error loading PCB: {e}")
             continue
 
+        # Issue #6625: pin the first tier's in-flight router so a deadline /
+        # Ctrl+C before any tier completes still saves a _partial.
+        # best_completed_attempt stays False; a completed tier wins.
+        if best_result is None:
+            _interrupt_state["router"] = router
+
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
@@ -14726,6 +14732,12 @@ def route_with_combined_escalation(
                     print(f"  Error loading PCB: {e}")
                 results_matrix[(tier.tier, layer_count)] = 0.0
                 continue
+
+            # Issue #6625: pin the first tier's in-flight router so a deadline /
+            # Ctrl+C before any tier completes still saves a _partial.
+            # best_completed_attempt stays False; a completed tier wins.
+            if best_result is None:
+                _interrupt_state["router"] = router
 
             # Issue #2996: merge --net-class-map sidecar onto router's map.
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
