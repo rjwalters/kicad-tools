@@ -187,6 +187,9 @@ class AStarNode:
     via_from_parent: bool = field(compare=False, default=False)
     direction: tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
     seq: int = field(compare=False, default=0)
+    # Issue #6473: nearest via node on this node's path (itself when it was
+    # reached through a via); twin of the native ``AStarNode::via_anc``.
+    via_anc: Optional["AStarNode"] = field(compare=False, default=None, repr=False)
 
     def __lt__(self, other: "AStarNode") -> bool:
         """Issue #3144 + #3199 tie-break.
@@ -1902,6 +1905,57 @@ class Router:
         if plane is not None and plane[layer, gy, gx] != 0:
             return True
         return bool(grid._is_obstacle[layer, gy, gx])
+
+    def _own_path_vias_clear(self, current: AStarNode) -> bool:
+        """May a via at ``current`` join the vias already on its path? (Issue #6473).
+
+        Python twin of the native ``Pathfinder::own_path_vias_clear`` (#6464).
+        The via checks in the expansion loops only see committed copper, so a
+        path could drop a second via closer than the fab hole-to-hole floor to
+        its own first one; :meth:`_validate_route_clearance` then rejected the
+        whole candidate.  Same floor, drill and arithmetic as
+        :meth:`RoutingGrid.validate_same_net_drill_spacing`, which measures
+        the vias :meth:`_convert_path_to_route` emits at these cell centres.
+        A via stack at one cell (F -> In1 -> B) is one drill.
+        """
+        node = current.via_anc
+        if node is None:
+            return True
+        rules = self.rules
+        floor = max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+        radius = rules.via_drill / 2
+        wx, wy = self.grid.grid_to_world(current.x, current.y)
+        while node is not None:
+            if node.x != current.x or node.y != current.y:
+                vx, vy = self.grid.grid_to_world(node.x, node.y)
+                if math.sqrt((wx - vx) ** 2 + (wy - vy) ** 2) - radius - radius < floor:
+                    return False
+            parent = node.parent
+            node = parent.via_anc if parent is not None else None
+        return True
+
+    def _own_pad_gate_inputs(self, start: Pad, end: Pad) -> tuple[set[str] | None, float]:
+        """Per-search inputs of the own-pad step gate: ``(exclude_refs, width)``.
+
+        Issue #6397: one definition for both Python A* loops (the one-way
+        loop in :meth:`_route_impl` and :meth:`route_bidirectional`).  The
+        refs are the same-component carve-out set both reconstructions hand
+        the validator; the width is the narrowest one
+        :meth:`_convert_path_to_route` can emit -- the #1018 neck-down only
+        narrows -- so a gate at this width is never stricter than the
+        validator measuring the emitted copper.  Python twin of
+        ``CppPathfinder._carveout_ref_hashes`` / ``_narrowest_emit_width``.
+        """
+        refs: set[str] | None = {p.component_key for p in (start, end) if p.component_key} or None
+        base_width = self._get_trace_width_for_net(start.net_name)
+        width = base_width
+        for pad in (start, end):
+            pitch = self.component_pitches.get(pad.component_key) if pad.component_key else None
+            if self.rules.should_apply_neck_down(pad.ref, pitch):
+                width = min(
+                    width, self.rules.get_neck_down_width(0.0, pitch, base_width=base_width)
+                )
+        return refs, width
 
     def _own_pad_step_clear(
         self,
@@ -4516,23 +4570,7 @@ class Router:
         # native #6375 gate, see the neighbour loop).  Same carve-out refs as
         # ``_reconstruct_route`` hands the validator, and the narrowest width
         # reconstruction can emit (the #1018 neck-down only narrows).
-        own_gate_refs: set[str] | None = {
-            p.component_key for p in (start, end) if p.component_key
-        } or None
-        own_gate_width = self._get_trace_width_for_net(start.net_name)
-        for _gate_pad in (start, end):
-            _gate_pitch = (
-                self.component_pitches.get(_gate_pad.component_key)
-                if _gate_pad.component_key
-                else None
-            )
-            if self.rules.should_apply_neck_down(_gate_pad.ref, _gate_pitch):
-                own_gate_width = min(
-                    own_gate_width,
-                    self.rules.get_neck_down_width(
-                        0.0, _gate_pitch, base_width=self._get_trace_width_for_net(start.net_name)
-                    ),
-                )
+        own_gate_refs, own_gate_width = self._own_pad_gate_inputs(start, end)
         own_gate_memo: dict[tuple[int, int, int, int, int], bool] = {}
         # The validator does not run on relief probes (#3438); neither does the gate.
         own_gate_active = not self.relief_mode
@@ -5299,11 +5337,13 @@ class Router:
                         False,
                         new_direction,
                         seq=next(seq_counter),
+                        via_anc=current.via_anc,
                     )
                     heapq.heappush(open_set, neighbor_node)
 
             # Try layer change (via) - use grid indices, not enum values
             # Only consider routable layers (skip planes)
+            own_vias_clear: bool | None = None
             for new_layer in self.grid.get_routable_indices():
                 if new_layer == current.layer:
                     continue
@@ -5342,6 +5382,13 @@ class Router:
                 if self._is_via_in_exclusion_zone(current.x, current.y):
                     self._via_diag_exclusion_blocked += 1
                     continue
+
+                # Issue #6473: hole-to-hole against this path's own earlier
+                # vias (the same for every target layer, so one verdict).
+                if own_vias_clear is None:
+                    own_vias_clear = self._own_path_vias_clear(current)
+                if not own_vias_clear:
+                    break
 
                 self._via_diag_eligible += 1
 
@@ -5443,6 +5490,7 @@ class Router:
                         True,
                         seq=next(seq_counter),
                     )
+                    neighbor_node.via_anc = neighbor_node
                     heapq.heappush(open_set, neighbor_node)
 
         # No path found.  Issue #6098: the open set is empty only when the
@@ -6528,6 +6576,12 @@ class Router:
                     backward_nodes[bkey] = seed_node
                     heapq.heappush(backward_open, seed_node)
 
+        # Issue #6397: inputs of the own-pad step gate, computed once for both
+        # frontiers (see ``_expand_bidirectional_neighbors``).  ``None`` on
+        # relief probes, as in ``_route_impl``.
+        own_gate: tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
+        own_gate = None if self.relief_mode else (*self._own_pad_gate_inputs(start, end), {})
+
         # Best meeting point tracking
         best_path_cost = float("inf")
         meeting_point: tuple[int, int, int] | None = None
@@ -6580,6 +6634,7 @@ class Router:
                         partner_radius=net_partner_half_width_cells,
                         partner_active=partner_active_flag,
                         seq_counter=forward_seq_counter,
+                        own_gate=own_gate,
                     )
 
             # Process backward step
@@ -6620,6 +6675,7 @@ class Router:
                         partner_radius=net_partner_half_width_cells,
                         partner_active=partner_active_flag,
                         seq_counter=backward_seq_counter,
+                        own_gate=own_gate,
                     )
 
             # Early termination: if we have a meeting point and both queues
@@ -6664,6 +6720,9 @@ class Router:
         partner_radius: int | None = None,
         partner_active: bool | None = None,
         seq_counter: "itertools.count[int] | None" = None,
+        own_gate: (
+            tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
+        ) = None,
     ) -> None:
         """Expand neighbors for bidirectional A* search.
 
@@ -6686,6 +6745,10 @@ class Router:
                 for the partner branch.  Forwarded to ``_is_trace_blocked``
                 so the per-call 4-condition tuple evaluation is skipped on
                 the hot path.
+            own_gate: Issue #6397 -- ``(exclude_refs, width, memo)`` of the
+                own-pad step gate, from :meth:`_own_pad_gate_inputs`, shared
+                by both frontiers of one search.  ``None`` disables the gate
+                (relief probes, and legacy callers).
         """
         # Extract bounds (Issue #990: also need source bounds for pad exit check)
         src_gx1, src_gy1, src_gx2, src_gy2 = source_metal_bounds
@@ -6847,6 +6910,48 @@ class Router:
                     ):
                         continue
 
+            # Issue #6397: own-pad step gate, as in ``_route_impl`` (#6389) and
+            # the native loops (#6375).  A planar step touching the routing
+            # net's own pad copper/halo outside both pads' metal boxes must
+            # pass the validator's own segment-vs-pad verdict; the same-net
+            # branch above admits such cells unchecked, and an unblocked
+            # neighbour reached FROM such a cell is not checked at all.
+            if (
+                own_gate is not None
+                and not (
+                    src_gx1 <= nx <= src_gx2
+                    and src_gy1 <= ny <= src_gy2
+                    and nlayer in source_layers
+                )
+                and not (
+                    tgt_gx1 <= nx <= tgt_gx2
+                    and tgt_gy1 <= ny <= tgt_gy2
+                    and nlayer in target_layers
+                )
+                and (
+                    self._own_pad_cell(nx, ny, nlayer, source_pad.net)
+                    or self._own_pad_cell(current.x, current.y, nlayer, source_pad.net)
+                )
+                and not self._own_pad_step_clear(
+                    current.x,
+                    current.y,
+                    nx,
+                    ny,
+                    nlayer,
+                    source_pad.net,
+                    own_gate[1],
+                    own_gate[0],
+                    own_gate[2],
+                )
+            ):
+                if _ASTAR_TRACE_ENABLED:
+                    _astar_trace(
+                        f"[A*/py-bidi] cur=({current.x},{current.y},L{current.layer}) "
+                        f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                        f"reason=own_pad_step_foreign_pad_too_close"
+                    )
+                continue
+
             # Check zone blocking
             if self._is_zone_blocked(nx, ny, nlayer, source_pad.net):
                 continue
@@ -6932,6 +7037,7 @@ class Router:
                     False,
                     new_direction,
                     seq=neighbor_seq,
+                    via_anc=current.via_anc,
                 )
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
@@ -6970,6 +7076,12 @@ class Router:
             if not self._can_place_via_in_zones(current.x, current.y, source_pad.net):
                 self._via_diag_zone_blocked += 1
                 continue
+
+            # Issue #6473: hole-to-hole against the earlier vias of this
+            # frontier's path.  A pair split across the two frontiers is only
+            # seen by the validator in ``_reconstruct_bidirectional_route``.
+            if not self._own_path_vias_clear(current):
+                break
 
             self._via_diag_eligible += 1
 
@@ -7043,6 +7155,7 @@ class Router:
                     True,
                     seq=neighbor_seq,
                 )
+                neighbor_node.via_anc = neighbor_node
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
 
