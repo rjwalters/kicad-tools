@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1155",
-  "loom_commit": "4844d0404ab018a44c679f3da55b6ff8bf61dfc3",
+  "loom_version": "0.19.1156",
+  "loom_commit": "f952aeb6ac2440c77f4ec90ab1f9e01415cc5a4d",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -437,7 +437,8 @@
     ".loom/scripts/tests/fixtures/config_resolver/.loom-local/fleet-repo.json",
     ".loom/scripts/check-dependabot-labels.sh",
     ".loom/scripts/tests/lib/assert.sh",
-    ".loom/scripts/tests/test-check-dependabot-labels.sh"
+    ".loom/scripts/tests/test-check-dependabot-labels.sh",
+    ".loom/scripts/tests/test-ci-suite-manifest-installed-layout.sh"
   ],
   "last_resync": "2026-10-14",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
