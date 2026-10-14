@@ -6505,6 +6505,55 @@ knobs not yet audited here.
 | `autonomous.ciTelemetry.journalRotateKeep` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_KEEP` | `2` | Rotated journals kept (`ci-telemetry.jsonl.1` newest … `.N` oldest; capped at 32). `0` deletes the journal at rotation instead of keeping it. Read on every export pass |
 | `autonomous.sweepOutcomeWriteback.enabled` | `LOOM_SWEEP_OUTCOME_WRITEBACK` | `false` | Post-`Success` issue write-back comment (#9056). Opt-in, unlike the safety backstops above — it posts a forge-visible comment, not a dispatch decision. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. Resolved fresh at each terminal `Success` transition (not cached at startup), so a config edit takes effect on the very next sweep to finish with no daemon restart. See "Sweep-outcome issue write-back (#9056)" below |
 
+### Post-roll check: is the work finder on? (#11934)
+
+A daemon can come back from a relaunch healthy, reachable and dispatching
+nothing: `LOOM_WORK_FINDER=0` in its environment beats
+`autonomous.workFinder.enabled: true` in its config (env > config > default).
+On 2026-10-14 two dispatchers came back that way from `restart --pause
+--then-exit` followed by a plain `daemon-start`, and nothing alerted. After
+every roll, `restart --drain`, `--pause --then-exit` + start, or update
+relaunch, check each dispatcher:
+
+```bash
+loom-daemon status --json | jq '{wf: .work_finder.enabled, mismatch: .protection.autonomy_mismatch}'
+```
+
+`work_finder.enabled` is resolved inside the running daemon from its own
+environment and config (#4693), so it is the truth for the process that
+answers; `false` on a host meant to dispatch is the failure. On Linux the
+process environment is the ground truth for why:
+`tr '\0' '\n' < /proc/$(systemctl --user show loom-daemon -p MainPID --value)/environ | grep '^LOOM_WORK_FINDER='`.
+To fix, stop the daemon and start it with the host's autonomy flags
+(`loom-daemon-stop.sh && loom-daemon-start.sh --from-config`, or
+`--work-finder`); a running daemon ignores start flags.
+
+What now catches it without the check:
+
+- **Start refuses the downgrade.** A plain `daemon-start` / `loom-daemon-start.sh`
+  that would export `LOOM_WORK_FINDER=0` refuses (exit 1) when the resolved
+  config enables the work finder, or when the operator-stop record left by
+  `--then-exit` holds a moved-aside marker from an autonomous run, in addition
+  to the prior plist/unit and marker it already checked (#5409). A refused
+  start leaves `.daemon.flags` as it was, so the watchdog's next recovery
+  replays the previous flags rather than the refused bare start.
+- **`loom-daemon-update.sh --relaunch` keeps a config-driven unit
+  config-driven.** When the live plist/unit carries no `LOOM_WORK_FINDER` or
+  `LOOM_MAIN_HEALTH_GATE`, it re-renders with `--from-config` instead of a bare
+  start.
+- **The daemon says so at startup.** A daemon whose config enables the work
+  finder but whose environment switches it off logs `work_finder: OFF on a host
+  whose config enables it` at **ERROR**, opens a critical loom-ui alert (rule
+  `work_finder_forced_off`, resolved by the next start that runs the work
+  finder), and reports `work_finder.forced_off: true` on its `daemon.start`
+  telemetry record, so `topic = daemon.start` in SigNoz shows every host's
+  startup verdict. A host that turns the work finder off in config (a captain)
+  is not flagged.
+
+Supervisor relaunches (`restart`, `restart --drain`, the floor roll's
+supervised exit, a crash) re-exec from the installed plist/unit and keep its
+environment unchanged. The paths above re-render it.
+
 ### The fleet floor drives rolls; no roll windows (#10885)
 
 There is no roll window, no per-host offset and no jitter. On startup and on
@@ -9033,7 +9082,9 @@ Hygiene — `worktree.issue_state`, `worktree.has_open_pr`, `clean.pr_list`,
 `clean.pr_status_rest`, `worktree.landed_pulls`, `intake.list_open`, and
 `clean.pr_by_number_rest` / `worktree.issue_state_rest` /
 `worktree.issue_closed_at` on a root without a repo fact; Observability —
-`stage_dwell`'s `api.rest`, `telemetry.repo_identity`. `visibility.repo`, and
+`stage_dwell`'s `api.rest` (its `pulls/{n}` merge check), the events
+page walk's `stage_dwell.events` and `stage_entry.events` (#11924),
+`telemetry.repo_identity`. `visibility.repo`, and
 the single-item hygiene reads on a root with a repo fact, are conditional
 reads through the shared ETag store (#10512, W6) and route as `Gate` — not
 shed, but mostly free `304`s. Nothing under `sweep_registry/`,
@@ -13197,6 +13248,15 @@ loom-daemon restart --abort-drain                 # cancel an in-progress drain,
     the workspace volume, or the items are requeued. The budget is the lease
     TTL because lease freshness is judged by the reading host against its own
     TTL and nothing renews a lease while the host is down.
+    **Restart it with its autonomy, not a bare start (#11934).** The pause moves
+    the autonomy-desired marker aside into the operator-stop record, so the
+    explicit start that follows is the one most likely to lose the work
+    finder. Use the flags the host runs with (`--from-config` on a host whose
+    `.loom/config.json` / `.loom-local/local.json` / machine tier sets
+    `autonomous.workFinder.enabled`, or `--work-finder`). A plain start that
+    would force `LOOM_WORK_FINDER=0` over a prior autonomous run (read from
+    the record) or over a config that enables the work finder is refused,
+    then run the [post-roll check](#post-roll-check-is-the-work-finder-on-11934).
   - **A newer release supersedes an armed roll (#8514)** only until the pause
     has stopped an agent; after that it is too late and the roll completes.
   - **Floor rolls (#10712)** take this same path. They skip the settle gate,

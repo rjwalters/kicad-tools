@@ -75,6 +75,7 @@ cat > "$TMP/bin/loom-daemon" <<S
 #!/usr/bin/env bash
 case "\$*" in
   "forge merge-queue step "*) printf '%s\n' "\$*" >> "$TMP/queue-argv"; echo LOOM-MERGE-QUEUE-DIRECT; exit 0 ;;
+  "champion-hold classify "*) echo "LOOM-CHAMPION-HOLD state=clear pr=42 detail=-"; exit 0 ;;
 esac
 exit 99
 S
